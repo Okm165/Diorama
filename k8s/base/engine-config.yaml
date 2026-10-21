@@ -1,0 +1,140 @@
+# engine.yaml - runtime configuration for the mirror engine.
+#
+# The engine drives two chains from the local reth head:
+#   M (anvil-m): strict replay of every parent block + per-block verification.
+#   T (anvil-t): the devnet. Watch-list state kept fresh by EIP-7928 BAL diffs;
+#                never replays mainnet txs (your writes live here).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: engine-config
+  labels:
+    app.kubernetes.io/part-of: mainnet-mirror
+data:
+  engine.yaml: |
+    reth:
+      url: http://reth:8545
+      # Follow the safe head by default: ~1 epoch (32-64 blocks) behind the
+      # chain head, but immune to shallow reorgs. `latest` trades that safety
+      # for freshness. The plan's ops alarm threshold (>60 blocks) matches the
+      # safe-head lag.
+      follow: safe
+      request_timeout_secs: 30
+
+    anvil:
+      m_url: http://anvil-m:8545
+      t_url: http://anvil-t:8545
+
+    loops:
+      poll_interval_ms: 1000
+      # Replay/apply is always contiguous from the chain's own head: on first
+      # start that is the pin + 1, so the whole pin window (~2000 blocks) is
+      # replayed as the warm-up; restarts resume at cursor + 1.
+      # Refuse to catch up when the follow head is further than this ahead of
+      # the cursor (operator re-pin drill territory).
+      max_gap_blocks: 5000
+      # Max JSON-RPC batch size for raw-tx submissions and cheatcode writes.
+      chunk_size: 500
+      replay_into_m: true
+      apply_into_t: true
+      # Converge M from the parent BAL before each replay: a fork cannot
+      # reproduce blockhash-dependent values (A17; e.g. Seaport 1.6 counters use
+      # blockhash(n-1)), and without convergence one divergence cascades into
+      # invalid txs and permanently wrong state. With it, M stays a faithful
+      # mirror while still executing every tx (traces + verification).
+      repair_m: true
+      # continue (default): record every divergence in drift.jsonl + metrics and
+      #   keep replaying. M's state is converged from the parent BAL before each
+      #   block, so divergences never cascade. Measured: a fork cannot reproduce
+      #   blockhash-dependent values (A17; e.g. Seaport 1.6 counters, near-full
+      #   blocks where a small gas delta pushes the last txs out), so freezing
+      #   would stall the mirror permanently.
+      # freeze_m: stop replaying into M on divergence (T keeps syncing).
+      # halt_all: stop both loops. Use these for conformance runs.
+      on_divergence: continue
+
+    verifier:
+      enabled: true
+      # Each block is verified against reth: tx count/order, blob gas, receipts
+      # (count/status/gas), logs (bloom + full set), withdrawals, and state
+      # probes. Divergences are classified structural (counts/order/gas) vs
+      # behavioral (values) in drift.jsonl and metrics; both are recorded.
+      # After the repair the probes are re-run against M: convergence_failures
+      # staying at 0 is the "M is an exact mirror" health signal.
+      drift_sample_keys: 8
+      # EIP-7702: fork gas delta must lie in [-refund * #auths, 0].
+      type4_refund_per_auth: 12500
+      probes:
+        - name: usdc_total_supply
+          to: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          data: "0x18160ddd"
+        - name: weth_total_supply
+          to: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+          data: "0x18160ddd"
+        - name: chainlink_weth_usd
+          to: "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
+          data: "0xfeaf968c"
+        - name: univ3_weth_usdc_slot0
+          to: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
+          data: "0x3850c7bd"
+        - name: aave_aethusdc_total_supply
+          to: "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c"
+          data: "0x18160ddd"
+        - name: aave_usdc_normalized_income
+          to: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+          data: "0xd15e0053000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+
+    # Blob sidecar sources, tried in order. Local Lighthouse first; the public
+    # beacon API covers blocks older than Lighthouse's checkpoint/backfill
+    # (and any local beacon outage). A block whose blob txs cannot be fully
+    # reconstructed is never mined: M stays strict.
+    blobs:
+      enabled: true
+      # Sidecar sources, tried in order. publicnode is first because a regular
+      # (non-supernode) Lighthouse CANNOT reconstruct blobs after PeerDAS
+      # (EIP-7594): it answers HTTP 400 "Insufficient data columns to
+      # reconstruct blobs: required 64, but only 4 were found. You may need to
+      # run the beacon node with --supernode or --semi-supernode." (measured on
+      # bpo2). publicnode serves the legacy 4844 sidecars with kzg_proof, which
+      # is the wrapper form anvil accepts here.
+      beacon_urls:
+        - https://ethereum-beacon-api.publicnode.com
+        # - http://lighthouse:5052   # only with --semi-supernode/--supernode
+
+    # Watch list seed (plan section 3.5). All slots of a watched account are
+    # synced on T; shadowed keys are skipped (COW). Extend with your own
+    # deployment addresses from contracts/deployments/ethereum.json.
+    watchlist:
+      # Chainlink feeds (config/oracles/ethereum.toml)
+      - { address: "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419", note: "Chainlink WETH/USD" }
+      - { address: "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c", note: "Chainlink WBTC/USD" }
+      - { address: "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8", note: "Chainlink STETH/USD" }
+      - { address: "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6", note: "Chainlink USDC/USD" }
+      - { address: "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D", note: "Chainlink USDT/USD" }
+      # Assets (config/assets/*.toml)
+      - { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", note: "USDC" }
+      - { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", note: "USDT" }
+      - { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", note: "WETH" }
+      - { address: "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", note: "WBTC" }
+      - { address: "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", note: "wstETH" }
+      # Uniswap
+      - { address: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45", note: "Universal Router" }
+      - { address: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640", note: "UniV3 WETH/USDC 0.05%" }
+      # Aave V3 (cascade scenario)
+      - { address: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", note: "Aave V3 Pool" }
+      - { address: "0x54586bE62E3c3580375aE3723C145253060Ca0C2", note: "Aave V3 Oracle" }
+      - { address: "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e", note: "Aave V3 PoolAddressesProvider" }
+      - { address: "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c", note: "aEthUSDC" }
+      - { address: "0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8", note: "aEthWETH" }
+      - { address: "0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a", note: "aEthUSDT" }
+      - { address: "0xD322A49006FC828F9B5B37Ab215F99B4E5caB19C", note: "Aave V3 WETH Gateway" }
+
+    journal:
+      dir: /state/journal
+      blocks: 1024
+
+    state_dir: /state
+
+    http:
+      addr: 0.0.0.0
+      port: 8080

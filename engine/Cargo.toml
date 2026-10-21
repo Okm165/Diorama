@@ -1,0 +1,32 @@
+[package]
+name = "mirror-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Mainnet mirror engine: replay (M) + verifier + EIP-7928 diff applier (T)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Plan pins: alloy 2.5.0 (EIP-7928 BAL types live in alloy-eips::eip7928).
+alloy-primitives = { version = "1.7", features = ["serde"] }
+alloy-consensus = { version = "2.5", features = ["serde"] }
+alloy-network-primitives = { version = "2.5", features = ["serde"] }
+alloy-eips = { version = "2.5", features = ["serde"] }
+alloy-rpc-types-eth = { version = "2.5", features = ["serde"] }
+
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,94 @@
+# reth - the local fork source (pruned full node, lean profile).
+#
+# Deployment (not StatefulSet) with an explicitly managed PVC: single writer,
+# Recreate strategy, and the same claim is mounted by the snapshot Job.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reth
+  labels:
+    app.kubernetes.io/name: reth
+    app.kubernetes.io/part-of: mainnet-mirror
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reth
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: reth
+        app.kubernetes.io/part-of: mainnet-mirror
+    spec:
+      # reth needs a moment to flush on shutdown.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: reth
+          image: ghcr.io/paradigmxyz/reth:v2.7.0
+          args:
+            - node
+            - --chain=mainnet
+            - --datadir=/data
+            - --config=/etc/reth/reth.toml
+            # JSON-RPC for the engine and Anvil read-through.
+            - --http
+            - --http.addr=0.0.0.0
+            - --http.port=8545
+            # `debug` carries the prestateTracer fallback for the diff applier.
+            - --http.api=eth,net,web3,debug
+            # Engine API (Lighthouse).
+            - --authrpc.addr=0.0.0.0
+            - --authrpc.port=8551
+            - --authrpc.jwtsecret=/secrets/jwt.hex
+            # P2P (hostPorts below give us inbound peers on this single node).
+            - --port=30303
+            - --discovery.port=30303
+            - --metrics=0.0.0.0:9001
+            - --log.stdout.format=json
+            - --log.stdout.filter=info
+            - --color=never
+          ports:
+            - { name: http, containerPort: 8545 }
+            - { name: authrpc, containerPort: 8551 }
+            - { name: metrics, containerPort: 9001 }
+            - { name: p2p-tcp, containerPort: 30303, protocol: TCP, hostPort: 30303 }
+            - { name: p2p-udp, containerPort: 30303, protocol: UDP, hostPort: 30303 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: config, mountPath: /etc/reth, readOnly: true }
+            - { name: jwt, mountPath: /secrets, readOnly: true }
+          readinessProbe:
+            tcpSocket: { port: 8545 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: { port: 8545 }
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests: { cpu: "2", memory: 4Gi }
+            limits: { memory: 12Gi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: reth-data }
+        - name: config
+          configMap: { name: reth-config }
+        - name: jwt
+          secret: { secretName: reth-jwt }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reth
+  labels: { app.kubernetes.io/name: reth, app.kubernetes.io/part-of: mainnet-mirror }
+spec:
+  selector: { app.kubernetes.io/name: reth }
+  ports:
+    - { name: http, port: 8545, targetPort: 8545 }
+    - { name: authrpc, port: 8551, targetPort: 8551 }
+    - { name: metrics, port: 9001, targetPort: 9001 }

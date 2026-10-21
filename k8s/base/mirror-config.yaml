@@ -1,0 +1,23 @@
+# Shared runtime configuration for the mirror stack.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mirror-config
+  labels:
+    app.kubernetes.io/part-of: mainnet-mirror
+data:
+  # Local fork source (reth). Never point this at a remote endpoint in
+  # production mode: remote mining is 55-256 s/block (measured).
+  RETH_URL: "http://reth:8545"
+
+  # Anvil pin = reth head - FORK_OFFSET, resolved once per epoch and persisted
+  # in /state/pin. Must stay well inside reth's 10,064-block state window.
+  FORK_OFFSET: "2000"
+
+  # Lighthouse checkpoint sync (fresh CL head without genesis sync).
+  CHECKPOINT_SYNC_URL: "https://mainnet-checkpoint-sync.stakely.io"
+  CHECKPOINT_SYNC_FALLBACK: "https://sync-mainnet.beaconcha.in"
+
+  # Public mainnet RPC, used only by smoke tests / selftest before reth is
+  # synced. The engine itself always talks to the local reth.
+  MAINNET_RPC: "https://ethereum-rpc.publicnode.com"

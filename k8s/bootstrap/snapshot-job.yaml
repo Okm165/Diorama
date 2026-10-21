@@ -1,0 +1,48 @@
+# Bootstrap Job: download the official reth modular snapshot into the reth PVC.
+#
+#   Profile: --minimal = state + headers + last 50k blocks of txs/receipts +
+#   recent changesets. Measured 165 GB compressed / ~287 GB on disk (2026-10).
+#   This is the leanest snapshot that still gives the mirror: head state,
+#   the 10,064-block state window, live block bodies and receipts.
+#
+#   Resumable by default (.part + Range), so a killed pod just continues.
+#   Run `make snapshot` (which scales reth down first - the downloader refuses
+#   to run while the node holds the database lock).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: reth-snapshot
+  namespace: mainnet-mirror
+  labels:
+    app.kubernetes.io/name: reth-snapshot
+    app.kubernetes.io/part-of: mainnet-mirror
+spec:
+  backoffLimit: 10
+  activeDeadlineSeconds: 172800
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: reth-snapshot
+        app.kubernetes.io/part-of: mainnet-mirror
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: download
+          image: ghcr.io/paradigmxyz/reth:v2.7.0
+          args:
+            - download
+            - --chain=mainnet
+            - --minimal
+            - --non-interactive
+            - --resumable
+            - --download-concurrency=16
+            - --datadir=/data
+            - --color=never
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: "1", memory: 512Mi }
+            limits: { memory: 4Gi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: reth-data }

@@ -1,0 +1,116 @@
+# Engine self test: replays + diff-applies real mainnet blocks against two
+# scratch Anvil forks of a public RPC. Validates the whole pipeline before the
+# local reth fork source is synced (and on demand afterwards).
+#
+#   make selftest
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: engine-selftest
+  namespace: mainnet-mirror
+  labels:
+    app.kubernetes.io/name: engine-selftest
+    app.kubernetes.io/part-of: mainnet-mirror
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: engine-selftest
+        app.kubernetes.io/part-of: mainnet-mirror
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: resolve-pin
+          image: docker.io/library/alpine:3.21
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              i=0; HEAD=""
+              while [ -z "$HEAD" ] && [ "$i" -lt 120 ]; do
+                HEAD=$(wget -qO- --header='Content-Type: application/json' \
+                  --post-data='{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                  "$MAINNET_RPC" 2>/dev/null \
+                  | sed -n 's/.*"result":"\(0x[0-9a-fA-F]*\)".*/\1/p')
+                [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
+              done
+              [ -n "$HEAD" ] || { echo "ERROR: rpc unreachable"; exit 1; }
+              PIN=$((HEAD - OFFSET))
+              echo "$PIN" > /shared/pin
+              echo "selftest pin=$PIN (head=$HEAD offset=$OFFSET)"
+          env:
+            # Trace-capable endpoint: the self test's diff-apply step needs
+            # debug_traceBlockByNumber with prestateTracer (publicnode does not
+            # serve it; local reth does, which is what production uses).
+            - { name: MAINNET_RPC, value: "https://eth.drpc.org" }
+            # 16 blocks back: well inside finality, still forkable on any provider.
+            - { name: OFFSET, value: "16" }
+          volumeMounts:
+            - { name: shared, mountPath: /shared }
+      containers:
+        - name: anvil-m
+          image: ghcr.io/foundry-rs/foundry:v1.8.5
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              PIN=$(cat /shared/pin)
+              echo "anvil-m: fork=$MAINNET_RPC pin=$PIN"
+              exec anvil --host 0.0.0.0 --port 8545 \
+                --fork-url "$MAINNET_RPC" --fork-block-number "$PIN" \
+                --chain-id 1 --hardfork bpo2 --gas-limit 60000000 \
+                --enable-tx-gas-limit --code-size-limit 24576 \
+                --disable-pool-balance-checks --order fifo --auto-impersonate \
+                --prune-history 1000 --no-rate-limit --no-request-size-limit --no-fork-node-info
+          env:
+            - { name: MAINNET_RPC, value: "https://eth.drpc.org" }
+          volumeMounts:
+            - { name: shared, mountPath: /shared }
+          resources:
+            requests: { cpu: "250m", memory: 256Mi }
+            limits: { memory: 2Gi }
+        - name: anvil-t
+          image: ghcr.io/foundry-rs/foundry:v1.8.5
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              PIN=$(cat /shared/pin)
+              echo "anvil-t: fork=$MAINNET_RPC pin=$PIN"
+              exec anvil --host 0.0.0.0 --port 8546 \
+                --fork-url "$MAINNET_RPC" --fork-block-number "$PIN" \
+                --chain-id 1 --hardfork bpo2 --gas-limit 60000000 \
+                --enable-tx-gas-limit --code-size-limit 24576 \
+                --disable-pool-balance-checks --order fifo --auto-impersonate \
+                --prune-history 1000 --no-rate-limit --no-request-size-limit --no-fork-node-info
+          env:
+            - { name: MAINNET_RPC, value: "https://eth.drpc.org" }
+          volumeMounts:
+            - { name: shared, mountPath: /shared }
+          resources:
+            requests: { cpu: "250m", memory: 256Mi }
+            limits: { memory: 2Gi }
+        - name: engine
+          image: localhost/mirror-engine
+          imagePullPolicy: IfNotPresent
+          args:
+            - selftest
+            - --rpc=$(MAINNET_RPC)
+            - --anvil-m=http://127.0.0.1:8545
+            - --anvil-t=http://127.0.0.1:8546
+            - --config=/etc/mirror/engine.yaml
+            - --beacon=$(BEACON_API)
+            - --blocks=2
+            - --timeout-secs=300
+          env:
+            - { name: MAINNET_RPC, value: "https://eth.drpc.org" }
+            - name: BEACON_API
+              value: "https://ethereum-beacon-api.publicnode.com"
+          volumeMounts:
+            - { name: config, mountPath: /etc/mirror, readOnly: true }
+          resources:
+            requests: { cpu: "250m", memory: 256Mi }
+            limits: { memory: 2Gi }
+      volumes:
+        - { name: shared, emptyDir: {} }
+        - { name: config, configMap: { name: engine-config } }

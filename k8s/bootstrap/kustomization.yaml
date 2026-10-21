@@ -1,0 +1,18 @@
+# Bootstrap Jobs (one-shot): reth snapshot download, engine self test, re-pin wipe.
+#
+#   kubectl apply -k k8s/bootstrap
+#
+# Kept out of the base so `make apply` never re-runs one-shot work.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mainnet-mirror
+
+resources:
+  - snapshot-job.yaml
+  - selftest-job.yaml
+  - repin-job.yaml
+
+images:
+  - name: localhost/mirror-engine
+    newTag: v1

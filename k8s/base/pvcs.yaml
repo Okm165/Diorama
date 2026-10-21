@@ -1,0 +1,62 @@
+# Persistent volumes for the mirror. All use the mirror-retain StorageClass
+# (reclaimPolicy: Retain) so deleting a PVC never destroys the data.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: reth-data
+  labels: { app.kubernetes.io/part-of: mainnet-mirror, app: reth }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: mirror-retain
+  resources:
+    requests:
+      storage: 400Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lighthouse-data
+  labels: { app.kubernetes.io/part-of: mainnet-mirror, app: lighthouse }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: mirror-retain
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: anvil-m-state
+  labels: { app.kubernetes.io/part-of: mainnet-mirror, app: anvil-m }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: mirror-retain
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: anvil-t-state
+  labels: { app.kubernetes.io/part-of: mainnet-mirror, app: anvil-t }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: mirror-retain
+  resources:
+    requests:
+      storage: 40Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: engine-state
+  labels: { app.kubernetes.io/part-of: mainnet-mirror, app: engine }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: mirror-retain
+  resources:
+    requests:
+      storage: 10Gi

@@ -1,0 +1,62 @@
+# engine - the mirror engine: replay loop (M) + verifier + BAL diff applier (T).
+#
+# Built from ./engine (see Makefile). State (cursor, journal, shadow registry,
+# drift log) lives on the engine-state PVC so restarts resume where they left.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: engine
+  labels:
+    app.kubernetes.io/name: engine
+    app.kubernetes.io/part-of: mainnet-mirror
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: engine
+        app.kubernetes.io/part-of: mainnet-mirror
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: engine
+          image: localhost/mirror-engine
+          imagePullPolicy: IfNotPresent
+          args: ["run", "--config", "/etc/mirror/engine.yaml"]
+          ports:
+            - { name: http, containerPort: 8080 }
+          volumeMounts:
+            - { name: config, mountPath: /etc/mirror, readOnly: true }
+            - { name: state, mountPath: /state }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "100m", memory: 128Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: config
+          configMap: { name: engine-config }
+        - name: state
+          persistentVolumeClaim: { claimName: engine-state }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: engine
+  labels: { app.kubernetes.io/name: engine, app.kubernetes.io/part-of: mainnet-mirror }
+spec:
+  selector: { app.kubernetes.io/name: engine }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

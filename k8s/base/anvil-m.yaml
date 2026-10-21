@@ -1,0 +1,136 @@
+# anvil-m - the strict mirror chain (M).
+#
+# Forked from local reth at an absolute pin (reth head - FORK_OFFSET), resolved
+# once per epoch and persisted in /state/pin so restarts keep the same base.
+# The engine replays every parent block on top of the pin; M is never written
+# by the devnet, which is what keeps per-block parity assertions meaningful.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anvil-m
+  labels:
+    app.kubernetes.io/name: anvil-m
+    app.kubernetes.io/part-of: mainnet-mirror
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anvil-m
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: anvil-m
+        app.kubernetes.io/part-of: mainnet-mirror
+    spec:
+      # anvil dumps its state on SIGTERM; give it time.
+      terminationGracePeriodSeconds: 90
+      initContainers:
+        # Resolve the fork pin once and persist it. `auto` semantics: pin is
+        # reth head - FORK_OFFSET, clamped to reth's 10,064-block state window
+        # by construction (FORK_OFFSET=2000). Wipe /state/pin to re-pin.
+        - name: resolve-pin
+          image: docker.io/library/alpine:3.21
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -s /state/pin ]; then
+                echo "pin persisted: $(cat /state/pin)"; exit 0
+              fi
+              echo "resolving pin: $RETH_URL head - $FORK_OFFSET"
+              i=0; HEAD=""
+              while [ -z "$HEAD" ] && [ "$i" -lt 240 ]; do
+                HEAD=$(wget -qO- --header='Content-Type: application/json' \
+                  --post-data='{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                  "$RETH_URL" 2>/dev/null \
+                  | sed -n 's/.*"result":"\(0x[0-9a-fA-F]*\)".*/\1/p')
+                [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
+              done
+              [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
+              PIN=$((HEAD - FORK_OFFSET))
+              echo "$PIN" > /state/pin
+              echo "resolved pin=$PIN (reth head=$HEAD)"
+          env:
+            - name: RETH_URL
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: RETH_URL } }
+            - name: FORK_OFFSET
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: FORK_OFFSET } }
+          volumeMounts:
+            - { name: state, mountPath: /state }
+      containers:
+        - name: anvil
+          image: ghcr.io/foundry-rs/foundry:v1.8.5
+          # The image entrypoint is `/bin/sh -c` and swallows bare args; use a
+          # shell wrapper and `exec` so SIGTERM reaches anvil (state dump).
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              PIN=$(cat /state/pin)
+              echo "anvil-m: fork-url=$RETH_URL pin=$PIN"
+              exec anvil \
+                --host 0.0.0.0 --port 8545 \
+                --fork-url "$RETH_URL" \
+                --fork-block-number "$PIN" \
+                --chain-id 1 \
+                --hardfork bpo2 \
+                --gas-limit 60000000 \
+                --enable-tx-gas-limit \
+                --code-size-limit 24576 \
+                --disable-pool-balance-checks \
+                --order fifo \
+                # The engine owns block production on both chains: without this,
+                # every raw tx / cheatcode write would automine its own block and
+                # the engine's mine(1) would produce empty blocks (measured: the
+                # 2026-10 automine-reset incident).
+                --no-mining \
+                --auto-impersonate \
+                --prune-history 16 \
+                --transaction-block-keeper 2 \
+                --no-rate-limit \
+                --no-request-size-limit \
+                --no-fork-node-info \
+                --state /state/state.json \
+                --state-interval 300
+          env:
+            - name: RETH_URL
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: RETH_URL } }
+            # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
+            # flushed on SIGTERM, so restarts keep the read-through warm.
+            - { name: HOME, value: /state }
+          ports:
+            - { name: http, containerPort: 8545 }
+          volumeMounts:
+            - { name: state, mountPath: /state }
+          readinessProbe:
+            tcpSocket: { port: 8545 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 8545 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "500m", memory: 1Gi }
+            # M replays every mainnet tx, so anvil caches all state it reads
+            # from the fork (~15-25 MB per replayed block, measured) plus a
+            # 350 MB state dump (T's is 27 MB). k8s restarts M under pressure;
+            # the engine detects the backward head jump and rebases (logged),
+            # then re-converges from the parent BALs. Give it room so a restart
+            # costs minutes, not seconds.
+            limits: { memory: 24Gi }
+      volumes:
+        - name: state
+          persistentVolumeClaim: { claimName: anvil-m-state }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: anvil-m
+  labels: { app.kubernetes.io/name: anvil-m, app.kubernetes.io/part-of: mainnet-mirror }
+spec:
+  selector: { app.kubernetes.io/name: anvil-m }
+  ports:
+    - { name: http, port: 8545, targetPort: 8545 }

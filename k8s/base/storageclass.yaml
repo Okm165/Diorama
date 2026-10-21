@@ -1,0 +1,13 @@
+# Dedicated StorageClass for the mirror: local-path provisioner with
+# reclaimPolicy Retain, so deleting a PVC never deletes the underlying data.
+# Recreate a PVC with the same name to re-attach an existing volume.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: mirror-retain
+  labels:
+    app.kubernetes.io/part-of: mainnet-mirror
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true

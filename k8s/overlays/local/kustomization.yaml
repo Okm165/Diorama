@@ -1,0 +1,12 @@
+# Local overlay for the single-node k3s cluster in this workshop.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: mainnet-mirror
+
+resources:
+  - ../../base
+
+images:
+  - name: localhost/mirror-engine
+    newTag: v1

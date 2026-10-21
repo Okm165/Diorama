@@ -1,0 +1,46 @@
+# Bootstrap Job: wipe the anvil pins + state dumps to force a re-pin.
+#
+# Used by `make repin`. After this Job:
+#   1. delete it,
+#   2. restart anvil-m / anvil-t (their init containers resolve a fresh pin),
+#   3. the engine detects the chain reset on its next poll and rebases its
+#      cursor automatically (see engine state rebase logic).
+#
+# The fork RPC cache (~/.foundry/cache/rpc/<chain>/<block>/) is keyed by block
+# number and is left in place.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: repin-wipe
+  namespace: mainnet-mirror
+  labels:
+    app.kubernetes.io/name: repin-wipe
+    app.kubernetes.io/part-of: mainnet-mirror
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: repin-wipe
+        app.kubernetes.io/part-of: mainnet-mirror
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: wipe
+          image: docker.io/library/alpine:3.21
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              for d in /state/anvil-m /state/anvil-t; do
+                echo "wiping $d: pin + state dump"
+                rm -f "$d/pin" "$d/state.json"
+                ls -la "$d" || true
+              done
+          volumeMounts:
+            - { name: anvil-m-state, mountPath: /state/anvil-m }
+            - { name: anvil-t-state, mountPath: /state/anvil-t }
+      volumes:
+        - { name: anvil-m-state, persistentVolumeClaim: { claimName: anvil-m-state } }
+        - { name: anvil-t-state, persistentVolumeClaim: { claimName: anvil-t-state } }

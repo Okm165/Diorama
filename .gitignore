@@ -1,0 +1,11 @@
+# Rust build artifacts
+engine/target/
+
+# Local scratch
+*.tar
+*.log
+
+# Never commit secret material (JWT is created by scripts/gen-secret.sh)
+k8s/**/secret-*.yaml
+
+.context/
