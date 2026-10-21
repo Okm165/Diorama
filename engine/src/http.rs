@@ -133,6 +133,9 @@ struct ShadowReq {
     slots: Vec<U256>,
     #[serde(default)]
     account_fields: bool,
+    /// Hand these keys back to mainnet sync (and re-sync their values now).
+    #[serde(default)]
+    clear: bool,
 }
 
 /// Mark devnet writes that bypassed T's block pipeline (direct cheatcode calls).
@@ -140,7 +143,64 @@ async fn admin_shadow(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<ShadowReq>,
 ) -> Json<serde_json::Value> {
-    {
+    let mut resynced = 0usize;
+    if req.clear {
+        {
+            let mut s = ctx.shadow.lock().unwrap();
+            if req.account_fields {
+                s.unmark_account_fields(req.address);
+            }
+            for slot in &req.slots {
+                s.unmark_slot(req.address, *slot);
+            }
+        }
+        // A key without a shadow but with a stale devnet value is the most
+        // confusing state there is: push mainnet's current values to T now.
+        let mut calls: Vec<(String, serde_json::Value)> = Vec::new();
+        // T's state reflects the last applied parent block, so re-sync from
+        // *that* block - reading head would leave T holding a future value.
+        let head = ctx
+            .cursor_t()
+            .map(|c| c.block)
+            .unwrap_or_else(|| 0);
+        let head = if head == 0 { ctx.reth.block_number().await.unwrap_or(0) } else { head };
+        if req.account_fields {
+            if let Ok(bal) = ctx.reth.balance_at(req.address, head).await {
+                calls.push((
+                    "anvil_setBalance".to_string(),
+                    serde_json::json!([req.address, crate::bal::quant_hex_u256(bal)]),
+                ));
+            }
+            if let Ok(nonce) = ctx.reth.nonce_at(req.address, head).await {
+                calls.push((
+                    "anvil_setNonce".to_string(),
+                    serde_json::json!([req.address, format!("0x{nonce:x}")]),
+                ));
+            }
+        }
+        for slot in &req.slots {
+            if let Ok(v) = ctx.reth.storage_at(req.address, *slot, head).await {
+                calls.push((
+                    "anvil_setStorageAt".to_string(),
+                    serde_json::json!([
+                        req.address,
+                        crate::bal::quant_hex_u256(*slot),
+                        format!("0x{}", hex::encode(v))
+                    ]),
+                ));
+            }
+        }
+        if let Ok(results) = ctx.anvil_t.batch_raw(&calls).await {
+            for r in results {
+                if let Err(e) = r {
+                    tracing::warn!(error = %e, "unshadow re-sync write failed");
+                } else {
+                    resynced += 1;
+                }
+            }
+        }
+        let _ = ctx.save_shadow();
+    } else {
         let mut s = ctx.shadow.lock().unwrap();
         if req.account_fields {
             s.mark_account_fields(req.address);
@@ -148,11 +208,14 @@ async fn admin_shadow(
         for slot in &req.slots {
             s.mark_slot(req.address, *slot);
         }
+        drop(s);
+        let _ = ctx.save_shadow();
     }
-    let _ = ctx.save_shadow();
     let shadow = ctx.shadow.lock().unwrap();
     Json(json!({
         "address": req.address,
+        "cleared": req.clear,
+        "resynced_keys": resynced,
         "shadowed_slots": shadow.slot_count(),
         "shadowed_accounts": shadow.accounts.len(),
     }))

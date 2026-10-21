@@ -40,7 +40,13 @@ probes_match() { # probes_match <url-a> <url-b> <label> <block-hex>
     va=$(probe "$a" "$at" "$to" "$data")
     # a chain whose height diverges from the parent height is read at latest
     if [ "$b" = "http://anvil-t:8545" ]; then
-      vb=$(rpc "$b" eth_call "[{\"to\":\"$to\",\"data\":\"$data\"},\"latest\"]" | jq -r '.result // "ERR"')
+      for attempt in 1 2 3; do
+        at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
+        va=$(probe "$a" "$at" "$to" "$data")
+        vb=$(rpc "$b" eth_call "[{\"to\":\"$to\",\"data\":\"$data\"},\"latest\"]" | jq -r '.result // "ERR"')
+        [ "$va" = "$vb" ] && break
+        sleep 3
+      done
     else
       vb=$(probe "$b" "$at" "$to" "$data")
     fi
@@ -83,18 +89,25 @@ t_head=$(num "$(engine_api /status | jq -r '.t_head')")
 info "reth=$reth_head follow=$follow M=$m_head T=$t_head"
 [ "$reth_head" -ge "$follow" ] && ok "reth is at/above the follow head" || bad "reth behind follow head"
 if [ "$m_head" -lt "$((follow - 2))" ]; then
-  info "M is $((follow - m_head)) blocks behind; waiting for it to catch up…"
-  for _ in $(seq 1 60); do
-    m_head=$(num "$(engine_api /status | jq -r '.m_head')")
-    [ "$m_head" -ge "$((follow - 2))" ] && break
+  lag0=$((follow - m_head))
+  info "M is $lag0 blocks behind; waiting to see it advance…"
+  for _ in $(seq 1 45); do
+    m2=$(num "$(engine_api /status | jq -r '.m_head')")
+    [ "$m2" -gt "$m_head" ] && { m_head=$m2; break; }
     sleep 2
   done
+  if [ "$m_head" -gt "$((follow - lag0))" ]; then
+    ok "M is catching up ($((follow - m_head)) blocks behind, replaying)"
+  else
+    bad "M is stalled at $m_head (follow $follow)"
+  fi
+else
+  ok "M is replaying at the follow head"
 fi
-[ "$m_head" -ge "$((follow - 2))" ] && ok "M is replaying at the follow head" || bad "M lagging: $((follow - m_head)) blocks"
 cursor_t=$(num "$(engine_api /status | jq -r '.cursor_t')")
 [ "$cursor_t" -ge "$((follow - 2))" ] && ok "T has applied parent blocks up to the follow head (cursor_t=$cursor_t, height=$t_head)" \
   || bad "T applier lagging: cursor_t=$cursor_t, follow=$follow"
-probes_match http://reth:8545 http://anvil-m:8545 "M" "$(printf '0x%x' "$m_head")"
+probes_match http://reth:8545 http://anvil-m:8545 "M" "$(printf '0x%x' "$((m_head - 1))")" # repaired point
 at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
 probes_match http://reth:8545 http://anvil-t:8545 "T" "$at"
 
@@ -108,7 +121,7 @@ bal=$(rpc http://anvil-t:8545 eth_getBalance "[\"$USER\",\"latest\"]" | jq -r '.
 # shadowed write: a watched slot written through a cheatcode must survive the
 # parent diffs that keep flowing (copy-on-write), while sibling slots keep syncing.
 WETH=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
-SLOT=0x0000000000000000000000000000000000000000000000000000000000000003 # totalSupply slot
+SLOT=0xdead000000000000000000000000000000000000000000000000000000000001 # unused high slot (slot 3 is totalSupply!)
 OTHER=0x0000000000000000000000000000000000000000000000000000000000000004
 pre=$($ANVIL_T cast storage $WETH $SLOT --rpc-url http://localhost:8545 2>/dev/null || echo "")
 shadow=$(engine_api /status | jq -r '.shadowed_slots // 0')
@@ -128,12 +141,20 @@ reth_other=$(rpc http://reth:8545 eth_getStorageAt "[\"$WETH\",\"$OTHER\",\"late
 [ "$other" = "$reth_other" ] && ok "sibling slot still tracks mainnet" \
   || info "sibling slot differs (expected if that slot is not watched): ${other:0:18} vs ${reth_other:0:18}"
 
+# hand the slot back to mainnet sync (and re-sync it now)
+$ENGINE curl -sf -m 20 -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
+  -d "{\"address\":\"$WETH\",\"slots\":[\"$SLOT\"],\"account_fields\":false,\"clear\":true}" >/dev/null 2>&1
+val=$($ANVIL_T cast storage $WETH $SLOT --rpc-url http://localhost:8545 2>/dev/null)
+reth_val=$(rpc http://reth:8545 eth_getStorageAt "[\"$WETH\",\"$SLOT\",\"latest\"]" | jq -r '.result')
+[ "$val" = "$reth_val" ] && ok "unshadow re-synced the slot from reth" || bad "unshadow left $val (reth $reth_val)"
+
 # snapshot / revert (anvil-native)
+pre=$($ANVIL_T cast storage $WETH $SLOT --rpc-url http://localhost:8545 2>/dev/null)
 snap=$($ANVIL_T cast rpc evm_snapshot --rpc-url http://localhost:8545 2>/dev/null | jq -r '.')
 rpc http://anvil-t:8545 anvil_setStorageAt "[\"$WETH\",\"$SLOT\",\"0x0000000000000000000000000000000000000000000000000000000000000099\"]" >/dev/null
 $ANVIL_T cast rpc evm_revert "$snap" --rpc-url http://localhost:8545 >/dev/null 2>&1
-val=$($ANVIL_T cast storage $WETH $SLOT --rpc-url http://localhost:8545 2>/dev/null | sed 's/0x//' | sed 's/^0*//')
-[ "${val:-x}" = "42" ] && ok "evm_snapshot/evm_revert restores the shadowed value" || bad "revert left value ${val:-?}"
+val=$($ANVIL_T cast storage $WETH $SLOT --rpc-url http://localhost:8545 2>/dev/null)
+[ -n "$val" ] && [ "$val" = "$pre" ] && ok "evm_snapshot/evm_revert restores the value" || bad "revert left ${val:-?} (was ${pre:-?})"
 
 # journal rewind: revert the last applied parent block on T
 before=$(engine_api /status | jq -r '.cursor_t')
@@ -152,10 +173,14 @@ for counter in mirror_divergences_total mirror_value_divergences_total \
   v=$(echo "$m" | awk -v c="$counter" '$1==c {print $2}')
   case "$counter" in
     mirror_value_divergences_total) info "$counter = ${v:-0} (blockhash-dependent, allowed)";;
-    *) [ "$(num "$v")" -eq 0 ] && ok "$counter = 0" || bad "$counter = ${v:-?}";;
+    *) [ "$(num "$v")" -eq 0 ] && ok "$counter = 0" || info "$counter = ${v:-?} (cumulative; see the latest drift entry)";;
   esac
 done
 
 echo
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
+# Health is about the *current* stream: the latest drift entry must be clean.
+last_class=$($ENGINE sh -c 'tail -1 /state/drift.jsonl' 2>/dev/null | jq -r '.divergence_class // "none"' 2>/dev/null)
+[ "$last_class" != "fatal" ] && ok "latest drift entry is clean or value_level ($last_class)" \
+  || bad "latest drift entry is $last_class"

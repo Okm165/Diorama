@@ -257,7 +257,7 @@ point; everything else is a rate/pruning choice:
 | Lighthouse block backfill depth | weak-subjectivity point (~5 months, ~1.03M slots) | Design bound since v4.2.0; no knob reduces it. One-time: ends with `INFO Historical block download complete` |
 | Lighthouse backfill rate | default rate limiter ("typically <20 slots/s") | 6.7-15 slots/s measured; covers the 8.4k-slot snapshot gap in ~10 min, then continues gently in the background |
 | Lighthouse block cost | ~150-200 KB/slot | ~150 GB for the full 5-month range; retained in the freezer (blocks are not pruned) |
-| Lighthouse column/blob cost | 18-day DA window only | ~377 KB/slot measured while inside the window (~50 GB for the full window); beyond it the backfill fetches blocks only |
+| Lighthouse column/blob cost | **not bounded to the DA window during the backfill** (measured) | The backfill fetches blob/column data for *every* backfilled slot: `blobs_db` grew ~18.6 GB/h (~650 KB/slot) at 8 slots/s, far beyond the 18-day window it will ever serve. Projected peak for the full 5-month range: ~850 GB (blobs) + ~185 GB (blocks). local-path volumes are thin, so this consumes the node's disk (2.5 TB free) rather than a PVC quota; size the PVC honestly (1500Gi) and reclaim with the drill below |
 | Lighthouse prune cadence | `--epochs-per-blob-prune=1` (was 256) | Default 256 epochs (~27 h) can let ~20 GB/h of backfill blobs accumulate before the first prune - more than the PVC headroom. Pruning every epoch bounds the peak; only data older than the DA boundary is touched, which the mirror never needs |
 | Lighthouse payloads | retained (`--prune-payloads=false`) | Default pruning rebuilds payloads from the EL on demand - impossible for blocks the EL has not executed, which is exactly the top-up gap. This is what makes the backfilled range cost full block size |
 | reth P2P | none (`--disable-discovery --trusted-only`) | 0 peers; no discovery chatter; no pipeline/backfill runs (measured 0 pipeline log lines) - the EL is driven purely by the Engine API |
@@ -265,9 +265,29 @@ point; everything else is a rate/pruning choice:
 | reth retention | prune profile (see table above) | receipts/bodies 20,000 blocks, account/storage history 10,064 blocks |
 | reth bulk download | one-time snapshot (`reth download --minimal`) | 154 GB download / ~287 GB on disk - the only bootstrap-time network use besides Lighthouse's checkpoint sync |
 
-Total expected footprint once the one-time backfill completes: ~200 GB in
-`lighthouse-data` (~50 GB DA-window columns + ~150 GB blocks) and ~300 GB in
-`reth-data` (snapshot + growth), both well inside their PVCs (500Gi / 400Gi).
+Total expected footprint once the one-time backfill completes: ~850 GB of
+blobs (mostly beyond the DA window, so prunable) + ~185 GB of blocks in
+`lighthouse-data`, and ~300 GB in `reth-data`.
+
+**Reclaiming the backfill's blob storage** (one-time, after the backfill logs
+`INFO Historical block download complete`; needs the node stopped because MDBX
+is locked while it runs - measured: `Fatal error: LevelDbError(... lock
+/data/beacon/chain_db/LOCK: Resource temporarily unavailable)`):
+
+```bash
+kubectl -n mainnet-mirror scale deploy/lighthouse --replicas=0
+kubectl -n mainnet-mirror run prune --rm -it --restart=Never \
+  --image=docker.io/sigp/lighthouse:v8.3.0 --command -- \
+  sh -c 'lighthouse db prune-blobs --datadir /data --network mainnet'
+# (mount the lighthouse-data PVC in that pod; or exec into a one-off pod that does)
+kubectl -n mainnet-mirror scale deploy/lighthouse --replicas=1
+```
+
+Pruning removes everything older than the DA boundary - the mirror only ever
+needs the pin window (~1.4 days), so this is safe. It leaves ~50 GB of columns
+plus the blocks. The alternative trade-off is dropping `--semi-supernode`:
+~650 GB less disk, but the mirror loses blob-tx fidelity on M (blob blocks are
+mined without their blob txs and recorded; state stays exact via the BAL).
 
 **Follow head during a catch-up.** The engine follows reth's `safe` block, which
 Lighthouse updates via `forkchoiceUpdated`. While reth is far behind the CL's
@@ -347,4 +367,4 @@ time-dependence proof – it only matches when the block context is aligned).
 | `GET /metrics` | Prometheus text: heads, lag, durations, divergences (structural + behavioral), repair writes, convergence probes, writes, pin age |
 | `POST /admin/rewind` | `{"blocks": N}` – journal-based rewind of T |
 | `POST /admin/resume` | clear a divergence freeze |
-| `POST /admin/shadow` | register devnet writes that bypassed the block pipeline |
+| `POST /admin/shadow` | register devnet writes that bypassed the block pipeline; with `"clear": true` hand the given slots/account fields *back* to mainnet sync and re-sync their values from reth at T's cursor (a key with a stale value and no shadow is the most confusing state there is) |

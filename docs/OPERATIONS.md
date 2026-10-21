@@ -148,6 +148,21 @@ curl -X POST .../admin/shadow -H 'Content-Type: application/json' \
   -d '{"address":"0xYourContract","slots":["0x1","0x2"],"account_fields":true}'
 ```
 
+### Hand a key back to mainnet sync
+
+`anvil_setStorageAt` / `anvil_setBalance` writes are owned by the devnet (COW):
+parent diffs never overwrite them. To give a key back:
+
+```bash
+kubectl -n mainnet-mirror exec deploy/engine -- \
+  curl -s -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
+  -d '{"address":"0xYourContract","slots":["0x1"],"account_fields":false,"clear":true}'
+```
+
+The engine drops the shadow and immediately writes mainnet's current value
+(read at T's cursor, so T stays consistent with the parent blocks it has
+applied).
+
 ### Resume after a freeze
 
 Only relevant with `on_divergence: freeze_m|halt_all` (conformance runs):

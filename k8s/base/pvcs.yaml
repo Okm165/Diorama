@@ -26,7 +26,7 @@ spec:
       # Data columns (PeerDAS semi-supernode, ~18 day availability window,
       # ~100 GB) + retained execution payloads (backfill to the weak
       # subjectivity point) + the beacon DB.
-      storage: 500Gi
+      storage: 1500Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

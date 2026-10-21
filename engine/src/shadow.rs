@@ -61,6 +61,22 @@ impl Shadow {
         self.slots.values().map(|s| s.len()).sum()
     }
 
+    /// Hand a slot back to mainnet sync. The caller re-syncs its value from
+    /// reth, so T does not keep a stale devnet value with no shadow to explain it.
+    pub fn unmark_slot(&mut self, address: Address, slot: U256) {
+        if let Some(slots) = self.slots.get_mut(&address) {
+            slots.remove(&slot);
+            if slots.is_empty() {
+                self.slots.remove(&address);
+            }
+        }
+    }
+
+    /// Hand an account's balance/nonce/code back to mainnet sync.
+    pub fn unmark_account_fields(&mut self, address: Address) {
+        self.accounts.remove(&address);
+    }
+
     /// A re-pin starts a new epoch: the devnet's writes are gone with the old
     /// chain, so the shadow set ("these keys belong to the devnet") must go too.
     /// Keeping it would silently stop T from syncing keys it no longer owns.
