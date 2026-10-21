@@ -54,10 +54,10 @@ bootstrap: ns secrets images ## First-time setup: namespace, secrets, images, sn
 # them into the k3s containerd store keeps pod start-up independent of registry
 # DNS - measured: containerd's resolver can fail transiently while podman's
 # works, which turned a deploy into ImagePullBackOff.
-IMAGES := ghcr.io/paradigmxyz/reth:v2.8.0 \
-          docker.io/sigp/lighthouse:v8.3.0 \
-          ghcr.io/foundry-rs/foundry:v1.8.6 \
-          docker.io/library/alpine:3.24.2
+# Single source of truth: every third-party image reference in the manifests,
+# pinned by tag *and* digest. Bumping a version means editing the manifest once.
+IMAGES := $(shell grep -rhoE 'image: [^ ]+' k8s/ | awk '{print $$2}' \
+            | grep -v 'mirror-engine' | sort -u)
 
 images: ## Pull + import the pinned third-party images into k3s containerd
 	@for img in $(IMAGES); do \

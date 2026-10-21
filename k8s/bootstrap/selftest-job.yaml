@@ -26,7 +26,7 @@ spec:
       restartPolicy: Never
       initContainers:
         - name: resolve-pin
-          image: docker.io/library/alpine:3.24.2
+          image: docker.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -54,7 +54,7 @@ spec:
             - { name: shared, mountPath: /shared }
       containers:
         - name: anvil-m
-          image: ghcr.io/foundry-rs/foundry:v1.8.6
+          image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -74,7 +74,7 @@ spec:
             requests: { cpu: "250m", memory: 256Mi }
             limits: { memory: 2Gi }
         - name: anvil-t
-          image: ghcr.io/foundry-rs/foundry:v1.8.6
+          image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
           command: ["/bin/sh", "-c"]
           args:
             - |

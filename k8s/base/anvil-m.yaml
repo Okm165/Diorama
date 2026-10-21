@@ -32,7 +32,7 @@ spec:
         # reth head - FORK_OFFSET, clamped to reth's 10,064-block state window
         # by construction (FORK_OFFSET=2000). Wipe /state/pin to re-pin.
         - name: resolve-pin
-          image: docker.io/library/alpine:3.24.2
+          image: docker.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -65,7 +65,7 @@ spec:
             - { name: state, mountPath: /state }
       containers:
         - name: anvil
-          image: ghcr.io/foundry-rs/foundry:v1.8.6
+          image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
           # The image entrypoint is `/bin/sh -c` and swallows bare args; use a
           # shell wrapper and `exec` so SIGTERM reaches anvil (state dump).
           command: ["/bin/sh", "-c"]

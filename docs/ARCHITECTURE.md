@@ -300,27 +300,35 @@ update), so it never clobbers them. After a fresh bootstrap, re-pin once the
 catch-up has finished: M/T then start from a live, exact pin instead of
 replaying the (partially degraded) catch-up window.
 
-## Pinned versions (no floating tags)
+## Pinned versions (tag + digest, no floating references)
 
-Every image reference uses a **full version tag**; nothing in the repo uses
-`latest`, a minor-only tag, or an unpinned reference. Full semver tags are
-static for all of these projects, and - unlike `@sha256:` digest pins - they can
-be satisfied by an offline import, which matters on a single-node cluster whose
-containerd resolver can fail transiently (measured: a digest-pinned pull turned
-a rollout into `ErrImagePull` on a DNS hiccup).
+Every image reference in the repo is pinned by **full version tag and digest**;
+nothing uses `latest`, a minor-only tag, or an unpinned reference. The digest is
+verified to be present in the k3s containerd store, so a pod starts with **zero
+registry access** (measured: `Container image ... already present on machine`).
 
 | Component | Image | Notes |
 |---|---|---|
-| reth | `ghcr.io/paradigmxyz/reth:v2.8.0` | latest release (2026-10-20); opens the v2.7 snapshot DB (manual `reth db migrate-v2` exists, so older layouts stay supported) |
-| Lighthouse | `docker.io/sigp/lighthouse:v8.3.0` | latest release |
-| Foundry (anvil) | `ghcr.io/foundry-rs/foundry:v1.8.6` | latest release |
-| init containers / wipe job | `docker.io/library/alpine:3.24.2` | latest stable |
-| engine | `localhost/mirror-engine:v1` | built from this repo; the tag lives in `k8s/base/engine.yaml` and the Makefile reads it from there (single source of truth) |
+| reth | `ghcr.io/paradigmxyz/reth:v2.8.0@sha256:796c8664…` | latest release; opens the v2.7 snapshot DB (a manual `reth db migrate-v2` exists, so older layouts stay supported) |
+| Lighthouse | `docker.io/sigp/lighthouse:v8.3.0@sha256:ca59d3a3…` | latest release |
+| Foundry (anvil) | `ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f…` | latest release |
+| init containers / wipe job | `docker.io/library/alpine:3.24.2@sha256:294b683c…` | 3.24.3 exists; bump with `make images` when the registry is reachable |
+| engine | `localhost/mirror-engine:v1` | built from this repo; the tag lives in `k8s/base/engine.yaml` and the Makefile reads it from there |
 
-`make images` pre-pulls and imports the third-party images into the k3s
-containerd store, so pod start-up never depends on registry DNS. `make
-bootstrap` runs it first. Base images of the engine build are pinned the same
-way in `engine/Dockerfile` (`rust:1.99.1-slim-trixie`, `debian:13.7-slim`).
+**Single source of truth.** The Makefile derives the image list for `make images`
+from the manifests (`grep 'image:' k8s/`), so a version bump is a one-line
+manifest edit - there is no second list to drift.
+
+**How to resolve a digest.** Use the client that populates the store (podman /
+k3s), not the registry API: for the same tag the API can return a different
+manifest depending on the `Accept` header. Measured: Lighthouse v8.3.0 is
+`ca59d3a3…` in containerd but `6d76f50b…` via the API. After pinning, verify
+with `sudo k3s ctr images ls -q | grep <image>@` - the digest must be listed, or
+the pod needs a registry pull (which fails when DNS is flaky, as it was here).
+
+`make images` pre-pulls and imports the pinned references into the k3s containerd
+store; `make bootstrap` runs it first. The engine's build bases are pinned the
+same way in `engine/Dockerfile` (`rust:1.99.1-slim-trixie`, `debian:13.7-slim`).
 
 ## Engine configuration (`k8s/base/engine-config.yaml`)
 

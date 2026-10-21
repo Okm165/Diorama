@@ -27,7 +27,7 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: reth
-          image: ghcr.io/paradigmxyz/reth:v2.8.0
+          image: ghcr.io/paradigmxyz/reth:v2.8.0@sha256:796c866410171459946d6607301ad728a1b150ea0aa05623cf6bdf79cd3e3322
           args:
             - node
             - --chain=mainnet
