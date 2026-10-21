@@ -4,9 +4,9 @@
 
 | Component | Image / build | Role | Measured footprint |
 |---|---|---|---|
-| `reth` | `ghcr.io/paradigmxyz/reth:v2.7.0` | Source of truth: head state, blocks, receipts, EIP-7928 BALs, `debug` traces | ~300 GB disk, ~2.6 GB RAM (idle) |
-| `lighthouse` | `sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator), serves payloads + blob sidecars to the engine | ~100 GB disk (18-day column custody), 2.4-5 GB RAM (16Gi limit) |
-| `anvil-m` | `ghcr.io/foundry-rs/foundry:v1.8.5` | Mirror chain (M): replays every parent tx, then re-converges from the BAL | ~15-25 MB per replayed block (24Gi limit) |
+| `reth` | `ghcr.io/paradigmxyz/reth:v2.8.0` | Source of truth: head state, blocks, receipts, EIP-7928 BALs, `debug` traces | ~300 GB disk, ~2.6 GB RAM (idle) |
+| `lighthouse` | `docker.io/sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator), serves payloads + blob sidecars to the engine | ~100 GB disk (18-day column custody), 2.4-5 GB RAM (16Gi limit) |
+| `anvil-m` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Mirror chain (M): replays every parent tx, then re-converges from the BAL | ~15-25 MB per replayed block (24Gi limit) |
 | `anvil-t` | same | Devnet chain (T): watch-list state + your writes, never replays parent txs | ~2.5 GB after thousands of applied blocks (16Gi limit) |
 | `engine` | `localhost/mirror-engine:v1` (this repo) | Replay loop, verifier, BAL diff applier, convergence repair, journal, admin API | ~100 MB RAM |
 
@@ -312,7 +312,7 @@ registry access** (measured: `Container image ... already present on machine`).
 | reth | `ghcr.io/paradigmxyz/reth:v2.8.0@sha256:796c8664…` | latest release; opens the v2.7 snapshot DB (a manual `reth db migrate-v2` exists, so older layouts stay supported) |
 | Lighthouse | `docker.io/sigp/lighthouse:v8.3.0@sha256:ca59d3a3…` | latest release |
 | Foundry (anvil) | `ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f…` | latest release |
-| init containers / wipe job | `docker.io/library/alpine:3.24.2@sha256:294b683c…` | 3.24.3 exists; bump with `make images` when the registry is reachable |
+| init containers / wipe job | `docker.io/library/alpine:3.24.2@sha256:294b683c…` | 3.24.3 exists but the registry was unreachable from this node (DNS/IPv6: `dial tcp [2600:…]: connect: network is unreachable`). Bump with `make images` once it is; the running set is complete without it |
 | engine | `localhost/mirror-engine:v1` | built from this repo; the tag lives in `k8s/base/engine.yaml` and the Makefile reads it from there |
 
 **Single source of truth.** The Makefile derives the image list for `make images`
@@ -327,8 +327,16 @@ with `sudo k3s ctr images ls -q | grep <image>@` - the digest must be listed, or
 the pod needs a registry pull (which fails when DNS is flaky, as it was here).
 
 `make images` pre-pulls and imports the pinned references into the k3s containerd
-store; `make bootstrap` runs it first. The engine's build bases are pinned the
-same way in `engine/Dockerfile` (`rust:1.99.1-slim-trixie`, `debian:13.7-slim`).
+store and then runs **`make check-pins`**, which mechanically enforces the policy:
+every `image:` in `k8s/` must carry a tag *and* a digest (or be the local engine
+build), the digest must be present in the containerd store, and no `latest` may
+appear anywhere. `make bootstrap` runs it first.
+
+The engine's own dependencies are pinned in `Cargo.lock`: the plan's `alloy 2.5`
+pin (EIP-7928 BAL types) is deliberate and only patch updates are applied
+(measured: `tokio 1.54.0 -> 1.54.1` was the only in-range update). The build
+bases are pinned the same way in `engine/Dockerfile`
+(`rust:1.99.1-slim-trixie`, `debian:13.7-slim`).
 
 ## Engine configuration (`k8s/base/engine-config.yaml`)
 

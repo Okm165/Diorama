@@ -59,6 +59,26 @@ bootstrap: ns secrets images ## First-time setup: namespace, secrets, images, sn
 IMAGES := $(shell grep -rhoE 'image: [^ ]+' k8s/ | awk '{print $$2}' \
             | grep -v 'mirror-engine' | sort -u)
 
+check-pins: ## Verify every image reference is pinned by tag+digest and present locally
+	@fail=0; \
+	for ref in $$(grep -rhoE 'image: [^ ]+' k8s/ | awk '{print $$2}' | sort -u); do \
+	  case "$$ref" in \
+	    localhost/*) \
+	      printf "  %-62s local build, tag pinned\n" "$$ref" ;; \
+	    *@sha256:*) \
+	      if sudo k3s ctr images ls -q 2>/dev/null | grep -qF "$${ref%%:*}@$${ref##*@}"; then \
+	        printf "  %-62s pinned + present locally\n" "$${ref%%@*}"; \
+	      else \
+	        printf "  %-62s PINNED BUT MISSING locally\n" "$${ref%%@*}"; fail=1; \
+	      fi ;; \
+	    *) \
+	      printf "  %-62s NOT PINNED (no digest)\n" "$$ref"; fail=1 ;; \
+	  esac; \
+	done; \
+	if grep -rqE 'image: [^ ]*:latest' k8s/; then echo "  'latest' tag found in k8s/"; fail=1; fi; \
+	if [ $$fail -eq 0 ]; then echo "all images pinned by tag+digest and present"; \
+	else echo "pin check FAILED"; exit 1; fi
+
 images: ## Pull + import the pinned third-party images into k3s containerd
 	@for img in $(IMAGES); do \
 		printf "== %s\n" "$$img"; \
@@ -69,6 +89,7 @@ images: ## Pull + import the pinned third-party images into k3s containerd
 	done
 	@rm -f /tmp/mirror-img.tar
 	@echo "imported: $(IMAGES)"
+	@$(MAKE) --no-print-directory check-pins
 
 ##@ Engine
 
