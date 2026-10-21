@@ -37,10 +37,9 @@ spec:
           args:
             - |
               set -eu
-              if [ -s /state/pin ]; then
-                echo "pin persisted: $(cat /state/pin)"; exit 0
-              fi
-              echo "resolving pin: $RETH_URL head - $FORK_OFFSET"
+              # Always wait for reth first, even when the pin is persisted:
+              # anvil forks at start-up, so restarting while reth is restarting
+              # would crash-loop (measured: "failed to fetch network chain ID").
               i=0; HEAD=""
               while [ -z "$HEAD" ] && [ "$i" -lt 240 ]; do
                 HEAD=$(wget -qO- --header='Content-Type: application/json' \
@@ -50,6 +49,10 @@ spec:
                 [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
               done
               [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
+              if [ -s /state/pin ]; then
+                echo "pin persisted: $(cat /state/pin) (reth head=$HEAD)"; exit 0
+              fi
+              echo "resolving pin: $RETH_URL head - $FORK_OFFSET"
               PIN=$((HEAD - FORK_OFFSET))
               echo "$PIN" > /state/pin
               echo "resolved pin=$PIN (reth head=$HEAD)"
