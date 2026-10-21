@@ -5,9 +5,9 @@
 | Component | Image / build | Role | Measured footprint |
 |---|---|---|---|
 | `reth` | `ghcr.io/paradigmxyz/reth:v2.7.0` | Source of truth: head state, blocks, receipts, EIP-7928 BALs, `debug` traces | ~300 GB disk, ~2.6 GB RAM (idle) |
-| `lighthouse` | `sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator) | ~25 GB disk, ~5 GB RAM synced (16Gi limit) |
+| `lighthouse` | `sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator), serves payloads + blob sidecars to the engine | ~100 GB disk (18-day column custody), 2.4-5 GB RAM (16Gi limit) |
 | `anvil-m` | `ghcr.io/foundry-rs/foundry:v1.8.5` | Mirror chain (M): replays every parent tx, then re-converges from the BAL | ~15-25 MB per replayed block (24Gi limit) |
-| `anvil-t` | same | Devnet chain (T): watch-list state + your writes, never replays parent txs | ~2.5 GB after thousands of applied blocks (12Gi limit) |
+| `anvil-t` | same | Devnet chain (T): watch-list state + your writes, never replays parent txs | ~2.5 GB after thousands of applied blocks (16Gi limit) |
 | `engine` | `localhost/mirror-engine:v1` (this repo) | Replay loop, verifier, BAL diff applier, convergence repair, journal, admin API | ~100 MB RAM |
 
 ## Data flow
@@ -50,14 +50,18 @@ because the mirror only replays *live* blocks.
 
 | Segment | Retained | Why |
 |---|---|---|
-| account + storage history | 10,064 blocks | reth's minimum unwind-safe distance; the Anvil pin (`head-2000`) lives inside it |
+| account + storage history | 10,064 blocks | reth's minimum unwind-safe distance; the Anvil pin (`head-64`) lives well inside it |
 | receipts | 20,000 blocks | verifier slack + `eth_getLogs` debugging |
 | bodies | 20,000 blocks | replayable catch-up backlog after an engine restart |
 | senders, tx lookup | pruned | the mirror never serves historical lookups (a pruned lookup is why `eth_getTransactionByHash`/`getTransactionReceipt(hash)` return `null` on reth; `eth_getBlockReceipts` still works) |
 
 **Lighthouse**: checkpoint sync (no genesis sync), no validator, no light-client
-server, no QUIC/UPnP, 40 target peers. Measured: the initial sync + state caches
-need >6 GiB (it OOM-looped at 6Gi) – the deployment requests 2Gi and limits 16Gi.
+server, no QUIC/UPnP, 40 target peers, `--semi-supernode` (half the data
+columns = enough to reconstruct any blob within the DA window),
+`--prune-payloads=false` (the top-up needs payloads the EL has not executed),
+blob/column pruning and backfill rate limiting left at their defaults - all
+bounded, see "Backfill limits" below. Measured: the initial sync + state caches
+need >6 GiB (it OOM-looped at 6Gi) - the deployment requests 2Gi and limits 16Gi.
 
 **Anvil `--prune-history`** is a memory knob, not a disk knob: it keeps up to N
 full *state snapshots* in memory for rollback/tracing. Measured with 1000:
@@ -88,11 +92,20 @@ but state stays exact: `mirror_m_convergence_failures_total` stays 0 in steady
 state. Without this, one Seaport counter divergence cascaded into invalid txs
 (queued senders), missing txs, and permanently wrong state within ~10 blocks.
 
-**Known open gap: blob-tx replay after PeerDAS.** Sidecars come from a public
-beacon API (a non-supernode Lighthouse cannot reconstruct blobs post-EIP-7594).
-Blocks whose blob txs are rejected by the pool are skipped after three attempts
-and recorded; the BAL repair keeps M's state exact, and T is unaffected. See
-TESTING → Known limitations #5 for the fix direction.
+**Blob-tx replay works without any public API.** The local Lighthouse runs
+`--semi-supernode`: it custodies half the data columns (enough to reconstruct
+any blob) for the 18-day data-availability window, so the engine's only blob
+source is `http://lighthouse:5052`. Two measured quirks are handled:
+
+- For Fulu blocks the beacon API's `kzg_proof` field is a *placeholder*
+  (`0xc0…`, the point at infinity): the stored container only has cell proofs.
+  The engine recomputes the blob proof locally with c-KZG and re-verifies the
+  triple. This is a real check, not a bypass - a recomputed proof verifies if
+  and only if the blob is the one the commitment commits to, and the tx's
+  versioned hash anchors the commitment. Covered by a KZG round-trip unit test.
+- A block whose blob txs still cannot be built (source gap) is mined with
+  whatever the pool holds after three attempts and recorded; the parent-BAL
+  repair keeps M's state exact and T is unaffected.
 
 **Divergence policy: record, don't freeze** (`loops.on_divergence`, default
 `continue`). Every divergence is classified and written to `drift.jsonl` +
@@ -113,12 +126,25 @@ Safe is ~1 epoch (32-64 blocks) behind head but immune to shallow reorgs.
 `latest` trades that safety for freshness. The mirror follows *reth's* head:
 see "Source liveness" below.
 
-**Pins and epochs.** Anvil forks at an absolute pin (`reth head - 2000`),
-resolved once per epoch by an init container and persisted in `/state/pin`, so
-restarts keep the same base. Reads above the pin come from the replayed chain
-(M) or from applied diffs (T); reads below it come from reth's state window.
-When the pin ages out of that window (~10k blocks ≈ 1.4 days), run `make repin`
-– a new epoch. The engine detects the chain reset and rebases automatically.
+**Pins and epochs.** Anvil forks at an absolute pin (`reth head - FORK_OFFSET`,
+default 64), resolved once per epoch by an init container and persisted in
+`/state/pin`, so restarts keep the same base. Reads above the pin come from the
+replayed chain (M) or from applied diffs (T); reads below it come from reth's
+state window (which serves deep history: 10,064 blocks of state, 20,000 blocks
+of receipts/bodies).
+
+Two constraints bound the pin depth:
+1. reth's state window (10,064 blocks ≈ 1.4 days) - reth must be able to serve
+   `eth_getProof`/`debug_trace*` reads at the pin;
+2. the range of slots the local supernode can reconstruct blobs for (18-day DA
+   window, minus anything pruned) - blob txs in the replayed window need
+   sidecars.
+
+Depth is a trade-off, not a requirement: 64 keeps the mirror live with a fast,
+exact bootstrap (~13 min of replayed mainnet history); raising it replays more
+history but costs replay time and M memory. When the pin ages out of reth's
+state window, run `make repin` - a new epoch. The engine detects the chain reset
+and rebases automatically.
 
 **EIP-7702 nonce gaps.** Every authorization in a type-4 tx bumps the
 authority's nonce, so a self-sponsored delegation advances the sender's nonce by
@@ -151,11 +177,21 @@ parent block, every block `m=0`, senders' nonces hundreds behind).
 **A block that cannot be replayed is skipped, not fatal.** After three failed
 attempts the engine mines whatever the pool holds and records the divergence;
 the parent-BAL repair still converges M's state, so one block's missing txs
-(e.g. a beacon source serving a sidecar anvil rejects with "invalid KZG proof")
-never stalls the mirror. Blob sidecars are tried in `blobs.beacon_urls` order
-and the first sidecar whose commitments match the tx's versioned hashes wins;
-publicnode is listed first because the local Lighthouse returned a mismatching
-sidecar for block 26232853.
+never stalls the mirror. Blob sidecars are fetched from the local Lighthouse
+only, validated with the bundled mainnet trusted setup, and placeholder proofs
+are recomputed (see above).
+
+**Epochs own the devnet's writes.** A re-pin starts a new epoch: the anvils
+fork at a fresh pin and the devnet's writes are gone, so the engine clears the
+shadow set when it sees a new fork pin (persisted in `/state/cursor.json` as
+`epoch_pin`). Keeping stale shadows would silently stop T from syncing keys it
+no longer owns. An anvil restart (OOM, dump restore) keeps the same pin and the
+same writes, so its shadows stay.
+
+**T's heights are its own.** T mines one block per applied parent block, plus
+one per journal rewind, so its height is not a mainnet block number - the
+engine tracks progress by `cursor_t` (last applied parent block) and only M,
+which replays 1:1, is compared against the follow head by height.
 
 **Measured rules baked into the code** (each cost a real run to discover):
 padding all hex to 32 bytes / even length (anvil rejects odd-length hex with
@@ -164,50 +200,106 @@ rejected with `-32600`); raw txs sent sequentially (batch items execute
 concurrently and scramble pool order); withdrawals credited via `setBalance`
 (idempotent - `addBalance` double-credits on retries); type-4 gas delta bound
 `[-12,500 × #auths, 0]`; blob sidecars from the beacon API using
-`parentBeaconBlockRoot` of EL block N+1.
+`parentBeaconBlockRoot` of EL block N+1; beacon-API quantities are **decimal
+strings** while the Engine API wants hex (parsing a decimal slot as hex silently
+un-bounds the top-up walk); withdrawal credits read their pre-balance from reth
+so a retried block can never double-credit (reading M at N-1 does exactly that,
+because anvil's "N-1" is the live state when the block is not mined yet).
 
-## Source liveness (read this before trusting freshness)
+## Source liveness: self-contained by construction
 
-The mirror's freshness is **reth's head**, and reth's head only advances when
-the consensus layer drives it:
+At runtime the mirror needs **no external nodes**: no public beacon API, no
+public RPC, no EL P2P peers. reth's chain comes from the local Lighthouse over
+the Engine API (JWT on 8551):
 
 1. `lighthouse` checkpoint-syncs, then feeds `newPayload`/`forkchoiceUpdated`
-   to reth over the engine API (JWT on 8551).
-2. reth executes the payloads *in order*. If the snapshot's head is older than
-   the CL's first payload, reth needs the missing blocks – from **P2P** – or it
-   buffers the live payloads unexecuted (`eth_blockNumber` stays at the
-   snapshot block, `connected_peers: 0`).
+   for new blocks to reth as usual.
+2. For the gap between the snapshot's head and the CL's checkpoint (measured:
+   8.4k blocks ≈ 1.2 days), reth cannot fetch ancestors from peers - it has
+   none. The engine's **top-up loop** (`source_sync`, EIP-8379) walks the CL's
+   canonical chain from reth's head forward, slot by slot, and feeds each
+   ancestor payload to `engine_newPayloadV4` in ascending order followed by
+   `engine_forkchoiceUpdatedV3`. reth buffers and executes them contiguously;
+   measured ~10-11 blocks/s, so a fresh bootstrap catches up in ~15 minutes.
 
-Measured in this environment: reth's discv5 discovery works
-(`reth_discv5_established_sessions_raw_total` climbs) but no RLPx session forms,
-so a snapshot older than the CL's checkpoint cannot be gap-filled by P2P here.
-The mirror then faithfully mirrors the *snapshot's* state and window. Options:
+Spec details that cost real debugging runs:
 
-- Re-run the snapshot bootstrap (`make snapshot`) for a fresher base (the
-  official `--minimal` snapshot lags the chain by hours to ~a day).
-- Point the mirror at any mainnet RPC that serves blocks/receipts and
-  `debug_traceBlockByNumber` (the BAL falls back to the trace diff): set
-  `reth.url` in `k8s/base/engine-config.yaml` and the `RETH_URL` env of both
-  anvil deployments. Public endpoints are rate-limited and serve no BAL, so the
-  engine uses its prestateTracer fallback per block.
-- If P2P is available (host networking, port 30303 open), reth backfills the
-  gap by itself and everything follows live.
+- **Quantities.** The beacon API serves every quantity as a *decimal string*
+  (`"26243147"`, `"1792611803"`); the Engine API wants *hex quantities*. The
+  engine normalizes both.
+- **`executionRequests`** (EIP-7685 / `engine/prague.md`): each element is
+  `request_type || SSZ(request_data)`, ordered by type, and **elements with
+  empty request_data MUST be excluded** - all-empty is `[]`, not `["0x","0x","0x"]`.
+  reth answers anything else with `-32602 Invalid params: EmptyExecutionRequest`.
+  The three request types are re-encoded from the beacon API's structured
+  objects (EIP-6110 deposits 192 B, EIP-7002 withdrawals 76 B, EIP-7251
+  consolidations 116 B per element; SSZ quantities little-endian).
+- **JWT.** alloy's `jwt` feature pulls `jsonwebtoken` without selecting a
+  crypto provider, so signing panics at runtime ("Could not automatically
+  determine the process-level CryptoProvider"). The engine depends on
+  jsonwebtoken with `rust_crypto`; feature unification fixes it graph-wide.
+- **A dead top-up task is invisible** (reth simply stops advancing), so the
+  loop runs under a supervisor that logs and restarts it on panic/exit.
 
-Watch `mirror_reth_head` vs the real mainnet head; if it does not move, the
-mirror is static by construction, not broken.
+**Backfill limits** (what each node downloads and keeps, and why):
+
+| Node | Bounded by | Notes |
+|---|---|---|
+| Lighthouse blocks | weak-subjectivity point (~5 months) | Design bound since v4.2.0; `--genesis-backfill` would go deeper and is never used |
+| Lighthouse rate | "typically <20 slots/s" (default rate limiter) | Measured ~10-15 slots/s here; enough to cover the 8.4k-slot gap in ~10 min |
+| Lighthouse columns | 18-day data-availability window | `--prune-blobs` default true prunes at the DA boundary; combining `--prune-blobs=false` with `--semi-supernode` means *nothing* is ever pruned (book, advanced_blobs.md) - unbounded disk, so we don't |
+| Lighthouse payloads | retained (`--prune-payloads=false`) | Default pruning rebuilds payloads from the EL on demand - impossible for blocks the EL has not executed, which is exactly the top-up gap |
+| reth P2P | none (`--disable-discovery --trusted-only`) | 0 peers; no discovery chatter; no pipeline/backfill runs (measured 0 pipeline log lines) - the EL is driven purely by the Engine API |
+| reth retention | prune profile (see table above) | receipts/bodies 20,000 blocks, account/storage history 10,064 blocks |
+| reth bulk download | one-time snapshot (`reth download --minimal`) | The only bootstrap-time network use besides Lighthouse's checkpoint sync |
+
+**Follow head during a catch-up.** The engine follows reth's `safe` block, which
+Lighthouse updates via `forkchoiceUpdated`. While reth is far behind the CL's
+head, those updates reference blocks reth has not executed, so reth ignores them
+("Received forkchoice updated message when syncing") and its `safe`/`finalized`
+pointers stay at the snapshot's values - the mirror's follow head is frozen
+until the catch-up completes, then jumps to live. The top-up's own
+`forkchoiceUpdated` passes zero hashes for safe/finalized (spec: zero = no
+update), so it never clobbers them. After a fresh bootstrap, re-pin once the
+catch-up has finished: M/T then start from a live, exact pin instead of
+replaying the (partially degraded) catch-up window.
+
+## Pinned versions (no floating tags)
+
+Every image reference uses a **full version tag**; nothing in the repo uses
+`latest`, a minor-only tag, or an unpinned reference. Full semver tags are
+static for all of these projects, and - unlike `@sha256:` digest pins - they can
+be satisfied by an offline import, which matters on a single-node cluster whose
+containerd resolver can fail transiently (measured: a digest-pinned pull turned
+a rollout into `ErrImagePull` on a DNS hiccup).
+
+| Component | Image | Notes |
+|---|---|---|
+| reth | `ghcr.io/paradigmxyz/reth:v2.8.0` | latest release (2026-10-20); opens the v2.7 snapshot DB (manual `reth db migrate-v2` exists, so older layouts stay supported) |
+| Lighthouse | `docker.io/sigp/lighthouse:v8.3.0` | latest release |
+| Foundry (anvil) | `ghcr.io/foundry-rs/foundry:v1.8.6` | latest release |
+| init containers / wipe job | `docker.io/library/alpine:3.24.2` | latest stable |
+| engine | `localhost/mirror-engine:v1` | built from this repo; the tag lives in `k8s/base/engine.yaml` and the Makefile reads it from there (single source of truth) |
+
+`make images` pre-pulls and imports the third-party images into the k3s
+containerd store, so pod start-up never depends on registry DNS. `make
+bootstrap` runs it first. Base images of the engine build are pinned the same
+way in `engine/Dockerfile` (`rust:1.99.1-slim-trixie`, `debian:13.7-slim`).
 
 ## Engine configuration (`k8s/base/engine-config.yaml`)
 
 ```yaml
 reth:   { url, follow: safe|latest|finalized, request_timeout_secs }
 anvil:  { m_url, t_url }
+source_sync: { enabled, interval_ms, max_per_pass,
+               engine_url, jwt_path }   # EIP-8379 top-up via reth's Engine API
 loops:  { poll_interval_ms, max_gap_blocks, chunk_size,
           replay_into_m, apply_into_t, repair_m,
           on_divergence: continue|freeze_m|halt_all }
 verifier: { enabled, drift_sample_keys, type4_refund_per_auth, probes[] }
 watchlist: [ { address, note } ]     # all slots of a watched account sync to T
 journal: { dir, blocks }             # ring size
-blobs:  { enabled, beacon_urls[] }   # sidecar source (local Lighthouse first)
+blobs:  { enabled, beacon_urls[] }   # sidecar source: local Lighthouse only
 http:   { addr, port }
 ```
 

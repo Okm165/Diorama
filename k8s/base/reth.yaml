@@ -27,7 +27,7 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: reth
-          image: ghcr.io/paradigmxyz/reth:v2.7.0
+          image: ghcr.io/paradigmxyz/reth:v2.8.0
           args:
             - node
             - --chain=mainnet
@@ -43,9 +43,17 @@ spec:
             - --authrpc.addr=0.0.0.0
             - --authrpc.port=8551
             - --authrpc.jwtsecret=/secrets/jwt.hex
-            # P2P (hostPorts below give us inbound peers on this single node).
+            # The mirror is self-contained: reth's chain comes from the local
+            # Lighthouse over the Engine API (EIP-8379 top-up, see
+            # docs/ARCHITECTURE.md), so it needs no EL peers at all. Discovery
+            # off and trusted-only with an empty trusted set means zero inbound
+            # and outbound P2P traffic (measured: 0 peers, ~3 discovery log
+            # lines/s before this change). Only the bootstrap snapshot download
+            # job (`reth download --minimal`) uses public peers, and it has its
+            # own args.
+            - --disable-discovery
+            - --trusted-only
             - --port=30303
-            - --discovery.port=30303
             - --metrics=0.0.0.0:9001
             - --log.stdout.format=json
             - --log.stdout.filter=info
@@ -54,8 +62,6 @@ spec:
             - { name: http, containerPort: 8545 }
             - { name: authrpc, containerPort: 8551 }
             - { name: metrics, containerPort: 9001 }
-            - { name: p2p-tcp, containerPort: 30303, protocol: TCP, hostPort: 30303 }
-            - { name: p2p-udp, containerPort: 30303, protocol: UDP, hostPort: 30303 }
           volumeMounts:
             - { name: data, mountPath: /data }
             - { name: config, mountPath: /etc/reth, readOnly: true }

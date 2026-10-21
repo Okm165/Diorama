@@ -34,6 +34,10 @@ pub struct Persisted {
     /// Learned blob wrapper form ("legacy" | "eip7594" | "bare").
     #[serde(default)]
     pub blob_wrapper: Option<String>,
+    /// Fork pin of the current epoch (anvil forkBlockNumber). A change means a
+    /// re-pin: the shadow set is cleared so the devnet starts fresh.
+    #[serde(default)]
+    pub epoch_pin: Option<u64>,
 }
 
 pub struct StateFile {

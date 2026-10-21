@@ -61,6 +61,14 @@ impl Shadow {
         self.slots.values().map(|s| s.len()).sum()
     }
 
+    /// A re-pin starts a new epoch: the devnet's writes are gone with the old
+    /// chain, so the shadow set ("these keys belong to the devnet") must go too.
+    /// Keeping it would silently stop T from syncing keys it no longer owns.
+    pub fn clear(&mut self) {
+        self.slots.clear();
+        self.accounts.clear();
+    }
+
     pub fn load(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),

@@ -19,6 +19,8 @@ metadata:
 spec:
   backoffLimit: 10
   activeDeadlineSeconds: 172800
+  # Keep the completed pod for an hour (log inspection), then clean up.
+  ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:
@@ -28,7 +30,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: download
-          image: ghcr.io/paradigmxyz/reth:v2.7.0
+          image: ghcr.io/paradigmxyz/reth:v2.8.0
           args:
             - download
             - --chain=mainnet

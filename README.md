@@ -23,7 +23,7 @@ reth + Lighthouse ──► ENGINE ──► anvil-m (replay + verify + BAL conv
 ## Quickstart
 
 ```bash
-make ns secrets          # namespace, StorageClass, reth<->lighthouse JWT
+make ns secrets images   # namespace, StorageClass, JWT, pinned images into k3s
 make bootstrap           # + snapshot download (~50 min, 154 GB) + full stack
 make status              # pods, PVCs, engine status
 make smoke               # end-to-end checks (parity spot check included)
@@ -33,11 +33,21 @@ The bootstrap is ordered on purpose: the reth snapshot lands in the PVC first,
 then reth starts, Lighthouse checkpoint-syncs to the CL head, and the anvils
 resolve their pins and the engine starts replaying.
 
-**Freshness check:** the mirror is only as fresh as `mirror_reth_head`. If reth
-is stuck at the snapshot block (no P2P gap-fill), the mirror faithfully mirrors
-the snapshot's state – see
-[OPERATIONS → Source liveness](docs/OPERATIONS.md#source-liveness) for the
-options (re-snapshot, open P2P, or point the mirror at a public RPC).
+**Self-contained at runtime.** Nothing outside the namespace is needed once
+bootstrapped: reth has **no P2P peers** (`--disable-discovery --trusted-only`)
+and gets its chain from the local Lighthouse over the Engine API - including
+the snapshot→head gap, which the engine fills with an EIP-8379 top-up loop
+(`mirror_source_sync_gap_blocks` falls to 0, ~10-11 blocks/s measured). Blob
+sidecars come from the local `--semi-supernode` Lighthouse only, with
+placeholder blob proofs recomputed and verified locally with c-KZG. The only
+external dependencies are bootstrap-time: the reth snapshot download and
+Lighthouse's checkpoint sync (both documented in
+[ARCHITECTURE](docs/ARCHITECTURE.md#source-liveness-self-contained-by-construction)).
+
+**Freshness check:** `mirror_reth_head` must advance with the chain. While the
+top-up catches up, `mirror_source_sync_gap_blocks` counts down; once it is 0,
+run `make repin` so M/T start from a live, exact base. See
+[OPERATIONS → Source liveness](docs/OPERATIONS.md#source-liveness-self-contained).
 
 ## Common operations
 

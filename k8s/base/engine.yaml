@@ -26,7 +26,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/mirror-engine
+          image: localhost/mirror-engine:v1
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/engine.yaml"]
           ports:
@@ -34,6 +34,10 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /etc/mirror, readOnly: true }
             - { name: state, mountPath: /state }
+            # Shared with reth + lighthouse: the engine calls reth's authrpc
+            # (Engine API) to run the top-up loop that keeps reth at the CL head
+            # without any P2P peers.
+            - { name: jwt, mountPath: /secrets, readOnly: true }
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 5
@@ -50,6 +54,8 @@ spec:
           configMap: { name: engine-config }
         - name: state
           persistentVolumeClaim: { claimName: engine-state }
+        - name: jwt
+          secret: { secretName: reth-jwt }
 ---
 apiVersion: v1
 kind: Service

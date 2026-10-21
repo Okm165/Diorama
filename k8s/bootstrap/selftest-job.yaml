@@ -2,6 +2,9 @@
 # scratch Anvil forks of a public RPC. Validates the whole pipeline before the
 # local reth fork source is synced (and on demand afterwards).
 #
+# Test-only external dependencies: a public RPC and a public beacon API. The
+# deployed stack is self-contained (see docs/ARCHITECTURE.md, "Source liveness").
+#
 #   make selftest
 apiVersion: batch/v1
 kind: Job
@@ -23,7 +26,7 @@ spec:
       restartPolicy: Never
       initContainers:
         - name: resolve-pin
-          image: docker.io/library/alpine:3.21
+          image: docker.io/library/alpine:3.24.2
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -51,7 +54,7 @@ spec:
             - { name: shared, mountPath: /shared }
       containers:
         - name: anvil-m
-          image: ghcr.io/foundry-rs/foundry:v1.8.5
+          image: ghcr.io/foundry-rs/foundry:v1.8.6
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -71,7 +74,7 @@ spec:
             requests: { cpu: "250m", memory: 256Mi }
             limits: { memory: 2Gi }
         - name: anvil-t
-          image: ghcr.io/foundry-rs/foundry:v1.8.5
+          image: ghcr.io/foundry-rs/foundry:v1.8.6
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -91,7 +94,7 @@ spec:
             requests: { cpu: "250m", memory: 256Mi }
             limits: { memory: 2Gi }
         - name: engine
-          image: localhost/mirror-engine
+          image: localhost/mirror-engine:v1
           imagePullPolicy: IfNotPresent
           args:
             - selftest

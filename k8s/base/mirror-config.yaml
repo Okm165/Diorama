@@ -11,13 +11,23 @@ data:
   RETH_URL: "http://reth:8545"
 
   # Anvil pin = reth head - FORK_OFFSET, resolved once per epoch and persisted
-  # in /state/pin. Must stay well inside reth's 10,064-block state window.
-  FORK_OFFSET: "2000"
+  # in /state/pin. Two constraints:
+  #   1. well inside reth's 10,064-block state window (it is: 64), and
+  #   2. inside the range of slots whose blobs the local Lighthouse supernode
+  #      can reconstruct - i.e. slots since it started, plus whatever the
+  #      PeerDAS blob backfill has covered.
+  # 64 keeps the mirror live (~13 min of replayed history) and every blob
+  # available. Raise it after the blob backfill has covered the availability
+  # window if you want a deeper replay; a deeper pin than the supernode's
+  # coverage makes blob blocks unreplayable (KZG validation fails).
+  FORK_OFFSET: "64"
 
   # Lighthouse checkpoint sync (fresh CL head without genesis sync).
   CHECKPOINT_SYNC_URL: "https://mainnet-checkpoint-sync.stakely.io"
   CHECKPOINT_SYNC_FALLBACK: "https://sync-mainnet.beaconcha.in"
 
-  # Public mainnet RPC, used only by smoke tests / selftest before reth is
-  # synced. The engine itself always talks to the local reth.
+  # Public mainnet RPC, used only by the self-test Job (a test-only external
+  # dependency: it forks scratch Anvils from a public RPC and needs no reth).
+  # Nothing in the runtime stack uses it - the engine always talks to the local
+  # reth, and smoke.sh checks source liveness against the local CL.
   MAINNET_RPC: "https://ethereum-rpc.publicnode.com"

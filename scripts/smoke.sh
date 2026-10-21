@@ -42,16 +42,19 @@ if head_hex=$(rpc http://reth:8545 eth_blockNumber | jq -r .result) && [ "$head_
       bad "reth still syncing: current=$cur highest=$high"
     fi
   fi
-  # Source liveness: is reth following the real network? (P2P gap-fill may be
-  # unavailable in some environments - see OPERATIONS -> Source liveness.)
-  pub=$(run curl -sf -m 15 -X POST https://ethereum-rpc.publicnode.com -H 'Content-Type: application/json' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' 2>/dev/null | jq -r .result 2>/dev/null || true)
-  if [ -n "$pub" ] && [ "$pub" != "null" ]; then
-    lag=$((pub - head))
-    if [ "$lag" -le 100 ]; then
-      ok "source liveness: reth is $lag blocks behind the public head"
-    else
-      echo "  ! reth is $lag blocks behind the public head - the mirror is as fresh as reth (see OPERATIONS -> Source liveness)"
+  # Source liveness, checked locally (no external calls): reth's head vs the
+  # local CL's execution head, plus the engine's top-up gap metric.
+  cl_slot=$(run curl -sf -m 10 http://lighthouse:5052/eth/v1/beacon/headers/head 2>/dev/null | jq -r '.data.header.message.slot' 2>/dev/null || true)
+  if [ -n "$cl_slot" ] && [ "$cl_slot" != "null" ]; then
+    cl_head=$(run curl -sf -m 20 "http://lighthouse:5052/eth/v2/beacon/blocks/$cl_slot" 2>/dev/null | jq -r '.data.message.body.execution_payload.block_number // empty' 2>/dev/null || true)
+    gap=$(run curl -sf -m 10 localhost:8080/metrics 2>/dev/null | awk '/^mirror_source_sync_gap_blocks /{print $2}' || true)
+    if [ -n "$cl_head" ] && [ "$cl_head" != "null" ]; then
+      lag=$((cl_head - head))
+      if [ "$lag" -le 100 ]; then
+        ok "source liveness: reth is $lag blocks behind the local CL's head (top-up gap ${gap:-?})"
+      else
+        echo "  ! reth is $lag blocks behind the local CL's head (top-up gap ${gap:-?}) - the engine is catching up; see OPERATIONS -> Source liveness"
+      fi
     fi
   fi
   bal=$(rpc http://reth:8545 eth_getBlockAccessList "[\"latest\"]" | jq -r '.result | length')
@@ -61,7 +64,7 @@ else
 fi
 
 echo "-- lighthouse"
-syncing=$(run curl -sf -m 20 http://lighthouse:5052/eth/v1/node/syncing | jq -c '{head_slot, sync_distance, is_syncing}' || echo FAIL)
+syncing=$(run curl -sf -m 20 http://lighthouse:5052/eth/v1/node/syncing | jq -c '.data | {head_slot, sync_distance, is_syncing}' || echo FAIL)
 if [ "$syncing" != "FAIL" ]; then ok "beacon node: $syncing"; else bad "lighthouse unreachable"; fi
 
 echo "-- anvil M / T"

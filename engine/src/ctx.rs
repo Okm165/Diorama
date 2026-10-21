@@ -27,6 +27,9 @@ pub struct Ctx {
     pub anvil_m: Rpc,
     pub anvil_t: Rpc,
     pub beacon: BeaconClient,
+    /// Engine API client (reth authrpc) for the top-up loop; None when disabled
+    /// or unconfigured.
+    pub engine: Option<crate::engine_api::EngineClient>,
     pub watchlist: HashSet<Address>,
     pub shadow: Mutex<Shadow>,
     pub shadow_path: PathBuf,
@@ -49,11 +52,24 @@ impl Ctx {
         let state = StateFile::open(cfg.state_dir.join("cursor.json"));
         let drift = Drift::new(cfg.state_dir.join("drift.jsonl"));
         let beacon = BeaconClient::new(cfg.blobs.beacon_urls.clone());
+        let engine = match (&cfg.source_sync.engine_url, &cfg.source_sync.jwt_path) {
+            (Some(url), Some(jwt)) if cfg.source_sync.enabled => {
+                match crate::engine_api::EngineClient::new(url, jwt) {
+                    Ok(client) => Some(client),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "engine API client disabled");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         Ok(Self {
             reth: Rpc::new(reth_url, timeout),
             anvil_m: Rpc::new(anvil_m_url, timeout),
             anvil_t: Rpc::new(anvil_t_url, timeout),
             beacon,
+            engine,
             watchlist,
             shadow: Mutex::new(shadow),
             shadow_path,

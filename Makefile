@@ -2,7 +2,8 @@ SHELL := /bin/bash
 
 NS             := mainnet-mirror
 ENGINE_IMAGE   := localhost/mirror-engine
-ENGINE_TAG     := v1
+# Single source of truth: the tag in the manifest we deploy.
+ENGINE_TAG     := $(shell grep -o 'mirror-engine:[^@ ]*' k8s/base/engine.yaml | cut -d: -f2)
 OVERLAY        := k8s/overlays/local
 BOOTSTRAP      := k8s/bootstrap
 KUBECTL        := kubectl -n $(NS)
@@ -32,7 +33,7 @@ delete: ## Delete the namespace (data survives: StorageClass is reclaimPolicy Re
 snapshot: ## Download the reth snapshot into the reth PVC (scales reth down first)
 	kubectl -n $(NS) scale deploy/reth --replicas=0 2>/dev/null || true
 	kubectl -n $(NS) delete job reth-snapshot --ignore-not-found
-	kubectl apply -k $(BOOTSTRAP)
+	kubectl apply -f $(BOOTSTRAP)/snapshot-job.yaml
 	@echo "waiting for snapshot to finish (up to 2h; resumable)..."
 	kubectl -n $(NS) wait --for=condition=complete job/reth-snapshot --timeout=7200s || \
 		{ echo "still running - check: make snapshot-status"; exit 1; }
@@ -41,11 +42,33 @@ snapshot-status: ## Show snapshot job status + progress
 	@$(KUBECTL) get job reth-snapshot 2>/dev/null || echo "no snapshot job"
 	@$(KUBECTL) logs job/reth-snapshot --tail=3 2>/dev/null || true
 
-bootstrap: ns secrets ## First-time setup: namespace, secrets, snapshot, full stack
+bootstrap: ns secrets images ## First-time setup: namespace, secrets, images, snapshot, full stack
 	kubectl apply -f k8s/base/pvcs.yaml
 	$(MAKE) snapshot
 	$(MAKE) apply
 	@echo "bootstrap complete. watch: make status"
+
+##@ Images
+
+# Every image is pinned by full version tag (see k8s/base/*.yaml). Pre-importing
+# them into the k3s containerd store keeps pod start-up independent of registry
+# DNS - measured: containerd's resolver can fail transiently while podman's
+# works, which turned a deploy into ImagePullBackOff.
+IMAGES := ghcr.io/paradigmxyz/reth:v2.8.0 \
+          docker.io/sigp/lighthouse:v8.3.0 \
+          ghcr.io/foundry-rs/foundry:v1.8.6 \
+          docker.io/library/alpine:3.24.2
+
+images: ## Pull + import the pinned third-party images into k3s containerd
+	@for img in $(IMAGES); do \
+		printf "== %s\n" "$$img"; \
+		podman pull -q "$$img" || exit 1; \
+		rm -f /tmp/mirror-img.tar; \
+		podman save -o /tmp/mirror-img.tar "$$img" || exit 1; \
+		sudo k3s ctr images import /tmp/mirror-img.tar >/dev/null || exit 1; \
+	done
+	@rm -f /tmp/mirror-img.tar
+	@echo "imported: $(IMAGES)"
 
 ##@ Engine
 
@@ -55,7 +78,6 @@ build: ## Build the engine image with podman
 import: build ## Import the engine image into the k3s containerd store
 	podman save -o /tmp/mirror-engine.tar $(ENGINE_IMAGE):$(ENGINE_TAG)
 	sudo k3s ctr images import /tmp/mirror-engine.tar
-	sudo k3s ctr images tag $(ENGINE_IMAGE):$(ENGINE_TAG) $(ENGINE_IMAGE):latest
 	rm -f /tmp/mirror-engine.tar
 
 deploy-engine: import ## Rebuild + redeploy the engine
@@ -82,9 +104,12 @@ logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-
 smoke: ## End-to-end smoke test
 	NS=$(NS) ./scripts/smoke.sh
 
+scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
+	NS=$(NS) ./scripts/scenario.sh
+
 selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
 	kubectl -n $(NS) delete job engine-selftest --ignore-not-found
-	kubectl apply -k $(BOOTSTRAP)
+	kubectl apply -f $(BOOTSTRAP)/selftest-job.yaml
 	kubectl -n $(NS) wait --for=condition=complete job/engine-selftest --timeout=900s || true
 	$(KUBECTL) logs job/engine-selftest
 
@@ -101,7 +126,7 @@ repin: ## Re-pin drill: wipe pins/state dumps, restart anvils (engine auto-rebas
 	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=anvil-m --timeout=180s || true
 	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=anvil-t --timeout=180s || true
 	kubectl -n $(NS) delete job repin-wipe --ignore-not-found
-	kubectl apply -k $(BOOTSTRAP)
+	kubectl apply -f $(BOOTSTRAP)/repin-job.yaml
 	kubectl -n $(NS) wait --for=condition=complete job/repin-wipe --timeout=300s
 	kubectl -n $(NS) delete job repin-wipe --ignore-not-found
 	kubectl -n $(NS) scale deploy/anvil-m deploy/anvil-t --replicas=1

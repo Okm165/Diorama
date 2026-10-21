@@ -11,7 +11,9 @@ mod journal;
 mod metrics;
 mod replay;
 mod rpc;
+mod engine_api;
 mod selftest;
+mod source_sync;
 mod shadow;
 mod state;
 mod verify;
@@ -123,10 +125,19 @@ async fn run(config: PathBuf) -> Result<()> {
     ctx.restore_blob_form();
 
     // M is engine-owned: transactions are batched and mined explicitly.
+    // A coordinated restart (anvil, reth or lighthouse rolling) must not turn
+    // into CrashLoopBackOff: wait for both anvils to answer before proceeding,
+    // then fail fast only if they stay down.
+    wait_for_anvil(&ctx.anvil_m, "anvil-m").await?;
     ctx.anvil_m
         .anvil_set_automine(false)
         .await
         .context("disabling automine on M")?;
+    wait_for_anvil(&ctx.anvil_t, "anvil-t").await?;
+    ctx.anvil_t
+        .anvil_set_automine(false)
+        .await
+        .context("disabling automine on T")?;
 
     tracing::info!(
         reth = %ctx.reth.url(),
@@ -142,6 +153,9 @@ async fn run(config: PathBuf) -> Result<()> {
     let mut tasks = Vec::new();
     if ctx.cfg.loops.replay_into_m {
         tasks.push(tokio::spawn(replay_loop(ctx.clone())));
+    }
+    if ctx.engine.is_some() {
+        tasks.push(tokio::spawn(source_sync_supervisor(ctx.clone())));
     }
     if ctx.cfg.loops.apply_into_t {
         tasks.push(tokio::spawn(apply_loop(ctx.clone())));
@@ -217,14 +231,20 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     };
 
     let (start, rebased) = state::next_block(cursor.as_ref(), head);
-    if head > follow {
-        // A restored state dump (or a regressed source head) can leave the
-        // chain ahead of the follow head; the loop can never advance from here.
+    if matches!(chain, Chain::M) && head > follow {
+        // A restored state dump (or a regressed source head) can leave M ahead
+        // of the follow head; M replays 1:1 so its height is a parent height and
+        // the loop can never advance from here.
+        //
+        // T is exempt: its heights advance independently of mainnet's (one T
+        // block per applied parent block, plus one per journal rewind), so
+        // comparing them would wrongly stall T after a rewind drill. T's
+        // progress is bounded by `cursor_t` vs the follow head below.
         tracing::warn!(
             chain = ?chain,
             head,
             follow,
-            "chain head is ahead of the follow head - stale state dump or source regression; re-pin to realign"
+            "M head is ahead of the follow head - stale state dump or source regression; re-pin to realign"
         );
         return Ok(None);
     }
@@ -234,6 +254,39 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         // block and the engine's mine(1) produces empty blocks.
         if let Err(e) = rpc.anvil_set_automine(false).await {
             tracing::warn!(chain = ?chain, error = %e, "could not re-assert automine=false");
+        }
+        // A *new epoch* (re-pin) wipes the devnet's writes, so the shadow set -
+        // "these keys belong to the devnet" - must go with them; keeping it
+        // would silently stop T from syncing keys it no longer owns. A plain
+        // anvil restart keeps the same fork pin, so its shadows stay.
+        if matches!(chain, Chain::T) {
+            if let Some(pin) = rpc
+                .anvil_node_info()
+                .await
+                .ok()
+                .and_then(|info| info.pointer("/forkConfig/forkBlockNumber").and_then(|v| v.as_u64()))
+            {
+                let known = ctx.state.lock().unwrap().data.epoch_pin;
+                if known != Some(pin) {
+                    if known.is_some() {
+                        let cleared = {
+                            let mut shadow = ctx.shadow.lock().unwrap();
+                            let n = shadow.slot_count();
+                            shadow.clear();
+                            n
+                        };
+                        tracing::info!(
+                            pin,
+                            previous = ?known,
+                            cleared_slots = cleared,
+                            "new epoch: cleared the shadow set (devnet writes are gone)"
+                        );
+                        let _ = ctx.save_shadow();
+                    }
+                    ctx.state.lock().unwrap().data.epoch_pin = Some(pin);
+                    let _ = ctx.save_state();
+                }
+            }
         }
         tracing::info!(chain = ?chain, head, follow, start, "starting chain at block");
     }
@@ -346,10 +399,47 @@ async fn apply_loop(ctx: Arc<Ctx>) {
     }
 }
 
+/// Wait for an anvil to answer RPC, so a coordinated restart (reth unwinding,
+/// anvil re-pinning) does not turn the engine into CrashLoopBackOff. Bounded:
+/// if the anvil is still down after the deadline, start-up fails loudly.
+async fn wait_for_anvil(anvil: &crate::rpc::Rpc, name: &str) -> anyhow::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
+    let mut last_log = std::time::Instant::now();
+    loop {
+        match anvil.block_number().await {
+            Ok(head) => {
+                tracing::info!(anvil = name, head, "anvil is up");
+                return Ok(());
+            }
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!("{name} did not answer RPC within 900s: {e}");
+                }
+                if last_log.elapsed() > std::time::Duration::from_secs(30) {
+                    tracing::warn!(anvil = name, error = %e, "waiting for anvil to come up");
+                    last_log = std::time::Instant::now();
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+}
+
+/// Supervises the top-up loop. A panicking top-up task is invisible from the
+/// outside (reth simply stops advancing), so restart it and say so loudly.
+async fn source_sync_supervisor(ctx: Arc<Ctx>) {
+    loop {
+        match tokio::spawn(source_sync::source_sync_loop(ctx.clone())).await {
+            Ok(()) => tracing::warn!("top-up loop exited; restarting"),
+            Err(e) => tracing::error!(error = %e, "top-up loop panicked; restarting"),
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
 /// Watch T's own blocks: every devnet transaction's writes become shadowed
 /// (copy-on-write) so parent diffs never overwrite them.
-async fn shadow_loop(ctx: Arc<Ctx>) {
-    let poll = Duration::from_millis(ctx.cfg.loops.poll_interval_ms.max(200));
+async fn shadow_loop(ctx: Arc<Ctx>) {    let poll = Duration::from_millis(ctx.cfg.loops.poll_interval_ms.max(200));
     let mut last: Option<u64> = None;
     loop {
         tokio::time::sleep(poll * 2).await;

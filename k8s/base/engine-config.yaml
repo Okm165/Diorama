@@ -25,6 +25,18 @@ data:
       m_url: http://anvil-m:8545
       t_url: http://anvil-t:8545
 
+    # Top-up sync (EIP-8379 choreography): the engine feeds reth the execution
+    # payloads it is missing, straight from the local Lighthouse over reth's
+    # authenticated Engine API. This is what makes the mirror self-contained -
+    # no EL P2P peers and no public RPC are needed to close a gap after the
+    # checkpoint sync or an EL restart.
+    source_sync:
+      enabled: true
+      interval_ms: 1000
+      max_per_pass: 256
+      engine_url: http://reth:8551
+      jwt_path: /secrets/jwt.hex
+
     loops:
       poll_interval_ms: 1000
       # Replay/apply is always contiguous from the chain's own head: on first
@@ -90,16 +102,19 @@ data:
     # reconstructed is never mined: M stays strict.
     blobs:
       enabled: true
-      # Sidecar sources, tried in order. publicnode is first because a regular
-      # (non-supernode) Lighthouse CANNOT reconstruct blobs after PeerDAS
-      # (EIP-7594): it answers HTTP 400 "Insufficient data columns to
-      # reconstruct blobs: required 64, but only 4 were found. You may need to
-      # run the beacon node with --supernode or --semi-supernode." (measured on
-      # bpo2). publicnode serves the legacy 4844 sidecars with kzg_proof, which
-      # is the wrapper form anvil accepts here.
+      # Sidecar sources, tried in order. Self-contained: the only source is our
+      # own Lighthouse, which runs as a PeerDAS semi-supernode (half the data
+      # columns = enough to reconstruct every blob) for the 18-day availability
+      # window. A regular (non-supernode) node CANNOT reconstruct blobs after
+      # EIP-7594 - it answers HTTP 400 "Insufficient data columns to reconstruct
+      # blobs: required 64, but only 4 were found. You may need to run the
+      # beacon node with --supernode or --semi-supernode." (measured).
+      # Every candidate is KZG-validated (c-kzg + bundled mainnet trusted setup)
+      # per blob tx before it is sent; Fulu placeholder proofs (0xc0..) are
+      # recomputed locally, so a source that cannot reconstruct blobs can never
+      # poison the pool.
       beacon_urls:
-        - https://ethereum-beacon-api.publicnode.com
-        # - http://lighthouse:5052   # only with --semi-supernode/--supernode
+        - http://lighthouse:5052
 
     # Watch list seed (plan section 3.5). All slots of a watched account are
     # synced on T; shadowed keys are skipped (COW). Extend with your own

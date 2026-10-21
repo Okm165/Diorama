@@ -1,7 +1,8 @@
 # Lighthouse - consensus layer driver for reth (checkpoint-synced, no validator).
 #
 # Lean profile: no validator client, no light-client server, no QUIC/UPnP,
-# 40 target peers, payload/blob pruning left at their (enabled) defaults.
+# 40 target peers, blob/column pruning at the data-availability boundary,
+# execution payloads retained (needed by the engine's top-up loop).
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -52,12 +53,34 @@ spec:
             - --disable-upnp
             - --disable-light-client-server
             - --target-peers=40
-            # NOTE: after PeerDAS (EIP-7594, live on bpo2) a regular beacon node
-            # cannot serve full blob sidecars: /eth/v1/beacon/blob_sidecars
-            # returns 400 "Insufficient data columns ... run with --supernode or
-            # --semi-supernode". The mirror therefore takes sidecars from a
-            # public beacon API (engine config `blobs.beacon_urls`); add
-            # --semi-supernode here if you want a local source (more disk/CPU).
+            # After PeerDAS (EIP-7594) a regular beacon node cannot serve full
+            # blob sidecars (HTTP 400 "Insufficient data columns ... run with
+            # --supernode or --semi-supernode"). The mirror is self-contained:
+            # Lighthouse custodies half the data columns (enough to reconstruct
+            # every blob) for the data-availability window (18 days), which is
+            # far more than the mirror needs (reth's state window is 10,064
+            # blocks ~ 1.4 days). Costs ~100 GB of columns at steady state.
+            #
+            # Backfill is bounded by design and deliberately left at its
+            # defaults (Lighthouse book, "Backfilling Blocks"):
+            #   - depth stops at the weak-subjectivity point (~5 months), not
+            #     genesis, unless --genesis-backfill is passed (we never do);
+            #   - rate-limited to "typically less than 20 slots/s" - measured
+            #     ~10-15 slots/s here, enough to cover the snapshot->head gap
+            #     (8.4k slots, ~10 min) while the top-up loop waits;
+            #   - columns/blobs are pruned at the data-availability boundary
+            #     (--prune-blobs default true). Setting --prune-blobs=false
+            #     together with --semi-supernode means *nothing* is ever pruned
+            #     (book, advanced_blobs.md) - unbounded disk for no benefit;
+            #   - --complete-blob-backfill only fetches columns *beyond* the DA
+            #     window (experimental, "may block most of its peers") - not
+            #     needed, so not set.
+            - --semi-supernode
+            # Keep execution payloads in the beacon DB. Default (true) prunes
+            # them and rebuilds from the execution client on demand - impossible
+            # for blocks the EL has not executed yet, which is exactly the gap
+            # the engine's top-up loop fills. See docs/ARCHITECTURE.md.
+            - --prune-payloads=false
             - --log-format=JSON
             - --logfile-max-number=2
           envFrom:

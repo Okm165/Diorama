@@ -3,7 +3,9 @@
 //! Sequence per block (plan §4.5): set block env -> apply withdrawals ->
 //! automine off -> send raws in order (chunked) -> mine 1 -> verify.
 use crate::bal;
-use crate::blob::{available_forms, encode_blob_tx, select_sidecars, BlobForm, SidecarItem};
+use crate::blob::{
+    available_forms, encode_blob_tx, repair_proofs, select_sidecars, BlobForm, SidecarItem,
+};
 use crate::ctx::{block_txs, cursor_from, Ctx};
 use crate::rpc::{Rpc, RpcError};
 use crate::verify::{verify_block, Verification};
@@ -119,8 +121,14 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     }
 
     // 2. withdrawals are not txs: credit recipients directly. The credit is
-    //    idempotent (pre-balance + aggregated amount, via setBalance) so a
-    //    retried block never double-credits.
+    //    idempotent by construction: `setBalance(reth_pre + amount)` always
+    //    yields the same absolute post-block value, so a retried block can
+    //    never double-credit.
+    //
+    //    The pre-balance must come from **reth**, not from M at N-1: when a
+    //    block is retried before it is mined, anvil's "N-1" *is* the live
+    //    state, which already contains the first attempt's credit. Measured
+    //    once as `withdrawals` divergence (M = reth_post + amount).
     if let Some(withdrawals) = &block.withdrawals {
         let mut per_address: std::collections::BTreeMap<alloy_primitives::Address, U256> =
             std::collections::BTreeMap::new();
@@ -128,9 +136,32 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
             let wei = U256::from(w.amount) * U256::from(1_000_000_000u64);
             *per_address.entry(w.address).or_default() += wei;
         }
+        let reads: Vec<(String, Value)> = per_address
+            .keys()
+            .map(|address| {
+                (
+                    "eth_getBalance".to_string(),
+                    json!([address, format!("0x{:x}", n - 1)]),
+                )
+            })
+            .collect();
+        let mut pre_balances: Vec<U256> = Vec::with_capacity(reads.len());
+        for chunk in reads.chunks(ctx.cfg.loops.chunk_size) {
+            for r in ctx.reth.batch_raw(chunk).await? {
+                // batch_raw yields the JSON-RPC *result* (a hex balance here).
+                let v = match r {
+                    Ok(v) => v,
+                    Err(e) => bail!("reth pre-balance: {e}"),
+                };
+                pre_balances.push(
+                    v.as_str()
+                        .and_then(|s| U256::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                        .context("reth pre-balance")?,
+                );
+            }
+        }
         let mut calls: Vec<(String, Value)> = Vec::with_capacity(per_address.len());
-        for (address, amount) in &per_address {
-            let pre = ctx.anvil_m.balance_at(*address, n - 1).await?;
+        for ((address, amount), pre) in per_address.iter().zip(pre_balances) {
             calls.push((
                 "anvil_setBalance".to_string(),
                 json!([address, bal::quant_hex_u256(pre + *amount)]),
@@ -228,15 +259,18 @@ async fn build_raws(
         .iter()
         .any(|t| matches!(&*t.inner, EthereumTxEnvelope::Eip4844(_)));
 
-    // Fetch sidecars once per block. Beacon root of payload N = parent beacon
-    // block root of EL block N+1 (verified against mainnet).
-    let mut sidecars: Vec<SidecarItem> = Vec::new();
+    // Fetch sidecar candidates from every configured source. Beacon root of
+    // payload N = parent beacon block root of EL block N+1 (verified against
+    // mainnet). Candidates are validated with KZG per tx below, so a source
+    // that cannot reconstruct blobs (e.g. a non-supernode after PeerDAS) is
+    // skipped instead of poisoning the pool.
+    let mut sources: Vec<(String, Vec<SidecarItem>)> = Vec::new();
     if has_blobs && ctx.cfg.blobs.enabled && ctx.beacon.enabled() {
         if let Some(next) = ctx.reth.block_by_number_opt(n + 1, false).await? {
             if let Some(root) = next.header.parent_beacon_block_root {
-                match ctx.beacon.blob_sidecars(root).await {
-                    Ok(items) => sidecars = items,
-                    Err(e) => tracing::warn!(block = n, error = %e, "blob sidecar fetch failed"),
+                sources = ctx.beacon.blob_sidecar_sources(root).await;
+                if sources.is_empty() {
+                    tracing::warn!(block = n, "no beacon source returned blob sidecars");
                 }
             } else {
                 tracing::warn!(block = n, "no parent beacon block root on N+1");
@@ -260,46 +294,68 @@ async fn build_raws(
                     });
                     continue;
                 };
-                match select_sidecars(&sidecars, &t.blob_versioned_hashes) {
-                    Ok(items) => {
-                        let forms = available_forms(&items, t.blob_versioned_hashes.len());
-                        let preferred = ctx.blob_form().unwrap_or(BlobForm::Legacy);
-                        let mut order =
-                            vec![preferred, BlobForm::Legacy, BlobForm::Eip7594, BlobForm::Bare];
-                        order.dedup();
-                        let mut encoded: Option<(BlobForm, Bytes)> = None;
-                        for form in order {
-                            if !forms.contains(&form) {
-                                continue;
-                            }
-                            if let Ok(b) = encode_blob_tx(t, signature, hash, &items, form) {
-                                encoded = Some((form, b));
-                                break;
-                            }
+                let mut built: Option<(Bytes, Vec<SidecarItem>)> = None;
+                let mut last_err = String::from("no beacon source returned sidecars");
+                for (source, items) in &sources {
+                    let selected = match select_sidecars(items, &t.blob_versioned_hashes) {
+                        Ok(sel) => sel,
+                        Err(e) => {
+                            last_err = format!("{e}");
+                            continue;
                         }
-                        match encoded {
-                            Some((form, bytes)) => {
-                                ctx.set_blob_form(form);
-                                out.push(RawTx {
-                                    hash: tx.tx_hash(),
-                                    bytes,
-                                    blob: Some((
-                                        t.clone(),
-                                        signature,
-                                        hash,
-                                        items.into_iter().cloned().collect(),
-                                    )),
-                                });
-                            }
-                            None => {
-                                skipped += 1;
-                                tracing::warn!(block = n, tx = %tx.tx_hash(), "no encodable blob form");
-                            }
+                    };
+                    // Recompute placeholder blob proofs (Lighthouse on Fulu)
+                    // and verify every triple before it reaches the pool.
+                    let fixed = match repair_proofs(&selected, &t.blob_versioned_hashes) {
+                        Ok(fixed) => fixed,
+                        Err(e) => {
+                            tracing::warn!(
+                                block = n,
+                                tx = %tx.tx_hash(),
+                                source = %source,
+                                error = %e,
+                                "blob sidecar failed KZG validation - trying next source"
+                            );
+                            last_err = format!("{e}");
+                            continue;
+                        }
+                    };
+                    let selected: Vec<&SidecarItem> = fixed.iter().collect();
+                    let forms = available_forms(&selected, t.blob_versioned_hashes.len());
+                    let preferred = ctx.blob_form().unwrap_or(BlobForm::Legacy);
+                    let mut order =
+                        vec![preferred, BlobForm::Legacy, BlobForm::Eip7594, BlobForm::Bare];
+                    order.dedup();
+                    let mut encoded: Option<(Bytes, BlobForm)> = None;
+                    for form in order {
+                        if !forms.contains(&form) {
+                            continue;
+                        }
+                        if let Ok(b) = encode_blob_tx(t, signature, hash, &selected, form) {
+                            encoded = Some((b, form));
+                            break;
                         }
                     }
-                    Err(e) => {
+                    if let Some((bytes, form)) = encoded {
+                        ctx.set_blob_form(form);
+                        built = Some((bytes, fixed));
+                        break;
+                    }
+                }
+                match built {
+                    Some((bytes, items)) => out.push(RawTx {
+                        hash: tx.tx_hash(),
+                        bytes,
+                        blob: Some((t.clone(), signature, hash, items)),
+                    }),
+                    None => {
                         skipped += 1;
-                        tracing::warn!(block = n, tx = %tx.tx_hash(), error = %e, "blob sidecar missing");
+                        tracing::warn!(
+                            block = n,
+                            tx = %tx.tx_hash(),
+                            error = %last_err,
+                            "no valid blob sidecar from any source"
+                        );
                     }
                 }
             }

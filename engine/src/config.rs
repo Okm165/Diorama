@@ -5,6 +5,45 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Top-up sync: feed reth the execution payloads it is missing, straight from
+/// the local consensus client over the Engine API (EIP-8379 choreography). This
+/// is what keeps the mirror self-contained: no EL P2P peers are required to
+/// close a gap after a checkpoint sync or an EL restart.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceSyncConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_source_sync_interval")]
+    pub interval_ms: u64,
+    /// Payloads delivered per pass (each is a full block execution).
+    #[serde(default = "default_source_sync_max")]
+    pub max_per_pass: u64,
+    /// reth's authenticated engine API endpoint.
+    pub engine_url: Option<String>,
+    /// JWT secret shared with the consensus client.
+    pub jwt_path: Option<std::path::PathBuf>,
+}
+
+fn default_source_sync_interval() -> u64 {
+    1000
+}
+
+fn default_source_sync_max() -> u64 {
+    64
+}
+
+impl Default for SourceSyncConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_ms: default_source_sync_interval(),
+            max_per_pass: default_source_sync_max(),
+            engine_url: None,
+            jwt_path: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub reth: RethConfig,
@@ -14,6 +53,7 @@ pub struct Config {
     #[serde(default)]
     pub verifier: VerifierConfig,
     #[serde(default)]
+    pub source_sync: SourceSyncConfig,
     pub watchlist: Vec<WatchEntry>,
     #[serde(default)]
     pub journal: JournalConfig,

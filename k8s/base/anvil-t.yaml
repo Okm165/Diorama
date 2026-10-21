@@ -33,7 +33,7 @@ spec:
         # reth head - FORK_OFFSET, clamped to reth's 10,064-block state window
         # by construction (FORK_OFFSET=2000). Wipe /state/pin to re-pin.
         - name: resolve-pin
-          image: docker.io/library/alpine:3.21
+          image: docker.io/library/alpine:3.24.2
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -63,7 +63,7 @@ spec:
             - { name: state, mountPath: /state }
       containers:
         - name: anvil
-          image: ghcr.io/foundry-rs/foundry:v1.8.5
+          image: ghcr.io/foundry-rs/foundry:v1.8.6
           # The image entrypoint is `/bin/sh -c` and swallows bare args; use a
           # shell wrapper and `exec` so SIGTERM reaches anvil (state dump).
           command: ["/bin/sh", "-c"]
@@ -115,10 +115,11 @@ spec:
             periodSeconds: 30
           resources:
             requests: { cpu: "500m", memory: 1Gi }
-            # T never executes mainnet txs (BAL diffs only), so its fork cache
-            # stays small: ~2.5 GiB live after thousands of applied blocks
-            # (measured). 12Gi leaves headroom for state-dump serialization.
-            limits: { memory: 12Gi }
+            # T never executes mainnet txs (BAL diffs only), so its state stays
+            # small; the resident set is dominated by the state-dump
+            # serialization spike (~10 GiB measured with a ~5 GiB in-memory
+            # state). 16Gi keeps a comfortable margin.
+            limits: { memory: 16Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-t-state }

@@ -7,6 +7,3 @@ namespace: mainnet-mirror
 resources:
   - ../../base
 
-images:
-  - name: localhost/mirror-engine
-    newTag: v1

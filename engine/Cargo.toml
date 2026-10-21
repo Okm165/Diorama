@@ -8,15 +8,26 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # Plan pins: alloy 2.5.0 (EIP-7928 BAL types live in alloy-eips::eip7928).
 alloy-primitives = { version = "1.7", features = ["serde"] }
-alloy-consensus = { version = "2.5", features = ["serde"] }
+# "kzg" gives c-kzg (bundled mainnet trusted setup) so the engine can
+# verify blob sidecars before sending them: a bad sidecar (e.g. a non-supernode
+# beacon source serving stale data) is skipped and the next source is tried.
+alloy-consensus = { version = "2.5", features = ["serde", "kzg"] }
 alloy-network-primitives = { version = "2.5", features = ["serde"] }
 alloy-eips = { version = "2.5", features = ["serde"] }
 alloy-rpc-types-eth = { version = "2.5", features = ["serde"] }
+# Engine API client: replays the local CL's execution payloads into reth, so
+# the mirror never needs P2P peers or a public RPC to fill a sync gap.
+alloy-rpc-types-engine = { version = "2.5", features = ["jwt", "serde"] }
 
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
+# alloy-rpc-types-engine's `jwt` feature pulls jsonwebtoken but selects no
+# crypto provider, so signing panics at runtime ("Could not automatically
+# determine the process-level CryptoProvider"). alloy has no rust-crypto
+# variant, so enable it here; feature unification applies it graph-wide.
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

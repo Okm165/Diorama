@@ -32,6 +32,10 @@ pub struct Metrics {
     pub probes_failed: AtomicU64,
     pub receipts_unverified: AtomicU64,
     pub reorgs_detected: AtomicU64,
+    /// EIP-8379 top-up: payloads delivered to reth and the remaining gap to the
+    /// CL's head (what "self-contained catch-up" looks like in monitoring).
+    pub source_sync_delivered: AtomicU64,
+    pub source_sync_gap_blocks: AtomicU64,
 }
 
 impl Metrics {
@@ -56,6 +60,8 @@ impl Metrics {
         };
         gauge(&mut out, "mirror_reth_head", "reth chain head", self.reth_head.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_reth_follow_head", "reth follow head (safe/latest/finalized)", self.reth_follow_head.load(Ordering::Relaxed));
+        gauge(&mut out, "mirror_source_sync_gap_blocks", "CL head execution block - reth head (top-up catch-up progress)", self.source_sync_gap_blocks.load(Ordering::Relaxed));
+        counter(&mut out, "mirror_source_sync_delivered_total", "execution payloads delivered to reth via the Engine API (EIP-8379 top-up)", self.source_sync_delivered.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_m_head", "anvil-m head", self.m_head.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_t_head", "anvil-t head", self.t_head.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_cursor_block", "last replayed parent block", self.cursor_m.load(Ordering::Relaxed));
