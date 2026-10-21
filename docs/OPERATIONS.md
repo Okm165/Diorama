@@ -162,8 +162,8 @@ With the default `continue` policy nothing freezes; divergences are recorded.
 
 | PVC | Size | Contents |
 |---|---|---|
-| `reth-data` | 400 Gi | reth DB + static files (snapshot + growth) |
-| `lighthouse-data` | 500 Gi | beacon DB + 18-day column custody (~100 GB at steady state) |
+| `reth-data` | 400 Gi | reth DB + static files (snapshot + growth, ~300 GB expected) |
+| `lighthouse-data` | 500 Gi | beacon DB + 18-day column custody. Measured during the one-time backfill: ~377 KB/slot inside the DA window, blocks only beyond it; ~200 GB expected when it completes |
 | `anvil-m-state` | 20 Gi | pin, state dump (~350 MB), fork cache |
 | `anvil-t-state` | 40 Gi | same for the devnet chain (dump ~27 MB) |
 | `engine-state` | 10 Gi | cursor.json, shadow.json, drift.jsonl, journal/ |

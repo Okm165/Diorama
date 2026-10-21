@@ -76,6 +76,16 @@ spec:
             #     window (experimental, "may block most of its peers") - not
             #     needed, so not set.
             - --semi-supernode
+            # Blob/column storage is bounded to the 18-day DA window, but the
+            # *pruner* runs every --epochs-per-blob-prune epochs (default 256 ~
+            # 27 h). During the one-time backfill the node downloads blobs for
+            # every backfilled slot, and with a 27 h prune interval the peak can
+            # exceed the PVC before the first prune (measured: blobs_db growing
+            # ~20 GB/h). Prune every epoch instead; only data older than the DA
+            # boundary is touched, which the mirror never needs.
+            - --prune-blobs=true
+            - --epochs-per-blob-prune=1
+            - --blob-prune-margin-epochs=0
             # Keep execution payloads in the beacon DB. Default (true) prunes
             # them and rebuilds from the execution client on demand - impossible
             # for blocks the EL has not executed yet, which is exactly the gap

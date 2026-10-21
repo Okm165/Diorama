@@ -53,6 +53,13 @@ spec:
             # own args.
             - --disable-discovery
             - --trusted-only
+            # Gap-closing policy: gaps up to this size are closed by fetching
+            # the missing blocks directly, larger gaps trigger a *pipeline*
+            # (backfill) run. With no peers both are inert, and the CL supplies
+            # the blocks over the Engine API - but a pipeline run can unwind a
+            # detached head, so keep the threshold at its maximum (values above
+            # 1024 are clamped) to stay on the live path.
+            - --engine.backfill-threshold=1024
             - --port=30303
             - --metrics=0.0.0.0:9001
             - --log.stdout.format=json

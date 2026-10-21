@@ -245,17 +245,29 @@ Spec details that cost real debugging runs:
 - **A dead top-up task is invisible** (reth simply stops advancing), so the
   loop runs under a supervisor that logs and restarts it on panic/exit.
 
-**Backfill limits** (what each node downloads and keeps, and why):
+**Backfill limits** (what each node downloads and keeps, and why). Lighthouse
+v8.3.0 has **no backfill-depth flag** - verified against the image itself: the
+only backfill-related flags are `--disable-backfill-rate-limiting`,
+`--genesis-backfill` (goes *deeper*, never used), `--shutdown-after-sync` and
+the pruning knobs. Depth is therefore bounded by design at the weak-subjectivity
+point; everything else is a rate/pruning choice:
 
-| Node | Bounded by | Notes |
+| Node | Bounded by | Measured / notes |
 |---|---|---|
-| Lighthouse blocks | weak-subjectivity point (~5 months) | Design bound since v4.2.0; `--genesis-backfill` would go deeper and is never used |
-| Lighthouse rate | "typically <20 slots/s" (default rate limiter) | Measured ~10-15 slots/s here; enough to cover the 8.4k-slot gap in ~10 min |
-| Lighthouse columns | 18-day data-availability window | `--prune-blobs` default true prunes at the DA boundary; combining `--prune-blobs=false` with `--semi-supernode` means *nothing* is ever pruned (book, advanced_blobs.md) - unbounded disk, so we don't |
-| Lighthouse payloads | retained (`--prune-payloads=false`) | Default pruning rebuilds payloads from the EL on demand - impossible for blocks the EL has not executed, which is exactly the top-up gap |
+| Lighthouse block backfill depth | weak-subjectivity point (~5 months, ~1.03M slots) | Design bound since v4.2.0; no knob reduces it. One-time: ends with `INFO Historical block download complete` |
+| Lighthouse backfill rate | default rate limiter ("typically <20 slots/s") | 6.7-15 slots/s measured; covers the 8.4k-slot snapshot gap in ~10 min, then continues gently in the background |
+| Lighthouse block cost | ~150-200 KB/slot | ~150 GB for the full 5-month range; retained in the freezer (blocks are not pruned) |
+| Lighthouse column/blob cost | 18-day DA window only | ~377 KB/slot measured while inside the window (~50 GB for the full window); beyond it the backfill fetches blocks only |
+| Lighthouse prune cadence | `--epochs-per-blob-prune=1` (was 256) | Default 256 epochs (~27 h) can let ~20 GB/h of backfill blobs accumulate before the first prune - more than the PVC headroom. Pruning every epoch bounds the peak; only data older than the DA boundary is touched, which the mirror never needs |
+| Lighthouse payloads | retained (`--prune-payloads=false`) | Default pruning rebuilds payloads from the EL on demand - impossible for blocks the EL has not executed, which is exactly the top-up gap. This is what makes the backfilled range cost full block size |
 | reth P2P | none (`--disable-discovery --trusted-only`) | 0 peers; no discovery chatter; no pipeline/backfill runs (measured 0 pipeline log lines) - the EL is driven purely by the Engine API |
+| reth gap-closing | `--engine.backfill-threshold=1024` (max) | Gaps up to 1024 blocks are closed by fetching blocks directly instead of a *pipeline* run. With no peers both are inert, but a pipeline run can unwind a detached head, so the maximum keeps reth on the live/CL-driven path |
 | reth retention | prune profile (see table above) | receipts/bodies 20,000 blocks, account/storage history 10,064 blocks |
-| reth bulk download | one-time snapshot (`reth download --minimal`) | The only bootstrap-time network use besides Lighthouse's checkpoint sync |
+| reth bulk download | one-time snapshot (`reth download --minimal`) | 154 GB download / ~287 GB on disk - the only bootstrap-time network use besides Lighthouse's checkpoint sync |
+
+Total expected footprint once the one-time backfill completes: ~200 GB in
+`lighthouse-data` (~50 GB DA-window columns + ~150 GB blocks) and ~300 GB in
+`reth-data` (snapshot + growth), both well inside their PVCs (500Gi / 400Gi).
 
 **Follow head during a catch-up.** The engine follows reth's `safe` block, which
 Lighthouse updates via `forkchoiceUpdated`. While reth is far behind the CL's
