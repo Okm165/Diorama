@@ -191,7 +191,11 @@ same writes, so its shadows stay.
 **T's heights are its own.** T mines one block per applied parent block, plus
 one per journal rewind, so its height is not a mainnet block number - the
 engine tracks progress by `cursor_t` (last applied parent block) and only M,
-which replays 1:1, is compared against the follow head by height.
+which replays 1:1, is compared against the follow head by height. Two rules
+follow from this and both were bugs once: a hash-validated cursor always wins
+(resuming at `cursor + 1`, even behind the chain head - jumping to `head + 1`
+silently skipped parent blocks and stalled T), and after a reset T resumes from
+the fork pin (`pin + 1`), because its state *is* the pin's state.
 
 **Measured rules baked into the code** (each cost a real run to discover):
 padding all hex to 32 bytes / even length (anvil rejects odd-length hex with
@@ -304,11 +308,18 @@ http:   { addr, port }
 ```
 
 **Watch list** (seed = the plan's §3.5 closure): Chainlink feeds (WETH/WBTC/
-STETH/USDC/USDT-USD), assets (USDC/USDT/WETH/WBTC/wstETH), Uniswap Universal
-Router + WETH/USDC 0.05% pool, Aave V3 (Pool, Oracle, PoolAddressesProvider,
-aEthUSDC/aEthWETH/aEthUSDT, WETH Gateway). Extend with your own deployment
-addresses. Only watched accounts are synced to T – add your contracts or their
-state will stay at pin values.
+STETH/USDC/USDT-USD) **and their aggregators**, assets (USDC/USDT/WETH/WBTC/
+wstETH), Uniswap Universal Router + WETH/USDC 0.05% pool, Aave V3 (Pool,
+Oracle, PoolAddressesProvider, aEthUSDC/aEthWETH/aEthUSDT, WETH Gateway).
+Extend with your own deployment addresses. Only watched accounts are synced to
+T – add your contracts or their state will stay at pin values.
+
+Closure rule that bit once (measured): a Chainlink feed is an
+`AggregatorProxy`; `latestRoundData()` is a **delegatecall** into the current
+aggregator, whose storage holds the round. Watching only the proxy left the
+price one round stale on T. Resolve the aggregator with `aggregator()`
+(selector `0x245a7bfc`) and watch it too; re-check after a feed upgrade, when
+the address changes.
 
 **Probes** (per-block `eth_call` parity reth vs M, and reth vs M *after* the
 repair): USDC/WETH totalSupply, Chainlink WETH/USD `latestRoundData`, UniV3

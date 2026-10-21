@@ -224,13 +224,40 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                     block = c.block,
                     "cursor not found on chain (reset or re-pin) - rebasing"
                 );
+                // Drop it from the persisted state too: `first_block` is an
+                // epoch marker, and the next processed block must set a fresh
+                // one (otherwise `mirror_pin_age_blocks` counts across epochs).
+                {
+                    let mut state = ctx.state.lock().unwrap();
+                    match chain {
+                        Chain::M => state.data.m = None,
+                        Chain::T => state.data.t = None,
+                    }
+                }
+                let _ = ctx.save_state();
                 None
             }
         }
         None => None,
     };
 
-    let (start, rebased) = state::next_block(cursor.as_ref(), head);
+    // A reset chain (re-pin / wiped state): T's state is exactly the fork pin's
+    // state, so the applier resumes from the pin. Using T's own height + 1 would
+    // be wrong - T mines one block per applied parent block (plus one per
+    // journal rewind), so its height is not a parent height and `head + 1` can
+    // land past the follow head, stalling T forever (measured).
+    let reset_pin = if cursor.is_none() {
+        rpc.anvil_node_info()
+            .await
+            .ok()
+            .and_then(|info| info.pointer("/forkConfig/forkBlockNumber").and_then(|v| v.as_u64()))
+    } else {
+        None
+    };
+    let (start, rebased) = match (chain, reset_pin) {
+        (Chain::T, Some(pin)) => (pin + 1, true),
+        _ => state::next_block(cursor.as_ref(), head),
+    };
     if matches!(chain, Chain::M) && head > follow {
         // A restored state dump (or a regressed source head) can leave M ahead
         // of the follow head; M replays 1:1 so its height is a parent height and
@@ -258,13 +285,15 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         // A *new epoch* (re-pin) wipes the devnet's writes, so the shadow set -
         // "these keys belong to the devnet" - must go with them; keeping it
         // would silently stop T from syncing keys it no longer owns. A plain
-        // anvil restart keeps the same fork pin, so its shadows stay.
+        // anvil restart keeps the same fork pin, so its shadows stay. (The
+        // cursors' epoch marker resets via the hash check above, which drops a
+        // stale cursor and lets the next processed block set a fresh one.)
         if matches!(chain, Chain::T) {
-            if let Some(pin) = rpc
+            if let Some(pin) = reset_pin.or(rpc
                 .anvil_node_info()
                 .await
                 .ok()
-                .and_then(|info| info.pointer("/forkConfig/forkBlockNumber").and_then(|v| v.as_u64()))
+                .and_then(|info| info.pointer("/forkConfig/forkBlockNumber").and_then(|v| v.as_u64())))
             {
                 let known = ctx.state.lock().unwrap().data.epoch_pin;
                 if known != Some(pin) {

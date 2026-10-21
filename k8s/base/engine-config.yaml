@@ -126,6 +126,16 @@ data:
       - { address: "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8", note: "Chainlink STETH/USD" }
       - { address: "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6", note: "Chainlink USDC/USD" }
       - { address: "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D", note: "Chainlink USDT/USD" }
+      # Chainlink feeds are AggregatorProxy contracts: `latestRoundData()` is a
+      # delegatecall into the *current aggregator*, whose storage holds the
+      # round. Watching only the proxy leaves the price stale on T (measured:
+      # the probe diverged by one round). Resolve with `aggregator()` (0x245a7bfc)
+      # and re-check after a feed upgrade - the aggregator address changes.
+      - { address: "0x7d4e742018fb52e48b08be73d041c18b21de6fb5", note: "Chainlink WETH/USD aggregator" }
+      - { address: "0x4a3411ac2948b33c69666b35cc6d055b27ea84f1", note: "Chainlink WBTC/USD aggregator" }
+      - { address: "0x26f196806f43e88fd27798c9e3fb8fdf4618240f", note: "Chainlink STETH/USD aggregator" }
+      - { address: "0x54bcc589d9743e521c64233706fc8cb36d275b07", note: "Chainlink USDC/USD aggregator" }
+      - { address: "0x9c41663bb8d6800c8050e2fbf98e86ad01c973e3", note: "Chainlink USDT/USD aggregator" }
       # Assets (config/assets/*.toml)
       - { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", note: "USDC" }
       - { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", note: "USDT" }

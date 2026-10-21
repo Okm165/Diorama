@@ -67,17 +67,18 @@ impl StateFile {
 
 /// Decide which block to process next for a chain.
 ///
-/// Replay must be contiguous: the chain's own head is the only valid start
-/// point. A cursor resumes at cursor + 1; a fresh or reset chain starts at
-/// chain_head + 1 (on first start that is the pin + 1, i.e. the whole pin
-/// window is replayed as the warm-up).
+/// Replay must be contiguous. A hash-validated cursor always wins: resume at
+/// cursor + 1, even when the cursor sits *behind* the chain head - that happens
+/// legitimately (T's height advances independently of parent heights; a cursor
+/// write can also race a restart), and jumping to `chain_head + 1` silently
+/// skipped parent blocks and stalled T. A fresh or reset chain (no cursor)
+/// starts at `chain_head + 1`; on first start that is the pin + 1, so the whole
+/// pin window is replayed as the warm-up.
 pub fn next_block(cursor: Option<&ChainCursor>, chain_head: u64) -> (u64, bool) {
-    if let Some(c) = cursor {
-        if c.block >= chain_head {
-            return (c.block + 1, false);
-        }
+    match cursor {
+        Some(c) => (c.block + 1, false),
+        None => (chain_head.saturating_add(1), true),
     }
-    (chain_head.saturating_add(1), true)
 }
 
 #[cfg(test)]
@@ -92,6 +93,12 @@ mod tests {
             first_block: 1,
         };
         assert_eq!(next_block(Some(&c), 100), (101, false));
+        // a valid cursor behind the chain head still resumes right after it
+        // (T's height advances independently; skipping ahead loses diffs)
+        assert_eq!(next_block(Some(&c), 500), (101, false));
+        // and a cursor ahead of the head (chain reset) is handled by the
+        // caller's hash check, which discards it
+        assert_eq!(next_block(Some(&c), 50), (101, false));
     }
 
     #[test]
