@@ -8,6 +8,7 @@ mod drift;
 mod engine_api;
 mod error;
 mod eth_source;
+pub mod feed_bridge;
 mod http;
 mod replay;
 mod selftest;
@@ -166,10 +167,21 @@ async fn run(config: PathBuf) -> Result<()> {
         tasks.push(tokio::spawn(apply_loop(ctx.clone())));
         tasks.push(tokio::spawn(shadow_loop(ctx.clone())));
     }
+    // The feed bridge: only when configured; a boot fault here is fatal
+    // (a mis-scaled price would poison every scenario).
+    let bridge = match ctx.engine.feed_bridge.is_some() {
+        true => {
+            let bridge = Arc::new(feed_bridge::FeedBridge::new(&ctx).await?);
+            tracing::info!(feeds = bridge.list().len(), "feed bridge active");
+            tasks.push(tokio::spawn(bridge.clone().run(ctx.clone())));
+            Some(bridge)
+        }
+        false => None,
+    };
     {
         let ctx = ctx.clone();
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = http::serve(ctx).await {
+            if let Err(e) = http::serve(ctx, bridge).await {
                 tracing::error!(error = %e, "http server exited");
             }
         }));

@@ -80,6 +80,33 @@ pub struct EngineSection {
     pub journal: JournalSection,
     pub blobs: BlobsSection,
     pub http: HttpSection,
+    /// Optional: the feed bridge (absent = the devnet's own price writers own
+    /// the mocks, the pre-mirror arrangement).
+    pub feed_bridge: Option<FeedBridgeSection>,
+}
+
+/// `[services.engine.feed_bridge]`: live parent-chain feed answers →
+/// `updateAnswer` on the devnet's mock aggregators (plan §7.1, Phase 0).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedBridgeSection {
+    /// Poll cadence for the source aggregators.
+    pub poll_interval_ms: u64,
+    /// The account that submits `updateAnswer` on T (auto-impersonate makes
+    /// any address usable; the mock's own access control decides who may).
+    pub writer: Address,
+    /// The feeds to bridge (one row per mock aggregator).
+    pub feeds: Vec<FeedSection>,
+}
+
+/// One bridged feed: the parent chain's aggregator is the source, the
+/// devnet's mock aggregator the write target.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedSection {
+    pub name: String,
+    pub target: Address,
+    pub source: Address,
 }
 
 /// The engine's anvil clients (M = verified replay chain, T = devnet chain).

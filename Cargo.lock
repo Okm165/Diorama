@@ -2583,6 +2583,7 @@ dependencies = [
  "alloy-rpc-types-beacon",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
+ "alloy-sol-types",
  "axum",
  "clap",
  "hex",

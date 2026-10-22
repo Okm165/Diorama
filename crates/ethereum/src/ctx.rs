@@ -53,6 +53,9 @@ pub struct Ctx {
     pub journal: Journal,
     pub state: Shared<StateFile>,
     pub metrics: Metrics,
+    /// The feed bridge's counters (shared with the bridge task; /metrics
+    /// renders them whether or not the bridge is configured).
+    pub feed_bridge_metrics: Arc<crate::feed_bridge::FeedBridgeMetrics>,
     pub drift: Drift,
     pub frozen: AtomicBool,
     pub halted: AtomicBool,
@@ -160,6 +163,7 @@ impl Ctx {
             time_offset: AtomicU64::new(offset),
             state: Shared::new("cursor state", state),
             metrics: Metrics::default(),
+            feed_bridge_metrics: Arc::new(crate::feed_bridge::FeedBridgeMetrics::default()),
             drift,
             frozen: AtomicBool::new(false),
             halted: AtomicBool::new(false),

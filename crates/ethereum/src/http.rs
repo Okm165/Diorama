@@ -11,6 +11,7 @@
 //! everything else is a server-side fault, logged with its typed cause.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::feed_bridge::FeedBridge;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -99,8 +100,25 @@ impl IntoResponse for Error {
     }
 }
 
-pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
+/// The feed bridge's routes need both the context (override publishes a tx)
+/// and the bridge itself; a separate state keeps the main router untouched.
+#[derive(Clone)]
+struct FeedState {
+    ctx: Arc<Ctx>,
+    bridge: Option<Arc<FeedBridge>>,
+}
+
+pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()> {
     let addr = format!("{}:{}", ctx.engine.http.addr, ctx.engine.http.port);
+    let feed_routes = Router::new()
+        .route("/admin/feed", get(feed_list))
+        .route("/admin/feed/pause", post(feed_pause))
+        .route("/admin/feed/resume", post(feed_resume))
+        .route("/admin/feed/override", post(feed_override))
+        .with_state(FeedState {
+            ctx: ctx.clone(),
+            bridge,
+        });
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/status", get(status))
@@ -111,7 +129,9 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
         .route("/admin/time", post(admin_time))
         .route("/admin/shadow", post(admin_shadow))
         .route("/admin/deal", post(admin_deal))
-        .with_state(ctx);
+        .route("/admin/epoch", post(admin_epoch))
+        .with_state(ctx)
+        .merge(feed_routes);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|source| Error::Bind {
@@ -174,7 +194,9 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
 }
 
 async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
-    ctx.metrics.render()
+    let mut out = ctx.metrics.render();
+    out.push_str(&ctx.feed_bridge_metrics.render());
+    out
 }
 
 async fn admin_rewind(
@@ -249,4 +271,95 @@ async fn admin_deal(
     Json(req): Json<DealRequest>,
 ) -> Result<Json<mirror_devnet::deal::DealOutcome>> {
     Ok(Json(ctx.admin().deal(&req).await?))
+}
+
+/// `/admin/epoch` — one-call revert-to-blank (plan §7.1): re-pin T to the
+/// source's latest block. The engine's cursor check detects the reset on its
+/// next pass and runs the epoch rule (new base = clear marks and values;
+/// same base = re-apply the recorded writes), so this route never replicates
+/// that logic.
+async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
+    ctx.anvil_t
+        .anvil_reset_fork_latest(&ctx.l1.source_url)
+        .await?;
+    tracing::warn!(
+        source = %ctx.l1.source_url,
+        "T was re-pinned to the source's latest block; the engine reconciles on its next pass"
+    );
+    Ok(Json(EpochResponse {
+        reset: true,
+        source: ctx.l1.source_url.clone(),
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct EpochResponse {
+    reset: bool,
+    source: String,
+}
+
+/// `/admin/feed` — the bridged feeds and their state.
+async fn feed_list(State(state): State<FeedState>) -> Result<Json<Vec<crate::feed_bridge::FeedStatus>>> {
+    let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
+    Ok(Json(bridge.list()))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FeedNameRequest {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FeedAck {
+    name: String,
+    paused: bool,
+}
+
+/// `/admin/feed/pause` — the scenario takes the value (the bridge stops
+/// writing this feed; divergence detection does the same automatically).
+async fn feed_pause(
+    State(state): State<FeedState>,
+    Json(req): Json<FeedNameRequest>,
+) -> Result<Json<FeedAck>> {
+    let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
+    bridge.pause(&req.name)?;
+    Ok(Json(FeedAck {
+        name: req.name,
+        paused: true,
+    }))
+}
+
+/// `/admin/feed/resume` — hand the feed back: the bridge forgets what it last
+/// wrote, so the next pass re-establishes the parent chain's value.
+async fn feed_resume(
+    State(state): State<FeedState>,
+    Json(req): Json<FeedNameRequest>,
+) -> Result<Json<FeedAck>> {
+    let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
+    bridge.resume(&req.name)?;
+    Ok(Json(FeedAck {
+        name: req.name,
+        paused: false,
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FeedOverrideRequest {
+    name: String,
+    /// The raw aggregator answer (the feed's own decimals).
+    answer: i128,
+}
+
+/// `/admin/feed/override` — publish a scripted value now and pause the feed
+/// (the same net effect as a scenario's crash write, driven explicitly).
+async fn feed_override(
+    State(state): State<FeedState>,
+    Json(req): Json<FeedOverrideRequest>,
+) -> Result<Json<FeedAck>> {
+    let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
+    bridge.override_answer(&state.ctx, &req.name, req.answer).await?;
+    Ok(Json(FeedAck {
+        name: req.name,
+        paused: true,
+    }))
 }

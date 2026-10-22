@@ -148,6 +148,31 @@ pub enum Error {
         status: String,
         message: String,
     },
+
+    // ---- the feed bridge (plan §7.1) --------------------------------------
+    /// A feed-bridge admin call arrived while the bridge is not configured.
+    #[error("the feed bridge is not configured ([services.engine.feed_bridge])")]
+    FeedBridgeUnconfigured,
+
+    /// One feed could not be prepared at boot: the cause is named with it.
+    #[error("feed `{feed}`: reading {what}")]
+    FeedBridgeFeed {
+        feed: String,
+        what: &'static str,
+        #[source]
+        source: Box<Error>,
+    },
+
+    /// The mock and the real aggregator disagree on decimals: writing the
+    /// source's answer unscaled would poison every consumer.
+    #[error("feed `{feed}`: source decimals {have} != target decimals {want}")]
+    FeedBridgeDecimals { feed: String, have: u8, want: u8 },
+
+    #[error("feed bridge ABI: {what}: {detail}")]
+    FeedBridgeAbi { what: &'static str, detail: String },
+
+    #[error("feed bridge: no feed named `{feed}`")]
+    FeedBridgeUnknown { feed: String },
 }
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).

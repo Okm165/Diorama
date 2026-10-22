@@ -229,6 +229,23 @@ impl Instance {
             if eng.state_dir.as_os_str().is_empty() {
                 issues.push("services.engine.state_dir must not be empty".into());
             }
+            if let Some(fb) = &eng.feed_bridge {
+                if fb.poll_interval_ms == 0 {
+                    issues.push("services.engine.feed_bridge.poll_interval_ms must be > 0".into());
+                }
+                if fb.feeds.is_empty() {
+                    issues.push("services.engine.feed_bridge.feeds must not be empty".into());
+                }
+                let mut names = std::collections::HashSet::new();
+                for (i, feed) in fb.feeds.iter().enumerate() {
+                    if feed.name.is_empty() {
+                        issues.push(format!("services.engine.feed_bridge.feeds[{i}].name must not be empty"));
+                    }
+                    if !names.insert(feed.name.clone()) {
+                        issues.push(format!("services.engine.feed_bridge.feeds[{i}].name `{}` is duplicated", feed.name));
+                    }
+                }
+            }
             if eng.journal.dir.as_os_str().is_empty() {
                 issues.push("services.engine.journal.dir must not be empty".into());
             }

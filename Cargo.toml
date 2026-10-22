@@ -31,6 +31,9 @@ alloy-rpc-types-engine = { version = "2.5", features = ["jwt", "serde"] }
 alloy-json-rpc = { version = "2.5" }
 # Quantity (0x-hex) and other wire serde helpers.
 alloy-serde = { version = "2.5" }
+# ABI encode/decode for the few plain contracts the mirror calls directly
+# (the feed bridge's Chainlink aggregators; the CCTP bridge's messages).
+alloy-sol-types = { version = "1.7" }
 # The Beacon REST API wire model (blob sidecars, signed blocks, headers).
 # "ssz" enables the official beacon→engine execution-request conversion
 # (`ExecutionRequestsV4::to_requests`), used by the top-up loop.
