@@ -101,7 +101,7 @@ spec:
             - --rpc=$(MAINNET_RPC)
             - --anvil-m=http://127.0.0.1:8545
             - --anvil-t=http://127.0.0.1:8546
-            - --config=/etc/mirror/engine.yaml
+            - --config=/etc/mirror/instance.toml
             - --beacon=$(BEACON_API)
             - --blocks=2
             - --timeout-secs=300
@@ -110,10 +110,10 @@ spec:
             - name: BEACON_API
               value: "https://ethereum-beacon-api.publicnode.com"
           volumeMounts:
-            - { name: config, mountPath: /etc/mirror, readOnly: true }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
           resources:
             requests: { cpu: "250m", memory: 256Mi }
             limits: { memory: 2Gi }
       volumes:
         - { name: shared, emptyDir: {} }
-        - { name: config, configMap: { name: engine-config } }
+        - { name: instance, configMap: { name: mainnet-instance } }

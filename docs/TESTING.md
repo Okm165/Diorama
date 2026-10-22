@@ -88,8 +88,10 @@ kubectl -n mainnet-mirror exec deploy/engine -- curl -s localhost:8080/metrics \
 kubectl -n mainnet-mirror logs deploy/engine --tail=50 | grep -c "top-up"  # >0 while catching up
 
 # 3. blobs come from the local CL only
-kubectl -n mainnet-mirror get cm engine-config -o jsonpath='{.data.engine\.yaml}' \
-  | grep -A3 "blobs:"   # beacon_urls: [http://lighthouse:5052]
+kubectl -n mainnet-mirror get cm -l app.kubernetes.io/part-of=mainnet-mirror \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'   # mainnet-instance carries instance.toml
+kubectl -n mainnet-mirror get cm mainnet-instance -o jsonpath='{.data.instance\.toml}' \
+  | grep -A2 "beacon_urls"   # ["${BEACON_URL}"] -> mirror-config: http://lighthouse:5052
 ```
 
 ## Invariants asserted per replayed block (on M)

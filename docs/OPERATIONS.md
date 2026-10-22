@@ -115,6 +115,24 @@ make scenario          # self-containment + M/T parity + devnet workflow
 make pin-show          # current fork pins
 ```
 
+## The engine image and its manifest travel together
+
+The engine reads the **instance TOML** (mounted from the `mainnet-instance`
+ConfigMap); the previous image read the retired `engine-config` YAML. Rolling
+out the workspace-built image therefore pairs the image import with the
+manifest change:
+
+```bash
+make build && make import        # the workspace-built image (workspace root)
+make diff                        # expect: engine-config gone, mainnet-instance mounted
+make apply && make deploy-engine
+```
+
+Rollback = re-import the previous image **and** `git revert` the manifest
+change (the old image needs the old ConfigMap). `make smoke` + `make scenario`
+are the gate; the anvil pods pick the offset up from the mounted instance file
+(`fork_offset` in `[chains.l1]`), so no env var carries it any more.
+
 Read the flight recorder:
 
 ```bash

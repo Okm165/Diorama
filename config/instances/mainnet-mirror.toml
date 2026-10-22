@@ -31,7 +31,9 @@ follow = "latest"
 # the follow head and a safe-head recede of a few blocks left M ahead of it,
 # stalling the replay until the safe head caught up - measured). 128 keeps
 # ~64 blocks of margin. This is the single home of the offset: the anvil
-# init containers read it via `mirror-config get chains.l1.fork_offset`.
+# pods read it from this file (an anchored sed over the mounted TOML — the
+# foundry image carries no mirror-config binary, so the read is one line,
+# never a second definition).
 fork_offset = 128
 
 [services.engine]

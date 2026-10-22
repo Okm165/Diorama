@@ -14,7 +14,6 @@ resources:
   - storageclass.yaml
   - mirror-config.yaml
   - reth-config.yaml
-  - engine-config.yaml
   - pvcs.yaml
   - reth.yaml
   - lighthouse.yaml
@@ -22,3 +21,8 @@ resources:
   - anvil-t.yaml
   - engine.yaml
   - nodeports.yaml
+  # The instance ConfigMaps (config/instances/kustomization.yaml): every pod
+  # of this instance mounts /etc/mirror/instance.toml from it (plan §19.5).
+  # The generator lives in that directory because kustomize reads generator
+  # files only from below the kustomization root.
+  - ../../config/instances

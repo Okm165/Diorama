@@ -529,26 +529,39 @@ also prefers IPv4 (`gai.conf`), because this host has no IPv6 route while
 crates.io resolves AAAA first. Build bases are pinned the same way
 (`rust:1.99.1-slim-trixie`, `debian:13.7-slim`).
 
-## Engine configuration (`k8s/base/engine-config.yaml`)
+The anvil pods read `fork_offset` from the mounted instance file (one anchored
+`sed` in their wrappers — the foundry image carries no `mirror-config` binary),
+so the offset has one home: the instance file. The legacy YAML ConfigMap
+(`engine-config.yaml`) is retired; the wiring env lives in `mirror-config`.
 
+## Engine configuration (`config/`)
+
+The engine reads an **instance TOML** (`/etc/mirror/instance.toml`, mounted
+from the instance ConfigMap; `--config` overrides): deployment facts only,
+layered over `config/defaults.toml` (the values every deployment shares) with
+`${VAR}` references resolved from the pod environment (the L1 wiring in
+`mirror-config`) and `MIRROR__SECTION__KEY` env overrides for incidents.
 Parsing is strict: an unknown key is a startup error, never a silently ignored
-setting (`deny_unknown_fields` on every config struct).
+setting (`deny_unknown_fields` on every config struct); a missing required key
+or an unresolvable `${VAR}` names itself. `mirror-config check` validates an
+instance file (CI + boot gate).
 
-```yaml
-reth:   { url, follow: safe|latest|finalized, follow_margin_blocks,
-          request_timeout_secs }
-anvil:  { m_url, t_url }
-source_sync: { enabled, interval_ms, max_per_pass,
-               engine_url, jwt_path }   # EIP-8379 top-up via reth's Engine API
-loops:  { poll_interval_ms, max_gap_blocks, chunk_size,
-          replay_into_m, apply_into_t, repair_m, fork_offset,
-          on_divergence: continue|freeze_m|halt_all }
-verifier: { enabled, drift_sample_keys, type4_refund_per_auth, probes[] }
-watchlist: [ { address, note } ]     # all slots of a watched account sync to T
-journal: { dir, blocks }             # ring size
-blobs:  { enabled, beacon_urls[] }   # sidecar source: local Lighthouse only
-http:   { addr, port }
-state_dir: /state                    # cursors, shadow.json, drift.jsonl
+```toml
+[instance] { name, namespace, profile }        # profile selects the sections
+[chains.l1] { kind = "ethereum", source_url = "${RETH_URL}", follow,
+              follow_margin_blocks, fork_offset }   # the offset's single home
+[services.engine] { state_dir = "${STATE_DIR}", fixture_addresses[] }
+[services.engine.reth] { request_timeout_secs }
+[services.engine.source_sync] { enabled, interval_ms, max_per_pass,
+              engine_url = "${ENGINE_API_URL}", jwt_path = "${JWT_PATH}" }
+[services.engine.loops] { poll_interval_ms, max_gap_blocks, chunk_size,
+              replay_into_m, apply_into_t, repair_m,
+              on_divergence = "continue"|"freeze_m"|"halt_all" }
+[services.engine.verifier] { enabled, drift_sample_keys, probes[] }
+[services.engine.journal] { dir = "${STATE_DIR}/journal", blocks }
+[services.engine.blobs] { enabled, beacon_urls = ["${BEACON_URL}"] }
+[services.engine.http] { addr, port }
+[watchlist] [ { address, note } ]   # all slots of a watched account sync to T
 ```
 
 **Watch list** (seed = the plan's §3.5 closure): Chainlink feeds (WETH/WBTC/

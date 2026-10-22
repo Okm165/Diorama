@@ -55,6 +55,10 @@ spec:
                 [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
               done
               [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
+              # The offset's single home is the instance TOML (plan §19.5):
+              # this is a read of the mounted file, not a second definition.
+              FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
+              [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
               PIN=$((HEAD - FORK_OFFSET))
               echo "$PIN" > /state/pin
               # The container runs unprivileged and re-resolves the pin on every
@@ -68,10 +72,9 @@ spec:
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: mirror-config, key: RETH_URL } }
-            - name: FORK_OFFSET
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: FORK_OFFSET } }
           volumeMounts:
             - { name: state, mountPath: /state }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
       containers:
         - name: anvil
           image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
@@ -85,6 +88,10 @@ spec:
               # container's pin ages with the pod and the post-restart replay
               # grows until it OOMs mid-catch-up (measured: 9 OOM restarts in
               # 20 min with a pod-lifetime pin). `cast` is in the image.
+              # The offset's single home is the instance TOML (plan §19.5):
+              # this is a read of the mounted file, not a second definition.
+              FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
+              [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
               PIN=$(cast block-number --rpc-url "$RETH_URL" 2>/dev/null || echo 0)
               if [ "${PIN:-0}" -gt 0 ]; then
                 PIN=$((PIN - FORK_OFFSET))
@@ -128,6 +135,7 @@ spec:
             - { name: http, containerPort: 8545 }
           volumeMounts:
             - { name: state, mountPath: /state }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
           # A restarted anvil forks (and, for M, re-replays) before it can
           # serve: gate readiness/liveness behind a startup probe so k8s does
           # not flap them during the catch-up (measured: "Readiness probe
@@ -154,6 +162,8 @@ spec:
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-m-state }
+        - name: instance
+          configMap: { name: mainnet-instance }
 ---
 apiVersion: v1
 kind: Service

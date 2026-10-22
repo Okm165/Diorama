@@ -1,7 +1,9 @@
 # engine - the mirror engine: replay loop (M) + verifier + BAL diff applier (T).
 #
-# Built from ./engine (see Makefile). State (cursor, journal, shadow registry,
-# drift log) lives on the engine-state PVC so restarts resume where they left.
+# Built from the workspace root (see Makefile). State (cursor, journal, shadow
+# registry, drift log) lives on the engine-state PVC so restarts resume where
+# they left. The mounted instance TOML is the config (plan §19.5): one file
+# per instance, many readers - the engine's section is [services.engine].
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -28,17 +30,15 @@ spec:
         - name: engine
           image: localhost/mirror-engine:v1
           imagePullPolicy: IfNotPresent
-          args: ["run", "--config", "/etc/mirror/engine.yaml"]
-          # The re-base offset must match the one anvil-m's init container uses
-          # to resolve its pin, so it lives in exactly one place (mirror-config)
-          # and the engine reads it from there.
-          env:
-            - name: FORK_OFFSET
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: FORK_OFFSET } }
+          args: ["run", "--config", "/etc/mirror/instance.toml"]
+          # The wiring the instance TOML references as ${...} (RETH_URL,
+          # ANVIL_*_URL, BEACON_URL, ENGINE_API_URL, JWT_PATH, STATE_DIR).
+          envFrom:
+            - configMapRef: { name: mirror-config }
           ports:
             - { name: http, containerPort: 8080 }
           volumeMounts:
-            - { name: config, mountPath: /etc/mirror, readOnly: true }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
             - { name: state, mountPath: /state }
             # Shared with reth + lighthouse: the engine calls reth's authrpc
             # (Engine API) to run the top-up loop that keeps reth at the CL head
@@ -56,8 +56,8 @@ spec:
             requests: { cpu: "100m", memory: 128Mi }
             limits: { memory: 1Gi }
       volumes:
-        - name: config
-          configMap: { name: engine-config }
+        - name: instance
+          configMap: { name: mainnet-instance }
         - name: state
           persistentVolumeClaim: { claimName: engine-state }
         - name: jwt
