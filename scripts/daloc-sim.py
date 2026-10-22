@@ -160,7 +160,12 @@ def role_operator():
     check("liquidationPx isolated-only",
           p["leverage"]["type"] != "cross" or "liquidationPx" not in p or p.get("liquidationPx") is None)
     now_ms = int(time.time() * 1000)
-    check("time fresh (≤6 s gate)", abs(now_ms - state["time"]) <= 6000, f"age={now_ms - state['time']}ms")
+    # Staleness is one-sided (the indexer's own formula): an *old* time is the
+    # failure. A time ahead of wall is the echo of their harness's own chain
+    # jump (the venue's served time follows the venue chain's clock -- the
+    # client's `chain_time = max(wall, head)` rule).
+    age = now_ms - state["time"]
+    check("time fresh (≤6 s gate)", age <= 6000, f"age={age}ms")
     # the recall figure (their operator reads totalRawUsd)
     check("totalRawUsd is the recall amount (positive here)", Decimal(m["totalRawUsd"]) > 0,
           m["totalRawUsd"])
