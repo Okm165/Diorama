@@ -109,13 +109,19 @@ spec:
             - { name: http, containerPort: 8545 }
           volumeMounts:
             - { name: state, mountPath: /state }
+          # A restarted anvil forks (and, for M, re-replays) before it can
+          # serve: gate readiness/liveness behind a startup probe so k8s does
+          # not flap them during the catch-up (measured: "Readiness probe
+          # failed: connection refused" events on every M restart).
+          startupProbe:
+            tcpSocket: { port: 8545 }
+            periodSeconds: 5
+            failureThreshold: 60 # up to 5 min to fork + catch up
           readinessProbe:
             tcpSocket: { port: 8545 }
-            initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             tcpSocket: { port: 8545 }
-            initialDelaySeconds: 30
             periodSeconds: 30
           resources:
             requests: { cpu: "500m", memory: 1Gi }

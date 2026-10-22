@@ -71,6 +71,8 @@ Read the flight recorder:
 
 ```bash
 kubectl -n mainnet-mirror exec deploy/engine -- tail -5 /state/drift.jsonl | jq .
+# drift.jsonl is a *divergence* log (one line per divergence or apply anomaly),
+# rotated at 16 MiB. Clean blocks are only in /metrics.
 kubectl -n mainnet-mirror exec deploy/engine -- ls -la /state/journal | tail
 kubectl -n mainnet-mirror exec deploy/engine -- cat /state/cursor.json
 ```
@@ -110,7 +112,8 @@ kubectl -n mainnet-mirror exec deploy/engine -- curl -s http://reth:8545 -X POST
   Lighthouse's own `forkchoiceUpdated` calls (which fail with "Received
   forkchoice updated message when syncing" during a catch-up) start updating
   reth's `safe`/`finalized` pointers again - the mirror's follow head then jumps
-  from the snapshot's value to live.
+  from the snapshot's value to live. With `reth.follow: latest` the mirror then
+  tracks the head one block per ~12 s.
 
 ## Drills
 
@@ -194,6 +197,39 @@ kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/a
 ```
 
 With the default `continue` policy nothing freezes; divergences are recorded.
+
+## Devnet transactions
+
+A devnet tx confirms in ~12 s (one T block per parent block, `follow: latest`).
+Two measured gotchas:
+
+- **Give every devnet tx a gas buffer.** The applier mines your txs in their own
+  block *before* the parent's diffs land (the prepend rule), so anvil's
+  auto-gas for `eth_sendTransaction` is accurate - but a tx that *does* share a
+  block with the diffs can run out of gas (measured: an Aave borrow estimated at
+  257,560 needed 271,389). `cast send --gas-limit`, or a wallet's own buffer,
+  removes the class.
+- **Manipulated state persists by design.** Writes through the devnet (txs or
+  cheatcodes) shadow their keys (copy-on-write), so mainnet's diffs stop
+  updating them. Hand them back with `/admin/shadow {clear: true}` (optionally
+  `all: true` to reset a whole account - "reset this venue to mainnet truth"):
+  the engine un-shadows the keys *and* re-syncs their current reth values.
+  Forgetting this is how a drill leaves a poisoned oracle behind: the *next*
+  run's parity probes then fail on values nobody remembers writing.
+
+### Stale watched accounts
+
+A watchlist entry only takes effect for *future* mainnet writes. If an account
+changed between its last sync and the moment it was added, it stays stale until
+mainnet writes it again - for a Chainlink aggregator that can be an hour. The
+`aave_weth_price` probe is the alarm for this class (the WETH source is a proxy
+and its aggregator was missing from the watch list: 8 rounds / ~$44 stale).
+Heal without waiting:
+
+```bash
+# 1. which keys differ?  (read slots on reth vs T; cast storage <addr> <slot>)
+# 2. hand them back:  POST /admin/shadow {"address": ..., "slots": [...], "clear": true}
+```
 
 ## Storage
 

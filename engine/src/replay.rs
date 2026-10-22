@@ -328,12 +328,28 @@ async fn build_raws(
                     }),
                     None => {
                         skipped += 1;
-                        tracing::warn!(
-                            block = n,
-                            tx = %tx.tx_hash(),
-                            error = %last_err,
-                            "no valid blob sidecar from any source"
-                        );
+                        // One WARN per block: the retry loop calls this again
+                        // until the beacon ingests the sidecars (with
+                        // `follow: latest` that is seconds after the block).
+                        let first = ctx
+                            .blob_warned
+                            .swap(n, std::sync::atomic::Ordering::Relaxed)
+                            != n;
+                        if first {
+                            tracing::warn!(
+                                block = n,
+                                tx = %tx.tx_hash(),
+                                error = %last_err,
+                                "no valid blob sidecar from any source (will retry)"
+                            );
+                        } else {
+                            tracing::debug!(
+                                block = n,
+                                tx = %tx.tx_hash(),
+                                error = %last_err,
+                                "blob sidecar still unavailable"
+                            );
+                        }
                     }
                 }
             }
@@ -605,7 +621,15 @@ fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_t
         "divergences": v.map(|v| v.divergences.clone()).unwrap_or_default(),
         "checks": v.map(|v| v.checks.iter().map(|(k, ok, d)| json!({"check": k, "ok": ok, "detail": d})).collect::<Vec<_>>()).unwrap_or_default(),
     });
-    ctx.drift.append(&entry);
+    // The journal is a *divergence* log: clean blocks are counted in the
+    // metrics, not written to disk (it used to grow ~20 MB of clean-block
+    // telemetry that nobody reads).
+    let clean = v.map(|v| v.divergences.is_empty()).unwrap_or(false)
+        && !outcome.partial
+        && outcome.skipped_blobs == 0;
+    if !clean {
+        ctx.drift.append(&entry);
+    }
 
     match v {
         Some(v) if v.ok => {

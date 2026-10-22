@@ -77,7 +77,17 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let s = std::fs::read_to_string(path)
             .with_context(|| format!("reading engine config {}", path.display()))?;
-        serde_yaml::from_str(&s).context("parsing engine config")
+        let mut cfg: Self = serde_yaml::from_str(&s).context("parsing engine config")?;
+        // One source of truth: anvil-m's init container resolves its pin with
+        // FORK_OFFSET from mirror-config, and the re-base offset must match it,
+        // so the env (when set) wins over the file's default.
+        if let Ok(v) = std::env::var("FORK_OFFSET") {
+            match v.trim().parse::<u64>() {
+                Ok(n) if n > 0 => cfg.loops.fork_offset = n,
+                _ => tracing::warn!(value = %v, "ignoring unparseable FORK_OFFSET"),
+            }
+        }
+        Ok(cfg)
     }
 
     pub fn watch_set(&self) -> HashSet<Address> {
@@ -139,7 +149,18 @@ pub struct LoopsConfig {
     /// verification). Set false for pure-replay conformance runs.
     #[serde(default = "default_true")]
     pub repair_m: bool,
+    /// Blocks between the follow head and M's fork base when the engine has to
+    /// re-base M: the safe head can move *backward* (CL forkchoice / failed
+    /// justification) and M's replay is irreversible, so the mirror re-forks
+    /// behind the follow head instead of stalling. Must exceed the safe-head
+    /// lag (~32-64 blocks) and stay inside reth's state window.
+    #[serde(default = "default_fork_offset")]
+    pub fork_offset: u64,
     pub on_divergence: OnDivergence,
+}
+
+fn default_fork_offset() -> u64 {
+    128
 }
 
 impl Default for LoopsConfig {
@@ -151,6 +172,7 @@ impl Default for LoopsConfig {
             replay_into_m: true,
             apply_into_t: true,
             repair_m: true,
+            fork_offset: 128,
             on_divergence: OnDivergence::FreezeM,
         }
     }

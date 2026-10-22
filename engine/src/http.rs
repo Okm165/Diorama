@@ -47,6 +47,17 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Json<serde_json::Value> {
     let cm = ctx.cursor_m();
     let ct = ctx.cursor_t();
     let shadow = ctx.shadow.lock().unwrap();
+    // The shadowed account list (not just counts): the devnet's own writes are
+    // copy-on-write, so these accounts are expected to differ from mainnet -
+    // parity checks (scenario probes) must skip them instead of alarming.
+    let mut shadowed: Vec<String> = shadow
+        .slots
+        .keys()
+        .chain(shadow.accounts.iter())
+        .map(|a| format!("{a:?}").to_lowercase())
+        .collect();
+    shadowed.sort();
+    shadowed.dedup();
     Json(json!({
         "reth_head": reth_head,
         "follow_head": follow,
@@ -61,6 +72,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Json<serde_json::Value> {
         "watchlist": ctx.watchlist.len(),
         "shadowed_slots": shadow.slot_count(),
         "shadowed_accounts": shadow.accounts.len(),
+        "shadowed": shadowed,
         "blob_form": ctx.blob_form().map(|f| f.as_str()),
     }))
 }
@@ -147,6 +159,10 @@ struct ShadowReq {
     /// Hand these keys back to mainnet sync (and re-sync their values now).
     #[serde(default)]
     clear: bool,
+    /// With `clear`: hand back *every* shadowed key of this account - the
+    /// "reset this venue to mainnet truth" operation after a venue sim.
+    #[serde(default)]
+    all: bool,
 }
 
 /// Mark devnet writes that bypassed T's block pipeline (direct cheatcode calls).
@@ -156,12 +172,25 @@ async fn admin_shadow(
 ) -> Json<serde_json::Value> {
     let mut resynced = 0usize;
     if req.clear {
+        // `all` hands every shadowed key of the account back to mainnet sync.
+        let mut slots = req.slots.clone();
+        if req.all {
+            let s = ctx.shadow.lock().unwrap();
+            if let Some(set) = s.slots.get(&req.address) {
+                for slot in set {
+                    if !slots.contains(slot) {
+                        slots.push(*slot);
+                    }
+                }
+            }
+        }
+        let account_fields = req.account_fields || req.all;
         {
             let mut s = ctx.shadow.lock().unwrap();
-            if req.account_fields {
+            if account_fields {
                 s.unmark_account_fields(req.address);
             }
-            for slot in &req.slots {
+            for slot in &slots {
                 s.unmark_slot(req.address, *slot);
             }
         }
@@ -175,7 +204,7 @@ async fn admin_shadow(
             .map(|c| c.block)
             .unwrap_or_else(|| 0);
         let head = if head == 0 { ctx.reth.block_number().await.unwrap_or(0) } else { head };
-        if req.account_fields {
+        if account_fields {
             if let Ok(bal) = ctx.reth.balance_at(req.address, head).await {
                 calls.push((
                     "anvil_setBalance".to_string(),
@@ -189,7 +218,7 @@ async fn admin_shadow(
                 ));
             }
         }
-        for slot in &req.slots {
+        for slot in &slots {
             if let Ok(v) = ctx.reth.storage_at(req.address, *slot, head).await {
                 calls.push((
                     "anvil_setStorageAt".to_string(),

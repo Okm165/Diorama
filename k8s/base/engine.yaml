@@ -29,6 +29,12 @@ spec:
           image: localhost/mirror-engine:v1
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/engine.yaml"]
+          # The re-base offset must match the one anvil-m's init container uses
+          # to resolve its pin, so it lives in exactly one place (mirror-config)
+          # and the engine reads it from there.
+          env:
+            - name: FORK_OFFSET
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: FORK_OFFSET } }
           ports:
             - { name: http, containerPort: 8080 }
           volumeMounts:

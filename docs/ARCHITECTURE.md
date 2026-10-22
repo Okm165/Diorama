@@ -42,7 +42,50 @@ Per replayed block on M the engine does, in order:
    full log set, withdrawals. (State probes deliberately do *not* re-run here:
    post-execution they only re-detect the blockhash-level divergence the log and
    receipt checks already record - measured on a `BLOCKHASH`-gated MEV bot.)
-6. Drift entry (`drift.jsonl`) + cursor + metrics.
+6. Divergence entry (`drift.jsonl`, only when something diverged) + cursor +
+   metrics. Clean blocks are counted in the metrics, never written to disk.
+
+### Devnet transactions: the prepend rule
+
+The applier mines the devnet's pending transactions in **their own block,
+before** the parent's diffs are applied (`diff.rs` step 0), then applies the
+diffs and mines the parent's block. Two reasons, both measured:
+
+1. **The replayed block must contain only the parent's effects** (plan,
+   "Prepend rules"). Without it, a devnet tx and a parent's state change land in
+   the same T block and the block no longer means anything.
+2. **Gas estimates stay honest.** Anvil estimates the gas for
+   `eth_sendTransaction` against `latest`; if the parent's diffs land between
+   the estimate and the execution, the tx executes against a different state and
+   can run out of gas (measured: an Aave `borrow` estimated at 257,560 used
+   271,389 - reverted at 97% of its limit, succeeded with an explicit 1M limit).
+
+T's head therefore drifts ahead of the parent cursor by the number of devnet
+blocks; that is normal. The cursor stays keyed to the parent height, and the
+applier only bails when T's head is *behind* the cursor by more than one block
+(an `anvil_reset` outside the engine, which the incremental diff applier cannot
+recover from).
+
+### Watchlist closure: proxies need their aggregators
+
+A watched account only stays fresh while mainnet writes to *that* account.
+Chainlink feeds are `AggregatorProxy` contracts: `latestRoundData()` is a
+delegatecall into the *current aggregator*, whose storage holds the round, so
+watching the proxy alone freezes the price at the pin era. The same applies to
+Aave oracle sources - they are feeds, and at least the WETH/USD source is itself
+a proxy (measured: 8 rounds / ~$44 stale while USDC's direct-aggregator source
+stayed fresh and hid the gap). Resolve each source's aggregator and watch it:
+
+```bash
+cast call <source> "aggregator()(address)" --rpc-url $RETH
+```
+
+A watchlist addition only affects *future* writes; a value that went stale
+before the entry existed heals on the account's next mainnet write. To heal it
+immediately, hand the stale slots back to mainnet sync with
+`/admin/shadow {clear: true, slots: [...]}` - the engine re-syncs them from reth
+at the cursor (used for the WETH/USD aggregator: hot-vars slot + the
+transmission mapping slots, `keccak(roundId, 17)`).
 
 ### Fork pins (M refreshes, T persists)
 
@@ -143,10 +186,17 @@ Structural checks (tx count/order, blob gas, receipt count, withdrawals) are
 what an engine bug would break; they are reported separately
 (`mirror_divergences_total`) so `continue` stays honest.
 
-**Follow the `safe` head by default** (`reth.follow: safe|latest|finalized`).
-Safe is ~1 epoch (32-64 blocks) behind head but immune to shallow reorgs.
-`latest` trades that safety for freshness. The mirror follows *reth's* head:
-see "Source liveness" below.
+**Follow `latest`** (`reth.follow: latest|safe|finalized`). This is a devnet
+requirement, not a preference: the applier mines one T block per applied parent
+block, so the follow head *is* the devnet's block cadence. With `safe` the CL
+updates the safe block once per epoch, the applier burst-mines 32 blocks every
+~6.4 min, and a devnet tx sent between bursts waits minutes for a receipt
+(measured: 180 s+ timeouts, then "transaction not found" after a pool reset).
+With `latest` the parent stream advances every ~12 s and a devnet tx confirms in
+~12 s (measured). The cost is exposure to shallow reorgs; those are detected
+(`mirror_reorgs_detected_total`) and M is re-based behind the new head by the
+same self-heal path that handles a receding follow head. The mirror follows
+*reth's* head: see "Source liveness" below.
 
 **Pins and epochs.** Anvil forks at an absolute pin (`reth head - FORK_OFFSET`,
 default 64), resolved once per epoch by an init container and persisted in
@@ -306,7 +356,7 @@ plus the blocks. The alternative trade-off is dropping `--semi-supernode`:
 ~650 GB less disk, but the mirror loses blob-tx fidelity on M (blob blocks are
 mined without their blob txs and recorded; state stays exact via the BAL).
 
-**Follow head during a catch-up.** The engine follows reth's `safe` block, which
+**Follow head during a catch-up.** The engine follows reth's `safe`/`latest` block, which
 Lighthouse updates via `forkchoiceUpdated`. While reth is far behind the CL's
 head, those updates reference blocks reth has not executed, so reth ignores them
 ("Received forkchoice updated message when syncing") and its `safe`/`finalized`

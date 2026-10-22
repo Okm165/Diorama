@@ -15,6 +15,7 @@ NS=${NS:-mainnet-mirror}
 K="kubectl -n $NS"
 ENGINE="$K exec deploy/engine --"
 ANVIL_T="$K exec deploy/anvil-t --"
+ANVIL_M="$K exec deploy/anvil-m --"
 pass=0; fail=0
 ok()  { echo "  ✔ $*"; pass=$((pass+1)); }
 bad() { echo "  ✘ $*"; fail=$((fail+1)); }
@@ -31,12 +32,40 @@ num() { printf '%d' "${1:-0}" 2>/dev/null || echo 0; }
 # The probes mirror k8s/base/engine-config.yaml:verifier.probes (all watched
 # accounts, so T must match reth exactly; none is blockhash-dependent, so M must
 # too - the engine's convergence repair is what makes that true).
+# Devnet sends: anvil auto-impersonates, so eth_sendTransaction works from any
+# address. We poll for the receipt ourselves (cast send's own wait times out
+# when the engine is catching up; the engine mines one T block per parent block).
+send_tx() { # send_tx <from> <to> <calldata>  -> tx hash on stdout
+  rpc http://anvil-t:8545 eth_sendTransaction \
+    "[{\"from\":\"$1\",\"to\":\"$2\",\"data\":\"$3\",\"gasPrice\":\"0x174876e800\"}]" | jq -r '.result // .error.message'
+}
+wait_tx() { # wait_tx <hash> [tries]  -> status (0x1/0x0) or "pending"
+  local tries=${2:-40}
+  for _ in $(seq 1 "$tries"); do
+    local st
+    st=$(rpc http://anvil-t:8545 eth_getTransactionReceipt "[\"$1\"]" | jq -r '.result.status // "pending"' 2>/dev/null)
+    [ "$st" != "pending" ] && { echo "$st"; return 0; }
+    sleep 4
+  done
+  echo "pending"
+}
+
 probe() { # probe <rpc-url> <block-hex> <to> <data>
   rpc "$1" eth_call "[{\"to\":\"$3\",\"data\":\"$4\"},\"$2\"]" | jq -r '.result // "ERR"'
 }
 probes_match() { # probes_match <url-a> <url-b> <label> <block-hex>
-  local a=$1 b=$2 label=$3 at=$4 mismatches=0
+  local a=$1 b=$2 label=$3 at=$4 mismatches=0 skipped=0 shadowed=""
+  if [ "$b" = "http://anvil-t:8545" ]; then
+    # Devnet-owned (shadowed) accounts are copy-on-write: their state is the
+    # devnet's, not mainnet's, so parity is not expected. The engine's status
+    # lists them (a devnet tx on the pool/aToken legitimately diverges views
+    # like totalSupply); skip those probes instead of alarming.
+    shadowed=$(engine_api /status | jq -r '(.shadowed // [])[]' 2>/dev/null | tr '\n' ' ')
+  fi
   while read -r name to data; do
+    case " $shadowed " in
+      *" ${to,,} "*) info "$label probe $name: devnet-owned (shadowed), skipped"; skipped=$((skipped+1)); continue;;
+    esac
     va=$(probe "$a" "$at" "$to" "$data")
     # a chain whose height diverges from the parent height is read at latest
     if [ "$b" = "http://anvil-t:8545" ]; then
@@ -58,10 +87,12 @@ usdc_total_supply 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 0x18160ddd
 weth_total_supply 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 0x18160ddd
 chainlink_weth_usd 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419 0xfeaf968c
 univ3_weth_usdc_slot0 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640 0x3850c7bd
-aave_aethusdc_total_supply 0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c 0x18160ddd
+aave_aethusdc_scaled_total_supply 0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c 0xb1bf962d
 aave_usdc_normalized_income 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2 0xd15e0053000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+aave_usdc_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f07000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+aave_weth_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f07000000000000000000000000C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
 PROBES
-  [ "$mismatches" -eq 0 ] && ok "$label matches reth on all 6 probes"
+  [ "$mismatches" -eq 0 ] && ok "$label matches reth on all 8 probes (${skipped} devnet-owned skipped)"
 }
 
 echo "== mirror scenario test (namespace $NS)"
@@ -75,6 +106,23 @@ urls=$($K get cm engine-config -o jsonpath='{.data.engine\.yaml}' | awk '/beacon
 case "$urls" in *lighthouse*) ok "blob source is the local CL ($urls)";; *) bad "blob source: $urls";; esac
 pipeline=$($K logs deploy/reth --since=10m 2>/dev/null | grep -ciE "pipeline|backfill")
 [ "$(num "$pipeline")" -eq 0 ] && ok "no peer-based pipeline/backfill activity on reth" || info "reth pipeline log lines: $pipeline"
+
+# Preflight: T is a devnet, so a previous drill's manipulation persists by
+# design (devnet writes are copy-on-write). Hand the oracle's shadowed keys
+# back to mainnet sync: the engine re-syncs reth's values and future Chainlink
+# updates flow again. One idempotent POST, no transactions.
+PRE_ORACLE=0x54586bE62E3c3580375aE3723C145253060Ca0C2
+PRE_USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+$ENGINE curl -sf -m 25 -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
+  -d "{\"address\":\"$PRE_ORACLE\",\"slots\":[],\"account_fields\":false,\"clear\":true,\"all\":true}" >/dev/null 2>&1
+sleep 4
+pre_t=$($ANVIL_T cast call $PRE_ORACLE "getSourceOfAsset(address)(address)" $PRE_USDC --rpc-url http://localhost:8545 2>/dev/null | tr -d '\r')
+pre_true=$($ANVIL_T cast call $PRE_ORACLE "getSourceOfAsset(address)(address)" $PRE_USDC --rpc-url http://reth:8545 2>/dev/null | tr -d '\r')
+if [ -n "$pre_t" ] && [ "$pre_t" = "$pre_true" ]; then
+  ok "preflight: oracle sources re-synced from reth"
+else
+  bad "preflight: oracle source still off ($pre_t vs reth $pre_true)"
+fi
 
 echo "-- 2. live parity"
 for _ in $(seq 1 30); do
@@ -114,7 +162,7 @@ probes_match http://reth:8545 http://anvil-m:8545 "M" "$(printf '0x%x' "$((m_hea
 root=$(rpc http://anvil-m:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$m_head")\",false]" | jq -r '.result.stateRoot')
 [ "$root" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] \
   && ok "A1: M blocks carry no trie (stateRoot = 0x0)" || bad "A1: stateRoot = $root"
-pin=$(kubectl -n "$NS" exec deploy/anvil-m -- cat /state/pin 2>/dev/null | tr -d '\r')
+pin=$($ANVIL_M cast rpc anvil_nodeInfo --rpc-url http://localhost:8545 2>/dev/null | jq -r '.forkConfig.forkBlockNumber' | tr -d '\r')
 mhash=$(rpc http://anvil-m:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$pin")\",false]" | jq -r '.result.hash')
 rhash=$(rpc http://reth:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$pin")\",false]" | jq -r '.result.hash')
 [ -n "$mhash" ] && [ "$mhash" = "$rhash" ] && ok "A2: pin block $pin byte-identical to mainnet" \
@@ -204,6 +252,140 @@ fi
 sleep 20
 at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
 probes_match http://reth:8545 http://anvil-t:8545 "T after rewind" "$at"
+
+echo "-- 5. cascade lever (plan §7: the real Aave crash path)"
+# The mirror's signature scenario: take over the Aave oracle through its own
+# admin path and crash a price, with no mock contracts - the devnet's
+# dependency closure (all watched) makes the lever real.
+#
+# Manipulations on T *persist* (that is the devnet's contract), so this check
+# heals on entry: the truth for the oracle's source comes from reth, never
+# from T, otherwise a previous run's leftover would poison the next one.
+ORACLE=0x54586bE62E3c3580375aE3723C145253060Ca0C2
+PROVIDER=0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e
+USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+WETH_USD=0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419
+RPC_T="--rpc-url http://localhost:8545"
+RPC_R="--rpc-url http://reth:8545"
+# The oracle has no owner() of its own; its admin is the PoolAddressesProvider's
+# owner (the Aave governance executor) - verified on-chain.
+ORACLE_OWNER=$($ANVIL_T cast call $PROVIDER "owner()(address)" $RPC_T 2>/dev/null | tr -d '\r')
+TRUE_SOURCE=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $USDC $RPC_R 2>/dev/null | tr -d '\r')
+T_SOURCE=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $USDC $RPC_T 2>/dev/null | tr -d '\r')
+if [ -n "$ORACLE_OWNER" ] && [ -n "$TRUE_SOURCE" ]; then
+  rpc http://anvil-t:8545 anvil_impersonateAccount "[\"$ORACLE_OWNER\"]" >/dev/null
+  rpc http://anvil-t:8545 anvil_setBalance "[\"$ORACLE_OWNER\",\"0xde0b6b3a7640000\"]" >/dev/null
+  price() { $ANVIL_T cast call $ORACLE "getAssetPrice(address)(uint256)" $USDC $RPC_T 2>/dev/null | tr -d '\r'; }
+  set_source() { # set_source <source> ; the engine mines, we do not wait
+    local cd
+    cd=$($ANVIL_T cast calldata "setAssetSources(address[],address[])" "[$USDC]" "[$1]" 2>/dev/null | tr -d '\r')
+    send_tx "$ORACLE_OWNER" "$ORACLE" "$cd" >/dev/null
+  }
+  before=$(price)
+  CASCADE_CD=$($ANVIL_T cast calldata "setAssetSources(address[],address[])" "[$USDC]" "[$WETH_USD]" 2>/dev/null | tr -d '\r')
+  CASCADE_TX=$(send_tx "$ORACLE_OWNER" "$ORACLE" "$CASCADE_CD")
+  after=""
+  for _ in $(seq 1 24); do
+    sleep 5
+    after=$(price)
+    [ -n "$after" ] && [ "$after" != "$before" ] && break
+  done
+  now_src=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $USDC $RPC_T 2>/dev/null | tr -d '\r')
+  # Hand the mapping back to mainnet sync: re-syncs the real feed *and* lets
+  # future Chainlink updates flow (a restore transaction would leave the slot
+  # devnet-owned forever - the poisoned-source bug this suite hit).
+  $ENGINE curl -sf -m 25 -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
+    -d "{\"address\":\"$ORACLE\",\"slots\":[],\"account_fields\":false,\"clear\":true,\"all\":true}" >/dev/null 2>&1
+  sleep 4
+  set_source_done=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $USDC $RPC_T 2>/dev/null | tr -d '\r')
+  [ "$set_source_done" = "$TRUE_SOURCE" ] && info "cascade: source restored via unshadow ($set_source_done)" \
+    || info "cascade: source restore pending ($set_source_done vs $TRUE_SOURCE)"
+  if [ -n "$after" ] && [ "$after" != "$before" ]; then
+    ok "cascade lever: oracle admin impersonated, USDC price crashed ($before -> $after) and restored"
+  else
+    bad "cascade lever: USDC price did not move ($before -> $after; src=$now_src want=$WETH_USD tx=${CASCADE_TX:0:20})"
+  fi
+else
+  bad "cascade lever: could not read the oracle admin/source (admin=$ORACLE_OWNER source=$TRUE_SOURCE)"
+fi
+
+echo "-- 6. market simulation on T (the core product loop, no mocks)"
+# supply -> borrow -> oracle crash -> liquidation condition, on the real Aave
+# pool. Everything is the product's own dependency closure: WETH/USDC, the
+# pool, the oracle and its sources are all watched, so the position and the
+# crash are real market state, not fixtures.
+POOL=0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2
+A_WETH=0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8
+MKT=0x00000000000000000000000000000000000F00d2
+WETH=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+USDC_USD_FEED=0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6
+TRUE_WETH_SRC=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $WETH $RPC_R 2>/dev/null | tr -d '\r')
+# fund: WETH via its standard balance slot (silent), ETH for gas
+MKT_SLOT=$($ANVIL_T cast index address "$MKT" 3 2>/dev/null | tr -d '\r')
+rpc http://anvil-t:8545 anvil_setStorageAt "[\"$WETH\",\"$MKT_SLOT\",\"0x0000000000000000000000000000000000000000000000000de0b6b3a7640000\"]" >/dev/null
+rpc http://anvil-t:8545 anvil_impersonateAccount "[\"$MKT\"]" >/dev/null
+rpc http://anvil-t:8545 anvil_setBalance "[\"$MKT\",\"0x21e19e0c9bab2400000\"]" >/dev/null # 10000 ETH
+# approve + supply 1 WETH + borrow 100 USDC (variable), mined as one T block
+MKT_ERR=""
+# T is a devnet: the position accumulates across runs by design, so measure
+# the supply as a delta against the balance before this run.
+a_weth_before=$($ANVIL_T cast call $A_WETH "balanceOf(address)(uint256)" $MKT $RPC_T 2>/dev/null | awk '{print $1}' | tr -d '\r')
+a_weth_before=${a_weth_before:-0}
+APPROVE_TX=$(send_tx "$MKT" "$WETH" "$($ANVIL_T cast calldata "approve(address,uint256)" $POOL 1000000000000000000 2>/dev/null | tr -d '\r')")
+SUPPLY_TX=$(send_tx "$MKT" "$POOL" "$($ANVIL_T cast calldata "supply(address,uint256,address,uint16)" $WETH 1000000000000000000 $MKT 0 2>/dev/null | tr -d '\r')")
+[ -z "$SUPPLY_TX" ] && MKT_ERR="supply not accepted"
+# wait for supply to land before borrowing (the engine mines one block per parent)
+[ -n "$SUPPLY_TX" ] && [ "$(wait_tx "$SUPPLY_TX" 40)" = "pending" ] && MKT_ERR="supply not mined"
+BORROW_TX=$(send_tx "$MKT" "$POOL" "$($ANVIL_T cast calldata "borrow(address,uint256,uint256,uint16,address)" $USDC 100000000 2 0 $MKT 2>/dev/null | tr -d '\r')")
+case "$BORROW_TX" in 0x*) : ;; *) MKT_ERR="${MKT_ERR:+$MKT_ERR; }borrow rejected: ${BORROW_TX:0:60}" ;; esac
+# aToken balances accrue interest through the liquidity index and the position
+# accumulates across runs, so the check is a band above the pre-run balance.
+a_want=$((a_weth_before + 1000000000000000000))
+a_cap=$((a_weth_before + 1100000000000000000))
+a_weth=""
+for _ in $(seq 1 12); do
+  sleep 5
+  a_weth=$($ANVIL_T cast call $A_WETH "balanceOf(address)(uint256)" $MKT $RPC_T 2>/dev/null | awk '{print $1}' | tr -d '\r')
+  if [ -n "$a_weth" ] && [ "$a_weth" -ge "$a_want" ] 2>/dev/null && [ "$a_weth" -lt "$a_cap" ] 2>/dev/null; then break; fi
+done
+if [ -n "$a_weth" ] && [ "$a_weth" -ge "$a_want" ] 2>/dev/null && [ "$a_weth" -lt "$a_cap" ] 2>/dev/null; then
+  ok "market: supplied 1 WETH + borrowed 100 USDC on the real Aave pool (aEthWETH=$a_weth_before -> $a_weth)"
+else
+  bad "market: supply/borrow did not land (aEthWETH=$a_weth_before -> ${a_weth:-?}; $MKT_ERR)"
+fi
+hf() { $ANVIL_T cast call $POOL "getUserAccountData(address)(uint256,uint256,uint256,uint256,uint256,uint256)" $MKT $RPC_T 2>/dev/null | sed -n 6p | awk '{print $1}' | tr -d '\r'; }
+hf_before=$(hf)
+# crash WETH's oracle source to the USDC feed (~$1) through the same admin path
+send_tx "$ORACLE_OWNER" "$ORACLE" "$($ANVIL_T cast calldata "setAssetSources(address[],address[])" "[$WETH]" "[$USDC_USD_FEED]" 2>/dev/null | tr -d '\r')" >/dev/null
+hf_after=""
+for _ in $(seq 1 24); do
+  sleep 5
+  hf_after=$(hf)
+  [ -n "$hf_after" ] && [ "$hf_after" != "$hf_before" ] && break
+done
+# Hand WETH's mapping back to mainnet sync (same reason as the cascade).
+$ENGINE curl -sf -m 25 -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
+  -d "{\"address\":\"$ORACLE\",\"slots\":[],\"account_fields\":false,\"clear\":true,\"all\":true}" >/dev/null 2>&1
+if [ -n "$hf_after" ] && [ "$hf_after" -lt 1000000000000000000 ] 2>/dev/null; then
+  ok "market: the crash made the position liquidatable (HF $hf_before -> $hf_after)"
+else
+  bad "market: HF did not fall below 1e18 ($hf_before -> $hf_after)"
+fi
+# core debug capability: the position's txs must be traceable
+if [ -n "$SUPPLY_TX" ]; then
+  for _ in $(seq 1 24); do
+    st=$(rpc http://anvil-t:8545 eth_getTransactionReceipt "[\"$SUPPLY_TX\"]" | jq -r '.result.status // "pending"' 2>/dev/null)
+    [ "$st" != "pending" ] && break
+    sleep 5
+  done
+  frames=$(rpc http://anvil-t:8545 debug_traceTransaction "[\"$SUPPLY_TX\",{\"tracer\":\"callTracer\"}]" | jq -r '.result.calls | length' 2>/dev/null)
+  [ -n "$frames" ] && [ "$frames" -gt 0 ] 2>/dev/null \
+    && ok "market: debug_traceTransaction(callTracer) works on T ($frames call frames)" \
+    || bad "market: trace of the supply tx failed (frames=$frames)"
+else
+  bad "market: supply tx hash not captured"
+fi
 
 echo "-- 4. integrity counters"
 m=$(engine_api /metrics)

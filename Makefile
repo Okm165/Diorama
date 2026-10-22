@@ -128,11 +128,23 @@ smoke: ## End-to-end smoke test
 scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
 	NS=$(NS) ./scripts/scenario.sh
 
+proof: ## Tenderly-core proof: live fork, mint funds, real Aave/Uniswap interaction
+	NS=$(NS) ./scripts/tenderly-core.sh
+
 selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
 	kubectl -n $(NS) delete job engine-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/selftest-job.yaml
 	kubectl -n $(NS) wait --for=condition=complete job/engine-selftest --timeout=900s || true
 	$(KUBECTL) logs job/engine-selftest
+
+logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
+	@for c in reth lighthouse anvil-m anvil-t engine; do \
+	  printf "== %s\n" "$$c"; \
+	  kubectl -n $(NS) logs deploy/$$c --since=30m 2>/dev/null \
+	    | grep -aE "WARN|ERROR|\"level\":\"(WARN|ERROR)\"" \
+	    | sed -E 's/\"timestamp\":\"[^\"]*\"/TS/; s/[0-9a-fx]{8,}/HEX/g; s/[0-9]{4,}/N/g' \
+	    | sort | uniq -c | sort -rn | head -6; \
+	done
 
 backfill: ## Show the CL backfill progress and the lighthouse datadir sizes
 	@$(KUBECTL) logs deploy/lighthouse --tail=200 2>/dev/null \

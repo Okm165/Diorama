@@ -14,11 +14,14 @@ data:
   engine.yaml: |
     reth:
       url: http://reth:8545
-      # Follow the safe head by default: ~1 epoch (32-64 blocks) behind the
-      # chain head, but immune to shallow reorgs. `latest` trades that safety
-      # for freshness. The plan's ops alarm threshold (>60 blocks) matches the
-      # safe-head lag.
-      follow: safe
+      # Follow `latest` (the CL head): the parent stream then advances one block
+      # per ~12 s, so T mines one block per ~12 s and devnet transactions
+      # confirm in ~12 s (measured with `safe`: the safe tag jumps 32 blocks per
+      # epoch, so the applier burst-mines every ~6.4 min and a devnet tx waits
+      # minutes - a fork that does not confirm is not a fork). The rare shallow
+      # reorg is handled by the continuity check + the M re-base path
+      # (metrics: mirror_reorgs_detected_total).
+      follow: latest
       request_timeout_secs: 30
 
     anvil:
@@ -45,6 +48,12 @@ data:
       # Refuse to catch up when the follow head is further than this ahead of
       # the cursor (operator re-pin drill territory).
       max_gap_blocks: 5000
+      # Blocks between the follow head and M's fork base when the engine has
+      # to re-base M: the safe head can move backward (CL forkchoice), and M's
+      # replay is irreversible, so the mirror re-forks behind it instead of
+      # stalling until the safe head catches up. Keep in sync with
+      # mirror-config's FORK_OFFSET.
+      fork_offset: 128
       # Max JSON-RPC batch size for raw-tx submissions and cheatcode writes.
       chunk_size: 500
       replay_into_m: true
@@ -89,9 +98,26 @@ data:
         - name: univ3_weth_usdc_slot0
           to: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
           data: "0x3850c7bd"
-        - name: aave_aethusdc_total_supply
+        # scaledTotalSupply, not totalSupply: the aToken's totalSupply is
+        # `scaled * liquidityIndex`, and the devnet's own reserve actions
+        # re-price the index at a different second than mainnet's last update -
+        # a dust drift (measured 7.8e-13 aUSDC) that an exact probe cannot tell
+        # from a real divergence. The scaled value is index-independent and
+        # still catches any real supply/withdraw divergence.
+        - name: aave_aethusdc_scaled_total_supply
           to: "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c"
-          data: "0x18160ddd"
+          data: "0xb1bf962d"
+        # The oracle's price proves the interaction closure: it only matches
+        # reth when the oracle *and* its source contracts are watched.
+        - name: aave_usdc_price
+          to: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
+          data: "0xb3596f07000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        # WETH's source is a proxy whose aggregator was missing from the watch
+        # list; its price froze while USDC's stayed live. One WETH price probe
+        # makes that class of gap an alarm instead of a silent staleness.
+        - name: aave_weth_price
+          to: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
+          data: "0xb3596f07000000000000000000000000C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
         - name: aave_usdc_normalized_income
           to: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
           data: "0xd15e0053000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
@@ -159,6 +185,28 @@ data:
       - { address: "0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8", note: "aEthWETH" }
       - { address: "0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a", note: "aEthUSDT" }
       - { address: "0xD322A49006FC828F9B5B37Ab215F99B4E5caB19C", note: "Aave V3 WETH Gateway" }
+      # Interaction closure (plan §3.5: "closed under interaction") - derived
+      # on-chain; re-derive after a feed upgrade:
+      #   oracle sources: cast call $ORACLE "getSourceOfAsset(address)(address)" $ASSET
+      #   rate strategy:  cast call $POOL "getReserveData(address)(...)" $ASSET  (12th field)
+      #   ACL manager:    cast call $PROVIDER "getACLManager()(address)"
+      # Without them the devnet reads a pin-era Aave price/rate even though the
+      # pool and oracle themselves stay fresh.
+      - { address: "0xc2aaCf6553D20d1e9d78E365AAba8032af9c85b0", note: "Aave V3 ACLManager" }
+      - { address: "0x9ec6F08190DeA04A54f8Afc53Db96134e5E3FdFB", note: "Aave V3 rate strategy (shared by all reserves)" }
+      - { address: "0x3f73F03aa83B2A48ed27E964eD0fDb590332095B", note: "Aave oracle source: USDC/USD" }
+      - { address: "0x260326c220E469358846b187eE53328303Efe19C", note: "Aave oracle source: USDT/USD" }
+      - { address: "0x5424384B256154046E9667dDFaaa5e550145215e", note: "Aave oracle source: WETH/USD" }
+      # The WETH/USD source is itself an AggregatorProxy: `latestRoundData()`
+      # delegatecalls into its aggregator, so watching only the source leaves
+      # the price frozen at the pin era (measured: 8 rounds / ~$44 stale, while
+      # USDC's direct-aggregator source stayed fresh and hid the gap). The other
+      # four sources answered `aggregator()` with no data - they are direct
+      # aggregators and need no extra entry. Re-resolve after a feed upgrade:
+      #   cast call <source> "aggregator()(address)" --rpc-url $RETH
+      - { address: "0x7c7FdFCa295a787ded12Bb5c1A49A8D2cC20E3F8", note: "Aave oracle source: WETH/USD aggregator" }
+      - { address: "0xDaa4B74C6bAc4e25188e64ebc68DB5050b690cAc", note: "Aave oracle source: WBTC/USD" }
+      - { address: "0xe1D97bF61901B075E9626c8A2340a7De385861Ef", note: "Aave oracle source: wstETH/USD" }
 
     journal:
       dir: /state/journal

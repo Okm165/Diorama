@@ -259,20 +259,58 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         _ => state::next_block(cursor.as_ref(), head),
     };
     if matches!(chain, Chain::M) && head > follow {
-        // A restored state dump (or a regressed source head) can leave M ahead
-        // of the follow head; M replays 1:1 so its height is a parent height and
-        // the loop can never advance from here.
+        // M's replay is irreversible, but the follow head can move *backward*:
+        // the CL's forkchoice may report a lower safe block (reorg / failed
+        // justification), which strands M until it catches up (measured: a
+        // 42-block recede stalling ~10 min, with a warning every poll).
+        // Re-base M at a fresh pin behind the follow head instead; the cursor
+        // hash check on the next pass rebases the replay, bounding the whole
+        // recovery to `fork_offset` blocks (~1-2 min). T is unaffected: the
+        // epoch/COW state is keyed on T's own fork block, not M's.
         //
-        // T is exempt: its heights advance independently of mainnet's (one T
-        // block per applied parent block, plus one per journal rewind), so
-        // comparing them would wrongly stall T after a rewind drill. T's
-        // progress is bounded by `cursor_t` vs the follow head below.
-        tracing::warn!(
-            chain = ?chain,
-            head,
-            follow,
-            "M head is ahead of the follow head - stale state dump or source regression; re-pin to realign"
-        );
+        // T is exempt from this check entirely: its heights advance
+        // independently of mainnet's (one T block per applied parent block,
+        // plus one per journal rewind).
+        {
+            let mut last = ctx.last_stall.lock().unwrap();
+            if *last != (head, follow) {
+                *last = (head, follow);
+                tracing::warn!(
+                    chain = ?chain,
+                    head,
+                    follow,
+                    "M is ahead of the follow head (safe head moved backward)"
+                );
+            }
+        }
+        let attempt = {
+            let mut t = ctx.last_rebase.lock().unwrap();
+            let due = t
+                .map(|i: std::time::Instant| i.elapsed() > std::time::Duration::from_secs(60))
+                .unwrap_or(true);
+            if due {
+                *t = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if attempt {
+            match ctx.anvil_m.fork_config().await {
+                Ok(Some((url, _))) => {
+                    let pin = follow.saturating_sub(ctx.cfg.loops.fork_offset);
+                    match ctx.anvil_m.anvil_reset_fork(&url, pin).await {
+                        Ok(()) => tracing::warn!(
+                            head,
+                            follow,
+                            pin,
+                            "M re-based at a fresh pin behind the follow head"
+                        ),
+                        Err(e) => tracing::warn!(error = %e, "M re-base failed; will retry"),
+                    }
+                }
+                Ok(None) => tracing::warn!("M re-base skipped: chain has no fork config"),
+                Err(e) => tracing::warn!(error = %e, "M re-base: anvil_nodeInfo failed"),
+            }
+        }
         return Ok(None);
     }
     if rebased {

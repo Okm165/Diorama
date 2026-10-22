@@ -10,17 +10,23 @@ data:
   # production mode: remote mining is 55-256 s/block (measured).
   RETH_URL: "http://reth:8545"
 
-  # Anvil pin = reth head - FORK_OFFSET, resolved once per epoch and persisted
-  # in /state/pin. Two constraints:
-  #   1. well inside reth's 10,064-block state window (it is: 64), and
+  # Anvil pin = reth head - FORK_OFFSET, re-resolved on every M start and
+  # persisted for T (see anvil-m.yaml / anvil-t.yaml). Constraints:
+  #   1. well inside reth's 10,064-block state window (it is),
   #   2. inside the range of slots whose blobs the local Lighthouse supernode
   #      can reconstruct - i.e. slots since it started, plus whatever the
-  #      PeerDAS blob backfill has covered.
-  # 64 keeps the mirror live (~13 min of replayed history) and every blob
-  # available. Raise it after the blob backfill has covered the availability
-  # window if you want a deeper replay; a deeper pin than the supernode's
-  # coverage makes blob blocks unreplayable (KZG validation fails).
-  FORK_OFFSET: "64"
+  #      PeerDAS blob backfill has covered,
+  #   3. *behind* the follow head (`safe`), which lags the chain head by ~32-64
+  #      blocks: with the offset at 64 the pin sat exactly at the follow head
+  #      and a safe-head recede of a few blocks left M ahead of it, stalling
+  #      the replay until the safe head caught up (measured). 128 keeps ~64
+  #      blocks of margin.
+  # 128 also bounds the post-restart re-replay (~128 blocks, ~1-2 min, well
+  # within the 24Gi memory budget at ~60-80 MB/block cold). Raise it after the
+  # blob backfill has covered the availability window if a deeper replay is
+  # wanted; a deeper pin than the supernode's coverage makes blob blocks
+  # unreplayable (KZG validation fails).
+  FORK_OFFSET: "128"
 
   # Lighthouse checkpoint sync (fresh CL head without genesis sync).
   CHECKPOINT_SYNC_URL: "https://mainnet-checkpoint-sync.stakely.io"

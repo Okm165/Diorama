@@ -68,8 +68,17 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // late-completion skip below leaves the rolled-back values stale.
     let reapply = *ctx.reapply_from.lock().unwrap();
     let needs_reapply = matches!(reapply, Some((from, _)) if n >= from);
-    if t_head >= n && !needs_reapply {
-        // Late completion after a timeout: samples + cursor only.
+    // The journal is the discriminator between "this block's writes are already
+    // in" (a timed-out apply that finished late) and "T's head is ahead because
+    // devnet txs were mined in their own prepend block".
+    let journaled = ctx
+        .journal
+        .load(n)
+        .map(|e| !e.is_empty())
+        .unwrap_or(false);
+    if t_head >= n && journaled && !needs_reapply {
+        // Late completion after a timeout: the writes are already in (the
+        // journal has the block). Samples + cursor only.
         tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
         let t_block = ctx.anvil_t.block_by_number(n, false).await?;
         let first_block = ctx.cursor_t().map(|c| c.first_block).unwrap_or(n);
@@ -88,8 +97,33 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
             duration_ms: started.elapsed().as_millis() as u64,
         });
     }
-    if !needs_reapply && t_head + 1 != n {
-        bail!("T head {t_head} does not precede block {n}");
+    // T's head may be *ahead* of the cursor (devnet prepend blocks) - that is
+    // normal. Behind by more than one block is not: that means someone reset T
+    // outside the engine (anvil_reset), which the incremental diff applier
+    // cannot recover from - alarm and keep retrying instead of corrupting state.
+    if t_head + 1 < n {
+        bail!("T head {t_head} is more than one block behind the parent cursor {n}");
+    }
+
+    // 0. Prepend rule (plan, "Prepend rules"): mine the devnet's pending txs in
+    //    their own block *before* this parent's diffs land. Then the parent's
+    //    block on T carries only the parent's effects, and a devnet tx executes
+    //    against the same state its gas was estimated on (measured: anvil's
+    //    auto-gas for eth_sendTransaction came out ~5% short when the diffs
+    //    landed between estimate and execution, so the tx ran out of gas).
+    if let Ok((pending, _queued)) = ctx.anvil_t.txpool_status().await {
+        if pending > 0 {
+            let last = ctx.anvil_t.block_by_number(t_head, false).await?;
+            let _ = ctx
+                .anvil_t
+                .batch_raw(&[(
+                    "anvil_setNextBlockTimestamp".into(),
+                    json!([last.header.timestamp + 1]),
+                )])
+                .await;
+            ctx.anvil_t.anvil_mine(1).await?;
+            tracing::info!(block = n, pending, "mined devnet txs before the parent diffs");
+        }
     }
 
     // 1. diffs: native BAL first, prestateTracer diff fallback.
@@ -147,31 +181,39 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let applied = apply_writes(ctx, &ctx.anvil_t, &filtered).await?;
 
     // 5. align block context + mine, so `latest` views (Aave-style time
-    //    extrapolation) match the parent at N.
-    let h = &block.header;
-    let mut env: Vec<(String, Value)> = vec![
-        ("anvil_setNextBlockTimestamp".into(), json!([h.timestamp])),
-        ("anvil_setCoinbase".into(), json!([h.beneficiary])),
-        ("anvil_setNextBlockPrevRandao".into(), json!([h.mix_hash])),
-    ];
-    if let Some(bf) = h.base_fee_per_gas {
-        env.push((
-            "anvil_setNextBlockBaseFeePerGas".into(),
-            json!([format!("0x{bf:x}")]),
-        ));
-    }
-    for r in ctx.anvil_t.batch_raw(&env).await? {
-        if let Err(e) = r {
-            tracing::warn!(error = %e, "context alignment failed");
+    //    extrapolation) match the parent at N. Always mined: the parent's
+    //    effects (diffs + context) must land in their own block, and the cursor
+    //    advances once per parent regardless of how many devnet blocks T mined.
+    {
+        let h = &block.header;
+        let mut env: Vec<(String, Value)> = vec![
+            ("anvil_setNextBlockTimestamp".into(), json!([h.timestamp])),
+            ("anvil_setCoinbase".into(), json!([h.beneficiary])),
+            ("anvil_setNextBlockPrevRandao".into(), json!([h.mix_hash])),
+        ];
+        if let Some(bf) = h.base_fee_per_gas {
+            env.push((
+                "anvil_setNextBlockBaseFeePerGas".into(),
+                json!([format!("0x{bf:x}")]),
+            ));
         }
+        for r in ctx.anvil_t.batch_raw(&env).await? {
+            if let Err(e) = r {
+                tracing::warn!(error = %e, "context alignment failed");
+            }
+        }
+        ctx.anvil_t.anvil_mine(1).await?;
     }
-    ctx.anvil_t.anvil_mine(1).await?;
 
     // 6. journal + prune.
     ctx.journal.record(n, &entries)?;
     ctx.journal.prune(n);
 
-    // 7. sampled storage parity vs reth at n (drift lens).
+    // 7. sampled storage parity vs reth at n (drift lens). T's *height* drifts
+    //    ahead of the parent height (devnet prepend blocks), so compare T's
+    //    latest block against reth at n - reading T by height compared
+    //    unrelated blocks and produced ~200 false mismatches per 30 min.
+    let t_latest = ctx.anvil_t.block_number().await?;
     let sample: Vec<&Write> = filtered
         .iter()
         .filter(|w| matches!(w, Write::Storage { .. }))
@@ -181,7 +223,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     for w in &sample {
         if let Write::Storage { address, slot, .. } = w {
             match (
-                ctx.anvil_t.storage_at(*address, *slot, n).await,
+                ctx.anvil_t.storage_at(*address, *slot, t_latest).await,
                 ctx.reth.storage_at(*address, *slot, n).await,
             ) {
                 (Ok(a), Ok(b)) if a == b => sampled_ok += 1,
@@ -228,19 +270,24 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         sampled_ok,
         duration_ms,
     };
-    ctx.drift.append(&json!({
-        "chain": "t",
-        "block": n,
-        "source": source,
-        "bal_writes": total,
-        "applied": applied,
-        "filtered": outcome.filtered,
-        "not_watched": not_watched,
-        "skipped_shadowed": skipped_shadowed,
-        "sampled": outcome.sampled,
-        "sampled_ok": outcome.sampled_ok,
-        "duration_ms": duration_ms,
-    }));
+    // Divergence log, not a flight recorder: only anomalies land here (the
+    // re-apply of a rewound range, or a sampled-parity mismatch). Counts live
+    // in the metrics.
+    if needs_reapply || outcome.sampled_ok < outcome.sampled {
+        ctx.drift.append(&json!({
+            "chain": "t",
+            "block": n,
+            "source": if needs_reapply { "reapply" } else { source },
+            "bal_writes": total,
+            "applied": applied,
+            "filtered": outcome.filtered,
+            "not_watched": not_watched,
+            "skipped_shadowed": skipped_shadowed,
+            "sampled": outcome.sampled,
+            "sampled_ok": outcome.sampled_ok,
+            "duration_ms": duration_ms,
+        }));
+    }
     tracing::info!(
         block = n,
         source,

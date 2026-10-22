@@ -349,6 +349,30 @@ impl Rpc {
         Ok(())
     }
 
+    /// The chain's fork source + block from anvil_nodeInfo (None when the
+    /// chain was not forked).
+    pub async fn fork_config(&self) -> Result<Option<(String, u64)>> {
+        let v: Value = self.call("anvil_nodeInfo", json!([])).await?;
+        let url = v
+            .pointer("/forkConfig/forkUrl")
+            .and_then(|x| x.as_str())
+            .map(str::to_owned);
+        let block = v.pointer("/forkConfig/forkBlockNumber").and_then(|x| x.as_u64());
+        Ok(url.zip(block))
+    }
+
+    /// anvil_reset with a fresh fork: re-bases the chain at `block` from `url`.
+    /// Used to recover M when the follow head moves backward past its
+    /// irreversible replay (the cursor hash check rebases the replay after).
+    pub async fn anvil_reset_fork(&self, url: &str, block: u64) -> Result<()> {
+        self.call_raw(
+            "anvil_reset",
+            json!([{ "forking": { "jsonRpcUrl": url, "blockNumber": format!("0x{block:x}") } }]),
+        )
+        .await?;
+        Ok(())
+    }
+
     /// (pending, queued) counts from txpool_status.
     pub async fn txpool_status(&self) -> Result<(u64, u64)> {
         let v: Value = self.call("txpool_status", json!([])).await?;

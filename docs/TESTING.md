@@ -108,7 +108,7 @@ kubectl -n mainnet-mirror get cm engine-config -o jsonpath='{.data.engine\.yaml}
 | reth parent-hash continuity between consecutive blocks (reorg detection) | structural | `main.rs` |
 | T sampled storage parity on written keys | diff | `diff.rs` |
 
-Divergence classes are recorded per block in `drift.jsonl`
+Divergence classes are recorded in `drift.jsonl` (divergences only)
 (`divergence_class: none|value_level|fatal`) and counted separately in metrics
 (`mirror_divergences_total` structural, `mirror_value_divergences_total`
 behavioral). The default policy (`on_divergence: continue`) records all of them;
@@ -136,6 +136,31 @@ behavioral). The default policy (`on_divergence: continue`) records all of them;
 | A withdrawal credit must read its pre-balance from **reth**, not from M at N-1 | when a block is retried before mining, anvil's "N-1" *is* the live state, which already contains the first attempt's credit - measured once as `withdrawals` divergence (M = reth_post + amount) |
 | T's heights advance independently of mainnet's | one T block per applied parent block plus one per journal rewind; the engine bounds T by `cursor_t` (not by its height), so a rewind drill cannot stall it. A hash-validated cursor always wins (`cursor + 1`) - jumping to `chain_head + 1` skipped parent blocks and stalled T until the cursor semantics were fixed |
 | Watching a proxy is not enough: delegate targets own the state | Chainlink `AggregatorProxy.latestRoundData()` delegatecalls the aggregator; the scenario's T probe caught a one-round-stale price until the aggregators were added to the watchlist |
+| The follow head sets the devnet's block cadence | with `reth.follow: safe` the CL updates the safe block once per epoch: the applier burst-mines 32 blocks every ~6.4 min and a devnet tx sent between bursts waited 180 s+ (cast's own receipt timeout, then "transaction not found" after a pool reset). With `latest` the parent stream advances every ~12 s and a tx confirms in ~12 s |
+| A devnet tx must not share a block with the parent's diffs | anvil estimates `eth_sendTransaction` gas against `latest`; with the diffs landing in between, an Aave `borrow` estimated at 257,560 used 271,389 (97% of its limit) and reverted, then succeeded with an explicit 1M limit. Fixed structurally by the prepend rule (devnet txs mine in their own block first) |
+| A corrupted drift journal hides the history it exists to keep | two tasks appended long lines with separate handles: 10 interleaved lines in 48k. Now serialized, one write per line, divergences only, 16 MiB rotation |
+| `cast calldata` rejects `--rpc-url` | a wrapper that appended it silently produced *empty* calldata: the "supply" shipped as a 21,000-gas plain transfer and reverted. Every failed market step in that run traced back to this |
+| `cast send --unlocked` needs an explicit `anvil_impersonateAccount` | anvil's `--auto-impersonate` accepts `eth_sendTransaction` from any sender, but cast's own signer check refuses first ("No Signer available"). The suite sends raw `eth_sendTransaction` through the engine pod instead - no signer involved, and the receipt poll is ours |
+| `cast index` is offline | it ignores/silently mishandles `--rpc-url`; a slot computed with one comes back empty and the storage read looks like "no value" instead of a wrong slot |
+| The tx pool keeps a devnet tx that the engine cannot mine | when the applier bails (T's head behind the cursor after an out-of-band `anvil_reset`), pending txs starve while the probes stay green - watch `mirror_t_head` vs `cursor_t`, not just the probes |
+
+## Capability proof: `scripts/tenderly-core.sh`
+
+`scripts/scenario.sh` proves the *substrate* (replay fidelity, COW, drills).
+`scripts/tenderly-core.sh` proves the *product*: the three things a fork must do,
+measured end-to-end against the live stack and left clean afterwards.
+
+| Section | Checks |
+|---|---|
+| A. live fork | T's head at/ahead of the applied parent cursor; reth's head/safe gap; live oracle prices equal reth at the cursor (USDC *and* WETH) |
+| B. mint funds | 10,000 ETH (`anvil_setBalance`); 0.1 WETH (slot 3); 100 USDC (packed `balanceAndBlacklistStates`, slot 9) - each read back through `balanceOf` |
+| C. live markets | real Aave pool: `approve` → `supply` (aToken delta) → `borrow` (debt + HF from `getUserAccountData`) → `repay` → `withdraw`; real Uniswap V3 `SwapRouter02.exactInputSingle` on the WETH/USDC 0.05% pool (USDC delta) |
+| D. debug surface | `debug_traceTransaction` (callTracer) on the supply; receipt logs; `eth_call` with a `stateDiff` override |
+| E. reset | `POST /admin/shadow {clear:true, all:true}` per touched venue, then assert the Uniswap `slot0` is back to reth's value at the cursor |
+
+Every send is simulated with `eth_call` first (Tenderly's own workflow), so a
+revert prints its reason before any transaction is spent. Measured runtime:
+~4 min; last full run: 19 passed, 0 failed.
 
 ## Plan axioms → how they are covered
 

@@ -46,6 +46,15 @@ pub struct Ctx {
     /// (idempotent writes; re-journaling records the rolled-back values as the
     /// new before-values). Cleared once the whole range is re-applied.
     pub reapply_from: Mutex<Option<(u64, u64)>>,
+    /// Last (head, follow) pair logged as "M ahead of the follow head": the
+    /// poll loop runs every second, so the same stall must not spam the log.
+    pub last_stall: Mutex<(u64, u64)>,
+    /// Last block whose missing blob sidecars were logged at WARN: with
+    /// `follow: latest` the beacon ingests sidecars seconds after the block, so
+    /// the first attempt legitimately misses and the retries must not spam.
+    pub blob_warned: std::sync::atomic::AtomicU64,
+    /// When M was last re-based (rate-limits `anvil_reset` attempts to 1/min).
+    pub last_rebase: Mutex<Option<std::time::Instant>>,
 }
 
 impl Ctx {
@@ -87,6 +96,9 @@ impl Ctx {
             halted: AtomicBool::new(false),
             blob_pref: Mutex::new(None),
             reapply_from: Mutex::new(None),
+            blob_warned: std::sync::atomic::AtomicU64::new(0),
+            last_stall: Mutex::new((0, 0)),
+            last_rebase: Mutex::new(None),
             cfg,
         })
     }

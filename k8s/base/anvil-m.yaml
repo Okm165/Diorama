@@ -73,7 +73,19 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              PIN=$(cat /state/pin)
+              # Re-resolve the pin on *every container start*, not just every
+              # pod start: k8s restarts only the container on OOM, so the init
+              # container's pin ages with the pod and the post-restart replay
+              # grows until it OOMs mid-catch-up (measured: 9 OOM restarts in
+              # 20 min with a pod-lifetime pin). `cast` is in the image.
+              PIN=$(cast block-number --rpc-url "$RETH_URL" 2>/dev/null || echo 0)
+              if [ "${PIN:-0}" -gt 0 ]; then
+                PIN=$((PIN - FORK_OFFSET))
+                echo "$PIN" > /state/pin
+              else
+                PIN=$(cat /state/pin 2>/dev/null || echo 0)
+                echo "reth unreachable; keeping persisted pin $PIN" >&2
+              fi
               echo "anvil-m: fork-url=$RETH_URL pin=$PIN"
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
@@ -107,13 +119,19 @@ spec:
             - { name: http, containerPort: 8545 }
           volumeMounts:
             - { name: state, mountPath: /state }
+          # A restarted anvil forks (and, for M, re-replays) before it can
+          # serve: gate readiness/liveness behind a startup probe so k8s does
+          # not flap them during the catch-up (measured: "Readiness probe
+          # failed: connection refused" events on every M restart).
+          startupProbe:
+            tcpSocket: { port: 8545 }
+            periodSeconds: 5
+            failureThreshold: 60 # up to 5 min to fork + catch up
           readinessProbe:
             tcpSocket: { port: 8545 }
-            initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             tcpSocket: { port: 8545 }
-            initialDelaySeconds: 30
             periodSeconds: 30
           resources:
             requests: { cpu: "500m", memory: 1Gi }
