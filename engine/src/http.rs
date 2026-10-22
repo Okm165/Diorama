@@ -76,7 +76,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Json<serde_json::Value> {
         "shadowed_slots": shadow.slot_count(),
         "shadowed_accounts": shadow.accounts.len(),
         "shadowed": shadowed,
-        "blob_form": ctx.blob_form().map(|f| f.as_str()),
+        "blob_form": ctx.blob_form().map(crate::blob::BlobForm::as_str),
         "time_offset_seconds": ctx.time_offset.load(Ordering::Relaxed),
     }))
 }
@@ -108,15 +108,12 @@ pub async fn do_rewind(ctx: &Ctx, blocks: u64) -> anyhow::Result<(u64, usize)> {
             .await?;
     }
     let target = from - 1;
-    match ctx.anvil_t.block_by_number_opt(target, false).await {
-        Ok(Some(b)) => {
-            let first = ctx.cursor_t().map(|c| c.first_block).unwrap_or(target);
-            ctx.set_cursor_t(crate::ctx::cursor_from(&b, first));
-        }
-        _ => {
-            let mut st = ctx.state.lock().unwrap();
-            st.data.t = None;
-        }
+    if let Ok(Some(b)) = ctx.anvil_t.block_by_number_opt(target, false).await {
+        let first = ctx.cursor_t().map(|c| c.first_block).unwrap_or(target);
+        ctx.set_cursor_t(crate::ctx::cursor_from(&b, first));
+    } else {
+        let mut st = ctx.state.lock().unwrap();
+        st.data.t = None;
     }
     ctx.save_state()?;
     // T's *head* is still where it was - only the values were rolled back - so
@@ -210,6 +207,10 @@ struct ShadowReq {
 }
 
 /// Mark devnet writes that bypassed T's block pipeline (direct cheatcode calls).
+#[allow(
+    clippy::too_many_lines,
+    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
+)]
 async fn admin_shadow(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<ShadowReq>,
@@ -361,7 +362,7 @@ async fn admin_deal(
     // slot 3). The sentinel stays below 2^255 so packed layouts (USDC's
     // balanceAndBlacklistStates) return it unmasked.
     let sentinel: U256 = (U256::from(0x5eed_0000u64) << 192) | U256::from(0x1234_5678u64);
-    let sentinel_hex = format!("0x{:064x}", sentinel);
+    let sentinel_hex = format!("0x{sentinel:064x}");
     // ABI-encode balanceOf(address): selector + the 32-byte left-padded address.
     // `format!("{:064x}", address)` does NOT pad an alloy Address (measured: it
     // produced 3 bytes and the probe silently compared against a bare `0x`).
@@ -377,7 +378,7 @@ async fn admin_deal(
     // eth_call with a stateDiff override - no mining, ~5 ms.
     for slot in 0u64..16 {
         let idx = crate::bal::mapping_slot(req.to, U256::from(slot));
-        let idx_hex = format!("0x{:064x}", idx);
+        let idx_hex = format!("0x{idx:064x}");
         // Address keys must be plain `0x`-prefixed hex (`{:#x}` on an alloy
         // Address is not guaranteed to be) and override *values* must be full
         // 32-byte hex: anvil answers a quantized value with "invalid string

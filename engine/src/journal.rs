@@ -174,7 +174,7 @@ pub enum BeforeValue {
 /// Storage before-values are already 32-byte data; keep the padding rule in one place.
 fn pad_storage(s: &str) -> String {
     let t = s.trim_start_matches("0x");
-    format!("0x{:0>64}", t)
+    format!("0x{t:0>64}")
 }
 
 #[cfg(test)]
@@ -191,12 +191,12 @@ mod tests {
             slot: Some(U256::from(5u64)),
             before: "0x000000000000000000000000000000000000000000000000000000000000002a".into(),
         };
-        j.record(100, &[e.clone()]).unwrap();
+        j.record(100, std::slice::from_ref(&e)).unwrap();
         let loaded = j.load(100).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].before, e.before);
         // prune keeps last `keep` blocks
-        j.record(200, &[e.clone()]).unwrap();
+        j.record(200, std::slice::from_ref(&e)).unwrap();
         j.prune(205);
         assert!(j.load(100).is_err(), "block 100 pruned at head 205 keep 10");
         assert!(j.load(200).is_ok());

@@ -374,7 +374,7 @@ impl Rpc {
             .pointer("/forkConfig/forkUrl")
             .and_then(|x| x.as_str())
             .map(str::to_owned);
-        let block = v.pointer("/forkConfig/forkBlockNumber").and_then(|x| x.as_u64());
+        let block = v.pointer("/forkConfig/forkBlockNumber").and_then(serde_json::Value::as_u64);
         Ok(url.zip(block))
     }
 

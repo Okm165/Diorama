@@ -16,10 +16,11 @@
 //! immediately follows the execution client head, until the execution client
 //! reaches the consensus client head").
 //!
-//! Data comes from the local Lighthouse only:
+//! Data comes from the local Lighthouse only (Lighthouse therefore runs with
+//! `--prune-payloads=false`), plus reth's authrpc:
 //!   - `GET /eth/v1/beacon/headers/head`   -> CL head slot
 //!   - `GET /eth/v2/beacon/blocks/{slot}`  -> beacon block + execution payload
-//! (hence Lighthouse runs with `--prune-payloads=false`), plus reth's authrpc.
+//!
 //! No P2P peers, no public RPC.
 use crate::ctx::Ctx;
 use anyhow::{bail, Context, Result};
@@ -158,11 +159,9 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
             .iter()
             .map(|h| format!("0x{}", hex::encode(h)))
             .collect::<Vec<_>>();
-        let parent_beacon_block_root = block
-            .parent_root()
-            .context("beacon block has no parent_root")?;
+        let parent_beacon_block_root = block.parent_root();
         let requests = block.execution_requests();
-        let payload_json = to_engine_payload(&payload)?;
+        let payload_json = to_engine_payload(payload)?;
         let (status, message) = engine
             .new_payload(payload_json, versioned_hashes, parent_beacon_block_root, requests)
             .await?;

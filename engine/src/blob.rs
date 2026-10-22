@@ -32,7 +32,7 @@ pub enum BlobForm {
 }
 
 impl BlobForm {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             BlobForm::Legacy => "legacy",
             BlobForm::Eip7594 => "eip7594",
@@ -107,7 +107,7 @@ impl BeaconClient {
                     return Ok(slot);
                 }
                 Ok(resp) => {
-                    tracing::debug!(url = %url, status = %resp.status(), "head slot unavailable")
+                    tracing::debug!(url = %url, status = %resp.status(), "head slot unavailable");
                 }
                 Err(e) => tracing::debug!(url = %url, error = %e, "head slot request failed"),
             }
@@ -132,7 +132,7 @@ impl BeaconClient {
                 }
                 Ok(resp) if resp.status() == reqwest::StatusCode::NOT_FOUND => return Ok(None),
                 Ok(resp) => {
-                    tracing::debug!(slot, status = %resp.status(), "beacon block unavailable")
+                    tracing::debug!(slot, status = %resp.status(), "beacon block unavailable");
                 }
                 Err(e) => tracing::debug!(slot, error = %e, "beacon block request failed"),
             }
@@ -213,8 +213,8 @@ impl BeaconBlock {
         self.message.body.execution_payload.as_ref()
     }
 
-    pub fn parent_root(&self) -> Option<String> {
-        Some(self.message.parent_root.clone())
+    pub fn parent_root(&self) -> String {
+        self.message.parent_root.clone()
     }
 
     /// Versioned hashes of the block's blobs, in order (engine_newPayload arg).
@@ -556,7 +556,7 @@ mod tests {
             .spawn(|| {
                 use alloy_eips::eip4844::c_kzg;
                 let settings = c_kzg::ethereum_kzg_settings(0);
-                let mut bytes = vec![0u8; 131072];
+                let mut bytes = vec![0u8; 131_072];
                 bytes[31] = 42; // one field element = 42
                 let blob = c_kzg::Blob::from_bytes(&bytes).expect("blob");
                 let commitment = settings.blob_to_kzg_commitment(&blob).expect("commitment");
@@ -576,7 +576,7 @@ mod tests {
 
                 // And a corrupted blob must be rejected.
                 let mut bad = item.clone();
-                bad.blob = format!("0x{}", hex::encode(vec![7u8; 131072]));
+                bad.blob = format!("0x{}", hex::encode(vec![7u8; 131_072]));
                 assert!(validate_sidecars(&[&bad], &[vh]).is_err());
             })
             .expect("spawn")

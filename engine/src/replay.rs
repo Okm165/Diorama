@@ -36,6 +36,10 @@ struct RawTx {
     blob: Option<(TxEip4844, Signature, B256, Vec<SidecarItem>)>,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
+)]
 pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     let started = Instant::now();
     let block = ctx.reth.block_by_number(n, true).await?;
@@ -69,19 +73,18 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
         tracing::debug!(block = n, "previous M block verified clean; no repair needed");
     }
     if repair {
-        match ctx.reth.block_access_list(n - 1).await? {
-            Some(bal) => {
-                let writes = bal::flatten_bal(&bal);
-                let applied = crate::diff::apply_writes(ctx, &ctx.anvil_m, &writes).await?;
-                ctx.metrics.add(&ctx.metrics.m_repair_writes, applied as u64);
-                tracing::debug!(
-                    block = n,
-                    writes = writes.len(),
-                    applied,
-                    "M state converged from parent BAL"
-                );
-            }
-            None => tracing::debug!(block = n, "no parent BAL; M repair skipped"),
+        if let Some(bal) = ctx.reth.block_access_list(n - 1).await? {
+            let writes = bal::flatten_bal(&bal);
+            let applied = crate::diff::apply_writes(ctx, &ctx.anvil_m, &writes).await?;
+            ctx.metrics.add(&ctx.metrics.m_repair_writes, applied as u64);
+            tracing::debug!(
+                block = n,
+                writes = writes.len(),
+                applied,
+                "M state converged from parent BAL"
+            );
+        } else {
+            tracing::debug!(block = n, "no parent BAL; M repair skipped");
         }
     }
     // The convergence probes are the state-level assertion "M == mainnet at
@@ -240,6 +243,10 @@ async fn finish_replay(
 
 /// Build the ordered raw-tx list; blob txs are encoded with a sidecar when one
 /// can be fetched (network form), otherwise skipped and the block marked partial.
+#[allow(
+    clippy::too_many_lines,
+    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
+)]
 async fn build_raws(
     ctx: &Ctx,
     n: u64,
@@ -333,36 +340,35 @@ async fn build_raws(
                         break;
                     }
                 }
-                match built {
-                    Some((bytes, items)) => out.push(RawTx {
+                if let Some((bytes, items)) = built {
+                    out.push(RawTx {
                         hash: tx.tx_hash(),
                         bytes,
                         blob: Some((t.clone(), signature, hash, items)),
-                    }),
-                    None => {
-                        skipped += 1;
-                        // One WARN per block: the retry loop calls this again
-                        // until the beacon ingests the sidecars (with
-                        // `follow: latest` that is seconds after the block).
-                        let first = ctx
-                            .blob_warned
-                            .swap(n, std::sync::atomic::Ordering::Relaxed)
-                            != n;
-                        if first {
-                            tracing::warn!(
-                                block = n,
-                                tx = %tx.tx_hash(),
-                                error = %last_err,
-                                "no valid blob sidecar from any source (will retry)"
-                            );
-                        } else {
-                            tracing::debug!(
-                                block = n,
-                                tx = %tx.tx_hash(),
-                                error = %last_err,
-                                "blob sidecar still unavailable"
-                            );
-                        }
+                    });
+                } else {
+                    skipped += 1;
+                    // One WARN per block: the retry loop calls this again
+                    // until the beacon ingests the sidecars (with
+                    // `follow: latest` that is seconds after the block).
+                    let first = ctx
+                        .blob_warned
+                        .swap(n, std::sync::atomic::Ordering::Relaxed)
+                        != n;
+                    if first {
+                        tracing::warn!(
+                            block = n,
+                            tx = %tx.tx_hash(),
+                            error = %last_err,
+                            "no valid blob sidecar from any source (will retry)"
+                        );
+                    } else {
+                        tracing::debug!(
+                            block = n,
+                            tx = %tx.tx_hash(),
+                            error = %last_err,
+                            "blob sidecar still unavailable"
+                        );
                     }
                 }
             }
@@ -657,22 +663,21 @@ fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_t
             } else {
                 ctx.metrics.add(&ctx.metrics.value_divergences, 1);
             }
-            match ctx.cfg.loops.on_divergence {
-                crate::config::OnDivergence::Continue => tracing::warn!(
+            if ctx.cfg.loops.on_divergence == crate::config::OnDivergence::Continue {
+                tracing::warn!(
                     block = n,
                     structural,
                     divergences = ?v.divergences,
                     "divergence recorded (state re-converges from the parent BAL before the next block)"
-                ),
-                _ => {
-                    tracing::error!(
-                        block = n,
-                        structural,
-                        divergences = ?v.divergences,
-                        "replay verification failed"
-                    );
-                    ctx.on_divergence(&format!("block {n}"));
-                }
+                );
+            } else {
+                tracing::error!(
+                    block = n,
+                    structural,
+                    divergences = ?v.divergences,
+                    "replay verification failed"
+                );
+                ctx.on_divergence(&format!("block {n}"));
             }
         }
         None => {}
@@ -691,6 +696,6 @@ pub async fn reth_block_hash(rpc: &Rpc, n: u64) -> Result<Option<String>> {
 }
 
 #[allow(dead_code)]
-fn _unused(e: RpcError) -> anyhow::Error {
+fn _unused(e: &RpcError) -> anyhow::Error {
     anyhow!(e.to_string())
 }

@@ -19,7 +19,7 @@ pub async fn run(
     if let Some(b) = beacon {
         cfg.blobs.beacon_urls = vec![b];
     }
-    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_m, &anvil_t)?);
+    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_m, &anvil_t));
     ctx.restore_blob_form();
 
     // Wait for the scratch anvils (same pod, they start in parallel).

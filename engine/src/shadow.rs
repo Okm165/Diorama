@@ -155,7 +155,7 @@ impl Shadow {
     }
 
     pub fn slot_count(&self) -> usize {
-        self.slots.values().map(|s| s.len()).sum()
+        self.slots.values().map(std::collections::BTreeSet::len).sum()
     }
 
     /// Hand a slot back to mainnet sync. The caller re-syncs its value from

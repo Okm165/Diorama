@@ -128,7 +128,7 @@ pub enum FollowHead {
 }
 
 impl FollowHead {
-    pub fn tag(&self) -> &'static str {
+    pub fn tag(self) -> &'static str {
         match self {
             FollowHead::Safe => "safe",
             FollowHead::Latest => "latest",

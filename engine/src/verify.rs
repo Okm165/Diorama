@@ -43,6 +43,10 @@ fn log_key(l: &Log) -> String {
     s
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
+)]
 pub async fn verify_block(ctx: &Ctx, n: u64, reth_block: &Block, m_block: &Block) -> Result<Verification> {
     let mut v = Verification::default();
 

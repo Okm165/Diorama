@@ -81,7 +81,11 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    pub fn new(cfg: Config, reth_url: &str, anvil_m_url: &str, anvil_t_url: &str) -> Result<Self> {
+    #[allow(
+        clippy::similar_names,
+        reason = "M/T are the domain's chain names (M = verified replay chain, T = devnet chain)"
+    )]
+    pub fn new(cfg: Config, reth_url: &str, anvil_m_url: &str, anvil_t_url: &str) -> Self {
         let timeout = Duration::from_secs(cfg.reth.request_timeout_secs);
         let watchlist = cfg.watch_set();
         let shadow_path = cfg.state_dir.join("shadow.json");
@@ -103,7 +107,7 @@ impl Ctx {
             }
             _ => None,
         };
-        Ok(Self {
+        Self {
             reth: Rpc::new(reth_url, timeout),
             anvil_m: Rpc::new(anvil_m_url, timeout),
             anvil_t: Rpc::new(anvil_t_url, timeout),
@@ -134,7 +138,7 @@ impl Ctx {
             last_stall: Mutex::new((0, 0)),
             last_rebase: Mutex::new(None),
             cfg,
-        })
+        }
     }
 
     pub fn cursor_m(&self) -> Option<ChainCursor> {

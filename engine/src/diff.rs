@@ -58,6 +58,10 @@ pub async fn apply_writes(ctx: &Ctx, target: &Rpc, writes: &[Write]) -> Result<u
     Ok(applied)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
+)]
 pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let started = Instant::now();
     let block = ctx.reth.block_by_number(n, false).await?;
@@ -139,12 +143,11 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     }
 
     // 1. diffs: native BAL first, prestateTracer diff fallback.
-    let (writes, source) = match ctx.reth.block_access_list(n).await? {
-        Some(bal) => (bal::flatten_bal(&bal), "bal"),
-        None => {
-            let traces = ctx.reth.trace_block_prestate(n).await?;
-            (bal::flatten_trace_block(&traces)?, "trace")
-        }
+    let (writes, source) = if let Some(bal) = ctx.reth.block_access_list(n).await? {
+        (bal::flatten_bal(&bal), "bal")
+    } else {
+        let traces = ctx.reth.trace_block_prestate(n).await?;
+        (bal::flatten_trace_block(&traces)?, "trace")
     };
     let total = writes.len();
 

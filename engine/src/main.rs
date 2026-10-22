@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
             let reth = cfg.reth.url.clone();
             let m = cfg.anvil.m_url.clone();
             let t = cfg.anvil.t_url.clone();
-            let ctx = Ctx::new(cfg, &reth, &m, &t)?;
+            let ctx = Ctx::new(cfg, &reth, &m, &t);
             let (cursor, restored) = http::do_rewind(&ctx, blocks).await?;
             println!("rewound {blocks} block(s): {restored} values restored, cursor_t now {cursor}");
             Ok(())
@@ -121,7 +121,7 @@ async fn run(config: PathBuf) -> Result<()> {
     let reth_url = cfg.reth.url.clone();
     let m_url = cfg.anvil.m_url.clone();
     let t_url = cfg.anvil.t_url.clone();
-    let ctx = Arc::new(Ctx::new(cfg, &reth_url, &m_url, &t_url)?);
+    let ctx = Arc::new(Ctx::new(cfg, &reth_url, &m_url, &t_url));
     ctx.restore_blob_form();
 
     // M is engine-owned: transactions are batched and mined explicitly.
@@ -184,8 +184,22 @@ enum Chain {
     T,
 }
 
+/// Whether the shadow registry holds marks or recorded values (decides the
+/// same-pin restore path after a restart).
+fn shadow_has_recorded_state(ctx: &Ctx) -> bool {
+    let s = ctx.shadow.lock().unwrap();
+    s.slot_count() > 0
+        || !s.accounts.is_empty()
+        || !s.values.is_empty()
+        || !s.account_values.is_empty()
+}
+
 /// Decide the next parent block to process for one chain, applying the cursor,
 /// rebase, gap, and reorg rules. `None` means "nothing to do right now".
+#[allow(
+    clippy::too_many_lines,
+    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
+)]
 async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     let Some(follow) = ctx.follow_head().await? else {
         tracing::debug!("follow head unavailable");
@@ -220,7 +234,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
             if let Ok(info) = rpc.anvil_node_info().await {
                 if let Some(fork) = info
                     .pointer("/forkConfig/forkBlockNumber")
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                 {
                     ctx.metrics
                         .set(&ctx.metrics.t_fork_age_blocks, head.saturating_sub(fork));
@@ -262,7 +276,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                         .ok()
                         .and_then(|i| {
                             i.pointer("/forkConfig/forkBlockNumber")
-                                .and_then(|v| v.as_u64())
+                                .and_then(serde_json::Value::as_u64)
                         });
                     let known = ctx.state.lock().unwrap().data.epoch_pin;
                     let new_epoch = matches!((known, pin), (Some(k), Some(p)) if k != p);
@@ -277,13 +291,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                             cleared_accounts = accounts,
                             "new epoch: the fork base moved; the devnet's writes are gone with it (re-create positions from your journal)"
                         );
-                    } else if {
-                        let s = ctx.shadow.lock().unwrap();
-                        s.slot_count() > 0
-                            || !s.accounts.is_empty()
-                            || !s.values.is_empty()
-                            || !s.account_values.is_empty()
-                    } {
+                    } else if shadow_has_recorded_state(ctx) {
                         // Values whose keys are not marked are orphans from an
                         // older engine (unmark used to keep them): drop them
                         // before restoring, or the re-apply would resurrect a
@@ -377,7 +385,10 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         rpc.anvil_node_info()
             .await
             .ok()
-            .and_then(|info| info.pointer("/forkConfig/forkBlockNumber").and_then(|v| v.as_u64()))
+            .and_then(|info| {
+                info.pointer("/forkConfig/forkBlockNumber")
+                    .and_then(serde_json::Value::as_u64)
+            })
     } else {
         None
     };
@@ -546,7 +557,7 @@ async fn replay_loop(ctx: Arc<Ctx>) {
                             );
                             ctx.force_rebase.store(true, Ordering::Relaxed);
                         }
-                        if attempts == 1 || attempts % 20 == 0 {
+                        if attempts == 1 || attempts.is_multiple_of(20) {
                             tracing::error!(
                                 block = n,
                                 attempt = attempts,

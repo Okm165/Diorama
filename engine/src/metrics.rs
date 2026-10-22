@@ -49,6 +49,10 @@ pub struct Metrics {
     pub source_sync_gap_blocks: AtomicU64,
 }
 
+#[allow(
+    clippy::unused_self,
+    reason = "the registry is the namespace; the field is the operand (call sites stay `metrics.set(...)`)"
+)]
 impl Metrics {
     pub fn set(&self, field: &AtomicU64, v: u64) {
         field.store(v, Ordering::Relaxed);
