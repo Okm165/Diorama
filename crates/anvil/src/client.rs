@@ -506,6 +506,15 @@ impl Rpc {
         .await
     }
 
+    /// `debug_traceBlockByNumber` with the callTracer: one call-frame tree per
+    /// transaction. The venue bridge needs the *internal* calls (a contract
+    /// calling CoreWriter attributes the action to itself, not to the tx
+    /// sender).
+    pub async fn trace_block_calls(&self, n: u64) -> Result<Vec<TraceResult>> {
+        let options = GethDebugTracingOptions::call_tracer(Default::default());
+        self.call("debug_traceBlockByNumber", (U64::from(n), options)).await
+    }
+
     // ---- anvil namespace -----------------------------------------------
 
     pub async fn anvil_set_automine(&self, on: bool) -> Result<()> {
@@ -627,6 +636,19 @@ impl Rpc {
     pub async fn anvil_set_nonce(&self, addr: Address, nonce: u64) -> Result<()> {
         self.call_raw("anvil_setNonce", (addr, U64::from(nonce))).await?;
         Ok(())
+    }
+
+    /// `anvil_setBalance` — the impersonated senders (the bridge's system
+    /// addresses) need gas on V.
+    pub async fn anvil_set_balance(&self, addr: Address, balance: U256) -> Result<()> {
+        self.call_raw("anvil_setBalance", (addr, balance)).await?;
+        Ok(())
+    }
+
+    /// `eth_sendTransaction` from an arbitrary sender (V runs
+    /// auto-impersonate): the bridge's system-address completion path.
+    pub async fn send_transaction(&self, tx: TransactionRequest) -> Result<B256> {
+        self.call("eth_sendTransaction", (tx,)).await
     }
 
     /// One storage word, silently (the venue driver's chain-instance canary;

@@ -41,6 +41,10 @@ pub struct SimSection {
     /// The venue engine's admin base (`/admin/epoch`), called by
     /// `/control/epoch_new`; absent means epoch_new refuses.
     pub engine_admin_url: Option<String>,
+    /// Anvil V (the devnet chain): the bridge watches its blocks for the
+    /// Core↔EVM boundary (system-address transfers, CoreWriter actions).
+    /// Absent disables the bridge (the sim still serves reads).
+    pub anvil_url: Option<String>,
 }
 
 /// `[services.venue]`: the Venue Mirror's fork driver.

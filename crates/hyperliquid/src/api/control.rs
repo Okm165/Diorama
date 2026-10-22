@@ -27,6 +27,9 @@ pub async fn health() -> impl IntoResponse {
 pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
     let mut out = state.sim.metrics.render();
     out.push_str(&state.feed.metrics.render());
+    if let Some(bridge) = &state.bridge {
+        out.push_str(&bridge.render());
+    }
     out
 }
 

@@ -55,11 +55,13 @@ async fn run() -> mirror_hyperliquid::Result<()> {
     )?);
 
     let api_client = mirror_hyperliquid::feed::rest::RestClient::new(&chain.api_url)?;
+    let bridge_metrics = Arc::new(mirror_hyperliquid::bridge::metrics::BridgeMetrics::default());
     let state = Arc::new(mirror_hyperliquid::api::ApiState::new(
         feed.clone(),
         sim.clone(),
         api_client.clone(),
         sim_section.engine_admin_url.clone(),
+        Some(bridge_metrics.clone()),
     )?);
 
     // The market plane: REST snapshots + WS pushes (both write the same cache).
@@ -71,6 +73,16 @@ async fn run() -> mirror_hyperliquid::Result<()> {
     let ws = mirror_hyperliquid::feed::ws::WsClient::new(feed.clone(), chain.ws_url.clone());
     tokio::spawn(poller.run());
     tokio::spawn(ws.run());
+
+    // The Core↔EVM bridge (when V is configured): system-address credits and
+    // CoreWriter actions become sim state.
+    if let Some(v_url) = &sim_section.anvil_url {
+        let v = mirror_anvil::Rpc::new(v_url, Duration::from_secs(30))?;
+        let bridge = mirror_hyperliquid::bridge::Bridge::new(v, sim.clone(), feed.clone(), bridge_metrics.clone());
+        tokio::spawn(bridge.run());
+    } else {
+        tracing::warn!("services.sim.anvil_url is not set: the Core<->EVM bridge is disabled");
+    }
 
     // The account plane's self-advance tick: funding + liquidations + persist.
     let tick_feed = feed.clone();

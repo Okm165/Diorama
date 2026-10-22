@@ -18,6 +18,7 @@
 //! bridges are the venue's own half and land on top of this driver; the
 //! ethereum stack is never compiled here (the closure matrix enforces it).
 pub mod api;
+pub mod bridge;
 pub mod ctx;
 pub mod driver;
 pub mod error;

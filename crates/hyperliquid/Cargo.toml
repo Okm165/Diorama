@@ -10,7 +10,10 @@ description = "The Venue Mirror: the fork driver over anvil V, the market/accoun
 mirror-config = { path = "../config" }
 mirror-anvil = { path = "../anvil" }
 mirror-devnet = { path = "../devnet" }
+alloy-consensus = { workspace = true }
 alloy-primitives = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-rpc-types-trace = { workspace = true }
 axum = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }

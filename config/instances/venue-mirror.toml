@@ -43,6 +43,7 @@ port = 8080
 state_dir = "${SIM_STATE_DIR}"
 markets = ["BTC", "ETH", "HYPE", "SOL"]
 engine_admin_url = "${ENGINE_ADMIN_URL}"
+anvil_url = "${ANVIL_V_URL}"
 
 [services.sim.info]
 addr = "0.0.0.0"

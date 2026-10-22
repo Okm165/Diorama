@@ -24,6 +24,13 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// One recorded API wallet (the agent identity daloc's cosigner registers).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentWallet {
+    pub wallet: Address,
+    pub name: String,
+}
+
 /// One simulated account (persisted). The fields are the *inputs*; the wire
 /// shape is derived per read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -41,6 +48,9 @@ pub struct Account {
     /// The sim clock (ms) funding was last accrued to.
     #[serde(default)]
     pub funded_at_ms: u64,
+    /// API wallets the CoreWriter registered for this account.
+    #[serde(default)]
+    pub agents: Vec<AgentWallet>,
 }
 
 fn default_mode() -> UserAbstraction {

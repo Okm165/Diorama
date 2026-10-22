@@ -258,6 +258,9 @@ impl Instance {
             if let Some(url) = &sim.engine_admin_url {
                 check_http_url("services.sim.engine_admin_url", url, issues);
             }
+            if let Some(url) = &sim.anvil_url {
+                check_http_url("services.sim.anvil_url", url, issues);
+            }
         }
     }
 

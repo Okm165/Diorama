@@ -26,6 +26,9 @@ pub struct ApiState {
     pub engine_admin: Option<String>,
     /// Plain client for the engine admin call.
     pub http: reqwest::Client,
+    /// The bridge's counters (rendered with the sim's metrics), when the
+    /// bridge is configured.
+    pub bridge: Option<Arc<crate::bridge::metrics::BridgeMetrics>>,
     pub started_ms: u64,
 }
 
@@ -35,6 +38,7 @@ impl ApiState {
         sim: Arc<Sim>,
         api: RestClient,
         engine_admin: Option<String>,
+        bridge: Option<Arc<crate::bridge::metrics::BridgeMetrics>>,
     ) -> Result<Self> {
         Ok(Self {
             feed,
@@ -44,6 +48,7 @@ impl ApiState {
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()?,
+            bridge,
             started_ms: crate::now_ms(),
         })
     }

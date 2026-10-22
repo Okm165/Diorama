@@ -36,6 +36,10 @@ pub struct SimState {
     /// The sim clock's offset from wall time (ms); `advance` scripts jumps.
     #[serde(default)]
     pub clock_offset_ms: i64,
+    /// The bridge's last scanned V block (0 = not anchored yet). Persisted so
+    /// a sim restart does not lose the boundary activity mined meanwhile.
+    #[serde(default)]
+    pub bridge_cursor: u64,
     #[serde(default)]
     pub accounts: Accounts,
 }
@@ -127,6 +131,18 @@ impl Sim {
         Ok(self.state.lock()?.epoch)
     }
 
+    /// The bridge's scan cursor (0 = not anchored).
+    pub fn bridge_cursor(&self) -> Result<u64> {
+        Ok(self.state.lock()?.bridge_cursor)
+    }
+
+    /// Move the bridge's cursor (persisted with the next save).
+    pub fn set_bridge_cursor(&self, block: u64) -> Result<()> {
+        self.state.lock()?.bridge_cursor = block;
+        self.dirty.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
     // ---- scenario mutations ----------------------------------------------
 
     /// `deal`: mint funds into the account (perp wallet or spot token).
@@ -145,9 +161,7 @@ impl Sim {
         let clock = self.clock(now)?;
         let mut state = self.state.lock()?;
         let account = state.accounts.entry(address).or_default();
-        if account.funded_at_ms == 0 {
-            account.funded_at_ms = clock;
-        }
+        stamp_funding_baseline(account, clock);
         let after = match class {
             DealClass::Perp => {
                 account.perp_balance += amount;
@@ -183,6 +197,131 @@ impl Sim {
         state.accounts.insert(address, account);
         drop(state);
         self.mark_dirty()
+    }
+
+    // ---- the Core↔EVM bridge's effects -----------------------------------
+
+    /// EVM→Core: credit a spot token (creates the account on first touch).
+    pub fn credit_spot(&self, address: Address, token: u32, coin: &str, amount: Decimal) -> Result<()> {
+        // Read the clock *before* taking the state lock: `clock()` locks the
+        // same mutex, and a std Mutex is not reentrant.
+        let clock = self.clock(crate::now_ms())?;
+        let mut state = self.state.lock()?;
+        let account = state.accounts.entry(address).or_default();
+        stamp_funding_baseline(account, clock);
+        let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
+            coin: coin.to_string(),
+            total: Decimal::ZERO,
+            hold: Decimal::ZERO,
+            entry_ntl: Decimal::ZERO,
+        });
+        entry.total += amount;
+        drop(state);
+        self.touch();
+        Ok(())
+    }
+
+    /// Core→EVM / spot send: debit the spot balance; `None` when the account
+    /// or the balance is short (the bridge counts the refusal — a system
+    /// transfer never goes negative).
+    pub fn try_debit_spot(&self, address: Address, token: u32, amount: Decimal) -> Result<Option<Decimal>> {
+        let mut state = self.state.lock()?;
+        let Some(account) = state.accounts.get_mut(&address) else {
+            return Ok(None);
+        };
+        let Some(entry) = account.spot.get_mut(&token) else {
+            return Ok(None);
+        };
+        if entry.total < amount {
+            return Ok(None);
+        }
+        entry.total -= amount;
+        let after = entry.total;
+        drop(state);
+        self.touch();
+        Ok(Some(after))
+    }
+
+    /// USD class transfer (CoreWriter action 7): spot USDC ↔ perp wallet.
+    /// `false` when the source side is short.
+    pub fn usd_class_transfer(&self, address: Address, token: u32, coin: &str, amount: Decimal, to_perp: bool) -> Result<bool> {
+        let clock = self.clock(crate::now_ms())?;
+        let mut state = self.state.lock()?;
+        let account = state.accounts.entry(address).or_default();
+        stamp_funding_baseline(account, clock);
+        if to_perp {
+            let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
+                coin: coin.to_string(),
+                total: Decimal::ZERO,
+                hold: Decimal::ZERO,
+                entry_ntl: Decimal::ZERO,
+            });
+            if entry.total < amount {
+                return Ok(false);
+            }
+            entry.total -= amount;
+            account.perp_balance += amount;
+        } else {
+            if account.perp_balance < amount {
+                return Ok(false);
+            }
+            account.perp_balance -= amount;
+            let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
+                coin: coin.to_string(),
+                total: Decimal::ZERO,
+                hold: Decimal::ZERO,
+                entry_ntl: Decimal::ZERO,
+            });
+            entry.total += amount;
+        }
+        drop(state);
+        self.touch();
+        Ok(true)
+    }
+
+    /// Core spot send: debit the sender, credit the recipient. `false` when
+    /// the sender is short.
+    pub fn spot_send(&self, from: Address, to: Address, token: u32, coin: &str, amount: Decimal) -> Result<bool> {
+        {
+            let mut state = self.state.lock()?;
+            let Some(sender) = state.accounts.get_mut(&from) else {
+                return Ok(false);
+            };
+            let Some(entry) = sender.spot.get_mut(&token) else {
+                return Ok(false);
+            };
+            if entry.total < amount {
+                return Ok(false);
+            }
+            entry.total -= amount;
+        }
+        self.credit_spot(to, token, coin, amount)?;
+        Ok(true)
+    }
+
+    /// Record an API wallet (CoreWriter action 9).
+    pub fn note_agent(&self, address: Address, wallet: Address, name: &str) -> Result<()> {
+        let mut state = self.state.lock()?;
+        let account = state.accounts.entry(address).or_default();
+        if account.agents.iter().all(|a| a.wallet != wallet) {
+            account.agents.push(account::AgentWallet {
+                wallet,
+                name: name.to_string(),
+            });
+        }
+        drop(state);
+        self.touch();
+        Ok(())
+    }
+
+    /// Set the account's abstraction mode (CoreWriter action 16).
+    pub fn set_mode(&self, address: Address, mode: crate::wire::UserAbstraction) -> Result<()> {
+        let mut state = self.state.lock()?;
+        let account = state.accounts.entry(address).or_default();
+        account.mode = mode;
+        drop(state);
+        self.touch();
+        Ok(())
     }
 
     /// `reset`: blank the scenario (accounts + clock offset), bump the epoch.
@@ -305,6 +444,13 @@ impl Sim {
         self.save()
     }
 
+    /// Mark the state dirty without saving: the bridge applies a block's
+    /// effects and the cursor together, then saves once — a crash mid-block
+    /// loses both (re-scan) rather than saving a half-applied block.
+    fn touch(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
     fn publish_gauges(&self) {
         if let Ok(state) = self.state.lock() {
             self.metrics.accounts.store(state.accounts.len() as u64, Ordering::Relaxed);
@@ -320,6 +466,14 @@ pub struct AdvanceOutcome {
     pub advanced_ms: u64,
     pub blocks: u64,
     pub liquidations: Vec<Liquidation>,
+}
+
+/// First touch of an account establishes its funding baseline (an account
+/// created by the bridge must not inherit funding from the epoch's start).
+fn stamp_funding_baseline(account: &mut Account, clock: u64) {
+    if account.funded_at_ms == 0 {
+        account.funded_at_ms = clock;
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +500,27 @@ mod tests {
             1,
         );
         feed
+    }
+
+    /// The bridge's effects take the state lock; a re-entrant lock (calling
+    /// `clock()` while holding it) deadlocks the whole service. Guarded with
+    /// a timeout so a regression fails the test instead of hanging CI.
+    #[test]
+    fn bridge_effects_do_not_self_deadlock() {
+        let feed = feed_with("USDC", "1", "1");
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let sim = sim;
+            sim.credit_spot(a, 0, "USDC", Decimal::from(5)).unwrap();
+            sim.usd_class_transfer(a, 0, "USDC", Decimal::ONE, true).unwrap();
+            sim.spot_send(a, Address::repeat_byte(0xbb), 0, "USDC", Decimal::ONE).unwrap();
+            let _ = &feed;
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the bridge effects must not self-deadlock");
     }
 
     #[test]

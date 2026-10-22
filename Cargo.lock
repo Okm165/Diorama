@@ -2604,7 +2604,10 @@ dependencies = [
 name = "mirror-hyperliquid"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-rpc-types-trace",
  "axum",
  "futures-util",
  "mirror-anvil",
@@ -4358,6 +4361,7 @@ dependencies = [
 name = "venue-sim"
 version = "0.1.0"
 dependencies = [
+ "mirror-anvil",
  "mirror-config",
  "mirror-hyperliquid",
  "tokio",
