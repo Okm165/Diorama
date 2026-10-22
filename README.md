@@ -79,7 +79,7 @@ make selftest            # replay+apply 3 real blocks against a public RPC (no r
 make product-sim         # the margin-product workflow end to end on T (leverage, live data, liquidation)
 make closure-check       # every market-data view's storage deps must be in the watchlist
 make pin-show            # resolved fork pins of M and T
-make repin               # re-pin drill (new epoch; engine rebases automatically)
+make repin               # re-pin drill: fresh pins; engine rebases, a new epoch starts
 ```
 
 Engine admin API (controls that belong to the mirror itself):

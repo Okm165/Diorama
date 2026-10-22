@@ -280,10 +280,11 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // 7b. probe parity for T (the plan's invariant: "probe parity on T after
     //     context alignment"). Devnet-owned targets are skipped - their state
     //     is the devnet's, not mainnet's.
-    let (t_ok, t_failed) = crate::verify::t_probe_parity(ctx, n).await;
+    let (t_ok, t_failed, t_skipped) = crate::verify::t_probe_parity(ctx, n).await;
     ctx.metrics.add(&ctx.metrics.t_convergence_ok, t_ok as u64);
     ctx.metrics.add(&ctx.metrics.t_convergence_failed, t_failed as u64);
     ctx.metrics.set(&ctx.metrics.t_convergence_last_failed, t_failed as u64);
+    ctx.metrics.add(&ctx.metrics.t_probe_skipped, t_skipped as u64);
 
     // 8. cursor + metrics + drift.
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;

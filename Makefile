@@ -178,11 +178,11 @@ pin-show: ## Show the resolved fork pins of anvil M and T
 		printf "%s pin: " $$c; $(KUBECTL) exec deploy/$$c -- cat /state/pin 2>/dev/null || echo "(not resolved yet)"; \
 	done
 
-repin: ## Re-pin drill: wipe pins/state dumps, restart anvils (engine auto-rebases)
+repin: ## Re-pin drill: wipe the pins, restart the anvils (engine auto-rebases; a new epoch starts)
 	kubectl -n $(NS) scale deploy/anvil-m deploy/anvil-t --replicas=0
-	# anvil dumps state on SIGTERM, so the wipe must wait until the pods are
-	# really gone - otherwise the dump lands after the wipe and a fresh pod
-	# restores a stale chain (head ahead of the follow head, empty blocks).
+	# Wait until the pods are really gone before wiping: the wipe must not
+	# race a container that is still shutting down (its init container
+	# re-resolves the pin on the next start).
 	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=anvil-m --timeout=180s || true
 	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=anvil-t --timeout=180s || true
 	kubectl -n $(NS) delete job repin-wipe --ignore-not-found

@@ -242,29 +242,70 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                     "cursor not found on chain (reset or re-pin) - rebasing"
                 );
                 if matches!(chain, Chain::T) {
-                    // T was re-forked (its OOM restart or a re-pin): the chain
-                    // is back at the pin, but the devnet's own writes are kept
-                    // in the shadow registry's value map. Restore them - the
-                    // marks stay, so mainnet's diffs keep skipping these keys.
-                    // (Without this the devnet's positions vanish while their
-                    // marks keep mainnet's writes away: stale pin-era values
-                    // that look devnet-owned - measured: a poisoned Aave
-                    // oracle, healed only by hand.)
-                    let (slots, accounts, values, accounts_values) = {
-                        let s = ctx.shadow.lock().unwrap();
-                        (
-                            s.slot_count(),
-                            s.accounts.len(),
-                            s.values.len(),
-                            s.account_values.len(),
-                        )
-                    };
+                    // T was re-forked (its OOM restart or a re-pin). Which
+                    // epoch is this?
+                    // - The fork pin *changed*: the base moved, so the
+                    //   recorded values are stale derivations of the old base
+                    //   (plan 2.2/6.3: "derived values go stale when the base
+                    //   advances"). Start a *new epoch*: drop marks and values
+                    //   - the product re-creates its positions from its own
+                    //   journal (plan 3.6). Measured: restoring across a pin
+                    //   change re-applied a +30d time-travel write as a future
+                    //   `lastUpdateTimestamp` and every Aave supply panicked
+                    //   with an arithmetic underflow.
+                    // - The pin is *unchanged* (an out-of-band reset at the
+                    //   same base): the recorded writes are still coherent -
+                    //   re-apply them and keep the marks.
+                    let pin = rpc
+                        .anvil_node_info()
+                        .await
+                        .ok()
+                        .and_then(|i| {
+                            i.pointer("/forkConfig/forkBlockNumber")
+                                .and_then(|v| v.as_u64())
+                        });
+                    let known = ctx.state.lock().unwrap().data.epoch_pin;
+                    let new_epoch = matches!((known, pin), (Some(k), Some(p)) if k != p);
                     ctx.metrics.inc(&ctx.metrics.t_resets_total);
-                    if slots > 0 || accounts > 0 {
+                    if new_epoch {
+                        let (slots, accounts) = ctx.shadow.lock().unwrap().clear_all();
+                        let _ = ctx.save_shadow();
+                        tracing::warn!(
+                            pin = ?pin,
+                            previous = ?known,
+                            cleared_slots = slots,
+                            cleared_accounts = accounts,
+                            "new epoch: the fork base moved; the devnet's writes are gone with it (re-create positions from your journal)"
+                        );
+                    } else if {
+                        let s = ctx.shadow.lock().unwrap();
+                        s.slot_count() > 0
+                            || !s.accounts.is_empty()
+                            || !s.values.is_empty()
+                            || !s.account_values.is_empty()
+                    } {
+                        // Values whose keys are not marked are orphans from an
+                        // older engine (unmark used to keep them): drop them
+                        // before restoring, or the re-apply would resurrect a
+                        // value the devnet handed back (measured: a crashed
+                        // oracle source). The marks themselves are kept.
+                        let (orphan_slots, orphan_accounts) =
+                            ctx.shadow.lock().unwrap().prune_orphans();
+                        let (slots, accounts, values, accounts_values) = {
+                            let s = ctx.shadow.lock().unwrap();
+                            (
+                                s.slot_count(),
+                                s.accounts.len(),
+                                s.values.len(),
+                                s.account_values.len(),
+                            )
+                        };
                         // Clone out: the re-apply awaits, and a MutexGuard must
                         // not be held across it (the loop must stay Send).
                         let snapshot = ctx.shadow.lock().unwrap().clone();
                         let restored = snapshot.reapply(&ctx.anvil_t).await;
+                        // Marked keys with no recorded value would hold pin-era
+                        // mainnet values under a devnet mark - hand them back.
                         let (unknown_slots, unknown_accounts) =
                             ctx.shadow.lock().unwrap().unrecorded();
                         let _ = ctx.save_shadow();
@@ -274,10 +315,16 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                             storage_accounts = values,
                             account_values = accounts_values,
                             restored,
+                            orphan_slots,
+                            orphan_accounts,
                             unknown_slots,
                             unknown_accounts,
-                            "T was reset: re-applied the devnet's writes; unshadowed keys without a recorded value"
+                            "T was reset at the same pin: re-applied the devnet's writes"
                         );
+                    }
+                    if pin.is_some() && known != pin {
+                        ctx.state.lock().unwrap().data.epoch_pin = pin;
+                        let _ = ctx.save_state();
                     }
                     // The journal holds before-values of the *old* chain: a
                     // rewind against the re-forked chain would restore values
@@ -407,41 +454,8 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         if let Err(e) = rpc.anvil_set_automine(false).await {
             tracing::warn!(chain = ?chain, error = %e, "could not re-assert automine=false");
         }
-        // A *new epoch* (re-pin) wipes the devnet's writes, so the shadow set -
-        // "these keys belong to the devnet" - must go with them; keeping it
-        // would silently stop T from syncing keys it no longer owns. A plain
-        // anvil restart keeps the same fork pin, so its shadows stay. (The
-        // cursors' epoch marker resets via the hash check above, which drops a
-        // stale cursor and lets the next processed block set a fresh one.)
-        if matches!(chain, Chain::T) {
-            if let Some(pin) = reset_pin.or(rpc
-                .anvil_node_info()
-                .await
-                .ok()
-                .and_then(|info| info.pointer("/forkConfig/forkBlockNumber").and_then(|v| v.as_u64())))
-            {
-                let known = ctx.state.lock().unwrap().data.epoch_pin;
-                if known != Some(pin) {
-                    if known.is_some() {
-                        let cleared = {
-                            let mut shadow = ctx.shadow.lock().unwrap();
-                            let n = shadow.slot_count();
-                            shadow.clear();
-                            n
-                        };
-                        tracing::info!(
-                            pin,
-                            previous = ?known,
-                            cleared_slots = cleared,
-                            "new epoch: cleared the shadow set (devnet writes are gone)"
-                        );
-                        let _ = ctx.save_shadow();
-                    }
-                    ctx.state.lock().unwrap().data.epoch_pin = Some(pin);
-                    let _ = ctx.save_state();
-                }
-            }
-        }
+        // The epoch decision (clear vs restore) lives with the reset handling
+        // above, where the fork pin is compared before anything is written.
         tracing::info!(chain = ?chain, head, follow, start, "starting chain at block");
     }
     if start > follow {

@@ -159,7 +159,9 @@ impl Shadow {
     }
 
     /// Hand a slot back to mainnet sync. The caller re-syncs its value from
-    /// reth, so T does not keep a stale devnet value with no shadow to explain it.
+    /// reth, so T does not keep a stale devnet value with no shadow to explain
+    /// it - and the recorded value goes too: a later re-fork must not restore
+    /// (or re-own) a key that was deliberately handed back.
     pub fn unmark_slot(&mut self, address: Address, slot: U256) {
         if let Some(slots) = self.slots.get_mut(&address) {
             slots.remove(&slot);
@@ -167,26 +169,87 @@ impl Shadow {
                 self.slots.remove(&address);
             }
         }
+        if let Some(values) = self.values.get_mut(&address) {
+            values.remove(&slot);
+            if values.is_empty() {
+                self.values.remove(&address);
+            }
+        }
     }
 
-    /// Hand an account's balance/nonce/code back to mainnet sync.
+    /// Hand an account's balance/nonce/code back to mainnet sync (recorded
+    /// values go with the mark, like [`Self::unmark_slot`]).
     pub fn unmark_account_fields(&mut self, address: Address) {
         self.accounts.remove(&address);
+        self.account_values.remove(&address);
     }
 
-    /// A re-pin starts a new epoch: the devnet's writes are gone with the old
-    /// chain, so the shadow set ("these keys belong to the devnet") must go too.
-    /// Keeping it would silently stop T from syncing keys it no longer owns.
-    pub fn clear(&mut self) {
+    /// Drop values whose keys are not marked. The maps hold only devnet
+    /// writes, and a write is recorded together with its mark - so a value
+    /// without a mark is an orphan from an older engine (which left values
+    /// behind when a key was handed back). Re-marking it would resurrect a
+    /// value the devnet explicitly gave up (measured: a crashed oracle source
+    /// came back this way); restore paths must prune instead.
+    pub fn prune_orphans(&mut self) -> (usize, usize) {
+        let orphan_slots: Vec<Address> = self
+            .values
+            .keys()
+            .filter(|a| !self.slots.contains_key(*a))
+            .copied()
+            .collect();
+        let mut slots = 0usize;
+        for a in orphan_slots {
+            if let Some(v) = self.values.remove(&a) {
+                slots += v.len();
+            }
+        }
+        let orphan_accounts: Vec<Address> = self
+            .account_values
+            .keys()
+            .filter(|a| !self.accounts.contains(*a))
+            .copied()
+            .collect();
+        let accounts = orphan_accounts.len();
+        for a in orphan_accounts {
+            self.account_values.remove(&a);
+        }
+        (slots, accounts)
+    }
+
+    /// A *new epoch*: the fork base moved (a fresh pin after a restart or a
+    /// re-pin), so the devnet's writes are gone with the old base. Marks *and*
+    /// values go: the recorded values were derived from the old base (plan
+    /// 2.2/6.3 - "derived values go stale when the base advances"), and
+    /// replaying them onto a moved base mixes eras (measured: a +30d
+    /// time-travel write came back as a future `lastUpdateTimestamp` and every
+    /// Aave supply panicked with an arithmetic underflow). The product
+    /// re-creates its positions from its own journal (plan 3.6).
+    pub fn clear_all(&mut self) -> (usize, usize) {
+        let slots = self.slot_count();
+        let accounts = self.accounts.len();
         self.slots.clear();
         self.accounts.clear();
+        self.values.clear();
+        self.account_values.clear();
+        (slots, accounts)
     }
 
     pub fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
+        let mut s: Self = match std::fs::read_to_string(path) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
             Err(_) => Self::default(),
+        };
+        // Heal state files from the era when unmark kept recorded values:
+        // orphans are dropped, never re-owned (see `prune_orphans`).
+        let (slots, accounts) = s.prune_orphans();
+        if slots > 0 || accounts > 0 {
+            tracing::warn!(
+                orphan_slots = slots,
+                orphan_accounts = accounts,
+                "shadow state had orphan values (keys handed back earlier); pruned"
+            );
         }
+        s
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -233,5 +296,63 @@ mod tests {
             address: a,
             value: 0
         }));
+    }
+
+    #[test]
+    fn prune_orphans_drops_handed_back_values() {
+        // A re-fork restores the value maps. Values whose keys are still
+        // marked are devnet writes (restored, not touched here); values whose
+        // keys are *not* marked are orphans from the era when unmark kept
+        // them - restoring or re-owning those would resurrect a value the
+        // devnet handed back (measured: a crashed oracle source).
+        let mut s = Shadow::default();
+        let a = Address::repeat_byte(0xaa); // owned: mark + value
+        let b = Address::repeat_byte(0xbb); // orphan: value, no mark
+        let c = Address::repeat_byte(0xcc); // marked, no recorded value
+        s.mark_slot(a, U256::from(1u64));
+        s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
+        s.mark_account_fields(a);
+        s.account_values.insert(a, (U256::from(5u64), 3));
+        s.values.entry(b).or_default().insert(U256::from(2u64), U256::from(9u64));
+        s.account_values.insert(b, (U256::from(1u64), 1));
+        s.mark_slot(c, U256::from(3u64));
+
+        let (slots, accounts) = s.prune_orphans();
+        assert_eq!((slots, accounts), (1, 1)); // b's slot + b's fields dropped
+        assert!(!s.values.contains_key(&b) && !s.account_values.contains_key(&b));
+        assert!(s.values.contains_key(&a) && s.account_values.contains_key(&a)); // a kept
+        // c is marked without a value: `unrecorded` hands it back.
+        let (unknown_slots, unknown_accounts) = s.unrecorded();
+        assert_eq!((unknown_slots, unknown_accounts), (1, 0));
+    }
+
+    #[test]
+    fn clear_all_drops_marks_and_values() {
+        let mut s = Shadow::default();
+        let a = Address::repeat_byte(0xee);
+        s.mark_slot(a, U256::from(1u64));
+        s.mark_account_fields(a);
+        s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
+        s.account_values.insert(a, (U256::from(5u64), 3));
+
+        let (slots, accounts) = s.clear_all();
+        assert_eq!((slots, accounts), (1, 1));
+        assert!(s.slots.is_empty() && s.accounts.is_empty());
+        assert!(s.values.is_empty() && s.account_values.is_empty());
+    }
+
+    #[test]
+    fn unmark_drops_the_recorded_value() {
+        let mut s = Shadow::default();
+        let a = Address::repeat_byte(0xdd);
+        s.mark_slot(a, U256::from(1u64));
+        s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
+        s.mark_account_fields(a);
+        s.account_values.insert(a, (U256::from(5u64), 3));
+
+        s.unmark_slot(a, U256::from(1u64));
+        s.unmark_account_fields(a);
+        assert!(!s.values.contains_key(&a) && !s.account_values.contains_key(&a));
+        assert_eq!(s.prune_orphans(), (0, 0)); // nothing left to prune
     }
 }

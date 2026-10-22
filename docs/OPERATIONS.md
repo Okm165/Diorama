@@ -17,7 +17,7 @@
 | `mirror_t_convergence_failures_total` | increase | T's state ≠ mainnet at the parent block just applied, on a probe whose target the devnet does *not* own (shadowed targets are skipped by design). A missing BAL entry, a watchlist gap, or a clock offset left set (`/admin/time`). A deliberate manipulation whose target is shadowed does *not* fire it; one that is read *through* an unowned contract (e.g. crashing a Chainlink aggregator behind its proxy) does, until restored - the counter is cumulative, `mirror_t_convergence_last_failed` shows the current state |
 | `mirror_m_repair_writes_total` | flat | normal when no block diverged: the parent-BAL repair is gated on the *previous* block's verification, so a clean block's state stays the replay's own product (and a diverged one is repaired before the next block executes). Non-zero growth = A17-class divergences being repaired |
 | `mirror_reorgs_detected_total` | any increase | upstream reorg: the engine re-bases M behind the follow head (self-healing, ~1-2 min) and keeps applying T; with `on_divergence: freeze_m` it freezes instead - re-pin only if it keeps recurring |
-| `mirror_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make repin`) - the devnet's own writes are lost with the re-fork, so re-apply them |
+| `mirror_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make repin`) - the fresh pin starts a new epoch: the devnet's writes are gone with the old base (re-create positions from your journal) |
 | `mirror_pin_age_blocks` | informational | blocks since this epoch's first parent block (the journal/cursor marker) |
 | `mirror_blob_failures_total` | increase | a blob block could not be built (source gap). Placeholder proofs are repaired automatically; a rising counter means the CL cannot serve the sidecars |
 | engine log `holding M (never mining an empty or partial block)` | any | the block's raws could not be built (blob sidecars not in the beacon yet). M waits at n-1 and retries; T keeps applying. With `follow_margin_blocks: 2` this should not appear - if it does, the CL is lagging the head by more than ~24 s |
@@ -46,18 +46,18 @@ it. Because **M re-resolves its fork pin on every start** (`anvil-m.yaml`), the
 post-restart re-replay is bounded by `FORK_OFFSET` (128 blocks, ~1-2 min)
 instead of the whole epoch - with a stale pin the replay OOMs before it can
 catch up (measured death spiral: lag grew 458 -> 546 and never closed).
-**T's pin is re-resolved on every container start**, like M's: the devnet's own
-writes live in the shadow registry (keys *and* latest values) and the engine
-re-applies them after a re-fork, so a fresh pin loses nothing and bounds the
-re-replay to `FORK_OFFSET` (~128 blocks) instead of the pin age.
+**T's pin is re-resolved on every container start**, like M's: that bounds the
+post-restart re-replay to `FORK_OFFSET` (~128 blocks) instead of the pin age.
 
-**A T restart loses the devnet's own writes** - its state is the pin's again,
-rebuilt from the parent diffs. The engine detects the reset (the cursor's block
-hash no longer matches) and clears the shadow registry with a WARN: keeping the
-marks would make the applier skip mainnet's writes for keys that no longer hold
-devnet values, leaving stale pin-era values that *look* devnet-owned (measured:
-a poisoned Aave oracle after a T restart). Re-apply your writes after a T
-restart - the scenario's preflight is the model for that.
+**A T restart starts a new epoch.** The engine detects the reset (the cursor's
+block hash no longer matches) and, when the pin changed, clears the shadow
+registry - marks *and* values (WARN + `mirror_t_resets_total`). The devnet
+starts clean on the fresh base; **re-create your positions from your journal**
+(the plan's 3.6 venue-restart discipline). Restoring instead is what mixes
+eras: measured, a +30d time-travel write came back as a future
+`lastUpdateTimestamp` and every Aave supply panicked with an underflow. A
+reset at the *same* pin restores the recorded writes, and orphan values (keys
+handed back earlier) are always pruned, never re-owned.
 
 **The anvil state dump is disabled on both chains.** `--state`/`--state-interval`
 writes per-block historical state: a T dump grew to 13 GB and never completed,
@@ -80,7 +80,7 @@ covers the ones that page someone; these are the rest.
 | `mirror_m_head` / `mirror_t_head` | the anvil chains' heights (T drifts ahead: one block per parent block plus one per devnet batch) |
 | `mirror_cursor_block` / `mirror_cursor_block_t` | the last *parent* block applied on each chain (the honest progress signal) |
 | `mirror_t_fork_age_blocks` | how far T's fork base is behind its head (reth serves reads below it) |
-| `mirror_t_resets_total` | times T was found re-forked (its OOM restart / a re-pin): the engine re-applies the devnet's recorded writes, the chain history is gone |
+| `mirror_t_resets_total` | times T was found re-forked (its OOM restart / a re-pin): a new epoch starts (the devnet's writes are gone with the old base) - re-create positions from your journal |
 | `mirror_lag_blocks` | `follow_head - cursor_m` (2-3 in steady state = the replay margin) |
 | `mirror_frozen` / `mirror_halted` | 1 when a divergence policy froze M / when `/admin/pause` holds both loops |
 | `mirror_blocks_replayed_total` / `mirror_blocks_applied_total` | parent blocks replayed on M / applied to T |
@@ -95,6 +95,7 @@ covers the ones that page someone; these are the rest.
 | `mirror_m_convergence_ok_total` / `mirror_m_convergence_failures_total` | the 12 state probes against reth at n-1, run every block |
 | `mirror_m_convergence_last_failed` | how many probes failed in the last check (0 in steady state) |
 | `mirror_t_convergence_ok_total` / `mirror_t_convergence_failures_total` | the same probes against T at the applied parent block (the plan's "probe parity on T after context alignment"); devnet-owned targets are skipped, and the check is suspended while a `/admin/time` offset is set |
+| `mirror_t_probe_skipped_total` | informational | probes skipped because their target is devnet-owned - a devnet write to a shared contract (e.g. the Aave oracle) hides *all* of that contract's probes until it is handed back. If it grows while you are not writing, inspect `/status` `shadowed` and unshadow the venue |
 | `mirror_t_convergence_last_failed` | how many T probes diverged in the last applied block (0 in steady state) |
 | `mirror_receipts_unverified_total` | blocks replayed after lagging past the receipts window |
 | `mirror_reorgs_detected_total` | parent-hash discontinuities seen by the M loop |
@@ -185,7 +186,7 @@ kubectl -n mainnet-mirror rollout status  deploy/anvil-t
   does. The journal is cleared with the old chain, so rewind drills start from
   the new one.
 
-### Re-pin (new epoch) — `make repin`
+### Re-pin — `make repin`
 
 Three occasions:
 
@@ -203,9 +204,10 @@ The drill:
 2. wipes `/state/pin` and `/state/state.json` (fork cache is keyed by block and
    is kept),
 3. scales back up: init containers resolve a fresh pin (`reth head - FORK_OFFSET`,
-   default 64),
-4. the engine detects the chain reset on its next poll and rebases its cursor
-   automatically (start = chain head + 1).
+   default 128),
+4. the engine detects the chain reset on its next poll, starts a new epoch
+   (the devnet's writes are gone with the old base) and rebases its cursor
+   (start = chain head + 1). Re-create positions from your journal.
 
 ### Rewind applied parent blocks
 
@@ -249,8 +251,11 @@ kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/a
 Measured on the live Aave USDC reserve: +30 days moved the income index by a
 month of interest and grew a borrow's debt in the same read. While the offset is
 non-zero the T probe parity is skipped (views are meant to differ). The offset
-lives in the engine's memory: restarting the engine resets it to 0 (T's
-timestamps stay monotonic either way), so re-set it after a redeploy.
+is **persisted with the cursors** (`/state/cursor.json`): it survives engine
+restarts and redeploys, because T's blocks carry it - a restart that silently
+dropped it would leave time-dependent contracts (Aave's
+`lastUpdateTimestamp`) ahead of the clock, and their next write panics with an
+arithmetic underflow (measured). Set it back to 0 to return to mainnet's clock.
 
 ### Fast iteration: mine your own blocks
 

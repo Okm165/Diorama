@@ -1,4 +1,4 @@
-# Bootstrap Job: wipe the anvil pins + state dumps to force a re-pin.
+# Bootstrap Job: wipe the anvil pins to force a re-pin.
 #
 # Used by `make repin`. After this Job:
 #   1. delete it,
@@ -34,7 +34,7 @@ spec:
             - |
               set -eu
               for d in /state/anvil-m /state/anvil-t; do
-                echo "wiping $d: pin + state dump"
+                echo "wiping $d: pin (+ legacy dump)"
                 rm -f "$d/pin" "$d/state.json"
                 ls -la "$d" || true
               done

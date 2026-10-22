@@ -137,9 +137,12 @@ re-forks.
 6. **Mine.** `anvil_mine(1)` — the parent's block on T.
 7. **Journal** before-values per block (ring; what `/admin/rewind` restores).
 8. **Parity.** 8 sampled storage keys, then the 12 probes: T@latest vs reth at
-   `n`. Devnet-owned targets are skipped, and the applier scans its own prepend
-   blocks first, so a write made in this very apply is already marked and
-   cannot fire a spurious alarm. Suspended while a `/admin/time` offset is set.
+   `n`. Devnet-owned targets are skipped (counted in
+   `mirror_t_probe_skipped_total` - a devnet write to a shared contract hides
+   all of that contract's probes until it is handed back), and the applier
+   scans its own prepend blocks first, so a write made in this very apply is
+   already marked and cannot fire a spurious alarm. Suspended while a
+   `/admin/time` offset is set.
 9. **Cursor.** Keyed to the parent height; carries the T block's hash for
    re-fork detection.
 
@@ -182,12 +185,15 @@ by construction — but not re-executed, which
 `mirror_m_rebase_skipped_blocks_total` counts and a WARN names. **M's re-base
 never touches T.**
 
-### 6.4 Re-fork detection and restore
+### 6.4 Re-fork detection and epochs
 
 T's cursor carries the hash of its block at the cursor height; a mismatch means
-the chain was re-forked (OOM restart, re-pin). The engine re-applies the
-registry's values, keeps the marks, unshadows keys with no recorded value, and
-clears the journal. State survives; transaction history does not.
+the chain was re-forked (OOM restart, re-pin). A *changed* fork pin is a new
+epoch: the base moved and the recorded writes are derivations of the old base
+(plan 2.2/6.3), so the engine clears the registry - marks *and* values - and
+the product re-creates its positions from its own journal (plan 3.6). A reset
+at the *same* pin restores the recorded writes (the base is identical); orphan
+values are always pruned, never re-owned. The journal is cleared either way.
 
 ### 6.5 Reorg and gap guard
 

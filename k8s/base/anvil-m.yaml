@@ -25,7 +25,7 @@ spec:
         app.kubernetes.io/name: anvil-m
         app.kubernetes.io/part-of: mainnet-mirror
     spec:
-      # anvil dumps its state on SIGTERM; give it time.
+      # Give anvil time to shut down cleanly on SIGTERM.
       terminationGracePeriodSeconds: 90
       initContainers:
         # Resolve the fork pin and persist it. M's pin is re-resolved on *every*
@@ -76,7 +76,7 @@ spec:
         - name: anvil
           image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
           # The image entrypoint is `/bin/sh -c` and swallows bare args; use a
-          # shell wrapper and `exec` so SIGTERM reaches anvil (state dump).
+          # shell wrapper and `exec` so SIGTERM reaches anvil (clean shutdown).
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -143,8 +143,8 @@ spec:
           resources:
             requests: { cpu: "500m", memory: 1Gi }
             # M replays every mainnet tx, so anvil caches all state it reads
-            # from the fork (~15-25 MB per replayed block, measured) plus a
-            # 350 MB state dump (T's is 27 MB). k8s restarts M under pressure;
+            # from the fork (~15-25 MB per replayed block, measured; the
+            # state dump is disabled - see OPERATIONS). k8s restarts M;
             # the engine detects the backward head jump and rebases (logged),
             # then re-converges from the parent BALs. Give it room so a restart
             # costs minutes, not seconds.

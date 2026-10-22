@@ -177,6 +177,10 @@ struct TimeReq {
 async fn admin_time(State(ctx): State<Arc<Ctx>>, Json(req): Json<TimeReq>) -> Json<serde_json::Value> {
     ctx.time_offset
         .store(req.offset_seconds, std::sync::atomic::Ordering::Relaxed);
+    // Persist it: the offset is part of T's state contract (its blocks carry
+    // it), so a restart must keep it - see `Ctx::new`.
+    ctx.state.lock().unwrap().data.time_offset_seconds = Some(req.offset_seconds);
+    let _ = ctx.save_state();
     let head = ctx.anvil_t.block_number().await.unwrap_or(0);
     tracing::warn!(
         offset_seconds = req.offset_seconds,

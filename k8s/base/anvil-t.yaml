@@ -26,15 +26,16 @@ spec:
         app.kubernetes.io/name: anvil-t
         app.kubernetes.io/part-of: mainnet-mirror
     spec:
-      # anvil dumps its state on SIGTERM; give it time.
+      # Give anvil time to shut down cleanly on SIGTERM.
       terminationGracePeriodSeconds: 90
       initContainers:
-        # Resolve a *fresh* fork pin on every start, like M. T's old design kept
-        # the pin stable so a restart could not lose the devnet's writes; the
-        # engine now keeps those writes in the shadow registry's value map and
-        # re-applies them after a re-fork (verified by killing the pod), so a
-        # fresh pin is safe - and it bounds the post-restart re-replay to
-        # FORK_OFFSET (~128 blocks, minutes) instead of the whole pin age.
+        # Resolve a *fresh* fork pin on every start, like M. That bounds the
+        # post-restart re-replay to FORK_OFFSET (~128 blocks, minutes) instead
+        # of the whole pin age - and a fresh pin is a *new epoch*: the base
+        # moved, so the engine clears the shadow registry (marks *and* values)
+        # and the devnet starts clean. Re-create positions from your journal;
+        # a value-restore onto a moved base mixes eras (measured: a future
+        # lastUpdateTimestamp made every Aave supply panic).
         - name: resolve-pin
           image: docker.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
           command: ["/bin/sh", "-c"]
@@ -75,7 +76,7 @@ spec:
         - name: anvil
           image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
           # The image entrypoint is `/bin/sh -c` and swallows bare args; use a
-          # shell wrapper and `exec` so SIGTERM reaches anvil (state dump).
+          # shell wrapper and `exec` so SIGTERM reaches anvil (clean shutdown).
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -145,9 +146,8 @@ spec:
           resources:
             requests: { cpu: "500m", memory: 1Gi }
             # T never executes mainnet txs (BAL diffs only), so its state stays
-            # small; the resident set is dominated by the state-dump
-            # serialization spike (~10 GiB measured with a ~5 GiB in-memory
-            # state). 16Gi keeps a comfortable margin.
+            # small (measured ~2.5 GB with --prune-history 32; the snapshots
+            # are the dominant term). 16Gi keeps a comfortable margin.
             limits: { memory: 16Gi }
       volumes:
         - name: state

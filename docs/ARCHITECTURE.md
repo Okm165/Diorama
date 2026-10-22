@@ -169,12 +169,16 @@ memory limit (~2.5-4 h at the measured ~20 MB/replayed block), and a fresh pin
 keeps the post-restart re-replay at 128 blocks (~1-2 min) instead of the whole
 epoch - a stale pin makes the replay OOM before it can catch up (measured).
 T's pin is **re-resolved on every container start** as well (init container +
-container wrapper, like M). It used to be persistent so that a restart could
-not lose the devnet's writes; the engine now keeps those writes - keys *and*
-values - in the shadow registry and re-applies them after a re-fork (verified
-by killing the pod: the dealt balances came back), so a fresh pin loses nothing
-and bounds the re-replay to `FORK_OFFSET` (~128 blocks) instead of the pin age
-(~1.5 h measured). M's own re-base never touches T: T's epoch is its own.
+container wrapper, like M), which bounds the post-restart re-replay to
+`FORK_OFFSET` (~128 blocks, minutes) instead of the pin age (~1.5 h measured).
+A fresh pin is a **new epoch**: the base moved, and the devnet's recorded
+writes are derivations of the old base (plan 2.2/6.3) - restoring them would
+mix eras (measured: a +30d time-travel write came back as a future
+`lastUpdateTimestamp` and every Aave supply panicked with an underflow). So
+the engine clears the shadow registry (marks *and* values) and the product
+re-creates its positions from its own journal (plan 3.6); a reset at the
+*same* pin restores the recorded writes instead. M's own re-base never touches
+T: T's epoch is its own.
 Watch `mirror_t_fork_age_blocks` (reth serves reads below T's fork block, and
 its state window is 10,064 blocks) and `mirror_t_resets_total`.
 
@@ -189,7 +193,7 @@ because the mirror only replays *live* blocks.
 
 | Segment | Retained | Why |
 |---|---|---|
-| account + storage history | 10,064 blocks | reth's minimum unwind-safe distance; the Anvil pin (`head-64`) lives well inside it |
+| account + storage history | 10,064 blocks | reth's minimum unwind-safe distance; the Anvil pin (`head-128`) lives well inside it |
 | receipts | 20,000 blocks | verifier slack + `eth_getLogs` debugging |
 | bodies | 20,000 blocks | replayable catch-up backlog after an engine restart |
 | senders, tx lookup | pruned | the mirror never serves historical lookups (a pruned lookup is why `eth_getTransactionByHash`/`getTransactionReceipt(hash)` return `null` on reth; `eth_getBlockReceipts` still works) |
@@ -210,10 +214,11 @@ anvil-t reached 9.8 GB in minutes and anvil-m OOM'd at 12Gi. Now: T keeps 32
 Tracing a historical block on M is therefore limited to the last ~2 replayed
 blocks; T's own journal (`/admin/rewind`) is engine-side and unaffected.
 
-**State dumps**: M's dump is ~350 MB (it replays every parent tx), T's is ~27 MB
-(watch list only). M dumps every 300 s, T every 60 s. A restored dump is a
-*stale* state: the engine detects the backward head jump and rebases, then the
-per-block repair re-converges M as slots are touched again.
+**State dumps are disabled** on both chains: `--state`/`--state-interval` wrote
+per-block historical state (a T dump grew to 13 GB and never completed; leaked
+tmp dirs filled a PVC). Restarts are handled by design instead: a fresh pin
+bounds M's re-replay to `FORK_OFFSET` (~1-2 min) and T's devnet writes are
+re-applied from the shadow registry.
 
 ## Design decisions
 
@@ -300,8 +305,8 @@ Two constraints bound the pin depth:
 Depth is a trade-off, not a requirement: 128 keeps the mirror live with a fast,
 exact bootstrap (~26 min of replayed mainnet history); raising it replays more
 history but costs replay time and M memory. When the pin ages out of reth's
-state window, run `make repin` - a new epoch. The engine detects the chain reset
-and rebases automatically.
+state window, run `make repin`: fresh pins, the engine rebases automatically and
+restores the devnet's writes.
 
 **EIP-7702 nonce gaps.** Every authorization in a type-4 tx bumps the
 authority's nonce, so a self-sponsored delegation advances the sender's nonce by
@@ -338,12 +343,16 @@ never stalls the mirror. Blob sidecars are fetched from the local Lighthouse
 only, validated with the bundled mainnet trusted setup, and placeholder proofs
 are recomputed (see above).
 
-**Epochs own the devnet's writes.** A re-pin starts a new epoch: the anvils
-fork at a fresh pin and the devnet's writes are gone, so the engine clears the
-shadow set when it sees a new fork pin (persisted in `/state/cursor.json` as
-`epoch_pin`). Keeping stale shadows would silently stop T from syncing keys it
-no longer owns. An anvil restart (OOM, dump restore) keeps the same pin and the
-same writes, so its shadows stay.
+**A fresh pin starts a new epoch.** A re-fork at a *changed* fork pin (an OOM
+restart or `make repin`) moves T's base, so the devnet's recorded writes -
+derivations of the old base (plan 2.2/6.3) - are cleared with it: marks *and*
+values go, and the product re-creates its positions from its own journal
+(plan 3.6). Measured why restoring is wrong: a +30d time-travel write came
+back as a future `lastUpdateTimestamp` and every Aave supply panicked with an
+arithmetic underflow. A reset at the *same* pin (an out-of-band `anvil_reset`)
+restores the recorded writes instead - the base is identical - and orphan
+values (keys handed back earlier) are pruned, never re-owned. `epoch_pin` in
+`/state/cursor.json` records the current pin; `mirror_t_resets_total` counts epoch changes.
 
 **T's heights are its own.** T mines one block per applied parent block, plus
 one per journal rewind, so its height is not a mainnet block number - the
@@ -549,6 +558,18 @@ Anvil cannot do. This is the mapping, so nothing is ambiguous:
 | Snapshots | anvil: `evm_snapshot`/`evm_revert`; engine: `POST /admin/rewind` = the plan's §4.4 sync-revert control (rolls T back per parent block through the journal) | |
 | Time travel | engine: `POST /admin/time` (persistent clock offset, survives parent blocks) *and* anvil's `evm_increaseTime` (which the next alignment would overwrite - use the offset) | the capability a margin product needs; a static fork's `evm_increaseTime` alone is not enough on a live mirror |
 | Mirror sync control | engine: `POST /admin/pause` = the plan's §4.4 stop-sync, `POST /admin/resume` = start-sync, `GET /status` = sync status (`frozen`/`halted` = active, `lag`, `cursor`/`cursor_t` = latest synced block, `follow_head` = parent latest block, `time_offset_seconds` = the `/admin/time` offset) | the plan's sync-next has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
+
+**Scope vs the plan's fork engine (M1-M5).** This repo implements the plan's
+*minimal viable mirror* path - stock Anvil + replay + verifier + BAL diff
+applier + journal + the admin surface above - which the plan explicitly allows
+to ship first ("the diff applier alone already works on stock Anvil", §4.3).
+The custom revm engine (`MirrorDb`, Executor, chain/journal, RPC, native modes)
+is **not** built: its purpose is to drop Anvil's per-write cost and get the
+modes natively. The watch-list filter makes the stock path viable (1-2 orders
+of magnitude fewer writes than a full BAL, which costs 10-50 s/block on Anvil),
+and the modes' *capabilities* are provided by the engine's loops + `/admin`
+(the mapping table above). If write cost or native modes ever become the
+constraint, M1+ is the next step.
 
 The Solidity precompile (M6) and the bridge relay (M7) are future deliverables -
 the engine's equivalent today is the HTTP surface above plus the cheatcodes.

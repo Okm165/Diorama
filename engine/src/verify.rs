@@ -301,13 +301,14 @@ fn trunc(s: &str) -> String {
 /// skipping probes whose target account the devnet owns (copy-on-write: that
 /// state is the devnet's, so parity is not expected there). Runs once per
 /// applied block; the metric is the alarm.
-pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize) {
+pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize, usize) {
     let mut ok = 0usize;
     let mut failed = 0usize;
+    let mut skipped = 0usize;
     // A devnet time offset makes time-dependent views diverge from mainnet by
     // design (that is what it is for): skip instead of alarming.
     if ctx.time_offset.load(std::sync::atomic::Ordering::Relaxed) != 0 {
-        return (0, 0);
+        return (0, 0, 0);
     }
     let shadowed: std::collections::HashSet<Address> = {
         let s = ctx.shadow.lock().unwrap();
@@ -315,6 +316,13 @@ pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize) {
     };
     for probe in &ctx.cfg.verifier.probes {
         if shadowed.contains(&probe.to) {
+            // A devnet write anywhere in this target hides *all* of its
+            // probes (measured: a crashed oracle source stayed marked and the
+            // five oracle probes were skipped silently). Count them so the
+            // blind spot is visible; hand the key back to check again.
+            skipped += 1;
+            tracing::debug!(block = n, probe = %probe.name, target = ?probe.to,
+                "probe skipped: target is devnet-owned");
             continue;
         }
         let r = ctx.reth.call_at(probe.to, &probe.data, n).await;
@@ -337,7 +345,7 @@ pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize) {
             }
         }
     }
-    (ok, failed)
+    (ok, failed, skipped)
 }
 
 pub async fn convergence_check(ctx: &Ctx, n: u64) -> (usize, usize) {

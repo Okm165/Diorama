@@ -34,10 +34,17 @@ pub struct Persisted {
     /// Learned blob wrapper form ("legacy" | "eip7594" | "bare").
     #[serde(default)]
     pub blob_wrapper: Option<String>,
-    /// Fork pin of the current epoch (anvil forkBlockNumber). A change means a
-    /// re-pin: the shadow set is cleared so the devnet starts fresh.
+    /// Fork pin of the current epoch (anvil forkBlockNumber). A change starts
+    /// a new epoch: the shadow registry is cleared (marks *and* values - the
+    /// old base's derivations must not be replayed onto the moved base) and
+    /// the product re-creates its positions from its own journal.
     #[serde(default)]
     pub epoch_pin: Option<u64>,
+    /// The devnet's clock offset (seconds ahead of mainnet, `/admin/time`).
+    /// Persisted: T's blocks carry it, so a restart must keep it or
+    /// time-dependent contracts see a clock behind their own state.
+    #[serde(default)]
+    pub time_offset_seconds: Option<u64>,
 }
 
 pub struct StateFile {

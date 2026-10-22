@@ -88,6 +88,7 @@ impl Ctx {
         let shadow = Shadow::load(&shadow_path);
         let journal = Journal::new(cfg.journal.dir.clone(), cfg.journal.blocks);
         let state = StateFile::open(cfg.state_dir.join("cursor.json"));
+        let offset = state.data.time_offset_seconds.unwrap_or(0);
         let drift = Drift::new(cfg.state_dir.join("drift.jsonl"));
         let beacon = BeaconClient::new(cfg.blobs.beacon_urls.clone());
         let engine = match (&cfg.source_sync.engine_url, &cfg.source_sync.jwt_path) {
@@ -112,6 +113,13 @@ impl Ctx {
             shadow: Mutex::new(shadow),
             shadow_path,
             journal,
+            // The devnet's clock offset is part of its state contract: T's
+            // blocks (and every time-dependent contract on it) carry it, so a
+            // restart must not silently drop it back to 0 - T would hold
+            // +offset-era state under a mainnet clock (measured: Aave's
+            // `lastUpdateTimestamp` lands in the future and every supply
+            // panics with an arithmetic underflow).
+            time_offset: AtomicU64::new(offset),
             state: Mutex::new(state),
             metrics: Metrics::default(),
             drift,
@@ -121,7 +129,6 @@ impl Ctx {
             reapply_from: Mutex::new(None),
             blob_warned: std::sync::atomic::AtomicU64::new(0),
             force_rebase: AtomicBool::new(false),
-            time_offset: AtomicU64::new(0),
             shadow_scanned_upto: AtomicU64::new(0),
             last_m_diverged: AtomicBool::new(true),
             last_stall: Mutex::new((0, 0)),

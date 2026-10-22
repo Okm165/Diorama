@@ -25,6 +25,7 @@ pub struct Metrics {
     pub t_convergence_ok: AtomicU64,
     pub t_convergence_failed: AtomicU64,
     pub t_convergence_last_failed: AtomicU64,
+    pub t_probe_skipped: AtomicU64,
     pub bal_filtered_out: AtomicU64,
     pub bal_skipped_shadowed: AtomicU64,
     pub shadowed_slots: AtomicU64,
@@ -109,6 +110,7 @@ impl Metrics {
         counter(&mut out, "mirror_t_convergence_ok_total", "devnet probes matching mainnet at the applied parent block", self.t_convergence_ok.load(Ordering::Relaxed));
         counter(&mut out, "mirror_t_convergence_failures_total", "devnet probes diverging from mainnet (devnet-owned accounts skipped)", self.t_convergence_failed.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_t_convergence_last_failed", "devnet probes that diverged in the last applied block", self.t_convergence_last_failed.load(Ordering::Relaxed));
+        counter(&mut out, "mirror_t_probe_skipped_total", "probes skipped because their target is devnet-owned (a devnet write to a shared contract hides that contract's probes until it is handed back)", self.t_probe_skipped.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_bal_filtered_out_last_block", "BAL writes in the last parent block filtered out (not watched)", self.bal_filtered_out.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_bal_skipped_shadowed_last_block", "BAL writes in the last parent block skipped (shadowed by devnet)", self.bal_skipped_shadowed.load(Ordering::Relaxed));
         counter(&mut out, "mirror_blob_failures_total", "blocks with blob sidecar/replay failures", self.blob_failures.load(Ordering::Relaxed));
