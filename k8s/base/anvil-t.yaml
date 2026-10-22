@@ -101,6 +101,14 @@ spec:
               # (measured: the 2026-10 automine-reset incident). Comments must
               # stay *above* the exec: a comment inside the backslash-continued
               # command swallows every flag after it (measured with a stub).
+              #
+              # daloc bringup parity (plan §17.6, adopted at R4): their
+              # entrypoint sets --code-size-limit 99999 deliberately (the
+              # margin-agent deploys exceed EIP-170 — discover it now, not at
+              # runtime) and --transaction-block-keeper 1000000 (their failing-
+              # run forensics read the run's own chain; keeper 2 makes a run
+              # unreadable seconds after it ends). --hardfork stays bpo2 here
+              # (V takes cancun — the real HyperEVM's fork).
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
                 --fork-url "$RETH_URL" \
@@ -109,13 +117,13 @@ spec:
                 --hardfork bpo2 \
                 --gas-limit 60000000 \
                 --enable-tx-gas-limit \
-                --code-size-limit 24576 \
+                --code-size-limit 99999 \
                 --disable-pool-balance-checks \
                 --order fifo \
                 --no-mining \
                 --auto-impersonate \
                 --prune-history 32 \
-                --transaction-block-keeper 2 \
+                --transaction-block-keeper 1000000 \
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info \
