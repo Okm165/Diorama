@@ -36,7 +36,24 @@ enum Cmd {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // The config error's Display already renders the issue list; the
+            // cause chain is appended when a lower boundary named one.
+            eprintln!("Error: {e}");
+            let mut source = std::error::Error::source(&e);
+            while let Some(s) = source {
+                eprintln!("  caused by: {s}");
+                source = s.source();
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), mirror_config::ConfigError> {
     match Cli::parse().cmd {
         Cmd::Check { instance } => {
             let (inst, unresolved) = mirror_config::Instance::inspect(&instance)?;

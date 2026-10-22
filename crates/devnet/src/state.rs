@@ -6,7 +6,7 @@
 //!   - a chain reset (re-pin drill, wiped state) is detected by the same check
 //!     and the cursor rebases to the chain head;
 //!   - `reth_last_hash` detects upstream reorgs between consecutive blocks.
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -53,22 +53,55 @@ pub struct StateFile {
 }
 
 impl StateFile {
-    pub fn open(path: PathBuf) -> Self {
-        let data = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
-        Self { path, data }
+    /// Load the cursor file.
+    ///
+    /// Three answers (boundary-discipline): **absent** is a fact — first boot
+    /// starts empty; an **IO fault** is not emptiness (a cursor that cannot be
+    /// read must be fixed, not silently re-derived); **corrupt** bytes die
+    /// here, at the load point, with the path named — a silently defaulted
+    /// cursor would re-run or skip blocks with no trace of why.
+    pub fn open(path: PathBuf) -> Result<Self> {
+        let data = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|source| Error::Corrupt {
+                what: "cursor state",
+                path: path.clone(),
+                source,
+            })?,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Persisted::default(),
+            Err(source) => {
+                return Err(Error::Io {
+                    what: "cursor state",
+                    path,
+                    source,
+                })
+            }
+        };
+        Ok(Self { path, data })
     }
 
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent).map_err(|source| Error::Io {
+                what: "cursor state directory",
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
         let tmp = self.path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&self.data)?)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &self.path).with_context(|| format!("renaming {}", self.path.display()))
+        let bytes = serde_json::to_vec_pretty(&self.data).map_err(|source| Error::Encode {
+            what: "cursor state",
+            source,
+        })?;
+        std::fs::write(&tmp, bytes).map_err(|source| Error::Io {
+            what: "cursor state",
+            path: tmp.clone(),
+            source,
+        })?;
+        std::fs::rename(&tmp, &self.path).map_err(|source| Error::Io {
+            what: "cursor state",
+            path: self.path.clone(),
+            source,
+        })
     }
 }
 

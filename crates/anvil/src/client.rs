@@ -6,31 +6,11 @@
 use alloy_eips::eip7928::BlockAccessList;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::{Block, Log, TransactionReceipt};
-use anyhow::{anyhow, bail, Context, Result};
+use crate::error::{Error, Result, RpcError};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct RpcError {
-    pub code: i64,
-    pub message: String,
-    #[serde(default)]
-    pub data: Option<Value>,
-}
-
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "rpc error {}: {}", self.code, self.message)?;
-        // `data` carries revert data / validation details on many nodes
-        // (measured: reth's "-32602 Invalid params: EmptyExecutionRequest").
-        if let Some(data) = &self.data {
-            write!(f, " ({data})")?;
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug, serde::Deserialize)]
 struct RpcResponse {
@@ -49,16 +29,19 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    pub fn new(url: &str, timeout: Duration) -> Self {
+    /// Build a client for `url`. Fallible: the TLS backend's initialization can
+    /// fail, and a boundary that cannot be built is a boot error naming itself,
+    /// not a panic.
+    pub fn new(url: &str, timeout: Duration) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .build()
-            .expect("http client");
-        Self {
+            .map_err(|source| Error::ClientBuild { source })?;
+        Ok(Self {
             http,
             url: url.trim_end_matches('/').to_string(),
             next_id: AtomicU64::new(1),
-        }
+        })
     }
 
     pub fn url(&self) -> &str {
@@ -67,6 +50,45 @@ impl Rpc {
 
     fn id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    // ---- typed error constructors (one site per variant) ----------------
+
+    fn transport(&self, method: &str, source: reqwest::Error) -> Error {
+        Error::Transport {
+            endpoint: self.url.clone(),
+            method: method.to_string(),
+            source,
+        }
+    }
+
+    fn status(&self, method: &str, status: u16, body: &str) -> Error {
+        Error::Status {
+            endpoint: self.url.clone(),
+            method: method.to_string(),
+            status,
+            body: truncate(body, 300).to_string(),
+        }
+    }
+
+    fn rpc(&self, method: &str, source: RpcError) -> Error {
+        Error::Rpc {
+            endpoint: self.url.clone(),
+            method: method.to_string(),
+            source,
+        }
+    }
+
+    fn decode(&self, method: &str, source: serde_json::Error) -> Error {
+        Error::Decode {
+            endpoint: self.url.clone(),
+            method: method.to_string(),
+            source,
+        }
+    }
+
+    fn bad_quantity(&self, method: &str, value: &str) -> Error {
+        Error::bad_quantity(&self.url, method, value)
     }
 
     /// Single call, raw JSON result.
@@ -78,16 +100,19 @@ impl Rpc {
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("{method} -> {}", self.url))?;
+            .map_err(|source| self.transport(method, source))?;
         let status = resp.status();
-        let text = resp.text().await.context("reading rpc response")?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|source| self.transport(method, source))?;
         if !status.is_success() {
-            bail!("{method}: HTTP {status}: {}", truncate(&text, 300));
+            return Err(self.status(method, status.as_u16(), &text));
         }
         let parsed: RpcResponse = serde_json::from_str(&text)
-            .with_context(|| format!("{method}: bad rpc response: {}", truncate(&text, 300)))?;
+            .map_err(|source| self.decode(method, source))?;
         if let Some(err) = parsed.error {
-            bail!("{method}: {err}");
+            return Err(self.rpc(method, err));
         }
         // JSON-RPC allows `result: null` (anvil cheatcodes return null on success).
         Ok(parsed.result.unwrap_or(Value::Null))
@@ -95,28 +120,37 @@ impl Rpc {
 
     pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
         let v = self.call_raw(method, params).await?;
-        serde_json::from_value(v).with_context(|| format!("{method}: decoding result"))
+        serde_json::from_value(v).map_err(|source| self.decode(method, source))
     }
 
     /// Result may legitimately be null (e.g. `eth_getBlockByNumber` of a
     /// pruned/future block, `eth_getBlockAccessList` before activation).
     pub async fn call_opt<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<Option<T>> {
         let body = json!({"jsonrpc":"2.0","id":self.id(),"method":method,"params":params});
-        let resp = self.http.post(&self.url).json(&body).send().await?;
+        let resp = self
+            .http
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| self.transport(method, source))?;
         let status = resp.status();
-        let text = resp.text().await.context("reading rpc response")?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|source| self.transport(method, source))?;
         if !status.is_success() {
-            bail!("{method}: HTTP {status}: {}", truncate(&text, 300));
+            return Err(self.status(method, status.as_u16(), &text));
         }
         let parsed: RpcResponse = serde_json::from_str(&text)
-            .with_context(|| format!("{method}: bad rpc response: {}", truncate(&text, 300)))?;
+            .map_err(|source| self.decode(method, source))?;
         if let Some(err) = parsed.error {
-            bail!("{method}: {err}");
+            return Err(self.rpc(method, err));
         }
         match parsed.result {
             None | Some(Value::Null) => Ok(None),
             Some(v) => Ok(Some(
-                serde_json::from_value(v).with_context(|| format!("{method}: decoding result"))?,
+                serde_json::from_value(v).map_err(|source| self.decode(method, source))?,
             )),
         }
     }
@@ -145,7 +179,9 @@ impl Rpc {
             let mut end = start;
             let mut bytes = 2usize; // brackets
             while end < calls.len() && (end - start) < max_items {
-                let estimate = calls[end].0.len() + serde_json::to_string(&calls[end].1)?.len() + 64;
+                // `Value`'s Display is compact JSON and cannot fail (a Value
+                // serializes by construction) - no error path to invent here.
+                let estimate = calls[end].0.len() + calls[end].1.to_string().len() + 64;
                 if end > start && bytes + estimate > max_bytes {
                     break;
                 }
@@ -168,7 +204,7 @@ impl Rpc {
                 json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
             })
             .collect();
-        let body_str = serde_json::to_string(&body)?;
+        let body_str = Value::Array(body).to_string();
         let resp = self
             .http
             .post(&self.url)
@@ -176,18 +212,19 @@ impl Rpc {
             .body(body_str.clone())
             .send()
             .await
-            .context("batch request")?;
+            .map_err(|source| self.transport("batch", source))?;
         let status = resp.status();
-        let text = resp.text().await.context("reading batch response")?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|source| self.transport("batch", source))?;
         if !status.is_success() {
-            bail!("batch: HTTP {status}: {}", truncate(&text, 300));
+            return Err(self.status("batch", status.as_u16(), &text));
         }
-        let parsed: Vec<RpcResponse> = serde_json::from_str(&text).with_context(|| {
-            format!(
-                "batch: bad response ({}), request was: {}",
-                truncate(&text, 200),
-                truncate(&body_str, 600)
-            )
+        let parsed: Vec<RpcResponse> = serde_json::from_str(&text).map_err(|source| Error::BatchDecode {
+            endpoint: self.url.clone(),
+            request: truncate(&body_str, 600).to_string(),
+            source,
         })?;
         let mut by_id: std::collections::HashMap<u64, RpcResponse> = parsed
             .into_iter()
@@ -203,11 +240,7 @@ impl Rpc {
                         out.push(Ok(r.result.unwrap_or(Value::Null)));
                     }
                 }
-                None => out.push(Err(RpcError {
-                    code: -1,
-                    message: "missing batch response".into(),
-                    data: None,
-                })),
+                None => out.push(Err(RpcError::missing_from_batch(id))),
             }
         }
         Ok(out)
@@ -217,13 +250,17 @@ impl Rpc {
 
     pub async fn block_number(&self) -> Result<u64> {
         let hex: String = self.call("eth_blockNumber", json!([])).await?;
-        Ok(u64::from_str_radix(hex.trim_start_matches("0x"), 16)?)
+        u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+            .map_err(|_| self.bad_quantity("eth_blockNumber", &hex))
     }
 
     pub async fn block_by_number(&self, n: u64, full: bool) -> Result<Block> {
         self.call_opt("eth_getBlockByNumber", json!([hex_u64(n), full]))
             .await?
-            .ok_or_else(|| anyhow!("block {n} not available on {}", self.url))
+            .ok_or_else(|| Error::BlockMissing {
+                endpoint: self.url.clone(),
+                n,
+            })
     }
 
     pub async fn block_by_number_opt(&self, n: u64, full: bool) -> Result<Option<Block>> {
@@ -240,8 +277,9 @@ impl Rpc {
             .await
         {
             Ok(v) => Ok(v),
-            // Older builds / non-reth endpoints may not know the method.
-            Err(e) if e.to_string().contains("-32601") || e.to_string().contains("not found") => Ok(None),
+            // Older builds / non-reth endpoints may not know the method: a
+            // typed predicate, never a message-text match.
+            Err(e) if e.is_method_not_found() => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -276,25 +314,29 @@ impl Rpc {
     /// eth_call with a `stateDiff` override, returned as the raw hex string.
     /// Used to discover ERC20 balance slots without mining anything (anvil's
     /// own dealERC20 probe needs mined writes and fails on a no-mining fork).
+    ///
+    /// A transport/RPC fault is a typed error, never collapsed into `None`: a
+    /// probe that could not run must not masquerade as "this slot is not the
+    /// balance slot" (boundary-discipline: a fault is not an empty answer).
     pub async fn call_with_override(
         &self,
         to: Address,
         data: &Bytes,
         overrides: &serde_json::Value,
-    ) -> Option<String> {
+    ) -> Result<String> {
         self.call::<String>(
             "eth_call",
             json!([{"to": to, "data": data}, "latest", overrides]),
         )
         .await
-        .ok()
     }
 
     pub async fn balance_at(&self, addr: Address, block: u64) -> Result<U256> {
         let hex: String = self
             .call("eth_getBalance", json!([addr, hex_u64(block)]))
             .await?;
-        Ok(U256::from_str_radix(hex.trim_start_matches("0x"), 16)?)
+        U256::from_str_radix(hex.trim_start_matches("0x"), 16)
+            .map_err(|_| self.bad_quantity("eth_getBalance", &hex))
     }
 
     pub async fn storage_at(&self, addr: Address, slot: U256, block: u64) -> Result<B256> {
@@ -310,7 +352,8 @@ impl Rpc {
         let hex: String = self
             .call("eth_getTransactionCount", json!([addr, hex_u64(block)]))
             .await?;
-        Ok(u64::from_str_radix(hex.trim_start_matches("0x"), 16)?)
+        u64::from_str_radix(hex.trim_start_matches("0x"), 16)
+            .map_err(|_| self.bad_quantity("eth_getTransactionCount", &hex))
     }
 
     /// Batch raw-tx submission. Per-item errors are returned, not thrown.
@@ -322,18 +365,14 @@ impl Rpc {
             .map(|raw| ("eth_sendRawTransaction".to_string(), json!([raw])))
             .collect();
         let results = self.batch_raw_limited(&calls, 500, 1 << 20).await?;
-        results
+        Ok(results
             .into_iter()
             .map(|r| match r {
-                Ok(v) => serde_json::from_value::<B256>(v).map_err(|e| RpcError {
-                    code: -1,
-                    message: format!("bad tx hash: {e}"),
-                    data: None,
-                }),
+                Ok(v) => serde_json::from_value::<B256>(v)
+                    .map_err(|e| RpcError::bad_result("eth_sendRawTransaction", &e.to_string())),
                 Err(e) => Err(e),
             })
-            .collect::<Vec<_>>()
-            .pipe(Ok)
+            .collect())
     }
 
     /// debug_traceBlockByNumber with prestateTracer diffMode (BAL fallback and
@@ -432,11 +471,3 @@ pub fn hex_u64(v: u64) -> String {
 pub fn hex_u256(v: U256) -> String {
     format!("0x{v:x}")
 }
-
-// Tiny pipeline helper (avoids a `.map(...).collect()` dance above).
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-impl<T> Pipe for T {}

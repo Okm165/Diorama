@@ -10,11 +10,16 @@ description = "The anvil control plane: JSON-RPC client, batching, cheatcode con
 alloy-primitives = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
-anyhow = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The write-policy predicates are pinned against a real connect-phase
+# transport failure (ECONNREFUSED), which needs a runtime to observe.
+tokio = { workspace = true }
 
 [lints]
 workspace = true

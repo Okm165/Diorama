@@ -6,9 +6,9 @@
 //! bounded by EIP-7702 refund accounting) · withdrawal recipient balances ·
 //! configured probe calls.
 use crate::ctx::{block_txs, Ctx};
+use crate::error::Result;
 use alloy_network_primitives::{ReceiptResponse, TransactionResponse};
 use alloy_rpc_types_eth::{Block, Log};
-use anyhow::Result;
 use alloy_primitives::Address;
 
 /// EIP-7702: a fork's type-4 gas delta must lie in `[-refund * #auths, 0]`.
@@ -310,17 +310,17 @@ fn trunc(s: &str) -> String {
 /// skipping probes whose target account the devnet owns (copy-on-write: that
 /// state is the devnet's, so parity is not expected there). Runs once per
 /// applied block; the metric is the alarm.
-pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize, usize) {
+pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> Result<(usize, usize, usize)> {
     let mut ok = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
     // A devnet time offset makes time-dependent views diverge from mainnet by
     // design (that is what it is for): skip instead of alarming.
     if ctx.time_offset.load(std::sync::atomic::Ordering::Relaxed) != 0 {
-        return (0, 0, 0);
+        return Ok((0, 0, 0));
     }
     let shadowed: std::collections::HashSet<Address> = {
-        let s = ctx.shadow.lock().unwrap();
+        let s = ctx.shadow.lock()?;
         s.slots.keys().chain(s.accounts.iter()).copied().collect()
     };
     for probe in &ctx.cfg.services.engine.verifier.probes {
@@ -354,7 +354,7 @@ pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize, usize) {
             }
         }
     }
-    (ok, failed, skipped)
+    Ok((ok, failed, skipped))
 }
 
 pub async fn convergence_check(ctx: &Ctx, n: u64) -> (usize, usize) {

@@ -27,7 +27,6 @@ alloy-rpc-types-eth = { version = "2.5", features = ["serde"] }
 # the mirror never needs P2P peers or a public RPC to fill a sync gap.
 alloy-rpc-types-engine = { version = "2.5", features = ["jwt", "serde"] }
 
-anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
@@ -39,8 +38,6 @@ jsonwebtoken = { version = "10", default-features = false, features = ["rust_cry
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The engine's config today; replaced by TOML when crates/config lands (R0.5).
-serde_yaml = "0.9"
 sha2 = "0.10"
 thiserror = "2"
 # Config is TOML (§19): crates/config, the layered loader.

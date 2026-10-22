@@ -1,7 +1,7 @@
 //! prestateTracer diff flattening (`debug_traceBlockByNumber(..., diffMode)`) —
 //! the fallback when a BAL is unavailable. Shapes measured on anvil 1.8.5.
 use alloy_primitives::{Address, Bytes, U256};
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +107,10 @@ pub fn flatten_trace_diff(result: &Value) -> Vec<Write> {
 /// `debug_traceBlockByNumber(..., diffMode)` returns one entry per tx:
 /// `[{txHash, result: {pre, post}}, ...]`. Flatten all of them.
 pub fn flatten_trace_block(traces: &Value) -> Result<Vec<Write>> {
-    let arr = traces.as_array().context("trace block: expected array")?;
+    let arr = traces.as_array().ok_or(Error::Corrupt {
+        what: "trace block",
+        detail: "expected an array of per-tx traces".into(),
+    })?;
     let mut out = Vec::new();
     for entry in arr {
         if let Some(result) = entry.get("result") {

@@ -23,7 +23,7 @@
 //!
 //! No P2P peers, no public RPC.
 use crate::ctx::Ctx;
-use anyhow::{bail, Context, Result};
+use crate::error::{BeaconError, Error, Result};
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -99,14 +99,15 @@ pub async fn source_sync_loop(ctx: Arc<Ctx>) {
     }
 }
 
-/// The CL head's execution block number, cached for a minute.
+/// The CL head's execution block number, cached for a minute. Metrics-only:
+/// a beacon fault here degrades the gauge, not the top-up itself.
 async fn cl_head_el_block(ctx: &Ctx, cache: &mut Option<(Instant, u64)>) -> Option<u64> {
     if let Some((at, n)) = cache {
         if at.elapsed() < Duration::from_secs(60) {
             return Some(*n);
         }
     }
-    let slot = ctx.beacon.head_slot().await.ok()??;
+    let slot = ctx.beacon.head_slot().await.ok()?;
     let block = ctx.beacon.block_by_slot(slot).await.ok()??;
     let n = quantity_u64(block.execution_payload()?.get("block_number")).ok()?;
     *cache = Some((Instant::now(), n));
@@ -116,11 +117,13 @@ async fn cl_head_el_block(ctx: &Ctx, cache: &mut Option<(Instant, u64)>) -> Opti
 /// One pass: deliver as many contiguous payloads as the budget allows.
 /// Returns how many were delivered.
 async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<usize> {
+    if !ctx.beacon.enabled() {
+        // No beacon configured: the top-up has no source. A fact, not a fault.
+        return Ok(0);
+    }
     let el_head = ctx.reth.block_number().await?;
     let el = ctx.reth.block_by_number(el_head, false).await?;
-    let Some(cl_head) = ctx.beacon.head_slot().await? else {
-        return Ok(0);
-    };
+    let cl_head = ctx.beacon.head_slot().await?;
     // First slot whose payload can follow the EL head.
     let mut slot =
         (el.header.timestamp.saturating_sub(MAINNET_GENESIS_TIME)) / SECONDS_PER_SLOT + 1;
@@ -144,15 +147,18 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
             continue;
         }
         if number != el_head + delivered as u64 + 1 {
-            bail!(
-                "top-up gap: reth head {el_head}, next CL payload {number} at slot {slot} \
-                 (missing ancestors are outside the CL's retained history)"
-            );
+            return Err(Error::TopUpGap {
+                el_head,
+                number,
+                slot,
+            });
         }
         let payload_hash = payload
             .get("block_hash")
             .and_then(|v| v.as_str())
-            .context("payload has no block_hash")?
+            .ok_or(BeaconError::Payload {
+                what: "payload has no block_hash",
+            })?
             .to_string();
         let versioned_hashes = block
             .blob_versioned_hashes()
@@ -167,7 +173,13 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
             .await?;
         match status.as_str() {
             "VALID" | "ACCEPTED" => {}
-            other => bail!("reth answered {other} for payload {number}: {message}"),
+            other => {
+                return Err(Error::PayloadRejected {
+                    number,
+                    status: other.to_string(),
+                    message,
+                })
+            }
         }
         engine.forkchoice_updated(&payload_hash, ZERO_HASH, ZERO_HASH).await?;
         tracing::debug!(block = number, slot, "top-up delivered");
@@ -179,19 +191,27 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
 
 /// The beacon API serves quantities as decimal strings; the Engine API wants
 /// hex quantities. Accept both (single implementation lives in `blob`).
-fn quantity_u64(v: Option<&Value>) -> Result<u64> {
-    let s = v.and_then(|v| v.as_str()).context("missing quantity")?;
-    crate::blob::parse_quantity(s).context("bad quantity")
+fn quantity_u64(v: Option<&Value>) -> Result<u64, BeaconError> {
+    let s = v
+        .and_then(|v| v.as_str())
+        .ok_or(BeaconError::Payload {
+            what: "missing quantity",
+        })?;
+    crate::blob::parse_quantity(s).ok_or(BeaconError::Payload {
+        what: "bad quantity",
+    })
 }
 
 /// Engine API quantity (hex).
-fn hex_quantity(v: &Value) -> Result<Value> {
+fn hex_quantity(v: &Value) -> Result<Value, BeaconError> {
     Ok(Value::String(format!("0x{:x}", quantity_u64(Some(v))?)))
 }
 
 /// Rewrite a beacon-API execution payload into the Engine API shape.
-fn to_engine_payload(src: &Value) -> Result<Value> {
-    let obj = src.as_object().context("execution_payload is not an object")?;
+fn to_engine_payload(src: &Value) -> Result<Value, BeaconError> {
+    let obj = src.as_object().ok_or(BeaconError::Payload {
+        what: "execution_payload is not an object",
+    })?;
     let mut out = Map::new();
     for (snake, camel) in PAYLOAD_FIELDS {
         if let Some(v) = obj.get(*snake) {
@@ -241,7 +261,9 @@ fn to_engine_payload(src: &Value) -> Result<Value> {
         out.insert("withdrawals".to_string(), Value::Array(mapped));
     }
     if out.get("parentHash").is_none() || out.get("blockHash").is_none() {
-        bail!("execution_payload missing required fields");
+        return Err(BeaconError::Payload {
+            what: "missing required fields",
+        });
     }
     Ok(Value::Object(out))
 }

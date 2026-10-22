@@ -5,9 +5,10 @@ mod blob;
 mod ctx;
 mod diff;
 mod drift;
+mod engine_api;
+mod error;
 mod http;
 mod replay;
-mod engine_api;
 mod selftest;
 mod source_sync;
 mod verify;
@@ -18,11 +19,12 @@ mod verify;
 pub use mirror_anvil as rpc;
 pub use mirror_devnet::{journal, metrics, shadow, state};
 
+pub use error::{Error, Result};
+
 use mirror_config::Instance;
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
 use crate::replay::{replay_block, reth_block_hash};
-use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -96,7 +98,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             let reth = cfg.chains.l1.source_url.clone();
             let m = cfg.services.engine.anvil.m_url.clone();
             let t = cfg.services.engine.anvil.t_url.clone();
-            let ctx = Ctx::new(cfg, &reth, &m, &t);
+            let ctx = Ctx::new(cfg, &reth, &m, &t)?;
             let (cursor, restored) = http::do_rewind(&ctx, blocks).await?;
             println!("rewound {blocks} block(s): {restored} values restored, cursor_t now {cursor}");
             Ok(())
@@ -120,23 +122,17 @@ async fn run(config: PathBuf) -> Result<()> {
     let reth_url = cfg.chains.l1.source_url.clone();
     let m_url = cfg.services.engine.anvil.m_url.clone();
     let t_url = cfg.services.engine.anvil.t_url.clone();
-    let ctx = Arc::new(Ctx::new(cfg, &reth_url, &m_url, &t_url));
-    ctx.restore_blob_form();
+    let ctx = Arc::new(Ctx::new(cfg, &reth_url, &m_url, &t_url)?);
+    ctx.restore_blob_form()?;
 
     // M is engine-owned: transactions are batched and mined explicitly.
     // A coordinated restart (anvil, reth or lighthouse rolling) must not turn
     // into CrashLoopBackOff: wait for both anvils to answer before proceeding,
     // then fail fast only if they stay down.
     wait_for_anvil(&ctx.anvil_m, "anvil-m").await?;
-    ctx.anvil_m
-        .anvil_set_automine(false)
-        .await
-        .context("disabling automine on M")?;
+    ctx.anvil_m.anvil_set_automine(false).await?;
     wait_for_anvil(&ctx.anvil_t, "anvil-t").await?;
-    ctx.anvil_t
-        .anvil_set_automine(false)
-        .await
-        .context("disabling automine on T")?;
+    ctx.anvil_t.anvil_set_automine(false).await?;
 
     tracing::info!(
         reth = %ctx.reth.url(),
@@ -185,12 +181,12 @@ enum Chain {
 
 /// Whether the shadow registry holds marks or recorded values (decides the
 /// same-pin restore path after a restart).
-fn shadow_has_recorded_state(ctx: &Ctx) -> bool {
-    let s = ctx.shadow.lock().unwrap();
-    s.slot_count() > 0
+fn shadow_has_recorded_state(ctx: &Ctx) -> Result<bool> {
+    let s = ctx.shadow.lock()?;
+    Ok(s.slot_count() > 0
         || !s.accounts.is_empty()
         || !s.values.is_empty()
-        || !s.account_values.is_empty()
+        || !s.account_values.is_empty())
 }
 
 /// Decide the next parent block to process for one chain, applying the cursor,
@@ -211,18 +207,20 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     // extra lag is invisible; the metric keeps the raw head so
     // `mirror_lag_blocks` still measures the true distance.
     let follow = follow.saturating_sub(ctx.cfg.chains.l1.follow_margin_blocks);
+    // Metrics-only read: a reth blip must not fail the poll (the gauge reads 0
+    // until reth answers again; the next pass overwrites it).
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
     ctx.metrics.set(&ctx.metrics.reth_head, reth_head);
 
     let (head, cursor, rpc) = match chain {
         Chain::M => (
             ctx.anvil_m.block_number().await?,
-            ctx.cursor_m(),
+            ctx.cursor_m()?,
             &ctx.anvil_m,
         ),
         Chain::T => (
             ctx.anvil_t.block_number().await?,
-            ctx.cursor_t(),
+            ctx.cursor_t()?,
             &ctx.anvil_t,
         ),
     };
@@ -269,20 +267,20 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                     // - The pin is *unchanged* (an out-of-band reset at the
                     //   same base): the recorded writes are still coherent -
                     //   re-apply them and keep the marks.
+                    // Fail-closed on the pin read: without it the epoch
+                    // decision would default to "same pin" and re-apply writes
+                    // across a pin change - the measured Aave-underflow hazard.
                     let pin = rpc
                         .anvil_node_info()
-                        .await
-                        .ok()
-                        .and_then(|i| {
-                            i.pointer("/forkConfig/forkBlockNumber")
-                                .and_then(serde_json::Value::as_u64)
-                        });
-                    let known = ctx.state.lock().unwrap().data.epoch_pin;
+                        .await?
+                        .pointer("/forkConfig/forkBlockNumber")
+                        .and_then(serde_json::Value::as_u64);
+                    let known = ctx.state.lock()?.data.epoch_pin;
                     let new_epoch = matches!((known, pin), (Some(k), Some(p)) if k != p);
                     ctx.metrics.inc(&ctx.metrics.t_resets_total);
                     if new_epoch {
-                        let (slots, accounts) = ctx.shadow.lock().unwrap().clear_all();
-                        let _ = ctx.save_shadow();
+                        let (slots, accounts) = ctx.shadow.lock()?.clear_all();
+                        ctx.save_shadow()?;
                         tracing::warn!(
                             pin = ?pin,
                             previous = ?known,
@@ -290,16 +288,16 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                             cleared_accounts = accounts,
                             "new epoch: the fork base moved; the devnet's writes are gone with it (re-create positions from your journal)"
                         );
-                    } else if shadow_has_recorded_state(ctx) {
+                    } else if shadow_has_recorded_state(ctx)? {
                         // Values whose keys are not marked are orphans from an
                         // older engine (unmark used to keep them): drop them
                         // before restoring, or the re-apply would resurrect a
                         // value the devnet handed back (measured: a crashed
                         // oracle source). The marks themselves are kept.
                         let (orphan_slots, orphan_accounts) =
-                            ctx.shadow.lock().unwrap().prune_orphans();
+                            ctx.shadow.lock()?.prune_orphans();
                         let (slots, accounts, values, accounts_values) = {
-                            let s = ctx.shadow.lock().unwrap();
+                            let s = ctx.shadow.lock()?;
                             (
                                 s.slot_count(),
                                 s.accounts.len(),
@@ -309,13 +307,13 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                         };
                         // Clone out: the re-apply awaits, and a MutexGuard must
                         // not be held across it (the loop must stay Send).
-                        let snapshot = ctx.shadow.lock().unwrap().clone();
-                        let restored = snapshot.reapply(&ctx.anvil_t).await;
+                        let snapshot = ctx.shadow.lock()?.clone();
+                        let restored = snapshot.reapply(&ctx.anvil_t).await?;
                         // Marked keys with no recorded value would hold pin-era
                         // mainnet values under a devnet mark - hand them back.
                         let (unknown_slots, unknown_accounts) =
-                            ctx.shadow.lock().unwrap().unrecorded();
-                        let _ = ctx.save_shadow();
+                            ctx.shadow.lock()?.unrecorded();
+                        ctx.save_shadow()?;
                         tracing::warn!(
                             slots,
                             accounts,
@@ -330,8 +328,8 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                         );
                     }
                     if pin.is_some() && known != pin {
-                        ctx.state.lock().unwrap().data.epoch_pin = pin;
-                        let _ = ctx.save_state();
+                        ctx.state.lock()?.data.epoch_pin = pin;
+                        ctx.save_state()?;
                     }
                     // The journal holds before-values of the *old* chain: a
                     // rewind against the re-forked chain would restore values
@@ -362,13 +360,13 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                     }
                 }
                 {
-                    let mut state = ctx.state.lock().unwrap();
+                    let mut state = ctx.state.lock()?;
                     match chain {
                         Chain::M => state.data.m = None,
                         Chain::T => state.data.t = None,
                     }
                 }
-                let _ = ctx.save_state();
+                ctx.save_state()?;
                 None
             }
         }
@@ -379,15 +377,13 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     // state, so the applier resumes from the pin. Using T's own height + 1 would
     // be wrong - T mines one block per applied parent block (plus one per
     // journal rewind), so its height is not a parent height and `head + 1` can
-    // land past the follow head, stalling T forever (measured).
+    // land past the follow head, stalling T forever (measured). Fail-closed on
+    // the pin read: a fault here must not silently pick that stalled path.
     let reset_pin = if cursor.is_none() {
         rpc.anvil_node_info()
-            .await
-            .ok()
-            .and_then(|info| {
-                info.pointer("/forkConfig/forkBlockNumber")
-                    .and_then(serde_json::Value::as_u64)
-            })
+            .await?
+            .pointer("/forkConfig/forkBlockNumber")
+            .and_then(serde_json::Value::as_u64)
     } else {
         None
     };
@@ -415,7 +411,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         // independently of mainnet's (one T block per applied parent block,
         // plus one per journal rewind).
         {
-            let mut last = ctx.last_stall.lock().unwrap();
+            let mut last = ctx.last_stall.lock()?;
             if *last != (head, follow) {
                 *last = (head, follow);
                 tracing::warn!(
@@ -428,7 +424,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
             }
         }
         let attempt = {
-            let mut t = ctx.last_rebase.lock().unwrap();
+            let mut t = ctx.last_rebase.lock()?;
             let due = t
                 .map(|i: std::time::Instant| i.elapsed() > std::time::Duration::from_secs(60))
                 .unwrap_or(true);
@@ -497,7 +493,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     // both loops double-counted every reorg.
     if matches!(chain, Chain::M) {
         if let (Some(last_hash), Some(last_block)) =
-            (ctx.reth_last_hash(), ctx.reth_last_block())
+            (ctx.reth_last_hash()?, ctx.reth_last_block()?)
         {
             if start > 1 && start - 1 == last_block {
                 if let Some(prev) = reth_block_hash(&ctx.reth, start - 1).await? {
@@ -605,7 +601,7 @@ async fn apply_loop(ctx: Arc<Ctx>) {
 /// Wait for an anvil to answer RPC, so a coordinated restart (reth unwinding,
 /// anvil re-pinning) does not turn the engine into CrashLoopBackOff. Bounded:
 /// if the anvil is still down after the deadline, start-up fails loudly.
-async fn wait_for_anvil(anvil: &crate::rpc::Rpc, name: &str) -> anyhow::Result<()> {
+async fn wait_for_anvil(anvil: &crate::rpc::Rpc, name: &'static str) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
     let mut last_log = std::time::Instant::now();
     loop {
@@ -616,7 +612,11 @@ async fn wait_for_anvil(anvil: &crate::rpc::Rpc, name: &str) -> anyhow::Result<(
             }
             Err(e) => {
                 if std::time::Instant::now() >= deadline {
-                    anyhow::bail!("{name} did not answer RPC within 900s: {e}");
+                    return Err(Error::NotReady {
+                        name,
+                        timeout_secs: 900,
+                        source: Some(e),
+                    });
                 }
                 if last_log.elapsed() > std::time::Duration::from_secs(30) {
                     tracing::warn!(anvil = name, error = %e, "waiting for anvil to come up");
@@ -642,7 +642,8 @@ async fn source_sync_supervisor(ctx: Arc<Ctx>) {
 
 /// Watch T's own blocks: every devnet transaction's writes become shadowed
 /// (copy-on-write) so parent diffs never overwrite them.
-async fn shadow_loop(ctx: Arc<Ctx>) {    let poll = Duration::from_millis(ctx.cfg.services.engine.loops.poll_interval_ms.max(200));
+async fn shadow_loop(ctx: Arc<Ctx>) {
+    let poll = Duration::from_millis(ctx.cfg.services.engine.loops.poll_interval_ms.max(200));
     loop {
         tokio::time::sleep(poll * 2).await;
         let t_head = match ctx.anvil_t.block_number().await {
@@ -663,7 +664,11 @@ async fn shadow_loop(ctx: Arc<Ctx>) {    let poll = Duration::from_millis(ctx.cf
             }
             ctx.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
         }
-        let _ = ctx.save_shadow();
+        // A save fault is logged, not swallowed: the marks are in memory and
+        // the next pass retries the write (bounded: one warn per poll).
+        if let Err(e) = ctx.save_shadow() {
+            tracing::warn!(error = %e, "shadow registry save failed");
+        }
     }
 }
 
@@ -681,13 +686,13 @@ pub(crate) async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
         // A tx from an account stops its account-field sync (nonce -> balance too).
         use alloy_network_primitives::TransactionResponse as _;
         let from = tx.from();
-        ctx.shadow.lock().unwrap().mark_account_fields(from);
+        ctx.shadow.lock()?.mark_account_fields(from);
         shadowed += 1;
         // Value transfers shadow the recipient's balance.
         let value = tx.inner.value();
         if value > alloy_primitives::U256::ZERO {
             if let Some(to) = tx.inner.to() {
-                ctx.shadow.lock().unwrap().mark_account_fields(to);
+                ctx.shadow.lock()?.mark_account_fields(to);
             }
         }
         // Storage writes come from the tx trace (anvil 1.8.5 supports
@@ -695,7 +700,7 @@ pub(crate) async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
         match ctx.anvil_t.trace_tx_prestate(tx.tx_hash()).await {
             Ok(result) => {
                 for w in crate::bal::flatten_trace_diff(&result) {
-                    ctx.shadow.lock().unwrap().mark(&w);
+                    ctx.shadow.lock()?.mark(&w);
                     shadowed += 1;
                 }
             }

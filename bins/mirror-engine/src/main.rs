@@ -3,6 +3,7 @@
 //! `--profile ethereum` runs the Mainnet Mirror engine (today's behavior);
 //! `--profile hyperliquid` lands in R3.
 use clap::{Parser, ValueEnum};
+use std::process::ExitCode;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum Profile {
@@ -23,11 +24,38 @@ struct Cli {
     args: Vec<String>,
 }
 
+/// The shell's own failures (the profile router's vocabulary).
+#[derive(Debug, thiserror::Error)]
+enum ShellError {
+    #[error("the hyperliquid profile lands in R3")]
+    HyperliquidNotYet,
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.profile {
-        Profile::Ethereum => mirror_ethereum::main_entry(cli.args).await,
-        Profile::Hyperliquid => anyhow::bail!("the hyperliquid profile lands in R3"),
+        Profile::Ethereum => match mirror_ethereum::main_entry(cli.args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                report(&e);
+                ExitCode::FAILURE
+            }
+        },
+        Profile::Hyperliquid => {
+            report(&ShellError::HyperliquidNotYet);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print the error and its full cause chain: the typed sources are the point
+/// (the operator sees the boundary that failed, not a flattened string).
+fn report(e: &dyn std::error::Error) {
+    eprintln!("Error: {e}");
+    let mut source = e.source();
+    while let Some(s) = source {
+        eprintln!("  caused by: {s}");
+        source = s.source();
     }
 }

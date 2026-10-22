@@ -427,12 +427,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "ark-ff"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2367,11 +2361,12 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rpc-types-eth",
- "anyhow",
  "hex",
  "reqwest",
  "serde",
  "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2379,7 +2374,6 @@ name = "mirror-config"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "anyhow",
  "clap",
  "serde",
  "thiserror",
@@ -2392,10 +2386,10 @@ name = "mirror-devnet"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "anyhow",
  "mirror-anvil",
  "serde",
  "serde_json",
+ "thiserror",
  "tracing",
 ]
 
@@ -2403,9 +2397,9 @@ dependencies = [
 name = "mirror-engine"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clap",
  "mirror-ethereum",
+ "thiserror",
  "tokio",
 ]
 
@@ -2419,7 +2413,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
- "anyhow",
  "axum",
  "clap",
  "hex",
@@ -2430,7 +2423,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2",
  "thiserror",
  "tokio",
@@ -3434,19 +3426,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap 2.14.2",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "serdect"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4050,12 +4029,6 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

@@ -6,6 +6,10 @@
 //! serialized and flushed as a single write per line: the M replay and the T
 //! applier run as separate tasks, and concurrent appends of long lines
 //! interleaved and corrupted the file (measured: 10 broken lines in 48k).
+//!
+//! A drift write that fails is a typed fault the caller surfaces: a divergence
+//! record that could not be written must not look like a clean run.
+use crate::error::{Error, Result};
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,42 +19,73 @@ const ROTATE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub struct Drift {
     path: PathBuf,
+    /// Serializes whole-line writes. It protects nothing but ordering, so a
+    /// poisoned lock is recovered by construction (there is no value a panic
+    /// could have left mid-update).
     lock: Mutex<()>,
 }
 
 impl Drift {
-    pub fn new(path: PathBuf) -> Self {
+    /// Create the log's directory. A drift log that cannot exist is a boot
+    /// fault, not a silent no-op: it is the forensic trail an alarm points at.
+    pub fn new(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent).map_err(|source| Error::Io {
+                what: "drift log directory",
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
-        Self {
+        Ok(Self {
             path,
             lock: Mutex::new(()),
-        }
+        })
     }
 
-    pub fn append(&self, value: &Value) {
+    pub fn append(&self, value: &Value) -> Result<()> {
         let line = format!("{value}\n");
-        let _guard = self.lock.lock().unwrap();
-        self.rotate_if_needed();
-        let Ok(mut f) = std::fs::OpenOptions::new()
+        let _guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.rotate_if_needed()?;
+        let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-        else {
-            return;
-        };
-        let _ = f.write_all(line.as_bytes());
+            .map_err(|source| Error::Io {
+                what: "drift log",
+                path: self.path.clone(),
+                source,
+            })?;
+        f.write_all(line.as_bytes()).map_err(|source| Error::Io {
+            what: "drift log",
+            path: self.path.clone(),
+            source,
+        })
     }
 
-    fn rotate_if_needed(&self) {
-        let Ok(meta) = std::fs::metadata(&self.path) else {
-            return;
+    fn rotate_if_needed(&self) -> Result<()> {
+        let meta = match std::fs::metadata(&self.path) {
+            Ok(meta) => meta,
+            // No file yet: the first append creates it.
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(Error::Io {
+                    what: "drift log",
+                    path: self.path.clone(),
+                    source,
+                })
+            }
         };
         if meta.len() < ROTATE_BYTES {
-            return;
+            return Ok(());
         }
         let rotated = self.path.with_extension("jsonl.1");
-        let _ = std::fs::rename(&self.path, rotated);
+        std::fs::rename(&self.path, &rotated).map_err(|source| Error::Io {
+            what: "drift log rotation",
+            path: rotated,
+            source,
+        })
     }
 }

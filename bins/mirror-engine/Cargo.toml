@@ -8,8 +8,8 @@ description = "The mirror engine binary: selects the profile and hands off to it
 
 [dependencies]
 mirror-ethereum = { path = "../../crates/ethereum" }
-anyhow = { workspace = true }
 clap = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [lints]

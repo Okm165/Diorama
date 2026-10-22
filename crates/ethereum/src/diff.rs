@@ -5,16 +5,14 @@
 //! context -> mine -> journal -> sampled parity check.
 use crate::bal::{self, Write};
 use crate::ctx::{cursor_from, Ctx};
+use crate::error::{Error, Result};
 use crate::rpc::Rpc;
 use crate::journal::{entry_for_write, BeforeValue, JournalEntry};
 use alloy_primitives::U256;
-use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use std::time::Instant;
 
 pub struct ApplyOutcome {
-    #[allow(dead_code)]
-    pub block: u64,
     pub source: &'static str,
     pub writes: usize,
     pub filtered: usize,
@@ -70,29 +68,26 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // A journal rewind rolled T's values back without moving its head: those
     // blocks must be re-applied even though `t_head >= n`, otherwise the
     // late-completion skip below leaves the rolled-back values stale.
-    let reapply = *ctx.reapply_from.lock().unwrap();
+    let reapply = *ctx.reapply_from.lock()?;
     let needs_reapply = matches!(reapply, Some((from, _)) if n >= from);
     // The journal is the discriminator between "this block's writes are already
     // in" (a timed-out apply that finished late) and "T's head is ahead because
-    // devnet txs were mined in their own prepend block".
-    let journaled = ctx
-        .journal
-        .load(n)
-        .map(|e| !e.is_empty())
-        .unwrap_or(false);
+    // devnet txs were mined in their own prepend block". A journal fault is an
+    // error, never "no journal": guessing would re-journal already-applied
+    // values as before-values.
+    let journaled = ctx.journal.has_entry(n)?;
     if t_head >= n && journaled && !needs_reapply {
         // Late completion after a timeout: the writes are already in (the
         // journal has the block). Samples + cursor only.
         tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
         let t_block = ctx.anvil_t.block_by_number(n, false).await?;
-        let first_block = ctx.cursor_t().map(|c| c.first_block).unwrap_or(n);
-        ctx.set_cursor_t(cursor_from(&t_block, first_block));
+        let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
+        ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
         ctx.save_state()?;
         ctx.metrics.inc(&ctx.metrics.blocks_applied);
         ctx.metrics.set(&ctx.metrics.t_head, n);
         ctx.metrics.set(&ctx.metrics.cursor_t, n);
         return Ok(ApplyOutcome {
-            block: n,
             source: "late",
             writes: 0,
             filtered: 0,
@@ -107,7 +102,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // outside the engine (anvil_reset), which the incremental diff applier
     // cannot recover from - alarm and keep retrying instead of corrupting state.
     if t_head + 1 < n {
-        bail!("T head {t_head} is more than one block behind the parent cursor {n}");
+        return Err(Error::ApplierBehind { t_head, n });
     }
 
     // 0. Prepend rule (plan, "Prepend rules"): mine the devnet's pending txs in
@@ -123,21 +118,33 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     //    at most 3 rounds so a steady stream cannot starve the parent block.
     let mut rounds = 0;
     while rounds < 3 {
-        let Ok((pending, _queued)) = ctx.anvil_t.txpool_status().await else {
-            break;
+        let (pending, _queued) = match ctx.anvil_t.txpool_status().await {
+            Ok(status) => status,
+            Err(e) => {
+                // The prepend is a gas-estimate safeguard; a txpool fault skips
+                // it (named here, bounded: the next apply tries again).
+                tracing::debug!(block = n, error = %e, "prepend skipped: txpool unavailable");
+                break;
+            }
         };
         if pending == 0 {
             break;
         }
         rounds += 1;
         let last = ctx.anvil_t.block_by_number(ctx.anvil_t.block_number().await?, false).await?;
-        let _ = ctx
+        if let Err(e) = ctx
             .anvil_t
             .batch_raw(&[(
                 "anvil_setNextBlockTimestamp".into(),
                 json!([last.header.timestamp + 1]),
             )])
-            .await;
+            .await
+        {
+            // The prepend block's timestamp drifts to anvil's default; the
+            // parent's own context alignment below still sets the *applied*
+            // block's timestamp, so this is a named, bounded degradation.
+            tracing::debug!(block = n, error = %e, "prepend timestamp not set");
+        }
         ctx.anvil_t.anvil_mine(1).await?;
         tracing::info!(block = n, pending, round = rounds, "mined devnet txs before the parent diffs");
     }
@@ -160,36 +167,34 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
             not_watched += 1;
             continue;
         }
-        if ctx.is_shadowed(&w) {
+        if ctx.is_shadowed(&w)? {
             skipped_shadowed += 1;
             continue;
         }
         filtered.push(w);
     }
 
-    // 3. before-values for the journal (read at T's current head).
+    // 3. before-values for the journal (read at T's current head). A read that
+    //    fails fails the apply: a journal with a missing before-value would let
+    //    a later rewind report success while leaving that key un-restored.
     let mut entries: Vec<JournalEntry> = Vec::with_capacity(filtered.len());
     for w in &filtered {
         let before = match w {
-            Write::Storage { address, slot, .. } => ctx
-                .anvil_t
-                .storage_at(*address, *slot, t_head)
-                .await
-                .ok()
-                .map(|v| BeforeValue::Storage(U256::from_be_bytes(v.0))),
+            Write::Storage { address, slot, .. } => {
+                let v = ctx.anvil_t.storage_at(*address, *slot, t_head).await?;
+                BeforeValue::Storage(U256::from_be_bytes(v.0))
+            }
             Write::Balance { address, .. } => {
-                ctx.anvil_t.balance_at(*address, t_head).await.ok().map(BeforeValue::Balance)
+                BeforeValue::Balance(ctx.anvil_t.balance_at(*address, t_head).await?)
             }
             Write::Nonce { address, .. } => {
-                ctx.anvil_t.nonce_at(*address, t_head).await.ok().map(BeforeValue::Nonce)
+                BeforeValue::Nonce(ctx.anvil_t.nonce_at(*address, t_head).await?)
             }
             Write::Code { address, .. } => {
-                ctx.anvil_t.code_at(*address, t_head).await.ok().map(BeforeValue::Code)
+                BeforeValue::Code(ctx.anvil_t.code_at(*address, t_head).await?)
             }
         };
-        if let Some(b) = before {
-            entries.push(entry_for_write(w, b));
-        }
+        entries.push(entry_for_write(w, before)?);
     }
 
     // 4. batched writes (padding is mandatory - measured).
@@ -210,9 +215,9 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         let last_ts = ctx
             .anvil_t
             .block_by_number(ctx.anvil_t.block_number().await?, false)
-            .await
-            .map(|b| b.header.timestamp)
-            .unwrap_or(0);
+            .await?
+            .header
+            .timestamp;
         let ts = (h.timestamp + offset).max(last_ts.saturating_add(1));
         let mut env: Vec<(String, Value)> = vec![
             ("anvil_setNextBlockTimestamp".into(), json!([ts])),
@@ -283,7 +288,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // 7b. probe parity for T (the plan's invariant: "probe parity on T after
     //     context alignment"). Devnet-owned targets are skipped - their state
     //     is the devnet's, not mainnet's.
-    let (t_ok, t_failed, t_skipped) = crate::verify::t_probe_parity(ctx, n).await;
+    let (t_ok, t_failed, t_skipped) = crate::verify::t_probe_parity(ctx, n).await?;
     ctx.metrics.add(&ctx.metrics.t_convergence_ok, t_ok as u64);
     ctx.metrics.add(&ctx.metrics.t_convergence_failed, t_failed as u64);
     ctx.metrics.set(&ctx.metrics.t_convergence_last_failed, t_failed as u64);
@@ -291,8 +296,8 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
 
     // 8. cursor + metrics + drift.
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;
-    let first_block = ctx.cursor_t().map(|c| c.first_block).unwrap_or(n);
-    ctx.set_cursor_t(cursor_from(&t_block, first_block));
+    let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
+    ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
     ctx.metrics.set(&ctx.metrics.cursor_t, n);
     ctx.save_state()?;
     ctx.metrics.inc(&ctx.metrics.blocks_applied);
@@ -308,13 +313,12 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // The rewound range is fully re-applied: resume normal late-completion skips.
     if let Some((_, until)) = reapply {
         if n >= until {
-            *ctx.reapply_from.lock().unwrap() = None;
+            *ctx.reapply_from.lock()? = None;
             tracing::info!(block = n, until, "rewound range re-applied");
         }
     }
 
     let outcome = ApplyOutcome {
-        block: n,
         source: if needs_reapply { "reapply" } else { source },
         writes: total,
         filtered: filtered.len(),
@@ -339,7 +343,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
             "sampled": outcome.sampled,
             "sampled_ok": outcome.sampled_ok,
             "duration_ms": duration_ms,
-        }));
+        }))?;
     }
     tracing::info!(
         block = n,

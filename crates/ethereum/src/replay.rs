@@ -7,14 +7,14 @@ use crate::blob::{
     available_forms, encode_blob_tx, repair_proofs, select_sidecars, BlobForm, SidecarItem,
 };
 use crate::ctx::{block_txs, cursor_from, Ctx};
-use crate::rpc::{Rpc, RpcError};
+use crate::error::{Error, Result};
+use crate::rpc::Rpc;
 use crate::verify::{verify_block, Verification};
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxEip4844Variant};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_consensus::Transaction as _;
 use alloy_network_primitives::TransactionResponse;
 use alloy_primitives::{Bytes, Signature, B256, U256};
-use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
 use serde_json::Value;
 use std::time::Instant;
@@ -53,12 +53,12 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
         return finish_replay(ctx, n, block, started, 0).await;
     }
     if m_head + 1 != n {
-        bail!("M head {m_head} does not precede block {n}");
+        return Err(Error::ReplayOrder { m_head, n });
     }
     // Leftover pool txs from a timed-out attempt would make the resend dirty.
-    if !pool_hashes(&ctx.anvil_m).await.is_empty() {
+    if !pool_hashes(&ctx.anvil_m).await?.is_empty() {
         tracing::warn!(block = n, "clearing leftover pool txs from a previous attempt");
-        clear_pool(ctx, &ctx.anvil_m).await?;
+        clear_pool(&ctx.anvil_m).await?;
     }
 
     // 0. convergence repair: force M's state to mainnet's post-state of n-1
@@ -111,7 +111,7 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     }
     for r in ctx.anvil_m.batch_raw(&env).await? {
         if let Err(e) = r {
-            bail!("block env failed: {e}");
+            return Err(Error::BlockEnv { block: n, source: e });
         }
     }
 
@@ -146,12 +146,18 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
                 // batch_raw yields the JSON-RPC *result* (a hex balance here).
                 let v = match r {
                     Ok(v) => v,
-                    Err(e) => bail!("reth pre-balance: {e}"),
+                    Err(e) => return Err(Error::PreBalance { block: n, source: e }),
                 };
                 pre_balances.push(
                     v.as_str()
                         .and_then(|s| U256::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                        .context("reth pre-balance")?,
+                        .ok_or_else(|| {
+                            mirror_anvil::Error::bad_quantity(
+                                ctx.reth.url(),
+                                "eth_getBalance",
+                                v.as_str().unwrap_or_default(),
+                            )
+                        })?,
                 );
             }
         }
@@ -178,14 +184,15 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
         // The alarm the operator watches for CL sidecar trouble (the replay
         // holds M and retries; the block is never mined partial or empty).
         ctx.metrics.inc(&ctx.metrics.blob_failures);
-        bail!(
-            "block {n}: {skipped_blobs} blob tx(s) have no sidecar (beacon sources unavailable); not mining a partial block"
-        );
+        return Err(Error::BlobsUnavailable {
+            block: n,
+            skipped: skipped_blobs,
+        });
     }
 
     // 4. send + retry-once + mine.
-    send_with_retry(ctx, &raws, block_txs(&block)).await?;
-    ctx.anvil_m.anvil_mine(1).await.context("mining M block")?;
+    send_with_retry(ctx, n, &raws, block_txs(&block)).await?;
+    ctx.anvil_m.anvil_mine(1).await?;
 
     finish_replay(ctx, n, block, started, skipped_blobs).await
 }
@@ -215,13 +222,13 @@ async fn finish_replay(
 
     // 6. cursor + metrics + drift.
     let first_block = ctx
-        .cursor_m()
+        .cursor_m()?
         .map(|c| c.first_block)
         .unwrap_or(n);
-    ctx.set_cursor_m(cursor_from(&m_block, first_block));
+    ctx.set_cursor_m(cursor_from(&m_block, first_block))?;
     ctx.metrics.set(&ctx.metrics.cursor_m, n);
-    ctx.set_reth_last_hash(format!("0x{:x}", block.header.hash));
-    ctx.set_reth_last_block(n);
+    ctx.set_reth_last_hash(format!("0x{:x}", block.header.hash))?;
+    ctx.set_reth_last_block(n)?;
     ctx.save_state()?;
     ctx.metrics.inc(&ctx.metrics.blocks_replayed);
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -237,7 +244,7 @@ async fn finish_replay(
         duration_ms,
         verification,
     };
-    log_and_drift(ctx, n, &outcome, &block);
+    log_and_drift(ctx, n, &outcome, &block)?;
     Ok(outcome)
 }
 
@@ -320,7 +327,7 @@ async fn build_raws(
                     };
                     let selected: Vec<&SidecarItem> = fixed.iter().collect();
                     let forms = available_forms(&selected, t.blob_versioned_hashes.len());
-                    let preferred = ctx.blob_form().unwrap_or(BlobForm::Legacy);
+                    let preferred = ctx.blob_form()?.unwrap_or(BlobForm::Legacy);
                     let mut order =
                         vec![preferred, BlobForm::Legacy, BlobForm::Eip7594, BlobForm::Bare];
                     order.dedup();
@@ -335,7 +342,7 @@ async fn build_raws(
                         }
                     }
                     if let Some((bytes, form)) = encoded {
-                        ctx.set_blob_form(form);
+                        ctx.set_blob_form(form)?;
                         built = Some((bytes, fixed));
                         break;
                     }
@@ -386,6 +393,7 @@ async fn build_raws(
 /// wrapper form). Aborts the block - without mining - if a retry is needed twice.
 async fn send_with_retry(
     ctx: &Ctx,
+    n: u64,
     raws: &[RawTx],
     txs: &[alloy_rpc_types_eth::Transaction],
 ) -> Result<()> {
@@ -420,7 +428,11 @@ async fn send_with_retry(
                 }
                 Err(e) => {
                     // Transport failure: retry the whole block via the caller.
-                    bail!("raw tx send failed at index {i}: {e}");
+                    return Err(Error::TxSend {
+                        block: n,
+                        index: i,
+                        source: e,
+                    });
                 }
             }
         }
@@ -441,50 +453,55 @@ async fn send_with_retry(
         // else is a hard abort.
         let all_blob = rejected.iter().all(|i| raws[*i].blob.is_some());
         if attempt == 0 && all_blob {
-            let next_form = next_blob_form(ctx);
+            let next_form = next_blob_form(ctx)?;
             tracing::warn!(
                 block_txs = raws.len(),
                 rejected = rejected.len(),
                 form = next_form.as_str(),
                 "retrying block with next blob wrapper form"
             );
-            clear_pool(ctx, &ctx.anvil_m).await?;
+            clear_pool(&ctx.anvil_m).await?;
             for i in &rejected {
-                let (t, sig, hash, items) = raws[*i].blob.as_ref().expect("blob parts");
+                // `all_blob` was checked above; the `else` keeps this loop
+                // total without an `expect` (a non-blob rejection aborts below).
+                let Some((t, sig, hash, items)) = raws[*i].blob.as_ref() else {
+                    continue;
+                };
                 let item_refs: Vec<&SidecarItem> = items.iter().collect();
-                let bytes = encode_blob_tx(t, *sig, *hash, &item_refs, next_form)
-                    .with_context(|| format!("re-encode blob tx {}", raws[*i].hash))?;
+                let bytes = encode_blob_tx(t, *sig, *hash, &item_refs, next_form).map_err(
+                    |source| Error::BlobReencode {
+                        block: n,
+                        hash: raws[*i].hash,
+                        source,
+                    },
+                )?;
                 current[*i] = bytes;
             }
-            ctx.set_blob_form(next_form);
+            ctx.set_blob_form(next_form)?;
             continue;
         }
 
-        clear_pool(ctx, &ctx.anvil_m).await?;
-        let e = rejected
-            .first()
-            .map(|i| format!("tx {}", raws[*i].hash))
-            .unwrap_or_default();
-        bail!("block replay aborted: {} raw tx(s) rejected ({e})", rejected.len());
+        clear_pool(&ctx.anvil_m).await?;
+        return Err(Error::ReplayAborted {
+            block: n,
+            rejected: rejected.len(),
+        });
     }
-    bail!("block replay aborted after retry")
+    Err(Error::ReplayRetryExhausted { block: n })
 }
 
-fn next_blob_form(ctx: &Ctx) -> BlobForm {
-    match ctx.blob_form() {
+fn next_blob_form(ctx: &Ctx) -> Result<BlobForm> {
+    Ok(match ctx.blob_form()? {
         Some(BlobForm::Legacy) => BlobForm::Eip7594,
         Some(BlobForm::Eip7594) => BlobForm::Bare,
         Some(BlobForm::Bare) => BlobForm::Legacy,
         None => BlobForm::Legacy,
-    }
+    })
 }
 
 /// Every tx currently in the pool.
-async fn pool_hashes(rpc: &Rpc) -> Vec<B256> {
-    let content: Value = rpc
-        .call_raw("txpool_content", json!([]))
-        .await
-        .unwrap_or(Value::Null);
+async fn pool_hashes(rpc: &Rpc) -> Result<Vec<B256>> {
+    let content: Value = rpc.call_raw("txpool_content", json!([])).await?;
     let mut hashes: Vec<B256> = Vec::new();
     for side in ["pending", "queued"] {
         if let Some(accounts) = content.get(side).and_then(Value::as_object) {
@@ -499,7 +516,7 @@ async fn pool_hashes(rpc: &Rpc) -> Vec<B256> {
             }
         }
     }
-    hashes
+    Ok(hashes)
 }
 
 /// Pool nonce-sequence tracking.
@@ -613,14 +630,21 @@ impl NonceTracker {
 }
 
 /// Drop every tx currently in the pool (M is engine-owned; this keeps retries clean).
-async fn clear_pool(_ctx: &Ctx, rpc: &Rpc) -> Result<()> {
-    for h in pool_hashes(rpc).await {
-        let _ = rpc.anvil_drop_transaction(h).await;
+async fn clear_pool(rpc: &Rpc) -> Result<()> {
+    for h in pool_hashes(rpc).await? {
+        if let Err(e) = rpc.anvil_drop_transaction(h).await {
+            tracing::debug!(tx = %h, error = %e, "pool drop failed");
+        }
     }
     Ok(())
 }
 
-fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_types_eth::Block) {
+fn log_and_drift(
+    ctx: &Ctx,
+    n: u64,
+    outcome: &ReplayOutcome,
+    block: &alloy_rpc_types_eth::Block,
+) -> Result<()> {
     let v = outcome.verification.as_ref();
     let entry = json!({
         "chain": "m",
@@ -644,7 +668,7 @@ fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_t
     // telemetry that nobody reads).
     let clean = v.map(|v| v.divergences.is_empty()).unwrap_or(false);
     if !clean {
-        ctx.drift.append(&entry);
+        ctx.drift.append(&entry)?;
     }
 
     match v {
@@ -685,6 +709,7 @@ fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_t
     if outcome.duration_ms > 10_000 {
         tracing::warn!(block = n, ms = outcome.duration_ms, "slow replay (>10 s)");
     }
+    Ok(())
 }
 
 /// Fetch a reth block for the loop's continuity check (used by the driver).
@@ -693,9 +718,4 @@ pub async fn reth_block_hash(rpc: &Rpc, n: u64) -> Result<Option<String>> {
         .block_by_number_opt(n, false)
         .await?
         .map(|b| format!("0x{:x}", b.header.hash)))
-}
-
-#[allow(dead_code)]
-fn _unused(e: &RpcError) -> anyhow::Error {
-    anyhow!(e.to_string())
 }

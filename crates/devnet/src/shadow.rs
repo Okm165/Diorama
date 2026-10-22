@@ -10,7 +10,7 @@
 //! can be added explicitly through the admin API.
 use mirror_anvil::Write;
 use alloy_primitives::{Address, U256};
-use anyhow::{Context, Result};
+use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -59,8 +59,8 @@ impl Shadow {
                 self.accounts.insert(*address);
                 self.account_values.entry(*address).or_default().1 = *value;
             }
-            _ => {
-                self.accounts.insert(w.address());
+            Write::Code { address, .. } => {
+                self.accounts.insert(*address);
             }
         }
     }
@@ -108,7 +108,12 @@ impl Shadow {
     /// vanish silently while their shadow marks keep mainnet's diffs away -
     /// the worst of both worlds. Values are batched; the caller keeps the
     /// shadow marks so the parent diffs still skip these keys.
-    pub async fn reapply(&self, rpc: &mirror_anvil::Rpc) -> usize {
+    ///
+    /// A transport fault aborts the restore with a typed error: a partial
+    /// restore that reported success would leave T holding some devnet values
+    /// and some pin-era ones with no way to tell which (the caller retries or
+    /// halts; the marks are still in place either way).
+    pub async fn reapply(&self, rpc: &mirror_anvil::Rpc) -> Result<usize> {
         let mut calls: Vec<(String, serde_json::Value)> = Vec::new();
         for (address, slots) in &self.values {
             for (slot, value) in slots {
@@ -138,12 +143,10 @@ impl Shadow {
         }
         let mut applied = 0usize;
         for chunk in calls.chunks(500) {
-            match rpc.batch_raw(chunk).await {
-                Ok(results) => applied += results.iter().filter(|r| r.is_ok()).count(),
-                Err(_) => break,
-            }
+            let results = rpc.batch_raw(chunk).await?;
+            applied += results.iter().filter(|r| r.is_ok()).count();
         }
-        applied
+        Ok(applied)
     }
 
     pub fn mark_account_fields(&mut self, address: Address) {
@@ -234,10 +237,28 @@ impl Shadow {
         (slots, accounts)
     }
 
-    pub fn load(path: &Path) -> Self {
-        let mut s: Self = match std::fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Self::default(),
+    /// Load the registry from its state file.
+    ///
+    /// Three answers (boundary-discipline): **absent** is a fact — first boot
+    /// starts empty; an **IO fault** is not emptiness; **corrupt** bytes die
+    /// here, at the load point, with the path named. Collapsing either failure
+    /// into an empty registry would let the next parent diffs clobber devnet
+    /// writes whose marks just vanished.
+    pub fn load(path: &Path) -> Result<Self> {
+        let mut s = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|source| Error::Corrupt {
+                what: "shadow registry",
+                path: path.to_path_buf(),
+                source,
+            })?,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(source) => {
+                return Err(Error::Io {
+                    what: "shadow registry",
+                    path: path.to_path_buf(),
+                    source,
+                })
+            }
         };
         // Heal state files from the era when unmark kept recorded values:
         // orphans are dropped, never re-owned (see `prune_orphans`).
@@ -249,18 +270,32 @@ impl Shadow {
                 "shadow state had orphan values (keys handed back earlier); pruned"
             );
         }
-        s
+        Ok(s)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent).map_err(|source| Error::Io {
+                what: "shadow registry directory",
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
         let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("renaming {}", path.display()))?;
-        Ok(())
+        let bytes = serde_json::to_vec_pretty(self).map_err(|source| Error::Encode {
+            what: "shadow registry",
+            source,
+        })?;
+        std::fs::write(&tmp, bytes).map_err(|source| Error::Io {
+            what: "shadow registry",
+            path: tmp.clone(),
+            source,
+        })?;
+        std::fs::rename(&tmp, path).map_err(|source| Error::Io {
+            what: "shadow registry",
+            path: path.to_path_buf(),
+            source,
+        })
     }
 }
 

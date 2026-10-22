@@ -4,8 +4,8 @@
 use mirror_config::Instance;
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
+use crate::error::{Error, Result};
 use crate::replay::replay_block;
-use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
 
 pub async fn run(
@@ -19,16 +19,22 @@ pub async fn run(
     if let Some(b) = beacon {
         cfg.services.engine.blobs.beacon_urls = vec![b];
     }
-    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_m, &anvil_t));
-    ctx.restore_blob_form();
+    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_m, &anvil_t)?);
+    ctx.restore_blob_form()?;
 
     // Wait for the scratch anvils (same pod, they start in parallel).
+    let mut last: Option<mirror_anvil::Error>;
     for attempt in 0..120 {
-        if ctx.anvil_m.block_number().await.is_ok() && ctx.anvil_t.block_number().await.is_ok() {
-            break;
+        match (ctx.anvil_m.block_number().await, ctx.anvil_t.block_number().await) {
+            (Ok(_), Ok(_)) => break,
+            (m, t) => last = m.err().or(t.err()),
         }
         if attempt == 119 {
-            anyhow::bail!("scratch anvils did not become ready");
+            return Err(Error::NotReady {
+                name: "scratch anvils",
+                timeout_secs: 120,
+                source: last,
+            });
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
@@ -44,9 +50,7 @@ pub async fn run(
                     .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
             })
         })
-        .ok_or_else(|| {
-            anyhow!("anvil-m has no fork pin - start it with --fork-url and --fork-block-number")
-        })?;
+        .ok_or(Error::NoForkPin { chain: "anvil-m" })?;
 
     println!("== mirror engine selftest ==");
     println!("rpc:      {rpc}");
@@ -60,9 +64,11 @@ pub async fn run(
     for n in (pin + 1)..=(pin + blocks) {
         println!("-- block {n}");
 
-        let r = replay_block(&ctx, n)
-            .await
-            .with_context(|| format!("replay {n}"))?;
+        let r = replay_block(&ctx, n).await.map_err(|source| Error::Step {
+            step: "replay",
+            block: n,
+            source: Box::new(source),
+        })?;
         let mut replayed_ok = true;
         if let Some(v) = &r.verification {
             for (check, ok, detail) in &v.checks {
@@ -89,9 +95,11 @@ pub async fn run(
             if replayed_ok { "" } else { "(DIVERGED)" }
         );
 
-        let a = apply_block(&ctx, n)
-            .await
-            .with_context(|| format!("apply {n}"))?;
+        let a = apply_block(&ctx, n).await.map_err(|source| Error::Step {
+            step: "apply",
+            block: n,
+            source: Box::new(source),
+        })?;
         println!(
             "   T apply:  source={} writes={} filtered={} skipped_shadowed={} sampled={}/{} ms={}",
             a.source, a.writes, a.filtered, a.skipped_shadowed, a.sampled_ok, a.sampled, a.duration_ms

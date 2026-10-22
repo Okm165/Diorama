@@ -4,9 +4,62 @@
 //! for pre-Prague payloads) and `engine_forkchoiceUpdatedV3`. The JWT is the
 //! same secret the consensus client uses (`/secrets/jwt.hex`).
 use alloy_rpc_types_engine::{Claims, JwtSecret};
-use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The engine-API boundary's error taxonomy (boundary-discipline): a JWT that
+/// cannot be read or signed is a boot/config fault; a transport failure is a
+/// fault; an HTTP refusal or a bad body is named with the method and a
+/// truncated body, so the operator sees what reth actually said.
+#[derive(Debug, thiserror::Error)]
+pub enum EngineApiError {
+    #[error("reading the engine JWT secret {path}")]
+    JwtRead {
+        path: PathBuf,
+        #[source]
+        source: alloy_rpc_types_engine::JwtError,
+    },
+
+    #[error("signing the engine JWT")]
+    JwtSign {
+        #[source]
+        source: jsonwebtoken::errors::Error,
+    },
+
+    #[error("building the engine api client")]
+    ClientBuild {
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("engine {method} transport")]
+    Transport {
+        method: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+
+    #[error("engine {method}: HTTP {status}: {body}")]
+    Status {
+        method: &'static str,
+        status: u16,
+        body: String,
+    },
+
+    #[error("engine {method}: bad response: {body}")]
+    Decode {
+        method: &'static str,
+        body: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("engine {method}: {message}")]
+    Rpc {
+        method: &'static str,
+        message: String,
+    },
+}
 
 #[derive(Clone)]
 pub struct EngineClient {
@@ -16,23 +69,27 @@ pub struct EngineClient {
 }
 
 impl EngineClient {
-    pub fn new(url: &str, jwt_path: &Path) -> Result<Self> {
-        let secret = JwtSecret::from_file(jwt_path)
-            .with_context(|| format!("reading engine JWT secret {}", jwt_path.display()))?;
+    pub fn new(url: &str, jwt_path: &Path) -> Result<Self, EngineApiError> {
+        let secret = JwtSecret::from_file(jwt_path).map_err(|source| EngineApiError::JwtRead {
+            path: jwt_path.to_path_buf(),
+            source,
+        })?;
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|source| EngineApiError::ClientBuild { source })?;
         Ok(Self {
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(180))
-                .build()?,
+            http,
             url: url.to_string(),
             secret,
         })
     }
 
-    async fn call(&self, method: &str, params: Value) -> Result<Value> {
+    async fn call(&self, method: &'static str, params: Value) -> Result<Value, EngineApiError> {
         let token = self
             .secret
             .encode(&Claims::with_current_timestamp())
-            .context("signing engine JWT")?;
+            .map_err(|source| EngineApiError::JwtSign { source })?;
         let resp = self
             .http
             .post(&self.url)
@@ -41,16 +98,29 @@ impl EngineClient {
             .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
             .send()
             .await
-            .with_context(|| format!("engine {method} request"))?;
+            .map_err(|source| EngineApiError::Transport { method, source })?;
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let text = resp
+            .text()
+            .await
+            .map_err(|source| EngineApiError::Transport { method, source })?;
         if !status.is_success() {
-            bail!("engine {method}: HTTP {status}: {}", truncate(&text, 300));
+            return Err(EngineApiError::Status {
+                method,
+                status: status.as_u16(),
+                body: truncate(&text, 300).to_string(),
+            });
         }
-        let v: Value = serde_json::from_str(&text)
-            .with_context(|| format!("engine {method}: bad response {}", truncate(&text, 200)))?;
+        let v: Value = serde_json::from_str(&text).map_err(|source| EngineApiError::Decode {
+            method,
+            body: truncate(&text, 200).to_string(),
+            source,
+        })?;
         if let Some(err) = v.get("error") {
-            bail!("engine {method}: {err}");
+            return Err(EngineApiError::Rpc {
+                method,
+                message: err.to_string(),
+            });
         }
         Ok(v.get("result").cloned().unwrap_or(Value::Null))
     }
@@ -63,19 +133,20 @@ impl EngineClient {
         versioned_hashes: Vec<String>,
         parent_beacon_block_root: String,
         execution_requests: Option<Vec<String>>,
-    ) -> Result<(String, String)> {
-        let mut params = json!([payload, versioned_hashes, parent_beacon_block_root]);
-        let method = match &execution_requests {
+    ) -> Result<(String, String), EngineApiError> {
+        let mut params = vec![
+            payload,
+            json!(versioned_hashes),
+            json!(parent_beacon_block_root),
+        ];
+        let method = match execution_requests {
             Some(requests) => {
-                params
-                    .as_array_mut()
-                    .expect("array")
-                    .push(json!(requests));
+                params.push(json!(requests));
                 "engine_newPayloadV4"
             }
             None => "engine_newPayloadV3",
         };
-        let out = self.call(method, params).await?;
+        let out = self.call(method, Value::Array(params)).await?;
         let status = out
             .get("status")
             .and_then(|s| s.as_str())
@@ -91,7 +162,12 @@ impl EngineClient {
     }
 
     /// Update the forkchoice to `head`. Returns the resulting payload status.
-    pub async fn forkchoice_updated(&self, head: &str, safe: &str, finalized: &str) -> Result<String> {
+    pub async fn forkchoice_updated(
+        &self,
+        head: &str,
+        safe: &str,
+        finalized: &str,
+    ) -> Result<String, EngineApiError> {
         let out = self
             .call(
                 "engine_forkchoiceUpdatedV3",
