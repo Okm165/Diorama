@@ -17,22 +17,22 @@ numbered list below then walks M's side of it step by step):
 
 ```
    reth                          ENGINE                          anvil M / T
-   │                             │                               │
-   │ block(N): txs, env,         │                               │
-   │   withdrawals               │                               │
-   ├────────────────────────────►│ replay loop                   │
-   │ receipts · logs · traces    │                               │
-   ├────────────────────────────►│ verifier: counts · gas ·      │
-   │                             │ logsBloom · log set · probes  │
-   │                             │ send raws in order → mine     │
-   │                             ├──────────────────────────────►│ M
-   │ BAL(N) for the watch list   │                               │
-   ├────────────────────────────►│ diff applier                  │
-   │                             │ pad → write ≤500 → mine(1)    │
-   │                             ├──────────────────────────────►│ T
-   │                             │ sampled parity + T probes     │
-   ├────────────────────────────►│◄──────────────────────────────┤
-   │                             │ journal + drift.jsonl         │
+   |                             |                               |
+   | block(N): txs, env,         |                               |
+   |   withdrawals               |                               |
+   +---------------------------->| replay loop                   |
+   | receipts, logs, traces      |                               |
+   +---------------------------->| verifier: counts, gas,        |
+   |                             | logsBloom, log set, probes    |
+   |                             | send raws in order -> mine    |
+   |                             +------------------------------>| M
+   | BAL(N) for the watch list   |                               |
+   +---------------------------->| diff applier                  |
+   |                             | pad -> write <=500 -> mine(1) |
+   |                             +------------------------------>| T
+   |                             | sampled parity + T probes     |
+   +---------------------------->|<------------------------------+
+   |                             | journal + drift.jsonl         |
 ```
 
 Per replayed block on M the engine does, in order:
@@ -72,8 +72,8 @@ diffs and mines the parent's block. Two reasons, both measured:
    the state its gas was estimated on.
 
 ```
-   no prepend  estimate on S ──► diffs land ──► execute on S′ reverts at 97%
-   prepend     estimate on S ──► own block  ──► execute on S  gas stays honest
+   no prepend  estimate on S ---> diffs land ---> execute on S' reverts at 97%
+   prepend     estimate on S ---> own block  ---> execute on S  gas is honest
 ```
 
 After the parent's block is mined, the applier runs the plan's T-side invariant

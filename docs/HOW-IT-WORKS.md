@@ -26,40 +26,39 @@ has no P2P peers and is fed by the local Lighthouse over the Engine API.
 
 ```
    mainnet (bootstrap only)
-             │ checkpoint sync
-             ▼
-   ┌─────────┬─────────┐
-   │  Lighthouse (CL)  │
-   ├───────────────────┤
-   │  semi-supernode   │────────┐
-   └─────────┬─────────┘        │ beacon API
-             │ Engine API       │ (blob sidecars)
-             ▼                  │
-   ┌─────────┬──────────┐       │
-   │  reth (EL)         │       │
-   ├────────────────────┤       │
-   │  pruned full node  │       │
-   └─────────┬──────────┘       │
-             │                  │
-             │ blocks · BAL(N)  │
-             │ receipts · state │
-             ▼                  ▼
-   ┌─────────┬──────────────────┬────────────────────────────────┐
-   │  ENGINE                                                     │
-   ├─────────────────────────────────────────────────────────────┤
-   │  replay loop → M  ·  BAL diff applier → T                   │
-   │  verifier · convergence repair · shadow registry · journal  │
-   │  API: /status · /metrics · /admin/*                         │
-   └─────────┬──────────────────────┬────────────────────────────┘
-             │ 1:1 replay + verify  │ watch-list BAL diffs (COW)
-             │ every parent block   │ (copy-on-write)
-             ▼                      ▼
-       ┌─────┬─────┐          ┌─────┬─────┐
-       │  anvil M  │          │  anvil T  │ ◄── your dapp
-       │  strict   │          │  devnet   │     (HTTP / WS)
-       └───────────┘          └───────────┘
-
-   both anvils fork reth at reth_head − 128 (the pin)
+             | checkpoint sync
+             v
+   +---------+---------+
+   |  Lighthouse (CL)  |
+   +-------------------+
+   |  semi-supernode   |--------+
+   +---------+---------+        | beacon API
+             | Engine API       | (blob sidecars)
+             v                  |
+   +---------+----------+       |
+   |  reth (EL)         |       |
+   +--------------------+       |
+   |  pruned full node  |       |
+   +---------+----------+       |
+             |                  |
+             | blocks, BAL(N)   |
+             | receipts, state  |
+             v                  v
+   +---------+------------------+-----------------------------+
+   |  ENGINE                                                  |
+   +----------------------------------------------------------+
+   |  replay loop -> M  .  BAL diff applier -> T              |
+   |  verifier, convergence repair, shadow registry, journal  |
+   |  API: /status, /metrics, /admin/*                        |
+   +---------+-----------------------+------------------------+
+             | 1:1 replay + verify   | watch-list BAL diffs (COW)
+             | every parent block    | (copy-on-write)
+             v                       v
+       +-----+-----+           +-----+-----+
+       |  anvil M  |           |  anvil T  | <--- your dapp
+       |  strict   |           |  devnet   |      (HTTP/WS)
+       +-----------+           +-----------+
+   both anvils fork reth at reth_head - 128 (the pin)
 ```
 
 One namespace (`mainnet-mirror`). The engine never talks P2P; its only inputs
@@ -149,9 +148,9 @@ registry (`shadow.json`) keeps the **marks** (parent diffs skip those keys
 forever) and the **latest values** (state is rebuilt from them after a re-fork).
 
 ```
-   parent diff for key K ──► is K devnet-owned?
-                             ├── no  ──► write mainnet's value to T
-                             └── yes ──► skip; T keeps the devnet's value
+   parent diff for key K ---> is K devnet-owned?
+                              +-- no  ---> write mainnet's value to T
+                              +-- yes ---> skip; T keeps the devnet's value
 ```
 
 Unshadowing (`/admin/shadow`) clears both and *immediately* pushes reth's values
