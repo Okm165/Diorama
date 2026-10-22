@@ -10,6 +10,11 @@ description = "The anvil control plane: JSON-RPC client, batching, cheatcode con
 alloy-primitives = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
+alloy-json-rpc = { workspace = true }
+alloy-serde = { workspace = true }
+alloy-rpc-types-trace = { workspace = true }
+alloy-rpc-types-anvil = { workspace = true }
+alloy-rpc-types-txpool = { workspace = true }
 hex = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

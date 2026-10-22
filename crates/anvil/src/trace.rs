@@ -1,9 +1,19 @@
 //! prestateTracer diff flattening (`debug_traceBlockByNumber(..., diffMode)`) —
-//! the fallback when a BAL is unavailable. Shapes measured on anvil 1.8.5.
+//! the fallback when a BAL is unavailable. The wire shapes are alloy's
+//! (`alloy_rpc_types_trace::geth`); the flattening is one small function per
+//! account field, so a tracer shape change lands as a compile error, never as
+//! a silently skipped write.
+//!
+//! Measured on anvil 1.8.6 (the mirror's pin): the frame lists only *changed*
+//! accounts in `post` (created accounts absent from `pre`, selfdestructed
+//! absent from `post`), `balance`/`code`/`storage` as hex strings, `nonce` as
+//! a JSON number, and storage keys/values as **full-width** 32-byte hex —
+//! exactly what alloy's `AccountState` models, so the parse is the official
+//! type's, not ours.
 use alloy_primitives::{Address, Bytes, U256};
-use crate::error::{Error, Result};
-use serde_json::Value;
+use alloy_rpc_types_trace::geth::{AccountState, GethTrace, PreStateFrame, TraceResult};
 
+/// One state write a trace diff reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Write {
     Storage {
@@ -36,133 +46,163 @@ impl Write {
     }
 }
 
-/// Flatten one `prestateTracer{diffMode}` result object (`{pre, post}`).
-pub fn flatten_trace_diff(result: &Value) -> Vec<Write> {
-    let mut out = Vec::new();
-    let pre = result.get("pre").and_then(Value::as_object);
-    let Some(post) = result.get("post").and_then(Value::as_object) else {
-        return out;
+/// Flatten one transaction's `prestateTracer{diffMode}` frame into writes:
+/// every account the frame lists in `post` contributes the fields that
+/// differ from `pre`.
+pub fn flatten_trace_diff(frame: &PreStateFrame) -> Vec<Write> {
+    let Some(diff) = frame.as_diff() else {
+        return Vec::new();
     };
-    for (addr_str, post_acct) in post {
-        let Ok(address) = addr_str.parse::<Address>() else {
-            continue;
-        };
-        let pre_acct = pre.and_then(|p| p.get(addr_str));
-        // Balance
-        let post_balance = post_acct.get("balance").and_then(Value::as_str);
-        let pre_balance = pre_acct
-            .and_then(|p| p.get("balance"))
-            .and_then(Value::as_str);
-        if let Some(pb) = post_balance {
-            if pre_balance != Some(pb) {
-                if let Some(v) = parse_hex_u256(pb) {
-                    out.push(Write::Balance { address, value: v });
-                }
-            }
-        }
-        // Nonce (tracer emits a JSON number)
-        let post_nonce = post_acct.get("nonce").and_then(Value::as_u64);
-        let pre_nonce = pre_acct.and_then(|p| p.get("nonce")).and_then(Value::as_u64);
-        if let Some(n) = post_nonce {
-            if pre_nonce != Some(n) {
-                out.push(Write::Nonce { address, value: n });
-            }
-        }
-        // Code
-        let post_code = post_acct.get("code").and_then(Value::as_str);
-        let pre_code = pre_acct.and_then(|p| p.get("code")).and_then(Value::as_str);
-        if let Some(c) = post_code {
-            if pre_code != Some(c) {
-                if let Ok(bytes) = c.parse::<Bytes>() {
-                    out.push(Write::Code { address, value: bytes });
-                }
-            }
-        }
-        // Storage
-        if let Some(storage) = post_acct.get("storage").and_then(Value::as_object) {
-            let pre_storage = pre_acct
-                .and_then(|p| p.get("storage"))
-                .and_then(Value::as_object);
-            for (slot_str, value) in storage {
-                let Some(v) = value.as_str() else { continue };
-                let pre_v = pre_storage
-                    .and_then(|s| s.get(slot_str))
-                    .and_then(Value::as_str);
-                if pre_v == Some(v) {
-                    continue;
-                }
-                if let (Some(slot), Some(value)) = (parse_hex_u256(slot_str), parse_hex_u256(v)) {
-                    out.push(Write::Storage {
-                        address,
-                        slot,
-                        value,
-                    });
-                }
-            }
-        }
+    let mut out = Vec::new();
+    for (address, post) in &diff.post {
+        let pre = diff.pre.get(address);
+        push_balance(&mut out, *address, pre, post);
+        push_nonce(&mut out, *address, pre, post);
+        push_code(&mut out, *address, pre, post);
+        push_storage(&mut out, *address, pre, post);
     }
     out
 }
 
-/// `debug_traceBlockByNumber(..., diffMode)` returns one entry per tx:
-/// `[{txHash, result: {pre, post}}, ...]`. Flatten all of them.
-pub fn flatten_trace_block(traces: &Value) -> Result<Vec<Write>> {
-    let arr = traces.as_array().ok_or(Error::Corrupt {
-        what: "trace block",
-        detail: "expected an array of per-tx traces".into(),
-    })?;
-    let mut out = Vec::new();
-    for entry in arr {
-        if let Some(result) = entry.get("result") {
-            out.extend(flatten_trace_diff(result));
+fn push_balance(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>, post: &AccountState) {
+    if let Some(value) = post.balance {
+        if pre.and_then(|p| p.balance) != Some(value) {
+            out.push(Write::Balance { address, value });
         }
     }
-    Ok(out)
 }
 
-pub fn parse_hex_u256(s: &str) -> Option<U256> {
-    let t = s.trim_start_matches("0x");
-    if t.is_empty() {
-        return Some(U256::ZERO);
+fn push_nonce(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>, post: &AccountState) {
+    if let Some(value) = post.nonce {
+        if pre.and_then(|p| p.nonce) != Some(value) {
+            out.push(Write::Nonce { address, value });
+        }
     }
-    U256::from_str_radix(t, 16).ok()
+}
+
+fn push_code(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>, post: &AccountState) {
+    if let Some(value) = &post.code {
+        if pre.and_then(|p| p.code.as_ref()) != Some(value) {
+            out.push(Write::Code {
+                address,
+                value: value.clone(),
+            });
+        }
+    }
+}
+
+fn push_storage(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>, post: &AccountState) {
+    for (slot, value) in &post.storage {
+        if pre.and_then(|p| p.storage.get(slot)) == Some(value) {
+            continue;
+        }
+        out.push(Write::Storage {
+            address,
+            slot: U256::from_be_bytes(slot.0),
+            value: U256::from_be_bytes(value.0),
+        });
+    }
+}
+
+/// Flatten one transaction's trace answer: the prestate frame's writes, or
+/// none when the tracer answered with another frame (we always ask for the
+/// prestate tracer, so another frame means nothing to mark).
+pub fn flatten_trace(trace: &GethTrace) -> Vec<Write> {
+    match trace {
+        GethTrace::PreStateTracer(frame) => flatten_trace_diff(frame),
+        _ => Vec::new(),
+    }
+}
+
+/// Flatten a `debug_traceBlockByNumber` answer (`[{txHash, result}]`):
+/// the prestate frames of every successfully traced transaction, in order.
+/// A transaction the tracer could not process contributes no writes — the
+/// caller's convergence repair is the backstop for a partial flattening.
+pub fn flatten_trace_block(traces: &[TraceResult]) -> Vec<Write> {
+    traces
+        .iter()
+        .filter_map(TraceResult::success)
+        .flat_map(flatten_trace)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A genuine excerpt of anvil 1.8.6 `prestateTracer` diffMode output
+    /// (measured 2026-10-22 on the dry-run fork): storage keys/values are
+    /// full-width 32-byte hex; `nonce` is a JSON number; `post` carries only
+    /// the fields that changed, `pre` the touched account's prior state.
+    const MEASURED_FRAME: &str = r#"{
+      "post": {
+        "0x5875db54cd9ae2b2a875e09bb731772297ae9d92": {"balance": "0xbdc602038b410e5", "nonce": 172449},
+        "0x0000000aa232009084bd71a5797d089aa4edfad4": {
+          "storage": {
+            "0x0000000000000000000000000000000000000000000000000000000000000003": "0x000000004be6a279be925c8183c6ab0b5b60554bc7adbacf0000000001908b7a",
+            "0xc00849b9357c3b9274369e6c5b3b60d0742a7ddad7c3c48b10e9b9109914640a": "0x0000000000000000000000000000000000000000000000000000001cfc5bd1cb"
+          }
+        }
+      },
+      "pre": {
+        "0x5875db54cd9ae2b2a875e09bb731772297ae9d92": {"balance": "0xbdc860812f71543", "nonce": 172448},
+        "0x0000000aa232009084bd71a5797d089aa4edfad4": {
+          "balance": "0x0",
+          "nonce": 8,
+          "storage": {
+            "0x0000000000000000000000000000000000000000000000000000000000000003": "0x000000004be6a279be925c8183c6ab0b5b60554bc7adbacf0000000001908b79",
+            "0xc00849b9357c3b9274369e6c5b3b60d0742a7ddad7c3c48b10e9b9109914640a": "0x0000000000000000000000000000000000000000000000000000001cf99154b7"
+          }
+        }
+      }
+    }"#;
+
     #[test]
     fn trace_diff_flattening() {
-        // Shape measured on anvil 1.8.5 (prestateTracer diffMode).
-        let trace: Value = serde_json::from_str(
-            r#"{
-              "post": {
-                "0x0000000000000000000000000000000000000000": {"balance":"0x1319718a5000"},
-                "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": {"balance":"0xde0b6b3a7640001"},
-                "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {"balance":"0x21e19e0a387cf2b5fff","nonce":1},
-                "0x00000000000000000000000000000000000000aa": {"storage":{"0x1":"0x2a"}}
-              },
-              "pre": {
-                "0x0000000000000000000000000000000000000000": {"balance":"0x0"},
-                "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": {"balance":"0xde0b6b3a7640000"},
-                "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {"balance":"0x21e19e0a387cf2b5ffe","nonce":0}
-              }
-            }"#,
-        )
-        .unwrap();
-        let writes = flatten_trace_diff(&trace);
-        // 3 balances + 1 nonce + 1 storage; coinbase excluded only if unchanged (it changed)
-        assert!(writes.iter().any(|w| matches!(w, Write::Storage { .. })));
-        assert!(writes
-            .iter()
-            .any(|w| matches!(w, Write::Nonce { value: 1, .. })));
+        let frame: PreStateFrame = serde_json::from_str(MEASURED_FRAME).expect("measured frame");
+        let writes = flatten_trace_diff(&frame);
         assert_eq!(
-            writes
-                .iter()
-                .filter(|w| matches!(w, Write::Balance { .. }))
-                .count(),
-            3
+            writes,
+            vec![
+                Write::Storage {
+                    address: "0x0000000aa232009084bd71a5797d089aa4edfad4".parse().unwrap(),
+                    slot: U256::from(3u64),
+                    value: U256::from_str_radix(
+                        "4be6a279be925c8183c6ab0b5b60554bc7adbacf0000000001908b7a",
+                        16
+                    )
+                    .unwrap(),
+                },
+                Write::Storage {
+                    address: "0x0000000aa232009084bd71a5797d089aa4edfad4".parse().unwrap(),
+                    slot: U256::from_str_radix(
+                        "c00849b9357c3b9274369e6c5b3b60d0742a7ddad7c3c48b10e9b9109914640a",
+                        16
+                    )
+                    .unwrap(),
+                    value: U256::from_str_radix("1cfc5bd1cb", 16).unwrap(),
+                },
+                Write::Balance {
+                    address: "0x5875db54cd9ae2b2a875e09bb731772297ae9d92".parse().unwrap(),
+                    value: U256::from(0x0bdc_6020_38b4_10e5_u64),
+                },
+                Write::Nonce {
+                    address: "0x5875db54cd9ae2b2a875e09bb731772297ae9d92".parse().unwrap(),
+                    value: 172_449,
+                },
+            ]
         );
+    }
+
+    #[test]
+    fn unchanged_fields_are_not_writes() {
+        // The same value in `pre` and `post` is not a write (the scanner must
+        // not mark untouched state as devnet-owned).
+        let frame: PreStateFrame = serde_json::from_str(
+            r#"{"pre":{"0x0000000000000000000000000000000000000001":{"balance":"0x1"}},
+                "post":{"0x0000000000000000000000000000000000000001":{"balance":"0x1"}}}"#,
+        )
+        .expect("frame");
+        assert!(flatten_trace_diff(&frame).is_empty());
     }
 }

@@ -1,15 +1,18 @@
 //! Diff applier: keeps T's watch-list state fresh by applying parent BALs.
 //!
-//! Per parent block (plan §4.2): fetch BAL -> watch list -> skip shadowed (COW)
-//! -> pad hex -> read before-values -> batched cheatcode writes -> align block
-//! context -> mine -> journal -> sampled parity check.
+//! Per parent block (plan §4.2): prepend devnet txs -> fetch BAL (trace
+//! fallback) -> watch list -> skip shadowed (COW) -> read before-values ->
+//! batched cheatcode writes -> align block context -> mine -> journal ->
+//! sampled parity + probe parity. Each phase is one function; `apply_block` is
+//! the sequence.
 use crate::bal::{self, Write};
 use crate::ctx::{cursor_from, Ctx};
 use crate::error::{Error, Result};
 use crate::journal::{entry_for_write, BeforeValue, JournalEntry};
 use alloy_primitives::U256;
+use alloy_rpc_types_eth::Block;
 use mirror_devnet::probes::ProbeRunner;
-use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 pub struct ApplyOutcome {
@@ -22,10 +25,24 @@ pub struct ApplyOutcome {
     pub duration_ms: u64,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
-)]
+/// One T apply anomaly line in drift.jsonl (the re-apply of a rewound range,
+/// or a sampled-parity mismatch). The `source` names which diff source the
+/// anomaly belongs to (`bal`, `trace`, `late`, `reapply`).
+#[derive(serde::Serialize)]
+struct TDriftEntry<'a> {
+    chain: &'static str,
+    block: u64,
+    source: &'a str,
+    bal_writes: usize,
+    applied: usize,
+    filtered: usize,
+    not_watched: usize,
+    skipped_shadowed: usize,
+    sampled: usize,
+    sampled_ok: usize,
+    duration_ms: u64,
+}
+
 pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let started = Instant::now();
     let block = ctx.reth.block_by_number(n, false).await?;
@@ -43,25 +60,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // values as before-values.
     let journaled = ctx.journal.has_entry(n)?;
     if t_head >= n && journaled && !needs_reapply {
-        // Late completion after a timeout: the writes are already in (the
-        // journal has the block). Samples + cursor only.
-        tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
-        let t_block = ctx.anvil_t.block_by_number(n, false).await?;
-        let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
-        ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
-        ctx.save_state()?;
-        ctx.metrics.inc(&ctx.metrics.blocks_applied);
-        ctx.metrics.set(&ctx.metrics.t_head, t_head);
-        ctx.metrics.set(&ctx.metrics.cursor_t, n);
-        return Ok(ApplyOutcome {
-            source: "late",
-            writes: 0,
-            filtered: 0,
-            skipped_shadowed: 0,
-            sampled: 0,
-            sampled_ok: 0,
-            duration_ms: started.elapsed().as_millis() as u64,
-        });
+        return late_completion(ctx, n, t_head, started).await;
     }
     // T's head may be *ahead* of the cursor (devnet prepend blocks) - that is
     // normal. Behind by more than one block is not: that means someone reset T
@@ -71,39 +70,205 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         return Err(Error::ApplierBehind { t_head, n });
     }
 
-    // 0. Prepend rule (plan, "Prepend rules"): mine the devnet's pending txs in
-    //    their own block *before* this parent's diffs land. Then the parent's
-    //    block on T carries only the parent's effects, and a devnet tx executes
-    //    against the same state its gas was estimated on (measured: anvil's
-    //    auto-gas for eth_sendTransaction came out ~5% short when the diffs
-    //    landed between estimate and execution, so the tx ran out of gas).
-    //    Bounded loop: a tx that arrives *while* this apply is writing diffs
-    //    would otherwise be mined together with them, executing against a state
-    //    its gas was never estimated on (measured: an Aave borrow estimated
-    //    pre-diff came out ~5% short and reverted). Mine until the pool drains,
-    //    at most 3 rounds so a steady stream cannot starve the parent block.
+    prepend_devnet_txs(ctx, n).await?;
+
+    let (writes, source) = fetch_diffs(ctx, n).await?;
+    let total = writes.len();
+    let (filtered, stats) = filter_watched(ctx, writes)?;
+    let entries = read_before_values(ctx, &filtered, t_head).await?;
+
+    // Batched writes (padding is mandatory - measured).
+    let applied = mirror_anvil::apply_writes(
+        &ctx.anvil_t,
+        &filtered,
+        ctx.cfg.services.engine.loops.chunk_size,
+    )
+    .await?;
+
+    align_context_and_mine(ctx, &block).await?;
+
+    ctx.journal.record(n, &entries)?;
+    ctx.journal.prune(n);
+
+    // Scan this apply's own devnet blocks *before* asserting parity: the
+    // prepend loop may have mined devnet txs whose writes are not marked
+    // shadowed yet (the shadow loop polls every ~2 s), and the probe parity
+    // must skip devnet-owned accounts (copy-on-write) instead of alarming on
+    // the devnet's own writes. Measured: spurious aave_weth_price /
+    // univ3_weth_usdc_slot0 mismatches right after a venue interaction.
+    // A scan that cannot complete keeps the marks already in memory and the
+    // walk retries from the last clean block: a named, bounded degradation.
+    if let Err(e) = scan_own_blocks(ctx, t_head).await {
+        tracing::warn!(error = %e, "inline shadow scan incomplete");
+    }
+
+    let t_latest = ctx.anvil_t.block_number().await?;
+    let (sampled, sampled_ok) = sample_parity(ctx, n, &filtered, t_latest).await;
+    t_convergence_probes(ctx, n).await?;
+
+    finalize(
+        ctx,
+        n,
+        started,
+        t_latest,
+        ApplyFacts {
+            source: if needs_reapply { "reapply" } else { source },
+            total,
+            applied,
+            filtered: filtered.len(),
+            stats,
+            sampled,
+            sampled_ok,
+            needs_reapply,
+            reapply,
+        },
+    )
+    .await
+}
+
+/// The per-block facts the finalize step records (cursor, metrics, drift,
+/// outcome).
+struct ApplyFacts {
+    source: &'static str,
+    total: usize,
+    applied: usize,
+    filtered: usize,
+    stats: FilterStats,
+    sampled: usize,
+    sampled_ok: usize,
+    needs_reapply: bool,
+    reapply: Option<(u64, u64)>,
+}
+
+/// Cursor + metrics + drift + log for one applied block.
+async fn finalize(
+    ctx: &Ctx,
+    n: u64,
+    started: Instant,
+    t_latest: u64,
+    facts: ApplyFacts,
+) -> Result<ApplyOutcome> {
+    let t_block = ctx.anvil_t.block_by_number(n, false).await?;
+    let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
+    ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
+    ctx.metrics.set(&ctx.metrics.cursor_t, n);
+    ctx.save_state()?;
+    ctx.metrics.inc(&ctx.metrics.blocks_applied);
+    ctx.metrics.set(&ctx.metrics.bal_writes, facts.applied as u64);
+    ctx.metrics
+        .set(&ctx.metrics.bal_filtered_out, facts.stats.not_watched as u64);
+    ctx.metrics
+        .set(&ctx.metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
+    let duration_ms = started.elapsed().as_millis() as u64;
+    ctx.metrics.set(&ctx.metrics.last_apply_ms, duration_ms);
+    ctx.metrics.set(&ctx.metrics.t_head, t_latest);
+
+    // The rewound range is fully re-applied: resume normal late-completion skips.
+    if let Some((_, until)) = facts.reapply {
+        if n >= until {
+            *ctx.reapply_from.lock()? = None;
+            tracing::info!(block = n, until, "rewound range re-applied");
+        }
+    }
+
+    let outcome = ApplyOutcome {
+        source: facts.source,
+        writes: facts.total,
+        filtered: facts.filtered,
+        skipped_shadowed: facts.stats.skipped_shadowed,
+        sampled: facts.sampled,
+        sampled_ok: facts.sampled_ok,
+        duration_ms,
+    };
+    // Divergence log, not a flight recorder: only anomalies land here (the
+    // re-apply of a rewound range, or a sampled-parity mismatch). Counts live
+    // in the metrics.
+    if facts.needs_reapply || outcome.sampled_ok < outcome.sampled {
+        ctx.drift.append(&TDriftEntry {
+            chain: "t",
+            block: n,
+            source: facts.source,
+            bal_writes: facts.total,
+            applied: facts.applied,
+            filtered: outcome.filtered,
+            not_watched: facts.stats.not_watched,
+            skipped_shadowed: facts.stats.skipped_shadowed,
+            sampled: outcome.sampled,
+            sampled_ok: outcome.sampled_ok,
+            duration_ms,
+        })?;
+    }
+    tracing::info!(
+        block = n,
+        source = facts.source,
+        bal_writes = facts.total,
+        applied = facts.applied,
+        filtered = outcome.filtered,
+        skipped_shadowed = outcome.skipped_shadowed,
+        sampled_ok = outcome.sampled_ok,
+        sampled = outcome.sampled,
+        ms = duration_ms,
+        "parent diffs applied to T"
+    );
+    Ok(outcome)
+}
+
+/// Late completion after a timeout: the writes are already in (the journal
+/// has the block). Cursor + metrics only.
+async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result<ApplyOutcome> {
+    tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
+    let t_block = ctx.anvil_t.block_by_number(n, false).await?;
+    let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
+    ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
+    ctx.save_state()?;
+    ctx.metrics.inc(&ctx.metrics.blocks_applied);
+    ctx.metrics.set(&ctx.metrics.t_head, t_head);
+    ctx.metrics.set(&ctx.metrics.cursor_t, n);
+    Ok(ApplyOutcome {
+        source: "late",
+        writes: 0,
+        filtered: 0,
+        skipped_shadowed: 0,
+        sampled: 0,
+        sampled_ok: 0,
+        duration_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// Prepend rule (plan, "Prepend rules"): mine the devnet's pending txs in
+/// their own block *before* this parent's diffs land. Then the parent's block
+/// on T carries only the parent's effects, and a devnet tx executes against
+/// the same state its gas was estimated on (measured: anvil's auto-gas for
+/// eth_sendTransaction came out ~5% short when the diffs landed between
+/// estimate and execution, so the tx ran out of gas). Bounded loop: a tx that
+/// arrives *while* this apply is writing diffs would otherwise be mined
+/// together with them, executing against a state its gas was never estimated
+/// on (measured: an Aave borrow estimated pre-diff came out ~5% short and
+/// reverted). Mine until the pool drains, at most 3 rounds so a steady stream
+/// cannot starve the parent block.
+async fn prepend_devnet_txs(ctx: &Ctx, n: u64) -> Result<()> {
     let mut rounds = 0;
     while rounds < 3 {
-        let (pending, _queued) = match ctx.anvil_t.txpool_status().await {
+        let status = match ctx.anvil_t.txpool_status().await {
             Ok(status) => status,
             Err(e) => {
                 // The prepend is a gas-estimate safeguard; a txpool fault skips
                 // it (named here, bounded: the next apply tries again).
                 tracing::debug!(block = n, error = %e, "prepend skipped: txpool unavailable");
-                break;
+                return Ok(());
             }
         };
-        if pending == 0 {
-            break;
+        if status.pending == 0 {
+            return Ok(());
         }
         rounds += 1;
-        let last = ctx.anvil_t.block_by_number(ctx.anvil_t.block_number().await?, false).await?;
+        let last = ctx
+            .anvil_t
+            .block_by_number(ctx.anvil_t.block_number().await?, false)
+            .await?;
         if let Err(e) = ctx
             .anvil_t
-            .batch_raw(&[(
-                "anvil_setNextBlockTimestamp".into(),
-                json!([last.header.timestamp + 1]),
-            )])
+            .anvil_set_next_block_timestamp(last.header.timestamp + 1)
             .await
         {
             // The prepend block's timestamp drifts to anvil's default; the
@@ -112,44 +277,67 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
             tracing::debug!(block = n, error = %e, "prepend timestamp not set");
         }
         ctx.anvil_t.anvil_mine(1).await?;
-        tracing::info!(block = n, pending, round = rounds, "mined devnet txs before the parent diffs");
+        tracing::info!(
+            block = n,
+            pending = status.pending,
+            round = rounds,
+            "mined devnet txs before the parent diffs"
+        );
     }
+    Ok(())
+}
 
-    // 1. diffs: native BAL first, prestateTracer diff fallback.
-    let (writes, source) = if let Some(bal) = ctx.reth.block_access_list(n).await? {
-        (bal::flatten_bal(&bal), "bal")
-    } else {
-        let traces = ctx.reth.trace_block_prestate(n).await?;
-        (bal::flatten_trace_block(&traces)?, "trace")
+/// The parent's diffs: native BAL first, prestateTracer diff fallback.
+async fn fetch_diffs(ctx: &Ctx, n: u64) -> Result<(Vec<Write>, &'static str)> {
+    if let Some(bal) = ctx.reth.block_access_list(n).await? {
+        return Ok((bal::flatten_bal(&bal), "bal"));
+    }
+    let traces = ctx.reth.trace_block_prestate(n).await?;
+    Ok((bal::flatten_trace_block(&traces), "trace"))
+}
+
+/// Watch list + COW counts for one apply.
+struct FilterStats {
+    not_watched: usize,
+    skipped_shadowed: usize,
+}
+
+/// Keep only the watch list's writes, skipping devnet-owned keys (COW:
+/// account fields count as one unit).
+fn filter_watched(ctx: &Ctx, writes: Vec<Write>) -> Result<(Vec<Write>, FilterStats)> {
+    let mut filtered = Vec::new();
+    let mut stats = FilterStats {
+        not_watched: 0,
+        skipped_shadowed: 0,
     };
-    let total = writes.len();
-
-    // 2. watch list + COW (skip shadowed keys; account fields as one unit).
-    let mut filtered: Vec<Write> = Vec::new();
-    let mut skipped_shadowed = 0usize;
-    let mut not_watched = 0usize;
     for w in writes {
         if !ctx.watchlist.contains(&w.address()) {
-            not_watched += 1;
+            stats.not_watched += 1;
             continue;
         }
         if ctx.is_shadowed(&w)? {
-            skipped_shadowed += 1;
+            stats.skipped_shadowed += 1;
             continue;
         }
         filtered.push(w);
     }
+    Ok((filtered, stats))
+}
 
-    // 3. before-values for the journal (read at T's current head). A read that
-    //    fails fails the apply: a journal with a missing before-value would let
-    //    a later rewind report success while leaving that key un-restored.
-    let mut entries: Vec<JournalEntry> = Vec::with_capacity(filtered.len());
-    for w in &filtered {
+/// Before-values for the journal, read at T's current head. A read that fails
+/// fails the apply: a journal with a missing before-value would let a later
+/// rewind report success while leaving that key un-restored.
+async fn read_before_values(
+    ctx: &Ctx,
+    filtered: &[Write],
+    t_head: u64,
+) -> Result<Vec<JournalEntry>> {
+    let mut entries = Vec::with_capacity(filtered.len());
+    for w in filtered {
         let before = match w {
-            Write::Storage { address, slot, .. } => {
-                let v = ctx.anvil_t.storage_at(*address, *slot, t_head).await?;
-                BeforeValue::Storage(U256::from_be_bytes(v.0))
-            }
+            Write::Storage { address, slot, .. } => BeforeValue::Storage(U256::from_be_bytes(
+                ctx.anvil_t.storage_at(*address, *slot, t_head).await?.0,
+            )),
             Write::Balance { address, .. } => {
                 BeforeValue::Balance(ctx.anvil_t.balance_at(*address, t_head).await?)
             }
@@ -162,76 +350,48 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         };
         entries.push(entry_for_write(w, before)?);
     }
+    Ok(entries)
+}
 
-    // 4. batched writes (padding is mandatory - measured).
-    let applied = mirror_anvil::apply_writes(
-        &ctx.anvil_t,
-        &filtered,
-        ctx.cfg.services.engine.loops.chunk_size,
-    )
-    .await?;
-
-    // 5. align block context + mine, so `latest` views (Aave-style time
-    //    extrapolation) match the parent at N. Always mined: the parent's
-    //    effects (diffs + context) must land in their own block, and the cursor
-    //    advances once per parent regardless of how many devnet blocks T mined.
-    {
-        let h = &block.header;
-        // Align to the parent, plus the devnet's time offset. Clamped to
-        // last+1 so a deliberate `evm_increaseTime` (or a lowered offset)
-        // can never make the timestamp non-monotonic and fail the alignment -
-        // anvil would then mine with its own default and the context would
-        // silently drift (measured).
-        let offset = ctx.time_offset.load(std::sync::atomic::Ordering::Relaxed);
-        let last_ts = ctx
-            .anvil_t
-            .block_by_number(ctx.anvil_t.block_number().await?, false)
-            .await?
-            .header
-            .timestamp;
-        let ts = (h.timestamp + offset).max(last_ts.saturating_add(1));
-        let mut env: Vec<(String, Value)> = vec![
-            ("anvil_setNextBlockTimestamp".into(), json!([ts])),
-            ("anvil_setCoinbase".into(), json!([h.beneficiary])),
-            ("anvil_setNextBlockPrevRandao".into(), json!([h.mix_hash])),
-        ];
-        if let Some(bf) = h.base_fee_per_gas {
-            env.push((
-                "anvil_setNextBlockBaseFeePerGas".into(),
-                json!([format!("0x{bf:x}")]),
-            ));
-        }
-        for r in ctx.anvil_t.batch_raw(&env).await? {
-            if let Err(e) = r {
-                tracing::warn!(error = %e, "context alignment failed");
-            }
-        }
-        ctx.anvil_t.anvil_mine(1).await?;
+/// Align block context + mine, so `latest` views (Aave-style time
+/// extrapolation) match the parent at N. Always mined: the parent's effects
+/// (diffs + context) must land in their own block, and the cursor advances
+/// once per parent regardless of how many devnet blocks T mined.
+///
+/// Align to the parent, plus the devnet's time offset. Clamped to last+1 so a
+/// deliberate `evm_increaseTime` (or a lowered offset) can never make the
+/// timestamp non-monotonic and fail the alignment - anvil would then mine with
+/// its own default and the context would silently drift (measured).
+async fn align_context_and_mine(ctx: &Ctx, block: &Block) -> Result<()> {
+    let h = &block.header;
+    let offset = ctx.time_offset.load(Ordering::Relaxed);
+    let last_ts = ctx
+        .anvil_t
+        .block_by_number(ctx.anvil_t.block_number().await?, false)
+        .await?
+        .header
+        .timestamp;
+    let ts = (h.timestamp + offset).max(last_ts.saturating_add(1));
+    if let Err(e) = ctx.anvil_t.set_next_block_context(ts, h).await {
+        tracing::warn!(error = %e, "context alignment failed");
     }
+    ctx.anvil_t.anvil_mine(1).await?;
+    Ok(())
+}
 
-    // 6. journal + prune.
-    ctx.journal.record(n, &entries)?;
-    ctx.journal.prune(n);
+/// Scan T's blocks from `from` up to the current head (the apply's own devnet
+/// blocks included).
+async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
+    let now = ctx.anvil_t.block_number().await?;
+    crate::scan_range(ctx, from, now).await
+}
 
-    // 6b. scan this apply's own devnet blocks *before* asserting parity: the
-    //     prepend loop may have mined devnet txs whose writes are not marked
-    //     shadowed yet (the shadow loop polls every ~2 s), and the probe parity
-    //     must skip devnet-owned accounts (copy-on-write) instead of alarming on
-    //     the devnet's own writes. Measured: spurious aave_weth_price /
-    //     univ3_weth_usdc_slot0 mismatches right after a venue interaction.
-    let t_head_now = ctx.anvil_t.block_number().await?;
-    if let Err(e) = crate::scan_range(ctx, t_head, t_head_now).await {
-        // The marks already in memory are kept and the walk retries from the
-        // last clean block (the shadow loop scans every ~2 s), so this is a
-        // named, bounded degradation - not a silent skip.
-        tracing::warn!(error = %e, "inline shadow scan incomplete");
-    }
-
-    // 7. sampled storage parity vs reth at n (drift lens). T's *height* drifts
-    //    ahead of the parent height (devnet prepend blocks), so compare T's
-    //    latest block against reth at n - reading T by height compared
-    //    unrelated blocks and produced ~200 false mismatches per 30 min.
-    let t_latest = ctx.anvil_t.block_number().await?;
+/// One sampled storage-parity reading vs reth at n (drift lens). T's *height*
+/// drifts ahead of the parent height (devnet prepend blocks), so compare T's
+/// latest block against reth at n - reading T by height compared unrelated
+/// blocks and produced ~200 false mismatches per 30 min. Returns
+/// `(sampled, sampled_ok)`.
+async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> (usize, usize) {
     let sample: Vec<&Write> = filtered
         .iter()
         .filter(|w| matches!(w, Write::Storage { .. }))
@@ -254,14 +414,17 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
             }
         }
     }
+    (sample.len(), sampled_ok)
+}
 
-    // 7b. probe parity for T (the plan's invariant: "probe parity on T after
-    //     context alignment"). Devnet-owned targets are skipped - their state
-    //     is the devnet's, not mainnet's.
+/// Probe parity for T (the plan's invariant: "probe parity on T after context
+/// alignment"). Devnet-owned targets are skipped - their state is the
+/// devnet's, not mainnet's.
+async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     let probes = ProbeRunner::devnet(
         &ctx.cfg.services.engine.verifier.probes,
         &ctx.shadow,
-        ctx.time_offset.load(std::sync::atomic::Ordering::Relaxed) != 0,
+        ctx.time_offset.load(Ordering::Relaxed) != 0,
     )
     .parity(&ctx.reth, n, &ctx.anvil_t)
     .await?;
@@ -272,69 +435,5 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         .set(&ctx.metrics.t_convergence_last_failed, probes.failed as u64);
     ctx.metrics
         .add(&ctx.metrics.t_probe_skipped, probes.skipped as u64);
-
-    // 8. cursor + metrics + drift.
-    let t_block = ctx.anvil_t.block_by_number(n, false).await?;
-    let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
-    ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
-    ctx.metrics.set(&ctx.metrics.cursor_t, n);
-    ctx.save_state()?;
-    ctx.metrics.inc(&ctx.metrics.blocks_applied);
-    ctx.metrics.set(&ctx.metrics.bal_writes, applied as u64);
-    ctx.metrics
-        .set(&ctx.metrics.bal_filtered_out, not_watched as u64);
-    ctx.metrics
-        .set(&ctx.metrics.bal_skipped_shadowed, skipped_shadowed as u64);
-    let duration_ms = started.elapsed().as_millis() as u64;
-    ctx.metrics.set(&ctx.metrics.last_apply_ms, duration_ms);
-    ctx.metrics.set(&ctx.metrics.t_head, t_latest);
-
-    // The rewound range is fully re-applied: resume normal late-completion skips.
-    if let Some((_, until)) = reapply {
-        if n >= until {
-            *ctx.reapply_from.lock()? = None;
-            tracing::info!(block = n, until, "rewound range re-applied");
-        }
-    }
-
-    let outcome = ApplyOutcome {
-        source: if needs_reapply { "reapply" } else { source },
-        writes: total,
-        filtered: filtered.len(),
-        skipped_shadowed,
-        sampled: sample.len(),
-        sampled_ok,
-        duration_ms,
-    };
-    // Divergence log, not a flight recorder: only anomalies land here (the
-    // re-apply of a rewound range, or a sampled-parity mismatch). Counts live
-    // in the metrics.
-    if needs_reapply || outcome.sampled_ok < outcome.sampled {
-        ctx.drift.append(&json!({
-            "chain": "t",
-            "block": n,
-            "source": if needs_reapply { "reapply" } else { source },
-            "bal_writes": total,
-            "applied": applied,
-            "filtered": outcome.filtered,
-            "not_watched": not_watched,
-            "skipped_shadowed": skipped_shadowed,
-            "sampled": outcome.sampled,
-            "sampled_ok": outcome.sampled_ok,
-            "duration_ms": duration_ms,
-        }))?;
-    }
-    tracing::info!(
-        block = n,
-        source,
-        bal_writes = total,
-        applied,
-        filtered = outcome.filtered,
-        skipped_shadowed,
-        sampled_ok = outcome.sampled_ok,
-        sampled = outcome.sampled,
-        ms = duration_ms,
-        "parent diffs applied to T"
-    );
-    Ok(outcome)
+    Ok(())
 }

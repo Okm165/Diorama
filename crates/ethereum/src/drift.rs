@@ -10,7 +10,6 @@
 //! A drift write that fails is a typed fault the caller surfaces: a divergence
 //! record that could not be written must not look like a clean run.
 use crate::error::{Error, Result};
-use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -42,8 +41,13 @@ impl Drift {
         })
     }
 
-    pub fn append(&self, value: &Value) -> Result<()> {
-        let line = format!("{value}\n");
+    /// One line per entry: the entry type owns its schema (each producer
+    /// defines a narrow struct), the log owns the file. A write that fails is
+    /// a typed fault the caller surfaces: a divergence record that could not
+    /// be written must not look like a clean run.
+    pub fn append<T: serde::Serialize>(&self, entry: &T) -> Result<()> {
+        let encoded = serde_json::to_string(entry).map_err(|source| Error::DriftEncode { source })?;
+        let line = format!("{encoded}\n");
         let _guard = self
             .lock
             .lock()

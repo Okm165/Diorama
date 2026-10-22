@@ -20,9 +20,64 @@ use axum::{
 };
 use mirror_devnet::admin::{RewindRequest, ShadowRequest, TimeRequest};
 use mirror_devnet::deal::DealRequest;
-use serde_json::json;
+use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+/// `/status` — the engine's diagnostic report. A typed shape: the scripts and
+/// dashboards read it by field name, so a rename must be a compile error here,
+/// not a silent `null`.
+#[derive(Debug, Serialize)]
+struct StatusResponse {
+    reth_head: u64,
+    follow_head: u64,
+    follow: &'static str,
+    m_head: u64,
+    t_head: u64,
+    cursor: Option<u64>,
+    cursor_t: Option<u64>,
+    lag: u64,
+    frozen: bool,
+    halted: bool,
+    watchlist: usize,
+    shadowed_slots: usize,
+    shadowed_accounts: usize,
+    /// The shadowed account list (not just counts): the devnet's own writes
+    /// are copy-on-write, so these accounts are expected to differ from
+    /// mainnet — parity checks (scenario probes) must skip them instead of
+    /// alarming.
+    shadowed: Vec<String>,
+    blob_form: Option<&'static str>,
+    time_offset_seconds: u64,
+}
+
+/// `/admin/rewind` — the journal rewind's report.
+#[derive(Debug, Serialize)]
+struct RewindResponse {
+    rewound_blocks: u64,
+    restored_values: usize,
+    cursor_t: u64,
+}
+
+/// `/admin/pause` — the loops are held (plan §4.4 stop-sync).
+#[derive(Debug, Serialize)]
+struct PauseResponse {
+    paused: bool,
+}
+
+/// `/admin/resume` — the halt and the divergence freeze are both cleared.
+#[derive(Debug, Serialize)]
+struct ResumeResponse {
+    resumed: bool,
+}
+
+/// `/admin/time` — the devnet clock offset is set (and persisted).
+#[derive(Debug, Serialize)]
+struct TimeResponse {
+    offset_seconds: u64,
+    t_head: u64,
+    note: &'static str,
+}
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
@@ -80,7 +135,7 @@ async fn healthz(State(ctx): State<Arc<Ctx>>) -> impl IntoResponse {
     }
 }
 
-async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<serde_json::Value>> {
+async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     // Head gauges: an endpoint that cannot answer degrades the report to 0,
     // never fails it - /status is a diagnostic, not a fact source.
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
@@ -90,9 +145,6 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<serde_json::Value>> 
     let cm = ctx.cursor_m()?;
     let ct = ctx.cursor_t()?;
     let shadow = ctx.shadow.lock()?;
-    // The shadowed account list (not just counts): the devnet's own writes are
-    // copy-on-write, so these accounts are expected to differ from mainnet -
-    // parity checks (scenario probes) must skip them instead of alarming.
     let mut shadowed: Vec<String> = shadow
         .slots
         .keys()
@@ -101,24 +153,24 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<serde_json::Value>> 
         .collect();
     shadowed.sort();
     shadowed.dedup();
-    Ok(Json(json!({
-        "reth_head": reth_head,
-        "follow_head": follow,
-        "follow": ctx.follow_tag(),
-        "m_head": m_head,
-        "t_head": t_head,
-        "cursor": cm.as_ref().map(|c| c.block),
-        "cursor_t": ct.as_ref().map(|c| c.block),
-        "lag": follow.saturating_sub(cm.as_ref().map(|c| c.block).unwrap_or(follow)),
-        "frozen": ctx.frozen.load(Ordering::Relaxed),
-        "halted": ctx.halted.load(Ordering::Relaxed),
-        "watchlist": ctx.watchlist.len(),
-        "shadowed_slots": shadow.slot_count(),
-        "shadowed_accounts": shadow.accounts.len(),
-        "shadowed": shadowed,
-        "blob_form": ctx.blob_form()?.map(crate::blob::BlobForm::as_str),
-        "time_offset_seconds": ctx.time_offset.load(Ordering::Relaxed),
-    })))
+    Ok(Json(StatusResponse {
+        reth_head,
+        follow_head: follow,
+        follow: ctx.follow_tag(),
+        m_head,
+        t_head,
+        cursor: cm.as_ref().map(|c| c.block),
+        cursor_t: ct.as_ref().map(|c| c.block),
+        lag: follow.saturating_sub(cm.as_ref().map(|c| c.block).unwrap_or(follow)),
+        frozen: ctx.frozen.load(Ordering::Relaxed),
+        halted: ctx.halted.load(Ordering::Relaxed),
+        watchlist: ctx.watchlist.len(),
+        shadowed_slots: shadow.slot_count(),
+        shadowed_accounts: shadow.accounts.len(),
+        shadowed,
+        blob_form: ctx.blob_form()?.map(crate::blob::BlobForm::as_str),
+        time_offset_seconds: ctx.time_offset.load(Ordering::Relaxed),
+    }))
 }
 
 async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
@@ -128,35 +180,35 @@ async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
 async fn admin_rewind(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<RewindRequest>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<RewindResponse>> {
     let out = ctx.admin().rewind(req.blocks).await?;
-    Ok(Json(json!({
-        "rewound_blocks": req.blocks,
-        "restored_values": out.restored,
-        "cursor_t": out.cursor,
-    })))
+    Ok(Json(RewindResponse {
+        rewound_blocks: req.blocks,
+        restored_values: out.restored,
+        cursor_t: out.cursor,
+    }))
 }
 
-async fn admin_resume(State(ctx): State<Arc<Ctx>>) -> Json<serde_json::Value> {
+async fn admin_resume(State(ctx): State<Arc<Ctx>>) -> Json<ResumeResponse> {
     ctx.admin().resume();
-    Json(json!({"resumed": true}))
+    Json(ResumeResponse { resumed: true })
 }
 
-async fn admin_pause(State(ctx): State<Arc<Ctx>>) -> Json<serde_json::Value> {
+async fn admin_pause(State(ctx): State<Arc<Ctx>>) -> Json<PauseResponse> {
     ctx.admin().pause();
-    Json(json!({"paused": true}))
+    Json(PauseResponse { paused: true })
 }
 
 async fn admin_time(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<TimeRequest>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<TimeResponse>> {
     let out = ctx.admin().time(req.offset_seconds).await?;
-    Ok(Json(json!({
-        "offset_seconds": out.offset_seconds,
-        "t_head": out.head,
-        "note": "T's timestamps are monotonic; lowering the offset lets the clock converge, it cannot jump backwards"
-    })))
+    Ok(Json(TimeResponse {
+        offset_seconds: out.offset_seconds,
+        t_head: out.head,
+        note: "T's timestamps are monotonic; lowering the offset lets the clock converge, it cannot jump backwards",
+    }))
 }
 
 async fn admin_shadow(

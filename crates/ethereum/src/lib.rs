@@ -27,6 +27,7 @@ use crate::ctx::Ctx;
 use crate::diff::apply_block;
 use crate::replay::{replay_block, reth_block_hash};
 use clap::{Parser, Subcommand};
+use mirror_devnet::state::ChainCursor;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -195,10 +196,6 @@ fn shadow_has_recorded_state(ctx: &Ctx) -> Result<bool> {
 
 /// Decide the next parent block to process for one chain, applying the cursor,
 /// rebase, gap, and reorg rules. `None` means "nothing to do right now".
-#[allow(
-    clippy::too_many_lines,
-    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
-)]
 async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     let Some(follow) = ctx.follow_head().await? else {
         tracing::debug!("follow head unavailable");
@@ -216,6 +213,37 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
     ctx.metrics.set(&ctx.metrics.reth_head, reth_head);
 
+    let (head, cursor, rpc) = chain_state(ctx, chain).await?;
+    let cursor = validate_cursor(ctx, chain, rpc, head, cursor).await?;
+    let (start, rebased) = resume_point(chain, rpc, cursor.as_ref(), head).await?;
+
+    let forced = matches!(chain, Chain::M) && ctx.force_rebase.swap(false, Ordering::Relaxed);
+    if matches!(chain, Chain::M) && (head > follow || forced) {
+        rebase_m(ctx, chain, head, follow, forced).await?;
+        return Ok(None);
+    }
+    if rebased {
+        on_rebase(chain, rpc, head, follow, start).await?;
+    }
+    if start > follow {
+        tracing::debug!(chain = ?chain, head, follow, start, "chain is at the follow head");
+        return Ok(None);
+    }
+    if !gap_within_limit(ctx, chain, follow.saturating_sub(start), rebased) {
+        return Ok(None);
+    }
+    if !reorg_continuity(ctx, chain, start).await? {
+        return Ok(None);
+    }
+    Ok(Some(start))
+}
+
+/// The chain's head, cursor and RPC endpoint (the per-chain head metrics
+/// included).
+async fn chain_state(
+    ctx: &Ctx,
+    chain: Chain,
+) -> Result<(u64, Option<ChainCursor>, &mirror_anvil::Rpc)> {
     let (head, cursor, rpc) = match chain {
         Chain::M => (
             ctx.anvil_m.block_number().await?,
@@ -233,253 +261,281 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         Chain::T => {
             ctx.metrics.set(&ctx.metrics.t_head, head);
             if let Ok(info) = rpc.anvil_node_info().await {
-                if let Some(fork) = info
-                    .pointer("/forkConfig/forkBlockNumber")
-                    .and_then(serde_json::Value::as_u64)
-                {
+                if let Some(fork) = info.fork_config.fork_block_number {
                     ctx.metrics
                         .set(&ctx.metrics.t_fork_age_blocks, head.saturating_sub(fork));
                 }
             }
         }
     }
+    Ok((head, cursor, rpc))
+}
 
-    // Validate the cursor against the chain; a mismatch means the chain was
-    // reset (re-pin / wiped state) and the cursor must rebase.
-    let cursor = match cursor {
-        Some(c) => {
-            let hash = crate::ctx::block_hash(rpc, c.block).await?;
-            if hash.as_deref() == Some(c.hash.as_str()) {
-                Some(c)
-            } else {
-                tracing::warn!(
-                    block = c.block,
-                    "cursor not found on chain (reset or re-pin) - rebasing"
-                );
-                if matches!(chain, Chain::T) {
-                    // T was re-forked (its OOM restart or a re-pin). Which
-                    // epoch is this?
-                    // - The fork pin *changed*: the base moved, so the
-                    //   recorded values are stale derivations of the old base
-                    //   (plan 2.2/6.3: "derived values go stale when the base
-                    //   advances"). Start a *new epoch*: drop marks and values
-                    //   - the product re-creates its positions from its own
-                    //   journal (plan 3.6). Measured: restoring across a pin
-                    //   change re-applied a +30d time-travel write as a future
-                    //   `lastUpdateTimestamp` and every Aave supply panicked
-                    //   with an arithmetic underflow.
-                    // - The pin is *unchanged* (an out-of-band reset at the
-                    //   same base): the recorded writes are still coherent -
-                    //   re-apply them and keep the marks.
-                    // Fail-closed on the pin read: without it the epoch
-                    // decision would default to "same pin" and re-apply writes
-                    // across a pin change - the measured Aave-underflow hazard.
-                    let pin = rpc
-                        .anvil_node_info()
-                        .await?
-                        .pointer("/forkConfig/forkBlockNumber")
-                        .and_then(serde_json::Value::as_u64);
-                    let known = ctx.state.lock()?.data.epoch_pin;
-                    let new_epoch = matches!((known, pin), (Some(k), Some(p)) if k != p);
-                    ctx.metrics.inc(&ctx.metrics.t_resets_total);
-                    if new_epoch {
-                        let (slots, accounts) = ctx.shadow.lock()?.clear_all();
-                        ctx.save_shadow()?;
-                        tracing::warn!(
-                            pin = ?pin,
-                            previous = ?known,
-                            cleared_slots = slots,
-                            cleared_accounts = accounts,
-                            "new epoch: the fork base moved; the devnet's writes are gone with it (re-create positions from your journal)"
-                        );
-                    } else if shadow_has_recorded_state(ctx)? {
-                        // Values whose keys are not marked are orphans from an
-                        // older engine (unmark used to keep them): drop them
-                        // before restoring, or the re-apply would resurrect a
-                        // value the devnet handed back (measured: a crashed
-                        // oracle source). The marks themselves are kept.
-                        let (orphan_slots, orphan_accounts) =
-                            ctx.shadow.lock()?.prune_orphans();
-                        let (slots, accounts, values, accounts_values) = {
-                            let s = ctx.shadow.lock()?;
-                            (
-                                s.slot_count(),
-                                s.accounts.len(),
-                                s.values.len(),
-                                s.account_values.len(),
-                            )
-                        };
-                        // Clone out: the re-apply awaits, and a MutexGuard must
-                        // not be held across it (the loop must stay Send).
-                        let snapshot = ctx.shadow.lock()?.clone();
-                        let restored = snapshot
-                            .reapply(&ctx.anvil_t, ctx.cfg.services.engine.loops.chunk_size)
-                            .await?;
-                        // Marked keys with no recorded value would hold pin-era
-                        // mainnet values under a devnet mark - hand them back.
-                        let (unknown_slots, unknown_accounts) =
-                            ctx.shadow.lock()?.unrecorded();
-                        ctx.save_shadow()?;
-                        tracing::warn!(
-                            slots,
-                            accounts,
-                            storage_accounts = values,
-                            account_values = accounts_values,
-                            restored,
-                            orphan_slots,
-                            orphan_accounts,
-                            unknown_slots,
-                            unknown_accounts,
-                            "T was reset at the same pin: re-applied the devnet's writes"
-                        );
-                    }
-                    if pin.is_some() && known != pin {
-                        ctx.state.lock()?.data.epoch_pin = pin;
-                        ctx.save_state()?;
-                    }
-                    // The journal holds before-values of the *old* chain: a
-                    // rewind against the re-forked chain would restore values
-                    // that never existed there. Drop it.
-                    if let Err(e) = ctx.journal.clear() {
-                        tracing::warn!(error = %e, "clearing the journal after a T reset failed");
-                    }
-                }
-                // Drop it from the persisted state too: `first_block` is an
-                // epoch marker, and the next processed block must set a fresh
-                // one (otherwise `mirror_pin_age_blocks` counts across epochs).
-                if matches!(chain, Chain::M) {
-                    // An M re-base skipped this range: those blocks are
-                    // mainnet's own (the fresh fork serves them and the state
-                    // comes from the fork base, so it is exact by construction),
-                    // but the engine did not re-execute them - their tx-level
-                    // verification is skipped. Bounded by `fork_offset`; counted
-                    // and logged so the gap is never invisible.
-                    let skipped = head.saturating_sub(c.block);
-                    if skipped > 0 {
-                        ctx.metrics.add(&ctx.metrics.m_rebase_skipped, skipped);
-                        tracing::warn!(
-                            from = c.block,
-                            to = head,
-                            skipped,
-                            "M re-base skipped a range (fork base: state exact, tx verification skipped)"
-                        );
-                    }
-                }
-                {
-                    let mut state = ctx.state.lock()?;
-                    match chain {
-                        Chain::M => state.data.m = None,
-                        Chain::T => state.data.t = None,
-                    }
-                }
-                ctx.save_state()?;
-                None
-            }
-        }
-        None => None,
+/// Validate the cursor against the chain; a mismatch means the chain was reset
+/// (re-pin / wiped state) and the cursor must rebase. Returns the cursor when
+/// it is still valid, `None` after a rebase.
+async fn validate_cursor(
+    ctx: &Ctx,
+    chain: Chain,
+    rpc: &mirror_anvil::Rpc,
+    head: u64,
+    cursor: Option<ChainCursor>,
+) -> Result<Option<ChainCursor>> {
+    let Some(c) = cursor else {
+        return Ok(None);
     };
+    let hash = crate::ctx::block_hash(rpc, c.block).await?;
+    if hash.as_deref() == Some(c.hash.as_str()) {
+        return Ok(Some(c));
+    }
+    tracing::warn!(
+        block = c.block,
+        "cursor not found on chain (reset or re-pin) - rebasing"
+    );
+    if matches!(chain, Chain::T) {
+        handle_t_reset(ctx, rpc).await?;
+    }
+    // An M re-base skipped this range: those blocks are mainnet's own (the
+    // fresh fork serves them and the state comes from the fork base, so it is
+    // exact by construction), but the engine did not re-execute them - their
+    // tx-level verification is skipped. Bounded by `fork_offset`; counted and
+    // logged so the gap is never invisible.
+    if matches!(chain, Chain::M) {
+        account_m_rebase_skip(ctx, c.block, head);
+    }
+    // Drop it from the persisted state too: `first_block` is an epoch marker,
+    // and the next processed block must set a fresh one (otherwise
+    // `mirror_pin_age_blocks` counts across epochs).
+    {
+        let mut state = ctx.state.lock()?;
+        match chain {
+            Chain::M => state.data.m = None,
+            Chain::T => state.data.t = None,
+        }
+    }
+    ctx.save_state()?;
+    Ok(None)
+}
 
-    // A reset chain (re-pin / wiped state): T's state is exactly the fork pin's
-    // state, so the applier resumes from the pin. Using T's own height + 1 would
-    // be wrong - T mines one block per applied parent block (plus one per
-    // journal rewind), so its height is not a parent height and `head + 1` can
-    // land past the follow head, stalling T forever (measured). Fail-closed on
-    // the pin read: a fault here must not silently pick that stalled path.
+/// T was re-forked (its OOM restart or a re-pin). Which epoch is this?
+///
+/// - The fork pin *changed*: the base moved, so the recorded values are stale
+///   derivations of the old base (plan 2.2/6.3: "derived values go stale when
+///   the base advances"). Start a *new epoch*: drop marks and values - the
+///   product re-creates its positions from its own journal (plan 3.6).
+///   Measured: restoring across a pin change re-applied a +30d time-travel
+///   write as a future `lastUpdateTimestamp` and every Aave supply panicked
+///   with an arithmetic underflow.
+/// - The pin is *unchanged* (an out-of-band reset at the same base): the
+///   recorded writes are still coherent - re-apply them and keep the marks.
+///
+/// Fail-closed on the pin read: without it the epoch decision would default to
+/// "same pin" and re-apply writes across a pin change - the measured
+/// Aave-underflow hazard.
+async fn handle_t_reset(ctx: &Ctx, rpc: &mirror_anvil::Rpc) -> Result<()> {
+    let pin = rpc.anvil_node_info().await?.fork_config.fork_block_number;
+    let known = ctx.state.lock()?.data.epoch_pin;
+    let new_epoch = matches!((known, pin), (Some(k), Some(p)) if k != p);
+    ctx.metrics.inc(&ctx.metrics.t_resets_total);
+    if new_epoch {
+        let (slots, accounts) = ctx.shadow.lock()?.clear_all();
+        ctx.save_shadow()?;
+        tracing::warn!(
+            pin = ?pin,
+            previous = ?known,
+            cleared_slots = slots,
+            cleared_accounts = accounts,
+            "new epoch: the fork base moved; the devnet's writes are gone with it (re-create positions from your journal)"
+        );
+    } else if shadow_has_recorded_state(ctx)? {
+        restore_shadow(ctx).await?;
+    }
+    if pin.is_some() && known != pin {
+        ctx.state.lock()?.data.epoch_pin = pin;
+        ctx.save_state()?;
+    }
+    // The journal holds before-values of the *old* chain: a rewind against the
+    // re-forked chain would restore values that never existed there. Drop it.
+    if let Err(e) = ctx.journal.clear() {
+        tracing::warn!(error = %e, "clearing the journal after a T reset failed");
+    }
+    Ok(())
+}
+
+/// Same-pin restore: prune orphaned values, re-apply the recorded writes, and
+/// report marked-but-unrecorded keys.
+async fn restore_shadow(ctx: &Ctx) -> Result<()> {
+    // Values whose keys are not marked are orphans from an older engine
+    // (unmark used to keep them): drop them before restoring, or the re-apply
+    // would resurrect a value the devnet handed back (measured: a crashed
+    // oracle source). The marks themselves are kept.
+    let (orphan_slots, orphan_accounts) = ctx.shadow.lock()?.prune_orphans();
+    let (slots, accounts, values, accounts_values) = {
+        let s = ctx.shadow.lock()?;
+        (
+            s.slot_count(),
+            s.accounts.len(),
+            s.values.len(),
+            s.account_values.len(),
+        )
+    };
+    // Clone out: the re-apply awaits, and a MutexGuard must not be held across
+    // it (the loop must stay Send).
+    let snapshot = ctx.shadow.lock()?.clone();
+    let restored = snapshot
+        .reapply(&ctx.anvil_t, ctx.cfg.services.engine.loops.chunk_size)
+        .await?;
+    // Marked keys with no recorded value would hold pin-era mainnet values
+    // under a devnet mark - hand them back.
+    let (unknown_slots, unknown_accounts) = ctx.shadow.lock()?.unrecorded();
+    ctx.save_shadow()?;
+    tracing::warn!(
+        slots,
+        accounts,
+        storage_accounts = values,
+        account_values = accounts_values,
+        restored,
+        orphan_slots,
+        orphan_accounts,
+        unknown_slots,
+        unknown_accounts,
+        "T was reset at the same pin: re-applied the devnet's writes"
+    );
+    Ok(())
+}
+
+/// An M re-base skipped a range (see [`validate_cursor`]).
+fn account_m_rebase_skip(ctx: &Ctx, from: u64, head: u64) {
+    let skipped = head.saturating_sub(from);
+    if skipped > 0 {
+        ctx.metrics.add(&ctx.metrics.m_rebase_skipped, skipped);
+        tracing::warn!(
+            from,
+            to = head,
+            skipped,
+            "M re-base skipped a range (fork base: state exact, tx verification skipped)"
+        );
+    }
+}
+
+/// The block to resume from, plus whether this is a rebase. A reset chain
+/// (re-pin / wiped state): T's state is exactly the fork pin's state, so the
+/// applier resumes from the pin. Using T's own height + 1 would be wrong - T
+/// mines one block per applied parent block (plus one per journal rewind), so
+/// its height is not a parent height and `head + 1` can land past the follow
+/// head, stalling T forever (measured). Fail-closed on the pin read: a fault
+/// here must not silently pick that stalled path.
+async fn resume_point(
+    chain: Chain,
+    rpc: &mirror_anvil::Rpc,
+    cursor: Option<&ChainCursor>,
+    head: u64,
+) -> Result<(u64, bool)> {
     let reset_pin = if cursor.is_none() {
         rpc.anvil_node_info()
             .await?
-            .pointer("/forkConfig/forkBlockNumber")
-            .and_then(serde_json::Value::as_u64)
+            .fork_config
+            .fork_block_number
     } else {
         None
     };
-    let (start, rebased) = match (chain, reset_pin) {
+    Ok(match (chain, reset_pin) {
         (Chain::T, Some(pin)) => (pin + 1, true),
-        _ => state::next_block(cursor.as_ref(), head),
+        _ => state::next_block(cursor, head),
+    })
+}
+
+/// Re-base M at a fresh pin behind the follow head.
+///
+/// M's replay is irreversible, but the follow head can move *backward*: the
+/// CL's forkchoice may report a lower safe block (reorg / failed
+/// justification), which strands M until it catches up (measured: a 42-block
+/// recede stalling ~10 min, with a warning every poll). Re-base M at a fresh
+/// pin behind the follow head instead; the cursor hash check on the next pass
+/// rebases the replay. The blocks between the old cursor and the new pin are
+/// mainnet's own (the fork serves them and the state comes from the fork base,
+/// so it is exact by construction), but they are not re-executed: their
+/// tx-level verification is skipped. Bounded by `fork_offset` per re-base and
+/// counted in `mirror_m_rebase_skipped_blocks_total` with a WARN naming the
+/// range, so the gap is never invisible. T is unaffected: the epoch/COW state
+/// is keyed on T's own fork block, not M's - and T is exempt from this check
+/// entirely (its heights advance independently of mainnet's).
+async fn rebase_m(ctx: &Ctx, chain: Chain, head: u64, follow: u64, forced: bool) -> Result<()> {
+    {
+        let mut last = ctx.last_stall.lock()?;
+        if *last != (head, follow) {
+            *last = (head, follow);
+            tracing::warn!(
+                chain = ?chain,
+                head,
+                follow,
+                forced = forced,
+                "re-basing M: ahead of the follow head (reorg) or a block is unservable"
+            );
+        }
+    }
+    // At most one attempt per minute: a failed re-base retries on later polls.
+    let attempt = {
+        let mut t = ctx.last_rebase.lock()?;
+        let due = t
+            .map(|i: std::time::Instant| i.elapsed() > std::time::Duration::from_secs(60))
+            .unwrap_or(true);
+        if due {
+            *t = Some(std::time::Instant::now());
+        }
+        due
     };
-    let forced = matches!(chain, Chain::M) && ctx.force_rebase.swap(false, Ordering::Relaxed);
-    if matches!(chain, Chain::M) && (head > follow || forced) {
-        // M's replay is irreversible, but the follow head can move *backward*:
-        // the CL's forkchoice may report a lower safe block (reorg / failed
-        // justification), which strands M until it catches up (measured: a
-        // 42-block recede stalling ~10 min, with a warning every poll).
-        // Re-base M at a fresh pin behind the follow head instead; the cursor
-        // hash check on the next pass rebases the replay. The blocks between
-        // the old cursor and the new pin are mainnet's own (the fork serves
-        // them and the state comes from the fork base, so it is exact by
-        // construction), but they are not re-executed: their tx-level
-        // verification is skipped. Bounded by `fork_offset` per re-base and
-        // counted in `mirror_m_rebase_skipped_blocks_total` with a WARN naming
-        // the range, so the gap is never invisible. T is unaffected: the
-        // epoch/COW state is keyed on T's own fork block, not M's.
-        //
-        // T is exempt from this check entirely: its heights advance
-        // independently of mainnet's (one T block per applied parent block,
-        // plus one per journal rewind).
-        {
-            let mut last = ctx.last_stall.lock()?;
-            if *last != (head, follow) {
-                *last = (head, follow);
-                tracing::warn!(
-                    chain = ?chain,
+    if !attempt {
+        return Ok(());
+    }
+    match ctx.anvil_m.fork_config().await {
+        Ok(Some((url, _))) => {
+            let pin = follow.saturating_sub(ctx.cfg.chains.l1.fork_offset);
+            match ctx.anvil_m.anvil_reset_fork(&url, pin).await {
+                Ok(()) => tracing::warn!(
                     head,
                     follow,
-                    forced = forced,
-                    "re-basing M: ahead of the follow head (reorg) or a block is unservable"
-                );
+                    pin,
+                    "M re-based at a fresh pin behind the follow head"
+                ),
+                Err(e) => tracing::warn!(error = %e, "M re-base failed; will retry"),
             }
         }
-        let attempt = {
-            let mut t = ctx.last_rebase.lock()?;
-            let due = t
-                .map(|i: std::time::Instant| i.elapsed() > std::time::Duration::from_secs(60))
-                .unwrap_or(true);
-            if due {
-                *t = Some(std::time::Instant::now());
-            }
-            due
-        };
-        if attempt {
-            match ctx.anvil_m.fork_config().await {
-                Ok(Some((url, _))) => {
-                    let pin = follow.saturating_sub(ctx.cfg.chains.l1.fork_offset);
-                    match ctx.anvil_m.anvil_reset_fork(&url, pin).await {
-                        Ok(()) => tracing::warn!(
-                            head,
-                            follow,
-                            pin,
-                            "M re-based at a fresh pin behind the follow head"
-                        ),
-                        Err(e) => tracing::warn!(error = %e, "M re-base failed; will retry"),
-                    }
-                }
-                Ok(None) => tracing::warn!("M re-base skipped: chain has no fork config"),
-                Err(e) => tracing::warn!(error = %e, "M re-base: anvil_nodeInfo failed"),
-            }
-        }
-        return Ok(None);
+        Ok(None) => tracing::warn!("M re-base skipped: chain has no fork config"),
+        Err(e) => tracing::warn!(error = %e, "M re-base: anvil_nodeInfo failed"),
     }
-    if rebased {
-        // An anvil restart (re-pin, OOM) resets automine to its default (on).
-        // Re-assert it on every rebase: otherwise each raw tx mines its own
-        // block and the engine's mine(1) produces empty blocks.
-        if let Err(e) = rpc.anvil_set_automine(false).await {
-            tracing::warn!(chain = ?chain, error = %e, "could not re-assert automine=false");
-        }
-        // The epoch decision (clear vs restore) lives with the reset handling
-        // above, where the fork pin is compared before anything is written.
-        tracing::info!(chain = ?chain, head, follow, start, "starting chain at block");
+    Ok(())
+}
+
+/// A rebase means an anvil restart (re-pin, OOM) happened, which resets
+/// automine to its default (on). Re-assert it: otherwise each raw tx mines its
+/// own block and the engine's mine(1) produces empty blocks. (The epoch
+/// decision - clear vs restore - lives with the reset handling above, where
+/// the fork pin is compared before anything is written.)
+async fn on_rebase(
+    chain: Chain,
+    rpc: &mirror_anvil::Rpc,
+    head: u64,
+    follow: u64,
+    start: u64,
+) -> Result<()> {
+    if let Err(e) = rpc.anvil_set_automine(false).await {
+        tracing::warn!(chain = ?chain, error = %e, "could not re-assert automine=false");
     }
-    if start > follow {
-        tracing::debug!(chain = ?chain, head, follow, start, "chain is at the follow head");
-        return Ok(None);
-    }
-    let gap = follow.saturating_sub(start);
-    // Two regimes (plan §3 ops): normal operation pauses at `max_gap_blocks`
-    // (300 = the plan's "> 300 -> pause and re-sync"), while a *rebased* cursor
-    // (a fresh pin after a restart/re-fork) is allowed to replay its whole pin
-    // window - bounded by reth's state window (10,064), the plan's own limit.
-    let limit = if rebased { 10_064 } else { ctx.cfg.services.engine.loops.max_gap_blocks };
+    tracing::info!(chain = ?chain, head, follow, start, "starting chain at block");
+    Ok(())
+}
+
+/// Two regimes (plan §3 ops): normal operation pauses at `max_gap_blocks`
+/// (300 = the plan's "> 300 -> pause and re-sync"), while a *rebased* cursor
+/// (a fresh pin after a restart/re-fork) is allowed to replay its whole pin
+/// window - bounded by reth's state window (10,064), the plan's own limit.
+fn gap_within_limit(ctx: &Ctx, chain: Chain, gap: u64, rebased: bool) -> bool {
+    let limit = if rebased {
+        10_064
+    } else {
+        ctx.cfg.services.engine.loops.max_gap_blocks
+    };
     if gap > limit {
         tracing::error!(
             chain = ?chain,
@@ -488,31 +544,35 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
             rebased,
             "sync gap too large - paused; run the re-pin drill (make repin)"
         );
-        return Ok(None);
+        return false;
     }
+    true
+}
 
-    // Upstream reorg continuity: only meaningful when we processed start-1, and
-    // it belongs to the *M* loop alone - it owns the parent-stream integrity
-    // (`reth_last_*` is written by the M replay). T consumes the same blocks
-    // through the diff applier, whose absolute-value writes self-heal across a
-    // reorg, and its own cursor check rebases on a reset. Running the check in
-    // both loops double-counted every reorg.
-    if matches!(chain, Chain::M) {
-        if let (Some(last_hash), Some(last_block)) =
-            (ctx.reth_last_hash()?, ctx.reth_last_block()?)
-        {
-            if start > 1 && start - 1 == last_block {
-                if let Some(prev) = reth_block_hash(&ctx.reth, start - 1).await? {
-                    if prev != last_hash {
-                        ctx.metrics.inc(&ctx.metrics.reorgs_detected);
-                        ctx.on_divergence(&format!("reth reorg at {}", start - 1));
-                        return Ok(None);
-                    }
-                }
+/// Upstream reorg continuity: only meaningful when we processed start-1, and
+/// it belongs to the *M* loop alone - it owns the parent-stream integrity
+/// (`reth_last_*` is written by the M replay). T consumes the same blocks
+/// through the diff applier, whose absolute-value writes self-heal across a
+/// reorg, and its own cursor check rebases on a reset. Running the check in
+/// both loops double-counted every reorg. Returns `false` to stop this poll.
+async fn reorg_continuity(ctx: &Ctx, chain: Chain, start: u64) -> Result<bool> {
+    if !matches!(chain, Chain::M) {
+        return Ok(true);
+    }
+    let (Some(last_hash), Some(last_block)) = (ctx.reth_last_hash()?, ctx.reth_last_block()?)
+    else {
+        return Ok(true);
+    };
+    if start > 1 && start - 1 == last_block {
+        if let Some(prev) = reth_block_hash(&ctx.reth, start - 1).await? {
+            if prev != last_hash {
+                ctx.metrics.inc(&ctx.metrics.reorgs_detected);
+                ctx.on_divergence(&format!("reth reorg at {}", start - 1));
+                return Ok(false);
             }
         }
     }
-    Ok(Some(start))
+    Ok(true)
 }
 
 async fn replay_loop(ctx: Arc<Ctx>) {
@@ -713,11 +773,11 @@ pub(crate) async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
                 ctx.shadow.lock()?.mark_account_fields(to);
             }
         }
-        // Storage writes come from the tx trace (anvil 1.8.5 supports
+        // Storage writes come from the tx trace (anvil 1.8.6 supports
         // prestateTracer diffMode - measured).
         match ctx.anvil_t.trace_tx_prestate(tx.tx_hash()).await {
-            Ok(result) => {
-                for w in crate::bal::flatten_trace_diff(&result) {
+            Ok(trace) => {
+                for w in mirror_anvil::flatten_trace(&trace) {
                     ctx.shadow.lock()?.mark(&w);
                     shadowed += 1;
                 }

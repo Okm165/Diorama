@@ -26,6 +26,21 @@ alloy-rpc-types-eth = { version = "2.5", features = ["serde"] }
 # Engine API client: replays the local CL's execution payloads into reth, so
 # the mirror never needs P2P peers or a public RPC to fill a sync gap.
 alloy-rpc-types-engine = { version = "2.5", features = ["jwt", "serde"] }
+# The official JSON-RPC 2.0 wire model (request/response/error/id/batch) both
+# clients share - the envelope is a protocol, not our vocabulary.
+alloy-json-rpc = { version = "2.5" }
+# Quantity (0x-hex) and other wire serde helpers.
+alloy-serde = { version = "2.5" }
+# The Beacon REST API wire model (blob sidecars, signed blocks, headers).
+# "ssz" enables the official beacon→engine execution-request conversion
+# (`ExecutionRequestsV4::to_requests`), used by the top-up loop.
+alloy-rpc-types-beacon = { version = "2.5", features = ["ssz"] }
+# The debug_* trace wire model (geth tracer options, prestateTracer frames).
+alloy-rpc-types-trace = { version = "2.5" }
+# The anvil control-plane wire model (nodeInfo, reset/forking params).
+alloy-rpc-types-anvil = { version = "2.5" }
+# The txpool namespace wire model (status/content/inspect).
+alloy-rpc-types-txpool = { version = "2.5" }
 
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }

@@ -4,12 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The mirror engine binary: selects the profile and hands off to it"
+description = "The Mainnet Mirror engine binary (the ethereum profile's entrypoint)"
 
 [dependencies]
 mirror-ethereum = { path = "../../crates/ethereum" }
-clap = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 
 [lints]

@@ -18,70 +18,58 @@
 //! truth — never with a silent resend. The two write predicates are exact
 //! complements (pinned by test), so a caller branching on one cannot leave the
 //! other unhandled.
-use serde_json::Value;
-
-/// One RPC call's answer from the node, preserved verbatim: unknown upstream
-/// codes surface as themselves (`code`), never bucketed into a retry class.
-/// `data` is boxed: revert data is rare, and the box keeps the error small
-/// enough that `Result` stays cheap on the hot paths (`result_large_err`).
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct RpcError {
-    pub code: i64,
-    pub message: String,
-    #[serde(default)]
-    pub data: Option<Box<Value>>,
-}
+/// The node's error payload, verbatim: alloy's official wire type
+/// (`alloy_json_rpc::ErrorPayload`) — code, message, and the optional
+/// `data` (revert data / validation details) preserved as raw JSON, never
+/// bucketed. A spec change lands here as a compile error, not a silent
+/// mismatch.
+pub use alloy_json_rpc::ErrorPayload as RpcError;
 
 /// Codes the client synthesizes for answers that never came from the node
 /// (a batch response missing an item, a result that would not decode). Kept
 /// outside the JSON-RPC ranges so they cannot be confused with node codes.
 const CLIENT_ERROR_CODE: i64 = -1;
 
-impl RpcError {
-    /// The node did not include this batch item's answer.
-    pub(crate) fn missing_from_batch(id: u64) -> Self {
-        Self {
-            code: CLIENT_ERROR_CODE,
-            message: format!("batch response is missing item id {id}"),
-            data: None,
-        }
+/// The node did not include this batch item's answer.
+pub(crate) fn missing_from_batch(id: u64) -> RpcError {
+    RpcError {
+        code: CLIENT_ERROR_CODE,
+        message: format!("batch response is missing item id {id}").into(),
+        data: None,
     }
+}
 
-    /// The node's answer did not decode into the expected shape.
-    pub(crate) fn bad_result(method: &str, detail: &str) -> Self {
-        Self {
-            code: CLIENT_ERROR_CODE,
-            message: format!("{method}: bad result: {detail}"),
-            data: None,
-        }
+/// The node's answer did not decode into the expected shape.
+pub(crate) fn bad_result(method: &str, detail: &str) -> RpcError {
+    RpcError {
+        code: CLIENT_ERROR_CODE,
+        message: format!("{method}: bad result: {detail}").into(),
+        data: None,
     }
+}
 
+/// The measured policy predicates over the node's error payload — the
+/// classification half of the boundary (`Error` carries the endpoint and
+/// method; the payload carries the node's own vocabulary).
+pub trait RpcErrorPolicy {
     /// A content refusal: retrying the same bytes reproduces it. Measured:
     /// `-32600 Invalid request` (body ≥ 2 MB), `-32601 method not found`,
     /// `-32602 Invalid params` (e.g. odd-length hex).
-    pub fn is_content_error(&self) -> bool {
+    fn is_content_error(&self) -> bool;
+
+    /// The node's internal error: plausibly transient.
+    fn is_retryable(&self) -> bool;
+}
+
+impl RpcErrorPolicy for RpcError {
+    fn is_content_error(&self) -> bool {
         matches!(self.code, -32602..=-32600)
     }
 
-    /// The node's internal error: plausibly transient.
-    pub fn is_retryable(&self) -> bool {
+    fn is_retryable(&self) -> bool {
         self.code == -32603
     }
 }
-
-impl std::fmt::Display for RpcError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "rpc error {}: {}", self.code, self.message)?;
-        // `data` carries revert data / validation details on many nodes
-        // (measured: reth's "-32602 Invalid params: EmptyExecutionRequest").
-        if let Some(data) = &self.data {
-            write!(f, " ({data})")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for RpcError {}
 
 /// Everything the anvil/reth boundary can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -111,17 +99,30 @@ pub enum Error {
         body: String,
     },
 
-    #[error("{endpoint}: {method}: {source}")]
+    /// The node's typed refusal. The field is named `payload`, not `source`:
+    /// alloy's `ErrorPayload` implements `Display`, not `Error`, and
+    /// thiserror treats a field named `source` as the error source. The
+    /// payload is inlined in the message so it stays complete: code, message,
+    /// and `data` verbatim.
+    #[error("{endpoint}: {method}: {payload}")]
     Rpc {
         endpoint: String,
         method: String,
-        #[source]
-        source: RpcError,
+        payload: RpcError,
     },
 
     #[error("{endpoint}: {method}: decoding the answer")]
     Decode {
         endpoint: String,
+        method: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// A request that could not be encoded (a bug in our own types; named so
+    /// it can never masquerade as a node fault).
+    #[error("{method}: encoding the request")]
+    Encode {
         method: String,
         #[source]
         source: serde_json::Error,
@@ -173,8 +174,9 @@ impl Error {
         match self {
             Error::Transport { .. } => true,
             Error::Status { status, .. } => matches!(status, 429 | 502 | 503 | 504),
-            Error::Rpc { source, .. } => source.is_retryable(),
+            Error::Rpc { payload, .. } => payload.is_retryable(),
             Error::ClientBuild { .. }
+            | Error::Encode { .. }
             | Error::Decode { .. }
             | Error::BatchDecode { .. }
             | Error::BadQuantity { .. }
@@ -201,13 +203,13 @@ impl Error {
     /// `eth_getBlockAccessList` answers `-32601`). Callers gate on it to fall
     /// back to older data sources.
     pub fn is_method_not_found(&self) -> bool {
-        matches!(self, Error::Rpc { source, .. } if source.code == -32601)
+        matches!(self, Error::Rpc { payload, .. } if payload.code == -32601)
     }
 
     /// The endpoint the failure belongs to (for logs and error aggregation).
     pub fn endpoint(&self) -> &str {
         match self {
-            Error::ClientBuild { .. } | Error::Corrupt { .. } => "<local>",
+            Error::ClientBuild { .. } | Error::Corrupt { .. } | Error::Encode { .. } => "<local>",
             Error::Transport { endpoint, .. }
             | Error::Status { endpoint, .. }
             | Error::Rpc { endpoint, .. }
@@ -283,7 +285,7 @@ mod tests {
         let err = Error::Rpc {
             endpoint: "http://reth:8545".into(),
             method: "eth_getBlockAccessList".into(),
-            source: RpcError {
+            payload: RpcError {
                 code: -32601,
                 message: "the method eth_getBlockAccessList does not exist/is not available".into(),
                 data: None,

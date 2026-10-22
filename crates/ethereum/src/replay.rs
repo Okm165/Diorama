@@ -7,16 +7,16 @@ use crate::blob::{
     available_forms, encode_blob_tx, repair_proofs, select_sidecars, BlobForm, SidecarItem,
 };
 use crate::ctx::{block_txs, cursor_from, Ctx};
-use crate::error::{Error, Result};
+use crate::error::{BlobError, Error, Result};
 use crate::rpc::Rpc;
 use crate::verify::{verify_block, Verification};
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxEip4844Variant};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_consensus::Transaction as _;
 use alloy_network_primitives::TransactionResponse;
-use alloy_primitives::{Bytes, Signature, B256, U256};
-use serde_json::json;
-use serde_json::Value;
+use alloy_primitives::{Address, Bytes, Signature, B256, U256, U64};
+use mirror_anvil::Call;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 pub struct ReplayOutcome {
@@ -36,10 +36,6 @@ struct RawTx {
     blob: Option<(TxEip4844, Signature, B256, Vec<SidecarItem>)>,
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
-)]
 pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     let started = Instant::now();
     let block = ctx.reth.block_by_number(n, true).await?;
@@ -61,133 +57,26 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
         clear_pool(&ctx.anvil_m).await?;
     }
 
-    // 0. convergence repair: force M's state to mainnet's post-state of n-1
-    //    from the parent BAL. M cannot reproduce blockhash-dependent values
-    //    (A17: e.g. Seaport 1.6 counters), and one divergence would cascade
-    //    forever (invalid txs, different statuses). The BAL is authoritative
-    //    for every changed entry, so applying it makes M exact again; the
-    //    per-block verification below still measures what execution got right.
-    let repair = ctx.cfg.services.engine.loops.repair_m
-        && ctx.last_m_diverged.load(std::sync::atomic::Ordering::Relaxed);
-    if !repair && ctx.cfg.services.engine.loops.repair_m {
-        tracing::debug!(block = n, "previous M block verified clean; no repair needed");
-    }
-    if repair {
-        if let Some(bal) = ctx.reth.block_access_list(n - 1).await? {
-            let writes = bal::flatten_bal(&bal);
-            let applied = mirror_anvil::apply_writes(
-                &ctx.anvil_m,
-                &writes,
-                ctx.cfg.services.engine.loops.chunk_size,
-            )
-            .await?;
-            ctx.metrics.add(&ctx.metrics.m_repair_writes, applied as u64);
-            tracing::debug!(
-                block = n,
-                writes = writes.len(),
-                applied,
-                "M state converged from parent BAL"
-            );
-        } else {
-            tracing::debug!(block = n, "no parent BAL; M repair skipped");
-        }
-    }
-    // The convergence probes are the state-level assertion "M == mainnet at
-    // n-1": they run for *every* block, repaired or not (a clean block's state
-    // is the replay's own product, which is exactly what this measures).
-    let probes = mirror_devnet::probes::ProbeRunner::replay(&ctx.cfg.services.engine.verifier.probes)
-        .parity(&ctx.reth, n - 1, &ctx.anvil_m)
-        .await?;
-    ctx.metrics.add(&ctx.metrics.m_convergence_ok, probes.ok as u64);
-    ctx.metrics
-        .add(&ctx.metrics.m_convergence_failed, probes.failed as u64);
-    ctx.metrics
-        .set(&ctx.metrics.m_convergence_last_failed, probes.failed as u64);
+    repair_m_state(ctx, n).await?;
+    convergence_probes(ctx, n).await?;
 
-    // 1. block env (all five context fields aligned to the parent).
+    // Block env (the parent header verbatim: timestamp, coinbase, prevRandao,
+    // gas limit, base fee).
     let h = &block.header;
-    let mut env: Vec<(String, Value)> = vec![
-        ("anvil_setNextBlockTimestamp".into(), json!([h.timestamp])),
-        ("anvil_setCoinbase".into(), json!([h.beneficiary])),
-        ("anvil_setNextBlockPrevRandao".into(), json!([h.mix_hash])),
-        ("anvil_setBlockGasLimit".into(), json!([format!("0x{:x}", h.gas_limit)])),
-    ];
-    if let Some(bf) = h.base_fee_per_gas {
-        env.push((
-            "anvil_setNextBlockBaseFeePerGas".into(),
-            json!([format!("0x{bf:x}")]),
-        ));
-    }
-    for r in ctx.anvil_m.batch_raw(&env).await? {
-        if let Err(e) = r {
-            return Err(Error::BlockEnv { block: n, source: e });
-        }
-    }
+    ctx.anvil_m
+        .set_next_block_env(h.timestamp, h)
+        .await
+        .map_err(|source| Error::BlockEnv {
+            block: n,
+            source: Box::new(source),
+        })?;
 
-    // 2. withdrawals are not txs: credit recipients directly. The credit is
-    //    idempotent by construction: `setBalance(reth_pre + amount)` always
-    //    yields the same absolute post-block value, so a retried block can
-    //    never double-credit.
-    //
-    //    The pre-balance must come from **reth**, not from M at N-1: when a
-    //    block is retried before it is mined, anvil's "N-1" *is* the live
-    //    state, which already contains the first attempt's credit. Measured
-    //    once as `withdrawals` divergence (M = reth_post + amount).
     if let Some(withdrawals) = &block.withdrawals {
-        let mut per_address: std::collections::BTreeMap<alloy_primitives::Address, U256> =
-            std::collections::BTreeMap::new();
-        for w in withdrawals {
-            let wei = U256::from(w.amount) * U256::from(1_000_000_000u64);
-            *per_address.entry(w.address).or_default() += wei;
-        }
-        let reads: Vec<(String, Value)> = per_address
-            .keys()
-            .map(|address| {
-                (
-                    "eth_getBalance".to_string(),
-                    json!([address, format!("0x{:x}", n - 1)]),
-                )
-            })
-            .collect();
-        let mut pre_balances: Vec<U256> = Vec::with_capacity(reads.len());
-        for chunk in reads.chunks(ctx.cfg.services.engine.loops.chunk_size) {
-            for r in ctx.reth.batch_raw(chunk).await? {
-                // batch_raw yields the JSON-RPC *result* (a hex balance here).
-                let v = match r {
-                    Ok(v) => v,
-                    Err(e) => return Err(Error::PreBalance { block: n, source: e }),
-                };
-                pre_balances.push(
-                    v.as_str()
-                        .and_then(|s| U256::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-                        .ok_or_else(|| {
-                            mirror_anvil::Error::bad_quantity(
-                                ctx.reth.url(),
-                                "eth_getBalance",
-                                v.as_str().unwrap_or_default(),
-                            )
-                        })?,
-                );
-            }
-        }
-        let mut calls: Vec<(String, Value)> = Vec::with_capacity(per_address.len());
-        for ((address, amount), pre) in per_address.iter().zip(pre_balances) {
-            calls.push((
-                "anvil_setBalance".to_string(),
-                json!([address, bal::quant_hex_u256(pre + *amount)]),
-            ));
-        }
-        for chunk in calls.chunks(ctx.cfg.services.engine.loops.chunk_size) {
-            for r in ctx.anvil_m.batch_raw(chunk).await? {
-                if let Err(e) = r {
-                    tracing::warn!(error = %e, "withdrawal credit failed");
-                }
-            }
-        }
+        credit_withdrawals(ctx, n, withdrawals).await?;
     }
 
-    // 3. raw txs (blob txs get their sidecar from the beacon API). A block
-    //    that cannot be replayed in full is never mined: M must stay strict.
+    // Raw txs (blob txs get their sidecar from the beacon API). A block that
+    // cannot be replayed in full is never mined: M must stay strict.
     let (raws, skipped_blobs) = build_raws(ctx, n, &block).await?;
     if skipped_blobs > 0 {
         // The alarm the operator watches for CL sidecar trouble (the replay
@@ -199,11 +88,109 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
         });
     }
 
-    // 4. send + retry-once + mine.
     send_with_retry(ctx, n, &raws, block_txs(&block)).await?;
     ctx.anvil_m.anvil_mine(1).await?;
 
     finish_replay(ctx, n, block, started, skipped_blobs).await
+}
+
+/// Convergence repair: force M's state to mainnet's post-state of n-1 from the
+/// parent BAL. M cannot reproduce blockhash-dependent values (A17: e.g. Seaport
+/// 1.6 counters), and one divergence would cascade forever (invalid txs,
+/// different statuses). The BAL is authoritative for every changed entry, so
+/// applying it makes M exact again; the per-block verification still measures
+/// what execution got right.
+async fn repair_m_state(ctx: &Ctx, n: u64) -> Result<()> {
+    let repair = ctx.cfg.services.engine.loops.repair_m
+        && ctx.last_m_diverged.load(std::sync::atomic::Ordering::Relaxed);
+    if !repair {
+        if ctx.cfg.services.engine.loops.repair_m {
+            tracing::debug!(block = n, "previous M block verified clean; no repair needed");
+        }
+        return Ok(());
+    }
+    if let Some(bal) = ctx.reth.block_access_list(n - 1).await? {
+        let writes = bal::flatten_bal(&bal);
+        let applied = mirror_anvil::apply_writes(
+            &ctx.anvil_m,
+            &writes,
+            ctx.cfg.services.engine.loops.chunk_size,
+        )
+        .await?;
+        ctx.metrics.add(&ctx.metrics.m_repair_writes, applied as u64);
+        tracing::debug!(
+            block = n,
+            writes = writes.len(),
+            applied,
+            "M state converged from parent BAL"
+        );
+    } else {
+        // No BAL available: a named, bounded degradation (the probes below
+        // still measure the state; the next block repairs).
+        tracing::debug!(block = n, "no parent BAL; M repair skipped");
+    }
+    Ok(())
+}
+
+/// The convergence probes are the state-level assertion "M == mainnet at n-1":
+/// they run for *every* block, repaired or not (a clean block's state is the
+/// replay's own product, which is exactly what this measures).
+async fn convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
+    let probes =
+        mirror_devnet::probes::ProbeRunner::replay(&ctx.cfg.services.engine.verifier.probes)
+            .parity(&ctx.reth, n - 1, &ctx.anvil_m)
+            .await?;
+    ctx.metrics.add(&ctx.metrics.m_convergence_ok, probes.ok as u64);
+    ctx.metrics
+        .add(&ctx.metrics.m_convergence_failed, probes.failed as u64);
+    ctx.metrics
+        .set(&ctx.metrics.m_convergence_last_failed, probes.failed as u64);
+    Ok(())
+}
+
+/// Withdrawals are not txs: credit recipients directly. The credit is
+/// idempotent by construction: `setBalance(reth_pre + amount)` always yields
+/// the same absolute post-block value, so a retried block can never
+/// double-credit.
+///
+/// The pre-balance must come from **reth**, not from M at N-1: when a block is
+/// retried before it is mined, anvil's "N-1" *is* the live state, which already
+/// contains the first attempt's credit. Measured once as `withdrawals`
+/// divergence (M = reth_post + amount).
+async fn credit_withdrawals(
+    ctx: &Ctx,
+    n: u64,
+    withdrawals: &[alloy_rpc_types_eth::Withdrawal],
+) -> Result<()> {
+    let credits = withdrawal_credits(withdrawals);
+    let reads: Vec<Call> = credits
+        .keys()
+        .map(|address| Call::new("eth_getBalance", (*address, U64::from(n - 1))))
+        .collect::<mirror_anvil::Result<_>>()?;
+    let mut pre_balances: Vec<U256> = Vec::with_capacity(reads.len());
+    for chunk in reads.chunks(ctx.cfg.services.engine.loops.chunk_size) {
+        for result in ctx.reth.batch(chunk).await? {
+            let value = result.map_err(|payload| Error::PreBalance {
+                block: n,
+                payload,
+            })?;
+            pre_balances.push(serde_json::from_str(value.get()).map_err(|_| {
+                mirror_anvil::Error::bad_quantity(ctx.reth.url(), "eth_getBalance", value.get())
+            })?);
+        }
+    }
+    let mut calls: Vec<Call> = Vec::with_capacity(credits.len());
+    for ((address, amount), pre) in credits.iter().zip(pre_balances) {
+        calls.push(Call::new("anvil_setBalance", (*address, pre + *amount))?);
+    }
+    for chunk in calls.chunks(ctx.cfg.services.engine.loops.chunk_size) {
+        for result in ctx.anvil_m.batch(chunk).await? {
+            if let Err(payload) = result {
+                tracing::warn!(error = %payload, "withdrawal credit failed");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Verify the mined block and advance the cursor (shared by the normal path and
@@ -259,10 +246,6 @@ async fn finish_replay(
 
 /// Build the ordered raw-tx list; blob txs are encoded with a sidecar when one
 /// can be fetched (network form), otherwise skipped and the block marked partial.
-#[allow(
-    clippy::too_many_lines,
-    reason = "R0 freeze: verbatim; the split is a deferred follow-up refactor"
-)]
 async fn build_raws(
     ctx: &Ctx,
     n: u64,
@@ -272,25 +255,8 @@ async fn build_raws(
     let has_blobs = txs
         .iter()
         .any(|t| matches!(&*t.inner, EthereumTxEnvelope::Eip4844(_)));
-
-    // Fetch sidecar candidates from every configured source. Beacon root of
-    // payload N = parent beacon block root of EL block N+1 (verified against
-    // mainnet). Candidates are validated with KZG per tx below, so a source
-    // that cannot reconstruct blobs (e.g. a non-supernode after PeerDAS) is
-    // skipped instead of poisoning the pool.
-    let mut sources: Vec<(String, Vec<SidecarItem>)> = Vec::new();
-    if has_blobs && ctx.cfg.services.engine.blobs.enabled && ctx.beacon.enabled() {
-        if let Some(next) = ctx.reth.block_by_number_opt(n + 1, false).await? {
-            if let Some(root) = next.header.parent_beacon_block_root {
-                sources = ctx.beacon.blob_sidecar_sources(root).await;
-                if sources.is_empty() {
-                    tracing::warn!(block = n, "no beacon source returned blob sidecars");
-                }
-            } else {
-                tracing::warn!(block = n, "no parent beacon block root on N+1");
-            }
-        }
-    }
+    let sources = blob_sidecar_sources(ctx, n, has_blobs).await?;
+    let preferred = ctx.blob_form()?;
 
     let mut out = Vec::with_capacity(txs.len());
     let mut skipped = 0usize;
@@ -308,83 +274,15 @@ async fn build_raws(
                     });
                     continue;
                 };
-                let mut built: Option<(Bytes, Vec<SidecarItem>)> = None;
-                let mut last_err = String::from("no beacon source returned sidecars");
-                for (source, items) in &sources {
-                    let selected = match select_sidecars(items, &t.blob_versioned_hashes) {
-                        Ok(sel) => sel,
-                        Err(e) => {
-                            last_err = format!("{e}");
-                            continue;
-                        }
-                    };
-                    // Recompute placeholder blob proofs (Lighthouse on Fulu)
-                    // and verify every triple before it reaches the pool.
-                    let fixed = match repair_proofs(&selected, &t.blob_versioned_hashes) {
-                        Ok(fixed) => fixed,
-                        Err(e) => {
-                            tracing::warn!(
-                                block = n,
-                                tx = %tx.tx_hash(),
-                                source = %source,
-                                error = %e,
-                                "blob sidecar failed KZG validation - trying next source"
-                            );
-                            last_err = format!("{e}");
-                            continue;
-                        }
-                    };
-                    let selected: Vec<&SidecarItem> = fixed.iter().collect();
-                    let forms = available_forms(&selected, t.blob_versioned_hashes.len());
-                    let preferred = ctx.blob_form()?.unwrap_or(BlobForm::Legacy);
-                    let mut order =
-                        vec![preferred, BlobForm::Legacy, BlobForm::Eip7594, BlobForm::Bare];
-                    order.dedup();
-                    let mut encoded: Option<(Bytes, BlobForm)> = None;
-                    for form in order {
-                        if !forms.contains(&form) {
-                            continue;
-                        }
-                        if let Ok(b) = encode_blob_tx(t, signature, hash, &selected, form) {
-                            encoded = Some((b, form));
-                            break;
-                        }
-                    }
-                    if let Some((bytes, form)) = encoded {
-                        ctx.set_blob_form(form)?;
-                        built = Some((bytes, fixed));
-                        break;
-                    }
-                }
-                if let Some((bytes, items)) = built {
-                    out.push(RawTx {
+                match encode_from_sources(ctx, t, signature, hash, &sources, preferred) {
+                    Ok((bytes, items)) => out.push(RawTx {
                         hash: tx.tx_hash(),
                         bytes,
                         blob: Some((t.clone(), signature, hash, items)),
-                    });
-                } else {
-                    skipped += 1;
-                    // One WARN per block: the retry loop calls this again
-                    // until the beacon ingests the sidecars (with
-                    // `follow: latest` that is seconds after the block).
-                    let first = ctx
-                        .blob_warned
-                        .swap(n, std::sync::atomic::Ordering::Relaxed)
-                        != n;
-                    if first {
-                        tracing::warn!(
-                            block = n,
-                            tx = %tx.tx_hash(),
-                            error = %last_err,
-                            "no valid blob sidecar from any source (will retry)"
-                        );
-                    } else {
-                        tracing::debug!(
-                            block = n,
-                            tx = %tx.tx_hash(),
-                            error = %last_err,
-                            "blob sidecar still unavailable"
-                        );
+                    }),
+                    Err(last_err) => {
+                        skipped += 1;
+                        warn_skipped_blob(ctx, n, tx.tx_hash(), &last_err);
                     }
                 }
             }
@@ -398,6 +296,133 @@ async fn build_raws(
     Ok((out, skipped))
 }
 
+/// Fetch sidecar candidates from every configured source. Beacon root of
+/// payload N = parent beacon block root of EL block N+1 (verified against
+/// mainnet). Candidates are validated with KZG per tx below, so a source that
+/// cannot reconstruct blobs (e.g. a non-supernode after PeerDAS) is skipped
+/// instead of poisoning the pool.
+async fn blob_sidecar_sources(
+    ctx: &Ctx,
+    n: u64,
+    has_blobs: bool,
+) -> Result<Vec<(String, Vec<SidecarItem>)>> {
+    if !has_blobs || !ctx.cfg.services.engine.blobs.enabled || !ctx.beacon.enabled() {
+        return Ok(Vec::new());
+    }
+    let Some(next) = ctx.reth.block_by_number_opt(n + 1, false).await? else {
+        return Ok(Vec::new());
+    };
+    let Some(root) = next.header.parent_beacon_block_root else {
+        tracing::warn!(block = n, "no parent beacon block root on N+1");
+        return Ok(Vec::new());
+    };
+    let sources = ctx.beacon.blob_sidecar_sources(root).await;
+    if sources.is_empty() {
+        tracing::warn!(block = n, "no beacon source returned blob sidecars");
+    }
+    Ok(sources)
+}
+
+/// Encode one blob tx from the first source whose sidecars select, repair and
+/// encode: returns the network-form bytes with the repaired items, or the last
+/// source's error (reported once per block by the caller).
+fn encode_from_sources(
+    ctx: &Ctx,
+    t: &TxEip4844,
+    signature: Signature,
+    hash: B256,
+    sources: &[(String, Vec<SidecarItem>)],
+    preferred: Option<BlobForm>,
+) -> std::result::Result<(Bytes, Vec<SidecarItem>), String> {
+    let mut last_err = String::from("no beacon source returned sidecars");
+    for (source, items) in sources {
+        match encode_with_source(t, signature, hash, items, &t.blob_versioned_hashes, preferred) {
+            Ok((bytes, form, fixed)) => {
+                ctx.set_blob_form(form).map_err(|e| e.to_string())?;
+                return Ok((bytes, fixed));
+            }
+            Err(e) => {
+                // A source that does not hold this tx's sidecar is an empty
+                // answer, not a fault; anything else is a validation failure
+                // worth a warning.
+                if matches!(e, BlobError::NoSidecar { .. }) {
+                    tracing::debug!(tx = %hash, source = %source, error = %e, "source does not hold this tx's sidecar");
+                } else {
+                    tracing::warn!(
+                        tx = %hash,
+                        source = %source,
+                        error = %e,
+                        "blob sidecar failed KZG validation - trying next source"
+                    );
+                }
+                last_err = e.to_string();
+            }
+        }
+    }
+    Err(last_err)
+}
+
+/// One source's attempt: select -> repair proofs -> pick the first encodable
+/// form in preference order.
+fn encode_with_source(
+    t: &TxEip4844,
+    signature: Signature,
+    hash: B256,
+    items: &[SidecarItem],
+    versioned_hashes: &[B256],
+    preferred: Option<BlobForm>,
+) -> std::result::Result<(Bytes, BlobForm, Vec<SidecarItem>), BlobError> {
+    let selected = select_sidecars(items, versioned_hashes)?;
+    // Recompute placeholder blob proofs (Lighthouse on Fulu) and verify every
+    // triple before it reaches the pool.
+    let fixed = repair_proofs(&selected, versioned_hashes)?;
+    let selected: Vec<&SidecarItem> = fixed.iter().collect();
+    let forms = available_forms(&selected, versioned_hashes.len());
+    let mut order = vec![
+        preferred.unwrap_or(BlobForm::Legacy),
+        BlobForm::Legacy,
+        BlobForm::Eip7594,
+        BlobForm::Bare,
+    ];
+    order.dedup();
+    for form in order {
+        if !forms.contains(&form) {
+            continue;
+        }
+        if let Ok(bytes) = encode_blob_tx(t, signature, hash, &selected, form) {
+            return Ok((bytes, form, fixed));
+        }
+    }
+    Err(BlobError::Missing {
+        what: "no encodable form (no sidecar proofs)",
+    })
+}
+
+/// One WARN per block: the retry loop calls this again until the beacon
+/// ingests the sidecars (with `follow: latest` that is seconds after the
+/// block).
+fn warn_skipped_blob(ctx: &Ctx, n: u64, hash: B256, last_err: &str) {
+    let first = ctx
+        .blob_warned
+        .swap(n, std::sync::atomic::Ordering::Relaxed)
+        != n;
+    if first {
+        tracing::warn!(
+            block = n,
+            tx = %hash,
+            error = %last_err,
+            "no valid blob sidecar from any source (will retry)"
+        );
+    } else {
+        tracing::debug!(
+            block = n,
+            tx = %hash,
+            error = %last_err,
+            "blob sidecar still unavailable"
+        );
+    }
+}
+
 /// Send all raws; on rejection retry once (re-encoding blob txs with the next
 /// wrapper form). Aborts the block - without mining - if a retry is needed twice.
 async fn send_with_retry(
@@ -409,51 +434,7 @@ async fn send_with_retry(
     let mut current: Vec<Bytes> = raws.iter().map(|r| r.bytes.clone()).collect();
 
     for attempt in 0..2 {
-        let mut rejected: Vec<usize> = Vec::new();
-        // Raws are sent one request at a time: batch items are processed
-        // concurrently by the JSON-RPC server, which scrambles pool insertion
-        // order (measured: type-4 txs landed 6 positions late). Tx order is
-        // load-bearing for replay fidelity, so we pay the round-trips.
-        let mut nonces = NonceTracker::prepare(ctx, txs).await?;
-        for (i, raw) in current.iter().enumerate() {
-            if let Some(tx) = txs.get(i) {
-                if let Err(e) = nonces.before_send(ctx, tx).await {
-                    tracing::warn!(tx = %raws[i].hash, error = %e, "nonce pre-adjust failed");
-                }
-            }
-            match ctx.anvil_m.send_raw_batch(std::slice::from_ref(raw)).await {
-                Ok(results) => {
-                    for r in results {
-                        if let Err(e) = r {
-                            rejected.push(i);
-                            tracing::warn!(
-                                index = i,
-                                tx = %raws[i].hash,
-                                error = %e,
-                                "raw tx rejected"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Transport failure: retry the whole block via the caller.
-                    return Err(Error::TxSend {
-                        block: n,
-                        index: i,
-                        source: e,
-                    });
-                }
-            }
-        }
-        let pool = ctx.anvil_m.txpool_status().await;
-        tracing::info!(
-            sent = current.len(),
-            rejected = rejected.len(),
-            adjusted = nonces.manipulated.len(),
-            pool = ?pool,
-            "raw txs sent (pre-mine)"
-        );
-        nonces.restore(ctx).await?;
+        let rejected = send_once(ctx, n, raws, txs, &current).await?;
         if rejected.is_empty() {
             return Ok(());
         }
@@ -470,22 +451,7 @@ async fn send_with_retry(
                 "retrying block with next blob wrapper form"
             );
             clear_pool(&ctx.anvil_m).await?;
-            for i in &rejected {
-                // `all_blob` was checked above; the `else` keeps this loop
-                // total without an `expect` (a non-blob rejection aborts below).
-                let Some((t, sig, hash, items)) = raws[*i].blob.as_ref() else {
-                    continue;
-                };
-                let item_refs: Vec<&SidecarItem> = items.iter().collect();
-                let bytes = encode_blob_tx(t, *sig, *hash, &item_refs, next_form).map_err(
-                    |source| Error::BlobReencode {
-                        block: n,
-                        hash: raws[*i].hash,
-                        source,
-                    },
-                )?;
-                current[*i] = bytes;
-            }
+            reencode_blobs(n, raws, &rejected, next_form, &mut current)?;
             ctx.set_blob_form(next_form)?;
             continue;
         }
@@ -499,6 +465,89 @@ async fn send_with_retry(
     Err(Error::ReplayRetryExhausted { block: n })
 }
 
+/// One send pass. Raws go one request at a time: batch items are processed
+/// concurrently by the JSON-RPC server, which scrambles pool insertion order
+/// (measured: type-4 txs landed 6 positions late). Tx order is load-bearing
+/// for replay fidelity, so we pay the round-trips. Returns the indices the
+/// node rejected.
+async fn send_once(
+    ctx: &Ctx,
+    n: u64,
+    raws: &[RawTx],
+    txs: &[alloy_rpc_types_eth::Transaction],
+    current: &[Bytes],
+) -> Result<Vec<usize>> {
+    let mut rejected: Vec<usize> = Vec::new();
+    let mut nonces = NonceTracker::prepare(ctx, txs).await?;
+    for (i, raw) in current.iter().enumerate() {
+        if let Some(tx) = txs.get(i) {
+            if let Err(e) = nonces.before_send(ctx, tx).await {
+                tracing::warn!(tx = %raws[i].hash, error = %e, "nonce pre-adjust failed");
+            }
+        }
+        match ctx.anvil_m.send_raw_batch(std::slice::from_ref(raw)).await {
+            Ok(results) => {
+                for r in results {
+                    if let Err(e) = r {
+                        rejected.push(i);
+                        tracing::warn!(
+                            index = i,
+                            tx = %raws[i].hash,
+                            error = %e,
+                            "raw tx rejected"
+                        );
+                    }
+                }
+            }
+            // Transport failure: retry the whole block via the caller.
+            Err(e) => {
+                return Err(Error::TxSend {
+                    block: n,
+                    index: i,
+                    source: e,
+                })
+            }
+        }
+    }
+    let pool = ctx.anvil_m.txpool_status().await;
+    tracing::info!(
+        sent = current.len(),
+        rejected = rejected.len(),
+        adjusted = nonces.manipulated.len(),
+        pool = ?pool,
+        "raw txs sent (pre-mine)"
+    );
+    nonces.restore(ctx).await?;
+    Ok(rejected)
+}
+
+/// Re-encode the rejected blob txs in the next wrapper form.
+fn reencode_blobs(
+    n: u64,
+    raws: &[RawTx],
+    rejected: &[usize],
+    form: BlobForm,
+    current: &mut [Bytes],
+) -> Result<()> {
+    for i in rejected {
+        // `all_blob` was checked by the caller; the `else` keeps this loop
+        // total without an `expect` (a non-blob rejection aborts there).
+        let Some((t, sig, hash, items)) = raws[*i].blob.as_ref() else {
+            continue;
+        };
+        let item_refs: Vec<&SidecarItem> = items.iter().collect();
+        current[*i] =
+            encode_blob_tx(t, *sig, *hash, &item_refs, form).map_err(|source| {
+                Error::BlobReencode {
+                    block: n,
+                    hash: raws[*i].hash,
+                    source,
+                }
+            })?;
+    }
+    Ok(())
+}
+
 fn next_blob_form(ctx: &Ctx) -> Result<BlobForm> {
     Ok(match ctx.blob_form()? {
         Some(BlobForm::Legacy) => BlobForm::Eip7594,
@@ -508,20 +557,24 @@ fn next_blob_form(ctx: &Ctx) -> Result<BlobForm> {
     })
 }
 
-/// Every tx currently in the pool.
+/// The withdrawals' per-recipient credit (gwei → wei), summed per address.
+fn withdrawal_credits(withdrawals: &[alloy_rpc_types_eth::Withdrawal]) -> BTreeMap<Address, U256> {
+    let mut credits: BTreeMap<Address, U256> = BTreeMap::new();
+    for w in withdrawals {
+        let wei = U256::from(w.amount) * U256::from(1_000_000_000u64);
+        *credits.entry(w.address).or_default() += wei;
+    }
+    credits
+}
+
+/// Every tx currently in the pool (typed `txpool_content`).
 async fn pool_hashes(rpc: &Rpc) -> Result<Vec<B256>> {
-    let content: Value = rpc.call_raw("txpool_content", json!([])).await?;
+    let content = rpc.txpool_content().await?;
     let mut hashes: Vec<B256> = Vec::new();
-    for side in ["pending", "queued"] {
-        if let Some(accounts) = content.get(side).and_then(Value::as_object) {
-            for txs in accounts.values().filter_map(Value::as_object) {
-                for tx in txs.values() {
-                    if let Some(h) = tx.get("hash").and_then(Value::as_str) {
-                        if let Ok(h) = h.parse::<B256>() {
-                            hashes.push(h);
-                        }
-                    }
-                }
+    for side in [content.pending, content.queued] {
+        for txs in side.into_values() {
+            for tx in txs.into_values() {
+                hashes.push(tx.tx_hash());
             }
         }
     }
@@ -648,6 +701,39 @@ async fn clear_pool(rpc: &Rpc) -> Result<()> {
     Ok(())
 }
 
+/// One verification check line inside the M drift entry.
+#[derive(serde::Serialize)]
+struct DriftCheck<'a> {
+    check: &'a str,
+    ok: bool,
+    detail: &'a str,
+}
+
+/// One M replay anomaly line in drift.jsonl: divergences only — clean blocks
+/// live in the metrics (the log used to grow ~20 MB of clean-block telemetry
+/// that nobody reads).
+#[derive(serde::Serialize)]
+struct MDriftEntry<'a> {
+    chain: &'static str,
+    block: u64,
+    mainnet_hash: String,
+    txs: usize,
+    replayed: usize,
+    duration_ms: u64,
+    ok: Option<bool>,
+    divergence_class: Option<&'static str>,
+    divergences: Vec<String>,
+    checks: Vec<DriftCheck<'a>>,
+}
+
+fn divergence_class_name(class: crate::verify::DivergenceClass) -> &'static str {
+    match class {
+        crate::verify::DivergenceClass::None => "none",
+        crate::verify::DivergenceClass::ValueLevel => "value_level",
+        crate::verify::DivergenceClass::Fatal => "fatal",
+    }
+}
+
 fn log_and_drift(
     ctx: &Ctx,
     n: u64,
@@ -655,26 +741,31 @@ fn log_and_drift(
     block: &alloy_rpc_types_eth::Block,
 ) -> Result<()> {
     let v = outcome.verification.as_ref();
-    let entry = json!({
-        "chain": "m",
-        "block": n,
-        "mainnet_hash": format!("0x{:x}", block.header.hash),
-        "txs": outcome.txs,
-        "replayed": outcome.replayed,
-
-        "duration_ms": outcome.duration_ms,
-        "ok": v.map(|v| v.ok),
-        "divergence_class": v.map(|v| match v.class() {
-            crate::verify::DivergenceClass::None => "none",
-            crate::verify::DivergenceClass::ValueLevel => "value_level",
-            crate::verify::DivergenceClass::Fatal => "fatal",
-        }),
-        "divergences": v.map(|v| v.divergences.clone()).unwrap_or_default(),
-        "checks": v.map(|v| v.checks.iter().map(|(k, ok, d)| json!({"check": k, "ok": ok, "detail": d})).collect::<Vec<_>>()).unwrap_or_default(),
-    });
+    let entry = MDriftEntry {
+        chain: "m",
+        block: n,
+        mainnet_hash: format!("0x{:x}", block.header.hash),
+        txs: outcome.txs,
+        replayed: outcome.replayed,
+        duration_ms: outcome.duration_ms,
+        ok: v.map(|v| v.ok),
+        divergence_class: v.map(|v| divergence_class_name(v.class())),
+        divergences: v.map(|v| v.divergences.clone()).unwrap_or_default(),
+        checks: v
+            .map(|v| {
+                v.checks
+                    .iter()
+                    .map(|(check, ok, detail)| DriftCheck {
+                        check,
+                        ok: *ok,
+                        detail,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
     // The journal is a *divergence* log: clean blocks are counted in the
-    // metrics, not written to disk (it used to grow ~20 MB of clean-block
-    // telemetry that nobody reads).
+    // metrics, not written to disk.
     let clean = v.map(|v| v.divergences.is_empty()).unwrap_or(false);
     if !clean {
         ctx.drift.append(&entry)?;

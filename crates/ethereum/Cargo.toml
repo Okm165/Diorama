@@ -16,6 +16,8 @@ alloy-network-primitives = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 alloy-rpc-types-engine = { workspace = true }
+alloy-rpc-types-beacon = { workspace = true }
+alloy-json-rpc = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
 hex = { workspace = true }

@@ -1,48 +1,22 @@
-//! Thin shell: selects the mirror profile and hands the remaining arguments to it.
+//! The Mainnet Mirror engine binary — the `ethereum` profile's entrypoint.
 //!
-//! `--profile ethereum` runs the Mainnet Mirror engine (today's behavior);
-//! `--profile hyperliquid` lands in R3.
-use clap::{Parser, ValueEnum};
+//! Thin shell by design: the runtime is built with the measured worker stack
+//! budget, then `mirror_ethereum::main_entry` owns the subcommands (`run`,
+//! `selftest`, `rewind`). The Venue Mirror is a sibling binary over its own
+//! project crate (R3); the two share the common crates and never each other.
 use std::process::ExitCode;
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Profile {
-    /// The Mainnet Mirror engine.
-    Ethereum,
-    /// The Venue Mirror engine (lands in R3).
-    Hyperliquid,
-}
-
-#[derive(Parser)]
-#[command(name = "mirror-engine", version, about)]
-struct Cli {
-    /// Which mirror's engine to run.
-    #[arg(long, value_enum, default_value = "ethereum")]
-    profile: Profile,
-    /// The profile's own arguments (subcommand and flags).
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    args: Vec<String>,
-}
-
-/// The shell's own failures (the profile router's vocabulary).
-#[derive(Debug, thiserror::Error)]
-enum ShellError {
-    #[error("the hyperliquid profile lands in R3")]
-    HyperliquidNotYet,
-}
 
 /// Worker stack budget for the engine runtime.
 ///
 /// Debug builds give every by-value 128 KiB `Blob` temporary its own stack
 /// slot: the blob/KZG chain alone needs ~2.1 MiB (measured: `repair_proofs`
 /// 1.28 MiB + `validate_sidecars` 0.64 MiB, `encode_blob_tx` 1.29 MiB), which
-/// is exactly tokio's 2 MiB worker default - the first blob block overflowed
+/// is exactly tokio's 2 MiB worker default — the first blob block overflowed
 /// it. The engine owns an explicit budget with headroom; release builds use a
 /// fraction of it, and the cost is address space, not resident memory.
 const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(WORKER_STACK_SIZE)
@@ -55,16 +29,10 @@ fn main() -> ExitCode {
         }
     };
     runtime.block_on(async move {
-        match cli.profile {
-            Profile::Ethereum => match mirror_ethereum::main_entry(cli.args).await {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    report(&e);
-                    ExitCode::FAILURE
-                }
-            },
-            Profile::Hyperliquid => {
-                report(&ShellError::HyperliquidNotYet);
+        match mirror_ethereum::main_entry(std::env::args().skip(1).collect()).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                report(&e);
                 ExitCode::FAILURE
             }
         }

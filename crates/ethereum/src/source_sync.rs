@@ -21,46 +21,21 @@
 //!   - `GET /eth/v1/beacon/headers/head`   -> CL head slot
 //!   - `GET /eth/v2/beacon/blocks/{slot}`  -> beacon block + execution payload
 //!
+//! Both are parsed into alloy's official beacon types (`crate::blob`), and the
+//! payload goes to reth through the official engine types — no hand-rewritten
+//! JSON anywhere on this path.
+//!
 //! No P2P peers, no public RPC.
 use crate::ctx::Ctx;
-use crate::error::{BeaconError, Error, Result};
-use serde_json::{Map, Value};
+use crate::error::{Error, Result};
+use alloy_primitives::B256;
+use alloy_rpc_types_engine::{ForkchoiceState, PayloadStatusEnum};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Mainnet genesis time (beacon chain); slot = (timestamp - genesis) / 12.
 const MAINNET_GENESIS_TIME: u64 = 1_606_824_023;
 const SECONDS_PER_SLOT: u64 = 12;
-const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
-
-/// Beacon-API (snake_case) -> Engine-API (camelCase) payload field map. Only
-/// these fields are forwarded: the Engine API schema is strict and the beacon
-/// block may carry extra fields.
-const PAYLOAD_FIELDS: &[(&str, &str)] = &[
-    ("parent_hash", "parentHash"),
-    ("fee_recipient", "feeRecipient"),
-    ("state_root", "stateRoot"),
-    ("receipts_root", "receiptsRoot"),
-    ("logs_bloom", "logsBloom"),
-    ("prev_randao", "prevRandao"),
-    ("block_number", "blockNumber"),
-    ("gas_limit", "gasLimit"),
-    ("gas_used", "gasUsed"),
-    ("timestamp", "timestamp"),
-    ("extra_data", "extraData"),
-    ("base_fee_per_gas", "baseFeePerGas"),
-    ("block_hash", "blockHash"),
-    ("transactions", "transactions"),
-    ("blob_gas_used", "blobGasUsed"),
-    ("excess_blob_gas", "excessBlobGas"),
-];
-
-const WITHDRAWAL_FIELDS: &[(&str, &str)] = &[
-    ("index", "index"),
-    ("validator_index", "validatorIndex"),
-    ("address", "address"),
-    ("amount", "amount"),
-];
 
 pub async fn source_sync_loop(ctx: Arc<Ctx>) {
     let Some(engine) = ctx.engine.clone() else {
@@ -109,7 +84,14 @@ async fn cl_head_el_block(ctx: &Ctx, cache: &mut Option<(Instant, u64)>) -> Opti
     }
     let slot = ctx.beacon.head_slot().await.ok()?;
     let block = ctx.beacon.block_by_slot(slot).await.ok()??;
-    let n = quantity_u64(block.execution_payload()?.get("block_number")).ok()?;
+    let n = block
+        .data
+        .message
+        .body
+        .payload()?
+        .payload_inner
+        .payload_inner
+        .block_number;
     *cache = Some((Instant::now(), n));
     Some(n)
 }
@@ -137,11 +119,12 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
             slot += 1; // missed slot
             continue;
         };
-        let Some(payload) = block.execution_payload() else {
+        let body = &block.data.message.body;
+        let Some(payload) = body.payload() else {
             slot += 1; // no payload in this slot
             continue;
         };
-        let number = quantity_u64(payload.get("block_number"))?;
+        let number = payload.payload_inner.payload_inner.block_number;
         if number <= el_head {
             slot += 1; // already executed
             continue;
@@ -153,117 +136,37 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
                 slot,
             });
         }
-        let payload_hash = payload
-            .get("block_hash")
-            .and_then(|v| v.as_str())
-            .ok_or(BeaconError::Payload {
-                what: "payload has no block_hash",
-            })?
-            .to_string();
-        let versioned_hashes = block
-            .blob_versioned_hashes()
-            .iter()
-            .map(|h| format!("0x{}", hex::encode(h)))
-            .collect::<Vec<_>>();
-        let parent_beacon_block_root = block.parent_root();
-        let requests = block.execution_requests();
-        let payload_json = to_engine_payload(payload)?;
-        let (status, message) = engine
-            .new_payload(payload_json, versioned_hashes, parent_beacon_block_root, requests)
+        let payload_hash = payload.payload_inner.payload_inner.block_hash;
+        let versioned_hashes = body.versioned_hashes();
+        let requests = body.requests();
+        let status = engine
+            .new_payload(
+                payload,
+                &versioned_hashes,
+                block.data.message.parent_root,
+                requests.as_ref(),
+            )
             .await?;
-        match status.as_str() {
-            "VALID" | "ACCEPTED" => {}
+        match &status.status {
+            PayloadStatusEnum::Valid | PayloadStatusEnum::Accepted => {}
             other => {
                 return Err(Error::PayloadRejected {
                     number,
-                    status: other.to_string(),
-                    message,
+                    status: other.as_str().to_string(),
+                    message: other.validation_error().unwrap_or_default().to_string(),
                 })
             }
         }
-        engine.forkchoice_updated(&payload_hash, ZERO_HASH, ZERO_HASH).await?;
+        engine
+            .forkchoice_updated(&ForkchoiceState {
+                head_block_hash: payload_hash,
+                safe_block_hash: B256::ZERO,
+                finalized_block_hash: B256::ZERO,
+            })
+            .await?;
         tracing::debug!(block = number, slot, "top-up delivered");
         delivered += 1;
         slot += 1;
     }
     Ok(delivered)
-}
-
-/// The beacon API serves quantities as decimal strings; the Engine API wants
-/// hex quantities. Accept both (single implementation lives in `blob`).
-fn quantity_u64(v: Option<&Value>) -> Result<u64, BeaconError> {
-    let s = v
-        .and_then(|v| v.as_str())
-        .ok_or(BeaconError::Payload {
-            what: "missing quantity",
-        })?;
-    crate::blob::parse_quantity(s).ok_or(BeaconError::Payload {
-        what: "bad quantity",
-    })
-}
-
-/// Engine API quantity (hex).
-fn hex_quantity(v: &Value) -> Result<Value, BeaconError> {
-    Ok(Value::String(format!("0x{:x}", quantity_u64(Some(v))?)))
-}
-
-/// Rewrite a beacon-API execution payload into the Engine API shape.
-fn to_engine_payload(src: &Value) -> Result<Value, BeaconError> {
-    let obj = src.as_object().ok_or(BeaconError::Payload {
-        what: "execution_payload is not an object",
-    })?;
-    let mut out = Map::new();
-    for (snake, camel) in PAYLOAD_FIELDS {
-        if let Some(v) = obj.get(*snake) {
-            out.insert((*camel).to_string(), v.clone());
-        }
-    }
-    if let Some(Value::Array(withdrawals)) = obj.get("withdrawals") {
-        let mapped = withdrawals
-            .iter()
-            .map(|w| {
-                let mut m = Map::new();
-                for (snake, camel) in WITHDRAWAL_FIELDS {
-                    if let Some(v) = w.get(*snake) {
-                        m.insert((*camel).to_string(), v.clone());
-                    }
-                }
-                Value::Object(m)
-            })
-            .collect();
-        out.insert("withdrawals".to_string(), Value::Array(mapped));
-    }
-    // Beacon API quantities are decimal strings; the Engine API requires hex.
-    for key in [
-        "blockNumber",
-        "gasLimit",
-        "gasUsed",
-        "timestamp",
-        "baseFeePerGas",
-        "blobGasUsed",
-        "excessBlobGas",
-    ] {
-        if let Some(v) = out.get(key).cloned() {
-            out.insert(key.to_string(), hex_quantity(&v)?);
-        }
-    }
-    if let Some(Value::Array(withdrawals)) = out.get("withdrawals").cloned() {
-        let mut mapped = Vec::with_capacity(withdrawals.len());
-        for w in withdrawals {
-            let mut m = w.as_object().cloned().unwrap_or_default();
-            for key in ["index", "validatorIndex", "amount"] {
-                if let Some(v) = m.get(key).cloned() {
-                    m.insert(key.to_string(), hex_quantity(&v)?);
-                }
-            }
-            mapped.push(Value::Object(m));
-        }
-        out.insert("withdrawals".to_string(), Value::Array(mapped));
-    }
-    if out.get("parentHash").is_none() || out.get("blockHash").is_none() {
-        return Err(BeaconError::Payload {
-            what: "missing required fields",
-        });
-    }
-    Ok(Value::Object(out))
 }

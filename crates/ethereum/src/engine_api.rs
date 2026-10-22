@@ -1,10 +1,18 @@
-//! Minimal Engine API client (JWT-authenticated authrpc).
+//! Engine API client (JWT-authenticated authrpc) on the official wire model.
 //!
 //! Only what the top-up loop needs: `engine_newPayloadV4` (falling back to V3
 //! for pre-Prague payloads) and `engine_forkchoiceUpdatedV3`. The JWT is the
-//! same secret the consensus client uses (`/secrets/jwt.hex`).
-use alloy_rpc_types_engine::{Claims, JwtSecret};
-use serde_json::{json, Value};
+//! same secret the consensus client uses (`/secrets/jwt.hex`); the envelope is
+//! `alloy_json_rpc`'s and the params/results are `alloy_rpc_types_engine`'s,
+//! so a spec change lands as a compile error, never a silent mismatch.
+use alloy_eips::eip7685::Requests;
+use alloy_json_rpc::{ErrorPayload, Id, Request, ResponsePacket, ResponsePayload};
+use alloy_primitives::B256;
+use alloy_rpc_types_engine::{
+    Claims, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, JwtSecret, PayloadStatus,
+};
+use serde::{de::Error as _, Serialize};
+use serde_json::value::RawValue;
 use std::path::{Path, PathBuf};
 
 /// The engine-API boundary's error taxonomy (boundary-discipline): a JWT that
@@ -32,6 +40,15 @@ pub enum EngineApiError {
         source: reqwest::Error,
     },
 
+    /// A request that could not be encoded (a bug in our own types; named so
+    /// it can never masquerade as a reth fault).
+    #[error("engine {method}: encoding the request")]
+    Encode {
+        method: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("engine {method} transport")]
     Transport {
         method: &'static str,
@@ -54,21 +71,14 @@ pub enum EngineApiError {
         source: serde_json::Error,
     },
 
-    #[error("engine {method}: {message}")]
+    /// reth's typed refusal. The field is named `payload`, not `source`:
+    /// alloy's `ErrorPayload` implements `Display`, not `Error`, and thiserror
+    /// treats a field named `source` as the error source.
+    #[error("engine {method}: {payload}")]
     Rpc {
         method: &'static str,
-        message: String,
+        payload: ErrorPayload,
     },
-}
-
-/// One Engine API answer: exactly one of `result` or `error`. A body with
-/// neither is not an answer (a gateway page dressed as JSON), and the HTTP
-/// status classifies it instead.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum Answer {
-    Result { result: Value },
-    Error { error: Value },
 }
 
 #[derive(Clone)]
@@ -95,17 +105,30 @@ impl EngineClient {
         })
     }
 
-    async fn call(&self, method: &'static str, params: Value) -> Result<Value, EngineApiError> {
+    /// One JSON-RPC round trip; the raw `result` is returned so each typed
+    /// method parses its own shape. The same boundary rule as the anvil
+    /// client: a body that parses as a JSON-RPC answer *is* reth's answer,
+    /// whatever the HTTP status.
+    async fn call(
+        &self,
+        method: &'static str,
+        params: &impl Serialize,
+    ) -> Result<Box<RawValue>, EngineApiError> {
         let token = self
             .secret
             .encode(&Claims::with_current_timestamp())
             .map_err(|source| EngineApiError::JwtSign { source })?;
+        let params = serde_json::value::to_raw_value(params)
+            .map_err(|source| EngineApiError::Encode { method, source })?;
+        let body = Request::new(method.to_string(), Id::Number(1), params)
+            .serialize()
+            .map_err(|source| EngineApiError::Encode { method, source })?;
         let resp = self
             .http
             .post(&self.url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}))
+            .body(body.take_request().get().to_string())
             .send()
             .await
             .map_err(|source| EngineApiError::Transport { method, source })?;
@@ -114,13 +137,15 @@ impl EngineClient {
             .text()
             .await
             .map_err(|source| EngineApiError::Transport { method, source })?;
-        // The same boundary rule as the anvil client: a body that parses as a
-        // JSON-RPC answer is the node's answer, whatever the HTTP status.
-        match serde_json::from_str::<Answer>(&text) {
-            Ok(Answer::Result { result }) => Ok(result),
-            Ok(Answer::Error { error }) => Err(EngineApiError::Rpc {
+        match serde_json::from_str::<ResponsePacket>(&text) {
+            Ok(ResponsePacket::Single(response)) => match response.payload {
+                ResponsePayload::Success(result) => Ok(result),
+                ResponsePayload::Failure(payload) => Err(EngineApiError::Rpc { method, payload }),
+            },
+            Ok(ResponsePacket::Batch(_)) => Err(EngineApiError::Decode {
                 method,
-                message: error.to_string(),
+                body: truncate(&text, 200).to_string(),
+                source: serde_json::Error::custom("a batch answer to a single call"),
             }),
             Err(_) if !status.is_success() => Err(EngineApiError::Status {
                 method,
@@ -135,72 +160,72 @@ impl EngineClient {
         }
     }
 
-    /// Validate+execute a payload. Returns (status, message); status is one of
-    /// VALID | INVALID | SYNCING | ACCEPTED per the Engine API spec.
-    pub async fn new_payload(
-        &self,
-        payload: Value,
-        versioned_hashes: Vec<String>,
-        parent_beacon_block_root: String,
-        execution_requests: Option<Vec<String>>,
-    ) -> Result<(String, String), EngineApiError> {
-        let mut params = vec![
-            payload,
-            json!(versioned_hashes),
-            json!(parent_beacon_block_root),
-        ];
-        let method = match execution_requests {
-            Some(requests) => {
-                params.push(json!(requests));
-                "engine_newPayloadV4"
-            }
-            None => "engine_newPayloadV3",
-        };
-        let out = self.call(method, Value::Array(params)).await?;
-        let status = out
-            .get("status")
-            .and_then(|s| s.as_str())
-            .unwrap_or("?")
-            .to_string();
-        let message = out
-            .get("validationError")
-            .or_else(|| out.get("message"))
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_string();
-        Ok((status, message))
+    /// Parse a raw `result` into its typed shape, naming the method on a
+    /// corrupt answer.
+    fn parse<T: serde::de::DeserializeOwned>(
+        method: &'static str,
+        result: &RawValue,
+    ) -> Result<T, EngineApiError> {
+        serde_json::from_str(result.get()).map_err(|source| EngineApiError::Decode {
+            method,
+            body: truncate(result.get(), 200).to_string(),
+            source,
+        })
     }
 
-    /// Update the forkchoice to `head`. Returns the resulting payload status.
+    /// Validate+execute a payload. `engine_newPayloadV4` when the EIP-7685
+    /// execution requests are present (Prague+), `V3` otherwise. The returned
+    /// status is the spec's VALID | INVALID | SYNCING | ACCEPTED.
+    pub async fn new_payload(
+        &self,
+        payload: &ExecutionPayloadV3,
+        versioned_hashes: &[B256],
+        parent_beacon_block_root: B256,
+        execution_requests: Option<&Requests>,
+    ) -> Result<PayloadStatus, EngineApiError> {
+        let (method, result) = match execution_requests {
+            Some(requests) => (
+                "engine_newPayloadV4",
+                self.call(
+                    "engine_newPayloadV4",
+                    &(
+                        payload,
+                        versioned_hashes,
+                        parent_beacon_block_root,
+                        requests,
+                    ),
+                )
+                .await?,
+            ),
+            None => (
+                "engine_newPayloadV3",
+                self.call(
+                    "engine_newPayloadV3",
+                    &(payload, versioned_hashes, parent_beacon_block_root),
+                )
+                .await?,
+            ),
+        };
+        Self::parse(method, &result)
+    }
+
+    /// Update the forkchoice to `state` (no payload attributes). Returns the
+    /// resulting payload status.
     pub async fn forkchoice_updated(
         &self,
-        head: &str,
-        safe: &str,
-        finalized: &str,
-    ) -> Result<String, EngineApiError> {
-        let out = self
+        state: &ForkchoiceState,
+    ) -> Result<PayloadStatus, EngineApiError> {
+        let result = self
             .call(
                 "engine_forkchoiceUpdatedV3",
-                json!([{
-                    "headBlockHash": head,
-                    "safeBlockHash": safe,
-                    "finalizedBlockHash": finalized
-                }, null]),
+                &(state, Option::<()>::None),
             )
             .await?;
-        Ok(out
-            .get("payloadStatus")
-            .and_then(|p| p.get("status"))
-            .and_then(|s| s.as_str())
-            .unwrap_or("?")
-            .to_string())
+        let updated: ForkchoiceUpdated = Self::parse("engine_forkchoiceUpdatedV3", &result)?;
+        Ok(updated.payload_status)
     }
 }
 
 fn truncate(s: &str, n: usize) -> &str {
-    if s.len() <= n {
-        s
-    } else {
-        &s[..n]
-    }
+    mirror_anvil::truncate(s, n)
 }

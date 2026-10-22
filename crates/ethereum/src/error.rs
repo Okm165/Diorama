@@ -45,6 +45,15 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// A drift-log entry could not be serialized (a bug in an entry type,
+    /// never a runtime condition): named so the gap cannot look like a clean
+    /// run.
+    #[error("drift log: encoding the entry")]
+    DriftEncode {
+        #[source]
+        source: serde_json::Error,
+    },
+
     /// The HTTP listener could not bind.
     #[error("binding the http api at {addr}")]
     Bind {
@@ -85,14 +94,16 @@ pub enum Error {
     BlockEnv {
         block: u64,
         #[source]
-        source: mirror_anvil::RpcError,
+        source: Box<mirror_anvil::Error>,
     },
 
-    #[error("block {block}: reth pre-balance: {source}")]
+    /// A reth pre-balance read for the withdrawal credits failed. The field
+    /// is named `payload`: alloy's `ErrorPayload` implements `Display`, not
+    /// `Error`, so thiserror's automatic source detection must not see it.
+    #[error("block {block}: reth pre-balance: {payload}")]
     PreBalance {
         block: u64,
-        #[source]
-        source: mirror_anvil::RpcError,
+        payload: mirror_anvil::RpcError,
     },
 
     #[error("block {block}: raw tx {index} send failed")]

@@ -43,13 +43,8 @@ pub async fn run(
     // The pin comes from the scratch anvil itself (forkConfig.forkBlockNumber).
     let info = ctx.anvil_m.anvil_node_info().await?;
     let pin = info
-        .pointer("/forkConfig/forkBlockNumber")
-        .and_then(|v| {
-            v.as_u64().or_else(|| {
-                v.as_str()
-                    .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
-            })
-        })
+        .fork_config
+        .fork_block_number
         .ok_or(Error::NoForkPin { chain: "anvil-m" })?;
 
     println!("== mirror engine selftest ==");

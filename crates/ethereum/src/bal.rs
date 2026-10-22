@@ -9,9 +9,7 @@
 //! implements exactly that.
 use alloy_eips::eip7928::BlockAccessList;
 
-pub use mirror_anvil::{
-    flatten_trace_block, flatten_trace_diff, quant_hex_u256, Write,
-};
+pub use mirror_anvil::{flatten_trace_block, Write};
 
 /// Flatten a BAL into post-state writes (last change per key).
 pub fn flatten_bal(bal: &BlockAccessList) -> Vec<Write> {
