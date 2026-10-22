@@ -36,6 +36,10 @@ pub struct VenueMetrics {
     pub epochs_total: AtomicU64,
     /// Writes re-applied by a same-pin restore.
     pub restore_writes_total: AtomicU64,
+    /// V blocks the shadow scan walked (the harness mines one block per poll;
+    /// empty blocks are skipped cheaply — this counter makes the cost visible,
+    /// plan §17.4).
+    pub scanned_blocks_total: AtomicU64,
     pub probe_ok: AtomicU64,
     pub probe_failed: AtomicU64,
     pub probe_skipped: AtomicU64,
@@ -66,6 +70,7 @@ impl VenueMetrics {
         g(&mut out, "venue_pin_age_blocks", "blocks since the first scanned block in this epoch", self.pin_age_blocks.load(Ordering::Relaxed));
         c(&mut out, "venue_epochs_total", "times V was found re-forked under the driver (epoch rule ran)", self.epochs_total.load(Ordering::Relaxed));
         c(&mut out, "venue_restore_writes_total", "writes re-applied by same-pin restores", self.restore_writes_total.load(Ordering::Relaxed));
+        c(&mut out, "venue_scanned_blocks_total", "V blocks the shadow scan walked", self.scanned_blocks_total.load(Ordering::Relaxed));
         c(&mut out, "venue_probe_ok_total", "at-pin probes matching the fork source", self.probe_ok.load(Ordering::Relaxed));
         c(&mut out, "venue_probe_failures_total", "at-pin probes diverging from the fork source (devnet-owned skipped)", self.probe_failed.load(Ordering::Relaxed));
         c(&mut out, "venue_probe_skipped_total", "probes skipped because their target is devnet-owned", self.probe_skipped.load(Ordering::Relaxed));

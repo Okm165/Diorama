@@ -83,6 +83,7 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
         .route("/admin/shadow", post(admin_shadow))
         .route("/admin/deal", post(admin_deal))
         .route("/admin/epoch", post(admin_epoch))
+        .route("/admin/probes", post(admin_probes))
         .with_state(ctx);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -238,4 +239,25 @@ async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>>
 struct EpochResponse {
     reset: bool,
     source: String,
+}
+
+/// `/admin/probes`: run the at-pin parity probes now and report the counters
+/// (boot and re-pin run them automatically; the on-demand trigger matters
+/// after a hand-back, when the probes should go green again).
+async fn admin_probes(State(ctx): State<Arc<Ctx>>) -> Result<Json<ProbeReport>> {
+    crate::driver::probes_now(&ctx).await?;
+    Ok(Json(ProbeReport {
+        ok: ctx.venue_metrics.probe_ok.load(Ordering::Relaxed),
+        failed: ctx.venue_metrics.probe_failed.load(Ordering::Relaxed),
+        skipped: ctx.venue_metrics.probe_skipped.load(Ordering::Relaxed),
+        last_failed: ctx.venue_metrics.probe_last_failed.load(Ordering::Relaxed),
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct ProbeReport {
+    ok: u64,
+    failed: u64,
+    skipped: u64,
+    last_failed: u64,
 }

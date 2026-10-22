@@ -121,6 +121,8 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     }
     if head > last {
         scan::scan_range(&ctx.v, &ctx.shadow, &ctx.shadow_scanned_upto, last, head).await?;
+        ctx.venue_metrics
+            .add(&ctx.venue_metrics.scanned_blocks_total, head - last);
         ctx.save_shadow()?;
         let block = ctx.v.block_by_number(head, false).await?;
         let first_block = cursor.as_ref().map(|c| c.first_block).unwrap_or(head);
@@ -297,6 +299,13 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
 /// meaningful while the pin *is* the source's head — i.e. right after a
 /// `latest` pin (boot, re-pin). An older pin is skipped and counted, never
 /// alarmed: the source cannot serve it, and a mismatch would be a lie.
+/// Run the at-pin probes now (the admin route's entry: boot and re-pin run
+/// them automatically; this is the on-demand trigger, e.g. after a hand-back).
+pub async fn probes_now(ctx: &Ctx) -> Result<()> {
+    let pin = ctx.v.anvil_node_info().await?.fork_config.fork_block_number;
+    probes_at_pin(ctx, pin).await
+}
+
 async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     let Some(pin) = pin else {
         tracing::warn!("at-pin probes skipped: V has no fork pin");
