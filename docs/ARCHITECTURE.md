@@ -115,6 +115,18 @@ stayed fresh and hid the gap). Resolve each source's aggregator and watch it:
 cast call <source> "aggregator()(address)" --rpc-url $RETH
 ```
 
+**Composite sources need the whole chain.** Aave's WBTC/USD source is not a
+feed at all: it multiplies `BTC/USD x WBTC/BTC`, each leg a proxy whose
+aggregator holds the round. None of those four contracts was watched, so the
+WBTC price on T sat stale (measured: $81,811.77 vs mainnet's $81,810.37 at the
+same cursor) while *every* probe stayed green - there was no WBTC price probe.
+Found by the product sim's broad freshness audit, which compares the whole
+market-data closure per parent block. Heal for this class: trace the source's
+read path on reth with the plain `prestateTracer` (no `diffMode` - a view call
+changes nothing, so a diff-mode trace is empty), then write the read slots'
+values to T. The full price closure now has a probe per reserve, so the class
+alarms continuously instead of waiting for an audit.
+
 **Closure runs both ways.** The watchlist must contain every account whose
 *mainnet* state the mirror needs, **and** every account the devnet's own writes
 land on: a devnet write to an unwatched account is safe (no diff ever touches
@@ -174,10 +186,11 @@ need >6 GiB (it OOM-looped at 6Gi) - the deployment requests 2Gi and limits 16Gi
 
 **Anvil `--prune-history`** is a memory knob, not a disk knob: it keeps up to N
 full *state snapshots* in memory for rollback/tracing. Measured with 1000:
-anvil-t reached 9.8 GB in minutes and anvil-m OOM'd at 12Gi. Now: T keeps 32,
-M keeps 16. Tracing a historical block on M is therefore limited to the last
-~16 replayed blocks; T's own journal (`/admin/rewind`) is engine-side and
-unaffected.
+anvil-t reached 9.8 GB in minutes and anvil-m OOM'd at 12Gi. Now: T keeps 32
+(its state is small and the devnet uses `evm_snapshot`/`evm_revert`), M keeps 2
+(it replays every parent tx, so snapshots are huge and M is recycled by design).
+Tracing a historical block on M is therefore limited to the last ~2 replayed
+blocks; T's own journal (`/admin/rewind`) is engine-side and unaffected.
 
 **State dumps**: M's dump is ~350 MB (it replays every parent tx), T's is ~27 MB
 (watch list only). M dumps every 300 s, T every 60 s. A restored dump is a
@@ -251,11 +264,13 @@ same self-heal path that handles a receding follow head. The mirror follows
 *reth's* head: see "Source liveness" below.
 
 **Pins and epochs.** Anvil forks at an absolute pin (`reth head - FORK_OFFSET`,
-default 64), resolved once per epoch by an init container and persisted in
-`/state/pin`, so restarts keep the same base. Reads above the pin come from the
-replayed chain (M) or from applied diffs (T); reads below it come from reth's
-state window (which serves deep history: 10,064 blocks of state, 20,000 blocks
-of receipts/bodies).
+128 blocks). The pin is re-resolved on every *container* start (the init
+container for a fresh pod, the wrapper on a container restart) and persisted in
+`/state/pin` as the fallback for when reth is unreachable, so an OOM restart
+re-forks at the live head instead of replaying an aging fork until the next
+OOM. Reads above the pin come from the replayed chain (M) or from applied diffs
+(T); reads below it come from reth's state window (which serves deep history:
+10,064 blocks of state, 20,000 blocks of receipts/bodies).
 
 Two constraints bound the pin depth:
 1. reth's state window (10,064 blocks ≈ 1.4 days) - reth must be able to serve
@@ -264,8 +279,8 @@ Two constraints bound the pin depth:
    window, minus anything pruned) - blob txs in the replayed window need
    sidecars.
 
-Depth is a trade-off, not a requirement: 64 keeps the mirror live with a fast,
-exact bootstrap (~13 min of replayed mainnet history); raising it replays more
+Depth is a trade-off, not a requirement: 128 keeps the mirror live with a fast,
+exact bootstrap (~26 min of replayed mainnet history); raising it replays more
 history but costs replay time and M memory. When the pin ages out of reth's
 state window, run `make repin` - a new epoch. The engine detects the chain reset
 and rebases automatically.
@@ -467,18 +482,20 @@ Parsing is strict: an unknown key is a startup error, never a silently ignored
 setting (`deny_unknown_fields` on every config struct).
 
 ```yaml
-reth:   { url, follow: safe|latest|finalized, request_timeout_secs }
+reth:   { url, follow: safe|latest|finalized, follow_margin_blocks,
+          request_timeout_secs }
 anvil:  { m_url, t_url }
 source_sync: { enabled, interval_ms, max_per_pass,
                engine_url, jwt_path }   # EIP-8379 top-up via reth's Engine API
 loops:  { poll_interval_ms, max_gap_blocks, chunk_size,
-          replay_into_m, apply_into_t, repair_m,
+          replay_into_m, apply_into_t, repair_m, fork_offset,
           on_divergence: continue|freeze_m|halt_all }
 verifier: { enabled, drift_sample_keys, type4_refund_per_auth, probes[] }
 watchlist: [ { address, note } ]     # all slots of a watched account sync to T
 journal: { dir, blocks }             # ring size
 blobs:  { enabled, beacon_urls[] }   # sidecar source: local Lighthouse only
 http:   { addr, port }
+state_dir: /state                    # cursors, shadow.json, drift.jsonl
 ```
 
 **Watch list** (seed = the plan's §3.5 closure): Chainlink feeds (WETH/WBTC/

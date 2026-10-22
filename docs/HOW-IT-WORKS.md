@@ -90,7 +90,7 @@ your state if T re-forks.
 ## 4. The M pipeline (per parent block `n`)
 
 1. **Convergence repair.** Apply `BAL(n-1)` for the watched accounts to M as
-   cheatcode writes (unmined), then prove it: the 8 configured probes on M vs
+   cheatcode writes (unmined), then prove it: the 12 configured probes on M vs
    reth at `n-1`. Gated on the previous block's verification passing. Reason: a
    fork cannot reproduce `blockhash()`-dependent values (Seaport counters are
    the classic case); one such divergence would otherwise cascade into invalid
@@ -104,11 +104,14 @@ your state if T re-forks.
    exact except EIP-7702 type-4, whose delta must lie in
    `[−12,500 × #auths, 0]`) · `logsBloom` · full log set · withdrawals · the 8
    state probes.
-7. **Classify.** Structural divergences (counts, order, statuses, gas) count in
-   `mirror_divergences_total` and can freeze M (`on_divergence: freeze_m` for
-   conformance runs). Value-level ones (blockhash-dependent) count in
+7. **Classify.** Structural divergences (tx count, tx order, blob gas,
+   withdrawal count) count in `mirror_divergences_total` and can freeze M
+   (`on_divergence: freeze_m` for conformance runs). Behavioral ones (receipt
+   statuses, gas, logs, supplies - the blockhash-gated A17 class) count in
    `mirror_value_divergences_total` and land in `drift.jsonl`; the next block's
-   repair re-converges the state.
+   repair re-converges the state. A *real* execution problem cannot hide behind
+   that: it shows up as a convergence-probe failure (`mirror_m_convergence_*`),
+   which is why the receipts check is classified behavioral.
 8. **Cursor + metrics.** Advance, publish.
 
 ## 5. The T pipeline (per parent block `n`)
@@ -134,7 +137,7 @@ your state if T re-forks.
 7. **Journal + prune.** Before-values recorded per block (ring).
 8. **Sampled parity.** 8 storage keys from the filtered set vs reth at `n` (the
    drift lens).
-9. **Probe parity on T.** The same 8 probes against T@latest vs reth at `n`;
+9. **Probe parity on T.** The same 12 probes against T@latest vs reth at `n`;
    devnet-owned targets are skipped, and the check is suspended while a clock
    offset is set (views are then *meant* to differ). The applier scans its own
    devnet blocks (the prepend) *before* the probes run, so a write made in this
@@ -168,7 +171,12 @@ on every *container* start (an OOM restart re-forks at the live head and
 re-replays only the pin window, instead of replaying an aging fork until the
 next OOM — the measured memory death spiral). T re-resolves the same way, and
 its devnet state is rebuilt from the shadow registry. **M's re-base never
-touches T**: the two chains share a source, not a lifetime.
+touches T**: the two chains share a source, not a lifetime. A re-base *skips*
+the range between the old cursor and the new pin (bounded by `FORK_OFFSET`):
+those blocks are mainnet's own — the fork base makes the state exact by
+construction — but they are not re-executed, and
+`mirror_m_rebase_skipped_blocks_total` plus a WARN naming the range make that
+visible rather than silent.
 
 ### 6.3 Re-fork detection and devnet-state restore
 
@@ -231,7 +239,7 @@ fresh pin (cheap by design), T restores its devnet state from the registry.
 - `logsBloom` parity and full log-set equality
 - receipt count, statuses, and gas (type-4 within the refund rule)
 - withdrawal totals
-- 8 state probes on M (post-repair) and on T (post-alignment, COW-aware)
+- 12 state probes on M (post-repair) and on T (post-alignment, COW-aware)
 - 8 sampled storage keys on T (drift lens)
 
 ## 9. Alarms that matter

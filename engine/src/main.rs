@@ -289,6 +289,24 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                 // Drop it from the persisted state too: `first_block` is an
                 // epoch marker, and the next processed block must set a fresh
                 // one (otherwise `mirror_pin_age_blocks` counts across epochs).
+                if matches!(chain, Chain::M) {
+                    // An M re-base skipped this range: those blocks are
+                    // mainnet's own (the fresh fork serves them and the state
+                    // comes from the fork base, so it is exact by construction),
+                    // but the engine did not re-execute them - their tx-level
+                    // verification is skipped. Bounded by `fork_offset`; counted
+                    // and logged so the gap is never invisible.
+                    let skipped = head.saturating_sub(c.block);
+                    if skipped > 0 {
+                        ctx.metrics.add(&ctx.metrics.m_rebase_skipped, skipped);
+                        tracing::warn!(
+                            from = c.block,
+                            to = head,
+                            skipped,
+                            "M re-base skipped a range (fork base: state exact, tx verification skipped)"
+                        );
+                    }
+                }
                 {
                     let mut state = ctx.state.lock().unwrap();
                     match chain {
@@ -327,8 +345,13 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         // justification), which strands M until it catches up (measured: a
         // 42-block recede stalling ~10 min, with a warning every poll).
         // Re-base M at a fresh pin behind the follow head instead; the cursor
-        // hash check on the next pass rebases the replay, bounding the whole
-        // recovery to `fork_offset` blocks (~1-2 min). T is unaffected: the
+        // hash check on the next pass rebases the replay. The blocks between
+        // the old cursor and the new pin are mainnet's own (the fork serves
+        // them and the state comes from the fork base, so it is exact by
+        // construction), but they are not re-executed: their tx-level
+        // verification is skipped. Bounded by `fork_offset` per re-base and
+        // counted in `mirror_m_rebase_skipped_blocks_total` with a WARN naming
+        // the range, so the gap is never invisible. T is unaffected: the
         // epoch/COW state is keyed on T's own fork block, not M's.
         //
         // T is exempt from this check entirely: its heights advance

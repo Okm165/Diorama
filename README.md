@@ -65,6 +65,8 @@ run `make repin` so M/T start from a live, exact base. See
 ```bash
 make logs-reth           # or logs-lighthouse / logs-engine / logs-anvil-t
 make selftest            # replay+apply 3 real blocks against a public RPC (no reth needed)
+make product-sim         # the margin-product workflow end to end on T (leverage, live data, liquidation)
+make closure-check       # every market-data view's storage deps must be in the watchlist
 make pin-show            # resolved fork pins of M and T
 make repin               # re-pin drill (new epoch; engine rebases automatically)
 ```
@@ -95,7 +97,8 @@ engine/                 Rust engine (replay + verifier + BAL diff applier + conv
 k8s/base/               kustomize base: reth, lighthouse, anvil-m/t, engine
 k8s/overlays/local/     single-node k3s overlay (engine image tag)
 k8s/bootstrap/          one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
-scripts/                gen-secret.sh, smoke.sh, scenario.sh, capability-proof.sh
+scripts/                lib.sh, gen-secret.sh, smoke.sh, scenario.sh, capability-proof.sh,
+                        product-sim.sh, closure-check.sh
 docs/                   ARCHITECTURE.md, OPERATIONS.md, TESTING.md
 ```
 

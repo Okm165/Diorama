@@ -18,6 +18,7 @@ pub struct Metrics {
     pub halted: AtomicU64,
     pub bal_writes: AtomicU64,
     pub m_repair_writes: AtomicU64,
+    pub m_rebase_skipped: AtomicU64,
     pub m_convergence_ok: AtomicU64,
     pub m_convergence_failed: AtomicU64,
     pub m_convergence_last_failed: AtomicU64,
@@ -101,6 +102,7 @@ impl Metrics {
         counter(&mut out, "mirror_reorgs_detected_total", "upstream reorgs detected", self.reorgs_detected.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_bal_writes_last_block", "watch-list writes applied to T in the last applied parent block", self.bal_writes.load(Ordering::Relaxed));
         counter(&mut out, "mirror_m_repair_writes_total", "BAL writes applied to converge M", self.m_repair_writes.load(Ordering::Relaxed));
+        counter(&mut out, "mirror_m_rebase_skipped_blocks_total", "parent blocks an M re-base skipped (fork base: state exact, tx verification skipped)", self.m_rebase_skipped.load(Ordering::Relaxed));
         counter(&mut out, "mirror_m_convergence_ok_total", "post-repair probes matching mainnet", self.m_convergence_ok.load(Ordering::Relaxed));
         counter(&mut out, "mirror_m_convergence_failures_total", "post-repair probes diverging (repair incomplete)", self.m_convergence_failed.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_m_convergence_last_failed", "post-repair probes diverging in the last block", self.m_convergence_last_failed.load(Ordering::Relaxed));

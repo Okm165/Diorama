@@ -11,9 +11,9 @@
 | `mirror_cursor_block` / `mirror_cursor_block_t` | not advancing | the chain's parent cursor; `_t` is the devnet's. T's cursor must track the head even when M holds (they are independent loops) |
 | `mirror_lag_blocks` | > `max_gap_blocks` (300) | engine pauses itself (the plan's "> 300 → pause and re-sync"); re-pin drill or restore reth. A cursor that was just rebased to a fresh pin is exempt and may replay its whole pin window (bounded by reth's 10,064-block state window) |
 | `mirror_last_replay_seconds` | > 10 s warm | investigate; check reth health first (state-fetch bound) |
-| `mirror_divergences_total` | increase | structural divergence (counts/order/gas) – inspect `drift.jsonl`; the repair re-converges state on the next block |
+| `mirror_divergences_total` | increase | structural divergence (tx count/order, blob gas, withdrawals) – inspect `drift.jsonl`; the repair re-converges state on the next block. Statuses/gas/logs are classified *behavioral* (the A17 blockhash class) and counted in `mirror_value_divergences_total`; real execution problems surface via the convergence probes |
 | `mirror_value_divergences_total` | increase | expected for blocks with blockhash-dependent txs (A17) – no action |
-| `mirror_m_convergence_failures_total` | increase | M's state ≠ mainnet at n-1 (the 8 probes, run for every block). A stale pin or a missing BAL entry; re-pin if it keeps climbing |
+| `mirror_m_convergence_failures_total` | increase | M's state ≠ mainnet at n-1 (the 12 probes, run for every block). A stale pin or a missing BAL entry; re-pin if it keeps climbing |
 | `mirror_t_convergence_failures_total` | increase | T's state ≠ mainnet at the parent block just applied, on a probe whose target the devnet does *not* own (shadowed targets are skipped by design). A missing BAL entry, a watchlist gap, or a clock offset left set (`/admin/time`). A deliberate manipulation whose target is shadowed does *not* fire it; one that is read *through* an unowned contract (e.g. crashing a Chainlink aggregator behind its proxy) does, until restored - the counter is cumulative, `mirror_t_convergence_last_failed` shows the current state |
 | `mirror_m_repair_writes_total` | flat | normal when no block diverged: the parent-BAL repair is gated on the *previous* block's verification, so a clean block's state stays the replay's own product (and a diverged one is repaired before the next block executes). Non-zero growth = A17-class divergences being repaired |
 | `mirror_reorgs_detected_total` | any increase | upstream reorg: the engine re-bases M behind the follow head (self-healing, ~1-2 min) and keeps applying T; with `on_divergence: freeze_m` it freezes instead - re-pin only if it keeps recurring |
@@ -91,7 +91,8 @@ covers the ones that page someone; these are the rest.
 | `mirror_bal_skipped_shadowed_last_block` | BAL entries skipped in the last block because the devnet owns the key (copy-on-write) |
 | `mirror_shadowed_slots` | devnet-owned storage keys (see `/status.shadowed` for the accounts) |
 | `mirror_m_repair_writes_total` | parent-BAL writes applied to M by the convergence repair (gated on the previous block's verification) |
-| `mirror_m_convergence_ok_total` / `mirror_m_convergence_failures_total` | the 8 state probes against reth at n-1, run every block |
+| `mirror_m_rebase_skipped_blocks_total` | parent blocks an M re-base skipped. Their state is exact (the fresh fork's base *is* mainnet's state), but the engine did not re-execute them, so their tx-level verification is skipped. Bounded by `fork_offset` per re-base; a rise simply means M re-based (OOM recovery, reorg) |
+| `mirror_m_convergence_ok_total` / `mirror_m_convergence_failures_total` | the 12 state probes against reth at n-1, run every block |
 | `mirror_m_convergence_last_failed` | how many probes failed in the last check (0 in steady state) |
 | `mirror_t_convergence_ok_total` / `mirror_t_convergence_failures_total` | the same probes against T at the applied parent block (the plan's "probe parity on T after context alignment"); devnet-owned targets are skipped, and the check is suspended while a `/admin/time` offset is set |
 | `mirror_t_convergence_last_failed` | how many T probes diverged in the last applied block (0 in steady state) |
@@ -251,6 +252,28 @@ non-zero the T probe parity is skipped (views are meant to differ). The offset
 lives in the engine's memory: restarting the engine resets it to 0 (T's
 timestamps stay monotonic either way), so re-set it after a redeploy.
 
+### Fast iteration: mine your own blocks
+
+The engine mines one T block per parent block (~12 s) - the right cadence for
+"live mainnet next to my devnet", but slow for a tight test loop. Hold the
+loops and mine by hand instead:
+
+```bash
+# 1. hold both loops (reads, writes and cheatcodes keep working):
+kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/pause
+# 2. send transactions - automine is off by design, so they queue in T's pool
+# 3. mine when *you* want, with the timestamp you want:
+kubectl -n mainnet-mirror exec deploy/anvil-t -- cast rpc anvil_mine 1 --rpc-url http://localhost:8545
+#    (or anvil_setNextBlockTimestamp <ts> first, for a chosen clock)
+# 4. resume: the engine applies the parent blocks it missed, then re-aligns
+kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/resume
+```
+
+While paused, mainnet keeps advancing on reth; on resume the engine catches up
+at roughly one parent block per second (the poll interval, not the 12 s head
+cadence), and the gap guard allows up to `max_gap_blocks` (300) - so a pause is
+cheap for minutes, not hours.
+
 ### Register devnet writes made outside the block pipeline
 
 Cheatcodes applied directly to T (`anvil_setBalance`, `anvil_setStorageAt`, …)
@@ -313,13 +336,28 @@ Two measured gotchas:
 A watchlist entry only takes effect for *future* mainnet writes. If an account
 changed between its last sync and the moment it was added, it stays stale until
 mainnet writes it again - for a Chainlink aggregator that can be an hour. The
-`aave_weth_price` probe is the alarm for this class (the WETH source is a proxy
-and its aggregator was missing from the watch list: 8 rounds / ~$44 stale).
-Heal without waiting:
+per-reserve price probes (`aave_weth_price`, `aave_wbtc_price`, ...) are the
+alarm for this class (measured twice: the WETH source's aggregator was missing -
+8 rounds / ~$44 stale; and the WBTC source is *composite*, so its two
+proxy/aggregator pairs were missing - a ~$1.40 stale price with no probe to see
+it until the probe was added). Heal without waiting:
 
 ```bash
 # 1. which keys differ?  (read slots on reth vs T; cast storage <addr> <slot>)
 # 2. hand them back:  POST /admin/shadow {"address": ..., "slots": [...], "clear": true}
+```
+
+For an account that was *never* watched (so nothing is shadowed to hand back),
+trace its read path on reth and write the slots it actually reads - the plain
+`prestateTracer` (no `diffMode`: a view call changes nothing, so a diff-mode
+trace is empty):
+
+```bash
+AT=$(printf '0x%x' "$(engine_api /status | jq -r .cursor_t)")
+curl -s -X POST -H 'content-type: application/json' http://reth:8545 \
+  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"debug_traceCall\",\"params\":[{\"to\":\"$AGG\",\"data\":\"0x50d25bcd\"},\"$AT\",{\"tracer\":\"prestateTracer\"}]}" \
+  | jq -r ".result | to_entries[] | select(.key|ascii_downcase==\"${AGG,,}\") | .value.storage | to_entries[] | \"\(.key) \(.value)\""
+# then anvil_setStorageAt each (slot, value) on T - padded to 32 bytes.
 ```
 
 ## Storage
@@ -330,7 +368,7 @@ Heal without waiting:
 | `lighthouse-data` | 1500 Gi | beacon DB + 18-day column custody. Measured during the one-time backfill: ~377 KB/slot inside the DA window, blocks only beyond it; ~200 GB expected when it completes |
 | `anvil-m-state` | 20 Gi | pin (the fork cache is RAM; no state dump - see above) |
 | `anvil-t-state` | 40 Gi | same for the devnet chain (dump ~27 MB) |
-| `engine-state` | 10 Gi | cursor.json, shadow.json, drift.jsonl, journal/ |
+| `engine-state` | 10 Gi | cursor.json, shadow.json, drift.jsonl (divergence-only; a legacy `drift.jsonl.1` may hold older per-block records from before that rewrite), journal/ |
 
 All PVCs use the `mirror-retain` StorageClass (`reclaimPolicy: Retain`):
 **deleting a PVC never deletes the data**. The PV stays; re-create a PVC with

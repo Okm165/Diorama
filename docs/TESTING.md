@@ -7,7 +7,8 @@ Three layers, each runnable on demand:
 | Unit | `make test-engine` (cargo test) | nothing | pure logic: BAL flattening, padding, COW granularity, journal, cursor/rebase rules, KZG proof repair, Engine API request encoding |
 | Self test | `make selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (replay + verify + diff apply + sampled parity) |
 | Smoke | `make smoke` | the deployed stack | service health + parity spot check on M's head vs reth |
-| Scenario | `make scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 8 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
+| Scenario | `make scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 12 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
+| Product sim | `make product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
 
 ## Unit tests (`engine/src/**`)
 
@@ -142,6 +143,7 @@ behavioral). The default policy (`on_divergence: continue`) records all of them;
 | `cast calldata` rejects `--rpc-url` | a wrapper that appended it silently produced *empty* calldata: the "supply" shipped as a 21,000-gas plain transfer and reverted. Every failed market step in that run traced back to this |
 | `anvil_dealERC20` cannot work on this fork, but `eth_call` overrides can | it discovers balance slots by writing and re-reading, and on a no-mining fork its probe never lands ("no slot found", measured). `/admin/deal` probes with `eth_call` + a `stateDiff` override instead: candidate slots 0..16, a sentinel value (a balance that already equals the target makes every slot match - measured), 32-byte padded override values (a quantized value answers "invalid string length") and an explicitly encoded `balanceOf` calldata (`format!("{:064x}", address)` does not pad an alloy Address). Finds WETH slot 3 and USDC's packed slot 9 alike |
 | A watchlist gap can hide in the counterparties | Aave's variable debt tokens were unwatched: a devnet borrow writes the user's scaled debt there, the write is not tracked (the shadow scanner follows watched accounts), so `/admin/shadow {all:true}` cannot clear it - a phantom $315 debt against zero collateral broke every later borrow with `LtvValidationFailed`. The proof now uses a fresh position address per run and the closure includes all five aTokens and debt tokens |
+| A composite price source hides a whole dependency chain | Aave's WBTC/USD source multiplies `BTC/USD x WBTC/BTC`, each leg a proxy whose aggregator holds the round. None of the four contracts was watched, so T's WBTC price sat stale ($81,811.77 vs mainnet's $81,810.37 at the same cursor) while every probe stayed green - there was no WBTC price probe. Found by the product sim's broad freshness audit (16 views per parent block); fixed by watching all four contracts, adding per-reserve price probes, and healing the read slots via reth's plain `prestateTracer` (a `diffMode` trace of a view call is empty) |
 | A devnet reset can make your next tx a no-op that reports success | re-syncing an account's fields puts its nonce back to mainnet's; a byte-identical tx (same nonce, data, gas price) has the same hash, so the node answers with the *old* receipt while the reset state no longer holds its effects (measured: a "successful" approve that changed nothing, then a supply reverting with a bare `revert()`). Vary something - the gas price is enough - or never reset the sender's nonce |
 | `cast send --unlocked` needs an explicit `anvil_impersonateAccount` | anvil's `--auto-impersonate` accepts `eth_sendTransaction` from any sender, but cast's own signer check refuses first ("No Signer available"). The suite sends raw `eth_sendTransaction` through the engine pod instead - no signer involved, and the receipt poll is ours |
 | `cast index` is offline | it ignores/silently mishandles `--rpc-url`; a slot computed with one comes back empty and the storage read looks like "no value" instead of a wrong slot |
@@ -167,6 +169,22 @@ do, measured end-to-end against the live stack and left clean afterwards.
 Every send is simulated with `eth_call` first (the standard simulate-then-send
 workflow), so a revert prints its reason before any transaction is spent.
 Measured runtime: ~10 min; last full run: 30 passed, 0 failed.
+
+## Product simulation: `scripts/product-sim.sh`
+
+Where the capability proof checks *capabilities*, the product sim runs the
+workflow a margin product actually executes, in one pass and on live state
+(`make product-sim`, ~8 min, 9 checks):
+
+| Act | What runs | Asserted |
+|---|---|---|
+| 1. the trader | faucet funds → `approve` → `supply` 1 WETH → `borrow` 100 USDC → swap 50 USDC→WETH on the real Uniswap pool → `supply` the swap back | the aToken delta, debt > 0 with the HF read |
+| 2. live data | the market-data closure the product reads - five Chainlink rounds, the Aave oracle for five assets, the UniV3 pool, three token supplies, two Aave income indexes - sampled once per *parent block* | every view-comparison matches reth at the applied cursor: freshness is continuous and broad, not a one-shot spot check. Devnet-owned views are skipped by design (copy-on-write) and counted |
+| 3. the bot | a WS `eth_subscribe` on the pool sees the trader's `Borrow`; the oracle is crashed through its admin path; the bot polls health, calls `liquidationCall`, takes the bonus | the event arrived live, HF crossed below 1e18, the bot's collateral grew with the bonus, the oracle was handed back (unshadow) - and, because the crash leaves the position *underwater*, the liquidation takes Aave's **bad-debt path**: the collateral is consumed entirely and the whole remaining debt token balance is burned while the liquidator repays only what the collateral covered (measured on this deployment: `getReserveData` returns 15 words, the pre-`deficit` struct) |
+
+All three scripts share `scripts/lib.sh` - the measured conventions live there
+(explicit gas on devnet sends, offline `cast` without `--rpc-url`, polled
+receipts) instead of being copied three times.
 
 ## Plan axioms → how they are covered
 

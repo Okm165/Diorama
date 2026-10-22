@@ -131,6 +131,12 @@ scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
 proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
 	NS=$(NS) ./scripts/capability-proof.sh
 
+product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T
+	NS=$(NS) ./scripts/product-sim.sh
+
+closure-check: ## Audit the watchlist closure: every storage dep of every market-data view
+	NS=$(NS) ./scripts/closure-check.sh
+
 selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
 	kubectl -n $(NS) delete job engine-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/selftest-job.yaml

@@ -4,52 +4,18 @@
 #
 # Phases
 #   1. self-containment   reth has no peers, the top-up gap is 0, blobs are local
-#   2. live parity        heads agree; the 8 state probes match reth on M *and* T
+#   2. live parity        heads agree; the 12 state probes match reth on M *and* T
 #   3. devnet workflow    fund, send, shadow, rewind, snapshot/revert on T
 #   4. integrity counters no divergences / convergence failures / blob failures
 #
 # Requires: the deployed stack (make bootstrap), kubectl, no external network.
 set -uo pipefail
 
-NS=${NS:-mainnet-mirror}
-K="kubectl -n $NS"
-ENGINE="$K exec deploy/engine --"
-ANVIL_T="$K exec deploy/anvil-t --"
-ANVIL_M="$K exec deploy/anvil-m --"
-pass=0; fail=0
-ok()  { echo "  ✔ $*"; pass=$((pass+1)); }
-bad() { echo "  ✘ $*"; fail=$((fail+1)); }
-info(){ echo "  · $*"; }
-
-rpc() { # rpc <url> <method> [params-json]
-  local url=$1 method=$2 params=${3:-[]}
-  $ENGINE curl -sf -m 20 "$url" -H 'Content-Type: application/json' \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" 2>/dev/null
-}
-engine_api() { $ENGINE curl -sf -m 20 "localhost:8080$1" 2>/dev/null; }
-num() { printf '%d' "${1:-0}" 2>/dev/null || echo 0; }
+source "$(dirname "$0")/lib.sh"
 
 # The probes mirror k8s/base/engine-config.yaml:verifier.probes (all watched
 # accounts, so T must match reth exactly; none is blockhash-dependent, so M must
 # too - the engine's convergence repair is what makes that true).
-# Devnet sends: anvil auto-impersonates, so eth_sendTransaction works from any
-# address. We poll for the receipt ourselves (cast send's own wait times out
-# when the engine is catching up; the engine mines one T block per parent block).
-send_tx() { # send_tx <from> <to> <calldata>  -> tx hash on stdout
-  rpc http://anvil-t:8545 eth_sendTransaction \
-    "[{\"from\":\"$1\",\"to\":\"$2\",\"data\":\"$3\",\"gasPrice\":\"0x174876e800\",\"gas\":\"0x1e8480\"}]" | jq -r '.result // .error.message'
-}
-wait_tx() { # wait_tx <hash> [tries]  -> status (0x1/0x0) or "pending"
-  local tries=${2:-40}
-  for _ in $(seq 1 "$tries"); do
-    local st
-    st=$(rpc http://anvil-t:8545 eth_getTransactionReceipt "[\"$1\"]" | jq -r '.result.status // "pending"' 2>/dev/null)
-    [ "$st" != "pending" ] && { echo "$st"; return 0; }
-    sleep 4
-  done
-  echo "pending"
-}
-
 probe() { # probe <rpc-url> <block-hex> <to> <data>
   rpc "$1" eth_call "[{\"to\":\"$3\",\"data\":\"$4\"},\"$2\"]" | jq -r '.result // "ERR"'
 }
@@ -91,8 +57,11 @@ aave_aethusdc_scaled_total_supply 0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c 0xb
 aave_usdc_normalized_income 0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2 0xd15e0053000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 aave_usdc_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f07000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 aave_weth_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f07000000000000000000000000C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+aave_wbtc_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f070000000000000000000000002260FAC5E5542a773Aa44fBCfeDf7C193bc2C599
+aave_usdt_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f07000000000000000000000000dAC17F958D2ee523a2206206994597C13D831ec7
+aave_wsteth_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f070000000000000000000000007f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0
 PROBES
-  [ "$mismatches" -eq 0 ] && ok "$label matches reth on all 8 probes (${skipped} devnet-owned skipped)"
+  [ "$mismatches" -eq 0 ] && ok "$label matches reth on all 12 probes (${skipped} devnet-owned skipped)"
 }
 
 echo "== mirror scenario test (namespace $NS)"
@@ -227,6 +196,22 @@ $ENGINE curl -sf -m 20 -X POST localhost:8080/admin/shadow -H 'Content-Type: app
 val=$($ANVIL_T cast storage $WETH $SLOT --rpc-url http://localhost:8545 2>/dev/null)
 reth_val=$(rpc http://reth:8545 eth_getStorageAt "[\"$WETH\",\"$SLOT\",\"latest\"]" | jq -r '.result')
 [ "$val" = "$reth_val" ] && ok "unshadow re-synced the slot from reth" || bad "unshadow left $val (reth $reth_val)"
+
+# The same round-trip on a *direct* (low-numbered) slot: this exercises the
+# encoder. The re-sync must pad the slot - a quantized "0x4" is rejected by
+# anvil with "invalid string length", and the key would stay stale with its
+# shadow mark already cleared (the silent-staleness class; mapping slots are
+# keccak-derived and 64 chars, which is why they never caught it).
+DSLOT=0x0000000000000000000000000000000000000000000000000000000000000004
+rpc http://anvil-t:8545 anvil_setStorageAt "[\"$WETH\",\"$DSLOT\",\"0x0000000000000000000000000000000000000000000000000000000000000042\"]" >/dev/null
+$ENGINE curl -sf -m 20 -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
+  -d "{\"address\":\"$WETH\",\"slots\":[\"$DSLOT\"],\"account_fields\":false}" >/dev/null 2>&1
+$ENGINE curl -sf -m 20 -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
+  -d "{\"address\":\"$WETH\",\"slots\":[\"$DSLOT\"],\"account_fields\":false,\"clear\":true}" >/dev/null 2>&1
+dval=$($ANVIL_T cast storage $WETH $DSLOT --rpc-url http://localhost:8545 2>/dev/null)
+dreth=$(rpc http://reth:8545 eth_getStorageAt "[\"$WETH\",\"$DSLOT\",\"latest\"]" | jq -r '.result')
+[ "$dval" = "$dreth" ] && ok "unshadow re-synced a direct (low-numbered) slot too" \
+  || bad "direct-slot re-sync left $dval (reth $dreth)"
 
 # snapshot / revert (anvil-native)
 pre=$($ANVIL_T cast storage $WETH $SLOT --rpc-url http://localhost:8545 2>/dev/null)

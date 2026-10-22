@@ -288,7 +288,14 @@ async fn admin_shadow(
                     "anvil_setStorageAt".to_string(),
                     serde_json::json!([
                         req.address,
-                        crate::bal::quant_hex_u256(*slot),
+                        // Padded like every other write path (diff applier, journal
+                        // rewind, re-fork restore). Anvil happens to accept
+                        // even-length short slots ("0x02"), but it rejects
+                        // odd-length ones ("0x4") - so quantizing here would fail
+                        // silently for those and leave the key stale with its mark
+                        // already cleared (measured: the "invalid string length"
+                        // class). One rule for all five call sites.
+                        crate::bal::pad_data32(*slot),
                         format!("0x{}", hex::encode(v))
                     ]),
                 ));

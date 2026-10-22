@@ -85,8 +85,11 @@ data:
       enabled: true
       # Each block is verified against reth: tx count/order, blob gas, receipts
       # (count/status/gas), logs (bloom + full set), withdrawals, and state
-      # probes. Divergences are classified structural (counts/order/gas) vs
-      # behavioral (values) in drift.jsonl and metrics; both are recorded.
+      # probes. Divergences are classified structural (tx count/order, blob gas,
+      # withdrawals) vs
+      # behavioral (receipt statuses/gas, logs, values - the blockhash-gated
+      # class; real execution problems surface via the convergence probes) in
+      # drift.jsonl and metrics; both are recorded.
       # After the repair the probes are re-run against M: convergence_failures
       # staying at 0 is the "M is an exact mirror" health signal.
       drift_sample_keys: 8
@@ -125,6 +128,20 @@ data:
         - name: aave_weth_price
           to: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
           data: "0xb3596f07000000000000000000000000C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+        # The full price closure: the composite WBTC source and the other
+        # reserves get the same probe the WETH source has, so a missing
+        # aggregator behind a *composite* source is an alarm, not a silent
+        # staleness (measured: the WBTC price sat stale while all probes stayed
+        # green, 2026-10).
+        - name: aave_wbtc_price
+          to: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
+          data: "0xb3596f070000000000000000000000002260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
+        - name: aave_usdt_price
+          to: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
+          data: "0xb3596f07000000000000000000000000dAC17F958D2ee523a2206206994597C13D831ec7"
+        - name: aave_wsteth_price
+          to: "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
+          data: "0xb3596f070000000000000000000000007f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
         - name: aave_usdc_normalized_income
           to: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
           data: "0xd15e0053000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
@@ -226,6 +243,23 @@ data:
       #   cast call <source> "aggregator()(address)" --rpc-url $RETH
       - { address: "0x7c7FdFCa295a787ded12Bb5c1A49A8D2cC20E3F8", note: "Aave oracle source: WETH/USD aggregator" }
       - { address: "0xDaa4B74C6bAc4e25188e64ebc68DB5050b690cAc", note: "Aave oracle source: WBTC/USD" }
+      # Found by `make closure-check` (it traces each view's storage reads):
+      # the USDC source is a CAPO wrapper with its own ratio feeds, and the
+      # wstETH source reads stETH's share rate (updated daily - T would go
+      # stale within a day while every probe stayed green).
+      - { address: "0xcc31418a98f7afc4a9e2f8ea8fa6cbd4dbb4c9f7", note: "Aave USDC source: CAPO ratio feed" }
+      - { address: "0xea674bbc33ae708bc9eb4ba348b04e4eb55b496b", note: "Aave USDC source: CAPO ratio feed" }
+      - { address: "0xae7ab96520de3a18e5e111b5eaab095312d7fe84", note: "stETH (wstETH source reads the share rate)" }
+      - { address: "0xb8ffc3cd6e7cf5a098a1c92f48009765b24088dc", note: "Aave wstETH source: storage dependency" }
+      # The WBTC source is *composite* (BTC/USD x WBTC/BTC), built from two
+      # proxy->aggregator pairs. Missing these made the WBTC price stale on T
+      # while every probe stayed green (found by the product sim's broad
+      # freshness audit, 2026-10): the aggregators hold the round data, so they
+      # must be watched, not just the source.
+      - { address: "0xb41e773f507f7a7ea890b1afb7d2b660c30c8b0a", note: "Aave WBTC source: BTC/USD proxy" }
+      - { address: "0xdc715c751f1cc129a6b47fedc87d9918a4580502", note: "Aave WBTC source: BTC/USD aggregator" }
+      - { address: "0xfdfd9c85ad200c506cf9e21f1fd8dd01932fbb23", note: "Aave WBTC source: WBTC/BTC proxy" }
+      - { address: "0xa5e3a55cea42b86560a5215094981c300899199d", note: "Aave WBTC source: WBTC/BTC aggregator" }
       - { address: "0xe1D97bF61901B075E9626c8A2340a7De385861Ef", note: "Aave oracle source: wstETH/USD" }
 
     journal:
