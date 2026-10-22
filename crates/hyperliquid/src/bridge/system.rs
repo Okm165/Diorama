@@ -10,6 +10,13 @@
 //!   the system address on the linked ERC20;
 //! - Core amounts are in the token's Core wei (`weiDecimals`), EVM amounts in
 //!   `weiDecimals + evmExtraWeiDecimals` (USDC: 8 and 6).
+//!
+//! Measured caveat: the *real* HyperEVM USDC blacklists token 0's system
+//! address (`isBlacklisted(0x2000…0) == true` on the live chain), so
+//! EVM→Core USDC cannot be a plain transfer with the real token. Daloc's
+//! deploy replaces the canonical ERC20s with its own mocks (the fixture
+//! set), whose transfers to system addresses succeed — that is the path the
+//! bridge credits.
 use crate::error::Error;
 use crate::wire::SpotMeta;
 use alloy_primitives::{address, b256, Address, Bytes, B256, U256};
@@ -144,14 +151,25 @@ pub fn transfer_of(topics: &[B256], data: &[u8]) -> Option<Transfer> {
 /// The EVM→Core credit an observed transfer represents: the sender, the
 /// token, and the human amount. A transfer to a system address of an
 /// unlinked token (or a Core→EVM completion from a system address) is not a
-/// credit.
-pub fn credit_of<'a>(transfer: &Transfer, tokens: &'a [TokenInfo]) -> Option<(Address, &'a TokenInfo, Decimal)> {
+/// credit — and neither is a `Transfer` log emitted by any contract other
+/// than the token's *linked* EVM contract (a malicious or unrelated emitter
+/// could mint Core balances with a look-alike event; the docs' rule is the
+/// linked contract's own log).
+pub fn credit_of<'a>(
+    transfer: &Transfer,
+    tokens: &'a [TokenInfo],
+    emitter: Address,
+) -> Option<(Address, &'a TokenInfo, Decimal)> {
     if transfer.from.0[0] == 0x20 {
         // The completion path: the system sends out; never re-credit.
         return None;
     }
     let index = token_index_of(transfer.to)?;
     let token = by_index(tokens, u32::try_from(index).ok()?)?;
+    let (linked, _extra) = token.evm?;
+    if emitter != linked {
+        return None;
+    }
     let evm_decimals = token.evm_decimals()?;
     Some((transfer.from, token, evm_to_human(transfer.value, evm_decimals)))
 }
@@ -240,7 +258,8 @@ mod tests {
         topics.push(system_address(0).into_word());
         let data = U256::from(5_000_000u64).to_be_bytes::<32>();
         let t = transfer_of(&topics, &data).unwrap();
-        let (sender, token, amount) = credit_of(&t, &tokens).unwrap();
+        let linked = Address::repeat_byte(0x88);
+        let (sender, token, amount) = credit_of(&t, &tokens, linked).unwrap();
         assert_eq!(sender, from);
         assert_eq!(token.name, "USDC");
         assert_eq!(amount, Decimal::from(5));
@@ -249,11 +268,15 @@ mod tests {
         reverse[1] = system_address(0).into_word();
         reverse[2] = from.into_word();
         let t = transfer_of(&reverse, &data).unwrap();
-        assert!(credit_of(&t, &tokens).is_none());
+        assert!(credit_of(&t, &tokens, linked).is_none());
+        // A Transfer log from any other emitter is not a credit (a
+        // look-alike event must not mint Core balances).
+        let impostor = Address::repeat_byte(0x77);
+        assert!(credit_of(&t, &tokens, impostor).is_none());
         // An unlinked token's transfer is not ours to credit.
         let mut topics2 = topics;
         topics2[2] = system_address(5).into_word();
         let t = transfer_of(&topics2, &data).unwrap();
-        assert!(credit_of(&t, &tokens).is_none());
+        assert!(credit_of(&t, &tokens, linked).is_none());
     }
 }

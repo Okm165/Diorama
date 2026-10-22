@@ -56,6 +56,10 @@ struct FeedRuntime {
     values: Mutex<ValueState>,
     /// The scenario owns this feed's value until resumed.
     paused: AtomicBool,
+    /// The last pass fault, when one happened (the verifier caught a wiped
+    /// target error-looping invisibly: /admin/feed showed a stale confirmed
+    /// value and the counter never moved).
+    last_error: Mutex<Option<String>>,
     /// Source/target decimals, read once at boot (a mismatch is a boot fault).
     decimals: u8,
 }
@@ -69,6 +73,10 @@ pub struct FeedBridgeMetrics {
 }
 
 impl FeedBridgeMetrics {
+    pub fn inc_source_errors(&self) {
+        self.source_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
     fn count(field: &Mutex<Vec<(String, u64)>>, name: &str) {
         let mut v = field.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match v.iter_mut().find(|(n, _)| n == name) {
@@ -147,6 +155,7 @@ impl FeedBridge {
                 section: feed.clone(),
                 values: Mutex::new(ValueState::default()),
                 paused: AtomicBool::new(false),
+                last_error: Mutex::new(None),
                 decimals: source,
             });
         }
@@ -163,7 +172,12 @@ impl FeedBridge {
         loop {
             for feed in &self.feeds {
                 if let Err(e) = self.pass_one(&ctx, feed).await {
+                    self.metrics.inc_source_errors();
+                    *feed.last_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(e.to_string());
                     tracing::warn!(feed = %feed.section.name, error = %e, "feed bridge pass failed; will retry");
+                } else {
+                    *feed.last_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 }
             }
             tokio::time::sleep(self.poll).await;
@@ -224,6 +238,11 @@ impl FeedBridge {
                     paused: f.paused.load(Ordering::Relaxed),
                     confirmed_answer: values.confirmed,
                     pending_answer: values.pending,
+                    last_error: f
+                        .last_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
                     decimals: f.decimals,
                 }
             })
@@ -362,6 +381,9 @@ pub struct FeedStatus {
     pub confirmed_answer: Option<i128>,
     /// A publish awaiting its block, when one is in flight.
     pub pending_answer: Option<i128>,
+    /// The last pass fault (a wiped target, a source outage), when one is
+    /// active: /admin/feed must show a stuck feed, not a stale success.
+    pub last_error: Option<String>,
     pub decimals: u8,
 }
 

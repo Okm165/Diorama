@@ -279,9 +279,23 @@ async fn admin_deal(
 /// same base = re-apply the recorded writes), so this route never replicates
 /// that logic.
 async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
-    ctx.anvil_t
-        .anvil_reset_fork_latest(&ctx.l1.source_url)
-        .await?;
+    // The reset rides a public RPC and can outlive the client's timeout: on
+    // a transport fault, check whether the fork base actually moved — an
+    // applied-but-unanswered reset is a success, not a failure (the
+    // retry-discipline rule: never report a fault for a completed effect).
+    let before = ctx.anvil_t.fork_config().await?.map(|(_, block)| block);
+    if let Err(e) = ctx.anvil_t.anvil_reset_fork_latest(&ctx.l1.source_url).await {
+        let after = ctx.anvil_t.fork_config().await?.map(|(_, block)| block);
+        if after == before {
+            return Err(e.into());
+        }
+        tracing::warn!(
+            error = %e,
+            before = ?before,
+            after = ?after,
+            "anvil_reset answered with a transport fault but the fork base moved; treating it as applied"
+        );
+    }
     tracing::warn!(
         source = %ctx.l1.source_url,
         "T was re-pinned to the source's latest block; the engine reconciles on its next pass"

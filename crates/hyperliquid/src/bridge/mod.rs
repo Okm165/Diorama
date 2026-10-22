@@ -120,7 +120,7 @@ impl Bridge {
                 let Some(transfer) = system::transfer_of(log.topics(), &log.data().data) else {
                     continue;
                 };
-                self.apply_credit(&transfer, &tokens).await?;
+                self.apply_credit(&transfer, log.address(), &tokens).await?;
             }
         }
 
@@ -163,9 +163,10 @@ impl Bridge {
         }
     }
 
-    /// EVM→Core credit from one transfer log.
-    async fn apply_credit(&self, transfer: &Transfer, tokens: &[TokenInfo]) -> Result<()> {
-        let Some((sender, token, amount)) = system::credit_of(transfer, tokens) else {
+    /// EVM→Core credit from one transfer log (the emitting contract must be
+    /// the token's linked EVM contract).
+    async fn apply_credit(&self, transfer: &Transfer, emitter: Address, tokens: &[TokenInfo]) -> Result<()> {
+        let Some((sender, token, amount)) = system::credit_of(transfer, tokens, emitter) else {
             return Ok(());
         };
         self.sim.credit_spot(sender, token.index, &token.name, amount)?;

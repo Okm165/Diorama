@@ -47,19 +47,27 @@ impl Write {
 }
 
 /// Flatten one transaction's `prestateTracer{diffMode}` frame into writes:
-/// every account the frame lists in `post` contributes the fields that
-/// differ from `pre`.
+/// the `pre` side lists the *changed* fields (measured: a read-only or no-op
+/// touch appears nowhere), the `post` side omits fields that changed to zero
+/// (measured on anvil 1.8.6: a drained storage slot is present in `pre` with
+/// its old value and absent from `post`). A slot in `pre` but not in `post`
+/// is therefore a write to zero — without this the shadow registry records a
+/// stale non-zero value, and a same-pin restore resurrects it (measured: a
+/// drained balance came back after a reset).
 pub fn flatten_trace_diff(frame: &PreStateFrame) -> Vec<Write> {
     let Some(diff) = frame.as_diff() else {
         return Vec::new();
     };
     let mut out = Vec::new();
+    for (address, pre) in &diff.pre {
+        let post = diff.post.get(address);
+        push_storage(&mut out, *address, pre, post);
+    }
     for (address, post) in &diff.post {
         let pre = diff.pre.get(address);
         push_balance(&mut out, *address, pre, post);
         push_nonce(&mut out, *address, pre, post);
         push_code(&mut out, *address, pre, post);
-        push_storage(&mut out, *address, pre, post);
     }
     out
 }
@@ -91,15 +99,27 @@ fn push_code(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>,
     }
 }
 
-fn push_storage(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>, post: &AccountState) {
-    for (slot, value) in &post.storage {
-        if pre.and_then(|p| p.storage.get(slot)) == Some(value) {
-            continue;
-        }
+/// Storage writes, driven by `pre` (measured: `pre.storage` lists exactly the
+/// changed slots — read-only and no-op touches appear nowhere — while `post`
+/// omits slots that changed to zero; a drained slot is therefore
+/// `pre`-present and `post`-absent, and must be recorded as a write to ZERO).
+fn push_storage(out: &mut Vec<Write>, address: Address, pre: &AccountState, post: Option<&AccountState>) {
+    for (slot, pre_value) in &pre.storage {
+        let value = if let Some(post_value) = post.and_then(|p| p.storage.get(slot)) {
+            if post_value == pre_value {
+                continue;
+            }
+            U256::from_be_bytes(post_value.0)
+        } else {
+            if pre_value.is_zero() {
+                continue;
+            }
+            U256::ZERO
+        };
         out.push(Write::Storage {
             address,
             slot: U256::from_be_bytes(slot.0),
-            value: U256::from_be_bytes(value.0),
+            value,
         });
     }
 }
@@ -204,5 +224,63 @@ mod tests {
         )
         .expect("frame");
         assert!(flatten_trace_diff(&frame).is_empty());
+    }
+
+    /// A genuine excerpt of a zeroing transfer (measured 2026-10-22 on the
+    /// scratch V): the drained slot sits in `pre` with its old value and is
+    /// ABSENT from `post.storage` — anvil omits zeroed slots. Missing this
+    /// made the shadow registry keep the stale non-zero value, and a same-pin
+    /// restore resurrected a drained balance.
+    #[test]
+    fn a_slot_changed_to_zero_is_a_write() {
+        let frame: PreStateFrame = serde_json::from_str(
+            r#"{
+              "pre": {
+                "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e": {
+                  "storage": {
+                    "0x986d56fe2954bacde776e5a83b13aa605cf4db18d945bbea664eb3dc8135d4c1": "0x0000000000000000000000000000000000000000000000000000000000000064",
+                    "0x4c9e99a9b0f9f4f7d2b6cf12a3b7e6c1a1e5b7d9e3f2a4c6b8d0e2f4a6c8e0f2": "0x0000000000000000000000000000000000000000000000000000000000000009"
+                  }
+                }
+              },
+              "post": {
+                "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e": {
+                  "storage": {
+                    "0x4c9e99a9b0f9f4f7d2b6cf12a3b7e6c1a1e5b7d9e3f2a4c6b8d0e2f4a6c8e0f2": "0x000000000000000000000000000000000000000000000000000000000000006d"
+                  }
+                }
+              }
+            }"#,
+        )
+        .expect("measured frame");
+        let writes = flatten_trace_diff(&frame);
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        // BTreeMap order: the changed slot (4c9e…) precedes the zeroed one.
+        // The changed slot keeps its post value.
+        assert_eq!(
+            writes[0],
+            Write::Storage {
+                address: "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e".parse().unwrap(),
+                slot: U256::from_str_radix(
+                    "4c9e99a9b0f9f4f7d2b6cf12a3b7e6c1a1e5b7d9e3f2a4c6b8d0e2f4a6c8e0f2",
+                    16
+                )
+                .unwrap(),
+                value: U256::from(0x6d_u64),
+            }
+        );
+        // The zeroed slot (pre-present, post-absent) is recorded as ZERO.
+        assert_eq!(
+            writes[1],
+            Write::Storage {
+                address: "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e".parse().unwrap(),
+                slot: U256::from_str_radix(
+                    "986d56fe2954bacde776e5a83b13aa605cf4db18d945bbea664eb3dc8135d4c1",
+                    16
+                )
+                .unwrap(),
+                value: U256::ZERO,
+            }
+        );
     }
 }

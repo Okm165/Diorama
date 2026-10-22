@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """The daloc use-case simulation: the harness flows the plan documents (§17),
-driven against a *scratch* mirror stack — T (a devnet Ethereum fork), V (a
-devnet HyperEVM fork), the venue engine and the venue simulator. The
-endpoints below are the scratch stack's ports; point them at a deployment's
-NodePorts to run the same arc there.
+driven against the scratch mirrors — T (the devnet Ethereum fork), V (the
+devnet HyperEVM fork), the venue engine and the venue simulator.
 
 Each role is what one daloc-side actor does, and each assertion is a gate the
 plan names (client gates §2.1/§18.3, the time policy §17.2, the epoch model
@@ -272,10 +270,21 @@ def role_epoch():
     """The epoch model (§6.5): one call reverts the substrate to blank on both
     mirrors; the venue sim resets with it."""
     print("role: epoch (revert to blank)")
-    # venue: epoch_new resets the sim and re-pins V through the engine
-    before = sim_account(AGENT)
-    status, body = post(f"{SIM_CTRL}/control/epoch_new", {}, timeout=60)
-    check("epoch_new accepted", status == 200 and body["engine_repinned"], str(body))
+    # venue: epoch_new resets the sim and re-pins V through the engine.
+    # The engine's fork reset rides a public RPC: a transient transport fault
+    # is a documented 502 meaning "nothing happened, retry" (the sim only
+    # blanks the scenario after the engine accepts).
+    body = None
+    for attempt in range(3):
+        try:
+            status, body = post(f"{SIM_CTRL}/control/epoch_new", {}, timeout=120)
+        except urllib.error.HTTPError as e:
+            status, body = e.code, e.read().decode()[:160]
+        if status == 200:
+            break
+        time.sleep(5)
+    check("epoch_new accepted (with the documented retry)",
+          status == 200 and body.get("engine_repinned"), f"attempts<=3: {body}")
     time.sleep(4)
     _, status_raw = get(f"{V_ADMIN}/status")
     status_body = json.loads(status_raw)

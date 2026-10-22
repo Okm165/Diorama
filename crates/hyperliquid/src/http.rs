@@ -207,7 +207,23 @@ async fn admin_deal(
 /// epoch rule (new base = new epoch, same base = restore), so this route
 /// never needs to replicate that logic.
 async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
-    ctx.v.anvil_reset_fork_latest(&ctx.chain.source_url).await?;
+    // The reset rides a public RPC and can outlive the client's timeout: on
+    // a transport fault, check whether the fork base actually moved — an
+    // applied-but-unanswered reset is a success, not a failure (the
+    // retry-discipline rule: never report a fault for a completed effect).
+    let before = ctx.v.fork_config().await?.map(|(_, block)| block);
+    if let Err(e) = ctx.v.anvil_reset_fork_latest(&ctx.chain.source_url).await {
+        let after = ctx.v.fork_config().await?.map(|(_, block)| block);
+        if after == before {
+            return Err(e.into());
+        }
+        tracing::warn!(
+            error = %e,
+            before = ?before,
+            after = ?after,
+            "anvil_reset answered with a transport fault but the fork base moved; treating it as applied"
+        );
+    }
     tracing::warn!(
         source = %ctx.chain.source_url,
         "V was re-pinned to the source's latest block; the driver reconciles on its next pass"
