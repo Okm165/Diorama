@@ -72,10 +72,9 @@ enum Cmd {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+pub async fn main_entry(args: Vec<String>) -> Result<()> {
     init_tracing();
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(std::iter::once("mirror-engine".to_string()).chain(args));
     match cli.cmd {
         Cmd::Run { config } => run(config).await,
         Cmd::Selftest {

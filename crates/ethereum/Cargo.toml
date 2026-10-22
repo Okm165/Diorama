@@ -1,0 +1,32 @@
+[package]
+name = "mirror-ethereum"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Mainnet mirror engine: replay (M) + verifier + EIP-7928 diff applier (T)"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-consensus = { workspace = true }
+alloy-network-primitives = { workspace = true }
+alloy-eips = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-rpc-types-engine = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+jsonwebtoken = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

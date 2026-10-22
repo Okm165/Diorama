@@ -1,11 +1,16 @@
-[package]
-name = "mirror-engine"
+# The mirrors workspace: one workspace, two projects (ethereum, hyperliquid),
+# the shared crates, and the CCTP bridge (refactor plan §11).
+[workspace]
+members = ["crates/*", "bins/*"]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Mainnet mirror engine: replay (M) + verifier + EIP-7928 diff applier (T)"
+rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 
-[dependencies]
+[workspace.dependencies]
 # Plan pins: alloy 2.5.0 (EIP-7928 BAL types live in alloy-eips::eip7928).
 alloy-primitives = { version = "1.7", features = ["serde"] }
 # "kzg" gives c-kzg (bundled mainnet trusted setup) so the engine can
@@ -34,12 +39,28 @@ jsonwebtoken = { version = "10", default-features = false, features = ["rust_cry
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The engine's config today; replaced by TOML when crates/config lands (R0.5).
 serde_yaml = "0.9"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[workspace.lints.clippy]
+# The anti-patterns the design doctrine names (§11.0); CI runs -D warnings.
+needless_pass_by_value = "warn"
+unused_self = "warn"
+unnecessary_wraps = "warn"
+single_match = "warn"
+single_match_else = "warn"
+trivially_copy_pass_by_ref = "warn"
+uninlined_format_args = "warn"
+semicolon_if_nothing_returned = "warn"
+similar_names = "warn"
+too_many_lines = "warn"
+unreadable_literal = "warn"
+redundant_closure_for_method_calls = "warn"
 
 [profile.release]
 lto = "thin"

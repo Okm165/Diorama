@@ -1,5 +1,5 @@
 # Rust build artifacts
-engine/target/
+/target/
 
 # Local scratch
 *.tar

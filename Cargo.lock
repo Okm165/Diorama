@@ -2364,6 +2364,16 @@ dependencies = [
 name = "mirror-engine"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "clap",
+ "mirror-ethereum",
+ "tokio",
+]
+
+[[package]]
+name = "mirror-ethereum"
+version = "0.1.0"
+dependencies = [
  "alloy-consensus",
  "alloy-eips",
  "alloy-network-primitives",
