@@ -137,6 +137,9 @@ product-sim: ## Product simulation: levered position, live-data sampling, bot li
 closure-check: ## Audit the watchlist closure: every storage dep of every market-data view
 	NS=$(NS) ./scripts/closure-check.sh
 
+diagrams: ## Regenerate docs/img renders from the ASCII diagram blocks (needs pango-view)
+	./scripts/render-diagrams.sh
+
 selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
 	kubectl -n $(NS) delete job engine-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/selftest-job.yaml

@@ -16,24 +16,30 @@ The per-block exchange between the three processes, top to bottom (the
 numbered list below then walks M's side of it step by step):
 
 ```
-   reth                          ENGINE                          anvil M / T
-   |                             |                               |
-   | block(N): txs, env,         |                               |
-   |   withdrawals               |                               |
-   +---------------------------->| replay loop                   |
-   | receipts, logs, traces      |                               |
-   +---------------------------->| verifier: counts, gas,        |
-   |                             | logsBloom, log set, probes    |
-   |                             | send raws in order -> mine    |
-   |                             +------------------------------>| M
-   | BAL(N) for the watch list   |                               |
-   +---------------------------->| diff applier                  |
-   |                             | pad -> write <=500 -> mine(1) |
-   |                             +------------------------------>| T
-   |                             | sampled parity + T probes     |
-   +---------------------------->|<------------------------------+
-   |                             | journal + drift.jsonl         |
+   reth            ENGINE              anvil M / T
+   |               |                   |
+   | block(N):     |                   |
+   | txs, env,     |                   |
+   | withdrawals   |                   |
+   +-------------->| replay loop       |
+   | receipts,     |                   |
+   | logs, traces  |                   |
+   +-------------->| verify: counts,   |
+   |               | gas, bloom, logs  |
+   |               | send raws -> mine |
+   |               +------------------>| M
+   | BAL(N) for    |                   |
+   | the watchlist |                   |
+   +-------------->| diff applier      |
+   |               | pad, write <=500, |
+   |               | mine(1)           |
+   |               +------------------>| T
+   |               | sampled parity,   |
+   |               | T probes          |
+   +-------------->|<------------------+
+   |               | journal + drift   |
 ```
+![per-block data flow](img/arch-data-flow.png)
 
 Per replayed block on M the engine does, in order:
 
@@ -72,9 +78,12 @@ diffs and mines the parent's block. Two reasons, both measured:
    the state its gas was estimated on.
 
 ```
-   no prepend  estimate on S ---> diffs land ---> execute on S' reverts at 97%
-   prepend     estimate on S ---> own block  ---> execute on S  gas is honest
+   no prepend estimate on S -> diffs land -> execute on S'
+              result: reverts at 97%
+   prepend    estimate on S -> own block  -> execute on S
+              result: succeeds
 ```
+![prepend rule](img/arch-prepend.png)
 
 After the parent's block is mined, the applier runs the plan's T-side invariant
 ("probe parity on T after context alignment"): the same probe set against

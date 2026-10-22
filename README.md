@@ -16,21 +16,31 @@ The one accepted limitation is storage proofs (fork blocks report
 `stateRoot = 0x0`).
 
 ```
-   +---------------------+     +------------------------------------+
-   |  reth + Lighthouse  |     |  ENGINE                            |
-   +---------------------+     +------------------------------------+
-   |  local fork source  |---->|  replay -> M  .  BAL diffs -> T    |
-   |  blocks, BAL(N)     |     |  verify, shadow registry, journal  |
-   +---------------------+     |  API: /status, /metrics, /admin/*  |
-                               +-------+----------------+-----------+
-                                       | 1:1 replay     | watch-list
-                                       | + verify       | BAL diffs (COW)
-                                       v                v
-                                 +-----+-----+    +-----+-----+
-                                 |  anvil M  |    |  anvil T  | <--- your dapp
-                                 |  strict   |    |  devnet   |      (HTTP/WS)
-                                 +-----------+    +-----------+
+   +---------------------+
+   |  reth + Lighthouse  |
+   +---------------------+
+   |  local fork source  |
+   +----------+----------+
+              | blocks, BAL(N)
+              v
+   +----------+-----------------------+
+   |  ENGINE                          |
+   +----------------------------------+
+   |  replay -> M  .  BAL diffs -> T  |
+   |  verify, shadow registry,        |
+   |  journal                         |
+   |  API: /status, /metrics,         |
+   |  /admin/*                        |
+   +-------+----------------+---------+
+           | replay         | diffs
+           | + verify       | (COW)
+           v                v
+      +----+------+    +----+------+
+      |  anvil M  |    |  anvil T  | <-- your dapp
+      |  strict   |    |  devnet   |      (HTTP/WS)
+      +-----------+    +-----------+
 ```
+![readme overview](docs/img/readme-overview.png)
 
 ## Quickstart
 
