@@ -1,5 +1,12 @@
 //! Thin JSON-RPC client: typed helpers + chunked batching with per-item errors.
 //!
+//! Boundary rule (`classify`): a body that parses as a JSON-RPC answer *is*
+//! the node's answer, whatever the HTTP status; the status only classifies
+//! bodies that are not answers (gateway pages, auth walls, empty bodies).
+//! Measured: drpc answers `-32601` with HTTP 400 — status-first classification
+//! turned the node's typed refusal into a transport fault and the BAL→trace
+//! fallback never engaged.
+//!
 //! Batching matters for two measured reasons: writes are 9.6-18 ms each when
 //! issued one at a time, and public endpoints reject large batches with HTTP 413
 //! (local reth tolerates the sizes we use here, but callers chunk regardless).
@@ -12,20 +19,50 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// One JSON-RPC answer: exactly one of `result` or `error`. A body with
+/// neither is not an answer at all (a gateway page dressed as JSON), and the
+/// HTTP status classifies it instead — many endpoints answer a JSON-RPC
+/// error on a non-2xx status (measured: drpc answers `-32601` with HTTP 400).
 #[derive(Debug, serde::Deserialize)]
-struct RpcResponse {
-    #[serde(default)]
-    id: Option<u64>,
-    #[serde(default)]
-    result: Option<Value>,
-    #[serde(default)]
-    error: Option<RpcError>,
+#[serde(untagged)]
+enum RpcAnswer {
+    Result {
+        #[serde(default)]
+        id: Option<u64>,
+        result: Value,
+    },
+    Error {
+        #[serde(default)]
+        id: Option<u64>,
+        error: RpcError,
+    },
 }
 
+impl RpcAnswer {
+    fn id(&self) -> Option<u64> {
+        match self {
+            RpcAnswer::Result { id, .. } | RpcAnswer::Error { id, .. } => *id,
+        }
+    }
+}
+
+/// One HTTP client + URL, cloned cheaply (reqwest's client is `Arc`-backed).
+/// A clone starts a fresh request-id counter; ids only need to correlate a
+/// request with its own response.
 pub struct Rpc {
     http: reqwest::Client,
     url: String,
     next_id: AtomicU64,
+}
+
+impl Clone for Rpc {
+    fn clone(&self) -> Self {
+        Self {
+            http: self.http.clone(),
+            url: self.url.clone(),
+            next_id: AtomicU64::new(1),
+        }
+    }
 }
 
 impl Rpc {
@@ -106,16 +143,21 @@ impl Rpc {
             .text()
             .await
             .map_err(|source| self.transport(method, source))?;
-        if !status.is_success() {
-            return Err(self.status(method, status.as_u16(), &text));
+        self.classify(method, status, &text)
+    }
+
+    /// The JSON-RPC-over-HTTP boundary rule: the body is the node's answer
+    /// whenever it parses as one, whatever the HTTP status; the status only
+    /// classifies bodies that are not answers (gateway pages, auth walls,
+    /// empty bodies). A JSON-RPC error on a non-2xx status is the node's
+    /// typed refusal, not a transport fault.
+    fn classify(&self, method: &str, status: reqwest::StatusCode, text: &str) -> Result<Value> {
+        match serde_json::from_str::<RpcAnswer>(text) {
+            Ok(RpcAnswer::Result { result, .. }) => Ok(result),
+            Ok(RpcAnswer::Error { error, .. }) => Err(self.rpc(method, error)),
+            Err(_) if !status.is_success() => Err(self.status(method, status.as_u16(), text)),
+            Err(source) => Err(self.decode(method, source)),
         }
-        let parsed: RpcResponse = serde_json::from_str(&text)
-            .map_err(|source| self.decode(method, source))?;
-        if let Some(err) = parsed.error {
-            return Err(self.rpc(method, err));
-        }
-        // JSON-RPC allows `result: null` (anvil cheatcodes return null on success).
-        Ok(parsed.result.unwrap_or(Value::Null))
     }
 
     pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
@@ -126,32 +168,12 @@ impl Rpc {
     /// Result may legitimately be null (e.g. `eth_getBlockByNumber` of a
     /// pruned/future block, `eth_getBlockAccessList` before activation).
     pub async fn call_opt<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<Option<T>> {
-        let body = json!({"jsonrpc":"2.0","id":self.id(),"method":method,"params":params});
-        let resp = self
-            .http
-            .post(&self.url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|source| self.transport(method, source))?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|source| self.transport(method, source))?;
-        if !status.is_success() {
-            return Err(self.status(method, status.as_u16(), &text));
-        }
-        let parsed: RpcResponse = serde_json::from_str(&text)
-            .map_err(|source| self.decode(method, source))?;
-        if let Some(err) = parsed.error {
-            return Err(self.rpc(method, err));
-        }
-        match parsed.result {
-            None | Some(Value::Null) => Ok(None),
-            Some(v) => Ok(Some(
-                serde_json::from_value(v).map_err(|source| self.decode(method, source))?,
-            )),
+        let v = self.call_raw(method, params).await?;
+        match v {
+            Value::Null => Ok(None),
+            v => serde_json::from_value(v)
+                .map(Some)
+                .map_err(|source| self.decode(method, source)),
         }
     }
 
@@ -218,28 +240,33 @@ impl Rpc {
             .text()
             .await
             .map_err(|source| self.transport("batch", source))?;
-        if !status.is_success() {
-            return Err(self.status("batch", status.as_u16(), &text));
-        }
-        let parsed: Vec<RpcResponse> = serde_json::from_str(&text).map_err(|source| Error::BatchDecode {
-            endpoint: self.url.clone(),
-            request: truncate(&body_str, 600).to_string(),
-            source,
-        })?;
-        let mut by_id: std::collections::HashMap<u64, RpcResponse> = parsed
+        // Same boundary rule as `classify`: a body that parses as a batch of
+        // JSON-RPC answers is the answers, whatever the HTTP status.
+        let parsed: Vec<Value> = match serde_json::from_str(&text) {
+            Ok(parsed) => parsed,
+            Err(_) if !status.is_success() => {
+                return Err(self.status("batch", status.as_u16(), &text));
+            }
+            Err(source) => {
+                return Err(Error::BatchDecode {
+                    endpoint: self.url.clone(),
+                    request: truncate(&body_str, 600).to_string(),
+                    source,
+                });
+            }
+        };
+        // Items that do not parse as an answer (or carry no id) are dropped:
+        // their ids surface as `missing_from_batch` below, per item.
+        let mut by_id: std::collections::HashMap<u64, RpcAnswer> = parsed
             .into_iter()
-            .filter_map(|r| r.id.map(|id| (id, r)))
+            .filter_map(|item| serde_json::from_value::<RpcAnswer>(item).ok())
+            .filter_map(|a| a.id().map(|id| (id, a)))
             .collect();
         let mut out = Vec::with_capacity(calls.len());
         for id in ids {
             match by_id.remove(&id) {
-                Some(r) => {
-                    if let Some(err) = r.error {
-                        out.push(Err(err));
-                    } else {
-                        out.push(Ok(r.result.unwrap_or(Value::Null)));
-                    }
-                }
+                Some(RpcAnswer::Result { result, .. }) => out.push(Ok(result)),
+                Some(RpcAnswer::Error { error, .. }) => out.push(Err(error)),
                 None => out.push(Err(RpcError::missing_from_batch(id))),
             }
         }
@@ -456,11 +483,13 @@ impl Rpc {
     }
 }
 
-fn truncate(s: &str, n: usize) -> &str {
+/// Truncate to at most `n` bytes without splitting a UTF-8 character: a node's
+/// answer must not panic the boundary that reads it.
+pub fn truncate(s: &str, n: usize) -> &str {
     if s.len() <= n {
         s
     } else {
-        &s[..n]
+        &s[..s.floor_char_boundary(n)]
     }
 }
 
@@ -470,4 +499,71 @@ pub fn hex_u64(v: u64) -> String {
 
 pub fn hex_u256(v: U256) -> String {
     format!("0x{v:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+
+    fn client() -> Rpc {
+        Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).expect("client builds")
+    }
+
+    /// Measured: drpc answers a JSON-RPC `-32601` on HTTP 400. The body is
+    /// the node's answer, so the typed predicate must see it — otherwise the
+    /// BAL→trace fallback never engages and the engine retries forever.
+    #[test]
+    fn jsonrpc_error_on_non_2xx_is_the_nodes_answer() {
+        let err = client()
+            .classify(
+                "eth_getBlockAccessList",
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"id":7,"jsonrpc":"2.0","error":{"code":-32601,"message":"method is not available"}}"#,
+            )
+            .expect_err("an error answer is an error");
+        assert!(err.is_method_not_found(), "{err}");
+        match err {
+            Error::Rpc { source, .. } => assert_eq!(source.code, -32601),
+            other => panic!("expected the Rpc class, got {other:?}"),
+        }
+    }
+
+    /// A gateway page on a 5xx is not an answer: the HTTP status classifies it.
+    #[test]
+    fn non_answer_body_on_non_2xx_keeps_the_status_class() {
+        let err = client()
+            .classify(
+                "eth_call",
+                reqwest::StatusCode::BAD_GATEWAY,
+                "<html>bad gateway</html>",
+            )
+            .expect_err("a page is not an answer");
+        assert!(matches!(err, Error::Status { status: 502, .. }), "{err}");
+        assert!(err.is_retryable());
+    }
+
+    /// A 2xx body with neither `result` nor `error` is not a JSON-RPC answer.
+    #[test]
+    fn non_answer_body_on_2xx_is_corrupt() {
+        let err = client()
+            .classify("eth_call", reqwest::StatusCode::OK, r#"{"message":"hello"}"#)
+            .expect_err("not an answer");
+        assert!(matches!(err, Error::Decode { .. }), "{err}");
+        assert!(!err.is_retryable());
+    }
+
+    /// `result: null` is a legitimate empty answer (anvil cheatcodes return
+    /// null on success), not corruption and not a method-not-found.
+    #[test]
+    fn null_result_is_an_empty_answer() {
+        let v = client()
+            .classify(
+                "anvil_setAutomine",
+                reqwest::StatusCode::OK,
+                r#"{"id":1,"jsonrpc":"2.0","result":null}"#,
+            )
+            .expect("null result parses");
+        assert!(v.is_null());
+    }
 }

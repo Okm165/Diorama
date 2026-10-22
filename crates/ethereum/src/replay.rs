@@ -75,7 +75,12 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     if repair {
         if let Some(bal) = ctx.reth.block_access_list(n - 1).await? {
             let writes = bal::flatten_bal(&bal);
-            let applied = crate::diff::apply_writes(ctx, &ctx.anvil_m, &writes).await?;
+            let applied = mirror_anvil::apply_writes(
+                &ctx.anvil_m,
+                &writes,
+                ctx.cfg.services.engine.loops.chunk_size,
+            )
+            .await?;
             ctx.metrics.add(&ctx.metrics.m_repair_writes, applied as u64);
             tracing::debug!(
                 block = n,
@@ -90,10 +95,14 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     // The convergence probes are the state-level assertion "M == mainnet at
     // n-1": they run for *every* block, repaired or not (a clean block's state
     // is the replay's own product, which is exactly what this measures).
-    let (ok, failed) = crate::verify::convergence_check(ctx, n - 1).await;
-    ctx.metrics.add(&ctx.metrics.m_convergence_ok, ok as u64);
-    ctx.metrics.add(&ctx.metrics.m_convergence_failed, failed as u64);
-    ctx.metrics.set(&ctx.metrics.m_convergence_last_failed, failed as u64);
+    let probes = mirror_devnet::probes::ProbeRunner::replay(&ctx.cfg.services.engine.verifier.probes)
+        .parity(&ctx.reth, n - 1, &ctx.anvil_m)
+        .await?;
+    ctx.metrics.add(&ctx.metrics.m_convergence_ok, probes.ok as u64);
+    ctx.metrics
+        .add(&ctx.metrics.m_convergence_failed, probes.failed as u64);
+    ctx.metrics
+        .set(&ctx.metrics.m_convergence_last_failed, probes.failed as u64);
 
     // 1. block env (all five context fields aligned to the parent).
     let h = &block.header;

@@ -27,7 +27,8 @@ poll_interval_ms = 1000
 # replay its whole pin window, bounded by reth's 10,064-block state window -
 # otherwise a T restart could never warm up.
 max_gap_blocks = 300
-# Max JSON-RPC batch size for raw-tx submissions and cheatcode writes.
+# Max JSON-RPC batch size: source reads (a public endpoint may refuse more;
+# measured: drpc's free plan allows 3) and cheatcode writes to the local anvils.
 chunk_size = 500
 replay_into_m = true
 apply_into_t = true

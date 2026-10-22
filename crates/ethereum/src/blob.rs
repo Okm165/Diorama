@@ -17,6 +17,7 @@ use alloy_eips::{
 };
 use alloy_primitives::{Bytes, B256};
 use crate::error::Result;
+use mirror_anvil::truncate;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -799,27 +800,21 @@ pub fn encode_blob_tx(
     Ok(envelope.encoded_2718().into())
 }
 
-fn truncate(s: &str, n: usize) -> &str {
-    if s.len() <= n {
-        s
-    } else {
-        &s[..n]
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn kzg_validation_accepts_a_valid_sidecar() {
-        // Build a blob, its commitment and proof with c-kzg (the same library
-        // anvil uses), then run it through the validator the replay path uses.
-        // If this passes, "invalid KZG proof" from a beacon source means the
-        // source's data is genuinely bad. Blobs are 128 KiB values, so this
-        // needs more stack than a debug test thread has by default.
+    fn blob_path_validates_repairs_and_encodes_on_a_bounded_stack() {
+        // One fixture through every call the replay path makes on a blob tx,
+        // on a deliberately small stack budget: 4 MiB, a quarter of the
+        // engine's worker budget (bins/mirror-engine). Debug builds give every
+        // by-value 128 KiB `Blob` its own slot, so the chain measures ~2 MiB
+        // (repair 1.28 + validate 0.64; encode 1.29). If a future frame
+        // outgrows the budget, this test aborts loudly instead of the engine
+        // crashing in the field.
         std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(4 * 1024 * 1024)
             .spawn(|| {
                 use alloy_eips::eip4844::c_kzg;
                 let settings = c_kzg::ethereum_kzg_settings(0);
@@ -839,16 +834,51 @@ mod tests {
                     kzg_proof: Some(format!("0x{}", hex::encode(proof.to_bytes().into_inner()))),
                     proofs: None,
                 };
+
+                // The validator the replay path uses accepts a good triple...
                 validate_sidecars(&[&item], &[vh]).expect("valid sidecar must validate");
 
-                // And a corrupted blob must be rejected.
+                // ...and rejects a blob that does not match its commitment.
                 let mut bad = item.clone();
                 bad.blob = format!("0x{}", hex::encode(vec![7u8; 131_072]));
                 assert!(validate_sidecars(&[&bad], &[vh]).is_err());
+
+                // A Lighthouse-on-Fulu source serves the point-at-infinity
+                // proof placeholder; repair recomputes and re-validates it.
+                let mut placeholder = item.clone();
+                placeholder.kzg_proof = Some(format!("0x{}{}", "c0", "00".repeat(47)));
+                let repaired = repair_proofs(&[&placeholder], &[vh]).expect("repaired");
+                validate_sidecars(&[&repaired[0]], &[vh]).expect("repaired proof validates");
+
+                // Both network forms the encoder can build from the item.
+                let tx = TxEip4844 {
+                    chain_id: 1,
+                    nonce: 0,
+                    gas_limit: 21_000,
+                    max_fee_per_gas: 1,
+                    max_priority_fee_per_gas: 1,
+                    max_fee_per_blob_gas: 1,
+                    to: alloy_primitives::Address::ZERO,
+                    value: alloy_primitives::U256::ZERO,
+                    input: Bytes::new(),
+                    access_list: Default::default(),
+                    blob_versioned_hashes: vec![vh],
+                };
+                let signature = alloy_primitives::Signature::new(
+                    alloy_primitives::U256::ONE,
+                    alloy_primitives::U256::ONE,
+                    false,
+                );
+                let items: Vec<&SidecarItem> = repaired.iter().collect();
+                let legacy = encode_blob_tx(&tx, signature, B256::ZERO, &items, BlobForm::Legacy)
+                    .expect("legacy form");
+                let bare = encode_blob_tx(&tx, signature, B256::ZERO, &items, BlobForm::Bare)
+                    .expect("bare form");
+                assert!(legacy.len() > bare.len(), "the sidecar form carries the blobs");
             })
             .expect("spawn")
             .join()
-            .expect("kzg test");
+            .expect("blob path");
     }
 
     #[test]

@@ -1,10 +1,12 @@
 //! The JSON-RPC boundary's error taxonomy (boundary-discipline; §11.3 rule 1).
 //!
 //! A call has three answers: the value, a **fault** — [`Error::Transport`] (no
-//! answer reached us), [`Error::Status`] (an HTTP-layer refusal), [`Error::Rpc`]
-//! (the node refused) — or **corrupt** — [`Error::Decode`] / [`Error::BadQuantity`]
-//! (an answer that parsed as HTTP but not as the expected shape). Corrupt data
-//! dies here, at the boundary, while the failure is still named.
+//! answer reached us), [`Error::Status`] (an HTTP refusal whose body was not a
+//! JSON-RPC answer), [`Error::Rpc`] (the node refused) — or **corrupt** —
+//! [`Error::Decode`] / [`Error::BadQuantity`] (an answer that parsed as HTTP
+//! but not as the expected shape). The body is the protocol's answer whatever
+//! the HTTP status (measured: drpc answers `-32601` with HTTP 400); corrupt
+//! data dies here, at the boundary, while the failure is still named.
 //!
 //! Policy is a typed predicate, never inferred from message text
 //! (retry-discipline): [`Error::is_retryable`] is the optimistic *read*-policy
@@ -98,6 +100,9 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    /// An HTTP refusal whose body was not a JSON-RPC answer (gateway page,
+    /// auth wall, empty body): the transport answered, but not with the
+    /// protocol. A JSON-RPC error on a non-2xx status is [`Error::Rpc`].
     #[error("{endpoint}: {method}: HTTP {status}: {body}")]
     Status {
         endpoint: String,

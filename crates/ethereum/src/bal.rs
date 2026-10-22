@@ -1,7 +1,8 @@
-//! EIP-7928 BAL flattening. The measured padding rules and the prestateTracer
-//! fallback live in `mirror-anvil` (anvil-facing formats) and are re-exported
-//! here so the frozen engine `crate::bal::*` paths keep resolving (R1
-//! extraction — zero call-site churn).
+//! The EIP-7928 BAL flattening. The measured padding rules and the prestateTracer
+//! fallback live in `mirror-anvil` (anvil-facing formats); the symbols the
+//! frozen engine still reaches through `crate::bal::*` are re-exported here
+//! (R1 extraction — zero call-site churn; the write encoder now lives in
+//! `mirror_anvil::apply_writes`).
 //!
 //! Measured rule (do not rediscover): "last change per key = final value" is
 //! guaranteed by the spec ordering; `AccountChanges::storage_post_states()`
@@ -9,8 +10,7 @@
 use alloy_eips::eip7928::BlockAccessList;
 
 pub use mirror_anvil::{
-    bytes_hex, flatten_trace_block, flatten_trace_diff, mapping_slot, pad_data32, quant_hex_u256,
-    quant_hex_u64, Write,
+    flatten_trace_block, flatten_trace_diff, quant_hex_u256, Write,
 };
 
 /// Flatten a BAL into post-state writes (last change per key).

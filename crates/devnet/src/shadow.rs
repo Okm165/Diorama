@@ -9,8 +9,10 @@
 //! Writes are discovered by watching T's own blocks (traces + tx semantics) and
 //! can be added explicitly through the admin API.
 use mirror_anvil::Write;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use crate::error::{Error, Result};
+use crate::metrics::Metrics;
+use crate::shared::Shared;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -26,9 +28,66 @@ pub struct Shadow {
     /// Latest value per shadowed storage key (what a re-fork must restore).
     #[serde(default)]
     pub values: BTreeMap<Address, BTreeMap<U256, U256>>,
-    /// Latest (balance, nonce) per shadowed account.
+    /// Latest recorded field values per shadowed account. Each field is
+    /// optional: a marked account whose balance was never *recorded* must not
+    /// have a default zero restored over a real value on a re-fork.
     #[serde(default)]
-    pub account_values: BTreeMap<Address, (U256, u64)>,
+    pub account_values: BTreeMap<Address, AccountValues>,
+}
+
+/// The recorded account fields of one shadowed account (any subset).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(from = "RawAccountValues")]
+pub struct AccountValues {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<U256>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<Bytes>,
+}
+
+impl AccountValues {
+    /// Is any field recorded? (A mark with nothing recorded is handed back.)
+    fn any(&self) -> bool {
+        self.balance.is_some() || self.nonce.is_some() || self.code.is_some()
+    }
+}
+
+/// The persisted form: today's map, or the older `[balance, nonce]` tuple.
+/// Old files must keep loading (the registry is a state file, not a cache).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawAccountValues {
+    Legacy((U256, u64)),
+    Current(RawCurrent),
+}
+
+#[derive(Deserialize)]
+struct RawCurrent {
+    #[serde(default)]
+    balance: Option<U256>,
+    #[serde(default)]
+    nonce: Option<u64>,
+    #[serde(default)]
+    code: Option<Bytes>,
+}
+
+impl From<RawAccountValues> for AccountValues {
+    fn from(raw: RawAccountValues) -> Self {
+        match raw {
+            RawAccountValues::Legacy((balance, nonce)) => Self {
+                balance: Some(balance),
+                nonce: Some(nonce),
+                code: None,
+            },
+            RawAccountValues::Current(c) => Self {
+                balance: c.balance,
+                nonce: c.nonce,
+                code: c.code,
+            },
+        }
+    }
 }
 
 impl Shadow {
@@ -53,14 +112,15 @@ impl Shadow {
             }
             Write::Balance { address, value } => {
                 self.accounts.insert(*address);
-                self.account_values.entry(*address).or_default().0 = *value;
+                self.account_values.entry(*address).or_default().balance = Some(*value);
             }
             Write::Nonce { address, value } => {
                 self.accounts.insert(*address);
-                self.account_values.entry(*address).or_default().1 = *value;
+                self.account_values.entry(*address).or_default().nonce = Some(*value);
             }
-            Write::Code { address, .. } => {
+            Write::Code { address, value } => {
                 self.accounts.insert(*address);
+                self.account_values.entry(*address).or_default().code = Some(value.clone());
             }
         }
     }
@@ -92,7 +152,12 @@ impl Shadow {
         self.slots.retain(|_, set| !set.is_empty());
         let mut drop_accounts: Vec<Address> = Vec::new();
         for address in self.accounts.iter() {
-            if !self.account_values.contains_key(address) {
+            let recorded = self
+                .account_values
+                .get(address)
+                .map(AccountValues::any)
+                .unwrap_or(false);
+            if !recorded {
                 drop_accounts.push(*address);
             }
         }
@@ -106,47 +171,51 @@ impl Shadow {
     /// Re-apply the devnet's own writes to a chain that was re-forked under us
     /// (anvil-t's OOM restart, a re-pin). Without this the devnet's positions
     /// vanish silently while their shadow marks keep mainnet's diffs away -
-    /// the worst of both worlds. Values are batched; the caller keeps the
-    /// shadow marks so the parent diffs still skip these keys.
+    /// the worst of both worlds. Values are batched through the one write path;
+    /// the caller keeps the shadow marks so the parent diffs still skip these
+    /// keys.
     ///
     /// A transport fault aborts the restore with a typed error: a partial
     /// restore that reported success would leave T holding some devnet values
     /// and some pin-era ones with no way to tell which (the caller retries or
     /// halts; the marks are still in place either way).
-    pub async fn reapply(&self, rpc: &mirror_anvil::Rpc) -> Result<usize> {
-        let mut calls: Vec<(String, serde_json::Value)> = Vec::new();
+    pub async fn reapply(&self, rpc: &mirror_anvil::Rpc, chunk_size: usize) -> Result<usize> {
+        let mut writes: Vec<Write> = Vec::new();
         for (address, slots) in &self.values {
             for (slot, value) in slots {
-                calls.push((
-                    "anvil_setStorageAt".to_string(),
-                    serde_json::json!([
-                        address,
-                        mirror_anvil::pad_data32(*slot),
-                        mirror_anvil::pad_data32(*value)
-                    ]),
-                ));
+                writes.push(Write::Storage {
+                    address: *address,
+                    slot: *slot,
+                    value: *value,
+                });
             }
         }
-        for (address, (balance, nonce)) in &self.account_values {
-            if !balance.is_zero() {
-                calls.push((
-                    "anvil_setBalance".to_string(),
-                    serde_json::json!([address, mirror_anvil::quant_hex_u256(*balance)]),
-                ));
+        for (address, v) in &self.account_values {
+            // Recorded zeros restore as zeros: "never recorded" is the absent
+            // field, not a zero value (a drained account must come back
+            // drained, not at its pin-era balance).
+            if let Some(balance) = v.balance {
+                writes.push(Write::Balance {
+                    address: *address,
+                    value: balance,
+                });
             }
-            if *nonce > 0 {
-                calls.push((
-                    "anvil_setNonce".to_string(),
-                    serde_json::json!([address, mirror_anvil::quant_hex_u64(*nonce)]),
-                ));
+            if let Some(nonce) = v.nonce {
+                writes.push(Write::Nonce {
+                    address: *address,
+                    value: nonce,
+                });
+            }
+            if let Some(code) = &v.code {
+                writes.push(Write::Code {
+                    address: *address,
+                    value: code.clone(),
+                });
             }
         }
-        let mut applied = 0usize;
-        for chunk in calls.chunks(500) {
-            let results = rpc.batch_raw(chunk).await?;
-            applied += results.iter().filter(|r| r.is_ok()).count();
-        }
-        Ok(applied)
+        mirror_anvil::apply_writes(rpc, &writes, chunk_size)
+            .await
+            .map_err(Error::from)
     }
 
     pub fn mark_account_fields(&mut self, address: Address) {
@@ -299,6 +368,16 @@ impl Shadow {
     }
 }
 
+/// Persist the registry and update its gauge: the one save path (the shadow
+/// loop, hand-backs and deals all go through it, so the gauge never lags a
+/// save).
+pub fn save_registry(shadow: &Shared<Shadow>, path: &Path, metrics: &Metrics) -> Result<()> {
+    let s = shadow.lock()?;
+    s.save(path)?;
+    metrics.set(&metrics.shadowed_slots, s.slot_count() as u64);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,9 +426,23 @@ mod tests {
         s.mark_slot(a, U256::from(1u64));
         s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
         s.mark_account_fields(a);
-        s.account_values.insert(a, (U256::from(5u64), 3));
+        s.account_values.insert(
+            a,
+            AccountValues {
+                balance: Some(U256::from(5u64)),
+                nonce: Some(3),
+                code: None,
+            },
+        );
         s.values.entry(b).or_default().insert(U256::from(2u64), U256::from(9u64));
-        s.account_values.insert(b, (U256::from(1u64), 1));
+        s.account_values.insert(
+            b,
+            AccountValues {
+                balance: Some(U256::from(1u64)),
+                nonce: Some(1),
+                code: None,
+            },
+        );
         s.mark_slot(c, U256::from(3u64));
 
         let (slots, accounts) = s.prune_orphans();
@@ -368,7 +461,14 @@ mod tests {
         s.mark_slot(a, U256::from(1u64));
         s.mark_account_fields(a);
         s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
-        s.account_values.insert(a, (U256::from(5u64), 3));
+        s.account_values.insert(
+            a,
+            AccountValues {
+                balance: Some(U256::from(5u64)),
+                nonce: Some(3),
+                code: None,
+            },
+        );
 
         let (slots, accounts) = s.clear_all();
         assert_eq!((slots, accounts), (1, 1));
@@ -383,11 +483,51 @@ mod tests {
         s.mark_slot(a, U256::from(1u64));
         s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
         s.mark_account_fields(a);
-        s.account_values.insert(a, (U256::from(5u64), 3));
+        s.account_values.insert(
+            a,
+            AccountValues {
+                balance: Some(U256::from(5u64)),
+                nonce: Some(3),
+                code: None,
+            },
+        );
 
         s.unmark_slot(a, U256::from(1u64));
         s.unmark_account_fields(a);
         assert!(!s.values.contains_key(&a) && !s.account_values.contains_key(&a));
         assert_eq!(s.prune_orphans(), (0, 0)); // nothing left to prune
+    }
+
+    /// The pre-code registry stored `[balance, nonce]`: old state files must
+    /// keep loading (the registry is a state file, not a cache).
+    #[test]
+    fn legacy_account_values_parse() {
+        let a = Address::repeat_byte(0xab);
+        let json = format!(
+            r#"{{"accounts":["{a:?}"],"account_values":{{"{a:?}":[5,3]}}}}"#
+        );
+        let s: Shadow = serde_json::from_str(&json).unwrap();
+        let v = s.account_values.get(&a).expect("legacy tuple loaded");
+        assert_eq!(v.balance, Some(U256::from(5u64)));
+        assert_eq!(v.nonce, Some(3));
+        assert!(v.code.is_none());
+    }
+
+    /// A recorded zero restores as a zero; only an absent field means "never
+    /// recorded" (the old format could not tell them apart).
+    #[test]
+    fn recorded_zero_is_a_value() {
+        let a = Address::repeat_byte(0xcd);
+        let json = format!(
+            r#"{{"accounts":["{a:?}"],"account_values":{{"{a:?}":{{"balance":"0x0"}}}}}}"#
+        );
+        let mut s: Shadow = serde_json::from_str(&json).unwrap();
+        assert!(s.account_values.get(&a).unwrap().any());
+        assert_eq!(s.unrecorded(), (0, 0)); // kept: a recorded zero is a value
+        // round-trips as a map, not as a legacy tuple
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(text.contains("\"balance\":\"0x0\""), "{text}");
+        s.unmark_account_fields(a);
+        assert_eq!(s.prune_orphans(), (0, 0));
     }
 }

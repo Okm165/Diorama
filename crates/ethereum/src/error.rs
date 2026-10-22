@@ -4,9 +4,10 @@
 //! structured fields an operator needs (endpoint, block, path). The
 //! sub-boundaries keep their own vocabularies with their modules —
 //! [`EngineApiError`] (reth authrpc), [`BeaconError`] / [`BlobError`] (beacon
-//! API + KZG) — and compose here.
+//! API + KZG), `mirror_devnet::Error` (the devnet plane, incl. the admin
+//! refusals) — and compose here.
 //!
-//! Policy carriers: [`Error::NoCursor`] and [`Error::InvalidRewind`] are admin
+//! Policy carriers: the devnet's `NoCursor` / `InvalidRewind` are admin
 //! *request refusals* — `http.rs` maps them to 4xx while every other variant is
 //! a server-side fault (5xx, or 503 for a poisoned registry).
 use alloy_primitives::B256;
@@ -76,13 +77,6 @@ pub enum Error {
         source: Box<Error>,
     },
 
-    // ---- admin request refusals (mapped to 4xx by http.rs) ---------------
-    #[error("no T cursor yet")]
-    NoCursor,
-
-    #[error("rewind {blocks} exceeds the applied range (cursor {cursor})")]
-    InvalidRewind { blocks: u64, cursor: u64 },
-
     // ---- replay (M) ------------------------------------------------------
     #[error("M head {m_head} does not precede block {n}")]
     ReplayOrder { m_head: u64, n: u64 },
@@ -130,6 +124,13 @@ pub enum Error {
     #[error("T head {t_head} is more than one block behind the parent cursor {n}")]
     ApplierBehind { t_head: u64, n: u64 },
 
+    /// A devnet block's shadow scan could not trace some of its txs. The scan
+    /// stops before that block (the watermark must not advance past it): its
+    /// writes would stay unmarked, and the next parent diff would overwrite
+    /// the devnet's state. The per-tx causes are logged; this names the block.
+    #[error("block {block}: shadow scan failed for {failed} tx trace(s); the block is re-scanned")]
+    ShadowScan { block: u64, failed: usize },
+
     // ---- top-up sync -----------------------------------------------------
     #[error(
         "top-up gap: reth head {el_head}, next CL payload {number} at slot {slot} \
@@ -151,17 +152,6 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn request_refusals_render_the_numbers_they_refuse() {
-        let e = Error::InvalidRewind {
-            blocks: 50,
-            cursor: 10,
-        };
-        let rendered = e.to_string();
-        assert!(rendered.contains("50") && rendered.contains("10"), "{rendered}");
-        assert!(Error::NoCursor.to_string().contains("cursor"));
-    }
 
     #[test]
     fn the_step_wrapper_keeps_the_chain_walkable() {

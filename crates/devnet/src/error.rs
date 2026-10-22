@@ -56,7 +56,38 @@ pub enum Error {
         write_kind: &'static str,
         before_kind: &'static str,
     },
+
+    // ---- admin request refusals (the engine maps them to 4xx) ------------
+    #[error("no cursor yet: nothing has been applied to the devnet chain")]
+    NoCursor,
+
+    #[error("rewind {blocks} exceeds the applied range (cursor {cursor})")]
+    InvalidRewind { blocks: u64, cursor: u64 },
+
+    #[error("invalid shadow request: {reason}")]
+    InvalidShadow { reason: &'static str },
 }
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_refusals_render_the_numbers_they_refuse() {
+        let e = Error::InvalidRewind {
+            blocks: 50,
+            cursor: 10,
+        };
+        let rendered = e.to_string();
+        assert!(rendered.contains("50") && rendered.contains("10"), "{rendered}");
+        assert!(Error::NoCursor.to_string().contains("cursor"));
+        let rendered = Error::InvalidShadow {
+            reason: "`all` requires `clear`",
+        }
+        .to_string();
+        assert!(rendered.contains("`all` requires `clear`"), "{rendered}");
+    }
+}

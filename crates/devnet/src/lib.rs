@@ -1,10 +1,15 @@
-//! `mirror-devnet` — the devnet plane: shadow registry, journal, state, metrics.
-//! The devnet axioms live here; the engine composes these with chain clients.
+//! `mirror-devnet` — the devnet plane: shadow registry, journal, state, the
+//! admin surface, deal, probes, metrics, and the unshadow re-sync `Source`.
+//! The devnet axioms live here; the projects compose these with chain clients.
+pub mod admin;
+pub mod deal;
 pub mod error;
 pub mod journal;
 pub mod metrics;
+pub mod probes;
 pub mod shadow;
 pub mod shared;
+pub mod source;
 pub mod state;
 
 pub use error::{Error, Result};

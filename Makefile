@@ -111,6 +111,20 @@ test-engine: ## Run workspace unit tests on the host (cargo)
 config-check: ## Validate the instance config through the layered loader
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check config/instances/mainnet-mirror.toml
 
+fitness: lint design-assertions closure-matrix no-orphans ## Run every structural fitness function (plan §11.3)
+
+lint: ## lint-gate: clippy, all targets, warnings are errors
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
+
+design-assertions: ## Public types keep Send + Sync (rule 11)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace design_assertions
+
+closure-matrix: ## Every internal dependency edge is declared (plan §11.3)
+	./scripts/closure-matrix.sh
+
+no-orphans: ## No utils/common/helpers crate or module (Lesson 101)
+	./scripts/no-orphans.sh
+
 ##@ Ops
 
 status: ## Pods, PVCs, engine status

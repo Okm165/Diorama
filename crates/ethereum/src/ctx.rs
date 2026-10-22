@@ -14,11 +14,18 @@ use crate::rpc::Rpc;
 use crate::shadow::Shadow;
 use crate::state::{ChainCursor, StateFile};
 use alloy_primitives::Address;
+use mirror_devnet::admin::AdminSurface;
+use mirror_devnet::source::Source;
 use mirror_devnet::Shared;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Block → cursor conversion (the shim keeps the frozen `crate::ctx::cursor_from`
+/// path resolving; the code lives in `mirror-devnet`).
+pub use mirror_devnet::state::cursor_from;
 
 /// Transactions of a full block (the engine always requests full=true).
 pub fn block_txs(block: &alloy_rpc_types_eth::Block) -> &[alloy_rpc_types_eth::Transaction] {
@@ -30,6 +37,9 @@ pub struct Ctx {
     pub reth: Rpc,
     pub anvil_m: Rpc,
     pub anvil_t: Rpc,
+    /// The unshadow re-sync source (reth at the applied cursor): one
+    /// implementation per profile, chosen at boot (rule 15).
+    pub source: Arc<dyn Source>,
     pub beacon: BeaconClient,
     /// Engine API client (reth authrpc) for the top-up loop; None when disabled
     /// or unconfigured.
@@ -105,22 +115,25 @@ impl Ctx {
         let offset = state.data.time_offset_seconds.unwrap_or(0);
         let drift = Drift::new(cfg.services.engine.state_dir.join("drift.jsonl"))?;
         let beacon = BeaconClient::new(cfg.services.engine.blobs.beacon_urls.clone())?;
-        let engine = match (&cfg.services.engine.source_sync.engine_url, &cfg.services.engine.source_sync.jwt_path) {
+        let reth = Rpc::new(reth_url, timeout)?;
+        let source: Arc<dyn Source> = Arc::new(crate::eth_source::EthereumSource::new(reth.clone()));
+        let engine = match (
+            &cfg.services.engine.source_sync.engine_url,
+            &cfg.services.engine.source_sync.jwt_path,
+        ) {
             (Some(url), Some(jwt)) if cfg.services.engine.source_sync.enabled => {
-                match crate::engine_api::EngineClient::new(url, jwt) {
-                    Ok(client) => Some(client),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "engine API client disabled");
-                        None
-                    }
-                }
+                // A configured boundary that cannot be built is a boot error
+                // naming itself: silently disabling it would stop the top-up
+                // loop while every dashboard still says "enabled".
+                Some(crate::engine_api::EngineClient::new(url, jwt)?)
             }
             _ => None,
         };
         Ok(Self {
-            reth: Rpc::new(reth_url, timeout)?,
+            reth,
             anvil_m: Rpc::new(anvil_m_url, timeout)?,
             anvil_t: Rpc::new(anvil_t_url, timeout)?,
+            source,
             beacon,
             engine,
             watchlist,
@@ -193,11 +206,30 @@ impl Ctx {
     }
 
     pub fn save_shadow(&self) -> Result<()> {
-        let s = self.shadow.lock()?;
-        s.save(&self.shadow_path)?;
-        self.metrics
-            .set(&self.metrics.shadowed_slots, s.slot_count() as u64);
-        Ok(())
+        Ok(mirror_devnet::shadow::save_registry(
+            &self.shadow,
+            &self.shadow_path,
+            &self.metrics,
+        )?)
+    }
+
+    /// The devnet admin surface (plan §11.3), wired to this engine's chain and
+    /// registries: the semantics live in `mirror-devnet`, the wiring here.
+    pub fn admin(&self) -> AdminSurface<'_> {
+        AdminSurface {
+            target: &self.anvil_t,
+            source: self.source.as_ref(),
+            shadow: &self.shadow,
+            shadow_path: &self.shadow_path,
+            journal: &self.journal,
+            state: &self.state,
+            metrics: &self.metrics,
+            time_offset: &self.time_offset,
+            halted: &self.halted,
+            frozen: &self.frozen,
+            reapply_from: &self.reapply_from,
+            chunk_size: self.cfg.services.engine.loops.chunk_size,
+        }
     }
 
     pub fn is_shadowed(&self, w: &crate::bal::Write) -> Result<bool> {
@@ -229,13 +261,6 @@ impl Ctx {
         }
     }
 
-    pub fn resume(&self) {
-        self.frozen.store(false, Ordering::SeqCst);
-        self.halted.store(false, Ordering::SeqCst);
-        self.metrics.set(&self.metrics.frozen, 0);
-        self.metrics.set(&self.metrics.halted, 0);
-    }
-
     pub fn follow_tag(&self) -> &'static str {
         match self.cfg.chains.l1.follow {
             FollowHead::Safe => "safe",
@@ -264,15 +289,6 @@ impl Ctx {
             }
         }
         Ok(())
-    }
-}
-
-/// Convenience: build a `ChainCursor` from a block.
-pub fn cursor_from(block: &alloy_rpc_types_eth::Block, first_block: u64) -> ChainCursor {
-    ChainCursor {
-        block: block.header.number,
-        hash: format!("0x{:x}", block.header.hash),
-        first_block,
     }
 }
 

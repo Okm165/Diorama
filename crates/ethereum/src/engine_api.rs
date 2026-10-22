@@ -61,6 +61,16 @@ pub enum EngineApiError {
     },
 }
 
+/// One Engine API answer: exactly one of `result` or `error`. A body with
+/// neither is not an answer (a gateway page dressed as JSON), and the HTTP
+/// status classifies it instead.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Answer {
+    Result { result: Value },
+    Error { error: Value },
+}
+
 #[derive(Clone)]
 pub struct EngineClient {
     http: reqwest::Client,
@@ -104,25 +114,25 @@ impl EngineClient {
             .text()
             .await
             .map_err(|source| EngineApiError::Transport { method, source })?;
-        if !status.is_success() {
-            return Err(EngineApiError::Status {
+        // The same boundary rule as the anvil client: a body that parses as a
+        // JSON-RPC answer is the node's answer, whatever the HTTP status.
+        match serde_json::from_str::<Answer>(&text) {
+            Ok(Answer::Result { result }) => Ok(result),
+            Ok(Answer::Error { error }) => Err(EngineApiError::Rpc {
+                method,
+                message: error.to_string(),
+            }),
+            Err(_) if !status.is_success() => Err(EngineApiError::Status {
                 method,
                 status: status.as_u16(),
                 body: truncate(&text, 300).to_string(),
-            });
-        }
-        let v: Value = serde_json::from_str(&text).map_err(|source| EngineApiError::Decode {
-            method,
-            body: truncate(&text, 200).to_string(),
-            source,
-        })?;
-        if let Some(err) = v.get("error") {
-            return Err(EngineApiError::Rpc {
+            }),
+            Err(source) => Err(EngineApiError::Decode {
                 method,
-                message: err.to_string(),
-            });
+                body: truncate(&text, 200).to_string(),
+                source,
+            }),
         }
-        Ok(v.get("result").cloned().unwrap_or(Value::Null))
     }
 
     /// Validate+execute a payload. Returns (status, message); status is one of

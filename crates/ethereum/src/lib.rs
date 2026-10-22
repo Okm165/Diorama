@@ -7,6 +7,7 @@ mod diff;
 mod drift;
 mod engine_api;
 mod error;
+mod eth_source;
 mod http;
 mod replay;
 mod selftest;
@@ -99,8 +100,11 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             let m = cfg.services.engine.anvil.m_url.clone();
             let t = cfg.services.engine.anvil.t_url.clone();
             let ctx = Ctx::new(cfg, &reth, &m, &t)?;
-            let (cursor, restored) = http::do_rewind(&ctx, blocks).await?;
-            println!("rewound {blocks} block(s): {restored} values restored, cursor_t now {cursor}");
+            let out = ctx.admin().rewind(blocks).await?;
+            println!(
+                "rewound {blocks} block(s): {} values restored, cursor_t now {}",
+                out.restored, out.cursor
+            );
             Ok(())
         }
     }
@@ -308,7 +312,9 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                         // Clone out: the re-apply awaits, and a MutexGuard must
                         // not be held across it (the loop must stay Send).
                         let snapshot = ctx.shadow.lock()?.clone();
-                        let restored = snapshot.reapply(&ctx.anvil_t).await?;
+                        let restored = snapshot
+                            .reapply(&ctx.anvil_t, ctx.cfg.services.engine.loops.chunk_size)
+                            .await?;
                         // Marked keys with no recorded value would hold pin-era
                         // mainnet values under a devnet mark - hand them back.
                         let (unknown_slots, unknown_accounts) =
@@ -658,11 +664,8 @@ async fn shadow_loop(ctx: Arc<Ctx>) {
             ctx.shadow_scanned_upto.store(t_head, Ordering::Relaxed);
             continue;
         }
-        for n in (last + 1)..=t_head {
-            if let Err(e) = scan_t_block(&ctx, n).await {
-                tracing::warn!(block = n, error = %e, "shadow scan failed");
-            }
-            ctx.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
+        if let Err(e) = scan_range(&ctx, last, t_head).await {
+            tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block");
         }
         // A save fault is logged, not swallowed: the marks are in memory and
         // the next pass retries the write (bounded: one warn per poll).
@@ -670,6 +673,20 @@ async fn shadow_loop(ctx: Arc<Ctx>) {
             tracing::warn!(error = %e, "shadow registry save failed");
         }
     }
+}
+
+/// Scan T's blocks in `(from, to]`, advancing the high-water mark only past
+/// blocks that scanned cleanly. A trace fault stops the walk: re-scanning is
+/// cheap (the marks are idempotent), while advancing past a failed block would
+/// lose its devnet writes silently — and the next parent diff would then
+/// overwrite the devnet's state, the exact COW failure the registry exists to
+/// prevent.
+pub(crate) async fn scan_range(ctx: &Ctx, from: u64, to: u64) -> Result<()> {
+    for n in (from + 1)..=to {
+        scan_t_block(ctx, n).await?;
+        ctx.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 /// Watch T's own blocks: every devnet transaction's writes become shadowed
@@ -681,6 +698,7 @@ pub(crate) async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
         return Ok(());
     }
     let mut shadowed = 0usize;
+    let mut trace_failures = 0usize;
     for tx in txs {
         use alloy_consensus::Transaction as _;
         // A tx from an account stops its account-field sync (nonce -> balance too).
@@ -704,8 +722,19 @@ pub(crate) async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
                     shadowed += 1;
                 }
             }
-            Err(e) => tracing::warn!(tx = %tx.tx_hash(), error = %e, "shadow trace failed"),
+            Err(e) => {
+                // A tx whose trace failed hides its writes: the block is *not*
+                // cleanly scanned and the watermark must not advance past it.
+                trace_failures += 1;
+                tracing::warn!(tx = %tx.tx_hash(), error = %e, "shadow trace failed");
+            }
         }
+    }
+    if trace_failures > 0 {
+        return Err(Error::ShadowScan {
+            block: n,
+            failed: trace_failures,
+        });
     }
     tracing::info!(
         block = n,

@@ -2367,6 +2367,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2386,7 +2387,9 @@ name = "mirror-devnet"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-rpc-types-eth",
  "mirror-anvil",
+ "mirror-config",
  "serde",
  "serde_json",
  "thiserror",

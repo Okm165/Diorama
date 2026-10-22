@@ -31,22 +31,44 @@ enum ShellError {
     HyperliquidNotYet,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// Worker stack budget for the engine runtime.
+///
+/// Debug builds give every by-value 128 KiB `Blob` temporary its own stack
+/// slot: the blob/KZG chain alone needs ~2.1 MiB (measured: `repair_proofs`
+/// 1.28 MiB + `validate_sidecars` 0.64 MiB, `encode_blob_tx` 1.29 MiB), which
+/// is exactly tokio's 2 MiB worker default - the first blob block overflowed
+/// it. The engine owns an explicit budget with headroom; release builds use a
+/// fraction of it, and the cost is address space, not resident memory.
+const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.profile {
-        Profile::Ethereum => match mirror_ethereum::main_entry(cli.args).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                report(&e);
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_SIZE)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            report(&e);
+            return ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async move {
+        match cli.profile {
+            Profile::Ethereum => match mirror_ethereum::main_entry(cli.args).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    report(&e);
+                    ExitCode::FAILURE
+                }
+            },
+            Profile::Hyperliquid => {
+                report(&ShellError::HyperliquidNotYet);
                 ExitCode::FAILURE
             }
-        },
-        Profile::Hyperliquid => {
-            report(&ShellError::HyperliquidNotYet);
-            ExitCode::FAILURE
         }
-    }
+    })
 }
 
 /// Print the error and its full cause chain: the typed sources are the point

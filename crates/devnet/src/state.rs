@@ -105,6 +105,16 @@ impl StateFile {
     }
 }
 
+/// Convenience: build a `ChainCursor` from a block (the block's own number and
+/// hash, plus the epoch's first processed block).
+pub fn cursor_from(block: &alloy_rpc_types_eth::Block, first_block: u64) -> ChainCursor {
+    ChainCursor {
+        block: block.header.number,
+        hash: format!("0x{:x}", block.header.hash),
+        first_block,
+    }
+}
+
 /// Decide which block to process next for a chain.
 ///
 /// Replay must be contiguous. A hash-validated cursor always wins: resume at

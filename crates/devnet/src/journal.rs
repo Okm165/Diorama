@@ -2,23 +2,89 @@
 //!
 //! The journal records what the applier is about to overwrite on T (storage
 //! slots and account fields). Files are `journal/<block>.jsonl`, ring-bounded.
-use mirror_anvil::Rpc;
-use mirror_anvil as bal;
-use mirror_anvil::Write;
-use alloy_primitives::{Address, U256};
+//!
+//! Entries are typed and serde's tag *is* the file format: an unknown kind, a
+//! storage entry without a slot, or a malformed value fails the load as
+//! [`Error::Corrupt`]. A skipped entry would make a rewind report success while
+//! leaving part of the rolled-back range un-restored.
 use crate::error::{Error, Result};
+use alloy_primitives::{Address, Bytes, U256};
+use mirror_anvil::{Rpc, Write};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::path::PathBuf;
 
+/// One recorded before-value, tagged by kind in the JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JournalEntry {
-    pub address: Address,
-    pub kind: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slot: Option<U256>,
-    /// Value before the write (hex as returned by the node).
-    pub before: String,
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum JournalEntry {
+    Storage {
+        address: Address,
+        slot: U256,
+        before: U256,
+    },
+    Balance {
+        address: Address,
+        before: U256,
+    },
+    Nonce {
+        address: Address,
+        before: HexU64,
+    },
+    Code {
+        address: Address,
+        before: Bytes,
+    },
+}
+
+impl JournalEntry {
+    /// The undo write this entry restores.
+    fn to_write(&self) -> Write {
+        match self {
+            JournalEntry::Storage {
+                address,
+                slot,
+                before,
+            } => Write::Storage {
+                address: *address,
+                slot: *slot,
+                value: *before,
+            },
+            JournalEntry::Balance { address, before } => Write::Balance {
+                address: *address,
+                value: *before,
+            },
+            JournalEntry::Nonce { address, before } => Write::Nonce {
+                address: *address,
+                value: before.0,
+            },
+            JournalEntry::Code { address, before } => Write::Code {
+                address: *address,
+                value: before.clone(),
+            },
+        }
+    }
+}
+
+/// `u64` as a `0x`-quantized hex string (the node's own quantity encoding),
+/// so a nonce before-value round-trips through serde like the others.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct HexU64(pub u64);
+
+impl TryFrom<String> for HexU64 {
+    type Error = String;
+
+    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
+        u64::from_str_radix(s.trim_start_matches("0x"), 16)
+            .map(HexU64)
+            .map_err(|e| format!("not a hex quantity: {s:?} ({e})"))
+    }
+}
+
+impl From<HexU64> for String {
+    fn from(v: HexU64) -> Self {
+        format!("0x{:x}", v.0)
+    }
 }
 
 pub struct Journal {
@@ -74,7 +140,15 @@ impl Journal {
             buf.push_str(&line);
             buf.push('\n');
         }
-        std::fs::write(&path, buf).map_err(|source| Error::Io {
+        // tmp+rename, like the other state files: a crash mid-write must not
+        // leave a truncated file that parses as a shorter, valid journal.
+        let tmp = self.dir.join(format!("{block}.jsonl.tmp"));
+        std::fs::write(&tmp, buf).map_err(|source| Error::Io {
+            what: "journal entry",
+            path: tmp.clone(),
+            source,
+        })?;
+        std::fs::rename(&tmp, &path).map_err(|source| Error::Io {
             what: "journal entry",
             path,
             source,
@@ -139,7 +213,22 @@ impl Journal {
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
-            let Some(stem) = name.to_str().and_then(|s| s.strip_suffix(".jsonl")) else {
+            let Some(stem) = name.to_str() else {
+                continue;
+            };
+            // A crashed `record` left a partial temp file: the real entry is
+            // the renamed one, so the temp is always garbage.
+            if stem.ends_with(".jsonl.tmp") {
+                if let Err(source) = std::fs::remove_file(entry.path()) {
+                    tracing::warn!(
+                        path = %entry.path().display(),
+                        error = %source,
+                        "journal prune: temp file could not be removed"
+                    );
+                }
+                continue;
+            }
+            let Some(stem) = stem.strip_suffix(".jsonl") else {
                 continue;
             };
             if let Ok(n) = stem.parse::<u64>() {
@@ -156,38 +245,14 @@ impl Journal {
         }
     }
 
-    /// Write every recorded before-value back to the chain (newest block first).
-    /// Returns the number of restored values.
+    /// Write every recorded before-value back to the chain (newest block first
+    /// is the caller's order). Returns the number of accepted writes.
     pub async fn undo_block(&self, block: u64, t: &Rpc, chunk: usize) -> Result<usize> {
         let entries = self.load(block)?;
-        let mut calls: Vec<(String, serde_json::Value)> = Vec::with_capacity(entries.len());
-        for e in &entries {
-            let call = match e.kind.as_str() {
-                "storage" => (
-                    "anvil_setStorageAt".to_string(),
-                    json!([e.address, bal::pad_data32(e.slot.unwrap_or_default()), pad_storage(&e.before)]),
-                ),
-                "balance" => ("anvil_setBalance".to_string(), json!([e.address, e.before])),
-                "nonce" => ("anvil_setNonce".to_string(), json!([e.address, e.before])),
-                "code" => ("anvil_setCode".to_string(), json!([e.address, e.before])),
-                other => {
-                    tracing::warn!(kind = other, "unknown journal entry kind");
-                    continue;
-                }
-            };
-            calls.push(call);
-        }
-        let mut restored = 0usize;
-        for chunk_calls in calls.chunks(chunk.max(1)) {
-            let results = t.batch_raw(chunk_calls).await?;
-            for r in results {
-                match r {
-                    Ok(_) => restored += 1,
-                    Err(e) => tracing::warn!(error = %e, "journal undo: write failed"),
-                }
-            }
-        }
-        Ok(restored)
+        let writes: Vec<Write> = entries.iter().map(JournalEntry::to_write).collect();
+        mirror_anvil::apply_writes(t, &writes, chunk)
+            .await
+            .map_err(Error::from)
     }
 }
 
@@ -198,32 +263,22 @@ impl Journal {
 /// is a library — a caller bug must not abort the engine mid-apply).
 pub fn entry_for_write(w: &Write, before: BeforeValue) -> Result<JournalEntry> {
     match (w, before) {
-        (
-            Write::Storage { address, slot, .. },
-            BeforeValue::Storage(v),
-        ) => Ok(JournalEntry {
+        (Write::Storage { address, slot, .. }, BeforeValue::Storage(v)) => Ok(JournalEntry::Storage {
             address: *address,
-            kind: "storage".into(),
-            slot: Some(*slot),
-            before: bal::pad_data32(v),
+            slot: *slot,
+            before: v,
         }),
-        (Write::Balance { address, .. }, BeforeValue::Balance(v)) => Ok(JournalEntry {
+        (Write::Balance { address, .. }, BeforeValue::Balance(v)) => Ok(JournalEntry::Balance {
             address: *address,
-            kind: "balance".into(),
-            slot: None,
-            before: bal::quant_hex_u256(v),
+            before: v,
         }),
-        (Write::Nonce { address, .. }, BeforeValue::Nonce(v)) => Ok(JournalEntry {
+        (Write::Nonce { address, .. }, BeforeValue::Nonce(v)) => Ok(JournalEntry::Nonce {
             address: *address,
-            kind: "nonce".into(),
-            slot: None,
-            before: bal::quant_hex_u64(v),
+            before: HexU64(v),
         }),
-        (Write::Code { address, .. }, BeforeValue::Code(v)) => Ok(JournalEntry {
+        (Write::Code { address, .. }, BeforeValue::Code(v)) => Ok(JournalEntry::Code {
             address: *address,
-            kind: "code".into(),
-            slot: None,
-            before: bal::bytes_hex(&v),
+            before: v,
         }),
         (w, b) => Err(Error::KindMismatch {
             write_kind: write_kind(w),
@@ -246,7 +301,7 @@ pub enum BeforeValue {
     Storage(U256),
     Balance(U256),
     Nonce(u64),
-    Code(alloy_primitives::Bytes),
+    Code(Bytes),
 }
 
 impl BeforeValue {
@@ -260,12 +315,6 @@ impl BeforeValue {
     }
 }
 
-/// Storage before-values are already 32-byte data; keep the padding rule in one place.
-fn pad_storage(s: &str) -> String {
-    let t = s.trim_start_matches("0x");
-    format!("0x{t:0>64}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,21 +323,65 @@ mod tests {
     fn journal_roundtrip_and_prune() {
         let dir = std::env::temp_dir().join(format!("mirror-journal-test-{}", std::process::id()));
         let j = Journal::new(dir.clone(), 10).unwrap();
-        let e = JournalEntry {
+        let e = JournalEntry::Storage {
             address: Address::repeat_byte(1),
-            kind: "storage".into(),
-            slot: Some(U256::from(5u64)),
-            before: "0x000000000000000000000000000000000000000000000000000000000000002a".into(),
+            slot: U256::from(5u64),
+            before: U256::from(42u64),
         };
         j.record(100, std::slice::from_ref(&e)).unwrap();
         let loaded = j.load(100).unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].before, e.before);
         // prune keeps last `keep` blocks
         j.record(200, std::slice::from_ref(&e)).unwrap();
         j.prune(205);
         assert!(j.load(100).is_err(), "block 100 pruned at head 205 keep 10");
         assert!(j.load(200).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The entries an older engine wrote must still parse: a rollout must not
+    /// brick a rewind that spans the old journal's files.
+    #[test]
+    fn legacy_entries_parse() {
+        let dir = std::env::temp_dir().join(format!("mirror-journal-legacy-{}", std::process::id()));
+        let j = Journal::new(dir.clone(), 10).unwrap();
+        let addr = format!("0x{}", alloy_primitives::hex::encode([0x11u8; 20]));
+        let legacy = [
+            format!(r#"{{"address":"{addr}","kind":"storage","slot":"0x5","before":"0x000000000000000000000000000000000000000000000000000000000000002a"}}"#),
+            format!(r#"{{"address":"{addr}","kind":"balance","before":"0x2a"}}"#),
+            format!(r#"{{"address":"{addr}","kind":"nonce","before":"0x3"}}"#),
+        ]
+        .join("\n");
+        std::fs::write(dir.join("7.jsonl"), legacy).unwrap();
+        let loaded = j.load(7).unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert!(matches!(
+            loaded[0],
+            JournalEntry::Storage { before, .. } if before == U256::from(42u64)
+        ));
+        assert!(matches!(loaded[2], JournalEntry::Nonce { before, .. } if before.0 == 3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unknown kind or a storage entry without a slot is corrupt, never a
+    /// silently skipped entry: a partial rewind must not report success.
+    #[test]
+    fn malformed_entries_are_corrupt() {
+        let dir = std::env::temp_dir().join(format!("mirror-journal-bad-{}", std::process::id()));
+        let j = Journal::new(dir.clone(), 10).unwrap();
+        let addr = format!("0x{}", alloy_primitives::hex::encode([0x11u8; 20]));
+        std::fs::write(
+            dir.join("7.jsonl"),
+            format!(r#"{{"address":"{addr}","kind":"mystery","before":"0x1"}}"#),
+        )
+        .unwrap();
+        assert!(matches!(j.load(7), Err(Error::Corrupt { .. })));
+        std::fs::write(
+            dir.join("7.jsonl"),
+            format!(r#"{{"address":"{addr}","kind":"storage","before":"0x1"}}"#),
+        )
+        .unwrap();
+        assert!(matches!(j.load(7), Err(Error::Corrupt { .. })));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

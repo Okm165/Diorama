@@ -6,9 +6,9 @@
 use crate::bal::{self, Write};
 use crate::ctx::{cursor_from, Ctx};
 use crate::error::{Error, Result};
-use crate::rpc::Rpc;
 use crate::journal::{entry_for_write, BeforeValue, JournalEntry};
 use alloy_primitives::U256;
+use mirror_devnet::probes::ProbeRunner;
 use serde_json::{json, Value};
 use std::time::Instant;
 
@@ -20,40 +20,6 @@ pub struct ApplyOutcome {
     pub sampled: usize,
     pub sampled_ok: usize,
     pub duration_ms: u64,
-}
-
-/// Apply BAL-derived writes to a chain as batched cheatcode calls. Padding is
-/// mandatory (measured: anvil rejects odd-length hex with -32602). Returns the
-/// number of accepted writes.
-pub async fn apply_writes(ctx: &Ctx, target: &Rpc, writes: &[Write]) -> Result<usize> {
-    let mut calls: Vec<(String, Value)> = Vec::with_capacity(writes.len());
-    for w in writes {
-        calls.push(match w {
-            Write::Storage { address, slot, value } => (
-                "anvil_setStorageAt".into(),
-                json!([address, bal::pad_data32(*slot), bal::pad_data32(*value)]),
-            ),
-            Write::Balance { address, value } => {
-                ("anvil_setBalance".into(), json!([address, bal::quant_hex_u256(*value)]))
-            }
-            Write::Nonce { address, value } => {
-                ("anvil_setNonce".into(), json!([address, bal::quant_hex_u64(*value)]))
-            }
-            Write::Code { address, value } => {
-                ("anvil_setCode".into(), json!([address, bal::bytes_hex(value)]))
-            }
-        });
-    }
-    let mut applied = 0usize;
-    for chunk in calls.chunks(ctx.cfg.services.engine.loops.chunk_size) {
-        for r in target.batch_raw(chunk).await? {
-            match r {
-                Ok(_) => applied += 1,
-                Err(e) => tracing::warn!(error = %e, "bal write failed"),
-            }
-        }
-    }
-    Ok(applied)
 }
 
 #[allow(
@@ -85,7 +51,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
         ctx.save_state()?;
         ctx.metrics.inc(&ctx.metrics.blocks_applied);
-        ctx.metrics.set(&ctx.metrics.t_head, n);
+        ctx.metrics.set(&ctx.metrics.t_head, t_head);
         ctx.metrics.set(&ctx.metrics.cursor_t, n);
         return Ok(ApplyOutcome {
             source: "late",
@@ -198,7 +164,12 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     }
 
     // 4. batched writes (padding is mandatory - measured).
-    let applied = apply_writes(ctx, &ctx.anvil_t, &filtered).await?;
+    let applied = mirror_anvil::apply_writes(
+        &ctx.anvil_t,
+        &filtered,
+        ctx.cfg.services.engine.loops.chunk_size,
+    )
+    .await?;
 
     // 5. align block context + mine, so `latest` views (Aave-style time
     //    extrapolation) match the parent at N. Always mined: the parent's
@@ -249,12 +220,11 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     //     the devnet's own writes. Measured: spurious aave_weth_price /
     //     univ3_weth_usdc_slot0 mismatches right after a venue interaction.
     let t_head_now = ctx.anvil_t.block_number().await?;
-    for b in (t_head + 1)..=t_head_now {
-        if let Err(e) = crate::scan_t_block(ctx, b).await {
-            tracing::warn!(block = b, error = %e, "inline shadow scan failed");
-        }
-        ctx.shadow_scanned_upto
-            .fetch_max(b, std::sync::atomic::Ordering::Relaxed);
+    if let Err(e) = crate::scan_range(ctx, t_head, t_head_now).await {
+        // The marks already in memory are kept and the walk retries from the
+        // last clean block (the shadow loop scans every ~2 s), so this is a
+        // named, bounded degradation - not a silent skip.
+        tracing::warn!(error = %e, "inline shadow scan incomplete");
     }
 
     // 7. sampled storage parity vs reth at n (drift lens). T's *height* drifts
@@ -288,11 +258,20 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // 7b. probe parity for T (the plan's invariant: "probe parity on T after
     //     context alignment"). Devnet-owned targets are skipped - their state
     //     is the devnet's, not mainnet's.
-    let (t_ok, t_failed, t_skipped) = crate::verify::t_probe_parity(ctx, n).await?;
-    ctx.metrics.add(&ctx.metrics.t_convergence_ok, t_ok as u64);
-    ctx.metrics.add(&ctx.metrics.t_convergence_failed, t_failed as u64);
-    ctx.metrics.set(&ctx.metrics.t_convergence_last_failed, t_failed as u64);
-    ctx.metrics.add(&ctx.metrics.t_probe_skipped, t_skipped as u64);
+    let probes = ProbeRunner::devnet(
+        &ctx.cfg.services.engine.verifier.probes,
+        &ctx.shadow,
+        ctx.time_offset.load(std::sync::atomic::Ordering::Relaxed) != 0,
+    )
+    .parity(&ctx.reth, n, &ctx.anvil_t)
+    .await?;
+    ctx.metrics.add(&ctx.metrics.t_convergence_ok, probes.ok as u64);
+    ctx.metrics
+        .add(&ctx.metrics.t_convergence_failed, probes.failed as u64);
+    ctx.metrics
+        .set(&ctx.metrics.t_convergence_last_failed, probes.failed as u64);
+    ctx.metrics
+        .add(&ctx.metrics.t_probe_skipped, probes.skipped as u64);
 
     // 8. cursor + metrics + drift.
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;
@@ -308,7 +287,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         .set(&ctx.metrics.bal_skipped_shadowed, skipped_shadowed as u64);
     let duration_ms = started.elapsed().as_millis() as u64;
     ctx.metrics.set(&ctx.metrics.last_apply_ms, duration_ms);
-    ctx.metrics.set(&ctx.metrics.t_head, n);
+    ctx.metrics.set(&ctx.metrics.t_head, t_latest);
 
     // The rewound range is fully re-applied: resume normal late-completion skips.
     if let Some((_, until)) = reapply {
