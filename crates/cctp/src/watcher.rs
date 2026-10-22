@@ -1,0 +1,380 @@
+//! The watcher: both chains' `MessageSent` events → the persisted attestation
+//! store (§15.4).
+//!
+//! One pass: scan each chain from the configured start block to head
+//! (`eth_getLogs`, chunked — the emitter is the pinned MessageTransmitterV2,
+//! topic0 the measured `MessageSent(bytes)` hash), decode each log into a
+//! [`MessageRecord`], patch the attester fields (`nonce = burn-tx hash`,
+//! `finalityThresholdExecuted = 2000`, `feeExecuted = 0`,
+//! `expirationBlock = configured`, §15.3), and sign every record whose
+//! emulated PENDING window has elapsed.
+//!
+//! **Restart backfill** (§15.4): the first scan of every run starts at
+//! `start_block` — a burn awaiting attestation across a restart is re-read
+//! and re-signed — and later passes continue from the scanned head. Dedupe is
+//! by `(sourceDomain, nonce)`; the nonce is the burn tx hash, so a re-scan is
+//! idempotent by construction.
+//!
+//! Known boundary: a source-chain **re-fork** (T's epoch reset) invalidates
+//! watched burns. The records survive; an operator clears the state dir (or
+//! sets a fresh start block) when a reset should drop history. The nonce
+//! policy is the plan's deterministic one (burn tx hash, §15.3), so a
+//! transaction emitting **two** burns collides on the nonce: the second is
+//! refused with a warning (the devnet lanes burn once per tx).
+use crate::attester::Attester;
+use crate::chains::{Chain, FINALITY_THRESHOLD_FINALIZED, MESSAGE_TRANSMITTER_V2};
+use crate::error::{Error, Result};
+use crate::metrics::CctpMetrics;
+use crate::store::{MessageRecord, RelayState, Store};
+use crate::transfer::{Message, IMessageTransmitterV2};
+use alloy_primitives::{Bytes, U256};
+use alloy_rpc_types_eth::{Filter, Log};
+use alloy_sol_types::SolEvent;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// One chain's watcher. The bin spawns one per served chain.
+pub struct Watcher {
+    pub chain: Chain,
+    /// The only destination this chain's messages are served for (the peer
+    /// mirror's domain): a burn to a third chain is not this bridge's to
+    /// relay, and is skipped with a warning (never silently).
+    pub destination_domain: u32,
+    pub store: Arc<Store>,
+    pub attester: Arc<Attester>,
+    /// First block scanned every boot (the deploy block of the CCTP contracts
+    /// on that chain; 0 = genesis, correct but slow on a deep fork).
+    pub start_block: u64,
+    /// Where the *next* scan resumes inside this run (0 = not scanned yet, so
+    /// the first pass backfills from `start_block`; later passes continue from
+    /// the last scanned head). Not persisted: every boot re-reads from
+    /// `start_block` by design (§15.4's restart self-heal) — the dedupe by
+    /// `(sourceDomain, nonce)` makes the re-read idempotent.
+    pub scanned_upto: std::sync::atomic::AtomicU64,
+    /// `eth_getLogs` range per call.
+    pub chunk_blocks: u64,
+    /// The emulated PENDING window: an attestation is produced this long after
+    /// the burn is watched (0 = immediately, §15.5's PENDING emulation).
+    pub finality_delay: Duration,
+    /// The served `expirationBlock` (0 = no expiry; short values exercise the
+    /// "must be re-signed" path).
+    pub expiration_blocks: u64,
+    pub metrics: Arc<CctpMetrics>,
+}
+
+impl Watcher {
+    /// The steady loop: one pass per interval; failures are logged and
+    /// counted, never fatal (a chain that is down must not stop the other).
+    pub async fn run(self, poll: Duration) {
+        let mut ticker = tokio::time::interval(poll);
+        loop {
+            ticker.tick().await;
+            if let Err(e) = self.tick().await {
+                self.metrics.scan_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(chain = self.chain.name, error = %e, "cctp watcher pass failed; will retry");
+            }
+        }
+    }
+
+    /// One pass: absorb new logs, sign everything due, persist if anything
+    /// moved.
+    pub async fn tick(&self) -> Result<usize> {
+        let seen = self.scan().await?;
+        let signed = self.sign_due()?;
+        if seen > 0 || signed > 0 {
+            self.store.save()?;
+        }
+        Ok(seen)
+    }
+
+    /// Scan from the in-run cursor (boot: `start_block`) to head in chunks;
+    /// returns the number of new records.
+    pub async fn scan(&self) -> Result<usize> {
+        let head = self.chain.rpc.block_number().await?;
+        let last = self.scanned_upto.load(std::sync::atomic::Ordering::Relaxed);
+        let mut from = match last {
+            0 => self.start_block,
+            n => (n + 1).max(self.start_block),
+        };
+        let mut seen = 0usize;
+        while from <= head {
+            let to = from.saturating_add(self.chunk_blocks - 1).min(head);
+            let filter = Filter::new()
+                .address(MESSAGE_TRANSMITTER_V2)
+                .event_signature(IMessageTransmitterV2::MessageSent::SIGNATURE_HASH)
+                .from_block(from)
+                .to_block(to);
+            let logs: Vec<Log> = self.chain.rpc.call("eth_getLogs", (filter,)).await?;
+            for log in &logs {
+                seen += self.absorb(log)?;
+            }
+            from = to + 1;
+        }
+        // Monotonic within a run: a head that moved backward (a re-fork) is
+        // not re-scanned from a regressed cursor.
+        self.scanned_upto
+            .store(head.max(last), std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .last_scan_block
+            .store(head, std::sync::atomic::Ordering::Relaxed);
+        Ok(seen)
+    }
+
+    /// Decode one `MessageSent` log into a record. The log must carry its
+    /// transaction hash (it is the deterministic nonce) and its block.
+    fn absorb(&self, log: &Log) -> Result<usize> {
+        let decoded =
+            IMessageTransmitterV2::MessageSent::decode_log(&log.inner).map_err(|source| {
+                Error::Abi {
+                    what: "MessageSent event",
+                    source,
+                }
+            })?;
+        let burn_tx = log.transaction_hash.ok_or_else(|| Error::BadRequest {
+            reason: "MessageSent log without a transaction hash".into(),
+        })?;
+        let burn_block = log.block_number.ok_or_else(|| Error::BadRequest {
+            reason: "MessageSent log without a block number".into(),
+        })?;
+        let raw_message: Bytes = decoded.data.message;
+        let parsed = Message::decode(&raw_message)?;
+        if parsed.header.source_domain != self.chain.domain
+            || parsed.header.destination_domain != self.destination_domain
+        {
+            tracing::warn!(
+                chain = self.chain.name,
+                tx = %burn_tx,
+                source = parsed.header.source_domain,
+                destination = parsed.header.destination_domain,
+                "MessageSent outside this bridge's lanes; skipped"
+            );
+            return Ok(0);
+        }
+        // The deterministic nonce: the burn tx hash (§15.3). The raw event
+        // message carries EMPTY_NONCE; the served artifact fills it.
+        let served = parsed.with_attester_fields(
+            burn_tx,
+            FINALITY_THRESHOLD_FINALIZED,
+            U256::ZERO,
+            U256::from(self.expiration_blocks),
+        );
+        let now = crate::now_ms();
+        let record = MessageRecord {
+            source_domain: parsed.header.source_domain,
+            destination_domain: parsed.header.destination_domain,
+            nonce: burn_tx,
+            burn_tx,
+            burn_block,
+            raw_message,
+            message_hash: served.keccak(),
+            message: served.encode(),
+            attestation: None,
+            state: RelayState::Pending,
+            created_ms: now,
+            attest_after_ms: now + self.finality_delay.as_millis() as u64,
+            relay_tx: None,
+            relayed_ms: None,
+            attempts: 0,
+            park_reason: None,
+        };
+        let source_domain = record.source_domain;
+        let destination_domain = record.destination_domain;
+        // `Some(true)` = the same event re-scanned (the restart backfill,
+        // normal); `Some(false)` = a different burn with the same nonce (two
+        // burns in one tx — refused loudly).
+        let duplicate = self.store.with(move |state| {
+            if let Some(existing) = state
+                .messages
+                .iter()
+                .find(|m| m.nonce == burn_tx && m.source_domain == source_domain)
+            {
+                return Ok(Some(existing.raw_message == record.raw_message));
+            }
+            state.messages.push(record);
+            Ok(None)
+        })?;
+        match duplicate {
+            None => {
+                self.metrics
+                    .messages_seen
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(
+                    chain = self.chain.name,
+                    tx = %burn_tx,
+                    block = burn_block,
+                    source = source_domain,
+                    destination = destination_domain,
+                    "cctp burn watched"
+                );
+                Ok(1)
+            }
+            Some(true) => Ok(0),
+            Some(false) => {
+                tracing::warn!(
+                    chain = self.chain.name,
+                    tx = %burn_tx,
+                    "duplicate nonce with a different message (a second burn in the same tx?); kept the first"
+                );
+                Ok(0)
+            }
+        }
+    }
+
+    /// Sign every PENDING record whose window elapsed (the PENDING → SIGNED
+    /// transition); returns how many moved.
+    fn sign_due(&self) -> Result<usize> {
+        let now = crate::now_ms();
+        let mut signed = 0usize;
+        self.store.with(|state| {
+            for record in state.messages.iter_mut() {
+                if record.state != RelayState::Pending || now < record.attest_after_ms {
+                    continue;
+                }
+                record.attestation = Some(self.attester.sign(&record.message)?);
+                record.state = RelayState::Signed;
+                signed += 1;
+                tracing::info!(
+                    nonce = %record.nonce,
+                    destination = record.destination_domain,
+                    "cctp message attested (PENDING -> SIGNED)"
+                );
+            }
+            Ok(())
+        })?;
+        if signed > 0 {
+            self.metrics
+                .messages_signed
+                .fetch_add(signed as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(signed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transfer::tests_support::sample_raw_message;
+    use alloy_primitives::B256;
+
+    fn watcher(dir: &std::path::Path, destination_domain: u32, finality_delay: Duration) -> Watcher {
+        Watcher {
+            chain: Chain::ethereum("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+            destination_domain,
+            store: Arc::new(Store::load(dir.join("cctp.json")).unwrap()),
+            attester: Arc::new(Attester::from_seed("watcher-test").unwrap()),
+            start_block: 0,
+            scanned_upto: std::sync::atomic::AtomicU64::new(0),
+            chunk_blocks: 2000,
+            finality_delay,
+            expiration_blocks: 0,
+            metrics: Arc::new(CctpMetrics::default()),
+        }
+    }
+
+    /// A synthetic `MessageSent` log carrying the sample raw message with the
+    /// given lane.
+    fn log(tx: B256, source: u32, destination: u32) -> Log {
+        let mut message = Message::decode(&sample_raw_message()).unwrap();
+        message.header.source_domain = source;
+        message.header.destination_domain = destination;
+        let event = IMessageTransmitterV2::MessageSent {
+            message: message.encode(),
+        };
+        let inner = alloy_primitives::Log {
+            address: MESSAGE_TRANSMITTER_V2,
+            data: event.encode_log_data(),
+        };
+        Log {
+            inner,
+            block_hash: None,
+            block_number: Some(7),
+            block_timestamp: None,
+            transaction_hash: Some(tx),
+            transaction_index: Some(0),
+            log_index: Some(0),
+            removed: false,
+        }
+    }
+
+    /// One absorb: the nonce is the burn tx hash, the served message fills the
+    /// attester fields, the state starts PENDING; a re-scan (the restart
+    /// backfill) is idempotent.
+    #[test]
+    fn absorb_patches_dedupes_and_signs() {
+        let dir = std::env::temp_dir().join(format!("mirror-cctp-watcher-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let watcher = watcher(&dir, 19, Duration::ZERO);
+        let tx = B256::repeat_byte(0xab);
+
+        assert_eq!(watcher.absorb(&log(tx, 0, 19)).unwrap(), 1, "first absorb inserts");
+        assert_eq!(watcher.absorb(&log(tx, 0, 19)).unwrap(), 0, "re-scan is idempotent");
+        let record = watcher
+            .store
+            .with(|s| Ok(s.messages[0].clone()))
+            .unwrap();
+        assert_eq!(record.nonce, tx, "the nonce is the burn tx hash");
+        assert_eq!(record.burn_block, 7);
+        assert_eq!(record.state, RelayState::Pending);
+        assert!(record.attestation.is_none());
+        let served = record.decoded().unwrap();
+        assert_eq!(served.header.nonce, tx);
+        assert_eq!(served.header.finality_threshold_executed, 2000);
+        assert_ne!(record.raw_message, record.message, "the raw event message is not the served one");
+
+        assert_eq!(watcher.sign_due().unwrap(), 1);
+        let record = watcher.store.with(|s| Ok(s.messages[0].clone())).unwrap();
+        assert_eq!(record.state, RelayState::Signed);
+        let attestation = record.attestation.unwrap();
+        assert_eq!(attestation.len(), 65);
+        let signature = alloy_primitives::Signature::from_raw(&attestation).unwrap();
+        assert_eq!(
+            signature
+                .recover_address_from_prehash(&record.message_hash)
+                .unwrap(),
+            watcher.attester.address()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A burn to a third chain is not this bridge's lane; it is skipped (with
+    /// a warning) and never stored.
+    #[test]
+    fn absorb_skips_foreign_lanes() {
+        let dir = std::env::temp_dir().join(format!("mirror-cctp-lanes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let watcher = watcher(&dir, 19, Duration::ZERO);
+        assert_eq!(watcher.absorb(&log(B256::repeat_byte(1), 0, 3)).unwrap(), 0);
+        assert_eq!(watcher.absorb(&log(B256::repeat_byte(2), 7, 19)).unwrap(), 0);
+        assert_eq!(watcher.store.counts().unwrap().pending, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The emulated PENDING window holds the attestation back.
+    #[test]
+    fn sign_due_respects_the_pending_window() {
+        let dir = std::env::temp_dir().join(format!("mirror-cctp-pending-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let watcher = watcher(&dir, 19, Duration::from_secs(3600));
+        watcher.absorb(&log(B256::repeat_byte(3), 0, 19)).unwrap();
+        assert_eq!(watcher.sign_due().unwrap(), 0, "window still open");
+        assert_eq!(
+            watcher.store.with(|s| Ok(s.messages[0].state)).unwrap(),
+            RelayState::Pending
+        );
+        // The window elapsing signs it.
+        watcher
+            .store
+            .with(|s| {
+                s.messages[0].attest_after_ms = 0;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(watcher.sign_due().unwrap(), 1);
+        assert_eq!(
+            watcher.store.with(|s| Ok(s.messages[0].state)).unwrap(),
+            RelayState::Signed
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+}

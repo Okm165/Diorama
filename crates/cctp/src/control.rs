@@ -1,0 +1,323 @@
+//! The bridge's control API (8096): health, metrics, the message listing, and
+//! the one mutation a test needs — trigger a transfer.
+//!
+//! `POST /control/transfer` builds and submits a real `depositForBurn` on the
+//! source chain (approve + burn, §15.1's exact call), so a scenario can start
+//! a CCTP transfer without hand-crafting calldata. The wallet is the same
+//! funded relay key; the mint recipient defaults to that wallet (a
+//! self-bridge). The watcher picks the `MessageSent` event up from the chain —
+//! the control route never inserts records itself (the chain stays the source
+//! of truth).
+use crate::chains::{by_domain, Chain, FINALITY_THRESHOLD_FINALIZED, TOKEN_MESSENGER_V2};
+use crate::error::{Error, Result};
+use crate::metrics::{render_counts, CctpMetrics};
+use crate::store::{MessageRecord, RelayState, Store};
+use crate::transfer::{
+    deposit_for_burn_calldata, wait_for_receipt, FeeSurface, IERC20, TxSender,
+};
+use alloy_primitives::{Address, B256, U256};
+use alloy_sol_types::SolCall;
+use axum::extract::State;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Everything the control routes read.
+pub struct ControlState {
+    pub store: Arc<Store>,
+    pub chains: Vec<Chain>,
+    pub sender: Arc<TxSender>,
+    pub metrics: Arc<CctpMetrics>,
+    /// The boot-probed min-fee surface per source domain (§15.2: absent on
+    /// Ethereum, `0` on HyperEVM).
+    pub min_fees: BTreeMap<u32, Option<U256>>,
+    pub receipt_timeout: Duration,
+}
+
+/// The control router (8096).
+pub fn router(state: Arc<ControlState>) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .route("/control/state", get(state_listing))
+        .route("/control/transfer", post(transfer))
+        .with_state(state)
+}
+
+/// The HTTP mapping of the bridge's error taxonomy: request refusals are 4xx,
+/// an unserved domain is 404, everything else is a server-side fault.
+impl IntoResponse for Error {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            Error::BadRequest { .. } => axum::http::StatusCode::BAD_REQUEST,
+            Error::UnknownDomain { .. } => axum::http::StatusCode::NOT_FOUND,
+            _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        if status == axum::http::StatusCode::INTERNAL_SERVER_ERROR {
+            tracing::error!(error = %self, "control request failed");
+        }
+        (status, self.to_string()).into_response()
+    }
+}
+
+// ---- health / metrics ------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct HealthResponse {
+    /// `ok` with no parked messages, `degraded` when one is parked (never
+    /// dropped, never hidden).
+    pub status: &'static str,
+    pub pending: usize,
+    pub signed: usize,
+    pub relayed: usize,
+    pub parked: usize,
+    pub chains: Vec<ChainHealth>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChainHealth {
+    pub name: &'static str,
+    pub domain: u32,
+}
+
+pub async fn health(State(state): State<Arc<ControlState>>) -> Result<Json<HealthResponse>> {
+    let counts = state.store.counts()?;
+    Ok(Json(HealthResponse {
+        status: if counts.parked == 0 { "ok" } else { "degraded" },
+        pending: counts.pending,
+        signed: counts.signed,
+        relayed: counts.relayed,
+        parked: counts.parked,
+        chains: state
+            .chains
+            .iter()
+            .map(|chain| ChainHealth {
+                name: chain.name,
+                domain: chain.domain,
+            })
+            .collect(),
+    }))
+}
+
+pub async fn metrics(State(state): State<Arc<ControlState>>) -> Result<String> {
+    let counts = state.store.counts()?;
+    let mut out = state.metrics.render();
+    render_counts(&mut out, &counts);
+    Ok(out)
+}
+
+// ---- the message listing ---------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct MessageSummary {
+    pub source_domain: u32,
+    pub destination_domain: u32,
+    pub burn_tx: B256,
+    pub burn_block: u64,
+    pub nonce: B256,
+    pub state: RelayState,
+    pub message: String,
+    pub attestation: Option<String>,
+    pub relay_tx: Option<B256>,
+    pub relayed_ms: Option<u64>,
+    pub park_reason: Option<String>,
+}
+
+impl MessageSummary {
+    fn of(record: &MessageRecord) -> Self {
+        Self {
+            source_domain: record.source_domain,
+            destination_domain: record.destination_domain,
+            burn_tx: record.burn_tx,
+            burn_block: record.burn_block,
+            nonce: record.nonce,
+            state: record.state,
+            message: record.message_hex(),
+            attestation: record.attestation_hex(),
+            relay_tx: record.relay_tx,
+            relayed_ms: record.relayed_ms,
+            park_reason: record.park_reason.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct StateResponse {
+    pub messages: Vec<MessageSummary>,
+}
+
+pub async fn state_listing(State(state): State<Arc<ControlState>>) -> Result<Json<StateResponse>> {
+    let messages = state
+        .store
+        .with(|s| Ok(s.messages.iter().map(MessageSummary::of).collect::<Vec<_>>()))?;
+    Ok(Json(StateResponse { messages }))
+}
+
+// ---- transfer --------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct TransferRequest {
+    /// The source CCTP domain (0 = T, 19 = V).
+    pub source: u32,
+    /// The destination CCTP domain (must be the other mirror).
+    pub destination: u32,
+    /// Base units (100 USDC = 100_000_000).
+    pub amount: U256,
+    /// Defaults to the relay wallet (a self-bridge).
+    #[serde(default)]
+    pub mint_recipient: Option<Address>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransferResponse {
+    pub burn_tx: B256,
+    /// Whether the burn was mined within the receipt window (a test may also
+    /// poll the tx; the watcher absorbs it either way).
+    pub mined: bool,
+    pub source_domain: u32,
+    pub destination_domain: u32,
+    pub amount: U256,
+    pub mint_recipient: Address,
+}
+
+pub async fn transfer(
+    State(state): State<Arc<ControlState>>,
+    Json(request): Json<TransferRequest>,
+) -> Result<Json<TransferResponse>> {
+    let chain = by_domain(&state.chains, request.source)?;
+    if request.destination == request.source {
+        return Err(Error::BadRequest {
+            reason: "source and destination are the same domain".into(),
+        });
+    }
+    by_domain(&state.chains, request.destination)?;
+    if request.amount.is_zero() {
+        return Err(Error::BadRequest {
+            reason: "amount must be nonzero".into(),
+        });
+    }
+    let mint_recipient = request.mint_recipient.unwrap_or(state.sender.address());
+
+    // The source-side validation the contract performs, refused here with the
+    // numbers instead of paying for a revert (devnet maxFee is 0).
+    let surface = FeeSurface {
+        min_fee: state.min_fees.get(&request.source).copied().flatten(),
+    };
+    surface.validate_max_fee(request.amount, U256::ZERO)?;
+
+    // Funding and allowance: the messenger pulls from the sender's balance
+    // (`_depositAndBurn`), so both must be in place before the burn.
+    let balance = chain.usdc_balance(state.sender.address()).await?;
+    if balance < request.amount {
+        return Err(Error::BadRequest {
+            reason: format!(
+                "sender {} holds {balance} USDC on {}, needs {} (deal via the chain's admin surface)",
+                state.sender.address(),
+                chain.name,
+                request.amount
+            ),
+        });
+    }
+    let allowance = chain
+        .usdc_allowance(state.sender.address(), TOKEN_MESSENGER_V2)
+        .await?;
+    if allowance < request.amount {
+        let approve = IERC20::approveCall {
+            spender: TOKEN_MESSENGER_V2,
+            amount: U256::MAX,
+        }
+        .abi_encode();
+        let hash = state
+            .sender
+            .send(&chain.rpc, chain.usdc, &approve, U256::ZERO)
+            .await?;
+        match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
+            Some(receipt) if receipt.status() => {}
+            Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
+            None => {
+                return Err(Error::BadRequest {
+                    reason: format!(
+                        "approve tx {hash} was not mined within {}s; retry the transfer",
+                        state.receipt_timeout.as_secs()
+                    ),
+                })
+            }
+        }
+        tracing::info!(chain = chain.name, tx = %hash, "cctp approve submitted");
+    }
+
+    let calldata = deposit_for_burn_calldata(
+        request.amount,
+        request.destination,
+        mint_recipient,
+        chain.usdc,
+        B256::ZERO,
+        U256::ZERO,
+        FINALITY_THRESHOLD_FINALIZED,
+    );
+    let hash = state
+        .sender
+        .send(&chain.rpc, TOKEN_MESSENGER_V2, &calldata, U256::ZERO)
+        .await?;
+    tracing::info!(
+        chain = chain.name,
+        tx = %hash,
+        source = request.source,
+        destination = request.destination,
+        amount = %request.amount,
+        "cctp depositForBurn submitted"
+    );
+    let mined = match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
+        Some(receipt) if receipt.status() => true,
+        Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
+        None => false,
+    };
+    Ok(Json(TransferResponse {
+        burn_tx: hash,
+        mined,
+        source_domain: request.source,
+        destination_domain: request.destination,
+        amount: request.amount,
+        mint_recipient,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transfer::tests_support::sample_raw_message;
+    use crate::transfer::Message;
+
+    #[test]
+    fn message_summary_serves_hex_and_state() {
+        let message = Message::decode(&sample_raw_message()).unwrap();
+        let record = MessageRecord {
+            source_domain: 0,
+            destination_domain: 19,
+            nonce: B256::repeat_byte(0xab),
+            burn_tx: B256::repeat_byte(0xab),
+            burn_block: 5,
+            raw_message: sample_raw_message(),
+            message_hash: message.keccak(),
+            message: message.encode(),
+            attestation: Some(alloy_primitives::Bytes::from(vec![1u8; 65])),
+            state: RelayState::Signed,
+            created_ms: 0,
+            attest_after_ms: 0,
+            relay_tx: None,
+            relayed_ms: None,
+            attempts: 0,
+            park_reason: None,
+        };
+        let summary = MessageSummary::of(&record);
+        assert!(summary.message.starts_with("0x"));
+        assert_eq!(summary.attestation.as_deref().unwrap().len(), 2 + 130);
+        assert_eq!(summary.state, RelayState::Signed);
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("\"state\":\"signed\""), "{json}");
+    }
+}

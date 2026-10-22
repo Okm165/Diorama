@@ -1,0 +1,30 @@
+[package]
+name = "mirror-cctp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The CCTP bridge: the devnet attester, the Iris-compatible API, the MessageSent watcher, and the receiveMessage relayer (§15)"
+
+[dependencies]
+mirror-config = { path = "../config" }
+mirror-anvil = { path = "../anvil" }
+alloy-consensus = { workspace = true }
+alloy-eips = { workspace = true }
+# "k256" gives the Ethereum `Signature` type its k256 conversions and
+# `Address::from_public_key`, so the attester signs with alloy's own types.
+alloy-primitives = { workspace = true, features = ["k256"] }
+alloy-rpc-types-eth = { workspace = true }
+alloy-sol-types = { workspace = true }
+axum = { workspace = true }
+# The devnet attester signs real ECDSA: RFC6979 + low-s, byte-compatible with
+# the OZ ECDSA.recover the on-chain Attestable verifies (measured, §15.3).
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
