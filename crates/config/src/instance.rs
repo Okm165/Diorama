@@ -3,7 +3,7 @@ use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::sections::{EngineSection, Services, SimSection, VenueSection};
+use crate::sections::{CctpSection, EngineSection, Services, SimSection, VenueSection};
 use crate::ConfigError;
 
 /// One mirror deployment: identity, chains, watchlist, service sections.
@@ -279,6 +279,9 @@ impl Instance {
                 check_http_url("services.sim.anvil_url", url, issues);
             }
         }
+        if let Some(cctp) = &self.services.cctp {
+            check_cctp(cctp, issues);
+        }
     }
 
     /// The ethereum profile's sections, moved out for the run path (the check
@@ -326,6 +329,15 @@ impl Instance {
             .take()
             .ok_or_else(|| mismatch("the simulator requires [services.sim]"))?;
         Ok((chain, sim))
+    }
+
+    /// The CCTP bridge's section, moved out for the run path. Cross-cutting:
+    /// it needs no chain section (its own `t_url`/`v_url` are the endpoints).
+    pub fn take_cctp(&mut self) -> Result<CctpSection, ConfigError> {
+        self.services
+            .cctp
+            .take()
+            .ok_or_else(|| mismatch("the CCTP bridge requires [services.cctp]"))
     }
 
     /// The ethereum profile's endpoints: the pre-context reads the run path
@@ -404,6 +416,40 @@ impl Instance {
 fn mismatch(what: &str) -> ConfigError {
     ConfigError::Invalid {
         issues: vec![what.to_string()],
+    }
+}
+
+/// The CCTP bridge's coherence: endpoints, the secret-shaped relay key (never
+/// a path), the deterministic attester seed, and ordered gas thresholds.
+fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
+    if cctp.state_dir.as_os_str().is_empty() {
+        issues.push("services.cctp.state_dir must not be empty".into());
+    }
+    check_http_url("services.cctp.t_url", &cctp.t_url, issues);
+    check_http_url("services.cctp.v_url", &cctp.v_url, issues);
+    // After `${VAR}` expansion the value must be the 32-byte hex key; a raw
+    // reference is checked once the deployment expands it.
+    if !cctp.relay_key.contains("${") && !looks_like_secret(&cctp.relay_key) {
+        issues.push(
+            "services.cctp.relay_key must be a 32-byte hex key (or a ${VAR} reference), \
+             never a path"
+                .into(),
+        );
+    }
+    if cctp.attester_seed.trim().is_empty() {
+        issues.push("services.cctp.attester_seed must not be empty".into());
+    }
+    if cctp.poll_interval_ms == 0 {
+        issues.push("services.cctp.poll_interval_ms must be > 0".into());
+    }
+    if cctp.scan_chunk_blocks == 0 {
+        issues.push("services.cctp.scan_chunk_blocks must be > 0".into());
+    }
+    if cctp.receipt_timeout_secs == 0 {
+        issues.push("services.cctp.receipt_timeout_secs must be > 0".into());
+    }
+    if cctp.balance_critical_wei >= cctp.balance_low_wei {
+        issues.push("services.cctp.balance_critical_wei must be below balance_low_wei".into());
     }
 }
 

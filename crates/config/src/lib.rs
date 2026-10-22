@@ -23,9 +23,9 @@ pub use instance::{
     ChainKind, ChainL1, ChainVenue, Chains, FollowHead, Instance, InstanceMeta, Profile, WatchEntry,
 };
 pub use sections::{
-    BlobsSection, EngineAnvil, EngineReth, EngineSection, FeedBridgeSection, FeedSection,
-    HttpSection, JournalSection, LoopsSection, OnDivergence, Probe, Services, SimSection,
-    SourceSyncSection, VenueSection, VerifierSection,
+    BlobsSection, CctpSection, EngineAnvil, EngineReth, EngineSection, FeedBridgeSection,
+    FeedSection, HttpSection, JournalSection, LoopsSection, OnDivergence, Probe, Services,
+    SimSection, SourceSyncSection, VenueSection, VerifierSection,
 };
 
 use std::path::Path;
@@ -153,18 +153,21 @@ fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
 }
 
 /// Optional services (not pinned by the profile): the defaults' stub is kept
-/// only when the instance file carries the section.
+/// only when the instance file carries the section. The simulator is optional
+/// (a venue deployment may run only the engine); the CCTP bridge is optional
+/// under either profile (the third element is its own deployment, §15).
 fn prune_absent_services(defaults: &mut toml::Value, over: &toml::Value) {
-    // The simulator is optional (a venue deployment may run only the engine).
-    let present = over
-        .get("services")
-        .and_then(|s| s.get("sim"))
-        .is_some();
-    if present {
-        return;
-    }
-    if let Some(services) = defaults.get_mut("services").and_then(|v| v.as_table_mut()) {
-        services.remove("sim");
+    for section in ["sim", "cctp"] {
+        let present = over
+            .get("services")
+            .and_then(|s| s.get(section))
+            .is_some();
+        if present {
+            continue;
+        }
+        if let Some(services) = defaults.get_mut("services").and_then(|v| v.as_table_mut()) {
+            services.remove(section);
+        }
     }
 }
 
@@ -189,6 +192,7 @@ fn merge(base: &mut toml::Value, over: toml::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::U256;
 
     fn vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -492,9 +496,73 @@ port = 8080
         names.sort();
         assert_eq!(
             names,
-            vec!["ANVIL_V_URL", "ENGINE_ADMIN_URL", "HL_RPC_URL", "SIM_STATE_DIR", "STATE_DIR"],
+            vec![
+                "ANVIL_V_URL",
+                "CCTP_RELAY_KEY",
+                "CCTP_STATE_DIR",
+                "ENGINE_ADMIN_URL",
+                "HL_RPC_URL",
+                "SIM_STATE_DIR",
+                "STATE_DIR",
+                "T_RPC_URL"
+            ],
             "the wiring the venue instance references"
         );
+    }
+
+    /// `[services.cctp]` is optional under both profiles and cross-cutting:
+    /// a venue instance may carry it (and take it), and an ethereum instance
+    /// may too — unlike the simulator, which the ethereum profile forbids.
+    #[test]
+    fn the_cctp_section_is_optional_and_cross_cutting() {
+        let src = format!(
+            "{}\n[services.cctp]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp.iris]\nport = 8095\n[services.cctp.control]\nport = 8096\n",
+            minimal_venue_instance(),
+            "59".repeat(32)
+        );
+        let (mut inst, _) = load_str(&src, &[]).unwrap();
+        inst.check().unwrap();
+        // The defaults filled the shared numbers.
+        let cctp = inst.services.cctp.as_ref().unwrap();
+        assert_eq!(cctp.poll_interval_ms, 1000);
+        assert_eq!(cctp.finality_delay_secs, 0);
+        assert_eq!(cctp.expiration_blocks, 0);
+        assert_eq!(cctp.scan_chunk_blocks, 2000);
+        assert_eq!(cctp.receipt_timeout_secs, 30);
+        assert_eq!(cctp.balance_low_wei, U256::from(100_000_000_000_000_000u64));
+        assert!(cctp.t_start_block.is_none());
+        let section = inst.take_cctp().unwrap();
+        assert_eq!(section.iris.port, 8095);
+        assert_eq!(section.control.port, 8096);
+        assert!(inst.take_cctp().is_err(), "the section is moved, not copied");
+
+        // Absent on a deployment that does not run it (the defaults stub was
+        // pruned before the merge).
+        let (inst, _) = load_str(minimal_venue_instance(), &[]).unwrap();
+        assert!(inst.services.cctp.is_none());
+
+        // The ethereum profile may carry it (the bridge spans both mirrors).
+        let src = format!(
+            "{}\n[services.cctp]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp.iris]\nport = 8095\n[services.cctp.control]\nport = 8096\n",
+            minimal_instance(),
+            "59".repeat(32)
+        );
+        let (inst, _) = load_str(&src, &wiring()).unwrap();
+        inst.check().unwrap();
+
+        // The relay key must be a secret, never a path; the seed must be
+        // non-empty; the gas thresholds must be ordered.
+        let src = format!(
+            "{}\n[services.cctp]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"/etc/mirror/relay.key\"\nattester_seed = \"devnet\"\n[services.cctp.iris]\nport = 8095\n[services.cctp.control]\nport = 8096\n",
+            minimal_venue_instance()
+        );
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("relay_key"), "{err}");
+        let src = src.replace("attester_seed = \"devnet\"", "attester_seed = \"\"");
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("attester_seed"), "{err}");
     }
 
     #[test]
@@ -509,6 +577,7 @@ port = 8080
         is_normal::<EngineSection>();
         is_normal::<VenueSection>();
         is_normal::<SimSection>();
+        is_normal::<CctpSection>();
         is_normal::<LoopsSection>();
         is_normal::<VerifierSection>();
         is_normal::<SourceSyncSection>();

@@ -92,6 +92,14 @@ pub enum Error {
     #[error("{what} is not configured for this deployment")]
     NotConfigured { what: &'static str },
 
+    /// A money mutation would leave the decimal range: refused cleanly.
+    /// rust_decimal panics on overflow, and a panic under the state lock
+    /// poisons the whole account plane — so every arithmetic step that an
+    /// input can reach is checked (measured: `Decimal::MAX` + 1 in `deal`
+    /// bricked every account path until a restart).
+    #[error("amount overflow: {what}")]
+    Overflow { what: &'static str },
+
     /// A market read before the first venue poll landed (or an untouched
     /// account the venue cannot answer for): warming up, 503.
     #[error("the market plane is warming up (no venue data yet)")]

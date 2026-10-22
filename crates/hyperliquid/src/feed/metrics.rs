@@ -64,8 +64,17 @@ impl FeedMetrics {
         push_counter(&mut out, "venue_sim_ws_reconnects_total", "market websocket reconnects", &[], self.ws_reconnects.load(Ordering::Relaxed));
         push_counter(&mut out, "venue_sim_budget_skips_total", "REST calls skipped at the rate budget", &[], self.budget_skips.load(Ordering::Relaxed));
         push_gauge(&mut out, "venue_sim_budget_weight_used", "REST weight spent in the rolling minute", &[], self.budget_used.load(Ordering::Relaxed));
+        // One family, one HELP/TYPE, then every series (strict scrapers
+        // reject a repeated header — the verifier caught it).
+        if !self.stale_ms.is_empty() {
+            out.push_str("# HELP venue_sim_stale_ms ms since the coin's last live context update\n");
+            out.push_str("# TYPE venue_sim_stale_ms gauge\n");
+        }
         for (coin, ms) in &self.stale_ms {
-            push_gauge(&mut out, "venue_sim_stale_ms", "ms since the coin's last live context update", &[("coin", coin)], ms.load(Ordering::Relaxed));
+            out.push_str(&format!(
+                "venue_sim_stale_ms{{coin=\"{coin}\"}} {}\n",
+                ms.load(Ordering::Relaxed)
+            ));
         }
         out
     }
@@ -90,8 +99,6 @@ fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, labels: &[(
             .join(",");
         format!("{name}{{{l}}}")
     };
-    // HELP/TYPE are per family, not per series: emit them only for the first
-    // label set (the caller renders families in one pass).
     out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{series} {value}\n"));
 }
 

@@ -27,11 +27,19 @@ use std::sync::Arc;
 /// margin for a poll interval).
 const READY_MAX_STALE_MS: u64 = 30_000;
 
-pub async fn healthz() -> impl IntoResponse {
+pub async fn healthz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    if state.sim.is_poisoned() {
+        // The account plane refuses every read; a 200 here would hide an
+        // outage from the orchestrator (the verifier's readiness-gap find).
+        return (StatusCode::SERVICE_UNAVAILABLE, "sim state poisoned");
+    }
     (StatusCode::OK, "ok")
 }
 
 pub async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    if state.sim.is_poisoned() {
+        return (StatusCode::SERVICE_UNAVAILABLE, "sim state poisoned");
+    }
     if state.ready(READY_MAX_STALE_MS) {
         (StatusCode::OK, "ready")
     } else {
@@ -41,9 +49,10 @@ pub async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
 
 /// `POST /info`: parse the typed request, dispatch, or pass through.
 pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
-    let req: InfoRequest = serde_json::from_slice(&body).map_err(|source| Error::Decode {
-        what: "info request",
-        source,
+    // A malformed body is the caller's fault (400), not a server fault: the
+    // verifier measured a 500 here, which reads as "the sim is broken".
+    let req: InfoRequest = serde_json::from_slice(&body).map_err(|source| Error::BadRequest {
+        reason: format!("invalid info request: {source}"),
     })?;
     match req {
         // hl_mock's contract for types it does not route.
@@ -54,8 +63,8 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
                 // The sim serves the first perp dex only (perpDexs = [null]).
                 return Ok(Json(empty_clearinghouse()).into_response());
             }
-            match state.sim.account(user)? {
-                Some(account) => Ok(Json(clearinghouse_of(&state, user, &account)?).into_response()),
+            match clearinghouse_of(&state, user)? {
+                Some(state_body) => Ok(Json(state_body).into_response()),
                 None => pass_through(&state, &body).await,
             }
         }
@@ -120,13 +129,17 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
     }
 }
 
-/// The served `clearinghouseState` for a touched account: lazy funding
-/// accrual + the computed figures (shared with the control read).
-pub fn clearinghouse_of(state: &ApiState, _address: Address, account: &account::Account) -> Result<ClearinghouseState> {
+/// The served `clearinghouseState` for a touched account: accrual *first*,
+/// then the read (the verifier caught the reverse order: the served figures
+/// lagged one accrual window behind the stored state).
+pub fn clearinghouse_of(state: &ApiState, address: Address) -> Result<Option<ClearinghouseState>> {
     let now = crate::now_ms();
     state.sim.accrue_all(&state.feed, now)?;
+    let Some(account) = state.sim.account(address)? else {
+        return Ok(None);
+    };
     let meta = state.feed.meta();
-    account::clearinghouse(account, &state.feed, meta.as_ref(), now)
+    Ok(Some(account::clearinghouse(&account, &state.feed, meta.as_ref(), now)?))
 }
 
 /// The venue's own answer for an untouched account (verbatim passthrough).

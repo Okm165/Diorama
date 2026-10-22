@@ -131,6 +131,12 @@ impl Sim {
         Ok(self.state.lock()?.epoch)
     }
 
+    /// The state lock is poisoned (a panic happened mid-update): every
+    /// account path refuses until a restart — health/readiness must say so.
+    pub fn is_poisoned(&self) -> bool {
+        self.state.lock().is_err()
+    }
+
     /// The bridge's scan cursor (0 = not anchored).
     pub fn bridge_cursor(&self) -> Result<u64> {
         Ok(self.state.lock()?.bridge_cursor)
@@ -164,7 +170,7 @@ impl Sim {
         stamp_funding_baseline(account, clock);
         let after = match class {
             DealClass::Perp => {
-                account.perp_balance += amount;
+                account.perp_balance = account::add(account.perp_balance, amount, "perp deal")?;
                 account.perp_balance
             }
             DealClass::Spot => {
@@ -178,7 +184,7 @@ impl Sim {
                     hold: Decimal::ZERO,
                     entry_ntl: Decimal::ZERO,
                 });
-                entry.total += amount;
+                entry.total = account::add(entry.total, amount, "spot deal")?;
                 entry.total
             }
         };
@@ -187,13 +193,20 @@ impl Sim {
         Ok(after)
     }
 
-    /// `set_account`: seed an account from the hl_mock-compatible shape.
+    /// `set_account`: seed an account from the hl_mock-compatible shape. An
+    /// all-empty seed is refused: it would silently register a zero account.
     pub fn set_account(&self, address: Address, seed: AccountSeed) -> Result<()> {
+        if seed.is_empty() {
+            return Err(Error::BadRequest {
+                reason: "the seed is empty (no marginSummary, positions, balances or abstraction)"
+                    .into(),
+            });
+        }
         let now = crate::now_ms();
         let clock = self.clock(now)?;
-        let mut state = self.state.lock()?;
-        let mut account = seed.into_account();
+        let mut account = seed.into_account()?;
         account.funded_at_ms = clock;
+        let mut state = self.state.lock()?;
         state.accounts.insert(address, account);
         drop(state);
         self.mark_dirty()
@@ -215,7 +228,7 @@ impl Sim {
             hold: Decimal::ZERO,
             entry_ntl: Decimal::ZERO,
         });
-        entry.total += amount;
+        entry.total = account::add(entry.total, amount, "spot credit")?;
         drop(state);
         self.touch();
         Ok(())
@@ -235,7 +248,7 @@ impl Sim {
         if entry.total < amount {
             return Ok(None);
         }
-        entry.total -= amount;
+        entry.total = account::sub(entry.total, amount, "spot debit")?;
         let after = entry.total;
         drop(state);
         self.touch();
@@ -259,20 +272,20 @@ impl Sim {
             if entry.total < amount {
                 return Ok(false);
             }
-            entry.total -= amount;
-            account.perp_balance += amount;
+            entry.total = account::sub(entry.total, amount, "usd class transfer")?;
+            account.perp_balance = account::add(account.perp_balance, amount, "usd class transfer")?;
         } else {
             if account.perp_balance < amount {
                 return Ok(false);
             }
-            account.perp_balance -= amount;
+            account.perp_balance = account::sub(account.perp_balance, amount, "usd class transfer")?;
             let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
                 coin: coin.to_string(),
                 total: Decimal::ZERO,
                 hold: Decimal::ZERO,
                 entry_ntl: Decimal::ZERO,
             });
-            entry.total += amount;
+            entry.total = account::add(entry.total, amount, "usd class transfer")?;
         }
         drop(state);
         self.touch();
@@ -293,7 +306,7 @@ impl Sim {
             if entry.total < amount {
                 return Ok(false);
             }
-            entry.total -= amount;
+            entry.total = account::sub(entry.total, amount, "spot send")?;
         }
         self.credit_spot(to, token, coin, amount)?;
         Ok(true)
@@ -382,7 +395,7 @@ impl Sim {
         let mut state = self.state.lock()?;
         let mut payments = 0u64;
         for account in state.accounts.values_mut() {
-            payments += account::accrue_funding(account, feed, clock) as u64;
+            payments += account::accrue_funding(account, feed, clock)? as u64;
         }
         if payments > 0 {
             self.metrics.funding_payments_total.fetch_add(payments, Ordering::Relaxed);
@@ -399,7 +412,7 @@ impl Sim {
         let mut state = self.state.lock()?;
         let mut liquidated = Vec::new();
         for (address, account) in state.accounts.iter_mut() {
-            account::accrue_funding(account, feed, clock);
+            account::accrue_funding(account, feed, clock)?;
             if let Some(liq) = account::liquidate_if_needed(account, feed, meta.as_ref())? {
                 self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
                 self.dirty.store(true, Ordering::Relaxed);
@@ -537,6 +550,51 @@ mod tests {
             .deal(&feed, a, DealClass::Perp, None, "0.5".parse().unwrap())
             .unwrap();
         assert_eq!(after, "101".parse::<Decimal>().unwrap());
+    }
+
+    /// The verifier's critical find: an amount that overflows must be refused
+    /// cleanly (a panic under the state lock poisons every account path).
+    #[test]
+    fn overflow_is_refused_not_panicked() {
+        let feed = feed_with("USDC", "1", "1");
+        feed.put_spot_meta(crate::wire::SpotMeta {
+            tokens: vec![crate::wire::SpotToken {
+                name: "USDC".into(),
+                sz_decimals: 8,
+                wei_decimals: 8,
+                index: 0,
+                is_canonical: true,
+                evm_contract: None,
+            }],
+            universe: vec![],
+        });
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        let max = Decimal::MAX;
+        sim.deal(&feed, a, DealClass::Perp, None, max).unwrap();
+        let err = sim.deal(&feed, a, DealClass::Perp, None, Decimal::ONE).unwrap_err();
+        assert!(matches!(err, Error::Overflow { .. }), "{err}");
+        // The state is intact and readable (no poison).
+        assert!(!sim.is_poisoned());
+        assert_eq!(sim.account(a).unwrap().unwrap().perp_balance, max);
+        let err = sim
+            .deal(&feed, a, DealClass::Spot, Some("USDC"), max)
+            .unwrap();
+        assert_eq!(err, max);
+        let err = sim
+            .deal(&feed, a, DealClass::Spot, Some("USDC"), Decimal::ONE)
+            .unwrap_err();
+        assert!(matches!(err, Error::Overflow { .. }), "{err}");
+    }
+
+    #[test]
+    fn empty_seed_is_refused() {
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xbb);
+        let seed: AccountSeed = serde_json::from_str("{}").unwrap();
+        let err = sim.set_account(a, seed).unwrap_err();
+        assert!(matches!(err, Error::BadRequest { .. }), "{err}");
+        assert!(sim.account(a).unwrap().is_none());
     }
 
     #[test]

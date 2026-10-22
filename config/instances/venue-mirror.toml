@@ -52,3 +52,29 @@ port = 8090
 [services.sim.control]
 addr = "0.0.0.0"
 port = 8091
+
+# The CCTP bridge (the third element, §15): real USDC between T (domain 0)
+# and V (domain 19) over the CCTP V2 contracts already present in both forks.
+# Optional (the venue deployment may run without it); its own state root and
+# two listeners. `relay_key` is the funded relay wallet's hex key (a ${VAR}
+# reference — never a path), `attester_seed` derives the devnet attester
+# deterministically (the same seed always installs the same key, §15.3).
+[services.cctp]
+state_dir = "${CCTP_STATE_DIR}"
+t_url = "${T_RPC_URL}"
+v_url = "${ANVIL_V_URL}"
+relay_key = "${CCTP_RELAY_KEY}"
+attester_seed = "mirror-cctp-devnet-attester"
+# The watcher scans from genesis unless pinned. The CCTP contracts predate
+# the fork pins, so pinning the pin block keeps boot scans short; 0 is
+# correct but costs thousands of chunked eth_getLogs calls on a deep fork.
+# t_start_block = 0
+# v_start_block = 0
+
+[services.cctp.iris]
+addr = "0.0.0.0"
+port = 8095
+
+[services.cctp.control]
+addr = "0.0.0.0"
+port = 8096

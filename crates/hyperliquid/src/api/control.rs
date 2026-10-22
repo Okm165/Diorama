@@ -7,7 +7,7 @@
 use super::ApiState;
 use crate::error::{Error, Result};
 use crate::feed::PriceOverride;
-use crate::sim::account::{Account, AccountSeed};
+use crate::sim::account::AccountSeed;
 use crate::sim::DealClass;
 use crate::wire::{ClearinghouseState, Level, L2Book, SpotBalance, UserAbstraction};
 use alloy_primitives::Address;
@@ -18,8 +18,23 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub async fn health() -> impl IntoResponse {
+pub async fn health(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    if state.sim.is_poisoned() {
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "sim state poisoned");
+    }
     (axum::http::StatusCode::OK, "ok")
+}
+
+/// A control write that names a coin the market plane does not track is a
+/// refusal, not a silent success (the verifier's find: `set_funding NOTACOIN`
+/// answered 200).
+fn require_tracked(feed: &crate::feed::MarketFeed, coin: &str) -> Result<()> {
+    if feed.mark(coin).is_some() {
+        return Ok(());
+    }
+    Err(Error::NotFound {
+        what: format!("coin `{coin}` (not in the venue's tracked markets)"),
+    })
 }
 
 /// `/metrics`: the sim's + feed's gauges/counters (the engine's shared admin
@@ -201,6 +216,7 @@ pub async fn set_funding(
             }))
         }
         Some(rate) => {
+            require_tracked(&state.feed, &req.coin)?;
             state.feed.own_funding(&req.coin, rate)?;
             Ok(Json(SetFundingResponse {
                 coin: req.coin,
@@ -241,6 +257,7 @@ pub async fn set_book(
             }))
         }
         Some(levels) => {
+            require_tracked(&state.feed, &req.coin)?;
             for side in &levels {
                 if side.len() > 20 {
                     return Err(Error::BadRequest {
@@ -284,12 +301,21 @@ pub struct StateResponse {
 }
 
 impl StateResponse {
-    fn of(state: &ApiState, account: &Account) -> Result<Self> {
-        let clearinghouse = super::info::clearinghouse_of(state, Address::ZERO, account)?;
+    fn of(state: &ApiState, address: Address) -> Result<Self> {
+        let clearinghouse = super::info::clearinghouse_of(state, address)?
+            .ok_or_else(|| Error::NotFound {
+                what: format!("{address} is not a simulated account"),
+            })?;
+        let account = state
+            .sim
+            .account(address)?
+            .ok_or_else(|| Error::NotFound {
+                what: format!("{address} is not a simulated account"),
+            })?;
         Ok(Self {
             clearinghouse,
-            balances: crate::sim::account::spot_balances(account),
-            abstraction: super::info::abstraction_of(account),
+            balances: crate::sim::account::spot_balances(&account),
+            abstraction: super::info::abstraction_of(&account),
         })
     }
 }
@@ -299,11 +325,7 @@ pub async fn set_account(
     Json(req): Json<SetAccountRequest>,
 ) -> Result<Json<StateResponse>> {
     state.sim.set_account(req.address, req.state)?;
-    let account = state
-        .sim
-        .account(req.address)?
-        .ok_or_else(|| Error::NotFound { what: "the account just seeded".into() })?;
-    Ok(Json(StateResponse::of(&state, &account)?))
+    Ok(Json(StateResponse::of(&state, req.address)?))
 }
 
 /// hl_mock's `POST /control/state/{address}`: the body is the state seed.
@@ -313,11 +335,7 @@ pub async fn post_state(
     Json(seed): Json<AccountSeed>,
 ) -> Result<Json<StateResponse>> {
     state.sim.set_account(address, seed)?;
-    let account = state
-        .sim
-        .account(address)?
-        .ok_or_else(|| Error::NotFound { what: "the account just seeded".into() })?;
-    Ok(Json(StateResponse::of(&state, &account)?))
+    Ok(Json(StateResponse::of(&state, address)?))
 }
 
 /// hl_mock's `GET /control/state/{address}` (404 when untouched — the read
@@ -326,13 +344,7 @@ pub async fn get_state(
     State(state): State<Arc<ApiState>>,
     Path(address): Path<Address>,
 ) -> Result<Json<StateResponse>> {
-    let account = state
-        .sim
-        .account(address)?
-        .ok_or_else(|| Error::NotFound {
-            what: format!("{address} is not a simulated account (untouched reads go to the venue)"),
-        })?;
-    Ok(Json(StateResponse::of(&state, &account)?))
+    Ok(Json(StateResponse::of(&state, address)?))
 }
 
 // ---- reset / epoch_new ---------------------------------------------------

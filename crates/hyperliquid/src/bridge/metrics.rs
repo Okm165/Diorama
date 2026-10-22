@@ -55,13 +55,15 @@ impl BridgeMetrics {
         c(&mut out, "venue_bridge_refusals_total", "bridge effects refused", self.refusals.load(Ordering::Relaxed));
         c(&mut out, "venue_bridge_malformed_total", "undecodable CoreWriter action streams", self.malformed.load(Ordering::Relaxed));
         c(&mut out, "venue_bridge_trace_faults_total", "blocks whose callTracer failed", self.trace_faults.load(Ordering::Relaxed));
+        // One family, one HELP/TYPE, then the observed series.
+        if self.actions.iter().any(|c| c.load(Ordering::Relaxed) > 0) {
+            out.push_str("# HELP venue_bridge_actions_total decoded CoreWriter actions by id\n");
+            out.push_str("# TYPE venue_bridge_actions_total counter\n");
+        }
         for (id, count) in self.actions.iter().enumerate() {
             let v = count.load(Ordering::Relaxed);
             if v > 0 {
-                // The per-id series is labeled (one per observed action).
-                out.push_str(&format!(
-                    "# HELP venue_bridge_actions_total decoded CoreWriter actions by id\n# TYPE venue_bridge_actions_total counter\nvenue_bridge_actions_total{{id=\"{id}\"}} {v}\n"
-                ));
+                out.push_str(&format!("venue_bridge_actions_total{{id=\"{id}\"}} {v}\n"));
             }
         }
         out

@@ -94,7 +94,8 @@ addr = "0.0.0.0"
 # The market plane's REST cache cadence. WS pushes (allMids, activeAssetCtx)
 # are the primary freshness source; the REST poller backfills meta/books and
 # is gated by the rate budget meter (1200 weight/min: metaAndAssetCtxs = 20,
-# l2Book/allMids = 2). 5 s gives ~360 weight/min for the default market set.
+# spotMeta = 20, l2Book/allMids = 2). 5 s gives ~600 weight/min for the
+# default four-market set (20+20+4x2+2 = 50 per pass, 12 passes/min).
 [services.sim]
 poll_interval_ms = 5000
 
@@ -102,4 +103,35 @@ poll_interval_ms = 5000
 addr = "0.0.0.0"
 
 [services.sim.control]
+addr = "0.0.0.0"
+
+# ---- the CCTP bridge (optional; either profile, §15) ----------------------
+# The bridge spans both mirrors: T (Ethereum, domain 0) and V (HyperEVM,
+# domain 19) over the real CCTP V2 contracts. Its stub is kept only when an
+# instance declares [services.cctp] (the deployment that runs it); the
+# chain endpoints, the relay key and the attester seed are deployment facts
+# and live in the instance file.
+
+[services.cctp]
+# One watcher pass per second on each chain: new MessageSent logs + due
+# attestations.
+poll_interval_ms = 1000
+# The emulated PENDING window (§15.5): the attestation is served this many
+# seconds after the burn (0 = immediately).
+finality_delay_secs = 0
+# The served `expirationBlock`: 0 = the message never expires; short values
+# exercise the "must be re-signed" path.
+expiration_blocks = 0
+# `eth_getLogs` range per scan call.
+scan_chunk_blocks = 2000
+# How long a submitted tx may wait for a receipt inside one tick.
+receipt_timeout_secs = 30
+# Gas alerts, daloc's defaults: warn below 0.1 ETH, error below 0.01 ETH.
+balance_low_wei = "100000000000000000"
+balance_critical_wei = "10000000000000000"
+
+[services.cctp.iris]
+addr = "0.0.0.0"
+
+[services.cctp.control]
 addr = "0.0.0.0"

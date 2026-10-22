@@ -4,7 +4,7 @@
 //! `config/defaults.toml` (shared) or the instance file (deployment-specific).
 //! Fields carry no serde defaults: a key missing from both layers is a load
 //! error naming it.
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, U256};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -12,13 +12,57 @@ use std::path::PathBuf;
 /// Exactly one profile's sections are present (the instance's `check` pins the
 /// coherence): the ethereum profile carries `[services.engine]`, the venue
 /// profile carries `[services.venue]` (the engine) and `[services.sim]` (the
-/// simulator).
+/// simulator). `[services.cctp]` is cross-cutting: it is optional under
+/// either profile (the bridge spans both mirrors, §15).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Services {
     pub engine: Option<EngineSection>,
     pub venue: Option<VenueSection>,
     pub sim: Option<SimSection>,
+    pub cctp: Option<CctpSection>,
+}
+
+/// `[services.cctp]`: the CCTP bridge (plan §15): Iris-compatible API (8095)
+/// + control API (8096), one watcher per chain and one relayer.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CctpSection {
+    /// Bridge state root (`cctp.json`: watched messages + lifecycle).
+    pub state_dir: PathBuf,
+    /// T's RPC (Ethereum, CCTP domain 0).
+    pub t_url: String,
+    /// V's RPC (HyperEVM, CCTP domain 19).
+    pub v_url: String,
+    /// The daloc-facing Iris API (8095).
+    pub iris: HttpSection,
+    /// The bridge's control API (8096).
+    pub control: HttpSection,
+    /// The relay wallet's 32-byte hex key: signs `receiveMessage` and the
+    /// control transfers, and pays gas on both chains. A `${VAR}` reference
+    /// keeps the secret out of the file; never a path.
+    pub relay_key: String,
+    /// The devnet attester's deterministic seed (a 32-byte hex key is used
+    /// verbatim; any other string is hashed, §15.3).
+    pub attester_seed: String,
+    /// One watcher pass per interval.
+    pub poll_interval_ms: u64,
+    /// The emulated PENDING window (0 = attest immediately).
+    pub finality_delay_secs: u64,
+    /// The served `expirationBlock` (0 = no expiry).
+    pub expiration_blocks: u64,
+    /// `eth_getLogs` range per scan call.
+    pub scan_chunk_blocks: u64,
+    /// How long a submitted tx may wait for a receipt inside one tick.
+    pub receipt_timeout_secs: u64,
+    /// Gas alerts (daloc's defaults: 0.1 ETH low / 0.01 ETH critical, wei).
+    pub balance_low_wei: U256,
+    pub balance_critical_wei: U256,
+    /// First block the watcher scans on T / V. Absent = 0 (genesis: correct
+    /// but thousands of chunked calls on a deep fork — pin the deployment
+    /// block).
+    pub t_start_block: Option<u64>,
+    pub v_start_block: Option<u64>,
 }
 
 /// `[services.sim]`: the venue simulator (info + control API).
