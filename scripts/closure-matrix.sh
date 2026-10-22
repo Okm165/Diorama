@@ -22,7 +22,8 @@ allowed() {
     mirror-ethereum)    echo "mirror-devnet mirror-anvil mirror-config" ;;
     mirror-hyperliquid) echo "mirror-devnet mirror-anvil mirror-config" ;;
     mirror-cctp)        echo "mirror-anvil mirror-config" ;;
-    mirror-engine)      echo "mirror-ethereum mirror-hyperliquid mirror-devnet mirror-anvil mirror-config" ;;
+    mirror-engine)      echo "mirror-ethereum mirror-devnet mirror-anvil mirror-config" ;;
+    venue-mirror)       echo "mirror-hyperliquid mirror-devnet mirror-anvil mirror-config" ;;
     venue-sim)          echo "mirror-hyperliquid mirror-devnet mirror-anvil mirror-config" ;;
     cctp-bridge)        echo "mirror-cctp mirror-anvil mirror-config" ;;
     *)                  echo "UNKNOWN-PACKAGE" ;;

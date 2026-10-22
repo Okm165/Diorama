@@ -135,13 +135,6 @@ pub enum Error {
     #[error("T head {t_head} is more than one block behind the parent cursor {n}")]
     ApplierBehind { t_head: u64, n: u64 },
 
-    /// A devnet block's shadow scan could not trace some of its txs. The scan
-    /// stops before that block (the watermark must not advance past it): its
-    /// writes would stay unmarked, and the next parent diff would overwrite
-    /// the devnet's state. The per-tx causes are logged; this names the block.
-    #[error("block {block}: shadow scan failed for {failed} tx trace(s); the block is re-scanned")]
-    ShadowScan { block: u64, failed: usize },
-
     // ---- top-up sync -----------------------------------------------------
     #[error(
         "top-up gap: reth head {el_head}, next CL payload {number} at slot {slot} \

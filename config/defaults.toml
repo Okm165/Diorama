@@ -72,3 +72,20 @@ enabled = true
 
 [services.engine.http]
 addr = "0.0.0.0"
+
+# ---- the Venue Mirror's service (profile "venue") ------------------------
+# The driver watches V (the fork-mode anvil) for the devnet's own blocks and
+# re-asserts the chain discipline on every pass; the sim/feed sections land
+# with those services.
+
+[services.venue]
+# One pass per second: a head read + the new-block scan.
+poll_interval_ms = 1000
+# Max JSON-RPC batch size for cheatcode writes (deal, restore).
+chunk_size = 500
+# The journal's before-value ring (the rewind window; same convention as the
+# engine's).
+journal_blocks = 1024
+
+[services.venue.http]
+addr = "0.0.0.0"

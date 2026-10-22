@@ -1,0 +1,21 @@
+[package]
+name = "mirror-hyperliquid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Venue Mirror: the fork driver over anvil V (pin, epochs, probes-at-pin, shadow scan)"
+
+[dependencies]
+mirror-config = { path = "../config" }
+mirror-anvil = { path = "../anvil" }
+mirror-devnet = { path = "../devnet" }
+alloy-primitives = { workspace = true }
+axum = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

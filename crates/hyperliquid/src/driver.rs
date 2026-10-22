@@ -1,0 +1,351 @@
+//! The fork driver: V's lifecycle from boot to epoch to steady state.
+//!
+//! V is a fork-mode anvil (chain id 999): static between re-pins, so the
+//! ethereum profile's parent stream machinery has no counterpart here. The
+//! driver's jobs (plan §7.2):
+//!
+//! - **boot asserts**: V answers, is the venue chain, and automine is off;
+//! - **reset detection**: V's block at the cursor hash changed (a re-pin, an
+//!   OOM restart) — checked on every pass;
+//! - **the epoch rule**: a fresh pin means the base moved (drop marks and
+//!   values: a new epoch); the same pin means the recorded writes are still
+//!   coherent (re-apply them and keep the marks);
+//! - **probes-at-pin**: V vs the fork source at the pin, devnet-owned targets
+//!   skipped and counted;
+//! - **the steady-state scan**: every devnet tx's writes become shadowed
+//!   (COW), so a hand-back can restore the source's truth and probes can skip
+//!   what the devnet owns.
+use crate::ctx::Ctx;
+use crate::error::{Error, Result};
+use mirror_devnet::probes::ProbeRunner;
+use mirror_devnet::scan;
+use mirror_devnet::state::cursor_from;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// HyperEVM's chain id on mainnet (998 on testnet). A code fact.
+const VENUE_CHAIN_ID: u64 = 999;
+
+/// The chain-instance canary: one storage word on a scratch address, written
+/// by `reconcile` with the current pin as its value.
+///
+/// V is a fork-mode anvil, and a fresh fork cannot carry the canary — so
+/// "the canary reads back the recorded pin" means "this is still the chain
+/// instance the registry was built against". It is the only reliable reset
+/// signal: heights below the fork resolve to the *source's* real blocks (a
+/// re-pin to a later base keeps every cursor hash valid — measured live:
+/// the driver kept scanning a stale range), and a same-pin restart leaves no
+/// other trace. One storage read per pass; one write per reconcile.
+const CANARY_ADDRESS: alloy_primitives::Address =
+    alloy_primitives::address!("00000000000000000000000000000000ca11ca11");
+const CANARY_SLOT: alloy_primitives::U256 = alloy_primitives::U256::ZERO;
+
+/// Boot: wait for V, assert the chain, reconcile the registry, run the at-pin
+/// probes. A boot fault is fatal (the bin exits): a driver over the wrong
+/// chain or a broken registry must not serve.
+pub async fn boot(ctx: &Ctx) -> Result<()> {
+    wait_for_v(ctx).await?;
+    assert_venue_chain(ctx).await?;
+    let pin = reconcile(ctx).await?;
+    probes_at_pin(ctx, pin).await?;
+    Ok(())
+}
+
+/// The steady-state loop (boot has already run).
+pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
+    let poll = Duration::from_millis(ctx.venue.poll_interval_ms.max(200));
+    loop {
+        if ctx.is_halted() {
+            tokio::time::sleep(poll).await;
+            continue;
+        }
+        match pass(&ctx).await {
+            Ok(Pass::Steady) => {}
+            Ok(Pass::Reset) => {
+                tracing::warn!("V was reset under the driver - reconciling (epoch rule)");
+                if let Err(e) = assert_venue_chain(&ctx).await {
+                    tracing::warn!(error = %e, "venue chain assert failed after a reset");
+                }
+                match reconcile(&ctx).await {
+                    Ok(pin) => {
+                        if let Err(e) = probes_at_pin(&ctx, pin).await {
+                            tracing::warn!(error = %e, "at-pin probes failed after a reset");
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "reconcile failed; will retry"),
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "venue driver pass failed; will retry"),
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// One steady-state pass. Returns [`Pass::Reset`] when V's block at the cursor
+/// hash changed (the epoch rule must run).
+enum Pass {
+    Steady,
+    Reset,
+}
+
+async fn pass(ctx: &Ctx) -> Result<Pass> {
+    let head = ctx.v.block_number().await?;
+    ctx.venue_metrics.set(&ctx.venue_metrics.head, head);
+
+    // Reset detection: the canary must read back the recorded pin (see
+    // CANARY_ADDRESS). Anything else — a re-pin, a same-pin restart, a wiped
+    // state — means this is no longer the chain instance the registry was
+    // built against, and the epoch rule must run.
+    let expected = ctx.state.lock()?.data.epoch_pin;
+    let canary = read_canary(ctx).await?;
+    if canary != expected {
+        return Ok(Pass::Reset);
+    }
+
+    let cursor = ctx.cursor_v()?;
+    if let Some(c) = &cursor {
+        ctx.venue_metrics.set(&ctx.venue_metrics.cursor, c.block);
+        ctx.venue_metrics
+            .set(&ctx.venue_metrics.pin_age_blocks, head.saturating_sub(c.first_block) + 1);
+    }
+
+    // Scan the devnet's own blocks: every tx's writes become shadowed (COW).
+    // The watermark starts from the persisted cursor, so blocks the devnet
+    // mined while the driver was down are scanned too (V's head only advances
+    // when someone mines explicitly - the chain runs with automine off).
+    let mut last = ctx.shadow_scanned_upto.load(Ordering::Relaxed);
+    if last == 0 {
+        last = cursor.as_ref().map(|c| c.block).unwrap_or(head);
+        ctx.shadow_scanned_upto.store(last, Ordering::Relaxed);
+    }
+    if head > last {
+        scan::scan_range(&ctx.v, &ctx.shadow, &ctx.shadow_scanned_upto, last, head).await?;
+        ctx.save_shadow()?;
+        let block = ctx.v.block_by_number(head, false).await?;
+        let first_block = cursor.as_ref().map(|c| c.first_block).unwrap_or(head);
+        ctx.set_cursor_v(cursor_from(&block, first_block))?;
+        ctx.save_state()?;
+        ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
+    }
+
+    // A journal rewind on the venue restores before-values without moving the
+    // head; the range marker clears once the head is past it (there is no
+    // parent diff to re-apply - the devnet re-creates its writes).
+    if let Some((_, until)) = *ctx.reapply_from.lock()? {
+        if head >= until {
+            *ctx.reapply_from.lock()? = None;
+            tracing::info!(block = head, until, "rewound range passed");
+        }
+    }
+    Ok(Pass::Steady)
+}
+
+/// The canary word: `Some(pin)` when the recorded chain instance wrote it,
+/// `None` when the storage is empty (a fresh fork) — and a read fault is the
+/// caller's error.
+async fn read_canary(ctx: &Ctx) -> Result<Option<u64>> {
+    let word = ctx.v.storage_at_latest(CANARY_ADDRESS, CANARY_SLOT).await?;
+    let value = alloy_primitives::U256::from_be_bytes(word.0);
+    if value.is_zero() {
+        return Ok(None);
+    }
+    Ok(Some(value.to::<u64>()))
+}
+
+/// Mark this chain instance (see [`CANARY_ADDRESS`]).
+async fn write_canary(ctx: &Ctx, pin: u64) -> Result<()> {
+    let value = alloy_primitives::B256::from(alloy_primitives::U256::from(pin));
+    ctx.v
+        .anvil_set_storage_at(CANARY_ADDRESS, CANARY_SLOT, value)
+        .await?;
+    Ok(())
+}
+
+/// Wait for V to answer (a coordinated restart must not become
+/// CrashLoopBackOff).
+async fn wait_for_v(ctx: &Ctx) -> Result<()> {
+    let mut last: Option<mirror_anvil::Error> = None;
+    for _ in 0..120 {
+        match ctx.v.block_number().await {
+            Ok(head) => {
+                tracing::info!(anvil = "anvil-v", head, "anvil is up");
+                return Ok(());
+            }
+            Err(e) => last = Some(e),
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Err(Error::NotReady {
+        name: "anvil-v",
+        timeout_secs: 120,
+        source: last,
+    })
+}
+
+/// V must be the venue chain with automine off. An anvil restart resets
+/// automine to its default (on) — measured — so the discipline is re-asserted
+/// on every boot and after every reset.
+async fn assert_venue_chain(ctx: &Ctx) -> Result<()> {
+    let got = ctx.v.chain_id().await?;
+    if got != VENUE_CHAIN_ID {
+        return Err(Error::WrongChain {
+            got,
+            want: VENUE_CHAIN_ID,
+        });
+    }
+    ctx.v.anvil_set_automine(false).await?;
+    Ok(())
+}
+
+/// Reconcile the registry with V's base: check the chain-instance canary, run
+/// the epoch rule when the instance changed, and anchor the cursor. Returns
+/// the fork pin.
+async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
+    // Fail-closed on the pin read: without it the epoch decision would default
+    // to "same pin" and re-apply writes across a pin change.
+    let pin = ctx.v.anvil_node_info().await?.fork_config.fork_block_number;
+    ctx.venue_metrics
+        .set(&ctx.venue_metrics.fork_pin, pin.unwrap_or(0));
+    if let Some(p) = pin {
+        // The unshadow source's anchor: V's base state is the source's state
+        // at the pin.
+        ctx.pin.store(p, Ordering::Relaxed);
+    }
+
+    // The canary tells whether this is still the chain instance the registry
+    // was built against (see CANARY_ADDRESS): present and equal to the pin
+    // means steady, nothing to reconcile.
+    if read_canary(ctx).await? == pin {
+        return Ok(pin);
+    }
+
+    let known = ctx.state.lock()?.data.epoch_pin;
+    let new_epoch = known != pin;
+    if new_epoch {
+        // A fresh pin: the base moved, so the recorded values are stale
+        // derivations of the old base. Drop marks and values - the devnet
+        // re-creates its state from its own journal (plan 2.2/6.3).
+        let (slots, accounts) = ctx.shadow.lock()?.clear_all();
+        ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
+        tracing::warn!(
+            pin = ?pin,
+            previous = ?known,
+            cleared_slots = slots,
+            cleared_accounts = accounts,
+            "new epoch: the fork base moved; the devnet's writes are gone with it (re-create state from your journal)"
+        );
+    } else if pin.is_some() {
+        // The same pin: the recorded writes are still coherent - re-apply
+        // them and keep the marks.
+        let stats =
+            mirror_devnet::shadow::restore_recorded(&ctx.v, &ctx.shadow, ctx.venue.chunk_size)
+                .await?;
+        ctx.save_shadow()?;
+        ctx.venue_metrics
+            .add(&ctx.venue_metrics.restore_writes_total, stats.restored as u64);
+        ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
+        tracing::warn!(
+            pin = ?pin,
+            restored = stats.restored,
+            orphan_slots = stats.orphan_slots,
+            orphan_accounts = stats.orphan_accounts,
+            unknown_slots = stats.unknown_slots,
+            unknown_accounts = stats.unknown_accounts,
+            "V was reset at the same pin: re-applied the devnet's writes"
+        );
+    }
+    if pin.is_some() && known != pin {
+        ctx.state.lock()?.data.epoch_pin = pin;
+    }
+    // The journal holds before-values of the *old* chain: a rewind against the
+    // re-forked chain would restore values that never existed there. Drop it.
+    if let Err(e) = ctx.journal.clear() {
+        tracing::warn!(error = %e, "clearing the journal after a V reset failed");
+    }
+
+    // The registry now reflects V's base: anchor the cursor at the pin (V's
+    // state *is* the source's state at the pin), and let the steady-state scan
+    // advance it as the devnet mines.
+    let watermark = if let Some(p) = pin {
+        let block = ctx.v.block_by_number(p, false).await?;
+        ctx.set_cursor_v(cursor_from(&block, p))?;
+        p
+    } else {
+        tracing::warn!("anvil-v has no fork pin: epoch decisions are pin-based and cannot run");
+        ctx.v.block_number().await?
+    };
+    ctx.shadow_scanned_upto.store(watermark, Ordering::Relaxed);
+    ctx.save_state()?;
+    if let Some(p) = pin {
+        write_canary(ctx, p).await?;
+    }
+    Ok(pin)
+}
+
+/// Run the at-pin probes: V vs the fork source at the pin, devnet-owned
+/// targets skipped and counted (COW means that state is the devnet's).
+///
+/// The public source serves its *latest* state for `eth_call` (measured: V's
+/// fork at block N differs from the source's answer at N, while V's state IS
+/// the source's state at N — the block parameter is ignored, or the retention
+/// window is shorter than a re-pin interval). The comparison is therefore only
+/// meaningful while the pin *is* the source's head — i.e. right after a
+/// `latest` pin (boot, re-pin). An older pin is skipped and counted, never
+/// alarmed: the source cannot serve it, and a mismatch would be a lie.
+async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
+    let Some(pin) = pin else {
+        tracing::warn!("at-pin probes skipped: V has no fork pin");
+        return Ok(());
+    };
+    let source_head = ctx.source_rpc.block_number().await?;
+    if pin != source_head {
+        ctx.venue_metrics
+            .add(&ctx.venue_metrics.probe_skipped, ctx.venue.probes.len() as u64);
+        tracing::info!(
+            pin,
+            source_head,
+            skipped = ctx.venue.probes.len(),
+            "at-pin probes skipped: the source serves its latest state (measured); the pin is not the source head"
+        );
+        return Ok(());
+    }
+    let probes = ProbeRunner::devnet(&ctx.venue.probes, &ctx.shadow, false)
+        .parity(&ctx.source_rpc, pin, &ctx.v)
+        .await?;
+    if probes.failed > 0 {
+        // The chain may have advanced mid-run (1 s blocks): the source's state
+        // then belongs to a later block than V's pin — a race, not a
+        // divergence. Re-check the head; if it moved, count the run skipped.
+        let head_now = ctx.source_rpc.block_number().await?;
+        if head_now != source_head {
+            ctx.venue_metrics
+                .add(&ctx.venue_metrics.probe_ok, probes.ok as u64);
+            ctx.venue_metrics
+                .add(&ctx.venue_metrics.probe_skipped, (probes.failed + probes.skipped) as u64);
+            tracing::info!(
+                pin,
+                source_head,
+                head_now,
+                "at-pin probes raced a source advance; the run is counted skipped"
+            );
+            return Ok(());
+        }
+    }
+    ctx.venue_metrics
+        .add(&ctx.venue_metrics.probe_ok, probes.ok as u64);
+    ctx.venue_metrics
+        .add(&ctx.venue_metrics.probe_failed, probes.failed as u64);
+    ctx.venue_metrics
+        .add(&ctx.venue_metrics.probe_skipped, probes.skipped as u64);
+    ctx.venue_metrics
+        .set(&ctx.venue_metrics.probe_last_failed, probes.failed as u64);
+    tracing::info!(
+        pin,
+        ok = probes.ok,
+        failed = probes.failed,
+        skipped = probes.skipped,
+        "at-pin probes complete"
+    );
+    Ok(())
+}

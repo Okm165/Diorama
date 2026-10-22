@@ -3,7 +3,7 @@ use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::sections::Services;
+use crate::sections::{EngineSection, Services, VenueSection};
 use crate::ConfigError;
 
 /// One mirror deployment: identity, chains, watchlist, service sections.
@@ -12,6 +12,9 @@ use crate::ConfigError;
 pub struct Instance {
     pub instance: InstanceMeta,
     pub chains: Chains,
+    /// The watched addresses (the ethereum profile's parent-diff scope; the
+    /// venue has no parent stream, so it is empty there).
+    #[serde(default)]
     pub watchlist: Vec<WatchEntry>,
     pub services: Services,
 }
@@ -31,11 +34,13 @@ pub enum Profile {
     Venue,
 }
 
-/// `[chains]`: one entry per chain the mirror serves.
+/// `[chains]`: one entry per chain the mirror serves. Exactly one is present
+/// (the profile pins which).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Chains {
-    pub l1: ChainL1,
+    pub l1: Option<ChainL1>,
+    pub venue: Option<ChainVenue>,
 }
 
 /// `[chains.l1]`: the Ethereum source. `kind` only - the chain id, CCTP
@@ -52,10 +57,23 @@ pub struct ChainL1 {
     pub fork_offset: u64,
 }
 
+/// `[chains.venue]`: the venue's fork source. `kind` only - chain id 999,
+/// CCTP domain 19 and the canonical HyperEVM addresses are code facts. V pins
+/// at the source's `latest` (or an explicit block chosen at deploy time by
+/// the anvil init container), so there is no follow/offset policy here: the
+/// source is archive-deep (measured: ≥5M blocks).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ChainVenue {
+    pub kind: ChainKind,
+    pub source_url: String,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ChainKind {
     Ethereum,
+    Hyperliquid,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -101,71 +119,191 @@ impl Instance {
     /// Cross-validation (§19.5). Every failure names the key and the reason.
     pub fn check(&self) -> Result<(), ConfigError> {
         let mut issues = Vec::new();
-        if self.instance.profile == Profile::Venue {
-            issues.push("profile \"venue\": the venue sections land in R3".into());
-        }
-
-        let l1 = &self.chains.l1;
-        if l1.fork_offset < MIN_FORK_OFFSET_BLOCKS {
-            issues.push(format!(
-                "chains.l1.fork_offset {} is below the safe-head lag (~{} blocks): \
-                 the pin would sit at or behind the follow head",
-                l1.fork_offset, MIN_FORK_OFFSET_BLOCKS
-            ));
-        }
-        if l1.fork_offset >= RETH_STATE_WINDOW_BLOCKS {
-            issues.push(format!(
-                "chains.l1.fork_offset {} is outside reth's {}-block state window",
-                l1.fork_offset, RETH_STATE_WINDOW_BLOCKS
-            ));
-        }
-        check_http_url("chains.l1.source_url", &l1.source_url, &mut issues);
-
-        let eng = &self.services.engine;
-        check_http_url("services.engine.anvil.m_url", &eng.anvil.m_url, &mut issues);
-        check_http_url("services.engine.anvil.t_url", &eng.anvil.t_url, &mut issues);
-        for (i, url) in eng.blobs.beacon_urls.iter().enumerate() {
-            check_http_url(
-                &format!("services.engine.blobs.beacon_urls[{i}]"),
-                url,
-                &mut issues,
-            );
-        }
-        if let Some(url) = &eng.source_sync.engine_url {
-            check_http_url("services.engine.source_sync.engine_url", url, &mut issues);
-        }
-        if let Some(path) = &eng.source_sync.jwt_path {
-            if looks_like_secret(&path.to_string_lossy()) {
-                issues.push(
-                    "services.engine.source_sync.jwt_path must be a file path, \
-                     not the secret itself"
-                        .into(),
-                );
-            }
-        }
-        if eng.state_dir.as_os_str().is_empty() {
-            issues.push("services.engine.state_dir must not be empty".into());
-        }
-        if eng.journal.dir.as_os_str().is_empty() {
-            issues.push("services.engine.journal.dir must not be empty".into());
-        }
-
-        let ports = [("services.engine.http.port", eng.http.port)];
-        for (i, (name, port)) in ports.iter().enumerate() {
-            for (other_name, other_port) in ports.iter().skip(i + 1) {
-                if port == other_port {
-                    issues.push(format!(
-                        "port {port} is used by both {name} and {other_name}"
-                    ));
-                }
-            }
-        }
-
+        self.check_profile_coherence(&mut issues);
+        self.check_chains(&mut issues);
+        self.check_services(&mut issues);
         if issues.is_empty() {
             Ok(())
         } else {
             Err(ConfigError::Invalid { issues })
         }
+    }
+
+    /// Exactly one profile's sections are present.
+    fn check_profile_coherence(&self, issues: &mut Vec<String>) {
+        let ethereum = self.instance.profile == Profile::Ethereum;
+        let profile = if ethereum { "ethereum" } else { "venue" };
+        let needs = if ethereum {
+            [
+                ("[chains.l1]", self.chains.l1.is_some()),
+                ("[services.engine]", self.services.engine.is_some()),
+            ]
+        } else {
+            [
+                ("[chains.venue]", self.chains.venue.is_some()),
+                ("[services.venue]", self.services.venue.is_some()),
+            ]
+        };
+        for (section, present) in needs {
+            if !present {
+                issues.push(format!("profile \"{profile}\" requires {section}"));
+            }
+        }
+        let forbids = if ethereum {
+            [
+                ("[chains.venue]", self.chains.venue.is_some()),
+                ("[services.venue]", self.services.venue.is_some()),
+            ]
+        } else {
+            [
+                ("[chains.l1]", self.chains.l1.is_some()),
+                ("[services.engine]", self.services.engine.is_some()),
+            ]
+        };
+        for (section, present) in forbids {
+            if present {
+                issues.push(format!("profile \"{profile}\" must not carry {section}"));
+            }
+        }
+    }
+
+    fn check_chains(&self, issues: &mut Vec<String>) {
+        if let Some(l1) = &self.chains.l1 {
+            if l1.kind != ChainKind::Ethereum {
+                issues.push("chains.l1.kind must be \"ethereum\"".into());
+            }
+            if l1.fork_offset < MIN_FORK_OFFSET_BLOCKS {
+                issues.push(format!(
+                    "chains.l1.fork_offset {} is below the safe-head lag (~{} blocks): \
+                     the pin would sit at or behind the follow head",
+                    l1.fork_offset, MIN_FORK_OFFSET_BLOCKS
+                ));
+            }
+            if l1.fork_offset >= RETH_STATE_WINDOW_BLOCKS {
+                issues.push(format!(
+                    "chains.l1.fork_offset {} is outside reth's {}-block state window",
+                    l1.fork_offset, RETH_STATE_WINDOW_BLOCKS
+                ));
+            }
+            check_http_url("chains.l1.source_url", &l1.source_url, issues);
+        }
+        if let Some(venue) = &self.chains.venue {
+            if venue.kind != ChainKind::Hyperliquid {
+                issues.push("chains.venue.kind must be \"hyperliquid\"".into());
+            }
+            check_http_url("chains.venue.source_url", &venue.source_url, issues);
+        }
+    }
+
+    fn check_services(&self, issues: &mut Vec<String>) {
+        if let Some(eng) = &self.services.engine {
+            check_http_url("services.engine.anvil.m_url", &eng.anvil.m_url, issues);
+            check_http_url("services.engine.anvil.t_url", &eng.anvil.t_url, issues);
+            for (i, url) in eng.blobs.beacon_urls.iter().enumerate() {
+                check_http_url(
+                    &format!("services.engine.blobs.beacon_urls[{i}]"),
+                    url,
+                    issues,
+                );
+            }
+            if let Some(url) = &eng.source_sync.engine_url {
+                check_http_url("services.engine.source_sync.engine_url", url, issues);
+            }
+            if let Some(path) = &eng.source_sync.jwt_path {
+                if looks_like_secret(&path.to_string_lossy()) {
+                    issues.push(
+                        "services.engine.source_sync.jwt_path must be a file path, \
+                         not the secret itself"
+                            .into(),
+                    );
+                }
+            }
+            if eng.state_dir.as_os_str().is_empty() {
+                issues.push("services.engine.state_dir must not be empty".into());
+            }
+            if eng.journal.dir.as_os_str().is_empty() {
+                issues.push("services.engine.journal.dir must not be empty".into());
+            }
+        }
+        if let Some(venue) = &self.services.venue {
+            check_http_url("services.venue.anvil_url", &venue.anvil_url, issues);
+            if venue.state_dir.as_os_str().is_empty() {
+                issues.push("services.venue.state_dir must not be empty".into());
+            }
+            if venue.poll_interval_ms == 0 {
+                issues.push("services.venue.poll_interval_ms must be > 0".into());
+            }
+            if venue.chunk_size == 0 {
+                issues.push("services.venue.chunk_size must be > 0".into());
+            }
+        }
+    }
+
+    /// The ethereum profile's sections, moved out for the run path (the check
+    /// already validated presence; a missing one is still a named error, never
+    /// a silent default).
+    pub fn take_ethereum(&mut self) -> Result<(ChainL1, EngineSection), ConfigError> {
+        let l1 = self
+            .chains
+            .l1
+            .take()
+            .ok_or_else(|| mismatch("profile \"ethereum\" requires [chains.l1]"))?;
+        let engine = self
+            .services
+            .engine
+            .take()
+            .ok_or_else(|| mismatch("profile \"ethereum\" requires [services.engine]"))?;
+        Ok((l1, engine))
+    }
+
+    /// The venue profile's sections, moved out for the run path.
+    pub fn take_venue(&mut self) -> Result<(ChainVenue, VenueSection), ConfigError> {
+        let chain = self
+            .chains
+            .venue
+            .take()
+            .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
+        let venue = self
+            .services
+            .venue
+            .take()
+            .ok_or_else(|| mismatch("profile \"venue\" requires [services.venue]"))?;
+        Ok((chain, venue))
+    }
+
+    /// The ethereum profile's endpoints: the pre-context reads the run path
+    /// needs (`Ctx::new` takes the sections itself).
+    pub fn ethereum_urls(&self) -> Result<(String, String, String), ConfigError> {
+        let l1 = self
+            .chains
+            .l1
+            .as_ref()
+            .ok_or_else(|| mismatch("profile \"ethereum\" requires [chains.l1]"))?;
+        let engine = self
+            .services
+            .engine
+            .as_ref()
+            .ok_or_else(|| mismatch("profile \"ethereum\" requires [services.engine]"))?;
+        Ok((
+            l1.source_url.clone(),
+            engine.anvil.m_url.clone(),
+            engine.anvil.t_url.clone(),
+        ))
+    }
+
+    /// The venue profile's endpoints (the fork source and anvil V).
+    pub fn venue_urls(&self) -> Result<(String, String), ConfigError> {
+        let chain = self
+            .chains
+            .venue
+            .as_ref()
+            .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
+        let venue = self
+            .services
+            .venue
+            .as_ref()
+            .ok_or_else(|| mismatch("profile \"venue\" requires [services.venue]"))?;
+        Ok((chain.source_url.clone(), venue.anvil_url.clone()))
     }
 
     /// The instance as a TOML value (the shape the loader produced).
@@ -191,11 +329,24 @@ impl Instance {
     /// containers resolve their pin with `FORK_OFFSET` from here.
     pub fn export_env(&self, section: &str) -> Result<Vec<String>, ConfigError> {
         match section {
-            "anvil" => Ok(vec![format!("FORK_OFFSET={}", self.chains.l1.fork_offset)]),
+            "anvil" => {
+                let l1 = self
+                    .chains
+                    .l1
+                    .as_ref()
+                    .ok_or_else(|| mismatch("export-env anvil requires [chains.l1]"))?;
+                Ok(vec![format!("FORK_OFFSET={}", l1.fork_offset)])
+            }
             other => Err(ConfigError::Invalid {
                 issues: vec![format!("unknown section `{other}` (known: anvil)")],
             }),
         }
+    }
+}
+
+fn mismatch(what: &str) -> ConfigError {
+    ConfigError::Invalid {
+        issues: vec![what.to_string()],
     }
 }
 

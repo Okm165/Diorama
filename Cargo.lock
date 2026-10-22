@@ -2519,6 +2519,8 @@ dependencies = [
 name = "mirror-devnet"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-network-primitives",
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "mirror-anvil",
@@ -2564,6 +2566,21 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "mirror-hyperliquid"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "axum",
+ "mirror-anvil",
+ "mirror-config",
+ "mirror-devnet",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4226,6 +4243,17 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "venue-mirror"
+version = "0.1.0"
+dependencies = [
+ "mirror-config",
+ "mirror-hyperliquid",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "version_check"

@@ -5,7 +5,7 @@
 //! typed fault (`Error::Poisoned`) that the loops propagate and the admin
 //! surface answers 503 for — never a per-call panic, never a silent recovery.
 use crate::blob::{BeaconClient, BlobForm};
-use mirror_config::{FollowHead, Instance};
+use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
 use crate::drift::Drift;
 use crate::error::Result;
 use crate::journal::Journal;
@@ -27,13 +27,16 @@ use std::time::Duration;
 /// path resolving; the code lives in `mirror-devnet`).
 pub use mirror_devnet::state::cursor_from;
 
-/// Transactions of a full block (the engine always requests full=true).
-pub fn block_txs(block: &alloy_rpc_types_eth::Block) -> &[alloy_rpc_types_eth::Transaction] {
-    block.transactions.as_transactions().unwrap_or(&[])
-}
+/// Transactions of a full block — chain-generic, so it lives in
+/// `mirror-devnet::scan` (the venue profile scans V with the same code).
+pub use mirror_devnet::scan::block_txs;
 
 pub struct Ctx {
-    pub cfg: Instance,
+    /// The ethereum chain's section (the source, follow policy, fork offset).
+    pub l1: ChainL1,
+    /// The engine's section (the run path moved it out of the instance: the
+    /// context carries exactly the sections it reads).
+    pub engine: EngineSection,
     pub reth: Rpc,
     pub anvil_m: Rpc,
     pub anvil_t: Rpc,
@@ -43,7 +46,7 @@ pub struct Ctx {
     pub beacon: BeaconClient,
     /// Engine API client (reth authrpc) for the top-up loop; None when disabled
     /// or unconfigured.
-    pub engine: Option<crate::engine_api::EngineClient>,
+    pub engine_api: Option<crate::engine_api::EngineClient>,
     pub watchlist: HashSet<Address>,
     pub shadow: Shared<Shadow>,
     pub shadow_path: PathBuf,
@@ -102,26 +105,32 @@ impl Ctx {
         clippy::similar_names,
         reason = "M/T are the domain's chain names (M = verified replay chain, T = devnet chain)"
     )]
-    pub fn new(cfg: Instance, reth_url: &str, anvil_m_url: &str, anvil_t_url: &str) -> Result<Self> {
-        let timeout = Duration::from_secs(cfg.services.engine.reth.request_timeout_secs);
+    pub fn new(
+        mut cfg: Instance,
+        reth_url: &str,
+        anvil_m_url: &str,
+        anvil_t_url: &str,
+    ) -> Result<Self> {
+        let (l1, engine_section) = cfg.take_ethereum()?;
+        let timeout = Duration::from_secs(engine_section.reth.request_timeout_secs);
         let watchlist = cfg.watch_set();
-        let shadow_path = cfg.services.engine.state_dir.join("shadow.json");
+        let shadow_path = engine_section.state_dir.join("shadow.json");
         let shadow = Shadow::load(&shadow_path)?;
         let journal = Journal::new(
-            cfg.services.engine.journal.dir.clone(),
-            cfg.services.engine.journal.blocks,
+            engine_section.journal.dir.clone(),
+            engine_section.journal.blocks,
         )?;
-        let state = StateFile::open(cfg.services.engine.state_dir.join("cursor.json"))?;
+        let state = StateFile::open(engine_section.state_dir.join("cursor.json"))?;
         let offset = state.data.time_offset_seconds.unwrap_or(0);
-        let drift = Drift::new(cfg.services.engine.state_dir.join("drift.jsonl"))?;
-        let beacon = BeaconClient::new(cfg.services.engine.blobs.beacon_urls.clone())?;
+        let drift = Drift::new(engine_section.state_dir.join("drift.jsonl"))?;
+        let beacon = BeaconClient::new(engine_section.blobs.beacon_urls.clone())?;
         let reth = Rpc::new(reth_url, timeout)?;
         let source: Arc<dyn Source> = Arc::new(crate::eth_source::EthereumSource::new(reth.clone()));
-        let engine = match (
-            &cfg.services.engine.source_sync.engine_url,
-            &cfg.services.engine.source_sync.jwt_path,
+        let engine_api = match (
+            &engine_section.source_sync.engine_url,
+            &engine_section.source_sync.jwt_path,
         ) {
-            (Some(url), Some(jwt)) if cfg.services.engine.source_sync.enabled => {
+            (Some(url), Some(jwt)) if engine_section.source_sync.enabled => {
                 // A configured boundary that cannot be built is a boot error
                 // naming itself: silently disabling it would stop the top-up
                 // loop while every dashboard still says "enabled".
@@ -130,12 +139,14 @@ impl Ctx {
             _ => None,
         };
         Ok(Self {
+            l1,
+            engine: engine_section,
             reth,
             anvil_m: Rpc::new(anvil_m_url, timeout)?,
             anvil_t: Rpc::new(anvil_t_url, timeout)?,
             source,
             beacon,
-            engine,
+            engine_api,
             watchlist,
             shadow: Shared::new("shadow registry", shadow),
             shadow_path,
@@ -160,7 +171,6 @@ impl Ctx {
             last_m_diverged: AtomicBool::new(true),
             last_stall: Shared::new("stall log", (0, 0)),
             last_rebase: Shared::new("rebase clock", None),
-            cfg,
         })
     }
 
@@ -228,7 +238,7 @@ impl Ctx {
             halted: &self.halted,
             frozen: &self.frozen,
             reapply_from: &self.reapply_from,
-            chunk_size: self.cfg.services.engine.loops.chunk_size,
+            chunk_size: self.engine.loops.chunk_size,
         }
     }
 
@@ -238,7 +248,7 @@ impl Ctx {
 
     /// reth follow head (safe/latest/finalized per config).
     pub async fn follow_head(&self) -> Result<Option<u64>> {
-        let tag = self.cfg.chains.l1.follow.tag();
+        let tag = self.l1.follow.tag();
         let block = self.reth.block_by_tag(tag, false).await?;
         Ok(block.map(|b| b.header.number))
     }
@@ -246,7 +256,7 @@ impl Ctx {
     pub fn on_divergence(&self, reason: &str) {
         self.metrics.inc(&self.metrics.divergences);
         tracing::error!(reason, "DIVERGENCE");
-        match self.cfg.services.engine.loops.on_divergence {
+        match self.engine.loops.on_divergence {
             mirror_config::OnDivergence::FreezeM => {
                 self.frozen.store(true, Ordering::SeqCst);
                 self.metrics.set(&self.metrics.frozen, 1);
@@ -262,7 +272,7 @@ impl Ctx {
     }
 
     pub fn follow_tag(&self) -> &'static str {
-        match self.cfg.chains.l1.follow {
+        match self.l1.follow {
             FollowHead::Safe => "safe",
             FollowHead::Latest => "latest",
             FollowHead::Finalized => "finalized",
@@ -290,10 +300,4 @@ impl Ctx {
         }
         Ok(())
     }
-}
-
-/// Read a block's hash (for cursor validation).
-pub async fn block_hash(rpc: &Rpc, n: u64) -> Result<Option<String>> {
-    let b = rpc.block_by_number_opt(n, false).await?;
-    Ok(b.map(|b| format!("0x{:x}", b.header.hash)))
 }

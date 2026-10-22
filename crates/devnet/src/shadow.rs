@@ -8,7 +8,7 @@
 //!
 //! Writes are discovered by watching T's own blocks (traces + tx semantics) and
 //! can be added explicitly through the admin API.
-use mirror_anvil::Write;
+use mirror_anvil::{Rpc, Write};
 use alloy_primitives::{Address, Bytes, U256};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
@@ -376,6 +376,61 @@ pub fn save_registry(shadow: &Shared<Shadow>, path: &Path, metrics: &Metrics) ->
     s.save(path)?;
     metrics.set(&metrics.shadowed_slots, s.slot_count() as u64);
     Ok(())
+}
+
+/// What a same-pin restore moved, for the caller's log and metrics.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RestoreStats {
+    pub slots: usize,
+    pub accounts: usize,
+    pub storage_accounts: usize,
+    pub account_values: usize,
+    pub restored: usize,
+    pub orphan_slots: usize,
+    pub orphan_accounts: usize,
+    pub unknown_slots: usize,
+    pub unknown_accounts: usize,
+}
+
+/// Re-apply the devnet's recorded writes to a chain that was reset at the same
+/// pin (T re-forked under the engine; V restarted at the same base).
+///
+/// Three steps, in order: prune orphaned values (keys whose marks are gone —
+/// from an older engine that kept values on unmark), re-apply the recorded
+/// values, and hand back marked keys with no recorded value (they would hold
+/// pin-era source values under a devnet mark). The caller persists the
+/// registry; a fault leaves the marks in memory, so a retry is idempotent.
+pub async fn restore_recorded(
+    target: &Rpc,
+    shadow: &Shared<Shadow>,
+    chunk_size: usize,
+) -> Result<RestoreStats> {
+    let (orphan_slots, orphan_accounts) = shadow.lock()?.prune_orphans();
+    let counts = {
+        let s = shadow.lock()?;
+        (
+            s.slot_count(),
+            s.accounts.len(),
+            s.values.len(),
+            s.account_values.len(),
+        )
+    };
+    // Clone out: the re-apply awaits, and a MutexGuard must not be held across
+    // it (the loops must stay Send).
+    let snapshot = shadow.lock()?.clone();
+    let restored = snapshot.reapply(target, chunk_size).await?;
+    let (unknown_slots, unknown_accounts) = shadow.lock()?.unrecorded();
+    Ok(RestoreStats {
+        slots: counts.0,
+        accounts: counts.1,
+        storage_accounts: counts.2,
+        account_values: counts.3,
+        restored,
+        orphan_slots,
+        orphan_accounts,
+        unknown_slots,
+        unknown_accounts,
+    })
 }
 
 #[cfg(test)]

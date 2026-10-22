@@ -1,0 +1,33 @@
+# The Venue Mirror instance (plan §19): deployment facts only.
+#
+# Values that every deployment of the venue service shares live in
+# config/defaults.toml (layered below this file); `${VAR}` references are
+# resolved from the pod's environment at load time (deploy-time wiring, §19.4).
+
+[instance]
+name = "venue-mirror"
+namespace = "venue-mirror"
+profile = "venue"
+
+[chains.venue]
+# The chain id (999) and the canonical HyperEVM addresses are code facts;
+# only the deployment's fork source is data. V (the fork-mode anvil) pins at
+# this source's `latest` - the source is archive-deep (measured: ≥5M blocks),
+# so there is no fork-offset policy and no follow machinery.
+kind = "hyperliquid"
+source_url = "${HL_RPC_URL}"
+
+[services.venue]
+state_dir = "${STATE_DIR}"
+anvil_url = "${ANVIL_V_URL}"
+# At-pin probes: V vs the fork source at the pin, devnet-owned targets
+# skipped and counted. USDC's totalSupply is the one canonical HyperEVM
+# fact worth a standing check (Circle's native USDC, the CCTP burn token -
+# §15.1; `evmContract` in spotMeta is a venue link, never this contract).
+probes = [
+  { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
+]
+
+[services.venue.http]
+addr = "0.0.0.0"
+port = 8080

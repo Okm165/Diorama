@@ -38,10 +38,10 @@ const MAINNET_GENESIS_TIME: u64 = 1_606_824_023;
 const SECONDS_PER_SLOT: u64 = 12;
 
 pub async fn source_sync_loop(ctx: Arc<Ctx>) {
-    let Some(engine) = ctx.engine.clone() else {
+    let Some(engine) = ctx.engine_api.clone() else {
         return;
     };
-    let interval = Duration::from_millis(ctx.cfg.services.engine.source_sync.interval_ms.max(250));
+    let interval = Duration::from_millis(ctx.engine.source_sync.interval_ms.max(250));
     let mut last_report = Instant::now();
     // CL head execution block, cached for a minute (one beacon call per minute).
     let mut head_cache: Option<(Instant, u64)> = None;
@@ -112,7 +112,7 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
     if slot > cl_head {
         return Ok(0);
     }
-    let budget = ctx.cfg.services.engine.source_sync.max_per_pass.max(1) as usize;
+    let budget = ctx.engine.source_sync.max_per_pass.max(1) as usize;
     let mut delivered = 0usize;
     while slot <= cl_head && delivered < budget {
         let Some(block) = ctx.beacon.block_by_slot(slot).await? else {

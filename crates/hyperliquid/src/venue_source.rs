@@ -1,0 +1,99 @@
+//! `VenueSource` — the unshadow re-sync truth for the venue profile.
+//!
+//! The ethereum profile re-syncs a handed-back key from reth at the applied
+//! cursor; the venue's truth is the fork source **at the pin**: V's base state
+//! *is* the source's state at that block.
+//!
+//! Fail-closed, because the public source cannot serve history: its `eth_call`
+//! returns the *latest* state (measured: V's fork at block N differs from the
+//! source's answer at N, while V's state IS the source's state at N — the
+//! block parameter is ignored, or the retention window is shorter than a
+//! re-pin interval). A read is therefore only exact while the source's head is
+//! still the pin; once the source has advanced, the read is *refused* with the
+//! numbers rather than silently returning a newer value (the "never hand back
+//! a poisoned value" rule). The robust path — recording each write's trace
+//! `pre` value at first touch, so the base truth lives in the registry — lands
+//! with the venue's journaling slice.
+use alloy_primitives::{Address, B256, U256};
+use mirror_anvil::{Error, Rpc};
+use mirror_devnet::source::{Fut, Source};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+pub struct VenueSource {
+    rpc: Rpc,
+    /// V's fork pin (0 = not yet resolved: the driver sets it during boot's
+    /// reconcile, before the HTTP surface serves).
+    pin: Arc<AtomicU64>,
+}
+
+impl VenueSource {
+    pub fn new(rpc: Rpc, pin: Arc<AtomicU64>) -> Self {
+        Self { rpc, pin }
+    }
+
+    /// The pin guard: every read is only exact while the source's head is
+    /// still the pin.
+    async fn guard(&self) -> Result<u64, Error> {
+        let pin = self.pin.load(Ordering::Relaxed);
+        if pin == 0 {
+            return Err(Error::Corrupt {
+                what: "venue source",
+                detail: "the fork pin is not resolved yet".into(),
+            });
+        }
+        let head = self.rpc.block_number().await?;
+        if head != pin {
+            return Err(Error::Corrupt {
+                what: "venue source",
+                detail: format!(
+                    "the source advanced past the pin (pin {pin}, head {head}); \
+                     re-pin before handing keys back — the source serves its \
+                     latest state for eth_call (measured)"
+                ),
+            });
+        }
+        Ok(pin)
+    }
+}
+
+impl Source for VenueSource {
+    /// The source's anchor: the pin. Before the pin is resolved (a boot race
+    /// the bin's ordering rules out) the source's head is the only truthful
+    /// answer left; it is never the steady-state path.
+    fn head(&self) -> Fut<'_, mirror_anvil::Result<u64>> {
+        Box::pin(async move {
+            let pin = self.pin.load(Ordering::Relaxed);
+            if pin != 0 {
+                return Ok(pin);
+            }
+            self.rpc.block_number().await
+        })
+    }
+
+    fn balance_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<U256>> {
+        Box::pin(async move {
+            self.guard().await?;
+            self.rpc.balance_at(address, block).await
+        })
+    }
+
+    fn nonce_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<u64>> {
+        Box::pin(async move {
+            self.guard().await?;
+            self.rpc.nonce_at(address, block).await
+        })
+    }
+
+    fn storage_at(
+        &self,
+        address: Address,
+        slot: U256,
+        block: u64,
+    ) -> Fut<'_, mirror_anvil::Result<B256>> {
+        Box::pin(async move {
+            self.guard().await?;
+            self.rpc.storage_at(address, slot, block).await
+        })
+    }
+}

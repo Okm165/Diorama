@@ -100,7 +100,7 @@ impl IntoResponse for Error {
 }
 
 pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
-    let addr = format!("{}:{}", ctx.cfg.services.engine.http.addr, ctx.cfg.services.engine.http.port);
+    let addr = format!("{}:{}", ctx.engine.http.addr, ctx.engine.http.port);
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/status", get(status))
@@ -231,7 +231,14 @@ async fn admin_shadow(
         if from == 0 {
             ctx.shadow_scanned_upto.store(t_head, Ordering::Relaxed);
         } else {
-            crate::scan_range(&ctx, from, t_head).await?;
+            mirror_devnet::scan::scan_range(
+                &ctx.anvil_t,
+                &ctx.shadow,
+                &ctx.shadow_scanned_upto,
+                from,
+                t_head,
+            )
+            .await?;
         }
     }
     Ok(Json(ctx.admin().shadow(&req).await?))

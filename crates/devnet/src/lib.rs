@@ -7,6 +7,7 @@ pub mod error;
 pub mod journal;
 pub mod metrics;
 pub mod probes;
+pub mod scan;
 pub mod shadow;
 pub mod shared;
 pub mod source;

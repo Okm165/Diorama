@@ -8,11 +8,34 @@ use alloy_primitives::{Address, Bytes};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// `[services]`: one section per service; the venue sections land in R3.
+/// `[services]`: one section per service; each service reads its own (§19.3).
+/// Exactly one profile's sections are present (the instance's `check` pins the
+/// coherence): the ethereum profile carries `[services.engine]`, the venue
+/// profile carries `[services.venue]`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Services {
-    pub engine: EngineSection,
+    pub engine: Option<EngineSection>,
+    pub venue: Option<VenueSection>,
+}
+
+/// `[services.venue]`: the Venue Mirror's fork driver.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VenueSection {
+    /// Devnet state root: cursors, shadow registry, journal.
+    pub state_dir: PathBuf,
+    /// The fork-mode anvil V (chain id 999).
+    pub anvil_url: String,
+    pub poll_interval_ms: u64,
+    /// Max JSON-RPC batch size for cheatcode writes (deal, restore).
+    pub chunk_size: usize,
+    /// The journal's before-value ring (the rewind window).
+    pub journal_blocks: u64,
+    pub http: HttpSection,
+    /// At-pin probes: devnet-owned targets are skipped and counted (COW means
+    /// that state is the devnet's, not the fork base's).
+    pub probes: Vec<Probe>,
 }
 
 /// `[services.engine]`: the Mainnet Mirror engine.

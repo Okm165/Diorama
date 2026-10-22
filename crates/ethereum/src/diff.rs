@@ -81,7 +81,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let applied = mirror_anvil::apply_writes(
         &ctx.anvil_t,
         &filtered,
-        ctx.cfg.services.engine.loops.chunk_size,
+        ctx.engine.loops.chunk_size,
     )
     .await?;
 
@@ -383,7 +383,9 @@ async fn align_context_and_mine(ctx: &Ctx, block: &Block) -> Result<()> {
 /// blocks included).
 async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
     let now = ctx.anvil_t.block_number().await?;
-    crate::scan_range(ctx, from, now).await
+    mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, from, now)
+        .await?;
+    Ok(())
 }
 
 /// One sampled storage-parity reading vs reth at n (drift lens). T's *height*
@@ -395,7 +397,7 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
     let sample: Vec<&Write> = filtered
         .iter()
         .filter(|w| matches!(w, Write::Storage { .. }))
-        .take(ctx.cfg.services.engine.verifier.drift_sample_keys)
+        .take(ctx.engine.verifier.drift_sample_keys)
         .collect();
     let mut sampled_ok = 0usize;
     for w in &sample {
@@ -422,7 +424,7 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
 /// devnet's, not mainnet's.
 async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     let probes = ProbeRunner::devnet(
-        &ctx.cfg.services.engine.verifier.probes,
+        &ctx.engine.verifier.probes,
         &ctx.shadow,
         ctx.time_offset.load(Ordering::Relaxed) != 0,
     )

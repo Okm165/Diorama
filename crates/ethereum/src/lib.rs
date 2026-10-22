@@ -25,7 +25,7 @@ pub use error::{Error, Result};
 use mirror_config::Instance;
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
-use crate::replay::{replay_block, reth_block_hash};
+use crate::replay::replay_block;
 use clap::{Parser, Subcommand};
 use mirror_devnet::state::ChainCursor;
 use std::path::PathBuf;
@@ -91,15 +91,22 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             timeout_secs,
         } => {
             let mut cfg = Instance::load(&config)?;
-            cfg.services.engine.reth.request_timeout_secs = timeout_secs;
+            cfg.services
+                .engine
+                .as_mut()
+                .ok_or_else(|| {
+                    Error::Config(mirror_config::ConfigError::Invalid {
+                        issues: vec!["profile \"ethereum\" requires [services.engine]".into()],
+                    })
+                })?
+                .reth
+                .request_timeout_secs = timeout_secs;
             let ok = selftest::run(cfg, rpc, anvil_m, anvil_t, beacon, blocks).await?;
             std::process::exit(if ok { 0 } else { 1 });
         }
         Cmd::Rewind { config, blocks } => {
             let cfg = Instance::load(&config)?;
-            let reth = cfg.chains.l1.source_url.clone();
-            let m = cfg.services.engine.anvil.m_url.clone();
-            let t = cfg.services.engine.anvil.t_url.clone();
+            let (reth, m, t) = cfg.ethereum_urls()?;
             let ctx = Ctx::new(cfg, &reth, &m, &t)?;
             let out = ctx.admin().rewind(blocks).await?;
             println!(
@@ -124,9 +131,7 @@ fn init_tracing() {
 
 async fn run(config: PathBuf) -> Result<()> {
     let cfg = Instance::load(&config)?;
-    let reth_url = cfg.chains.l1.source_url.clone();
-    let m_url = cfg.services.engine.anvil.m_url.clone();
-    let t_url = cfg.services.engine.anvil.t_url.clone();
+    let (reth_url, m_url, t_url) = cfg.ethereum_urls()?;
     let ctx = Arc::new(Ctx::new(cfg, &reth_url, &m_url, &t_url)?);
     ctx.restore_blob_form()?;
 
@@ -145,19 +150,19 @@ async fn run(config: PathBuf) -> Result<()> {
         anvil_t = %ctx.anvil_t.url(),
         follow = ctx.follow_tag(),
         watchlist = ctx.watchlist.len(),
-        replay_into_m = ctx.cfg.services.engine.loops.replay_into_m,
-        apply_into_t = ctx.cfg.services.engine.loops.apply_into_t,
+        replay_into_m = ctx.engine.loops.replay_into_m,
+        apply_into_t = ctx.engine.loops.apply_into_t,
         "mirror engine starting"
     );
 
     let mut tasks = Vec::new();
-    if ctx.cfg.services.engine.loops.replay_into_m {
+    if ctx.engine.loops.replay_into_m {
         tasks.push(tokio::spawn(replay_loop(ctx.clone())));
     }
-    if ctx.engine.is_some() {
+    if ctx.engine_api.is_some() {
         tasks.push(tokio::spawn(source_sync_supervisor(ctx.clone())));
     }
-    if ctx.cfg.services.engine.loops.apply_into_t {
+    if ctx.engine.loops.apply_into_t {
         tasks.push(tokio::spawn(apply_loop(ctx.clone())));
         tasks.push(tokio::spawn(shadow_loop(ctx.clone())));
     }
@@ -207,7 +212,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     // blob block with `follow: latest`, holding M each time). ~2 blocks of
     // extra lag is invisible; the metric keeps the raw head so
     // `mirror_lag_blocks` still measures the true distance.
-    let follow = follow.saturating_sub(ctx.cfg.chains.l1.follow_margin_blocks);
+    let follow = follow.saturating_sub(ctx.l1.follow_margin_blocks);
     // Metrics-only read: a reth blip must not fail the poll (the gauge reads 0
     // until reth answers again; the next pass overwrites it).
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
@@ -284,7 +289,7 @@ async fn validate_cursor(
     let Some(c) = cursor else {
         return Ok(None);
     };
-    let hash = crate::ctx::block_hash(rpc, c.block).await?;
+    let hash = mirror_devnet::scan::block_hash(rpc, c.block).await?;
     if hash.as_deref() == Some(c.hash.as_str()) {
         return Ok(Some(c));
     }
@@ -363,42 +368,26 @@ async fn handle_t_reset(ctx: &Ctx, rpc: &mirror_anvil::Rpc) -> Result<()> {
 }
 
 /// Same-pin restore: prune orphaned values, re-apply the recorded writes, and
-/// report marked-but-unrecorded keys.
+/// report marked-but-unrecorded keys (the shared implementation lives in
+/// `mirror-devnet::shadow`).
 async fn restore_shadow(ctx: &Ctx) -> Result<()> {
-    // Values whose keys are not marked are orphans from an older engine
-    // (unmark used to keep them): drop them before restoring, or the re-apply
-    // would resurrect a value the devnet handed back (measured: a crashed
-    // oracle source). The marks themselves are kept.
-    let (orphan_slots, orphan_accounts) = ctx.shadow.lock()?.prune_orphans();
-    let (slots, accounts, values, accounts_values) = {
-        let s = ctx.shadow.lock()?;
-        (
-            s.slot_count(),
-            s.accounts.len(),
-            s.values.len(),
-            s.account_values.len(),
-        )
-    };
-    // Clone out: the re-apply awaits, and a MutexGuard must not be held across
-    // it (the loop must stay Send).
-    let snapshot = ctx.shadow.lock()?.clone();
-    let restored = snapshot
-        .reapply(&ctx.anvil_t, ctx.cfg.services.engine.loops.chunk_size)
-        .await?;
-    // Marked keys with no recorded value would hold pin-era mainnet values
-    // under a devnet mark - hand them back.
-    let (unknown_slots, unknown_accounts) = ctx.shadow.lock()?.unrecorded();
+    let stats = mirror_devnet::shadow::restore_recorded(
+        &ctx.anvil_t,
+        &ctx.shadow,
+        ctx.engine.loops.chunk_size,
+    )
+    .await?;
     ctx.save_shadow()?;
     tracing::warn!(
-        slots,
-        accounts,
-        storage_accounts = values,
-        account_values = accounts_values,
-        restored,
-        orphan_slots,
-        orphan_accounts,
-        unknown_slots,
-        unknown_accounts,
+        slots = stats.slots,
+        accounts = stats.accounts,
+        storage_accounts = stats.storage_accounts,
+        account_values = stats.account_values,
+        restored = stats.restored,
+        orphan_slots = stats.orphan_slots,
+        orphan_accounts = stats.orphan_accounts,
+        unknown_slots = stats.unknown_slots,
+        unknown_accounts = stats.unknown_accounts,
         "T was reset at the same pin: re-applied the devnet's writes"
     );
     Ok(())
@@ -490,7 +479,7 @@ async fn rebase_m(ctx: &Ctx, chain: Chain, head: u64, follow: u64, forced: bool)
     }
     match ctx.anvil_m.fork_config().await {
         Ok(Some((url, _))) => {
-            let pin = follow.saturating_sub(ctx.cfg.chains.l1.fork_offset);
+            let pin = follow.saturating_sub(ctx.l1.fork_offset);
             match ctx.anvil_m.anvil_reset_fork(&url, pin).await {
                 Ok(()) => tracing::warn!(
                     head,
@@ -534,7 +523,7 @@ fn gap_within_limit(ctx: &Ctx, chain: Chain, gap: u64, rebased: bool) -> bool {
     let limit = if rebased {
         10_064
     } else {
-        ctx.cfg.services.engine.loops.max_gap_blocks
+        ctx.engine.loops.max_gap_blocks
     };
     if gap > limit {
         tracing::error!(
@@ -564,7 +553,7 @@ async fn reorg_continuity(ctx: &Ctx, chain: Chain, start: u64) -> Result<bool> {
         return Ok(true);
     };
     if start > 1 && start - 1 == last_block {
-        if let Some(prev) = reth_block_hash(&ctx.reth, start - 1).await? {
+        if let Some(prev) = mirror_devnet::scan::block_hash(&ctx.reth, start - 1).await? {
             if prev != last_hash {
                 ctx.metrics.inc(&ctx.metrics.reorgs_detected);
                 ctx.on_divergence(&format!("reth reorg at {}", start - 1));
@@ -576,7 +565,7 @@ async fn reorg_continuity(ctx: &Ctx, chain: Chain, start: u64) -> Result<bool> {
 }
 
 async fn replay_loop(ctx: Arc<Ctx>) {
-    let poll = Duration::from_millis(ctx.cfg.services.engine.loops.poll_interval_ms.max(200));
+    let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     let mut failing_block = 0u64;
     let mut attempts = 0u64;
     loop {
@@ -642,7 +631,7 @@ async fn replay_loop(ctx: Arc<Ctx>) {
 }
 
 async fn apply_loop(ctx: Arc<Ctx>) {
-    let poll = Duration::from_millis(ctx.cfg.services.engine.loops.poll_interval_ms.max(200));
+    let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     loop {
         if ctx.halted.load(Ordering::Relaxed) || ctx.frozen.load(Ordering::Relaxed) {
             tokio::time::sleep(poll).await;
@@ -709,7 +698,7 @@ async fn source_sync_supervisor(ctx: Arc<Ctx>) {
 /// Watch T's own blocks: every devnet transaction's writes become shadowed
 /// (copy-on-write) so parent diffs never overwrite them.
 async fn shadow_loop(ctx: Arc<Ctx>) {
-    let poll = Duration::from_millis(ctx.cfg.services.engine.loops.poll_interval_ms.max(200));
+    let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     loop {
         tokio::time::sleep(poll * 2).await;
         let t_head = match ctx.anvil_t.block_number().await {
@@ -724,7 +713,10 @@ async fn shadow_loop(ctx: Arc<Ctx>) {
             ctx.shadow_scanned_upto.store(t_head, Ordering::Relaxed);
             continue;
         }
-        if let Err(e) = scan_range(&ctx, last, t_head).await {
+        if let Err(e) =
+            mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, last, t_head)
+                .await
+        {
             tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block");
         }
         // A save fault is logged, not swallowed: the marks are in memory and
@@ -733,76 +725,6 @@ async fn shadow_loop(ctx: Arc<Ctx>) {
             tracing::warn!(error = %e, "shadow registry save failed");
         }
     }
-}
-
-/// Scan T's blocks in `(from, to]`, advancing the high-water mark only past
-/// blocks that scanned cleanly. A trace fault stops the walk: re-scanning is
-/// cheap (the marks are idempotent), while advancing past a failed block would
-/// lose its devnet writes silently — and the next parent diff would then
-/// overwrite the devnet's state, the exact COW failure the registry exists to
-/// prevent.
-pub(crate) async fn scan_range(ctx: &Ctx, from: u64, to: u64) -> Result<()> {
-    for n in (from + 1)..=to {
-        scan_t_block(ctx, n).await?;
-        ctx.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
-    }
-    Ok(())
-}
-
-/// Watch T's own blocks: every devnet transaction's writes become shadowed
-/// (copy-on-write) so parent diffs never overwrite them.
-pub(crate) async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
-    let block = ctx.anvil_t.block_by_number(n, true).await?;
-    let txs = ctx::block_txs(&block);
-    if txs.is_empty() {
-        return Ok(());
-    }
-    let mut shadowed = 0usize;
-    let mut trace_failures = 0usize;
-    for tx in txs {
-        use alloy_consensus::Transaction as _;
-        // A tx from an account stops its account-field sync (nonce -> balance too).
-        use alloy_network_primitives::TransactionResponse as _;
-        let from = tx.from();
-        ctx.shadow.lock()?.mark_account_fields(from);
-        shadowed += 1;
-        // Value transfers shadow the recipient's balance.
-        let value = tx.inner.value();
-        if value > alloy_primitives::U256::ZERO {
-            if let Some(to) = tx.inner.to() {
-                ctx.shadow.lock()?.mark_account_fields(to);
-            }
-        }
-        // Storage writes come from the tx trace (anvil 1.8.6 supports
-        // prestateTracer diffMode - measured).
-        match ctx.anvil_t.trace_tx_prestate(tx.tx_hash()).await {
-            Ok(trace) => {
-                for w in mirror_anvil::flatten_trace(&trace) {
-                    ctx.shadow.lock()?.mark(&w);
-                    shadowed += 1;
-                }
-            }
-            Err(e) => {
-                // A tx whose trace failed hides its writes: the block is *not*
-                // cleanly scanned and the watermark must not advance past it.
-                trace_failures += 1;
-                tracing::warn!(tx = %tx.tx_hash(), error = %e, "shadow trace failed");
-            }
-        }
-    }
-    if trace_failures > 0 {
-        return Err(Error::ShadowScan {
-            block: n,
-            failed: trace_failures,
-        });
-    }
-    tracing::info!(
-        block = n,
-        txs = txs.len(),
-        shadowed_writes = shadowed,
-        "scanned devnet block for shadow writes"
-    );
-    Ok(())
 }
 
 #[cfg(test)]

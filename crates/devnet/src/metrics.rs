@@ -2,6 +2,12 @@
 //! counters, and the engine's metric surface is deliberately small).
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// One Prometheus text block (HELP/TYPE/value). The shared shape for every
+/// registry's render (the engine's `Metrics`, the venue's `VenueMetrics`).
+pub fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, v: u64) {
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {v}\n"));
+}
+
 #[derive(Default)]
 pub struct Metrics {
     pub reth_head: AtomicU64,
@@ -63,6 +69,18 @@ impl Metrics {
 
     pub fn inc(&self, field: &AtomicU64) {
         field.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The slice of the registry the shared admin surface writes
+    /// (`shadowed_slots`, `halted`, `frozen`): the venue renders these beside
+    /// its own `venue_*` set — the ethereum engine's head/replay gauges are
+    /// not this profile's facts.
+    pub fn render_admin(&self) -> String {
+        let mut out = String::with_capacity(256);
+        push_metric(&mut out, "gauge", "mirror_shadowed_slots", "storage slots shadowed by the devnet", self.shadowed_slots.load(Ordering::Relaxed));
+        push_metric(&mut out, "gauge", "mirror_halted", "1 while the driver is halted", self.halted.load(Ordering::Relaxed));
+        push_metric(&mut out, "gauge", "mirror_frozen", "1 while the driver is frozen", self.frozen.load(Ordering::Relaxed));
+        out
     }
 
     pub fn render(&self) -> String {

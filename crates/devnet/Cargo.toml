@@ -9,6 +9,8 @@ description = "The devnet plane: shadow registry (COW), journal, state (epoch pi
 [dependencies]
 mirror-anvil = { path = "../anvil" }
 mirror-config = { path = "../config" }
+alloy-consensus = { workspace = true }
+alloy-network-primitives = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 serde = { workspace = true }

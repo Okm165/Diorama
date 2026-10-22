@@ -355,6 +355,12 @@ impl Rpc {
         Ok(quantity.to::<u64>())
     }
 
+    /// The chain's id (`eth_chainId`): the venue's boot assert reads it.
+    pub async fn chain_id(&self) -> Result<u64> {
+        let quantity: U64 = self.call("eth_chainId", NO_PARAMS).await?;
+        Ok(quantity.to::<u64>())
+    }
+
     pub async fn block_by_number(&self, n: u64, full: bool) -> Result<Block> {
         self.call_opt("eth_getBlockByNumber", (U64::from(n), full))
             .await?
@@ -441,6 +447,14 @@ impl Rpc {
 
     pub async fn storage_at(&self, addr: Address, slot: U256, block: u64) -> Result<B256> {
         self.call("eth_getStorageAt", (addr, slot, U64::from(block)))
+            .await
+    }
+
+    /// Read a storage word at the node's latest state: the block parameter
+    /// `0` names a real block on a fork (the source's genesis-era state, i.e.
+    /// empty), so "latest" must be spelled out — measured with the canary.
+    pub async fn storage_at_latest(&self, addr: Address, slot: U256) -> Result<B256> {
+        self.call("eth_getStorageAt", (addr, slot, BlockNumberOrTag::Latest))
             .await
     }
 
@@ -600,6 +614,17 @@ impl Rpc {
 
     pub async fn anvil_set_nonce(&self, addr: Address, nonce: u64) -> Result<()> {
         self.call_raw("anvil_setNonce", (addr, U64::from(nonce))).await?;
+        Ok(())
+    }
+
+    /// One storage word, silently (the venue driver's chain-instance canary;
+    /// the same measured wire rules as [`crate::apply_writes`]' storage form).
+    pub async fn anvil_set_storage_at(&self, addr: Address, slot: U256, value: B256) -> Result<()> {
+        self.call_raw(
+            "anvil_setStorageAt",
+            (addr, B256::from(slot.to_be_bytes::<32>()), value),
+        )
+        .await?;
         Ok(())
     }
 

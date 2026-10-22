@@ -66,6 +66,13 @@ pub enum Error {
 
     #[error("invalid shadow request: {reason}")]
     InvalidShadow { reason: &'static str },
+
+    /// A devnet block's shadow scan could not trace some of its txs. The scan
+    /// stops before that block (the watermark must not advance past it): its
+    /// writes would stay unmarked, and the next parent diff would overwrite
+    /// the devnet's state. The per-tx causes are logged; this names the block.
+    #[error("block {block}: shadow scan failed for {failed} tx trace(s); the block is re-scanned")]
+    ShadowScan { block: u64, failed: usize },
 }
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).

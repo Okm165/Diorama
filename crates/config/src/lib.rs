@@ -19,10 +19,12 @@ mod env;
 mod instance;
 mod sections;
 
-pub use instance::{ChainKind, ChainL1, Chains, FollowHead, Instance, InstanceMeta, Profile, WatchEntry};
+pub use instance::{
+    ChainKind, ChainL1, ChainVenue, Chains, FollowHead, Instance, InstanceMeta, Profile, WatchEntry,
+};
 pub use sections::{
     BlobsSection, EngineAnvil, EngineReth, EngineSection, HttpSection, JournalSection,
-    LoopsSection, OnDivergence, Probe, Services, SourceSyncSection, VerifierSection,
+    LoopsSection, OnDivergence, Probe, Services, SourceSyncSection, VenueSection, VerifierSection,
 };
 
 use std::path::Path;
@@ -100,6 +102,12 @@ fn load_merged(
         what: path.display().to_string(),
         source,
     })?;
+    // The defaults carry every profile's section tree (the workspace
+    // conventions of each service). A load sees only the sections its own
+    // profile owns: without this, a venue instance would inherit the
+    // ethereum engine's stub and fail deserialization on the missing fields
+    // (and vice versa).
+    prune_other_profile(&mut merged, profile_of(&over));
     merge(&mut merged, over);
     let unresolved = env::expand(&mut merged, vars);
     env::apply_overrides(&mut merged, vars)?;
@@ -108,6 +116,33 @@ fn load_merged(
         source,
     })?;
     Ok((instance, unresolved))
+}
+
+/// The profile an instance file declares, if it declares one (a missing
+/// profile is left to the deserializer, which names it).
+fn profile_of(instance_value: &toml::Value) -> Option<&str> {
+    instance_value
+        .get("instance")?
+        .get("profile")?
+        .as_str()
+}
+
+/// Drop the sections the profile does not own from the defaults layer.
+fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
+    let (chain_section, service_section) = match profile {
+        Some("ethereum") => ("venue", "venue"),
+        Some("venue") => ("l1", "engine"),
+        _ => return,
+    };
+    let Some(root) = defaults.as_table_mut() else {
+        return;
+    };
+    if let Some(chains) = root.get_mut("chains").and_then(|v| v.as_table_mut()) {
+        chains.remove(chain_section);
+    }
+    if let Some(services) = root.get_mut("services").and_then(|v| v.as_table_mut()) {
+        services.remove(service_section);
+    }
 }
 
 /// Deep merge: tables merge key by key; everything else (scalars, arrays)
@@ -193,8 +228,10 @@ port = 8080
     }
 
     fn load_str(src: &str, vars: &[(String, String)]) -> Result<(Instance, Vec<String>), ConfigError> {
-        let mut merged: toml::Value = toml::from_str(DEFAULTS).unwrap();
         let over: toml::Value = toml::from_str(src).unwrap();
+        let mut merged: toml::Value = toml::from_str(DEFAULTS).unwrap();
+        // Same pipeline as the real loader, pruning included.
+        prune_other_profile(&mut merged, profile_of(&over));
         merge(&mut merged, over);
         let unresolved = env::expand(&mut merged, vars);
         env::apply_overrides(&mut merged, vars)?;
@@ -205,17 +242,49 @@ port = 8080
         Ok((instance, unresolved))
     }
 
+    /// The ethereum sections, for the tests' direct field reads.
+    fn l1(inst: &Instance) -> &ChainL1 {
+        inst.chains.l1.as_ref().expect("[chains.l1]")
+    }
+
+    fn engine(inst: &Instance) -> &EngineSection {
+        inst.services.engine.as_ref().expect("[services.engine]")
+    }
+
+    fn minimal_venue_instance() -> &'static str {
+        r#"
+watchlist = []
+
+[instance]
+name = "v"
+namespace = "v"
+profile = "venue"
+
+[chains.venue]
+kind = "hyperliquid"
+source_url = "http://hl-rpc:8545"
+
+[services.venue]
+state_dir = "/state"
+anvil_url = "http://anvil-v:8545"
+probes = []
+
+[services.venue.http]
+port = 8080
+"#
+    }
+
     #[test]
     fn defaults_and_instance_deep_merge() {
         let (inst, unresolved) = load_str(minimal_instance(), &wiring()).unwrap();
         assert!(unresolved.is_empty());
         // From defaults.toml:
-        assert_eq!(inst.services.engine.loops.poll_interval_ms, 1000);
-        assert_eq!(inst.chains.l1.follow_margin_blocks, 2);
-        assert_eq!(inst.services.engine.journal.blocks, 1024);
+        assert_eq!(engine(&inst).loops.poll_interval_ms, 1000);
+        assert_eq!(l1(&inst).follow_margin_blocks, 2);
+        assert_eq!(engine(&inst).journal.blocks, 1024);
         // From the instance:
-        assert_eq!(inst.chains.l1.fork_offset, 128);
-        assert_eq!(inst.services.engine.http.port, 8080);
+        assert_eq!(l1(&inst).fork_offset, 128);
+        assert_eq!(engine(&inst).http.port, 8080);
     }
 
     #[test]
@@ -225,7 +294,7 @@ port = 8080
             r#"beacon_urls = ["http://a:1", "http://b:2"]"#,
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
-        assert_eq!(inst.services.engine.blobs.beacon_urls.len(), 2);
+        assert_eq!(engine(&inst).blobs.beacon_urls.len(), 2);
     }
 
     #[test]
@@ -235,10 +304,10 @@ port = 8080
         let src = minimal_instance().replace("http://reth:8545", "${RETH_URL}");
         let (inst, unresolved) = load_str(&src, &[]).unwrap();
         assert_eq!(unresolved, vec!["RETH_URL".to_string()]);
-        assert_eq!(inst.chains.l1.source_url, "${RETH_URL}", "raw ref kept");
+        assert_eq!(l1(&inst).source_url, "${RETH_URL}", "raw ref kept");
         let (inst2, unresolved2) = load_str(&src, &wiring()).unwrap();
         assert!(unresolved2.is_empty());
-        assert_eq!(inst2.chains.l1.source_url, "http://reth:8545");
+        assert_eq!(l1(&inst2).source_url, "http://reth:8545");
     }
 
     #[test]
@@ -248,7 +317,7 @@ port = 8080
             &vars(&[("MIRROR__SERVICES__ENGINE__LOOPS__POLL_INTERVAL_MS", "2000")]),
         )
         .unwrap();
-        assert_eq!(inst.services.engine.loops.poll_interval_ms, 2000);
+        assert_eq!(engine(&inst).loops.poll_interval_ms, 2000);
         let err = load_str(
             minimal_instance(),
             &vars(&[("MIRROR__SERVICES__ENGINE__LOOPS__POL_INTERVAL_MS", "2000")]),
@@ -260,10 +329,10 @@ port = 8080
     #[test]
     fn check_flags_fork_offset_bounds() {
         let (mut inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
-        inst.chains.l1.fork_offset = 32;
+        inst.chains.l1.as_mut().unwrap().fork_offset = 32;
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("fork_offset"), "{err}");
-        inst.chains.l1.fork_offset = 20_000;
+        inst.chains.l1.as_mut().unwrap().fork_offset = 20_000;
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("state window"), "{err}");
     }
@@ -271,29 +340,30 @@ port = 8080
     #[test]
     fn check_flags_secret_shaped_jwt_path_and_bad_urls() {
         let (mut inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
-        inst.services.engine.source_sync.jwt_path = Some("/secrets/jwt.hex".into());
+        let engine = inst.services.engine.as_mut().unwrap();
+        engine.source_sync.jwt_path = Some("/secrets/jwt.hex".into());
         inst.check().unwrap();
-        inst.services.engine.source_sync.jwt_path =
-            Some(format!("0x{}", "ab".repeat(32)).into());
+        let engine = inst.services.engine.as_mut().unwrap();
+        engine.source_sync.jwt_path = Some(format!("0x{}", "ab".repeat(32)).into());
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("jwt_path"), "{err}");
-        inst.services.engine.source_sync.jwt_path = Some("/secrets/jwt.hex".into());
-        inst.services.engine.anvil.m_url = "anvil-m:8545".into();
+        let engine = inst.services.engine.as_mut().unwrap();
+        engine.source_sync.jwt_path = Some("/secrets/jwt.hex".into());
+        engine.anvil.m_url = "anvil-m:8545".into();
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("m_url"), "{err}");
     }
 
     #[test]
-    fn the_real_mainnet_mirror_instance_loads_and_checks() {
-        let path = std::path::Path::new(concat!(
+    fn the_real_mainnet_mirror_instance_loads_and_checks() {        let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/instances/mainnet-mirror.toml"
         ));
         let (inst, unresolved) = Instance::inspect(path).unwrap();
         assert_eq!(inst.instance.name, "mainnet-mirror");
         assert_eq!(inst.watchlist.len(), 48, "the audited watchlist is complete");
-        assert_eq!(inst.chains.l1.fork_offset, 128);
-        assert_eq!(inst.services.engine.verifier.probes.len(), 11);
+        assert_eq!(l1(&inst).fork_offset, 128);
+        assert_eq!(engine(&inst).verifier.probes.len(), 11);
         let mut names = unresolved.clone();
         names.sort();
         assert_eq!(
@@ -307,6 +377,71 @@ port = 8080
     }
 
     #[test]
+    fn the_venue_instance_loads_checks_and_takes_its_sections() {
+        let (mut inst, unresolved) = load_str(minimal_venue_instance(), &[]).unwrap();
+        assert!(unresolved.is_empty());
+        // From defaults.toml (the venue service's shared conventions):
+        assert_eq!(
+            inst.services.venue.as_ref().unwrap().poll_interval_ms,
+            1000
+        );
+        assert_eq!(inst.services.venue.as_ref().unwrap().chunk_size, 500);
+        // The ethereum engine's stub was pruned before the merge: no
+        // [services.engine] on a venue load.
+        assert!(inst.services.engine.is_none());
+        assert!(inst.chains.l1.is_none());
+        inst.check().unwrap();
+        let (chain, venue) = inst.take_venue().unwrap();
+        assert_eq!(chain.source_url, "http://hl-rpc:8545");
+        assert_eq!(venue.anvil_url, "http://anvil-v:8545");
+        // And the sections are gone after the take (moved, not copied).
+        assert!(inst.take_venue().is_err());
+    }
+
+    #[test]
+    fn profile_coherence_is_enforced() {
+        // A venue instance carrying ethereum sections:
+        let src = format!(
+            "{}\n[chains.l1]\nkind = \"ethereum\"\nsource_url = \"http://reth:8545\"\nfollow = \"latest\"\nfollow_margin_blocks = 2\nfork_offset = 128\n",
+            minimal_venue_instance()
+        );
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("must not carry [chains.l1]"), "{err}");
+
+        // An ethereum instance carrying venue sections:
+        let src = format!(
+            "{}\n[chains.venue]\nkind = \"hyperliquid\"\nsource_url = \"http://hl-rpc:8545\"\n",
+            minimal_instance()
+        );
+        let (inst, _) = load_str(&src, &wiring()).unwrap();
+        let err = inst.check().unwrap_err();
+        assert!(
+            format!("{err}").contains("must not carry [chains.venue]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_venue_instance_file_loads() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/instances/venue-mirror.toml"
+        ));
+        let (inst, unresolved) = Instance::inspect(path).unwrap();
+        assert_eq!(inst.instance.name, "venue-mirror");
+        assert_eq!(inst.instance.profile, Profile::Venue);
+        assert_eq!(inst.chains.venue.as_ref().unwrap().kind, ChainKind::Hyperliquid);
+        let mut names = unresolved.clone();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["ANVIL_V_URL", "HL_RPC_URL", "STATE_DIR"],
+            "the wiring the venue instance references"
+        );
+    }
+
+    #[test]
     fn design_assertions() {
         // Public types stay Send + Sync + Sized + Unpin (Rust-for-Rustaceans).
         fn is_normal<T: Send + Sync + Sized + Unpin>() {}
@@ -314,7 +449,9 @@ port = 8080
         is_normal::<InstanceMeta>();
         is_normal::<Chains>();
         is_normal::<ChainL1>();
+        is_normal::<ChainVenue>();
         is_normal::<EngineSection>();
+        is_normal::<VenueSection>();
         is_normal::<LoopsSection>();
         is_normal::<VerifierSection>();
         is_normal::<SourceSyncSection>();

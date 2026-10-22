@@ -7,8 +7,7 @@ use crate::blob::{
     available_forms, encode_blob_tx, repair_proofs, select_sidecars, BlobForm, SidecarItem,
 };
 use crate::ctx::{block_txs, cursor_from, Ctx};
-use crate::error::{BlobError, Error, Result};
-use crate::rpc::Rpc;
+use crate::error::{BlobError, Error, Result};use crate::rpc::Rpc;
 use crate::verify::{verify_block, Verification};
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxEip4844Variant};
 use alloy_eips::eip2718::Encodable2718;
@@ -101,10 +100,10 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
 /// applying it makes M exact again; the per-block verification still measures
 /// what execution got right.
 async fn repair_m_state(ctx: &Ctx, n: u64) -> Result<()> {
-    let repair = ctx.cfg.services.engine.loops.repair_m
+    let repair = ctx.engine.loops.repair_m
         && ctx.last_m_diverged.load(std::sync::atomic::Ordering::Relaxed);
     if !repair {
-        if ctx.cfg.services.engine.loops.repair_m {
+        if ctx.engine.loops.repair_m {
             tracing::debug!(block = n, "previous M block verified clean; no repair needed");
         }
         return Ok(());
@@ -114,7 +113,7 @@ async fn repair_m_state(ctx: &Ctx, n: u64) -> Result<()> {
         let applied = mirror_anvil::apply_writes(
             &ctx.anvil_m,
             &writes,
-            ctx.cfg.services.engine.loops.chunk_size,
+            ctx.engine.loops.chunk_size,
         )
         .await?;
         ctx.metrics.add(&ctx.metrics.m_repair_writes, applied as u64);
@@ -137,7 +136,7 @@ async fn repair_m_state(ctx: &Ctx, n: u64) -> Result<()> {
 /// replay's own product, which is exactly what this measures).
 async fn convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     let probes =
-        mirror_devnet::probes::ProbeRunner::replay(&ctx.cfg.services.engine.verifier.probes)
+        mirror_devnet::probes::ProbeRunner::replay(&ctx.engine.verifier.probes)
             .parity(&ctx.reth, n - 1, &ctx.anvil_m)
             .await?;
     ctx.metrics.add(&ctx.metrics.m_convergence_ok, probes.ok as u64);
@@ -168,7 +167,7 @@ async fn credit_withdrawals(
         .map(|address| Call::new("eth_getBalance", (*address, U64::from(n - 1))))
         .collect::<mirror_anvil::Result<_>>()?;
     let mut pre_balances: Vec<U256> = Vec::with_capacity(reads.len());
-    for chunk in reads.chunks(ctx.cfg.services.engine.loops.chunk_size) {
+    for chunk in reads.chunks(ctx.engine.loops.chunk_size) {
         for result in ctx.reth.batch(chunk).await? {
             let value = result.map_err(|payload| Error::PreBalance {
                 block: n,
@@ -183,7 +182,7 @@ async fn credit_withdrawals(
     for ((address, amount), pre) in credits.iter().zip(pre_balances) {
         calls.push(Call::new("anvil_setBalance", (*address, pre + *amount))?);
     }
-    for chunk in calls.chunks(ctx.cfg.services.engine.loops.chunk_size) {
+    for chunk in calls.chunks(ctx.engine.loops.chunk_size) {
         for result in ctx.anvil_m.batch(chunk).await? {
             if let Err(payload) = result {
                 tracing::warn!(error = %payload, "withdrawal credit failed");
@@ -204,7 +203,7 @@ async fn finish_replay(
 ) -> Result<ReplayOutcome> {
     // Full txs: the verifier checks tx order (hashes in position).
     let m_block = ctx.anvil_m.block_by_number(n, true).await?;
-    let verification = if ctx.cfg.services.engine.verifier.enabled {
+    let verification = if ctx.engine.verifier.enabled {
         let v = verify_block(ctx, n, &block, &m_block).await?;
         if v.receipts_unverified {
             ctx.metrics.inc(&ctx.metrics.receipts_unverified);
@@ -306,7 +305,7 @@ async fn blob_sidecar_sources(
     n: u64,
     has_blobs: bool,
 ) -> Result<Vec<(String, Vec<SidecarItem>)>> {
-    if !has_blobs || !ctx.cfg.services.engine.blobs.enabled || !ctx.beacon.enabled() {
+    if !has_blobs || !ctx.engine.blobs.enabled || !ctx.beacon.enabled() {
         return Ok(Vec::new());
     }
     let Some(next) = ctx.reth.block_by_number_opt(n + 1, false).await? else {
@@ -787,7 +786,7 @@ fn log_and_drift(
             } else {
                 ctx.metrics.add(&ctx.metrics.value_divergences, 1);
             }
-            if ctx.cfg.services.engine.loops.on_divergence == mirror_config::OnDivergence::Continue {
+            if ctx.engine.loops.on_divergence == mirror_config::OnDivergence::Continue {
                 tracing::warn!(
                     block = n,
                     structural,
@@ -810,12 +809,4 @@ fn log_and_drift(
         tracing::warn!(block = n, ms = outcome.duration_ms, "slow replay (>10 s)");
     }
     Ok(())
-}
-
-/// Fetch a reth block for the loop's continuity check (used by the driver).
-pub async fn reth_block_hash(rpc: &Rpc, n: u64) -> Result<Option<String>> {
-    Ok(rpc
-        .block_by_number_opt(n, false)
-        .await?
-        .map(|b| format!("0x{:x}", b.header.hash)))
 }

@@ -17,7 +17,12 @@ pub async fn run(
     blocks: u64,
 ) -> Result<bool> {
     if let Some(b) = beacon {
-        cfg.services.engine.blobs.beacon_urls = vec![b];
+        let engine = cfg.services.engine.as_mut().ok_or_else(|| Error::Config(
+            mirror_config::ConfigError::Invalid {
+                issues: vec!["profile \"ethereum\" requires [services.engine]".into()],
+            },
+        ))?;
+        engine.blobs.beacon_urls = vec![b];
     }
     let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_m, &anvil_t)?);
     ctx.restore_blob_form()?;
