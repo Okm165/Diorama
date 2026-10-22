@@ -92,8 +92,7 @@ impl Relayer {
     pub async fn gas_alerts(&self) -> Result<()> {
         for chain in &self.chains {
             let balance = chain.native_balance(self.sender.address()).await?;
-            self.metrics
-                .set_balance(chain.name, balance.saturating_to::<u64>());
+            self.metrics.set_balance(chain.name, balance);
             if balance < self.balance_critical {
                 self.metrics.gas_critical.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(

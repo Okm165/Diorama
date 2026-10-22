@@ -4,6 +4,7 @@
 //! key's gas (the alerts daloc's relay also carries: 0.1 ETH low / 0.01 ETH
 //! critical by default).
 use crate::store::Counts;
+use alloy_primitives::U256;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -26,19 +27,21 @@ pub struct CctpMetrics {
     pub gas_critical: AtomicU64,
     /// The last head the watcher scanned (a coarse liveness gauge).
     pub last_scan_block: AtomicU64,
-    /// The relay key's native balance per chain (wei).
-    balances: Mutex<Vec<(String, u64)>>,
+    /// The relay key's native balance per chain (wei, full-width: a devnet
+    /// balance can exceed `u64`, so the gauge carries the decimal string).
+    balances: Mutex<Vec<(String, String)>>,
 }
 
 impl CctpMetrics {
-    pub fn set_balance(&self, chain: &str, wei: u64) {
+    pub fn set_balance(&self, chain: &str, wei: U256) {
+        let rendered = wei.to_string();
         let mut balances = self
             .balances
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match balances.iter_mut().find(|(name, _)| name == chain) {
-            Some((_, value)) => *value = wei,
-            None => balances.push((chain.to_string(), wei)),
+            Some((_, value)) => *value = rendered,
+            None => balances.push((chain.to_string(), rendered)),
         }
     }
 
@@ -102,11 +105,15 @@ mod tests {
     fn render_names_every_counter_and_labels_balances() {
         let metrics = CctpMetrics::default();
         metrics.messages_seen.fetch_add(3, Ordering::Relaxed);
-        metrics.set_balance("ethereum", 42);
-        metrics.set_balance("hyper_evm", 7);
+        // 10,000 ETH exceeds u64: the gauge must carry the full decimal.
+        metrics.set_balance("ethereum", U256::from(10_000) * U256::from(10).pow(U256::from(18)));
+        metrics.set_balance("hyper_evm", U256::from(7));
         let rendered = metrics.render();
         assert!(rendered.contains("cctp_messages_seen_total 3"), "{rendered}");
-        assert!(rendered.contains("cctp_relay_balance_wei{chain=\"ethereum\"} 42"), "{rendered}");
+        assert!(
+            rendered.contains("cctp_relay_balance_wei{chain=\"ethereum\"} 10000000000000000000000"),
+            "{rendered}"
+        );
         assert!(rendered.contains("cctp_relay_balance_wei{chain=\"hyper_evm\"} 7"), "{rendered}");
         let mut counts = String::new();
         render_counts(&mut counts, &Counts { pending: 1, signed: 2, relayed: 3, parked: 4 });
