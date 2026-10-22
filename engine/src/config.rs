@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 /// is what keeps the mirror self-contained: no EL P2P peers are required to
 /// close a gap after a checkpoint sync or an EL restart.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceSyncConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -45,6 +46,7 @@ impl Default for SourceSyncConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub reth: RethConfig,
     pub anvil: AnvilConfig,
@@ -96,6 +98,7 @@ impl Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RethConfig {
     pub url: String,
     #[serde(default)]
@@ -135,6 +138,7 @@ impl FollowHead {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnvilConfig {
     pub m_url: String,
     pub t_url: String,
@@ -142,6 +146,7 @@ pub struct AnvilConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct LoopsConfig {
     pub poll_interval_ms: u64,
     pub max_gap_blocks: u64,
@@ -208,6 +213,7 @@ pub enum OnDivergence {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct VerifierConfig {
     pub enabled: bool,
     pub drift_sample_keys: usize,
@@ -227,6 +233,7 @@ impl Default for VerifierConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Probe {
     pub name: String,
     pub to: Address,
@@ -234,6 +241,7 @@ pub struct Probe {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WatchEntry {
     pub address: Address,
     #[serde(default)]
@@ -243,6 +251,7 @@ pub struct WatchEntry {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct JournalConfig {
     pub dir: PathBuf,
     pub blocks: u64,
@@ -259,6 +268,7 @@ impl Default for JournalConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct BlobsConfig {
     pub enabled: bool,
     /// Beacon-API base URLs, tried in order (local Lighthouse first).
@@ -276,6 +286,7 @@ impl Default for BlobsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     pub addr: String,
     pub port: u16,

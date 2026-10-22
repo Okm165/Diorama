@@ -4,27 +4,31 @@
 
 | Component | Image / build | Role | Measured footprint |
 |---|---|---|---|
-| `reth` | `ghcr.io/paradigmxyz/reth:v2.8.0` | Source of truth: head state, blocks, receipts, EIP-7928 BALs, `debug` traces | ~300 GB disk, ~2.6 GB RAM (idle) |
-| `lighthouse` | `docker.io/sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator), serves payloads + blob sidecars to the engine | ~100 GB disk (18-day column custody), 2.4-5 GB RAM (16Gi limit) |
-| `anvil-m` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Mirror chain (M): replays every parent tx, then re-converges from the BAL | ~15-25 MB per replayed block (24Gi limit) |
+| `reth` | `ghcr.io/paradigmxyz/reth:v2.8.0` | Source of truth: head state, blocks, receipts, EIP-7928 BALs, `debug` traces | ~300 GB disk, ~2.6 GB RAM idle / ~5.5 GB while following and serving |
+| `lighthouse` | `docker.io/sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator), serves payloads + blob sidecars to the engine | ~160 GB disk and growing to ~200 GB (18-day column custody), ~5-7.5 GB RAM while backfilling (16Gi limit) |
+| `anvil-m` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Mirror chain (M): replays every parent tx, then re-converges from the BAL | ~15-25 MB per replayed block; OOMs into a fresh pin every ~2.5-4 h by design (24Gi limit) |
 | `anvil-t` | same | Devnet chain (T): watch-list state + your writes, never replays parent txs | ~2.5 GB after thousands of applied blocks (16Gi limit) |
 | `engine` | `localhost/mirror-engine:v1` (this repo) | Replay loop, verifier, BAL diff applier, convergence repair, journal, admin API | ~100 MB RAM |
 
 ## Data flow
 
 ```
-                 eth_getBlockByNumber(N, full)                eth_getBlockReceipts(N)
-reth  ──────────────────────────────────────►  replay loop ─────────────────────────► verify vs M
-  │                                                 │
-  │  eth_getBlockAccessList(N)                      │  send raws in order (sequential), anvil_mine(1)
-  │  (fallback: debug_traceBlockByNumber prestate)  │
-  ├──────────────────────────────────────────►  M convergence repair (BAL N-1, before replay)
-  │                                                 │
-  │  eth_getBlockAccessList(N)                      ▼
-  └──────────────────────────────────────────►  diff applier ──► T (batched cheatcodes, mine 1)
-                                                    │  watch list → skip shadowed → pad → write
-                                                    │  align timestamp/baseFee/coinbase/prevrandao
-                                                    └─ drift.jsonl + journal/<block>.jsonl
+   reth                           ENGINE                       anvil M / T
+   │                              │                                 │
+   │ ① block(N): txs, env,        │                                 │
+   │    withdrawals               │                                 │
+   ├─────────────────────────────►│ replay loop                     │
+   │ ② receipts · logs · traces   │                                 │
+   ├─────────────────────────────►│ verifier: counts · gas ·        │
+   │                              │  logsBloom · log set · probes   │
+   │                              │ ③ send raws in order → mine     │
+   │                              ├────────────────────────────────►│ M
+   │ ④ BAL(N) for the watch list  │                                 │
+   ├─────────────────────────────►│ diff applier                    │
+   │                              │ ⑤ pad → write ≤500 → mine(1)    │
+   │                              ├────────────────────────────────►│ T
+   │                              │ ⑥ sampled parity + T probes     │
+   │                              │ ⑦ journal + drift.jsonl         │
 ```
 
 Per replayed block on M the engine does, in order:
@@ -59,6 +63,18 @@ diffs and mines the parent's block. Two reasons, both measured:
    the estimate and the execution, the tx executes against a different state and
    can run out of gas (measured: an Aave `borrow` estimated at 257,560 used
    271,389 - reverted at 97% of its limit, succeeded with an explicit 1M limit).
+   The prepend therefore loops (at most 3 rounds): a tx that arrives *while* the
+   diffs are being written still gets its own block and still executes against
+   the state its gas was estimated on.
+
+After the parent's block is mined, the applier runs the plan's T-side invariant
+("probe parity on T after context alignment"): the same probe set against
+T@latest vs reth at the applied parent block. Probes whose target the devnet
+owns are skipped (copy-on-write: that state is the devnet's, not mainnet's) and
+the check is suspended while a `/admin/time` offset is set (views are then
+*meant* to differ). The applier scans its own devnet blocks (the prepend) before
+the probes run, so a write made in this very apply is already marked and cannot
+fire a spurious alarm. The alarm is `mirror_t_convergence_failures_total`.
 
 T's head therefore drifts ahead of the parent cursor by the number of devnet
 blocks (measured: ~70 after a session of drills); that is normal. The cursor stays keyed to the parent height, and the
@@ -387,8 +403,9 @@ survives the pause - reth buffers the CL's payloads and the top-up resumes.
 Progress and sizes: `make backfill`.
 
 Pruning removes everything older than the DA boundary - the mirror only ever
-needs the pin window (~1.4 days), so this is safe. It leaves ~50 GB of columns
-plus the blocks. The alternative trade-off is dropping `--semi-supernode`:
+needs the replay window (10,064 blocks ≈ 1.4 days, bounded by reth's state
+window; the pin itself is only 128 blocks), so this is safe. It leaves ~50 GB of
+columns plus the blocks. The alternative trade-off is dropping `--semi-supernode`:
 ~650 GB less disk, but the mirror loses blob-tx fidelity on M (blob blocks are
 mined without their blob txs and recorded; state stays exact via the BAL).
 
@@ -446,6 +463,9 @@ crates.io resolves AAAA first. Build bases are pinned the same way
 
 ## Engine configuration (`k8s/base/engine-config.yaml`)
 
+Parsing is strict: an unknown key is a startup error, never a silently ignored
+setting (`deny_unknown_fields` on every config struct).
+
 ```yaml
 reth:   { url, follow: safe|latest|finalized, request_timeout_secs }
 anvil:  { m_url, t_url }
@@ -480,7 +500,7 @@ repair): USDC/WETH totalSupply, Chainlink WETH/USD `latestRoundData`, UniV3
 `slot0`, aEthUSDC totalSupply, Aave `getReserveNormalizedIncome(USDC)` (the
 time-dependence proof – it only matches when the block context is aligned).
 
-## The Tenderly-compatible surface (plan §4.4, mapped)
+## The admin surface (plan §4.4, mapped)
 
 Most of the plan's admin surface is *stock Anvil* - the engine adds only what
 Anvil cannot do. This is the mapping, so nothing is ambiguous:
@@ -489,11 +509,11 @@ Anvil cannot do. This is the mapping, so nothing is ambiguous:
 |---|---|---|
 | Network customization | anvil: `evm_increaseTime`, `evm_setNextBlockTimestamp`, `evm_mine`/`anvil_mine` | a devnet override is deliberate and is re-aligned by the next parent block |
 | Send | anvil: `eth_sendTransaction` (impersonate first - `anvil_impersonateAccount`, auto-impersonate alone answers "No Signer available"), `eth_createAccessList` | unsigned sends are the devnet's normal path |
-| Unlimited faucet | anvil: `anvil_setBalance`/`anvil_addBalance`; **engine: `POST /admin/deal`** (= `tenderly_setErc20Balance`) | the engine's deal discovers the balance slot with `eth_call` + a `stateDiff` override probe (sentinel value, slots 0..16), writes it silently and marks it devnet-owned. Anvil's own `anvil_dealERC20` cannot do this on a forked, no-mining chain ("no slot found", measured). `addErc20Balance`'s synthetic `Transfer` log has no equivalent - use a real transfer |
-| Storage / code | anvil: `anvil_setStorageAt`, `anvil_setCode`; engine: `POST /admin/shadow` hands keys back to mainnet sync | |
-| Snapshots | anvil: `evm_snapshot`/`evm_revert`; engine: `POST /admin/rewind` = the plan's `tenderly_revertSync` (rolls T back per parent block through the journal) | |
+| Unlimited faucet | anvil: `anvil_setBalance`/`anvil_addBalance`; **engine: `POST /admin/deal`** (= the plan's §4.4 ERC-20 faucet) | the engine's deal discovers the balance slot with `eth_call` + a `stateDiff` override probe (sentinel value, slots 0..16), writes it silently and marks it devnet-owned. Anvil's own `anvil_dealERC20` cannot do this on a forked, no-mining chain ("no slot found", measured). The plan's synthetic `Transfer` log has no equivalent - use a real transfer |
+| Storage / code | anvil: `anvil_setStorageAt`, `anvil_setCode`; engine: `POST /admin/shadow` hands keys back to mainnet sync (immediate: reth's values at the cursor are pushed to T; the engine scans T up to its head first so a just-mined devnet write cannot re-mark the key) | |
+| Snapshots | anvil: `evm_snapshot`/`evm_revert`; engine: `POST /admin/rewind` = the plan's §4.4 sync-revert control (rolls T back per parent block through the journal) | |
 | Time travel | engine: `POST /admin/time` (persistent clock offset, survives parent blocks) *and* anvil's `evm_increaseTime` (which the next alignment would overwrite - use the offset) | the capability a margin product needs; a static fork's `evm_increaseTime` alone is not enough on a live mirror |
-| Mirror sync control | engine: `POST /admin/pause` = `tenderly_stopSync`, `POST /admin/resume` = `tenderly_startSync`, `GET /status` = `tenderly_getSyncStatus` (`frozen`/`halted` = active, `lag`, `cursor`/`cursor_t` = latestSyncedBlock, `follow_head` = parentLatestBlock) | `tenderly_syncNext` has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
+| Mirror sync control | engine: `POST /admin/pause` = the plan's §4.4 stop-sync, `POST /admin/resume` = start-sync, `GET /status` = sync status (`frozen`/`halted` = active, `lag`, `cursor`/`cursor_t` = latest synced block, `follow_head` = parent latest block, `time_offset_seconds` = the `/admin/time` offset) | the plan's sync-next has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
 
 The Solidity precompile (M6) and the bridge relay (M7) are future deliverables -
 the engine's equivalent today is the HTTP surface above plus the cheatcodes.

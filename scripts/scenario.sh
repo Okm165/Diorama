@@ -4,7 +4,7 @@
 #
 # Phases
 #   1. self-containment   reth has no peers, the top-up gap is 0, blobs are local
-#   2. live parity        heads agree; the 6 state probes match reth on M *and* T
+#   2. live parity        heads agree; the 8 state probes match reth on M *and* T
 #   3. devnet workflow    fund, send, shadow, rewind, snapshot/revert on T
 #   4. integrity counters no divergences / convergence failures / blob failures
 #
@@ -296,12 +296,23 @@ if [ -n "$ORACLE_OWNER" ] && [ -n "$TRUE_SOURCE" ]; then
   # devnet-owned forever - the poisoned-source bug this suite hit).
   $ENGINE curl -sf -m 25 -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
     -d "{\"address\":\"$ORACLE\",\"slots\":[],\"account_fields\":false,\"clear\":true,\"all\":true}" >/dev/null 2>&1
-  sleep 4
-  set_source_done=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $USDC $RPC_T 2>/dev/null | tr -d '\r')
-  [ "$set_source_done" = "$TRUE_SOURCE" ] && info "cascade: source restored via unshadow ($set_source_done)" \
-    || info "cascade: source restore pending ($set_source_done vs $TRUE_SOURCE)"
+  # The unshadow re-syncs from reth immediately (deterministic), and the engine
+  # scans T up to the head before clearing, so a just-mined crash cannot be
+  # re-marked after the fact. Poll briefly anyway; a pending restore is a real
+  # substrate failure and must surface here, not as a confusing borrow revert.
+  set_source_done=""
+  for _ in $(seq 1 8); do
+    sleep 2
+    set_source_done=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $USDC $RPC_T 2>/dev/null | tr -d '\r')
+    [ "$set_source_done" = "$TRUE_SOURCE" ] && break
+  done
+  if [ "$set_source_done" = "$TRUE_SOURCE" ]; then
+    ok "cascade: source restored via unshadow ($set_source_done)"
+  else
+    bad "cascade: source NOT restored after unshadow ($set_source_done vs $TRUE_SOURCE)"
+  fi
   if [ -n "$after" ] && [ "$after" != "$before" ]; then
-    ok "cascade lever: oracle admin impersonated, USDC price crashed ($before -> $after) and restored"
+    ok "cascade lever: oracle admin impersonated, USDC price crashed ($before -> $after)"
   else
     bad "cascade lever: USDC price did not move ($before -> $after; src=$now_src want=$WETH_USD tx=${CASCADE_TX:0:20})"
   fi
@@ -337,6 +348,13 @@ SUPPLY_TX=$(send_tx "$MKT" "$POOL" "$($ANVIL_T cast calldata "supply(address,uin
 [ -z "$SUPPLY_TX" ] && MKT_ERR="supply not accepted"
 # wait for supply to land before borrowing (the engine mines one block per parent)
 [ -n "$SUPPLY_TX" ] && [ "$(wait_tx "$SUPPLY_TX" 40)" = "pending" ] && MKT_ERR="supply not mined"
+# Heal-on-entry: the borrow validates LTV against the USDC price, so it must be
+# mainnet's (a leftover manipulation would silently turn it into an LTV revert).
+at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
+price_t=$($ANVIL_T cast call $ORACLE "getAssetPrice(address)(uint256)" $USDC $RPC_T 2>/dev/null | tr -d '\r')
+price_r=$($ANVIL_T cast call $ORACLE "getAssetPrice(address)(uint256)" $USDC $RPC_R --block "$at" 2>/dev/null | tr -d '\r')
+[ -n "$price_t" ] && [ "$price_t" = "$price_r" ] && ok "market: USDC price is mainnet's before the borrow ($price_t)" \
+  || bad "market: USDC price diverges from mainnet before the borrow (t=$price_t r@cursor=$price_r)"
 BORROW_TX=$(send_tx "$MKT" "$POOL" "$($ANVIL_T cast calldata "borrow(address,uint256,uint256,uint16,address)" $USDC 100000000 2 0 $MKT 2>/dev/null | tr -d '\r')")
 case "$BORROW_TX" in 0x*) : ;; *) MKT_ERR="${MKT_ERR:+$MKT_ERR; }borrow rejected: ${BORROW_TX:0:60}" ;; esac
 # aToken balances accrue interest through the liquidity index and the position
@@ -367,6 +385,18 @@ done
 # Hand WETH's mapping back to mainnet sync (same reason as the cascade).
 $ENGINE curl -sf -m 25 -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
   -d "{\"address\":\"$ORACLE\",\"slots\":[],\"account_fields\":false,\"clear\":true,\"all\":true}" >/dev/null 2>&1
+# ... and assert it really came back (the restore is deterministic; a pending
+# one would poison the next run's borrow through the same LTV path).
+at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
+weth_src_t=""
+weth_src_r=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $WETH $RPC_R --block "$at" 2>/dev/null | tr -d '\r')
+for _ in $(seq 1 8); do
+  sleep 2
+  weth_src_t=$($ANVIL_T cast call $ORACLE "getSourceOfAsset(address)(address)" $WETH $RPC_T 2>/dev/null | tr -d '\r')
+  [ "$weth_src_t" = "$weth_src_r" ] && break
+done
+[ -n "$weth_src_t" ] && [ "$weth_src_t" = "$weth_src_r" ] && ok "market: WETH source restored via unshadow ($weth_src_t)" \
+  || bad "market: WETH source NOT restored ($weth_src_t vs $weth_src_r)"
 if [ -n "$hf_after" ] && [ "$hf_after" -lt 1000000000000000000 ] 2>/dev/null; then
   ok "market: the crash made the position liquidatable (HF $hf_before -> $hf_after)"
 else

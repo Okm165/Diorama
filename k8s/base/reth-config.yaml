@@ -2,8 +2,8 @@
 #
 # Retention profile (everything the mirror needs, nothing more):
 #   - state window 10,064 blocks  = reth's minimum unwind-safe distance; also the
-#     window the Anvil pin (-2,000) lives in (state reads at the pin, eth_call,
-#     debug_traceBlockByNumber for the BAL fallback).
+#     window the Anvil pin (reth head - FORK_OFFSET, 128 blocks) lives in (state
+#     reads at the pin, eth_call, debug_traceBlockByNumber for the BAL fallback).
 #   - receipts/bodies 20,000 blocks = verifier slack + replayable catch-up backlog
 #     after an engine restart.
 #   - senders + tx-lookup fully pruned (the mirror never serves historical lookups).

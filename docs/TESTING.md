@@ -7,7 +7,7 @@ Three layers, each runnable on demand:
 | Unit | `make test-engine` (cargo test) | nothing | pure logic: BAL flattening, padding, COW granularity, journal, cursor/rebase rules, KZG proof repair, Engine API request encoding |
 | Self test | `make selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (replay + verify + diff apply + sampled parity) |
 | Smoke | `make smoke` | the deployed stack | service health + parity spot check on M's head vs reth |
-| Scenario | `make scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 6 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
+| Scenario | `make scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 8 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
 
 ## Unit tests (`engine/src/**`)
 
@@ -147,11 +147,11 @@ behavioral). The default policy (`on_divergence: continue`) records all of them;
 | `cast index` is offline | it ignores/silently mishandles `--rpc-url`; a slot computed with one comes back empty and the storage read looks like "no value" instead of a wrong slot |
 | The tx pool keeps a devnet tx that the engine cannot mine | when the applier bails (T's head behind the cursor after an out-of-band `anvil_reset`), pending txs starve while the probes stay green - watch `mirror_t_head` vs `cursor_t`, not just the probes |
 
-## Capability proof: `scripts/tenderly-core.sh`
+## Capability proof: `scripts/capability-proof.sh`
 
 `scripts/scenario.sh` proves the *substrate* (replay fidelity, COW, drills).
-`scripts/tenderly-core.sh` proves the *product*: the three things a fork must do,
-measured end-to-end against the live stack and left clean afterwards.
+`scripts/capability-proof.sh` proves the *product*: the three things a fork must
+do, measured end-to-end against the live stack and left clean afterwards.
 
 | Section | Checks |
 |---|---|
@@ -160,13 +160,13 @@ measured end-to-end against the live stack and left clean afterwards.
 | C. live markets | real Aave pool: `approve` → `supply` (aToken delta) → `borrow` (debt + HF from `getUserAccountData`) → `repay` → `withdraw`; real Uniswap V3 `SwapRouter02.exactInputSingle` on the WETH/USDC 0.05% pool (USDC delta) |
 | C2. the financial core | crash WETH's oracle source through the pool owner (the governance path), watch `getUserAccountData` cross below `1e18`, then have a **fresh liquidator funded through `/admin/deal`** call the real `liquidationCall`: debt seized (`5.000004 → 0`), collateral taken with the liquidation bonus, oracle restored via unshadow |
 | C3. time travel | a fresh position, then `POST /admin/time` +30 days: the clock is 30 days ahead *and still following mainnet*, the USDC income index advanced by a month of interest, and the borrow's debt grew with it |
-| D2. event bridge | WS `eth_subscribe` is accepted (returns an id) and `eth_getLogs` returns the transfer. **Measured limitation**: anvil does not *push* notifications for engine-mined blocks (verified with automine on and off), so dapps must poll `eth_getLogs` - the fallback every client implements |
+| D2. event bridge | WS `eth_subscribe` **delivers WETH `Transfer` logs live for engine-mined blocks** (subscriber connected, address filter applied, log delivered in the next prepend block); `eth_getLogs` returns the same log. Two measured traps: anvil serves WS on its HTTP port (no `--ws` flag exists) and `cast` block-buffers stdout when redirected - without `stdbuf -oL` a working subscription looks dead |
 | D. debug surface | `debug_traceTransaction` (callTracer) on the supply; receipt logs; `eth_call` with a `stateDiff` override |
 | E. reset | `POST /admin/shadow {clear:true, all:true}` per touched venue, then assert the Uniswap `slot0` is back to reth's value at the cursor |
 
-Every send is simulated with `eth_call` first (Tenderly's own workflow), so a
-revert prints its reason before any transaction is spent. Measured runtime:
-~10 min; last full run: 30 passed, 0 failed.
+Every send is simulated with `eth_call` first (the standard simulate-then-send
+workflow), so a revert prints its reason before any transaction is spent.
+Measured runtime: ~10 min; last full run: 30 passed, 0 failed.
 
 ## Plan axioms → how they are covered
 
@@ -182,12 +182,12 @@ revert prints its reason before any transaction is spent. Measured runtime:
 | A8 | mining is state-fetch-bound | `mirror_last_replay_seconds`; the local reth keeps it ~2 s/block even cold (remote measured 55-256 s) |
 | A9 | type-4 gas deviation bound | `verify.rs` receipts check |
 | A10 | replayed blocks expose real logs | log-set + logsBloom checks |
-| A11 | `deal` writes storage silently | scenario: a WETH deal sets the balance with **no** Transfer log; USDC's packed `balanceAndBlacklistStates` layout is refused ("no slot found", measured) |
+| A11 | `deal` writes storage silently | scenario: a WETH deal sets the balance with **no** Transfer log; the same probe finds USDC's packed `balanceAndBlacklistStates` slot (the sentinel stays below 2^255 so packed reads return it unmasked) |
 | A12 | exactly one M block per parent block | scenario head parity (`m_head == follow_head`) + `anvil_mine(1)` |
 | A13 | local writes never touch M | the COW/shadow section runs on T; M's probes and the drift gate are asserted after it |
-| A14 | warm restart preserves state | anvil `--state` removed (it dumped per-block history: 13 GB/dump, leaked tmp dirs, filled T's PVC); the engine rebases instead - M re-replays FORK_OFFSET blocks (~1-2 min, measured). For T a restart *is* a re-fork: the devnet's writes are gone and the engine clears their shadow marks so mainnet's diffs resume (re-apply your writes) |
+| A14 | warm restart preserves state | anvil `--state` removed (it dumped per-block history: 13 GB/dump, leaked tmp dirs, filled T's PVC); the engine rebases instead - M re-replays FORK_OFFSET blocks (~1-2 min, measured). T's chain is re-forked too, but the devnet's writes are *restored* from the shadow registry (marks + latest values); only transaction history is lost |
 | A15 | memory bounded by restart | measured ~20 MB per replayed block steady state; M recycles at its 24Gi limit (~2.5-4 h) and recovers in ~1-2 min |
-| A16 | upstream reorgs detected | parent-hash continuity check → freeze + drill |
+| A16 | upstream reorgs detected | parent-hash continuity check (M loop only); the engine records it and re-bases M behind the follow head - self-healing in ~1-2 min. With `on_divergence: freeze_m` it freezes for inspection instead |
 | A17 | mirror block hashes differ | inherent (verified: anvil exposes no blockhash/beacon-root setter); recorded as behavioral, state re-converged from the parent BAL. Measured rate: ~45% of blocks carry a value-level divergence (the blockhash-gated MEV/Seaport class), 0 structural in steady state, and `mirror_m_convergence_failures_total` stays 0 - the state is exact even when the execution diverges |
 | A18 | delivery is event-driven | consumers subscribe to anvil M/T WS (`eth_subscribe`) |
 | A19 | scoped manipulation leaves replay intact | scenario: a shadowed slot survives further parent diffs; unshadow re-syncs from reth; M's probes stay green |

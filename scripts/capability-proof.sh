@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Tenderly-core capability proof: the three things a fork must do.
+# Capability proof: the three things a fork must do.
 #   A. live fork     - T tracks live mainnet blocks, watched state matches reth
 #   B. mint funds    - ETH, WETH (slot 3), USDC (packed slot 9) via cheatcodes
 #   C. live markets  - Aave supply/borrow/repay/withdraw, Uniswap V3 swap,
 #                      Chainlink price, debug traces, state overrides
 # Ends by resetting the venues it touched back to mainnet truth (unshadow).
-# Usage: NS=mainnet-mirror ./scripts/tenderly-core.sh
+# Usage: NS=mainnet-mirror ./scripts/capability-proof.sh
 set -uo pipefail
 
 NS=${NS:-mainnet-mirror}
@@ -42,7 +42,7 @@ wait_tx() { # wait_tx <hash> [tries] -> status
   done
   echo pending
 }
-sim() { # sim <from> <to> <calldata> -> "ok" or the revert reason (Tenderly UX)
+sim() { # sim <from> <to> <calldata> -> "ok" or the revert reason (simulate-then-send)
   rpc http://anvil-t:8545 eth_call "[{\"from\":\"$1\",\"to\":\"$2\",\"data\":\"$3\"},\"latest\"]" \
     | jq -r '.error.message // "ok"'
 }
@@ -77,7 +77,7 @@ UNIV3=0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640
 # The address only has to be stable *within* a run.
 MKT=0x$(printf '%040x' $(( ( $(date +%s) % 100000000 ) * 100000 + 1 )))
 
-echo "== Tenderly-core proof (namespace $NS)"
+echo "== capability proof (namespace $NS)"
 # T's state is "as of" the applied parent cursor; reth's head is ahead. Every
 # parity read must compare T@latest against reth@cursor_t (measured: comparing
 # against reth@latest reports the ~50-block safe-head lag as a false mismatch).
@@ -202,21 +202,27 @@ rpc http://anvil-t:8545 anvil_setBalance "[\"$EV\",\"0x21e19e0c9bab2400000\"]" >
 rpc http://anvil-t:8545 anvil_impersonateAccount "[\"$EV\"]" >/dev/null
 fund=$($ENGINE curl -sf -m 25 -X POST localhost:8080/admin/deal -H 'Content-Type: application/json' \
   -d "{\"token\":\"$WETH\",\"to\":\"$EV\",\"amount\":\"1000000000000000\"}" | jq -r '.ok')
-$ANVIL_T sh -c 'rm -f /tmp/ws.log; nohup timeout 40 cast logs --subscribe --rpc-url ws://localhost:8546 --address 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 --from-block latest > /tmp/ws.log 2>&1 &' >/dev/null 2>&1
+# anvil serves WS on its HTTP port (there is no --ws flag), and cast
+# block-buffers stdout when redirected to a file - without stdbuf -oL a
+# perfectly working subscription looks dead (this masked delivery for a while).
+$ANVIL_T sh -c 'rm -f /tmp/ws.log; nohup stdbuf -oL timeout 40 cast logs --subscribe --rpc-url ws://localhost:8545 --address 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 > /tmp/ws.log 2>&1 &' >/dev/null 2>&1
 sleep 4
 h=$(send_ok "$EV" "$WETH" "$(castoff calldata 'transfer(address,uint256)' 0x000000000000000000000000000000000000dEaD 1)") \
   && info "event-bridge transfer: $h" || bad "event-bridge transfer failed"
-# What is verifiable end-to-end: the WS endpoint accepts eth_subscribe (it
-# returns a subscription id), and the log the subscription filters for is
-# retrievable through the standard polling path every dapp falls back to.
-sub=$($ANVIL_T sh -c 'timeout 10 cast rpc eth_subscribe logs --rpc-url ws://localhost:8545 2>&1 | head -1' 2>/dev/null | tr -d '\r' | tr -d '"')
-case "$sub" in 0x*) ok "WS endpoint accepts eth_subscribe (id ${sub:0:18}…)\
-  · note: anvil does not push notifications for engine-mined blocks (measured with automine on and off); dapps must poll eth_getLogs, which works";;
-  *) bad "eth_subscribe over WS failed: ${sub:-no response}";;
-esac
+# The subscription must deliver the log *while still connected* - that is the
+# path a liquidation bot or a position monitor takes.
+got=0
+for _ in $(seq 1 12); do
+  sleep 2
+  got=$($ANVIL_T sh -c 'grep -c 0xddf252ad /tmp/ws.log 2>/dev/null || true' 2>/dev/null | tr -d '\r')
+  [ "${got:-0}" -gt 0 ] 2>/dev/null && break
+done
+[ "${got:-0}" -gt 0 ] 2>/dev/null \
+  && ok "WS eth_subscribe delivered the Transfer log live ($got line(s), engine-mined block)" \
+  || bad "no log delivered over WS (subscription, filter or buffering failed)"
 if [ -n "$h" ]; then
   got=$(rpc http://anvil-t:8545 eth_getLogs "[{\"address\":\"$WETH\",\"fromBlock\":\"0x$(printf %x $(( $(num "$(rpc http://anvil-t:8545 eth_blockNumber | jq -r .result)") - 20 )))\",\"toBlock\":\"latest\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\"]}]" | jq -r '.result | length')
-  [ "${got:-0}" -gt 0 ] 2>/dev/null && ok "eth_getLogs returns the Transfer (the polling path dapps use): $got log(s)" \
+  [ "${got:-0}" -gt 0 ] 2>/dev/null && ok "eth_getLogs returns the same Transfer (the polling fallback): $got log(s)" \
     || bad "eth_getLogs returned no logs for the transfer"
 fi
 
@@ -264,7 +270,7 @@ grew=$(awk -v a="$debt_before_ts" -v b="$debt_after_ts" 'BEGIN { print (b > a) ?
 $ENGINE curl -sf -m 20 -X POST localhost:8080/admin/time -H 'Content-Type: application/json' -d '{"offset_seconds":0}' >/dev/null 2>&1
 info "clock offset reset to 0 (timestamps are monotonic: the clock converges, it does not jump back)"
 
-echo "-- D. Tenderly-class debug surface"
+echo "-- D. debug surface"
 if [ -n "$SUPPLY" ]; then
   frames=$(rpc http://anvil-t:8545 debug_traceTransaction "[\"$SUPPLY\",{\"tracer\":\"callTracer\"}]" | jq -r '.result.calls | length' 2>/dev/null)
   [ "$(num "$frames")" -gt 0 ] && ok "debug_traceTransaction(callTracer): $frames call frames on the supply" \

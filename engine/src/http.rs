@@ -1,6 +1,6 @@
 //! Engine HTTP API: health, status, Prometheus metrics, and the small admin
-//! surface (rewind / resume / shadow marking) - the Tenderly-style controls
-//! that belong to the mirror itself rather than to Anvil.
+//! surface (rewind / resume / shadow marking) - the fork controls that belong
+//! to the mirror itself rather than to Anvil.
 use crate::ctx::Ctx;
 use alloy_primitives::{Address, U256, Bytes};
 use axum::{
@@ -77,6 +77,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Json<serde_json::Value> {
         "shadowed_accounts": shadow.accounts.len(),
         "shadowed": shadowed,
         "blob_form": ctx.blob_form().map(|f| f.as_str()),
+        "time_offset_seconds": ctx.time_offset.load(Ordering::Relaxed),
     }))
 }
 
@@ -152,7 +153,7 @@ async fn admin_resume(State(ctx): State<Arc<Ctx>>) -> Json<serde_json::Value> {
     Json(json!({"resumed": true}))
 }
 
-/// `POST /admin/pause` - plan §4.4 `tenderly_stopSync`: hold both loops where
+/// `POST /admin/pause` - the plan's §4.4 stop-sync control: hold both loops where
 /// they are. Devnet writes, cheatcodes and reads keep working; nothing new is
 /// applied until `/admin/resume`. Useful for a long manipulation you do not
 /// want a parent block to land in the middle of.
@@ -211,6 +212,30 @@ async fn admin_shadow(
 ) -> Json<serde_json::Value> {
     let mut resynced = 0usize;
     if req.clear {
+        // The shadow scanner is a ~2 s poll: a devnet write mined moments ago
+        // may not be marked yet. Clearing before it is marked would let the
+        // scanner re-mark the key *with the devnet's value* right after this
+        // re-sync - the "poisoned source" race (measured: an oracle crash tx
+        // mined <2 s before the unshadow, re-marked with the crashed source,
+        // and the borrow that followed reverted on the crashed price). Force
+        // the scan up to the current head first, so the registry reflects every
+        // mined write and `all` really collects them all.
+        let t_head = ctx.anvil_t.block_number().await.unwrap_or(0);
+        let from = ctx
+            .shadow_scanned_upto
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if from == 0 {
+            ctx.shadow_scanned_upto
+                .store(t_head, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            for b in (from + 1)..=t_head {
+                if let Err(e) = crate::scan_t_block(&ctx, b).await {
+                    tracing::warn!(block = b, error = %e, "pre-unshadow scan failed");
+                }
+                ctx.shadow_scanned_upto
+                    .fetch_max(b, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         // `all` hands every shadowed key of the account back to mainnet sync.
         let mut slots = req.slots.clone();
         if req.all {
@@ -300,8 +325,8 @@ async fn admin_shadow(
     }))
 }
 
-/// `POST /admin/deal` - the unlimited ERC20 faucet (plan §4.4:
-/// `tenderly_setErc20Balance`). Anvil's own `anvil_dealERC20` cannot discover
+/// `POST /admin/deal` - the unlimited ERC20 faucet (plan §4.4).
+/// Anvil's own `anvil_dealERC20` cannot discover
 /// balance slots on a forked, no-mining chain ("no slot found", measured): its
 /// probe writes never reach a mined state. This one discovers the slot with
 /// `eth_call` + a `stateDiff` override - no mining involved - then writes it

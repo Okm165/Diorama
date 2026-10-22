@@ -234,6 +234,21 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     ctx.journal.record(n, &entries)?;
     ctx.journal.prune(n);
 
+    // 6b. scan this apply's own devnet blocks *before* asserting parity: the
+    //     prepend loop may have mined devnet txs whose writes are not marked
+    //     shadowed yet (the shadow loop polls every ~2 s), and the probe parity
+    //     must skip devnet-owned accounts (copy-on-write) instead of alarming on
+    //     the devnet's own writes. Measured: spurious aave_weth_price /
+    //     univ3_weth_usdc_slot0 mismatches right after a venue interaction.
+    let t_head_now = ctx.anvil_t.block_number().await?;
+    for b in (t_head + 1)..=t_head_now {
+        if let Err(e) = crate::scan_t_block(ctx, b).await {
+            tracing::warn!(block = b, error = %e, "inline shadow scan failed");
+        }
+        ctx.shadow_scanned_upto
+            .fetch_max(b, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // 7. sampled storage parity vs reth at n (drift lens). T's *height* drifts
     //    ahead of the parent height (devnet prepend blocks), so compare T's
     //    latest block against reth at n - reading T by height compared
@@ -261,6 +276,14 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
             }
         }
     }
+
+    // 7b. probe parity for T (the plan's invariant: "probe parity on T after
+    //     context alignment"). Devnet-owned targets are skipped - their state
+    //     is the devnet's, not mainnet's.
+    let (t_ok, t_failed) = crate::verify::t_probe_parity(ctx, n).await;
+    ctx.metrics.add(&ctx.metrics.t_convergence_ok, t_ok as u64);
+    ctx.metrics.add(&ctx.metrics.t_convergence_failed, t_failed as u64);
+    ctx.metrics.set(&ctx.metrics.t_convergence_last_failed, t_failed as u64);
 
     // 8. cursor + metrics + drift.
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;

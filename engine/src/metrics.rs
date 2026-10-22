@@ -21,6 +21,9 @@ pub struct Metrics {
     pub m_convergence_ok: AtomicU64,
     pub m_convergence_failed: AtomicU64,
     pub m_convergence_last_failed: AtomicU64,
+    pub t_convergence_ok: AtomicU64,
+    pub t_convergence_failed: AtomicU64,
+    pub t_convergence_last_failed: AtomicU64,
     pub bal_filtered_out: AtomicU64,
     pub bal_skipped_shadowed: AtomicU64,
     pub shadowed_slots: AtomicU64,
@@ -96,13 +99,16 @@ impl Metrics {
         counter(&mut out, "mirror_divergences_total", "fatal verification divergences", self.divergences.load(Ordering::Relaxed));
         counter(&mut out, "mirror_value_divergences_total", "value-level divergences (blockhash-dependent; not fatal)", self.value_divergences.load(Ordering::Relaxed));
         counter(&mut out, "mirror_reorgs_detected_total", "upstream reorgs detected", self.reorgs_detected.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_bal_writes_total", "watch-list writes applied to T", self.bal_writes.load(Ordering::Relaxed));
+        gauge(&mut out, "mirror_bal_writes_last_block", "watch-list writes applied to T in the last applied parent block", self.bal_writes.load(Ordering::Relaxed));
         counter(&mut out, "mirror_m_repair_writes_total", "BAL writes applied to converge M", self.m_repair_writes.load(Ordering::Relaxed));
         counter(&mut out, "mirror_m_convergence_ok_total", "post-repair probes matching mainnet", self.m_convergence_ok.load(Ordering::Relaxed));
         counter(&mut out, "mirror_m_convergence_failures_total", "post-repair probes diverging (repair incomplete)", self.m_convergence_failed.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_m_convergence_last_failed", "post-repair probes diverging in the last block", self.m_convergence_last_failed.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_bal_filtered_out_total", "BAL writes filtered out (not watched)", self.bal_filtered_out.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_bal_skipped_shadowed_total", "BAL writes skipped (shadowed by devnet)", self.bal_skipped_shadowed.load(Ordering::Relaxed));
+        counter(&mut out, "mirror_t_convergence_ok_total", "devnet probes matching mainnet at the applied parent block", self.t_convergence_ok.load(Ordering::Relaxed));
+        counter(&mut out, "mirror_t_convergence_failures_total", "devnet probes diverging from mainnet (devnet-owned accounts skipped)", self.t_convergence_failed.load(Ordering::Relaxed));
+        gauge(&mut out, "mirror_t_convergence_last_failed", "devnet probes that diverged in the last applied block", self.t_convergence_last_failed.load(Ordering::Relaxed));
+        gauge(&mut out, "mirror_bal_filtered_out_last_block", "BAL writes in the last parent block filtered out (not watched)", self.bal_filtered_out.load(Ordering::Relaxed));
+        gauge(&mut out, "mirror_bal_skipped_shadowed_last_block", "BAL writes in the last parent block skipped (shadowed by devnet)", self.bal_skipped_shadowed.load(Ordering::Relaxed));
         counter(&mut out, "mirror_blob_failures_total", "blocks with blob sidecar/replay failures", self.blob_failures.load(Ordering::Relaxed));
         counter(&mut out, "mirror_receipts_unverified_total", "blocks replayed without receipts verification", self.receipts_unverified.load(Ordering::Relaxed));
         out

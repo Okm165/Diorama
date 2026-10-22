@@ -60,6 +60,11 @@ pub struct Ctx {
     /// fork gets from `evm_increaseTime` but a live one would lose on the next
     /// parent block.
     pub time_offset: AtomicU64,
+    /// Highest T block whose devnet writes have been scanned into the shadow
+    /// registry. Shared by the polling shadow loop and the applier's inline
+    /// scan (which runs its own prepend blocks *before* the probe parity), so
+    /// a block is traced once and the log stays one line per devnet block.
+    pub shadow_scanned_upto: AtomicU64,
     /// Set by the replay loop when the same block has failed long enough that
     /// the cause cannot be transient (measured: Lighthouse prunes blob sidecars
     /// after ~1 epoch, so a hold longer than that can never be served and M
@@ -117,6 +122,7 @@ impl Ctx {
             blob_warned: std::sync::atomic::AtomicU64::new(0),
             force_rebase: AtomicBool::new(false),
             time_offset: AtomicU64::new(0),
+            shadow_scanned_upto: AtomicU64::new(0),
             last_m_diverged: AtomicBool::new(true),
             last_stall: Mutex::new((0, 0)),
             last_rebase: Mutex::new(None),

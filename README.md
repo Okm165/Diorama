@@ -10,14 +10,25 @@ A local Ethereum mainnet **fork source** (`reth` + `Lighthouse`) drives a
 
 Consumers connect to **T** (or **M** for the pristine reference) over HTTP/WS.
 The engine verifies M against reth on every block, records everything in
-`drift.jsonl`, and exposes Prometheus metrics plus a Tenderly-style admin API.
+`drift.jsonl`, and exposes Prometheus metrics plus an admin API (fork controls:
+rewind, pause/resume, clock offset, faucet, shadow marking).
 The one accepted limitation is storage proofs (fork blocks report
 `stateRoot = 0x0`).
 
 ```
-reth + Lighthouse ──► ENGINE ──► anvil-m (replay + verify + BAL convergence)
-  blocks/receipts       │ replay   anvil-t (watch-list BAL diffs + your writes)
-  BAL(N) / traces       └ verify   drift.jsonl · journal · /status /metrics
+   ┌─────────────────────┐        ┌──────────────────────────────────────┐
+   │  reth + Lighthouse  │        │  ENGINE                              │
+   │  local fork source  │───────►│  replay → M  ·  BAL diffs → T        │
+   │  blocks · BAL(N)    │        │  verify · shadow registry · journal  │
+   └─────────────────────┘        │  API: /status · /metrics · /admin/*  │
+                                  └──────┬──────────────┬────────────────┘
+                                         │ 1:1 replay   │ watch-list
+                                         │ + verify     │ BAL diffs (COW)
+                                         ▼              ▼
+                                  ┌───────────┐  ┌───────────┐
+                                  │  anvil M  │  │  anvil T  │ ◄── your dapp
+                                  │   strict  │  │   devnet  │     (HTTP / WS)
+                                  └───────────┘  └───────────┘
 ```
 
 ## Quickstart
@@ -65,6 +76,8 @@ kubectl -n mainnet-mirror exec deploy/engine -- curl -s localhost:8080/status | 
 kubectl -n mainnet-mirror exec deploy/engine -- curl -s localhost:8080/metrics
 curl -X POST .../admin/rewind -d '{"blocks":5}'      # journal-based rewind of applied parent blocks
 curl -X POST .../admin/shadow -d '{"address":"0x..","slots":["0x1"],"account_fields":true}'
+curl -X POST .../admin/time -d '{"offset_seconds":2592000}'  # devnet clock 30 days ahead, persistent
+curl -X POST .../admin/deal -d '{"token":"0x..","to":"0x..","amount":"1000000"}'  # ERC-20 faucet
 curl -X POST .../admin/resume                        # clear a freeze (freeze_m/halt_all runs only)
 ```
 
@@ -82,12 +95,14 @@ engine/                 Rust engine (replay + verifier + BAL diff applier + conv
 k8s/base/               kustomize base: reth, lighthouse, anvil-m/t, engine
 k8s/overlays/local/     single-node k3s overlay (engine image tag)
 k8s/bootstrap/          one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
-scripts/                gen-secret.sh, smoke.sh
+scripts/                gen-secret.sh, smoke.sh, scenario.sh, capability-proof.sh
 docs/                   ARCHITECTURE.md, OPERATIONS.md, TESTING.md
 ```
 
 ## Docs
 
+- **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — the short technical
+  explainer: architecture, pipelines, information flow, algorithms.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — components, data flow, the
   measured lean profile, design decisions (convergence repair, divergence
   policy, EIP-7702 nonce gaps, COW, journal), config reference, source liveness.

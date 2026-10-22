@@ -47,8 +47,8 @@ data:
     loops:
       poll_interval_ms: 1000
       # Replay/apply is always contiguous from the chain's own head: on first
-      # start that is the pin + 1, so the whole pin window (~2000 blocks) is
-      # replayed as the warm-up; restarts resume at cursor + 1.
+      # start that is the pin + 1, so the whole pin window (FORK_OFFSET, 128
+      # blocks) is replayed as the warm-up; restarts resume at cursor + 1.
       # Refuse to catch up when the follow head is further than this ahead of
       # the cursor: the plan's ops rule ("> 300 -> pause and re-sync"). A
       # *rebased* cursor (a fresh pin after a restart or a T re-fork) is exempt

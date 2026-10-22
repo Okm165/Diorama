@@ -596,31 +596,33 @@ async fn source_sync_supervisor(ctx: Arc<Ctx>) {
 /// Watch T's own blocks: every devnet transaction's writes become shadowed
 /// (copy-on-write) so parent diffs never overwrite them.
 async fn shadow_loop(ctx: Arc<Ctx>) {    let poll = Duration::from_millis(ctx.cfg.loops.poll_interval_ms.max(200));
-    let mut last: Option<u64> = None;
     loop {
         tokio::time::sleep(poll * 2).await;
         let t_head = match ctx.anvil_t.block_number().await {
             Ok(h) => h,
             Err(_) => continue,
         };
-        let from = match last {
-            Some(l) => l + 1,
-            None => {
-                last = Some(t_head);
-                continue;
-            }
-        };
-        for n in from..=t_head {
+        let last = ctx.shadow_scanned_upto.load(Ordering::Relaxed);
+        if last == 0 {
+            // First pass: do not scan pre-existing history (the registry was
+            // persisted); start from the current head. The applier's inline
+            // scan shares this high-water mark, so its blocks are not re-traced.
+            ctx.shadow_scanned_upto.store(t_head, Ordering::Relaxed);
+            continue;
+        }
+        for n in (last + 1)..=t_head {
             if let Err(e) = scan_t_block(&ctx, n).await {
                 tracing::warn!(block = n, error = %e, "shadow scan failed");
             }
+            ctx.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
         }
-        last = Some(t_head);
         let _ = ctx.save_shadow();
     }
 }
 
-async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
+/// Watch T's own blocks: every devnet transaction's writes become shadowed
+/// (copy-on-write) so parent diffs never overwrite them.
+pub(crate) async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
     let block = ctx.anvil_t.block_by_number(n, true).await?;
     let txs = ctx::block_txs(&block);
     if txs.is_empty() {

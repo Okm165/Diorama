@@ -128,8 +128,8 @@ smoke: ## End-to-end smoke test
 scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
 	NS=$(NS) ./scripts/scenario.sh
 
-proof: ## Tenderly-core proof: live fork, mint funds, real Aave/Uniswap interaction
-	NS=$(NS) ./scripts/tenderly-core.sh
+proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
+	NS=$(NS) ./scripts/capability-proof.sh
 
 selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
 	kubectl -n $(NS) delete job engine-selftest --ignore-not-found
