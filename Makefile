@@ -4,7 +4,7 @@ NS             := mainnet-mirror
 ENGINE_IMAGE   := localhost/mirror-engine
 # Single source of truth: the tag in the manifest we deploy.
 ENGINE_TAG     := $(shell grep -o 'mirror-engine:[^@ ]*' k8s/base/engine.yaml | cut -d: -f2)
-OVERLAY        := k8s/overlays/local
+OVERLAY        := k8s/overlays/mainnet-mirror
 BOOTSTRAP      := k8s/bootstrap
 KUBECTL        := kubectl -n $(NS)
 
@@ -19,7 +19,7 @@ ns: ## Create namespace + StorageClass (idempotent)
 secrets: ## Create the reth<->lighthouse JWT secret if missing
 	NS=$(NS) ./scripts/gen-secret.sh
 
-apply: ## Apply the full mirror stack (kustomize build k8s/overlays/local)
+apply: ## Apply the full mirror stack (kustomize build k8s/overlays/mainnet-mirror)
 	kubectl apply -k $(OVERLAY)
 
 diff: ## Show what `make apply` would change
@@ -93,8 +93,8 @@ images: ## Pull + import the pinned third-party images into k3s containerd
 
 ##@ Engine
 
-build: ## Build the engine image with podman
-	cd engine && podman build -t $(ENGINE_IMAGE):$(ENGINE_TAG) .
+build: ## Build the engine image with podman (Dockerfile at the workspace root)
+	podman build -f Dockerfile --build-arg BIN=mirror-engine -t $(ENGINE_IMAGE):$(ENGINE_TAG) .
 
 import: build ## Import the engine image into the k3s containerd store
 	podman save -o /tmp/mirror-engine.tar $(ENGINE_IMAGE):$(ENGINE_TAG)
@@ -105,8 +105,8 @@ deploy-engine: import ## Rebuild + redeploy the engine
 	$(KUBECTL) rollout restart deploy/engine
 	$(KUBECTL) rollout status deploy/engine --timeout=120s
 
-test-engine: ## Run engine unit tests on the host (cargo)
-	cd engine && PATH="$$HOME/.cargo/bin:$$PATH" cargo test
+test-engine: ## Run workspace unit tests on the host (cargo)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
 ##@ Ops
 
