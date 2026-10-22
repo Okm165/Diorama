@@ -45,8 +45,11 @@ impl ApiState {
             sim,
             api,
             engine_admin,
+            // The engine's re-pin forks from a public RPC: the reset itself
+            // can take a while, so the admin call gets a wider window than a
+            // plain read would.
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(45))
                 .build()?,
             bridge,
             started_ms: crate::now_ms(),

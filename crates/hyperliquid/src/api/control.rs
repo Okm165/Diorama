@@ -363,14 +363,17 @@ pub struct EpochNewResponse {
 /// `/admin/epoch` (the driver's canary then runs the epoch rule). Refuses
 /// when `engine_admin_url` is not configured — a reset that silently left V
 /// on the old base would be the worst kind of success.
+///
+/// The engine call goes first: if the re-pin fails, nothing has changed yet
+/// (a 502 means "retry the whole thing"), and a retry after a success is
+/// idempotent on both sides (reset blanks an already-blank scenario; the
+/// engine re-pins to the then-current latest).
 pub async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json<EpochNewResponse>> {
     let Some(base) = &state.engine_admin else {
         return Err(Error::NotConfigured {
             what: "services.sim.engine_admin_url (needed to re-pin V)",
         });
     };
-    let epoch = state.sim.reset()?;
-    state.feed.clear_overrides()?;
     let url = format!("{}/admin/epoch", base.trim_end_matches('/'));
     let resp = state.http.post(&url).send().await?;
     let status = resp.status();
@@ -381,6 +384,8 @@ pub async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json<EpochN
             body: text,
         });
     }
+    let epoch = state.sim.reset()?;
+    state.feed.clear_overrides()?;
     #[derive(Deserialize)]
     struct EngineEpoch {
         reset: bool,
