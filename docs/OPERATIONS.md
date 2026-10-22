@@ -31,12 +31,26 @@ Anvil memory is a *state* cost, not a leak:
 
 | Chain | Growth | Steady state | Notes |
 |---|---|---|---|
-| `anvil-t` | ~1 MB per applied block | ~2.5 GB | watch-list writes only (~90-500 per block) |
-| `anvil-m` | ~15-25 MB per replayed block | grows until the limit | full tx replay: fork cache + 16 state snapshots + 350 MB dump |
+| `anvil-t` | ~1 MB per applied block | ~1.7 GB | watch-list writes only (~90-500 per block) |
+| `anvil-m` | ~20 MB per replayed block (measured steady state) | recycles at the 24Gi limit | full tx replay: the fork read cache + 2 state snapshots |
 
-`anvil-m` hitting its 24Gi limit is normal over long replays: k8s restarts it,
-it reloads its dump, the engine sees the backward head jump and rebases
-("cursor not found on chain (reset or re-pin) - rebasing"), then the per-block
+**M's recycle cycle is normal, and now cheap.** A full-replay fork materializes
+mainnet's working set in RAM (~20 MB/block steady state, more during a cold
+catch-up), so `anvil-m` reaches its 24Gi limit every ~2.5-4 h and k8s restarts
+it. Because **M re-resolves its fork pin on every start** (`anvil-m.yaml`), the
+post-restart re-replay is bounded by `FORK_OFFSET` (~64 blocks, ~1-2 min)
+instead of the whole epoch - with a stale pin the replay OOMs before it can
+catch up (measured death spiral: lag grew 458 -> 546 and never closed).
+**T's pin is deliberately not refreshed**: the epoch (and with it the devnet's
+shadow set) is keyed on T's fork block in the engine, so M moving its base
+never clears devnet writes.
+
+**The anvil state dump is disabled on both chains.** `--state`/`--state-interval`
+writes per-block historical state: a T dump grew to 13 GB and never completed,
+leaving orphaned `~/.foundry/anvil/tmp/anvil-state-*` dirs that filled the 40Gi
+PVC (measured: 3 dirs, 41 GB). State is rebuilt instead - M re-replays ~64
+blocks, T re-applies its parent diffs from its own pin. If tmp dirs ever
+reappear: `kubectl -n mainnet-mirror exec deploy/anvil-t -- rm -rf /state/.foundry/anvil/tmp/*`.
 repair re-converges state. `mirror_m_convergence_failures_total` may tick up
 right after such a restart until stale slots are touched again.
 

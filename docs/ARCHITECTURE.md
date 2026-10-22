@@ -44,6 +44,19 @@ Per replayed block on M the engine does, in order:
    receipt checks already record - measured on a `BLOCKHASH`-gated MEV bot.)
 6. Drift entry (`drift.jsonl`) + cursor + metrics.
 
+### Fork pins (M refreshes, T persists)
+
+M's fork pin is **re-resolved on every start** (`reth head - FORK_OFFSET`,
+64 by default): a full-replay fork is recycled by k8s when it reaches its
+memory limit (~2.5-4 h at the measured ~20 MB/replayed block), and a fresh pin
+keeps the post-restart re-replay at ~64 blocks (~1-2 min) instead of the whole
+epoch - a stale pin makes the replay OOM before it can catch up (measured).
+T's pin is **persistent**: the engine keys the epoch - and therefore the
+devnet's shadow set, i.e. "which keys belong to the devnet" - on T's fork
+block, so refreshing it would silently wipe devnet writes. Keep T's pin inside
+reth's 10,064-block state window (`mirror_pin_age_blocks` alarms at ~8000;
+re-pin with `make repin`, which is a new epoch for the devnet).
+
 ## The lean profile (measured, not guessed)
 
 **Snapshot** (`reth download --minimal`): 154 GB download → ~287 GB on disk.

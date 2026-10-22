@@ -28,18 +28,24 @@ spec:
       # anvil dumps its state on SIGTERM; give it time.
       terminationGracePeriodSeconds: 90
       initContainers:
-        # Resolve the fork pin once and persist it. `auto` semantics: pin is
-        # reth head - FORK_OFFSET, clamped to reth's 10,064-block state window
-        # by construction (FORK_OFFSET=2000). Wipe /state/pin to re-pin.
+        # Resolve the fork pin and persist it. M's pin is re-resolved on *every*
+        # start: a full-replay fork materializes mainnet's working set in RAM
+        # (~60-80 MB per replayed block, measured) and is recycled by k8s when
+        # it reaches its limit, so the post-restart re-replay must be bounded -
+        # with a fresh pin it is ~FORK_OFFSET blocks (~1 min), with a stale one
+        # it is the whole epoch and the replay OOMs before it can catch up
+        # (measured death spiral). T's pin is *not* refreshed: the epoch (and
+        # with it the devnet's shadow set) is keyed on T's fork block in the
+        # engine, so M moving its base never clears devnet writes.
         - name: resolve-pin
           image: docker.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
-              # Always wait for reth first, even when the pin is persisted:
-              # anvil forks at start-up, so restarting while reth is restarting
-              # would crash-loop (measured: "failed to fetch network chain ID").
+              # Always wait for reth first: anvil forks at start-up, so
+              # restarting while reth is restarting would crash-loop (measured:
+              # "failed to fetch network chain ID").
               i=0; HEAD=""
               while [ -z "$HEAD" ] && [ "$i" -lt 240 ]; do
                 HEAD=$(wget -qO- --header='Content-Type: application/json' \
@@ -49,13 +55,9 @@ spec:
                 [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
               done
               [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
-              if [ -s /state/pin ]; then
-                echo "pin persisted: $(cat /state/pin) (reth head=$HEAD)"; exit 0
-              fi
-              echo "resolving pin: $RETH_URL head - $FORK_OFFSET"
               PIN=$((HEAD - FORK_OFFSET))
               echo "$PIN" > /state/pin
-              echo "resolved pin=$PIN (reth head=$HEAD)"
+              echo "resolved pin=$PIN (reth head=$HEAD, offset=$FORK_OFFSET)"
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: mirror-config, key: RETH_URL } }
@@ -90,13 +92,11 @@ spec:
                 # 2026-10 automine-reset incident).
                 --no-mining \
                 --auto-impersonate \
-                --prune-history 16 \
+                --prune-history 2 \
                 --transaction-block-keeper 2 \
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info \
-                --state /state/state.json \
-                --state-interval 300
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: mirror-config, key: RETH_URL } }

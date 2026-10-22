@@ -108,6 +108,17 @@ cursor_t=$(num "$(engine_api /status | jq -r '.cursor_t')")
 [ "$cursor_t" -ge "$((follow - 2))" ] && ok "T has applied parent blocks up to the follow head (cursor_t=$cursor_t, height=$t_head)" \
   || bad "T applier lagging: cursor_t=$cursor_t, follow=$follow"
 probes_match http://reth:8545 http://anvil-m:8545 "M" "$(printf '0x%x' "$((m_head - 1))")" # repaired point
+
+# A1/A2: fork blocks carry no trie (stateRoot = 0x0 - proofs are impossible by
+# design) while the pin block itself is byte-identical to mainnet's.
+root=$(rpc http://anvil-m:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$m_head")\",false]" | jq -r '.result.stateRoot')
+[ "$root" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] \
+  && ok "A1: M blocks carry no trie (stateRoot = 0x0)" || bad "A1: stateRoot = $root"
+pin=$(kubectl -n "$NS" exec deploy/anvil-m -- cat /state/pin 2>/dev/null | tr -d '\r')
+mhash=$(rpc http://anvil-m:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$pin")\",false]" | jq -r '.result.hash')
+rhash=$(rpc http://reth:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$pin")\",false]" | jq -r '.result.hash')
+[ -n "$mhash" ] && [ "$mhash" = "$rhash" ] && ok "A2: pin block $pin byte-identical to mainnet" \
+  || bad "A2: pin block mismatch (m=$mhash reth=$rhash)"
 at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
 probes_match http://reth:8545 http://anvil-t:8545 "T" "$at"
 
@@ -117,6 +128,27 @@ USER=0x00000000000000000000000000000000000F00d1
 rpc http://anvil-t:8545 anvil_setBalance "[\"$USER\",\"0x8ac7230489e80000\"]" >/dev/null # 10 ETH
 bal=$(rpc http://anvil-t:8545 eth_getBalance "[\"$USER\",\"latest\"]" | jq -r '.result')
 [ "$bal" = "0x8ac7230489e80000" ] && ok "faucet: funded $USER with 10 ETH" || bad "balance after fund: $bal"
+
+# A11: an ERC20 "deal" writes storage silently (no Transfer log). WETH has a
+# standard balance mapping so anvil finds the slot; USDC's packed
+# balanceAndBlacklistStates does not ("no slot found", measured) - scenarios
+# needing USDC write the known slot or transfer for real.
+# anvil_dealERC20 cannot discover balance slots on a forked, no-mining anvil
+# ("no slot found", measured - its probe writes never reach the mined state),
+# so the scenario writes the standard mapping slot directly: the same silent
+# storage semantics the devnet uses for funding.
+WETH_DEAL=0x00000000000000000000000000000000000Dea11
+WETH_TOKEN=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
+DEAL_TOPIC="0x$(printf '0%.0s' $(seq 1 24))${WETH_DEAL#0x}"
+DEAL_SLOT=$($ANVIL_T cast index address "$WETH_DEAL" 3 2>/dev/null | tr -d '\r')
+if [ -n "$DEAL_SLOT" ]; then
+  rpc http://anvil-t:8545 anvil_setStorageAt "[\"$WETH_TOKEN\",\"$DEAL_SLOT\",\"0x00000000000000000000000000000000000000000000000000000000000004d2\"]" >/dev/null
+fi
+wbal=$(rpc http://anvil-t:8545 eth_call "[{\"to\":\"$WETH_TOKEN\",\"data\":\"0x70a0823100000000000000000000000000000000000000000000000000000000000Dea11\"},\"latest\"]" | jq -r '.result')
+[ "$wbal" = "0x00000000000000000000000000000000000000000000000000000000000004d2" ] \
+  && ok "A11: a raw balance write is silent (WETH balance set)" || bad "A11: WETH balance after write: $wbal"
+tlogs=$(rpc http://anvil-t:8545 eth_getLogs "[{\"address\":\"$WETH_TOKEN\",\"fromBlock\":\"$(printf '0x%x' "$((t_head - 3))")\",\"toBlock\":\"latest\",\"topics\":[\"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef\",null,\"$DEAL_TOPIC\"]}]" | jq -r '.result | length')
+[ "$tlogs" = "0" ] && ok "A11: deal emitted no Transfer log" || bad "A11: deal emitted $tlogs Transfer log(s)"
 
 # shadowed write: a watched slot written through a cheatcode must survive the
 # parent diffs that keep flowing (copy-on-write), while sibling slots keep syncing.
@@ -165,6 +197,13 @@ if [ "$rew" != "ERR" ] && [ "$(num "$after")" -lt "$(num "$before")" ]; then
 else
   info "rewind returned: ${rew:0:60} (cursor $before -> $after)"
 fi
+
+# The rewind rolls T's *values* back without moving its head, so the applier
+# must re-apply the rewound range (a plain "diffs already applied" skip would
+# leave them stale - measured). Give it a couple of blocks, then re-assert.
+sleep 20
+at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
+probes_match http://reth:8545 http://anvil-t:8545 "T after rewind" "$at"
 
 echo "-- 4. integrity counters"
 m=$(engine_api /metrics)

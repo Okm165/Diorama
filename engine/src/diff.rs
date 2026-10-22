@@ -63,7 +63,12 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let block = ctx.reth.block_by_number(n, false).await?;
 
     let t_head = ctx.anvil_t.block_number().await?;
-    if t_head >= n {
+    // A journal rewind rolled T's values back without moving its head: those
+    // blocks must be re-applied even though `t_head >= n`, otherwise the
+    // late-completion skip below leaves the rolled-back values stale.
+    let reapply = *ctx.reapply_from.lock().unwrap();
+    let needs_reapply = matches!(reapply, Some((from, _)) if n >= from);
+    if t_head >= n && !needs_reapply {
         // Late completion after a timeout: samples + cursor only.
         tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
         let t_block = ctx.anvil_t.block_by_number(n, false).await?;
@@ -83,7 +88,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
             duration_ms: started.elapsed().as_millis() as u64,
         });
     }
-    if t_head + 1 != n {
+    if !needs_reapply && t_head + 1 != n {
         bail!("T head {t_head} does not precede block {n}");
     }
 
@@ -205,9 +210,17 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     ctx.metrics.set(&ctx.metrics.last_apply_ms, duration_ms);
     ctx.metrics.set(&ctx.metrics.t_head, n);
 
+    // The rewound range is fully re-applied: resume normal late-completion skips.
+    if let Some((_, until)) = reapply {
+        if n >= until {
+            *ctx.reapply_from.lock().unwrap() = None;
+            tracing::info!(block = n, until, "rewound range re-applied");
+        }
+    }
+
     let outcome = ApplyOutcome {
         block: n,
-        source,
+        source: if needs_reapply { "reapply" } else { source },
         writes: total,
         filtered: filtered.len(),
         skipped_shadowed,

@@ -141,17 +141,26 @@ behavioral). The default policy (`on_divergence: continue`) records all of them;
 
 | # | Fact | Coverage |
 |---|---|---|
-| A2 | pin byte-identical to mainnet | `anvil` fork semantics; `make pin-show` + smoke |
+| A1 | fork blocks have no trie | scenario: M head `stateRoot = 0x0`; proofs impossible by design (§6) |
+| A2 | pin byte-identical to mainnet | scenario: pin block hash M == reth; `make pin-show` |
 | A3 | block env set exactly | replay sets all five context fields; an env error shows up as receipt/log-set divergence in the same block |
 | A4 | withdrawals are not txs | idempotent `setBalance` credit + withdrawal balance check |
 | A5 | in-block-funded txs need the flag | `--disable-pool-balance-checks` in both anvil deployments |
 | A6 | blob txs need the network wrapper | `blob.rs` (legacy / eip7594 / bare forms, learned at runtime) |
+| A7 | blob data for any age | narrowed by design: the mirror serves blobs only from the local CL's own window (self-containment); older blobs would need an external source, which the runtime never uses |
+| A8 | mining is state-fetch-bound | `mirror_last_replay_seconds`; the local reth keeps it ~2 s/block even cold (remote measured 55-256 s) |
 | A9 | type-4 gas deviation bound | `verify.rs` receipts check |
 | A10 | replayed blocks expose real logs | log-set + logsBloom checks |
-| A14 | warm restart preserves state | anvil `--state` dump (T 60 s, M 300 s) + on SIGTERM; the engine rebases onto whatever head the dump restores |
+| A11 | `deal` writes storage silently | scenario: a WETH deal sets the balance with **no** Transfer log; USDC's packed `balanceAndBlacklistStates` layout is refused ("no slot found", measured) |
+| A12 | exactly one M block per parent block | scenario head parity (`m_head == follow_head`) + `anvil_mine(1)` |
+| A13 | local writes never touch M | the COW/shadow section runs on T; M's probes and the drift gate are asserted after it |
+| A14 | warm restart preserves state | anvil `--state` removed (it dumped per-block history: 13 GB/dump, leaked tmp dirs, filled T's PVC); the engine rebases instead - M re-replays ~FORK_OFFSET blocks (~1-2 min, measured) |
+| A15 | memory bounded by restart | measured ~20 MB per replayed block steady state; M recycles at its 24Gi limit (~2.5-4 h) and recovers in ~1-2 min |
 | A16 | upstream reorgs detected | parent-hash continuity check → freeze + drill |
-| A17 | mirror block hashes differ from mainnet | inherent; divergence recorded as behavioral, state re-converged from the parent BAL |
+| A17 | mirror block hashes differ | inherent (verified: anvil exposes no blockhash/beacon-root setter); recorded as behavioral, state re-converged from the parent BAL |
 | A18 | delivery is event-driven | consumers subscribe to anvil M/T WS (`eth_subscribe`) |
+| A19 | scoped manipulation leaves replay intact | scenario: a shadowed slot survives further parent diffs; unshadow re-syncs from reth; M's probes stay green |
+| A20 | journal round-trip is faithful | scenario: snapshot/revert + `/admin/rewind` restore T's cursor and re-apply cleanly |
 
 ## Known limitations (accepted)
 

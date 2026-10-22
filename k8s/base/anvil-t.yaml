@@ -29,9 +29,12 @@ spec:
       # anvil dumps its state on SIGTERM; give it time.
       terminationGracePeriodSeconds: 90
       initContainers:
-        # Resolve the fork pin once and persist it. `auto` semantics: pin is
-        # reth head - FORK_OFFSET, clamped to reth's 10,064-block state window
-        # by construction (FORK_OFFSET=2000). Wipe /state/pin to re-pin.
+        # Resolve the fork pin once and persist it. T's pin is deliberately
+        # *stable* across restarts: the engine keys the epoch (and the devnet's
+        # shadow set - which keys belong to the devnet) on T's fork block, so a
+        # refreshed pin would wipe devnet writes. It must stay inside reth's
+        # 10,064-block state window: re-pin with `make repin` before that.
+        # (M re-resolves its own pin on every start - see anvil-m.yaml.)
         - name: resolve-pin
           image: docker.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
           command: ["/bin/sh", "-c"]
@@ -96,8 +99,6 @@ spec:
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info \
-                --state /state/state.json \
-                --state-interval 60
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: mirror-config, key: RETH_URL } }

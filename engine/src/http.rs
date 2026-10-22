@@ -103,6 +103,17 @@ pub async fn do_rewind(ctx: &Ctx, blocks: u64) -> anyhow::Result<(u64, usize)> {
         }
     }
     ctx.save_state()?;
+    // T's *head* is still where it was - only the values were rolled back - so
+    // the main loop's "diffs already applied" late-completion path would skip
+    // the re-application and leave the rewound range stale (measured: T's
+    // probes diverged after a rewind drill). Mark the range for re-apply.
+    {
+        let mut ra = ctx.reapply_from.lock().unwrap();
+        *ra = Some(match *ra {
+            Some((f, u)) => (f.min(from), u.max(cursor.block)),
+            None => (from, cursor.block),
+        });
+    }
     tracing::warn!(blocks, restored, "T rewound via journal");
     Ok((target, restored))
 }

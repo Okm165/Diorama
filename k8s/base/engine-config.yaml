@@ -145,6 +145,12 @@ data:
       # Uniswap
       - { address: "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45", note: "Universal Router" }
       - { address: "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640", note: "UniV3 WETH/USDC 0.05%" }
+      # The dapp's own mainnet deployment (plan §3.5). Only the hub is fully
+      # specified in the plan; the beacon/factory/timelock/registries are
+      # truncated there - add them from contracts/deployments/ethereum.json.
+      # (The plan's "whale" addresses hold zero balances today, so they are
+      # deliberately not watched; fund scenarios with the cheatcodes instead.)
+      - { address: "0xDA10C0070a117b6e97EC01E983236F9D39E3152d", note: "dapp hub" }
       # Aave V3 (cascade scenario)
       - { address: "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", note: "Aave V3 Pool" }
       - { address: "0x54586bE62E3c3580375aE3723C145253060Ca0C2", note: "Aave V3 Oracle" }

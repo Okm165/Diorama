@@ -40,6 +40,12 @@ pub struct Ctx {
     pub frozen: AtomicBool,
     pub halted: AtomicBool,
     pub blob_pref: Mutex<Option<BlobForm>>,
+    /// Set by `/admin/rewind`: parent blocks whose T writes were rolled back
+    /// but whose T head is already past them. The normal "late completion"
+    /// skip would leave them stale, so the applier re-applies them
+    /// (idempotent writes; re-journaling records the rolled-back values as the
+    /// new before-values). Cleared once the whole range is re-applied.
+    pub reapply_from: Mutex<Option<(u64, u64)>>,
 }
 
 impl Ctx {
@@ -80,6 +86,7 @@ impl Ctx {
             frozen: AtomicBool::new(false),
             halted: AtomicBool::new(false),
             blob_pref: Mutex::new(None),
+            reapply_from: Mutex::new(None),
             cfg,
         })
     }
