@@ -2,8 +2,9 @@
 //!
 //! The journal records what the applier is about to overwrite on T (storage
 //! slots and account fields). Files are `journal/<block>.jsonl`, ring-bounded.
-use crate::rpc::Rpc;
-use crate::{bal, bal::Write};
+use mirror_anvil::Rpc;
+use mirror_anvil as bal;
+use mirror_anvil::Write;
 use alloy_primitives::{Address, U256};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

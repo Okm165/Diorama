@@ -2388,6 +2388,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror-devnet"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "mirror-anvil",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "mirror-engine"
 version = "0.1.0"
 dependencies = [
@@ -2414,6 +2426,7 @@ dependencies = [
  "jsonwebtoken",
  "mirror-anvil",
  "mirror-config",
+ "mirror-devnet",
  "reqwest",
  "serde",
  "serde_json",

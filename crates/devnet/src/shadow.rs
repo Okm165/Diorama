@@ -8,7 +8,7 @@
 //!
 //! Writes are discovered by watching T's own blocks (traces + tx semantics) and
 //! can be added explicitly through the admin API.
-use crate::bal::Write;
+use mirror_anvil::Write;
 use alloy_primitives::{Address, U256};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -108,7 +108,7 @@ impl Shadow {
     /// vanish silently while their shadow marks keep mainnet's diffs away -
     /// the worst of both worlds. Values are batched; the caller keeps the
     /// shadow marks so the parent diffs still skip these keys.
-    pub async fn reapply(&self, rpc: &crate::rpc::Rpc) -> usize {
+    pub async fn reapply(&self, rpc: &mirror_anvil::Rpc) -> usize {
         let mut calls: Vec<(String, serde_json::Value)> = Vec::new();
         for (address, slots) in &self.values {
             for (slot, value) in slots {
@@ -116,8 +116,8 @@ impl Shadow {
                     "anvil_setStorageAt".to_string(),
                     serde_json::json!([
                         address,
-                        crate::bal::pad_data32(*slot),
-                        crate::bal::pad_data32(*value)
+                        mirror_anvil::pad_data32(*slot),
+                        mirror_anvil::pad_data32(*value)
                     ]),
                 ));
             }
@@ -126,13 +126,13 @@ impl Shadow {
             if !balance.is_zero() {
                 calls.push((
                     "anvil_setBalance".to_string(),
-                    serde_json::json!([address, crate::bal::quant_hex_u256(*balance)]),
+                    serde_json::json!([address, mirror_anvil::quant_hex_u256(*balance)]),
                 ));
             }
             if *nonce > 0 {
                 calls.push((
                     "anvil_setNonce".to_string(),
-                    serde_json::json!([address, crate::bal::quant_hex_u64(*nonce)]),
+                    serde_json::json!([address, mirror_anvil::quant_hex_u64(*nonce)]),
                 ));
             }
         }
@@ -267,7 +267,7 @@ impl Shadow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bal::Write;
+    use mirror_anvil::Write;
 
     #[test]
     fn cow_granularity() {

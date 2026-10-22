@@ -6,19 +6,17 @@ mod ctx;
 mod diff;
 mod drift;
 mod http;
-mod journal;
-mod metrics;
 mod replay;
 mod engine_api;
 mod selftest;
 mod source_sync;
-mod shadow;
-mod state;
 mod verify;
 
-// R1 extraction shim: the frozen `crate::rpc::*` paths keep resolving; the
-// client lives in `mirror-anvil` (zero call-site churn).
+// R1/R2 extraction shims: the frozen `crate::rpc::*`, `crate::bal::*` and
+// `crate::shadow|journal|state|metrics` paths keep resolving; the code lives
+// in `mirror-anvil` / `mirror-devnet` (zero call-site churn).
 pub use mirror_anvil as rpc;
+pub use mirror_devnet::{journal, metrics, shadow, state};
 
 use mirror_config::Instance;
 use crate::ctx::Ctx;
