@@ -1,0 +1,20 @@
+[package]
+name = "mirror-anvil"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The anvil control plane: JSON-RPC client, batching, cheatcode conventions, padding, trace flattening"
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-eips = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

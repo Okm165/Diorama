@@ -2361,6 +2361,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mirror-anvil"
+version = "0.1.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "anyhow",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mirror-config"
 version = "0.1.0"
 dependencies = [
@@ -2398,6 +2412,7 @@ dependencies = [
  "clap",
  "hex",
  "jsonwebtoken",
+ "mirror-anvil",
  "mirror-config",
  "reqwest",
  "serde",

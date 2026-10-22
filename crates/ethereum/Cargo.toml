@@ -8,6 +8,7 @@ description = "Mainnet mirror engine: replay (M) + verifier + EIP-7928 diff appl
 
 [dependencies]
 mirror-config = { path = "../config" }
+mirror-anvil = { path = "../anvil" }
 alloy-primitives = { workspace = true }
 alloy-consensus = { workspace = true }
 alloy-network-primitives = { workspace = true }

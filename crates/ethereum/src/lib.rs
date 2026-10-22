@@ -9,13 +9,16 @@ mod http;
 mod journal;
 mod metrics;
 mod replay;
-mod rpc;
 mod engine_api;
 mod selftest;
 mod source_sync;
 mod shadow;
 mod state;
 mod verify;
+
+// R1 extraction shim: the frozen `crate::rpc::*` paths keep resolving; the
+// client lives in `mirror-anvil` (zero call-site churn).
+pub use mirror_anvil as rpc;
 
 use mirror_config::Instance;
 use crate::ctx::Ctx;
@@ -708,4 +711,15 @@ pub(crate) async fn scan_t_block(ctx: &Ctx, n: u64) -> Result<()> {
         "scanned devnet block for shadow writes"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod design_assertions {
+    /// Public types stay Send + Sync + Sized + Unpin (Rust-for-Rustaceans);
+    /// the engine hands `Ctx` to every loop and the HTTP surface.
+    #[test]
+    fn design_assertions() {
+        fn is_normal<T: Send + Sync + Sized + Unpin>() {}
+        is_normal::<crate::ctx::Ctx>();
+    }
 }
