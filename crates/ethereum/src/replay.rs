@@ -67,9 +67,9 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     //    forever (invalid txs, different statuses). The BAL is authoritative
     //    for every changed entry, so applying it makes M exact again; the
     //    per-block verification below still measures what execution got right.
-    let repair = ctx.cfg.loops.repair_m
+    let repair = ctx.cfg.services.engine.loops.repair_m
         && ctx.last_m_diverged.load(std::sync::atomic::Ordering::Relaxed);
-    if !repair && ctx.cfg.loops.repair_m {
+    if !repair && ctx.cfg.services.engine.loops.repair_m {
         tracing::debug!(block = n, "previous M block verified clean; no repair needed");
     }
     if repair {
@@ -141,7 +141,7 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
             })
             .collect();
         let mut pre_balances: Vec<U256> = Vec::with_capacity(reads.len());
-        for chunk in reads.chunks(ctx.cfg.loops.chunk_size) {
+        for chunk in reads.chunks(ctx.cfg.services.engine.loops.chunk_size) {
             for r in ctx.reth.batch_raw(chunk).await? {
                 // batch_raw yields the JSON-RPC *result* (a hex balance here).
                 let v = match r {
@@ -162,7 +162,7 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
                 json!([address, bal::quant_hex_u256(pre + *amount)]),
             ));
         }
-        for chunk in calls.chunks(ctx.cfg.loops.chunk_size) {
+        for chunk in calls.chunks(ctx.cfg.services.engine.loops.chunk_size) {
             for r in ctx.anvil_m.batch_raw(chunk).await? {
                 if let Err(e) = r {
                     tracing::warn!(error = %e, "withdrawal credit failed");
@@ -201,7 +201,7 @@ async fn finish_replay(
 ) -> Result<ReplayOutcome> {
     // Full txs: the verifier checks tx order (hashes in position).
     let m_block = ctx.anvil_m.block_by_number(n, true).await?;
-    let verification = if ctx.cfg.verifier.enabled {
+    let verification = if ctx.cfg.services.engine.verifier.enabled {
         let v = verify_block(ctx, n, &block, &m_block).await?;
         if v.receipts_unverified {
             ctx.metrics.inc(&ctx.metrics.receipts_unverified);
@@ -263,7 +263,7 @@ async fn build_raws(
     // that cannot reconstruct blobs (e.g. a non-supernode after PeerDAS) is
     // skipped instead of poisoning the pool.
     let mut sources: Vec<(String, Vec<SidecarItem>)> = Vec::new();
-    if has_blobs && ctx.cfg.blobs.enabled && ctx.beacon.enabled() {
+    if has_blobs && ctx.cfg.services.engine.blobs.enabled && ctx.beacon.enabled() {
         if let Some(next) = ctx.reth.block_by_number_opt(n + 1, false).await? {
             if let Some(root) = next.header.parent_beacon_block_root {
                 sources = ctx.beacon.blob_sidecar_sources(root).await;
@@ -663,7 +663,7 @@ fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_t
             } else {
                 ctx.metrics.add(&ctx.metrics.value_divergences, 1);
             }
-            if ctx.cfg.loops.on_divergence == crate::config::OnDivergence::Continue {
+            if ctx.cfg.services.engine.loops.on_divergence == mirror_config::OnDivergence::Continue {
                 tracing::warn!(
                     block = n,
                     structural,

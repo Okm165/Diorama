@@ -47,7 +47,7 @@ pub async fn apply_writes(ctx: &Ctx, target: &Rpc, writes: &[Write]) -> Result<u
         });
     }
     let mut applied = 0usize;
-    for chunk in calls.chunks(ctx.cfg.loops.chunk_size) {
+    for chunk in calls.chunks(ctx.cfg.services.engine.loops.chunk_size) {
         for r in target.batch_raw(chunk).await? {
             match r {
                 Ok(_) => applied += 1,
@@ -260,7 +260,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let sample: Vec<&Write> = filtered
         .iter()
         .filter(|w| matches!(w, Write::Storage { .. }))
-        .take(ctx.cfg.verifier.drift_sample_keys)
+        .take(ctx.cfg.services.engine.verifier.drift_sample_keys)
         .collect();
     let mut sampled_ok = 0usize;
     for w in &sample {

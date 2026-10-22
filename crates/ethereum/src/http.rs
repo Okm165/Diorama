@@ -16,7 +16,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 pub async fn serve(ctx: Arc<Ctx>) -> anyhow::Result<()> {
-    let addr = format!("{}:{}", ctx.cfg.http.addr, ctx.cfg.http.port);
+    let addr = format!("{}:{}", ctx.cfg.services.engine.http.addr, ctx.cfg.services.engine.http.port);
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/status", get(status))
@@ -104,7 +104,7 @@ pub async fn do_rewind(ctx: &Ctx, blocks: u64) -> anyhow::Result<(u64, usize)> {
     for b in (from..=cursor.block).rev() {
         restored += ctx
             .journal
-            .undo_block(b, &ctx.anvil_t, ctx.cfg.loops.chunk_size)
+            .undo_block(b, &ctx.anvil_t, ctx.cfg.services.engine.loops.chunk_size)
             .await?;
     }
     let target = from - 1;

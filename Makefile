@@ -108,6 +108,9 @@ deploy-engine: import ## Rebuild + redeploy the engine
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
+config-check: ## Validate the instance config through the layered loader
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check config/instances/mainnet-mirror.toml
+
 ##@ Ops
 
 status: ## Pods, PVCs, engine status
@@ -203,4 +206,4 @@ help: ## Show this help
 	@echo
 
 .PHONY: ns secrets apply diff delete snapshot snapshot-status bootstrap build import deploy-engine \
-	test-engine status logs smoke selftest pin-show repin help
+	test-engine config-check status logs smoke selftest pin-show repin help

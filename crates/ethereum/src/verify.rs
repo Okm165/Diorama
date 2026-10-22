@@ -11,6 +11,11 @@ use alloy_rpc_types_eth::{Block, Log};
 use anyhow::Result;
 use alloy_primitives::Address;
 
+/// EIP-7702: a fork's type-4 gas delta must lie in `[-refund * #auths, 0]`.
+/// A measured protocol fact (not tunable): one authorization refunds 12,500
+/// gas, so the fork can only under-use relative to mainnet's refunds.
+const TYPE4_REFUND_PER_AUTH: u64 = 12_500;
+
 /// Divergence classes:
 ///   - `ValueLevel`: only log data / bloom differ - identical events with
 ///     different values. Expected for contracts whose output depends on
@@ -184,7 +189,7 @@ pub async fn verify_block(ctx: &Ctx, n: u64, reth_block: &Block, m_block: &Block
                         break;
                     }
                     let auths = block_txs(reth_block).get(i).map(auth_count).unwrap_or(0);
-                    let bound = ctx.cfg.verifier.type4_refund_per_auth * auths;
+                    let bound = TYPE4_REFUND_PER_AUTH * auths;
                     let delta = gb as i64 - ga as i64; // fork - mainnet
                     if delta > 0 || delta.unsigned_abs() > bound {
                         ok = false;
@@ -318,7 +323,7 @@ pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize, usize) {
         let s = ctx.shadow.lock().unwrap();
         s.slots.keys().chain(s.accounts.iter()).copied().collect()
     };
-    for probe in &ctx.cfg.verifier.probes {
+    for probe in &ctx.cfg.services.engine.verifier.probes {
         if shadowed.contains(&probe.to) {
             // A devnet write anywhere in this target hides *all* of its
             // probes (measured: a crashed oracle source stayed marked and the
@@ -355,7 +360,7 @@ pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize, usize) {
 pub async fn convergence_check(ctx: &Ctx, n: u64) -> (usize, usize) {
     let mut ok = 0usize;
     let mut failed = 0usize;
-    for probe in &ctx.cfg.verifier.probes {
+    for probe in &ctx.cfg.services.engine.verifier.probes {
         let r = ctx.reth.call_at(probe.to, &probe.data, n).await;
         // M's repair writes are unmined, so read M's current (latest) state.
         let m = ctx.anvil_m.call_latest(probe.to, &probe.data).await;

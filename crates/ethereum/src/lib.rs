@@ -2,7 +2,6 @@
 //! from EIP-7928 BALs, verify every block, and expose a small admin surface.
 mod bal;
 mod blob;
-mod config;
 mod ctx;
 mod diff;
 mod drift;
@@ -18,7 +17,7 @@ mod shadow;
 mod state;
 mod verify;
 
-use crate::config::Config;
+use mirror_config::Instance;
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
 use crate::replay::{replay_block, reth_block_hash};
@@ -40,7 +39,7 @@ struct Cli {
 enum Cmd {
     /// Run the engine loops and the HTTP API.
     Run {
-        #[arg(long, default_value = "/etc/mirror/engine.yaml")]
+        #[arg(long, default_value = "/etc/mirror/instance.toml")]
         config: PathBuf,
     },
     /// End-to-end self test against a public RPC + two scratch Anvil forks.
@@ -51,7 +50,7 @@ enum Cmd {
         anvil_m: String,
         #[arg(long)]
         anvil_t: String,
-        #[arg(long, default_value = "/etc/mirror/engine.yaml")]
+        #[arg(long, default_value = "/etc/mirror/instance.toml")]
         config: PathBuf,
         /// Optional beacon-API base URL override (sidecar source).
         #[arg(long)]
@@ -65,7 +64,7 @@ enum Cmd {
     },
     /// Rewind the last N applied parent blocks on T (journal-based).
     Rewind {
-        #[arg(long, default_value = "/etc/mirror/engine.yaml")]
+        #[arg(long, default_value = "/etc/mirror/instance.toml")]
         config: PathBuf,
         #[arg(long)]
         blocks: u64,
@@ -86,16 +85,16 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             blocks,
             timeout_secs,
         } => {
-            let mut cfg = Config::load(&config)?;
-            cfg.reth.request_timeout_secs = timeout_secs;
+            let mut cfg = Instance::load(&config)?;
+            cfg.services.engine.reth.request_timeout_secs = timeout_secs;
             let ok = selftest::run(cfg, rpc, anvil_m, anvil_t, beacon, blocks).await?;
             std::process::exit(if ok { 0 } else { 1 });
         }
         Cmd::Rewind { config, blocks } => {
-            let cfg = Config::load(&config)?;
-            let reth = cfg.reth.url.clone();
-            let m = cfg.anvil.m_url.clone();
-            let t = cfg.anvil.t_url.clone();
+            let cfg = Instance::load(&config)?;
+            let reth = cfg.chains.l1.source_url.clone();
+            let m = cfg.services.engine.anvil.m_url.clone();
+            let t = cfg.services.engine.anvil.t_url.clone();
             let ctx = Ctx::new(cfg, &reth, &m, &t);
             let (cursor, restored) = http::do_rewind(&ctx, blocks).await?;
             println!("rewound {blocks} block(s): {restored} values restored, cursor_t now {cursor}");
@@ -116,10 +115,10 @@ fn init_tracing() {
 }
 
 async fn run(config: PathBuf) -> Result<()> {
-    let cfg = Config::load(&config)?;
-    let reth_url = cfg.reth.url.clone();
-    let m_url = cfg.anvil.m_url.clone();
-    let t_url = cfg.anvil.t_url.clone();
+    let cfg = Instance::load(&config)?;
+    let reth_url = cfg.chains.l1.source_url.clone();
+    let m_url = cfg.services.engine.anvil.m_url.clone();
+    let t_url = cfg.services.engine.anvil.t_url.clone();
     let ctx = Arc::new(Ctx::new(cfg, &reth_url, &m_url, &t_url));
     ctx.restore_blob_form();
 
@@ -144,19 +143,19 @@ async fn run(config: PathBuf) -> Result<()> {
         anvil_t = %ctx.anvil_t.url(),
         follow = ctx.follow_tag(),
         watchlist = ctx.watchlist.len(),
-        replay_into_m = ctx.cfg.loops.replay_into_m,
-        apply_into_t = ctx.cfg.loops.apply_into_t,
+        replay_into_m = ctx.cfg.services.engine.loops.replay_into_m,
+        apply_into_t = ctx.cfg.services.engine.loops.apply_into_t,
         "mirror engine starting"
     );
 
     let mut tasks = Vec::new();
-    if ctx.cfg.loops.replay_into_m {
+    if ctx.cfg.services.engine.loops.replay_into_m {
         tasks.push(tokio::spawn(replay_loop(ctx.clone())));
     }
     if ctx.engine.is_some() {
         tasks.push(tokio::spawn(source_sync_supervisor(ctx.clone())));
     }
-    if ctx.cfg.loops.apply_into_t {
+    if ctx.cfg.services.engine.loops.apply_into_t {
         tasks.push(tokio::spawn(apply_loop(ctx.clone())));
         tasks.push(tokio::spawn(shadow_loop(ctx.clone())));
     }
@@ -210,7 +209,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     // blob block with `follow: latest`, holding M each time). ~2 blocks of
     // extra lag is invisible; the metric keeps the raw head so
     // `mirror_lag_blocks` still measures the true distance.
-    let follow = follow.saturating_sub(ctx.cfg.reth.follow_margin_blocks);
+    let follow = follow.saturating_sub(ctx.cfg.chains.l1.follow_margin_blocks);
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
     ctx.metrics.set(&ctx.metrics.reth_head, reth_head);
 
@@ -440,7 +439,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         if attempt {
             match ctx.anvil_m.fork_config().await {
                 Ok(Some((url, _))) => {
-                    let pin = follow.saturating_sub(ctx.cfg.loops.fork_offset);
+                    let pin = follow.saturating_sub(ctx.cfg.chains.l1.fork_offset);
                     match ctx.anvil_m.anvil_reset_fork(&url, pin).await {
                         Ok(()) => tracing::warn!(
                             head,
@@ -477,7 +476,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     // (300 = the plan's "> 300 -> pause and re-sync"), while a *rebased* cursor
     // (a fresh pin after a restart/re-fork) is allowed to replay its whole pin
     // window - bounded by reth's state window (10,064), the plan's own limit.
-    let limit = if rebased { 10_064 } else { ctx.cfg.loops.max_gap_blocks };
+    let limit = if rebased { 10_064 } else { ctx.cfg.services.engine.loops.max_gap_blocks };
     if gap > limit {
         tracing::error!(
             chain = ?chain,
@@ -514,7 +513,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
 }
 
 async fn replay_loop(ctx: Arc<Ctx>) {
-    let poll = Duration::from_millis(ctx.cfg.loops.poll_interval_ms.max(200));
+    let poll = Duration::from_millis(ctx.cfg.services.engine.loops.poll_interval_ms.max(200));
     let mut failing_block = 0u64;
     let mut attempts = 0u64;
     loop {
@@ -580,7 +579,7 @@ async fn replay_loop(ctx: Arc<Ctx>) {
 }
 
 async fn apply_loop(ctx: Arc<Ctx>) {
-    let poll = Duration::from_millis(ctx.cfg.loops.poll_interval_ms.max(200));
+    let poll = Duration::from_millis(ctx.cfg.services.engine.loops.poll_interval_ms.max(200));
     loop {
         if ctx.halted.load(Ordering::Relaxed) || ctx.frozen.load(Ordering::Relaxed) {
             tokio::time::sleep(poll).await;
@@ -642,7 +641,7 @@ async fn source_sync_supervisor(ctx: Arc<Ctx>) {
 
 /// Watch T's own blocks: every devnet transaction's writes become shadowed
 /// (copy-on-write) so parent diffs never overwrite them.
-async fn shadow_loop(ctx: Arc<Ctx>) {    let poll = Duration::from_millis(ctx.cfg.loops.poll_interval_ms.max(200));
+async fn shadow_loop(ctx: Arc<Ctx>) {    let poll = Duration::from_millis(ctx.cfg.services.engine.loops.poll_interval_ms.max(200));
     loop {
         tokio::time::sleep(poll * 2).await;
         let t_head = match ctx.anvil_t.block_number().await {

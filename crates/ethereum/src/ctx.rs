@@ -1,7 +1,7 @@
 //! Shared engine context: RPC clients, watch list, shadow registry, journal,
 //! cursor state, metrics.
 use crate::blob::{BeaconClient, BlobForm};
-use crate::config::{Config, FollowHead};
+use mirror_config::{FollowHead, Instance};
 use crate::drift::Drift;
 use crate::journal::Journal;
 use crate::metrics::Metrics;
@@ -22,7 +22,7 @@ pub fn block_txs(block: &alloy_rpc_types_eth::Block) -> &[alloy_rpc_types_eth::T
 }
 
 pub struct Ctx {
-    pub cfg: Config,
+    pub cfg: Instance,
     pub reth: Rpc,
     pub anvil_m: Rpc,
     pub anvil_t: Rpc,
@@ -85,18 +85,18 @@ impl Ctx {
         clippy::similar_names,
         reason = "M/T are the domain's chain names (M = verified replay chain, T = devnet chain)"
     )]
-    pub fn new(cfg: Config, reth_url: &str, anvil_m_url: &str, anvil_t_url: &str) -> Self {
-        let timeout = Duration::from_secs(cfg.reth.request_timeout_secs);
+    pub fn new(cfg: Instance, reth_url: &str, anvil_m_url: &str, anvil_t_url: &str) -> Self {
+        let timeout = Duration::from_secs(cfg.services.engine.reth.request_timeout_secs);
         let watchlist = cfg.watch_set();
-        let shadow_path = cfg.state_dir.join("shadow.json");
+        let shadow_path = cfg.services.engine.state_dir.join("shadow.json");
         let shadow = Shadow::load(&shadow_path);
-        let journal = Journal::new(cfg.journal.dir.clone(), cfg.journal.blocks);
-        let state = StateFile::open(cfg.state_dir.join("cursor.json"));
+        let journal = Journal::new(cfg.services.engine.journal.dir.clone(), cfg.services.engine.journal.blocks);
+        let state = StateFile::open(cfg.services.engine.state_dir.join("cursor.json"));
         let offset = state.data.time_offset_seconds.unwrap_or(0);
-        let drift = Drift::new(cfg.state_dir.join("drift.jsonl"));
-        let beacon = BeaconClient::new(cfg.blobs.beacon_urls.clone());
-        let engine = match (&cfg.source_sync.engine_url, &cfg.source_sync.jwt_path) {
-            (Some(url), Some(jwt)) if cfg.source_sync.enabled => {
+        let drift = Drift::new(cfg.services.engine.state_dir.join("drift.jsonl"));
+        let beacon = BeaconClient::new(cfg.services.engine.blobs.beacon_urls.clone());
+        let engine = match (&cfg.services.engine.source_sync.engine_url, &cfg.services.engine.source_sync.jwt_path) {
+            (Some(url), Some(jwt)) if cfg.services.engine.source_sync.enabled => {
                 match crate::engine_api::EngineClient::new(url, jwt) {
                     Ok(client) => Some(client),
                     Err(e) => {
@@ -196,7 +196,7 @@ impl Ctx {
 
     /// reth follow head (safe/latest/finalized per config).
     pub async fn follow_head(&self) -> Result<Option<u64>> {
-        let tag = self.cfg.reth.follow.tag();
+        let tag = self.cfg.chains.l1.follow.tag();
         let block = self.reth.block_by_tag(tag, false).await?;
         Ok(block.map(|b| b.header.number))
     }
@@ -204,18 +204,18 @@ impl Ctx {
     pub fn on_divergence(&self, reason: &str) {
         self.metrics.inc(&self.metrics.divergences);
         tracing::error!(reason, "DIVERGENCE");
-        match self.cfg.loops.on_divergence {
-            crate::config::OnDivergence::FreezeM => {
+        match self.cfg.services.engine.loops.on_divergence {
+            mirror_config::OnDivergence::FreezeM => {
                 self.frozen.store(true, Ordering::SeqCst);
                 self.metrics.set(&self.metrics.frozen, 1);
             }
-            crate::config::OnDivergence::HaltAll => {
+            mirror_config::OnDivergence::HaltAll => {
                 self.frozen.store(true, Ordering::SeqCst);
                 self.halted.store(true, Ordering::SeqCst);
                 self.metrics.set(&self.metrics.frozen, 1);
                 self.metrics.set(&self.metrics.halted, 1);
             }
-            crate::config::OnDivergence::Continue => {}
+            mirror_config::OnDivergence::Continue => {}
         }
     }
 
@@ -227,7 +227,7 @@ impl Ctx {
     }
 
     pub fn follow_tag(&self) -> &'static str {
-        match self.cfg.reth.follow {
+        match self.cfg.chains.l1.follow {
             FollowHead::Safe => "safe",
             FollowHead::Latest => "latest",
             FollowHead::Finalized => "finalized",

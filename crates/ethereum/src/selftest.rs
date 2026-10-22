@@ -1,7 +1,7 @@
 //! End-to-end self test: replays and diff-applies real mainnet blocks against
 //! two scratch Anvil instances forked from a public RPC. Needs no reth, so it
 //! can validate the whole pipeline before the local fork source is synced.
-use crate::config::Config;
+use mirror_config::Instance;
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
 use crate::replay::replay_block;
@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context, Result};
 use std::sync::Arc;
 
 pub async fn run(
-    mut cfg: Config,
+    mut cfg: Instance,
     rpc: String,
     anvil_m: String,
     anvil_t: String,
@@ -17,7 +17,7 @@ pub async fn run(
     blocks: u64,
 ) -> Result<bool> {
     if let Some(b) = beacon {
-        cfg.blobs.beacon_urls = vec![b];
+        cfg.services.engine.blobs.beacon_urls = vec![b];
     }
     let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_m, &anvil_t));
     ctx.restore_blob_form();

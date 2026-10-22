@@ -1,0 +1,73 @@
+# Global defaults for every mirror instance and service (plan §19).
+#
+# A value lives here iff every deployment of that service carries the same
+# number (workspace conventions: cadences, ring sizes, chunk limits). Values
+# that describe one deployment (topology, chain sources, pins, watchlists,
+# budgets) live in config/instances/<name>.toml. Protocol facts and measured
+# conventions are code constants, not configuration.
+#
+# Merge semantics: deep merge, defaults <- instance <- env; arrays replace,
+# never concatenate; unknown keys are errors at every level.
+
+[chains.l1]
+# Replay this many blocks behind the follow head. Blob sidecars for the
+# newest block are not in the beacon yet (measured: >15 s of retries on
+# ~every blob block), so the applier would hold M and retry on every blob
+# block. A 2-block margin costs ~24 s of lag and removes the stall.
+follow_margin_blocks = 2
+
+[services.engine.reth]
+request_timeout_secs = 30
+
+[services.engine.loops]
+poll_interval_ms = 1000
+# Refuse to catch up when the follow head is further than this ahead of the
+# cursor: the plan's ops rule ("> 300 -> pause and re-sync"). A *rebased*
+# cursor (a fresh pin after a restart or a T re-fork) is exempt and may
+# replay its whole pin window, bounded by reth's 10,064-block state window -
+# otherwise a T restart could never warm up.
+max_gap_blocks = 300
+# Max JSON-RPC batch size for raw-tx submissions and cheatcode writes.
+chunk_size = 500
+replay_into_m = true
+apply_into_t = true
+# Converge M from the parent BAL before each replay: a fork cannot
+# reproduce blockhash-dependent values (A17; e.g. Seaport 1.6 counters use
+# blockhash(n-1)), and without convergence one divergence cascades into
+# invalid txs and permanently wrong state. With it, M stays a faithful
+# mirror while still executing every tx (traces + verification).
+repair_m = true
+# continue (default): record every divergence in drift.jsonl + metrics and
+#   keep replaying. M's state is converged from the parent BAL before each
+#   block, so divergences never cascade. Measured: a fork cannot reproduce
+#   blockhash-dependent values (A17), so freezing would stall the mirror.
+# freeze_m: stop replaying into M on divergence (T keeps syncing).
+# halt_all: stop both loops. Use these for conformance runs.
+on_divergence = "continue"
+
+[services.engine.verifier]
+enabled = true
+# Each block is verified against reth: tx count/order, blob gas, receipts
+# (count/status/gas), logs (bloom + full set), withdrawals, and state
+# probes. Divergences are classified structural (tx count/order, blob gas,
+# withdrawals) vs behavioral (receipt statuses/gas, logs, values - the
+# blockhash-gated class; real execution problems surface via the
+# convergence probes) in drift.jsonl and metrics; both are recorded.
+# After the repair the probes are re-run against M: convergence_failures
+# staying at 0 is the "M is an exact mirror" health signal.
+drift_sample_keys = 8
+
+[services.engine.source_sync]
+enabled = true
+interval_ms = 1000
+# Payloads delivered per pass (each is a full block execution).
+max_per_pass = 256
+
+[services.engine.journal]
+blocks = 1024
+
+[services.engine.blobs]
+enabled = true
+
+[services.engine.http]
+addr = "0.0.0.0"

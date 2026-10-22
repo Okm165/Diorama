@@ -7,6 +7,7 @@ license.workspace = true
 description = "Mainnet mirror engine: replay (M) + verifier + EIP-7928 diff applier (T)"
 
 [dependencies]
+mirror-config = { path = "../config" }
 alloy-primitives = { workspace = true }
 alloy-consensus = { workspace = true }
 alloy-network-primitives = { workspace = true }
