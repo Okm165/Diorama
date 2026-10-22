@@ -334,7 +334,7 @@ verify against). Verdicts:
 | **REFRAMED** | L9 freshness → the pin (chain) + the live public API (venue data); the T guarantee → at-pin parity | `venue_fork_pin`, probes-at-pin (skip+count when the pin ≠ source head — measured: the source ignores the block parameter) |
 | **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (Phase 2), bridge round-trip exactness | `crates/hyperliquid`; the identity is re-checked at the serve boundary |
 
-Two venue-specific measured facts worth knowing before an integration run:
+Measured on the scratch stacks (2026-10-22) — facts an integration run can rely on:
 
 - **`anvil_dealERC20` fails on forks** (foundry 1.8.6; measured on a *fresh* HyperEVM fork for the
   real USDC proxy **and** a plain slot-0 ERC20 — not V's state). The mirror's `POST /admin/deal`
@@ -344,6 +344,21 @@ Two venue-specific measured facts worth knowing before an integration run:
   measured on the live chain), so EVM→Core USDC is impossible with the real token; the bridge's
   credit path runs over the harness's fixture mocks (which replace the canonical ERC20s), and the
   bridge only credits a `Transfer` log emitted by the token's *linked* contract.
+- **WS delivery works on both mirror chains**: subscribing `newHeads` + `logs`, two empty mines and
+  one log-emitting tx (a WETH/WHYPE `deposit()`) delivered **3 newHeads + 1 log on T and on V**
+  (the live-T silence recorded earlier did not reproduce on the copies; their scanner's
+  logs-filter + HTTP backup is unaffected either way).
+- **Negative equity flows end-to-end** (the master plan's venue-term requirement): seeding
+  `totalRawUsd = -80000` with a long BTC position and crashing the mark served signed
+  `accountValue = -2771.65…`; after the 1 Hz tick liquidated it, the bare negative balance
+  (`-2784.00…`, zero positions) still served — and the identity counter stayed 0, so the gated
+  read passes negative values through.
+- **The bridge burns sub-wei remainders like the real chain** (plan §16.3): EVM→Core credits floor
+  at the Core wei, Core→EVM floors at the EVM wei — a non-round amount transfers with the dust
+  burned instead of being refused. Unit-tested (`sub_wei_remainders_are_floored_not_refused`).
+- **Pass-through reads spend the rate budget**: an untouched account's `/info` is forwarded to the
+  live venue and accounted at the conservative heavy weight, so test reads and the poller share one
+  budget (plan §18.3).
 
 ## Known limitations (accepted)
 

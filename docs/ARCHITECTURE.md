@@ -340,6 +340,16 @@ writes via `debug_traceTransaction` with `prestateTracer{diffMode}`. Direct
 cheatcode calls that bypass T's block pipeline are registered through
 `POST /admin/shadow`.
 
+**Fixture ownership (whole-account).** The devnet's fixture deploy writes some
+state through cheatcodes the tx scanner cannot see — `anvil_setCode` over the
+canonical mock tokens (USDC/WETH/WBTC/DAI) and the seeded Aave aTokens. Those
+addresses are listed in the instance's `fixture_addresses` and are
+whole-account owned: every parent write to them is skipped without a mark, so
+the next mainnet diff cannot clobber a mock. The list is exactly the watched
+set that deploy replaces (only watched addresses can be clobbered); it is
+config, never persisted, and probes on those targets skip like any
+devnet-owned address.
+
 **Journal + rewind.** Before every applied write the applier records the
 before-value (`/state/journal/<block>.jsonl`, ring 1024 blocks).
 `POST /admin/rewind` restores those values newest-first and moves the cursor

@@ -157,6 +157,12 @@ pub fn clearinghouse_of(state: &ApiState, address: Address) -> Result<Option<Cle
 
 /// The venue's own answer for an untouched account (verbatim passthrough).
 async fn pass_through(state: &ApiState, body: &Bytes) -> Result<Response> {
+    // Budget accounting (plan §18.3): a pass-through is an outbound venue
+    // read, so it spends the conservative heavy weight (most info types weigh
+    // 20; clearinghouseState/l2Book/allMids weigh 2) — the poller backs off
+    // when test reads and its own polls add up. Not gated: refusing a caller's
+    // read would look like a venue outage.
+    state.feed.budget.try_spend(crate::feed::budget::weight::HEAVY);
     let resp = state.api.raw_info(body.to_vec()).await?;
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let bytes = resp.bytes().await?;

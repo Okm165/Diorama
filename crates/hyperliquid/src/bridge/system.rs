@@ -104,14 +104,22 @@ pub fn core_to_human(wei: u64, wei_decimals: u32) -> Decimal {
     Decimal::from(wei) / pow10(wei_decimals as i32)
 }
 
-/// A human decimal as an EVM-unit amount (exact; `None` on overflow or a
-/// fractional wei, which the chain would burn — the caller refuses instead).
+/// A human decimal as an EVM-unit amount, floored at the EVM wei: the real
+/// chain burns the sub-wei remainder of a non-round amount (plan §16.3), so
+/// the bridge does the same rather than refusing a transfer the chain would
+/// complete. `None` only for a negative amount or an unrepresentable one.
 pub fn human_to_evm(amount: Decimal, evm_decimals: i32) -> Option<U256> {
-    let scaled = amount * pow10(evm_decimals);
-    if scaled.fract() != Decimal::ZERO || scaled.is_sign_negative() {
+    if amount.is_sign_negative() {
         return None;
     }
-    scaled.trunc().to_string().parse().ok()
+    (amount * pow10(evm_decimals)).trunc().to_string().parse().ok()
+}
+
+/// Floor a human amount at the Core wei (`wei_decimals`): EVM→Core credits
+/// are floored the same way (the sub-wei remainder is burned on the real
+/// chain).
+pub fn floor_to_core_wei(amount: Decimal, wei_decimals: u32) -> Decimal {
+    (amount * pow10(wei_decimals as i32)).trunc() / pow10(wei_decimals as i32)
 }
 
 /// `transfer(address,uint256)` calldata.
@@ -171,7 +179,8 @@ pub fn credit_of<'a>(
         return None;
     }
     let evm_decimals = token.evm_decimals()?;
-    Some((transfer.from, token, evm_to_human(transfer.value, evm_decimals)))
+    let credited = floor_to_core_wei(evm_to_human(transfer.value, evm_decimals), token.wei_decimals);
+    Some((transfer.from, token, credited))
 }
 
 fn decimal_of(value: U256) -> Decimal {
@@ -205,6 +214,7 @@ pub fn no_evm_link(token: &TokenInfo) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn system_addresses_round_trip() {
@@ -239,8 +249,24 @@ mod tests {
         // 1 human → 1e6 EVM units.
         assert_eq!(human_to_evm(Decimal::ONE, 6), Some(U256::from(1_000_000u64)));
         assert_eq!(human_to_evm(Decimal::new(15, 1), 6), Some(U256::from(1_500_000u64)));
-        // A fractional wei cannot be represented: refuse, never truncate.
-        assert_eq!(human_to_evm(Decimal::new(1, 7), 6), None);
+        // A sub-wei fraction floors at the EVM wei (the real chain burns it).
+        assert_eq!(human_to_evm(Decimal::new(1, 7), 6), Some(U256::ZERO));
+    }
+
+    #[test]
+    fn sub_wei_remainders_are_floored_not_refused() {
+        // HYPE: 18 EVM decimals, 8 Core wei — a non-round amount credits the
+        // floored value (the rest burns, like the real chain).
+        let one_and_dust = Decimal::from_str("1.000000000000000001").unwrap();
+        let floored = floor_to_core_wei(one_and_dust, 8);
+        assert_eq!(floored, Decimal::from_str("1.00000000").unwrap());
+        // Core→EVM floors at the EVM wei instead of refusing.
+        let value = human_to_evm(one_and_dust, 18).unwrap();
+        assert_eq!(value, U256::from(1_000_000_000_000_000_001u128));
+        // A sub-EVM-wei amount floors to zero (all burned).
+        let sub_wei = Decimal::from_str("0.0000000000000000001").unwrap(); // 1e-19
+        assert_eq!(human_to_evm(sub_wei, 18).unwrap(), U256::ZERO);
+        assert!(human_to_evm(Decimal::from_str("-1").unwrap(), 6).is_none());
     }
 
     #[test]
