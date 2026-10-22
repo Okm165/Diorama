@@ -30,6 +30,12 @@ use std::time::Duration;
 /// convenience; the real managers carry their own gas).
 const MANAGER_GAS_STIPEND: u64 = 1_000_000_000_000_000_000;
 
+// TRUST: the devnet attester is the one substituted authority (Circle's
+// off-chain signer). The guards: it is installed through the contracts' own
+// setters (enableAttester/setSignatureThreshold, impersonating the live
+// attesterManager), and every verification stays real — recovery, ordering,
+// threshold, nonce replay, expiration, fee caps.
+
 /// The devnet attester: a real secp256k1 key that signs served messages.
 pub struct Attester {
     wallet: Wallet,

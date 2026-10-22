@@ -36,6 +36,17 @@ fork_offset = 128
 
 [services.engine]
 state_dir = "${STATE_DIR}"
+# Canonical addresses the daloc fixture deploy replaces via `anvil_setCode`
+# (its mock tokens and the seeded aTokens): whole-account owned, so the parent
+# diffs never clobber a mock the scanner cannot see (plan §14.1). The list is
+# exactly what that deploy mutates — its mock aggregators/adapters deploy at
+# fresh addresses (never watched) and its feed writes are txs (auto-marked).
+fixture_addresses = [
+  "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", # USDC
+  "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", # WETH
+  "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", # WBTC
+  "0x6B175474E89094C44Da98b954EedeAC495271d0F", # DAI
+]
 
 [services.engine.anvil]
 m_url = "${ANVIL_M_URL}"

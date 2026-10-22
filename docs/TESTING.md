@@ -320,6 +320,31 @@ curl -s -X POST localhost:8091/control/deal \
 | A19 | scoped manipulation leaves replay intact | scenario: a shadowed slot survives further parent diffs; unshadow re-syncs from reth; M's probes stay green |
 | A20 | journal round-trip is faithful | scenario: snapshot/revert + `/admin/rewind` restore T's cursor and re-apply cleanly |
 
+### The same axioms on the Venue Mirror (plan §12.6)
+
+The venue mirror shares the substrate axioms by **construction** (`crates/anvil` +
+`crates/devnet` are literally the same modules) and drops the replay axioms by **chain nature**
+(HyperEVM has no BALs, no beacon, no node replay, and the public RPC exposes no traces/proofs to
+verify against). Verdicts:
+
+| Verdict | Axioms | Where |
+|---|---|---|
+| **SAME** (same modules) | A1, A2, A5, A8, A11, A13, A14, A15, A18, A19, A20 + the pins/epochs/journal/COW/automine decisions | `crates/anvil` + `crates/devnet`, exercised by `make smoke-venue` and the epoch drill (same-pin restore / new-pin epoch) |
+| **IMPOSSIBLE (permanent)** | A3, A4, A6, A7, A9, A12, A16, A17 + the M guarantee (per-block verification, probe parity, convergence repair) | no replay exists to verify; the fork keeps the source's exact state and hashes at the pin |
+| **REFRAMED** | L9 freshness → the pin (chain) + the live public API (venue data); the T guarantee → at-pin parity | `venue_fork_pin`, probes-at-pin (skip+count when the pin ≠ source head — measured: the source ignores the block parameter) |
+| **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (Phase 2), bridge round-trip exactness | `crates/hyperliquid`; the identity is re-checked at the serve boundary |
+
+Two venue-specific measured facts worth knowing before an integration run:
+
+- **`anvil_dealERC20` fails on forks** (foundry 1.8.6; measured on a *fresh* HyperEVM fork for the
+  real USDC proxy **and** a plain slot-0 ERC20 — not V's state). The mirror's `POST /admin/deal`
+  works on V (measured: slot 9 discovered, 200 USDC landed). daloc's external mode should route
+  **both** its funding (`fund_token_on`) and drain paths through `/admin/deal`, not only the drain.
+- **The real HyperEVM USDC blacklists its own system address** (`isBlacklisted(0x2000…0) == true`,
+  measured on the live chain), so EVM→Core USDC is impossible with the real token; the bridge's
+  credit path runs over the harness's fixture mocks (which replace the canonical ERC20s), and the
+  bridge only credits a `Transfer` log emitted by the token's *linked* contract.
+
 ## Known limitations (accepted)
 
 1. **Storage proofs are impossible** on fork blocks (`stateRoot = 0x0`); use

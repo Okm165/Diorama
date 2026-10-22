@@ -48,3 +48,27 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod design_assertions {
+    /// The Rust-for-Rustaceans pin (plan §11.3 rule 11).
+    fn is_normal<T: Send + Sync + Sized + Unpin>() {}
+
+    #[test]
+    fn public_types_are_normal() {
+        is_normal::<crate::chains::Chain>();
+        is_normal::<crate::chains::Wiring>();
+        is_normal::<crate::transfer::MessageHeader>();
+        is_normal::<crate::transfer::BurnMessageBody>();
+        is_normal::<crate::transfer::Message>();
+        is_normal::<crate::transfer::FeeSurface>();
+        is_normal::<crate::transfer::Wallet>();
+        is_normal::<crate::transfer::TxSender>();
+        is_normal::<crate::attester::Attester>();
+        is_normal::<crate::watcher::Watcher>();
+        is_normal::<crate::relayer::Relayer>();
+        is_normal::<crate::iris::IrisState>();
+        is_normal::<crate::metrics::CctpMetrics>();
+        is_normal::<crate::error::Error>();
+    }
+}

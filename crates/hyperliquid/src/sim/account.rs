@@ -323,6 +323,35 @@ pub fn clearinghouse(account: &Account, feed: &MarketFeed, meta: Option<&crate::
     })
 }
 
+/// The client's own gate, re-checked at the boundary: the served identity
+/// `|accountValue − (totalRawUsd + Σ sign(szi)·positionValue)| ≤ 1e-6`. The
+/// construction makes it hold by definition — the counter exists so a
+/// regression in the construction is *visible* instead of silently failing
+/// daloc's client gate (plan §7.8's invariant counter).
+pub fn identity_holds(state: &ClearinghouseState) -> bool {
+    let mut signed = Decimal::ZERO;
+    for asset in &state.asset_positions {
+        let value = if asset.position.szi.is_sign_negative() {
+            -asset.position.position_value
+        } else {
+            asset.position.position_value
+        };
+        match signed.checked_add(value) {
+            Some(sum) => signed = sum,
+            None => return false,
+        }
+    }
+    let Some(expected) = state.margin_summary.total_raw_usd.checked_add(signed) else {
+        return false;
+    };
+    state
+        .margin_summary
+        .account_value
+        .checked_sub(expected)
+        .map(|diff| diff.abs() <= Decimal::new(1, 6))
+        .unwrap_or(false)
+}
+
 /// The served spot balances (USDC token 0 sorts first, like the venue's).
 pub fn spot_balances(account: &Account) -> Vec<SpotBalance> {
     let mut rows: Vec<SpotBalance> = account

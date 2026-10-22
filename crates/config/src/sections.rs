@@ -127,6 +127,13 @@ pub struct EngineSection {
     /// Optional: the feed bridge (absent = the devnet's own price writers own
     /// the mocks, the pre-mirror arrangement).
     pub feed_bridge: Option<FeedBridgeSection>,
+    /// Canonical addresses the devnet's fixture deploy replaces via
+    /// `anvil_setCode` (daloc's mock tokens and seeded aTokens): whole-account
+    /// owned, so the parent diffs never clobber them (plan §14.1). The list is
+    /// exactly what the deploy mutates — only watched addresses can be
+    /// clobbered, and these are the watched ones it replaces.
+    #[serde(default)]
+    pub fixture_addresses: Vec<Address>,
 }
 
 /// `[services.engine.feed_bridge]`: live parent-chain feed answers →

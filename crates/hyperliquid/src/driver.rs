@@ -144,6 +144,10 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
 /// The canary word: `Some(pin)` when the recorded chain instance wrote it,
 /// `None` when the storage is empty (a fresh fork) — and a read fault is the
 /// caller's error.
+// TRUST: the fork pin is the trusted root (A1/A2 — the base's state is the
+// source's, unverifiable by construction). The guards are this canary and the
+// epoch rule: a moved base clears marks *and* values; a same-pin reset
+// restores the recorded writes; a fresh chain cannot carry the canary word.
 async fn read_canary(ctx: &Ctx) -> Result<Option<u64>> {
     let word = ctx.v.storage_at_latest(CANARY_ADDRESS, CANARY_SLOT).await?;
     let value = alloy_primitives::U256::from_be_bytes(word.0);

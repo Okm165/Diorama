@@ -33,6 +33,13 @@ pub struct Shadow {
     /// have a default zero restored over a real value on a re-fork.
     #[serde(default)]
     pub account_values: BTreeMap<Address, AccountValues>,
+    /// Whole-account ownership for the devnet's fixtures (plan §14.1): the
+    /// canonical addresses daloc's deploy replaces via `anvil_setCode` write
+    /// through *cheatcodes*, which the tx scanner cannot see — without this,
+    /// the next parent diff would clobber the mock. Config carries the list;
+    /// it is runtime state, never persisted.
+    #[serde(skip)]
+    pub fixtures: BTreeSet<Address>,
 }
 
 /// The recorded account fields of one shadowed account (any subset).
@@ -92,6 +99,12 @@ impl From<RawAccountValues> for AccountValues {
 
 impl Shadow {
     pub fn is_shadowed(&self, w: &Write) -> bool {
+        if self.fixtures.contains(&w.address()) {
+            // Whole-account ownership: every write to a fixture address is
+            // devnet-owned, marked or not (the fixture deploy is invisible to
+            // the scanner).
+            return true;
+        }
         match w {
             Write::Storage { address, slot, .. } => self
                 .slots
@@ -100,6 +113,23 @@ impl Shadow {
                 .unwrap_or(false),
             _ => self.accounts.contains(&w.address()),
         }
+    }
+
+    /// Install the fixture list (boot: from the instance's
+    /// `fixture_addresses`).
+    pub fn set_fixtures(&mut self, fixtures: BTreeSet<Address>) {
+        self.fixtures = fixtures;
+    }
+
+    /// Every address the registry owns, fixtures included (the probe
+    /// runner's skip set).
+    pub fn owned_addresses(&self) -> BTreeSet<Address> {
+        self.slots
+            .keys()
+            .chain(self.accounts.iter())
+            .chain(self.fixtures.iter())
+            .copied()
+            .collect()
     }
 
     /// Mark a single write as shadowed.
@@ -584,5 +614,37 @@ mod tests {
         assert!(text.contains("\"balance\":\"0x0\""), "{text}");
         s.unmark_account_fields(a);
         assert_eq!(s.prune_orphans(), (0, 0));
+    }
+
+    /// Fixture addresses are whole-account owned (plan §14.1): the fixture
+    /// deploy writes through cheatcodes the scanner cannot see, so every
+    /// write to those addresses must be skipped without a mark — and the
+    /// list is runtime state, never persisted.
+    #[test]
+    fn fixture_addresses_are_owned_whole() {
+        let fixture = Address::repeat_byte(0xf1);
+        let other = Address::repeat_byte(0xf2);
+        let mut s = Shadow::default();
+        s.set_fixtures([fixture].into_iter().collect());
+        let write = |address: Address, slot: u64| Write::Storage {
+            address,
+            slot: U256::from(slot),
+            value: U256::from(1u64),
+        };
+        assert!(s.is_shadowed(&write(fixture, 7)), "any fixture slot is owned");
+        assert!(
+            s.is_shadowed(&Write::Balance {
+                address: fixture,
+                value: U256::from(9u64),
+            }),
+            "fixture account fields are owned"
+        );
+        assert!(!s.is_shadowed(&write(other, 7)), "non-fixtures need a mark");
+        assert!(s.owned_addresses().contains(&fixture));
+        // Runtime-only: the persisted form never carries the fixture list.
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(!text.contains("fixture"), "{text}");
+        let reloaded: Shadow = serde_json::from_str(&text).unwrap();
+        assert!(reloaded.fixtures.is_empty(), "fixtures come from config");
     }
 }

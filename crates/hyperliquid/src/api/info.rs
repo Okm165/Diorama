@@ -61,7 +61,7 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         InfoRequest::ClearinghouseState { user, dex } => {
             if !dex.as_deref().unwrap_or("").is_empty() {
                 // The sim serves the first perp dex only (perpDexs = [null]).
-                return Ok(Json(empty_clearinghouse()).into_response());
+                return Ok(Json(empty_clearinghouse(state.sim.served_time(crate::now_ms())?)).into_response());
             }
             match clearinghouse_of(&state, user)? {
                 Some(state_body) => Ok(Json(state_body).into_response()),
@@ -121,7 +121,7 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         }
         InfoRequest::ExchangeStatus => Ok(Json(ExchangeStatus {
             special_statuses: None,
-            time: crate::now_ms(),
+            time: state.sim.served_time(crate::now_ms())?,
         })
         .into_response()),
         InfoRequest::SpotMeta => Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response()),
@@ -134,12 +134,25 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
 /// lagged one accrual window behind the stored state).
 pub fn clearinghouse_of(state: &ApiState, address: Address) -> Result<Option<ClearinghouseState>> {
     let now = crate::now_ms();
+    let served_time = state.sim.served_time(now)?;
     state.sim.accrue_all(&state.feed, now)?;
     let Some(account) = state.sim.account(address)? else {
         return Ok(None);
     };
     let meta = state.feed.meta();
-    Ok(Some(account::clearinghouse(&account, &state.feed, meta.as_ref(), now)?))
+    let served = account::clearinghouse(&account, &state.feed, meta.as_ref(), served_time)?;
+    if !account::identity_holds(&served) {
+        state
+            .sim
+            .metrics
+            .identity_violations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(
+            address = %address,
+            "served clearinghouseState failed the identity re-check; daloc's client gate would refuse it"
+        );
+    }
+    Ok(Some(served))
 }
 
 /// The venue's own answer for an untouched account (verbatim passthrough).
@@ -150,7 +163,7 @@ async fn pass_through(state: &ApiState, body: &Bytes) -> Result<Response> {
     Ok((status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response())
 }
 
-fn empty_clearinghouse() -> ClearinghouseState {
+fn empty_clearinghouse(time: u64) -> ClearinghouseState {
     let zero = MarginSummary {
         account_value: Decimal::ZERO,
         total_ntl_pos: Decimal::ZERO,
@@ -163,7 +176,7 @@ fn empty_clearinghouse() -> ClearinghouseState {
         cross_maintenance_margin_used: Decimal::ZERO,
         withdrawable: Decimal::ZERO,
         asset_positions: Vec::new(),
-        time: crate::now_ms(),
+        time,
     }
 }
 

@@ -46,6 +46,9 @@ pub struct Bridge {
     v: Rpc,
     sim: Arc<Sim>,
     feed: Arc<MarketFeed>,
+    /// The last head whose timestamp was observed (one header read per new
+    /// block; the sim's served `time` follows the venue chain's clock).
+    observed_head: std::sync::atomic::AtomicU64,
     /// The last scanned V block (0 = not anchored yet); persisted in the
     /// sim's state so a restart does not lose the boundary activity mined
     /// meanwhile.
@@ -60,6 +63,7 @@ impl Bridge {
             v,
             sim,
             feed,
+            observed_head: std::sync::atomic::AtomicU64::new(0),
             cursor: std::sync::atomic::AtomicU64::new(cursor),
             metrics,
         }
@@ -78,6 +82,7 @@ impl Bridge {
     /// One pass: anchor (pin-aware), then scan every new block.
     pub async fn pass(&self) -> Result<()> {
         let head = self.v.block_number().await?;
+        self.observe_head_time(head).await?;
         let pin = self.v.fork_config().await?.map(|(_, block)| block).unwrap_or(0);
         let mut from = self.cursor.load(Ordering::Relaxed);
         if from == 0 || from < pin || from > head {
@@ -98,6 +103,20 @@ impl Bridge {
             // half-applying (a duplicate credit is a silent balance lie).
             self.sim.save_if_dirty()?;
         }
+        Ok(())
+    }
+
+    /// Keep the sim's served `time` on the venue chain's clock: one header
+    /// read per new head (their harness jumps every chain forward; a venue
+    /// read must not look stale afterwards).
+    async fn observe_head_time(&self, head: u64) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if self.observed_head.load(Ordering::Relaxed) == head {
+            return Ok(());
+        }
+        let block = self.v.block_by_number(head, false).await?;
+        self.sim.observe_chain_time(block.header.timestamp.saturating_mul(1_000));
+        self.observed_head.store(head, Ordering::Relaxed);
         Ok(())
     }
 
@@ -163,6 +182,9 @@ impl Bridge {
         }
     }
 
+    // TRUST: value in = value recorded (token-admission-policy). The guards:
+    // only a Transfer log from the token's linked EVM contract counts, and the
+    // Core amount is the log's exact value converted by the pinned decimals.
     /// EVM→Core credit from one transfer log (the emitting contract must be
     /// the token's linked EVM contract).
     async fn apply_credit(&self, transfer: &Transfer, emitter: Address, tokens: &[TokenInfo]) -> Result<()> {

@@ -118,7 +118,8 @@ impl Ctx {
         let timeout = Duration::from_secs(engine_section.reth.request_timeout_secs);
         let watchlist = cfg.watch_set();
         let shadow_path = engine_section.state_dir.join("shadow.json");
-        let shadow = Shadow::load(&shadow_path)?;
+        let mut shadow = Shadow::load(&shadow_path)?;
+        shadow.set_fixtures(engine_section.fixture_addresses.iter().copied().collect());
         let journal = Journal::new(
             engine_section.journal.dir.clone(),
             engine_section.journal.blocks,

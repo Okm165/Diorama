@@ -183,6 +183,12 @@ smoke: ## End-to-end smoke test
 smoke-venue: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
 	NS=venue-mirror ./scripts/smoke-venue.sh
 
+venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/epoch)
+	kubectl -n venue-mirror exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
+
+feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
+	./scripts/feed-bridge.sh $(ARGS)
+
 scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
 	NS=$(NS) ./scripts/scenario.sh
 
@@ -261,4 +267,5 @@ help: ## Show this help
 	@echo
 
 .PHONY: ns secrets apply diff delete snapshot snapshot-status bootstrap images build build-venue \
-	import deploy-engine test-engine config-check status logs smoke smoke-venue selftest pin-show repin help
+	import deploy-engine test-engine config-check status logs smoke smoke-venue venue-repin feed-bridge \
+	selftest pin-show repin help

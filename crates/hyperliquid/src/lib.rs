@@ -40,3 +40,39 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod design_assertions {
+    /// The Rust-for-Rustaceans pin (plan §11.3 rule 11): every public type is
+    /// Send + Sync + Sized + Unpin by construction, asserted at compile time.
+    fn is_normal<T: Send + Sync + Sized + Unpin>() {}
+
+    #[test]
+    fn public_types_are_normal() {
+        is_normal::<crate::ctx::VenueMetrics>();
+        is_normal::<crate::feed::MarketFeed>();
+        is_normal::<crate::feed::Overrides>();
+        is_normal::<crate::feed::PriceOverride>();
+        is_normal::<crate::feed::budget::Budget>();
+        is_normal::<crate::feed::metrics::FeedMetrics>();
+        is_normal::<crate::feed::rest::RestClient>();
+        is_normal::<crate::feed::ws::WsClient>();
+        is_normal::<crate::sim::Sim>();
+        is_normal::<crate::sim::SimState>();
+        is_normal::<crate::sim::SimMetrics>();
+        is_normal::<crate::sim::DealClass>();
+        is_normal::<crate::sim::AdvanceOutcome>();
+        is_normal::<crate::sim::account::Account>();
+        is_normal::<crate::sim::account::AccountSeed>();
+        is_normal::<crate::sim::account::Position>();
+        is_normal::<crate::sim::account::Liquidation>();
+        is_normal::<crate::api::ApiState>();
+        is_normal::<crate::bridge::Bridge>();
+        is_normal::<crate::bridge::metrics::BridgeMetrics>();
+        is_normal::<crate::wire::InfoRequest>();
+        is_normal::<crate::wire::ClearinghouseState>();
+        is_normal::<crate::wire::MetaAndAssetCtxs>();
+        is_normal::<crate::wire::L2Book>();
+        is_normal::<crate::wire::SpotMeta>();
+    }
+}

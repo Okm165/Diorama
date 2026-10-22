@@ -69,7 +69,7 @@ impl<'a> ProbeRunner<'a> {
         let shadowed: HashSet<Address> = match self.shadow {
             Some(s) => {
                 let s = s.lock()?;
-                s.slots.keys().chain(s.accounts.iter()).copied().collect()
+                s.owned_addresses().into_iter().collect()
             }
             None => HashSet::new(),
         };

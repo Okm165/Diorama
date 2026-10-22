@@ -55,6 +55,9 @@ pub struct SimMetrics {
     pub liquidations_total: AtomicU64,
     /// Funding payments applied (per position, per accrual).
     pub funding_payments_total: AtomicU64,
+    /// Served states that failed the identity re-check (the client's own
+    /// gate): any nonzero value is a construction regression to page on.
+    pub identity_violations: AtomicU64,
 }
 
 impl SimMetrics {
@@ -64,6 +67,7 @@ impl SimMetrics {
         mirror_devnet::metrics::push_metric(&mut out, "gauge", "venue_sim_epoch", "scenario epoch (reset bumps it)", self.epoch.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_liquidations_total", "liquidations executed by the sim", self.liquidations_total.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_funding_payments_total", "funding payments applied", self.funding_payments_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_identity_violations_total", "served states that failed the identity re-check (must stay 0)", self.identity_violations.load(Ordering::Relaxed));
         out
     }
 }
@@ -82,6 +86,11 @@ pub struct Sim {
     state: Shared<SimState>,
     path: Option<PathBuf>,
     dirty: AtomicBool,
+    /// The venue chain's head timestamp (ms), observed by the bridge when V is
+    /// configured. Their time policy jumps *every* chain's clock forward and
+    /// the client's own rule is `chain_time = max(wall, head)` — a served
+    /// `time` that stayed at wall would read as stale after a V jump.
+    chain_time_ms: AtomicU64,
     pub metrics: SimMetrics,
 }
 
@@ -102,6 +111,7 @@ impl Sim {
             state: Shared::new("sim state", state),
             path,
             dirty: AtomicBool::new(false),
+            chain_time_ms: AtomicU64::new(0),
             metrics: SimMetrics::default(),
         };
         sim.publish_gauges();
@@ -125,6 +135,22 @@ impl Sim {
     pub fn clock(&self, now_ms: u64) -> Result<u64> {
         let offset = self.state.lock()?.clock_offset_ms;
         Ok((now_ms as i64 + offset).max(0) as u64)
+    }
+
+    /// Observe the venue chain's head timestamp (the bridge calls this per
+    /// pass; a no-op when V is not configured).
+    pub fn observe_chain_time(&self, ms: u64) {
+        self.chain_time_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// The `time` a venue read serves: never behind wall, never behind the
+    /// sim's own clock (an `advance` jump), never behind the venue chain's
+    /// clock (their harness jumps every chain forward).
+    pub fn served_time(&self, wall_ms: u64) -> Result<u64> {
+        Ok(self
+            .clock(wall_ms)?
+            .max(wall_ms)
+            .max(self.chain_time_ms.load(Ordering::Relaxed)))
     }
 
     pub fn epoch(&self) -> Result<u64> {
@@ -585,6 +611,28 @@ mod tests {
             .deal(&feed, a, DealClass::Spot, Some("USDC"), Decimal::ONE)
             .unwrap_err();
         assert!(matches!(err, Error::Overflow { .. }), "{err}");
+    }
+
+    /// The served `time` never lags wall, the sim clock (`advance`), or the
+    /// venue chain's clock (their harness jumps every chain forward).
+    #[test]
+    fn served_time_never_lags() {
+        let feed = MarketFeed::memory(vec![]);
+        let sim = Sim::memory();
+        assert_eq!(sim.served_time(1_000).unwrap(), 1_000);
+        sim.advance(&feed, 60, 1).unwrap();
+        assert_eq!(sim.served_time(1_000).unwrap(), 61_000, "advance wins");
+        assert_eq!(
+            sim.served_time(500_000).unwrap(),
+            560_000,
+            "the sim clock tracks wall + offset"
+        );
+        sim.observe_chain_time(700_000);
+        assert_eq!(
+            sim.served_time(500_000).unwrap(),
+            700_000,
+            "the venue chain wins when it is ahead"
+        );
     }
 
     #[test]

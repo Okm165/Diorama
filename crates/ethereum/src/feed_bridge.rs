@@ -108,6 +108,11 @@ impl FeedBridgeMetrics {
     }
 }
 
+// TRUST: the mock aggregators are the devnet's own price surface. The guards:
+// both sides' decimals must match at boot (an unscaled answer would poison
+// every consumer), and a value the bridge did not write pauses the feed — a
+// scenario's crash is never overwritten.
+
 pub struct FeedBridge {
     feeds: Vec<FeedRuntime>,
     /// The account that submits `updateAnswer` on T (auto-impersonate makes

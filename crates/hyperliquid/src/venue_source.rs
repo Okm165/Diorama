@@ -57,6 +57,11 @@ impl VenueSource {
     }
 }
 
+// TRUST: the source's answers are venue-reported, never storage-proven. The
+// guard is the fail-closed pin check below: while the source head differs from
+// the pin (the public RPC serves latest regardless of the block parameter —
+// measured), reads are refused instead of served from the wrong state.
+
 impl Source for VenueSource {
     /// The source's anchor: the pin. Before the pin is resolved (a boot race
     /// the bin's ordering rules out) the source's head is the only truthful
