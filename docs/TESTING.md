@@ -140,6 +140,9 @@ behavioral). The default policy (`on_divergence: continue`) records all of them;
 | A devnet tx must not share a block with the parent's diffs | anvil estimates `eth_sendTransaction` gas against `latest`; with the diffs landing in between, an Aave `borrow` estimated at 257,560 used 271,389 (97% of its limit) and reverted, then succeeded with an explicit 1M limit. Fixed structurally by the prepend rule (devnet txs mine in their own block first) |
 | A corrupted drift journal hides the history it exists to keep | two tasks appended long lines with separate handles: 10 interleaved lines in 48k. Now serialized, one write per line, divergences only, 16 MiB rotation |
 | `cast calldata` rejects `--rpc-url` | a wrapper that appended it silently produced *empty* calldata: the "supply" shipped as a 21,000-gas plain transfer and reverted. Every failed market step in that run traced back to this |
+| `anvil_dealERC20` cannot work on this fork, but `eth_call` overrides can | it discovers balance slots by writing and re-reading, and on a no-mining fork its probe never lands ("no slot found", measured). `/admin/deal` probes with `eth_call` + a `stateDiff` override instead: candidate slots 0..16, a sentinel value (a balance that already equals the target makes every slot match - measured), 32-byte padded override values (a quantized value answers "invalid string length") and an explicitly encoded `balanceOf` calldata (`format!("{:064x}", address)` does not pad an alloy Address). Finds WETH slot 3 and USDC's packed slot 9 alike |
+| A watchlist gap can hide in the counterparties | Aave's variable debt tokens were unwatched: a devnet borrow writes the user's scaled debt there, the write is not tracked (the shadow scanner follows watched accounts), so `/admin/shadow {all:true}` cannot clear it - a phantom $315 debt against zero collateral broke every later borrow with `LtvValidationFailed`. The proof now uses a fresh position address per run and the closure includes all five aTokens and debt tokens |
+| A devnet reset can make your next tx a no-op that reports success | re-syncing an account's fields puts its nonce back to mainnet's; a byte-identical tx (same nonce, data, gas price) has the same hash, so the node answers with the *old* receipt while the reset state no longer holds its effects (measured: a "successful" approve that changed nothing, then a supply reverting with a bare `revert()`). Vary something - the gas price is enough - or never reset the sender's nonce |
 | `cast send --unlocked` needs an explicit `anvil_impersonateAccount` | anvil's `--auto-impersonate` accepts `eth_sendTransaction` from any sender, but cast's own signer check refuses first ("No Signer available"). The suite sends raw `eth_sendTransaction` through the engine pod instead - no signer involved, and the receipt poll is ours |
 | `cast index` is offline | it ignores/silently mishandles `--rpc-url`; a slot computed with one comes back empty and the storage read looks like "no value" instead of a wrong slot |
 | The tx pool keeps a devnet tx that the engine cannot mine | when the applier bails (T's head behind the cursor after an out-of-band `anvil_reset`), pending txs starve while the probes stay green - watch `mirror_t_head` vs `cursor_t`, not just the probes |
@@ -155,12 +158,15 @@ measured end-to-end against the live stack and left clean afterwards.
 | A. live fork | T's head at/ahead of the applied parent cursor; reth's head/safe gap; live oracle prices equal reth at the cursor (USDC *and* WETH) |
 | B. mint funds | 10,000 ETH (`anvil_setBalance`); 0.1 WETH (slot 3); 100 USDC (packed `balanceAndBlacklistStates`, slot 9) - each read back through `balanceOf` |
 | C. live markets | real Aave pool: `approve` → `supply` (aToken delta) → `borrow` (debt + HF from `getUserAccountData`) → `repay` → `withdraw`; real Uniswap V3 `SwapRouter02.exactInputSingle` on the WETH/USDC 0.05% pool (USDC delta) |
+| C2. the financial core | crash WETH's oracle source through the pool owner (the governance path), watch `getUserAccountData` cross below `1e18`, then have a **fresh liquidator funded through `/admin/deal`** call the real `liquidationCall`: debt seized (`5.000004 → 0`), collateral taken with the liquidation bonus, oracle restored via unshadow |
+| C3. time travel | a fresh position, then `POST /admin/time` +30 days: the clock is 30 days ahead *and still following mainnet*, the USDC income index advanced by a month of interest, and the borrow's debt grew with it |
+| D2. event bridge | WS `eth_subscribe` is accepted (returns an id) and `eth_getLogs` returns the transfer. **Measured limitation**: anvil does not *push* notifications for engine-mined blocks (verified with automine on and off), so dapps must poll `eth_getLogs` - the fallback every client implements |
 | D. debug surface | `debug_traceTransaction` (callTracer) on the supply; receipt logs; `eth_call` with a `stateDiff` override |
 | E. reset | `POST /admin/shadow {clear:true, all:true}` per touched venue, then assert the Uniswap `slot0` is back to reth's value at the cursor |
 
 Every send is simulated with `eth_call` first (Tenderly's own workflow), so a
 revert prints its reason before any transaction is spent. Measured runtime:
-~4 min; last full run: 19 passed, 0 failed.
+~10 min; last full run: 30 passed, 0 failed.
 
 ## Plan axioms → how they are covered
 
@@ -179,10 +185,10 @@ revert prints its reason before any transaction is spent. Measured runtime:
 | A11 | `deal` writes storage silently | scenario: a WETH deal sets the balance with **no** Transfer log; USDC's packed `balanceAndBlacklistStates` layout is refused ("no slot found", measured) |
 | A12 | exactly one M block per parent block | scenario head parity (`m_head == follow_head`) + `anvil_mine(1)` |
 | A13 | local writes never touch M | the COW/shadow section runs on T; M's probes and the drift gate are asserted after it |
-| A14 | warm restart preserves state | anvil `--state` removed (it dumped per-block history: 13 GB/dump, leaked tmp dirs, filled T's PVC); the engine rebases instead - M re-replays ~FORK_OFFSET blocks (~1-2 min, measured) |
+| A14 | warm restart preserves state | anvil `--state` removed (it dumped per-block history: 13 GB/dump, leaked tmp dirs, filled T's PVC); the engine rebases instead - M re-replays FORK_OFFSET blocks (~1-2 min, measured). For T a restart *is* a re-fork: the devnet's writes are gone and the engine clears their shadow marks so mainnet's diffs resume (re-apply your writes) |
 | A15 | memory bounded by restart | measured ~20 MB per replayed block steady state; M recycles at its 24Gi limit (~2.5-4 h) and recovers in ~1-2 min |
 | A16 | upstream reorgs detected | parent-hash continuity check → freeze + drill |
-| A17 | mirror block hashes differ | inherent (verified: anvil exposes no blockhash/beacon-root setter); recorded as behavioral, state re-converged from the parent BAL |
+| A17 | mirror block hashes differ | inherent (verified: anvil exposes no blockhash/beacon-root setter); recorded as behavioral, state re-converged from the parent BAL. Measured rate: ~45% of blocks carry a value-level divergence (the blockhash-gated MEV/Seaport class), 0 structural in steady state, and `mirror_m_convergence_failures_total` stays 0 - the state is exact even when the execution diverges |
 | A18 | delivery is event-driven | consumers subscribe to anvil M/T WS (`eth_subscribe`) |
 | A19 | scoped manipulation leaves replay intact | scenario: a shadowed slot survives further parent diffs; unshadow re-syncs from reth; M's probes stay green |
 | A20 | journal round-trip is faithful | scenario: snapshot/revert + `/admin/rewind` restore T's cursor and re-apply cleanly |

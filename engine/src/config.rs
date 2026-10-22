@@ -100,6 +100,12 @@ pub struct RethConfig {
     pub url: String,
     #[serde(default)]
     pub follow: FollowHead,
+    /// Replay this many blocks behind the follow head. Blob sidecars for the
+    /// newest block are not in the beacon yet (measured: >15 s of retries on
+    /// ~every blob block), so the applier would hold M and retry on every blob
+    /// block. A 2-block margin costs ~24 s of lag and removes the stall.
+    #[serde(default = "default_follow_margin")]
+    pub follow_margin_blocks: u64,
     #[serde(default = "default_timeout")]
     pub request_timeout_secs: u64,
 }
@@ -157,6 +163,10 @@ pub struct LoopsConfig {
     #[serde(default = "default_fork_offset")]
     pub fork_offset: u64,
     pub on_divergence: OnDivergence,
+}
+
+fn default_follow_margin() -> u64 {
+    2
 }
 
 fn default_fork_offset() -> u64 {

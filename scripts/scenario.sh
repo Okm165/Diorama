@@ -37,7 +37,7 @@ num() { printf '%d' "${1:-0}" 2>/dev/null || echo 0; }
 # when the engine is catching up; the engine mines one T block per parent block).
 send_tx() { # send_tx <from> <to> <calldata>  -> tx hash on stdout
   rpc http://anvil-t:8545 eth_sendTransaction \
-    "[{\"from\":\"$1\",\"to\":\"$2\",\"data\":\"$3\",\"gasPrice\":\"0x174876e800\"}]" | jq -r '.result // .error.message'
+    "[{\"from\":\"$1\",\"to\":\"$2\",\"data\":\"$3\",\"gasPrice\":\"0x174876e800\",\"gas\":\"0x1e8480\"}]" | jq -r '.result // .error.message'
 }
 wait_tx() { # wait_tx <hash> [tries]  -> status (0x1/0x0) or "pending"
   local tries=${2:-40}

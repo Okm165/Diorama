@@ -36,6 +36,18 @@ impl Journal {
         &self.dir
     }
 
+    /// Drop every recorded block. Used when T is re-forked under us: the
+    /// before-values belong to a chain that no longer exists, so a rewind
+    /// against the new one would write values that were never there.
+    pub fn clear(&self) -> Result<()> {
+        let entries = std::fs::read_dir(&self.dir)
+            .with_context(|| format!("reading {}", self.dir.display()))?;
+        for e in entries.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+        Ok(())
+    }
+
     pub fn record(&self, block: u64, entries: &[JournalEntry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());

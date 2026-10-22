@@ -192,6 +192,12 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         return Ok(None);
     };
     ctx.metrics.set(&ctx.metrics.reth_follow_head, follow);
+    // Schedule a small margin behind the head: the beacon cannot serve blob
+    // sidecars for the newest block yet (measured: >15 s of retries on ~every
+    // blob block with `follow: latest`, holding M each time). ~2 blocks of
+    // extra lag is invisible; the metric keeps the raw head so
+    // `mirror_lag_blocks` still measures the true distance.
+    let follow = follow.saturating_sub(ctx.cfg.reth.follow_margin_blocks);
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
     ctx.metrics.set(&ctx.metrics.reth_head, reth_head);
 
@@ -209,7 +215,18 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     };
     match chain {
         Chain::M => ctx.metrics.set(&ctx.metrics.m_head, head),
-        Chain::T => ctx.metrics.set(&ctx.metrics.t_head, head),
+        Chain::T => {
+            ctx.metrics.set(&ctx.metrics.t_head, head);
+            if let Ok(info) = rpc.anvil_node_info().await {
+                if let Some(fork) = info
+                    .pointer("/forkConfig/forkBlockNumber")
+                    .and_then(|v| v.as_u64())
+                {
+                    ctx.metrics
+                        .set(&ctx.metrics.t_fork_age_blocks, head.saturating_sub(fork));
+                }
+            }
+        }
     }
 
     // Validate the cursor against the chain; a mismatch means the chain was
@@ -224,6 +241,51 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                     block = c.block,
                     "cursor not found on chain (reset or re-pin) - rebasing"
                 );
+                if matches!(chain, Chain::T) {
+                    // T was re-forked (its OOM restart or a re-pin): the chain
+                    // is back at the pin, but the devnet's own writes are kept
+                    // in the shadow registry's value map. Restore them - the
+                    // marks stay, so mainnet's diffs keep skipping these keys.
+                    // (Without this the devnet's positions vanish while their
+                    // marks keep mainnet's writes away: stale pin-era values
+                    // that look devnet-owned - measured: a poisoned Aave
+                    // oracle, healed only by hand.)
+                    let (slots, accounts, values, accounts_values) = {
+                        let s = ctx.shadow.lock().unwrap();
+                        (
+                            s.slot_count(),
+                            s.accounts.len(),
+                            s.values.len(),
+                            s.account_values.len(),
+                        )
+                    };
+                    ctx.metrics.inc(&ctx.metrics.t_resets_total);
+                    if slots > 0 || accounts > 0 {
+                        // Clone out: the re-apply awaits, and a MutexGuard must
+                        // not be held across it (the loop must stay Send).
+                        let snapshot = ctx.shadow.lock().unwrap().clone();
+                        let restored = snapshot.reapply(&ctx.anvil_t).await;
+                        let (unknown_slots, unknown_accounts) =
+                            ctx.shadow.lock().unwrap().unrecorded();
+                        let _ = ctx.save_shadow();
+                        tracing::warn!(
+                            slots,
+                            accounts,
+                            storage_accounts = values,
+                            account_values = accounts_values,
+                            restored,
+                            unknown_slots,
+                            unknown_accounts,
+                            "T was reset: re-applied the devnet's writes; unshadowed keys without a recorded value"
+                        );
+                    }
+                    // The journal holds before-values of the *old* chain: a
+                    // rewind against the re-forked chain would restore values
+                    // that never existed there. Drop it.
+                    if let Err(e) = ctx.journal.clear() {
+                        tracing::warn!(error = %e, "clearing the journal after a T reset failed");
+                    }
+                }
                 // Drop it from the persisted state too: `first_block` is an
                 // epoch marker, and the next processed block must set a fresh
                 // one (otherwise `mirror_pin_age_blocks` counts across epochs).
@@ -258,7 +320,8 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         (Chain::T, Some(pin)) => (pin + 1, true),
         _ => state::next_block(cursor.as_ref(), head),
     };
-    if matches!(chain, Chain::M) && head > follow {
+    let forced = matches!(chain, Chain::M) && ctx.force_rebase.swap(false, Ordering::Relaxed);
+    if matches!(chain, Chain::M) && (head > follow || forced) {
         // M's replay is irreversible, but the follow head can move *backward*:
         // the CL's forkchoice may report a lower safe block (reorg / failed
         // justification), which strands M until it catches up (measured: a
@@ -279,7 +342,8 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
                     chain = ?chain,
                     head,
                     follow,
-                    "M is ahead of the follow head (safe head moved backward)"
+                    forced = forced,
+                    "re-basing M: ahead of the follow head (reorg) or a block is unservable"
                 );
             }
         }
@@ -362,24 +426,39 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         return Ok(None);
     }
     let gap = follow.saturating_sub(start);
-    if gap > ctx.cfg.loops.max_gap_blocks {
+    // Two regimes (plan §3 ops): normal operation pauses at `max_gap_blocks`
+    // (300 = the plan's "> 300 -> pause and re-sync"), while a *rebased* cursor
+    // (a fresh pin after a restart/re-fork) is allowed to replay its whole pin
+    // window - bounded by reth's state window (10,064), the plan's own limit.
+    let limit = if rebased { 10_064 } else { ctx.cfg.loops.max_gap_blocks };
+    if gap > limit {
         tracing::error!(
             chain = ?chain,
             gap,
-            max = ctx.cfg.loops.max_gap_blocks,
+            max = limit,
+            rebased,
             "sync gap too large - paused; run the re-pin drill (make repin)"
         );
         return Ok(None);
     }
 
-    // Upstream reorg continuity: only meaningful when we processed start-1.
-    if let (Some(last_hash), Some(last_block)) = (ctx.reth_last_hash(), ctx.reth_last_block()) {
-        if start > 1 && start - 1 == last_block {
-            if let Some(prev) = reth_block_hash(&ctx.reth, start - 1).await? {
-                if prev != last_hash {
-                    ctx.metrics.inc(&ctx.metrics.reorgs_detected);
-                    ctx.on_divergence(&format!("reth reorg at {}", start - 1));
-                    return Ok(None);
+    // Upstream reorg continuity: only meaningful when we processed start-1, and
+    // it belongs to the *M* loop alone - it owns the parent-stream integrity
+    // (`reth_last_*` is written by the M replay). T consumes the same blocks
+    // through the diff applier, whose absolute-value writes self-heal across a
+    // reorg, and its own cursor check rebases on a reset. Running the check in
+    // both loops double-counted every reorg.
+    if matches!(chain, Chain::M) {
+        if let (Some(last_hash), Some(last_block)) =
+            (ctx.reth_last_hash(), ctx.reth_last_block())
+        {
+            if start > 1 && start - 1 == last_block {
+                if let Some(prev) = reth_block_hash(&ctx.reth, start - 1).await? {
+                    if prev != last_hash {
+                        ctx.metrics.inc(&ctx.metrics.reorgs_detected);
+                        ctx.on_divergence(&format!("reth reorg at {}", start - 1));
+                        return Ok(None);
+                    }
                 }
             }
         }
@@ -412,23 +491,33 @@ async fn replay_loop(ctx: Arc<Ctx>) {
                             error = %e,
                             "replay failed (will retry)"
                         );
-                        // Transient failures get a few tries. After that the
-                        // block is mined with whatever the pool holds and the
-                        // divergence is recorded: the parent-BAL repair still
-                        // converges M's state, so skipping one block's txs is
-                        // strictly better than stalling the whole mirror (e.g.
-                        // a beacon source returning a bad blob sidecar).
-                        if attempts >= 3 {
+                        // A block whose raws could not be built (missing blob
+                        // sidecars) must NOT be mined: mining "what the pool
+                        // holds" produces an *empty* block, breaks the 1:1
+                        // block mapping and records a fatal tx-count divergence
+                        // (measured: 261 txs lost per block while the beacon
+                        // ingested the sidecars seconds behind the head). Hold
+                        // M at n-1 and retry - `mirror_lag_blocks` is the alarm.
+                        if attempts == 18 {
+                            // ~90 s of the same block failing: not transient.
+                            // Ask `next_block_for` to re-base M at a fresh pin
+                            // (blob sidecars older than the CL's prune window
+                            // can never be served, so waiting is forever).
                             tracing::error!(
                                 block = n,
-                                attempts,
-                                error = %e,
-                                "giving up on this block; mining what the pool holds"
+                                "block unservable for ~90 s; asking for an M re-base"
                             );
-                            if let Err(e2) = ctx.anvil_m.anvil_mine(1).await {
-                                tracing::error!(block = n, error = %e2, "forced mine failed");
-                            }
-                            attempts = 0;
+                            ctx.force_rebase.store(true, Ordering::Relaxed);
+                        }
+                        if attempts == 1 || attempts % 20 == 0 {
+                            tracing::error!(
+                                block = n,
+                                attempt = attempts,
+                                error = %e,
+                                "replay failed; holding M (never mining an empty or partial block)"
+                            );
+                        } else {
+                            tracing::debug!(block = n, attempt = attempts, error = %e, "replay retry");
                         }
                         tokio::time::sleep(poll * 5).await;
                     }
@@ -446,7 +535,7 @@ async fn replay_loop(ctx: Arc<Ctx>) {
 async fn apply_loop(ctx: Arc<Ctx>) {
     let poll = Duration::from_millis(ctx.cfg.loops.poll_interval_ms.max(200));
     loop {
-        if ctx.halted.load(Ordering::Relaxed) {
+        if ctx.halted.load(Ordering::Relaxed) || ctx.frozen.load(Ordering::Relaxed) {
             tokio::time::sleep(poll).await;
             continue;
         }

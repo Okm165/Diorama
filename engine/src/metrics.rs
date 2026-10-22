@@ -27,6 +27,14 @@ pub struct Metrics {
     pub last_replay_ms: AtomicU64,
     pub last_apply_ms: AtomicU64,
     pub pin_age_blocks: AtomicU64,
+    /// `T's head - T's fork block`: reads below the fork block are served by
+    /// reth, whose state window is 10,064 blocks. Past that, any slot T has
+    /// not written cannot be read at all - re-pin (make repin) before it.
+    pub t_fork_age_blocks: AtomicU64,
+    /// Times T was found re-forked under the engine (its OOM restart, a re-pin).
+    /// The engine re-applies the devnet's recorded writes; the chain history is
+    /// gone. A steady increase means T is restarting often (check its RSS).
+    pub t_resets_total: AtomicU64,
     pub blob_failures: AtomicU64,
     pub receipts_unverified: AtomicU64,
     pub reorgs_detected: AtomicU64,
@@ -65,6 +73,18 @@ impl Metrics {
         gauge(&mut out, "mirror_cursor_block", "last replayed parent block", self.cursor_m.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_cursor_block_t", "last applied parent block", self.cursor_t.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_lag_blocks", "follow head - replay cursor", self.reth_follow_head.load(Ordering::Relaxed).saturating_sub(self.cursor_m.load(Ordering::Relaxed)));
+        counter(
+            &mut out,
+            "mirror_t_resets_total",
+            "times T was re-forked under the engine (devnet writes re-applied)",
+            self.t_resets_total.load(Ordering::Relaxed),
+        );
+        gauge(
+            &mut out,
+            "mirror_t_fork_age_blocks",
+            "T head - T fork block (reth serves below it; 10,064-block window)",
+            self.t_fork_age_blocks.load(Ordering::Relaxed),
+        );
         gauge(&mut out, "mirror_pin_age_blocks", "blocks since the first processed block in this epoch", self.pin_age_blocks.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_frozen", "1 while the replay loop is frozen on divergence", self.frozen.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_halted", "1 while both loops are halted", self.halted.load(Ordering::Relaxed));

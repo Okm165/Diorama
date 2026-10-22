@@ -86,6 +86,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         ctx.save_state()?;
         ctx.metrics.inc(&ctx.metrics.blocks_applied);
         ctx.metrics.set(&ctx.metrics.t_head, n);
+        ctx.metrics.set(&ctx.metrics.cursor_t, n);
         return Ok(ApplyOutcome {
             block: n,
             source: "late",
@@ -111,19 +112,30 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     //    against the same state its gas was estimated on (measured: anvil's
     //    auto-gas for eth_sendTransaction came out ~5% short when the diffs
     //    landed between estimate and execution, so the tx ran out of gas).
-    if let Ok((pending, _queued)) = ctx.anvil_t.txpool_status().await {
-        if pending > 0 {
-            let last = ctx.anvil_t.block_by_number(t_head, false).await?;
-            let _ = ctx
-                .anvil_t
-                .batch_raw(&[(
-                    "anvil_setNextBlockTimestamp".into(),
-                    json!([last.header.timestamp + 1]),
-                )])
-                .await;
-            ctx.anvil_t.anvil_mine(1).await?;
-            tracing::info!(block = n, pending, "mined devnet txs before the parent diffs");
+    //    Bounded loop: a tx that arrives *while* this apply is writing diffs
+    //    would otherwise be mined together with them, executing against a state
+    //    its gas was never estimated on (measured: an Aave borrow estimated
+    //    pre-diff came out ~5% short and reverted). Mine until the pool drains,
+    //    at most 3 rounds so a steady stream cannot starve the parent block.
+    let mut rounds = 0;
+    while rounds < 3 {
+        let Ok((pending, _queued)) = ctx.anvil_t.txpool_status().await else {
+            break;
+        };
+        if pending == 0 {
+            break;
         }
+        rounds += 1;
+        let last = ctx.anvil_t.block_by_number(ctx.anvil_t.block_number().await?, false).await?;
+        let _ = ctx
+            .anvil_t
+            .batch_raw(&[(
+                "anvil_setNextBlockTimestamp".into(),
+                json!([last.header.timestamp + 1]),
+            )])
+            .await;
+        ctx.anvil_t.anvil_mine(1).await?;
+        tracing::info!(block = n, pending, round = rounds, "mined devnet txs before the parent diffs");
     }
 
     // 1. diffs: native BAL first, prestateTracer diff fallback.
@@ -186,8 +198,21 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     //    advances once per parent regardless of how many devnet blocks T mined.
     {
         let h = &block.header;
+        // Align to the parent, plus the devnet's time offset. Clamped to
+        // last+1 so a deliberate `evm_increaseTime` (or a lowered offset)
+        // can never make the timestamp non-monotonic and fail the alignment -
+        // anvil would then mine with its own default and the context would
+        // silently drift (measured).
+        let offset = ctx.time_offset.load(std::sync::atomic::Ordering::Relaxed);
+        let last_ts = ctx
+            .anvil_t
+            .block_by_number(ctx.anvil_t.block_number().await?, false)
+            .await
+            .map(|b| b.header.timestamp)
+            .unwrap_or(0);
+        let ts = (h.timestamp + offset).max(last_ts.saturating_add(1));
         let mut env: Vec<(String, Value)> = vec![
-            ("anvil_setNextBlockTimestamp".into(), json!([h.timestamp])),
+            ("anvil_setNextBlockTimestamp".into(), json!([ts])),
             ("anvil_setCoinbase".into(), json!([h.beneficiary])),
             ("anvil_setNextBlockPrevRandao".into(), json!([h.mix_hash])),
         ];
@@ -241,6 +266,7 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;
     let first_block = ctx.cursor_t().map(|c| c.first_block).unwrap_or(n);
     ctx.set_cursor_t(cursor_from(&t_block, first_block));
+    ctx.metrics.set(&ctx.metrics.cursor_t, n);
     ctx.save_state()?;
     ctx.metrics.inc(&ctx.metrics.blocks_applied);
     ctx.metrics.set(&ctx.metrics.bal_writes, applied as u64);

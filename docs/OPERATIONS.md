@@ -7,16 +7,20 @@
 | `mirror_reth_head` | not moving | top-up stalled: check `logs-engine` for "top-up failed" (reth unreachable, beacon API down, or a gap the CL cannot serve) |
 | `mirror_source_sync_gap_blocks` | > 0 for long | reth is catching up to the CL head via the Engine API (~10-11 blocks/s measured); a stuck gap means the CL's backfill has not reached the gap window yet |
 | `mirror_source_sync_delivered_total` | rate 0 while `gap_blocks` > 0 | the top-up loop is dead or erroring - it is supervised, so check `logs-engine` |
-| `mirror_lag_blocks` | > 60 | investigate: reth catching up, engine restart, or slow replay |
-| `mirror_lag_blocks` | > `max_gap_blocks` (5000) | engine pauses itself; re-pin drill or restore reth |
+| `mirror_lag_blocks` | > 60 | `follow_head - cursor_m`. A steady 2-3 is the replay margin (`reth.follow_margin_blocks`); a *growing* value means M is holding - check for "holding M" in the log (missing blob sidecars) or a reth/CL problem |
+| `mirror_cursor_block` / `mirror_cursor_block_t` | not advancing | the chain's parent cursor; `_t` is the devnet's. T's cursor must track the head even when M holds (they are independent loops) |
+| `mirror_lag_blocks` | > `max_gap_blocks` (300) | engine pauses itself (the plan's "> 300 → pause and re-sync"); re-pin drill or restore reth. A cursor that was just rebased to a fresh pin is exempt and may replay its whole pin window (bounded by reth's 10,064-block state window) |
 | `mirror_last_replay_seconds` | > 10 s warm | investigate; check reth health first (state-fetch bound) |
 | `mirror_divergences_total` | increase | structural divergence (counts/order/gas) – inspect `drift.jsonl`; the repair re-converges state on the next block |
 | `mirror_value_divergences_total` | increase | expected for blocks with blockhash-dependent txs (A17) – no action |
-| `mirror_m_convergence_failures_total` | increase | M's post-repair state ≠ mainnet: stale dump or a missing BAL. Re-pin if it keeps climbing |
-| `mirror_m_repair_writes_total` | flat while replaying | the repair is not running: check `loops.repair_m` and reth's BAL endpoint |
+| `mirror_m_convergence_failures_total` | increase | M's state ≠ mainnet at n-1 (the 8 probes, run for every block). A stale pin or a missing BAL entry; re-pin if it keeps climbing |
+| `mirror_m_repair_writes_total` | flat | normal when no block diverged: the parent-BAL repair is gated on the *previous* block's verification, so a clean block's state stays the replay's own product (and a diverged one is repaired before the next block executes). Non-zero growth = A17-class divergences being repaired |
 | `mirror_reorgs_detected_total` | any increase | upstream reorg; drill: re-pin (engine froze itself) |
-| `mirror_pin_age_blocks` | > ~8000 | schedule a re-pin (reth's state window is 10,064 blocks) |
+| `mirror_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make repin`) - the devnet's own writes are lost with the re-fork, so re-apply them |
+| `mirror_pin_age_blocks` | informational | blocks since this epoch's first parent block (the journal/cursor marker) |
 | `mirror_blob_failures_total` | increase | a blob block could not be built (source gap). Placeholder proofs are repaired automatically; a rising counter means the CL cannot serve the sidecars |
+| engine log `holding M (never mining an empty or partial block)` | any | the block's raws could not be built (blob sidecars not in the beacon yet). M waits at n-1 and retries; T keeps applying. With `follow_margin_blocks: 2` this should not appear - if it does, the CL is lagging the head by more than ~24 s |
+| engine log `block unservable for ~90 s; asking for an M re-base` | any | the same block kept failing. Lighthouse prunes blob sidecars after ~1 epoch, so older blobs can never be served: the engine re-bases M at a fresh pin (`follow - fork_offset`), which skips the unservable block and records it. The gap guard (300 blocks) pauses instead if the cause is an engine-side outage |
 | `mirror_receipts_unverified_total` | increase | engine lagged past the 20k receipts window; blocks replayed unverified |
 | Anvil RSS (kubectl top) | see table below | restart the pod; the engine rebases and re-converges |
 
@@ -31,28 +35,67 @@ Anvil memory is a *state* cost, not a leak:
 
 | Chain | Growth | Steady state | Notes |
 |---|---|---|---|
-| `anvil-t` | ~1 MB per applied block | ~1.7 GB | watch-list writes only (~90-500 per block) |
+| `anvil-t` | ~0.7 MB per applied block in steady state; a full drill run (scenario + proof) adds ~300 MB | ~6.5 GB after a session of drills, recycles at the 16Gi limit | watch-list writes only (~90-500 per block) plus the drills' own writes and the `--prune-history 32` state snapshots. A restart re-forks T: the devnet's writes are gone and the engine clears their shadow marks |
 | `anvil-m` | ~20 MB per replayed block (measured steady state) | recycles at the 24Gi limit | full tx replay: the fork read cache + 2 state snapshots |
 
 **M's recycle cycle is normal, and now cheap.** A full-replay fork materializes
 mainnet's working set in RAM (~20 MB/block steady state, more during a cold
 catch-up), so `anvil-m` reaches its 24Gi limit every ~2.5-4 h and k8s restarts
 it. Because **M re-resolves its fork pin on every start** (`anvil-m.yaml`), the
-post-restart re-replay is bounded by `FORK_OFFSET` (~64 blocks, ~1-2 min)
+post-restart re-replay is bounded by `FORK_OFFSET` (128 blocks, ~1-2 min)
 instead of the whole epoch - with a stale pin the replay OOMs before it can
 catch up (measured death spiral: lag grew 458 -> 546 and never closed).
-**T's pin is deliberately not refreshed**: the epoch (and with it the devnet's
-shadow set) is keyed on T's fork block in the engine, so M moving its base
-never clears devnet writes.
+**T's pin is re-resolved on every container start**, like M's: the devnet's own
+writes live in the shadow registry (keys *and* latest values) and the engine
+re-applies them after a re-fork, so a fresh pin loses nothing and bounds the
+re-replay to `FORK_OFFSET` (~128 blocks) instead of the pin age.
+
+**A T restart loses the devnet's own writes** - its state is the pin's again,
+rebuilt from the parent diffs. The engine detects the reset (the cursor's block
+hash no longer matches) and clears the shadow registry with a WARN: keeping the
+marks would make the applier skip mainnet's writes for keys that no longer hold
+devnet values, leaving stale pin-era values that *look* devnet-owned (measured:
+a poisoned Aave oracle after a T restart). Re-apply your writes after a T
+restart - the scenario's preflight is the model for that.
 
 **The anvil state dump is disabled on both chains.** `--state`/`--state-interval`
 writes per-block historical state: a T dump grew to 13 GB and never completed,
 leaving orphaned `~/.foundry/anvil/tmp/anvil-state-*` dirs that filled the 40Gi
-PVC (measured: 3 dirs, 41 GB). State is rebuilt instead - M re-replays ~64
-blocks, T re-applies its parent diffs from its own pin. If tmp dirs ever
+PVC (measured: 3 dirs, 41 GB). State is rebuilt instead - M re-replays FORK_OFFSET
+(128) blocks, T re-applies its parent diffs from its own pin. If tmp dirs ever
 reappear: `kubectl -n mainnet-mirror exec deploy/anvil-t -- rm -rf /state/.foundry/anvil/tmp/*`.
 repair re-converges state. `mirror_m_convergence_failures_total` may tick up
 right after such a restart until stale slots are touched again.
+
+## Metrics reference (complete)
+
+Every metric the engine emits, so nothing is silent. The action table above
+covers the ones that page someone; these are the rest.
+
+| Metric | Meaning |
+|---|---|
+| `mirror_reth_head` / `mirror_reth_follow_head` | reth's head / the follow head the engine schedules against (raw, before the replay margin) |
+| `mirror_source_sync_gap_blocks` / `mirror_source_sync_delivered_total` | the CL-head gap reth's top-up still owes / blocks it has delivered |
+| `mirror_m_head` / `mirror_t_head` | the anvil chains' heights (T drifts ahead: one block per parent block plus one per devnet batch) |
+| `mirror_cursor_block` / `mirror_cursor_block_t` | the last *parent* block applied on each chain (the honest progress signal) |
+| `mirror_t_fork_age_blocks` | how far T's fork base is behind its head (reth serves reads below it) |
+| `mirror_t_resets_total` | times T was found re-forked (its OOM restart / a re-pin): the engine re-applies the devnet's recorded writes, the chain history is gone |
+| `mirror_lag_blocks` | `follow_head - cursor_m` (2-3 in steady state = the replay margin) |
+| `mirror_frozen` / `mirror_halted` | 1 when a divergence policy froze M / when `/admin/pause` holds both loops |
+| `mirror_blocks_replayed_total` / `mirror_blocks_applied_total` | parent blocks replayed on M / applied to T |
+| `mirror_last_replay_seconds` / `mirror_last_apply_seconds` | duration of the last M replay / T apply |
+| `mirror_pin_age_blocks` | blocks since the epoch's first block (re-pin before reth's 10,064-block window) |
+| `mirror_bal_writes_total` | entries in the parent BALs seen so far |
+| `mirror_bal_filtered_out_total` | BAL entries for accounts outside the watchlist (skipped by design) |
+| `mirror_bal_skipped_shadowed_total` | BAL entries skipped because the devnet owns the key (copy-on-write) |
+| `mirror_shadowed_slots` | devnet-owned storage keys (see `/status.shadowed` for the accounts) |
+| `mirror_m_repair_writes_total` | parent-BAL writes applied to M by the convergence repair (gated on the previous block's verification) |
+| `mirror_m_convergence_ok_total` / `mirror_m_convergence_failures_total` | the 8 state probes against reth at n-1, run every block |
+| `mirror_m_convergence_last_failed` | how many probes failed in the last check (0 in steady state) |
+| `mirror_receipts_unverified_total` | blocks replayed after lagging past the receipts window |
+| `mirror_reorgs_detected_total` | parent-hash discontinuities seen by the M loop |
+| `mirror_divergences_total` / `mirror_value_divergences_total` | structural / value-level divergences (see `drift.jsonl`) |
+| `mirror_blob_failures_total` | blob sidecars that were not available yet (M holds and retries; should stay 0 with the replay margin) |
 
 ## Day-to-day
 
@@ -117,19 +160,26 @@ kubectl -n mainnet-mirror exec deploy/engine -- curl -s http://reth:8545 -X POST
 
 ## Drills
 
-### Restart a chain (state dump restores it)
+### Restart a chain (fresh fork + restore)
 
-Anvil dumps to `/state/state.json` (T every 60 s, M every 300 s) and on
-SIGTERM. A restarted pod loads the dump and re-attaches to the same fork pin.
+Both anvils re-resolve their fork pin on every container start, so a restart
+re-forks at `reth head - FORK_OFFSET` and the engine replays from there. There
+is no state dump any more (see "The anvil state dump is disabled").
 
 ```bash
-kubectl -n mainnet-mirror rollout restart deploy/anvil-t
+kubectl -n mainnet-mirror rollout restart deploy/anvil-t   # or anvil-m
 kubectl -n mainnet-mirror rollout status  deploy/anvil-t
 ```
 
-A dump is up to one interval *stale*: the engine notices the backward head jump
-and rebases; M re-converges from the parent BALs as slots are touched. For a
-guaranteed-clean M, re-pin instead.
+- **M**: the cursor's block hash no longer matches, so the engine rebases and
+  replays `FORK_OFFSET` (~128) blocks (~1-2 min). Nothing is lost - M is never
+  written.
+- **T**: same rebase, plus the engine re-applies the devnet's own writes from
+  the shadow registry's value map (`mirror_t_resets_total` increments, one WARN
+  per reset, keys without a recorded value are handed back to mainnet sync).
+  The devnet's *transaction history* does not survive a re-fork; its *state*
+  does. The journal is cleared with the old chain, so rewind drills start from
+  the new one.
 
 ### Re-pin (new epoch) — `make repin`
 
@@ -162,6 +212,39 @@ kubectl -n mainnet-mirror exec deploy/engine -- \
 
 Restores the before-values recorded in the journal (newest block first) and
 moves the T cursor back, so the applier re-applies from there.
+
+### Fund an account with any ERC20 (the unlimited faucet)
+
+```bash
+kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/deal \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48","to":"0xYourAddr","amount":"1000000000"}'
+# -> {"ok":true,"slot":"0x…"}   (1000 USDC; silent storage write)
+```
+
+The engine finds the balance slot itself (standard `mapping(address => uint256)`
+layouts and packed ones like USDC's `balanceAndBlacklistStates`; probes slots
+0..16 with an `eth_call` `stateDiff` override, so nothing is mined while
+discovering) and marks the slot devnet-owned, so mainnet diffs never take it
+back. ETH is `anvil_setBalance`; if a token uses a non-standard layout the
+response lists the probes it tried - write the slot yourself then.
+
+### Fast-forward the devnet (interest, expiry, funding)
+
+```bash
+# 30 days ahead of mainnet, persistently (mainnet data keeps flowing):
+kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/time \
+  -H 'Content-Type: application/json' -d '{"offset_seconds": 2592000}'
+# ... your scenario: read the accrued debt, exercise the expiry, ...
+# back to mainnet's clock (timestamps are monotonic: the clock converges, it
+# cannot jump backwards - the offset shrinks as mainnet advances):
+kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/time \
+  -H 'Content-Type: application/json' -d '{"offset_seconds": 0}'
+```
+
+Measured on the live Aave USDC reserve: +30 days moved the income index by a
+month of interest and grew a borrow's debt in the same read. While the offset is
+non-zero the T probe parity is skipped (views are meant to differ).
 
 ### Register devnet writes made outside the block pipeline
 
@@ -237,7 +320,7 @@ Heal without waiting:
 |---|---|---|
 | `reth-data` | 400 Gi | reth DB + static files (snapshot + growth, ~300 GB expected) |
 | `lighthouse-data` | 500 Gi | beacon DB + 18-day column custody. Measured during the one-time backfill: ~377 KB/slot inside the DA window, blocks only beyond it; ~200 GB expected when it completes |
-| `anvil-m-state` | 20 Gi | pin, state dump (~350 MB), fork cache |
+| `anvil-m-state` | 20 Gi | pin (the fork cache is RAM; no state dump - see above) |
 | `anvil-t-state` | 40 Gi | same for the devnet chain (dump ~27 MB) |
 | `engine-state` | 10 Gi | cursor.json, shadow.json, drift.jsonl, journal/ |
 
@@ -268,8 +351,8 @@ the same name to re-attach it, or delete the PV explicitly to free the space.
 | Engine: "gap too large" | engine was down > `max_gap_blocks` | re-pin (fast) or raise `max_gap_blocks` and restart the engine |
 | M mines empty blocks (`tx_count: reth=N m=0`) | automine is on (anvil restart reset it) | check `anvil_getAutomine` on both anvils; both deployments must run `--no-mining` (the engine also re-asserts it on rebases) |
 | `recomputed blob KZG proof` in engine logs | normal on Fulu: the beacon API's blob-level proof is a placeholder, the engine recomputes it | none (one line per blob) |
-| `no valid blob sidecar from any source` | the CL cannot reconstruct the blobs (slot outside its column coverage) | block is mined without the blob txs and recorded; state still converges via the BAL repair |
+| `no valid blob sidecar from any source` | the CL cannot serve the sidecars yet (they arrive seconds after the block; the replay margin hides it) | M holds at n-1 and retries - it never mines an empty or partial block. If it persists, the CL is lagging the head: check `mirror_lag_blocks` |
 | Senders' nonces hundreds behind | automine incident (chain height ran away) | re-pin for a clean chain |
-| `partial: true` in drift lines | blob sidecars unavailable | check the CL's column coverage / `blobs.beacon_urls` |
-| `mirror_m_convergence_failures_total` climbing | M's state stale (dump restore, no BAL) | re-pin for a clean M; verify `eth_getBlockAccessList` on reth |
+
+| `mirror_m_convergence_failures_total` climbing | M's state stale (old pin, missing BAL entry) | re-pin for a clean M; verify `eth_getBlockAccessList` on reth |
 | T state looks stale | diff applier behind, or the account is not watched | check `mirror_cursor_block_t` vs `mirror_cursor_block`; extend `watchlist` |

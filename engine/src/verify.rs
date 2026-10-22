@@ -9,6 +9,7 @@ use crate::ctx::{block_txs, Ctx};
 use alloy_network_primitives::{ReceiptResponse, TransactionResponse};
 use alloy_rpc_types_eth::{Block, Log};
 use anyhow::Result;
+use alloy_primitives::Address;
 
 /// Divergence classes:
 ///   - `ValueLevel`: only log data / bloom differ - identical events with
@@ -295,6 +296,50 @@ fn trunc(s: &str) -> String {
 /// post-state of the same block for every configured probe. Execution may
 /// diverge (A17), but the parent-BAL convergence restores mainnet's values
 /// before every block - this check measures that guarantee.
+/// Probe parity for T (the plan's "probe parity on T after context alignment"):
+/// the same probe set, compared against reth at the parent block just applied,
+/// skipping probes whose target account the devnet owns (copy-on-write: that
+/// state is the devnet's, so parity is not expected there). Runs once per
+/// applied block; the metric is the alarm.
+pub async fn t_probe_parity(ctx: &Ctx, n: u64) -> (usize, usize) {
+    let mut ok = 0usize;
+    let mut failed = 0usize;
+    // A devnet time offset makes time-dependent views diverge from mainnet by
+    // design (that is what it is for): skip instead of alarming.
+    if ctx.time_offset.load(std::sync::atomic::Ordering::Relaxed) != 0 {
+        return (0, 0);
+    }
+    let shadowed: std::collections::HashSet<Address> = {
+        let s = ctx.shadow.lock().unwrap();
+        s.slots.keys().chain(s.accounts.iter()).copied().collect()
+    };
+    for probe in &ctx.cfg.verifier.probes {
+        if shadowed.contains(&probe.to) {
+            continue;
+        }
+        let r = ctx.reth.call_at(probe.to, &probe.data, n).await;
+        let t = ctx.anvil_t.call_latest(probe.to, &probe.data).await;
+        match (r, t) {
+            (Ok(a), Ok(b)) if a == b => ok += 1,
+            (Ok(a), Ok(b)) => {
+                failed += 1;
+                tracing::warn!(
+                    block = n,
+                    probe = %probe.name,
+                    reth = %trunc(&hex::encode(&a)),
+                    t = %trunc(&hex::encode(&b)),
+                    "T probe mismatch after context alignment"
+                );
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                failed += 1;
+                tracing::debug!(block = n, probe = %probe.name, error = %e, "T probe failed");
+            }
+        }
+    }
+    (ok, failed)
+}
+
 pub async fn convergence_check(ctx: &Ctx, n: u64) -> (usize, usize) {
     let mut ok = 0usize;
     let mut failed = 0usize;

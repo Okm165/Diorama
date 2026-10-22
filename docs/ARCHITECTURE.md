@@ -61,10 +61,29 @@ diffs and mines the parent's block. Two reasons, both measured:
    271,389 - reverted at 97% of its limit, succeeded with an explicit 1M limit).
 
 T's head therefore drifts ahead of the parent cursor by the number of devnet
-blocks; that is normal. The cursor stays keyed to the parent height, and the
+blocks (measured: ~70 after a session of drills); that is normal. The cursor stays keyed to the parent height, and the
 applier only bails when T's head is *behind* the cursor by more than one block
 (an `anvil_reset` outside the engine, which the incremental diff applier cannot
 recover from).
+
+### Devnet time: the clock offset (`/admin/time`)
+
+A margin product is a function of time: interest accrual, option expiry, funding
+intervals. A static fork gets that from `evm_increaseTime`, but on a live mirror
+the next parent block re-aligns the clock and the jump is gone (and worse: the
+alignment then fails as non-monotonic, so the block gets anvil's default
+timestamp and the context drifts silently - measured).
+
+`POST /admin/time {"offset_seconds": 2592000}` makes the devnet's clock run that
+far ahead of mainnet, *persistently*: the applier aligns each parent block to
+`parent + offset`, clamped to `last + 1` so timestamps stay monotonic whatever
+the offset does. Mainnet's data keeps flowing while the devnet lives 30 days in
+the future - measured: the USDC reserve's income index advanced by a month of
+interest and a borrow's debt grew with it, with the clock still tracking the
+parent. Lowering the offset works; the clock then converges at mainnet's pace
+rather than jumping backwards (timestamps cannot). While the offset is non-zero
+the T-side probe parity is skipped: time-dependent views are *supposed* to
+differ.
 
 ### Watchlist closure: proxies need their aggregators
 
@@ -80,6 +99,15 @@ stayed fresh and hid the gap). Resolve each source's aggregator and watch it:
 cast call <source> "aggregator()(address)" --rpc-url $RETH
 ```
 
+**Closure runs both ways.** The watchlist must contain every account whose
+*mainnet* state the mirror needs, **and** every account the devnet's own writes
+land on: a devnet write to an unwatched account is safe (no diff ever touches
+it) but *invisible* to `/admin/shadow`, so a reset cannot clear it and a
+position keeps a phantom component. Measured: Aave's **variable debt tokens**
+were missing, so a reset left `$315` of debt against zero collateral and every
+later borrow failed with `LtvValidationFailed`. The full reserve closure is
+`getReserveAToken` + `getReserveVariableDebtToken` for each asset.
+
 A watchlist addition only affects *future* writes; a value that went stale
 before the entry existed heals on the account's next mainnet write. To heal it
 immediately, hand the stale slots back to mainnet sync with
@@ -92,13 +120,17 @@ transmission mapping slots, `keccak(roundId, 17)`).
 M's fork pin is **re-resolved on every start** (`reth head - FORK_OFFSET`,
 64 by default): a full-replay fork is recycled by k8s when it reaches its
 memory limit (~2.5-4 h at the measured ~20 MB/replayed block), and a fresh pin
-keeps the post-restart re-replay at ~64 blocks (~1-2 min) instead of the whole
+keeps the post-restart re-replay at 128 blocks (~1-2 min) instead of the whole
 epoch - a stale pin makes the replay OOM before it can catch up (measured).
-T's pin is **persistent**: the engine keys the epoch - and therefore the
-devnet's shadow set, i.e. "which keys belong to the devnet" - on T's fork
-block, so refreshing it would silently wipe devnet writes. Keep T's pin inside
-reth's 10,064-block state window (`mirror_pin_age_blocks` alarms at ~8000;
-re-pin with `make repin`, which is a new epoch for the devnet).
+T's pin is **re-resolved on every container start** as well (init container +
+container wrapper, like M). It used to be persistent so that a restart could
+not lose the devnet's writes; the engine now keeps those writes - keys *and*
+values - in the shadow registry and re-applies them after a re-fork (verified
+by killing the pod: the dealt balances came back), so a fresh pin loses nothing
+and bounds the re-replay to `FORK_OFFSET` (~128 blocks) instead of the pin age
+(~1.5 h measured). M's own re-base never touches T: T's epoch is its own.
+Watch `mirror_t_fork_age_blocks` (reth serves reads below T's fork block, and
+its state window is 10,064 blocks) and `mirror_t_resets_total`.
 
 ## The lean profile (measured, not guessed)
 
@@ -193,7 +225,11 @@ updates the safe block once per epoch, the applier burst-mines 32 blocks every
 ~6.4 min, and a devnet tx sent between bursts waits minutes for a receipt
 (measured: 180 s+ timeouts, then "transaction not found" after a pool reset).
 With `latest` the parent stream advances every ~12 s and a devnet tx confirms in
-~12 s (measured). The cost is exposure to shallow reorgs; those are detected
+~12 s (measured). A small replay margin (`reth.follow_margin_blocks`, default 2)
+sits between the head and the applier: the beacon cannot serve blob sidecars for
+the newest block yet, and without the margin M held and retried on ~every blob
+block (measured: 20 retry errors / 20 min, ~4 blocks/min instead of 5). The cost
+is exposure to shallow reorgs; those are detected
 (`mirror_reorgs_detected_total`) and M is re-based behind the new head by the
 same self-heal path that handles a receding follow head. The mirror follows
 *reth's* head: see "Source liveness" below.
@@ -443,6 +479,24 @@ the address changes.
 repair): USDC/WETH totalSupply, Chainlink WETH/USD `latestRoundData`, UniV3
 `slot0`, aEthUSDC totalSupply, Aave `getReserveNormalizedIncome(USDC)` (the
 time-dependence proof – it only matches when the block context is aligned).
+
+## The Tenderly-compatible surface (plan §4.4, mapped)
+
+Most of the plan's admin surface is *stock Anvil* - the engine adds only what
+Anvil cannot do. This is the mapping, so nothing is ambiguous:
+
+| Plan §4.4 group | Where it lives | Notes |
+|---|---|---|
+| Network customization | anvil: `evm_increaseTime`, `evm_setNextBlockTimestamp`, `evm_mine`/`anvil_mine` | a devnet override is deliberate and is re-aligned by the next parent block |
+| Send | anvil: `eth_sendTransaction` (impersonate first - `anvil_impersonateAccount`, auto-impersonate alone answers "No Signer available"), `eth_createAccessList` | unsigned sends are the devnet's normal path |
+| Unlimited faucet | anvil: `anvil_setBalance`/`anvil_addBalance`; **engine: `POST /admin/deal`** (= `tenderly_setErc20Balance`) | the engine's deal discovers the balance slot with `eth_call` + a `stateDiff` override probe (sentinel value, slots 0..16), writes it silently and marks it devnet-owned. Anvil's own `anvil_dealERC20` cannot do this on a forked, no-mining chain ("no slot found", measured). `addErc20Balance`'s synthetic `Transfer` log has no equivalent - use a real transfer |
+| Storage / code | anvil: `anvil_setStorageAt`, `anvil_setCode`; engine: `POST /admin/shadow` hands keys back to mainnet sync | |
+| Snapshots | anvil: `evm_snapshot`/`evm_revert`; engine: `POST /admin/rewind` = the plan's `tenderly_revertSync` (rolls T back per parent block through the journal) | |
+| Time travel | engine: `POST /admin/time` (persistent clock offset, survives parent blocks) *and* anvil's `evm_increaseTime` (which the next alignment would overwrite - use the offset) | the capability a margin product needs; a static fork's `evm_increaseTime` alone is not enough on a live mirror |
+| Mirror sync control | engine: `POST /admin/pause` = `tenderly_stopSync`, `POST /admin/resume` = `tenderly_startSync`, `GET /status` = `tenderly_getSyncStatus` (`frozen`/`halted` = active, `lag`, `cursor`/`cursor_t` = latestSyncedBlock, `follow_head` = parentLatestBlock) | `tenderly_syncNext` has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
+
+The Solidity precompile (M6) and the bridge relay (M7) are future deliverables -
+the engine's equivalent today is the HTTP surface above plus the cheatcodes.
 
 ## Engine HTTP API
 

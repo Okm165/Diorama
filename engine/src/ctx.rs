@@ -12,7 +12,7 @@ use alloy_primitives::Address;
 use anyhow::{Context as _, Result};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -53,6 +53,24 @@ pub struct Ctx {
     /// `follow: latest` the beacon ingests sidecars seconds after the block, so
     /// the first attempt legitimately misses and the retries must not spam.
     pub blob_warned: std::sync::atomic::AtomicU64,
+    /// Seconds the devnet's clock runs ahead of the parent block (`/admin/time`).
+    /// The applier aligns to `parent + offset` and clamps to keep timestamps
+    /// monotonic, so a jump sticks and mainnet's data keeps flowing - the
+    /// financial-dev use case (interest accrual, expiry, funding) that a static
+    /// fork gets from `evm_increaseTime` but a live one would lose on the next
+    /// parent block.
+    pub time_offset: AtomicU64,
+    /// Set by the replay loop when the same block has failed long enough that
+    /// the cause cannot be transient (measured: Lighthouse prunes blob sidecars
+    /// after ~1 epoch, so a hold longer than that can never be served and M
+    /// would wait forever). `next_block_for` honours it by re-basing M at a
+    /// fresh pin, the same path a receding follow head takes.
+    pub force_rebase: AtomicBool,
+    /// Did the *last* M block's verification find a divergence? The parent-BAL
+    /// repair only runs when it did: M's state is then the replay's own product
+    /// (the verification means something) and clean blocks cost no RPC churn.
+    /// Starts `true` so the first block after a restart is repaired.
+    pub last_m_diverged: AtomicBool,
     /// When M was last re-based (rate-limits `anvil_reset` attempts to 1/min).
     pub last_rebase: Mutex<Option<std::time::Instant>>,
 }
@@ -97,6 +115,9 @@ impl Ctx {
             blob_pref: Mutex::new(None),
             reapply_from: Mutex::new(None),
             blob_warned: std::sync::atomic::AtomicU64::new(0),
+            force_rebase: AtomicBool::new(false),
+            time_offset: AtomicU64::new(0),
+            last_m_diverged: AtomicBool::new(true),
             last_stall: Mutex::new((0, 0)),
             last_rebase: Mutex::new(None),
             cfg,

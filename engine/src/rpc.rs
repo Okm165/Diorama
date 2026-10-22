@@ -273,6 +273,23 @@ impl Rpc {
             .await
     }
 
+    /// eth_call with a `stateDiff` override, returned as the raw hex string.
+    /// Used to discover ERC20 balance slots without mining anything (anvil's
+    /// own dealERC20 probe needs mined writes and fails on a no-mining fork).
+    pub async fn call_with_override(
+        &self,
+        to: Address,
+        data: &Bytes,
+        overrides: &serde_json::Value,
+    ) -> Option<String> {
+        self.call::<String>(
+            "eth_call",
+            json!([{"to": to, "data": data}, "latest", overrides]),
+        )
+        .await
+        .ok()
+    }
+
     pub async fn balance_at(&self, addr: Address, block: u64) -> Result<U256> {
         let hex: String = self
             .call("eth_getBalance", json!([addr, hex_u64(block)]))

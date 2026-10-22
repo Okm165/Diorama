@@ -22,8 +22,9 @@ use std::time::Instant;
 pub struct ReplayOutcome {
     pub txs: usize,
     pub replayed: usize,
+    /// Always 0: a block whose sidecars are missing is never mined (the replay
+    /// holds M and retries), so a "partial" outcome cannot exist.
     pub skipped_blobs: usize,
-    pub partial: bool,
     pub duration_ms: u64,
     pub verification: Option<Verification>,
 }
@@ -62,7 +63,12 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     //    forever (invalid txs, different statuses). The BAL is authoritative
     //    for every changed entry, so applying it makes M exact again; the
     //    per-block verification below still measures what execution got right.
-    if ctx.cfg.loops.repair_m {
+    let repair = ctx.cfg.loops.repair_m
+        && ctx.last_m_diverged.load(std::sync::atomic::Ordering::Relaxed);
+    if !repair && ctx.cfg.loops.repair_m {
+        tracing::debug!(block = n, "previous M block verified clean; no repair needed");
+    }
+    if repair {
         match ctx.reth.block_access_list(n - 1).await? {
             Some(bal) => {
                 let writes = bal::flatten_bal(&bal);
@@ -74,14 +80,17 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
                     applied,
                     "M state converged from parent BAL"
                 );
-                let (ok, failed) = crate::verify::convergence_check(ctx, n - 1).await;
-                ctx.metrics.add(&ctx.metrics.m_convergence_ok, ok as u64);
-                ctx.metrics.add(&ctx.metrics.m_convergence_failed, failed as u64);
-                ctx.metrics.set(&ctx.metrics.m_convergence_last_failed, failed as u64);
             }
             None => tracing::debug!(block = n, "no parent BAL; M repair skipped"),
         }
     }
+    // The convergence probes are the state-level assertion "M == mainnet at
+    // n-1": they run for *every* block, repaired or not (a clean block's state
+    // is the replay's own product, which is exactly what this measures).
+    let (ok, failed) = crate::verify::convergence_check(ctx, n - 1).await;
+    ctx.metrics.add(&ctx.metrics.m_convergence_ok, ok as u64);
+    ctx.metrics.add(&ctx.metrics.m_convergence_failed, failed as u64);
+    ctx.metrics.set(&ctx.metrics.m_convergence_last_failed, failed as u64);
 
     // 1. block env (all five context fields aligned to the parent).
     let h = &block.header;
@@ -163,6 +172,9 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     //    that cannot be replayed in full is never mined: M must stay strict.
     let (raws, skipped_blobs) = build_raws(ctx, n, &block).await?;
     if skipped_blobs > 0 {
+        // The alarm the operator watches for CL sidecar trouble (the replay
+        // holds M and retries; the block is never mined partial or empty).
+        ctx.metrics.inc(&ctx.metrics.blob_failures);
         bail!(
             "block {n}: {skipped_blobs} blob tx(s) have no sidecar (beacon sources unavailable); not mining a partial block"
         );
@@ -191,6 +203,8 @@ async fn finish_replay(
         if v.receipts_unverified {
             ctx.metrics.inc(&ctx.metrics.receipts_unverified);
         }
+        ctx.last_m_diverged
+            .store(!v.ok, std::sync::atomic::Ordering::Relaxed);
         Some(v)
     } else {
         None
@@ -202,6 +216,7 @@ async fn finish_replay(
         .map(|c| c.first_block)
         .unwrap_or(n);
     ctx.set_cursor_m(cursor_from(&m_block, first_block));
+    ctx.metrics.set(&ctx.metrics.cursor_m, n);
     ctx.set_reth_last_hash(format!("0x{:x}", block.header.hash));
     ctx.set_reth_last_block(n);
     ctx.save_state()?;
@@ -212,12 +227,10 @@ async fn finish_replay(
     ctx.metrics
         .set(&ctx.metrics.pin_age_blocks, n.saturating_sub(first_block) + 1);
 
-    let partial = skipped_blobs > 0;
     let outcome = ReplayOutcome {
         txs: crate::ctx::block_txs(&block).len(),
         replayed: crate::ctx::block_txs(&block).len() - skipped_blobs,
         skipped_blobs,
-        partial,
         duration_ms,
         verification,
     };
@@ -609,8 +622,7 @@ fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_t
         "mainnet_hash": format!("0x{:x}", block.header.hash),
         "txs": outcome.txs,
         "replayed": outcome.replayed,
-        "skipped_blobs": outcome.skipped_blobs,
-        "partial": outcome.partial,
+
         "duration_ms": outcome.duration_ms,
         "ok": v.map(|v| v.ok),
         "divergence_class": v.map(|v| match v.class() {
@@ -624,9 +636,7 @@ fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_t
     // The journal is a *divergence* log: clean blocks are counted in the
     // metrics, not written to disk (it used to grow ~20 MB of clean-block
     // telemetry that nobody reads).
-    let clean = v.map(|v| v.divergences.is_empty()).unwrap_or(false)
-        && !outcome.partial
-        && outcome.skipped_blobs == 0;
+    let clean = v.map(|v| v.divergences.is_empty()).unwrap_or(false);
     if !clean {
         ctx.drift.append(&entry);
     }
@@ -638,18 +648,6 @@ fn log_and_drift(ctx: &Ctx, n: u64, outcome: &ReplayOutcome, block: &alloy_rpc_t
                 txs = outcome.txs,
                 ms = outcome.duration_ms,
                 "replayed + verified"
-            );
-        }
-        Some(v) if outcome.partial => {
-            // Blob txs were skipped because no sidecar source had them (e.g.
-            // Lighthouse has not backfilled that far yet). Expected to fail
-            // tx-count/order/blob-gas/receipts checks; recorded, not escalated.
-            ctx.metrics.inc(&ctx.metrics.blob_failures);
-            tracing::warn!(
-                block = n,
-                skipped_blobs = outcome.skipped_blobs,
-                divergences = ?v.divergences,
-                "partial replay (blob txs skipped) - not escalating to freeze"
             );
         }
         Some(v) => {

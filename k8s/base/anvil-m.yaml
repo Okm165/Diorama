@@ -57,6 +57,13 @@ spec:
               [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
               PIN=$((HEAD - FORK_OFFSET))
               echo "$PIN" > /state/pin
+              # The container runs unprivileged and re-resolves the pin on every
+              # *container* start (k8s restarts only the container on OOM), so it
+              # must be able to rewrite this file: without the chmod that write
+              # failed with "Permission denied" and the persisted pin silently
+              # aged with the pod (measured).
+              chmod 0777 /state 2>/dev/null || true
+              chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (reth head=$HEAD, offset=$FORK_OFFSET)"
           env:
             - name: RETH_URL
@@ -154,4 +161,6 @@ metadata:
 spec:
   selector: { app.kubernetes.io/name: anvil-m }
   ports:
+    # anvil serves WebSocket upgrades on the same port as HTTP (the plan's A18:
+    # "delivery is event-driven" - eth_subscribe over ws://...:8545).
     - { name: http, port: 8545, targetPort: 8545 }
