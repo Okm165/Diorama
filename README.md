@@ -18,6 +18,7 @@ The one accepted limitation is storage proofs (fork blocks report
 ```
    ┌─────────────────────┐     ┌──────────────────────────────────────┐
    │  reth + Lighthouse  │     │  ENGINE                              │
+   ├─────────────────────┤     ├──────────────────────────────────────┤
    │  local fork source  │────►│  replay → M  ·  BAL diffs → T        │
    │  blocks · BAL(N)    │     │  verify · shadow registry · journal  │
    └─────────────────────┘     │  API: /status · /metrics · /admin/*  │
@@ -27,7 +28,7 @@ The one accepted limitation is storage proofs (fork blocks report
                                       ▼                ▼
                                 ┌─────┬─────┐    ┌─────┬─────┐
                                 │  anvil M  │    │  anvil T  │ ◄── your dapp
-                                │   strict  │    │   devnet  │     (HTTP / WS)
+                                │  strict   │    │  devnet   │     (HTTP / WS)
                                 └───────────┘    └───────────┘
 ```
 

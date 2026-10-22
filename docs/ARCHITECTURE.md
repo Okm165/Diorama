@@ -31,6 +31,7 @@ numbered list below then walks M's side of it step by step):
    │                             │ pad → write ≤500 → mine(1)    │
    │                             ├──────────────────────────────►│ T
    │                             │ sampled parity + T probes     │
+   ├────────────────────────────►│◄──────────────────────────────┤
    │                             │ journal + drift.jsonl         │
 ```
 
@@ -69,6 +70,11 @@ diffs and mines the parent's block. Two reasons, both measured:
    The prepend therefore loops (at most 3 rounds): a tx that arrives *while* the
    diffs are being written still gets its own block and still executes against
    the state its gas was estimated on.
+
+```
+   no prepend    estimate on S ──► diffs land ──► execute on S′   ✗ 97% revert
+   prepend       estimate on S ──► own block  ──► execute on S    ✓ honest gas
+```
 
 After the parent's block is mined, the applier runs the plan's T-side invariant
 ("probe parity on T after context alignment"): the same probe set against
