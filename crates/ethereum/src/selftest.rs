@@ -58,54 +58,57 @@ pub async fn run(
     let mut all_ok = true;
     for n in (pin + 1)..=(pin + blocks) {
         println!("-- block {n}");
-
-        let r = replay_block(&ctx, n).await.map_err(|source| Error::Step {
-            step: "replay",
-            block: n,
-            source: Box::new(source),
-        })?;
-        let mut replayed_ok = true;
-        if let Some(v) = &r.verification {
-            for (check, ok, detail) in &v.checks {
-                if !*ok {
-                    replayed_ok = false;
-                }
-                println!(
-                    "   M {} {:<24} {}",
-                    if *ok { "✔" } else { "✘" },
-                    check,
-                    detail
-                );
-            }
-            if !v.ok {
-                all_ok = false;
-            }
-        }
-        println!(
-            "   M replay: txs={} replayed={} skipped_blobs={} ms={} {}",
-            r.txs,
-            r.replayed,
-            r.skipped_blobs,
-            r.duration_ms,
-            if replayed_ok { "" } else { "(DIVERGED)" }
-        );
-
-        let a = apply_block(&ctx, n).await.map_err(|source| Error::Step {
-            step: "apply",
-            block: n,
-            source: Box::new(source),
-        })?;
-        println!(
-            "   T apply:  source={} writes={} filtered={} skipped_shadowed={} sampled={}/{} ms={}",
-            a.source, a.writes, a.filtered, a.skipped_shadowed, a.sampled_ok, a.sampled, a.duration_ms
-        );
-        if a.sampled != a.sampled_ok {
+        if !run_one_block(&ctx, n).await? {
             all_ok = false;
-            println!("   T ✘ sampled storage parity failed");
         }
         println!();
     }
 
     println!("== selftest {} ==", if all_ok { "PASSED" } else { "FAILED" });
     Ok(all_ok)
+}
+
+/// Replay + verify + apply one block, printing the per-check lines; returns
+/// whether the block passed every check.
+async fn run_one_block(ctx: &Ctx, n: u64) -> Result<bool> {
+    let r = replay_block(ctx, n).await.map_err(|source| Error::Step {
+        step: "replay",
+        block: n,
+        source: Box::new(source),
+    })?;
+    let mut ok = true;
+    if let Some(v) = &r.verification {
+        for (check, passed, detail) in &v.checks {
+            if !*passed {
+                ok = false;
+            }
+            println!("   M {} {:<24} {}", if *passed { "✔" } else { "✘" }, check, detail);
+        }
+        if !v.ok {
+            ok = false;
+        }
+    }
+    println!(
+        "   M replay: txs={} replayed={} skipped_blobs={} ms={} {}",
+        r.txs,
+        r.replayed,
+        r.skipped_blobs,
+        r.duration_ms,
+        if ok { "" } else { "(DIVERGED)" }
+    );
+
+    let a = apply_block(ctx, n).await.map_err(|source| Error::Step {
+        step: "apply",
+        block: n,
+        source: Box::new(source),
+    })?;
+    println!(
+        "   T apply:  source={} writes={} filtered={} skipped_shadowed={} sampled={}/{} ms={}",
+        a.source, a.writes, a.filtered, a.skipped_shadowed, a.sampled_ok, a.sampled, a.duration_ms
+    );
+    if a.sampled != a.sampled_ok {
+        ok = false;
+        println!("   T ✘ sampled storage parity failed");
+    }
+    Ok(ok)
 }

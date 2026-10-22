@@ -73,87 +73,12 @@ impl AdminSurface<'_> {
                 reason: "`all` requires `clear` (it collects the keys to hand back)",
             });
         }
-        let mut resynced = 0usize;
-        if req.clear {
-            // `all` hands every shadowed key of the account back to the source.
-            let mut slots = req.slots.clone();
-            if req.all {
-                let s = self.shadow.lock()?;
-                if let Some(set) = s.slots.get(&req.address) {
-                    for slot in set {
-                        if !slots.contains(slot) {
-                            slots.push(*slot);
-                        }
-                    }
-                }
-            }
-            let account_fields = req.account_fields || req.all;
-            // The devnet's state reflects the last applied parent block, so
-            // re-sync from *that* block - reading the source's head would
-            // leave the devnet holding a future value.
-            let anchor = self
-                .state
-                .lock()?
-                .data
-                .t
-                .as_ref()
-                .map(|c| c.block)
-                .unwrap_or(0);
-            let anchor = if anchor == 0 {
-                self.source.head().await?
-            } else {
-                anchor
-            };
-            // Read the source's truth *before* touching the marks: a key
-            // without a shadow but with a stale devnet value is the most
-            // confusing state there is, and a read fault must abort the
-            // hand-back (retryable), not skip the key.
-            let mut writes: Vec<mirror_anvil::Write> = Vec::new();
-            if account_fields {
-                writes.push(mirror_anvil::Write::Balance {
-                    address: req.address,
-                    value: self.source.balance_at(req.address, anchor).await?,
-                });
-                writes.push(mirror_anvil::Write::Nonce {
-                    address: req.address,
-                    value: self.source.nonce_at(req.address, anchor).await?,
-                });
-            }
-            for slot in &slots {
-                writes.push(mirror_anvil::Write::Storage {
-                    address: req.address,
-                    slot: *slot,
-                    value: U256::from_be_bytes(
-                        self.source.storage_at(req.address, *slot, anchor).await?.0,
-                    ),
-                });
-            }
-            {
-                let mut s = self.shadow.lock()?;
-                if account_fields {
-                    s.unmark_account_fields(req.address);
-                }
-                for slot in &slots {
-                    s.unmark_slot(req.address, *slot);
-                }
-            }
-            // Push the source's values now, then persist the registry. A fault
-            // here leaves the marks in memory but not on disk; a restart
-            // restores them (conservative: the key stays devnet-owned), and the
-            // next request retries - the writes are absolute and idempotent.
-            resynced = mirror_anvil::apply_writes(self.target, &writes, self.chunk_size).await?;
-            save_registry(self.shadow, self.shadow_path, self.metrics)?;
+        let resynced = if req.clear {
+            self.hand_back(req).await?
         } else {
-            let mut s = self.shadow.lock()?;
-            if req.account_fields {
-                s.mark_account_fields(req.address);
-            }
-            for slot in &req.slots {
-                s.mark_slot(req.address, *slot);
-            }
-            drop(s);
-            save_registry(self.shadow, self.shadow_path, self.metrics)?;
-        }
+            self.register(req)?;
+            0
+        };
         let shadow = self.shadow.lock()?;
         Ok(ShadowOutcome {
             address: req.address,
@@ -162,6 +87,96 @@ impl AdminSurface<'_> {
             shadowed_slots: shadow.slot_count(),
             shadowed_accounts: shadow.accounts.len(),
         })
+    }
+
+    /// Register the devnet-owned keys (`clear: false`).
+    fn register(&self, req: &ShadowRequest) -> Result<()> {
+        let mut s = self.shadow.lock()?;
+        if req.account_fields {
+            s.mark_account_fields(req.address);
+        }
+        for slot in &req.slots {
+            s.mark_slot(req.address, *slot);
+        }
+        drop(s);
+        save_registry(self.shadow, self.shadow_path, self.metrics)
+    }
+
+    /// Hand the keys back to parent sync and re-sync the source's truth
+    /// (`clear: true`). Fail-closed: a source read that fails aborts with the
+    /// marks intact, so a retry re-reads the same truth — a swallowed read
+    /// would hand the key back holding a stale devnet value with no mark to
+    /// explain it. Returns the number of re-synced keys.
+    async fn hand_back(&self, req: &ShadowRequest) -> Result<usize> {
+        // `all` hands every shadowed key of the account back to the source.
+        let mut slots = req.slots.clone();
+        if req.all {
+            let s = self.shadow.lock()?;
+            if let Some(set) = s.slots.get(&req.address) {
+                for slot in set {
+                    if !slots.contains(slot) {
+                        slots.push(*slot);
+                    }
+                }
+            }
+        }
+        let account_fields = req.account_fields || req.all;
+        // The devnet's state reflects the last applied parent block, so
+        // re-sync from *that* block - reading the source's head would leave
+        // the devnet holding a future value.
+        let anchor = self
+            .state
+            .lock()?
+            .data
+            .t
+            .as_ref()
+            .map(|c| c.block)
+            .unwrap_or(0);
+        let anchor = if anchor == 0 {
+            self.source.head().await?
+        } else {
+            anchor
+        };
+        // Read the source's truth *before* touching the marks: a key without a
+        // shadow but with a stale devnet value is the most confusing state
+        // there is, and a read fault must abort the hand-back (retryable), not
+        // skip the key.
+        let mut writes: Vec<mirror_anvil::Write> = Vec::new();
+        if account_fields {
+            writes.push(mirror_anvil::Write::Balance {
+                address: req.address,
+                value: self.source.balance_at(req.address, anchor).await?,
+            });
+            writes.push(mirror_anvil::Write::Nonce {
+                address: req.address,
+                value: self.source.nonce_at(req.address, anchor).await?,
+            });
+        }
+        for slot in &slots {
+            writes.push(mirror_anvil::Write::Storage {
+                address: req.address,
+                slot: *slot,
+                value: U256::from_be_bytes(
+                    self.source.storage_at(req.address, *slot, anchor).await?.0,
+                ),
+            });
+        }
+        {
+            let mut s = self.shadow.lock()?;
+            if account_fields {
+                s.unmark_account_fields(req.address);
+            }
+            for slot in &slots {
+                s.unmark_slot(req.address, *slot);
+            }
+        }
+        // Push the source's values now, then persist the registry. A fault
+        // here leaves the marks in memory but not on disk; a restart restores
+        // them (conservative: the key stays devnet-owned), and the next request
+        // retries - the writes are absolute and idempotent.
+        let resynced = mirror_anvil::apply_writes(self.target, &writes, self.chunk_size).await?;
+        save_registry(self.shadow, self.shadow_path, self.metrics)?;
+        Ok(resynced)
     }
 
     /// `POST /admin/rewind` — undo the last N applied parent blocks using the
