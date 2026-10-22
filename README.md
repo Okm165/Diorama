@@ -100,7 +100,8 @@ k8s/overlays/local/     single-node k3s overlay (engine image tag)
 k8s/bootstrap/          one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
 scripts/                lib.sh, gen-secret.sh, smoke.sh, scenario.sh, capability-proof.sh,
                         product-sim.sh, closure-check.sh
-docs/                   ARCHITECTURE.md, OPERATIONS.md, TESTING.md
+docs/                   HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md,
+                        TESTING.md
 ```
 
 ## Docs
