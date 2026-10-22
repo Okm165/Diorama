@@ -25,32 +25,36 @@ has no P2P peers and is fed by the local Lighthouse over the Engine API.
 ## 2. Topology
 
 ```
-                          ┌───────────────────┐
-   mainnet                │  Lighthouse (CL)  │────┐
-   (bootstrap only) ─────►│  semi-supernode   │    │ beacon API
-                          │  checkpoint sync  │    │ (blob sidecars)
-                          └──────────┬────────┘    │
-                                     │ Engine API  │
-                                     ▼             │
-                          ┌────────────────────┐   │
-                          │  reth (EL)         │   │
-                          │  pruned full node  │   │
-                          └──────────┬─────────┘   │
- blocks · BAL(N) · receipts · state  │             │
-                                     ▼             ▼
-   ┌─────────────────────────────────────────────────────────────┐
+   mainnet (bootstrap only)
+             │ checkpoint sync
+             ▼
+   ┌─────────┬─────────┐
+   │  Lighthouse (CL)  │────────┐
+   │  semi-supernode   │        │ beacon API
+   └─────────┬─────────┘        │ (blob sidecars)
+             │ Engine API       │
+             ▼                  │
+   ┌─────────┬──────────┐       │
+   │  reth (EL)         │       │
+   │  pruned full node  │       │
+   └─────────┬──────────┘       │
+             │                  │
+             │ blocks · BAL(N)  │
+             │ receipts · state │
+             ▼                  ▼
+   ┌─────────┬──────────────────┬────────────────────────────────┐
    │  ENGINE                                                     │
-   │  replay loop → M          ·          BAL diff applier → T   │
+   │  replay loop → M  ·  BAL diff applier → T                   │
    │  verifier · convergence repair · shadow registry · journal  │
    │  API: /status · /metrics · /admin/*                         │
-   └─────────┬───────────────────────────────────┬───────────────┘
-             │ 1:1 replay + verification         │ watch-list BAL diffs (COW)
-             │ (every parent block)              │ (copy-on-write)
-             ▼                                   ▼
-      ┌───────────┐                       ┌───────────┐
-      │  anvil M  │                       │  anvil T  │ ◄── your dapp
-      │   strict  │                       │   devnet  │     (HTTP / WS)
-      └───────────┘                       └───────────┘
+   └─────────┬──────────────────────┬────────────────────────────┘
+             │ 1:1 replay + verify  │ watch-list BAL diffs (COW)
+             │ every parent block   │ (copy-on-write)
+             ▼                      ▼
+       ┌─────┬─────┐          ┌─────┬─────┐
+       │  anvil M  │          │  anvil T  │ ◄── your dapp
+       │   strict  │          │   devnet  │     (HTTP / WS)
+       └───────────┘          └───────────┘
 ```
 
 One namespace (`mainnet-mirror`). The engine never talks P2P; its only inputs

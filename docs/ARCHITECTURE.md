@@ -12,23 +12,26 @@
 
 ## Data flow
 
+The per-block exchange between the three processes, top to bottom (the
+numbered list below then walks M's side of it step by step):
+
 ```
-   reth                           ENGINE                       anvil M / T
-   │                              │                                 │
-   │ ① block(N): txs, env,        │                                 │
-   │    withdrawals               │                                 │
-   ├─────────────────────────────►│ replay loop                     │
-   │ ② receipts · logs · traces   │                                 │
-   ├─────────────────────────────►│ verifier: counts · gas ·        │
-   │                              │  logsBloom · log set · probes   │
-   │                              │ ③ send raws in order → mine     │
-   │                              ├────────────────────────────────►│ M
-   │ ④ BAL(N) for the watch list  │                                 │
-   ├─────────────────────────────►│ diff applier                    │
-   │                              │ ⑤ pad → write ≤500 → mine(1)    │
-   │                              ├────────────────────────────────►│ T
-   │                              │ ⑥ sampled parity + T probes     │
-   │                              │ ⑦ journal + drift.jsonl         │
+   reth                          ENGINE                          anvil M / T
+   │                             │                               │
+   │ block(N): txs, env,         │                               │
+   │   withdrawals               │                               │
+   ├────────────────────────────►│ replay loop                   │
+   │ receipts · logs · traces    │                               │
+   ├────────────────────────────►│ verifier: counts · gas ·      │
+   │                             │ logsBloom · log set · probes  │
+   │                             │ send raws in order → mine     │
+   │                             ├──────────────────────────────►│ M
+   │ BAL(N) for the watch list   │                               │
+   ├────────────────────────────►│ diff applier                  │
+   │                             │ pad → write ≤500 → mine(1)    │
+   │                             ├──────────────────────────────►│ T
+   │                             │ sampled parity + T probes     │
+   │                             │ journal + drift.jsonl         │
 ```
 
 Per replayed block on M the engine does, in order:
