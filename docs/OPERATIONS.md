@@ -247,7 +247,9 @@ kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/a
 
 Measured on the live Aave USDC reserve: +30 days moved the income index by a
 month of interest and grew a borrow's debt in the same read. While the offset is
-non-zero the T probe parity is skipped (views are meant to differ).
+non-zero the T probe parity is skipped (views are meant to differ). The offset
+lives in the engine's memory: restarting the engine resets it to 0 (T's
+timestamps stay monotonic either way), so re-set it after a redeploy.
 
 ### Register devnet writes made outside the block pipeline
 
