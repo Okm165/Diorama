@@ -24,7 +24,8 @@ pub use instance::{
 };
 pub use sections::{
     BlobsSection, EngineAnvil, EngineReth, EngineSection, HttpSection, JournalSection,
-    LoopsSection, OnDivergence, Probe, Services, SourceSyncSection, VenueSection, VerifierSection,
+    LoopsSection, OnDivergence, Probe, Services, SimSection, SourceSyncSection, VenueSection,
+    VerifierSection,
 };
 
 use std::path::Path;
@@ -108,6 +109,10 @@ fn load_merged(
     // ethereum engine's stub and fail deserialization on the missing fields
     // (and vice versa).
     prune_other_profile(&mut merged, profile_of(&over));
+    // Optional services: the defaults hold their shared numbers, but a
+    // deployment that does not run the service must not inherit a
+    // half-filled stub (the section would deserialize as present-but-broken).
+    prune_absent_services(&mut merged, &over);
     merge(&mut merged, over);
     let unresolved = env::expand(&mut merged, vars);
     env::apply_overrides(&mut merged, vars)?;
@@ -129,9 +134,9 @@ fn profile_of(instance_value: &toml::Value) -> Option<&str> {
 
 /// Drop the sections the profile does not own from the defaults layer.
 fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
-    let (chain_section, service_section) = match profile {
-        Some("ethereum") => ("venue", "venue"),
-        Some("venue") => ("l1", "engine"),
+    let (chain_section, service_sections): (&str, &[&str]) = match profile {
+        Some("ethereum") => ("venue", &["venue", "sim"]),
+        Some("venue") => ("l1", &["engine"]),
         _ => return,
     };
     let Some(root) = defaults.as_table_mut() else {
@@ -141,7 +146,25 @@ fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
         chains.remove(chain_section);
     }
     if let Some(services) = root.get_mut("services").and_then(|v| v.as_table_mut()) {
-        services.remove(service_section);
+        for section in service_sections {
+            services.remove(*section);
+        }
+    }
+}
+
+/// Optional services (not pinned by the profile): the defaults' stub is kept
+/// only when the instance file carries the section.
+fn prune_absent_services(defaults: &mut toml::Value, over: &toml::Value) {
+    // The simulator is optional (a venue deployment may run only the engine).
+    let present = over
+        .get("services")
+        .and_then(|s| s.get("sim"))
+        .is_some();
+    if present {
+        return;
+    }
+    if let Some(services) = defaults.get_mut("services").and_then(|v| v.as_table_mut()) {
+        services.remove("sim");
     }
 }
 
@@ -232,6 +255,7 @@ port = 8080
         let mut merged: toml::Value = toml::from_str(DEFAULTS).unwrap();
         // Same pipeline as the real loader, pruning included.
         prune_other_profile(&mut merged, profile_of(&over));
+        prune_absent_services(&mut merged, &over);
         merge(&mut merged, over);
         let unresolved = env::expand(&mut merged, vars);
         env::apply_overrides(&mut merged, vars)?;
@@ -263,6 +287,8 @@ profile = "venue"
 [chains.venue]
 kind = "hyperliquid"
 source_url = "http://hl-rpc:8545"
+api_url = "https://api.hyperliquid.xyz"
+ws_url = "wss://api.hyperliquid.xyz/ws"
 
 [services.venue]
 state_dir = "/state"
@@ -411,7 +437,7 @@ port = 8080
 
         // An ethereum instance carrying venue sections:
         let src = format!(
-            "{}\n[chains.venue]\nkind = \"hyperliquid\"\nsource_url = \"http://hl-rpc:8545\"\n",
+            "{}\n[chains.venue]\nkind = \"hyperliquid\"\nsource_url = \"http://hl-rpc:8545\"\napi_url = \"https://api.hyperliquid.xyz\"\nws_url = \"wss://api.hyperliquid.xyz/ws\"\n",
             minimal_instance()
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
@@ -420,6 +446,36 @@ port = 8080
             format!("{err}").contains("must not carry [chains.venue]"),
             "{err}"
         );
+
+        // An ethereum instance carrying the simulator's section:
+        let src = format!(
+            "{}\n[services.sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\npoll_interval_ms = 5000\n[services.sim.info]\naddr = \"0.0.0.0\"\nport = 8090\n[services.sim.control]\naddr = \"0.0.0.0\"\nport = 8091\n",
+            minimal_instance()
+        );
+        let (inst, _) = load_str(&src, &wiring()).unwrap();
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("must not carry [services.sim]"), "{err}");
+    }
+
+    #[test]
+    fn the_simulator_sections_load_and_take() {
+        let src = format!(
+            "{}\n[services.sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\", \"ETH\"]\npoll_interval_ms = 5000\n[services.sim.info]\nport = 8090\n[services.sim.control]\nport = 8091\n",
+            minimal_venue_instance()
+        );
+        let (mut inst, _) = load_str(&src, &[]).unwrap();
+        inst.check().unwrap();
+        let (chain, sim) = inst.take_sim().unwrap();
+        assert_eq!(chain.api_url, "https://api.hyperliquid.xyz");
+        assert_eq!(sim.markets, vec!["BTC", "ETH"]);
+        assert_eq!(sim.info.port, 8090);
+        assert_eq!(sim.control.port, 8091);
+        assert!(sim.engine_admin_url.is_none());
+        assert!(inst.take_sim().is_err(), "the sections are moved, not copied");
+        // The engine's take still works on an instance that also carries the sim.
+        let (mut inst2, _) = load_str(&src, &[]).unwrap();
+        let (_, venue) = inst2.take_venue().unwrap();
+        assert_eq!(venue.anvil_url, "http://anvil-v:8545");
     }
 
     #[test]
@@ -436,7 +492,7 @@ port = 8080
         names.sort();
         assert_eq!(
             names,
-            vec!["ANVIL_V_URL", "HL_RPC_URL", "STATE_DIR"],
+            vec!["ANVIL_V_URL", "ENGINE_ADMIN_URL", "HL_RPC_URL", "SIM_STATE_DIR", "STATE_DIR"],
             "the wiring the venue instance references"
         );
     }
@@ -452,6 +508,7 @@ port = 8080
         is_normal::<ChainVenue>();
         is_normal::<EngineSection>();
         is_normal::<VenueSection>();
+        is_normal::<SimSection>();
         is_normal::<LoopsSection>();
         is_normal::<VerifierSection>();
         is_normal::<SourceSyncSection>();

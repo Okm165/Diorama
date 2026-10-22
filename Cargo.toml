@@ -44,6 +44,8 @@ alloy-rpc-types-txpool = { version = "2.5" }
 
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
+# Stream/Sink adapters for the venue websocket client.
+futures-util = "0.3"
 hex = "0.4"
 # alloy-rpc-types-engine's `jwt` feature pulls jsonwebtoken but selects no
 # crypto provider, so signing panics at runtime ("Could not automatically
@@ -51,6 +53,9 @@ hex = "0.4"
 # variant, so enable it here; feature unification applies it graph-wide.
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Venue money is decimal text on the wire (prices/sizes/margins); f64 is not
+# a money type. rust_decimal keeps every served identity exact.
+rust_decimal = { version = "1.43", features = ["serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -58,6 +63,8 @@ thiserror = "2"
 # Config is TOML (§19): crates/config, the layered loader.
 toml = "1.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+# The venue's websocket lane (market plane: allMids + activeAssetCtx pushes).
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 

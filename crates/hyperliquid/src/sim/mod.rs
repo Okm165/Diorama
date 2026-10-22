@@ -1,0 +1,410 @@
+//! The account plane: the simulated accounts registry (COW overlay), its
+//! persistence, and the self-advance automaton (plan §5, §14.8).
+//!
+//! Untouched accounts are not the sim's business — the API layer passes those
+//! reads through to the real venue. A *touched* account (dealt funds, seeded,
+//! or otherwise registered) is simulated: its state is this registry's, its
+//! figures are computed from live marks, and it persists to `sim.json` so a
+//! restart does not lose a scenario.
+//!
+//! Time: the sim has its own clock (`wall + offset`, offset = 0 until
+//! `advance` scripts a jump). Funding accrues on that clock — lazily on every
+//! read and on the 1 Hz tick — so daloc's set-and-read tests see live
+//! funding/liquidation behavior without ever calling `advance`. The wire's
+//! `time` field stays *wall* now: it is the read's freshness, which the
+//! client's ≤6 s staleness gate compares against its own clock.
+pub mod account;
+
+use crate::error::{Error, Result};
+use crate::feed::MarketFeed;
+use crate::store;
+use account::{Account, AccountSeed, Accounts, Liquidation};
+use alloy_primitives::Address;
+use mirror_devnet::Shared;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// The persisted simulator state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SimState {
+    /// The scenario epoch: `reset` bumps it (state files say which run they
+    /// belong to).
+    #[serde(default)]
+    pub epoch: u64,
+    /// The sim clock's offset from wall time (ms); `advance` scripts jumps.
+    #[serde(default)]
+    pub clock_offset_ms: i64,
+    #[serde(default)]
+    pub accounts: Accounts,
+}
+
+/// The sim's metrics (rendered beside the feed's).
+#[derive(Default)]
+pub struct SimMetrics {
+    /// Registered (touched) accounts.
+    pub accounts: AtomicU64,
+    /// The scenario epoch.
+    pub epoch: AtomicU64,
+    /// Liquidations the sim executed (v1: full closes at the mark).
+    pub liquidations_total: AtomicU64,
+    /// Funding payments applied (per position, per accrual).
+    pub funding_payments_total: AtomicU64,
+}
+
+impl SimMetrics {
+    pub fn render(&self) -> String {
+        let mut out = String::with_capacity(512);
+        mirror_devnet::metrics::push_metric(&mut out, "gauge", "venue_sim_accounts", "simulated (touched) accounts", self.accounts.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "gauge", "venue_sim_epoch", "scenario epoch (reset bumps it)", self.epoch.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_liquidations_total", "liquidations executed by the sim", self.liquidations_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_funding_payments_total", "funding payments applied", self.funding_payments_total.load(Ordering::Relaxed));
+        out
+    }
+}
+
+/// Which side of the venue `deal` mints into.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DealClass {
+    /// The perp wallet (`totalRawUsd`; the enforcement's recall source).
+    Perp,
+    /// The spot wallet (by token; USDC is token 0).
+    Spot,
+}
+
+pub struct Sim {
+    state: Shared<SimState>,
+    path: Option<PathBuf>,
+    dirty: AtomicBool,
+    pub metrics: SimMetrics,
+}
+
+impl Sim {
+    /// Load the registry from its state file (absent = first boot, empty).
+    pub fn load(path: PathBuf) -> Result<Self> {
+        let state = store::load::<SimState>(&path, "sim state")?.unwrap_or_default();
+        Ok(Self::from_state(state, Some(path)))
+    }
+
+    /// An in-memory registry (tests).
+    pub fn memory() -> Self {
+        Self::from_state(SimState::default(), None)
+    }
+
+    fn from_state(state: SimState, path: Option<PathBuf>) -> Self {
+        let sim = Self {
+            state: Shared::new("sim state", state),
+            path,
+            dirty: AtomicBool::new(false),
+            metrics: SimMetrics::default(),
+        };
+        sim.publish_gauges();
+        sim
+    }
+
+    // ---- reads ------------------------------------------------------------
+
+    /// The account, or `None` when it was never touched (the caller passes
+    /// the read through to the real venue).
+    pub fn account(&self, address: Address) -> Result<Option<Account>> {
+        Ok(self.state.lock()?.accounts.get(&address).cloned())
+    }
+
+    /// Every touched address (control-side diagnostics).
+    pub fn addresses(&self) -> Result<Vec<Address>> {
+        Ok(self.state.lock()?.accounts.keys().copied().collect())
+    }
+
+    /// The sim clock (ms) at wall time `now_ms`.
+    pub fn clock(&self, now_ms: u64) -> Result<u64> {
+        let offset = self.state.lock()?.clock_offset_ms;
+        Ok((now_ms as i64 + offset).max(0) as u64)
+    }
+
+    pub fn epoch(&self) -> Result<u64> {
+        Ok(self.state.lock()?.epoch)
+    }
+
+    // ---- scenario mutations ----------------------------------------------
+
+    /// `deal`: mint funds into the account (perp wallet or spot token).
+    /// Absolute-additive: it raises the balance by `amount` (the harness's
+    /// `add_erc20` semantics; draining is `amount` negative or a `set_account`
+    /// seed).
+    pub fn deal(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        class: DealClass,
+        coin: Option<&str>,
+        amount: Decimal,
+    ) -> Result<Decimal> {
+        let now = crate::now_ms();
+        let clock = self.clock(now)?;
+        let mut state = self.state.lock()?;
+        let account = state.accounts.entry(address).or_default();
+        if account.funded_at_ms == 0 {
+            account.funded_at_ms = clock;
+        }
+        let after = match class {
+            DealClass::Perp => {
+                account.perp_balance += amount;
+                account.perp_balance
+            }
+            DealClass::Spot => {
+                let coin = coin.unwrap_or("USDC");
+                let token = feed.token_of(coin).ok_or_else(|| Error::BadRequest {
+                    reason: format!("spot coin `{coin}` is not in the venue's token registry yet"),
+                })?;
+                let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
+                    coin: coin.to_string(),
+                    total: Decimal::ZERO,
+                    hold: Decimal::ZERO,
+                    entry_ntl: Decimal::ZERO,
+                });
+                entry.total += amount;
+                entry.total
+            }
+        };
+        drop(state);
+        self.mark_dirty()?;
+        Ok(after)
+    }
+
+    /// `set_account`: seed an account from the hl_mock-compatible shape.
+    pub fn set_account(&self, address: Address, seed: AccountSeed) -> Result<()> {
+        let now = crate::now_ms();
+        let clock = self.clock(now)?;
+        let mut state = self.state.lock()?;
+        let mut account = seed.into_account();
+        account.funded_at_ms = clock;
+        state.accounts.insert(address, account);
+        drop(state);
+        self.mark_dirty()
+    }
+
+    /// `reset`: blank the scenario (accounts + clock offset), bump the epoch.
+    pub fn reset(&self) -> Result<u64> {
+        let epoch = {
+            let mut state = self.state.lock()?;
+            state.accounts.clear();
+            state.clock_offset_ms = 0;
+            state.epoch += 1;
+            state.epoch
+        };
+        self.save()?;
+        Ok(epoch)
+    }
+
+    /// `advance`: script a clock jump (`seconds`) with `blocks` liquidation
+    /// checks inside it — the deterministic complement to self-advance.
+    pub fn advance(&self, feed: &MarketFeed, seconds: u64, blocks: u64) -> Result<AdvanceOutcome> {
+        let jump_ms = seconds.saturating_mul(1_000);
+        {
+            let mut state = self.state.lock()?;
+            state.clock_offset_ms = state.clock_offset_ms.saturating_add(jump_ms as i64);
+        }
+        let now = crate::now_ms();
+        let mut liquidations = Vec::new();
+        let blocks = blocks.max(1);
+        for _ in 0..blocks {
+            self.accrue_all(feed, now)?;
+            liquidations.extend(self.check_all(feed, now)?);
+        }
+        self.save()?;
+        Ok(AdvanceOutcome {
+            advanced_ms: jump_ms,
+            blocks,
+            liquidations,
+        })
+    }
+
+    // ---- the automaton ----------------------------------------------------
+
+    /// One tick of the self-advance loop: accrue funding to the sim clock and
+    /// run the liquidation checks; persist when something moved. A warming
+    /// market plane (no meta yet) is a no-op, not a fault storm.
+    pub fn tick(&self, feed: &MarketFeed) -> Result<()> {
+        if feed.meta().is_none() {
+            return Ok(());
+        }
+        let now = crate::now_ms();
+        self.accrue_all(feed, now)?;
+        self.check_all(feed, now)?;
+        self.save_if_dirty()?;
+        Ok(())
+    }
+
+    /// Accrue funding for every account (the caller holds no lock).
+    pub fn accrue_all(&self, feed: &MarketFeed, now_ms: u64) -> Result<()> {
+        let clock = self.clock(now_ms)?;
+        let mut state = self.state.lock()?;
+        let mut payments = 0u64;
+        for account in state.accounts.values_mut() {
+            payments += account::accrue_funding(account, feed, clock) as u64;
+        }
+        if payments > 0 {
+            self.metrics.funding_payments_total.fetch_add(payments, Ordering::Relaxed);
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Check every account against its maintenance requirement and close the
+    /// ones below it (v1: full close at the mark).
+    pub fn check_all(&self, feed: &MarketFeed, now_ms: u64) -> Result<Vec<Liquidation>> {
+        let clock = self.clock(now_ms)?;
+        let meta = feed.meta();
+        let mut state = self.state.lock()?;
+        let mut liquidated = Vec::new();
+        for (address, account) in state.accounts.iter_mut() {
+            account::accrue_funding(account, feed, clock);
+            if let Some(liq) = account::liquidate_if_needed(account, feed, meta.as_ref())? {
+                self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
+                self.dirty.store(true, Ordering::Relaxed);
+                tracing::warn!(
+                    account = %address,
+                    positions = ?liq.positions_closed,
+                    account_value = %liq.account_value,
+                    maintenance = %liq.maintenance,
+                    "sim liquidation: the account fell below maintenance; positions closed at the mark"
+                );
+                liquidated.push(liq);
+            }
+        }
+        Ok(liquidated)
+    }
+
+    // ---- persistence ------------------------------------------------------
+
+    /// Persist if anything moved since the last save.
+    pub fn save_if_dirty(&self) -> Result<bool> {
+        if !self.dirty.swap(false, Ordering::Relaxed) {
+            return Ok(false);
+        }
+        self.save()?;
+        Ok(true)
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let Some(path) = &self.path else {
+            self.dirty.store(false, Ordering::Relaxed);
+            return Ok(());
+        };
+        let snapshot = self.state.lock()?.clone();
+        store::save(path, &snapshot, "sim state")?;
+        self.dirty.store(false, Ordering::Relaxed);
+        self.publish_gauges();
+        Ok(())
+    }
+
+    fn mark_dirty(&self) -> Result<()> {
+        self.dirty.store(true, Ordering::Relaxed);
+        self.save()
+    }
+
+    fn publish_gauges(&self) {
+        if let Ok(state) = self.state.lock() {
+            self.metrics.accounts.store(state.accounts.len() as u64, Ordering::Relaxed);
+            self.metrics.epoch.store(state.epoch, Ordering::Relaxed);
+        }
+    }
+}
+
+/// What `advance` moved.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvanceOutcome {
+    pub advanced_ms: u64,
+    pub blocks: u64,
+    pub liquidations: Vec<Liquidation>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::AssetCtx;
+
+    fn feed_with(coin: &str, mark: &str, oracle: &str) -> MarketFeed {
+        let feed = MarketFeed::memory(vec![coin.to_string()]);
+        feed.put_ctx(
+            coin.to_string(),
+            AssetCtx {
+                funding: Decimal::new(125, 7),
+                open_interest: Decimal::ZERO,
+                prev_day_px: Decimal::ZERO,
+                day_ntl_vlm: Decimal::ZERO,
+                premium: None,
+                oracle_px: oracle.parse().unwrap(),
+                mark_px: mark.parse().unwrap(),
+                mid_px: None,
+                impact_pxs: None,
+                day_base_vlm: Decimal::ZERO,
+            },
+            1,
+        );
+        feed
+    }
+
+    #[test]
+    fn deal_creates_and_raises() {
+        let feed = feed_with("USDC", "1", "1");
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        assert!(sim.account(a).unwrap().is_none());
+        let after = sim
+            .deal(&feed, a, DealClass::Perp, None, "100.5".parse().unwrap())
+            .unwrap();
+        assert_eq!(after, "100.5".parse::<Decimal>().unwrap());
+        let after = sim
+            .deal(&feed, a, DealClass::Perp, None, "0.5".parse().unwrap())
+            .unwrap();
+        assert_eq!(after, "101".parse::<Decimal>().unwrap());
+    }
+
+    #[test]
+    fn reset_blanks_and_bumps_the_epoch() {
+        let feed = feed_with("USDC", "1", "1");
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        sim.deal(&feed, a, DealClass::Perp, None, Decimal::ONE).unwrap();
+        assert_eq!(sim.epoch().unwrap(), 0);
+        let epoch = sim.reset().unwrap();
+        assert_eq!(epoch, 1);
+        assert!(sim.account(a).unwrap().is_none());
+    }
+
+    #[test]
+    fn advance_jumps_the_clock_and_accrues() {
+        let feed = feed_with("BTC", "100", "100");
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        sim.set_account(
+            a,
+            serde_json::from_str(
+                r#"{
+                    "marginSummary": {"accountValue": "100", "totalNtlPos": "100", "totalRawUsd": "0", "totalMarginUsed": "10"},
+                    "assetPositions": [{
+                        "type": "oneWay",
+                        "position": {
+                            "coin": "BTC", "entryPx": "100", "leverage": {"type": "cross", "value": 10},
+                            "marginUsed": "10", "maxLeverage": 20, "positionValue": "100",
+                            "returnOnEquity": "0.0", "szi": "1.0", "unrealizedPnl": "0.0",
+                            "cumFunding": {"allTime": "0.0", "sinceOpen": "0.0", "sinceChange": "0.0"}
+                        }
+                    }]
+                }"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let before = sim.account(a).unwrap().unwrap().perp_balance;
+        let outcome = sim.advance(&feed, 3600, 1).unwrap();
+        assert_eq!(outcome.advanced_ms, 3_600_000);
+        let after = sim.account(a).unwrap().unwrap().perp_balance;
+        // One hour of funding at rate 1.25e-5 on oracle 100, long 1.0: paid.
+        assert_eq!(before - after, Decimal::new(125, 5));
+    }
+}

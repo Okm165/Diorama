@@ -17,11 +17,25 @@
 //! The simulator (market/account planes), the daloc-facing API and the
 //! bridges are the venue's own half and land on top of this driver; the
 //! ethereum stack is never compiled here (the closure matrix enforces it).
+pub mod api;
 pub mod ctx;
 pub mod driver;
 pub mod error;
+pub mod feed;
 pub mod http;
+pub mod sim;
+pub mod store;
 pub mod venue_source;
+pub mod wire;
 
 pub use ctx::Ctx;
 pub use error::{Error, Result};
+
+/// Wall-clock milliseconds (the wire's `time` fields and the sim clock's
+/// base). One helper so every lane reads the same clock.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}

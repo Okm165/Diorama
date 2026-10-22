@@ -3,7 +3,7 @@ use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::sections::{EngineSection, Services, VenueSection};
+use crate::sections::{EngineSection, Services, SimSection, VenueSection};
 use crate::ConfigError;
 
 /// One mirror deployment: identity, chains, watchlist, service sections.
@@ -57,16 +57,21 @@ pub struct ChainL1 {
     pub fork_offset: u64,
 }
 
-/// `[chains.venue]`: the venue's fork source. `kind` only - chain id 999,
-/// CCTP domain 19 and the canonical HyperEVM addresses are code facts. V pins
-/// at the source's `latest` (or an explicit block chosen at deploy time by
-/// the anvil init container), so there is no follow/offset policy here: the
-/// source is archive-deep (measured: ≥5M blocks).
+/// `[chains.venue]`: the venue's fork source and public API. `kind` only -
+/// chain id 999, CCTP domain 19 and the canonical HyperEVM addresses are code
+/// facts. V pins at the source's `latest` (or an explicit block chosen at
+/// deploy time by the anvil init container), so there is no follow/offset
+/// policy here: the source is archive-deep (measured: ≥5M blocks).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ChainVenue {
     pub kind: ChainKind,
+    /// The EVM RPC (V's fork source).
     pub source_url: String,
+    /// The info REST API the simulator's market plane reads.
+    pub api_url: String,
+    /// The websocket API the simulator's market plane subscribes to.
+    pub ws_url: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -149,19 +154,20 @@ impl Instance {
                 issues.push(format!("profile \"{profile}\" requires {section}"));
             }
         }
-        let forbids = if ethereum {
-            [
+        let forbids: &[(&str, bool)] = if ethereum {
+            &[
                 ("[chains.venue]", self.chains.venue.is_some()),
                 ("[services.venue]", self.services.venue.is_some()),
+                ("[services.sim]", self.services.sim.is_some()),
             ]
         } else {
-            [
+            &[
                 ("[chains.l1]", self.chains.l1.is_some()),
                 ("[services.engine]", self.services.engine.is_some()),
             ]
         };
         for (section, present) in forbids {
-            if present {
+            if *present {
                 issues.push(format!("profile \"{profile}\" must not carry {section}"));
             }
         }
@@ -192,6 +198,8 @@ impl Instance {
                 issues.push("chains.venue.kind must be \"hyperliquid\"".into());
             }
             check_http_url("chains.venue.source_url", &venue.source_url, issues);
+            check_http_url("chains.venue.api_url", &venue.api_url, issues);
+            check_ws_url("chains.venue.ws_url", &venue.ws_url, issues);
         }
     }
 
@@ -237,6 +245,20 @@ impl Instance {
                 issues.push("services.venue.chunk_size must be > 0".into());
             }
         }
+        if let Some(sim) = &self.services.sim {
+            if sim.state_dir.as_os_str().is_empty() {
+                issues.push("services.sim.state_dir must not be empty".into());
+            }
+            if sim.markets.is_empty() {
+                issues.push("services.sim.markets must name at least one market".into());
+            }
+            if sim.poll_interval_ms == 0 {
+                issues.push("services.sim.poll_interval_ms must be > 0".into());
+            }
+            if let Some(url) = &sim.engine_admin_url {
+                check_http_url("services.sim.engine_admin_url", url, issues);
+            }
+        }
     }
 
     /// The ethereum profile's sections, moved out for the run path (the check
@@ -269,6 +291,21 @@ impl Instance {
             .take()
             .ok_or_else(|| mismatch("profile \"venue\" requires [services.venue]"))?;
         Ok((chain, venue))
+    }
+
+    /// The simulator's sections, moved out for the run path.
+    pub fn take_sim(&mut self) -> Result<(ChainVenue, SimSection), ConfigError> {
+        let chain = self
+            .chains
+            .venue
+            .take()
+            .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
+        let sim = self
+            .services
+            .sim
+            .take()
+            .ok_or_else(|| mismatch("the simulator requires [services.sim]"))?;
+        Ok((chain, sim))
     }
 
     /// The ethereum profile's endpoints: the pre-context reads the run path
@@ -362,6 +399,19 @@ fn check_http_url(key: &str, value: &str, issues: &mut Vec<String>) {
     let ok = matches!(host, Some(h) if !h.is_empty() && !h.starts_with('/'));
     if !ok {
         issues.push(format!("{key} \"{value}\" is not an http(s) URL with a host"));
+    }
+}
+
+fn check_ws_url(key: &str, value: &str, issues: &mut Vec<String>) {
+    if value.contains("${") {
+        return;
+    }
+    let host = value
+        .strip_prefix("ws://")
+        .or_else(|| value.strip_prefix("wss://"));
+    let ok = matches!(host, Some(h) if !h.is_empty() && !h.starts_with('/'));
+    if !ok {
+        issues.push(format!("{key} \"{value}\" is not a ws(s) URL with a host"));
     }
 }
 

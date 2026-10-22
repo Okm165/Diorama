@@ -11,12 +11,36 @@ use std::path::PathBuf;
 /// `[services]`: one section per service; each service reads its own (§19.3).
 /// Exactly one profile's sections are present (the instance's `check` pins the
 /// coherence): the ethereum profile carries `[services.engine]`, the venue
-/// profile carries `[services.venue]`.
+/// profile carries `[services.venue]` (the engine) and `[services.sim]` (the
+/// simulator).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Services {
     pub engine: Option<EngineSection>,
     pub venue: Option<VenueSection>,
+    pub sim: Option<SimSection>,
+}
+
+/// `[services.sim]`: the venue simulator (info + control API).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SimSection {
+    /// Simulator state root: accounts + market overrides (`sim.json`).
+    pub state_dir: PathBuf,
+    /// The markets whose books are cached and whose contexts are tracked; the
+    /// account plane prices every position from these (a position in an
+    /// untracked coin is a config error at the read that needs it).
+    pub markets: Vec<String>,
+    /// REST cache cadence (WS pushes are the primary freshness source; the
+    /// budget meter gates this poller).
+    pub poll_interval_ms: u64,
+    /// The daloc-facing info API (8090).
+    pub info: HttpSection,
+    /// The control API (8091).
+    pub control: HttpSection,
+    /// The venue engine's admin base (`/admin/epoch`), called by
+    /// `/control/epoch_new`; absent means epoch_new refuses.
+    pub engine_admin_url: Option<String>,
 }
 
 /// `[services.venue]`: the Venue Mirror's fork driver.

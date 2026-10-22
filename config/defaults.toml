@@ -89,3 +89,17 @@ journal_blocks = 1024
 
 [services.venue.http]
 addr = "0.0.0.0"
+
+# ---- the venue simulator (profile "venue") -------------------------------
+# The market plane's REST cache cadence. WS pushes (allMids, activeAssetCtx)
+# are the primary freshness source; the REST poller backfills meta/books and
+# is gated by the rate budget meter (1200 weight/min: metaAndAssetCtxs = 20,
+# l2Book/allMids = 2). 5 s gives ~360 weight/min for the default market set.
+[services.sim]
+poll_interval_ms = 5000
+
+[services.sim.info]
+addr = "0.0.0.0"
+
+[services.sim.control]
+addr = "0.0.0.0"

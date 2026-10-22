@@ -45,6 +45,9 @@ struct StatusResponse {
     source: String,
 }
 
+/// The HTTP mapping of the error taxonomy (the engine and the simulator
+/// share it): request refusals are 4xx, a warming/poisoned state is 503, the
+/// venue's own refusals are 502, everything else is a server-side fault.
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
@@ -53,11 +56,17 @@ impl IntoResponse for Error {
                 | mirror_devnet::Error::InvalidRewind { .. }
                 | mirror_devnet::Error::InvalidShadow { .. },
             ) => StatusCode::BAD_REQUEST,
-            Error::Devnet(mirror_devnet::Error::Poisoned { .. }) => StatusCode::SERVICE_UNAVAILABLE,
+            Error::BadRequest { .. } => StatusCode::BAD_REQUEST,
+            Error::NotFound { .. } | Error::NoMarket { .. } => StatusCode::NOT_FOUND,
+            Error::NotConfigured { .. } => StatusCode::CONFLICT,
+            Error::ApiStatus { .. } | Error::Http(_) => StatusCode::BAD_GATEWAY,
+            Error::Warming | Error::Devnet(mirror_devnet::Error::Poisoned { .. }) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
-            tracing::error!(error = %self, "admin request failed");
+            tracing::error!(error = %self, "request failed");
         }
         (status, self.to_string()).into_response()
     }
@@ -73,6 +82,7 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
         .route("/admin/pause", post(admin_pause))
         .route("/admin/shadow", post(admin_shadow))
         .route("/admin/deal", post(admin_deal))
+        .route("/admin/epoch", post(admin_epoch))
         .with_state(ctx);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -190,4 +200,26 @@ async fn admin_deal(
     Json(req): Json<DealRequest>,
 ) -> Result<Json<mirror_devnet::deal::DealOutcome>> {
     Ok(Json(ctx.admin().deal(&req).await?))
+}
+
+/// `/admin/epoch`: re-pin V to the fork source's latest block. One anvil
+/// call — the driver's canary notices the reset on its next pass and runs the
+/// epoch rule (new base = new epoch, same base = restore), so this route
+/// never needs to replicate that logic.
+async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
+    ctx.v.anvil_reset_fork_latest(&ctx.chain.source_url).await?;
+    tracing::warn!(
+        source = %ctx.chain.source_url,
+        "V was re-pinned to the source's latest block; the driver reconciles on its next pass"
+    );
+    Ok(Json(EpochResponse {
+        reset: true,
+        source: ctx.chain.source_url.clone(),
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct EpochResponse {
+    reset: bool,
+    source: String,
 }

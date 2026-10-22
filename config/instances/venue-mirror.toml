@@ -13,9 +13,12 @@ profile = "venue"
 # The chain id (999) and the canonical HyperEVM addresses are code facts;
 # only the deployment's fork source is data. V (the fork-mode anvil) pins at
 # this source's `latest` - the source is archive-deep (measured: ≥5M blocks),
-# so there is no fork-offset policy and no follow machinery.
+# so there is no fork-offset policy and no follow machinery. The API URLs are
+# the simulator's market plane (REST snapshots + WS pushes).
 kind = "hyperliquid"
 source_url = "${HL_RPC_URL}"
+api_url = "https://api.hyperliquid.xyz"
+ws_url = "wss://api.hyperliquid.xyz/ws"
 
 [services.venue]
 state_dir = "${STATE_DIR}"
@@ -31,3 +34,20 @@ probes = [
 [services.venue.http]
 addr = "0.0.0.0"
 port = 8080
+
+# The simulator (venue-sim): live market plane + COW account plane. Its own
+# state root (accounts + overrides); the info API is what daloc reads, the
+# control API drives scenarios. engine_admin_url lets /control/epoch_new
+# re-pin V through the engine's /admin/epoch.
+[services.sim]
+state_dir = "${SIM_STATE_DIR}"
+markets = ["BTC", "ETH", "HYPE", "SOL"]
+engine_admin_url = "${ENGINE_ADMIN_URL}"
+
+[services.sim.info]
+addr = "0.0.0.0"
+port = 8090
+
+[services.sim.control]
+addr = "0.0.0.0"
+port = 8091

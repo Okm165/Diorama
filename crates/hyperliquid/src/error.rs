@@ -46,6 +46,61 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+
+    /// A persisted state file parsed as JSON but not as its state: it dies at
+    /// the load point, path named (never silently becomes empty state).
+    #[error("{what}: {path}")]
+    Corrupt {
+        what: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("encoding {what}")]
+    Encode {
+        what: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    // ---- the venue's public API boundary (market plane, passthrough) ------
+    #[error("the venue api transport failed")]
+    Http(#[from] reqwest::Error),
+
+    /// The venue refused the call (non-2xx); its body carries the reason.
+    #[error("the venue api answered {status}: {body}")]
+    ApiStatus { status: u16, body: String },
+
+    #[error("decoding a venue api response as {what}")]
+    Decode {
+        what: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// A read that needs a coin's live prices and the market plane has none
+    /// (and no override owns it): a named fault, never a zero price.
+    #[error("no live market context for `{coin}`")]
+    NoMarket { coin: String },
+
+    // ---- control-plane refusals (the sim maps them to 4xx) ----------------
+    #[error("invalid control request: {reason}")]
+    BadRequest { reason: String },
+
+    /// A control route that needs wiring the deployment did not provide.
+    #[error("{what} is not configured for this deployment")]
+    NotConfigured { what: &'static str },
+
+    /// A market read before the first venue poll landed (or an untouched
+    /// account the venue cannot answer for): warming up, 503.
+    #[error("the market plane is warming up (no venue data yet)")]
+    Warming,
+
+    /// A read for a target the sim does not have (a coin with no book, a
+    /// margin table id the meta lacks): named, 404 at the API.
+    #[error("not found: {what}")]
+    NotFound { what: String },
 }
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).

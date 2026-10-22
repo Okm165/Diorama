@@ -601,6 +601,18 @@ impl Rpc {
         Ok(())
     }
 
+    /// `anvil_reset` to a fresh fork at the source's *latest* block (the
+    /// venue's `/admin/epoch`: the driver's canary detects the reset and runs
+    /// the epoch rule — new base = new epoch, same base = restore).
+    pub async fn anvil_reset_fork_latest(&self, url: &str) -> Result<()> {
+        let forking = Forking {
+            json_rpc_url: Some(url.to_string()),
+            block_number: None,
+        };
+        self.call_raw("anvil_reset", (ResetParams { forking },)).await?;
+        Ok(())
+    }
+
     /// (pending, queued) counts from txpool_status.
     pub async fn txpool_status(&self) -> Result<TxpoolStatus> {
         self.call("txpool_status", NO_PARAMS).await
