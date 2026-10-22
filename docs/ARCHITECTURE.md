@@ -72,8 +72,8 @@ diffs and mines the parent's block. Two reasons, both measured:
    the state its gas was estimated on.
 
 ```
-   no prepend    estimate on S ──► diffs land ──► execute on S′   ✗ 97% revert
-   prepend       estimate on S ──► own block  ──► execute on S    ✓ honest gas
+   no prepend  estimate on S ──► diffs land ──► execute on S′ reverts at 97%
+   prepend     estimate on S ──► own block  ──► execute on S  gas stays honest
 ```
 
 After the parent's block is mined, the applier runs the plan's T-side invariant
