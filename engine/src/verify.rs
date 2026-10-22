@@ -29,8 +29,6 @@ pub struct Verification {
     pub ok: bool,
     pub checks: Vec<(String, bool, String)>,
     pub divergences: Vec<String>,
-    pub probes_ok: usize,
-    pub probes_failed: usize,
     /// reth could not serve receipts (pruned window) - block accepted unverified.
     pub receipts_unverified: bool,
 }
@@ -239,45 +237,12 @@ pub async fn verify_block(ctx: &Ctx, n: u64, reth_block: &Block, m_block: &Block
         }
     }
 
-    // probes
-    for probe in &ctx.cfg.verifier.probes {
-        let r = ctx.reth.call_at(probe.to, &probe.data, n).await;
-        let m = ctx.anvil_m.call_at(probe.to, &probe.data, n).await;
-        match (r, m) {
-            (Ok(a), Ok(b)) if a == b => {
-                v.probes_ok += 1;
-                v.checks.push((
-                    format!("probe:{}", probe.name),
-                    true,
-                    format!("{} bytes equal", a.len()),
-                ));
-            }
-            (Ok(a), Ok(b)) => {
-                v.probes_failed += 1;
-                let d = format!(
-                    "probe {} diverged: reth={} m={}",
-                    probe.name,
-                    trunc(&hex::encode(&a)),
-                    trunc(&hex::encode(&b))
-                );
-                v.checks.push((format!("probe:{}", probe.name), false, d.clone()));
-                v.divergences.push(d);
-            }
-            (Err(e), _) => {
-                v.checks.push((
-                    format!("probe:{}", probe.name),
-                    true,
-                    format!("skipped (reth call failed: {e})"),
-                ));
-            }
-            (_, Err(e)) => {
-                v.probes_failed += 1;
-                let d = format!("probe {} failed on M: {e}", probe.name);
-                v.checks.push((format!("probe:{}", probe.name), false, d.clone()));
-                v.divergences.push(d);
-            }
-        }
-    }
+    // State probes are deliberately *not* re-run here. Post-execution they only
+    // re-detected the blockhash-level divergence that receipts/log_set already
+    // record (measured: `probe weth_total_supply diverged` on every block where
+    // a blockhash-gated tx flipped status). The probes run once per block at the
+    // repaired point (`convergence_check`), where a mismatch is a real repair
+    // failure and nothing else - that is the invariant worth alarming on.
 
     v.ok = v.divergences.is_empty();
     Ok(v)

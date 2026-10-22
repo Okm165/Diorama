@@ -22,7 +22,13 @@ pub struct RpcError {
 
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "rpc error {}: {}", self.code, self.message)
+        write!(f, "rpc error {}: {}", self.code, self.message)?;
+        // `data` carries revert data / validation details on many nodes
+        // (measured: reth's "-32602 Invalid params: EmptyExecutionRequest").
+        if let Some(data) = &self.data {
+            write!(f, " ({data})")?;
+        }
+        Ok(())
     }
 }
 
@@ -209,11 +215,6 @@ impl Rpc {
 
     // ---- eth namespace -------------------------------------------------
 
-    pub async fn chain_id(&self) -> Result<u64> {
-        let hex: String = self.call("eth_chainId", json!([])).await?;
-        Ok(u64::from_str_radix(hex.trim_start_matches("0x"), 16)?)
-    }
-
     pub async fn block_number(&self) -> Result<u64> {
         let hex: String = self.call("eth_blockNumber", json!([])).await?;
         Ok(u64::from_str_radix(hex.trim_start_matches("0x"), 16)?)
@@ -348,31 +349,6 @@ impl Rpc {
         Ok(())
     }
 
-    pub async fn anvil_set_next_block_timestamp(&self, ts: u64) -> Result<()> {
-        self.call_raw("anvil_setNextBlockTimestamp", json!([ts])).await?;
-        Ok(())
-    }
-
-    pub async fn anvil_set_next_block_base_fee(&self, fee: u64) -> Result<()> {
-        self.call_raw("anvil_setNextBlockBaseFeePerGas", json!([hex_u64(fee)])).await?;
-        Ok(())
-    }
-
-    pub async fn anvil_set_next_block_prev_randao(&self, value: B256) -> Result<()> {
-        self.call_raw("anvil_setNextBlockPrevRandao", json!([value])).await?;
-        Ok(())
-    }
-
-    pub async fn anvil_set_coinbase(&self, addr: Address) -> Result<()> {
-        self.call_raw("anvil_setCoinbase", json!([addr])).await?;
-        Ok(())
-    }
-
-    pub async fn anvil_set_block_gas_limit(&self, gas: u64) -> Result<()> {
-        self.call_raw("anvil_setBlockGasLimit", json!([hex_u64(gas)])).await?;
-        Ok(())
-    }
-
     /// (pending, queued) counts from txpool_status.
     pub async fn txpool_status(&self) -> Result<(u64, u64)> {
         let v: Value = self.call("txpool_status", json!([])).await?;
@@ -387,11 +363,6 @@ impl Rpc {
 
     pub async fn anvil_set_nonce(&self, addr: Address, nonce: u64) -> Result<()> {
         self.call_raw("anvil_setNonce", json!([addr, hex_u64(nonce)])).await?;
-        Ok(())
-    }
-
-    pub async fn anvil_add_balance(&self, addr: Address, wei: U256) -> Result<()> {
-        self.call_raw("anvil_addBalance", json!([addr, hex_u256(wei)])).await?;
         Ok(())
     }
 

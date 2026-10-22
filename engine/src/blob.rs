@@ -179,52 +179,6 @@ impl BeaconClient {
         }
         out
     }
-
-    /// Fetch the block's blob sidecars. Sources are tried in order, twice
-    /// around, with short backoff; an empty list is a miss (we only ask for
-    /// blocks that contain blob txs) so the next source gets a chance.
-    pub async fn blob_sidecars(&self, beacon_root: B256) -> Result<Vec<SidecarItem>> {
-        let mut last_err: Option<anyhow::Error> = None;
-        for attempt in 0..2u64 {
-            for base in &self.urls {
-                let url = format!(
-                    "{}/eth/v1/beacon/blob_sidecars/{}",
-                    base.trim_end_matches('/'),
-                    beacon_root
-                );
-                match self.http.get(&url).send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        let text = resp.text().await.unwrap_or_default();
-                        if !status.is_success() {
-                            last_err =
-                                Some(anyhow!("{url}: HTTP {status}: {}", truncate(&text, 200)));
-                            continue;
-                        }
-                        match serde_json::from_str::<BeaconResponse<Vec<SidecarItem>>>(&text) {
-                            Ok(parsed) if !parsed.data.is_empty() => return Ok(parsed.data),
-                            Ok(_) => {
-                                last_err = Some(anyhow!("{url}: empty sidecar list"));
-                                continue;
-                            }
-                            Err(e) => {
-                                last_err = Some(anyhow!("{url}: bad sidecar json: {e}"));
-                                continue;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        last_err = Some(anyhow!("{url}: {e}"));
-                        continue;
-                    }
-                }
-            }
-            if attempt == 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            }
-        }
-        Err(last_err.unwrap_or_else(|| anyhow!("no beacon urls configured")))
-    }
 }
 
 /// Beacon block (only the parts the top-up loop needs). The beacon API is

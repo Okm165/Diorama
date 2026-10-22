@@ -28,8 +28,6 @@ pub struct Metrics {
     pub last_apply_ms: AtomicU64,
     pub pin_age_blocks: AtomicU64,
     pub blob_failures: AtomicU64,
-    pub probes_ok: AtomicU64,
-    pub probes_failed: AtomicU64,
     pub receipts_unverified: AtomicU64,
     pub reorgs_detected: AtomicU64,
     /// EIP-8379 top-up: payloads delivered to reth and the remaining gap to the
@@ -86,8 +84,6 @@ impl Metrics {
         counter(&mut out, "mirror_bal_filtered_out_total", "BAL writes filtered out (not watched)", self.bal_filtered_out.load(Ordering::Relaxed));
         counter(&mut out, "mirror_bal_skipped_shadowed_total", "BAL writes skipped (shadowed by devnet)", self.bal_skipped_shadowed.load(Ordering::Relaxed));
         counter(&mut out, "mirror_blob_failures_total", "blocks with blob sidecar/replay failures", self.blob_failures.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_probes_ok_total", "probe calls that matched reth", self.probes_ok.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_probes_failed_total", "probe calls that diverged", self.probes_failed.load(Ordering::Relaxed));
         counter(&mut out, "mirror_receipts_unverified_total", "blocks replayed without receipts verification", self.receipts_unverified.load(Ordering::Relaxed));
         out
     }

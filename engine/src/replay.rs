@@ -20,7 +20,6 @@ use serde_json::Value;
 use std::time::Instant;
 
 pub struct ReplayOutcome {
-    pub block: u64,
     pub txs: usize,
     pub replayed: usize,
     pub skipped_blobs: usize,
@@ -68,22 +67,6 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
             Some(bal) => {
                 let writes = bal::flatten_bal(&bal);
                 let applied = crate::diff::apply_writes(ctx, &ctx.anvil_m, &writes).await?;
-                // DIAGNOSTIC (temporary): confirm a storage write landed.
-                if let Some(bal::Write::Storage { address, slot, value }) =
-                    writes.iter().find(|w| matches!(w, bal::Write::Storage { .. }))
-                {
-                    let head = ctx.anvil_m.block_number().await?;
-                    match ctx.anvil_m.storage_at(*address, *slot, head).await {
-                        Ok(got) => tracing::info!(
-                            address = %address,
-                            slot = %slot,
-                            want = %value,
-                            got = %got,
-                            "repair readback"
-                        ),
-                        Err(e) => tracing::warn!(error = %e, "repair readback failed"),
-                    }
-                }
                 ctx.metrics.add(&ctx.metrics.m_repair_writes, applied as u64);
                 tracing::debug!(
                     block = n,
@@ -205,10 +188,6 @@ async fn finish_replay(
     let m_block = ctx.anvil_m.block_by_number(n, true).await?;
     let verification = if ctx.cfg.verifier.enabled {
         let v = verify_block(ctx, n, &block, &m_block).await?;
-        ctx.metrics
-            .set(&ctx.metrics.probes_ok, v.probes_ok as u64);
-        ctx.metrics
-            .set(&ctx.metrics.probes_failed, v.probes_failed as u64);
         if v.receipts_unverified {
             ctx.metrics.inc(&ctx.metrics.receipts_unverified);
         }
@@ -235,7 +214,6 @@ async fn finish_replay(
 
     let partial = skipped_blobs > 0;
     let outcome = ReplayOutcome {
-        block: n,
         txs: crate::ctx::block_txs(&block).len(),
         replayed: crate::ctx::block_txs(&block).len() - skipped_blobs,
         skipped_blobs,
@@ -506,6 +484,10 @@ struct NonceTracker {
     /// Last nonce of the contiguous pending sequence per sender (-1 = none).
     seq_end: std::collections::BTreeMap<alloy_primitives::Address, i64>,
     manipulated: std::collections::BTreeSet<alloy_primitives::Address>,
+    /// EIP-7702 authorities of this block's authorizations, recovered from the
+    /// signatures. Their nonces bump mid-execution, so a sender listed here
+    /// legitimately sits "ahead" of the pre-block state and is not an anomaly.
+    auth_bumps: std::collections::BTreeMap<alloy_primitives::Address, usize>,
 }
 
 impl NonceTracker {
@@ -520,10 +502,21 @@ impl NonceTracker {
             base.insert(from, ctx.anvil_m.nonce_at(from, head).await?);
         }
         let seq_end = base.iter().map(|(a, n)| (*a, *n as i64 - 1)).collect();
+        let mut auth_bumps = std::collections::BTreeMap::new();
+        for tx in txs {
+            if let Some(auths) = tx.authorization_list() {
+                for auth in auths {
+                    if let Ok(authority) = auth.recover_authority() {
+                        *auth_bumps.entry(authority).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
         Ok(Self {
             base,
             seq_end,
             manipulated: Default::default(),
+            auth_bumps,
         })
     }
 
@@ -546,12 +539,28 @@ impl NonceTracker {
             ctx.anvil_m.anvil_set_nonce(from, nonce).await?;
             self.manipulated.insert(from);
             self.seq_end.insert(from, nonce_i);
-            tracing::warn!(
-                sender = %from,
-                nonce,
-                previous_end = end,
-                "nonce gap in block: adjusted state nonce for pool acceptance"
-            );
+            match self.auth_bumps.get(&from) {
+                Some(bumps) => {
+                    // Expected: the sender is an EIP-7702 authority in this
+                    // block; its nonce is bumped mid-execution by the
+                    // authorization, so the tx is only valid after that point.
+                    tracing::info!(
+                        sender = %from,
+                        nonce,
+                        previous_end = end,
+                        authorizations = bumps,
+                        "nonce ahead of state: EIP-7702 authorization bump within the block"
+                    );
+                }
+                None => {
+                    tracing::warn!(
+                        sender = %from,
+                        nonce,
+                        previous_end = end,
+                        "nonce gap in block: adjusted state nonce for pool acceptance"
+                    );
+                }
+            }
             return Ok(());
         }
         tracing::warn!(sender = %from, nonce, end, "tx nonce behind pool sequence");

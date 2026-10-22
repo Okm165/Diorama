@@ -13,7 +13,10 @@ alloy-primitives = { version = "1.7", features = ["serde"] }
 # beacon source serving stale data) is skipped and the next source is tried.
 alloy-consensus = { version = "2.5", features = ["serde", "kzg"] }
 alloy-network-primitives = { version = "2.5", features = ["serde"] }
-alloy-eips = { version = "2.5", features = ["serde"] }
+# "k256" enables EIP-7702 authorization-signature recovery: the nonce tracker
+# recovers each authorization's authority so a sender that is bumped mid-block
+# is classified as expected instead of logging a (false) nonce-gap warning.
+alloy-eips = { version = "2.5", features = ["serde", "k256"] }
 alloy-rpc-types-eth = { version = "2.5", features = ["serde"] }
 # Engine API client: replays the local CL's execution payloads into reth, so
 # the mirror never needs P2P peers or a public RPC to fill a sync gap.

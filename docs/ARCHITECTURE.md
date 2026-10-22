@@ -30,13 +30,18 @@ reth  ────────────────────────�
 Per replayed block on M the engine does, in order:
 
 0. **Convergence repair** – apply the parent BAL (`N-1`) to M as cheatcode writes,
-   then prove it with the configured probes (`eth_call` on M vs reth at `N-1`).
+   then prove it with the configured probes: `eth_call` on M's repaired (unmined)
+   state vs reth at `N-1`. A mismatch here is a real repair failure - not the
+   expected blockhash-level noise - so it is the counter to alarm on
+   (`mirror_m_convergence_failures_total`, must stay 0).
 1. Block env: timestamp, coinbase, prevRandao, gas limit, base fee (all five fields).
 2. Withdrawals credited idempotently (`setBalance(pre + amount)`).
 3. Raw txs built from the parent block (blob sidecars from the beacon API).
 4. Txs sent one request at a time (pool order is load-bearing), then `anvil_mine(1)`.
 5. Verification: tx count/order, blob gas, receipts (count/status/gas), logsBloom,
-   full log set, withdrawals, probes.
+   full log set, withdrawals. (State probes deliberately do *not* re-run here:
+   post-execution they only re-detect the blockhash-level divergence the log and
+   receipt checks already record - measured on a `BLOCKHASH`-gated MEV bot.)
 6. Drift entry (`drift.jsonl`) + cursor + metrics.
 
 ## The lean profile (measured, not guessed)
@@ -115,7 +120,11 @@ divergences are inherent:
 - near-full blocks: mainnet block 26,233,028 used 59,975,282 / 60,000,000 gas;
   a small gas delta (type-4 refund accounting is the only *known* systematic
   delta) pushes the last txs out of M's block;
-- cascades of the above *within* a block (statuses, log values, probes).
+- cascades of the above *within* a block (statuses, log values). Root cause
+  measured on block 26,244,417 tx 124: a MEV bot's `BLOCKHASH`-gated entry
+  (`revert("ph-")`) succeeds on mainnet and reverts on M; the flipped status
+  cascades into WETH supply and Uniswap pool logs, all repaired from the parent
+  BAL before the next block.
 
 Structural checks (tx count/order, blob gas, receipt count, withdrawals) are
 what an engine bug would break; they are reported separately
@@ -329,8 +338,11 @@ appear anywhere. `make bootstrap` runs it first.
 
 The engine's own dependencies are pinned in `Cargo.lock`: the plan's `alloy 2.5`
 pin (EIP-7928 BAL types) is deliberate and only patch updates are applied
-(measured: `tokio 1.54.0 -> 1.54.1` was the only in-range update). The build
-bases are pinned the same way in `engine/Dockerfile`
+(measured: `tokio 1.54.0 -> 1.54.1` was the only in-range update). The image
+build copies `Cargo.lock` and builds with `--locked`, so the shipped binary
+cannot drift from the lock (a stale lock fails the build instead). The build
+also prefers IPv4 (`gai.conf`), because this host has no IPv6 route while
+crates.io resolves AAAA first. Build bases are pinned the same way
 (`rust:1.99.1-slim-trixie`, `debian:13.7-slim`).
 
 ## Engine configuration (`k8s/base/engine-config.yaml`)

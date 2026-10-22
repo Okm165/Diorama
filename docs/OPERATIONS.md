@@ -20,6 +20,13 @@
 | `mirror_receipts_unverified_total` | increase | engine lagged past the 20k receipts window; blocks replayed unverified |
 | Anvil RSS (kubectl top) | see table below | restart the pod; the engine rebases and re-converges |
 
+Log-level signals for nonces: `nonce ahead of state: EIP-7702 authorization
+bump within the block` (INFO) is expected - the sender is an authority of a
+type-4 tx in the same block, so its nonce only becomes valid mid-execution. The
+WARN `nonce gap in block: adjusted state nonce for pool acceptance` means the
+gap is *not* explained by any authorization in the block and deserves a look (a
+skipped tx would look like this).
+
 Anvil memory is a *state* cost, not a leak:
 
 | Chain | Growth | Steady state | Notes |
