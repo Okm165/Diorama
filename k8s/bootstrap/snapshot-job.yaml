@@ -34,7 +34,20 @@ spec:
           args:
             - download
             - --chain=mainnet
-            - --minimal
+            # Explicit component selection instead of the --minimal preset, so
+            # the snapshot matches the runtime prune profile (receipts/bodies
+            # 20k, account/storage history 10,064) and no surplus is downloaded
+            # only to be pruned on first start. The state itself (~266 GB) is
+            # the bulk and cannot be trimmed.
+            #
+            # RocksDB stays: it holds the EIP-7928 BAL store that the engine's
+            # diff applier and convergence repair read via
+            # eth_getBlockAccessList. `--without-rocksdb` would break them.
+            - --with-txs-distance=20000
+            - --with-receipts-distance=20000
+            - --with-state-history-distance=10064
+            - --with-senders
+            - --with-rocksdb
             - --non-interactive
             - --resumable
             - --download-concurrency=16

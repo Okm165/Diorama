@@ -38,6 +38,7 @@ right after such a restart until stale slots are touched again.
 ```bash
 make status            # pods, PVCs, engine status JSON
 make images            # re-import the pinned images into k3s (after a bump)
+make backfill          # CL backfill progress + lighthouse datadir sizes
 make logs              # tail everything
 make logs-engine       # one component (also: logs-reth, logs-lighthouse, logs-anvil-t)
 make smoke             # endpoint checks + parity spot check on M's head

@@ -92,7 +92,11 @@ spec:
             # the engine's top-up loop fills. See docs/ARCHITECTURE.md.
             - --prune-payloads=false
             - --log-format=JSON
+            # File logging defaults to 10 x 200 MB on the same PVC (measured:
+            # 815 MB of info logs after a few hours of backfill). 2 x 50 MB is
+            # plenty - the container's stdout carries the same stream.
             - --logfile-max-number=2
+            - --logfile-max-size=50
           envFrom:
             - configMapRef: { name: mirror-config }
           ports:

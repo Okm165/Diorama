@@ -1,0 +1,45 @@
+# Reclaim the one-time backfill's blob storage.
+#
+# The Lighthouse backfill fetches blob/column data for every backfilled slot
+# (~14-19 GB/h measured) regardless of the 18-day data-availability window it
+# will ever serve, so the datadir peaks around 900 GB and then stays there:
+# pruning only runs while the node holds its database lock, and the offline
+# `lighthouse db prune-blobs` refuses to open a locked database.
+#
+# `make prune-blobs` runs this job with the node scaled down, then scales it
+# back up. Safe for the mirror: only data older than the DA boundary is
+# removed, and the mirror only ever needs the pin window (~1.4 days).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lighthouse-prune-blobs
+  namespace: mainnet-mirror
+  labels:
+    app.kubernetes.io/name: lighthouse-prune-blobs
+    app.kubernetes.io/part-of: mainnet-mirror
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lighthouse-prune-blobs
+        app.kubernetes.io/part-of: mainnet-mirror
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: prune
+          image: docker.io/sigp/lighthouse:v8.3.0@sha256:ca59d3a3f3016d3e1aa0bbf9ed331f4f24b113b4ab72c493a8216a0fd57aec27
+          args:
+            - db
+            - prune-blobs
+            - --datadir=/data
+            - --network=mainnet
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          resources:
+            requests: { cpu: "1", memory: 1Gi }
+            limits: { memory: 4Gi }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: lighthouse-data }

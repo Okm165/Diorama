@@ -134,6 +134,24 @@ selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth ne
 	kubectl -n $(NS) wait --for=condition=complete job/engine-selftest --timeout=900s || true
 	$(KUBECTL) logs job/engine-selftest
 
+backfill: ## Show the CL backfill progress and the lighthouse datadir sizes
+	@$(KUBECTL) logs deploy/lighthouse --tail=200 2>/dev/null \
+	  | jq -r 'select(.msg != null and (.msg|test("historical";"i"))) | "backfill: distance=\(.distance // "?") speed=\(.speed // "?") est=\(.est_time // "?")"' 2>/dev/null | tail -1
+	@sudo sh -c 'du -sh /var/lib/rancher/k3s/storage/pvc-*_$(NS)_lighthouse-data/beacon/* 2>/dev/null | sort -h | tail -4'
+
+prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; safe for the mirror)
+	@echo "scaling lighthouse down (the prune needs the database lock)..."
+	kubectl -n $(NS) scale deploy/lighthouse --replicas=0
+	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=lighthouse --timeout=180s || true
+	kubectl -n $(NS) delete job lighthouse-prune-blobs --ignore-not-found
+	kubectl apply -f $(BOOTSTRAP)/prune-blobs-job.yaml
+	kubectl -n $(NS) wait --for=condition=complete job/lighthouse-prune-blobs --timeout=3600s || true
+	$(KUBECTL) logs job/lighthouse-prune-blobs --tail=20 || true
+	kubectl -n $(NS) delete job lighthouse-prune-blobs --ignore-not-found
+	kubectl -n $(NS) scale deploy/lighthouse --replicas=1
+	kubectl -n $(NS) rollout status deploy/lighthouse --timeout=300s
+	@$(MAKE) --no-print-directory backfill
+
 pin-show: ## Show the resolved fork pins of anvil M and T
 	@for c in anvil-m anvil-t; do \
 		printf "%s pin: " $$c; $(KUBECTL) exec deploy/$$c -- cat /state/pin 2>/dev/null || echo "(not resolved yet)"; \
