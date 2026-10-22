@@ -10,6 +10,17 @@
 | `anvil-t` | same | Devnet chain (T): watch-list state + your writes, never replays parent txs | ~2.5 GB after thousands of applied blocks (16Gi limit) |
 | `engine` | `localhost/mirror-engine:v1` (this repo) | Replay loop, verifier, BAL diff applier, convergence repair, journal, admin API | ~100 MB RAM |
 
+The repo is one cargo workspace (`crates/*` + `bins/*`): `crates/anvil` (the
+JSON-RPC client and the measured cheatcode conventions), `crates/config` (the
+layered instance loader), `crates/devnet` (the substrate both mirrors share:
+shadow registry, journal, cursor state with `epoch_pin`, admin surface,
+chain-generic scanner, probes, metrics), the two projects `crates/ethereum`
+and `crates/hyperliquid`, and the binaries `bins/{mirror-engine,venue-mirror,
+venue-sim}`. The projects are siblings - they share the common crates and
+never each other; `scripts/closure-matrix.sh` is the structural contract that
+enforces it. The table above is the Mainnet Mirror's component set; the Venue
+Mirror's components and data flow are in "The Venue Mirror" below.
+
 ## Data flow
 
 The per-block exchange between the three processes, top to bottom (the
@@ -40,6 +51,11 @@ numbered list below then walks M's side of it step by step):
    |               | journal + drift   |
 ```
 ![per-block data flow](img/arch-data-flow.png)
+
+The exchange above is the ethereum profile's. The venue profile has no parent
+stream: V is static between re-pins, and the engine's job is the devnet's own
+blocks plus the fork lifecycle ("The Venue Mirror" below), with the
+simulator's market and account planes beside it ("The venue simulator").
 
 Per replayed block on M the engine does, in order:
 
@@ -580,7 +596,363 @@ the engine's equivalent today is the HTTP surface above plus the cheatcodes.
 |---|---|
 | `GET /healthz` | 200 unless halted on divergence |
 | `GET /status` | heads, cursors, lag, frozen, shadow counts, blob form |
-| `GET /metrics` | Prometheus text: heads, lag, durations, divergences (structural + behavioral), repair writes, convergence probes, writes, pin age |
+| `GET /metrics` | Prometheus text: heads, lag, durations, divergences (structural + behavioral), repair writes, convergence probes, writes, pin age, the feed bridge's counters |
 | `POST /admin/rewind` | `{"blocks": N}` – journal-based rewind of T |
-| `POST /admin/resume` | clear a divergence freeze |
+| `POST /admin/resume` | clear a divergence freeze (and a `/admin/pause` halt) |
+| `POST /admin/pause` | hold both loops (reads, writes and cheatcodes keep working) |
+| `POST /admin/time` | `{"offset_seconds": N}` – the persistent devnet clock offset |
 | `POST /admin/shadow` | register devnet writes that bypassed the block pipeline; with `"clear": true` hand the given slots/account fields *back* to mainnet sync and re-sync their values from reth at T's cursor (a key with a stale value and no shadow is the most confusing state there is) |
+| `POST /admin/deal` | the unlimited ERC-20 faucet: slot discovery via `eth_call` + a `stateDiff` override, silent write, marked devnet-owned |
+| `POST /admin/epoch` | one-call revert-to-blank: re-pin T to the source's latest block; the engine detects the reset on its next pass and runs the epoch rule (new base = clear, same base = restore) |
+| `GET /admin/feed` | the feed bridge's feeds: paused, confirmed/pending answers, decimals |
+| `POST /admin/feed/pause\|resume\|override` | pause a feed (the scenario owns its value), hand it back (the next pass re-establishes the source's value), or publish a scripted answer and pause |
+
+## The Venue Mirror
+
+The Venue Mirror serves the same substrate against HyperEVM: **V** (`anvil-v`)
+is a fork-mode Anvil of the public chain (`https://rpc.hyperliquid.xyz/evm`,
+chain id 999), and a **simulator** serves the venue's own API beside it (next
+section). The Mainnet Mirror's machinery does not transfer wholesale, and
+deliberately so: HyperEVM cannot be replayed (node-level precompiles, system
+txs, dual 1 s/60 s blocks) and the public API exposes no traces, BALs or
+proofs, so replay/verify/BAL-diff/prepend/clock-offset are **dropped
+permanently** (plan §4.4). What remains is exactly the half both chains share,
+delivered by the common crates: the shadow registry (COW), the journal, the
+cursor state with `epoch_pin`, the admin surface, the chain-generic scanner,
+and the probe runner. The driver in `crates/hyperliquid` is the venue's own
+loop.
+
+```
+   public HL API (info + WS)         rpc.hyperliquid.xyz/evm
+          |                                | fork (pin = source latest)
+          v                                v
+   +------+-------+                +-------+------+
+   |  venue-sim   |  info 8090     |    anvil V   | <-- your dapp
+   |  market +    | <------------> |   chain 999  |     (HTTP/WS on 8545)
+   |  account     |  control 8091  |              |
+   |  planes      |                +-------+------+
+   +------+-------+                        ^
+          | bridge scan                    | driver: canary,
+          +--------------------------------+ epoch rule, probes
+                          |
+                   +------+-------+
+                   | venue-mirror |  /status /metrics /admin/*
+                   +--------------+
+```
+
+**Two engine binaries, not one profile flag.** The plan sketched one engine
+binary with `profile: ethereum | hyperliquid`; the implementation ships
+per-profile binaries - `bins/mirror-engine` (ethereum) and `bins/venue-mirror`
+(venue) - over sibling project crates, plus `bins/venue-sim`. The reason is
+build isolation, and it is a fitness function, not a convention:
+`scripts/closure-matrix.sh` declares the allowed internal edges
+(`venue-mirror -> mirror-hyperliquid + devnet + anvil + config`, no ethereum
+edge; `venue-sim` likewise) and fails any undeclared dependency. With one
+package every build compiled the whole graph (measured, plan §11.3); a
+profile-routing binary would link both projects into every venue build.
+
+**Boot asserts.** The engine waits for V (a coordinated restart must not become
+CrashLoopBackOff), asserts the chain id is 999 (a profile over the wrong chain
+must not serve), and re-asserts `anvil_setAutomine(false)` - an Anvil restart
+resets automine to its default *on* (measured), so the discipline is re-asserted
+on every boot and after every reset.
+
+**The chain-instance canary.** V is a fork-mode Anvil, so the ethereum profile's
+reset detection (the cursor's block hash) is unsound here: heights below the
+fork resolve to the *source's* real blocks, so a re-pin to a later base keeps
+every cursor hash valid (measured live: the driver kept scanning a stale range),
+and a same-pin restart leaves no trace at all. The driver instead writes one
+storage word - address `0x…ca11ca11`, slot 0 - with the current pin as its
+value, and reads it once per pass: "the canary reads back the recorded pin"
+means "this is still the chain instance the registry was built against". A
+fresh fork cannot carry the canary (empty = reset).
+
+**The epoch rule.** A canary mismatch triggers `reconcile`: read V's fork pin
+from `anvil_nodeInfo`, then decide, fail-closed on the pin read (without it the
+decision would default to "same pin" and re-apply writes across a pin change):
+
+| Situation | Action |
+|---|---|
+| canary == pin | steady state, nothing to reconcile |
+| pin != `epoch_pin` | **new epoch**: drop marks *and* values (`venue_epochs_total`, WARN); the devnet re-creates its state from its own journal |
+| pin == `epoch_pin` | **restore**: re-apply the recorded writes, keep the marks; orphan values (keys handed back earlier) are pruned, never re-owned |
+
+Either way the journal is cleared (before-values of the old chain), the cursor
+is anchored at the pin (V's state *is* the source's state at the pin), and the
+canary is rewritten. Why clearing is the correct default: measured on T,
+restoring across a moved base re-applied a +30d time-travel write as a future
+`lastUpdateTimestamp` and every Aave supply panicked with an arithmetic
+underflow.
+
+**Probes-at-pin.** The at-pin probes compare V against the fork source at the
+pin, devnet-owned targets skipped and counted (COW: that state is the devnet's).
+They run at boot and after every reset - but only while the pin *is* the
+source's head: the public source serves its *latest* state for `eth_call`
+(measured: V's fork at block N differs from the source's answer at N, while V's
+state IS the source's state at N - the block parameter is ignored, or the
+retention window is shorter than a re-pin interval). An older pin is skipped
+and counted, never alarmed - a mismatch there would be a lie; and a source that
+advances mid-run turns the run into "skipped" (a race, not a divergence).
+
+**The steady-state scan.** V's head only advances when someone mines (automine
+is off), so the driver scans the devnet's own blocks into the shared shadow
+registry - every sender's account fields, value recipients, and storage writes
+via `prestateTracer{diffMode}` - so `/admin/shadow {clear}` can restore the
+source's truth and probes can skip what the devnet owns. The watermark starts
+from the persisted cursor, so blocks mined while the driver was down are
+scanned too.
+
+**The unshadow source.** `VenueSource` re-syncs a handed-back key from the fork
+source *at the pin*, and is fail-closed: the source's `eth_call` serves its
+latest state, so a read is only exact while the source's head is still the pin;
+once the source has advanced the read is refused with the numbers (pin X, head
+Y) rather than silently returning a newer value - "never hand back a poisoned
+value". The robust path (recording each write's `pre` value at first touch, so
+the base truth lives in the registry) lands with the venue's journaling slice.
+
+**The HTTP surface.**
+
+| Route | Purpose |
+|---|---|
+| `GET /healthz` | 200 unless halted |
+| `GET /status` | `head`, `cursor`, `fork_pin`, `epoch_pin`, `halted`, `shadowed_slots`, `shadowed_accounts`, `shadowed` (the list), `probes`, `source` |
+| `GET /metrics` | the `venue_*` set (below) + the shared admin gauges (`mirror_shadowed_slots`, `mirror_halted`, `mirror_frozen`) |
+| `POST /admin/deal`, `POST /admin/shadow` | the shared devnet surface, verbatim |
+| `POST /admin/pause` / `POST /admin/resume` | hold / release the driver |
+| `POST /admin/epoch` | re-pin V to the source's latest block (`anvil_reset` with an explicit forking config - measured: no-params drops the fork); the driver's canary notices on its next pass and runs the epoch rule, so the route never replicates that logic |
+
+`/admin/rewind` is **deliberately absent**: the venue's journal is empty until
+the devnet's own writes are journaled (or snapshots are wired), and a rewind
+that silently restores nothing while reporting success is the exact no-op the
+doctrine forbids. The route lands with that journaling.
+
+| Metric | Meaning |
+|---|---|
+| `venue_head` / `venue_cursor` | V's head / the last scanned V block |
+| `venue_fork_pin` / `venue_pin_age_blocks` | V's fork base / blocks since the first scanned block in this epoch |
+| `venue_epochs_total` | times V was found re-forked under the driver (the epoch rule ran) |
+| `venue_restore_writes_total` | writes re-applied by same-pin restores |
+| `venue_probe_ok_total` / `venue_probe_failures_total` / `venue_probe_skipped_total` / `venue_probe_last_failed` | the at-pin probes (skipped = a devnet-owned target, or a pin the source cannot serve) |
+
+**Profile-coherent config.** The instance file is the deployment's single home
+(`config/instances/{mainnet-mirror,venue-mirror}.toml`, layered over
+`config/defaults.toml`). `profile = "ethereum"` requires `[chains.l1]` +
+`[services.engine]` and forbids the venue sections; `profile = "venue"`
+requires `[chains.venue]` + `[services.venue]` and forbids `[chains.l1]` /
+`[services.engine]` - the loader prunes the other profile's section tree from
+the defaults before merging (without that, a venue instance would inherit the
+ethereum engine's stub and fail deserialization), and prunes optional services
+(the simulator) when the instance file does not carry the section. Unknown keys
+are errors at every level (`deny_unknown_fields`).
+
+## The venue simulator
+
+`bins/venue-sim` (image `localhost/venue-sim:v1`) is the venue's own half: it
+serves the info API daloc reads (8090) and a control API for scenarios (8091),
+backed by two planes and a persisted state root. It is a **superset of the
+harness's `hl_mock`**: the same info surface and control ergonomics, plus live
+market data and computed mechanics.
+
+### The market plane
+
+Two lanes, one cache. **WS-first**: subscriptions to `allMids` and
+`activeAssetCtx` (the server must send a message within 60 s, so the client
+pings every 30 s; a dropped connection reconnects with exponential backoff
+1 s -> 30 s). **A budget-gated REST poller** backfills `metaAndAssetCtxs`,
+`spotMeta`, one `l2Book` per configured market, and `allMids` every 5 s; every
+call spends from a rolling-60 s meter of the public API's 1200 weight/min
+(measured per-endpoint weights: `metaAndAssetCtxs`/`meta`/other info = 20;
+`l2Book`/`allMids`/`clearinghouseState` = 2). A call whose weight does not fit
+is skipped, never queued, and counted (`venue_sim_budget_skips_total`); the
+default 5 s poll of four markets spends ~600 weight/min at the measured
+weights (metaAndAssetCtxs + spotMeta at 20, four books + allMids at 2), well
+inside the cap. Per-coin staleness gauges
+(`venue_sim_stale_ms{coin}`) are the freshness signal, and `/readyz` gates on it
+(meta present + every configured market fresher than 30 s; the client's own gate
+is ≤6 s).
+
+Scenario overrides compose over the cache: `crash` owns a coin's **mark and
+oracle**, `set_funding` the hourly rate, `set_book` the book (a scripted book is
+stamped *now* at serve time - it is the scenario's present, not a snapshot). The
+composed view is what every read serves - `metaAndAssetCtxs` publishes the same
+owned numbers the account plane prices from, so daloc can never read a different
+mark than the sim used for margin. Overrides persist to `feed.json`; the live
+cache never persists (a stale file would masquerade as fresh data).
+
+### The account plane (COW)
+
+Untouched accounts are not the sim's business: the API layer passes those reads
+through to the real venue, verbatim. A **touched** account (dealt funds, seeded,
+or credited by the bridge) is simulated and persisted: its state is the sim's,
+its figures are computed from live marks, and it survives a restart.
+
+The internal truth is the *inputs* - the perp wallet's raw USDC balance,
+positions with entry prices, spot balances - and every served figure is computed
+from them, so the identity daloc's client gates on (1e-6) holds by
+construction:
+
+```
+totalRawUsd   = balance − Σ szi·entryPx
+accountValue  = balance + Σ szi·(mark − entryPx) = totalRawUsd + Σ szi·mark
+```
+
+(verified exact on the live sample by a wire test; `positionValue` is served
+unsigned with the side in `szi`, as the venue does). Seeding preserves
+`totalRawUsd` exactly (`balance = totalRawUsd + Σ szi·entryPx`), so the
+operator's recall amount round-trips byte-for-byte.
+
+Mechanics (v1): maintenance margin is ½ the initial margin of the tier the
+position's notional sits in; funding accrues hourly on the **sim clock** at the
+oracle price (`payment = −szi·oracle·rate·hours`), all-or-nothing per account (a
+missing coin's context defers the whole account's accrual - a partially accrued
+account would silently lose the skipped positions' funding forever); below
+maintenance, positions close at the mark (the full waterfall - partial closes,
+the backstop, ADL - is Phase 2). An account with no positions is never "below
+maintenance": negative equity alone is a state the venue reports.
+
+**Self-advance** (the plan's §14.8 decision): funding accrues lazily on every
+read and on a 1 Hz tick, so daloc's set-and-read tests see live funding and
+liquidation behavior without ever calling `advance`; `advance` stays for
+deterministic scripting. The sim has its own clock (wall + offset, offset 0
+until `advance` scripts a jump); the wire's `time` field stays *wall* now - it
+is the read's freshness, which the client's ≤6 s gate compares against its own
+clock.
+
+### The control API
+
+| Route | Body | Effect |
+|---|---|---|
+| `POST /control/deal` | `{address, class: spot\|perp, coin?, amount}` | mint venue funds (absolute-additive; the perp class is the enforcement's recall source) |
+| `POST /control/advance` | `{seconds?, n?}` | jump the sim clock and run `n` liquidation checks inside it |
+| `POST /control/crash` | `{coin, pct?}` | own the coin's mark + oracle (absent = hand back to live) |
+| `POST /control/set_book` | `{coin, levels?}` | scripted book, ≤20 levels per side (absent = hand back) |
+| `POST /control/set_funding` | `{coin, rate?}` | own the hourly rate (absent = hand back) |
+| `POST /control/set_account` | `{address, state}` | hl_mock-compatible seeding (`totalRawUsd` + positions) |
+| `GET /control/state/{address}` | - | the account's served state, or 404 for an untouched one |
+| `POST /control/reset` | `{}` | blank the scenario (accounts + overrides), bump the epoch |
+| `POST /control/epoch_new` | `{}` | reset + re-pin V through the engine's `/admin/epoch` |
+
+`epoch_new` is the one-call revert-to-blank: the engine call goes **first** (if
+the re-pin fails nothing has changed - a 502 means "retry the whole thing"), a
+retry after success is idempotent on both sides, and the route refuses (409)
+when `engine_admin_url` is not configured - a reset that silently left V on the
+old base would be the worst kind of success.
+
+### Persistence and the wire
+
+State files are atomic JSON (write temp, rename): `sim.json` (epoch, clock
+offset, the bridge cursor, accounts) and `feed.json` (overrides). A load has
+three answers - absent (a fact: start empty), fault, or corrupt (dies at the
+load point, path named). Money is `rust_decimal` end to end, serialized as
+strings - the identity gate is checked at 1e-6, which f64 arithmetic fails at
+the edges. Two measured quirks are pinned by unit tests: `spotMeta`'s
+`evm_extra_wei_decimals` is snake_case while the rest of the response is
+camelCase, and requests must omit null optionals (the venue rejects
+`{"type":"metaAndAssetCtxs","dex":null}` with a 422).
+
+The served info surface: `clearinghouseState`, `spotClearinghouseState`,
+`userAbstraction`, `openOrders` (empty for a touched account - the matching lane
+is Phase 2), `activeAssetData` (touched accounts) / `meta`, `metaAndAssetCtxs`,
+`spotMeta`, `allMids`, `l2Book`, `marginTable`, `exchangeStatus`, `perpDexs`
+(`[null]` - the first dex only until multi-dex lands; an account read scoped to
+a non-default dex answers the empty shape, a market read scoped to one is a 400).
+Unknown types answer `"unrouted"` (hl_mock's contract).
+
+## The Core↔EVM bridge
+
+`crates/hyperliquid/src/bridge` - V is a fork of the real HyperEVM, so the
+boundary *contracts* are real (CoreWriter `0x3333…3333`, the system addresses
+`0x20…<tokenIndex>`, HYPE `0x2222…2222`), but HyperCore is not there to act on
+them. The bridge is the missing half; it runs inside `venue-sim` (the same
+service owns the sim state it writes to) and scans V's blocks one pass per
+second.
+
+**EVM→Core.** An ERC20 `Transfer` to a token's system address credits the
+*sender's* Core spot balance, decoded from the receipt logs (the docs' exact
+rule: EVM→Core is an ERC20 transfer to the system address). The token index is
+decoded from the address; the completion direction (a transfer *from* a system
+address) is never re-credited; a token without an EVM link is not ours to
+credit.
+
+**CoreWriter actions.** A call to `0x3333…3333` carries one action: byte 1 =
+encoding version (1), bytes 2-4 = action id (u24 BE), then the action's raw ABI
+payload. The decoder handles the docs' own `sendRawAction(bytes)` wrapper
+(selector `0x17938e13`) as well as a bare stream, and turns the devnet's paths
+into a typed enum: 1 limit order, 6 spot send, 7 USD-class transfer, 9 add API
+wallet, 10/11 cancels, 13 sendAsset, 16 set abstraction; unmodeled ids are
+counted, malformed streams are counted, never guessed at. Calls are collected
+from the callTracer, so **contract-internal calls are seen too** (a contract's
+action is attributed to the contract - the calling address is the Core
+account); a trace fault degrades to top-level txs only and is counted
+(`venue_bridge_trace_faults_total`) - internal calls are missed that block,
+never silently dropped. Applied to the sim: USD-class transfer, spot send,
+sendAsset (spot→spot), API-wallet registration, abstraction mode;
+insufficient-balance refusals are counted, not retried; orders/cancels wait for
+the matching lane (Phase 2) and are counted by id
+(`venue_bridge_actions_total{id}`).
+
+**Core→EVM.** A `sendAsset` naming the token's system address debits the sim and
+is completed the way the chain does it: a `transfer(recipient, amount)` call on
+the linked ERC20 **from** the system address (V runs auto-impersonate). Amounts
+convert Core wei -> EVM wei (`weiDecimals + evmExtraWeiDecimals`; USDC 8 -> 6);
+a fractional wei is refused, never truncated (the chain burns sub-wei amounts;
+the bridge refuses). The system address is funded once so the pool's balance
+check passes (on the real chain system txs pay no gas; on V they do).
+
+**The scan is pin-anchored and per-block atomic.** Blocks at or below the fork
+pin are the *source's* real blocks and are never scanned (their transfers are
+not the devnet's); a first pass, a re-pin, or a chain reset anchors the cursor
+at `head.max(pin)`. Per block: decode -> apply -> advance the cursor -> one
+atomic JSON save - the block's effects and the cursor land together, so a crash
+mid-block re-scans the block instead of half-applying it (a duplicate credit
+would be a silent balance lie). The cursor lives in `sim.json`, so a sim restart
+does not lose boundary activity mined meanwhile.
+
+| Metric | Meaning |
+|---|---|
+| `venue_bridge_credits_total` | EVM→Core credits applied |
+| `venue_bridge_completions_total` | Core→EVM completion transfers submitted |
+| `venue_bridge_refusals_total` | effects refused (insufficient balance, unrepresentable amount) |
+| `venue_bridge_malformed_total` | action streams that did not decode |
+| `venue_bridge_trace_faults_total` | blocks whose callTracer failed (internal calls unseen that block) |
+| `venue_bridge_actions_total{id}` | decoded CoreWriter actions by id |
+
+## The feed bridge (Phase 0)
+
+`crates/ethereum/src/feed_bridge.rs` - daloc's harness periodically re-publishes
+its own mock aggregator answers; in mirror mode **the bridge is the single price
+writer** for those mocks (their refresher is off, plan §17.2). The value's
+source is the *parent chain's* aggregator for the same feed, read at the follow
+head via reth; the write target is the devnet's mock aggregator
+(`updateAnswer`).
+
+Each pass reads the source's answer and the target's answer and runs a small
+state machine, pure so the pause rule is testable without a chain:
+
+| Step | Condition | Effect |
+|---|---|---|
+| Confirm | the target holds the pending publish | record it as confirmed |
+| WaitPending | a publish is in flight | nothing (the target still holds the *previous* value until the tx mines) |
+| SkipUnchanged | the source's answer equals the confirmed value | no tx |
+| Publish | the source moved | submit `updateAnswer(answer)` from the configured writer |
+| Pause | the target holds neither our confirmed nor our pending value | a scenario wrote it: **pause the feed**, never overwrite a scenario's value |
+
+Decimals are read from both sides at boot; a mismatch (or an unreachable feed)
+is a boot fault naming the feed - a silently mis-scaled price would poison every
+scenario. Stamping is chain-native by construction: `updateAnswer` records the
+block timestamp of the T block that mines the bridge's tx, so feeds are stamped
+in the devnet chain's own domain, never in wall time (daloc's
+`assert_chain_time_invariant` holds).
+
+| Route | Purpose |
+|---|---|
+| `GET /admin/feed` | every feed: target, source, paused, confirmed/pending answers, decimals |
+| `POST /admin/feed/pause` | the scenario takes the value (divergence detection does the same automatically) |
+| `POST /admin/feed/resume` | hand it back: the bridge forgets what it last wrote, so the next pass re-establishes the source's value |
+| `POST /admin/feed/override` | publish a scripted answer now and pause - the same net effect as a crash write, driven explicitly |
+
+Metrics: `feed_bridge_updates_total{feed}`, `feed_bridge_pauses_total{feed}`,
+`feed_bridge_source_errors_total`. Config: `[services.engine.feed_bridge]`
+(`poll_interval_ms`, `writer`, `feeds[]`); absent means the devnet's own price
+writers own the mocks (the pre-mirror arrangement), and a boot with the section
+present fails loudly if a feed is unreachable or mis-scaled.

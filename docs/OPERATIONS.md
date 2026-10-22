@@ -413,3 +413,134 @@ the same name to re-attach it, or delete the PV explicitly to free the space.
 | `mirror_m_convergence_failures_total` climbing | M's state stale (old pin, missing BAL entry) | re-pin for a clean M; verify `eth_getBlockAccessList` on reth |
 | `mirror_t_convergence_failures_total` climbing | T drifted from mainnet on a devnet-unowned probe (missing BAL entry, watchlist gap) | check `/status.shadowed`; extend the watchlist if the account should be tracked; clear any `/admin/time` offset |
 | T state looks stale | diff applier behind, or the account is not watched | check `mirror_cursor_block_t` vs `mirror_cursor_block`; extend `watchlist` |
+
+## Venue operations
+
+The Venue Mirror is its own namespace (`venue-mirror`) with its own components:
+V (`anvil-v`, 8545), the venue engine (`venue-mirror`, 8080), the simulator
+(`venue-sim`, info 8090 / control 8091), and the CCTP bridge (8095/8096) when
+deployed. The NodePorts keep the 31xxx range (31545 / 31880 / 31090 / 31091),
+so both mirrors fit on one node. There is no `reth`/`lighthouse`/`anvil-m` here
+and no M/T split: V is a single fork-mode chain, and the engine's job is the
+fork lifecycle plus the devnet's own blocks.
+
+### The venue engine's `/status`
+
+| Field | Meaning |
+|---|---|
+| `head` | V's head |
+| `cursor` | the last scanned V block |
+| `fork_pin` | V's fork base (the source block V forked at) |
+| `epoch_pin` | the pin the shadow registry was built against; a mismatch with `fork_pin` means a reset is being reconciled |
+| `halted` | 1 while `/admin/pause` holds the driver |
+| `shadowed_slots` / `shadowed_accounts` / `shadowed` | the devnet-owned COW state; the list is what parity checks must skip |
+| `probes` | the configured at-pin probe count |
+| `source` | the fork source the pin derives from (the unshadow truth's home) |
+
+### Venue metrics
+
+The venue engine's `/metrics` renders the `venue_*` set plus the shared admin
+gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
+`venue_bridge_*`; the mainnet engine's `/metrics` gains `feed_bridge_*`.
+
+| Metric | Meaning |
+|---|---|
+| `venue_head` / `venue_cursor` | V's head / the last scanned V block |
+| `venue_fork_pin` / `venue_pin_age_blocks` | V's fork base / blocks since this epoch's first scanned block |
+| `venue_epochs_total` | times V was found re-forked under the driver (the epoch rule ran) |
+| `venue_restore_writes_total` | writes re-applied by same-pin restores |
+| `venue_probe_ok_total` / `venue_probe_failures_total` | at-pin probes matching / diverging from the fork source |
+| `venue_probe_skipped_total` / `venue_probe_last_failed` | probes skipped (devnet-owned target, or a pin the source cannot serve) / diverged in the last run |
+| `mirror_shadowed_slots` / `mirror_halted` / `mirror_frozen` | the shared admin gauges, rendered beside the venue's own |
+| `venue_sim_accounts` / `venue_sim_epoch` | simulated (touched) accounts / scenario epoch |
+| `venue_sim_liquidations_total` / `venue_sim_funding_payments_total` | liquidations executed / funding payments applied |
+| `venue_sim_ws_connected` / `venue_sim_ws_reconnects_total` | the market WS lane's health |
+| `venue_sim_rest_errors_total` / `venue_sim_budget_skips_total` / `venue_sim_budget_weight_used` | REST faults / calls skipped at the rate budget / weight spent in the rolling minute |
+| `venue_sim_stale_ms{coin}` | milliseconds since the coin's last live context update |
+| `venue_bridge_credits_total` / `venue_bridge_completions_total` | EVM→Core credits / Core→EVM completions |
+| `venue_bridge_refusals_total` / `venue_bridge_malformed_total` / `venue_bridge_trace_faults_total` | refused effects / undecodable actions / blocks whose callTracer failed |
+| `venue_bridge_actions_total{id}` | decoded CoreWriter actions by id |
+| `feed_bridge_updates_total{feed}` / `feed_bridge_pauses_total{feed}` | answers published to the mock aggregators / feeds paused on a scenario's write |
+| `feed_bridge_source_errors_total` | source aggregator reads that failed |
+
+Alarms: `venue_epochs_total` rising means V re-forked (the devnet's writes are
+gone with the old base unless the pin is unchanged); `venue_probe_failures_total`
+rising means a poisoned value survived a hand-back; `venue_sim_ws_connected` 0
+for >1 min means the market plane is on the REST lane (watch
+`venue_sim_budget_skips_total`); `venue_sim_stale_ms{coin}` above the readiness
+window means `/readyz` will fail; `venue_bridge_trace_faults_total` rising means
+contract-internal CoreWriter calls are being missed that block.
+
+### Drills
+
+**Revert to blank - `epoch_new` (one call, both halves).**
+
+```bash
+curl -s -X POST localhost:31091/control/epoch_new
+```
+
+The simulator resets (accounts + overrides, epoch +1) and the engine re-pins V
+to the source's latest; the driver's canary notices on its next pass and runs
+the epoch rule (new base = clear marks and values). Watch: `/status` `fork_pin`
+advances, `venue_epochs_total` +1, `venue_sim_epoch` +1, the touched account is
+gone. T's half is the same call on the mainnet engine:
+`POST .../admin/epoch` (re-pins T; the engine rebases and runs its own epoch
+rule).
+
+**Crash and hand-back (venue side).**
+
+```bash
+curl -s -X POST localhost:31091/control/crash -d '{"coin":"ETH","pct":"30"}'
+# ... read the account: the equity draws down at the owned mark ...
+curl -s -X POST localhost:31091/control/crash -d '{"coin":"ETH"}'   # hand back
+```
+
+The crash owns mark *and* oracle until handed back; a position below maintenance
+closes at the mark (v1). The L1 analog is the feed bridge: a scenario's write to
+a mock aggregator pauses that feed automatically; `POST .../admin/feed/resume`
+hands it back, and `GET .../admin/feed` shows confirmed/pending state.
+
+**The bridge round-trip.**
+
+```bash
+# EVM→Core: transfer USDC to its system address (token 0) on V. V runs with
+# --no-mining, so the tx queues; the explicit mine lands it (the harness is
+# the miner on both mirrors). cast needs the explicit impersonation even with
+# auto-impersonate on (measured).
+cast rpc anvil_impersonateAccount 0xYourAddr --rpc-url http://localhost:31545
+cast send 0xb88339CB7199b77E23DB6E890353E22632Ba630f \
+  "transfer(address,uint256)" 0x2000000000000000000000000000000000000000 1000000 \
+  --unlocked --from 0xYourAddr --rpc-url http://localhost:31545 --async
+cast rpc anvil_mine 1 --rpc-url http://localhost:31545
+# read the sender's Core spot balance (USDC rises by 1.0)
+curl -s -X POST localhost:31090/info \
+  -d '{"type":"spotClearinghouseState","user":"0xYourAddr"}'
+```
+
+`venue_bridge_credits_total` +1 and the sender's USDC spot balance rises by 1.0
+(the ERC20 is 6-decimals, Core 8). The reverse direction is a `sendAsset` naming
+the system address: the sim debits the account and submits a transfer **from**
+the system address; `venue_bridge_completions_total` +1 and the recipient's
+ERC20 balance rises. A `sendAsset` to any other address is a spot send inside
+Core (no EVM tx).
+
+**Storage.** The venue namespace's PVCs use the same `mirror-retain`
+StorageClass as the mainnet mirror; the state layout is the shared one
+(`cursor.json`, `shadow.json`, `journal/` on the engine's PVC; `sim.json`,
+`feed.json` on the simulator's).
+
+### Venue failure playbook
+
+| Symptom | Likely cause | Action |
+|---|---|---|
+| `venue_epochs_total` increased and `shadowed_slots` dropped to 0 | V was re-forked at a *new* pin (an OOM restart, `/admin/epoch`, an out-of-band `anvil_reset`): a new epoch - the devnet's writes are gone with the old base | re-create the scenario from its journal; the sim's `epoch_new` does both halves in one call |
+| `venue_epochs_total` increased and `venue_restore_writes_total` grew | V was reset at the *same* pin: the recorded writes were re-applied, orphans pruned | none; verify `/status.shadowed` matches expectation |
+| `venue_probe_skipped_total` climbing, `venue_probe_failures_total` flat | the pin is not the source's head (the source serves its latest state for `eth_call` - measured), so probes are skipped, never alarmed | re-pin (`/admin/epoch` or `epoch_new`) to probe against a fresh base |
+| `venue_probe_failures_total` climbing | V diverged from the fork source on a devnet-unowned target (a missing hand-back, a poisoned value) | inspect `/status.shadowed`; hand the keys back (`/admin/shadow {clear: true, all: true}`); re-pin if it persists |
+| `/admin/shadow {clear: true}` refused with "the source advanced past the pin" | the unshadow source can no longer serve the pin (`eth_call` serves its latest state - measured) | re-pin (`POST /admin/epoch`); the refusal is the protection against handing back a poisoned value |
+| a feed's `feed_bridge_pauses_total` rose | a scenario wrote the mock aggregator (or crashed it): the bridge paused, by design | `POST /admin/feed/resume` to hand it back; `GET /admin/feed` shows confirmed/pending |
+| `feed_bridge_source_errors_total` climbing | the parent-chain aggregator read failed (reth down, bad address) | check reth and the feed's `source` in the instance file |
+| `venue_bridge_credits_total` flat while a transfer landed on V | the bridge is not anchored, or the block predates the pin (source blocks are never scanned) | check `sim.json`'s `bridge_cursor` (0 = not anchored; the first pass anchors at `head.max(pin)`); check `venue_bridge_trace_faults_total` |
+| `venue_bridge_trace_faults_total` rising | V's callTracer failed: contract-internal CoreWriter calls are missed that block | check V's health; the block is counted, not half-applied - re-mine the activity |
+| `venue_sim_stale_ms{coin}` above the freshness window | the market plane is behind (WS down, REST budget exhausted) | check `venue_sim_ws_connected` / `venue_sim_budget_skips_total`; `/readyz` reflects it |
+| `venue_sim_budget_weight_used` pinned at 1200 | the rate budget is exhausted: REST calls are being skipped | raise the poll interval or trim `markets`; WS pushes keep carrying marks |

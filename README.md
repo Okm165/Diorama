@@ -42,6 +42,25 @@ The one accepted limitation is storage proofs (fork blocks report
 ```
 ![readme overview](docs/img/readme-overview.png)
 
+## The Venue Mirror (in the same workspace)
+
+The same workspace also carries the **Venue Mirror**: a fork-mode Anvil of
+HyperEVM (**V**, chain 999, forked from `rpc.hyperliquid.xyz/evm`) driven by
+its own engine (`venue-mirror`), with a **simulator** (`venue-sim`) that serves
+the venue's API from live market data and a copy-on-write account plane (info
+8090, control 8091), and a bridge that mirrors the Core↔EVM boundary. The two
+mirrors share the common crates (`anvil` conventions, `devnet` semantics, the
+layered config) and never each other. Detail:
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#the-venue-mirror).
+
+| | Mainnet Mirror | Venue Mirror |
+|---|---|---|
+| chain | T (`anvil-t`, an Ethereum fork kept fresh by BAL diffs) | V (`anvil-v`, a HyperEVM fork, static between re-pins) |
+| engine | `mirror-engine` | `venue-mirror` |
+| venue plane | — | `venue-sim` (market + account planes, an `hl_mock` superset) |
+| admin | deal / shadow / epoch / time / rewind | deal / shadow / epoch / pause / resume |
+| namespace | `mainnet-mirror` | `venue-mirror` |
+
 ## Quickstart
 
 ```bash
@@ -50,6 +69,18 @@ make bootstrap           # + snapshot download (~50 min, 154 GB) + full stack
 make status              # pods, PVCs, engine status
 make smoke               # end-to-end checks (parity spot check included)
 ```
+
+Venue Mirror (a second namespace in the same cluster; no snapshot needed):
+
+```bash
+kubectl apply -k k8s/overlays/venue-mirror   # V + venue engine + venue-sim (namespace venue-mirror)
+make smoke-venue                             # V, engine, sim and bridge checks
+python3 scripts/daloc-sim.py --lane all      # the daloc use-case arc (42 gates; point the
+                                             # script's constants at your endpoints first)
+```
+
+The local, no-cluster shape (Anvil V + the two binaries) is in
+[docs/TESTING.md](docs/TESTING.md) → "Venue smoke".
 
 The bootstrap is ordered on purpose: the reth snapshot lands in the PVC first,
 then reth starts, Lighthouse checkpoint-syncs to the CL head, and the anvils
@@ -104,14 +135,19 @@ runs.
 ## Repository layout
 
 ```
-engine/                 Rust engine (replay + verifier + BAL diff applier + convergence repair)
-k8s/base/               kustomize base: reth, lighthouse, anvil-m/t, engine
-k8s/overlays/local/     single-node k3s overlay (engine image tag)
-k8s/bootstrap/          one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
-scripts/                lib.sh, gen-secret.sh, smoke.sh, scenario.sh, capability-proof.sh,
-                        product-sim.sh, closure-check.sh
-docs/                   HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md,
-                        TESTING.md
+crates/anvil,devnet,config  common: anvil conventions, devnet semantics, the layered config
+crates/ethereum             the Mainnet Mirror project (replay, verifier, BAL diff applier, feed bridge)
+crates/hyperliquid          the Venue Mirror project (fork driver, simulator planes, API, Core<->EVM bridge)
+bins/mirror-engine          the Mainnet Mirror engine binary
+bins/venue-mirror           the Venue Mirror engine binary (fork driver)
+bins/venue-sim              the venue simulator (market + account planes; info 8090 / control 8091)
+k8s/base/                   kustomize base: reth, lighthouse, anvil-m/t, engine (+ venue/ for V, engine, sim)
+k8s/overlays/mainnet-mirror/  single-node k3s overlay (mainnet mirror)
+k8s/overlays/venue-mirror/    the venue stack overlay (V, engine, sim, NodePorts)
+k8s/bootstrap/              one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
+scripts/                    lib.sh, smoke.sh, smoke-venue.sh, scenario.sh, capability-proof.sh,
+                            product-sim.sh, closure-check.sh, closure-matrix.sh, daloc-sim.py
+docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md, TESTING.md, adr/
 ```
 
 ## Docs
@@ -120,8 +156,14 @@ docs/                   HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md,
   explainer: architecture, pipelines, information flow, algorithms.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — components, data flow, the
   measured lean profile, design decisions (convergence repair, divergence
-  policy, EIP-7702 nonce gaps, COW, journal), config reference, source liveness.
+  policy, EIP-7702 nonce gaps, COW, journal), config reference, source
+  liveness, and the Venue Mirror (fork driver, simulator, Core↔EVM bridge,
+  feed bridge).
 - **[docs/OPERATIONS.md](docs/OPERATIONS.md)** — signals/thresholds, day-to-day,
-  source-liveness playbook, drills, storage/PVC handling, failure playbook.
+  source-liveness playbook, drills, storage/PVC handling, failure playbook,
+  venue operations.
 - **[docs/TESTING.md](docs/TESTING.md)** — test layers, per-block invariants and
-  their classes, the measured facts behind the verifier, known limitations.
+  their classes, the measured facts behind the verifier, the venue smoke, the
+  daloc use-case simulation, known limitations.
+- **[docs/adr/](docs/adr/README.md)** — the architecture decision records (one
+  page each: context, decision, consequences).

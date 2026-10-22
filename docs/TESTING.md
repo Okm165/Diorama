@@ -188,6 +188,113 @@ All three scripts share `scripts/lib.sh` - the measured conventions live there
 (explicit gas on devnet sends, offline `cast` without `--rpc-url`, polled
 receipts) instead of being copied three times.
 
+## The daloc use-case simulation (`scripts/daloc-sim.py`)
+
+The plan's §17 harness flows, driven end-to-end against a mirror stack: T (a
+devnet Ethereum fork), V (a devnet HyperEVM fork), the venue engine, and the
+venue simulator. Each **role** is what one daloc-side actor does; each assertion
+is a gate the plan names (the client gates of §2.1/§18.3, the time policy of
+§17.2, the epoch model of §6.5, the venue mechanics of §5). The roles run in
+order, a failure prints the evidence, and the run exits non-zero. **42 checks**
+in a green run.
+
+| Role | Drives | Gates |
+|---|---|---|
+| `boot` | pins both chains' clocks and mines the carrying block; waits for the sim's readiness | T and V clocks start at wall time (±300 s, their gate); `venue-sim /readyz` 200 |
+| `provision` | `ensure_gas` on T; sim `reset`; `deal` perp + spot; a seeded position | T gas funded; scenario reset; perp deal returns `balance_after == 1000`; spot deal `== 250`; the hl_mock-shaped seed accepted |
+| `operator` | the gated venue reads (`hl_client.rs`) and the info shapes | identity `accountValue == totalRawUsd + Σ signed(positionValue)` at 1e-6; `positionValue` unsigned; `szi` signed; `cumFunding.sinceOpen`; `leverage.type`; flat rows dropped; `liquidationPx` isolated-only; `time` ≤6 s; `totalRawUsd` > 0; `meta.universe` carries `szDecimals`; `openOrders` = `[]`; a non-default dex → empty shape 200; `perpDexs` = `[null]`; `l2Book` exactly 2 sides, ≤20 levels; `userAbstraction` in the enum; an unconfigured account → empty shape 200 (passthrough) |
+| `indexer` | the 5 s poller cadence, then the crash arc | three ticks ≤6 s old; the series is live; `crash` accepted and owned; the crash draws the equity down; hand-back recovers the live mark |
+| `time` | `advance_time_then_refresh`'s shape and the venue-side drawdown | T accepts a forward `anvil_setTime` jump; V accepts a direct jump; `advance` runs the automaton; an underwater position is liquidated (closed at the mark) |
+| `epoch` | the revert-to-blank on both halves | `epoch_new` accepted + `engine_repinned`; the venue engine's `fork_pin` present; the sim's account is gone; T's `/admin/epoch` accepted; T's engine is live after the re-pin |
+
+The endpoints it expects (the scratch stack's ports; point them at a
+deployment's NodePorts to run the same arc there):
+
+| Endpoint | Constant | Scratch default | Deployment NodePort |
+|---|---|---|---|
+| T RPC | `T_RPC` | `http://127.0.0.1:18602` | 30545 |
+| T admin (engine) | `T_ADMIN` | `http://127.0.0.1:18680` | 30880 |
+| V RPC | `V_RPC` | `http://127.0.0.1:18610` | 31545 |
+| V admin (engine) | `V_ADMIN` | `http://127.0.0.1:18681` | 31880 |
+| venue-sim info | `SIM_INFO` | `http://127.0.0.1:18790` | 31090 |
+| venue-sim control | `SIM_CTRL` | `http://127.0.0.1:18791` | 31091 |
+
+`CAST` points at `/tmp/opencode/foundry-bin/cast` (a constant in the script -
+edit it for your environment). Run:
+
+```bash
+python3 scripts/daloc-sim.py --lane all        # every role, in order
+python3 scripts/daloc-sim.py --lane operator   # one role, for a focused run
+```
+
+## Venue smoke — running the venue stack locally
+
+The core venue stack is three processes: V (fork-mode Anvil of HyperEVM), the
+venue engine (`venue-mirror`), and the simulator (`venue-sim`). The manifests'
+shape, without a cluster:
+
+```bash
+# 1. V: fork the public chain at its latest block. The flags are the parity
+#    set (plan §17.6): cancun (the real chain is Cancun-without-blobs), the
+#    gas/code-size/keeper values daloc's entrypoint uses, no-mining (the
+#    engine owns block production), auto-impersonate (the bridge's Core->EVM
+#    completion sends from the system address).
+export HL_RPC_URL=https://rpc.hyperliquid.xyz/evm
+PIN=$(cast block-number --rpc-url $HL_RPC_URL)
+anvil --host 0.0.0.0 --port 8545 \
+  --fork-url $HL_RPC_URL --fork-block-number $PIN \
+  --chain-id 999 --hardfork cancun --gas-limit 100000000 \
+  --code-size-limit 99999 --disable-pool-balance-checks --order fifo \
+  --no-mining --auto-impersonate --prune-history 32 \
+  --transaction-block-keeper 1000000 --no-rate-limit \
+  --no-request-size-limit --no-fork-node-info
+```
+
+```bash
+# 2. The venue engine (fork driver + admin API on 8080) and the simulator
+#    (info 8090, control 8091). Both read the same instance file; every ${VAR}
+#    in it must resolve at load time (a missing one is a boot error naming the
+#    variable), so export the full set - including the refs of sections whose
+#    service you are not starting (the loader expands the whole file).
+export STATE_DIR=/tmp/venue-engine-state SIM_STATE_DIR=/tmp/venue-sim-state
+export ANVIL_V_URL=http://127.0.0.1:8545 ENGINE_ADMIN_URL=http://127.0.0.1:8080
+export CCTP_STATE_DIR=/tmp/venue-cctp-state T_RPC_URL=http://127.0.0.1:8545
+export CCTP_RELAY_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+cargo run -p venue-mirror -- config/instances/venue-mirror.toml
+cargo run -p venue-sim    -- config/instances/venue-mirror.toml
+```
+
+What to check:
+
+```bash
+cast chain-id --rpc-url http://127.0.0.1:8545            # 999
+cast rpc anvil_getAutomine --rpc-url http://127.0.0.1:8545   # false
+curl -s localhost:8080/healthz                           # ok
+curl -s localhost:8080/status | jq '{head, cursor, fork_pin, epoch_pin, shadowed_slots}'
+curl -s localhost:8080/metrics | grep -E '^venue_'
+curl -s localhost:8090/readyz                            # ready once the market plane is fresh
+curl -s -X POST localhost:8090/info -d '{"type":"metaAndAssetCtxs"}' | jq '.[0].universe[0]'
+curl -s -X POST localhost:8091/control/deal \
+  -d '{"address":"0x00000000000000000000000000000000000000aa","class":"perp","amount":"1000"}'
+```
+
+- The engine's log shows `anvil is up` and then either `at-pin probes complete`
+  (the pin was still the source's head) or `at-pin probes skipped` - the normal
+  case on a live source, which advances past the pin before the comparison runs
+  (`venue_probe_skipped_total` counts it). Both are healthy; a *failure* count
+  is the alarm.
+- `/status.fork_pin` and `epoch_pin` are both set once boot's reconcile ran; a
+  deal marks the slot it writes, so `shadowed_slots` grows with it.
+- The epoch drill: `curl -s -X POST localhost:8091/control/epoch_new`, then
+  watch `fork_pin` advance and `venue_epochs_total` increment.
+- In-cluster: `kubectl apply -k k8s/overlays/venue-mirror` (namespace
+  `venue-mirror`; NodePorts 31545/31880/31090/31091), then `make smoke-venue`
+  (`scripts/smoke-venue.sh`): V's chain 999 / head ≥ pin / automine off, the
+  engine's `/healthz`, `/status` (the engine pin must equal V's pin) and
+  `/metrics`, the sim's `/healthz`, `/readyz`, control `/health` and
+  `venue_sim_ws_connected`, the `venue_bridge_*` counters, and the `meta`
+  shape.
+
 ## Plan axioms → how they are covered
 
 | # | Fact | Coverage |
