@@ -94,6 +94,12 @@ spec:
                 echo "reth unreachable; keeping persisted pin $PIN" >&2
               fi
               echo "anvil-m: fork-url=$RETH_URL pin=$PIN"
+              # The engine owns block production on both chains: without
+              # --no-mining, every raw tx / cheatcode write would automine its
+              # own block and the engine's mine(1) would produce empty blocks
+              # (measured: the 2026-10 automine-reset incident). Comments must
+              # stay *above* the exec: a comment inside the backslash-continued
+              # command swallows every flag after it (measured with a stub).
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
                 --fork-url "$RETH_URL" \
@@ -105,10 +111,6 @@ spec:
                 --code-size-limit 24576 \
                 --disable-pool-balance-checks \
                 --order fifo \
-                # The engine owns block production on both chains: without this,
-                # every raw tx / cheatcode write would automine its own block and
-                # the engine's mine(1) would produce empty blocks (measured: the
-                # 2026-10 automine-reset incident).
                 --no-mining \
                 --auto-impersonate \
                 --prune-history 2 \

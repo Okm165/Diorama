@@ -1,5 +1,9 @@
 # Persistent volumes for the mirror. All use the mirror-retain StorageClass
 # (reclaimPolicy: Retain) so deleting a PVC never destroys the data.
+#
+# This file is the mainnet mirror's claims; the Venue Mirror's live in
+# venue/venue-pvcs.yaml - one file per mirror, because a kustomize overlay
+# composes whole files and must not declare the other mirror's claims.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

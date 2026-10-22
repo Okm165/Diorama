@@ -1,0 +1,88 @@
+# cctp-bridge - the CCTP V2 lane between the mirrors (plan §15): a burn on the
+# Ethereum fork (T, mainnet-mirror namespace), a local Iris-compatible
+# attestation, and the mint on V - plus the control surface for the devnet
+# lanes. Ports: 8095 serves the Iris-compatible API (daloc's cctp-relay points
+# its IRIS_API_URL at this *base* - the client appends /v2/messages/...), 8096
+# the control API.
+#
+# At boot the bridge verifies the wiring on both chains (fail closed), installs
+# the devnet attester through the contracts' own setters, and funds the relay
+# wallet. The [services.cctp] section of the mounted instance file carries the
+# chain endpoints, the relay key and the attester seed.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cctp-bridge
+  labels:
+    app.kubernetes.io/name: cctp-bridge
+    app.kubernetes.io/part-of: venue-mirror
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cctp-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cctp-bridge
+        app.kubernetes.io/part-of: venue-mirror
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: cctp-bridge
+          image: localhost/cctp-bridge:v1
+          imagePullPolicy: IfNotPresent
+          args: ["/etc/mirror/instance.toml"]
+          env:
+            - name: CCTP_STATE_DIR
+              valueFrom: { configMapKeyRef: { name: venue-config, key: CCTP_STATE_DIR } }
+            # The Ethereum fork the bridge burns on: anvil-t lives in the
+            # mainnet-mirror namespace (the venue namespace has no T of its
+            # own), so the bridge reaches it over cross-namespace service DNS.
+            - name: T_RPC_URL
+              valueFrom: { configMapKeyRef: { name: venue-config, key: T_RPC_URL } }
+            - name: ANVIL_V_URL
+              valueFrom: { configMapKeyRef: { name: venue-config, key: ANVIL_V_URL } }
+            # The funded relay wallet's hex key: a Secret, never a manifest
+            # literal (the instance reads it as ${CCTP_RELAY_KEY}).
+            - name: CCTP_RELAY_KEY
+              valueFrom: { secretKeyRef: { name: cctp-relay-key, key: relay-key } }
+          ports:
+            - { name: iris, containerPort: 8095 }
+            - { name: control, containerPort: 8096 }
+          volumeMounts:
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+            - { name: state, mountPath: /state }
+          # /healthz is the Iris router's (8095); the control plane carries
+          # /health + /metrics on 8096. The readiness gate narrows to the
+          # attester-installed check when the crate exposes it (plan §11.5).
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8095 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8095 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "100m", memory: 128Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: instance
+          configMap: { name: venue-instance }
+        - name: state
+          persistentVolumeClaim: { claimName: cctp-state }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cctp-bridge
+  labels: { app.kubernetes.io/name: cctp-bridge, app.kubernetes.io/part-of: venue-mirror }
+spec:
+  selector: { app.kubernetes.io/name: cctp-bridge }
+  ports:
+    - { name: iris, port: 8095, targetPort: 8095 }
+    - { name: control, port: 8096, targetPort: 8096 }

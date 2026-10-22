@@ -1,0 +1,75 @@
+# NodePort exposure for the daloc harness (plan §11.5): the venue mirror's
+# services, reachable from the test host. The 31xxx range keeps the two
+# mirrors' exposures distinct on one node (mainnet-mirror uses 30xxx; see
+# k8s/base/nodeports.yaml for the convention).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: anvil-v-nodeport
+  labels: { app.kubernetes.io/name: anvil-v, app.kubernetes.io/part-of: venue-mirror }
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: anvil-v }
+  ports:
+    # daloc's CHAIN_RPC_URL / CHAIN_WS_URL for chain 999 point here; anvil
+    # serves WebSocket upgrades on the same port.
+    - { name: http, port: 8545, targetPort: 8545, nodePort: 31545 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: engine-nodeport
+  labels: { app.kubernetes.io/name: engine, app.kubernetes.io/part-of: venue-mirror }
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: engine }
+  ports:
+    # /status, /metrics, /admin/* (deal, shadow, epoch, pause, resume).
+    - { name: http, port: 8080, targetPort: 8080, nodePort: 31880 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: venue-sim-nodeport
+  labels: { app.kubernetes.io/name: venue-sim, app.kubernetes.io/part-of: venue-mirror }
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: venue-sim }
+  ports:
+    # 8090 is the info API daloc reads (HL_INFO_API_URL); 8091 the control
+    # API the harness drives.
+    - { name: info, port: 8090, targetPort: 8090, nodePort: 31090 }
+    - { name: control, port: 8091, targetPort: 8091, nodePort: 31091 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cctp-bridge-nodeport
+  labels: { app.kubernetes.io/name: cctp-bridge, app.kubernetes.io/part-of: venue-mirror }
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: cctp-bridge }
+  ports:
+    # 8095 is the Iris-compatible base daloc's cctp-relay points at; 8096 the
+    # control API.
+    - { name: iris, port: 8095, targetPort: 8095, nodePort: 31095 }
+    - { name: control, port: 8096, targetPort: 8096, nodePort: 31096 }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-endpoints
+  labels:
+    app.kubernetes.io/part-of: venue-mirror
+data:
+  # The values the daloc harness sources (their external-mode env, plan §7.7).
+  # The single-node k3s node *is* the test host; a remote harness overrides
+  # the host and keeps the ports.
+  test-endpoints.env: |
+    CHAIN_RPC_URL=http://localhost:31545
+    CHAIN_WS_URL=ws://localhost:31545
+    HL_INFO_API_URL=http://localhost:31090
+    VENUE_CONTROL_URL=http://localhost:31091
+    IRIS_API_URL=http://localhost:31095
+    VENUE_ADMIN_URL=http://localhost:31880

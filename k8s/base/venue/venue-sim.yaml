@@ -1,0 +1,84 @@
+# venue-sim - the simulator: the live market plane (REST snapshots + WS pushes
+# from the venue's public API) and the COW account plane, served as the
+# daloc-facing info API (8090, the `hl_mock`-compatible surface) beside the
+# control API (8091: deal/advance/crash/set_account/reset/epoch_new).
+#
+# State (sim.json + feed.json) lives on the venue-sim-state PVC: a restart
+# resumes the scenario, and the simulator's epoch is its own (/control/reset
+# blanks the account plane; /control/epoch_new also re-pins V through the
+# engine's /admin/epoch).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: venue-sim
+  labels:
+    app.kubernetes.io/name: venue-sim
+    app.kubernetes.io/part-of: venue-mirror
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: venue-sim
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: venue-sim
+        app.kubernetes.io/part-of: venue-mirror
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: venue-sim
+          image: localhost/venue-sim:v1
+          imagePullPolicy: IfNotPresent
+          args: ["/etc/mirror/instance.toml"]
+          env:
+            - name: SIM_STATE_DIR
+              valueFrom: { configMapKeyRef: { name: venue-config, key: SIM_STATE_DIR } }
+            - name: ANVIL_V_URL
+              valueFrom: { configMapKeyRef: { name: venue-config, key: ANVIL_V_URL } }
+            - name: ENGINE_ADMIN_URL
+              valueFrom: { configMapKeyRef: { name: venue-config, key: ENGINE_ADMIN_URL } }
+            # The instance's [chains.venue] source_url is ${HL_RPC_URL}: the
+            # loader expands every reference at load time, so the variable must
+            # resolve even though the sim's reads go through api_url/ws_url.
+            - name: HL_RPC_URL
+              valueFrom: { configMapKeyRef: { name: venue-config, key: HL_RPC_URL } }
+          ports:
+            - { name: info, containerPort: 8090 }
+            - { name: control, containerPort: 8091 }
+          volumeMounts:
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+            - { name: state, mountPath: /state }
+          # /readyz is the market-plane freshness gate (meta present + every
+          # configured market fresher than the staleness window); it answers
+          # 503 while warming up, which is exactly the readiness signal.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8090 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "100m", memory: 128Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: instance
+          configMap: { name: venue-instance }
+        - name: state
+          persistentVolumeClaim: { claimName: venue-sim-state }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: venue-sim
+  labels: { app.kubernetes.io/name: venue-sim, app.kubernetes.io/part-of: venue-mirror }
+spec:
+  selector: { app.kubernetes.io/name: venue-sim }
+  ports:
+    - { name: info, port: 8090, targetPort: 8090 }
+    - { name: control, port: 8091, targetPort: 8091 }

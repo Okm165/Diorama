@@ -1,25 +1,43 @@
 SHELL := /bin/bash
 
-NS             := mainnet-mirror
-ENGINE_IMAGE   := localhost/mirror-engine
-# Single source of truth: the tag in the manifest we deploy.
-ENGINE_TAG     := $(shell grep -o 'mirror-engine:[^@ ]*' k8s/base/engine.yaml | cut -d: -f2)
-OVERLAY        := k8s/overlays/mainnet-mirror
+# INSTANCE selects the mirror: the namespace, the kustomize overlay, the
+# instance TOML and the engine image all follow from it (plan §19.8).
+INSTANCE       ?= mainnet-mirror
+NS             := $(INSTANCE)
+OVERLAY        := k8s/overlays/$(INSTANCE)
+INSTANCE_FILE  := config/instances/$(INSTANCE).toml
 BOOTSTRAP      := k8s/bootstrap
 KUBECTL        := kubectl -n $(NS)
+
+# The engine image/tag of the selected instance, scraped from the manifest
+# that deploys it - the deployed manifest stays the single source of truth.
+# mainnet-mirror runs the ethereum engine, venue-mirror the venue engine: one
+# deployment shape per profile, one image per binary.
+ENGINE_MANIFEST := $(if $(filter mainnet-mirror,$(INSTANCE)),k8s/base/engine.yaml,k8s/base/venue/venue-engine.yaml)
+ENGINE_REF      := $(shell grep -ohE 'image: localhost/[^ ]+' $(ENGINE_MANIFEST) | head -1 | awk '{print $$2}')
+ENGINE_IMAGE    := $(word 1,$(subst :, ,$(ENGINE_REF)))
+ENGINE_TAG      := $(lastword $(subst :, ,$(ENGINE_REF)))
+ENGINE_BIN      := $(notdir $(ENGINE_IMAGE))
+
+# The anvil components of the selected instance (pin-show).
+ANVILS := $(if $(filter mainnet-mirror,$(INSTANCE)),anvil-m anvil-t,anvil-v)
+
+# The selected instance's Namespace manifest: mainnet-mirror's lives in base
+# (bootstrap order), the venue overlay owns its own (instance identity).
+NS_MANIFEST := $(if $(filter mainnet-mirror,$(INSTANCE)),k8s/base/namespace.yaml,$(OVERLAY)/namespace.yaml)
 
 .DEFAULT_GOAL := help
 
 ##@ Cluster
 
 ns: ## Create namespace + StorageClass (idempotent)
-	kubectl apply -f k8s/base/namespace.yaml
+	kubectl apply -f $(NS_MANIFEST)
 	kubectl apply -f k8s/base/storageclass.yaml
 
 secrets: ## Create the reth<->lighthouse JWT secret if missing
 	NS=$(NS) ./scripts/gen-secret.sh
 
-apply: ## Apply the full mirror stack (kustomize build k8s/overlays/mainnet-mirror)
+apply: ## Apply the selected instance's stack (INSTANCE selects the overlay)
 	kubectl apply -k $(OVERLAY)
 
 diff: ## Show what `make apply` would change
@@ -50,14 +68,17 @@ bootstrap: ns secrets images ## First-time setup: namespace, secrets, images, sn
 
 ##@ Images
 
-# Every image is pinned by full version tag (see k8s/base/*.yaml). Pre-importing
+# Every image is pinned by full version tag (see k8s/base/**/*.yaml). Pre-importing
 # them into the k3s containerd store keeps pod start-up independent of registry
 # DNS - measured: containerd's resolver can fail transiently while podman's
 # works, which turned a deploy into ImagePullBackOff.
-# Single source of truth: every third-party image reference in the manifests,
-# pinned by tag *and* digest. Bumping a version means editing the manifest once.
+# Single source of truth: the manifests. LOCAL_IMAGES are the images this repo
+# builds (one binary per image, `--build-arg BIN`); IMAGES are the third-party
+# references, pinned by tag *and* digest. Bumping a version means editing the
+# manifest once.
+LOCAL_IMAGES := $(shell grep -rhoE 'image: localhost/[^ ]+' k8s/ | awk '{print $$2}' | sort -u)
 IMAGES := $(shell grep -rhoE 'image: [^ ]+' k8s/ | awk '{print $$2}' \
-            | grep -v 'mirror-engine' | sort -u)
+            | grep -v '^localhost/' | sort -u)
 
 check-pins: ## Verify every image reference is pinned by tag+digest and present locally
 	@fail=0; \
@@ -79,7 +100,18 @@ check-pins: ## Verify every image reference is pinned by tag+digest and present 
 	if [ $$fail -eq 0 ]; then echo "all images pinned by tag+digest and present"; \
 	else echo "pin check FAILED"; exit 1; fi
 
-images: ## Pull + import the pinned third-party images into k3s containerd
+images: ## Build + import the local images, then pull + import the pinned third-party images
+	@for ref in $(LOCAL_IMAGES); do \
+	  bin=$${ref##*/}; bin=$${bin%%:*}; \
+	  if [ ! -f "bins/$$bin/src/main.rs" ]; then \
+	    printf "  %-62s manifest only (bins/%s has no source yet)\n" "$$ref" "$$bin"; continue; \
+	  fi; \
+	  printf "== %s (build)\n" "$$ref"; \
+	  podman build -q -f Dockerfile --build-arg BIN=$$bin -t "$$ref" . || exit 1; \
+	  rm -f /tmp/mirror-img.tar; \
+	  podman save -o /tmp/mirror-img.tar "$$ref" || exit 1; \
+	  sudo k3s ctr images import /tmp/mirror-img.tar >/dev/null || exit 1; \
+	done
 	@for img in $(IMAGES); do \
 		printf "== %s\n" "$$img"; \
 		podman pull -q "$$img" || exit 1; \
@@ -88,28 +120,32 @@ images: ## Pull + import the pinned third-party images into k3s containerd
 		sudo k3s ctr images import /tmp/mirror-img.tar >/dev/null || exit 1; \
 	done
 	@rm -f /tmp/mirror-img.tar
+	@echo "local: $(LOCAL_IMAGES)"
 	@echo "imported: $(IMAGES)"
 	@$(MAKE) --no-print-directory check-pins
 
 ##@ Engine
 
-build: ## Build the engine image with podman (Dockerfile at the workspace root)
-	podman build -f Dockerfile --build-arg BIN=mirror-engine -t $(ENGINE_IMAGE):$(ENGINE_TAG) .
+build: ## Build the selected instance's engine image with podman (Dockerfile at the workspace root)
+	podman build -f Dockerfile --build-arg BIN=$(ENGINE_BIN) -t $(ENGINE_IMAGE):$(ENGINE_TAG) .
 
 import: build ## Import the engine image into the k3s containerd store
 	podman save -o /tmp/mirror-engine.tar $(ENGINE_IMAGE):$(ENGINE_TAG)
 	sudo k3s ctr images import /tmp/mirror-engine.tar
 	rm -f /tmp/mirror-engine.tar
 
-deploy-engine: import ## Rebuild + redeploy the engine
+deploy-engine: import ## Rebuild + redeploy the selected instance's engine
 	$(KUBECTL) rollout restart deploy/engine
 	$(KUBECTL) rollout status deploy/engine --timeout=120s
+
+build-venue: ## Build the venue binaries on the host (cargo: venue-mirror + venue-sim)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p venue-mirror -p venue-sim
 
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
-config-check: ## Validate the instance config through the layered loader
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check config/instances/mainnet-mirror.toml
+config-check: ## Validate the selected instance's config through the layered loader
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check $(INSTANCE_FILE)
 
 fitness: lint design-assertions closure-matrix no-orphans ## Run every structural fitness function (plan §11.3)
 
@@ -133,14 +169,19 @@ status: ## Pods, PVCs, engine status
 	@echo "--- engine status ---"
 	@$(KUBECTL) exec deploy/engine -- curl -sf http://localhost:8080/status | jq . 2>/dev/null || echo "(engine not ready)"
 
-logs: ## Tail logs of all pods (follow)
-	$(KUBECTL) logs -f -l app.kubernetes.io/part-of=mainnet-mirror --max-log-requests=10 --prefix
+logs: ## Tail logs of all pods of the selected instance (follow)
+	$(KUBECTL) logs -f -l app.kubernetes.io/part-of=$(NS) --max-log-requests=10 --prefix
 
 logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-anvil-m
 	$(KUBECTL) logs -f deploy/$* --tail=100
 
 smoke: ## End-to-end smoke test
 	NS=$(NS) ./scripts/smoke.sh
+
+# The venue smoke is inherently the venue instance: the shared targets follow
+# INSTANCE, this one pins NS=venue-mirror.
+smoke-venue: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
+	NS=venue-mirror ./scripts/smoke-venue.sh
 
 scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
 	NS=$(NS) ./scripts/scenario.sh
@@ -190,8 +231,8 @@ prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; safe for 
 	kubectl -n $(NS) rollout status deploy/lighthouse --timeout=300s
 	@$(MAKE) --no-print-directory backfill
 
-pin-show: ## Show the resolved fork pins of anvil M and T
-	@for c in anvil-m anvil-t; do \
+pin-show: ## Show the resolved fork pins of the instance's anvils
+	@for c in $(ANVILS); do \
 		printf "%s pin: " $$c; $(KUBECTL) exec deploy/$$c -- cat /state/pin 2>/dev/null || echo "(not resolved yet)"; \
 	done
 
@@ -219,5 +260,5 @@ help: ## Show this help
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: ns secrets apply diff delete snapshot snapshot-status bootstrap build import deploy-engine \
-	test-engine config-check status logs smoke selftest pin-show repin help
+.PHONY: ns secrets apply diff delete snapshot snapshot-status bootstrap images build build-venue \
+	import deploy-engine test-engine config-check status logs smoke smoke-venue selftest pin-show repin help

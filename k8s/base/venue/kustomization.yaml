@@ -1,0 +1,18 @@
+# The Venue Mirror's manifest base: V (the fork-mode anvil), the venue engine,
+# the simulator, the CCTP bridge, and the instance's own claims/wiring. It is a
+# kustomization of its own because kustomize composes directories, not files:
+# the venue overlay includes this directory, so the venue stack never lands in
+# the mainnet-mirror namespace (and vice versa - see k8s/base/kustomization.yaml).
+#
+# The namespace, the instance ConfigMap and the harness NodePorts are the
+# overlay's (they are instance identity/topology, not the service templates).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - venue-config.yaml
+  - venue-pvcs.yaml
+  - anvil-v.yaml
+  - venue-engine.yaml
+  - venue-sim.yaml
+  - cctp-bridge.yaml

@@ -1,8 +1,8 @@
 # Mirror images: multi-stage build, slim runtime with curl for smoke tests.
 #
 # One Dockerfile, one binary per image: `--build-arg BIN=<package>` selects
-# which workspace binary to build (mirror-engine today; venue-sim and
-# cctp-bridge land in R3/R4). The runtime entrypoint is a symlink to it.
+# which workspace binary to build (mirror-engine, venue-mirror, venue-sim and
+# cctp-bridge). The runtime entrypoint is a symlink to it.
 #
 # Base images are pinned to the latest stable releases by tag *and* digest, so a
 # rebuilt image is reproducible and no tag can silently move under us.
@@ -16,14 +16,25 @@ WORKDIR /src
 # Dependency layer: build stub members first so `cargo build` caches all deps.
 # Cargo.lock is copied and --locked is used so the image builds the exact
 # dependency set pinned in the repo (no silent re-resolution, and a stale lock
-# fails the build instead of drifting). A new workspace member needs its
+# fails the build instead of drifting). Every workspace member needs its
 # manifest copied and an empty src entry point created here too.
 COPY Cargo.toml Cargo.lock ./
+COPY crates/anvil/Cargo.toml crates/anvil/
+COPY crates/cctp/Cargo.toml crates/cctp/
+COPY crates/config/Cargo.toml crates/config/
+COPY crates/devnet/Cargo.toml crates/devnet/
 COPY crates/ethereum/Cargo.toml crates/ethereum/
+COPY crates/hyperliquid/Cargo.toml crates/hyperliquid/
+COPY bins/cctp-bridge/Cargo.toml bins/cctp-bridge/
 COPY bins/mirror-engine/Cargo.toml bins/mirror-engine/
-RUN mkdir -p crates/ethereum/src bins/mirror-engine/src \
-    && : > crates/ethereum/src/lib.rs \
-    && echo 'fn main() {}' > bins/mirror-engine/src/main.rs \
+COPY bins/venue-mirror/Cargo.toml bins/venue-mirror/
+COPY bins/venue-sim/Cargo.toml bins/venue-sim/
+RUN for d in crates/anvil crates/cctp crates/config crates/devnet crates/ethereum crates/hyperliquid; do \
+      mkdir -p "$d/src" && : > "$d/src/lib.rs"; \
+    done \
+    && for d in bins/cctp-bridge bins/mirror-engine bins/venue-mirror bins/venue-sim; do \
+      mkdir -p "$d/src" && echo 'fn main() {}' > "$d/src/main.rs"; \
+    done \
     && cargo build --release --locked -p ${BIN} \
     && rm -rf crates bins
 

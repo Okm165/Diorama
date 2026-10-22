@@ -1,0 +1,74 @@
+# engine (venue profile) - the Venue Mirror's driver: the fork-driver loop
+# over V, the at-pin probes, the epoch rule (same pin -> restore, new pin ->
+# clear), the Core<->EVM bridge scan, and the venue admin surface (/admin/deal,
+# /admin/shadow, /admin/epoch, /admin/pause, /admin/resume).
+#
+# Same shape as the mainnet engine deployment; the image carries the venue
+# binary and the mounted instance file selects the profile (plan §19.5). The
+# driver state (cursor, shadow registry, journal) lives on the engine-state PVC
+# so restarts resume where they left.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: engine
+  labels:
+    app.kubernetes.io/name: engine
+    app.kubernetes.io/part-of: venue-mirror
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: engine
+        app.kubernetes.io/part-of: venue-mirror
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: engine
+          image: localhost/venue-mirror:v1
+          imagePullPolicy: IfNotPresent
+          args: ["/etc/mirror/instance.toml"]
+          env:
+            - name: STATE_DIR
+              valueFrom: { configMapKeyRef: { name: venue-config, key: STATE_DIR } }
+            - name: ANVIL_V_URL
+              valueFrom: { configMapKeyRef: { name: venue-config, key: ANVIL_V_URL } }
+            - name: HL_RPC_URL
+              valueFrom: { configMapKeyRef: { name: venue-config, key: HL_RPC_URL } }
+          ports:
+            - { name: http, containerPort: 8080 }
+          volumeMounts:
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+            - { name: state, mountPath: /state }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "100m", memory: 128Mi }
+            limits: { memory: 1Gi }
+      volumes:
+        - name: instance
+          configMap: { name: venue-instance }
+        - name: state
+          persistentVolumeClaim: { claimName: engine-state }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: engine
+  labels: { app.kubernetes.io/name: engine, app.kubernetes.io/part-of: venue-mirror }
+spec:
+  selector: { app.kubernetes.io/name: engine }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
