@@ -209,3 +209,72 @@ async fn admin_probes(
 ) -> Result<Json<mirror_devnet::probes::ProbeOutcome>> {
     Ok(Json(crate::driver::probes_now(&ctx).await?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared taxonomy, pinned per service (the same test name lives in
+    /// the ethereum engine and the CCTP bridge): a request refusal is 400, a
+    /// transport fault at a boundary (anvil, the venue API) is 502, an
+    /// unavailable/warming state is 503, a named absence/conflict keeps its
+    /// 4xx. The sim serves the same mapping (this crate's `Error`).
+    #[test]
+    fn the_http_status_mapping_follows_the_shared_convention() {
+        let status = |e: Error| e.into_response().status();
+        let anvil = || mirror_anvil::Error::Status {
+            endpoint: "anvil-v".into(),
+            method: "eth_call".into(),
+            status: 503,
+            body: String::new(),
+        };
+        assert_eq!(
+            status(Error::Devnet(mirror_devnet::Error::NoCursor)),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(Error::BadRequest {
+                reason: "no".into()
+            }),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(Error::NotFound {
+                what: "coin".into()
+            }),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(Error::NoMarket {
+                coin: "BTC".into()
+            }),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(Error::NotConfigured { what: "sim" }),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(status(Error::Rpc(anvil())), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            status(Error::ApiStatus {
+                status: 429,
+                body: "slow down".into()
+            }),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(status(Error::Warming), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            status(Error::Devnet(mirror_devnet::Error::Poisoned {
+                what: "shadow registry"
+            })),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(Error::Decode {
+                what: "meta",
+                source: serde_json::from_str::<i32>("nope").unwrap_err()
+            }),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+}

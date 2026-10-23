@@ -371,7 +371,7 @@ taxonomy is shared too: `mirror_devnet::Error::{is_request_refusal,
 is_unavailable}` classify 4xx vs 503 once, and both engines map an upstream
 transport fault (anvil, the venue API) to 502.
 
-`make engine-symmetry` (`scripts/engine-symmetry.sh`, 19 checks) is the
+`make engine-symmetry` (`scripts/engine-symmetry.sh`, 20 checks) is the
 fitness function: it drives both engines' shared verbs live and requires
 identical statuses, shapes and refusal wording (digits normalized — a message
 may embed each chain's own cursor or ring size), the shared `/status` fields,
@@ -384,6 +384,8 @@ The behavioral checks, not just shapes:
   orchestrator's probe, deliberately pause-agnostic (a probe on `/healthz`
   would drop the engine — NodePort included — out of the Service and restart
   the pod mid-pause).
+- **shadow hand-back**: a no-op hand-back (`clear` with no keys) is the same
+  200 shape on both, and writes nothing — safe to assert anywhere.
 - **rewind**: a beyond-ring request is one named refusal byte-for-byte; a
   1-block rewind returns the same wire shape on both (direct mode only — on
   the cluster it is a live mutation; the counts legitimately differ: T's
@@ -404,6 +406,14 @@ The behavioral checks, not just shapes:
 - **`/status`** — each engine reports its own facts (reth/M/T vs fork
   pin/probes/source); the shared fields (`cursor`, `halted`, `shadowed*`) are
   present on both.
+- **rewind semantics** (deliberate): T's journal holds the applier's
+  parent-diff before-values, so `/admin/rewind` on T undoes *applied parent
+  blocks*; a T-side engine write (the deal faucet) is undone by the hand-back
+  (`/admin/shadow {clear}`), which re-syncs the source's value. On V there is
+  no parent stream, so the journal holds the engine's own writes and one
+  rewind covers both (measured: a V rewind restores a deal's before-value,
+  `restored_values: 1`). `mirror_frozen` stays 0 on V: the divergence policy
+  is a replay-tier concept (T's M chain).
 
 The behavioral contracts behind the surface are also verified by the drills
 (measured live 2026-10-23): `pause` freezes both engines' cursors (T's head

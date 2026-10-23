@@ -54,13 +54,18 @@ pub fn router(state: Arc<ControlState>) -> Router {
         .with_state(state)
 }
 
-/// The HTTP mapping of the bridge's error taxonomy: request refusals are 4xx,
-/// an unserved domain is 404, everything else is a server-side fault.
+/// The HTTP mapping of the bridge's error taxonomy — the same classes the
+/// engines use: request refusals are 4xx, an unserved domain is 404, a
+/// transport fault at the chain boundary is 502, a wedged store is 503
+/// (cannot serve correct answers until restarted), everything else is a
+/// server-side fault.
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
             Error::BadRequest { .. } => axum::http::StatusCode::BAD_REQUEST,
             Error::UnknownDomain { .. } => axum::http::StatusCode::NOT_FOUND,
+            Error::Rpc(_) => axum::http::StatusCode::BAD_GATEWAY,
+            Error::Poisoned { .. } => axum::http::StatusCode::SERVICE_UNAVAILABLE,
             _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == axum::http::StatusCode::INTERNAL_SERVER_ERROR {
@@ -437,5 +442,44 @@ mod tests {
         assert_eq!(summary.state, RelayState::Signed);
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("\"state\":\"signed\""), "{json}");
+    }
+
+    /// The shared taxonomy, pinned per service (the same test name lives in
+    /// both engines): a request refusal is 400, a transport fault at a chain
+    /// boundary is 502, a wedged store is 503, an unserved domain is 404,
+    /// everything else is 500.
+    #[test]
+    fn the_http_status_mapping_follows_the_shared_convention() {
+        use axum::http::StatusCode;
+        let status = |e: Error| e.into_response().status();
+        assert_eq!(
+            status(Error::BadRequest {
+                reason: "no".into()
+            }),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(Error::UnknownDomain { domain: 5 }),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(Error::Rpc(mirror_anvil::Error::Status {
+                endpoint: "anvil-t".into(),
+                method: "eth_call".into(),
+                status: 503,
+                body: String::new(),
+            })),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            status(Error::Poisoned {
+                what: "cctp store"
+            }),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(Error::MessageTooShort { len: 1, want: 2 }),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

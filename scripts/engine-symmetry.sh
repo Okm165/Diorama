@@ -150,6 +150,9 @@ fi
 same_error /admin/rewind -X POST -H 'Content-Type: application/json' -d '{"blocks":2000}'
 # A malformed shadow request is the extractor's 422 on both (axum's own body).
 same /admin/shadow -X POST -H 'Content-Type: application/json' -d '{"clear":"not-a-bool"}'
+# A no-op hand-back (clear, no keys named) is the success-path shape: both 200
+# with the same key set, and it writes nothing — safe to assert anywhere.
+same /admin/shadow -X POST -H 'Content-Type: application/json' -d "{\"address\":\"$ACCT\",\"slots\":[],\"clear\":true}"
 # A deal lands on both with each side's own token. Both USDCs are
 # byte-identical FiatTokenV2 deployments (balances mapping at slot 9), so on
 # clean chains the discovered slot must be the *same* mapping slot. A

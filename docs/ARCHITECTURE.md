@@ -380,6 +380,12 @@ restores the recorded writes instead - the base is identical - and orphan
 values (keys handed back earlier) are pruned, never re-owned. `epoch_pin` in
 `/state/cursor.json` records the current pin; `mirror_t_resets_total` counts epoch changes.
 
+**Every persisted state file is written atomically** — create the directory,
+write a sibling `.tmp`, rename over the target: the shadow registry, the
+cursor, the journal's block files, the simulator's account/market state and
+the CCTP message store all use the one pattern, so a crash mid-write can never
+leave a half-parsed file for the next boot to die on.
+
 **T's heights are its own.** T mines one block per applied parent block, plus
 one per journal rewind, so its height is not a mainnet block number - the
 engine tracks progress by `cursor_t` (last applied parent block) and only M,

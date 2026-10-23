@@ -319,3 +319,57 @@ async fn feed_override(
         paused: true,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared taxonomy, pinned per service (the same test name lives in
+    /// the venue engine and the CCTP bridge): a request refusal is 400, a
+    /// transport fault at a chain boundary is 502, an unavailable registry is
+    /// 503, a named absence/conflict keeps its 4xx, everything else is 500.
+    /// The live symmetry suite exercises the classes it can reach without
+    /// breaking a chain; this pins the rest.
+    #[test]
+    fn the_http_status_mapping_follows_the_shared_convention() {
+        let status = |e: Error| e.into_response().status();
+        let anvil = || mirror_anvil::Error::Status {
+            endpoint: "anvil-t".into(),
+            method: "eth_call".into(),
+            status: 503,
+            body: String::new(),
+        };
+        assert_eq!(
+            status(Error::Devnet(mirror_devnet::Error::NoCursor)),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(Error::Devnet(mirror_devnet::Error::Poisoned {
+                what: "shadow registry"
+            })),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(status(Error::Rpc(anvil())), StatusCode::BAD_GATEWAY);
+        assert_eq!(status(Error::FeedBridgeUnconfigured), StatusCode::CONFLICT);
+        assert_eq!(
+            status(Error::FeedBridgeUnknown {
+                feed: "ETH/USD".into()
+            }),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(Error::FeedBridgeWaiting {
+                feed: "ETH/USD".into()
+            }),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(Error::WrongChain {
+                anvil: "anvil-t",
+                got: 5,
+                want: 1
+            }),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+}
