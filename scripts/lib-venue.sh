@@ -22,16 +22,32 @@ pass=0; fail=0
 ok()   { echo "  ✔ $*"; pass=$((pass+1)); }
 bad()  { echo "  ✘ $*"; fail=$((fail+1)); }
 info() { echo "  · $*"; }
-json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+# Parse a JSON body and print one expression. An empty or unparsable body is a
+# *named* failure with the body echoed to stderr (a curl that suppressed its
+# body must not surface as a Python traceback: the caller's own check reports
+# the miss).
+json() {
+  python3 -c "
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    sys.stderr.write('json: unparsable body: ' + raw.strip()[:200] + '\n')
+    print('None')
+    raise SystemExit
+print($1)
+"
+}
 
 if [ -n "${ENGINE_URL:-}" ]; then
-  eget()   { curl -sf -m 60 "$ENGINE_URL$1"; }
-  epost()  { curl -sf -m 60 -X POST "$ENGINE_URL$1" -H 'Content-Type: application/json' -d "$2"; }
-  rpcv()   { curl -sf -m 30 -X POST "$V_URL" -H 'Content-Type: application/json' -d "$1"; }
-  sget()   { curl -sf -m 30 "$SIM_INFO$1"; }
-  sipost() { curl -sf -m 30 -X POST "$SIM_INFO$1" -H 'Content-Type: application/json' -d "$2"; }
-  spost()  { curl -sf -m 30 -X POST "$SIM_CTRL$1" -H 'Content-Type: application/json' -d "$2"; }
-  smetrics() { curl -sf -m 30 "$SIM_CTRL/metrics"; }
+  eget()   { curl -s --fail-with-body -m 60 "$ENGINE_URL$1"; }
+  epost()  { curl -s --fail-with-body -m 60 -X POST "$ENGINE_URL$1" -H 'Content-Type: application/json' -d "$2"; }
+  rpcv()   { curl -s --fail-with-body -m 30 -X POST "$V_URL" -H 'Content-Type: application/json' -d "$1"; }
+  sget()   { curl -s --fail-with-body -m 30 "$SIM_INFO$1"; }
+  sipost() { curl -s --fail-with-body -m 30 -X POST "$SIM_INFO$1" -H 'Content-Type: application/json' -d "$2"; }
+  spost()  { curl -s --fail-with-body -m 30 -X POST "$SIM_CTRL$1" -H 'Content-Type: application/json' -d "$2"; }
+  smetrics() { curl -s --fail-with-body -m 30 "$SIM_CTRL/metrics"; }
   balance() { # balance <token> <address> -> decimal units
     "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$V_URL" 2>/dev/null | awk '{print $1}'
   }

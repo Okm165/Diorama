@@ -596,9 +596,10 @@ mod tests {
             let _ = &feed;
             tx.send(()).unwrap();
         });
-        // 10 s: a deadlock never answers, so the budget only has to outlast a
-        // loaded parallel test run (5 s flaked once on a full-workspace run).
-        rx.recv_timeout(std::time::Duration::from_secs(10))
+        // 20 s: a deadlock never answers, so the budget only has to outlast a
+        // loaded parallel test run (5 s flaked once on a full-workspace run,
+        // 10 s once under a full-workspace run + a build).
+        rx.recv_timeout(std::time::Duration::from_secs(20))
             .expect("the bridge effects must not self-deadlock");
     }
 

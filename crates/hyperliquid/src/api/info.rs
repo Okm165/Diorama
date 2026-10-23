@@ -276,6 +276,9 @@ fn active_asset_data(
             value: p.leverage_value,
             raw_usd: None,
         })
+        // A no-position coin serves the venue's own default: the live sample
+        // measured `leverage: {type: "cross", value: 20}` for an account with
+        // no position (2026-10-23, §16.5's probe) — not a fabrication.
         .unwrap_or(Leverage {
             kind: LeverageType::Cross,
             value: 20,

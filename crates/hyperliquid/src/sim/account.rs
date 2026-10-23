@@ -455,7 +455,10 @@ fn position_row(
             },
             liquidation_px,
             margin_used: p.margin_used,
-            max_leverage: max_leverage(coin, meta),
+            // The live bound for a tracked coin; for a coin the meta does not
+            // carry (a seeded position outside the markets) the position's own
+            // leverage — a value we know, never a fabricated bound.
+            max_leverage: max_leverage(coin, meta).unwrap_or(p.leverage_value),
             position_value: facts.value,
             return_on_equity: roe,
             szi: p.szi,
@@ -649,10 +652,13 @@ pub fn maintenance_margin(coin: &str, notional: Decimal, meta: Option<&crate::wi
     mul(notional, maintenance_rate(coin, notional, meta)?, "maintenance margin")
 }
 
-fn max_leverage(coin: &str, meta: Option<&crate::wire::Meta>) -> u32 {
+/// The coin's live max leverage — `None` when the live meta does not carry
+/// the coin (a seeded position outside the tracked markets: the feed is
+/// warming). Callers pick their own bounded fallback; a fabricated default
+/// here would be a silent lie about a margin bound.
+fn max_leverage(coin: &str, meta: Option<&crate::wire::Meta>) -> Option<u32> {
     meta.and_then(|m| m.universe.iter().find(|a| a.name == coin))
         .map(|a| a.max_leverage)
-        .unwrap_or(20)
 }
 
 /// The isolated liquidation price (exact formula, plan §16.3):
@@ -795,7 +801,10 @@ pub fn ctx_of(feed: &MarketFeed, coin: &str) -> Option<AssetCtx> {
         }
     }
     Some(AssetCtx {
-        funding: feed.funding(coin).unwrap_or_default(),
+        // No funding source (neither an override nor the ctx cache) means this
+        // minimal ctx is not servable: a zero would be a silent lie (the
+        // caller — the WS lane — skips the push and retries on the next tick).
+        funding: feed.funding(coin)?,
         open_interest: Decimal::ZERO,
         prev_day_px: mark,
         day_ntl_vlm: Decimal::ZERO,
@@ -1217,5 +1226,31 @@ mod tests {
         // Long: mark − margin/size/(1 − l).
         let expected = mark - p.margin_used / p.szi / (Decimal::ONE - rate);
         assert_eq!(liq, expected);
+    }
+
+    #[test]
+    fn ctx_of_needs_a_funding_source() {
+        // A price override owns mark+oracle over an empty cache: the prices
+        // compose, but no funding exists anywhere — the minimal ctx is not
+        // servable (a zero would be a silent lie), so the WS lane skips the
+        // push and retries on the next tick.
+        use crate::feed::PriceOverride;
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        feed.own_price(
+            "BTC",
+            PriceOverride {
+                mark: Decimal::from(100),
+                oracle: Decimal::from(101),
+            },
+        )
+        .unwrap();
+        assert!(ctx_of(&feed, "BTC").is_none());
+        // With a funding source the ctx serves (the crash-lane shape: the
+        // override wins over the absent cache).
+        feed.own_funding("BTC", Decimal::new(125, 7)).unwrap();
+        let ctx = ctx_of(&feed, "BTC").unwrap();
+        assert_eq!(ctx.funding, Decimal::new(125, 7));
+        assert_eq!(ctx.mark_px, Decimal::from(100));
+        assert_eq!(ctx.oracle_px, Decimal::from(101));
     }
 }
