@@ -488,9 +488,13 @@ The behavioral checks, not just shapes:
   finer-grained than a per-feed seconds gauge); the rate budget as
   `venue_sim_budget_weight_used` (with `venue_sim_budget_skips_total`); the
   invariant-violation page as `venue_sim_identity_violations_total`; the
-  bridge's actions as the typed `venue_bridge_*_total` family and its pending
-  window as `cctp_messages_pending`. `venue_feed_overrides` and
-  `venue_sim_advances_total` are served under those names. There is no
+  bridge's actions as the typed `venue_bridge_*_total` family, and its pending
+  window as the **cursor lag** (`venue_head` − `venue_cursor`: the bridge
+  applies a block's effects and its cursor in one atomic write, so a growing
+  lag is a stuck bridge — the block is re-scanned until it lands).
+  `venue_feed_overrides` and `venue_sim_advances_total` are served under those
+  names. The CCTP bridge's own queue is a separate service's gauge
+  (`cctp_messages_pending`, the emulated PENDING window). There is no
   `venue-closure` target: the venue side has no diff applier/watchlist by
   chain nature (no BALs on HyperEVM), and its V-side wiring is verified at
   boot by the bridge's `verify_wiring` (chain id, contracts, roles) — the

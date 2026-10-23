@@ -136,7 +136,7 @@ impl Bridge {
         let receipts = self.v.receipts(n).await?;
         for receipt in &receipts {
             for log in receipt.logs() {
-                let Some(transfer) = system::transfer_of(log.topics(), &log.data().data) else {
+                let Some(transfer) = system::transfer_of(log.data()) else {
                     continue;
                 };
                 self.apply_credit(&transfer, log.address(), &tokens).await?;

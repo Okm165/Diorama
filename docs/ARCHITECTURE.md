@@ -735,6 +735,13 @@ state IS the source's state at N - the block parameter is ignored, or the
 retention window is shorter than a re-pin interval). An older pin is skipped
 and counted, never alarmed - a mismatch there would be a lie; and a source that
 advances mid-run turns the run into "skipped" (a race, not a divergence).
+The skip set includes the instance's **`fixture_addresses`** — the canonical
+addresses daloc's fixture deploy replaces on V via `anvil_setCode` (their
+chain-999 installs: USDC, WETH, WBTC, DAI, WHYPE, wstHYPE): cheatcode writes
+are invisible to the tx scanner, so without the list a re-pin-to-`latest`
+after their deploy would run the USDC probe against a mock and alarm on a
+lie. The list is instance data; empty it for a clean-chain run and the probe
+checks again.
 
 **The steady-state scan.** V's head only advances when someone mines (automine
 is off), so the driver scans the devnet's own blocks into the shared shadow
@@ -853,8 +860,9 @@ unsigned with the side in `szi`, as the venue does). Seeding preserves
 operator's recall amount round-trips byte-for-byte.
 
 Mechanics (v1): maintenance margin is ½ the initial margin of the tier the
-position's notional sits in; funding accrues hourly on the **sim clock** at the
-oracle price (`payment = −szi·oracle·rate·hours`), all-or-nothing per account (a
+position's notional sits in; funding accrues **pro-rata** on the sim clock at
+the venue's hourly rate and the oracle price
+(`payment = −szi·oracle·rate·hours`), all-or-nothing per account (a
 missing coin's context defers the whole account's accrual - a partially accrued
 account would silently lose the skipped positions' funding forever); below
 maintenance, positions close at the mark (the full waterfall - partial closes,
@@ -867,9 +875,14 @@ runs on every account-scoped read *and* on a 1 Hz tick, so daloc's
 set-and-read tests see live funding and liquidation behavior without ever
 calling `advance`; `advance` stays for deterministic scripting (n blocks of
 the same evaluation, clock included). The sim has its own clock (wall + offset,
-offset 0 until `advance` scripts a jump); the wire's `time` field stays *wall*
-now - it is the read's freshness, which the client's ≤6 s gate compares against
-its own clock.
+offset 0 until `advance` scripts a jump); the wire's `time` field is the
+**served clock** — `max(wall, the sim clock, V's head timestamp)`. The bridge
+observes V's head time once per new head (their harness jumps every chain
+forward and then reads the venue; a served time that lagged the chain would
+fail their freshness gate — measured 2026-10-23: after a +3600 s jump, a
+touched account served exactly V's head timestamp). Untouched accounts
+pass through to the live venue verbatim, so their `time` is the real venue's
+own clock — the COW overlay's split, by design.
 
 ### The control API
 
@@ -881,7 +894,7 @@ its own clock.
 | `POST /control/set_book` | `{coin, levels?}` | scripted book, ≤20 levels per side (absent = hand back) |
 | `POST /control/set_funding` | `{coin, rate?}` | own the hourly rate (absent = hand back) |
 | `POST /control/set_account` | `{address, state}` | hl_mock-compatible seeding (`totalRawUsd` + positions); a **patch** in their shape's field names (`userAbstraction`, `spotBalances`; unnamed fields keep their value) |
-| `GET /control/state/{address}` | - | the account's served state, or 404 for an untouched one |
+| `GET /control/state/{address}` | - | the account's control (fixture) view — the hl_mock-compatible patch shape; an untouched address answers hl_mock's default (mode `disabled`), never a 404 |
 | `POST /control/reset` | `{}` | blank the scenario (accounts + overrides), bump the epoch |
 | `POST /control/epoch_new` | `{}` | reset + re-pin V through the engine's `/admin/epoch` |
 

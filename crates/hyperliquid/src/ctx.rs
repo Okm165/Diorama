@@ -57,7 +57,7 @@ impl Ctx {
             &venue.state_dir,
             venue.state_dir.join("journal"),
             venue.journal_blocks,
-            &[],
+            &venue.fixture_addresses,
         )?;
         let source_rpc = Rpc::new(source_url, timeout)?;
         let pin = Arc::new(AtomicU64::new(0));

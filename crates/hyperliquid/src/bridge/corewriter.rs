@@ -8,16 +8,65 @@
 //!
 //! Amounts are in *Core wei* (`weiDecimals` of the token, 8 for USDC); the
 //! bridge converts to the human decimal the sim keeps when it applies one.
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::Address;
+use alloy_sol_types::{sol, SolCall, SolValue};
 use serde::{Deserialize, Serialize};
 
 /// The CoreWriter system contract.
 pub const CORE_WRITER: Address = alloy_primitives::address!("3333333333333333333333333333333333333333");
 
-/// `sendRawAction(bytes)` selector: the docs' own example wraps the action
-/// stream in this call, so a CoreWriter call's calldata is the selector plus
-/// an ABI-encoded `bytes` argument — never the raw stream alone.
-pub const SEND_RAW_ACTION_SELECTOR: [u8; 4] = [0x17, 0x93, 0x8e, 0x13];
+sol! {
+    /// The call wrapper (the docs' own example): a CoreWriter call's calldata
+    /// is this selector plus an ABI-encoded `bytes` argument — never the raw
+    /// stream alone. alloy owns the selector and the argument decoder.
+    function sendRawAction(bytes data);
+
+    // The action payloads the bridge models, in their documented ABI form —
+    // alloy decodes them (strict lengths, range-checked integers), so a
+    // malformed payload is a typed refusal, never a silently truncated value.
+    struct LimitOrderPayload {
+        uint32 asset;
+        bool isBuy;
+        uint64 limitPx;
+        uint64 sz;
+        bool reduceOnly;
+        uint8 tif;
+        uint128 cloid;
+    }
+    struct SpotSendPayload {
+        address destination;
+        uint64 token;
+        uint64 wei;
+    }
+    struct UsdClassTransferPayload {
+        uint64 ntl;
+        bool toPerp;
+    }
+    struct AddApiWalletPayload {
+        address apiWallet;
+        string name;
+    }
+    struct CancelByOidPayload {
+        uint32 asset;
+        uint64 oid;
+    }
+    struct CancelByCloidPayload {
+        uint32 asset;
+        uint128 cloid;
+    }
+    struct SendAssetPayload {
+        address destination;
+        address subAccount;
+        uint32 sourceDex;
+        uint32 destinationDex;
+        uint64 token;
+        uint64 wei;
+    }
+    struct SetAbstractionPayload {
+        address user;
+        uint8 abstraction;
+    }
+}
 
 /// The version byte this decoder understands.
 const VERSION: u8 = 1;
@@ -93,21 +142,13 @@ impl CoreAction {
 /// ABI bytes argument), or — for a caller that low-level-calls the contract —
 /// the raw stream itself.
 pub fn decode_calldata(input: &[u8]) -> CoreAction {
-    if input.len() >= 4 && input[..4] == SEND_RAW_ACTION_SELECTOR {
-        return match bytes_argument(&input[4..]) {
-            Some(stream) => decode(stream),
-            None => CoreAction::Malformed,
+    if input.len() >= 4 && input[..4] == sendRawActionCall::SELECTOR {
+        return match sendRawActionCall::abi_decode(input) {
+            Ok(call) => decode(&call.data),
+            Err(_) => CoreAction::Malformed,
         };
     }
     decode(input)
-}
-
-/// The single ABI `bytes` argument (head offset word + length word + data).
-fn bytes_argument(args: &[u8]) -> Option<&[u8]> {
-    let offset = usize::try_from(U256::from_be_slice(args.get(..32)?)).ok()?;
-    let len_word = args.get(offset..offset.checked_add(32)?)?;
-    let len = usize::try_from(U256::from_be_slice(len_word)).ok()?;
-    args.get(offset.checked_add(32)?..offset.checked_add(32)?.checked_add(len)?)
 }
 
 /// Decode one action stream (the raw bytes of a `sendRawAction` argument).
@@ -130,141 +171,110 @@ pub fn decode(input: &[u8]) -> CoreAction {
     }
 }
 
-/// Action 1: `limitOrder` (7 words).
+// The payloads are `abi.encode(...)` of their documented signatures, so every
+// decoder uses alloy's *params* variant (`abi_decode_params`) — the one that
+// reads the head/tail layout of a top-level parameter list.
+
+/// Action 1: `limitOrder`.
 fn decode_limit_order(payload: &[u8]) -> CoreAction {
-    match words(payload, 7) {
-        Some(w) => CoreAction::LimitOrder {
-            asset: u32_of(&w[0]),
-            is_buy: !w[1].is_zero(),
-            limit_px: u64_of(&w[2]),
-            sz: u64_of(&w[3]),
-            reduce_only: !w[4].is_zero(),
-            tif: u8_of(&w[5]),
-            cloid: u128_of(&w[6]),
+    match LimitOrderPayload::abi_decode_params(payload) {
+        Ok(v) => CoreAction::LimitOrder {
+            asset: v.asset,
+            is_buy: v.isBuy,
+            limit_px: v.limitPx,
+            sz: v.sz,
+            reduce_only: v.reduceOnly,
+            tif: v.tif,
+            cloid: v.cloid,
         },
-        None => CoreAction::Malformed,
+        Err(_) => CoreAction::Malformed,
     }
 }
 
-/// Action 6: `spotSend` (3 words).
+/// Action 6: `spotSend`.
 fn decode_spot_send(payload: &[u8]) -> CoreAction {
-    match words(payload, 3) {
-        Some(w) => CoreAction::SpotSend {
-            destination: address_of(&w[0]),
-            token: u64_of(&w[1]),
-            wei: u64_of(&w[2]),
+    match SpotSendPayload::abi_decode_params(payload) {
+        Ok(v) => CoreAction::SpotSend {
+            destination: v.destination,
+            token: v.token,
+            wei: v.wei,
         },
-        None => CoreAction::Malformed,
+        Err(_) => CoreAction::Malformed,
     }
 }
 
-/// Action 7: `usdClassTransfer` (2 words).
+/// Action 7: `usdClassTransfer`.
 fn decode_usd_class_transfer(payload: &[u8]) -> CoreAction {
-    match words(payload, 2) {
-        Some(w) => CoreAction::UsdClassTransfer {
-            ntl: u64_of(&w[0]),
-            to_perp: !w[1].is_zero(),
+    match UsdClassTransferPayload::abi_decode_params(payload) {
+        Ok(v) => CoreAction::UsdClassTransfer {
+            ntl: v.ntl,
+            to_perp: v.toPerp,
         },
-        None => CoreAction::Malformed,
+        Err(_) => CoreAction::Malformed,
     }
 }
 
-/// Action 10: `cancelByOid` (2 words).
+/// Action 10: `cancelByOid`.
 fn decode_cancel_by_oid(payload: &[u8]) -> CoreAction {
-    match words(payload, 2) {
-        Some(w) => CoreAction::CancelByOid {
-            asset: u32_of(&w[0]),
-            oid: u64_of(&w[1]),
+    match CancelByOidPayload::abi_decode_params(payload) {
+        Ok(v) => CoreAction::CancelByOid {
+            asset: v.asset,
+            oid: v.oid,
         },
-        None => CoreAction::Malformed,
+        Err(_) => CoreAction::Malformed,
     }
 }
 
-/// Action 11: `cancelByCloid` (2 words).
+/// Action 11: `cancelByCloid`.
 fn decode_cancel_by_cloid(payload: &[u8]) -> CoreAction {
-    match words(payload, 2) {
-        Some(w) => CoreAction::CancelByCloid {
-            asset: u32_of(&w[0]),
-            cloid: u128_of(&w[1]),
+    match CancelByCloidPayload::abi_decode_params(payload) {
+        Ok(v) => CoreAction::CancelByCloid {
+            asset: v.asset,
+            cloid: v.cloid,
         },
-        None => CoreAction::Malformed,
+        Err(_) => CoreAction::Malformed,
     }
 }
 
-/// Action 13: `sendAsset` (6 words).
+/// Action 13: `sendAsset`.
 fn decode_send_asset(payload: &[u8]) -> CoreAction {
-    match words(payload, 6) {
-        Some(w) => CoreAction::SendAsset {
-            destination: address_of(&w[0]),
-            sub_account: address_of(&w[1]),
-            source_dex: u32_of(&w[2]),
-            destination_dex: u32_of(&w[3]),
-            token: u64_of(&w[4]),
-            wei: u64_of(&w[5]),
+    match SendAssetPayload::abi_decode_params(payload) {
+        Ok(v) => CoreAction::SendAsset {
+            destination: v.destination,
+            sub_account: v.subAccount,
+            source_dex: v.sourceDex,
+            destination_dex: v.destinationDex,
+            token: v.token,
+            wei: v.wei,
         },
-        None => CoreAction::Malformed,
+        Err(_) => CoreAction::Malformed,
     }
 }
 
-/// Action 16: `setAbstraction` (2 words).
+/// Action 16: `setAbstraction`.
 fn decode_set_abstraction(payload: &[u8]) -> CoreAction {
-    match words(payload, 2) {
-        Some(w) => CoreAction::SetAbstraction {
-            user: address_of(&w[0]),
-            abstraction: u8_of(&w[1]),
+    match SetAbstractionPayload::abi_decode_params(payload) {
+        Ok(v) => CoreAction::SetAbstraction {
+            user: v.user,
+            abstraction: v.abstraction,
         },
-        None => CoreAction::Malformed,
+        Err(_) => CoreAction::Malformed,
     }
 }
 
-/// Decode `(address, string)`: the address word + an ABI dynamic string.
+/// Action 9: `addApiWallet` (the dynamic string included).
 fn decode_add_api_wallet(payload: &[u8]) -> Option<CoreAction> {
-    let w = words(payload, 2)?;
-    let offset = usize::try_from(u64_of(&w[1])).ok()?;
-    // The string's offset points into the payload (its head words included).
-    let len_start = offset.checked_add(32)?;
-    let bytes = payload.get(len_start..)?;
-    let len_word = payload.get(offset..offset.checked_add(32)?)?;
-    let len = U256::from_be_slice(len_word).try_into().ok()?;
-    let name = String::from_utf8(bytes.get(..len)?.to_vec()).ok()?;
+    let v = AddApiWalletPayload::abi_decode_params(payload).ok()?;
     Some(CoreAction::AddApiWallet {
-        wallet: address_of(&w[0]),
-        name,
+        wallet: v.apiWallet,
+        name: v.name,
     })
-}
-
-/// Read `n` 32-byte ABI words (a short payload is `None`).
-fn words(payload: &[u8], n: usize) -> Option<Vec<U256>> {
-    if payload.len() < n * 32 {
-        return None;
-    }
-    let (words, _rest) = payload.as_chunks::<32>();
-    Some(words.iter().take(n).map(|w| U256::from_be_slice(w)).collect())
-}
-
-fn u64_of(word: &U256) -> u64 {
-    word.try_into().unwrap_or(u64::MAX)
-}
-
-fn u32_of(word: &U256) -> u32 {
-    word.try_into().unwrap_or(u32::MAX)
-}
-
-fn u8_of(word: &U256) -> u8 {
-    word.try_into().unwrap_or(u8::MAX)
-}
-
-fn u128_of(word: &U256) -> u128 {
-    word.try_into().unwrap_or(u128::MAX)
-}
-
-fn address_of(word: &U256) -> Address {
-    Address::from_word(B256::from(word.to_be_bytes::<32>()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::U256;
 
     /// The docs' own example: `sendUsdClassTransfer(ntl, toPerp)` builds
     /// `[0x01, 0x00, 0x00, 0x07] ++ abi.encode(uint64, bool)`.
@@ -333,7 +343,7 @@ mod tests {
     /// from `cast calldata "sendRawAction(bytes)" 0x01000007…`).
     #[test]
     fn wrapped_calls_decode_through_the_bytes_argument() {
-        let mut input = SEND_RAW_ACTION_SELECTOR.to_vec();
+        let mut input = sendRawActionCall::SELECTOR.to_vec();
         input.extend_from_slice(&U256::from(32u64).to_be_bytes::<32>()); // offset
         input.extend_from_slice(&U256::from(68u64).to_be_bytes::<32>()); // len
         let mut stream = vec![0x01, 0x00, 0x00, 0x07];

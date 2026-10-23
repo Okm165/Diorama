@@ -45,6 +45,14 @@ pub trait Registry {
     fn inc(&self, field: &AtomicU64) {
         field.fetch_add(1, Ordering::Relaxed);
     }
+    /// Record one shadow scan's work: the walked/empty pair every profile
+    /// reports (the applier's inline scan, both drivers' loops, the
+    /// hand-backs' pre-scans — five call sites across the two projects, one
+    /// definition of what the pair means).
+    fn record_scan(&self, walk: &crate::scan::ScanWalk, scanned: &AtomicU64, skipped_empty: &AtomicU64) {
+        self.add(scanned, walk.walked);
+        self.add(skipped_empty, walk.empty);
+    }
 }
 
 impl Registry for Metrics {}

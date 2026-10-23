@@ -141,11 +141,18 @@ The running pin is **Lighthouse v8.3.0**. v8.3.1 is the current patch — the
 non-staking mirror) — and v8.3.x also satisfies the Hoodi-Oct-26 requirement.
 The bump is a two-step rollout (pull + import the new tag+digest, then
 `make apply` with the manifest edit) and therefore rides the **next rollout
-window**, together with the venue overlay: bump `k8s/base/lighthouse.yaml`'s
-tag+digest, `make images` (the pull), `make check-pins`, then `make apply`.
-Until then the running mirror is unaffected (the mitigation is a CA trust
-change, not a consensus change). reth v2.8.0 and foundry v1.8.6 are the
-current releases and stay as pinned.
+window**, together with the venue overlay: replace the line in
+`k8s/base/lighthouse.yaml` with
+
+```
+image: docker.io/sigp/lighthouse:v8.3.1@sha256:05b5068268ea3fbd64389309d1d7c15b8f18a53f28d0886f098316302f4cdb41
+```
+
+(the multi-arch index digest — the same form the v8.3.0 pin uses), then
+`make images` (the pull), `make check-pins`, `make apply`. Until then the
+running mirror is unaffected (the mitigation is a CA trust change, not a
+consensus change). reth v2.8.0 and foundry v1.8.6 are the current releases
+and stay as pinned.
 
 Read the flight recorder:
 

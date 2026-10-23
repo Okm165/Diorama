@@ -31,6 +31,21 @@ probes = [
   { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
 ]
 
+# Canonical addresses daloc's fixture deploy replaces on V via `anvil_setCode`
+# (their `deploy-contracts.sh` installs MockERC20Fixed over the Ethereum-family
+# addresses on every chain — USDC here is chain 999's 0xb883… — and adds
+# WHYPE/wstHYPE on 999). Whole-account owned: the at-pin probes skip them
+# (counted) instead of false-alarming once the mocks are installed. Empty this
+# list for a clean-chain run (no fixtures), and the USDC probe checks again.
+fixture_addresses = [
+  "0xb88339CB7199b77E23DB6E890353E22632Ba630f", # USDC (999)
+  "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", # WETH (their mock is installed on every chain)
+  "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", # WBTC
+  "0x6B175474E89094C44Da98b954EedeAC495271d0F", # DAI
+  "0x5555555555555555555555555555555555555555", # WHYPE (999's wrapped gas token)
+  "0x94e8396e0869c9F2200760aF0621aFd240E1CF38", # wstHYPE
+]
+
 [services.venue.http]
 addr = "0.0.0.0"
 port = 8080

@@ -125,6 +125,15 @@ pub struct VenueSection {
     /// At-pin probes: devnet-owned targets are skipped and counted (COW means
     /// that state is the devnet's, not the fork base's).
     pub probes: Vec<Probe>,
+    /// Canonical addresses the devnet's fixture deploy replaces on V via
+    /// `anvil_setCode` (daloc's chain-999 installs: USDC, WETH, WBTC, DAI,
+    /// WHYPE, wstHYPE — their deploy installs the Ethereum-family mocks on
+    /// every chain and adds WHYPE/wstHYPE on 999): whole-account owned, so the
+    /// at-pin probes skip them (counted) instead of false-alarming on a mock.
+    /// The venue has no parent stream to clobber, so probe honesty is the
+    /// whole job of this list here.
+    #[serde(default)]
+    pub fixture_addresses: Vec<Address>,
 }
 
 /// `[services.engine]`: the Mainnet Mirror engine.

@@ -486,10 +486,11 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
         // blocks are not re-traced.
         match mirror_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await {
             Ok(walk) => {
-                ctx.eth_metrics
-                    .add(&ctx.eth_metrics.shadow_scanned_blocks, walk.walked);
-                ctx.eth_metrics
-                    .add(&ctx.eth_metrics.shadow_skipped_empty_blocks, walk.empty);
+                ctx.eth_metrics.record_scan(
+                    &walk,
+                    &ctx.eth_metrics.shadow_scanned_blocks,
+                    &ctx.eth_metrics.shadow_skipped_empty_blocks,
+                );
             }
             Err(e) => tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block"),
         }

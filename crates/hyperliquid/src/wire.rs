@@ -357,6 +357,7 @@ pub struct MetaAndAssetCtxs(pub Meta, pub Vec<AssetCtx>);
 /// `perpDexs`: `[null, …]` (the first dex is null). The sim serves the first
 /// dex only until the multi-dex mechanics land (Phase 2).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct PerpDex {
     pub name: String,
     pub full_name: String,
@@ -365,7 +366,21 @@ pub struct PerpDex {
     pub oracle_updater: Option<Address>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fee_recipient: Option<Address>,
+    /// Per-coin OI caps (the venue's credit terms; the sim's feed reads them).
     pub asset_to_streaming_oi_cap: Vec<(String, Decimal)>,
+    /// The HIP-3 funding knobs the live dexes carry (measured 2026-10-23:
+    /// `assetToFundingClamp` empty on `xyz`, the other two populated per coin);
+    /// kept for wire completeness — no consumer reads them yet.
+    #[serde(default)]
+    pub asset_to_funding_clamp: Vec<(String, Decimal)>,
+    #[serde(default)]
+    pub asset_to_funding_interest_rate: Vec<(String, Decimal)>,
+    #[serde(default)]
+    pub asset_to_funding_multiplier: Vec<(String, Decimal)>,
+    /// `[[action, [address…]]…]` — the dex's delegated admin surface
+    /// (`registerAsset`, `setOracle`, …; measured live).
+    #[serde(default)]
+    pub sub_deployers: Vec<(String, Vec<Address>)>,
 }
 
 /// `l2Book`: exactly two sides, ≤20 levels each (daloc's gate). `n` is the
@@ -496,6 +511,81 @@ pub enum UserAbstraction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn measured_shapes_parse_through_their_types() {
+        // Trimmed live samples (2026-10-23): every wire shape the sim serves
+        // parses through its own type — the check that would have caught
+        // `PerpDex`'s missing camelCase rename (it never parsed the live shape
+        // until this test existed).
+        let meta: MetaAndAssetCtxs = serde_json::from_str(
+            r#"[
+              {"universe":[{"szDecimals":5,"name":"BTC","maxLeverage":40,"marginTableId":56}],
+               "marginTables":[[50,{"description":"","marginTiers":[{"lowerBound":"0.0","maxLeverage":50}]}]],
+               "collateralToken":0},
+              [{"funding":"0.0000125","openInterest":"43604.51494","prevDayPx":"82270.0",
+                "dayNtlVlm":"2889867410.3497600555","premium":"-0.0000587373","oraclePx":"81719.8",
+                "markPx":"81713.1","midPx":"81714.5","impactPxs":["81712.3","81715.0"],
+                "dayBaseVlm":"35396.23357"}]
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(meta.0.universe[0].margin_table_id, Some(56));
+        assert_eq!(meta.1[0].impact_pxs.unwrap()[1].to_string(), "81715.0");
+
+        let book: L2Book = serde_json::from_str(
+            r#"{"coin":"BTC","time":1792741463491,
+                "levels":[[{"px":"81712.0","sz":"3.29777","n":16}],[{"px":"81713.0","sz":"13.62593","n":55}]]}"#,
+        )
+        .unwrap();
+        assert_eq!(book.levels[0][0].n, 16);
+
+        let table: MarginTable = serde_json::from_str(
+            r#"{"description":"tiered 40x","marginTiers":[{"lowerBound":"0.0","maxLeverage":40},{"lowerBound":"150000000.0","maxLeverage":20}]}"#,
+        )
+        .unwrap();
+        assert_eq!(table.margin_tiers[1].max_leverage, 20);
+
+        let active: ActiveAssetData = serde_json::from_str(
+            r#"{"user":"0x00000000000000000000000000000000000000a1","coin":"BTC",
+                "leverage":{"type":"cross","value":20},"maxTradeSzs":["0.0","0.0"],
+                "availableToTrade":["0.0","0.0"],"markPx":"81697.0"}"#,
+        )
+        .unwrap();
+        assert_eq!(active.leverage.kind, LeverageType::Cross);
+
+        let status: ExchangeStatus =
+            serde_json::from_str(r#"{"specialStatuses":null,"time":1792741470785}"#).unwrap();
+        assert!(status.special_statuses.is_none());
+
+        let spot: SpotClearinghouseState = serde_json::from_str(r#"{"balances":[]}"#).unwrap();
+        assert!(spot.balances.is_empty());
+    }
+
+    #[test]
+    fn perp_dex_carries_the_measured_funding_knobs() {
+        // Captured live 2026-10-23 from `perpDexs[1]` (the `xyz` dex): the
+        // funding knobs and the delegated admin surface are part of the shape
+        // (wire completeness — no consumer reads them yet).
+        let raw = r#"{
+            "name": "xyz",
+            "fullName": "XYZ",
+            "deployer": "0x0000000000000000000000000000000000000001",
+            "oracleUpdater": "0x0000000000000000000000000000000000000002",
+            "feeRecipient": "0x0000000000000000000000000000000000000003",
+            "assetToStreamingOiCap": [["xyz:AAPL","200000000.0"]],
+            "assetToFundingClamp": [],
+            "assetToFundingInterestRate": [["xyz:EUR","0.0"]],
+            "assetToFundingMultiplier": [["xyz:AAPL","0.5"]],
+            "subDeployers": [["registerAsset",["0x0000000000000000000000000000000000000004"]]]
+        }"#;
+        let dex: PerpDex = serde_json::from_str(raw).unwrap();
+        assert_eq!(dex.asset_to_funding_clamp.len(), 0);
+        assert_eq!(dex.asset_to_funding_interest_rate[0].0, "xyz:EUR");
+        assert_eq!(dex.asset_to_funding_multiplier[0].1.to_string(), "0.5");
+        assert_eq!(dex.sub_deployers[0].0, "registerAsset");
+        assert_eq!(dex.sub_deployers[0].1.len(), 1);
+    }
 
     #[test]
     fn requests_parse_by_tag() {

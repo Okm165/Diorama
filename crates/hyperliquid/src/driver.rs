@@ -144,10 +144,11 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     )
     .await?;
     if walk.walked > 0 {
-        ctx.venue_metrics
-            .add(&ctx.venue_metrics.scanned_blocks_total, walk.walked);
-        ctx.venue_metrics
-            .add(&ctx.venue_metrics.skipped_empty_blocks_total, walk.empty);
+        ctx.venue_metrics.record_scan(
+            &walk,
+            &ctx.venue_metrics.scanned_blocks_total,
+            &ctx.venue_metrics.skipped_empty_blocks_total,
+        );
         ctx.plane.save_shadow()?;
         // Ring the journal like the applier does on T: the rewind window is
         // the same 1024 blocks on both mirrors (files older than head - keep

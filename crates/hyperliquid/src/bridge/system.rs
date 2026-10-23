@@ -19,18 +19,21 @@
 //! bridge credits.
 use crate::error::Error;
 use crate::wire::SpotMeta;
-use alloy_primitives::{address, b256, Address, Bytes, B256, U256};
+use alloy_primitives::{address, Address, Bytes, LogData, U256};
+use alloy_sol_types::{sol, SolCall, SolEvent};
 use rust_decimal::Decimal;
+
+sol! {
+    /// The canonical ERC-20 surface the bridge speaks: the `Transfer` event
+    /// (the EVM→Core credit's only admissible source) and `transfer` (the
+    /// Core→EVM completion). alloy generates the topic hash, the validating
+    /// decoder and the selector — the wire format is never hand-rolled.
+    event Transfer(address indexed from, address indexed to, uint256 value);
+    function transfer(address to, uint256 amount) returns (bool);
+}
 
 /// The native HYPE system address (transfers as tx value; `Received` event).
 pub const HYPE_SYSTEM: Address = address!("2222222222222222222222222222222222222222");
-
-/// The ERC20 `Transfer(address,address,uint256)` topic0.
-pub const TRANSFER_TOPIC: B256 =
-    b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
-
-/// The ERC20 `transfer(address,uint256)` selector.
-pub const TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
 
 /// The system address for a token index.
 pub fn system_address(token_index: u64) -> Address {
@@ -122,38 +125,16 @@ pub fn floor_to_core_wei(amount: Decimal, wei_decimals: u32) -> Decimal {
     (amount * pow10(wei_decimals as i32)).trunc() / pow10(wei_decimals as i32)
 }
 
-/// `transfer(address,uint256)` calldata.
+/// `transfer(address,uint256)` calldata — alloy's own encoder.
 pub fn transfer_calldata(to: Address, amount: U256) -> Bytes {
-    let mut out = Vec::with_capacity(68);
-    out.extend_from_slice(&TRANSFER_SELECTOR);
-    out.extend_from_slice(&to.into_word().0);
-    out.extend_from_slice(&amount.to_be_bytes::<32>());
-    Bytes::from(out)
+    transferCall { to, amount }.abi_encode().into()
 }
 
-/// One decoded ERC20 Transfer log.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Transfer {
-    pub from: Address,
-    pub to: Address,
-    pub value: U256,
-}
-
-/// Decode a log as an ERC20 `Transfer` (topic0 + two indexed address topics).
-pub fn transfer_of(topics: &[B256], data: &[u8]) -> Option<Transfer> {
-    if topics.len() != 3 || topics[0] != TRANSFER_TOPIC {
-        return None;
-    }
-    let from = Address::from_word(topics[1]);
-    let to = Address::from_word(topics[2]);
-    if data.len() != 32 {
-        return None;
-    }
-    Some(Transfer {
-        from,
-        to,
-        value: U256::from_be_slice(data),
-    })
+/// Decode a log as an ERC-20 `Transfer`: alloy's validating decoder (the
+/// topic0 hash, the indexed-address count and the data length), so a
+/// look-alike or malformed event decodes to `None` instead of a credit.
+pub fn transfer_of(log: &LogData) -> Option<Transfer> {
+    Transfer::decode_log_data_validate(log).ok()
 }
 
 /// The EVM→Core credit an observed transfer represents: the sender, the
@@ -269,6 +250,15 @@ mod tests {
         assert!(human_to_evm(Decimal::from_str("-1").unwrap(), 6).is_none());
     }
 
+    /// One `Transfer` log as the chain emits it: topic0 + two indexed
+    /// addresses + one data word.
+    fn transfer_log(from: Address, to: Address, value: U256) -> LogData {
+        LogData::new_unchecked(
+            vec![Transfer::SIGNATURE_HASH, from.into_word(), to.into_word()],
+            value.to_be_bytes::<32>().to_vec().into(),
+        )
+    }
+
     #[test]
     fn transfer_logs_decode_and_credit_only_evm_to_core() {
         let usdc = TokenInfo {
@@ -279,30 +269,54 @@ mod tests {
         };
         let tokens = vec![usdc];
         let from = Address::repeat_byte(0xdd);
-        let mut topics = vec![TRANSFER_TOPIC];
-        topics.push(from.into_word());
-        topics.push(system_address(0).into_word());
-        let data = U256::from(5_000_000u64).to_be_bytes::<32>();
-        let t = transfer_of(&topics, &data).unwrap();
         let linked = Address::repeat_byte(0x88);
+        let t = transfer_of(&transfer_log(from, system_address(0), U256::from(5_000_000u64)))
+            .unwrap();
         let (sender, token, amount) = credit_of(&t, &tokens, linked).unwrap();
         assert_eq!(sender, from);
         assert_eq!(token.name, "USDC");
         assert_eq!(amount, Decimal::from(5));
         // The completion direction (from the system) is never a credit.
-        let mut reverse = topics.clone();
-        reverse[1] = system_address(0).into_word();
-        reverse[2] = from.into_word();
-        let t = transfer_of(&reverse, &data).unwrap();
+        let t = transfer_of(&transfer_log(system_address(0), from, U256::from(5_000_000u64)))
+            .unwrap();
         assert!(credit_of(&t, &tokens, linked).is_none());
         // A Transfer log from any other emitter is not a credit (a
         // look-alike event must not mint Core balances).
         let impostor = Address::repeat_byte(0x77);
         assert!(credit_of(&t, &tokens, impostor).is_none());
         // An unlinked token's transfer is not ours to credit.
-        let mut topics2 = topics;
-        topics2[2] = system_address(5).into_word();
-        let t = transfer_of(&topics2, &data).unwrap();
+        let t = transfer_of(&transfer_log(from, system_address(5), U256::from(5_000_000u64)))
+            .unwrap();
         assert!(credit_of(&t, &tokens, linked).is_none());
+    }
+
+    #[test]
+    fn look_alike_and_malformed_events_never_decode() {
+        let from = Address::repeat_byte(0xdd);
+        // Wrong topic0 (some other event's hash): not a Transfer.
+        let look_alike = LogData::new_unchecked(
+            vec![
+                alloy_primitives::B256::repeat_byte(0x11),
+                from.into_word(),
+                system_address(0).into_word(),
+            ],
+            U256::from(1u64).to_be_bytes::<32>().to_vec().into(),
+        );
+        assert!(transfer_of(&look_alike).is_none());
+        // Wrong data length: a truncated word is refused, not truncated.
+        let malformed = LogData::new_unchecked(
+            vec![
+                Transfer::SIGNATURE_HASH,
+                from.into_word(),
+                system_address(0).into_word(),
+            ],
+            vec![0u8; 31].into(),
+        );
+        assert!(transfer_of(&malformed).is_none());
+        // alloy's encoder is the one the completion path sends: selector
+        // `0xa9059cbb`, 68 bytes total.
+        let calldata = transfer_calldata(from, U256::from(5u64));
+        assert_eq!(&calldata[..4], &transferCall::SELECTOR);
+        assert_eq!(calldata.len(), 68);
     }
 }
