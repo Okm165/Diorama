@@ -8,6 +8,6 @@ description = "The Venue Mirror's simulator service: live market plane + COW acc
 
 [dependencies]
 mirror-config = { path = "../../crates/config" }
-mirror-hyperliquid = { path = "../../crates/hyperliquid" }
+mirror-venue = { path = "../../crates/venue" }
 [lints]
 workspace = true

@@ -13,7 +13,7 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib-mainnet.sh"
 
-# The probes mirror config/instances/mainnet-mirror.toml:probes (all watched
+# The probes mirror config/instances/mainnet-mirror/instance.toml:probes (all watched
 # accounts, so T must match reth exactly; none is blockhash-dependent, so M must
 # too - the engine's convergence repair is what makes that true).
 probe() { # probe <rpc-url> <block-hex> <to> <data>

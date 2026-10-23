@@ -106,7 +106,7 @@ async fn selftest_cmd(
 /// The `rewind` subcommand: undo the last N applied parent blocks on T.
 async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
     let cfg = Instance::load(&config)?;
-    let (reth, m, t) = cfg.ethereum_urls()?;
+    let (reth, m, t) = cfg.mainnet_urls()?;
     let ctx = Ctx::new(cfg, &reth, &m, &t)?;
     let out = ctx.admin().rewind(blocks).await?;
     println!(
@@ -125,7 +125,7 @@ const MAINNET_CHAIN_ID: u64 = 1;
 
 async fn run(config: PathBuf) -> Result<()> {
     let cfg = Instance::load(&config)?;
-    let (reth_url, m_url, t_url) = cfg.ethereum_urls()?;
+    let (reth_url, m_url, t_url) = cfg.mainnet_urls()?;
     let ctx = Arc::new(Ctx::new(cfg, &reth_url, &m_url, &t_url)?);
     ctx.restore_blob_form()?;
     boot_asserts(&ctx).await?;

@@ -2,7 +2,7 @@
 //! cost, the engine-mined blocks, the at-pin probes. Rendered beside the
 //! shared admin gauges (`mirror_devnet::metrics::Metrics::render`) — the split
 //! keeps the shared crate's exposition to exactly what both profiles own (the
-//! ethereum engine's mirror of this file is `EthereumMetrics`).
+//! ethereum engine's mirror of this file is `MainnetMetrics`).
 
 mirror_devnet::registry! {
     pub struct VenueMetrics {

@@ -1,7 +1,7 @@
-# Shared runtime wiring for the Venue Mirror stack - the venue twin of
-# mirror-config: deploy-time URLs and paths the instance file references as
-# ${VAR} (plan §19.4 L1). One value, one home: the pods consume these by
-# configMapKeyRef, never by a literal copy in each manifest.
+# Shared runtime wiring for the Venue Mirror stack: the venue wiring env the
+# instance TOML references as ${...} (plan §19.4). Operational tunables live
+# in config/instances/*.toml; this ConfigMap carries only deployment wiring,
+# and the config loader is their only reader.
 apiVersion: v1
 kind: ConfigMap
 metadata:

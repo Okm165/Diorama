@@ -19,12 +19,12 @@ allowed() {
     mirror-config)      echo "" ;;
     mirror-anvil)       echo "mirror-config" ;;
     mirror-devnet)      echo "mirror-anvil mirror-config" ;;
-    mirror-ethereum)    echo "mirror-devnet mirror-anvil mirror-config" ;;
-    mirror-hyperliquid) echo "mirror-devnet mirror-anvil mirror-config" ;;
+    mirror-mainnet)     echo "mirror-devnet mirror-anvil mirror-config" ;;
+    mirror-venue)       echo "mirror-devnet mirror-anvil mirror-config" ;;
     mirror-cctp)        echo "mirror-anvil mirror-config" ;;
-    mainnet-engine)     echo "mirror-ethereum mirror-devnet mirror-anvil mirror-config" ;;
-    venue-engine)       echo "mirror-hyperliquid mirror-devnet mirror-anvil mirror-config" ;;
-    venue-sim)          echo "mirror-hyperliquid mirror-devnet mirror-anvil mirror-config" ;;
+    mainnet-engine)     echo "mirror-mainnet mirror-devnet mirror-anvil mirror-config" ;;
+    venue-engine)       echo "mirror-venue mirror-devnet mirror-anvil mirror-config" ;;
+    venue-sim)          echo "mirror-venue mirror-devnet mirror-anvil mirror-config" ;;
     cctp-bridge)        echo "mirror-cctp mirror-anvil mirror-config" ;;
     *)                  echo "UNKNOWN-PACKAGE" ;;
   esac

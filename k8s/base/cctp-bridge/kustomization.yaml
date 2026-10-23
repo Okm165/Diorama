@@ -1,0 +1,8 @@
+# The cross-mirror bridge's base: one resource, included by the venue overlay
+# (the bridge deploys beside its peers and reaches T cross-namespace). Kept
+# out of either mirror's base: it belongs to neither.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - cctp-bridge.yaml

@@ -46,12 +46,12 @@ instance, many readers.
 ## The CLI
 
 ```sh
-mirror-config check config/instances/mainnet-mirror.toml          # validate + wiring report
-mirror-config get   config/instances/mainnet-mirror.toml chains.l1.fork_offset
-mirror-config export-env config/instances/mainnet-mirror.toml --section anvil   # FORK_OFFSET=128
+mirror-config check config/instances/mainnet-mirror/instance.toml          # validate + wiring report
+mirror-config get   config/instances/mainnet-mirror/instance.toml chains.l1.fork_offset
+mirror-config export-env config/instances/mainnet-mirror/instance.toml --section anvil   # FORK_OFFSET=128
 ```
 
-`make config-check` checks **every** file under `config/instances/` and is part
+`make config-check` checks **every** instance unit under `config/instances/` and is part
 of `make fitness`. The anvil init containers read
 `FORK_OFFSET` via `export-env` — the instance file is the offset's single
 home.

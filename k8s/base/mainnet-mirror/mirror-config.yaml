@@ -1,4 +1,4 @@
-# Shared runtime configuration for the mirror stack: the L1 wiring env the
+# Shared runtime wiring for the Mainnet Mirror stack: the L1 wiring env the
 # instance TOML references as ${...} (plan §19.4). Operational tunables live
 # in config/instances/*.toml; this ConfigMap carries only deployment wiring,
 # and the config loader is their only reader.

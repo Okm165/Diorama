@@ -14,8 +14,8 @@ The repo is one cargo workspace (`crates/*` + `bins/*`): `crates/anvil` (the
 JSON-RPC client and the measured cheatcode conventions), `crates/config` (the
 layered instance loader), `crates/devnet` (the substrate both mirrors share:
 shadow registry, journal, cursor state with `epoch_pin`, admin surface,
-chain-generic scanner, probes, metrics), the two projects `crates/ethereum`
-and `crates/hyperliquid`, and the binaries `bins/{mainnet-engine,venue-engine,
+chain-generic scanner, probes, metrics), the two projects `crates/mainnet`
+and `crates/venue`, and the binaries `bins/{mainnet-engine,venue-engine,
 venue-sim,cctp-bridge}` — the fourth is element 3 (`crates/cctp` on the common
 client + config only; it does not depend on the devnet substrate or either
 project). The projects are siblings - they share the common crates and
@@ -54,7 +54,7 @@ numbered list below then walks M's side of it step by step):
 ```
 ![per-block data flow](img/arch-data-flow.png)
 
-The exchange above is the ethereum profile's. The venue profile has no parent
+The exchange above is the mainnet profile's. The venue profile has no parent
 stream: V is static between re-pins, and the engine's job is the devnet's own
 blocks plus the fork lifecycle ("The Venue Mirror" below), with the
 simulator's market and account planes beside it ("The venue simulator").
@@ -398,7 +398,7 @@ silently skipped parent blocks and stalled T), and after a reset T resumes from
 the fork pin (`pin + 1`), because its state *is* the pin's state.
 
 **The layout is symmetric by construction.** Every layer names the two mirrors
-the same way: `crates/ethereum` + `crates/hyperliquid` (the mirror projects —
+the same way: `crates/mainnet` + `crates/venue` (the mirror projects —
 siblings that never depend on each other), and the four bins — `mainnet-engine`
 + `venue-engine`, `venue-sim`, `cctp-bridge` — are the *same* thin shell over
 their owning crate's entry (`main_entry`; the venue crate's second service is
@@ -407,7 +407,7 @@ crate). The simulator and the bridge are the venue stack's own services, and
 `k8s/base/mainnet-mirror` + `k8s/base/venue-mirror` (service templates, with
 the shared cluster-scoped `k8s/base/shared` and one overlay per instance
 owning the namespace, the instance ConfigMap and the NodePorts). The instance
-files `config/instances/{mainnet-mirror,venue-mirror}.toml` are the single
+files `config/instances/{mainnet-mirror,venue-mirror}/instance.toml` are the single
 home of each mirror's wiring, and the Makefile reads one uniform path per
 instance (`k8s/base/$(INSTANCE)/engine.yaml`, `$(OVERLAY)/namespace.yaml`) —
 no per-mirror conditionals, and no deliberate name difference anywhere: the
@@ -429,7 +429,7 @@ because anvil's "N-1" is the live state when the block is not mined yet).
 
 **Contracts are as narrow as the body uses.** Every internal seam takes the
 narrowest type that carries the fact it needs: leaf helpers take the section
-they read (`&Rpc` for a chain client, `&Drift`, `&Plane`, `&EthereumMetrics`,
+they read (`&Rpc` for a chain client, `&Drift`, `&Plane`, `&MainnetMetrics`,
 `&EngineSection`, `&BeaconClient`, `&AtomicBool`/`&AtomicU64` for one flag),
 never the whole `Ctx`. A compiler-assisted audit (per-function field-use
 analysis over both engines' crates, 2026-10-23) found and narrowed eighteen
@@ -438,7 +438,7 @@ leaves: `prepend_devnet_txs` / `fetch_diffs` / `read_before_values` /
 `write_canary` / `assert_venue_chain` (`&Rpc`), `log_drift_if_anomalous`
 (`&Drift`), `deliver_slot` / `cl_head_el_block` (`&BeaconClient`),
 `gap_within_limit` (`&EngineSection`), `account_m_rebase_skip`
-(`&EthereumMetrics`), `clear_reapply` (`&Plane`), `hold_replay_failure`
+(`&MainnetMetrics`), `clear_reapply` (`&Plane`), `hold_replay_failure`
 (`&AtomicBool`), `warn_skipped_blob` (`&AtomicU64`). What stays `&Ctx` is a
 *composition point*, and the audit names why: `apply_block` / `apply_entry` /
 `advance_cursor` / `late_completion` / `finalize` / `journal_and_scan` /
@@ -709,7 +709,7 @@ permanently** (plan §4.4). What remains is exactly the half both chains share,
 delivered by the common crates: the shadow registry (COW), the journal, the
 cursor state with `epoch_pin`, the admin surface, the chain-generic scanner,
 the probe runner, the epoch rule, and the devnet plane (the registries and
-flags as one bundle). The driver in `crates/hyperliquid` is the venue's own
+flags as one bundle). The driver in `crates/venue` is the venue's own
 loop.
 
 ```
@@ -737,7 +737,7 @@ per-profile binaries - `bins/mainnet-engine` (ethereum) and `bins/venue-engine`
 `bins/cctp-bridge` (the same shell over their crates' entries). The reason is
 build isolation, and it is a fitness function, not a convention:
 `scripts/closure-matrix.sh` declares the allowed internal edges
-(`venue-engine -> mirror-hyperliquid + devnet + anvil + config`, no ethereum
+(`venue-engine -> mirror-venue + devnet + anvil + config`, no ethereum
 edge; `venue-sim` likewise) and fails any undeclared dependency. With one
 package every build compiled the whole graph (measured, plan §11.3); a
 profile-routing binary would link both projects into every venue build.
@@ -761,7 +761,7 @@ must not serve), and re-asserts `anvil_setAutomine(false)` - an Anvil restart
 resets automine to its default *on* (measured), so the discipline is re-asserted
 on every boot and after every reset.
 
-**The chain-instance canary.** V is a fork-mode Anvil, so the ethereum profile's
+**The chain-instance canary.** V is a fork-mode Anvil, so the mainnet profile's
 reset detection (the cursor's block hash) is unsound here: heights below the
 fork resolve to the *source's* real blocks, so a re-pin to a later base keeps
 every cursor hash valid (measured live: the driver kept scanning a stale range),
@@ -865,13 +865,13 @@ one block per applied parent block, V's driver mines a non-empty pool
 | `venue_probe_ok_total` / `venue_probe_failures_total` / `venue_probe_skipped_total` / `venue_probe_last_failed` | the at-pin probes (skipped = a devnet-owned target, or a pin the source cannot serve) |
 
 **Profile-coherent config.** The instance file is the deployment's single home
-(`config/instances/{mainnet-mirror,venue-mirror}.toml`, layered over
+(`config/instances/{mainnet-mirror,venue-mirror}/instance.toml`, layered over
 `config/defaults.toml`). `[services.engine]` is the same key for both profiles -
 what differs is the profile's shape: `[services.engine.anvil]` carries
 `m_url` + `t_url` for ethereum or `v_url` for the venue (the check requires
 exactly the profile's set), and the venue's driver reads the shared
 `loops`/`journal`/`verifier` sub-sections, so the cadence, write chunk and
-journal ring live there once for both profiles. `profile = "ethereum"` requires
+journal ring live there once for both profiles. `profile = "mainnet"` requires
 `[chains.l1]` + `[services.engine]` and forbids `[chains.venue]` /
 `[services.venue_sim]`; `profile = "venue"` requires `[chains.venue]` +
 `[services.engine]` and forbids `[chains.l1]` - the loader prunes the other
@@ -1096,7 +1096,7 @@ anvil-impersonation analogue; the acting account rides the body's `user`).
 
 ## The Core↔EVM bridge
 
-`crates/hyperliquid/src/bridge` - V is a fork of the real HyperEVM, so the
+`crates/venue/src/bridge` - V is a fork of the real HyperEVM, so the
 boundary *contracts* are real (CoreWriter `0x3333…3333`, the system addresses
 `0x20…<tokenIndex>`, HYPE `0x2222…2222`), but HyperCore is not there to act on
 them. The bridge is the missing half; it runs inside `venue-sim` (the same
@@ -1161,7 +1161,7 @@ does not lose boundary activity mined meanwhile.
 
 ## The feed bridge (Phase 0)
 
-`crates/ethereum/src/feed_bridge.rs` - daloc's harness periodically re-publishes
+`crates/mainnet/src/feed_bridge.rs` - daloc's harness periodically re-publishes
 its own mock aggregator answers; in mirror mode **the bridge is the single price
 writer** for those mocks (their refresher is off, plan §17.2). The value's
 source is the *parent chain's* aggregator for the same feed, read at the follow

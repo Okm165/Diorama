@@ -1,10 +1,10 @@
-# engine (venue profile) - the Venue Mirror's driver: the fork-driver loop
-# over V, the at-pin probes, the epoch rule (same pin -> restore, new pin ->
-# clear), the Core<->EVM bridge scan, and the venue admin surface (/admin/deal,
-# /admin/shadow, /admin/epoch, /admin/pause, /admin/resume).
+# engine - the Venue Mirror engine: the fork-driver loop over V, the at-pin
+# probes, the epoch rule (same pin -> restore, new pin -> clear), the Core<->EVM
+# bridge scan, and the admin surface (/admin/deal, /admin/shadow, /admin/epoch,
+# /admin/pause, /admin/resume).
 #
-# Same shape as the mainnet engine deployment; the image carries the venue
-# binary and the mounted instance file selects the profile (plan §19.5). The
+# Same shape as the mainnet engine deployment: the image carries the venue
+# binary, the mounted instance file selects the profile (plan §19.5), and the
 # driver state (cursor, shadow registry, journal) lives on the engine-state PVC
 # so restarts resume where they left.
 ---

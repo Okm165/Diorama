@@ -1,4 +1,4 @@
-//! The ethereum profile's metric set (plan §7.8): reth/M/T heads, the
+//! The mainnet profile's metric set (plan §7.8): reth/M/T heads, the
 //! applier's counters, the convergence probes, the shadow-scan cost, the
 //! source-sync top-up. Rendered beside the shared admin gauges
 //! (`mirror_devnet::metrics::Metrics::render`) and the feed bridge's own set —
@@ -8,7 +8,7 @@ use mirror_devnet::metrics::push_metric;
 use std::sync::atomic::Ordering;
 
 mirror_devnet::registry! {
-    pub struct EthereumMetrics {
+    pub struct MainnetMetrics {
         gauge reth_head = "mirror_reth_head", "reth chain head";
         gauge reth_follow_head = "mirror_reth_follow_head", "reth follow head (safe/latest/finalized)";
         gauge source_sync_gap_blocks = "mirror_source_sync_gap_blocks", "CL head execution block - reth head (top-up catch-up progress)";
@@ -60,9 +60,9 @@ mirror_devnet::registry! {
 
 /// The registry convention (`set`/`add`/`inc`) is the shared trait's; this
 /// type adds only its own exposition.
-impl mirror_devnet::metrics::Registry for EthereumMetrics {}
+impl mirror_devnet::metrics::Registry for MainnetMetrics {}
 
-impl EthereumMetrics {
+impl MainnetMetrics {
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
         self.render_declared(&mut out);
@@ -92,7 +92,7 @@ mod tests {
     /// `venue_and_admin_series_do_not_overlap` is the mirror of this test).
     #[test]
     fn profile_admin_and_bridge_series_do_not_overlap() {
-        let profile = EthereumMetrics::default();
+        let profile = MainnetMetrics::default();
         let admin = mirror_devnet::metrics::Metrics::default();
         let bridge = crate::feed_bridge::FeedBridgeMetrics::default();
         let mut names = series(&profile.render());

@@ -1,4 +1,4 @@
-//! `EthereumSource: Source` — the ethereum profile's unshadow re-sync source:
+//! `L1Source: Source` — the mainnet profile's unshadow re-sync source:
 //! reth, at the block the devnet's state reflects (the applied cursor; the
 //! engine passes the cursor to the admin surface, which resolves the anchor).
 use alloy_primitives::{Address, B256, U256};
@@ -6,17 +6,17 @@ use mirror_devnet::source::{Fut, Source};
 
 /// The reth client is cloned into the source (cheap: reqwest's client is
 /// `Arc`-backed); the source is chosen at boot and never re-created (rule 15).
-pub struct EthereumSource {
+pub struct L1Source {
     reth: crate::rpc::Rpc,
 }
 
-impl EthereumSource {
+impl L1Source {
     pub fn new(reth: crate::rpc::Rpc) -> Self {
         Self { reth }
     }
 }
 
-impl Source for EthereumSource {
+impl Source for L1Source {
     fn head(&self) -> Fut<'_, mirror_anvil::Result<u64>> {
         Box::pin(self.reth.block_number())
     }

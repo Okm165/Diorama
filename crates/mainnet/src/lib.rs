@@ -13,7 +13,7 @@ mod driver;
 mod drift;
 mod engine_api;
 mod error;
-mod ethereum_source;
+mod l1_source;
 pub mod feed_bridge;
 mod http;
 mod metrics;

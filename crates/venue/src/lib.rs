@@ -2,7 +2,7 @@
 //! anvil V.
 //!
 //! V is a fork-mode anvil of HyperEVM (chain id 999): static between re-pins,
-//! so the ethereum profile's parent stream machinery (replay, BAL diffs, the
+//! so the mainnet profile's parent stream machinery (replay, BAL diffs, the
 //! prepend rule, the clock offset) has no counterpart here. What remains is
 //! the substrate's half, delivered by the shared crates:
 //!
@@ -16,7 +16,7 @@
 //!
 //! The simulator (market/account planes), the daloc-facing API and the
 //! bridges are the venue's own half and land on top of this driver; the
-//! ethereum stack is never compiled here (the closure matrix enforces it).
+//! mainnet project is never compiled here (the closure matrix enforces it).
 //! Clocks: `block` = the **V height** (HyperEVM blocks; the venue profile has
 //! no second chain); the simulator's clock is its served `time` (ms,
 //! self-advancing), never a block label; `age_ms` = the served book's

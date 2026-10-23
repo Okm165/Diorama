@@ -59,7 +59,7 @@ macro_rules! registry {
 registry! {
     /// The shared admin surface's gauges (plan §11.3): what the devnet plane
     /// itself owns. Each profile renders its own set beside these (the ethereum
-    /// engine's `EthereumMetrics`, the venue's `VenueMetrics`), so this crate
+    /// engine's `MainnetMetrics`, the venue's `VenueMetrics`), so this crate
     /// knows nothing about reth, M/T or the venue's chain.
     pub struct Metrics {
         gauge shadowed_slots = "mirror_shadowed_slots", "storage slots shadowed by the devnet";
@@ -70,7 +70,7 @@ registry! {
 }
 
 /// The registry convention, one implementation for every registry: the shared
-/// admin gauges, the ethereum profile's `EthereumMetrics`, the venue's
+/// admin gauges, the mainnet profile's `MainnetMetrics`, the venue's
 /// `VenueMetrics`. `set`/`add`/`inc` take the field as the operand, so the
 /// receiver is the namespace, not the state — the call sites read
 /// `registry.add(&registry.field, n)` and a profile's registry can never grow
@@ -100,7 +100,7 @@ impl Registry for Metrics {}
 impl Metrics {
     /// The shared admin gauges: the whole of this crate's exposition. Each
     /// profile renders these beside its own set (the ethereum engine's
-    /// `EthereumMetrics`, the venue's `VenueMetrics`).
+    /// `MainnetMetrics`, the venue's `VenueMetrics`).
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(256);
         self.render_declared(&mut out);
@@ -126,7 +126,7 @@ mod tests {
     /// The shared crate's whole exposition: the three admin gauges. A fourth
     /// series means a profile field crept back in — the layering rule is that
     /// profile sets live with their profile (the ethereum engine's
-    /// `EthereumMetrics`, the venue's `VenueMetrics`), which also keeps the
+    /// `MainnetMetrics`, the venue's `VenueMetrics`), which also keeps the
     /// compositions duplicate-free (measured 2026-10-23: the shared set once
     /// carried profile gauges beside its admin gauges, and the two copies'
     /// HELP text had drifted).

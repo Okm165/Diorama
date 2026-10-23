@@ -194,7 +194,7 @@ Mainnet is not scheduled (Hoodi's 2026-10-26 activation was **cancelled**
 - **EIP-7928** — BALs leave reth's computed `eth_getBlockAccessList` and become
   consensus-carried (`ExecutionPayloadV4`; header `block_access_list_hash`;
   `engine_newPayloadV5` / `getPayloadV6` / `getPayloadBodiesBy*V2`). The BAL
-  source in `crates/ethereum` switches from the RPC method to the engine
+  source in `crates/mainnet` switches from the RPC method to the engine
   payload at that point. The EIP's Last Call deadline is 2026-11-01.
 
 Anvil's Amsterdam support is mapped from foundry v1.8.0 (EIP-8037 state gas in

@@ -3,7 +3,7 @@
 //! and the on-demand probe run.
 //!
 //! Extracted from the crate root so both projects read the same way: this
-//! module is the ethereum profile's counterpart of `mirror-hyperliquid`'s
+//! module is the mainnet profile's counterpart of `mirror-hyperliquid`'s
 //! `driver` (the fork driver over anvil V). The loops themselves are
 //! source-specific — replay and BAL application have no venue counterpart —
 //! and the substrate's half (shadow, journal, cursor, probes) lives in
@@ -11,7 +11,7 @@
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
 use crate::error::Result;
-use crate::metrics::EthereumMetrics;
+use crate::metrics::MainnetMetrics;
 use crate::replay::replay_block;
 use crate::source_sync;
 use mirror_config::EngineSection;
@@ -179,7 +179,7 @@ fn below_fork_base(cursor_block: u64, base: Option<u64>) -> bool {
 }
 
 /// An M re-base skipped a range (see [`validate_cursor`]).
-fn account_m_rebase_skip(eth_metrics: &EthereumMetrics, from: u64, head: u64) {
+fn account_m_rebase_skip(eth_metrics: &MainnetMetrics, from: u64, head: u64) {
     let skipped = head.saturating_sub(from);
     if skipped > 0 {
         eth_metrics.add(&eth_metrics.m_rebase_skipped, skipped);

@@ -14,7 +14,7 @@ use crate::ConfigError;
 pub struct Instance {
     pub instance: InstanceMeta,
     pub chains: Chains,
-    /// The watched addresses (the ethereum profile's parent-diff scope; the
+    /// The watched addresses (the mainnet profile's parent-diff scope; the
     /// venue has no parent stream, so it is empty there).
     #[serde(default)]
     pub watchlist: Vec<WatchEntry>,
@@ -32,7 +32,7 @@ pub struct InstanceMeta {
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
-    Ethereum,
+    Mainnet,
     Venue,
 }
 
@@ -138,9 +138,9 @@ impl Instance {
 
     /// Exactly one profile's sections are present.
     fn check_profile_coherence(&self, issues: &mut Vec<String>) {
-        let ethereum = self.instance.profile == Profile::Ethereum;
-        let profile = if ethereum { "ethereum" } else { "venue" };
-        let needs: &[(&str, bool)] = if ethereum {
+        let mainnet = self.instance.profile == Profile::Mainnet;
+        let profile = if mainnet { "mainnet" } else { "venue" };
+        let needs: &[(&str, bool)] = if mainnet {
             &[
                 ("[chains.l1]", self.chains.l1.is_some()),
                 ("[services.engine]", self.services.engine.is_some()),
@@ -156,7 +156,7 @@ impl Instance {
                 issues.push(format!("profile \"{profile}\" requires {section}"));
             }
         }
-        let forbids: &[(&str, bool)] = if ethereum {
+        let forbids: &[(&str, bool)] = if mainnet {
             &[
                 ("[chains.venue]", self.chains.venue.is_some()),
                 ("[services.venue_sim]", self.services.venue_sim.is_some()),
@@ -213,20 +213,20 @@ impl Instance {
         }
     }
 
-    /// The ethereum profile's sections, moved out for the run path (the check
+    /// The mainnet profile's sections, moved out for the run path (the check
     /// already validated presence; a missing one is still a named error, never
     /// a silent default).
-    pub fn take_ethereum(&mut self) -> Result<(ChainL1, EngineSection), ConfigError> {
+    pub fn take_mainnet(&mut self) -> Result<(ChainL1, EngineSection), ConfigError> {
         let l1 = self
             .chains
             .l1
             .take()
-            .ok_or_else(|| mismatch("profile \"ethereum\" requires [chains.l1]"))?;
+            .ok_or_else(|| mismatch("profile \"mainnet\" requires [chains.l1]"))?;
         let engine = self
             .services
             .engine
             .take()
-            .ok_or_else(|| mismatch("profile \"ethereum\" requires [services.engine]"))?;
+            .ok_or_else(|| mismatch("profile \"mainnet\" requires [services.engine]"))?;
         Ok((l1, engine))
     }
 
@@ -269,26 +269,26 @@ impl Instance {
             .ok_or_else(|| mismatch("the CCTP bridge requires [services.cctp_bridge]"))
     }
 
-    /// The ethereum profile's endpoints: the pre-context reads the run path
+    /// The mainnet profile's endpoints: the pre-context reads the run path
     /// needs (`Ctx::new` takes the sections itself).
-    pub fn ethereum_urls(&self) -> Result<(String, String, String), ConfigError> {
+    pub fn mainnet_urls(&self) -> Result<(String, String, String), ConfigError> {
         let l1 = self
             .chains
             .l1
             .as_ref()
-            .ok_or_else(|| mismatch("profile \"ethereum\" requires [chains.l1]"))?;
+            .ok_or_else(|| mismatch("profile \"mainnet\" requires [chains.l1]"))?;
         let engine = self
             .services
             .engine
             .as_ref()
-            .ok_or_else(|| mismatch("profile \"ethereum\" requires [services.engine]"))?;
+            .ok_or_else(|| mismatch("profile \"mainnet\" requires [services.engine]"))?;
         Ok((
             l1.source_url.clone(),
             engine.anvil.m_url.clone().ok_or_else(|| {
-                mismatch("profile \"ethereum\" requires [services.engine.anvil].m_url")
+                mismatch("profile \"mainnet\" requires [services.engine.anvil].m_url")
             })?,
             engine.anvil.t_url.clone().ok_or_else(|| {
-                mismatch("profile \"ethereum\" requires [services.engine.anvil].t_url")
+                mismatch("profile \"mainnet\" requires [services.engine.anvil].t_url")
             })?,
         ))
     }
@@ -361,7 +361,7 @@ impl Instance {
     /// `venue-sim`, `cctp-bridge` — `k8s/base/engine.yaml`, `base/venue/`).
     fn daloc_env(&self) -> Result<Vec<String>, ConfigError> {
         let mut out = match self.instance.profile {
-            Profile::Ethereum => self.daloc_env_ethereum()?,
+            Profile::Mainnet => self.daloc_env_mainnet()?,
             Profile::Venue => self.daloc_env_venue()?,
         };
         // The bridge spans both mirrors: its Iris base is part of the block
@@ -373,14 +373,14 @@ impl Instance {
         Ok(out)
     }
 
-    /// The ethereum profile's daloc block: the first chain's keys.
-    fn daloc_env_ethereum(&self) -> Result<Vec<String>, ConfigError> {
+    /// The mainnet profile's daloc block: the first chain's keys.
+    fn daloc_env_mainnet(&self) -> Result<Vec<String>, ConfigError> {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
-            mismatch("export-env daloc (ethereum profile) requires [services.engine]")
+            mismatch("export-env daloc (mainnet profile) requires [services.engine]")
         })?;
         let t_url = engine.anvil.t_url.as_deref().ok_or_else(|| {
             mismatch(
-                "export-env daloc (ethereum profile) requires [services.engine.anvil].t_url",
+                "export-env daloc (mainnet profile) requires [services.engine.anvil].t_url",
             )
         })?;
         let t = resolved("ANVIL_T_URL", t_url)?;
@@ -516,7 +516,7 @@ fn looks_like_secret(value: &str) -> bool {
 /// parseable http URL.
 fn check_engine_anvil(profile: Profile, anvil: &EngineAnvil, issues: &mut Vec<String>) {
     match profile {
-        Profile::Ethereum => {
+        Profile::Mainnet => {
             for (key, url) in [
                 ("services.engine.anvil.m_url", &anvil.m_url),
                 ("services.engine.anvil.t_url", &anvil.t_url),

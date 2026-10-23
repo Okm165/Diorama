@@ -3,7 +3,7 @@
 //! of which chain the mirror serves. The engine's `http.rs` owns the axum
 //! routes; the semantics live here, wired per profile through [`AdminSurface`].
 //!
-//! `Persisted::t` is the devnet chain's cursor slot (T in the ethereum profile;
+//! `Persisted::t` is the devnet chain's cursor slot (T in the mainnet profile;
 //! a profile runs one devnet chain, so the venue profile reuses it for V).
 use crate::deal;
 use crate::error::{Error, Result};

@@ -10,7 +10,7 @@ namespace: mainnet-mirror
 resources:
   - namespace.yaml
   - ../../base/mainnet-mirror
-  # The instance ConfigMap generator (config/instances/kustomization.yaml):
-  # every pod of this instance mounts /etc/mirror/instance.toml from it.
-  - ../../../config/instances
+  # This instance's unit (config/instances/mainnet-mirror): the file every pod
+  # of this instance mounts at /etc/mirror/instance.toml, and its generator.
+  - ../../../config/instances/mainnet-mirror
   - nodeports.yaml

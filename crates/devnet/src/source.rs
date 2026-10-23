@@ -3,7 +3,7 @@
 //!
 //! One implementation per binary, chosen at boot — the trait is deliberately
 //! `Arc<dyn Source>` (rule 15: a boundary, not a hot loop; the two projects
-//! never monomorphize each other's types). `EthereumSource` reads reth at the
+//! never monomorphize each other's types). `L1Source` reads reth at the
 //! applied cursor; the venue profile's `VenueSource` (R3) reads the fork
 //! source at the pin. The trait is exactly what a hand-back asks for: the
 //! source's head (the anchor before the first apply) and the three account

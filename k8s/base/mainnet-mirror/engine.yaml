@@ -1,9 +1,11 @@
-# engine - the mirror engine: replay loop (M) + verifier + BAL diff applier (T).
+# engine - the Mainnet Mirror engine: the L1 replay loop (M), the verifier, the
+# BAL diff applier (T), and the admin surface (/admin/epoch, /admin/shadow,
+# /admin/feed, /admin/time, /admin/rewind).
 #
-# Built from the workspace root (see Makefile). State (cursor, journal, shadow
-# registry, drift log) lives on the engine-state PVC so restarts resume where
-# they left. The mounted instance TOML is the config (plan §19.5): one file
-# per instance, many readers - the engine's section is [services.engine].
+# Same shape as the venue engine deployment: the image carries the mainnet
+# binary, the mounted instance file selects the profile (plan §19.5), and the
+# state (cursor, journal, shadow registry, drift log) lives on the engine-state
+# PVC so restarts resume where they left.
 ---
 apiVersion: apps/v1
 kind: Deployment

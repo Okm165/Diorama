@@ -1,9 +1,10 @@
-# cctp-bridge - the CCTP V2 lane between the mirrors (plan §15): a burn on the
+# cctp-bridge - the cross-mirror CCTP V2 lane (plan §15): a burn on the
 # Ethereum fork (T, mainnet-mirror namespace), a local Iris-compatible
 # attestation, and the mint on V - plus the control surface for the devnet
-# lanes. Ports: 8095 serves the Iris-compatible API (daloc's cctp-relay points
-# its IRIS_API_URL at this *base* - the client appends /v2/messages/...), 8096
-# the control API.
+# lanes. It belongs to neither mirror (it bridges them) and deploys beside the
+# venue stack, its peers; T is reached cross-namespace. Ports: 8095 serves the
+# Iris-compatible API (daloc's cctp-relay points its IRIS_API_URL at this
+# *base* - the client appends /v2/messages/...), 8096 the control API.
 #
 # At boot the bridge verifies the wiring on both chains (fail closed), installs
 # the devnet attester through the contracts' own setters, and funds the relay
@@ -16,7 +17,7 @@ metadata:
   name: cctp-bridge
   labels:
     app.kubernetes.io/name: cctp-bridge
-    app.kubernetes.io/part-of: venue-mirror
+    app.kubernetes.io/part-of: devnet
 spec:
   replicas: 1
   strategy:
@@ -28,7 +29,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: cctp-bridge
-        app.kubernetes.io/part-of: venue-mirror
+        app.kubernetes.io/part-of: devnet
     spec:
       terminationGracePeriodSeconds: 30
       containers:
@@ -79,7 +80,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: cctp-bridge
-  labels: { app.kubernetes.io/name: cctp-bridge, app.kubernetes.io/part-of: venue-mirror }
+  labels: { app.kubernetes.io/name: cctp-bridge, app.kubernetes.io/part-of: devnet }
 spec:
   selector: { app.kubernetes.io/name: cctp-bridge }
   ports:

@@ -7,7 +7,7 @@
 [instance]
 name = "mainnet-mirror"
 namespace = "mainnet-mirror"
-profile = "ethereum"
+profile = "mainnet"
 
 [chains.l1]
 # The chain id is a code fact (`kind = "ethereum"` implies chain 1, CCTP

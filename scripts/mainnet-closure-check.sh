@@ -37,7 +37,7 @@ aave_income_weth  0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2 0xd15e0053000000000
 # the old k8s/base/engine-config.yaml path went stale with the config move and
 # made every view look unwatched). Only the [[watchlist]] blocks count: the
 # file's other 0x addresses (fixtures, contracts) are not watched accounts.
-INSTANCE_TOML="${INSTANCE_TOML:-config/instances/mainnet-mirror.toml}"
+INSTANCE_TOML="${INSTANCE_TOML:-config/instances/mainnet-mirror/instance.toml}"
 WATCH=$(awk '/^\[\[watchlist\]\]/{f=1;next} /^\[/{f=0} f' "$INSTANCE_TOML" \
   | grep -oE '0x[0-9a-fA-F]{40}' | tr 'A-F' 'a-f' | sort -u)
 

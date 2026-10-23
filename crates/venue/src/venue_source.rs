@@ -1,6 +1,6 @@
 //! `VenueSource` — the unshadow re-sync truth for the venue profile.
 //!
-//! The ethereum profile re-syncs a handed-back key from reth at the applied
+//! The mainnet profile re-syncs a handed-back key from reth at the applied
 //! cursor; the venue's truth is the fork source **at the pin**: V's base state
 //! *is* the source's state at that block.
 //!

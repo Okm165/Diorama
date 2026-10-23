@@ -1,7 +1,7 @@
 //! The fork driver: V's lifecycle from boot to epoch to steady state.
 //!
 //! V is a fork-mode anvil (chain id 999): static between re-pins, so the
-//! ethereum profile's parent stream machinery has no counterpart here. The
+//! mainnet profile's parent stream machinery has no counterpart here. The
 //! driver's jobs (plan §7.2):
 //!
 //! - **boot asserts**: V answers, is the venue chain, and automine is off;

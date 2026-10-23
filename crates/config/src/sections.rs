@@ -178,7 +178,7 @@ pub struct FeedSection {
 }
 
 /// `[services.engine.anvil]`: the profile's anvil endpoints — M (the verified
-/// replay chain) and T (the devnet chain) for the ethereum profile, V (the
+/// replay chain) and T (the devnet chain) for the mainnet profile, V (the
 /// fork) for the venue's. The coherence check requires exactly the profile's
 /// set; the names mirror the deployment wiring (`ANVIL_{M,T,V}_URL`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

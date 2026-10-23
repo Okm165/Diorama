@@ -6,7 +6,9 @@
 
 The plan (§11.1) sketched **one** engine binary, `bins/mirror-engine`, with a
 `profile: ethereum | hyperliquid` flag selecting the behavior. The workspace
-instead has two projects (`crates/ethereum`, `crates/hyperliquid`) that share
+instead has two projects (`crates/mainnet`, `crates/venue` — one
+vocabulary across the tree: the projects, the `mainnet`/`venue` profiles,
+the bins and the namespaces) that share
 the common crates (`anvil`, `config`, `devnet`) and never each other, plus a
 simulator service whose closure must stay narrow. Measured: with one package,
 every build compiled the whole graph (plan §11.3); a profile-routing binary
@@ -16,7 +18,7 @@ compile the ethereum stack.
 ## Decision
 
 One binary per profile: `bins/mainnet-engine` (depends only on
-`mirror-ethereum`) and `bins/venue-engine` (only on `mirror-hyperliquid`), plus
+`mirror-mainnet`) and `bins/venue-engine` (only on `mirror-venue`), plus
 `bins/venue-sim` for the simulator. The names are mirror-qualified (`mainnet-`
 / `venue-`, matching the `mainnet-mirror` / `venue-mirror` instances) so
 neither mirror is the unqualified default; the deployments are both `engine`

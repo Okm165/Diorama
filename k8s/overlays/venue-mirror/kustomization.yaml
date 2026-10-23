@@ -10,7 +10,10 @@ namespace: venue-mirror
 resources:
   - namespace.yaml
   - ../../base/venue-mirror
-  # The instance ConfigMap generator (config/instances/kustomization.yaml):
-  # every pod of this instance mounts /etc/mirror/instance.toml from it.
-  - ../../../config/instances
+  # The cross-mirror bridge: its own base (it belongs to neither mirror); it
+  # deploys beside the venue stack and reaches T cross-namespace.
+  - ../../base/cctp-bridge
+  # This instance's unit (config/instances/venue-mirror): the file every pod
+  # of this instance mounts at /etc/mirror/instance.toml, and its generator.
+  - ../../../config/instances/venue-mirror
   - nodeports.yaml

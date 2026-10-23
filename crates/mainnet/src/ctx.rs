@@ -8,7 +8,7 @@
 use crate::blob::{BeaconClient, BlobForm};
 use crate::drift::Drift;
 use crate::error::Result;
-use crate::metrics::EthereumMetrics;
+use crate::metrics::MainnetMetrics;
 use crate::rpc::Rpc;
 use alloy_primitives::Address;
 use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
@@ -54,7 +54,7 @@ pub struct Ctx {
     pub(crate) plane: Plane,
     /// The profile's own set (reth/M/T heads, the applier's counters, the
     /// probes); rendered beside the shared admin gauges.
-    pub(crate) eth_metrics: EthereumMetrics,
+    pub(crate) eth_metrics: MainnetMetrics,
     /// The feed bridge's counters (shared with the bridge task; /metrics
     /// renders them whether or not the bridge is configured).
     pub(crate) feed_bridge_metrics: Arc<crate::feed_bridge::FeedBridgeMetrics>,
@@ -97,7 +97,7 @@ impl Ctx {
         anvil_m_url: &str,
         anvil_t_url: &str,
     ) -> Result<Self> {
-        let (l1, engine_section) = cfg.take_ethereum()?;
+        let (l1, engine_section) = cfg.take_mainnet()?;
         let timeout = Duration::from_secs(engine_section.reth.request_timeout_secs);
         let watchlist = cfg.watch_set();
         let plane = Plane::open(
@@ -109,7 +109,7 @@ impl Ctx {
         let drift = Drift::new(engine_section.state_dir.join("drift.jsonl"))?;
         let beacon = BeaconClient::new(engine_section.blobs.beacon_urls.clone())?;
         let reth = Rpc::new(reth_url, timeout)?;
-        let source: Arc<dyn Source> = Arc::new(crate::ethereum_source::EthereumSource::new(reth.clone()));
+        let source: Arc<dyn Source> = Arc::new(crate::l1_source::L1Source::new(reth.clone()));
         let engine_api = match (
             &engine_section.source_sync.engine_url,
             &engine_section.source_sync.jwt_path,
@@ -133,7 +133,7 @@ impl Ctx {
             engine_api,
             watchlist,
             plane,
-            eth_metrics: EthereumMetrics::default(),
+            eth_metrics: MainnetMetrics::default(),
             feed_bridge_metrics: Arc::new(crate::feed_bridge::FeedBridgeMetrics::default()),
             drift,
             blob_pref: Shared::new("blob form", None),

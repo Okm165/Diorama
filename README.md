@@ -61,7 +61,7 @@ layered config) and never each other. Detail:
 | | Mainnet Mirror | Venue Mirror |
 |---|---|---|
 | chain | T (`anvil-t`, an Ethereum fork kept fresh by BAL diffs) | V (`anvil-v`, a HyperEVM fork, static between re-pins) |
-| engine | `mirror-engine` | `venue-mirror` |
+| engine | `mainnet-engine` | `venue-engine` |
 | venue plane | — | `venue-sim` (market + account planes, an `hl_mock` superset) |
 | admin | deal / shadow / epoch / time / rewind | deal / shadow / epoch / pause / resume |
 | namespace | `mainnet-mirror` | `venue-mirror` |
@@ -152,23 +152,30 @@ runs.
 
 ```
 crates/anvil,devnet,config  common: anvil conventions, devnet semantics, the layered config
-crates/ethereum             the Mainnet Mirror project (replay, verifier, BAL diff applier, feed bridge)
-crates/hyperliquid          the Venue Mirror project (fork driver, simulator planes, API, Core<->EVM bridge)
+crates/mainnet              the Mainnet Mirror project (replay, verifier, BAL diff applier, feed bridge)
+crates/venue                the Venue Mirror project (fork driver, simulator planes, API, Core<->EVM bridge)
 crates/cctp                 the CCTP bridge element (Iris-compatible attestation, watcher, relayer, transfer)
-bins/mirror-engine          the Mainnet Mirror engine binary
-bins/venue-mirror           the Venue Mirror engine binary (fork driver)
+bins/mainnet-engine         the Mainnet Mirror engine binary
+bins/venue-engine           the Venue Mirror engine binary (fork driver)
 bins/venue-sim              the venue simulator (market + account planes; info 8090 / control 8091)
 bins/cctp-bridge            the CCTP bridge service (Iris 8095 / control 8096)
-k8s/base/                   kustomize base: reth, lighthouse, anvil-m/t, engine (+ venue/ for V, engine, sim, bridge)
+k8s/base/mainnet-mirror/    the mainnet base: reth, lighthouse, anvil-m/t, engine
+k8s/base/venue-mirror/      the venue base: anvil-v, engine, sim
+k8s/base/cctp-bridge/       the cross-mirror bridge (deploys beside the venue stack; reaches T cross-namespace)
+k8s/base/shared/            the mirror-retain StorageClass
 k8s/overlays/mainnet-mirror/  single-node k3s overlay (mainnet mirror)
 k8s/overlays/venue-mirror/    the venue stack overlay (V, engine, sim, bridge, NodePorts)
 k8s/bootstrap/              one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
-scripts/                    lib-venue.sh + lib-cctp.sh (the shared plumbing), the suites
-                            (smoke, scenario, capability-proof, product-sim, closure-check,
-                            feed-bridge), the venue suites (smoke-venue, venue-drill,
-                            venue-proof, venue-product-sim), engine-symmetry, daloc-sim.py,
+scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the shared plumbing), the
+                            mainnet suites (mainnet-smoke, mainnet-scenario, mainnet-proof,
+                            mainnet-product-sim, mainnet-closure-check, mainnet-feed-bridge,
+                            mainnet-feed-local), the venue suites (venue-smoke, venue-drill,
+                            venue-proof, venue-order-proof, venue-product-sim), the
+                            cross-mirror suites (cctp-smoke,
+                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry), daloc-sim.py,
                             and the structural fitness scripts (closure-matrix, no-orphans,
-                            docs-metrics, trust-audit, gen-secret, render-diagrams)
+                            docs-metrics, trust-audit, clock-labels, no-panics,
+                            gen-secret, render-diagrams)
 docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md, TESTING.md, adr/
 ```
 

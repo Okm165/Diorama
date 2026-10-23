@@ -1,0 +1,12 @@
+# The instance unit: the file (mounted at /etc/mirror/instance.toml by every
+# pod of this instance) and its ConfigMap generator. One dir per instance -
+# an overlay includes only its own, so neither namespace carries the other's
+# instance file. The generated name's hash suffix rolls the instance's pods
+# when the file changes.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+configMapGenerator:
+  - name: venue-instance
+    files:
+      - instance.toml=instance.toml

@@ -13,8 +13,8 @@ Three layers, each runnable on demand:
 ## Unit tests (`cargo test --workspace`)
 
 140 tests, all offline, one suite per crate: `mirror-anvil` 15,
-`mirror-devnet` 21, `mirror-config` 16, `mirror-ethereum` 14,
-`mirror-hyperliquid` 43, `mirror-cctp` 31. The suites carry the measured rules
+`mirror-devnet` 21, `mirror-config` 16, `mirror-mainnet` 14,
+`mirror-venue` 43, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
 - `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with
@@ -37,14 +37,14 @@ each module documents:
   sections — one instance file, many readers, each pod carrying only its own
   wiring), `MIRROR__*` overrides, profile coherence, fork-offset bounds; the
   real instance files load and check.
-- `mirror-ethereum` — BAL flattening (post-states, last-change-wins), the
+- `mirror-mainnet` — BAL flattening (post-states, last-change-wins), the
   KZG sidecar path (build → validate → corrupt → reject; the proof repair is
   correct, so "invalid KZG proof" from a source means the source's data is
   bad), the Engine API execution-request encoding (type-prefixed SSZ
   elements, empty types excluded), the versioned-hash mapping, the feed
   bridge's pause rule (`step` never overwrites a scenario; a publish in
   flight is not a scenario write).
-- `mirror-hyperliquid` — the served identity, funding hourly on the oracle,
+- `mirror-venue` — the served identity, funding hourly on the oracle,
   liquidation at the mark + the isolated `liq_price` formula, the wire shapes
   (requests omit null optionals; the mixed-case spotMeta parses), the
   CoreWriter/system-address decode (sub-wei remainders floor, USDC
@@ -307,8 +307,8 @@ export STATE_DIR=/tmp/venue-engine-state SIM_STATE_DIR=/tmp/venue-sim-state
 export ANVIL_V_URL=http://127.0.0.1:8545 ENGINE_ADMIN_URL=http://127.0.0.1:8080
 export CCTP_STATE_DIR=/tmp/venue-cctp-state T_RPC_URL=http://127.0.0.1:8545
 export CCTP_RELAY_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
-cargo run -p venue-engine -- run --config config/instances/venue-mirror.toml
-cargo run -p venue-sim    -- config/instances/venue-mirror.toml
+cargo run -p venue-engine -- run --config config/instances/venue-mirror/instance.toml
+cargo run -p venue-sim    -- config/instances/venue-mirror/instance.toml
 ```
 
 What to check:
@@ -566,7 +566,7 @@ the epoch rule, the atomic state-file body, the devnet plane) —
 binaries' shared boot conventions: the worker stack budget, the logging init,
 the fatal-error report, the runtime shell `run_main` and the default instance
 path) — and each project owns its driver
-(`crates/ethereum/src/driver.rs`, `crates/hyperliquid/src/driver.rs`), its
+(`crates/mainnet/src/driver.rs`, `crates/venue/src/driver.rs`), its
 HTTP surface, and its source-specific loops. The admin *semantics* are shared
 whole: the hand-back carries its own scan-to-head race guard
 (`AdminSurface::shadow_hand_back`), the rewind response is assembled once
@@ -604,7 +604,7 @@ Four more single homes keep the two engines from drifting:
   caches — the venue's error enum carries it transparently.
 - **the metric registry convention** (`mirror_devnet::metrics::Registry`):
   `set`/`add`/`inc` take the field as the operand and are defined once for
-  every registry (the shared gauges, `EthereumMetrics`, `VenueMetrics`); a
+  every registry (the shared gauges, `MainnetMetrics`, `VenueMetrics`); a
   profile's registry cannot grow its own variant of the convention.
 
 `make engine-symmetry` (`scripts/engine-symmetry.sh`, 23 checks) is the
@@ -627,7 +627,7 @@ The behavioral checks, not just shapes:
   with drifted HELP text (fixed 2026-10-23); the check keeps a re-introduction
   visible. The sets themselves are layered: the shared crate renders exactly
   the three admin gauges, and each profile renders its own set beside them
-  (`EthereumMetrics` / `VenueMetrics`) — pinned by a unit test on each side.
+  (`MainnetMetrics` / `VenueMetrics`) — pinned by a unit test on each side.
 - **rewind**: a beyond-ring request is one named refusal byte-for-byte; a
   1-block rewind returns the same wire shape on both (direct mode only — on
   the cluster it is a live mutation; the counts legitimately differ: T's
@@ -652,7 +652,7 @@ The behavioral checks, not just shapes:
 - **`/status`** — each engine reports its own facts (reth/M/T vs fork
   pin/probes/source); the shared fields (`cursor`, `halted`, `shadowed*`) are
   present on both, and `cursor` means the *devnet chain's* cursor on both
-  (T-height; the plan's clock-labels rule). The ethereum profile names its
+  (T-height; the plan's clock-labels rule). The mainnet profile names its
   clocks explicitly: `cursor_t` is T's, `cursor_m` is M's replay cursor.
 - **the venue plane's alarm set** — the plan §7.8 alarms are served under the
   sim's own spellings: API lag as `venue_sim_stale_ms{coin}` (per coin, ms —
@@ -992,7 +992,7 @@ verify against). Verdicts:
 | **SAME** (same modules) | A1, A2, A5, A8, A11, A13, A14, A15, A18, A19, A20 + the pins/epochs/journal/COW/automine decisions | `crates/anvil` + `crates/devnet`, exercised by `make venue-smoke` and the epoch drill (same-pin restore / new-pin epoch) |
 | **IMPOSSIBLE (permanent)** | A3, A4, A6, A7, A9, A12, A16, A17 + the M guarantee (per-block verification, probe parity, convergence repair) | no replay exists to verify; the fork keeps the source's exact state and hashes at the pin |
 | **REFRAMED** | L9 freshness → the pin (chain) + the live public API (venue data); the T guarantee → at-pin parity | `venue_fork_pin`, probes-at-pin (skip+count when the pin ≠ source head — measured: the source ignores the block parameter) |
-| **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (Phase 2), bridge round-trip exactness | `crates/hyperliquid`; the identity is re-checked at the serve boundary |
+| **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (Phase 2), bridge round-trip exactness | `crates/venue`; the identity is re-checked at the serve boundary |
 
 Measured on the scratch stacks (2026-10-22) — facts an integration run can rely on:
 

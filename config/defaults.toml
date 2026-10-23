@@ -3,7 +3,7 @@
 # A value lives here iff every deployment of that service carries the same
 # number (workspace conventions: cadences, ring sizes, chunk limits). Values
 # that describe one deployment (topology, chain sources, pins, watchlists,
-# budgets) live in config/instances/<name>.toml. Protocol facts and measured
+# budgets) live in config/instances/<name>/instance.toml. Protocol facts and measured
 # conventions are code constants, not configuration.
 #
 # Merge semantics: deep merge, defaults <- instance <- env; arrays replace,

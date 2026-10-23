@@ -1,7 +1,7 @@
 //! The shadow scanner: every devnet transaction's writes become shadowed
 //! (copy-on-write), so parent diffs never overwrite them.
 //!
-//! Chain-generic by design: the ethereum profile scans T, the venue profile
+//! Chain-generic by design: the mainnet profile scans T, the venue profile
 //! scans V — same code, different anvil client. The high-water mark lives with
 //! the caller (it shares it with its inline scans).
 use crate::error::{Error, Result};

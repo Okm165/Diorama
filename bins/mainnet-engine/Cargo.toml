@@ -8,6 +8,6 @@ description = "The Mainnet Mirror engine binary (the ethereum profile's entrypoi
 
 [dependencies]
 mirror-config = { path = "../../crates/config" }
-mirror-ethereum = { path = "../../crates/ethereum" }
+mirror-mainnet = { path = "../../crates/mainnet" }
 [lints]
 workspace = true

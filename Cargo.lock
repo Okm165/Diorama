@@ -2504,7 +2504,7 @@ name = "mainnet-engine"
 version = "0.1.0"
 dependencies = [
  "mirror-config",
- "mirror-ethereum",
+ "mirror-mainnet",
 ]
 
 [[package]]
@@ -2620,7 +2620,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mirror-ethereum"
+name = "mirror-mainnet"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
@@ -2649,7 +2649,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mirror-hyperliquid"
+name = "mirror-venue"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
@@ -4484,7 +4484,7 @@ name = "venue-engine"
 version = "0.1.0"
 dependencies = [
  "mirror-config",
- "mirror-hyperliquid",
+ "mirror-venue",
 ]
 
 [[package]]
@@ -4492,7 +4492,7 @@ name = "venue-sim"
 version = "0.1.0"
 dependencies = [
  "mirror-config",
- "mirror-hyperliquid",
+ "mirror-venue",
 ]
 
 [[package]]

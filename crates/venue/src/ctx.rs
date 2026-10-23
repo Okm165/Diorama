@@ -51,7 +51,7 @@ impl Ctx {
     pub fn new(mut cfg: mirror_config::Instance, source_url: &str, v_url: &str) -> Result<Self> {
         let (chain, engine) = cfg.take_venue()?;
         // A fixed, generous per-call budget: V's chain is a local anvil and the
-        // source is one HTTP client. The ethereum profile's timeout is
+        // source is one HTTP client. The mainnet profile's timeout is
         // configurable because its reth queries race the sync; no measured need
         // justifies a second knob here.
         let timeout = Duration::from_secs(30);

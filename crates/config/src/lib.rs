@@ -1,7 +1,7 @@
 //! The mirrors' configuration: one grammar, three layers (plan §19).
 //!
 //! `config/defaults.toml` (global, embedded at build time) <-
-//! `config/instances/<name>.toml` (one deployment, mounted) <-
+//! `config/instances/<name>/instance.toml` (one deployment, mounted) <-
 //! `MIRROR__*` environment overrides (operator debug tooling, logged loudly).
 //! The merge is a deep merge; arrays replace, never concatenate; unknown keys
 //! are errors at every level.
@@ -141,7 +141,7 @@ fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
     // The engine's section is shared (`[services.engine]` for both profiles);
     // what is profile-specific is the other chain and the venue's simulator.
     let (chain_section, service_sections): (&str, &[&str]) = match profile {
-        Some("ethereum") => ("venue", &["venue_sim"]),
+        Some("mainnet") => ("venue", &["venue_sim"]),
         Some("venue") => ("l1", &[]),
         _ => return,
     };
@@ -227,7 +227,7 @@ watchlist = []
 [instance]
 name = "t"
 namespace = "t"
-profile = "ethereum"
+profile = "mainnet"
 
 [chains.l1]
 kind = "ethereum"
@@ -472,7 +472,7 @@ port = 8096
     #[test]
     fn the_real_mainnet_mirror_instance_loads_and_checks() {        let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../config/instances/mainnet-mirror.toml"
+            "/../../config/instances/mainnet-mirror/instance.toml"
         ));
         let (inst, unresolved) = Instance::inspect(path).unwrap();
         assert_eq!(inst.instance.name, "mainnet-mirror");
@@ -575,7 +575,7 @@ port = 8096
     fn the_venue_instance_file_loads() {
         let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../config/instances/venue-mirror.toml"
+            "/../../config/instances/venue-mirror/instance.toml"
         ));
         let (inst, unresolved) = Instance::inspect(path).unwrap();
         assert_eq!(inst.instance.name, "venue-mirror");
@@ -601,7 +601,7 @@ port = 8096
 
     /// `[services.cctp_bridge]` is optional under both profiles and cross-cutting:
     /// a venue instance may carry it (and take it), and an ethereum instance
-    /// may too — unlike the simulator, which the ethereum profile forbids.
+    /// may too — unlike the simulator, which the mainnet profile forbids.
     #[test]
     fn the_cctp_section_is_optional_and_cross_cutting() {
         let src = format!(
@@ -630,7 +630,7 @@ port = 8096
         let (inst, _) = load_str(minimal_venue_instance(), &[]).unwrap();
         assert!(inst.services.cctp_bridge.is_none());
 
-        // The ethereum profile may carry it (the bridge spans both mirrors).
+        // The mainnet profile may carry it (the bridge spans both mirrors).
         let src = format!(
             "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
             minimal_instance(),

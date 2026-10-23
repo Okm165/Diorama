@@ -1,7 +1,7 @@
 //! `mirror-devnet` — the devnet plane: shadow registry, journal, state, the
 //! admin surface, deal, probes, metrics, and the unshadow re-sync `Source`.
 //! The devnet axioms live here; the projects compose these with chain clients.
-//! Clocks: `block` = the **devnet chain's height** (T on the ethereum profile,
+//! Clocks: `block` = the **devnet chain's height** (T on the mainnet profile,
 //! V on the venue profile — the shared crates drive whichever chain the
 //! profile owns); `pin` = that chain's fork base.
 pub mod admin;

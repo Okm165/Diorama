@@ -1,5 +1,5 @@
-# The mirrors workspace: one workspace, two projects (ethereum, hyperliquid),
-# the shared crates, and the CCTP bridge (refactor plan §11).
+# The mirrors workspace: one workspace, the two mirror projects (mainnet,
+# venue), the shared crates, and the CCTP bridge (refactor plan §11).
 [workspace]
 members = ["crates/*", "bins/*"]
 resolver = "2"

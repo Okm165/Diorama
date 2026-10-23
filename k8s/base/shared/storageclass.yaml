@@ -6,7 +6,7 @@ kind: StorageClass
 metadata:
   name: mirror-retain
   labels:
-    app.kubernetes.io/part-of: mainnet-mirror
+    app.kubernetes.io/part-of: devnet
 provisioner: rancher.io/local-path
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer

@@ -4,7 +4,7 @@
 
 ## Context
 
-The ethereum profile detects a re-fork by re-reading the cursor's block hash.
+The mainnet profile detects a re-fork by re-reading the cursor's block hash.
 On V that check is unsound: heights below the fork resolve to the *source's*
 real blocks, so a re-pin to a later base keeps every cursor hash valid
 (measured live: the driver kept scanning a stale range), and a same-pin restart

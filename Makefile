@@ -147,7 +147,7 @@ test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
 config-check: ## Validate every instance file through the layered loader (structural fitness)
-	@for f in config/instances/*.toml; do \
+	@for f in config/instances/*/instance.toml; do \
 	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check "$$f" || exit 1; \
 	done
 

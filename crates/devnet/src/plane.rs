@@ -38,13 +38,13 @@ pub struct Plane {
     pub metrics: Metrics,
     /// Set by `/admin/pause`: the profile's loops hold where they are.
     pub halted: AtomicBool,
-    /// The divergence policy's switch (the ethereum profile's M chain). The
+    /// The divergence policy's switch (the mainnet profile's M chain). The
     /// venue never freezes — there is no parent stream to diverge from — so
     /// the field stays false there and `mirror_frozen` renders 0; it keeps the
     /// shared surface's exact shape.
     pub frozen: AtomicBool,
     /// Seconds the devnet's clock runs ahead of the parent block
-    /// (`/admin/time`). The ethereum profile's applier aligns to
+    /// (`/admin/time`). The mainnet profile's applier aligns to
     /// `parent + offset` and clamps for monotonicity, so a jump sticks while
     /// mainnet's data keeps flowing; the venue has no parent stream and never
     /// sets it — the field keeps the shared surface's shape. Seeded from the
