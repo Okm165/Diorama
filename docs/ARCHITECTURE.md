@@ -861,13 +861,15 @@ maintenance, positions close at the mark (the full waterfall - partial closes,
 the backstop, ADL - is Phase 2). An account with no positions is never "below
 maintenance": negative equity alone is a state the venue reports.
 
-**Self-advance** (the plan's §14.8 decision): funding accrues lazily on every
-read and on a 1 Hz tick, so daloc's set-and-read tests see live funding and
-liquidation behavior without ever calling `advance`; `advance` stays for
-deterministic scripting. The sim has its own clock (wall + offset, offset 0
-until `advance` scripts a jump); the wire's `time` field stays *wall* now - it
-is the read's freshness, which the client's ≤6 s gate compares against its own
-clock.
+**Self-advance** (the plan's §14.8 decision): the evaluation — funding
+accrued to now, liquidations checked against current marks, persist-if-dirty —
+runs on every account-scoped read *and* on a 1 Hz tick, so daloc's
+set-and-read tests see live funding and liquidation behavior without ever
+calling `advance`; `advance` stays for deterministic scripting (n blocks of
+the same evaluation, clock included). The sim has its own clock (wall + offset,
+offset 0 until `advance` scripts a jump); the wire's `time` field stays *wall*
+now - it is the read's freshness, which the client's ≤6 s gate compares against
+its own clock.
 
 ### The control API
 

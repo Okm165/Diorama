@@ -408,15 +408,20 @@ impl Sim {
     /// One tick of the self-advance loop: accrue funding to the sim clock and
     /// run the liquidation checks; persist when something moved. A warming
     /// market plane (no meta yet) is a no-op, not a fault storm.
-    pub fn tick(&self, feed: &MarketFeed) -> Result<()> {
+    /// The §14.8 evaluation, one implementation for the 1 Hz tick and every
+    /// account-scoped read: accrue funding to now, check every account against
+    /// its maintenance requirement (closing the ones below it at the mark),
+    /// and persist if anything moved — so a set-and-read test sees funding and
+    /// liquidation behavior without ever calling `advance`.
+    pub fn evaluate(&self, feed: &MarketFeed) -> Result<Vec<Liquidation>> {
         if feed.meta().is_none() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let now = crate::now_ms();
         self.accrue_all(feed, now)?;
-        self.check_all(feed, now)?;
+        let liquidated = self.check_all(feed, now)?;
         self.save_if_dirty()?;
-        Ok(())
+        Ok(liquidated)
     }
 
     /// Accrue funding for every account (the caller holds no lock).

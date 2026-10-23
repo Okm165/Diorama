@@ -12,8 +12,8 @@ Three layers, each runnable on demand:
 
 ## Unit tests (`cargo test --workspace`)
 
-139 tests, all offline, one suite per crate: `mirror-anvil` 15,
-`mirror-devnet` 20, `mirror-config` 16, `mirror-ethereum` 14,
+140 tests, all offline, one suite per crate: `mirror-anvil` 15,
+`mirror-devnet` 21, `mirror-config` 16, `mirror-ethereum` 14,
 `mirror-hyperliquid` 43, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
@@ -28,7 +28,9 @@ each module documents:
   rules (resume is contiguous; fresh/reset chains start at head+1), the
   pin-base predicate (`scan_anchor` clamps at the pin), the shared admin wire
   types, the atomic state-file body (`store`: absent is a fact, a fault and
-  corruption are errors), the metric registry convention.
+  corruption are errors), the metric registry convention, the epoch rule's
+  decision table (the anchor; fail-closed on an unknown pin, including a
+  values-only registry; the journal dropped on every reconcile).
 - `mirror-config` — the layered merge (arrays replace, never concatenate),
   `${ENV}` expansion (unresolved is reported, then fatal for services; the
   per-pod contract is `inspect` + `require_resolved` over the pod's own
@@ -725,7 +727,8 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   `range`+`exceed` pattern already matches.
 - **Negative equity flows end-to-end** (the master plan's venue-term requirement): seeding
   `totalRawUsd = -80000` with a long BTC position and crashing the mark served signed
-  `accountValue = -2771.65…`; after the 1 Hz tick liquidated it, the bare negative balance
+  `accountValue = -2771.65…`; the next evaluation (an account read, the 1 Hz tick, or `advance` —
+  §14.8's read-time evaluation) liquidated it, and the bare negative balance
   (`-2784.00…`, zero positions) still served — and the identity counter stayed 0, so the gated
   read passes negative values through.
 - **The bridge burns sub-wei remainders like the real chain** (plan §16.3): EVM→Core credits floor

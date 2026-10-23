@@ -97,15 +97,21 @@ print('ok' if abs(v - (raw + pnl)) < Decimal('0.000001') else f'mismatch v={v} r
 
 echo "-- C. crash ⇒ liquidation (the venue-side drawdown, not an oracle crash)"
 seed='{"marginSummary":{"accountValue":"0","totalNtlPos":"0","totalRawUsd":"-90000","totalMarginUsed":"1000"},"assetPositions":[{"type":"oneWay","position":{"coin":"BTC","entryPx":"100000","leverage":{"type":"cross","value":10},"marginUsed":"1000","maxLeverage":40,"positionValue":"0","returnOnEquity":"0","szi":"1","unrealizedPnl":"0","cumFunding":{"allTime":"0","sinceOpen":"0","sinceChange":"0"}}}]}'
+# The §14.8 evaluation (accrual + liquidation check against current marks)
+# runs on every account-scoped read as well as on the 1 Hz tick and on
+# `advance` — so the seeding call itself closes an underwater account. The
+# assertion is the metric, not which caller fired the evaluation.
+liq0=$(metric venue_sim_liquidations_total)
 spost /control/set_account "{\"address\":\"$UNDER\",\"state\":$seed}" > /dev/null \
   && ok "underwater account seeded" || bad "set_account refused"
-liqs=$(spost /control/advance '{"seconds":2}' | json 'len(d["liquidations"])')
+spost /control/advance '{"seconds":2}' > /dev/null
 sleep 3
+liq1=$(metric venue_sim_liquidations_total)
 after=$(sim_account "$UNDER")
 flat=$(echo "$after" | json 'len(d["assetPositions"])')
-[ "$liqs" -ge 1 ] && [ "$flat" = "0" ] \
-  && ok "the underwater position liquidated on the advance (equity=$(echo "$after" | json 'd["marginSummary"]["accountValue"]'))" \
-  || bad "no liquidation (report=$liqs, positions=$flat)"
+[ "$liq1" -gt "$liq0" ] && [ "$flat" = "0" ] \
+  && ok "the underwater position liquidated (equity=$(echo "$after" | json 'd["marginSummary"]["accountValue"]'))" \
+  || bad "no liquidation (metric $liq0 -> $liq1, positions=$flat)"
 # A crash draws a positioned account's equity down and the hand-back restores
 # the live mark (the daloc indexer's arc).
 eth_seed='{"marginSummary":{"accountValue":"1000","totalNtlPos":"0","totalRawUsd":"1000","totalMarginUsed":"50"},"assetPositions":[{"type":"oneWay","position":{"coin":"ETH","entryPx":"2500","leverage":{"type":"cross","value":20},"marginUsed":"50","maxLeverage":25,"positionValue":"0","returnOnEquity":"0","szi":"0.4","unrealizedPnl":"0","cumFunding":{"allTime":"0","sinceOpen":"0","sinceChange":"0"}}}]}'

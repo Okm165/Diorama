@@ -96,7 +96,7 @@ async fn clearinghouse(
 /// `spotClearinghouseState`: the unified reconciliation
 /// (`available + maintenance == balance`), or the venue's verbatim.
 async fn spot_state(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
-    state.sim.accrue_all(&state.feed, crate::now_ms())?;
+    state.sim.evaluate(&state.feed)?;
     match state.sim.account(user)? {
         Some(account) => {
             let meta = state.feed.meta();
@@ -195,7 +195,7 @@ fn exchange_status(state: &ApiState) -> Result<Response> {
 pub fn clearinghouse_of(state: &ApiState, address: Address) -> Result<Option<ClearinghouseState>> {
     let now = crate::now_ms();
     let served_time = state.sim.served_time(now)?;
-    state.sim.accrue_all(&state.feed, now)?;
+    state.sim.evaluate(&state.feed)?;
     let Some(account) = state.sim.account(address)? else {
         return Ok(None);
     };

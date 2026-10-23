@@ -144,7 +144,7 @@ fn spawn_tick(
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tick.tick().await;
-            if let Err(e) = tick_sim.tick(&tick_feed) {
+            if let Err(e) = tick_sim.evaluate(&tick_feed) {
                 tracing::warn!(error = %e, "sim tick failed; will retry");
             }
         }

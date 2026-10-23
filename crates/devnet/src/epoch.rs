@@ -77,8 +77,17 @@ pub async fn reconcile(
 ) -> Result<Epoch> {
     let known = plane.state.lock()?.data.epoch_pin;
     let epoch = if known != pin {
-        let (slots, accounts) = plane.shadow.lock()?.clear_all();
-        if known.is_none() && slots == 0 && accounts == 0 {
+        // Classify by what the registry *held* before the clear: `clear_all`
+        // reports the marked counts, and a registry can hold recorded values
+        // with no marks (healed on load, but never assumed) — reporting that
+        // as "nothing to clear" would drop it silently and uncounted.
+        let (had, slots, accounts) = {
+            let mut shadow = plane.shadow.lock()?;
+            let had = shadow.has_recorded();
+            let (slots, accounts) = shadow.clear_all();
+            (had, slots, accounts)
+        };
+        if known.is_none() && !had {
             Epoch::Steady
         } else {
             plane.save_shadow()?;
@@ -122,4 +131,134 @@ pub async fn reconcile(
         tracing::warn!(error = %e, "clearing the journal after a reset failed");
     }
     Ok(epoch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::journal::{Journal, JournalEntry};
+    use crate::metrics::Metrics;
+    use crate::shadow::Shadow;
+    use crate::shared::Shared;
+    use crate::state::StateFile;
+    use alloy_primitives::{Address, U256};
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::time::Duration;
+
+    /// A plane on a fresh temp dir (per test: they may run concurrently).
+    fn test_plane(name: &str) -> Plane {
+        let dir = std::env::temp_dir().join(format!("mirror-epoch-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Plane {
+            shadow: Shared::new("shadow registry", Shadow::default()),
+            shadow_path: dir.join("shadow.json"),
+            journal: Journal::new(dir.join("journal"), 16).unwrap(),
+            state: Shared::new(
+                "cursor state",
+                StateFile::open(dir.join("cursor.json")).unwrap(),
+            ),
+            metrics: Metrics::default(),
+            halted: AtomicBool::new(false),
+            frozen: AtomicBool::new(false),
+            time_offset: AtomicU64::new(0),
+            shadow_scanned_upto: AtomicU64::new(0),
+            reapply_from: Shared::new("reapply range", None),
+        }
+    }
+
+    /// Never connected to: the decision paths under test do not touch the
+    /// chain (only the same-pin restore does, and the drill covers that live).
+    fn target() -> Rpc {
+        Rpc::new("http://127.0.0.1:9", Duration::from_secs(1)).unwrap()
+    }
+
+    fn storage_write(addr: Address, slot: U256, value: U256) -> mirror_anvil::Write {
+        mirror_anvil::Write::Storage {
+            address: addr,
+            slot,
+            value,
+        }
+    }
+
+    /// The decision table's non-network paths: the anchor, the fail-closed
+    /// clear (including a values-only registry), the changed-pin clear, the
+    /// same-pin steady, and the journal dropped on every reconcile.
+    #[tokio::test]
+    async fn epoch_decisions_are_fail_closed() {
+        let rpc = target();
+        let addr = Address::repeat_byte(0x11);
+        let slot = U256::from(3);
+
+        // 1. Anchor: an empty registry's epoch is the current pin; a
+        //    non-empty one is left unknown (nothing is asserted unprovably).
+        let empty = test_plane("anchor-empty");
+        anchor(&empty, Some(100)).unwrap();
+        assert_eq!(empty.state.lock().unwrap().data.epoch_pin, Some(100));
+        let held = test_plane("anchor-held");
+        held.shadow
+            .lock()
+            .unwrap()
+            .mark(&storage_write(addr, slot, U256::from(7)));
+        anchor(&held, Some(100)).unwrap();
+        assert_eq!(held.state.lock().unwrap().data.epoch_pin, None);
+
+        // 2. A fresh state dir (unknown pin, empty registry) is not a
+        //    transition: the pin is merely anchored.
+        let fresh = test_plane("fresh");
+        assert!(matches!(
+            reconcile(&fresh, &rpc, 8, Some(100)).await.unwrap(),
+            Epoch::Steady
+        ));
+        assert_eq!(fresh.state.lock().unwrap().data.epoch_pin, Some(100));
+
+        // 3. Unknown pin beside a *values-only* registry: cleared, never
+        //    reported as "nothing to clear" (the values are stale derivations
+        //    of a base the state cannot prove).
+        let values_only = test_plane("values-only");
+        values_only.shadow.lock().unwrap().values.insert(
+            addr,
+            std::collections::BTreeMap::from([(slot, U256::from(7))]),
+        );
+        assert!(matches!(
+            reconcile(&values_only, &rpc, 8, Some(100)).await.unwrap(),
+            Epoch::Cleared
+        ));
+        assert!(!values_only.shadow.lock().unwrap().has_recorded());
+
+        // 4. A changed pin clears and re-anchors; the same pin with an empty
+        //    registry is steady.
+        let moved = test_plane("moved");
+        moved.state.lock().unwrap().data.epoch_pin = Some(1);
+        moved
+            .shadow
+            .lock()
+            .unwrap()
+            .mark(&storage_write(addr, slot, U256::from(7)));
+        assert!(matches!(
+            reconcile(&moved, &rpc, 8, Some(100)).await.unwrap(),
+            Epoch::Cleared
+        ));
+        assert_eq!(moved.state.lock().unwrap().data.epoch_pin, Some(100));
+        assert!(matches!(
+            reconcile(&moved, &rpc, 8, Some(100)).await.unwrap(),
+            Epoch::Steady
+        ));
+
+        // 5. The journal is dropped on every reconcile (its before-values
+        //    belong to the old chain).
+        moved
+            .journal
+            .record(
+                1,
+                &[JournalEntry::Storage {
+                    address: addr,
+                    slot,
+                    before: U256::from(1),
+                }],
+            )
+            .unwrap();
+        assert!(!moved.journal.blocks_in(1, 1).unwrap().is_empty());
+        reconcile(&moved, &rpc, 8, Some(100)).await.unwrap();
+        assert!(moved.journal.blocks_in(1, 1).unwrap().is_empty());
+    }
 }
