@@ -5,10 +5,10 @@
 #   C. live markets  - Aave supply/borrow/repay/withdraw, Uniswap V3 swap,
 #                      Chainlink price, debug traces, state overrides
 # Ends by resetting the venues it touched back to mainnet truth (unshadow).
-# Usage: NS=mainnet-mirror ./scripts/capability-proof.sh
+# Usage: NS=mainnet-mirror ./scripts/mainnet-proof.sh
 set -uo pipefail
 
-source "$(dirname "$0")/lib.sh"
+source "$(dirname "$0")/lib-mainnet.sh"
 
 USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 WETH=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2

@@ -34,10 +34,10 @@ ns: ## Create namespace + StorageClass (idempotent)
 	kubectl apply -f k8s/base/shared/storageclass.yaml
 
 mainnet-secrets: ## Create the reth<->lighthouse JWT secret if missing (mainnet namespace)
-	NS=mainnet-mirror ./scripts/gen-secret.sh
+	NS=mainnet-mirror ./scripts/mainnet-secrets.sh
 
 venue-secrets: ## Create the CCTP relay-wallet secret (CCTP_RELAY_KEY=0x…; venue namespace)
-	NS=venue-mirror ./scripts/gen-venue-secret.sh
+	NS=venue-mirror ./scripts/venue-secrets.sh
 
 apply: ## Apply the selected instance's stack (INSTANCE selects the overlay)
 	kubectl apply -k $(OVERLAY)
@@ -195,10 +195,10 @@ logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-
 # follow INSTANCE): a `mainnet-*` target is about the mainnet mirror, a
 # `venue-*` target about the venue's.
 mainnet-smoke: ## End-to-end smoke test (mainnet)
-	NS=mainnet-mirror ./scripts/smoke.sh
+	NS=mainnet-mirror ./scripts/mainnet-smoke.sh
 
 venue-smoke: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
-	NS=venue-mirror ./scripts/smoke-venue.sh
+	NS=venue-mirror ./scripts/venue-smoke.sh
 
 venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
 	kubectl apply -f k8s/base/venue-mirror/pvcs.yaml
@@ -227,19 +227,19 @@ engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fit
 	./scripts/engine-symmetry.sh
 
 mainnet-feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
-	./scripts/feed-bridge.sh $(ARGS)
+	./scripts/mainnet-feed-bridge.sh $(ARGS)
 
 mainnet-scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
-	NS=mainnet-mirror ./scripts/scenario.sh
+	NS=mainnet-mirror ./scripts/mainnet-scenario.sh
 
 mainnet-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
-	NS=mainnet-mirror ./scripts/capability-proof.sh
+	NS=mainnet-mirror ./scripts/mainnet-proof.sh
 
 mainnet-product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T
-	NS=mainnet-mirror ./scripts/product-sim.sh
+	NS=mainnet-mirror ./scripts/mainnet-product-sim.sh
 
 mainnet-closure-check: ## Audit the watchlist closure: every storage dep of every market-data view
-	NS=mainnet-mirror ./scripts/closure-check.sh
+	NS=mainnet-mirror ./scripts/mainnet-closure-check.sh
 
 diagrams: ## Regenerate docs/img renders from the ASCII diagram blocks (needs pango-view)
 	./scripts/render-diagrams.sh

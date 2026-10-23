@@ -13,10 +13,10 @@
 # implementation) appears in the trace but code is immutable, so only accounts
 # with storage reads are flagged.
 #
-# Usage: NS=mainnet-mirror ./scripts/closure-check.sh
+# Usage: NS=mainnet-mirror ./scripts/mainnet-closure-check.sh
 set -uo pipefail
 
-source "$(dirname "$0")/lib.sh"
+source "$(dirname "$0")/lib-mainnet.sh"
 
 VIEWS="
 aave_price_weth   0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f07000000000000000000000000C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2

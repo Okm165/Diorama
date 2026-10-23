@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for the mirror stack. Run from the repo root:
-#   make mainnet-smoke        (or ./scripts/smoke.sh)
+#   make mainnet-smoke        (or ./scripts/mainnet-smoke.sh)
 #
 # Executes curl+jq from inside the engine pod so every check talks to the
 # cluster-internal service names (the same way the engine does).

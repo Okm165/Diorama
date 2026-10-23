@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared helpers for the mirror's test scripts. Source it, never run it:
-#   source "$(dirname "$0")/lib.sh"
+#   source "$(dirname "$0")/lib-mainnet.sh"
 #
 # The conventions here are measured, not stylistic:
 #   - `rpc` runs through the engine pod: it has curl+jq, the anvil pods do not.

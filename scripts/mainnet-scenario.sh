@@ -11,7 +11,7 @@
 # Requires: the deployed stack (make mainnet-bootstrap), kubectl, no external network.
 set -uo pipefail
 
-source "$(dirname "$0")/lib.sh"
+source "$(dirname "$0")/lib-mainnet.sh"
 
 # The probes mirror config/instances/mainnet-mirror.toml:probes (all watched
 # accounts, so T must match reth exactly; none is blockhash-dependent, so M must

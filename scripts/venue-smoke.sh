@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for the Venue Mirror stack. Run from the repo root:
-#   make venue-smoke        (or NS=venue-mirror ./scripts/smoke-venue.sh)
+#   make venue-smoke        (or NS=venue-mirror ./scripts/venue-smoke.sh)
 #
 # Executes curl+jq from inside the venue engine pod so every check talks to the
 # cluster-internal service names (the same way the engine does). The mainnet
-# counterpart is scripts/smoke.sh; the checks differ because the venue's facts
+# counterpart is scripts/mainnet-smoke.sh; the checks differ because the venue's facts
 # differ: a fork pin instead of a follow head, the simulator's market-plane
 # freshness instead of reth/CL liveness, the bridge's counters instead of M/T
 # parity.

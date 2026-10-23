@@ -84,7 +84,7 @@ Expected output shape:
    T apply:  source=trace writes=... filtered=... skipped_shadowed=... sampled=8/8 ms=...
 ```
 
-## Smoke (`scripts/smoke.sh`)
+## Smoke (`scripts/mainnet-smoke.sh`)
 
 Checks pods, reth head + `eth_syncing` + `eth_getBlockAccessList` availability,
 Lighthouse sync status, both anvil pins, the engine `/status`, and a parity
@@ -174,10 +174,10 @@ behavioral). The default policy (`on_divergence: continue`) records all of them;
 | Handing a key back kept its recorded value, so a re-fork resurrected it | `unmark` cleared the mark only; the value stayed in the registry, and a later re-fork restored (and re-owned) it. Measured: the scenario's crashed oracle source (USDC source = the WETH/USD feed, price 240,233,000,110 vs mainnet's 99,983,478) came back this way - and because *any* devnet mark on a probe's target skips that probe, the five oracle probes stayed green while the price was poisoned. Fixed three ways: `unmark` now drops the recorded value, orphan values are pruned (never re-owned), and `mirror_t_probe_skipped_total` counts skipped probes so the blind spot is visible. One unshadow call healed the price (`resynced_keys: 4`). The same audit fixed the epoch semantics (a fresh pin clears marks *and* values) - restoring across a moved base is what resurrected the value in the first place |
 | Restoring devnet writes onto a *moved* base mixes eras | a +30d time-travel run recorded Aave's `lastUpdateTimestamp` ~13 days in the future; a later re-fork re-applied it and every `supply` panicked with `arithmetic underflow` (product sim 2/13, scenario 31/33). The plan's rule decides it - derived values go stale when the base advances (2.2/6.3): a pin change is a new epoch (clear marks and values), the product re-creates positions from its own journal (3.6). After the epoch reset the suites are green again |
 
-## Capability proof: `scripts/capability-proof.sh`
+## Capability proof: `scripts/mainnet-proof.sh`
 
-`scripts/scenario.sh` proves the *substrate* (replay fidelity, COW, drills).
-`scripts/capability-proof.sh` proves the *product*: the three things a fork must
+`scripts/mainnet-scenario.sh` proves the *substrate* (replay fidelity, COW, drills).
+`scripts/mainnet-proof.sh` proves the *product*: the three things a fork must
 do, measured end-to-end against the live stack and left clean afterwards.
 
 | Section | Checks |
@@ -195,7 +195,7 @@ Every send is simulated with `eth_call` first (the standard simulate-then-send
 workflow), so a revert prints its reason before any transaction is spent.
 Measured runtime: ~10 min; last full run: 30 passed, 0 failed.
 
-## Product simulation: `scripts/product-sim.sh`
+## Product simulation: `scripts/mainnet-product-sim.sh`
 
 Where the capability proof checks *capabilities*, the product sim runs the
 workflow a margin product actually executes, in one pass and on live state
@@ -207,7 +207,7 @@ workflow a margin product actually executes, in one pass and on live state
 | 2. live data | the market-data closure the product reads - five Chainlink rounds, the Aave oracle for five assets, the UniV3 pool, three token supplies, two Aave income indexes - sampled once per *parent block* | every view-comparison matches reth at the applied cursor: freshness is continuous and broad, not a one-shot spot check. Devnet-owned views are skipped by design (copy-on-write) and counted |
 | 3. the bot | a WS `eth_subscribe` on the pool sees the trader's `Borrow`; the oracle is crashed through its admin path; the bot polls health, calls `liquidationCall`, takes the bonus | the event arrived live, HF crossed below 1e18, the bot's collateral grew with the bonus, the oracle was handed back (unshadow) - and, because the crash leaves the position *underwater*, the liquidation takes Aave's **bad-debt path**: the collateral is consumed entirely and the whole remaining debt token balance is burned while the liquidator repays only what the collateral covered (measured on this deployment: `getReserveData` returns 15 words, the pre-`deficit` struct) |
 
-All three scripts share `scripts/lib.sh` - the measured conventions live there
+All three scripts share `scripts/lib-mainnet.sh` - the measured conventions live there
 (explicit gas on devnet sends, offline `cast` without `--rpc-url`, polled
 receipts) instead of being copied three times. The venue-side dual-mode
 scripts (the epoch drill, the capability proof) share `scripts/lib-venue.sh`
@@ -339,7 +339,7 @@ curl -s -X POST localhost:8091/control/deal \
   watch `fork_pin` advance and `venue_epochs_total` increment.
 - In-cluster: `kubectl apply -k k8s/overlays/venue-mirror` (namespace
   `venue-mirror`; NodePorts 31545/31880/31090/31091), then `make venue-smoke`
-  (`scripts/smoke-venue.sh`): V's chain 999 / head ≥ pin / automine off, the
+  (`scripts/venue-smoke.sh`): V's chain 999 / head ≥ pin / automine off, the
   engine's `/healthz`, `/status` (the engine pin must equal V's pin) and
   `/metrics`, the sim's `/healthz`, `/readyz`, control `/health` and
   `venue_sim_ws_connected`, the `venue_bridge_*` counters, and the `meta`
