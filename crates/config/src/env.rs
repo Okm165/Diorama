@@ -67,6 +67,46 @@ fn expand_str(s: &str, vars: &[(String, String)], unresolved: &mut Vec<String>) 
     out
 }
 
+/// The per-pod wiring contract (plan §19.4): one instance file, many readers
+/// — each pod sets only the `${VAR}`s its own sections reference. The caller
+/// passes the string values its sections carry; a reference still present in
+/// any of them (the loader keeps an unresolvable `${VAR}` verbatim) is a
+/// named refusal, never a literal used as an endpoint or a path.
+///
+/// `Instance::inspect` + this is the per-section counterpart of
+/// `Instance::load`: the venue engine, the simulator and the CCTP bridge all
+/// boot from the same instance file with only their own wiring present.
+pub fn require_resolved(what: &'static str, values: &[&str]) -> Result<(), ConfigError> {
+    let mut missing: Vec<String> = Vec::new();
+    for value in values {
+        let mut rest = *value;
+        while let Some(start) = rest.find("${") {
+            let after = &rest[start + 2..];
+            match after.find('}') {
+                Some(end) if !after[..end].is_empty() => {
+                    let name = &after[..end];
+                    if !missing.iter().any(|m| m == name) {
+                        missing.push(name.to_string());
+                    }
+                    rest = &after[end + 1..];
+                }
+                // `${}` is not a reference (the loader keeps it literal).
+                Some(end) => rest = &after[end + 1..],
+                None => break,
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(ConfigError::Invalid {
+        issues: missing
+            .into_iter()
+            .map(|name| format!("{what}: unresolved ${{{name}}} - deploy-time wiring must set it"))
+            .collect(),
+    })
+}
+
 /// `MIRROR__<PATH__SEGMENTS>=<value>`: operator debug overrides applied after
 /// the merge. The path must already exist (typo protection); every applied
 /// override is logged loudly at boot.
@@ -121,5 +161,21 @@ fn parse_scalar(raw: &str) -> toml::Value {
                 toml::Value::String(raw.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_resolved_names_every_reference() {
+        let err = require_resolved("test wiring", &["http://x", "${A}/b", "${B}", "${A}"]).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("${A}") && text.contains("${B}"), "{text}");
+        assert_eq!(text.matches("${A}").count(), 1, "one report per name: {text}");
+        // `${}` is not a reference (the loader keeps it literal); a clean set
+        // passes.
+        require_resolved("test wiring", &["${}", "plain", "http://x:1"]).unwrap();
     }
 }

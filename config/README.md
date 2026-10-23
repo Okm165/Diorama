@@ -13,6 +13,15 @@ time (deploy-time wiring). A service refuses to boot on an unresolved
 reference, naming the variable; `mirror-config check` (which needs no
 deployment environment) reports them as deploy-time wiring instead.
 
+**One file per instance, many readers — each pod provides only its own
+sections' wiring.** The venue instance is read by three pods with three
+different env sets (the engine's, the simulator's, the bridge's), so each
+service boots with `Instance::inspect` + `require_resolved` over *its* section
+values: the other services' `${VAR}`s stay unresolved in that pod by design,
+while a reference still present in its own wiring is a named boot refusal
+(`load` is the strict form for single-reader instances, e.g. the mainnet
+mirror's).
+
 Merge semantics: deep merge; arrays replace, never concatenate; unknown keys
 are errors at every level.
 

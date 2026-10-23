@@ -41,7 +41,30 @@ async fn run() -> mirror_hyperliquid::Result<()> {
     let config = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/etc/mirror/instance.toml".to_string());
-    let mut cfg = mirror_config::Instance::load(std::path::Path::new(&config))?;
+    // One instance file, many readers: this pod provides only the simulator's
+    // wiring (the venue engine's and the bridge's references stay unresolved
+    // here, by design).
+    let (cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(&config))?;
+    if let (Some(chain), Some(sim)) = (cfg.chains.venue.as_ref(), cfg.services.sim.as_ref()) {
+        let state_dir = sim.state_dir.to_string_lossy().to_string();
+        mirror_config::require_resolved(
+            "venue simulator wiring",
+            &[
+                &chain.source_url,
+                &state_dir,
+                sim.engine_admin_url.as_deref().unwrap_or_default(),
+                sim.anvil_url.as_deref().unwrap_or_default(),
+            ],
+        )
+        .inspect_err(|e| {
+            tracing::error!(
+                unresolved = %unresolved.join(", "),
+                error = %e,
+                "venue simulator wiring is incomplete"
+            );
+        })?;
+    }
+    let mut cfg = cfg;
     let (chain, sim_section) = cfg.take_sim()?;
 
     let feed = Arc::new(mirror_hyperliquid::feed::MarketFeed::load(

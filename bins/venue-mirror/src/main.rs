@@ -40,7 +40,25 @@ async fn run() -> mirror_hyperliquid::Result<()> {
     let config = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/etc/mirror/instance.toml".to_string());
-    let cfg = mirror_config::Instance::load(std::path::Path::new(&config))?;
+    // One instance file, many readers: this pod provides only the venue
+    // engine's wiring. `inspect` reports the other services' unresolved
+    // references instead of failing on them; the engine's own sections are
+    // then required here, by name (the cctp bridge's pattern).
+    let (cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(&config))?;
+    if let (Some(chain), Some(venue)) = (cfg.chains.venue.as_ref(), cfg.services.venue.as_ref()) {
+        let state_dir = venue.state_dir.to_string_lossy().to_string();
+        mirror_config::require_resolved(
+            "venue engine wiring",
+            &[&chain.source_url, &venue.anvil_url, &state_dir],
+        )
+        .inspect_err(|e| {
+            tracing::error!(
+                unresolved = %unresolved.join(", "),
+                error = %e,
+                "venue engine wiring is incomplete"
+            );
+        })?;
+    }
     let (source_url, v_url) = cfg.venue_urls()?;
     let ctx = std::sync::Arc::new(mirror_hyperliquid::Ctx::new(cfg, &source_url, &v_url)?);
 

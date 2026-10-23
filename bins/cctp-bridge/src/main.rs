@@ -67,9 +67,22 @@ async fn run() -> mirror_cctp::Result<()> {
     // required here, by name.
     let (mut cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(&config))?;
     let section = cfg.take_cctp()?;
-    require_resolved(&section).inspect_err(|e| {
-        tracing::error!(unresolved = %unresolved.join(", "), error = %e, "cctp wiring is incomplete");
-    })?;
+    {
+        let state_dir = section.state_dir.to_string_lossy().to_string();
+        mirror_config::require_resolved(
+            "cctp wiring",
+            &[
+                &state_dir,
+                &section.t_url,
+                &section.v_url,
+                &section.relay_key,
+                &section.attester_seed,
+            ],
+        )
+        .inspect_err(|e| {
+            tracing::error!(unresolved = %unresolved.join(", "), error = %e, "cctp wiring is incomplete");
+        })?;
+    }
     let receipt_timeout = Duration::from_secs(section.receipt_timeout_secs);
 
     let chains = build_chains(&section, Duration::from_secs(30))?;
@@ -234,30 +247,6 @@ fn build_chains(section: &CctpSection, timeout: Duration) -> mirror_cctp::Result
         Chain::ethereum(&section.t_url, timeout)?,
         Chain::hyper_evm(&section.v_url, timeout)?,
     ])
-}
-
-/// Every `[services.cctp]` value the bridge reads must be fully resolved: an
-/// unresolved `${VAR}` left in a URL/key/path is a named boot refusal, never
-/// a literal used as an endpoint.
-fn require_resolved(section: &CctpSection) -> mirror_cctp::Result<()> {
-    let fields = [
-        ("state_dir", section.state_dir.to_string_lossy().to_string()),
-        ("t_url", section.t_url.clone()),
-        ("v_url", section.v_url.clone()),
-        ("relay_key", section.relay_key.clone()),
-        ("attester_seed", section.attester_seed.clone()),
-    ];
-    for (key, value) in fields {
-        if value.contains("${") {
-            return Err(mirror_cctp::Error::BadRequest {
-                reason: format!(
-                    "services.cctp.{key} carries an unresolved ${{VAR}} reference; \
-                     the bridge pod must carry that wiring"
-                ),
-            });
-        }
-    }
-    Ok(())
 }
 
 /// The wiring asserts + the per-domain min-fee probe (§15.2: absent on
