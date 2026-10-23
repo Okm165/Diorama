@@ -8,7 +8,7 @@
 #   3. devnet workflow    fund, send, shadow, rewind, snapshot/revert on T
 #   4. integrity counters no divergences / convergence failures / blob failures
 #
-# Requires: the deployed stack (make bootstrap), kubectl, no external network.
+# Requires: the deployed stack (make mainnet-bootstrap), kubectl, no external network.
 set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"

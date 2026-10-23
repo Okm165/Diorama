@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The CCTP bridge smoke (the plan's `cctp-*` scripts; the counterpart of
-# `make smoke-venue`): the bridge answers on both ports, the queue is
+# `make venue-smoke`): the bridge answers on both ports, the queue is
 # coherent with the store, the metric set is present, and the declared chains
 # are the two the instance names.
 #

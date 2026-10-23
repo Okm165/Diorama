@@ -33,8 +33,8 @@ ns: ## Create namespace + StorageClass (idempotent)
 	kubectl apply -f $(NS_MANIFEST)
 	kubectl apply -f k8s/base/shared/storageclass.yaml
 
-secrets: ## Create the reth<->lighthouse JWT secret if missing
-	NS=$(NS) ./scripts/gen-secret.sh
+mainnet-secrets: ## Create the reth<->lighthouse JWT secret if missing (mainnet namespace)
+	NS=mainnet-mirror ./scripts/gen-secret.sh
 
 venue-secrets: ## Create the CCTP relay-wallet secret (CCTP_RELAY_KEY=0x…; venue namespace)
 	NS=venue-mirror ./scripts/gen-venue-secret.sh
@@ -50,21 +50,21 @@ delete: ## Delete the namespace (data survives: StorageClass is reclaimPolicy Re
 
 ##@ Bootstrap
 
-snapshot: ## Download the reth snapshot into the reth PVC (scales reth down first)
-	kubectl -n $(NS) scale deploy/reth --replicas=0 2>/dev/null || true
-	kubectl -n $(NS) delete job reth-snapshot --ignore-not-found
+mainnet-snapshot: ## Download the reth snapshot into the reth PVC (scales reth down first)
+	kubectl -n mainnet-mirror scale deploy/reth --replicas=0 2>/dev/null || true
+	kubectl -n mainnet-mirror delete job reth-snapshot --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/snapshot-job.yaml
 	@echo "waiting for snapshot to finish (up to 2h; resumable)..."
-	kubectl -n $(NS) wait --for=condition=complete job/reth-snapshot --timeout=7200s || \
-		{ echo "still running - check: make snapshot-status"; exit 1; }
+	kubectl -n mainnet-mirror wait --for=condition=complete job/reth-snapshot --timeout=7200s || \
+		{ echo "still running - check: make mainnet-snapshot-status"; exit 1; }
 
-snapshot-status: ## Show snapshot job status + progress
+mainnet-snapshot-status: ## Show snapshot job status + progress
 	@$(KUBECTL) get job reth-snapshot 2>/dev/null || echo "no snapshot job"
 	@$(KUBECTL) logs job/reth-snapshot --tail=3 2>/dev/null || true
 
-bootstrap: ns secrets images ## First-time setup: namespace, secrets, images, snapshot, full stack
+mainnet-bootstrap: ns mainnet-secrets images ## First-time setup (mainnet): namespace, secrets, images, snapshot, full stack
 	kubectl apply -f k8s/base/mainnet-mirror/pvcs.yaml
-	$(MAKE) snapshot
+	$(MAKE) mainnet-snapshot
 	$(MAKE) apply
 	@echo "bootstrap complete. watch: make status"
 
@@ -140,7 +140,7 @@ deploy-engine: import ## Rebuild + redeploy the selected instance's engine
 	$(KUBECTL) rollout restart deploy/engine
 	$(KUBECTL) rollout status deploy/engine --timeout=120s
 
-build-venue: ## Build the venue binaries on the host (cargo: venue-engine + venue-sim)
+venue-build: ## Build the venue binaries on the host (cargo: venue-engine + venue-sim)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p venue-engine -p venue-sim
 
 test-engine: ## Run workspace unit tests on the host (cargo)
@@ -191,13 +191,19 @@ logs: ## Tail logs of all pods of the selected instance (follow)
 logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-anvil-m
 	$(KUBECTL) logs -f deploy/$* --tail=100
 
-smoke: ## End-to-end smoke test
-	NS=$(NS) ./scripts/smoke.sh
+# The mirror-specific targets pin their own namespace (the shared targets
+# follow INSTANCE): a `mainnet-*` target is about the mainnet mirror, a
+# `venue-*` target about the venue's.
+mainnet-smoke: ## End-to-end smoke test (mainnet)
+	NS=mainnet-mirror ./scripts/smoke.sh
 
-# The venue smoke is inherently the venue instance: the shared targets follow
-# INSTANCE, this one pins NS=venue-mirror.
-smoke-venue: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
+venue-smoke: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
 	NS=venue-mirror ./scripts/smoke-venue.sh
+
+venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
+	kubectl apply -f k8s/base/venue-mirror/pvcs.yaml
+	$(MAKE) INSTANCE=venue-mirror apply
+	@echo "venue bootstrap complete. watch: make INSTANCE=venue-mirror status"
 
 venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/epoch)
 	kubectl -n venue-mirror exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
@@ -220,28 +226,28 @@ cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTIN
 engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fitness function)
 	./scripts/engine-symmetry.sh
 
-feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
+mainnet-feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
 	./scripts/feed-bridge.sh $(ARGS)
 
-scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
-	NS=$(NS) ./scripts/scenario.sh
+mainnet-scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
+	NS=mainnet-mirror ./scripts/scenario.sh
 
-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
-	NS=$(NS) ./scripts/capability-proof.sh
+mainnet-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
+	NS=mainnet-mirror ./scripts/capability-proof.sh
 
-product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T
-	NS=$(NS) ./scripts/product-sim.sh
+mainnet-product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T
+	NS=mainnet-mirror ./scripts/product-sim.sh
 
-closure-check: ## Audit the watchlist closure: every storage dep of every market-data view
-	NS=$(NS) ./scripts/closure-check.sh
+mainnet-closure-check: ## Audit the watchlist closure: every storage dep of every market-data view
+	NS=mainnet-mirror ./scripts/closure-check.sh
 
 diagrams: ## Regenerate docs/img renders from the ASCII diagram blocks (needs pango-view)
 	./scripts/render-diagrams.sh
 
-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
-	kubectl -n $(NS) delete job engine-selftest --ignore-not-found
+mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
+	kubectl -n mainnet-mirror delete job engine-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/selftest-job.yaml
-	kubectl -n $(NS) wait --for=condition=complete job/engine-selftest --timeout=900s || true
+	kubectl -n mainnet-mirror wait --for=condition=complete job/engine-selftest --timeout=900s || true
 	$(KUBECTL) logs job/engine-selftest
 
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
@@ -253,12 +259,12 @@ logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normal
 	    | sort | uniq -c | sort -rn | head -6; \
 	done
 
-backfill: ## Show the CL backfill progress and the lighthouse datadir sizes
+mainnet-backfill: ## Show the CL backfill progress and the lighthouse datadir sizes
 	@$(KUBECTL) logs deploy/lighthouse --tail=200 2>/dev/null \
 	  | jq -r 'select(.msg != null and (.msg|test("historical";"i"))) | "backfill: distance=\(.distance // "?") speed=\(.speed // "?") est=\(.est_time // "?")"' 2>/dev/null | tail -1
 	@sudo sh -c 'du -sh /var/lib/rancher/k3s/storage/pvc-*_$(NS)_lighthouse-data/beacon/* 2>/dev/null | sort -h | tail -4'
 
-prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; safe for the mirror)
+mainnet-prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; safe for the mirror)
 	@echo "scaling lighthouse down (the prune needs the database lock)..."
 	kubectl -n $(NS) scale deploy/lighthouse --replicas=0
 	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=lighthouse --timeout=180s || true
@@ -276,18 +282,18 @@ pin-show: ## Show the resolved fork pins of the instance's anvils
 		printf "%s pin: " $$c; $(KUBECTL) exec deploy/$$c -- cat /state/pin 2>/dev/null || echo "(not resolved yet)"; \
 	done
 
-repin: ## Re-pin drill: wipe the pins, restart the anvils (engine auto-rebases; a new epoch starts)
-	kubectl -n $(NS) scale deploy/anvil-m deploy/anvil-t --replicas=0
+mainnet-repin: ## Re-pin drill: wipe the pins, restart the anvils (engine auto-rebases; a new epoch starts)
+	kubectl -n mainnet-mirror scale deploy/anvil-m deploy/anvil-t --replicas=0
 	# Wait until the pods are really gone before wiping: the wipe must not
 	# race a container that is still shutting down (its init container
 	# re-resolves the pin on the next start).
-	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=anvil-m --timeout=180s || true
-	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=anvil-t --timeout=180s || true
-	kubectl -n $(NS) delete job repin-wipe --ignore-not-found
+	kubectl -n mainnet-mirror wait --for=delete pod -l app.kubernetes.io/name=anvil-m --timeout=180s || true
+	kubectl -n mainnet-mirror wait --for=delete pod -l app.kubernetes.io/name=anvil-t --timeout=180s || true
+	kubectl -n mainnet-mirror delete job repin-wipe --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/repin-job.yaml
-	kubectl -n $(NS) wait --for=condition=complete job/repin-wipe --timeout=300s
-	kubectl -n $(NS) delete job repin-wipe --ignore-not-found
-	kubectl -n $(NS) scale deploy/anvil-m deploy/anvil-t --replicas=1
+	kubectl -n mainnet-mirror wait --for=condition=complete job/repin-wipe --timeout=300s
+	kubectl -n mainnet-mirror delete job repin-wipe --ignore-not-found
+	kubectl -n mainnet-mirror scale deploy/anvil-m deploy/anvil-t --replicas=1
 	kubectl -n $(NS) rollout status deploy/anvil-m --timeout=600s
 	kubectl -n $(NS) rollout status deploy/anvil-t --timeout=600s
 	@echo "re-pinned. engine will rebase automatically on its next poll."
@@ -300,7 +306,10 @@ help: ## Show this help
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: ns secrets apply diff delete snapshot snapshot-status bootstrap images build build-venue \
-	import deploy-engine test-engine config-check status logs smoke smoke-venue venue-repin feed-bridge \
-	cctp-smoke cctp-roundtrip \
-	selftest pin-show repin help
+.PHONY: ns mainnet-secrets venue-secrets apply diff delete \
+	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
+	images build venue-build import deploy-engine test-engine config-check \
+	status logs mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-drill \
+	venue-proof venue-product-sim cctp-smoke cctp-roundtrip engine-symmetry \
+	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check \
+	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help

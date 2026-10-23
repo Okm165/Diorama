@@ -16,7 +16,7 @@ acceptance).
 | Engine admin (both engines) | :8080 | `GET /status`, `/metrics`, `/healthz`, `/livez`; `POST /admin/{deal, shadow, rewind, pause, resume, epoch, probes}` |
 | T-only admin | the mainnet engine | `POST /admin/time` (the persistent clock offset) and `/admin/feed{,/pause,/resume,/override}` (the feed bridge) — the symmetry gate's deliberate absences |
 | Feed bridge | T | live Chainlink answers → the mock aggregators; a crash is owned until handed back (`/admin/feed/override`, then clear) |
-| Watchlist + probes | the instance TOML | 88 watched accounts on the mainnet instance; the closure audit is `make closure-check` |
+| Watchlist + probes | the instance TOML | 88 watched accounts on the mainnet instance; the closure audit is `make mainnet-closure-check` |
 | Epochs | `POST /admin/epoch` (T) / the sim's `POST /control/epoch_new` (V) | a fresh pin clears the devnet's marks *and* values; a same-pin reset restores them |
 
 **M — the strict replay reference — is deliberately not exposed.** M is the

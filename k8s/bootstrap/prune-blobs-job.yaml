@@ -6,7 +6,7 @@
 # pruning only runs while the node holds its database lock, and the offline
 # `lighthouse db prune-blobs` refuses to open a locked database.
 #
-# `make prune-blobs` runs this job with the node scaled down, then scales it
+# `make mainnet-prune-blobs` runs this job with the node scaled down, then scales it
 # back up. Safe for the mirror: only data older than the DA boundary is
 # removed, and the mirror only ever needs the pin window (~1.4 days).
 apiVersion: batch/v1

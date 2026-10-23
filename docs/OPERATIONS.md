@@ -17,7 +17,7 @@
 | `mirror_t_convergence_failures_total` | increase | T's state ≠ mainnet at the parent block just applied, on a probe whose target the devnet does *not* own (shadowed targets are skipped by design). A missing BAL entry, a watchlist gap, or a clock offset left set (`/admin/time`). A deliberate manipulation whose target is shadowed does *not* fire it; one that is read *through* an unowned contract (e.g. crashing a Chainlink aggregator behind its proxy) does, until restored - the counter is cumulative, `mirror_t_convergence_last_failed` shows the current state |
 | `mirror_m_repair_writes_total` | flat | normal when no block diverged: the parent-BAL repair is gated on the *previous* block's verification, so a clean block's state stays the replay's own product (and a diverged one is repaired before the next block executes). Non-zero growth = A17-class divergences being repaired |
 | `mirror_reorgs_detected_total` | any increase | upstream reorg: the engine re-bases M behind the follow head (self-healing, ~1-2 min) and keeps applying T; with `on_divergence: freeze_m` it freezes instead - re-pin only if it keeps recurring |
-| `mirror_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make repin`) - the fresh pin starts a new epoch: the devnet's writes are gone with the old base (re-create positions from your journal) |
+| `mirror_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make mainnet-repin`) - the fresh pin starts a new epoch: the devnet's writes are gone with the old base (re-create positions from your journal) |
 | `mirror_pin_age_blocks` | informational | blocks since this epoch's first parent block (the journal/cursor marker) |
 | `mirror_blob_failures_total` | increase | a blob block could not be built (source gap). Placeholder proofs are repaired automatically; a rising counter means the CL cannot serve the sidecars |
 | engine log `holding M (never mining an empty or partial block)` | any | the block's raws could not be built (blob sidecars not in the beacon yet). M waits at n-1 and retries; T keeps applying. With `follow_margin_blocks: 2` this should not appear - if it does, the CL is lagging the head by more than ~24 s |
@@ -108,11 +108,11 @@ covers the ones that page someone; these are the rest.
 ```bash
 make status            # pods, PVCs, engine status JSON
 make images            # re-import the pinned images into k3s (after a bump)
-make backfill          # CL backfill progress + lighthouse datadir sizes
+make mainnet-backfill          # CL backfill progress + lighthouse datadir sizes
 make logs              # tail everything
 make logs-engine       # one component (also: logs-reth, logs-lighthouse, logs-anvil-t)
-make smoke             # endpoint checks + parity spot check on M's head
-make scenario          # self-containment + M/T parity + devnet workflow
+make mainnet-smoke             # endpoint checks + parity spot check on M's head
+make mainnet-scenario          # self-containment + M/T parity + devnet workflow
 make pin-show          # current fork pins
 ```
 
@@ -130,7 +130,7 @@ make apply && make deploy-engine
 ```
 
 Rollback = re-import the previous image **and** `git revert` the manifest
-change (the old image needs the old ConfigMap). `make smoke` + `make scenario`
+change (the old image needs the old ConfigMap). `make mainnet-smoke` + `make mainnet-scenario`
 are the gate; the anvil pods pick the offset up from the mounted instance file
 (`fork_offset` in `[chains.l1]`), so no env var carries it any more.
 
@@ -259,7 +259,7 @@ kubectl -n mainnet-mirror rollout status  deploy/anvil-t
   does. The journal is cleared with the old chain, so rewind drills start from
   the new one.
 
-### Re-pin — `make repin`
+### Re-pin — `make mainnet-repin`
 
 Three occasions:
 

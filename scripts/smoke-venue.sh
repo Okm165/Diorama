@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for the Venue Mirror stack. Run from the repo root:
-#   make smoke-venue        (or NS=venue-mirror ./scripts/smoke-venue.sh)
+#   make venue-smoke        (or NS=venue-mirror ./scripts/smoke-venue.sh)
 #
 # Executes curl+jq from inside the venue engine pod so every check talks to the
 # cluster-internal service names (the same way the engine does). The mainnet

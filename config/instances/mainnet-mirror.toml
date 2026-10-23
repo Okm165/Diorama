@@ -409,7 +409,7 @@ note = "Aave oracle source: WETH/USD aggregator"
 address = "0xDaa4B74C6bAc4e25188e64ebc68DB5050b690cAc"
 note = "Aave oracle source: WBTC/USD"
 
-# Found by `make closure-check` (it traces each view's storage reads):
+# Found by `make mainnet-closure-check` (it traces each view's storage reads):
 # the USDC source is a CAPO wrapper with its own ratio feeds, and the
 # wstETH source reads stETH's share rate (updated daily - T would go
 # stale within a day while every probe stayed green).

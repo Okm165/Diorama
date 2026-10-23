@@ -323,7 +323,7 @@ Two constraints bound the pin depth:
 Depth is a trade-off, not a requirement: 128 keeps the mirror live with a fast,
 exact bootstrap (~26 min of replayed mainnet history); raising it replays more
 history but costs replay time and M memory. When the pin ages out of reth's
-state window, run `make repin`: fresh pins, the engine rebases automatically and
+state window, run `make mainnet-repin`: fresh pins, the engine rebases automatically and
 restores the devnet's writes.
 
 **EIP-7702 nonce gaps.** Every authorization in a type-4 tx bumps the
@@ -372,7 +372,7 @@ only, validated with the bundled mainnet trusted setup, and placeholder proofs
 are recomputed (see above).
 
 **A fresh pin starts a new epoch.** A re-fork at a *changed* fork pin (an OOM
-restart or `make repin`) moves T's base, so the devnet's recorded writes -
+restart or `make mainnet-repin`) moves T's base, so the devnet's recorded writes -
 derivations of the old base (plan 2.2/6.3) - are cleared with it: marks *and*
 values go, and the product re-creates its positions from its own journal
 (plan 3.6). Measured why restoring is wrong: a +30d time-travel write came
@@ -501,7 +501,7 @@ point; everything else is a rate/pruning choice:
 | Lighthouse block backfill depth | weak-subjectivity point (~5 months, ~1.03M slots) | Design bound since v4.2.0; no knob reduces it. One-time: ends with `INFO Historical block download complete` |
 | Lighthouse backfill rate | default rate limiter ("typically <20 slots/s") | 6.7-15 slots/s measured; covers the 8.4k-slot snapshot gap in ~10 min, then continues gently in the background |
 | Lighthouse block cost | ~150-200 KB/slot | ~150 GB for the full 5-month range; retained in the freezer (blocks are not pruned) |
-| Lighthouse column/blob cost | **not bounded to the DA window during the backfill** (measured twice) | The backfill fetches blob/column data for *every* backfilled slot: `blobs_db` grew 13.9-18.6 GB/h (~600-650 KB/slot) at 3-8 slots/s, well past the 18-day window it will ever serve (84 GB at 145k slots covered). Projected peak for the full 5-month range: ~900 GB (blobs) + ~185 GB (blocks). local-path volumes are thin, so this consumes the node's disk (2.4 TB free) rather than a PVC quota; the PVC is sized honestly (1500Gi) and `make prune-blobs` reclaims it |
+| Lighthouse column/blob cost | **not bounded to the DA window during the backfill** (measured twice) | The backfill fetches blob/column data for *every* backfilled slot: `blobs_db` grew 13.9-18.6 GB/h (~600-650 KB/slot) at 3-8 slots/s, well past the 18-day window it will ever serve (84 GB at 145k slots covered). Projected peak for the full 5-month range: ~900 GB (blobs) + ~185 GB (blocks). local-path volumes are thin, so this consumes the node's disk (2.4 TB free) rather than a PVC quota; the PVC is sized honestly (1500Gi) and `make mainnet-prune-blobs` reclaims it |
 | Lighthouse prune cadence | `--epochs-per-blob-prune=1` (was 256) | Default 256 epochs (~27 h) can let ~20 GB/h of backfill blobs accumulate before the first prune - more than the PVC headroom. Pruning every epoch bounds the peak; only data older than the DA boundary is touched, which the mirror never needs |
 | Lighthouse payloads | retained (`--prune-payloads=false`) | Default pruning rebuilds payloads from the EL on demand - impossible for blocks the EL has not executed, which is exactly the top-up gap. This is what makes the backfilled range cost full block size |
 | reth P2P | none (`--disable-discovery --trusted-only`) | 0 peers; no discovery chatter; no pipeline/backfill runs (measured 0 pipeline log lines) - the EL is driven purely by the Engine API |
@@ -513,14 +513,14 @@ Total expected footprint once the one-time backfill completes: ~850 GB of
 blobs (mostly beyond the DA window, so prunable) + ~185 GB of blocks in
 `lighthouse-data`, and ~300 GB in `reth-data`.
 
-**Reclaiming the backfill's blob storage** - `make prune-blobs` (one-time, after
+**Reclaiming the backfill's blob storage** - `make mainnet-prune-blobs` (one-time, after
 the backfill logs `INFO Historical block download complete`). It scales the CL
 down, runs `lighthouse db prune-blobs` as a Job with the PVC mounted, scales it
 back up and prints the new sizes. Stopping the node is required: MDBX is locked
 while it runs (measured: `Fatal error: LevelDbError(... lock
 /data/beacon/chain_db/LOCK: Resource temporarily unavailable)`). The mirror
 survives the pause - reth buffers the CL's payloads and the top-up resumes.
-Progress and sizes: `make backfill`.
+Progress and sizes: `make mainnet-backfill`.
 
 Pruning removes everything older than the DA boundary - the mirror only ever
 needs the replay window (10,064 blocks ≈ 1.4 days, bounded by reth's state
@@ -570,7 +570,7 @@ the pod needs a registry pull (which fails when DNS is flaky, as it was here).
 store and then runs **`make check-pins`**, which mechanically enforces the policy:
 every `image:` in `k8s/` must carry a tag *and* a digest (or be the local engine
 build), the digest must be present in the containerd store, and no `latest` may
-appear anywhere. `make bootstrap` runs it first.
+appear anywhere. `make mainnet-bootstrap` runs it first.
 
 The engine's own dependencies are pinned in `Cargo.lock`: the plan's `alloy 2.5`
 pin (EIP-7928 BAL types) is deliberate and only patch updates are applied

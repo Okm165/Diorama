@@ -1,6 +1,6 @@
 # Bootstrap Job: wipe the anvil pins to force a re-pin.
 #
-# Used by `make repin`. After this Job:
+# Used by `make mainnet-repin`. After this Job:
 #   1. delete it,
 #   2. restart anvil-m / anvil-t (their init containers resolve a fresh pin),
 #   3. the engine detects the chain reset on its next poll and rebases its

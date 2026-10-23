@@ -170,7 +170,7 @@ just-mined write cannot re-mark the key (the poisoned-source race).
 Everything whose mainnet state matters must be watched — and watching a *proxy*
 is not enough: Chainlink feeds delegate to their current aggregator, Aave's
 WBTC source is *composite* (`BTC/USD × WBTC/BTC`), and the wstETH source reads
-stETH's share rate. `make closure-check` traces every market-data view's storage
+stETH's share rate. `make mainnet-closure-check` traces every market-data view's storage
 reads on reth and flags unwatched dependencies. A watchlist addition only
 affects *future* writes; heal a gap by writing reth's values for the slots the
 view reads.

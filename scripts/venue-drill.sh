@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The venue epoch drill (plan §7.8, the counterpart of `make scenario`):
+# The venue epoch drill (plan §7.8, the counterpart of `make mainnet-scenario`):
 # proves the epoch rule end-to-end — a deal survives a same-pin reset (the
 # COW restore), and a new-pin epoch clears it (fresh base = fresh epoch).
 #

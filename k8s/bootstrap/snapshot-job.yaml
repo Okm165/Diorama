@@ -6,7 +6,7 @@
 #   the 10,064-block state window, live block bodies and receipts.
 #
 #   Resumable by default (.part + Range), so a killed pod just continues.
-#   Run `make snapshot` (which scales reth down first - the downloader refuses
+#   Run `make mainnet-snapshot` (which scales reth down first - the downloader refuses
 #   to run while the node holds the database lock).
 apiVersion: batch/v1
 kind: Job

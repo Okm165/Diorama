@@ -2,7 +2,7 @@
 # Feed-bridge helpers (plan §7.1): list / pause / resume / override the live
 # feeds that the engine publishes to the devnet's mock aggregators.
 #
-# Run from the repo root:  make feed-bridge ARGS="list"
+# Run from the repo root:  make mainnet-feed-bridge ARGS="list"
 # The bridge lives in the *mainnet* engine (NS=mainnet-mirror by default); the
 # commands exec from the engine pod so they talk to the cluster-internal admin
 # API. Usage:

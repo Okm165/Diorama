@@ -5,10 +5,10 @@ Three layers, each runnable on demand:
 | Layer | Command | Needs | Covers |
 |---|---|---|---|
 | Unit | `make test-engine` (cargo test) | nothing | pure logic: BAL flattening, padding, COW granularity, journal, cursor/rebase rules, KZG proof repair, Engine API request encoding |
-| Self test | `make selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (replay + verify + diff apply + sampled parity) |
-| Smoke | `make smoke` | the deployed stack | service health + parity spot check on M's head vs reth |
-| Scenario | `make scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 12 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
-| Product sim | `make product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
+| Self test | `make mainnet-selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (replay + verify + diff apply + sampled parity) |
+| Smoke | `make mainnet-smoke` | the deployed stack | service health + parity spot check on M's head vs reth |
+| Scenario | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 12 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
+| Product sim | `make mainnet-product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
 
 ## Unit tests (`cargo test --workspace`)
 
@@ -199,7 +199,7 @@ Measured runtime: ~10 min; last full run: 30 passed, 0 failed.
 
 Where the capability proof checks *capabilities*, the product sim runs the
 workflow a margin product actually executes, in one pass and on live state
-(`make product-sim`, ~8 min, 9 checks):
+(`make mainnet-product-sim`, ~8 min, 9 checks):
 
 | Act | What runs | Asserted |
 |---|---|---|
@@ -338,7 +338,7 @@ curl -s -X POST localhost:8091/control/deal \
 - The epoch drill: `curl -s -X POST localhost:8091/control/epoch_new`, then
   watch `fork_pin` advance and `venue_epochs_total` increment.
 - In-cluster: `kubectl apply -k k8s/overlays/venue-mirror` (namespace
-  `venue-mirror`; NodePorts 31545/31880/31090/31091), then `make smoke-venue`
+  `venue-mirror`; NodePorts 31545/31880/31090/31091), then `make venue-smoke`
   (`scripts/smoke-venue.sh`): V's chain 999 / head ≥ pin / automine off, the
   engine's `/healthz`, `/status` (the engine pin must equal V's pin) and
   `/metrics`, the sim's `/healthz`, `/readyz`, control `/health` and
@@ -869,7 +869,7 @@ verify against). Verdicts:
 
 | Verdict | Axioms | Where |
 |---|---|---|
-| **SAME** (same modules) | A1, A2, A5, A8, A11, A13, A14, A15, A18, A19, A20 + the pins/epochs/journal/COW/automine decisions | `crates/anvil` + `crates/devnet`, exercised by `make smoke-venue` and the epoch drill (same-pin restore / new-pin epoch) |
+| **SAME** (same modules) | A1, A2, A5, A8, A11, A13, A14, A15, A18, A19, A20 + the pins/epochs/journal/COW/automine decisions | `crates/anvil` + `crates/devnet`, exercised by `make venue-smoke` and the epoch drill (same-pin restore / new-pin epoch) |
 | **IMPOSSIBLE (permanent)** | A3, A4, A6, A7, A9, A12, A16, A17 + the M guarantee (per-block verification, probe parity, convergence repair) | no replay exists to verify; the fork keeps the source's exact state and hashes at the pin |
 | **REFRAMED** | L9 freshness → the pin (chain) + the live public API (venue data); the T guarantee → at-pin parity | `venue_fork_pin`, probes-at-pin (skip+count when the pin ≠ source head — measured: the source ignores the block parameter) |
 | **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (Phase 2), bridge round-trip exactness | `crates/hyperliquid`; the identity is re-checked at the serve boundary |

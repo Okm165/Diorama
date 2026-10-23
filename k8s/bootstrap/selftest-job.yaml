@@ -5,7 +5,7 @@
 # Test-only external dependencies: a public RPC and a public beacon API. The
 # deployed stack is self-contained (see docs/ARCHITECTURE.md, "Source liveness").
 #
-#   make selftest
+#   make mainnet-selftest
 apiVersion: batch/v1
 kind: Job
 metadata:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The venue capability proof (plan §7.8, the counterpart of
-# `make capability-proof`): the four things the venue stack must do —
+# `make mainnet-proof`): the four things the venue stack must do —
 #   A. mint on V       - `/admin/deal` lands an ERC20 balance (silent COW write)
 #   B. sim deal        - the simulator funds an account and the served identity
 #                        holds (accountValue == totalRawUsd + signed PnL)
