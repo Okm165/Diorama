@@ -19,6 +19,7 @@
 //!   what the devnet owns.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use mirror_anvil::Rpc;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
 use mirror_devnet::scan;
@@ -54,7 +55,7 @@ pub async fn boot(ctx: &Ctx) -> Result<()> {
     ctx.v
         .wait_until_up("anvil-v", Duration::from_secs(120))
         .await?;
-    assert_venue_chain(ctx).await?;
+    assert_venue_chain(&ctx.v).await?;
     let pin = reconcile(ctx).await?;
     probes_at_pin(ctx, pin).await?;
     Ok(())
@@ -72,7 +73,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
             Ok(Pass::Steady) => {}
             Ok(Pass::Reset) => {
                 tracing::warn!("V was reset under the driver - reconciling (epoch rule)");
-                if let Err(e) = assert_venue_chain(&ctx).await {
+                if let Err(e) = assert_venue_chain(&ctx.v).await {
                     tracing::warn!(error = %e, "venue chain assert failed after a reset");
                 }
                 match reconcile(&ctx).await {
@@ -144,7 +145,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
 /// exists, and the epoch rule must run.
 async fn chain_instance_moved(ctx: &Ctx) -> Result<bool> {
     let expected = ctx.plane.state.lock()?.data.epoch_pin;
-    Ok(read_canary(ctx).await? != expected)
+    Ok(read_canary(&ctx.v).await? != expected)
 }
 
 /// Scan V's own blocks since `cursor` and persist the walk: the shadow
@@ -213,8 +214,8 @@ async fn mine_pending(ctx: &Ctx) -> Result<()> {
 // source's, unverifiable by construction). The guards are this canary and the
 // epoch rule: a moved base clears marks *and* values; a same-pin reset
 // restores the recorded writes; a fresh chain cannot carry the canary word.
-async fn read_canary(ctx: &Ctx) -> Result<Option<u64>> {
-    let word = ctx.v.storage_at_latest(CANARY_ADDRESS, CANARY_SLOT).await?;
+async fn read_canary(v: &Rpc) -> Result<Option<u64>> {
+    let word = v.storage_at_latest(CANARY_ADDRESS, CANARY_SLOT).await?;
     let value = alloy_primitives::U256::from_be_bytes(word.0);
     if value.is_zero() {
         return Ok(None);
@@ -223,9 +224,9 @@ async fn read_canary(ctx: &Ctx) -> Result<Option<u64>> {
 }
 
 /// Mark this chain instance (see [`CANARY_ADDRESS`]).
-async fn write_canary(ctx: &Ctx, pin: u64) -> Result<()> {
+async fn write_canary(v: &Rpc, pin: u64) -> Result<()> {
     let value = alloy_primitives::B256::from(alloy_primitives::U256::from(pin));
-    ctx.v
+    v
         .anvil_set_storage_at(CANARY_ADDRESS, CANARY_SLOT, value)
         .await?;
     Ok(())
@@ -236,15 +237,15 @@ async fn write_canary(ctx: &Ctx, pin: u64) -> Result<()> {
 /// V must be the venue chain with automine off. An anvil restart resets
 /// automine to its default (on) — measured — so the discipline is re-asserted
 /// on every boot and after every reset.
-async fn assert_venue_chain(ctx: &Ctx) -> Result<()> {
-    let got = ctx.v.chain_id().await?;
+async fn assert_venue_chain(v: &Rpc) -> Result<()> {
+    let got = v.chain_id().await?;
     if got != VENUE_CHAIN_ID {
         return Err(Error::WrongChain {
             got,
             want: VENUE_CHAIN_ID,
         });
     }
-    ctx.v.anvil_set_automine(false).await?;
+    v.anvil_set_automine(false).await?;
     Ok(())
 }
 
@@ -266,7 +267,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     // The canary tells whether this is still the chain instance the registry
     // was built against (see CANARY_ADDRESS): present and equal to the pin
     // means steady, nothing to reconcile.
-    if read_canary(ctx).await? == pin {
+    if read_canary(&ctx.v).await? == pin {
         return Ok(pin);
     }
 
@@ -300,7 +301,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     ctx.plane.shadow_scanned_upto.store(watermark, Ordering::Relaxed);
     ctx.plane.save_state()?;
     if let Some(p) = pin {
-        write_canary(ctx, p).await?;
+        write_canary(&ctx.v, p).await?;
     }
     Ok(pin)
 }

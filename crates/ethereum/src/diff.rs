@@ -7,11 +7,14 @@
 //! the sequence.
 use crate::bal::{self, Write};
 use crate::ctx::{cursor_from, Ctx};
+use crate::drift::Drift;
 use crate::error::{Error, Result};
 use crate::journal::{entry_for_write, BeforeValue, JournalEntry};
+use crate::rpc::Rpc;
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Block;
 use mirror_devnet::metrics::Registry as _;
+use mirror_devnet::plane::Plane;
 use mirror_devnet::probes::ProbeRunner;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -142,15 +145,15 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         } => (needs_reapply, reapply),
     };
 
-    prepend_devnet_txs(ctx, n).await?;
+    prepend_devnet_txs(&ctx.anvil_t, n).await?;
 
-    let (writes, source) = fetch_diffs(ctx, n).await?;
+    let (writes, source) = fetch_diffs(&ctx.reth, n).await?;
     if ctx.anvil_t.fork_block().await? != base {
         return Err(Error::ResetDuringApply { n });
     }
     let total = writes.len();
     let (filtered, stats) = filter_watched(ctx, writes)?;
-    let entries = read_before_values(ctx, &filtered, t_head).await?;
+    let entries = read_before_values(&ctx.anvil_t, &filtered, t_head).await?;
 
     let applied = write_and_mine(ctx, &block, &filtered).await?;
     journal_and_scan(ctx, n, &entries, t_head).await?;
@@ -204,7 +207,7 @@ async fn finalize(
     advance_cursor(ctx, n).await?;
     let duration_ms = started.elapsed().as_millis() as u64;
     record_apply_metrics(ctx, n, t_latest, &facts, duration_ms);
-    clear_reapply(ctx, n, facts.reapply)?;
+    clear_reapply(&ctx.plane, n, facts.reapply)?;
 
     let outcome = ApplyOutcome {
         source: facts.source,
@@ -215,7 +218,7 @@ async fn finalize(
         sampled_ok: facts.sampled_ok,
         duration_ms,
     };
-    log_drift_if_anomalous(ctx, n, &facts, &outcome, duration_ms)?;
+    log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome, duration_ms)?;
     tracing::info!(
         block = n,
         source = facts.source,
@@ -259,10 +262,10 @@ fn record_apply_metrics(ctx: &Ctx, n: u64, t_latest: u64, facts: &ApplyFacts, du
 }
 
 /// The rewound range is fully re-applied: resume normal late-completion skips.
-fn clear_reapply(ctx: &Ctx, n: u64, reapply: Option<(u64, u64)>) -> Result<()> {
+fn clear_reapply(plane: &Plane, n: u64, reapply: Option<(u64, u64)>) -> Result<()> {
     if let Some((_, until)) = reapply {
         if n >= until {
-            *ctx.plane.reapply_from.lock()? = None;
+            *plane.reapply_from.lock()? = None;
             tracing::info!(block = n, until, "rewound range re-applied");
         }
     }
@@ -273,7 +276,7 @@ fn clear_reapply(ctx: &Ctx, n: u64, reapply: Option<(u64, u64)>) -> Result<()> {
 /// re-apply of a rewound range, or a sampled-parity mismatch). Counts live in
 /// the metrics.
 fn log_drift_if_anomalous(
-    ctx: &Ctx,
+    drift: &Drift,
     n: u64,
     facts: &ApplyFacts,
     outcome: &ApplyOutcome,
@@ -282,7 +285,7 @@ fn log_drift_if_anomalous(
     if !(facts.needs_reapply || outcome.sampled_ok < outcome.sampled) {
         return Ok(());
     }
-    ctx.drift.append(&TDriftEntry {
+    drift.append(&TDriftEntry {
         chain: "t",
         block: n,
         source: facts.source,
@@ -327,10 +330,10 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
 /// on (measured: an Aave borrow estimated pre-diff came out ~5% short and
 /// reverted). Mine until the pool drains, at most 3 rounds so a steady stream
 /// cannot starve the parent block.
-async fn prepend_devnet_txs(ctx: &Ctx, n: u64) -> Result<()> {
+async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64) -> Result<()> {
     let mut rounds = 0;
     while rounds < 3 {
-        let status = match ctx.anvil_t.txpool_status().await {
+        let status = match anvil_t.txpool_status().await {
             Ok(status) => status,
             Err(e) => {
                 // The prepend is a gas-estimate safeguard; a txpool fault skips
@@ -343,12 +346,10 @@ async fn prepend_devnet_txs(ctx: &Ctx, n: u64) -> Result<()> {
             return Ok(());
         }
         rounds += 1;
-        let last = ctx
-            .anvil_t
-            .block_by_number(ctx.anvil_t.block_number().await?, false)
+        let last = anvil_t
+            .block_by_number(anvil_t.block_number().await?, false)
             .await?;
-        if let Err(e) = ctx
-            .anvil_t
+        if let Err(e) = anvil_t
             .anvil_set_next_block_timestamp(last.header.timestamp + 1)
             .await
         {
@@ -357,7 +358,7 @@ async fn prepend_devnet_txs(ctx: &Ctx, n: u64) -> Result<()> {
             // block's timestamp, so this is a named, bounded degradation.
             tracing::debug!(block = n, error = %e, "prepend timestamp not set");
         }
-        ctx.anvil_t.anvil_mine(1).await?;
+        anvil_t.anvil_mine(1).await?;
         tracing::info!(
             block = n,
             pending = status.pending,
@@ -369,11 +370,11 @@ async fn prepend_devnet_txs(ctx: &Ctx, n: u64) -> Result<()> {
 }
 
 /// The parent's diffs: native BAL first, prestateTracer diff fallback.
-async fn fetch_diffs(ctx: &Ctx, n: u64) -> Result<(Vec<Write>, &'static str)> {
-    if let Some(bal) = ctx.reth.block_access_list(n).await? {
+async fn fetch_diffs(reth: &Rpc, n: u64) -> Result<(Vec<Write>, &'static str)> {
+    if let Some(bal) = reth.block_access_list(n).await? {
         return Ok((bal::flatten_bal(&bal), "bal"));
     }
-    let traces = ctx.reth.trace_block_prestate(n).await?;
+    let traces = reth.trace_block_prestate(n).await?;
     Ok((bal::flatten_trace_block(&traces), "trace"))
 }
 
@@ -409,7 +410,7 @@ fn filter_watched(ctx: &Ctx, writes: Vec<Write>) -> Result<(Vec<Write>, FilterSt
 /// fails the apply: a journal with a missing before-value would let a later
 /// rewind report success while leaving that key un-restored.
 async fn read_before_values(
-    ctx: &Ctx,
+    anvil_t: &Rpc,
     filtered: &[Write],
     t_head: u64,
 ) -> Result<Vec<JournalEntry>> {
@@ -417,16 +418,16 @@ async fn read_before_values(
     for w in filtered {
         let before = match w {
             Write::Storage { address, slot, .. } => BeforeValue::Storage(U256::from_be_bytes(
-                ctx.anvil_t.storage_at(*address, *slot, t_head).await?.0,
+                anvil_t.storage_at(*address, *slot, t_head).await?.0,
             )),
             Write::Balance { address, .. } => {
-                BeforeValue::Balance(ctx.anvil_t.balance_at(*address, t_head).await?)
+                BeforeValue::Balance(anvil_t.balance_at(*address, t_head).await?)
             }
             Write::Nonce { address, .. } => {
-                BeforeValue::Nonce(ctx.anvil_t.nonce_at(*address, t_head).await?)
+                BeforeValue::Nonce(anvil_t.nonce_at(*address, t_head).await?)
             }
             Write::Code { address, .. } => {
-                BeforeValue::Code(ctx.anvil_t.code_at(*address, t_head).await?)
+                BeforeValue::Code(anvil_t.code_at(*address, t_head).await?)
             }
         };
         entries.push(entry_for_write(w, before)?);

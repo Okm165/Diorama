@@ -408,6 +408,29 @@ un-bounds the top-up walk); withdrawal credits read their pre-balance from reth
 so a retried block can never double-credit (reading M at N-1 does exactly that,
 because anvil's "N-1" is the live state when the block is not mined yet).
 
+**Contracts are as narrow as the body uses.** Every internal seam takes the
+narrowest type that carries the fact it needs: leaf helpers take the section
+they read (`&Rpc` for a chain client, `&Drift`, `&Plane`, `&EthereumMetrics`,
+`&EngineSection`, `&BeaconClient`, `&AtomicBool`/`&AtomicU64` for one flag),
+never the whole `Ctx`. A compiler-assisted audit (per-function field-use
+analysis over both engines' crates, 2026-10-23) found and narrowed eighteen
+leaves: `prepend_devnet_txs` / `fetch_diffs` / `read_before_values` /
+`send_once` + `NonceTracker::{prepare, before_send, restore}` / `read_canary` /
+`write_canary` / `assert_venue_chain` (`&Rpc`), `log_drift_if_anomalous`
+(`&Drift`), `deliver_slot` / `cl_head_el_block` (`&BeaconClient`),
+`gap_within_limit` (`&EngineSection`), `account_m_rebase_skip`
+(`&EthereumMetrics`), `clear_reapply` (`&Plane`), `hold_replay_failure`
+(`&AtomicBool`), `warn_skipped_blob` (`&AtomicU64`). What stays `&Ctx` is a
+*composition point*, and the audit names why: `apply_block` / `apply_entry` /
+`advance_cursor` / `late_completion` / `finalize` / `journal_and_scan` /
+`log_and_drift` thread several sections plus the cursor accessors,
+`probes_now` drives `probes_at_pin`, and the blob-form accessors bridge the
+preference cell and the persisted state. The payoff is mechanical: a leaf
+whose body grows a second dependency cannot compile until its signature says
+so, so contracts cannot silently widen. The audit's false positives are the
+framework's: axum handlers must take `State<Arc<ApiState>>` (the extractor
+dictates the type), and router builders pass the context through to the app.
+
 ## Source liveness: self-contained by construction
 
 At runtime the mirror needs **no external nodes**: no public beacon API, no

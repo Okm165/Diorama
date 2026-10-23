@@ -386,6 +386,18 @@ for **pre-pin source blocks** — anvil cannot re-execute a forked block's state
 `venue_bridge_trace_faults_total` increment means a real degradation, not the
 fork boundary.
 
+### The sim's control verbs (measured 2026-10-23)
+
+`POST /control/set_funding {"coin","rate?"}` answers `{"coin","owned","rate"}`
+and the override is served through `metaAndAssetCtxs` (`funding` = the
+override); omitting `rate` clears (`owned:false`). `POST /control/set_book
+{"coin","levels?"}` takes the **wire shape** — `levels` is the two-sided array
+(`[[{px,sz,n}…],[…]]`); a `{bids,asks}` map is refused by serde naming the
+field. A scripted book is served verbatim by `l2Book` with `time` stamped at
+serve; omitting `levels` clears (`{"owned":false,"levels":0}`) and the live
+book returns. `activeAssetCtx` is **not** a served REST type and correctly
+answers `"unrouted"` (it is a WS channel; hl_mock's contract).
+
 ### The wire types are pinned against measured samples
 
 Every info shape the sim serves — and every CoreWriter payload the bridge
@@ -660,10 +672,21 @@ between T and V over the real V2 contracts; the only substitutions are the
 devnet attester (installed through the contracts' own setters) and the local
 Iris. Proven live on scratch forks:
 
-- bidirectional burns with exact mints; replay → `Nonce already used`;
-  tampered signatures and empty attestations rejected by the real verification;
-- PENDING emulation (`finality_delay_secs`): the Iris serves
-  `{messages:[{message, attestation:null}]}` until the window elapses;
+- bidirectional burns with exact mints, both directions through the service
+  (measured 2026-10-23: a V burn 19→0 relayed to T, the wallet's T USDC 0 →
+  2,000,000; the T→V leg mints on V). The scratch chains have no block producer
+  of their own, so the burn's receipt needs a manual `evm_mine` loop; the
+  service's own waits then return named outcomes (`mined:false`, "not mined
+  within the window; the next boot retries") instead of hanging. Replay →
+  `Nonce already used`; tampered signatures and empty attestations rejected by
+  the real verification;
+- PENDING emulation (`finality_delay_secs`): measured deliberately with the
+  window raised to 30 s — the Iris served `{messages:[{message,
+  attestation:null}]}` on eight consecutive polls over ~32 s, then the 65-byte
+  hex (the watcher's log gap: watched 09:19:20 → attested 09:19:50, i.e. 30.5 s);
+  at the 5 s default the same gap measured 5.5 s. A poll that starts after the
+  window sees only a non-null attestation — the window is real, not a test
+  artifact;
 - `expiration_blocks` (anchored at the destination's head): measured — the
   contract rejects at `block.number == expirationBlock` and the relay's
   estimate runs at the pending block (head + 1), so a relayable window needs
@@ -716,6 +739,13 @@ Iris. Proven live on scratch forks:
   for domain 19 delivered to T (the wrong destination chain) reverts
   `Invalid destination domain` — proven with a *valid* attestation via
   `eth_call`, so the check is the contract's own, not the signature's.
+- service-level refusals are typed and name the fix: a burn above the wallet's
+  source balance answers 400 `invalid request: sender 0x7099…79C8 holds 0 USDC
+  on ethereum, needs 1000000 (deal via the chain's admin surface)`, and a
+  source read that needs an uncached fork slot while the fork upstream is down
+  answers 502 carrying the whole chain (`… eth_call: error code -32603: failed
+  to get storage for 0xb883…: MPP HTTP request to https://rpc.hyperliquid.xyz/
+  failed: … operation timed out`) — a boundary fault is never a bare 500;
 - **daloc's real `cctp-relay` cannot relay a real CCTP V2 message as written**
   (branch `feat/risk-engine-refactored-dev` @ `a400dbe`, measured 2026-10-23
   against this service with a real burn on the scratch T, and against the live

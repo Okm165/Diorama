@@ -18,6 +18,7 @@ use alloy_primitives::{Address, Bytes, Signature, B256, U256, U64};
 use mirror_anvil::Call;
 use mirror_devnet::metrics::Registry as _;
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 pub struct ReplayOutcome {
@@ -288,7 +289,7 @@ async fn build_raws(
                     }),
                     Err(last_err) => {
                         skipped += 1;
-                        warn_skipped_blob(ctx, n, tx.tx_hash(), &last_err);
+                        warn_skipped_blob(&ctx.blob_warned, n, tx.tx_hash(), &last_err);
                     }
                 }
             }
@@ -411,9 +412,8 @@ fn encode_with_source(
 /// One WARN per block: the retry loop calls this again until the beacon
 /// ingests the sidecars (with `follow: latest` that is seconds after the
 /// block).
-fn warn_skipped_blob(ctx: &Ctx, n: u64, hash: B256, last_err: &str) {
-    let first = ctx
-        .blob_warned
+fn warn_skipped_blob(blob_warned: &AtomicU64, n: u64, hash: B256, last_err: &str) {
+    let first = blob_warned
         .swap(n, std::sync::atomic::Ordering::Relaxed)
         != n;
     if first {
@@ -444,7 +444,7 @@ async fn send_with_retry(
     let mut current: Vec<Bytes> = raws.iter().map(|r| r.bytes.clone()).collect();
 
     for attempt in 0..2 {
-        let rejected = send_once(ctx, n, raws, txs, &current).await?;
+        let rejected = send_once(&ctx.anvil_m, n, raws, txs, &current).await?;
         if rejected.is_empty() {
             return Ok(());
         }
@@ -481,21 +481,21 @@ async fn send_with_retry(
 /// for replay fidelity, so we pay the round-trips. Returns the indices the
 /// node rejected.
 async fn send_once(
-    ctx: &Ctx,
+    anvil_m: &Rpc,
     n: u64,
     raws: &[RawTx],
     txs: &[alloy_rpc_types_eth::Transaction],
     current: &[Bytes],
 ) -> Result<Vec<usize>> {
     let mut rejected: Vec<usize> = Vec::new();
-    let mut nonces = NonceTracker::prepare(ctx, txs).await?;
+    let mut nonces = NonceTracker::prepare(anvil_m, txs).await?;
     for (i, raw) in current.iter().enumerate() {
         if let Some(tx) = txs.get(i) {
-            if let Err(e) = nonces.before_send(ctx, tx).await {
+            if let Err(e) = nonces.before_send(anvil_m, tx).await {
                 tracing::warn!(tx = %raws[i].hash, error = %e, "nonce pre-adjust failed");
             }
         }
-        match ctx.anvil_m.send_raw_batch(std::slice::from_ref(raw)).await {
+        match anvil_m.send_raw_batch(std::slice::from_ref(raw)).await {
             Ok(results) => {
                 for r in results {
                     if let Err(e) = r {
@@ -519,7 +519,7 @@ async fn send_once(
             }
         }
     }
-    let pool = ctx.anvil_m.txpool_status().await;
+    let pool = anvil_m.txpool_status().await;
     tracing::info!(
         sent = current.len(),
         rejected = rejected.len(),
@@ -527,7 +527,7 @@ async fn send_once(
         pool = ?pool,
         "raw txs sent (pre-mine)"
     );
-    nonces.restore(ctx).await?;
+    nonces.restore(anvil_m).await?;
     Ok(rejected)
 }
 
@@ -615,15 +615,15 @@ struct NonceTracker {
 }
 
 impl NonceTracker {
-    async fn prepare(ctx: &Ctx, txs: &[alloy_rpc_types_eth::Transaction]) -> Result<Self> {
-        let head = ctx.anvil_m.block_number().await?;
+    async fn prepare(anvil_m: &Rpc, txs: &[alloy_rpc_types_eth::Transaction]) -> Result<Self> {
+        let head = anvil_m.block_number().await?;
         let mut base = std::collections::BTreeMap::new();
         for tx in txs {
             let from = tx.from();
             if base.contains_key(&from) {
                 continue;
             }
-            base.insert(from, ctx.anvil_m.nonce_at(from, head).await?);
+            base.insert(from, anvil_m.nonce_at(from, head).await?);
         }
         let seq_end = base.iter().map(|(a, n)| (*a, *n as i64 - 1)).collect();
         let mut auth_bumps = std::collections::BTreeMap::new();
@@ -646,7 +646,7 @@ impl NonceTracker {
 
     async fn before_send(
         &mut self,
-        ctx: &Ctx,
+        anvil_m: &Rpc,
         tx: &alloy_rpc_types_eth::Transaction,
     ) -> Result<()> {
         let from = tx.from();
@@ -660,7 +660,7 @@ impl NonceTracker {
         }
         if nonce_i > end + 1 {
             // Gap beyond the sequence: make it current for the pool.
-            ctx.anvil_m.anvil_set_nonce(from, nonce).await?;
+            anvil_m.anvil_set_nonce(from, nonce).await?;
             self.manipulated.insert(from);
             self.seq_end.insert(from, nonce_i);
             match self.auth_bumps.get(&from) {
@@ -691,10 +691,10 @@ impl NonceTracker {
         Ok(())
     }
 
-    async fn restore(&self, ctx: &Ctx) -> Result<()> {
+    async fn restore(&self, anvil_m: &Rpc) -> Result<()> {
         for sender in &self.manipulated {
             if let Some(nonce) = self.base.get(sender) {
-                ctx.anvil_m.anvil_set_nonce(*sender, *nonce).await?;
+                anvil_m.anvil_set_nonce(*sender, *nonce).await?;
             }
         }
         Ok(())

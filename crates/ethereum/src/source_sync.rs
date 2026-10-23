@@ -26,6 +26,7 @@
 //! JSON anywhere on this path.
 //!
 //! No P2P peers, no public RPC.
+use crate::blob::BeaconClient;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::B256;
@@ -54,7 +55,7 @@ pub async fn source_sync_loop(ctx: Arc<Ctx>) {
                     .add(&ctx.eth_metrics.source_sync_delivered, n as u64);
                 if last_report.elapsed() > Duration::from_secs(5) {
                     if let (Some(cl_head), Ok(reth_head)) = (
-                        cl_head_el_block(&ctx, &mut head_cache).await,
+                        cl_head_el_block(&ctx.beacon, &mut head_cache).await,
                         ctx.reth.block_number().await,
                     ) {
                         ctx.eth_metrics.set(
@@ -77,14 +78,14 @@ pub async fn source_sync_loop(ctx: Arc<Ctx>) {
 
 /// The CL head's execution block number, cached for a minute. Metrics-only:
 /// a beacon fault here degrades the gauge, not the top-up itself.
-async fn cl_head_el_block(ctx: &Ctx, cache: &mut Option<(Instant, u64)>) -> Option<u64> {
+async fn cl_head_el_block(beacon: &BeaconClient, cache: &mut Option<(Instant, u64)>) -> Option<u64> {
     if let Some((at, n)) = cache {
         if at.elapsed() < Duration::from_secs(60) {
             return Some(*n);
         }
     }
-    let slot = ctx.beacon.head_slot().await.ok()?;
-    let block = ctx.beacon.block_by_slot(slot).await.ok()??;
+    let slot = beacon.head_slot().await.ok()?;
+    let block = beacon.block_by_slot(slot).await.ok()??;
     let n = block
         .data
         .message
@@ -115,7 +116,7 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
     let budget = ctx.engine.source_sync.max_per_pass.max(1) as usize;
     let mut delivered = 0usize;
     while slot <= cl_head && delivered < budget {
-        match deliver_slot(ctx, engine, slot, el_head, delivered).await? {
+        match deliver_slot(&ctx.beacon, engine, slot, el_head, delivered).await? {
             SlotOutcome::Skipped => slot += 1,
             SlotOutcome::Gap { number } => {
                 return Err(Error::TopUpGap {
@@ -153,13 +154,13 @@ enum SlotOutcome {
 /// Deliver one slot's payload: skip empty/missed/executed slots, report a gap,
 /// submit `newPayload` and advance the forkchoice.
 async fn deliver_slot(
-    ctx: &Ctx,
+    beacon: &BeaconClient,
     engine: &crate::engine_api::EngineClient,
     slot: u64,
     el_head: u64,
     delivered: usize,
 ) -> Result<SlotOutcome> {
-    let Some(block) = ctx.beacon.block_by_slot(slot).await? else {
+    let Some(block) = beacon.block_by_slot(slot).await? else {
         return Ok(SlotOutcome::Skipped); // missed slot
     };
     let body = &block.data.message.body;

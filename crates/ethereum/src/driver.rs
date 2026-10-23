@@ -11,10 +11,13 @@
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
 use crate::error::Result;
+use crate::metrics::EthereumMetrics;
 use crate::replay::replay_block;
 use crate::source_sync;
+use mirror_config::EngineSection;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::state::{self, ChainCursor};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,7 +63,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         tracing::debug!(chain = ?chain, head, follow, start, "chain is at the follow head");
         return Ok(None);
     }
-    if !gap_within_limit(ctx, chain, follow.saturating_sub(start), rebased) {
+    if !gap_within_limit(&ctx.engine, chain, follow.saturating_sub(start), rebased) {
         return Ok(None);
     }
     if !reorg_continuity(ctx, chain, start).await? {
@@ -152,7 +155,7 @@ async fn validate_cursor(
     // tx-level verification is skipped. Bounded by `fork_offset`; counted and
     // logged so the gap is never invisible.
     if matches!(chain, Chain::M) {
-        account_m_rebase_skip(ctx, c.block, head);
+        account_m_rebase_skip(&ctx.eth_metrics, c.block, head);
     }
     // Drop it from the persisted state too: `first_block` is an epoch marker,
     // and the next processed block must set a fresh one (otherwise
@@ -176,10 +179,10 @@ fn below_fork_base(cursor_block: u64, base: Option<u64>) -> bool {
 }
 
 /// An M re-base skipped a range (see [`validate_cursor`]).
-fn account_m_rebase_skip(ctx: &Ctx, from: u64, head: u64) {
+fn account_m_rebase_skip(eth_metrics: &EthereumMetrics, from: u64, head: u64) {
     let skipped = head.saturating_sub(from);
     if skipped > 0 {
-        ctx.eth_metrics.add(&ctx.eth_metrics.m_rebase_skipped, skipped);
+        eth_metrics.add(&eth_metrics.m_rebase_skipped, skipped);
         tracing::warn!(
             from,
             to = head,
@@ -301,11 +304,11 @@ async fn on_rebase(
 /// (300 = the plan's "> 300 -> pause and re-sync"), while a *rebased* cursor
 /// (a fresh pin after a restart/re-fork) is allowed to replay its whole pin
 /// window - bounded by reth's state window (10,064), the plan's own limit.
-fn gap_within_limit(ctx: &Ctx, chain: Chain, gap: u64, rebased: bool) -> bool {
+fn gap_within_limit(engine: &EngineSection, chain: Chain, gap: u64, rebased: bool) -> bool {
     let limit = if rebased {
         10_064
     } else {
-        ctx.engine.loops.max_gap_blocks
+        engine.loops.max_gap_blocks
     };
     if gap > limit {
         tracing::error!(
@@ -355,7 +358,7 @@ async fn reorg_continuity(ctx: &Ctx, chain: Chain, start: u64) -> Result<bool> {
 /// seconds behind the head). Hold M at n-1 and retry — `mirror_lag_blocks` is
 /// the alarm.
 async fn hold_replay_failure(
-    ctx: &Ctx,
+    force_rebase: &AtomicBool,
     n: u64,
     attempts: u64,
     e: &crate::error::Error,
@@ -370,7 +373,7 @@ async fn hold_replay_failure(
             block = n,
             "block unservable for ~90 s; asking for an M re-base"
         );
-        ctx.force_rebase.store(true, Ordering::Relaxed);
+        force_rebase.store(true, Ordering::Relaxed);
     }
     if attempts == 1 || attempts.is_multiple_of(20) {
         tracing::error!(
@@ -404,7 +407,7 @@ pub(crate) async fn replay_loop(ctx: Arc<Ctx>) {
                     Ok(_) => attempts = 0,
                     Err(e) => {
                         attempts += 1;
-                        hold_replay_failure(&ctx, n, attempts, &e, poll).await;
+                        hold_replay_failure(&ctx.force_rebase, n, attempts, &e, poll).await;
                     }
                 }
             }
