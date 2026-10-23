@@ -136,7 +136,7 @@ pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()>
 }
 
 async fn healthz(State(ctx): State<Arc<Ctx>>) -> impl IntoResponse {
-    if ctx.halted.load(Ordering::Relaxed) {
+    if ctx.is_halted() {
         (StatusCode::SERVICE_UNAVAILABLE, "halted")
     } else {
         (StatusCode::OK, "ok")
@@ -153,14 +153,6 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     let cm = ctx.cursor_m()?;
     let ct = ctx.cursor_t()?;
     let shadow = ctx.shadow.lock()?;
-    let mut shadowed: Vec<String> = shadow
-        .slots
-        .keys()
-        .chain(shadow.accounts.iter())
-        .map(|a| format!("{a:?}").to_lowercase())
-        .collect();
-    shadowed.sort();
-    shadowed.dedup();
     Ok(Json(StatusResponse {
         reth_head,
         follow_head: follow,
@@ -171,11 +163,11 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
         cursor_t: ct.as_ref().map(|c| c.block),
         lag: follow.saturating_sub(cm.as_ref().map(|c| c.block).unwrap_or(follow)),
         frozen: ctx.frozen.load(Ordering::Relaxed),
-        halted: ctx.halted.load(Ordering::Relaxed),
+        halted: ctx.is_halted(),
         watchlist: ctx.watchlist.len(),
         shadowed_slots: shadow.slot_count(),
         shadowed_accounts: shadow.accounts.len(),
-        shadowed,
+        shadowed: shadow.shadowed_addresses(),
         blob_form: ctx.blob_form()?.map(crate::blob::BlobForm::as_str),
         time_offset_seconds: ctx.time_offset.load(Ordering::Relaxed),
     }))
@@ -191,12 +183,7 @@ async fn admin_rewind(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<RewindRequest>,
 ) -> Result<Json<RewindResponse>> {
-    let out = ctx.admin().rewind(req.blocks).await?;
-    Ok(Json(RewindResponse {
-        rewound_blocks: req.blocks,
-        restored_values: out.restored,
-        cursor: out.cursor,
-    }))
+    Ok(Json(ctx.admin().rewind_response(req.blocks).await?))
 }
 
 async fn admin_resume(State(ctx): State<Arc<Ctx>>) -> Json<ResumeResponse> {
@@ -225,12 +212,8 @@ async fn admin_shadow(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<ShadowRequest>,
 ) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
-    if req.clear {
-        // Force the scan to the head first: the hand-back's poisoned-source
-        // race guard (shared semantics; see AdminSurface::scan_to_head).
-        ctx.admin().scan_to_head().await?;
-    }
-    Ok(Json(ctx.admin().shadow(&req).await?))
+    // The hand-back carries its own race guard (AdminSurface::shadow_hand_back).
+    Ok(Json(ctx.admin().shadow_hand_back(&req).await?))
 }
 
 async fn admin_deal(

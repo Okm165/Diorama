@@ -4387,6 +4387,7 @@ dependencies = [
  "mirror-config",
  "mirror-hyperliquid",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -122,14 +122,6 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     let head = ctx.v.block_number().await.unwrap_or(0);
     let cursor = ctx.cursor_v()?;
     let shadow = ctx.shadow.lock()?;
-    let mut shadowed: Vec<String> = shadow
-        .slots
-        .keys()
-        .chain(shadow.accounts.iter())
-        .map(|a| format!("{a:?}").to_lowercase())
-        .collect();
-    shadowed.sort();
-    shadowed.dedup();
     Ok(Json(StatusResponse {
         head,
         cursor: cursor.as_ref().map(|c| c.block),
@@ -141,7 +133,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
         halted: ctx.is_halted(),
         shadowed_slots: shadow.slot_count(),
         shadowed_accounts: shadow.accounts.len(),
-        shadowed,
+        shadowed: shadow.shadowed_addresses(),
         probes: ctx.venue.probes.len(),
         source: ctx.chain.source_url.clone(),
     }))
@@ -169,23 +161,14 @@ async fn admin_rewind(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<RewindRequest>,
 ) -> Result<Json<RewindResponse>> {
-    let out = ctx.admin().rewind(req.blocks).await?;
-    Ok(Json(RewindResponse {
-        rewound_blocks: req.blocks,
-        restored_values: out.restored,
-        cursor: out.cursor,
-    }))
+    Ok(Json(ctx.admin().rewind_response(req.blocks).await?))
 }
 async fn admin_shadow(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<ShadowRequest>,
 ) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
-    if req.clear {
-        // Force the scan to the head first: the hand-back's poisoned-source
-        // race guard (shared semantics; see AdminSurface::scan_to_head).
-        ctx.admin().scan_to_head().await?;
-    }
-    Ok(Json(ctx.admin().shadow(&req).await?))
+    // The hand-back carries its own race guard (AdminSurface::shadow_hand_back).
+    Ok(Json(ctx.admin().shadow_hand_back(&req).await?))
 }
 
 async fn admin_deal(

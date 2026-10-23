@@ -424,7 +424,7 @@ pub(crate) async fn replay_loop(ctx: Arc<Ctx>) {
     let mut failing_block = 0u64;
     let mut attempts = 0u64;
     loop {
-        if ctx.halted.load(Ordering::Relaxed) || ctx.frozen.load(Ordering::Relaxed) {
+        if ctx.is_halted() || ctx.frozen.load(Ordering::Relaxed) {
             tokio::time::sleep(poll).await;
             continue;
         }
@@ -488,7 +488,7 @@ pub(crate) async fn replay_loop(ctx: Arc<Ctx>) {
 pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
     let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     loop {
-        if ctx.halted.load(Ordering::Relaxed) || ctx.frozen.load(Ordering::Relaxed) {
+        if ctx.is_halted() || ctx.frozen.load(Ordering::Relaxed) {
             tokio::time::sleep(poll).await;
             continue;
         }

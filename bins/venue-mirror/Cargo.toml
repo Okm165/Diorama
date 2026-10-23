@@ -10,6 +10,7 @@ description = "The Venue Mirror engine binary (the venue profile's entrypoint)"
 mirror-hyperliquid = { path = "../../crates/hyperliquid" }
 mirror-config = { path = "../../crates/config" }
 tokio = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

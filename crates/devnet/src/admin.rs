@@ -176,6 +176,19 @@ impl AdminSurface<'_> {
         })
     }
 
+    /// `POST /admin/shadow` — the hand-back with its race guard, shared by
+    /// both engines so neither can forget it. A `clear` request flushes the
+    /// engine's pending write scan first (the scanner is per-project: on T it
+    /// is the applier's devnet-block scan, on V the fork driver's), then hands
+    /// the keys back. Without the flush the hand-back can read a source value
+    /// that predates the devnet's own writes and re-mark the stale value.
+    pub async fn shadow_hand_back(&self, req: &ShadowRequest) -> Result<ShadowOutcome> {
+        if req.clear {
+            self.scan_to_head().await?;
+        }
+        self.shadow(req).await
+    }
+
     /// Register the devnet-owned keys (`clear: false`).
     fn register(&self, req: &ShadowRequest) -> Result<()> {
         let mut s = self.shadow.lock()?;
@@ -345,6 +358,18 @@ impl AdminSurface<'_> {
         Ok(RewindOutcome {
             cursor: target,
             restored,
+        })
+    }
+
+    /// `POST /admin/rewind` — the route's response: the request's block count
+    /// plus the outcome, assembled once for both engines (the wire shape is
+    /// part of the shared surface's symmetry).
+    pub async fn rewind_response(&self, blocks: u64) -> Result<RewindResponse> {
+        let out = self.rewind(blocks).await?;
+        Ok(RewindResponse {
+            rewound_blocks: blocks,
+            restored_values: out.restored,
+            cursor: out.cursor,
         })
     }
 

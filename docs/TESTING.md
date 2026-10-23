@@ -362,41 +362,63 @@ substrate — `mirror-devnet` (shadow, journal, cursor, admin, probes, metrics),
 binaries' shared boot conventions: the worker stack budget, the logging init,
 the fatal-error report) — and each project owns its driver
 (`crates/ethereum/src/driver.rs`, `crates/hyperliquid/src/driver.rs`), its
-HTTP surface, and its source-specific loops. The refusal taxonomy is shared
-too: `mirror_devnet::Error::{is_request_refusal, is_unavailable}` classify 4xx
-vs 503 once, and both engines map an upstream transport fault (anvil, the
-venue API) to 502.
+HTTP surface, and its source-specific loops. The admin *semantics* are shared
+whole: the hand-back carries its own scan-to-head race guard
+(`AdminSurface::shadow_hand_back`), the rewind response is assembled once
+(`AdminSurface::rewind_response`), and the `/status` shadowed-addresses
+presentation is the registry's (`Shadow::shadowed_addresses`). The refusal
+taxonomy is shared too: `mirror_devnet::Error::{is_request_refusal,
+is_unavailable}` classify 4xx vs 503 once, and both engines map an upstream
+transport fault (anvil, the venue API) to 502.
 
-`make engine-symmetry` (`scripts/engine-symmetry.sh`) is the fitness function:
-it drives both engines' shared verbs live and requires identical statuses,
-shapes and refusal wording (digits normalized — a message may embed each
-chain's own cursor or ring size), the shared `/status` fields, the shared
-admin gauges in `/metrics`, and exactly the documented absences:
+`make engine-symmetry` (`scripts/engine-symmetry.sh`, 18 checks) is the
+fitness function: it drives both engines' shared verbs live and requires
+identical statuses, shapes and refusal wording (digits normalized — a message
+may embed each chain's own cursor or ring size), the shared `/status` fields,
+the shared admin gauges in `/metrics`, and exactly the documented absences.
+The behavioral checks, not just shapes:
 
-- `/admin/time` — the ethereum's persistent clock offset; V's clock is native
-  anvil (`setNextBlockTimestamp`/`evm_mine`), so a route nobody re-aligns
-  would be a no-op.
-The script checks the HTTP surface; the **behavioral contracts** behind it are
-verified separately (measured live 2026-10-23): `pause` freezes both engines'
-cursors (T's head held for 12 s; V's pool accumulated while the cursor stayed)
-and `resume` drains and advances; `/admin/deal {amount:"0"}` is the drain
-(0 on both chains, the same per-account slot); a successful `rewind` restores
-the journal's before-values (the venue: `restored_values: 1`, the balance
-returned to its pre-deal value).
+- **pause/resume effect**: while paused both report `halted`, refuse
+  `/healthz` with 503, and raise `mirror_halted` to 1; resume restores all
+  three (measured live).
+- **rewind**: a beyond-ring request is one named refusal byte-for-byte; a
+  1-block rewind returns the same wire shape on both (direct mode only — on
+  the cluster it is a live mutation; the counts legitimately differ: T's
+  applier journals parent-diff writes, V may have none).
+- **deal**: both discover a slot and write the same balance. On clean chains
+  both USDCs are byte-identical FiatTokenV2 deployments (balances mapping at
+  slot 9) and the slots must be *the same*. A scenario that replaces one
+  chain's token bytecode breaks that premise — daloc's fixtures mock T's USDC
+  with an OZ ERC20 (slot 0); measured, each discovery matched the expected
+  keccak slot for its layout (`0xa5701d…` = keccak(pad(acct)‖pad(0)),
+  `0x9a4401…` = keccak(pad(acct)‖pad(9))) — so such runs set
+  `DEAL_LAYOUT_TOLERANT=1`, which keeps the behavioral symmetry required.
+- **the documented absences**: `/admin/time` — the ethereum's persistent clock
+  offset; V's clock is native anvil (`setNextBlockTimestamp`/`evm_mine`), so a
+  route nobody re-aligns would be a no-op. `/admin/feed*` — the L1 feed
+  bridge's routes; the venue's counterpart is the simulator's control plane
+  (`/control/crash`, `/control/deal`, …).
+- **`/status`** — each engine reports its own facts (reth/M/T vs fork
+  pin/probes/source); the shared fields (`cursor`, `halted`, `shadowed*`) are
+  present on both.
 
-- `/admin/feed*` — the L1 feed bridge's routes; the venue's counterpart is the
-  simulator's control plane (`/control/crash`, `/control/deal`, …).
-- `/status` — each engine reports its own facts (reth/M/T vs fork pin/probes/
-  source); the shared fields (`cursor`, `halted`, `shadowed*`) are present on
-  both, and `/admin/deal` discovers the *same* storage slot on both USDCs
-  (Circle's FiatTokenV2 layout) — a symmetry the script asserts.
+The behavioral contracts behind the surface are also verified by the drills
+(measured live 2026-10-23): `pause` freezes both engines' cursors (T's head
+held for 12 s; V's pool accumulated while the cursor stayed) and `resume`
+drains and advances; `/admin/deal {amount:"0"}` is the drain (0 on both
+chains); a successful `rewind` restores the journal's before-values (the
+venue: `restored_values: 1`, the balance returned to its pre-deal value); the
+T-side shadow round-trip on the extracted path (`register` → `clear` →
+`clear all`) was re-verified after the extraction (resynced 1, then 2 keys).
 
 Entry shape follows the need, not symmetry for its own sake: the ethereum's
 lib owns a `main_entry` with subcommands (`run` / `selftest` / `rewind`), while
 the venue has no subcommands and its bin is the composition root (plan §11.3
-rule 10). `make venue-closure` has no script: the venue has no incoming parent
-diffs to close a scope over — its standing scope check is the at-pin probe set
-(`/admin/probes`, `venue_probe_*`), which the venue-drill and smoke exercise.
+rule 10) — with the same shutdown path (the signal aborts the tasks; every
+mutation persists as it happens). `make venue-closure` has no script: the
+venue has no incoming parent diffs to close a scope over — its standing scope
+check is the at-pin probe set (`/admin/probes`, `venue_probe_*`), which the
+venue-drill and smoke exercise.
 
 ## The feed bridge — measured behavior (Phase 0)
 

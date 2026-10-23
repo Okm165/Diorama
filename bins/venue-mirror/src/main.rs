@@ -6,7 +6,9 @@
 //! over the wrong chain or a broken registry must not serve.
 //!
 //! Thin shell by design: the runtime is built here, the story lives in
-//! `mirror_hyperliquid`.
+//! `mirror_hyperliquid`. The shutdown path mirrors the ethereum engine's: the
+//! signal aborts the tasks; every mutation persists its state as it happens
+//! (shadow registry, cursor), so there is nothing to drain.
 use mirror_config::boot;
 use std::process::ExitCode;
 
@@ -43,15 +45,30 @@ async fn run() -> mirror_hyperliquid::Result<()> {
     let ctx = std::sync::Arc::new(mirror_hyperliquid::Ctx::new(cfg, &source_url, &v_url)?);
 
     mirror_hyperliquid::driver::boot(&ctx).await?;
-    let http = tokio::spawn(mirror_hyperliquid::http::serve(ctx.clone()));
-    mirror_hyperliquid::driver::run(ctx).await?;
-    http.await.map_err(|e| {
-        mirror_hyperliquid::Error::Io {
-            what: "http task",
-            path: "http".into(),
-            source: std::io::Error::other(e),
-        }
-    })?
+    let mut tasks = Vec::new();
+    {
+        let ctx = ctx.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = mirror_hyperliquid::http::serve(ctx).await {
+                tracing::error!(error = %e, "http server exited");
+            }
+        }));
+    }
+    {
+        let ctx = ctx.clone();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = mirror_hyperliquid::driver::run(ctx).await {
+                tracing::error!(error = %e, "venue driver exited");
+            }
+        }));
+    }
+
+    tokio::signal::ctrl_c().await.ok();
+    tracing::info!("shutdown signal received");
+    for t in tasks {
+        t.abort();
+    }
+    Ok(())
 }
 
 

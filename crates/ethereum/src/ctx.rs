@@ -253,6 +253,10 @@ impl Ctx {
         Ok(self.shadow.lock()?.is_shadowed(w))
     }
 
+    pub fn is_halted(&self) -> bool {
+        self.halted.load(Ordering::Relaxed)
+    }
+
     /// reth follow head (safe/latest/finalized per config).
     pub async fn follow_head(&self) -> Result<Option<u64>> {
         let tag = self.l1.follow.tag();

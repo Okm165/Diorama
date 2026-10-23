@@ -260,6 +260,21 @@ impl Shadow {
         self.slots.values().map(std::collections::BTreeSet::len).sum()
     }
 
+    /// The shadowed addresses as the `/status` surface reports them: every
+    /// slot-marked and whole-account-owned address, lowercase, sorted, deduped
+    /// (one presentation for both engines).
+    pub fn shadowed_addresses(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .slots
+            .keys()
+            .chain(self.accounts.iter())
+            .map(|a| format!("{a:?}").to_lowercase())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// Hand a slot back to mainnet sync. The caller re-syncs its value from
     /// reth, so T does not keep a stale devnet value with no shadow to explain
     /// it - and the recorded value goes too: a later re-fork must not restore
@@ -468,13 +483,28 @@ mod tests {
     use super::*;
     use mirror_anvil::Write;
 
+    /// The `/status` presentation is the registry's: lowercase, sorted,
+    /// deduped, slot-marked and whole-account-owned addresses together.
+    #[test]
+    fn shadowed_addresses_are_presented_once() {
+        let mut s = Shadow::default();
+        let a = Address::repeat_byte(0xaa);
+        let b = Address::repeat_byte(0xbb);
+        s.mark_slot(b, U256::from(1u64));
+        s.mark_slot(a, U256::from(1u64));
+        s.mark_account_fields(a);
+        let out = s.shadowed_addresses();
+        assert_eq!(out.len(), 2, "one entry per address: {out:?}");
+        assert_eq!(out[0], format!("{a:?}").to_lowercase());
+        assert_eq!(out[1], format!("{b:?}").to_lowercase());
+    }
+
     #[test]
     fn cow_granularity() {
         let mut s = Shadow::default();
         let a = Address::repeat_byte(0xaa);
         s.mark_slot(a, U256::from(1u64));
         s.mark_account_fields(a);
-
         assert!(s.is_shadowed(&Write::Storage {
             address: a,
             slot: U256::from(1u64),
