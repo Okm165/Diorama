@@ -1,5 +1,10 @@
 # Mainnet Mirror — local, production-shaped Ethereum mainnet mirror
 
+This repository is the **mirrors workspace**: the Mainnet Mirror (this
+section), the [Venue Mirror](#the-venue-mirror-in-the-same-workspace), and the
+CCTP bridge between them — one workspace, shared crates, two mirrors that
+never share a runtime.
+
 A local Ethereum mainnet **fork source** (`reth` + `Lighthouse`) drives a
 **mirror engine** that maintains two Anvil chains:
 
@@ -113,6 +118,15 @@ make pin-show            # resolved fork pins of M and T
 make repin               # re-pin drill: fresh pins; engine rebases, a new epoch starts
 ```
 
+Venue Mirror counterparts:
+
+```bash
+make smoke-venue         # the venue stack end to end (V, engine, sim, bridge)
+make venue-drill         # epoch drill: a write survives a same-pin reset, dies with a new pin
+make venue-proof         # capability proof: mint, sim deal, crash⇒liquidation, bridge round-trip
+make engine-symmetry     # both engines' shared verbs answer identically (fitness function)
+```
+
 Engine admin API (controls that belong to the mirror itself):
 
 ```bash
@@ -138,15 +152,21 @@ runs.
 crates/anvil,devnet,config  common: anvil conventions, devnet semantics, the layered config
 crates/ethereum             the Mainnet Mirror project (replay, verifier, BAL diff applier, feed bridge)
 crates/hyperliquid          the Venue Mirror project (fork driver, simulator planes, API, Core<->EVM bridge)
+crates/cctp                 the CCTP bridge element (Iris-compatible attestation, watcher, relayer, transfer)
 bins/mirror-engine          the Mainnet Mirror engine binary
 bins/venue-mirror           the Venue Mirror engine binary (fork driver)
 bins/venue-sim              the venue simulator (market + account planes; info 8090 / control 8091)
-k8s/base/                   kustomize base: reth, lighthouse, anvil-m/t, engine (+ venue/ for V, engine, sim)
+bins/cctp-bridge            the CCTP bridge service (Iris 8095 / control 8096)
+k8s/base/                   kustomize base: reth, lighthouse, anvil-m/t, engine (+ venue/ for V, engine, sim, bridge)
 k8s/overlays/mainnet-mirror/  single-node k3s overlay (mainnet mirror)
-k8s/overlays/venue-mirror/    the venue stack overlay (V, engine, sim, NodePorts)
+k8s/overlays/venue-mirror/    the venue stack overlay (V, engine, sim, bridge, NodePorts)
 k8s/bootstrap/              one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
-scripts/                    lib.sh, smoke.sh, smoke-venue.sh, scenario.sh, capability-proof.sh,
-                            product-sim.sh, closure-check.sh, closure-matrix.sh, daloc-sim.py
+scripts/                    lib.sh + lib-venue.sh (the shared plumbing), the T-side suites
+                            (smoke, scenario, capability-proof, product-sim, closure-check,
+                            feed-bridge), the venue suites (smoke-venue, venue-drill,
+                            venue-proof, venue-product-sim), engine-symmetry, daloc-sim.py,
+                            and the structural fitness scripts (closure-matrix, no-orphans,
+                            docs-metrics, trust-audit, gen-secret, render-diagrams)
 docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md, TESTING.md, adr/
 ```
 
