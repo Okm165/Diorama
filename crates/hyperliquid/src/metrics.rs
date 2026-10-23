@@ -27,6 +27,7 @@ pub struct VenueMetrics {
     pub scanned_blocks_total: AtomicU64,
     /// The empty share of the walk (one call, no traces).
     pub skipped_empty_blocks_total: AtomicU64,
+
     /// V blocks the engine mined because the pool was non-empty: the engine is
     /// V's block producer (T's is the applier), so the bridge's boot txs and
     /// relay mints land without a harness mine.

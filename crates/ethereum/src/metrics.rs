@@ -37,6 +37,7 @@ pub struct EthereumMetrics {
     /// The empty share of the walk: one call, no traces (plan §17.4's
     /// empty-block cost reading — the harness mines one block per poll).
     pub shadow_skipped_empty_blocks: AtomicU64,
+
     pub last_replay_ms: AtomicU64,
     pub last_apply_ms: AtomicU64,
     pub pin_age_blocks: AtomicU64,

@@ -391,6 +391,7 @@ pub fn save_registry(shadow: &Shared<Shadow>, path: &Path, metrics: &Metrics) ->
     let s = shadow.lock()?;
     s.save(path)?;
     metrics.set(&metrics.shadowed_slots, s.slot_count() as u64);
+    metrics.set(&metrics.shadowed_accounts, s.accounts.len() as u64);
     Ok(())
 }
 

@@ -25,6 +25,7 @@ pub fn counter(out: &mut String, name: &str, help: &str, v: u64) {
 #[derive(Default)]
 pub struct Metrics {
     pub shadowed_slots: AtomicU64,
+    pub shadowed_accounts: AtomicU64,
     pub halted: AtomicU64,
     pub frozen: AtomicU64,
 }
@@ -64,6 +65,7 @@ impl Metrics {
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(256);
         push_metric(&mut out, "gauge", "mirror_shadowed_slots", "storage slots shadowed by the devnet", self.shadowed_slots.load(Ordering::Relaxed));
+        push_metric(&mut out, "gauge", "mirror_shadowed_accounts", "accounts with devnet-owned keys (whole-account marks or per-slot marks)", self.shadowed_accounts.load(Ordering::Relaxed));
         push_metric(&mut out, "gauge", "mirror_halted", "1 while the driver is halted", self.halted.load(Ordering::Relaxed));
         push_metric(&mut out, "gauge", "mirror_frozen", "1 while the driver is frozen", self.frozen.load(Ordering::Relaxed));
         out
@@ -96,7 +98,8 @@ mod tests {
     fn the_shared_set_is_exactly_the_admin_gauges() {
         let m = Metrics::default();
         let names = series(&m.render());
-        let want: BTreeSet<String> = ["mirror_frozen", "mirror_halted", "mirror_shadowed_slots"]
+        let want: BTreeSet<String> =
+            ["mirror_frozen", "mirror_halted", "mirror_shadowed_slots", "mirror_shadowed_accounts"]
             .into_iter()
             .map(String::from)
             .collect();

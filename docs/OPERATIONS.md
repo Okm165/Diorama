@@ -554,7 +554,8 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_scanned_blocks_total` / `venue_mined_blocks_total` | V blocks the shadow scan walked / V blocks the engine mined (the pool was non-empty — the engine is V's block producer; T's is the applier) |
 | `venue_probe_ok_total` / `venue_probe_failures_total` | at-pin probes matching / diverging from the fork source |
 | `venue_probe_skipped_total` / `venue_probe_last_failed` | probes skipped (devnet-owned target, or a pin the source cannot serve) / diverged in the last run |
-| `mirror_shadowed_slots` / `mirror_halted` / `mirror_frozen` | the shared admin gauges, rendered beside the venue's own |
+| `venue_bridge_lag_blocks` | V head minus the bridge's processed cursor (growing = stuck) |
+| `mirror_shadowed_slots` / `mirror_shadowed_accounts` / `mirror_halted` / `mirror_frozen` | the shared admin gauges, rendered beside the venue's own (the registry pushes them on change) |
 | `venue_sim_accounts` / `venue_sim_epoch` | simulated (touched) accounts / scenario epoch |
 | `venue_sim_liquidations_total` / `venue_sim_funding_payments_total` | liquidations executed / funding payments applied |
 | `venue_sim_ws_connected` / `venue_sim_ws_reconnects_total` | the market WS lane's health |
@@ -572,7 +573,26 @@ rising means a poisoned value survived a hand-back; `venue_sim_ws_connected` 0
 for >1 min means the market plane is on the REST lane (watch
 `venue_sim_budget_skips_total`); `venue_sim_stale_ms{coin}` above the readiness
 window means `/readyz` will fail; `venue_bridge_trace_faults_total` rising means
-contract-internal CoreWriter calls are being missed that block.
+contract-internal CoreWriter calls are being missed that block;
+`venue_bridge_lag_blocks` growing means the bridge is stuck behind V.
+
+**Plan §7.8's sketch names vs the implemented series** (the plan's operations
+map was written before the `venue_sim_*`/`venue_bridge_*` prefixes settled; the
+implemented names are the contract with the alarms above):
+
+- the probe-failure counter is `venue_probe_failures_total` (the plan's sketch
+  spelled it with "failed");
+- the feed lag is `venue_sim_stale_ms{coin}` — milliseconds, per coin (the
+  plan's sketch asked for seconds under a single feed label);
+- the WS flag, the rate-budget gauge and the identity counter carry the
+  `venue_sim_` prefix (`venue_sim_ws_connected`,
+  `venue_sim_budget_weight_used`, `venue_sim_identity_violations_total`);
+- the registry's size is the **shared** `mirror_shadowed_slots` /
+  `mirror_shadowed_accounts` pair (one fact, one home — the same series on both
+  engines, pushed by the registry on every change), not a venue-prefixed twin;
+- the bridge's signal is the lag, `venue_bridge_lag_blocks`: the bridge scans V
+  block by block, so there is no pending queue to gauge.
+
 
 ### The daloc-facing endpoints
 

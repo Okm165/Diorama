@@ -398,6 +398,30 @@ serve; omitting `levels` clears (`{"owned":false,"levels":0}`) and the live
 book returns. `activeAssetCtx` is **not** a served REST type and correctly
 answers `"unrouted"` (it is a WS channel; hl_mock's contract).
 
+### Negative venue equity, end-to-end (measured 2026-10-23)
+
+The master plan's P6.1/P6.2 wiring requires the sim to *produce and serve*
+negative venue equity (the signed venue term — §12.7's first row), and daloc's
+gate must pass it through. Measured live on the sim:
+
+- **the identity is exact both ways** — `accountValue == totalRawUsd + Σ signed
+  positionValue` held to the last digit on a seeded long after a −40 % crash
+  (`99132.398977… == 999.998977… + 98132.4…`); `totalRawUsd` is the signed
+  cost-netted base, not the cash;
+- **the stable negative state is a debt with no positions** — an account whose
+  base sits below minus the position value serves a negative `accountValue`
+  (measured `−1000.000000…`, a signed string) and stays there:
+  `liquidate_if_needed` skips position-less accounts by design ("negative
+  equity alone is a state the venue reports, not a liquidation to re-run every
+  tick");
+- **liquidation socializes the residual** — an underwater long is closed at the
+  mark (counted in `venue_sim_liquidations_total`), the loss is realized into
+  the balance and the residual is burned to zero (§4.6's "collateral consumed,
+  debt burned"), so the *pre-liquidation window* is the only place a
+  position-bearing negative equity is visible — a fixture that needs it must be
+  read within the tick (measured: the first read serves negative, the tick then
+  closes it).
+
 ### The wire types are pinned against measured samples
 
 Every info shape the sim serves — and every CoreWriter payload the bridge

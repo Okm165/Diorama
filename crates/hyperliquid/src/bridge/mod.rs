@@ -103,6 +103,7 @@ impl Bridge {
             // half-applying (a duplicate credit is a silent balance lie).
             self.sim.save_if_dirty()?;
         }
+        self.metrics.set_lag_blocks(head.saturating_sub(self.cursor.load(Ordering::Relaxed)));
         Ok(())
     }
 
