@@ -163,7 +163,7 @@ k8s/base/                   kustomize base: reth, lighthouse, anvil-m/t, engine 
 k8s/overlays/mainnet-mirror/  single-node k3s overlay (mainnet mirror)
 k8s/overlays/venue-mirror/    the venue stack overlay (V, engine, sim, bridge, NodePorts)
 k8s/bootstrap/              one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
-scripts/                    lib.sh + lib-venue.sh (the shared plumbing), the T-side suites
+scripts/                    lib-venue.sh + lib-cctp.sh (the shared plumbing), the suites
                             (smoke, scenario, capability-proof, product-sim, closure-check,
                             feed-bridge), the venue suites (smoke-venue, venue-drill,
                             venue-proof, venue-product-sim), engine-symmetry, daloc-sim.py,

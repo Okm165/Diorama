@@ -184,12 +184,10 @@ fn pow10(decimals: i32) -> Decimal {
 /// The system address's completion send cannot be built: a typed fault the
 /// bridge counts rather than a silent drop.
 pub(crate) fn no_evm_link(token: &TokenInfo) -> Error {
-    Error::BadRequest {
-        reason: format!(
+    Error::bad_request(format!(
             "token `{}` (index {}) has no EVM link; cannot complete Core→EVM",
             token.name, token.index
-        ),
-    }
+        ),)
 }
 
 #[cfg(test)]

@@ -269,12 +269,12 @@ impl Bridge {
         let CoreAction::LimitOrder { asset, tif, .. } = action else {
             return;
         };
-        if *tif != 3 {
-            self.metrics.inc_refusals();
-            tracing::warn!(account = %caller, tif, "bridge: CoreWriter order refused (IOC fills only)");
+        let Some(tif) = crate::sim::order::Tif::from_corewriter(*tif) else {
+            self.metrics.inc_malformed();
+            tracing::warn!(account = %caller, tif, "bridge: CoreWriter order with an unknown tif byte");
             return;
-        }
-        let Some(order) = core_order(self.feed.meta().as_ref(), action) else {
+        };
+        let Some(order) = core_order(self.feed.meta().as_ref(), action, tif) else {
             self.metrics.inc_refusals();
             tracing::warn!(account = %caller, asset, "bridge: CoreWriter order for an unknown asset refused");
             return;
@@ -478,9 +478,11 @@ fn walk_frame(frame: &CallFrame, out: &mut Vec<(Address, CoreAction)>) {
 /// The CoreWriter order's units (docs, pinned): prices and sizes are 10^8 ×
 /// the human value, and the asset index resolves through the live meta
 /// (`None` = an index the meta does not carry — a named refusal upstream).
+/// The tif comes in already mapped (`Tif::from_corewriter`, one home).
 fn core_order(
     meta: Option<&crate::wire::Meta>,
     action: &CoreAction,
+    tif: crate::sim::order::Tif,
 ) -> Option<crate::sim::order::Order> {
     let CoreAction::LimitOrder {
         asset,
@@ -500,7 +502,7 @@ fn core_order(
         is_buy: *is_buy,
         size: Decimal::from(*sz) / scale,
         limit_px: Some(Decimal::from(*limit_px) / scale),
-        tif: crate::sim::order::Tif::Ioc,
+        tif,
         reduce_only: *reduce_only,
     })
 }
@@ -538,7 +540,8 @@ mod tests {
             tif: 3,
             cloid: 0,
         };
-        let order = core_order(Some(&meta), &action).expect("a modeled order");
+        let order = core_order(Some(&meta), &action, crate::sim::order::Tif::Ioc)
+            .expect("a modeled order");
         assert_eq!(order.coin, "ETH");
         assert!(order.is_buy);
         assert_eq!(order.size, "2.5".parse().unwrap());
@@ -554,8 +557,8 @@ mod tests {
             tif: 3,
             cloid: 0,
         };
-        assert!(core_order(Some(&meta), &oob).is_none());
-        assert!(core_order(None, &action).is_none());
+        assert!(core_order(Some(&meta), &oob, crate::sim::order::Tif::Ioc).is_none());
+        assert!(core_order(None, &action, crate::sim::order::Tif::Ioc).is_none());
     }
 
     #[test]

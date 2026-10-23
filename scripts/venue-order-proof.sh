@@ -30,7 +30,6 @@ ORDER_ACCT="${ORDER_ACCT:-0x00000000000000000000000000000000000000e4}"
 COIN="${COIN:-ETH}"
 FUNDS="${FUNDS:-10000}"
 
-sim_account() { sipost /info "{\"type\":\"clearinghouseState\",\"user\":\"$1\"}"; }
 metric() { smetrics | awk -v k="$1" '$1 == k || $1 ~ "^"k"\\{" {s+=$2; found=1} END {print (found ? s : 0)}'; }
 book() { sipost /info "{\"type\":\"l2Book\",\"coin\":\"$COIN\"}"; }
 mark() {
@@ -64,38 +63,6 @@ except (InvalidOperation, ValueError):
 print("ok" if abs(a - b) < Decimal("0.000000001") else f"{a} != {b}")
 PY
 }
-# Flatten the actor's COIN position (a previous run's leftovers) against the
-# live book, so every leg's checks are absolute and the proof is rerunnable.
-flatten() {
-  local szi is_buy abs_szi
-  szi=$(sim_account "$ORDER_ACCT" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')
-  [ "$szi" = "0" ] && return 0
-  is_buy=false
-  case "$szi" in -*) is_buy=true ;; esac
-  abs_szi=$(python3 -c "from decimal import Decimal; print(abs(Decimal('$szi')))")
-  for _ in 1 2 3 4 5; do
-    spost /control/order "{\"address\":\"$ORDER_ACCT\",\"coin\":\"$COIN\",\"is_buy\":$is_buy,\"size\":\"$abs_szi\",\"reduce_only\":true}" > /dev/null || true
-    szi=$(sim_account "$ORDER_ACCT" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')
-    [ "$szi" = "0" ] && return 0
-    abs_szi=$(python3 -c "from decimal import Decimal; print(abs(Decimal('$szi')))")
-  done
-  return 0
-}
-
-identity() {
-  python3 -c "
-import json, sys
-from decimal import Decimal
-d = json.load(sys.stdin)
-v = Decimal(d['marginSummary']['accountValue'])
-raw = Decimal(d['marginSummary']['totalRawUsd'])
-pnl = sum(Decimal(p['position']['positionValue']) * (-1 if p['position']['szi'].startswith('-') else 1)
-          for p in d['assetPositions'])
-# positionValue is served rounded to 2dp; the identity is exact on the
-# unrounded figures, so the check is exact within that rounding.
-print('ok' if abs(v - (raw + pnl)) < Decimal('0.01') else f'mismatch v={v} raw={raw} pnl={pnl}')"
-}
-
 echo "== venue order-lane proof =="
 
 echo "-- preconditions"
@@ -109,7 +76,7 @@ idx=$(sipost /info '{"type":"meta"}' | python3 -c "import json,sys; print([a['na
 spost /control/set_book "{\"coin\":\"$COIN\"}" > /dev/null
 spost /control/crash "{\"coin\":\"$COIN\"}" > /dev/null
 filled0=$(metric venue_sim_orders_filled_total)
-flatten
+flatten_coin "$ORDER_ACCT" "$COIN"
 spost /control/deal "{\"address\":\"$ORDER_ACCT\",\"class\":\"perp\",\"amount\":\"$FUNDS\"}" > /dev/null
 ok "scenario state cleared, the actor flattened; $FUNDS perp USDC dealt"
 
@@ -151,7 +118,7 @@ asks2=$(book | json 'd["levels"][1]')
 
 echo "-- B. the trader's own state moves (the identity exact)"
 state=$(sim_account "$ORDER_ACCT")
-r=$(echo "$state" | identity)
+r=$(echo "$state" | identity_ok)
 [ "$r" = "ok" ] && ok "the measured identity holds after the fills" || bad "identity $r"
 szi=$(echo "$state" | json 'd["assetPositions"][0]["position"]["szi"]')
 r=$(same "$szi" "3")
@@ -164,7 +131,7 @@ pxr=$(echo "$red" | json 'd["avgPx"]')
 r=$(same "$pxr" "3000")
 [ "$r" = "ok" ] && ok "the reduce-only sell filled at the bid (3000)" || bad "reduce px $r"
 state=$(sim_account "$ORDER_ACCT")
-r=$(echo "$state" | identity)
+r=$(echo "$state" | identity_ok)
 [ "$r" = "ok" ] && ok "the identity stays exact after the realized PnL" || bad "identity $r"
 szi=$(echo "$state" | json 'd["assetPositions"][0]["position"]["szi"]')
 r=$(same "$szi" "2")

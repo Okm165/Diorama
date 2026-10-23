@@ -86,3 +86,13 @@ pub enum Error {
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+impl Error {
+    /// A refused request with its reason — one constructor for the most
+    /// common error (the routes answer it as a 400 with the reason verbatim).
+    pub(crate) fn bad_request(reason: impl Into<String>) -> Self {
+        Self::BadRequest {
+            reason: reason.into(),
+        }
+    }
+}

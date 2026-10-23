@@ -10,35 +10,7 @@
 #     ./scripts/cctp-smoke.sh                # direct mode: a scratch stack
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
-
-pass=0; fail=0
-ok()   { echo "  ✔ $*"; pass=$((pass+1)); }
-bad()  { echo "  ✘ $*"; fail=$((fail+1)); }
-info() { echo "  · $*"; }
-
-if [ -n "${BRIDGE_CTRL_URL:-}" ]; then
-  bget()  { curl -s --fail-with-body -m 30 "$BRIDGE_CTRL_URL$1"; }
-  biget() { curl -s --fail-with-body -m 30 "${BRIDGE_IRIS_URL:?set BRIDGE_IRIS_URL in direct mode}$1"; }
-else
-  exec_pod() { kubectl -n "$NS" exec -i deploy/cctp-bridge -- "$@"; }
-  bget()  { exec_pod curl -sf -m 30 "localhost:8096$1"; }
-  biget() { exec_pod curl -sf -m 30 "localhost:8095$1"; }
-fi
-
-json() { # json <python-expr>
-  python3 -c "
-import json, sys
-raw = sys.stdin.read()
-try:
-    d = json.loads(raw)
-except Exception:
-    sys.stderr.write('json: unparsable body: ' + raw.strip()[:200] + '\n')
-    print('None')
-    raise SystemExit
-print($1)
-"
-}
+source "$(dirname "$0")/lib-cctp.sh"
 
 echo "== CCTP bridge smoke =="
 

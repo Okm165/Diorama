@@ -264,12 +264,10 @@ impl Relayer {
         let wrapper = self
             .store
             .with(|state| Ok(state.hooks.get(&record.destination_domain).copied()))?
-            .ok_or_else(|| Error::BadRequest {
-                reason: format!(
+            .ok_or_else(|| Error::bad_request(format!(
                     "message {} carries a hook but domain {} has no wrapper (the boot step deploys one)",
                     record.nonce, record.destination_domain
-                ),
-            })?;
+                ),))?;
         Ok((wrapper, wrapper))
     }
 
@@ -315,9 +313,7 @@ impl Relayer {
         target: Address,
         decoded: &Message,
     ) -> Result<bool> {
-        let attestation = record.attestation.clone().ok_or_else(|| Error::BadRequest {
-            reason: format!("message {} is signed without an attestation", record.nonce),
-        })?;
+        let attestation = record.attestation.clone().ok_or_else(|| Error::bad_request(format!("message {} is signed without an attestation", record.nonce),))?;
         let calldata = if decoded.body.hook_data.is_empty() {
             receive_message_calldata(&record.message, &attestation)
         } else {

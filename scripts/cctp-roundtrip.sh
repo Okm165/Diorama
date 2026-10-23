@@ -17,7 +17,8 @@
 # the miss).
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
+source "$(dirname "$0")/lib-cctp.sh"
+
 SOURCE="${SOURCE:-0}"                 # 0 = Ethereum/T, 19 = HyperEVM/V
 DESTINATION="${DESTINATION:-19}"
 AMOUNT="${AMOUNT:-1000000}"           # raw units (1 USDC, 6-dec)
@@ -25,33 +26,7 @@ RELAY="${RELAY:-0x70997970C51812dc3A010C7d01b50e0d17dc79C8}"
 USDC_T="${USDC_T:-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48}"
 USDC_V="${USDC_V:-0xb88339CB7199b77E23DB6E890353E22632Ba630f}"
 BUDGET="${BUDGET:-180}"              # seconds to wait for `relayed`
-CAST="${CAST:-cast}"
-
-pass=0; fail=0
-ok()   { echo "  ✔ $*"; pass=$((pass+1)); }
-bad()  { echo "  ✘ $*"; fail=$((fail+1)); }
-info() { echo "  · $*"; }
-
-if [ -n "${BRIDGE_CTRL_URL:-}" ]; then
-  bget()  { curl -s --fail-with-body -m 30 "$BRIDGE_CTRL_URL$1"; }
-  bpost() { curl -s --fail-with-body -m 120 -X POST "$BRIDGE_CTRL_URL$1" -H 'Content-Type: application/json' -d "$2"; }
-  cget()  { curl -s --fail-with-body -m 60 "$2$1"; }
-  cpost() { curl -s --fail-with-body -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
-  balance() { # balance <token> <address> <url>
-    "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$3" 2>/dev/null | awk '{print $1}'
-  }
-  SRC_URL="${T_URL:?set T_URL in direct mode}"; DST_URL="${V_URL:?set V_URL in direct mode}"
-  SRC_ENGINE="${ENGINE_T_URL:?set ENGINE_T_URL in direct mode}"; DST_ENGINE="${ENGINE_V_URL:?set ENGINE_V_URL in direct mode}"
-else
-  exec_pod() { kubectl -n "$NS" exec -i deploy/cctp-bridge -- "$@"; }
-  bget()  { exec_pod curl -sf -m 30 "localhost:8096$1"; }
-  bpost() { exec_pod curl -sf -m 120 -X POST "localhost:8096$1" -H 'Content-Type: application/json' -d "$2"; }
-  cget()  { exec_pod curl -sf -m 60 "$2$1"; }
-  cpost() { exec_pod curl -sf -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
-  balance() { exec_pod "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$3" 2>/dev/null | awk '{print $1}'; }
-  SRC_URL="http://anvil-t:8545"; DST_URL="http://anvil-v:8545"
-  SRC_ENGINE="http://mainnet-engine.mainnet-mirror.svc:8080"; DST_ENGINE="localhost:8080"
-fi
+require_chain_urls
 
 if [ "$SOURCE" = "0" ]; then
   SRC_USDC="$USDC_T"; DST_USDC="$USDC_V"
@@ -71,36 +46,19 @@ fi
 dst_before=$(balance "$DST_USDC" "$RELAY" "$DST_URL")
 ok "destination balance before: $dst_before"
 
-burn=$(bpost /control/transfer "{\"source\":$SOURCE,\"destination\":$DESTINATION,\"amount\":\"$AMOUNT\"}")
-burn_tx=$(echo "$burn" | python3 -c "import json,sys; print(json.load(sys.stdin).get('burn_tx',''))")
-mined=$(echo "$burn" | python3 -c "import json,sys; print(json.load(sys.stdin).get('mined'))")
-[ -n "$burn_tx" ] && ok "burn submitted ($burn_tx, mined=$mined)" || bad "no burn_tx in the response: $burn"
+burn_resp=$(burn "$SOURCE" "$DESTINATION" "$RELAY")
+burn_tx=$(echo "$burn_resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('burn_tx',''))")
+mined=$(echo "$burn_resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('mined'))")
+[ -n "$burn_tx" ] && ok "burn submitted ($burn_tx, mined=$mined)" || bad "no burn_tx in the response: $burn_resp"
 
-state=""
-i=0
-while [ "$i" -lt "$BUDGET" ]; do
-  rec=$(bget /control/state | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-for m in d.get('messages', []):
-    if m.get('burn_tx', '').lower() == '$burn_tx'.lower():
-        print(m.get('state', ''), '|', m.get('park_reason') or '')
-        break
-")
-  state=${rec%% *}
-  case "$state" in
-    relayed) ok "the record relayed"; break ;;
-    parked)  bad "the record parked: ${rec#*| }"; break ;;
-  esac
-  i=$((i + 1))
-  sleep 1
-done
 # An empty store entry is the normal pending case (the watcher absorbs the
-# burn only after the finality window), not a terminal one — the loop above
-# keeps polling for it; only the budget running out is a failure.
+# burn only after the finality window), not a terminal one — the wait keeps
+# polling for it; only the budget running out is a failure.
+state=$(await_relay "$burn_tx" || true)
 case "$state" in
-  relayed | parked) ;;
-  *) bad "not relayed within ${BUDGET}s (state=${state:-no record yet}; a scratch destination needs a miner)" ;;
+  relayed) ok "the record relayed" ;;
+  parked*) bad "the record parked: ${state#parked: }" ;;
+  *) bad "not relayed within ${BUDGET}s ($state; a scratch destination needs a miner)" ;;
 esac
 
 dst_after=$(balance "$DST_USDC" "$RELAY" "$DST_URL")

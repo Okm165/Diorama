@@ -210,7 +210,11 @@ workflow a margin product actually executes, in one pass and on live state
 All three scripts share `scripts/lib-mainnet.sh` - the measured conventions live there
 (explicit gas on devnet sends, offline `cast` without `--rpc-url`, polled
 receipts) instead of being copied three times. The venue-side dual-mode
-scripts (the epoch drill, the capability proof) share `scripts/lib-venue.sh`
+scripts (the epoch drill, the capability proof, the order-lane proof) share
+`scripts/lib-venue.sh` — and the `cctp-*` family (smoke, roundtrip,
+margin-cycle) shares `scripts/lib-cctp.sh`, which sources the venue lib for
+the venue-shaped gates (`identity_ok`, `flatten_coin`) and adds the bridge's
+own doors (burn, the relay wait, the two chains' reads and the V-side mine)
 the same way: one transport per mode (direct URLs for a scratch stack, or
 `kubectl exec` from the venue engine pod in the cluster), plus the assertion
 helpers and the balance read - so a fix to the transport lands in one place.

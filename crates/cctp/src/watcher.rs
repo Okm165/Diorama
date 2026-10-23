@@ -413,12 +413,8 @@ fn decode_message_sent(log: &Log) -> Result<MessageSent> {
             what: "MessageSent event",
             source,
         })?;
-    let burn_tx = log.transaction_hash.ok_or_else(|| Error::BadRequest {
-        reason: "MessageSent log without a transaction hash".into(),
-    })?;
-    let burn_block = log.block_number.ok_or_else(|| Error::BadRequest {
-        reason: "MessageSent log without a block number".into(),
-    })?;
+    let burn_tx = log.transaction_hash.ok_or_else(|| Error::bad_request("MessageSent log without a transaction hash",))?;
+    let burn_block = log.block_number.ok_or_else(|| Error::bad_request("MessageSent log without a block number",))?;
     Ok(MessageSent {
         burn_tx,
         burn_block,

@@ -246,11 +246,9 @@ impl Sim {
                 }
                 DealClass::Spot => {
                     let coin = deal.coin.as_deref().unwrap_or("USDC");
-                    let index = feed.token_of(coin).ok_or_else(|| Error::BadRequest {
-                        reason: format!(
+                    let index = feed.token_of(coin).ok_or_else(|| Error::bad_request(format!(
                             "spot coin `{coin}` is not in the venue's token registry yet"
-                        ),
-                    })?;
+                        ),))?;
                     let entry = account::spot_entry(account, TokenRef { index, coin });
                     entry.total = account::add(entry.total, deal.amount, "spot deal")?;
                     Ok(entry.total)
@@ -270,9 +268,7 @@ impl Sim {
     /// register a zero account.
     pub(crate) fn set_account(&self, address: Address, seed: AccountSeed) -> Result<()> {
         if seed.is_empty() {
-            return Err(Error::BadRequest {
-                reason: "the patch is empty (no field named)".into(),
-            });
+            return Err(Error::bad_request("the patch is empty (no field named)",));
         }
         let now = crate::now_ms();
         let clock = self.clock(now)?;

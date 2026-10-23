@@ -194,16 +194,12 @@ pub(crate) async fn relay(
         let record = state
             .store
             .with(|s| Ok(s.messages.iter().find(|m| m.nonce == nonce).cloned()))?
-            .ok_or_else(|| Error::BadRequest {
-                reason: format!("no watched message with nonce {nonce}"),
-            })?;
+            .ok_or_else(|| Error::bad_request(format!("no watched message with nonce {nonce}"),))?;
         if record.state != RelayState::Signed {
-            return Err(Error::BadRequest {
-                reason: format!(
+            return Err(Error::bad_request(format!(
                     "message {nonce} is {:?}; only SIGNED messages relay (reattest an expired one first)",
                     record.state
-                ),
-            });
+                ),));
         }
     }
     let confirmed = state.relayer.relay_now(request.nonce).await?;
@@ -266,23 +262,19 @@ async fn hook_pin(state: &ControlState, request: &TransferRequest) -> Result<(B2
             let wrapper = state
                 .store
                 .with(|s| Ok(s.hooks.get(&request.destination).copied()))?
-                .ok_or_else(|| Error::BadRequest {
-                    reason: format!(
+                .ok_or_else(|| Error::bad_request(format!(
                         "no hook wrapper deployed on domain {} (its boot step deploys one; the bridge log names the outcome)",
                         request.destination
-                    ),
-                })?;
+                    ),))?;
             // A re-pin removes the wrapper's code: pinning `destinationCaller`
             // to a dead address would make the burn unrelayable. Refuse by
             // name before spending the burn.
             let chain = by_domain(&state.chains, request.destination)?;
             if !crate::transfer::has_code(&chain.rpc, wrapper).await? {
-                return Err(Error::BadRequest {
-                    reason: format!(
+                return Err(Error::bad_request(format!(
                         "the hook wrapper {wrapper} has no code on {} (a re-pin?); restart the bridge to redeploy it",
                         chain.name
-                    ),
-                });
+                    ),));
             }
             Ok((
                 wrapper.into_word(),
@@ -365,15 +357,11 @@ pub(crate) async fn transfer(
 /// paying for a revert (devnet maxFee is 0).
 fn validate_request(state: &ControlState, request: &TransferRequest) -> Result<()> {
     if request.destination == request.source {
-        return Err(Error::BadRequest {
-            reason: "source and destination are the same domain".into(),
-        });
+        return Err(Error::bad_request("source and destination are the same domain",));
     }
     by_domain(&state.chains, request.destination)?;
     if request.amount.is_zero() {
-        return Err(Error::BadRequest {
-            reason: "amount must be nonzero".into(),
-        });
+        return Err(Error::bad_request("amount must be nonzero",));
     }
     let surface = FeeSurface {
         min_fee: state.min_fees.get(&request.source).copied().flatten(),
@@ -387,13 +375,11 @@ fn validate_request(state: &ControlState, request: &TransferRequest) -> Result<(
 async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> Result<()> {
     let balance = chain.usdc_balance(state.sender.address()).await?;
     if balance < amount {
-        return Err(Error::BadRequest {
-            reason: format!(
+        return Err(Error::bad_request(format!(
                 "sender {} holds {balance} USDC on {}, needs {amount} (deal via the chain's admin surface)",
                 state.sender.address(),
                 chain.name,
-            ),
-        });
+            ),));
     }
     let allowance = chain
         .usdc_allowance(state.sender.address(), TOKEN_MESSENGER_V2)
@@ -414,12 +400,10 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
         Some(receipt) if receipt.status() => {}
         Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
         None => {
-            return Err(Error::BadRequest {
-                reason: format!(
+            return Err(Error::bad_request(format!(
                     "approve tx {hash} was not mined within {}s; retry the transfer",
                     state.receipt_timeout.as_secs()
-                ),
-            })
+                ),))
         }
     }
     tracing::info!(chain = chain.name, tx = %hash, "cctp approve submitted");
@@ -484,9 +468,7 @@ mod tests {
         use axum::http::StatusCode;
         let status = |e: Error| e.into_response().status();
         assert_eq!(
-            status(Error::BadRequest {
-                reason: "no".into()
-            }),
+            status(Error::bad_request("no")),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(

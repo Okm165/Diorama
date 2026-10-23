@@ -256,9 +256,7 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            status(Error::BadRequest {
-                reason: "no".into()
-            }),
+            status(Error::bad_request("no")),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(

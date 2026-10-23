@@ -57,22 +57,15 @@ pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoRespo
 /// accepted, never verified (the devnet has no keys — the anvil-impersonation
 /// analogue), and the acting account is read from `user`.
 pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
-    let req: ExchangeBody = serde_json::from_slice(&body).map_err(|source| Error::BadRequest {
-        reason: format!("invalid exchange request: {source}"),
-    })?;
-    let ExchangeAction::Order { orders, grouping } = req.action else {
-        return Ok(Json(ExchangeResponse {
-            status: "err",
-            response: "venue-sim: only the order action is modeled (plan §4.5/§5, Phase 2); \
-                       cancels, modifies, leverage updates, API wallets and multi-dex \
-                       actions are not. See docs/INTEGRATION.md."
-                .to_string(),
-        })
-        .into_response());
+    let req: ExchangeBody = serde_json::from_slice(&body).map_err(|source| Error::bad_request(format!("invalid exchange request: {source}"),))?;
+    let (orders, grouping) = match order_parts(&body, &req.action) {
+        Ok(parts) => parts,
+        Err(reason) => return Ok(err_envelope(reason).into_response()),
     };
     tracing::info!(
         user = %req.user,
         nonce = ?req.nonce,
+        expires_after = ?req.expires_after,
         signed = req.signature.as_ref().is_some_and(Signature::is_shaped),
         sig_v = req.signature.as_ref().map(|s| s.v),
         vault = ?req.vault_address,
@@ -81,20 +74,10 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
         "exchange order action accepted (the signature is accepted, never verified)"
     );
     let meta = state.feed.meta();
-    let mut statuses = Vec::with_capacity(orders.len());
-    for action in &orders {
-        let outcome = action
-            .to_order(meta.as_ref())
-            .and_then(|o| state.sim.order(&state.feed, req.user, &o));
-        match outcome {
-            Ok(fill) => statuses.push(OrderStatus::Filled(FilledInfo {
-                total_sz: fill.total_sz.to_string(),
-                avg_px: fill.avg_px.to_string(),
-                oid: fill.oid,
-            })),
-            Err(e) => statuses.push(OrderStatus::Error(e.to_string())),
-        }
-    }
+    let statuses = orders
+        .iter()
+        .map(|action| fill_status(&state, req.user, meta.as_ref(), action))
+        .collect();
     Ok(Json(ExchangeOk {
         status: "ok",
         response: OrderResponseBody {
@@ -105,12 +88,83 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
     .into_response())
 }
 
+/// The action's orders after the boundary checks, or the refusal reason the
+/// err envelope carries: the unmodeled tag (read alone so the reason *names*
+/// it) and the builder fee (fees are a research lane — a fill that silently
+/// skipped the fee would lie).
+fn order_parts<'a>(
+    body: &Bytes,
+    action: &'a ExchangeAction,
+) -> Result<(&'a [OrderAction], Option<Grouping>), String> {
+    let ExchangeAction::Order {
+        orders,
+        grouping,
+        builder,
+    } = action
+    else {
+        let tag = serde_json::from_slice::<ActionTag>(body)
+            .map(|t| t.action.r#type)
+            .unwrap_or_else(|_| "unknown".into());
+        return Err(format!(
+            "venue-sim: only the order action is modeled (plan §4.5/§5, Phase 2); `{tag}` is \
+             not. See docs/INTEGRATION.md."
+        ));
+    };
+    if let Some(builder) = builder {
+        return Err(format!(
+            "venue-sim: builder fees are not modeled (fees are a research lane, plan §16.3) \
+             — the order would fill without charging {} its {} tenths of a basis point. See \
+             docs/INTEGRATION.md.",
+            builder.b, builder.f
+        ));
+    }
+    Ok((orders, *grouping))
+}
+
+/// The venue's `err` envelope (HTTP 200 — the shape their client parses).
+fn err_envelope(response: String) -> Json<ExchangeResponse> {
+    Json(ExchangeResponse {
+        status: "err",
+        response,
+    })
+}
+
+/// One order's status: the fill, or its refusal, in the venue's own shapes.
+fn fill_status(
+    state: &ApiState,
+    user: Address,
+    meta: Option<&crate::wire::Meta>,
+    action: &OrderAction,
+) -> OrderStatus {
+    if let Some(cloid) = action.c {
+        tracing::info!(
+            cloid = %cloid,
+            asset = action.a,
+            "order carries a client id (echoed; nothing rests, so there is no id to key)"
+        );
+    }
+    match action
+        .to_order(meta)
+        .and_then(|o| state.sim.order(&state.feed, user, &o))
+    {
+        Ok(fill) => OrderStatus::Filled(FilledInfo {
+            total_sz: fill.total_sz.to_string(),
+            avg_px: fill.avg_px.to_string(),
+            oid: fill.oid,
+        }),
+        Err(e) => OrderStatus::Error(e.to_string()),
+    }
+}
+
 /// The `/exchange` body: the venue's compact action shape. The devnet reads
 /// the acting account from `user` (the real venue derives it from the
 /// signature) and accepts `signature` without checking it.
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ExchangeBody {
     pub action: ExchangeAction,
+    /// The acting account. The real venue derives it from the signature; the
+    /// devnet has no keys, so it reads the field (the documented analogue).
     pub user: Address,
     #[serde(default)]
     pub nonce: Option<u64>,
@@ -118,6 +172,23 @@ pub(crate) struct ExchangeBody {
     pub signature: Option<Signature>,
     #[serde(default)]
     pub vault_address: Option<Address>,
+    /// The optional staleness guard (docs: a timestamp in milliseconds after
+    /// which the action is rejected). Accepted, never enforced — the devnet
+    /// has no mempool to go stale in.
+    #[serde(default)]
+    pub expires_after: Option<u64>,
+}
+
+/// The action's tag, read alone so a refusal can *name* the unmodeled action
+/// (`serde(other)` keeps the tag out of the typed enum by construction).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ActionTag {
+    pub action: ActionTagInner,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ActionTagInner {
+    pub r#type: String,
 }
 
 /// The EIP-712 signature's fields (accepted, never verified): the devnet
@@ -144,15 +215,21 @@ impl Signature {
 pub(crate) enum ExchangeAction {
     Order {
         orders: Vec<OrderAction>,
+        /// The batch's grouping (docs: `"na" | "normalTpsl" | "positionTpsl"`).
         #[serde(default)]
-        grouping: Option<String>,
+        grouping: Option<Grouping>,
+        /// The optional builder fee (docs: `{"b": address, "f": tenths of a
+        /// basis point}`): refused by name — fees are a research lane, and a
+        /// fill that silently skips the fee would lie.
+        #[serde(default)]
+        builder: Option<Builder>,
     },
     #[serde(other)]
     Unmodeled,
 }
 
 /// One compact order (`a` asset index, `b` is_buy, `p` limit price, `s` size,
-/// `r` reduce-only, `t` type/time-in-force).
+/// `r` reduce-only, `t` type/time-in-force, `c` cloid).
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct OrderAction {
     pub a: u32,
@@ -164,15 +241,46 @@ pub(crate) struct OrderAction {
     pub r: bool,
     #[serde(default)]
     pub t: Option<OrderType>,
+    /// The client order id (docs: an optional 128-bit hex string). Accepted
+    /// and echoed in the trace; nothing rests, so there is no id to match on.
+    #[serde(default)]
+    pub c: Option<alloy_primitives::B128>,
 }
 
-/// The order type: the venue's own shape (a limit with a time-in-force; a
-/// "market" order is a limit at the touch with `Ioc`). Only IOC fills — a
-/// Gtc/Alo remainder cannot rest in the devnet (refused by name in the lane).
+/// The order type: the venue's own shapes (docs). Only IOC limit fills — a
+/// Gtc/Alo remainder cannot rest and a trigger order has no trigger engine in
+/// the devnet (both refused by name).
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OrderType {
-    Limit { tif: String },
+    Limit {
+        tif: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Trigger {
+        is_market: bool,
+        trigger_px: String,
+        tpsl: String,
+    },
+}
+
+/// The batch grouping (docs: `"na" | "normalTpsl" | "positionTpsl"`).
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub(crate) enum Grouping {
+    #[serde(rename = "na")]
+    Na,
+    #[serde(rename = "normalTpsl")]
+    NormalTpsl,
+    #[serde(rename = "positionTpsl")]
+    PositionTpsl,
+}
+
+/// The optional builder fee (docs: `{"b": address, "f": tenths of a basis
+/// point}`).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct Builder {
+    pub b: Address,
+    pub f: u64,
 }
 
 impl OrderAction {
@@ -183,32 +291,31 @@ impl OrderAction {
         let coin = meta
             .and_then(|m| m.universe.get(self.a as usize))
             .map(|a| a.name.clone())
-            .ok_or_else(|| Error::BadRequest {
-                reason: format!(
+            .ok_or_else(|| Error::bad_request(format!(
                     "unknown asset index {} (the live meta has not landed, or is shorter)",
                     self.a
-                ),
-            })?;
-        let size: Decimal = self.s.parse().map_err(|_| Error::BadRequest {
-            reason: format!("size `{}` is not a decimal", self.s),
-        })?;
+                ),))?;
+        let size: Decimal = self.s.parse().map_err(|_| Error::bad_request(format!("size `{}` is not a decimal", self.s),))?;
         let limit_px = match &self.p {
-            Some(p) => Some(p.parse().map_err(|_| Error::BadRequest {
-                reason: format!("limit price `{p}` is not a decimal"),
-            })?),
+            Some(p) => Some(p.parse().map_err(|_| Error::bad_request(format!("limit price `{p}` is not a decimal"),))?),
             None => None,
         };
         let tif = match &self.t {
             None => crate::sim::order::Tif::Ioc,
-            Some(OrderType::Limit { tif }) => match tif.as_str() {
-                "Ioc" => crate::sim::order::Tif::Ioc,
-                "Gtc" | "Alo" => crate::sim::order::Tif::Gtc,
-                other => {
-                    return Err(Error::BadRequest {
-                        reason: format!("unknown tif `{other}`"),
-                    })
-                }
-            },
+            Some(OrderType::Trigger {
+                is_market,
+                trigger_px,
+                tpsl,
+            }) => {
+                return Err(Error::bad_request(format!(
+                        "trigger orders are not modeled (`{tpsl}` at {trigger_px}, \
+                         market={is_market}: there is no trigger engine in the devnet; \
+                         plan §5, Phase 2)"
+                    ),))
+            }
+            Some(OrderType::Limit { tif }) => {
+                crate::sim::order::Tif::from_wire(tif).ok_or_else(|| Error::bad_request(format!("unknown tif `{tif}`"),))?
+            }
         };
         Ok(crate::sim::order::Order {
             coin,
@@ -268,9 +375,7 @@ pub(crate) struct ExchangeResponse {
 pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
     // A malformed body is the caller's fault (400), not a server fault: the
     // verifier measured a 500 here, which reads as "the sim is broken".
-    let req: InfoRequest = serde_json::from_slice(&body).map_err(|source| Error::BadRequest {
-        reason: format!("invalid info request: {source}"),
-    })?;
+    let req: InfoRequest = serde_json::from_slice(&body).map_err(|source| Error::bad_request(format!("invalid info request: {source}"),))?;
     match req {
         // hl_mock's contract for types it does not route.
         InfoRequest::Unrouted => Ok(Json("unrouted").into_response()),
@@ -467,9 +572,7 @@ fn expect_default_dex(dex: &Option<String>) -> Result<()> {
     if dex.as_deref().unwrap_or("").is_empty() {
         return Ok(());
     }
-    Err(Error::BadRequest {
-        reason: "the sim serves the first perp dex only (multi-dex is Phase 2)".into(),
-    })
+    Err(Error::bad_request("the sim serves the first perp dex only (multi-dex is Phase 2)",))
 }
 
 /// `activeAssetData`: the coin's mark, the user's leverage, and the sizes the
@@ -529,8 +632,8 @@ mod tests {
     /// The compact order maps onto the lane's order: the asset index resolves
     /// through the live meta, the strings parse, and the tif mapping is
     /// exactly IOC/resting.
-    #[test]
-    fn compact_orders_map_onto_the_lane() {
+    /// A one-asset meta (ETH at index 0, szDecimals 4).
+    fn eth_meta() -> crate::wire::Meta {
         let mut meta: crate::wire::Meta = serde_json::from_str(r#"{"universe": []}"#).unwrap();
         meta.universe.push(crate::wire::AssetInfo {
             name: "ETH".into(),
@@ -540,6 +643,12 @@ mod tests {
             only_isolated: None,
             is_delisted: None,
         });
+        meta
+    }
+
+    #[test]
+    fn compact_orders_map_onto_the_lane() {
+        let meta = eth_meta();
         let action: OrderAction =
             serde_json::from_str(r#"{"a":0,"b":true,"p":"101.5","s":"2","t":{"limit":{"tif":"Ioc"}}}"#)
                 .unwrap();
@@ -561,6 +670,45 @@ mod tests {
         // An index past the meta is a named refusal.
         let oob: OrderAction = serde_json::from_str(r#"{"a":7,"b":false,"s":"1"}"#).unwrap();
         assert!(format!("{}", oob.to_order(Some(&meta)).unwrap_err()).contains("unknown asset index"));
+    }
+
+    /// The complete wire shapes parse (cloid as alloy's `B128`, the trigger
+    /// order, `expiresAfter`, the builder) and the boundary refusals name
+    /// what they refused.
+    #[test]
+    fn complete_shapes_and_named_refusals() {
+        // The unmodeled tag is read alone and named in the reason.
+        let body = Bytes::from(
+            r#"{"action":{"type":"cancel","cancels":[]},"user":"0x00000000000000000000000000000000000000e1"}"#,
+        );
+        let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
+        let err = order_parts(&body, &req.action).unwrap_err();
+        assert!(err.contains("`cancel`"), "{err}");
+        // A builder fee is refused with its numbers.
+        let body = Bytes::from(
+            r#"{"action":{"type":"order","orders":[],"builder":{"b":"0x00000000000000000000000000000000000000e1","f":10}},"user":"0x00000000000000000000000000000000000000e1"}"#,
+        );
+        let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
+        let err = order_parts(&body, &req.action).unwrap_err();
+        assert!(err.contains("builder fees"), "{err}");
+        // A trigger order is refused by name at the order mapping.
+        let action: OrderAction = serde_json::from_str(
+            r#"{"a":0,"b":true,"s":"1","t":{"trigger":{"isMarket":true,"triggerPx":"100","tpsl":"sl"}}}"#,
+        )
+        .unwrap();
+        let err = action.to_order(Some(&eth_meta())).unwrap_err();
+        assert!(format!("{err}").contains("trigger orders"), "{err}");
+        // The cloid parses as its own type; expiresAfter rides the body.
+        let action: OrderAction = serde_json::from_str(
+            r#"{"a":0,"b":true,"s":"1","c":"0x1234567890abcdef1234567890abcdef"}"#,
+        )
+        .unwrap();
+        assert!(action.c.is_some(), "the cloid parsed as B128");
+        let req: ExchangeBody = serde_json::from_str(
+            r#"{"action":{"type":"order","orders":[]},"user":"0x00000000000000000000000000000000000000e1","expiresAfter":1792750000000}"#,
+        )
+        .unwrap();
+        assert_eq!(req.expires_after, Some(1_792_750_000_000));
     }
 
     /// Every non-order action lands in `Unmodeled` (the named refusal path),

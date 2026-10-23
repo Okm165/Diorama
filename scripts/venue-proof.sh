@@ -48,7 +48,6 @@ MINT="${MINT:-100000000}"                                     # 100 USDC (6-dec 
 
 source "$(dirname "$0")/lib-venue.sh"
 
-sim_account() { sipost /info "{\"type\":\"clearinghouseState\",\"user\":\"$1\"}"; }
 metric() { smetrics | awk -v k="$1" '$1 == k || $1 ~ "^"k"\\{" {s+=$2; found=1} END {print (found ? s : 0)}'; }
 # Poll a metric to a threshold (bounded): the bridge's and the sim's passes are
 # 1 Hz, but a cold market feed defers a bridge pass (the block is re-scanned),
@@ -104,13 +103,7 @@ d1=$(spost /control/deal "{\"address\":\"$SIM_ACCT\",\"class\":\"perp\",\"amount
 d2=$(spost /control/deal "{\"address\":\"$SIM_ACCT\",\"class\":\"perp\",\"amount\":\"1000\"}" | json 'd["balance_after"]')
 grew=$(python3 -c "from decimal import Decimal; print('yes' if Decimal('$d2') - Decimal('$d1') == 1000 else 'no')")
 [ "$grew" = "yes" ] && ok "perp funds dealt (+1000 twice, $d1 -> $d2)" || bad "deal delta $d1 -> $d2"
-ident=$(sim_account "$SIM_ACCT" | python3 -c "
-import json,sys
-from decimal import Decimal
-d=json.load(sys.stdin)
-v=Decimal(d['marginSummary']['accountValue']); raw=Decimal(d['marginSummary']['totalRawUsd'])
-pnl=sum(Decimal(p['position']['positionValue']) * (-1 if p['position']['szi'].startswith('-') else 1) for p in d['assetPositions'])
-print('ok' if abs(v - (raw + pnl)) < Decimal('0.000001') else f'mismatch v={v} raw={raw} pnl={pnl}')")
+ident=$(sim_account "$SIM_ACCT" | identity_ok)
 [ "$ident" = "ok" ] && ok "served identity holds (accountValue == totalRawUsd + signed PnL)" || bad "identity: $ident"
 
 echo "-- C. crash ⇒ liquidation (the venue-side drawdown, not an oracle crash)"

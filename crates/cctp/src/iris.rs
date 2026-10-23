@@ -156,10 +156,10 @@ impl IrisError {
         }
     }
 
-    fn bad_request(reason: String) -> Self {
+    fn bad_request(reason: impl Into<String>) -> Self {
         Self {
             status: axum::http::StatusCode::BAD_REQUEST,
-            error: reason,
+            error: reason.into(),
         }
     }
 
@@ -223,7 +223,7 @@ pub(crate) struct AllowanceQuery {
 async fn allowance(Query(query): Query<AllowanceQuery>) -> Result<Json<AllowanceResponse>, IrisError> {
     let Some(source) = query.source_domain else {
         return Err(IrisError::bad_request(
-            "sourceDomain is required".into(),
+            "sourceDomain is required",
         ));
     };
     if !matches!(
@@ -252,7 +252,7 @@ async fn messages(
     Query(query): Query<MessageQuery>,
 ) -> Result<Json<MessagesResponse>, IrisError> {
     let Some(raw_hash) = query.transaction_hash else {
-        return Err(IrisError::bad_request("transactionHash is required".into()));
+        return Err(IrisError::bad_request("transactionHash is required"));
     };
     let hash = raw_hash
         .parse::<alloy_primitives::B256>()
@@ -332,7 +332,7 @@ async fn fresh_expiration(state: &IrisState, record: &MessageRecord) -> Result<U
         .iter()
         .find(|c| c.domain == record.destination_domain)
         .ok_or_else(|| {
-            IrisError::bad_request("no served chain for the message's destination".into())
+            IrisError::bad_request("no served chain for the message's destination")
         })?;
     let head = destination
         .rpc

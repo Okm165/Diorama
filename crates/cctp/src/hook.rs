@@ -123,11 +123,9 @@ pub async fn verify(
     )
     .await?;
     if owner != expected_owner || transmitter != expected_transmitter {
-        return Err(Error::BadRequest {
-            reason: format!(
+        return Err(Error::bad_request(format!(
                 "hook wrapper {wrapper} wiring mismatch: owner {owner} (want {expected_owner}), transmitter {transmitter} (want {expected_transmitter})"
-            ),
-        });
+            ),));
     }
     Ok(())
 }

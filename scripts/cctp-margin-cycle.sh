@@ -42,112 +42,8 @@ USDC_T="${USDC_T:-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48}"
 USDC_V="${USDC_V:-0xb88339CB7199b77E23DB6E890353E22632Ba630f}"
 CORE_WRITER=0x3333333333333333333333333333333333333333
 
-pass=0; fail=0
-ok()   { echo "  ✔ $*"; pass=$((pass+1)); }
-bad()  { echo "  ✘ $*"; fail=$((fail+1)); }
-info() { echo "  · $*"; }
-
-if [ -n "${BRIDGE_CTRL_URL:-}" ]; then
-  bget()  { curl -s --fail-with-body -m 30 "$BRIDGE_CTRL_URL$1"; }
-  bpost() { curl -s --fail-with-body -m 120 -X POST "$BRIDGE_CTRL_URL$1" -H 'Content-Type: application/json' -d "$2"; }
-  cget()  { curl -s --fail-with-body -m 60 "$2$1"; }
-  cpost() { curl -s --fail-with-body -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
-  balance() { "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$3" 2>/dev/null | awk '{print $1}'; }
-  SRC_URL="${T_URL:?set T_URL in direct mode}"; DST_URL="${V_URL:?set V_URL in direct mode}"
-  SRC_ENGINE="${ENGINE_T_URL:?set ENGINE_T_URL in direct mode}"; DST_ENGINE="${ENGINE_V_URL:?set ENGINE_V_URL in direct mode}"
-  SIM_INFO="${SIM_INFO:?set SIM_INFO in direct mode}"; SIM_CTRL="${SIM_CTRL:?set SIM_CTRL in direct mode}"
-  rpcv()  { curl -s --fail-with-body -m 60 -X POST "$1" -H 'Content-Type: application/json' -d "$2"; }
-  sipost() { curl -s --fail-with-body -m 30 -X POST "$SIM_INFO$1" -H 'Content-Type: application/json' -d "$2"; }
-  spost()  { curl -s --fail-with-body -m 30 -X POST "$SIM_CTRL$1" -H 'Content-Type: application/json' -d "$2"; }
-else
-  exec_pod() { kubectl -n "$NS" exec -i deploy/cctp-bridge -- "$@"; }
-  bget()  { exec_pod curl -sf -m 30 "localhost:8096$1"; }
-  bpost() { exec_pod curl -sf -m 120 -X POST "localhost:8096$1" -H 'Content-Type: application/json' -d "$2"; }
-  cget()  { exec_pod curl -sf -m 60 "$2$1"; }
-  cpost() { exec_pod curl -sf -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
-  balance() { exec_pod "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$3" 2>/dev/null | awk '{print $1}'; }
-  SRC_URL="http://anvil-t:8545"; DST_URL="http://anvil-v:8545"
-  SRC_ENGINE="http://mainnet-engine.mainnet-mirror.svc:8080"; DST_ENGINE="localhost:8080"
-  SIM_INFO="http://venue-sim:8090"; SIM_CTRL="http://venue-sim:8091"
-  rpcv()  { exec_pod curl -sf -m 60 -X POST "$1" -H 'Content-Type: application/json' -d "$2"; }
-  sipost() { exec_pod curl -sf -m 30 -X POST "$SIM_INFO$1" -H 'Content-Type: application/json' -d "$2"; }
-  spost()  { exec_pod curl -sf -m 30 -X POST "$SIM_CTRL$1" -H 'Content-Type: application/json' -d "$2"; }
-fi
-
-json() {
-  python3 -c "
-import json, sys
-raw = sys.stdin.read()
-try:
-    d = json.loads(raw)
-except Exception:
-    sys.stderr.write('json: unparsable body: ' + raw.strip()[:200] + '\n')
-    print('None')
-    raise SystemExit
-print($1)"
-}
-mine() { rpcv "$DST_URL" '{"jsonrpc":"2.0","id":1,"method":"evm_mine","params":[]}' > /dev/null; }
-receipt_status() { # receipt_status <tx> -> 0x1 | 0x0 | None
-  rpcv "$DST_URL" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getTransactionReceipt\",\"params\":[\"$1\"]}" \
-    | json 'd["result"]["status"] if d.get("result") else None'
-}
-send_tx() { # send_tx <from> <to> <data>
-  local tx
-  tx=$(rpcv "$DST_URL" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_sendTransaction\",\"params\":[{\"from\":\"$1\",\"to\":\"$2\",\"data\":\"$3\"}]}" | json 'd["result"]')
-  mine
-  printf '%s' "$tx"
-}
-# Wait for a bridge record to reach `relayed` (the roundtrip's own pattern).
-await_relay() { # await_relay <burn_tx>
-  local state="" i=0 rec
-  while [ "$i" -lt "$BUDGET" ]; do
-    rec=$(bget /control/state | python3 -c "
-import json, sys
-d = json.load(sys.stdin)
-for m in d.get('messages', []):
-    if m.get('burn_tx', '').lower() == '$1'.lower():
-        print(m.get('state', ''), '|', m.get('park_reason') or '')
-        break
-")
-    state=${rec%% *}
-    case "$state" in
-      relayed) printf 'relayed'; return 0 ;;
-      parked)  printf 'parked: %s' "${rec#*| }"; return 1 ;;
-    esac
-    i=$((i + 1))
-    sleep 1
-  done
-  printf 'timeout (state=%s)' "${state:-none}"
-  return 1
-}
-burn() { # burn <source> <destination> <mint_recipient>
-  bpost /control/transfer "{\"source\":$1,\"destination\":$2,\"amount\":\"$AMOUNT\",\"mint_recipient\":\"$3\"}"
-}
-identity() {
-  python3 -c "
-import json, sys
-from decimal import Decimal
-d = json.load(sys.stdin)
-v = Decimal(d['marginSummary']['accountValue'])
-raw = Decimal(d['marginSummary']['totalRawUsd'])
-pnl = sum(Decimal(p['position']['positionValue']) * (-1 if p['position']['szi'].startswith('-') else 1)
-          for p in d['assetPositions'])
-print('ok' if abs(v - (raw + pnl)) < Decimal('0.01') else f'mismatch v={v} raw={raw} pnl={pnl}')"
-}
-sim_account() { sipost /info "{\"type\":\"clearinghouseState\",\"user\":\"$1\"}"; }
-sim_spot() {
-  sipost /info "{\"type\":\"spotClearinghouseState\",\"user\":\"$1\"}" \
-    | python3 -c "
-import json, sys
-from decimal import Decimal
-d = json.load(sys.stdin)
-for b in d.get('balances', []):
-    if b.get('coin') == 'USDC':
-        print(b.get('total', '0'))
-        break
-else:
-    print('0')"
-}
+source "$(dirname "$0")/lib-cctp.sh"
+require_chain_urls
 
 echo "== crosschain unified-margin cycle (T -> CCTP -> venue -> trade -> CCTP -> T) =="
 
@@ -155,18 +51,13 @@ echo "-- preconditions"
 [ -n "$(cget /status "$SRC_ENGINE" | json 'd.get("pin")')" ] && ok "the T engine answers" || bad "T engine silent"
 [ -n "$(cget /status "$DST_ENGINE" | json 'd.get("pin")')" ] && ok "the V engine answers" || bad "V engine silent"
 [ -n "$(bget /health | json 'd.get("ok")')" ] && ok "the bridge answers" || bad "bridge silent"
-[ -n "$(sipost /readyz '' 2>/dev/null || true)$(cget /readyz "$SIM_INFO" || true)" ] && ok "the simulator is ready" || bad "sim not ready"
+[ -n "$(sget /readyz || true)" ] && ok "the simulator is ready" || bad "sim not ready"
 idx=$(sipost /info '{"type":"meta"}' | python3 -c "import json,sys; print([a['name'] for a in json.load(sys.stdin)['universe']].index('$COIN'))")
 [ -n "$idx" ] && ok "$COIN is in the live meta (index $idx)" || bad "no $COIN in the live meta"
 # The trader's leftovers from a previous run: flatten the perp, clear the book
 # scenario; the spot leg's deal is a delta below.
 spost /control/set_book "{\"coin\":\"$COIN\"}" > /dev/null
-szi0=$(sim_account "$TRADER" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')
-if [ "$szi0" != "0" ]; then
-  is_buy=false; case "$szi0" in -*) is_buy=true ;; esac
-  abs_szi=$(python3 -c "from decimal import Decimal; print(abs(Decimal('$szi0')))")
-  spost /control/order "{\"address\":\"$TRADER\",\"coin\":\"$COIN\",\"is_buy\":$is_buy,\"size\":\"$abs_szi\",\"reduce_only\":true}" > /dev/null || true
-fi
+flatten_coin "$TRADER" "$COIN"
 rpcv "$DST_URL" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setBalance\",\"params\":[\"$TRADER\",\"0x8ac7230489e80000\"]}" > /dev/null
 ok "trader flattened, gas set (10 ETH on V)"
 
@@ -239,14 +130,14 @@ fill=$(spost /control/order "{\"address\":\"$TRADER\",\"coin\":\"$COIN\",\"is_bu
 fsz=$(echo "$fill" | json 'd.get("totalSz")')
 [ "$fsz" = "$SIZE" ] && ok "the order filled ($fsz $COIN at $(echo "$fill" | json 'd.get("avgPx")'))" || bad "fill: $fill"
 state=$(sim_account "$TRADER")
-[ "$(echo "$state" | identity)" = "ok" ] && ok "the identity holds with the position on" || bad "identity: $(echo "$state" | identity)"
+[ "$(echo "$state" | identity_ok)" = "ok" ] && ok "the identity holds with the position on" || bad "identity: $(echo "$state" | identity_ok)"
 close=$(spost /control/order "{\"address\":\"$TRADER\",\"coin\":\"$COIN\",\"is_buy\":false,\"size\":\"$SIZE\",\"reduce_only\":true}")
 csz=$(echo "$close" | json 'd.get("totalSz")')
 [ "$csz" = "$SIZE" ] && ok "the reduce-only close filled ($csz)" || bad "close: $close"
 state=$(sim_account "$TRADER")
 [ "$(echo "$state" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')" = "0" ] \
   && ok "the position is flat" || bad "not flat: $state"
-[ "$(echo "$state" | identity)" = "ok" ] && ok "the identity holds flat" || bad "identity: $(echo "$state" | identity)"
+[ "$(echo "$state" | identity_ok)" = "ok" ] && ok "the identity holds flat" || bad "identity: $(echo "$state" | identity_ok)"
 
 echo "-- E. CCTP V -> T (the cycle closes)"
 # The trader returns the V-side USDC to the bridge's wallet, then it burns.

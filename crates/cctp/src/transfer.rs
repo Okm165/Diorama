@@ -337,9 +337,7 @@ impl FeeSurface {
     /// paying for a revert.
     pub fn validate_max_fee(&self, amount: U256, max_fee: U256) -> Result<()> {
         if max_fee >= amount {
-            return Err(Error::BadRequest {
-                reason: format!("maxFee {max_fee} must be less than amount {amount}"),
-            });
+            return Err(Error::bad_request(format!("maxFee {max_fee} must be less than amount {amount}"),));
         }
         let Some(min_fee) = self.min_fee else {
             return Ok(());
@@ -349,12 +347,10 @@ impl FeeSurface {
         }
         let required = required_min_fee(amount, min_fee)?;
         if max_fee < required {
-            return Err(Error::BadRequest {
-                reason: format!(
+            return Err(Error::bad_request(format!(
                     "maxFee {max_fee} is below the contract's minimum fee {required} \
                      (minFee {min_fee}, amount {amount})"
-                ),
-            });
+                ),));
         }
         Ok(())
     }
@@ -364,9 +360,7 @@ impl FeeSurface {
 /// defined for `amount > 1` (its `getMinFeeAmount` guard).
 pub(crate) fn required_min_fee(amount: U256, min_fee: U256) -> Result<U256> {
     if amount <= U256::ONE {
-        return Err(Error::BadRequest {
-            reason: format!("amount {amount} must be greater than 1 when minFee {min_fee} is nonzero"),
-        });
+        return Err(Error::bad_request(format!("amount {amount} must be greater than 1 when minFee {min_fee} is nonzero"),));
     }
     let fee = amount.saturating_mul(min_fee) / U256::from(MIN_FEE_MULTIPLIER);
     Ok(if fee.is_zero() { U256::ONE } else { fee })

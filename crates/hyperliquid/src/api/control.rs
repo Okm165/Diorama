@@ -213,9 +213,7 @@ pub(crate) async fn crash(State(state): State<Arc<ApiState>>, Json(req): Json<Cr
         }
         Some(pct) => {
             if pct <= Decimal::ZERO || pct >= Decimal::ONE_HUNDRED {
-                return Err(Error::BadRequest {
-                    reason: format!("crash pct {pct} must be in (0, 100)"),
-                });
+                return Err(Error::bad_request(format!("crash pct {pct} must be in (0, 100)"),));
             }
             let mark = feed.mark(&req.coin).ok_or_else(|| Error::NoMarket {
                 coin: req.coin.clone(),
@@ -311,9 +309,7 @@ pub(crate) async fn set_book(
             require_tracked(&state.feed, &req.coin)?;
             for side in &levels {
                 if side.len() > 20 {
-                    return Err(Error::BadRequest {
-                        reason: format!("l2Book serves ≤20 levels per side (got {})", side.len()),
-                    });
+                    return Err(Error::bad_request(format!("l2Book serves ≤20 levels per side (got {})", side.len()),));
                 }
             }
             let book = L2Book {

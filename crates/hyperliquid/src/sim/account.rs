@@ -325,12 +325,10 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
             Some(px) => px,
             None if p.szi.is_zero() => Decimal::ZERO,
             None => {
-                return Err(crate::error::Error::BadRequest {
-                    reason: format!(
+                return Err(crate::error::Error::bad_request(format!(
                         "position {} has size {} but no entryPx (the raw base needs it)",
                         p.coin, p.szi
-                    ),
-                })
+                    ),))
             }
         };
         account.positions.insert(
@@ -716,9 +714,7 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
         .map(|p| p.szi)
         .unwrap_or(Decimal::ZERO);
     if fill.reduce_only && (old.is_zero() || sign(old) == sign(signed) || fill.size > old.abs()) {
-        return Err(Error::BadRequest {
-            reason: format!("reduce-only order would not reduce the {} position", fill.coin),
-        });
+        return Err(Error::bad_request(format!("reduce-only order would not reduce the {} position", fill.coin),));
     }
     let position = account
         .positions

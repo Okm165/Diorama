@@ -39,13 +39,36 @@ pub(crate) struct Order {
 }
 
 /// Time in force: only IOC fills (a Gtc/Alo remainder cannot rest in the
-/// devnet — the resting book is Phase 2).
+/// devnet — the resting book is Phase 2). The two wire encodings live here,
+/// one home each (the venue's `tif` strings and the CoreWriter byte).
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Tif {
     #[default]
     Ioc,
+    /// `Gtc` and `Alo` both rest; the lane refuses them by name.
     Gtc,
+}
+
+impl Tif {
+    /// The venue's wire spelling (docs: `"Alo" | "Ioc" | "Gtc"`; an unknown
+    /// one is `None`, refused by name at the caller).
+    pub(crate) fn from_wire(tif: &str) -> Option<Tif> {
+        match tif {
+            "Ioc" => Some(Tif::Ioc),
+            "Gtc" | "Alo" => Some(Tif::Gtc),
+            _ => None,
+        }
+    }
+
+    /// The CoreWriter byte (docs, action 1: `1` Alo, `2` Gtc, `3` Ioc).
+    pub(crate) fn from_corewriter(tif: u8) -> Option<Tif> {
+        match tif {
+            1 | 2 => Some(Tif::Gtc),
+            3 => Some(Tif::Ioc),
+            _ => None,
+        }
+    }
 }
 
 /// What a fill took (the response shape both surfaces serve).
@@ -62,8 +85,8 @@ pub(crate) struct Fill {
 impl Sim {
     /// `order`: fill `req` for `address` against the served book.
     pub(crate) fn order(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<Fill> {
-        let (filled, avg_px, consumed) = walk_served_book(feed, req)?;
         let meta = feed.meta();
+        let (filled, avg_px, consumed) = walk_served_book(feed, meta.as_ref(), req)?;
         let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
         let facts = super::account::FillFacts {
             coin: req.coin.clone(),
@@ -105,13 +128,11 @@ impl Sim {
             super::account::apply_fill(&mut probe, facts)?;
             let view = super::account::view(&probe, feed, meta)?;
             if view.margin_summary.account_value < view.margin_summary.total_margin_used {
-                return Err(Error::BadRequest {
-                    reason: format!(
-                        "insufficient margin: the {coin} position would need {} initial margin, \
-                         the account is worth {}",
-                        view.margin_summary.total_margin_used, view.margin_summary.account_value
-                    ),
-                });
+                return Err(Error::bad_request(format!(
+                    "insufficient margin: the {coin} position would need {} initial margin, \
+                     the account is worth {}",
+                    view.margin_summary.total_margin_used, view.margin_summary.account_value
+                )));
             }
             super::account::apply_fill(account, facts)
         })
@@ -157,73 +178,70 @@ impl Sim {
 /// depth within the limit.
 fn walk_served_book(
     feed: &MarketFeed,
+    meta: Option<&crate::wire::Meta>,
     req: &Order,
 ) -> Result<(Decimal, Decimal, Vec<Consumption>)> {
     if req.tif == Tif::Gtc {
-        return Err(Error::BadRequest {
-            reason: "resting orders are not modeled (IOC fills only; plan §4.5, Phase 2)".into(),
-        });
+        return Err(Error::bad_request(
+            "resting orders are not modeled (IOC fills only; plan §4.5, Phase 2)",
+        ));
     }
     if req.size <= Decimal::ZERO {
-        return Err(Error::BadRequest {
-            reason: "order size must be > 0".into(),
-        });
+        return Err(Error::bad_request("order size must be > 0"));
     }
-    validate_order(feed, feed.meta().as_ref(), req)?;
+    validate_tick_lot(meta, req)?;
+    validate_min_notional(feed, req)?;
     let now = crate::now_ms();
     let book = feed.book(&req.coin, now).ok_or(Error::Warming)?;
     let (filled, avg_px, consumed) = walk(&book, req)?;
     if filled <= Decimal::ZERO {
-        return Err(Error::BadRequest {
-            reason: format!(
-                "the book has no {} depth within the limit",
-                if req.is_buy { "ask" } else { "bid" }
-            ),
-        });
+        return Err(Error::bad_request(format!(
+            "the book has no {} depth within the limit",
+            if req.is_buy { "ask" } else { "bid" }
+        )));
     }
     Ok((filled, avg_px, consumed))
 }
 
-/// The venue's tick/lot rules (plan §5): a size carries at most the asset's
-/// `szDecimals` decimals; a price at most 5 significant figures and at most
-/// `6 − szDecimals` decimals (an integer price is always valid); and a perp
-/// order's notional (size × the limit, else the mark) is at least $10. The
-/// refusals name the rule — the venue's exact error strings are a Phase-2 pin
-/// (they need a live probe against the real venue, §16.3).
-fn validate_order(
-    feed: &MarketFeed,
-    meta: Option<&crate::wire::Meta>,
-    req: &Order,
-) -> Result<()> {
+/// The venue's tick/lot rules (plan §5, docs §16.3): a size carries at most
+/// the asset's `szDecimals` decimals; a price at most 5 significant figures
+/// and at most `6 − szDecimals` decimals (an integer price is always valid).
+fn validate_tick_lot(meta: Option<&crate::wire::Meta>, req: &Order) -> Result<()> {
     let Some(asset) = meta.and_then(|m| m.universe.iter().find(|a| a.name == req.coin)) else {
         return Ok(());
     };
     let sz_dec = u32::from(asset.sz_decimals);
     if req.size.scale() > sz_dec {
-        return Err(Error::BadRequest {
-            reason: format!(
-                "size {} has more than {sz_dec} decimals ({}'s szDecimals)",
-                req.size, req.coin
-            ),
-        });
+        return Err(Error::bad_request(format!(
+            "size {} has more than {sz_dec} decimals ({}'s szDecimals)",
+            req.size, req.coin
+        )));
     }
-    if let Some(px) = req.limit_px {
-        let max_dec = 6u32.saturating_sub(sz_dec);
-        if !px.fract().is_zero() {
-            if px.scale() > max_dec {
-                return Err(Error::BadRequest {
-                    reason: format!(
-                        "limit price {px} has more than {max_dec} decimals (6 − {sz_dec})"
-                    ),
-                });
-            }
-            if significant_digits(px) > 5 {
-                return Err(Error::BadRequest {
-                    reason: format!("limit price {px} has more than 5 significant figures"),
-                });
-            }
-        }
+    let Some(px) = req.limit_px else {
+        return Ok(());
+    };
+    if px.fract().is_zero() {
+        return Ok(()); // an integer price is always valid
     }
+    let max_dec = 6u32.saturating_sub(sz_dec);
+    if px.scale() > max_dec {
+        return Err(Error::bad_request(format!(
+            "limit price {px} has more than {max_dec} decimals (6 − {sz_dec})"
+        )));
+    }
+    if significant_digits(px) > 5 {
+        return Err(Error::bad_request(format!(
+            "limit price {px} has more than 5 significant figures"
+        )));
+    }
+    Ok(())
+}
+
+/// The venue's minimum order value: a perp order's notional (size × the
+/// limit, else the mark) is at least $10. The refusal is the venue's own
+/// string from the exchange docs' error sample ("Order must have minimum
+/// value of $10."), so a client matching on it sees the real message.
+fn validate_min_notional(feed: &MarketFeed, req: &Order) -> Result<()> {
     let notional = if let Some(px) = req.limit_px {
         super::account::mul(req.size, px, "order notional")?
     } else {
@@ -231,9 +249,7 @@ fn validate_order(
         super::account::mul(req.size, mark, "order notional")?
     };
     if notional < Decimal::from(10) {
-        return Err(Error::BadRequest {
-            reason: format!("order value {notional} is below the $10 minimum (perps)"),
-        });
+        return Err(Error::bad_request("Order must have minimum value of $10."));
     }
     Ok(())
 }

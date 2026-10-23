@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Shared helpers for the venue-mirror scripts that run in both modes — the
-# epoch drill and the capability proof. Source it, never run it:
+# Shared helpers for the venue-family scripts that run in both modes — the
+# epoch drill, the capability proof, the order-lane proof — and for the cctp
+# family (through `lib-cctp.sh`, which sources this one for the venue-shaped
+# gates). Source it, never run it:
 #   source "$(dirname "$0")/lib-venue.sh"
 #
 # One transport per mode, chosen once (the same convention in every venue
@@ -10,6 +12,11 @@
 #   cluster (default): the venue-mirror namespace, every call exec'd from the
 #           venue engine pod (cluster-internal service names — the same
 #           transport the engine itself uses).
+#
+# What lives here: the counters (`ok`/`bad`/`info`), the JSON reader, the
+# engine + simulator doors, and the venue-shaped client gates every family
+# shares — `sim_account`, `sim_spot`, `identity_ok` (the served-identity
+# check daloc gates on) and `flatten_coin` (a proof's rerunnable start).
 #
 # Conventions (measured, plan §7.6): V reads/writes go through eth_call /
 # eth_sendTransaction; the engine's admin reads are /status + /admin/*; the
@@ -38,6 +45,58 @@ except Exception:
     raise SystemExit
 print($1)
 "
+}
+
+# The venue-shaped client gates (transport-agnostic — they read stdin or the
+# sim doors above, so every venue-family script shares one definition):
+# The served USDC spot balance (the unified-margin reads).
+sim_spot() { # sim_spot <address>
+  sipost /info "{\"type\":\"spotClearinghouseState\",\"user\":\"$1\"}" \
+    | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for b in d.get('balances', []):
+    if b.get('coin') == 'USDC':
+        print(b.get('total', '0'))
+        break
+else:
+    print('0')"
+}
+
+sim_account() { sipost /info "{\"type\":\"clearinghouseState\",\"user\":\"$1\"}"; }
+
+# The identity daloc gates on: accountValue == totalRawUsd + Σ signed
+# positionValue, exact within the served positionValue's 2dp rounding.
+# Prints `ok` or the mismatch.
+identity_ok() {
+  python3 -c "
+import json, sys
+from decimal import Decimal
+d = json.load(sys.stdin)
+v = Decimal(d['marginSummary']['accountValue'])
+raw = Decimal(d['marginSummary']['totalRawUsd'])
+pnl = sum(Decimal(p['position']['positionValue']) * (-1 if p['position']['szi'].startswith('-') else 1)
+          for p in d['assetPositions'])
+print('ok' if abs(v - (raw + pnl)) < Decimal('0.01') else f'mismatch v={v} raw={raw} pnl={pnl}')"
+}
+
+# Flatten an account's coin position against the live book (a previous run's
+# leftovers), so a proof's legs are absolute and rerunnable: a reduce-only
+# order for the whole size, up to five attempts (the live book moves).
+flatten_coin() { # flatten_coin <account> <coin>
+  local account=$1 coin=$2 szi is_buy abs_szi
+  szi=$(sim_account "$account" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')
+  [ "$szi" = "0" ] && return 0
+  is_buy=false
+  case "$szi" in -*) is_buy=true ;; esac
+  abs_szi=$(python3 -c "from decimal import Decimal; print(abs(Decimal('$szi')))")
+  for _ in 1 2 3 4 5; do
+    spost /control/order "{\"address\":\"$account\",\"coin\":\"$coin\",\"is_buy\":$is_buy,\"size\":\"$abs_szi\",\"reduce_only\":true}" > /dev/null || true
+    szi=$(sim_account "$account" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')
+    [ "$szi" = "0" ] && return 0
+    abs_szi=$(python3 -c "from decimal import Decimal; print(abs(Decimal('$szi')))")
+  done
+  return 0
 }
 
 if [ -n "${ENGINE_URL:-}" ]; then
