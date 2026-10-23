@@ -386,6 +386,23 @@ for **pre-pin source blocks** — anvil cannot re-execute a forked block's state
 `venue_bridge_trace_faults_total` increment means a real degradation, not the
 fork boundary.
 
+### The wire types are pinned against measured samples
+
+Every info shape the sim serves — and every CoreWriter payload the bridge
+decodes — is parsed from a trimmed **live sample** in a unit test
+(`wire::tests::measured_shapes_parse_through_their_types`,
+`bridge::corewriter::tests::*`), and the ERC-20/CoreWriter surfaces are alloy's
+own `sol!` types: the `Transfer` event, the `sendRawAction(bytes)` wrapper and
+the eight action payloads are decoded by `SolEvent`/`SolCall`/`SolValue`, never
+by hand. The reason is measured: `PerpDex` lacked
+`#[serde(rename_all = "camelCase")]` and had never parsed the live shape (the
+sim serves `[null]` and reads `perpDexs` nowhere), so its field names would
+have mismatched silently the day a multi-dex path read one; the shape test now
+fails on exactly that class. `perpDexs` also gained the four fields the live
+dexes carry (`assetToFundingClamp` / `assetToFundingInterestRate` /
+`assetToFundingMultiplier` / `subDeployers`) — complete wire types, unused
+fields included.
+
 ## Engine symmetry (the two services read the same way)
 
 The two engines are one design over two sources. The shared crates carry the
