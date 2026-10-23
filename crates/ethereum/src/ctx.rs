@@ -109,7 +109,7 @@ impl Ctx {
         let drift = Drift::new(engine_section.state_dir.join("drift.jsonl"))?;
         let beacon = BeaconClient::new(engine_section.blobs.beacon_urls.clone())?;
         let reth = Rpc::new(reth_url, timeout)?;
-        let source: Arc<dyn Source> = Arc::new(crate::eth_source::EthereumSource::new(reth.clone()));
+        let source: Arc<dyn Source> = Arc::new(crate::ethereum_source::EthereumSource::new(reth.clone()));
         let engine_api = match (
             &engine_section.source_sync.engine_url,
             &engine_section.source_sync.jwt_path,
