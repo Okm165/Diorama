@@ -77,5 +77,7 @@ data:
     CHAIN_1_CHAIN_WS_URL=ws://localhost:31545
     HL_INFO_API_URL=http://localhost:31090
     VENUE_CONTROL_URL=http://localhost:31091
+    VENUE_ACCOUNT_FEEDS=http://localhost:31090
+    VENUE_RATE_FEEDS=http://localhost:31090
     IRIS_API_URL=http://localhost:31095
     VENUE_ADMIN_URL=http://localhost:31880

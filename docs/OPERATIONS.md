@@ -550,6 +550,16 @@ the second chain's `CHAIN_1_` prefix so sourcing both blocks yields one
 collision-free env). The NodePorts are the services' own (`kubectl get svc`),
 so the ConfigMaps and the Services cannot drift.
 
+`mirror-config export-env --section daloc` (alias `--for`) renders the same
+block from the mounted instance file with **in-cluster** addresses — the
+Service names (`engine`, `venue-sim`, `cctp-bridge`) and the instance's own
+ports, under exactly the ConfigMaps' key spellings (a unit test pins the
+pair). Use it from inside a pod (or for a pod-shaped harness); use the
+ConfigMaps for host access over the NodePorts. Both surfaces read the same
+facts: the export takes the chain URLs from the instance's own wiring
+(`[chains.venue].anvil_url`, `[services.engine.anvil].t_url`) and refuses a
+lingering `${VAR}` — its purpose is values, never references.
+
 ### The CCTP bridge
 
 The bridge (`cctp-bridge`, Iris 8095 / control 8096; 31095/31096 in-cluster)

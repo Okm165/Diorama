@@ -309,6 +309,42 @@ port = 8080
     }
 
     #[test]
+    fn daloc_export_uses_the_manifests_spellings() {
+        // The two `test-endpoints` ConfigMaps are the other surface of these
+        // facts (`k8s/base/nodeports.yaml` + `overlays/venue-mirror/`): one
+        // spelling on both sides, or the harness's env silently carries the
+        // wrong name (the venue is the second chain, so its keys carry the
+        // merge script's `CHAIN_1_` prefix).
+        let (inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
+        assert_eq!(
+            inst.export_env("daloc").unwrap(),
+            vec![
+                "CHAIN_RPC_URL=http://anvil-t:8545",
+                "CHAIN_WS_URL=ws://anvil-t:8545",
+                "MIRROR_ADMIN_URL=http://engine:8080",
+            ]
+        );
+
+        let venue_src = format!(
+            "{}\n[services.sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\n\n[services.sim.info]\nport = 8090\n\n[services.sim.control]\nport = 8091\n",
+            minimal_venue_instance()
+        );
+        let (venue, _) = load_str(&venue_src, &[]).unwrap();
+        assert_eq!(
+            venue.export_env("daloc").unwrap(),
+            vec![
+                "CHAIN_1_CHAIN_RPC_URL=http://anvil-v:8545",
+                "CHAIN_1_CHAIN_WS_URL=ws://anvil-v:8545",
+                "HL_INFO_API_URL=http://venue-sim:8090",
+                "VENUE_CONTROL_URL=http://venue-sim:8091",
+                "VENUE_ACCOUNT_FEEDS=http://venue-sim:8090",
+                "VENUE_RATE_FEEDS=http://venue-sim:8090",
+                "VENUE_ADMIN_URL=http://engine:8080",
+            ]
+        );
+    }
+
+    #[test]
     fn defaults_and_instance_deep_merge() {
         let (inst, unresolved) = load_str(minimal_instance(), &wiring()).unwrap();
         assert!(unresolved.is_empty());

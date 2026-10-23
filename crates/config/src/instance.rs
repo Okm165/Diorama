@@ -351,44 +351,52 @@ impl Instance {
 
     /// The daloc-facing endpoint block (plan §7.7/§19.7): our values under
     /// their names — we provide values, never rename their interface. The
-    /// chain URL is the deployment wiring (the same env the pods read); the
-    /// service URLs are in-cluster DNS built from the instance's own ports.
-    /// The Service names (`mirror-engine`, `venue-sim`, `cctp-bridge`) are
-    /// this repo's k8s topology, defined in `k8s/base/`.
+    /// keys are **exactly** the `test-endpoints` ConfigMaps' spellings
+    /// (`k8s/base/nodeports.yaml` for the first chain,
+    /// `k8s/overlays/venue-mirror/nodeports.yaml` for the venue's
+    /// `CHAIN_1_`-prefixed block): one fact, one spelling, whichever surface
+    /// renders it. The chain URL is the deployment wiring (the same env the
+    /// pods read); the service URLs are in-cluster DNS built from the
+    /// instance's own ports, under the manifests' Service names (`engine`,
+    /// `venue-sim`, `cctp-bridge` — `k8s/base/engine.yaml`, `base/venue/`).
     fn daloc_env(&self) -> Result<Vec<String>, ConfigError> {
         let mut out = Vec::new();
         match self.instance.profile {
             Profile::Ethereum => {
-                let t = env_url("ANVIL_T_URL")?;
-                out.push(format!("CHAIN_RPC_URL={t}"));
-                out.push(format!("CHAIN_WS_URL={}", ws_of(&t)));
                 let engine = self.services.engine.as_ref().ok_or_else(|| {
                     mismatch("export-env daloc (ethereum profile) requires [services.engine]")
                 })?;
-                out.push(format!(
-                    "CHAIN_ENGINE_URL=http://mirror-engine:{}",
-                    engine.http.port
-                ));
+                let t = resolved("ANVIL_T_URL", &engine.anvil.t_url)?;
+                out.push(format!("CHAIN_RPC_URL={t}"));
+                out.push(format!("CHAIN_WS_URL={}", ws_of(&t)));
+                out.push(format!("MIRROR_ADMIN_URL=http://engine:{}", engine.http.port));
             }
             Profile::Venue => {
                 let venue = self.services.venue.as_ref().ok_or_else(|| {
                     mismatch("export-env daloc (venue profile) requires [services.venue]")
                 })?;
                 let v = resolved("ANVIL_V_URL", &venue.anvil_url)?;
-                out.push(format!("CHAIN_999_RPC_URL={v}"));
-                out.push(format!("CHAIN_999_WS_URL={}", ws_of(&v)));
+                out.push(format!("CHAIN_1_CHAIN_RPC_URL={v}"));
+                out.push(format!("CHAIN_1_CHAIN_WS_URL={}", ws_of(&v)));
                 let sim = self.services.sim.as_ref().ok_or_else(|| {
                     mismatch("export-env daloc (venue profile) requires [services.sim]")
                 })?;
                 out.push(format!("HL_INFO_API_URL=http://venue-sim:{}", sim.info.port));
                 out.push(format!(
-                    "HL_CONTROL_API_URL=http://venue-sim:{}",
+                    "VENUE_CONTROL_URL=http://venue-sim:{}",
                     sim.control.port
                 ));
                 out.push(format!(
                     "VENUE_ACCOUNT_FEEDS=http://venue-sim:{}",
                     sim.info.port
                 ));
+                out.push(format!(
+                    "VENUE_RATE_FEEDS=http://venue-sim:{}",
+                    sim.info.port
+                ));
+                if let Some(port) = self.services.venue.as_ref().map(|v| v.http.port) {
+                    out.push(format!("VENUE_ADMIN_URL=http://engine:{port}"));
+                }
             }
         }
         // The bridge spans both mirrors: its Iris base is part of the block
@@ -399,16 +407,6 @@ impl Instance {
         }
         Ok(out)
     }
-}
-
-/// The env wiring a deployment always sets (`ANVIL_T_URL`); a missing one is a
-/// load error naming it (the config crate is the only env reader).
-fn env_url(name: &str) -> Result<String, ConfigError> {
-    std::env::var(name).map_err(|_| ConfigError::Invalid {
-        issues: vec![format!(
-            "export-env daloc: {name} is not set (deployment wiring)"
-        )],
-    })
 }
 
 /// A value that must be concrete for the export: a lingering `${VAR}`
