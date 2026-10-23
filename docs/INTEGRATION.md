@@ -19,13 +19,22 @@ acceptance).
 | Watchlist + probes | the instance TOML | 88 watched accounts on the mainnet instance; the closure audit is `make closure-check` |
 | Epochs | `POST /admin/epoch` (T) / the sim's `POST /control/epoch_new` (V) | a fresh pin clears the devnet's marks *and* values; a same-pin reset restores them |
 
+**M — the strict replay reference — is deliberately not exposed.** M is the
+mirror's internal "is the replay still true?" chain (never written, its parity
+asserted by the engine's probes); giving it a NodePort would put a writable
+RPC for it on the test host. T is the devnet the harness consumes; M stays
+inside the engine's loop.
+
 ## 2. The venue side — venue-sim (info :8090, control :8091)
 
 **Served `/info` types (13):** `clearinghouseState`, `spotClearinghouseState`,
 `userAbstraction`, `openOrders`, `meta`, `metaAndAssetCtxs`, `perpDexs`,
 `l2Book`, `marginTable`, `activeAssetData`, `exchangeStatus`, `spotMeta`,
 `allMids`. Anything else answers `"unrouted"` (hl_mock's contract — a *named*
-non-answer, never a 500).
+non-answer, never a 500). Un-simulated types are **not proxied** to the live
+venue: the overlay's discipline is that a read either comes from the sim's own
+state or is named absent — a proxy would leak live data past the COW boundary
+and break the identity guarantees below.
 
 Guarantees the gated read relies on: an unknown address serves the **empty
 shape** (zeros, 200); `userAbstraction` is `default` for unknown; `time` is
