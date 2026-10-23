@@ -5,7 +5,6 @@ SHELL := /bin/bash
 INSTANCE       ?= mainnet-mirror
 NS             := $(INSTANCE)
 OVERLAY        := k8s/overlays/$(INSTANCE)
-INSTANCE_FILE  := config/instances/$(INSTANCE).toml
 BOOTSTRAP      := k8s/bootstrap
 KUBECTL        := kubectl -n $(NS)
 
@@ -144,10 +143,12 @@ build-venue: ## Build the venue binaries on the host (cargo: venue-mirror + venu
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
-config-check: ## Validate the selected instance's config through the layered loader
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check $(INSTANCE_FILE)
+config-check: ## Validate every instance file through the layered loader (structural fitness)
+	@for f in config/instances/*.toml; do \
+	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check "$$f" || exit 1; \
+	done
 
-fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit ## Run every structural fitness function (plan §11.3)
+fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit config-check ## Run every structural fitness function (plan §11.3)
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings

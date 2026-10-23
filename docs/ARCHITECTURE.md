@@ -984,7 +984,8 @@ in the devnet chain's own domain, never in wall time (daloc's
 | `POST /admin/feed/override` | publish a scripted answer now and pause - the same net effect as a crash write, driven explicitly |
 
 Metrics: `feed_bridge_updates_total{feed}`, `feed_bridge_pauses_total{feed}`,
-`feed_bridge_source_errors_total`. Config: `[services.engine.feed_bridge]`
+`feed_bridge_pass_errors_total` (any pass fault; the feed's `last_error`
+names the cause). Config: `[services.engine.feed_bridge]`
 (`poll_interval_ms`, `writer`, `feeds[]`); absent means the devnet's own price
 writers own the mocks (the pre-mirror arrangement), and a boot with the section
 present fails loudly if a feed is unreachable or mis-scaled.

@@ -254,6 +254,13 @@ discovering) and marks the slot devnet-owned, so mainnet diffs never take it
 back. ETH is `anvil_setBalance`; if a token uses a non-standard layout the
 response lists the probes it tried - write the slot yourself then.
 
+Anvil's own `anvil_dealERC20` works on both mirror chains too - the argument
+order is foundry's `(account, token, amount)`, it is an absolute storage write
+(raises, lowers, and drains to 0), and the reversed order answers "no slot
+found". The mirror's scripts use `/admin/deal` because it also marks the slot
+devnet-owned (the cheatcode write is invisible to the tx scanner, so on a
+watched token the mark is what keeps a parent diff from taking it back).
+
 ### Fast-forward the devnet (interest, expiry, funding)
 
 ```bash
@@ -490,7 +497,7 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_bridge_refusals_total` / `venue_bridge_malformed_total` / `venue_bridge_trace_faults_total` | refused effects / undecodable actions / blocks whose callTracer failed |
 | `venue_bridge_actions_total{id}` | decoded CoreWriter actions by id |
 | `feed_bridge_updates_total{feed}` / `feed_bridge_pauses_total{feed}` | answers published to the mock aggregators / feeds paused on a scenario's write |
-| `feed_bridge_source_errors_total` | source aggregator reads that failed |
+| `feed_bridge_pass_errors_total` | feed passes that failed; `GET /admin/feed`'s `last_error` names the cause (source read, target read, publish, decimals mismatch) |
 
 Alarms: `venue_epochs_total` rising means V re-forked (the devnet's writes are
 gone with the old base unless the pin is unchanged); `venue_probe_failures_total`
@@ -581,8 +588,9 @@ hands it back, and `GET .../admin/feed` shows confirmed/pending state.
 
 ```bash
 # EVM→Core: transfer USDC to its system address (token 0) on V. V runs with
-# --no-mining, so the tx queues; the explicit mine lands it (the harness is
-# the miner on both mirrors). cast needs the explicit impersonation even with
+# --no-mining and the venue engine is V's block producer: it mines the queued
+# tx within a driver pass (venue_mined_blocks_total) - the explicit mine below
+# just lands it immediately. cast needs the explicit impersonation even with
 # auto-impersonate on (measured).
 cast rpc anvil_impersonateAccount 0xYourAddr --rpc-url http://localhost:31545
 cast send 0xb88339CB7199b77E23DB6E890353E22632Ba630f \
@@ -616,7 +624,7 @@ StorageClass as the mainnet mirror; the state layout is the shared one
 | `venue_probe_failures_total` climbing | V diverged from the fork source on a devnet-unowned target (a missing hand-back, a poisoned value) | inspect `/status.shadowed`; hand the keys back (`/admin/shadow {clear: true, all: true}`); re-pin if it persists |
 | `/admin/shadow {clear: true}` refused with "the source advanced past the pin" | the unshadow source can no longer serve the pin (`eth_call` serves its latest state - measured) | re-pin (`POST /admin/epoch`); the refusal is the protection against handing back a poisoned value |
 | a feed's `feed_bridge_pauses_total` rose | a scenario wrote the mock aggregator (or crashed it): the bridge paused, by design | `POST /admin/feed/resume` to hand it back; `GET /admin/feed` shows confirmed/pending |
-| `feed_bridge_source_errors_total` climbing | the parent-chain aggregator read failed (reth down, bad address) | check reth and the feed's `source` in the instance file |
+| `feed_bridge_pass_errors_total` climbing | a feed's pass keeps failing: a source read (reth down, bad address), a target read, a publish, or a decimals mismatch | `GET /admin/feed`'s `last_error` names the cause; check reth and the feed's addresses in the instance file |
 | `venue_bridge_credits_total` flat while a transfer landed on V | the bridge is not anchored, or the block predates the pin (source blocks are never scanned) | check `sim.json`'s `bridge_cursor` (0 = not anchored; the first pass anchors at `head.max(pin)`); check `venue_bridge_trace_faults_total` |
 | `venue_bridge_trace_faults_total` rising | V's callTracer failed: contract-internal CoreWriter calls are missed that block | check V's health; the block is counted, not half-applied - re-mine the activity |
 | `venue_sim_stale_ms{coin}` above the freshness window | the market plane is behind (WS down, REST budget exhausted) | check `venue_sim_ws_connected` / `venue_sim_budget_skips_total`; `/readyz` reflects it |

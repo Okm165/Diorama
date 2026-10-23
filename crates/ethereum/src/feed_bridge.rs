@@ -111,12 +111,16 @@ impl FeedRuntime {
 pub struct FeedBridgeMetrics {
     updates: Mutex<Vec<(String, u64)>>,
     pauses: Mutex<Vec<(String, u64)>>,
-    source_errors: std::sync::atomic::AtomicU64,
+    /// Pass faults, whatever the stage: a source read, a target read, a
+    /// publish, a decimals mismatch. The feed's `last_error` names the cause
+    /// (measured: an uninstalled target is *waiting*, not a fault - the
+    /// counter only moves when a pass actually fails).
+    pass_errors: std::sync::atomic::AtomicU64,
 }
 
 impl FeedBridgeMetrics {
-    pub fn inc_source_errors(&self) {
-        self.source_errors.fetch_add(1, Ordering::Relaxed);
+    pub fn inc_pass_errors(&self) {
+        self.pass_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     fn count(field: &Mutex<Vec<(String, u64)>>, name: &str) {
@@ -142,9 +146,9 @@ impl FeedBridgeMetrics {
         mirror_devnet::metrics::push_metric(
             &mut out,
             "counter",
-            "feed_bridge_source_errors_total",
-            "source aggregator reads that failed",
-            self.source_errors.load(Ordering::Relaxed),
+            "feed_bridge_pass_errors_total",
+            "feed bridge passes that failed (the feed's last_error names the cause)",
+            self.pass_errors.load(Ordering::Relaxed),
         );
         out
     }
@@ -235,7 +239,7 @@ impl FeedBridge {
         loop {
             for feed in &self.feeds {
                 if let Err(e) = self.pass_one(&ctx, feed).await {
-                    self.metrics.inc_source_errors();
+                    self.metrics.inc_pass_errors();
                     *feed.last_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
                         Some(e.to_string());
                     tracing::warn!(feed = %feed.section.name, error = %e, "feed bridge pass failed; will retry");

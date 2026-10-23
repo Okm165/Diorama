@@ -10,29 +10,44 @@ Three layers, each runnable on demand:
 | Scenario | `make scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 12 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
 | Product sim | `make product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
 
-## Unit tests (`engine/src/**`)
+## Unit tests (`cargo test --workspace`)
 
-11 tests, all offline:
+126 tests, all offline, one suite per crate: `mirror-anvil` 15,
+`mirror-devnet` 17, `mirror-config` 15, `mirror-ethereum` 11,
+`mirror-hyperliquid` 39, `mirror-cctp` 29. The suites carry the measured rules
+each module documents:
 
-- `bal::storage_values_are_padded_to_64` / `quantities_are_minimal_but_even_length`
-  — the measured padding rules (odd-length hex is rejected by anvil with `-32602`).
-- `bal::bal_flatten_uses_post_states` — last-change-wins per slot (EIP-7928
-  ordering guarantee), balance/nonce post-states.
-- `bal::trace_diff_flattening` — the `prestateTracer{diffMode}` fallback shape
-  (measured on anvil 1.8.5).
-- `shadow::cow_granularity` — storage shadows per slot, account fields as one
-  unit, other slots of the same account keep syncing.
-- `journal::journal_roundtrip_and_prune` — per-block before-values + ring.
-- `state::resume_beats_warmup` / `fresh_or_reset_chain_uses_warmup_clamped_to_head`
-  — restart vs first-run/re-pin cursor rules.
-- `blob::kzg_validation_accepts_a_valid_sidecar` — builds a blob + commitment +
-  proof with c-KZG, validates it through the replay path's validator, and
-  rejects a corrupted blob. Proves the validator (and the proof repair) is
-  correct, so "invalid KZG proof" from a source means the source's data is bad.
-- `blob::execution_requests_follow_engine_api_encoding` — `engine/prague.md`:
-  type-prefixed SSZ elements, little-endian quantities, empty request types
-  excluded (all-empty ⇒ `[]`).
-- `blob::versioned_hash_mapping` — commitment → versioned hash shape.
+- `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with
+  `-32602`), the batch body shapes, the wire-error predicates (content
+  refusals are never retryable; unknown upstream codes stay verbatim), the
+  trace flattening (`prestateTracer{diffMode}` — the fallback shape measured
+  on anvil 1.8.5; a slot changed to zero is still a write).
+- `mirror-devnet` — COW granularity (storage per slot, account fields as one
+  unit, other slots keep syncing; fixture addresses are owned whole), the
+  journal round-trip + ring + typed faults on malformed entries, the cursor
+  rules (resume is contiguous; fresh/reset chains start at head+1), the
+  pin-base predicate (`scan_anchor` clamps at the pin), the shared admin wire
+  types.
+- `mirror-config` — the layered merge (arrays replace, never concatenate),
+  `${ENV}` expansion (unresolved is reported, then fatal for services),
+  `MIRROR__*` overrides, profile coherence, fork-offset bounds; the real
+  instance files load and check.
+- `mirror-ethereum` — BAL flattening (post-states, last-change-wins), the
+  KZG sidecar path (build → validate → corrupt → reject; the proof repair is
+  correct, so "invalid KZG proof" from a source means the source's data is
+  bad), the Engine API execution-request encoding (type-prefixed SSZ
+  elements, empty types excluded), the versioned-hash mapping, the feed
+  bridge's pause rule (`step` never overwrites a scenario; a publish in
+  flight is not a scenario write).
+- `mirror-hyperliquid` — the served identity, funding hourly on the oracle,
+  liquidation at the mark + the isolated `liq_price` formula, the wire shapes
+  (requests omit null optionals; the mixed-case spotMeta parses), the
+  CoreWriter/system-address decode (sub-wei remainders floor, USDC
+  conversions exact), the budget window, the store's three answers.
+- `mirror-cctp` — the attester's seed derivation + keccak-recoverable
+  signing, the message encode/decode round trip against the contracts' index
+  table, the four attester-filled fields, the fee table, the Iris shapes
+  (404/pending/signed), the watcher's pin-as-rest-state predicate.
 
 ## Self test (`k8s/bootstrap/selftest-job.yaml`)
 
@@ -144,7 +159,7 @@ behavioral). The default policy (`on_divergence: continue`) records all of them;
 | A devnet tx must not share a block with the parent's diffs | anvil estimates `eth_sendTransaction` gas against `latest`; with the diffs landing in between, an Aave `borrow` estimated at 257,560 used 271,389 (97% of its limit) and reverted, then succeeded with an explicit 1M limit. Fixed structurally by the prepend rule (devnet txs mine in their own block first) |
 | A corrupted drift journal hides the history it exists to keep | two tasks appended long lines with separate handles: 10 interleaved lines in 48k. Now serialized, one write per line, divergences only, 16 MiB rotation |
 | `cast calldata` rejects `--rpc-url` | a wrapper that appended it silently produced *empty* calldata: the "supply" shipped as a 21,000-gas plain transfer and reverted. Every failed market step in that run traced back to this |
-| `anvil_dealERC20` cannot work on this fork, but `eth_call` overrides can | it discovers balance slots by writing and re-reading, and on a no-mining fork its probe never lands ("no slot found", measured). `/admin/deal` probes with `eth_call` + a `stateDiff` override instead: candidate slots 0..16, a sentinel value (a balance that already equals the target makes every slot match - measured), 32-byte padded override values (a quantized value answers "invalid string length") and an explicitly encoded `balanceOf` calldata (`format!("{:064x}", address)` does not pad an alloy Address). Finds WETH slot 3 and USDC's packed slot 9 alike |
+| `anvil_dealERC20` works on both mirror chains - in foundry's argument order `(account, token, amount)`; the reversed order reports "no slot found" (an earlier measurement fell into exactly that trap and concluded "fails on forks"; re-measured 2026-10-23: absolute writes that raise, lower and drain to 0 all landed, on the real USDC proxy and a slot-0 mock alike). `/admin/deal` remains the mirror's own faucet - an `eth_call` + `stateDiff` override: candidate slots 0..16, a sentinel value (a balance that already equals the target makes every slot match - measured), 32-byte padded override values (a quantized value answers "invalid string length") and an explicitly encoded `balanceOf` calldata (`format!("{:064x}", address)` does not pad an alloy Address). Finds WETH slot 3 and USDC's packed slot 9 alike |
 | A watchlist gap can hide in the counterparties | Aave's variable debt tokens were unwatched: a devnet borrow writes the user's scaled debt there, the write is not tracked (the shadow scanner follows watched accounts), so `/admin/shadow {all:true}` cannot clear it - a phantom $315 debt against zero collateral broke every later borrow with `LtvValidationFailed`. The proof now uses a fresh position address per run and the closure includes all five aTokens and debt tokens |
 | A composite price source hides a whole dependency chain | Aave's WBTC/USD source multiplies `BTC/USD x WBTC/BTC`, each leg a proxy whose aggregator holds the round. None of the four contracts was watched, so T's WBTC price sat stale ($81,811.77 vs mainnet's $81,810.37 at the same cursor) while every probe stayed green - there was no WBTC price probe. Found by the product sim's broad freshness audit (16 views per parent block); fixed by watching all four contracts, adding per-reserve price probes, and healing the read slots via reth's plain `prestateTracer` (a `diffMode` trace of a view call is empty) |
 | A devnet reset can make your next tx a no-op that reports success | re-syncing an account's fields puts its nonce back to mainnet's; a byte-identical tx (same nonce, data, gas price) has the same hash, so the node answers with the *old* receipt while the reset state no longer holds its effects (measured: a "successful" approve that changed nothing, then a supply reverting with a bare `revert()`). Vary something - the gas price is enough - or never reset the sender's nonce |
@@ -367,6 +382,36 @@ rule 10). `make venue-closure` has no script: the venue has no incoming parent
 diffs to close a scope over — its standing scope check is the at-pin probe set
 (`/admin/probes`, `venue_probe_*`), which the venue-drill and smoke exercise.
 
+## The feed bridge — measured behavior (Phase 0)
+
+The bridge is the single price writer for the devnet's mock aggregators in
+mirror mode (the harness's periodic refresher is off, plan §17.2): it reads
+each feed's *source* (the parent chain's own aggregator, via reth) and
+publishes `updateAnswer` to the configured *target* on T. Verified live on the
+scratch T (2026-10-23; ETH/USD: source = mainnet's aggregator, target = a mock
+aggregator deployed for the test):
+
+- the target may not exist yet (their fixture deploy installs it): the bridge
+  *waits*, reporting `decimals: null`; a transport fault or a
+  present-but-mismatched target (decimals must equal the source's) is a fault,
+  not a wait;
+- first contact publishes the source's answer; the next pass confirms it
+  (`confirmed_answer`, `feed_bridge_updates_total{feed}`);
+- a scenario write to the target pauses the feed on the next pass
+  (`feed_bridge_pauses_total{feed}`, `paused: true`, the last confirmed answer
+  kept) and the bridge **never overwrites** it — verified across repeated
+  passes;
+- `POST /admin/feed/resume` forgets the confirmed value; the next passes
+  re-establish the source's answer (publish, then confirm);
+- `POST /admin/feed/override {name, answer}` publishes a scripted value and
+  pauses — the scripted crash; a later `resume` re-establishes the source.
+  While the target is not installed the override is refused (a crash written
+  to an empty address would change nothing);
+- an unknown feed is refused `404 feed bridge: no feed named \`…\``;
+- pass faults count in `feed_bridge_pass_errors_total` and the feed's
+  `last_error` names the cause — a stuck feed is visible, never a silent stale
+  success.
+
 ## The CCTP bridge — measured facts and acceptance
 
 The real lane (`cctp-bridge`, Iris 8095 / control 8096) moves native USDC
@@ -430,6 +475,24 @@ Iris. Proven live on scratch forks:
   for domain 19 delivered to T (the wrong destination chain) reverts
   `Invalid destination domain` — proven with a *valid* attestation via
   `eth_call`, so the check is the contract's own, not the signature's.
+- **daloc's real `cctp-relay` cannot relay a real CCTP V2 message as written**
+  (branch `feat/risk-engine-refactored-dev` @ `a400dbe`, measured 2026-10-23
+  against this service with a real burn on the scratch T, and against the live
+  Iris with a real mainnet burn): its scanner queues the burn keyed by
+  `keccak256` of the **event** message (`services/cctp-relay/src/relay.rs`),
+  but the Iris — Circle's and ours, faithfully — serves the
+  **attester-patched** message: measured, the event message carries nonce `0`
+  and `finalityThresholdExecuted 0`, the served message a 32-byte nonce and
+  `2000` (the only byte ranges that differ on a live sample). `attempt_relay`'s
+  `find(keccak256(m.message) == hash)` therefore never matches: the message sat
+  `pending: 1` for 4+ minutes, never relayed, never parked; even on a match it
+  would submit the queued *raw* message, which the real verification rejects.
+  The fix is theirs and small — the tx-keyed Iris response is authoritative:
+  select by tx (or match on the unpatched header fields) and submit
+  `matched.message`. The same burn relayed through this service's own path
+  mints exactly (`{"confirmed":1}`, 100 USDC on V), so the lane, the message
+  and the attestation are sound; only their client's match is not. The plan's
+  "their `cctp-relay` runs unchanged" acceptance needs this one code change.
 
 Operator surface: `GET /health` (parked counts), `GET /control/state`,
 `POST /control/transfer` (`hook: {target, calldata}` for the credit lane),
@@ -476,10 +539,13 @@ verify against). Verdicts:
 
 Measured on the scratch stacks (2026-10-22) — facts an integration run can rely on:
 
-- **`anvil_dealERC20` fails on forks** (foundry 1.8.6; measured on a *fresh* HyperEVM fork for the
-  real USDC proxy **and** a plain slot-0 ERC20 — not V's state). The mirror's `POST /admin/deal`
-  works on V (measured: slot 9 discovered, 200 USDC landed). daloc's external mode should route
-  **both** its funding (`fund_token_on`) and drain paths through `/admin/deal`, not only the drain.
+- **`anvil_dealERC20` works on both mirror chains** (foundry 1.8.6; re-measured 2026-10-23 on T and
+  V: absolute writes that raise, lower and drain to 0 — on the real USDC proxy and a slot-0 mock
+  alike). The one trap is the argument order: foundry's is `(account, token, amount)`, and the
+  reversed order reports "no slot found" — the earlier "fails on forks" measurement was that
+  artifact, not the chain. daloc's `deal_erc20` / `add_erc20` / drain paths therefore work
+  **unchanged**; the mirror's `POST /admin/deal` is the equivalent faucet its own scripts use
+  (measured: slot 9 discovered, 200 USDC landed).
 - **The real HyperEVM USDC blacklists its own system address** (`isBlacklisted(0x2000…0) == true`,
   measured on the live chain), so EVM→Core USDC is impossible with the real token; the bridge's
   credit path runs over the harness's fixture mocks (which replace the canonical ERC20s), and the

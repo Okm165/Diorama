@@ -23,7 +23,7 @@ are errors at every level.
 | `[instance]` | every service | identity: name, namespace, profile |
 | `[chains.l1]` | the ethereum engine, the anvil-m/t init containers | the mainnet source; `fork_offset` (its single home) |
 | `[chains.venue]` | the venue engine, the simulator, the CCTP bridge | the venue source: HL API/WS, the fork RPC |
-| `[services.engine.*]` | the ethereum engine | reth / anvil / source_sync / verifier / journal / blobs / http |
+| `[services.engine.*]` | the ethereum engine | reth / anvil / source_sync / verifier / journal / blobs / http / feed_bridge (optional: absent = the devnet's own price writers own the mock aggregators) |
 | `[services.venue.*]` | the venue engine (the fork driver) | state_dir, anvil_url, journal ring, probes, http |
 | `[services.sim.*]` | the simulator | info/control ports, markets, rate budget, persistence |
 | `[services.cctp.*]` | the CCTP bridge | T/V RPCs, relay key, attester seed, iris/control ports, the relayer mode (`auto`/`manual`) |
@@ -43,7 +43,8 @@ mirror-config get   config/instances/mainnet-mirror.toml chains.l1.fork_offset
 mirror-config export-env config/instances/mainnet-mirror.toml --section anvil   # FORK_OFFSET=128
 ```
 
-`make config-check` runs the check in CI. The anvil init containers read
+`make config-check` checks **every** file under `config/instances/` and is part
+of `make fitness`. The anvil init containers read
 `FORK_OFFSET` via `export-env` — the instance file is the offset's single
 home.
 
