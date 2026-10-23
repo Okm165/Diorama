@@ -627,6 +627,7 @@ the engine's equivalent today is the HTTP surface above plus the cheatcodes.
 | `POST /admin/shadow` | register devnet writes that bypassed the block pipeline; with `"clear": true` hand the given slots/account fields *back* to mainnet sync and re-sync their values from reth at T's cursor (a key with a stale value and no shadow is the most confusing state there is) |
 | `POST /admin/deal` | the unlimited ERC-20 faucet: slot discovery via `eth_call` + a `stateDiff` override, silent write, marked devnet-owned |
 | `POST /admin/epoch` | one-call revert-to-blank: re-pin T to the source's latest block; the engine detects the reset on its next pass and runs the epoch rule (new base = clear, same base = restore) |
+| `POST /admin/probes` | run the configured probes now (M at the cursor vs reth) and report the run `{ok, failed, skipped}`; the per-block convergence counters stay the loop's. The venue engine's route is the same verb over its at-pin probe set (`make engine-symmetry` checks both) |
 | `GET /admin/feed` | the feed bridge's feeds: paused, confirmed/pending answers, decimals |
 | `POST /admin/feed/pause\|resume\|override` | pause a feed (the scenario owns its value), hand it back (the next pass re-establishes the source's value), or publish a scripted answer and pause |
 

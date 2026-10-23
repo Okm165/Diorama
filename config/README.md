@@ -16,6 +16,25 @@ deployment environment) reports them as deploy-time wiring instead.
 Merge semantics: deep merge; arrays replace, never concatenate; unknown keys
 are errors at every level.
 
+## The section map (who reads what)
+
+| Section | Read by | Carries |
+|---|---|---|
+| `[instance]` | every service | identity: name, namespace, profile |
+| `[chains.l1]` | the ethereum engine, the anvil-m/t init containers | the mainnet source; `fork_offset` (its single home) |
+| `[chains.venue]` | the venue engine, the simulator, the CCTP bridge | the venue source: HL API/WS, the fork RPC |
+| `[services.engine.*]` | the ethereum engine | reth / anvil / source_sync / verifier / journal / blobs / http |
+| `[services.venue.*]` | the venue engine (the fork driver) | state_dir, anvil_url, journal ring, probes, http |
+| `[services.sim.*]` | the simulator | info/control ports, markets, rate budget, persistence |
+| `[services.cctp.*]` | the CCTP bridge | T/V RPCs, relay key, attester seed, iris/control ports |
+| `[watchlist]` | the ethereum engine | the closure scope; one watchlist, two readers (`check` + `closure-check`) |
+
+The engines' sections are named per mirror — `engine` is the ethereum
+profile's, `venue` is the venue profile's (the plan's per-service grouping,
+§19.3; the venue's engine section doubles as the mirror's own section for
+chain-level knobs). Each service reads only its own section; one file per
+instance, many readers.
+
 ## The CLI
 
 ```sh
