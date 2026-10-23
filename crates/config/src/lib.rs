@@ -29,7 +29,7 @@ pub use instance::{
 pub use sections::{
     BlobsSection, CctpSection, EngineAnvil, EngineReth, EngineSection, FeedBridgeSection,
     FeedSection, HttpSection, JournalSection, LoopsSection, OnDivergence, Probe, RelayerMode,
-    Services, SimSection, SourceSyncSection, VenueSection, VerifierSection,
+    Services, SourceSyncSection, VenueSimSection, VerifierSection,
 };
 
 use std::path::Path;
@@ -138,9 +138,11 @@ fn profile_of(instance_value: &toml::Value) -> Option<&str> {
 
 /// Drop the sections the profile does not own from the defaults layer.
 fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
+    // The engine's section is shared (`[services.engine]` for both profiles);
+    // what is profile-specific is the other chain and the venue's simulator.
     let (chain_section, service_sections): (&str, &[&str]) = match profile {
-        Some("ethereum") => ("venue", &["venue", "sim"]),
-        Some("venue") => ("l1", &["engine"]),
+        Some("ethereum") => ("venue", &["venue_sim"]),
+        Some("venue") => ("l1", &[]),
         _ => return,
     };
     let Some(root) = defaults.as_table_mut() else {
@@ -161,7 +163,7 @@ fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
 /// (a venue deployment may run only the engine); the CCTP bridge is optional
 /// under either profile (the third element is its own deployment, §15).
 fn prune_absent_services(defaults: &mut toml::Value, over: &toml::Value) {
-    for section in ["sim", "cctp"] {
+    for section in ["venue_sim", "cctp_bridge"] {
         let present = over
             .get("services")
             .and_then(|s| s.get(section))
@@ -298,12 +300,19 @@ source_url = "http://hl-rpc:8545"
 api_url = "https://api.hyperliquid.xyz"
 ws_url = "wss://api.hyperliquid.xyz/ws"
 
-[services.venue]
+[services.engine]
 state_dir = "/state"
-anvil_url = "http://anvil-v:8545"
+
+[services.engine.anvil]
+v_url = "http://anvil-v:8545"
+
+[services.engine.journal]
+dir = "/state/journal"
+
+[services.engine.verifier]
 probes = []
 
-[services.venue.http]
+[services.engine.http]
 port = 8080
 "#
     }
@@ -326,7 +335,7 @@ port = 8080
         );
 
         let venue_src = format!(
-            "{}\n[services.sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\n\n[services.sim.info]\nport = 8090\n\n[services.sim.control]\nport = 8091\n",
+            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\n\n[services.venue_sim.info]\nport = 8090\n\n[services.venue_sim.control]\nport = 8091\n",
             minimal_venue_instance()
         );
         let (venue, _) = load_str(&venue_src, &[]).unwrap();
@@ -370,24 +379,24 @@ port = 8080
     #[test]
     fn cctp_relayer_mode_defaults_to_auto_and_the_instance_can_drive_it_manually() {
         let src = minimal_venue_instance().replace(
-            "[services.venue.http]",
-            r#"[services.cctp]
+            "[services.engine.http]",
+            r#"[services.cctp_bridge]
 state_dir = "/state/cctp"
 t_url = "http://t:8545"
 v_url = "http://v:8545"
 relay_key = "0x11"
 attester_seed = "seed"
 
-[services.cctp.iris]
+[services.cctp_bridge.iris]
 port = 8095
 
-[services.cctp.control]
+[services.cctp_bridge.control]
 port = 8096
 
-[services.venue.http]"#,
+[services.engine.http]"#,
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
-        let cctp = inst.services.cctp.as_ref().expect("[services.cctp]");
+        let cctp = inst.services.cctp_bridge.as_ref().expect("[services.cctp_bridge]");
         assert_eq!(cctp.relayer, RelayerMode::Auto, "defaults.toml drives the mode");
         assert_eq!(cctp.poll_interval_ms, 1000, "shared defaults merge in");
 
@@ -397,7 +406,7 @@ port = 8096
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
         assert_eq!(
-            inst.services.cctp.as_ref().unwrap().relayer,
+            inst.services.cctp_bridge.as_ref().unwrap().relayer,
             RelayerMode::Manual,
             "the instance can drive relays by hand"
         );
@@ -455,7 +464,7 @@ port = 8096
         assert!(format!("{err}").contains("jwt_path"), "{err}");
         let engine = inst.services.engine.as_mut().unwrap();
         engine.source_sync.jwt_path = Some("/secrets/jwt.hex".into());
-        engine.anvil.m_url = "anvil-m:8545".into();
+        engine.anvil.m_url = Some("anvil-m:8545".into());
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("m_url"), "{err}");
     }
@@ -489,20 +498,21 @@ port = 8096
     fn the_venue_instance_loads_checks_and_takes_its_sections() {
         let (mut inst, unresolved) = load_str(minimal_venue_instance(), &[]).unwrap();
         assert!(unresolved.is_empty());
-        // From defaults.toml (the venue service's shared conventions):
+        // From defaults.toml (the shared engine conventions): the venue's
+        // cadence and write chunk are the loops section's.
         assert_eq!(
-            inst.services.venue.as_ref().unwrap().poll_interval_ms,
+            inst.services.engine.as_ref().unwrap().loops.poll_interval_ms,
             1000
         );
-        assert_eq!(inst.services.venue.as_ref().unwrap().chunk_size, 500);
-        // The ethereum engine's stub was pruned before the merge: no
-        // [services.engine] on a venue load.
-        assert!(inst.services.engine.is_none());
+        assert_eq!(inst.services.engine.as_ref().unwrap().loops.chunk_size, 500);
+        // The other profile's chain was pruned before the merge, and the
+        // simulator (absent from this instance) with it.
         assert!(inst.chains.l1.is_none());
+        assert!(inst.services.venue_sim.is_none());
         inst.check().unwrap();
-        let (chain, venue) = inst.take_venue().unwrap();
+        let (chain, engine) = inst.take_venue().unwrap();
         assert_eq!(chain.source_url, "http://hl-rpc:8545");
-        assert_eq!(venue.anvil_url, "http://anvil-v:8545");
+        assert_eq!(engine.anvil.v_url.as_deref(), Some("http://anvil-v:8545"));
         // And the sections are gone after the take (moved, not copied).
         assert!(inst.take_venue().is_err());
     }
@@ -532,33 +542,33 @@ port = 8096
 
         // An ethereum instance carrying the simulator's section:
         let src = format!(
-            "{}\n[services.sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\npoll_interval_ms = 5000\n[services.sim.info]\naddr = \"0.0.0.0\"\nport = 8090\n[services.sim.control]\naddr = \"0.0.0.0\"\nport = 8091\n",
+            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\npoll_interval_ms = 5000\n[services.venue_sim.info]\naddr = \"0.0.0.0\"\nport = 8090\n[services.venue_sim.control]\naddr = \"0.0.0.0\"\nport = 8091\n",
             minimal_instance()
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
         let err = inst.check().unwrap_err();
-        assert!(format!("{err}").contains("must not carry [services.sim]"), "{err}");
+        assert!(format!("{err}").contains("must not carry [services.venue_sim]"), "{err}");
     }
 
     #[test]
     fn the_simulator_sections_load_and_take() {
         let src = format!(
-            "{}\n[services.sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\", \"ETH\"]\npoll_interval_ms = 5000\n[services.sim.info]\nport = 8090\n[services.sim.control]\nport = 8091\n",
+            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\", \"ETH\"]\npoll_interval_ms = 5000\n[services.venue_sim.info]\nport = 8090\n[services.venue_sim.control]\nport = 8091\n",
             minimal_venue_instance()
         );
         let (mut inst, _) = load_str(&src, &[]).unwrap();
         inst.check().unwrap();
-        let (chain, sim) = inst.take_sim().unwrap();
+        let (chain, sim) = inst.take_venue_sim().unwrap();
         assert_eq!(chain.api_url, "https://api.hyperliquid.xyz");
         assert_eq!(sim.markets, vec!["BTC", "ETH"]);
         assert_eq!(sim.info.port, 8090);
         assert_eq!(sim.control.port, 8091);
         assert!(sim.engine_admin_url.is_none());
-        assert!(inst.take_sim().is_err(), "the sections are moved, not copied");
+        assert!(inst.take_venue_sim().is_err(), "the sections are moved, not copied");
         // The engine's take still works on an instance that also carries the sim.
         let (mut inst2, _) = load_str(&src, &[]).unwrap();
-        let (_, venue) = inst2.take_venue().unwrap();
-        assert_eq!(venue.anvil_url, "http://anvil-v:8545");
+        let (_, engine2) = inst2.take_venue().unwrap();
+        assert_eq!(engine2.anvil.v_url.as_deref(), Some("http://anvil-v:8545"));
     }
 
     #[test]
@@ -589,20 +599,20 @@ port = 8096
         );
     }
 
-    /// `[services.cctp]` is optional under both profiles and cross-cutting:
+    /// `[services.cctp_bridge]` is optional under both profiles and cross-cutting:
     /// a venue instance may carry it (and take it), and an ethereum instance
     /// may too — unlike the simulator, which the ethereum profile forbids.
     #[test]
     fn the_cctp_section_is_optional_and_cross_cutting() {
         let src = format!(
-            "{}\n[services.cctp]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp.iris]\nport = 8095\n[services.cctp.control]\nport = 8096\n",
+            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
             minimal_venue_instance(),
             "59".repeat(32)
         );
         let (mut inst, _) = load_str(&src, &[]).unwrap();
         inst.check().unwrap();
         // The defaults filled the shared numbers.
-        let cctp = inst.services.cctp.as_ref().unwrap();
+        let cctp = inst.services.cctp_bridge.as_ref().unwrap();
         assert_eq!(cctp.poll_interval_ms, 1000);
         assert_eq!(cctp.finality_delay_secs, 0);
         assert_eq!(cctp.expiration_blocks, 0);
@@ -618,11 +628,11 @@ port = 8096
         // Absent on a deployment that does not run it (the defaults stub was
         // pruned before the merge).
         let (inst, _) = load_str(minimal_venue_instance(), &[]).unwrap();
-        assert!(inst.services.cctp.is_none());
+        assert!(inst.services.cctp_bridge.is_none());
 
         // The ethereum profile may carry it (the bridge spans both mirrors).
         let src = format!(
-            "{}\n[services.cctp]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp.iris]\nport = 8095\n[services.cctp.control]\nport = 8096\n",
+            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
             minimal_instance(),
             "59".repeat(32)
         );
@@ -632,7 +642,7 @@ port = 8096
         // The relay key must be a secret, never a path; the seed must be
         // non-empty; the gas thresholds must be ordered.
         let src = format!(
-            "{}\n[services.cctp]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"/etc/mirror/relay.key\"\nattester_seed = \"devnet\"\n[services.cctp.iris]\nport = 8095\n[services.cctp.control]\nport = 8096\n",
+            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"/etc/mirror/relay.key\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
             minimal_venue_instance()
         );
         let (inst, _) = load_str(&src, &[]).unwrap();
@@ -654,8 +664,8 @@ port = 8096
         is_normal::<ChainL1>();
         is_normal::<ChainVenue>();
         is_normal::<EngineSection>();
-        is_normal::<VenueSection>();
-        is_normal::<SimSection>();
+        is_normal::<VenueSimSection>();
+        is_normal::<VenueSimSection>();
         is_normal::<CctpSection>();
         is_normal::<LoopsSection>();
         is_normal::<VerifierSection>();

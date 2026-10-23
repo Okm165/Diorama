@@ -21,7 +21,7 @@ async fn run(args: Vec<String>) -> mirror_hyperliquid::Result<()> {
     boot::init_logging();
     let config = boot::service_config_or_exit(&args);
     let mut cfg = load_wiring(&config)?;
-    let (chain, sim_section) = cfg.take_sim()?;
+    let (chain, sim_section) = cfg.take_venue_sim()?;
 
     // The planes: the market feed's cache and the persisted account registry.
     let feed = Arc::new(mirror_hyperliquid::feed::MarketFeed::load(
@@ -66,7 +66,7 @@ async fn run(args: Vec<String>) -> mirror_hyperliquid::Result<()> {
 /// references stay unresolved here, by design.
 fn load_wiring(config: &std::path::Path) -> mirror_hyperliquid::Result<mirror_config::Instance> {
     let (cfg, unresolved) = mirror_config::Instance::inspect(config)?;
-    if let (Some(chain), Some(sim)) = (cfg.chains.venue.as_ref(), cfg.services.sim.as_ref()) {
+    if let (Some(chain), Some(sim)) = (cfg.chains.venue.as_ref(), cfg.services.venue_sim.as_ref()) {
         let state_dir = sim.state_dir.to_string_lossy().to_string();
         mirror_config::require_resolved_logged(
             "venue simulator wiring",
@@ -87,7 +87,7 @@ fn spawn_market_plane(
     feed: &Arc<mirror_hyperliquid::feed::MarketFeed>,
     api_client: mirror_hyperliquid::feed::rest::RestClient,
     ws_url: &str,
-    sim_section: &mirror_config::SimSection,
+    sim_section: &mirror_config::VenueSimSection,
 ) {
     let poller = mirror_hyperliquid::feed::rest::Poller::new(
         feed.clone(),
@@ -102,7 +102,7 @@ fn spawn_market_plane(
 /// The Core↔EVM bridge (when V is configured): system-address credits and
 /// CoreWriter actions become sim state.
 fn spawn_bridge(
-    sim_section: &mirror_config::SimSection,
+    sim_section: &mirror_config::VenueSimSection,
     sim: &Arc<mirror_hyperliquid::sim::Sim>,
     feed: &Arc<mirror_hyperliquid::feed::MarketFeed>,
     metrics: &Arc<mirror_hyperliquid::bridge::metrics::BridgeMetrics>,
@@ -146,7 +146,7 @@ fn spawn_tick(
 /// Serve the two listeners: the info API daloc reads, the control API the
 /// harness drives. The handles are the shutdown tail's.
 fn serve(
-    sim_section: &mirror_config::SimSection,
+    sim_section: &mirror_config::VenueSimSection,
     state: &Arc<mirror_hyperliquid::api::ApiState>,
 ) -> (
     tokio::task::JoinHandle<mirror_hyperliquid::Result<()>>,

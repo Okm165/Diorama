@@ -724,7 +724,7 @@ Iris. Proven live on scratch forks:
   by the relayer ("the mint is no longer on-chain"); reattest re-arms it and
   the mint lands again — but a reattest of a *vanished* burn is re-parked by
   the relayer ("the source burn no longer exists"), never minted;
-- the manual relay mode (`relayer = "manual"` in `[services.cctp]`): a burn
+- the manual relay mode (`relayer = "manual"` in `[services.cctp_bridge]`): a burn
   reaches `signed` and stays there (the tick keeps only the gas alerts and the
   rewind check); `POST /control/relay {nonce}` relays it on demand —
   `{"confirmed":1}`, minted — the deterministic way to test expiry/reattest

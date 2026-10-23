@@ -32,10 +32,9 @@ are errors at every level.
 | `[instance]` | every service | identity: name, namespace, profile |
 | `[chains.l1]` | the ethereum engine, the anvil-m/t init containers | the mainnet source; `fork_offset` (its single home) |
 | `[chains.venue]` | the venue engine, the simulator, the CCTP bridge | the venue source: HL API/WS, the fork RPC |
-| `[services.engine.*]` | the ethereum engine | reth / anvil / source_sync / verifier / journal / blobs / http / feed_bridge (optional: absent = the devnet's own price writers own the mock aggregators; keys: `poll_interval_ms`, `confirm_window_ms` (default 60 s — a publish that does not land is re-sent), `writer` (give it a dedicated account), `feeds`) |
-| `[services.venue.*]` | the venue engine (the fork driver) | state_dir, anvil_url, journal ring, probes, http |
-| `[services.sim.*]` | the simulator | info/control ports, markets, rate budget, persistence |
-| `[services.cctp.*]` | the CCTP bridge | T/V RPCs, relay key, attester seed, iris/control ports, the relayer mode (`auto`/`manual`) |
+| `[services.engine.*]` | the engine (both profiles — the same key, the profile's shape) | reth / anvil (`m_url`+`t_url` or `v_url`) / source_sync / verifier / journal / blobs / http / feed_bridge (optional: absent = the devnet's own price writers own the mock aggregators; keys: `poll_interval_ms`, `confirm_window_ms` (default 60 s — a publish that does not land is re-sent), `writer` (give it a dedicated account), `feeds`) |
+| `[services.venue_sim.*]` | the simulator | info/control ports, markets, rate budget, persistence |
+| `[services.cctp_bridge.*]` | the CCTP bridge | T/V RPCs, relay key, attester seed, iris/control ports, the relayer mode (`auto`/`manual`) |
 | `[watchlist]` | the ethereum engine | the closure scope; one watchlist, two readers (`check` + `closure-check`) |
 
 The engines' sections are named per mirror — `engine` is the ethereum

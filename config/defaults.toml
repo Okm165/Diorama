@@ -73,22 +73,10 @@ enabled = true
 [services.engine.http]
 addr = "0.0.0.0"
 
-# ---- the Venue Mirror's service (profile "venue") ------------------------
-# The driver watches V (the fork-mode anvil) for the devnet's own blocks and
-# re-asserts the chain discipline on every pass; the sim/feed sections land
-# with those services.
-
-[services.venue]
-# One pass per second: a head read + the new-block scan.
-poll_interval_ms = 1000
-# Max JSON-RPC batch size for cheatcode writes (deal, restore).
-chunk_size = 500
-# The journal's before-value ring (the rewind window; same convention as the
-# engine's).
-journal_blocks = 1024
-
-[services.venue.http]
-addr = "0.0.0.0"
+# ---- the venue profile ----------------------------------------------------
+# The venue engine is the same `[services.engine]` section (plan §19.3): its
+# driver reads the shared `loops`/`journal`/`verifier` sub-sections, so the
+# cadence, write chunk and journal ring live here once for both profiles.
 
 # ---- the venue simulator (profile "venue") -------------------------------
 # The market plane's REST cache cadence. WS pushes (allMids, activeAssetCtx)
@@ -96,23 +84,23 @@ addr = "0.0.0.0"
 # is gated by the rate budget meter (1200 weight/min: metaAndAssetCtxs = 20,
 # spotMeta = 20, l2Book/allMids = 2). 5 s gives ~600 weight/min for the
 # default four-market set (20+20+4x2+2 = 50 per pass, 12 passes/min).
-[services.sim]
+[services.venue_sim]
 poll_interval_ms = 5000
 
-[services.sim.info]
+[services.venue_sim.info]
 addr = "0.0.0.0"
 
-[services.sim.control]
+[services.venue_sim.control]
 addr = "0.0.0.0"
 
 # ---- the CCTP bridge (optional; either profile, §15) ----------------------
 # The bridge spans both mirrors: T (Ethereum, domain 0) and V (HyperEVM,
 # domain 19) over the real CCTP V2 contracts. Its stub is kept only when an
-# instance declares [services.cctp] (the deployment that runs it); the
+# instance declares [services.cctp_bridge] (the deployment that runs it); the
 # chain endpoints, the relay key and the attester seed are deployment facts
 # and live in the instance file.
 
-[services.cctp]
+[services.cctp_bridge]
 # One watcher pass per second on each chain: new MessageSent logs + due
 # attestations.
 poll_interval_ms = 1000
@@ -137,8 +125,8 @@ relayer = "auto"
 balance_low_wei = "100000000000000000"
 balance_critical_wei = "10000000000000000"
 
-[services.cctp.iris]
+[services.cctp_bridge.iris]
 addr = "0.0.0.0"
 
-[services.cctp.control]
+[services.cctp_bridge.control]
 addr = "0.0.0.0"

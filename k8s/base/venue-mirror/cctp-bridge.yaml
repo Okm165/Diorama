@@ -7,7 +7,7 @@
 #
 # At boot the bridge verifies the wiring on both chains (fail closed), installs
 # the devnet attester through the contracts' own setters, and funds the relay
-# wallet. The [services.cctp] section of the mounted instance file carries the
+# wallet. The [services.cctp_bridge] section of the mounted instance file carries the
 # chain endpoints, the relay key and the attester seed.
 ---
 apiVersion: apps/v1

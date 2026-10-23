@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::sections::{
-    CctpSection, EngineSection, FeedBridgeSection, Services, SimSection, VenueSection,
+    CctpSection, EngineAnvil, EngineSection, FeedBridgeSection, Services, VenueSimSection,
 };
 use crate::ConfigError;
 
@@ -140,15 +140,15 @@ impl Instance {
     fn check_profile_coherence(&self, issues: &mut Vec<String>) {
         let ethereum = self.instance.profile == Profile::Ethereum;
         let profile = if ethereum { "ethereum" } else { "venue" };
-        let needs = if ethereum {
-            [
+        let needs: &[(&str, bool)] = if ethereum {
+            &[
                 ("[chains.l1]", self.chains.l1.is_some()),
                 ("[services.engine]", self.services.engine.is_some()),
             ]
         } else {
-            [
+            &[
                 ("[chains.venue]", self.chains.venue.is_some()),
-                ("[services.venue]", self.services.venue.is_some()),
+                ("[services.engine]", self.services.engine.is_some()),
             ]
         };
         for (section, present) in needs {
@@ -159,14 +159,10 @@ impl Instance {
         let forbids: &[(&str, bool)] = if ethereum {
             &[
                 ("[chains.venue]", self.chains.venue.is_some()),
-                ("[services.venue]", self.services.venue.is_some()),
-                ("[services.sim]", self.services.sim.is_some()),
+                ("[services.venue_sim]", self.services.venue_sim.is_some()),
             ]
         } else {
-            &[
-                ("[chains.l1]", self.chains.l1.is_some()),
-                ("[services.engine]", self.services.engine.is_some()),
-            ]
+            &[("[chains.l1]", self.chains.l1.is_some())]
         };
         for (section, present) in forbids {
             if *present {
@@ -207,15 +203,12 @@ impl Instance {
 
     fn check_services(&self, issues: &mut Vec<String>) {
         if let Some(eng) = &self.services.engine {
-            check_engine(eng, issues);
+            check_engine(self.instance.profile, eng, issues);
         }
-        if let Some(venue) = &self.services.venue {
-            check_venue(venue, issues);
+        if let Some(sim) = &self.services.venue_sim {
+            check_venue_sim(sim, issues);
         }
-        if let Some(sim) = &self.services.sim {
-            check_sim(sim, issues);
-        }
-        if let Some(cctp) = &self.services.cctp {
+        if let Some(cctp) = &self.services.cctp_bridge {
             check_cctp(cctp, issues);
         }
     }
@@ -238,22 +231,22 @@ impl Instance {
     }
 
     /// The venue profile's sections, moved out for the run path.
-    pub fn take_venue(&mut self) -> Result<(ChainVenue, VenueSection), ConfigError> {
+    pub fn take_venue(&mut self) -> Result<(ChainVenue, EngineSection), ConfigError> {
         let chain = self
             .chains
             .venue
             .take()
             .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
-        let venue = self
+        let engine = self
             .services
-            .venue
+            .engine
             .take()
-            .ok_or_else(|| mismatch("profile \"venue\" requires [services.venue]"))?;
-        Ok((chain, venue))
+            .ok_or_else(|| mismatch("profile \"venue\" requires [services.engine]"))?;
+        Ok((chain, engine))
     }
 
     /// The simulator's sections, moved out for the run path.
-    pub fn take_sim(&mut self) -> Result<(ChainVenue, SimSection), ConfigError> {
+    pub fn take_venue_sim(&mut self) -> Result<(ChainVenue, VenueSimSection), ConfigError> {
         let chain = self
             .chains
             .venue
@@ -261,9 +254,9 @@ impl Instance {
             .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
         let sim = self
             .services
-            .sim
+            .venue_sim
             .take()
-            .ok_or_else(|| mismatch("the simulator requires [services.sim]"))?;
+            .ok_or_else(|| mismatch("the simulator requires [services.venue_sim]"))?;
         Ok((chain, sim))
     }
 
@@ -271,9 +264,9 @@ impl Instance {
     /// it needs no chain section (its own `t_url`/`v_url` are the endpoints).
     pub fn take_cctp(&mut self) -> Result<CctpSection, ConfigError> {
         self.services
-            .cctp
+            .cctp_bridge
             .take()
-            .ok_or_else(|| mismatch("the CCTP bridge requires [services.cctp]"))
+            .ok_or_else(|| mismatch("the CCTP bridge requires [services.cctp_bridge]"))
     }
 
     /// The ethereum profile's endpoints: the pre-context reads the run path
@@ -291,8 +284,12 @@ impl Instance {
             .ok_or_else(|| mismatch("profile \"ethereum\" requires [services.engine]"))?;
         Ok((
             l1.source_url.clone(),
-            engine.anvil.m_url.clone(),
-            engine.anvil.t_url.clone(),
+            engine.anvil.m_url.clone().ok_or_else(|| {
+                mismatch("profile \"ethereum\" requires [services.engine.anvil].m_url")
+            })?,
+            engine.anvil.t_url.clone().ok_or_else(|| {
+                mismatch("profile \"ethereum\" requires [services.engine.anvil].t_url")
+            })?,
         ))
     }
 
@@ -303,12 +300,15 @@ impl Instance {
             .venue
             .as_ref()
             .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
-        let venue = self
+        let engine = self
             .services
-            .venue
+            .engine
             .as_ref()
-            .ok_or_else(|| mismatch("profile \"venue\" requires [services.venue]"))?;
-        Ok((chain.source_url.clone(), venue.anvil_url.clone()))
+            .ok_or_else(|| mismatch("profile \"venue\" requires [services.engine]"))?;
+        let v_url = engine.anvil.v_url.clone().ok_or_else(|| {
+            mismatch("profile \"venue\" requires [services.engine.anvil].v_url")
+        })?;
+        Ok((chain.source_url.clone(), v_url))
     }
 
     /// The instance as a TOML value (the shape the loader produced).
@@ -360,52 +360,59 @@ impl Instance {
     /// instance's own ports, under the manifests' Service names (`engine`,
     /// `venue-sim`, `cctp-bridge` — `k8s/base/engine.yaml`, `base/venue/`).
     fn daloc_env(&self) -> Result<Vec<String>, ConfigError> {
-        let mut out = Vec::new();
-        match self.instance.profile {
-            Profile::Ethereum => {
-                let engine = self.services.engine.as_ref().ok_or_else(|| {
-                    mismatch("export-env daloc (ethereum profile) requires [services.engine]")
-                })?;
-                let t = resolved("ANVIL_T_URL", &engine.anvil.t_url)?;
-                out.push(format!("CHAIN_RPC_URL={t}"));
-                out.push(format!("CHAIN_WS_URL={}", ws_of(&t)));
-                out.push(format!("MIRROR_ADMIN_URL=http://engine:{}", engine.http.port));
-            }
-            Profile::Venue => {
-                let venue = self.services.venue.as_ref().ok_or_else(|| {
-                    mismatch("export-env daloc (venue profile) requires [services.venue]")
-                })?;
-                let v = resolved("ANVIL_V_URL", &venue.anvil_url)?;
-                out.push(format!("CHAIN_1_CHAIN_RPC_URL={v}"));
-                out.push(format!("CHAIN_1_CHAIN_WS_URL={}", ws_of(&v)));
-                let sim = self.services.sim.as_ref().ok_or_else(|| {
-                    mismatch("export-env daloc (venue profile) requires [services.sim]")
-                })?;
-                out.push(format!("HL_INFO_API_URL=http://venue-sim:{}", sim.info.port));
-                out.push(format!(
-                    "VENUE_CONTROL_URL=http://venue-sim:{}",
-                    sim.control.port
-                ));
-                out.push(format!(
-                    "VENUE_ACCOUNT_FEEDS=http://venue-sim:{}",
-                    sim.info.port
-                ));
-                out.push(format!(
-                    "VENUE_RATE_FEEDS=http://venue-sim:{}",
-                    sim.info.port
-                ));
-                if let Some(port) = self.services.venue.as_ref().map(|v| v.http.port) {
-                    out.push(format!("VENUE_ADMIN_URL=http://engine:{port}"));
-                }
-            }
-        }
+        let mut out = match self.instance.profile {
+            Profile::Ethereum => self.daloc_env_ethereum()?,
+            Profile::Venue => self.daloc_env_venue()?,
+        };
         // The bridge spans both mirrors: its Iris base is part of the block
         // whichever profile the instance carries (plan §15.4 — the base, their
         // client appends /v2/messages/... itself).
-        if let Some(cctp) = &self.services.cctp {
+        if let Some(cctp) = &self.services.cctp_bridge {
             out.push(format!("IRIS_API_URL=http://cctp-bridge:{}", cctp.iris.port));
         }
         Ok(out)
+    }
+
+    /// The ethereum profile's daloc block: the first chain's keys.
+    fn daloc_env_ethereum(&self) -> Result<Vec<String>, ConfigError> {
+        let engine = self.services.engine.as_ref().ok_or_else(|| {
+            mismatch("export-env daloc (ethereum profile) requires [services.engine]")
+        })?;
+        let t_url = engine.anvil.t_url.as_deref().ok_or_else(|| {
+            mismatch(
+                "export-env daloc (ethereum profile) requires [services.engine.anvil].t_url",
+            )
+        })?;
+        let t = resolved("ANVIL_T_URL", t_url)?;
+        Ok(vec![
+            format!("CHAIN_RPC_URL={t}"),
+            format!("CHAIN_WS_URL={}", ws_of(&t)),
+            format!("MIRROR_ADMIN_URL=http://engine:{}", engine.http.port),
+        ])
+    }
+
+    /// The venue profile's daloc block: the `CHAIN_1_`-prefixed second-chain
+    /// keys and the simulator's URLs.
+    fn daloc_env_venue(&self) -> Result<Vec<String>, ConfigError> {
+        let engine = self.services.engine.as_ref().ok_or_else(|| {
+            mismatch("export-env daloc (venue profile) requires [services.engine]")
+        })?;
+        let v_url = engine.anvil.v_url.as_deref().ok_or_else(|| {
+            mismatch("export-env daloc (venue profile) requires [services.engine.anvil].v_url")
+        })?;
+        let v = resolved("ANVIL_V_URL", v_url)?;
+        let sim = self.services.venue_sim.as_ref().ok_or_else(|| {
+            mismatch("export-env daloc (venue profile) requires [services.venue_sim]")
+        })?;
+        Ok(vec![
+            format!("CHAIN_1_CHAIN_RPC_URL={v}"),
+            format!("CHAIN_1_CHAIN_WS_URL={}", ws_of(&v)),
+            format!("HL_INFO_API_URL=http://venue-sim:{}", sim.info.port),
+            format!("VENUE_CONTROL_URL=http://venue-sim:{}", sim.control.port),
+            format!("VENUE_ACCOUNT_FEEDS=http://venue-sim:{}", sim.info.port),
+            format!("VENUE_RATE_FEEDS=http://venue-sim:{}", sim.info.port),
+            format!("VENUE_ADMIN_URL=http://engine:{}", engine.http.port),
+        ])
     }
 }
 
@@ -441,33 +448,33 @@ fn mismatch(what: &str) -> ConfigError {
 /// a path), the deterministic attester seed, and ordered gas thresholds.
 fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
     if cctp.state_dir.as_os_str().is_empty() {
-        issues.push("services.cctp.state_dir must not be empty".into());
+        issues.push("services.cctp_bridge.state_dir must not be empty".into());
     }
-    check_http_url("services.cctp.t_url", &cctp.t_url, issues);
-    check_http_url("services.cctp.v_url", &cctp.v_url, issues);
+    check_http_url("services.cctp_bridge.t_url", &cctp.t_url, issues);
+    check_http_url("services.cctp_bridge.v_url", &cctp.v_url, issues);
     // After `${VAR}` expansion the value must be the 32-byte hex key; a raw
     // reference is checked once the deployment expands it.
     if !cctp.relay_key.contains("${") && !looks_like_secret(&cctp.relay_key) {
         issues.push(
-            "services.cctp.relay_key must be a 32-byte hex key (or a ${VAR} reference), \
+            "services.cctp_bridge.relay_key must be a 32-byte hex key (or a ${VAR} reference), \
              never a path"
                 .into(),
         );
     }
     if cctp.attester_seed.trim().is_empty() {
-        issues.push("services.cctp.attester_seed must not be empty".into());
+        issues.push("services.cctp_bridge.attester_seed must not be empty".into());
     }
     if cctp.poll_interval_ms == 0 {
-        issues.push("services.cctp.poll_interval_ms must be > 0".into());
+        issues.push("services.cctp_bridge.poll_interval_ms must be > 0".into());
     }
     if cctp.scan_chunk_blocks == 0 {
-        issues.push("services.cctp.scan_chunk_blocks must be > 0".into());
+        issues.push("services.cctp_bridge.scan_chunk_blocks must be > 0".into());
     }
     if cctp.receipt_timeout_secs == 0 {
-        issues.push("services.cctp.receipt_timeout_secs must be > 0".into());
+        issues.push("services.cctp_bridge.receipt_timeout_secs must be > 0".into());
     }
     if cctp.balance_critical_wei >= cctp.balance_low_wei {
-        issues.push("services.cctp.balance_critical_wei must be below balance_low_wei".into());
+        issues.push("services.cctp_bridge.balance_critical_wei must be below balance_low_wei".into());
     }
 }
 
@@ -505,11 +512,50 @@ fn looks_like_secret(value: &str) -> bool {
     hex.len() >= 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// The ethereum engine's section: URLs, the beacon list, the source-sync
-/// boundary, the state dirs, and the feed bridge.
-fn check_engine(eng: &EngineSection, issues: &mut Vec<String>) {
-    check_http_url("services.engine.anvil.m_url", &eng.anvil.m_url, issues);
-    check_http_url("services.engine.anvil.t_url", &eng.anvil.t_url, issues);
+/// The profile's anvil shape: exactly the profile's endpoints, each a
+/// parseable http URL.
+fn check_engine_anvil(profile: Profile, anvil: &EngineAnvil, issues: &mut Vec<String>) {
+    match profile {
+        Profile::Ethereum => {
+            for (key, url) in [
+                ("services.engine.anvil.m_url", &anvil.m_url),
+                ("services.engine.anvil.t_url", &anvil.t_url),
+            ] {
+                match url {
+                    Some(url) => check_http_url(key, url, issues),
+                    None => issues.push(format!("profile \"ethereum\" requires [{key}]")),
+                }
+            }
+            if anvil.v_url.is_some() {
+                issues.push(
+                    "profile \"ethereum\" must not carry [services.engine.anvil].v_url".into(),
+                );
+            }
+        }
+        Profile::Venue => {
+            match &anvil.v_url {
+                Some(url) => check_http_url("services.engine.anvil.v_url", url, issues),
+                None => issues
+                    .push("profile \"venue\" requires [services.engine.anvil].v_url".into()),
+            }
+            for (key, present) in [
+                ("m_url", anvil.m_url.is_some()),
+                ("t_url", anvil.t_url.is_some()),
+            ] {
+                if present {
+                    issues.push(format!(
+                        "profile \"venue\" must not carry [services.engine.anvil].{key}"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// The engine's section: the profile's anvil shape, the beacon list, the
+/// source-sync boundary, the state dirs, and the feed bridge.
+fn check_engine(profile: Profile, eng: &EngineSection, issues: &mut Vec<String>) {
+    check_engine_anvil(profile, &eng.anvil, issues);
     for (i, url) in eng.blobs.beacon_urls.iter().enumerate() {
         check_http_url(
             &format!("services.engine.blobs.beacon_urls[{i}]"),
@@ -569,37 +615,22 @@ fn check_feed_bridge(fb: &FeedBridgeSection, issues: &mut Vec<String>) {
     }
 }
 
-/// The venue engine's section: the chain URL, the state dir, the cadence and
-/// the write chunk size.
-fn check_venue(venue: &VenueSection, issues: &mut Vec<String>) {
-    check_http_url("services.venue.anvil_url", &venue.anvil_url, issues);
-    if venue.state_dir.as_os_str().is_empty() {
-        issues.push("services.venue.state_dir must not be empty".into());
-    }
-    if venue.poll_interval_ms == 0 {
-        issues.push("services.venue.poll_interval_ms must be > 0".into());
-    }
-    if venue.chunk_size == 0 {
-        issues.push("services.venue.chunk_size must be > 0".into());
-    }
-}
-
 /// The simulator's section: the state dir, at least one market, the cadence
 /// and the optional chain URLs.
-fn check_sim(sim: &SimSection, issues: &mut Vec<String>) {
+fn check_venue_sim(sim: &VenueSimSection, issues: &mut Vec<String>) {
     if sim.state_dir.as_os_str().is_empty() {
-        issues.push("services.sim.state_dir must not be empty".into());
+        issues.push("services.venue_sim.state_dir must not be empty".into());
     }
     if sim.markets.is_empty() {
-        issues.push("services.sim.markets must name at least one market".into());
+        issues.push("services.venue_sim.markets must name at least one market".into());
     }
     if sim.poll_interval_ms == 0 {
-        issues.push("services.sim.poll_interval_ms must be > 0".into());
+        issues.push("services.venue_sim.poll_interval_ms must be > 0".into());
     }
     if let Some(url) = &sim.engine_admin_url {
-        check_http_url("services.sim.engine_admin_url", url, issues);
+        check_http_url("services.venue_sim.engine_admin_url", url, issues);
     }
     if let Some(url) = &sim.anvil_url {
-        check_http_url("services.sim.anvil_url", url, issues);
+        check_http_url("services.venue_sim.anvil_url", url, issues);
     }
 }

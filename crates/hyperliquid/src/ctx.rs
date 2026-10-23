@@ -7,7 +7,7 @@
 //! build never sees the ethereum sections and vice versa.
 use crate::error::Result;
 use crate::metrics::VenueMetrics;
-use mirror_config::{ChainVenue, VenueSection};
+use mirror_config::{ChainVenue, EngineSection};
 use mirror_devnet::admin::AdminSurface;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::source::Source;
@@ -20,8 +20,10 @@ use std::time::Duration;
 pub struct Ctx {
     /// The venue chain's section (the fork source).
     pub(crate) chain: ChainVenue,
-    /// The venue service's section (cadence, chunk size, probes, http).
-    pub(crate) venue: VenueSection,
+    /// The engine's section (cadence, chunk size, probes, http) — the same
+    /// `[services.engine]` section the ethereum engine carries, read for this
+    /// profile's fields.
+    pub(crate) engine: EngineSection,
     /// Anvil V (the devnet chain; chain id 999).
     pub(crate) v: Rpc,
     /// The fork source V derives from (the unshadow re-sync truth at the pin).
@@ -47,23 +49,23 @@ impl Ctx {
     /// correct is fallible here (clients, state files): a missing boundary is
     /// a boot error naming it, never a degraded start.
     pub fn new(mut cfg: mirror_config::Instance, source_url: &str, v_url: &str) -> Result<Self> {
-        let (chain, venue) = cfg.take_venue()?;
+        let (chain, engine) = cfg.take_venue()?;
         // A fixed, generous per-call budget: V's chain is a local anvil and the
         // source is one HTTP client. The ethereum profile's timeout is
         // configurable because its reth queries race the sync; no measured need
         // justifies a second knob here.
         let timeout = Duration::from_secs(30);
         let plane = Plane::open(
-            &venue.state_dir,
-            venue.state_dir.join("journal"),
-            venue.journal_blocks,
-            &venue.fixture_addresses,
+            &engine.state_dir,
+            engine.journal.dir.clone(),
+            engine.journal.blocks,
+            &engine.fixture_addresses,
         )?;
         let source_rpc = Rpc::new(source_url, timeout)?;
         let pin = Arc::new(AtomicU64::new(0));
         Ok(Self {
             chain,
-            venue,
+            engine,
             v: Rpc::new(v_url, timeout)?,
             source: Arc::new(crate::venue_source::VenueSource::new(
                 source_rpc.clone(),
@@ -82,7 +84,7 @@ impl Ctx {
     /// journal that is exactly the engine's own writes).
     pub fn admin(&self) -> AdminSurface<'_> {
         self.plane
-            .admin(&self.v, self.source.as_ref(), self.venue.chunk_size, true)
+            .admin(&self.v, self.source.as_ref(), self.engine.loops.chunk_size, true)
     }
 
     pub fn cursor_v(&self) -> Result<Option<ChainCursor>> {

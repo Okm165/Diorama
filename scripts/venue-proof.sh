@@ -171,8 +171,8 @@ stream = bytes.fromhex(
     "0100000d"
     + f"{system:064x}"
     + "00" * 32                                   # subAccount
-    + "ff" * 4 + "00" * 28                        # sourceDex = u32::MAX
-    + "ff" * 4 + "00" * 28                        # destinationDex = u32::MAX
+    + "00" * 28 + "ff" * 4                        # sourceDex = u32::MAX (ABI word)
+    + "00" * 28 + "ff" * 4                        # destinationDex = u32::MAX (ABI word)
     + f"{index:064x}"                             # token = PURR's spot index
     + f"{wei:064x}"                               # wei (core, 5-dec)
 )

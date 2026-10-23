@@ -9,18 +9,17 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// `[services]`: one section per service; each service reads its own (§19.3).
-/// Exactly one profile's sections are present (the instance's `check` pins the
-/// coherence): the ethereum profile carries `[services.engine]`, the venue
-/// profile carries `[services.venue]` (the engine) and `[services.sim]` (the
-/// simulator). `[services.cctp]` is cross-cutting: it is optional under
-/// either profile (the bridge spans both mirrors, §15).
+/// The engine's key is the same for both profiles — what differs is the
+/// profile's shape (`[services.engine.anvil]` carries M + T or V, and the
+/// coherence check requires exactly the profile's fields). The venue's
+/// simulator is `[services.venue_sim]`; `[services.cctp_bridge]` is element 3,
+/// optional under either profile (the bridge spans both mirrors, §15).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Services {
     pub engine: Option<EngineSection>,
-    pub venue: Option<VenueSection>,
-    pub sim: Option<SimSection>,
-    pub cctp: Option<CctpSection>,
+    pub venue_sim: Option<VenueSimSection>,
+    pub cctp_bridge: Option<CctpSection>,
 }
 
 /// Who drives relays: the relayer's own tick (`auto`) or only the control
@@ -32,7 +31,7 @@ pub enum RelayerMode {
     Manual,
 }
 
-/// `[services.cctp]`: the CCTP bridge (plan §15): Iris-compatible API (8095)
+/// `[services.cctp_bridge]`: the CCTP bridge (plan §15): Iris-compatible API (8095)
 /// + control API (8096), one watcher per chain and one relayer.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -82,10 +81,10 @@ pub struct CctpSection {
     pub v_start_block: Option<u64>,
 }
 
-/// `[services.sim]`: the venue simulator (info + control API).
+/// `[services.venue_sim]`: the venue simulator (info + control API).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct SimSection {
+pub struct VenueSimSection {
     /// Simulator state root: accounts + market overrides (`sim.json`).
     pub state_dir: PathBuf,
     /// The markets whose books are cached and whose contexts are tracked; the
@@ -108,35 +107,12 @@ pub struct SimSection {
     pub anvil_url: Option<String>,
 }
 
-/// `[services.venue]`: the Venue Mirror's fork driver.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct VenueSection {
-    /// Devnet state root: cursors, shadow registry, journal.
-    pub state_dir: PathBuf,
-    /// The fork-mode anvil V (chain id 999).
-    pub anvil_url: String,
-    pub poll_interval_ms: u64,
-    /// Max JSON-RPC batch size for cheatcode writes (deal, restore).
-    pub chunk_size: usize,
-    /// The journal's before-value ring (the rewind window).
-    pub journal_blocks: u64,
-    pub http: HttpSection,
-    /// At-pin probes: devnet-owned targets are skipped and counted (COW means
-    /// that state is the devnet's, not the fork base's).
-    pub probes: Vec<Probe>,
-    /// Canonical addresses the devnet's fixture deploy replaces on V via
-    /// `anvil_setCode` (daloc's chain-999 installs: USDC, WETH, WBTC, DAI,
-    /// WHYPE, wstHYPE — their deploy installs the Ethereum-family mocks on
-    /// every chain and adds WHYPE/wstHYPE on 999): whole-account owned, so the
-    /// at-pin probes skip them (counted) instead of false-alarming on a mock.
-    /// The venue has no parent stream to clobber, so probe honesty is the
-    /// whole job of this list here.
-    #[serde(default)]
-    pub fixture_addresses: Vec<Address>,
-}
-
-/// `[services.engine]`: the Mainnet Mirror engine.
+/// `[services.engine]`: the mirror engine — one section for both profiles
+/// (plan §19.3's grammar). What differs by profile is the anvil endpoints
+/// (`[services.engine.anvil]`: M + T or V) and which sub-sections the
+/// profile's code reads; `loops`/`journal`/`verifier` are the shared homes —
+/// the venue's cadence, write chunk and journal ring are the same knobs under
+/// the same keys.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EngineSection {
@@ -201,12 +177,16 @@ pub struct FeedSection {
     pub source: Address,
 }
 
-/// The engine's anvil clients (M = verified replay chain, T = devnet chain).
+/// `[services.engine.anvil]`: the profile's anvil endpoints — M (the verified
+/// replay chain) and T (the devnet chain) for the ethereum profile, V (the
+/// fork) for the venue's. The coherence check requires exactly the profile's
+/// set; the names mirror the deployment wiring (`ANVIL_{M,T,V}_URL`).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EngineAnvil {
-    pub m_url: String,
-    pub t_url: String,
+    pub m_url: Option<String>,
+    pub t_url: Option<String>,
+    pub v_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -256,7 +236,10 @@ pub enum OnDivergence {
 pub struct VerifierSection {
     pub enabled: bool,
     pub drift_sample_keys: usize,
-    /// State probes re-run against M after every repair.
+    /// State probes: re-run against M after every repair (ethereum), and at
+    /// the pin against the fork source (venue) — devnet-owned targets are
+    /// skipped and counted (COW means that state is the devnet's, not the
+    /// fork base's).
     pub probes: Vec<Probe>,
 }
 
@@ -296,7 +279,9 @@ pub struct JournalSection {
 #[serde(deny_unknown_fields)]
 pub struct BlobsSection {
     pub enabled: bool,
-    /// Beacon-API base URLs, tried in order (local Lighthouse first).
+    /// Beacon-API base URLs, tried in order (local Lighthouse first); empty
+    /// for a profile with no beacon sources (the venue's chain has none).
+    #[serde(default)]
     pub beacon_urls: Vec<String>,
 }
 

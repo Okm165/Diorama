@@ -7,11 +7,12 @@
 # undocumented. The prefixes are the metric namespace: any quoted string using
 # them is part of the surface.
 #
-# A token ending in `_` is a prefix, not a name; crate names are not metrics.
+# A token ending in `_` is a prefix, not a name; crate and service-section
+# names are not metrics.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-crate_names="mirror_devnet mirror_anvil mirror_config mirror_ethereum mirror_hyperliquid mirror_cctp"
+crate_names="mirror_devnet mirror_anvil mirror_config mirror_ethereum mirror_hyperliquid mirror_cctp venue_sim cctp_bridge"
 tokens=$(grep -rhoE '(mirror|venue|feed_bridge|cctp)_[a-z0-9_]+' docs/*.md | sort -u)
 fail=0
 checked=0

@@ -63,7 +63,7 @@ pub async fn boot(ctx: &Ctx) -> Result<()> {
 
 /// The steady-state loop (boot has already run).
 pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
-    let poll = Duration::from_millis(ctx.venue.poll_interval_ms.max(200));
+    let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     loop {
         if ctx.plane.is_halted() {
             tokio::time::sleep(poll).await;
@@ -275,7 +275,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     // a fresh pin drops marks and values, the same pin re-applies the recorded
     // writes; the journal goes either way. The transition's logs are the shared
     // module's; the counters are V's (epoch transitions, not resets found).
-    match mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.v, ctx.venue.chunk_size, pin).await? {
+    match mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.v, ctx.engine.loops.chunk_size, pin).await? {
         mirror_devnet::epoch::Epoch::Steady => {}
         mirror_devnet::epoch::Epoch::Cleared => {
             ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
@@ -328,7 +328,7 @@ pub async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
 /// venue side). The route reports the run; `/metrics` carries the totals.
 pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> {
     let skipped_all = || ProbeOutcome {
-        skipped: ctx.venue.probes.len(),
+        skipped: ctx.engine.verifier.probes.len(),
         ..Default::default()
     };
     let Some(pin) = pin else {
@@ -338,18 +338,18 @@ pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOu
     let source_head = ctx.source_rpc.block_number().await?;
     if pin != source_head {
         ctx.venue_metrics
-            .add(&ctx.venue_metrics.probe_skipped, ctx.venue.probes.len() as u64);
+            .add(&ctx.venue_metrics.probe_skipped, ctx.engine.verifier.probes.len() as u64);
         tracing::info!(
             pin,
             source_head,
-            skipped = ctx.venue.probes.len(),
+            skipped = ctx.engine.verifier.probes.len(),
             "at-pin probes skipped: the source serves its latest state (measured); the pin is not the source head"
         );
         return Ok(skipped_all());
     }
     // The venue has no clock offset (the plane's field is shape-only: nothing
     // re-aligns V's clock), so the probes never take the offset path.
-    let probes = ProbeRunner::devnet(&ctx.venue.probes, &ctx.plane.shadow, false)
+    let probes = ProbeRunner::devnet(&ctx.engine.verifier.probes, &ctx.plane.shadow, false)
         .parity(&ctx.source_rpc, pin, &ctx.v)
         .await?;
     count_probes(ctx, probes, pin, source_head).await

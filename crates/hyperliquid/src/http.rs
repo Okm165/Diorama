@@ -101,7 +101,7 @@ fn app(ctx: Arc<Ctx>) -> Router {
 /// Bind the configured address and serve the control surface until the
 /// process is torn down.
 pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
-    let addr = format!("{}:{}", ctx.venue.http.addr, ctx.venue.http.port);
+    let addr = format!("{}:{}", ctx.engine.http.addr, ctx.engine.http.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|source| Error::Bind {
@@ -155,7 +155,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
         shadowed_slots: shadow.slot_count(),
         shadowed_accounts: shadow.accounts.len(),
         shadowed: shadow.shadowed_addresses(),
-        probes: ctx.venue.probes.len(),
+        probes: ctx.engine.verifier.probes.len(),
         source: ctx.chain.source_url.clone(),
     }))
 }

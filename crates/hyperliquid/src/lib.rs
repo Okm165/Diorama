@@ -65,11 +65,13 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
     // references instead of failing on them; the engine's own sections are
     // then required here, by name (the cctp bridge's pattern).
     let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
-    if let (Some(chain), Some(venue)) = (cfg.chains.venue.as_ref(), cfg.services.venue.as_ref()) {
-        let state_dir = venue.state_dir.to_string_lossy().to_string();
+    if let (Some(chain), Some(engine)) = (cfg.chains.venue.as_ref(), cfg.services.engine.as_ref())
+    {
+        let state_dir = engine.state_dir.to_string_lossy().to_string();
+        let v_url = engine.anvil.v_url.as_deref().unwrap_or_default();
         mirror_config::require_resolved_logged(
             "venue engine wiring",
-            &[&chain.source_url, &venue.anvil_url, &state_dir],
+            &[&chain.source_url, v_url, &state_dir],
             &unresolved,
         )?;
     }

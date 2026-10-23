@@ -20,16 +20,8 @@ source_url = "${HL_RPC_URL}"
 api_url = "https://api.hyperliquid.xyz"
 ws_url = "wss://api.hyperliquid.xyz/ws"
 
-[services.venue]
+[services.engine]
 state_dir = "${STATE_DIR}"
-anvil_url = "${ANVIL_V_URL}"
-# At-pin probes: V vs the fork source at the pin, devnet-owned targets
-# skipped and counted. USDC's totalSupply is the one canonical HyperEVM
-# fact worth a standing check (Circle's native USDC, the CCTP burn token -
-# §15.1; `evmContract` in spotMeta is a venue link, never this contract).
-probes = [
-  { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
-]
 
 # Canonical addresses daloc's fixture deploy replaces on V via `anvil_setCode`
 # (their `deploy-contracts.sh` installs MockERC20Fixed over the Ethereum-family
@@ -46,7 +38,24 @@ fixture_addresses = [
   "0x94e8396e0869c9F2200760aF0621aFd240E1CF38", # wstHYPE
 ]
 
-[services.venue.http]
+[services.engine.anvil]
+v_url = "${ANVIL_V_URL}"
+
+# The journal's before-value ring (the rewind window) lives beside the
+# engine's state; the cadence and write chunk are the shared `loops` defaults.
+[services.engine.journal]
+dir = "${STATE_DIR}/journal"
+
+# At-pin probes: V vs the fork source at the pin, devnet-owned targets
+# skipped and counted. USDC's totalSupply is the one canonical HyperEVM
+# fact worth a standing check (Circle's native USDC, the CCTP burn token -
+# §15.1; `evmContract` in spotMeta is a venue link, never this contract).
+[services.engine.verifier]
+probes = [
+  { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
+]
+
+[services.engine.http]
 addr = "0.0.0.0"
 port = 8080
 
@@ -54,17 +63,17 @@ port = 8080
 # state root (accounts + overrides); the info API is what daloc reads, the
 # control API drives scenarios. engine_admin_url lets /control/epoch_new
 # re-pin V through the engine's /admin/epoch.
-[services.sim]
+[services.venue_sim]
 state_dir = "${SIM_STATE_DIR}"
 markets = ["BTC", "ETH", "HYPE", "SOL"]
 engine_admin_url = "${ENGINE_ADMIN_URL}"
 anvil_url = "${ANVIL_V_URL}"
 
-[services.sim.info]
+[services.venue_sim.info]
 addr = "0.0.0.0"
 port = 8090
 
-[services.sim.control]
+[services.venue_sim.control]
 addr = "0.0.0.0"
 port = 8091
 
@@ -74,7 +83,7 @@ port = 8091
 # two listeners. `relay_key` is the funded relay wallet's hex key (a ${VAR}
 # reference — never a path), `attester_seed` derives the devnet attester
 # deterministically (the same seed always installs the same key, §15.3).
-[services.cctp]
+[services.cctp_bridge]
 state_dir = "${CCTP_STATE_DIR}"
 t_url = "${T_RPC_URL}"
 v_url = "${ANVIL_V_URL}"
@@ -86,10 +95,10 @@ attester_seed = "mirror-cctp-devnet-attester"
 # t_start_block = 0
 # v_start_block = 0
 
-[services.cctp.iris]
+[services.cctp_bridge.iris]
 addr = "0.0.0.0"
 port = 8095
 
-[services.cctp.control]
+[services.cctp_bridge.control]
 addr = "0.0.0.0"
 port = 8096

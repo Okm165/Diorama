@@ -599,10 +599,14 @@ or an unresolvable `${VAR}` names itself. `mirror-config check` validates an
 instance file (CI + boot gate).
 
 ```toml
-[instance] { name, namespace, profile }        # profile selects the sections
+[instance] { name, namespace, profile }        # profile selects the shape
 [chains.l1] { kind = "ethereum", source_url = "${RETH_URL}", follow,
               follow_margin_blocks, fork_offset }   # the offset's single home
+[chains.venue] { kind = "hyperliquid", source_url = "${HL_RPC_URL}",
+              api_url, ws_url }                    # the venue profile's chain
 [services.engine] { state_dir = "${STATE_DIR}", fixture_addresses[] }
+[services.engine.anvil] { m_url = "${ANVIL_M_URL}", t_url = "${ANVIL_T_URL}" }
+              # ... or v_url = "${ANVIL_V_URL}" (the venue profile)
 [services.engine.reth] { request_timeout_secs }
 [services.engine.source_sync] { enabled, interval_ms, max_per_pass,
               engine_url = "${ENGINE_API_URL}", jwt_path = "${JWT_PATH}" }
@@ -613,6 +617,12 @@ instance file (CI + boot gate).
 [services.engine.journal] { dir = "${STATE_DIR}/journal", blocks }
 [services.engine.blobs] { enabled, beacon_urls = ["${BEACON_URL}"] }
 [services.engine.http] { addr, port }
+[services.venue_sim] { state_dir, markets, poll_interval_ms, engine_admin_url,
+              anvil_url }                # + .info/.control listener sections
+[services.cctp_bridge] { state_dir, t_url, v_url, relay_key, attester_seed,
+              poll_interval_ms, finality_delay_secs, expiration_blocks,
+              scan_chunk_blocks, receipt_timeout_secs, relayer,
+              balance_low_wei, balance_critical_wei }   # + .iris/.control
 [watchlist] [ { address, note } ]   # all slots of a watched account sync to T
 ```
 
@@ -853,14 +863,20 @@ one block per applied parent block, V's driver mines a non-empty pool
 
 **Profile-coherent config.** The instance file is the deployment's single home
 (`config/instances/{mainnet-mirror,venue-mirror}.toml`, layered over
-`config/defaults.toml`). `profile = "ethereum"` requires `[chains.l1]` +
-`[services.engine]` and forbids the venue sections; `profile = "venue"`
-requires `[chains.venue]` + `[services.venue]` and forbids `[chains.l1]` /
-`[services.engine]` - the loader prunes the other profile's section tree from
-the defaults before merging (without that, a venue instance would inherit the
-ethereum engine's stub and fail deserialization), and prunes optional services
-(the simulator) when the instance file does not carry the section. Unknown keys
-are errors at every level (`deny_unknown_fields`).
+`config/defaults.toml`). `[services.engine]` is the same key for both profiles -
+what differs is the profile's shape: `[services.engine.anvil]` carries
+`m_url` + `t_url` for ethereum or `v_url` for the venue (the check requires
+exactly the profile's set), and the venue's driver reads the shared
+`loops`/`journal`/`verifier` sub-sections, so the cadence, write chunk and
+journal ring live there once for both profiles. `profile = "ethereum"` requires
+`[chains.l1]` + `[services.engine]` and forbids `[chains.venue]` /
+`[services.venue_sim]`; `profile = "venue"` requires `[chains.venue]` +
+`[services.engine]` and forbids `[chains.l1]` - the loader prunes the other
+profile's chain and the venue's simulator from the defaults before merging
+(without that, a venue instance would inherit the ethereum stub and fail
+deserialization), and prunes optional services (the simulator, the bridge) when
+the instance file does not carry the section. Unknown keys are errors at every
+level (`deny_unknown_fields`).
 
 ## The venue simulator
 
