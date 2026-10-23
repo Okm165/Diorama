@@ -1,5 +1,5 @@
 //! The venue engine's HTTP surface: health, status, metrics, and the shared
-//! admin routes (deal / shadow / pause / resume).
+//! admin routes (deal / shadow / rewind / pause / resume / epoch / probes).
 //!
 //! The admin *semantics* live in `mirror-devnet`'s [`AdminSurface`] (shared
 //! with the Mainnet Mirror); this module owns the routes and the HTTP mapping
@@ -30,6 +30,7 @@ use mirror_devnet::admin::{
     ShadowRequest,
 };
 use mirror_devnet::deal::DealRequest;
+use mirror_devnet::metrics::Registry as _;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -110,7 +111,7 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
 }
 
 async fn healthz(State(ctx): State<Arc<Ctx>>) -> impl IntoResponse {
-    if ctx.is_halted() {
+    if ctx.plane.is_halted() {
         (StatusCode::SERVICE_UNAVAILABLE, "halted")
     } else {
         (StatusCode::OK, "ok")
@@ -132,7 +133,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     // never fails it - /status is a diagnostic, not a fact source.
     let head = ctx.v.block_number().await.unwrap_or(0);
     let cursor = ctx.cursor_v()?;
-    let shadow = ctx.shadow.lock()?;
+    let shadow = ctx.plane.shadow.lock()?;
     Ok(Json(StatusResponse {
         head,
         cursor: cursor.as_ref().map(|c| c.block),
@@ -140,8 +141,8 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
             0 => None,
             p => Some(p),
         },
-        epoch_pin: ctx.state.lock()?.data.epoch_pin,
-        halted: ctx.is_halted(),
+        epoch_pin: ctx.plane.state.lock()?.data.epoch_pin,
+        halted: ctx.plane.is_halted(),
         shadowed_slots: shadow.slot_count(),
         shadowed_accounts: shadow.accounts.len(),
         shadowed: shadow.shadowed_addresses(),
@@ -154,7 +155,7 @@ async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
     // The same composition as the ethereum engine: this profile's own set,
     // then the shared admin gauges (one definition — `Metrics::render`).
     let mut out = ctx.venue_metrics.render();
-    out.push_str(&ctx.metrics.render());
+    out.push_str(&ctx.plane.metrics.render());
     out
 }
 
@@ -166,7 +167,9 @@ async fn admin_resume(State(ctx): State<Arc<Ctx>>) -> Json<ResumeResponse> {
 async fn admin_pause(State(ctx): State<Arc<Ctx>>) -> Json<PauseResponse> {
     ctx.admin().pause();
     Json(PauseResponse { paused: true })
-}/// `/admin/rewind`: undo the engine's journaled writes (the deal faucet's
+}
+
+/// `/admin/rewind`: undo the engine's journaled writes (the deal faucet's
 /// silent storage writes) over the last `blocks` scanned blocks, newest first.
 async fn admin_rewind(
     State(ctx): State<Arc<Ctx>>,

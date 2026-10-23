@@ -30,6 +30,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadStatusEnum};
+use mirror_devnet::metrics::Registry as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -49,14 +50,14 @@ pub async fn source_sync_loop(ctx: Arc<Ctx>) {
         match top_up(&ctx, &engine).await {
             Ok(0) => tokio::time::sleep(interval).await,
             Ok(n) => {
-                ctx.metrics
+                ctx.eth_metrics
                     .add(&ctx.eth_metrics.source_sync_delivered, n as u64);
                 if last_report.elapsed() > Duration::from_secs(5) {
                     if let (Some(cl_head), Ok(reth_head)) = (
                         cl_head_el_block(&ctx, &mut head_cache).await,
                         ctx.reth.block_number().await,
                     ) {
-                        ctx.metrics.set(
+                        ctx.eth_metrics.set(
                             &ctx.eth_metrics.source_sync_gap_blocks,
                             cl_head.saturating_sub(reth_head),
                         );
@@ -107,66 +108,97 @@ async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<u
     let el = ctx.reth.block_by_number(el_head, false).await?;
     let cl_head = ctx.beacon.head_slot().await?;
     // First slot whose payload can follow the EL head.
-    let mut slot =
-        (el.header.timestamp.saturating_sub(MAINNET_GENESIS_TIME)) / SECONDS_PER_SLOT + 1;
+    let mut slot = first_payload_slot(el.header.timestamp);
     if slot > cl_head {
         return Ok(0);
     }
     let budget = ctx.engine.source_sync.max_per_pass.max(1) as usize;
     let mut delivered = 0usize;
     while slot <= cl_head && delivered < budget {
-        let Some(block) = ctx.beacon.block_by_slot(slot).await? else {
-            slot += 1; // missed slot
-            continue;
-        };
-        let body = &block.data.message.body;
-        let Some(payload) = body.payload() else {
-            slot += 1; // no payload in this slot
-            continue;
-        };
-        let number = payload.payload_inner.payload_inner.block_number;
-        if number <= el_head {
-            slot += 1; // already executed
-            continue;
-        }
-        if number != el_head + delivered as u64 + 1 {
-            return Err(Error::TopUpGap {
-                el_head,
-                number,
-                slot,
-            });
-        }
-        let payload_hash = payload.payload_inner.payload_inner.block_hash;
-        let versioned_hashes = body.versioned_hashes();
-        let requests = body.requests();
-        let status = engine
-            .new_payload(
-                payload,
-                &versioned_hashes,
-                block.data.message.parent_root,
-                requests.as_ref(),
-            )
-            .await?;
-        match &status.status {
-            PayloadStatusEnum::Valid | PayloadStatusEnum::Accepted => {}
-            other => {
-                return Err(Error::PayloadRejected {
+        match deliver_slot(ctx, engine, slot, el_head, delivered).await? {
+            SlotOutcome::Skipped => slot += 1,
+            SlotOutcome::Gap { number } => {
+                return Err(Error::TopUpGap {
+                    el_head,
                     number,
-                    status: other.as_str().to_string(),
-                    message: other.validation_error().unwrap_or_default().to_string(),
+                    slot,
                 })
             }
+            SlotOutcome::Delivered => {
+                delivered += 1;
+                slot += 1;
+            }
         }
-        engine
-            .forkchoice_updated(&ForkchoiceState {
-                head_block_hash: payload_hash,
-                safe_block_hash: B256::ZERO,
-                finalized_block_hash: B256::ZERO,
-            })
-            .await?;
-        tracing::debug!(block = number, slot, "top-up delivered");
-        delivered += 1;
-        slot += 1;
     }
     Ok(delivered)
+}
+
+/// The first slot whose payload can follow the EL head: the EL head's own slot
+/// + 1.
+fn first_payload_slot(el_timestamp: u64) -> u64 {
+    (el_timestamp.saturating_sub(MAINNET_GENESIS_TIME)) / SECONDS_PER_SLOT + 1
+}
+
+/// What one slot yielded.
+enum SlotOutcome {
+    /// A missed slot, a slot without a payload, or an already-executed payload:
+    /// the next slot.
+    Skipped,
+    /// A payload that does not follow the EL head (a gap): the caller names it.
+    Gap { number: u64 },
+    /// A payload delivered (`newPayload` accepted + forkchoice advanced).
+    Delivered,
+}
+
+/// Deliver one slot's payload: skip empty/missed/executed slots, report a gap,
+/// submit `newPayload` and advance the forkchoice.
+async fn deliver_slot(
+    ctx: &Ctx,
+    engine: &crate::engine_api::EngineClient,
+    slot: u64,
+    el_head: u64,
+    delivered: usize,
+) -> Result<SlotOutcome> {
+    let Some(block) = ctx.beacon.block_by_slot(slot).await? else {
+        return Ok(SlotOutcome::Skipped); // missed slot
+    };
+    let body = &block.data.message.body;
+    let Some(payload) = body.payload() else {
+        return Ok(SlotOutcome::Skipped); // no payload in this slot
+    };
+    let number = payload.payload_inner.payload_inner.block_number;
+    if number <= el_head {
+        return Ok(SlotOutcome::Skipped); // already executed
+    }
+    if number != el_head + delivered as u64 + 1 {
+        return Ok(SlotOutcome::Gap { number });
+    }
+    let payload_hash = payload.payload_inner.payload_inner.block_hash;
+    let status = engine
+        .new_payload(
+            payload,
+            &body.versioned_hashes(),
+            block.data.message.parent_root,
+            body.requests().as_ref(),
+        )
+        .await?;
+    match &status.status {
+        PayloadStatusEnum::Valid | PayloadStatusEnum::Accepted => {}
+        other => {
+            return Err(Error::PayloadRejected {
+                number,
+                status: other.as_str().to_string(),
+                message: other.validation_error().unwrap_or_default().to_string(),
+            })
+        }
+    }
+    engine
+        .forkchoice_updated(&ForkchoiceState {
+            head_block_hash: payload_hash,
+            safe_block_hash: B256::ZERO,
+            finalized_block_hash: B256::ZERO,
+        })
+        .await?;
+    tracing::debug!(block = number, slot, "top-up delivered");
+    Ok(SlotOutcome::Delivered)
 }

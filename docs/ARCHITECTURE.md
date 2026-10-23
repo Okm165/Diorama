@@ -650,7 +650,8 @@ proofs, so replay/verify/BAL-diff/prepend/clock-offset are **dropped
 permanently** (plan §4.4). What remains is exactly the half both chains share,
 delivered by the common crates: the shadow registry (COW), the journal, the
 cursor state with `epoch_pin`, the admin surface, the chain-generic scanner,
-and the probe runner. The driver in `crates/hyperliquid` is the venue's own
+the probe runner, the epoch rule, and the devnet plane (the registries and
+flags as one bundle). The driver in `crates/hyperliquid` is the venue's own
 loop.
 
 ```
@@ -700,20 +701,30 @@ fresh fork cannot carry the canary (empty = reset).
 
 **The epoch rule.** A canary mismatch triggers `reconcile`: read V's fork pin
 from `anvil_nodeInfo`, then decide, fail-closed on the pin read (without it the
-decision would default to "same pin" and re-apply writes across a pin change):
+decision would default to "same pin" and re-apply writes across a pin change).
+The rule is one implementation for both engines
+(`mirror_devnet::epoch::reconcile`, over the devnet plane):
 
 | Situation | Action |
 |---|---|
 | canary == pin | steady state, nothing to reconcile |
 | pin != `epoch_pin` | **new epoch**: drop marks *and* values (`venue_epochs_total`, WARN); the devnet re-creates its state from its own journal |
 | pin == `epoch_pin` | **restore**: re-apply the recorded writes, keep the marks; orphan values (keys handed back earlier) are pruned, never re-owned |
+| unknown `epoch_pin`, non-empty registry | **new epoch** (fail-closed): the rule must not restore across a base it cannot prove |
+| unknown `epoch_pin`, empty registry | not a transition (a fresh state dir): the pin is merely anchored |
 
 Either way the journal is cleared (before-values of the old chain), the cursor
 is anchored at the pin (V's state *is* the source's state at the pin), and the
-canary is rewritten. Why clearing is the correct default: measured on T,
-restoring across a moved base re-applied a +30d time-travel write as a future
-`lastUpdateTimestamp` and every Aave supply panicked with an arithmetic
-underflow.
+canary is rewritten. The transition is persisted *before* the pin moves: a
+crash between the decision and the save must not leave the stale registry on
+disk beside an advanced `epoch_pin` (the next boot would read the canary as
+matching and keep it). Both engines anchor the pin *before any writes exist*
+(T explicitly at boot; V through its boot-time reconcile), so a later
+same-pin restart is a provable restore rather than an unprovable epoch — the
+fail-closed clear is reserved for real state loss. Why clearing is the
+correct default: measured on T, restoring across a moved base re-applied a
++30d time-travel write as a future `lastUpdateTimestamp` and every Aave
+supply panicked with an arithmetic underflow.
 
 **Probes-at-pin.** The at-pin probes compare V against the fork source at the
 pin, devnet-owned targets skipped and counted (COW: that state is the devnet's).

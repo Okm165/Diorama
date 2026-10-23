@@ -237,109 +237,162 @@ pub struct AccountView {
     pub marks: BTreeMap<String, Decimal>,
 }
 
+/// One position's derived facts: the feed's mark, the unsigned notional
+/// (`position_value`) and the maintenance requirement at that mark. Computed
+/// once, consumed by both the totals and the served row.
+struct PositionFacts {
+    mark: Decimal,
+    value: Decimal,
+    maintenance: Decimal,
+}
+
+impl PositionFacts {
+    fn of(coin: &str, p: &Position, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<Self> {
+        let (mark, _oracle) = feed
+            .required_prices(coin)
+            .ok_or_else(|| crate::error::Error::NoMarket { coin: coin.to_string() })?;
+        let value = p.position_value(mark)?;
+        let maintenance = maintenance_margin(coin, value, meta)?;
+        Ok(Self {
+            mark,
+            value,
+            maintenance,
+        })
+    }
+}
+
+/// The running totals over the non-flat positions — the account summary's
+/// inputs, one accumulator instead of eight locals.
+#[derive(Default)]
+struct PositionTotals {
+    notional: Decimal,
+    margin: Decimal,
+    signed_value: Decimal,
+    cost_basis: Decimal,
+    cross_notional: Decimal,
+    cross_margin: Decimal,
+    cross_maintenance: Decimal,
+    isolated_margin: Decimal,
+}
+
+impl PositionTotals {
+    fn add(&mut self, p: &Position, facts: &PositionFacts) -> Result<()> {
+        let signed = if p.is_long() { facts.value } else { -facts.value };
+        self.notional = add(self.notional, facts.value, "total notional")?;
+        self.margin = add(self.margin, p.margin_used, "total margin")?;
+        self.signed_value = add(self.signed_value, signed, "signed value")?;
+        self.cost_basis = add(self.cost_basis, p.cost_basis()?, "cost basis")?;
+        if p.leverage == LeverageType::Cross {
+            self.cross_notional = add(self.cross_notional, facts.value, "cross notional")?;
+            self.cross_margin = add(self.cross_margin, p.margin_used, "cross margin")?;
+            self.cross_maintenance =
+                add(self.cross_maintenance, facts.maintenance, "cross maintenance")?;
+        } else {
+            self.isolated_margin = add(self.isolated_margin, p.margin_used, "isolated margin")?;
+        }
+        Ok(())
+    }
+}
+
+/// One served row for a non-flat position.
+fn position_row(
+    coin: &str,
+    p: &Position,
+    facts: &PositionFacts,
+    meta: Option<&crate::wire::Meta>,
+) -> Result<AssetPosition> {
+    let u_pnl = p.unrealized_pnl(facts.mark)?;
+    let roe = if p.margin_used.is_zero() {
+        Decimal::ZERO
+    } else {
+        u_pnl / p.margin_used
+    };
+    let liquidation_px = match p.leverage {
+        LeverageType::Isolated => Some(liquidation_px(
+            p,
+            facts.mark,
+            maintenance_rate(coin, facts.value, meta)?,
+        )?),
+        LeverageType::Cross => None,
+    };
+    Ok(AssetPosition {
+        kind: PositionKind::OneWay,
+        position: WirePosition {
+            coin: coin.to_string(),
+            entry_px: Some(p.entry_px),
+            leverage: Leverage {
+                kind: p.leverage,
+                value: p.leverage_value,
+                raw_usd: Some(p.margin_used - facts.value),
+            },
+            liquidation_px,
+            margin_used: p.margin_used,
+            max_leverage: max_leverage(coin, meta),
+            position_value: facts.value,
+            return_on_equity: roe,
+            szi: p.szi,
+            unrealized_pnl: u_pnl,
+            cum_funding: CumFunding {
+                all_time: p.funding_all_time,
+                since_open: p.funding_since_open,
+                since_change: p.funding_since_change,
+            },
+        },
+    })
+}
+
+/// Assemble the account view from the walked totals: the identity holds by
+/// construction (`accountValue == totalRawUsd + Σ signed(positionValue)`), and
+/// the cross view carves isolated margin out (measured exact on the live
+/// sample); with no isolated positions it equals the margin summary.
+fn assemble(
+    account: &Account,
+    totals: &PositionTotals,
+    rows: Vec<AssetPosition>,
+    marks: BTreeMap<String, Decimal>,
+) -> AccountView {
+    let total_raw = account.perp_balance - totals.cost_basis;
+    let account_value = total_raw + totals.signed_value;
+    let margin_summary = MarginSummary {
+        account_value,
+        total_ntl_pos: totals.notional,
+        total_raw_usd: total_raw,
+        total_margin_used: totals.margin,
+    };
+    let cross_account_value = account_value - totals.isolated_margin;
+    let cross_margin_summary = MarginSummary {
+        account_value: cross_account_value,
+        total_ntl_pos: totals.cross_notional,
+        total_raw_usd: total_raw,
+        total_margin_used: totals.cross_margin,
+    };
+    AccountView {
+        margin_summary,
+        cross_margin_summary,
+        cross_maintenance_margin_used: totals.cross_maintenance,
+        withdrawable: cross_account_value,
+        asset_positions: rows,
+        marks,
+    }
+}
+
 /// Compute the served figures at the feed's current marks.
 pub fn view(account: &Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<AccountView> {
-    let mut total_ntl = Decimal::ZERO;
-    let mut total_margin = Decimal::ZERO;
-    let mut total_signed_value = Decimal::ZERO;
-    let mut cost_basis = Decimal::ZERO;
-    let mut cross_ntl = Decimal::ZERO;
-    let mut cross_margin = Decimal::ZERO;
-    let mut cross_maintenance = Decimal::ZERO;
-    let mut isolated_margin = Decimal::ZERO;
+    let mut totals = PositionTotals::default();
     let mut rows = Vec::with_capacity(account.positions.len());
     let mut marks = BTreeMap::new();
-
     for (coin, p) in &account.positions {
         // Flat rows are dropped from the served state (daloc's gate): a
         // zero-size position is a closed one, not a row.
         if p.szi.is_zero() {
             continue;
         }
-        let (mark, _oracle) = feed
-            .required_prices(coin)
-            .ok_or_else(|| crate::error::Error::NoMarket { coin: coin.clone() })?;
-        marks.insert(coin.clone(), mark);
-        let value = p.position_value(mark)?;
-        let u_pnl = p.unrealized_pnl(mark)?;
-        let signed_value = if p.is_long() { value } else { -value };
-        let maintenance = maintenance_margin(coin, value, meta)?;
-
-        total_ntl = add(total_ntl, value, "total notional")?;
-        total_margin = add(total_margin, p.margin_used, "total margin")?;
-        total_signed_value = add(total_signed_value, signed_value, "signed value")?;
-        cost_basis = add(cost_basis, p.cost_basis()?, "cost basis")?;
-        if p.leverage == LeverageType::Cross {
-            cross_ntl = add(cross_ntl, value, "cross notional")?;
-            cross_margin = add(cross_margin, p.margin_used, "cross margin")?;
-            cross_maintenance = add(cross_maintenance, maintenance, "cross maintenance")?;
-        } else {
-            isolated_margin = add(isolated_margin, p.margin_used, "isolated margin")?;
-        }
-
-        let roe = if p.margin_used.is_zero() {
-            Decimal::ZERO
-        } else {
-            u_pnl / p.margin_used
-        };
-        let liquidation_px = match p.leverage {
-            LeverageType::Isolated => {
-                Some(liquidation_px(p, mark, maintenance_rate(coin, value, meta)?)?)
-            }
-            LeverageType::Cross => None,
-        };
-        rows.push(AssetPosition {
-            kind: PositionKind::OneWay,
-            position: WirePosition {
-                coin: coin.clone(),
-                entry_px: Some(p.entry_px),
-                leverage: Leverage {
-                    kind: p.leverage,
-                    value: p.leverage_value,
-                    raw_usd: Some(p.margin_used - value),
-                },
-                liquidation_px,
-                margin_used: p.margin_used,
-                max_leverage: max_leverage(coin, meta),
-                position_value: value,
-                return_on_equity: roe,
-                szi: p.szi,
-                unrealized_pnl: u_pnl,
-                cum_funding: CumFunding {
-                    all_time: p.funding_all_time,
-                    since_open: p.funding_since_open,
-                    since_change: p.funding_since_change,
-                },
-            },
-        });
+        let facts = PositionFacts::of(coin, p, feed, meta)?;
+        marks.insert(coin.clone(), facts.mark);
+        totals.add(p, &facts)?;
+        rows.push(position_row(coin, p, &facts, meta)?);
     }
-
-    // The identity, by construction: accountValue = totalRawUsd + Σ signed.
-    let total_raw = account.perp_balance - cost_basis;
-    let account_value = total_raw + total_signed_value;
-    let margin_summary = MarginSummary {
-        account_value,
-        total_ntl_pos: total_ntl,
-        total_raw_usd: total_raw,
-        total_margin_used: total_margin,
-    };
-    // The cross view carves isolated margin out (measured exact on the live
-    // sample); with no isolated positions it equals the margin summary.
-    let cross_account_value = account_value - isolated_margin;
-    let cross_margin_summary = MarginSummary {
-        account_value: cross_account_value,
-        total_ntl_pos: cross_ntl,
-        total_raw_usd: total_raw,
-        total_margin_used: cross_margin,
-    };
-    Ok(AccountView {
-        margin_summary,
-        cross_margin_summary,
-        cross_maintenance_margin_used: cross_maintenance,
-        withdrawable: cross_account_value,
-        asset_positions: rows,
-        marks,
-    })
+    Ok(assemble(account, &totals, rows, marks))
 }
 
 /// The served `clearinghouseState` (fresh `time` from the caller's wall clock).

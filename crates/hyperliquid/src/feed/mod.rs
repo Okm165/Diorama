@@ -20,10 +20,10 @@ pub mod rest;
 pub mod ws;
 
 use crate::error::Result;
-use crate::store;
 use crate::wire::{AllMids, AssetCtx, L2Book, Meta};
 use budget::Budget;
 use metrics::FeedMetrics;
+use mirror_devnet::store;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -297,7 +297,8 @@ impl MarketFeed {
             return Ok(());
         };
         let overrides = self.read_overrides().clone();
-        store::save(path, &overrides, "feed overrides")
+        store::save(path, &overrides, "feed overrides")?;
+        Ok(())
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Cache> {

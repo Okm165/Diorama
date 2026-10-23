@@ -37,23 +37,6 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// A persisted state file parsed as JSON but not as its state: it dies at
-    /// the load point, path named (never silently becomes empty state).
-    #[error("{what}: {path}")]
-    Corrupt {
-        what: &'static str,
-        path: std::path::PathBuf,
-        #[source]
-        source: serde_json::Error,
-    },
-
-    #[error("encoding {what}")]
-    Encode {
-        what: &'static str,
-        #[source]
-        source: serde_json::Error,
-    },
-
     // ---- the venue's public API boundary (market plane, passthrough) ------
     #[error("the venue api transport failed")]
     Http(#[from] reqwest::Error),

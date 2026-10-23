@@ -54,22 +54,11 @@ pub struct EthereumMetrics {
     pub source_sync_gap_blocks: AtomicU64,
 }
 
-#[allow(
-    clippy::unused_self,
-    reason = "the registry is the namespace; the field is the operand (call sites stay `metrics.set(...)`)"
-)]
+/// The registry convention (`set`/`add`/`inc`) is the shared trait's; this
+/// type adds only its own exposition.
+impl mirror_devnet::metrics::Registry for EthereumMetrics {}
+
 impl EthereumMetrics {
-    pub fn set(&self, field: &AtomicU64, v: u64) {
-        field.store(v, Ordering::Relaxed);
-    }
-    pub fn add(&self, field: &AtomicU64, v: u64) {
-        field.fetch_add(v, Ordering::Relaxed);
-    }
-
-    pub fn inc(&self, field: &AtomicU64) {
-        field.fetch_add(1, Ordering::Relaxed);
-    }
-
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
         let g = |out: &mut String, name: &str, help: &str, v: u64| push_metric(out, "gauge", name, help, v);

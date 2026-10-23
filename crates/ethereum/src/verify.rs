@@ -9,7 +9,7 @@
 use crate::ctx::{block_txs, Ctx};
 use crate::error::Result;
 use alloy_network_primitives::{ReceiptResponse, TransactionResponse};
-use alloy_rpc_types_eth::{Block, Log};
+use alloy_rpc_types_eth::{Block, Log, Transaction, TransactionReceipt};
 
 /// EIP-7702: a fork's type-4 gas delta must lie in `[-refund * #auths, 0]`.
 /// A measured protocol fact (not tunable): one authorization refunds 12,500
@@ -243,20 +243,9 @@ enum ReceiptsCheck {
 }
 
 async fn check_receipts(ctx: &Ctx, n: u64, reth_block: &Block) -> ReceiptsCheck {
-    let (rr, mr) = match (ctx.reth.receipts(n).await, ctx.anvil_m.receipts(n).await) {
-        // reth could not serve receipts (pruned window): the block is accepted
-        // unverified rather than failed for a source-side limitation.
-        (Err(e), _) => {
-            return ReceiptsCheck::Unverified {
-                reason: format!("reth receipts unavailable: {e}"),
-            }
-        }
-        (_, Err(e)) => {
-            return ReceiptsCheck::MUnavailable {
-                reason: format!("M receipts unavailable: {e}"),
-            }
-        }
-        (Ok(rr), Ok(mr)) => (rr, mr),
+    let (rr, mr) = match read_receipts(ctx, n).await {
+        Ok(pair) => pair,
+        Err(check) => return check,
     };
     let count = Check::verdict(
         rr.len() == mr.len(),
@@ -268,13 +257,39 @@ async fn check_receipts(ctx: &Ctx, n: u64, reth_block: &Block) -> ReceiptsCheck 
             gas: Check::fail(format!("count reth={} m={}", rr.len(), mr.len())),
         };
     }
-    let txs = block_txs(reth_block);
+    ReceiptsCheck::Compared {
+        count,
+        gas: check_receipt_gas(block_txs(reth_block), &rr, &mr),
+    }
+}
+
+/// Read both chains' receipts; an unreadable side is a recorded reason, never
+/// a structural verdict (reth's pruned window, or M's own receipts failing —
+/// a fetch fault on our own chain is not a verdict either).
+async fn read_receipts(
+    ctx: &Ctx,
+    n: u64,
+) -> std::result::Result<(Vec<TransactionReceipt>, Vec<TransactionReceipt>), ReceiptsCheck> {
+    match (ctx.reth.receipts(n).await, ctx.anvil_m.receipts(n).await) {
+        // reth could not serve receipts (pruned window): the block is accepted
+        // unverified rather than failed for a source-side limitation.
+        (Err(e), _) => Err(ReceiptsCheck::Unverified {
+            reason: format!("reth receipts unavailable: {e}"),
+        }),
+        (_, Err(e)) => Err(ReceiptsCheck::MUnavailable {
+            reason: format!("M receipts unavailable: {e}"),
+        }),
+        (Ok(rr), Ok(mr)) => Ok((rr, mr)),
+    }
+}
+
+/// The per-tx receipt comparison: statuses must be identical; gas may differ
+/// only for EIP-7702 txs, in `[-refund*auths, 0]` (the fork can only under-use
+/// relative to mainnet's refunds).
+fn check_receipt_gas(txs: &[Transaction], rr: &[TransactionReceipt], mr: &[TransactionReceipt]) -> Check {
     for (i, (a, b)) in rr.iter().zip(mr.iter()).enumerate() {
         if a.status() != b.status() {
-            return ReceiptsCheck::Compared {
-                count,
-                gas: Check::fail(format!("status mismatch at tx {i}")),
-            };
+            return Check::fail(format!("status mismatch at tx {i}"));
         }
         let ga = a.gas_used();
         let gb = b.gas_used();
@@ -284,27 +299,18 @@ async fn check_receipts(ctx: &Ctx, n: u64, reth_block: &Block) -> ReceiptsCheck 
         // Gas may differ only for EIP-7702 txs, in [-refund*auths, 0].
         let ty = txs.get(i).map(|t| u8::from(t.inner.tx_type())).unwrap_or(0);
         if ty != 4 {
-            return ReceiptsCheck::Compared {
-                count,
-                gas: Check::fail(format!("non-type-4 gas mismatch at tx {i}: reth={ga} m={gb}")),
-            };
+            return Check::fail(format!("non-type-4 gas mismatch at tx {i}: reth={ga} m={gb}"));
         }
         let auths = txs.get(i).map(auth_count).unwrap_or(0);
         let bound = TYPE4_REFUND_PER_AUTH * auths;
         let delta = gb as i64 - ga as i64; // fork - mainnet
         if delta > 0 || delta.unsigned_abs() > bound {
-            return ReceiptsCheck::Compared {
-                count,
-                gas: Check::fail(format!(
-                    "type-4 gas delta {delta} outside [-{bound},0] at tx {i}"
-                )),
-            };
+            return Check::fail(format!(
+                "type-4 gas delta {delta} outside [-{bound},0] at tx {i}"
+            ));
         }
     }
-    ReceiptsCheck::Compared {
-        count,
-        gas: Check::pass(format!("{} receipts", rr.len())),
-    }
+    Check::pass(format!("{} receipts", rr.len()))
 }
 
 /// Withdrawal recipients' balances must match reth at n (withdrawals are not

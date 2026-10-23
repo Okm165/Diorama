@@ -12,9 +12,9 @@ Three layers, each runnable on demand:
 
 ## Unit tests (`cargo test --workspace`)
 
-126 tests, all offline, one suite per crate: `mirror-anvil` 15,
-`mirror-devnet` 17, `mirror-config` 15, `mirror-ethereum` 11,
-`mirror-hyperliquid` 39, `mirror-cctp` 29. The suites carry the measured rules
+139 tests, all offline, one suite per crate: `mirror-anvil` 15,
+`mirror-devnet` 20, `mirror-config` 16, `mirror-ethereum` 14,
+`mirror-hyperliquid` 43, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
 - `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with
@@ -27,7 +27,8 @@ each module documents:
   journal round-trip + ring + typed faults on malformed entries, the cursor
   rules (resume is contiguous; fresh/reset chains start at head+1), the
   pin-base predicate (`scan_anchor` clamps at the pin), the shared admin wire
-  types.
+  types, the atomic state-file body (`store`: absent is a fact, a fault and
+  corruption are errors), the metric registry convention.
 - `mirror-config` — the layered merge (arrays replace, never concatenate),
   `${ENV}` expansion (unresolved is reported, then fatal for services; the
   per-pod contract is `inspect` + `require_resolved` over the pod's own
@@ -363,10 +364,12 @@ chain facts:
 ## Engine symmetry (the two services read the same way)
 
 The two engines are one design over two sources. The shared crates carry the
-substrate — `mirror-devnet` (shadow, journal, cursor, admin, probes, metrics),
+substrate — `mirror-devnet` (shadow, journal, cursor, admin, probes, metrics,
+the epoch rule, the atomic state-file body, the devnet plane) —
 `mirror-anvil` (the RPC boundary), `mirror-config` (the layered config plus the
 binaries' shared boot conventions: the worker stack budget, the logging init,
-the fatal-error report) — and each project owns its driver
+the fatal-error report, the runtime shell `run_main` and the default instance
+path) — and each project owns its driver
 (`crates/ethereum/src/driver.rs`, `crates/hyperliquid/src/driver.rs`), its
 HTTP surface, and its source-specific loops. The admin *semantics* are shared
 whole: the hand-back carries its own scan-to-head race guard
@@ -376,6 +379,37 @@ presentation is the registry's (`Shadow::shadowed_addresses`). The refusal
 taxonomy is shared too: `mirror_devnet::Error::{is_request_refusal,
 is_unavailable}` classify 4xx vs 503 once, and both engines map an upstream
 transport fault (anvil, the venue API) to 502.
+
+Four more single homes keep the two engines from drifting:
+
+- **the devnet plane** (`mirror_devnet::Plane`): the shadow registry, the
+  journal, the cursor state, the shared admin gauges and the flags (halt,
+  freeze, clock offset, scan watermark, re-apply marker) are one bundle both
+  contexts embed; the operations that must not drift — save the state, save
+  the registry, the halt check, building the admin surface — live there, and
+  the admin surface itself holds the plane plus only the profile's own facts
+  (target chain, re-sync source, chunk size, journaling policy). The venue's
+  no-clock/no-freeze facts are documented once, on the plane. The shared
+  primitives take the bundle (the scanner and the deal take the plane or the
+  surface, never ten loose references).
+- **the epoch rule** (`mirror_devnet::epoch`): a fresh pin drops marks and
+  values, the same pin re-applies the recorded writes, an unknown pin beside a
+  non-empty registry is fail-closed as fresh, and the transition is persisted
+  *before* the pin moves (a crash must not leave the stale registry on disk
+  beside an advanced `epoch_pin` — the next boot would read the canary as
+  matching and keep it). The pin is anchored *before any writes exist* (T
+  explicitly at boot; V through its boot-time reconcile), so a later same-pin
+  restart is a provable restore rather than an unprovable epoch. Each engine
+  maps the outcome to its own counters (T counts resets *found*; V counts
+  epoch transitions and restored writes).
+- **the state-file body** (`mirror_devnet::store`): one atomic JSON
+  load/save (absent is a fact; a fault and corruption are typed errors; a save
+  is temp + rename) used by the registries and by the venue's own sim/feed
+  caches — the venue's error enum carries it transparently.
+- **the metric registry convention** (`mirror_devnet::metrics::Registry`):
+  `set`/`add`/`inc` take the field as the operand and are defined once for
+  every registry (the shared gauges, `EthereumMetrics`, `VenueMetrics`); a
+  profile's registry cannot grow its own variant of the convention.
 
 `make engine-symmetry` (`scripts/engine-symmetry.sh`, 23 checks) is the
 fitness function: it drives both engines' shared verbs live and requires

@@ -7,7 +7,8 @@ use crate::blob::{
     available_forms, encode_blob_tx, repair_proofs, select_sidecars, BlobForm, SidecarItem,
 };
 use crate::ctx::{block_txs, cursor_from, Ctx};
-use crate::error::{BlobError, Error, Result};use crate::rpc::Rpc;
+use crate::error::{BlobError, Error, Result};
+use crate::rpc::Rpc;
 use crate::verify::{verify_block, Verification};
 use alloy_consensus::{EthereumTxEnvelope, TxEip4844, TxEip4844Variant};
 use alloy_eips::eip2718::Encodable2718;
@@ -15,6 +16,7 @@ use alloy_consensus::Transaction as _;
 use alloy_network_primitives::TransactionResponse;
 use alloy_primitives::{Address, Bytes, Signature, B256, U256, U64};
 use mirror_anvil::Call;
+use mirror_devnet::metrics::Registry as _;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -140,9 +142,9 @@ async fn convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
             .parity(&ctx.reth, n - 1, &ctx.anvil_m)
             .await?;
     ctx.eth_metrics.add(&ctx.eth_metrics.m_convergence_ok, probes.ok as u64);
-    ctx.metrics
+    ctx.plane.metrics
         .add(&ctx.eth_metrics.m_convergence_failed, probes.failed as u64);
-    ctx.metrics
+    ctx.plane.metrics
         .set(&ctx.eth_metrics.m_convergence_last_failed, probes.failed as u64);
     Ok(())
 }
@@ -224,12 +226,12 @@ async fn finish_replay(
     ctx.eth_metrics.set(&ctx.eth_metrics.cursor_m, n);
     ctx.set_reth_last_hash(format!("0x{:x}", block.header.hash))?;
     ctx.set_reth_last_block(n)?;
-    ctx.save_state()?;
+    ctx.plane.save_state()?;
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_replayed);
     let duration_ms = started.elapsed().as_millis() as u64;
     ctx.eth_metrics.set(&ctx.eth_metrics.last_replay_ms, duration_ms);
     ctx.eth_metrics.set(&ctx.eth_metrics.m_head, n);
-    ctx.metrics
+    ctx.plane.metrics
         .set(&ctx.eth_metrics.pin_age_blocks, n.saturating_sub(first_block) + 1);
 
     let outcome = ReplayOutcome {
@@ -739,8 +741,32 @@ fn log_and_drift(
     outcome: &ReplayOutcome,
     block: &alloy_rpc_types_eth::Block,
 ) -> Result<()> {
+    // The journal is a *divergence* log: clean blocks are counted in the
+    // metrics, not written to disk.
+    let clean = outcome
+        .verification
+        .as_ref()
+        .map(|v| v.divergences.is_empty())
+        .unwrap_or(false);
+    if !clean {
+        ctx.drift.append(&drift_entry(n, outcome, block))?;
+    }
+    log_outcome(ctx, n, outcome);
+    if outcome.duration_ms > 10_000 {
+        tracing::warn!(block = n, ms = outcome.duration_ms, "slow replay (>10 s)");
+    }
+    Ok(())
+}
+
+/// The drift entry for one replayed block: the verification's verdict and its
+/// per-check detail, flattened.
+fn drift_entry<'a>(
+    n: u64,
+    outcome: &'a ReplayOutcome,
+    block: &alloy_rpc_types_eth::Block,
+) -> MDriftEntry<'a> {
     let v = outcome.verification.as_ref();
-    let entry = MDriftEntry {
+    MDriftEntry {
         chain: "m",
         block: n,
         mainnet_hash: format!("0x{:x}", block.header.hash),
@@ -762,15 +788,14 @@ fn log_and_drift(
                     .collect()
             })
             .unwrap_or_default(),
-    };
-    // The journal is a *divergence* log: clean blocks are counted in the
-    // metrics, not written to disk.
-    let clean = v.map(|v| v.divergences.is_empty()).unwrap_or(false);
-    if !clean {
-        ctx.drift.append(&entry)?;
     }
+}
 
-    match v {
+/// Log one replay's outcome and count its divergence: structural divergences
+/// in their own counter, value-level ones beside them, and the halt/freeze
+/// policy applied through `on_divergence` unless the policy is `Continue`.
+fn log_outcome(ctx: &Ctx, n: u64, outcome: &ReplayOutcome) {
+    match outcome.verification.as_ref() {
         Some(v) if v.ok => {
             tracing::info!(
                 block = n,
@@ -805,8 +830,4 @@ fn log_and_drift(
         }
         None => {}
     }
-    if outcome.duration_ms > 10_000 {
-        tracing::warn!(block = n, ms = outcome.duration_ms, "slow replay (>10 s)");
-    }
-    Ok(())
 }

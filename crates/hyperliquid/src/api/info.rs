@@ -58,86 +58,135 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         // hl_mock's contract for types it does not route.
         InfoRequest::Unrouted => Ok(Json("unrouted").into_response()),
         // ---- account-scoped: the sim's, or the venue's -------------------
-        InfoRequest::ClearinghouseState { user, dex } => {
-            if !dex.as_deref().unwrap_or("").is_empty() {
-                // The sim serves the first perp dex only (perpDexs = [null]).
-                return Ok(Json(empty_clearinghouse(state.sim.served_time(crate::now_ms())?)).into_response());
-            }
-            match clearinghouse_of(&state, user)? {
-                Some(state_body) => Ok(Json(state_body).into_response()),
-                None => pass_through(&state, &body).await,
-            }
-        }
-        InfoRequest::SpotClearinghouseState { user } => {
-            state.sim.accrue_all(&state.feed, crate::now_ms())?;
-            match state.sim.account(user)? {
-                Some(account) => {
-                    let meta = state.feed.meta();
-                    Ok(Json(crate::wire::SpotClearinghouseState {
-                        balances: account::spot_balances(&account),
-                        token_to_available_after_maintenance: account::available_after_maintenance(
-                            &account,
-                            &state.feed,
-                            meta.as_ref(),
-                        )?,
-                    })
-                    .into_response())
-                }
-                None => pass_through(&state, &body).await,
-            }
-        }
-        InfoRequest::UserAbstraction { user } => match state.sim.account(user)? {
-            Some(account) => Ok(Json(account::mode_of(&account)).into_response()),
-            None => pass_through(&state, &body).await,
-        },
-        InfoRequest::OpenOrders { user, .. } => match state.sim.account(user)? {
-            // No order machinery yet (Phase 2 matching): a touched account has
-            // no open orders, and daloc's unwind list is empty.
-            Some(_) => Ok(Json(Vec::<crate::wire::Order>::new()).into_response()),
-            None => pass_through(&state, &body).await,
-        },
-        InfoRequest::ActiveAssetData { user, coin } => match state.sim.account(user)? {
-            Some(account) => Ok(Json(active_asset_data(&state, user, &account, &coin)?).into_response()),
-            None => pass_through(&state, &body).await,
-        },
+        InfoRequest::ClearinghouseState { user, dex } => clearinghouse(&state, body, user, dex).await,
+        InfoRequest::SpotClearinghouseState { user } => spot_state(&state, body, user).await,
+        InfoRequest::UserAbstraction { user } => abstraction(&state, body, user).await,
+        InfoRequest::OpenOrders { user, .. } => open_orders(&state, body, user).await,
+        InfoRequest::ActiveAssetData { user, coin } => active_asset(&state, body, user, coin).await,
         // ---- market-scoped: the feed's -----------------------------------
-        InfoRequest::Meta { dex } => {
-            expect_default_dex(&dex)?;
-            Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response())
-        }
-        InfoRequest::MetaAndAssetCtxs { dex } => {
-            expect_default_dex(&dex)?;
-            let (meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
-            Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response())
-        }
+        InfoRequest::Meta { dex } => meta(&dex, &state),
+        InfoRequest::MetaAndAssetCtxs { dex } => meta_and_ctxs(&dex, &state),
         InfoRequest::PerpDexs => Ok(Json(vec![None::<crate::wire::PerpDex>]).into_response()),
-        InfoRequest::L2Book { coin, .. } => {
-            let now = crate::now_ms();
-            let book = state.feed.book(&coin, now).ok_or_else(|| Error::NotFound {
-                what: format!("no book for `{coin}` (not a configured market and no scripted book)"),
-            })?;
-            Ok(Json(book).into_response())
-        }
-        InfoRequest::MarginTable { id } => {
-            let meta = state.feed.meta().ok_or(Error::Warming)?;
-            let table = meta
-                .margin_tables
-                .iter()
-                .find(|(tid, _)| *tid == id)
-                .map(|(_, t)| t.clone())
-                .ok_or_else(|| Error::NotFound {
-                    what: format!("margin table {id}"),
-                })?;
-            Ok(Json(table).into_response())
-        }
-        InfoRequest::ExchangeStatus => Ok(Json(ExchangeStatus {
-            special_statuses: None,
-            time: state.sim.served_time(crate::now_ms())?,
-        })
-        .into_response()),
+        InfoRequest::L2Book { coin, .. } => l2_book(&coin, &state),
+        InfoRequest::MarginTable { id } => margin_table(id, &state),
+        InfoRequest::ExchangeStatus => exchange_status(&state),
         InfoRequest::SpotMeta => Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response()),
         InfoRequest::AllMids { .. } => Ok(Json(state.feed.all_mids()).into_response()),
     }
+}
+
+/// `clearinghouseState`: the sim's for a touched account (the first perp dex
+/// only), the venue's verbatim otherwise.
+async fn clearinghouse(
+    state: &ApiState,
+    body: Bytes,
+    user: Address,
+    dex: Option<String>,
+) -> Result<Response> {
+    if !dex.as_deref().unwrap_or("").is_empty() {
+        // The sim serves the first perp dex only (perpDexs = [null]).
+        return Ok(Json(empty_clearinghouse(state.sim.served_time(crate::now_ms())?)).into_response());
+    }
+    match clearinghouse_of(state, user)? {
+        Some(served) => Ok(Json(served).into_response()),
+        None => pass_through(state, &body).await,
+    }
+}
+
+/// `spotClearinghouseState`: the unified reconciliation
+/// (`available + maintenance == balance`), or the venue's verbatim.
+async fn spot_state(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+    state.sim.accrue_all(&state.feed, crate::now_ms())?;
+    match state.sim.account(user)? {
+        Some(account) => {
+            let meta = state.feed.meta();
+            Ok(Json(crate::wire::SpotClearinghouseState {
+                balances: account::spot_balances(&account),
+                token_to_available_after_maintenance: account::available_after_maintenance(
+                    &account,
+                    &state.feed,
+                    meta.as_ref(),
+                )?,
+            })
+            .into_response())
+        }
+        None => pass_through(state, &body).await,
+    }
+}
+
+/// `userAbstraction`: the account's parseable mode, or the venue's verbatim.
+async fn abstraction(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+    match state.sim.account(user)? {
+        Some(account) => Ok(Json(account::mode_of(&account)).into_response()),
+        None => pass_through(state, &body).await,
+    }
+}
+
+/// `openOrders`: a touched account has no order machinery yet (Phase 2
+/// matching), so its unwind list is empty; untouched accounts pass through.
+async fn open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+    match state.sim.account(user)? {
+        Some(_) => Ok(Json(Vec::<crate::wire::Order>::new()).into_response()),
+        None => pass_through(state, &body).await,
+    }
+}
+
+/// `activeAssetData`: the sim's derived row, or the venue's verbatim.
+async fn active_asset(
+    state: &ApiState,
+    body: Bytes,
+    user: Address,
+    coin: String,
+) -> Result<Response> {
+    match state.sim.account(user)? {
+        Some(account) => Ok(Json(active_asset_data(state, user, &account, &coin)?).into_response()),
+        None => pass_through(state, &body).await,
+    }
+}
+
+/// `meta`: the cached metadata for the default dex.
+fn meta(dex: &Option<String>, state: &ApiState) -> Result<Response> {
+    expect_default_dex(dex)?;
+    Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response())
+}
+
+/// `metaAndAssetCtxs`: the cached metadata + per-market ctxs, default dex.
+fn meta_and_ctxs(dex: &Option<String>, state: &ApiState) -> Result<Response> {
+    expect_default_dex(dex)?;
+    let (meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
+    Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response())
+}
+
+/// `l2Book`: the cached or scripted book for one coin.
+fn l2_book(coin: &str, state: &ApiState) -> Result<Response> {
+    let now = crate::now_ms();
+    let book = state.feed.book(coin, now).ok_or_else(|| Error::NotFound {
+        what: format!("no book for `{coin}` (not a configured market and no scripted book)"),
+    })?;
+    Ok(Json(book).into_response())
+}
+
+/// `marginTable`: one table out of the cached metadata by id.
+fn margin_table(id: u32, state: &ApiState) -> Result<Response> {
+    let meta = state.feed.meta().ok_or(Error::Warming)?;
+    let table = meta
+        .margin_tables
+        .iter()
+        .find(|(tid, _)| *tid == id)
+        .map(|(_, t)| t.clone())
+        .ok_or_else(|| Error::NotFound {
+            what: format!("margin table {id}"),
+        })?;
+    Ok(Json(table).into_response())
+}
+
+/// `exchangeStatus`: the served clock.
+fn exchange_status(state: &ApiState) -> Result<Response> {
+    Ok(Json(ExchangeStatus {
+        special_statuses: None,
+        time: state.sim.served_time(crate::now_ms())?,
+    })
+    .into_response())
 }
 
 /// The served `clearinghouseState` for a touched account: accrual *first*,

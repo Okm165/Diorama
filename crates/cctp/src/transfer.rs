@@ -274,59 +274,6 @@ pub fn measured_fees(source: u32, destination: u32) -> Option<[(u32, u64); 2]> {
 
 // ---- the source-side builder ---------------------------------------------
 
-/// `depositForBurn` calldata with §15.1's exact signature. `mintRecipient` is
-/// the destination-domain address left-padded to bytes32 (the contracts'
-/// `toBytes32` convention).
-pub fn deposit_for_burn_calldata(
-    amount: U256,
-    destination_domain: u32,
-    mint_recipient: Address,
-    burn_token: Address,
-    destination_caller: B256,
-    max_fee: U256,
-    min_finality_threshold: u32,
-) -> Bytes {
-    ITokenMessengerV2::depositForBurnCall {
-        amount,
-        destinationDomain: destination_domain,
-        mintRecipient: mint_recipient.into_word(),
-        burnToken: burn_token,
-        destinationCaller: destination_caller,
-        maxFee: max_fee,
-        minFinalityThreshold: min_finality_threshold,
-    }
-    .abi_encode()
-    .into()
-}
-
-/// `depositForBurnWithHook` calldata — `depositForBurn` plus the hook
-/// payload; the caller pins `destinationCaller` to the hook wrapper (§15.4),
-/// so only the wrapper can consume the message.
-#[allow(clippy::too_many_arguments)]
-pub fn deposit_for_burn_with_hook_calldata(
-    amount: U256,
-    destination_domain: u32,
-    mint_recipient: Address,
-    burn_token: Address,
-    destination_caller: B256,
-    max_fee: U256,
-    min_finality_threshold: u32,
-    hook_data: &[u8],
-) -> Bytes {
-    ITokenMessengerV2::depositForBurnWithHookCall {
-        amount,
-        destinationDomain: destination_domain,
-        mintRecipient: mint_recipient.into_word(),
-        burnToken: burn_token,
-        destinationCaller: destination_caller,
-        maxFee: max_fee,
-        minFinalityThreshold: min_finality_threshold,
-        hookData: Bytes::copy_from_slice(hook_data),
-    }
-    .abi_encode()
-    .into()
-}
-
 /// `receiveMessage(message, attestation)` calldata.
 pub fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> Bytes {
     IMessageTransmitterV2::receiveMessageCall {
@@ -843,20 +790,22 @@ mod tests {
         assert!(Message::decode(&[0u8; HEADER_LEN]).is_err());
     }
 
-    /// The calldata builders encode the typed arguments in order. The
-    /// expected bytes were produced independently with
+    /// The calldata the `sol!` call type encodes. The expected bytes were
+    /// produced independently with
     /// `cast calldata "depositForBurn(uint256,uint32,bytes32,address,bytes32,uint256,uint32)"`.
     #[test]
     fn deposit_for_burn_calldata_carries_the_typed_arguments() {
-        let calldata = deposit_for_burn_calldata(
-            U256::from(100_000_000u64),
-            19,
-            Address::repeat_byte(0x22),
-            USDC_ETHEREUM,
-            B256::ZERO,
-            U256::ZERO,
-            2000,
-        );
+        let calldata: Bytes = ITokenMessengerV2::depositForBurnCall {
+            amount: U256::from(100_000_000u64),
+            destinationDomain: 19,
+            mintRecipient: Address::repeat_byte(0x22).into_word(),
+            burnToken: USDC_ETHEREUM,
+            destinationCaller: B256::ZERO,
+            maxFee: U256::ZERO,
+            minFinalityThreshold: 2000,
+        }
+        .abi_encode()
+        .into();
         assert_eq!(
             format!("0x{}", alloy_primitives::hex::encode(&calldata)),
             concat!(

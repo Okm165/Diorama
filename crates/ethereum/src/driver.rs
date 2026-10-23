@@ -13,6 +13,7 @@ use crate::diff::apply_block;
 use crate::error::Result;
 use crate::replay::replay_block;
 use crate::source_sync;
+use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::state::{self, ChainCursor};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -22,16 +23,6 @@ use std::time::Duration;
 enum Chain {
     M,
     T,
-}
-
-/// Whether the shadow registry holds marks or recorded values (decides the
-/// same-pin restore path after a restart).
-fn shadow_has_recorded_state(ctx: &Ctx) -> Result<bool> {
-    let s = ctx.shadow.lock()?;
-    Ok(s.slot_count() > 0
-        || !s.accounts.is_empty()
-        || !s.values.is_empty()
-        || !s.account_values.is_empty())
 }
 
 /// Decide the next parent block to process for one chain, applying the cursor,
@@ -102,7 +93,7 @@ async fn chain_state(
             ctx.eth_metrics.set(&ctx.eth_metrics.t_head, head);
             if let Ok(info) = rpc.anvil_node_info().await {
                 if let Some(fork) = info.fork_config.fork_block_number {
-                    ctx.metrics
+                    ctx.plane.metrics
                         .set(&ctx.eth_metrics.t_fork_age_blocks, head.saturating_sub(fork));
                 }
             }
@@ -146,7 +137,14 @@ async fn validate_cursor(
         "cursor not found on chain (reset or re-pin) - rebasing"
     );
     if matches!(chain, Chain::T) {
-        handle_t_reset(ctx, rpc).await?;
+        // The epoch rule (shared with the venue engine, `mirror-devnet::epoch`):
+        // a fresh pin drops marks and values, the same pin re-applies the
+        // recorded writes; the journal goes either way. `t_resets_total`
+        // counts resets *found* (this site), so it moves even when the
+        // registry was empty.
+        let pin = rpc.anvil_node_info().await?.fork_config.fork_block_number;
+        ctx.eth_metrics.inc(&ctx.eth_metrics.t_resets_total);
+        mirror_devnet::epoch::reconcile(&ctx.plane, rpc, ctx.engine.loops.chunk_size, pin).await?;
     }
     // An M re-base skipped this range: those blocks are mainnet's own (the
     // fresh fork serves them and the state comes from the fork base, so it is
@@ -160,13 +158,13 @@ async fn validate_cursor(
     // and the next processed block must set a fresh one (otherwise
     // `mirror_pin_age_blocks` counts across epochs).
     {
-        let mut state = ctx.state.lock()?;
+        let mut state = ctx.plane.state.lock()?;
         match chain {
             Chain::M => state.data.m = None,
             Chain::T => state.data.t = None,
         }
     }
-    ctx.save_state()?;
+    ctx.plane.save_state()?;
     Ok(None)
 }
 
@@ -175,77 +173,6 @@ async fn validate_cursor(
 /// source's own, at best) — a stale derivation by position, no read needed.
 fn below_fork_base(cursor_block: u64, base: Option<u64>) -> bool {
     base.is_some_and(|base| cursor_block < base)
-}
-
-/// T was re-forked (its OOM restart or a re-pin). Which epoch is this?
-///
-/// - The fork pin *changed*: the base moved, so the recorded values are stale
-///   derivations of the old base (plan 2.2/6.3: "derived values go stale when
-///   the base advances"). Start a *new epoch*: drop marks and values - the
-///   product re-creates its positions from its own journal (plan 3.6).
-///   Measured: restoring across a pin change re-applied a +30d time-travel
-///   write as a future `lastUpdateTimestamp` and every Aave supply panicked
-///   with an arithmetic underflow.
-/// - The pin is *unchanged* (an out-of-band reset at the same base): the
-///   recorded writes are still coherent - re-apply them and keep the marks.
-///
-/// Fail-closed on the pin read: without it the epoch decision would default to
-/// "same pin" and re-apply writes across a pin change - the measured
-/// Aave-underflow hazard.
-async fn handle_t_reset(ctx: &Ctx, rpc: &mirror_anvil::Rpc) -> Result<()> {
-    let pin = rpc.anvil_node_info().await?.fork_config.fork_block_number;
-    let known = ctx.state.lock()?.data.epoch_pin;
-    let new_epoch = matches!((known, pin), (Some(k), Some(p)) if k != p);
-    ctx.eth_metrics.inc(&ctx.eth_metrics.t_resets_total);
-    if new_epoch {
-        let (slots, accounts) = ctx.shadow.lock()?.clear_all();
-        ctx.save_shadow()?;
-        tracing::warn!(
-            pin = ?pin,
-            previous = ?known,
-            cleared_slots = slots,
-            cleared_accounts = accounts,
-            "new epoch: the fork base moved; the devnet's writes are gone with it (re-create positions from your journal)"
-        );
-    } else if shadow_has_recorded_state(ctx)? {
-        restore_shadow(ctx).await?;
-    }
-    if pin.is_some() && known != pin {
-        ctx.state.lock()?.data.epoch_pin = pin;
-        ctx.save_state()?;
-    }
-    // The journal holds before-values of the *old* chain: a rewind against the
-    // re-forked chain would restore values that never existed there. Drop it.
-    if let Err(e) = ctx.journal.clear() {
-        tracing::warn!(error = %e, "clearing the journal after a T reset failed");
-    }
-    Ok(())
-}
-
-/// Same-pin restore: prune orphaned values, re-apply the recorded writes, and
-/// report marked-but-unrecorded keys (the shared implementation lives in
-/// `mirror-devnet::shadow`).
-async fn restore_shadow(ctx: &Ctx) -> Result<()> {
-    let stats = mirror_devnet::shadow::restore_recorded(
-        &ctx.anvil_t,
-        &ctx.shadow,
-        ctx.engine.loops.chunk_size,
-    )
-    .await?;
-    ctx.save_shadow()?;
-    tracing::warn!(
-        slots = stats.slots,
-        accounts = stats.accounts,
-        storage_accounts = stats.storage_accounts,
-        account_values = stats.account_values,
-        restored = stats.restored,
-        orphan_slots = stats.orphan_slots,
-        orphan_accounts = stats.orphan_accounts,
-        unknown_slots = stats.unknown_slots,
-        unknown_accounts = stats.unknown_accounts,
-        "T was reset at the same pin: re-applied the devnet's writes"
-    );
-    Ok(())
 }
 
 /// An M re-base skipped a range (see [`validate_cursor`]).
@@ -424,7 +351,7 @@ pub(crate) async fn replay_loop(ctx: Arc<Ctx>) {
     let mut failing_block = 0u64;
     let mut attempts = 0u64;
     loop {
-        if ctx.is_halted() || ctx.frozen.load(Ordering::Relaxed) {
+        if ctx.plane.is_halted() || ctx.plane.frozen.load(Ordering::Relaxed) {
             tokio::time::sleep(poll).await;
             continue;
         }
@@ -488,7 +415,7 @@ pub(crate) async fn replay_loop(ctx: Arc<Ctx>) {
 pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
     let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     loop {
-        if ctx.is_halted() || ctx.frozen.load(Ordering::Relaxed) {
+        if ctx.plane.is_halted() || ctx.plane.frozen.load(Ordering::Relaxed) {
             tokio::time::sleep(poll).await;
             continue;
         }
@@ -511,6 +438,9 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
 
 /// Supervises the top-up loop. A panicking top-up task is invisible from the
 /// outside (reth simply stops advancing), so restart it and say so loudly.
+///
+/// No halt gate on purpose: the top-up is read-only catch-up for reth — a
+/// paused mirror must not let the source's head fall behind the replay.
 pub(crate) async fn source_sync_supervisor(ctx: Arc<Ctx>) {
     loop {
         match tokio::spawn(source_sync::source_sync_loop(ctx.clone())).await {
@@ -523,6 +453,11 @@ pub(crate) async fn source_sync_supervisor(ctx: Arc<Ctx>) {
 
 /// Watch T's own blocks: every devnet transaction's writes become shadowed
 /// (copy-on-write) so parent diffs never overwrite them.
+///
+/// No halt gate on purpose: while the engine is paused the harness mines T by
+/// hand (OPERATIONS), and those writes must still be marked — the marks are
+/// exactly what keeps the next parent diffs (after resume) from clobbering
+/// them.
 pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
     let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     loop {
@@ -544,16 +479,7 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
         // (the registry was persisted; T does not advance while the engine is
         // down). The applier's inline scan shares this high-water mark, so its
         // blocks are not re-traced.
-        match mirror_devnet::scan::scan_to(
-            &ctx.anvil_t,
-            &ctx.shadow,
-            &ctx.shadow_scanned_upto,
-            pin,
-            t_head,
-            t_head,
-        )
-        .await
-        {
+        match mirror_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await {
             Ok(walked) => ctx
                 .eth_metrics
                 .add(&ctx.eth_metrics.shadow_scanned_blocks, walked),
@@ -561,7 +487,7 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
         }
         // A save fault is logged, not swallowed: the marks are in memory and
         // the next pass retries the write (bounded: one warn per poll).
-        if let Err(e) = ctx.save_shadow() {
+        if let Err(e) = ctx.plane.save_shadow() {
             tracing::warn!(error = %e, "shadow registry save failed");
         }
     }

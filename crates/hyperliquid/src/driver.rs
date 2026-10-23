@@ -5,8 +5,10 @@
 //! driver's jobs (plan §7.2):
 //!
 //! - **boot asserts**: V answers, is the venue chain, and automine is off;
-//! - **reset detection**: V's block at the cursor hash changed (a re-pin, an
-//!   OOM restart) — checked on every pass;
+//! - **reset detection**: V's chain-instance canary no longer matches the pin
+//!   (a re-pin moved the base, an OOM restart lost the word) — checked on
+//!   every pass; V's cursor hashes cannot tell (below the pin, heights resolve
+//!   to the source's own blocks, ADR 0002);
 //! - **the epoch rule**: a fresh pin means the base moved (drop marks and
 //!   values: a new epoch); the same pin means the recorded writes are still
 //!   coherent (re-apply them and keep the marks);
@@ -17,6 +19,7 @@
 //!   what the devnet owns.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
 use mirror_devnet::scan;
 use mirror_devnet::state::cursor_from;
@@ -61,7 +64,7 @@ pub async fn boot(ctx: &Ctx) -> Result<()> {
 pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
     let poll = Duration::from_millis(ctx.venue.poll_interval_ms.max(200));
     loop {
-        if ctx.is_halted() {
+        if ctx.plane.is_halted() {
             tokio::time::sleep(poll).await;
             continue;
         }
@@ -87,8 +90,8 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
     }
 }
 
-/// One steady-state pass. Returns [`Pass::Reset`] when V's block at the cursor
-/// hash changed (the epoch rule must run).
+/// One steady-state pass. Returns [`Pass::Reset`] when V's chain-instance
+/// canary no longer matches the pin (the epoch rule must run).
 enum Pass {
     Steady,
     Reset,
@@ -108,7 +111,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // CANARY_ADDRESS). Anything else — a re-pin, a same-pin restart, a wiped
     // state — means this is no longer the chain instance the registry was
     // built against, and the epoch rule must run.
-    let expected = ctx.state.lock()?.data.epoch_pin;
+    let expected = ctx.plane.state.lock()?.data.epoch_pin;
     let canary = read_canary(ctx).await?;
     if canary != expected {
         return Ok(Pass::Reset);
@@ -133,9 +136,8 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // after a rewind or a re-pin.
     let first = cursor.as_ref().map(|c| c.block).unwrap_or(head);
     let walked = scan::scan_to(
+        &ctx.plane,
         &ctx.v,
-        &ctx.shadow,
-        &ctx.shadow_scanned_upto,
         ctx.pin.load(Ordering::Relaxed),
         head,
         first,
@@ -144,15 +146,15 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     if walked > 0 {
         ctx.venue_metrics
             .add(&ctx.venue_metrics.scanned_blocks_total, walked);
-        ctx.save_shadow()?;
+        ctx.plane.save_shadow()?;
         // Ring the journal like the applier does on T: the rewind window is
         // the same 1024 blocks on both mirrors (files older than head - keep
         // are pruned; the venue's journal holds its own writes — the deal).
-        ctx.journal.prune(head);
+        ctx.plane.journal.prune(head);
         let block = ctx.v.block_by_number(head, false).await?;
         let first_block = cursor.as_ref().map(|c| c.first_block).unwrap_or(head);
         ctx.set_cursor_v(cursor_from(&block, first_block))?;
-        ctx.save_state()?;
+        ctx.plane.save_state()?;
         ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
     }
 
@@ -162,10 +164,10 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // is copied out first: a guard held by the `if let` scrutinee across the
     // body's second `lock()` would self-deadlock (std mutexes are not
     // reentrant) - the mainnet's applier copies the same way.
-    let reapply = *ctx.reapply_from.lock()?;
+    let reapply = *ctx.plane.reapply_from.lock()?;
     if let Some((_, until)) = reapply {
         if head >= until {
-            *ctx.reapply_from.lock()? = None;
+            *ctx.plane.reapply_from.lock()? = None;
             tracing::info!(block = head, until, "rewound range passed");
         }
     }
@@ -254,48 +256,20 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
         return Ok(pin);
     }
 
-    let known = ctx.state.lock()?.data.epoch_pin;
-    let new_epoch = known != pin;
-    if new_epoch {
-        // A fresh pin: the base moved, so the recorded values are stale
-        // derivations of the old base. Drop marks and values - the devnet
-        // re-creates its state from its own journal (plan 2.2/6.3).
-        let (slots, accounts) = ctx.shadow.lock()?.clear_all();
-        ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
-        tracing::warn!(
-            pin = ?pin,
-            previous = ?known,
-            cleared_slots = slots,
-            cleared_accounts = accounts,
-            "new epoch: the fork base moved; the devnet's writes are gone with it (re-create state from your journal)"
-        );
-    } else if pin.is_some() {
-        // The same pin: the recorded writes are still coherent - re-apply
-        // them and keep the marks.
-        let stats =
-            mirror_devnet::shadow::restore_recorded(&ctx.v, &ctx.shadow, ctx.venue.chunk_size)
-                .await?;
-        ctx.save_shadow()?;
-        ctx.venue_metrics
-            .add(&ctx.venue_metrics.restore_writes_total, stats.restored as u64);
-        ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
-        tracing::warn!(
-            pin = ?pin,
-            restored = stats.restored,
-            orphan_slots = stats.orphan_slots,
-            orphan_accounts = stats.orphan_accounts,
-            unknown_slots = stats.unknown_slots,
-            unknown_accounts = stats.unknown_accounts,
-            "V was reset at the same pin: re-applied the devnet's writes"
-        );
-    }
-    if pin.is_some() && known != pin {
-        ctx.state.lock()?.data.epoch_pin = pin;
-    }
-    // The journal holds before-values of the *old* chain: a rewind against the
-    // re-forked chain would restore values that never existed there. Drop it.
-    if let Err(e) = ctx.journal.clear() {
-        tracing::warn!(error = %e, "clearing the journal after a V reset failed");
+    // The epoch rule (shared with the ethereum engine, `mirror-devnet::epoch`):
+    // a fresh pin drops marks and values, the same pin re-applies the recorded
+    // writes; the journal goes either way. The transition's logs are the shared
+    // module's; the counters are V's (epoch transitions, not resets found).
+    match mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.v, ctx.venue.chunk_size, pin).await? {
+        mirror_devnet::epoch::Epoch::Steady => {}
+        mirror_devnet::epoch::Epoch::Cleared => {
+            ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
+        }
+        mirror_devnet::epoch::Epoch::Restored { restored } => {
+            ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
+            ctx.venue_metrics
+                .add(&ctx.venue_metrics.restore_writes_total, restored as u64);
+        }
     }
 
     // The registry now reflects V's base: anchor the cursor at the pin (V's
@@ -309,8 +283,8 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
         tracing::warn!("anvil-v has no fork pin: epoch decisions are pin-based and cannot run");
         ctx.v.block_number().await?
     };
-    ctx.shadow_scanned_upto.store(watermark, Ordering::Relaxed);
-    ctx.save_state()?;
+    ctx.plane.shadow_scanned_upto.store(watermark, Ordering::Relaxed);
+    ctx.plane.save_state()?;
     if let Some(p) = pin {
         write_canary(ctx, p).await?;
     }
@@ -338,13 +312,13 @@ pub async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
 /// counters are updated here — an at-pin run is the only probe source on the
 /// venue side). The route reports the run; `/metrics` carries the totals.
 pub async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> {
-    let skipped_all = ProbeOutcome {
+    let skipped_all = || ProbeOutcome {
         skipped: ctx.venue.probes.len(),
         ..Default::default()
     };
     let Some(pin) = pin else {
         tracing::warn!("at-pin probes skipped: V has no fork pin");
-        return Ok(skipped_all);
+        return Ok(skipped_all());
     };
     let source_head = ctx.source_rpc.block_number().await?;
     if pin != source_head {
@@ -356,15 +330,26 @@ pub async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> 
             skipped = ctx.venue.probes.len(),
             "at-pin probes skipped: the source serves its latest state (measured); the pin is not the source head"
         );
-        return Ok(skipped_all);
+        return Ok(skipped_all());
     }
-    let probes = ProbeRunner::devnet(&ctx.venue.probes, &ctx.shadow, false)
+    // The venue has no clock offset (the plane's field is shape-only: nothing
+    // re-aligns V's clock), so the probes never take the offset path.
+    let probes = ProbeRunner::devnet(&ctx.venue.probes, &ctx.plane.shadow, false)
         .parity(&ctx.source_rpc, pin, &ctx.v)
         .await?;
+    count_probes(ctx, probes, pin, source_head).await
+}
+
+/// Fold one run's outcome into the counters and report it. A run that raced a
+/// source advance (the chain moved mid-run, so the source's state belongs to a
+/// later block than the pin) is counted skipped — a race, not a divergence.
+async fn count_probes(
+    ctx: &Ctx,
+    probes: ProbeOutcome,
+    pin: u64,
+    source_head: u64,
+) -> Result<ProbeOutcome> {
     if probes.failed > 0 {
-        // The chain may have advanced mid-run (1 s blocks): the source's state
-        // then belongs to a later block than V's pin — a race, not a
-        // divergence. Re-check the head; if it moved, count the run skipped.
         let head_now = ctx.source_rpc.block_number().await?;
         if head_now != source_head {
             ctx.venue_metrics

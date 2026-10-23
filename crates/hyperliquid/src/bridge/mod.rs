@@ -207,29 +207,14 @@ impl Bridge {
         self.metrics.count_action(action.id());
         match action {
             CoreAction::UsdClassTransfer { ntl, to_perp } => {
-                let Some(usdc) = system::by_name(tokens, "USDC") else {
-                    return Err(Error::Warming);
-                };
-                let amount = system::core_to_human(ntl, usdc.wei_decimals);
-                let applied = self.sim.usd_class_transfer(caller, usdc.index, &usdc.name, amount, to_perp)?;
-                if applied {
-                    tracing::info!(account = %caller, amount = %amount, to_perp, "bridge: USD class transfer");
-                } else {
-                    self.metrics.inc_refusals();
-                    tracing::warn!(account = %caller, amount = %amount, to_perp, "bridge: USD class transfer refused (insufficient balance)");
-                }
+                self.usd_class_transfer(caller, ntl, to_perp, tokens)?;
             }
-            CoreAction::SpotSend { destination, token, wei } => {
-                let Some(info) = system::by_index(tokens, u32::try_from(token).unwrap_or(u32::MAX)) else {
-                    self.metrics.inc_refusals();
-                    return Ok(());
-                };
-                let amount = system::core_to_human(wei, info.wei_decimals);
-                let applied = self.sim.spot_send(caller, destination, info.index, &info.name, amount)?;
-                if !applied {
-                    self.metrics.inc_refusals();
-                    tracing::warn!(account = %caller, amount = %amount, "bridge: spot send refused (insufficient balance)");
-                }
+            CoreAction::SpotSend {
+                destination,
+                token,
+                wei,
+            } => {
+                self.spot_send(caller, destination, token, wei, tokens)?;
             }
             CoreAction::SendAsset {
                 destination,
@@ -240,21 +225,10 @@ impl Bridge {
                 self.send_asset(caller, destination, token, wei, tokens).await?;
             }
             CoreAction::AddApiWallet { wallet, name } => {
-                self.sim.note_agent(caller, wallet, &name)?;
-                tracing::info!(account = %caller, wallet = %wallet, name, "bridge: API wallet registered");
+                self.add_api_wallet(caller, wallet, &name)?;
             }
             CoreAction::SetAbstraction { user, abstraction } => {
-                let mode = match abstraction {
-                    1 => UserAbstraction::Disabled,
-                    2 => UserAbstraction::UnifiedAccount,
-                    3 => UserAbstraction::PortfolioMargin,
-                    _ => {
-                        self.metrics.inc_refusals();
-                        return Ok(());
-                    }
-                };
-                self.sim.set_mode(user, mode)?;
-                tracing::info!(account = %user, ?mode, "bridge: abstraction set");
+                self.set_abstraction(user, abstraction)?;
             }
             // Orders and cancels need the matching lane (Phase 2): counted.
             CoreAction::LimitOrder { .. }
@@ -263,6 +237,78 @@ impl Bridge {
             | CoreAction::Unmodeled { .. } => {}
             CoreAction::Malformed => self.metrics.inc_malformed(),
         }
+        Ok(())
+    }
+
+    /// `usdClassTransfer`: USDC between the spot and perp wallets.
+    fn usd_class_transfer(
+        &self,
+        caller: Address,
+        ntl: u64,
+        to_perp: bool,
+        tokens: &[TokenInfo],
+    ) -> Result<()> {
+        let Some(usdc) = system::by_name(tokens, "USDC") else {
+            return Err(Error::Warming);
+        };
+        let amount = system::core_to_human(ntl, usdc.wei_decimals);
+        let applied =
+            self.sim
+                .usd_class_transfer(caller, usdc.index, &usdc.name, amount, to_perp)?;
+        if applied {
+            tracing::info!(account = %caller, amount = %amount, to_perp, "bridge: USD class transfer");
+        } else {
+            self.metrics.inc_refusals();
+            tracing::warn!(account = %caller, amount = %amount, to_perp, "bridge: USD class transfer refused (insufficient balance)");
+        }
+        Ok(())
+    }
+
+    /// `spotSend`: spot→spot inside Core.
+    fn spot_send(
+        &self,
+        caller: Address,
+        destination: Address,
+        token: u64,
+        wei: u64,
+        tokens: &[TokenInfo],
+    ) -> Result<()> {
+        let Some(info) = system::by_index(tokens, u32::try_from(token).unwrap_or(u32::MAX)) else {
+            self.metrics.inc_refusals();
+            return Ok(());
+        };
+        let amount = system::core_to_human(wei, info.wei_decimals);
+        let applied = self
+            .sim
+            .spot_send(caller, destination, info.index, &info.name, amount)?;
+        if !applied {
+            self.metrics.inc_refusals();
+            tracing::warn!(account = %caller, amount = %amount, "bridge: spot send refused (insufficient balance)");
+        }
+        Ok(())
+    }
+
+    /// `addApiWallet`: register the agent on the account.
+    fn add_api_wallet(&self, caller: Address, wallet: Address, name: &str) -> Result<()> {
+        self.sim.note_agent(caller, wallet, name)?;
+        tracing::info!(account = %caller, wallet = %wallet, name, "bridge: API wallet registered");
+        Ok(())
+    }
+
+    /// `setAbstraction`: 1 = disabled, 2 = unified account, 3 = portfolio
+    /// margin; any other code is counted and never applied.
+    fn set_abstraction(&self, user: Address, abstraction: u8) -> Result<()> {
+        let mode = match abstraction {
+            1 => UserAbstraction::Disabled,
+            2 => UserAbstraction::UnifiedAccount,
+            3 => UserAbstraction::PortfolioMargin,
+            _ => {
+                self.metrics.inc_refusals();
+                return Ok(());
+            }
+        };
+        self.sim.set_mode(user, mode)?;
+        tracing::info!(account = %user, ?mode, "bridge: abstraction set");
         Ok(())
     }
 

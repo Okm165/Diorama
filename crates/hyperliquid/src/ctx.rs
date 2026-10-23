@@ -1,88 +1,21 @@
-//! The venue engine's context: V's client, the devnet plane's registries, the
-//! venue's own metrics.
+//! The venue engine's context: V's client, the devnet plane (registry,
+//! journal, cursor state, admin gauges and flags) as one [`Plane`] — the same
+//! bundle the ethereum engine embeds — and the venue's own metrics.
 //!
 //! Narrow by construction: the context carries exactly the sections the venue
 //! profile reads (the run path moves them out of the instance), so a venue
 //! build never sees the ethereum sections and vice versa.
 use crate::error::Result;
+use crate::metrics::VenueMetrics;
 use mirror_config::{ChainVenue, VenueSection};
 use mirror_devnet::admin::AdminSurface;
-use mirror_devnet::journal::Journal;
-use mirror_devnet::metrics::{push_metric, Metrics};
-use mirror_devnet::shadow::Shadow;
+use mirror_devnet::plane::Plane;
 use mirror_devnet::source::Source;
-use mirror_devnet::state::{ChainCursor, StateFile};
-use mirror_devnet::Shared;
+use mirror_devnet::state::ChainCursor;
 use mirror_anvil::Rpc;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// The venue's own metric set (plan §7.8): rendered beside the shared admin
-/// gauges (`mirror_devnet::metrics::Metrics::render`).
-#[derive(Default)]
-pub struct VenueMetrics {
-    /// V's head.
-    pub head: AtomicU64,
-    /// The last scanned V block.
-    pub cursor: AtomicU64,
-    /// V's fork base (the pin).
-    pub fork_pin: AtomicU64,
-    /// Blocks since the first scanned block in this epoch.
-    pub pin_age_blocks: AtomicU64,
-    /// Times V was found re-forked under the driver (a re-pin, an OOM): the
-    /// epoch rule ran (clear or restore).
-    pub epochs_total: AtomicU64,
-    /// Writes re-applied by a same-pin restore.
-    pub restore_writes_total: AtomicU64,
-    /// V blocks the shadow scan walked (the harness mines one block per poll;
-    /// empty blocks are skipped cheaply — this counter makes the cost visible,
-    /// plan §17.4).
-    pub scanned_blocks_total: AtomicU64,
-    /// V blocks the engine mined because the pool was non-empty: the engine is
-    /// V's block producer (T's is the applier), so the bridge's boot txs and
-    /// relay mints land without a harness mine.
-    pub mined_blocks_total: AtomicU64,
-    pub probe_ok: AtomicU64,
-    pub probe_failed: AtomicU64,
-    pub probe_skipped: AtomicU64,
-    /// Probes that diverged in the last at-pin run.
-    pub probe_last_failed: AtomicU64,
-}
-
-impl VenueMetrics {
-    pub fn set(&self, field: &AtomicU64, v: u64) {
-        field.store(v, Ordering::Relaxed);
-    }
-
-    pub fn add(&self, field: &AtomicU64, v: u64) {
-        field.fetch_add(v, Ordering::Relaxed);
-    }
-
-    pub fn inc(&self, field: &AtomicU64) {
-        field.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn render(&self) -> String {
-        let mut out = String::with_capacity(1024);
-        let g = |out: &mut String, name: &str, help: &str, v: u64| push_metric(out, "gauge", name, help, v);
-        let c = |out: &mut String, name: &str, help: &str, v: u64| push_metric(out, "counter", name, help, v);
-        g(&mut out, "venue_head", "anvil-v head", self.head.load(Ordering::Relaxed));
-        g(&mut out, "venue_cursor", "last scanned V block", self.cursor.load(Ordering::Relaxed));
-        g(&mut out, "venue_fork_pin", "V's fork base (the pin)", self.fork_pin.load(Ordering::Relaxed));
-        g(&mut out, "venue_pin_age_blocks", "blocks since the first scanned block in this epoch", self.pin_age_blocks.load(Ordering::Relaxed));
-        c(&mut out, "venue_epochs_total", "times V was found re-forked under the driver (epoch rule ran)", self.epochs_total.load(Ordering::Relaxed));
-        c(&mut out, "venue_restore_writes_total", "writes re-applied by same-pin restores", self.restore_writes_total.load(Ordering::Relaxed));
-        c(&mut out, "venue_scanned_blocks_total", "V blocks the shadow scan walked", self.scanned_blocks_total.load(Ordering::Relaxed));
-        c(&mut out, "venue_mined_blocks_total", "V blocks the engine mined (the pool was non-empty; the engine is V's block producer)", self.mined_blocks_total.load(Ordering::Relaxed));
-        c(&mut out, "venue_probe_ok_total", "at-pin probes matching the fork source", self.probe_ok.load(Ordering::Relaxed));
-        c(&mut out, "venue_probe_failures_total", "at-pin probes diverging from the fork source (devnet-owned skipped)", self.probe_failed.load(Ordering::Relaxed));
-        c(&mut out, "venue_probe_skipped_total", "probes skipped because their target is devnet-owned", self.probe_skipped.load(Ordering::Relaxed));
-        g(&mut out, "venue_probe_last_failed", "probes that diverged in the last at-pin run", self.probe_last_failed.load(Ordering::Relaxed));
-        out
-    }
-}
 
 pub struct Ctx {
     /// The venue chain's section (the fork source).
@@ -100,28 +33,13 @@ pub struct Ctx {
     /// The unshadow re-sync source: `VenueSource` reads the fork source at the
     /// pin (one implementation per profile, chosen at boot — rule 15).
     pub source: Arc<dyn Source>,
-    pub shadow: Shared<Shadow>,
-    pub shadow_path: PathBuf,
-    pub journal: Journal,
-    pub state: Shared<StateFile>,
-    /// The shared admin-surface metrics (shadowed_slots/halted/frozen).
-    pub metrics: Metrics,
+    /// The devnet plane: the shadow registry, the journal, the cursor state,
+    /// the shared admin gauges and flags — the same bundle the ethereum engine
+    /// embeds. The venue never freezes and has no clock offset; those fields
+    /// keep the shared surface's shape (documented on the plane).
+    pub plane: Plane,
     /// The venue's own gauges/counters.
     pub venue_metrics: VenueMetrics,
-    /// Highest V block whose devnet writes have been scanned into the registry.
-    pub shadow_scanned_upto: AtomicU64,
-    /// Set by `/admin/pause`: the driver holds where it is.
-    pub halted: AtomicBool,
-    /// The venue has no persistent clock offset (nothing re-aligns the clock);
-    /// the field keeps the shared admin surface's exact shape.
-    pub time_offset: AtomicU64,
-    /// The venue never freezes on divergence (there is no parent stream to
-    /// diverge from); the field keeps the shared surface's shape.
-    pub frozen: AtomicBool,
-    /// Set by `/admin/rewind`: V blocks whose writes were rolled back but whose
-    /// chain head is already past them (the driver re-scans them so the marks
-    /// are re-established).
-    pub reapply_from: Shared<Option<(u64, u64)>>,
 }
 
 impl Ctx {
@@ -130,11 +48,17 @@ impl Ctx {
     /// a boot error naming it, never a degraded start.
     pub fn new(mut cfg: mirror_config::Instance, source_url: &str, v_url: &str) -> Result<Self> {
         let (chain, venue) = cfg.take_venue()?;
+        // A fixed, generous per-call budget: V's chain is a local anvil and the
+        // source is one HTTP client. The ethereum profile's timeout is
+        // configurable because its reth queries race the sync; no measured need
+        // justifies a second knob here.
         let timeout = Duration::from_secs(30);
-        let shadow_path = venue.state_dir.join("shadow.json");
-        let shadow = Shadow::load(&shadow_path)?;
-        let journal = Journal::new(venue.state_dir.join("journal"), venue.journal_blocks)?;
-        let state = StateFile::open(venue.state_dir.join("cursor.json"))?;
+        let plane = Plane::open(
+            &venue.state_dir,
+            venue.state_dir.join("journal"),
+            venue.journal_blocks,
+            &[],
+        )?;
         let source_rpc = Rpc::new(source_url, timeout)?;
         let pin = Arc::new(AtomicU64::new(0));
         Ok(Self {
@@ -147,89 +71,26 @@ impl Ctx {
             )),
             source_rpc,
             pin,
-            shadow: Shared::new("shadow registry", shadow),
-            shadow_path,
-            journal,
-            state: Shared::new("cursor state", state),
-            metrics: Metrics::default(),
+            plane,
             venue_metrics: VenueMetrics::default(),
-            shadow_scanned_upto: AtomicU64::new(0),
-            halted: AtomicBool::new(false),
-            time_offset: AtomicU64::new(0),
-            frozen: AtomicBool::new(false),
-            reapply_from: Shared::new("reapply range", None),
         })
     }
 
-    /// The admin surface, wired per request from the context (references only).
+    /// The devnet admin surface, wired to this engine's chain and re-sync
+    /// source (the semantics live in `mirror-devnet`; the wiring is the
+    /// profile's: V's chain, the fork source, the configured chunk size, and a
+    /// journal that is exactly the engine's own writes).
     pub fn admin(&self) -> AdminSurface<'_> {
-        AdminSurface {
-            target: &self.v,
-            source: self.source.as_ref(),
-            shadow: &self.shadow,
-            shadow_path: &self.shadow_path,
-            journal: &self.journal,
-            state: &self.state,
-            metrics: &self.metrics,
-            time_offset: &self.time_offset,
-            halted: &self.halted,
-            frozen: &self.frozen,
-            reapply_from: &self.reapply_from,
-            scanned_upto: &self.shadow_scanned_upto,
-            chunk_size: self.venue.chunk_size,
-            journal_writes: true,
-        }
+        self.plane
+            .admin(&self.v, self.source.as_ref(), self.venue.chunk_size, true)
     }
 
     pub fn cursor_v(&self) -> Result<Option<ChainCursor>> {
-        Ok(self.state.lock()?.data.t.clone())
+        Ok(self.plane.state.lock()?.data.t.clone())
     }
 
     pub fn set_cursor_v(&self, cursor: ChainCursor) -> Result<()> {
-        self.state.lock()?.data.t = Some(cursor);
+        self.plane.state.lock()?.data.t = Some(cursor);
         Ok(())
-    }
-
-    pub fn save_state(&self) -> Result<()> {
-        self.state.lock()?.save()?;
-        Ok(())
-    }
-
-    pub fn save_shadow(&self) -> Result<()> {
-        mirror_devnet::shadow::save_registry(&self.shadow, &self.shadow_path, &self.metrics)?;
-        Ok(())
-    }
-
-    pub fn is_halted(&self) -> bool {
-        self.halted.load(Ordering::Relaxed)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    /// The series names a rendered exposition defines (help/type lines and
-    /// label sets stripped).
-    fn series(rendered: &str) -> BTreeSet<String> {
-        rendered
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-            .map(|l| l.split([' ', '{']).next().unwrap_or_default().to_string())
-            .collect()
-    }
-
-    /// The venue's own set and the shared admin gauges must not overlap: the
-    /// engine renders both (venue first, admin second), and a duplicate series
-    /// would be invalid exposition (the mirror of the devnet-side test).
-    #[test]
-    fn venue_and_admin_series_do_not_overlap() {
-        let venue = super::VenueMetrics::default();
-        let admin = mirror_devnet::metrics::Metrics::default();
-        let dupes: Vec<String> = series(&venue.render())
-            .intersection(&series(&admin.render()))
-            .cloned()
-            .collect();
-        assert!(dupes.is_empty(), "duplicate series: {dupes:?}");
     }
 }

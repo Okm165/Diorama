@@ -1,26 +1,25 @@
-//! Shared engine context: RPC clients, watch list, shadow registry, journal,
-//! cursor state, metrics.
+//! Engine context: the profile's clients and config, plus the devnet plane
+//! (registry, journal, cursor state, admin gauges and flags) as one
+//! [`Plane`] — the same bundle the venue engine embeds.
 //!
 //! Every mutable registry is a [`mirror_devnet::Shared`] lock: poisoning is a
 //! typed fault (`Error::Poisoned`) that the loops propagate and the admin
 //! surface answers 503 for — never a per-call panic, never a silent recovery.
 use crate::blob::{BeaconClient, BlobForm};
-use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
 use crate::drift::Drift;
 use crate::error::Result;
-use crate::journal::Journal;
 use crate::metrics::EthereumMetrics;
-use mirror_devnet::metrics::Metrics;
 use crate::rpc::Rpc;
-use crate::shadow::Shadow;
-use crate::state::{ChainCursor, StateFile};
 use alloy_primitives::Address;
+use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
 use mirror_devnet::admin::AdminSurface;
+use mirror_devnet::metrics::Registry as _;
+use mirror_devnet::plane::Plane;
 use mirror_devnet::source::Source;
+use mirror_devnet::state::ChainCursor;
 use mirror_devnet::Shared;
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,11 +48,10 @@ pub struct Ctx {
     /// or unconfigured.
     pub engine_api: Option<crate::engine_api::EngineClient>,
     pub watchlist: HashSet<Address>,
-    pub shadow: Shared<Shadow>,
-    pub shadow_path: PathBuf,
-    pub journal: Journal,
-    pub state: Shared<StateFile>,
-    pub metrics: Metrics,
+    /// The devnet plane: the shadow registry, the journal, the cursor state,
+    /// the shared admin gauges and flags — the same bundle the venue engine
+    /// embeds (one home for the wiring that must not drift).
+    pub plane: Plane,
     /// The profile's own set (reth/M/T heads, the applier's counters, the
     /// probes); rendered beside the shared admin gauges.
     pub eth_metrics: EthereumMetrics,
@@ -61,15 +59,8 @@ pub struct Ctx {
     /// renders them whether or not the bridge is configured).
     pub feed_bridge_metrics: Arc<crate::feed_bridge::FeedBridgeMetrics>,
     pub drift: Drift,
-    pub frozen: AtomicBool,
-    pub halted: AtomicBool,
+    /// The learned blob wrapper form (persisted in the plane's state file).
     pub blob_pref: Shared<Option<BlobForm>>,
-    /// Set by `/admin/rewind`: parent blocks whose T writes were rolled back
-    /// but whose T head is already past them. The normal "late completion"
-    /// skip would leave them stale, so the applier re-applies them
-    /// (idempotent writes; re-journaling records the rolled-back values as the
-    /// new before-values). Cleared once the whole range is re-applied.
-    pub reapply_from: Shared<Option<(u64, u64)>>,
     /// Last (head, follow) pair logged as "M ahead of the follow head": the
     /// poll loop runs every second, so the same stall must not spam the log.
     pub last_stall: Shared<(u64, u64)>,
@@ -77,18 +68,6 @@ pub struct Ctx {
     /// `follow: latest` the beacon ingests sidecars seconds after the block, so
     /// the first attempt legitimately misses and the retries must not spam.
     pub blob_warned: std::sync::atomic::AtomicU64,
-    /// Seconds the devnet's clock runs ahead of the parent block (`/admin/time`).
-    /// The applier aligns to `parent + offset` and clamps to keep timestamps
-    /// monotonic, so a jump sticks and mainnet's data keeps flowing - the
-    /// financial-dev use case (interest accrual, expiry, funding) that a static
-    /// fork gets from `evm_increaseTime` but a live one would lose on the next
-    /// parent block.
-    pub time_offset: AtomicU64,
-    /// Highest T block whose devnet writes have been scanned into the shadow
-    /// registry. Shared by the polling shadow loop and the applier's inline
-    /// scan (which runs its own prepend blocks *before* the probe parity), so
-    /// a block is traced once and the log stays one line per devnet block.
-    pub shadow_scanned_upto: AtomicU64,
     /// Set by the replay loop when the same block has failed long enough that
     /// the cause cannot be transient (measured: Lighthouse prunes blob sidecars
     /// after ~1 epoch, so a hold longer than that can never be served and M
@@ -121,15 +100,12 @@ impl Ctx {
         let (l1, engine_section) = cfg.take_ethereum()?;
         let timeout = Duration::from_secs(engine_section.reth.request_timeout_secs);
         let watchlist = cfg.watch_set();
-        let shadow_path = engine_section.state_dir.join("shadow.json");
-        let mut shadow = Shadow::load(&shadow_path)?;
-        shadow.set_fixtures(engine_section.fixture_addresses.iter().copied().collect());
-        let journal = Journal::new(
+        let plane = Plane::open(
+            &engine_section.state_dir,
             engine_section.journal.dir.clone(),
             engine_section.journal.blocks,
+            &engine_section.fixture_addresses,
         )?;
-        let state = StateFile::open(engine_section.state_dir.join("cursor.json"))?;
-        let offset = state.data.time_offset_seconds.unwrap_or(0);
         let drift = Drift::new(engine_section.state_dir.join("drift.jsonl"))?;
         let beacon = BeaconClient::new(engine_section.blobs.beacon_urls.clone())?;
         let reth = Rpc::new(reth_url, timeout)?;
@@ -156,110 +132,71 @@ impl Ctx {
             beacon,
             engine_api,
             watchlist,
-            shadow: Shared::new("shadow registry", shadow),
-            shadow_path,
-            journal,
-            // The devnet's clock offset is part of its state contract: T's
-            // blocks (and every time-dependent contract on it) carry it, so a
-            // restart must not silently drop it back to 0 - T would hold
-            // +offset-era state under a mainnet clock (measured: Aave's
-            // `lastUpdateTimestamp` lands in the future and every supply
-            // panics with an arithmetic underflow).
-            time_offset: AtomicU64::new(offset),
-            state: Shared::new("cursor state", state),
-            metrics: Metrics::default(),
+            plane,
             eth_metrics: EthereumMetrics::default(),
             feed_bridge_metrics: Arc::new(crate::feed_bridge::FeedBridgeMetrics::default()),
             drift,
-            frozen: AtomicBool::new(false),
-            halted: AtomicBool::new(false),
             blob_pref: Shared::new("blob form", None),
-            reapply_from: Shared::new("reapply range", None),
+            last_stall: Shared::new("stall log", (0, 0)),
             blob_warned: std::sync::atomic::AtomicU64::new(0),
             force_rebase: AtomicBool::new(false),
-            shadow_scanned_upto: AtomicU64::new(0),
             last_m_diverged: AtomicBool::new(true),
-            last_stall: Shared::new("stall log", (0, 0)),
             last_rebase: Shared::new("rebase clock", None),
         })
     }
 
     pub fn cursor_m(&self) -> Result<Option<ChainCursor>> {
-        Ok(self.state.lock()?.data.m.clone())
+        Ok(self.plane.state.lock()?.data.m.clone())
     }
 
     pub fn cursor_t(&self) -> Result<Option<ChainCursor>> {
-        Ok(self.state.lock()?.data.t.clone())
+        Ok(self.plane.state.lock()?.data.t.clone())
     }
 
     pub fn set_cursor_m(&self, c: ChainCursor) -> Result<()> {
-        self.state.lock()?.data.m = Some(c);
+        self.plane.state.lock()?.data.m = Some(c);
         Ok(())
     }
 
     pub fn set_cursor_t(&self, c: ChainCursor) -> Result<()> {
-        self.state.lock()?.data.t = Some(c);
+        self.plane.state.lock()?.data.t = Some(c);
         Ok(())
     }
 
     pub fn set_reth_last_hash(&self, hash: String) -> Result<()> {
-        self.state.lock()?.data.reth_last_hash = Some(hash);
+        self.plane.state.lock()?.data.reth_last_hash = Some(hash);
         Ok(())
     }
 
     pub fn set_reth_last_block(&self, n: u64) -> Result<()> {
-        self.state.lock()?.data.reth_last_block = Some(n);
+        self.plane.state.lock()?.data.reth_last_block = Some(n);
         Ok(())
     }
 
     pub fn reth_last_block(&self) -> Result<Option<u64>> {
-        Ok(self.state.lock()?.data.reth_last_block)
+        Ok(self.plane.state.lock()?.data.reth_last_block)
     }
 
     pub fn reth_last_hash(&self) -> Result<Option<String>> {
-        Ok(self.state.lock()?.data.reth_last_hash.clone())
+        Ok(self.plane.state.lock()?.data.reth_last_hash.clone())
     }
 
-    pub fn save_state(&self) -> Result<()> {
-        self.state.lock()?.save()?;
-        Ok(())
-    }
-
-    pub fn save_shadow(&self) -> Result<()> {
-        Ok(mirror_devnet::shadow::save_registry(
-            &self.shadow,
-            &self.shadow_path,
-            &self.metrics,
-        )?)
-    }
-
-    /// The devnet admin surface (plan §11.3), wired to this engine's chain and
-    /// registries: the semantics live in `mirror-devnet`, the wiring here.
+    /// The devnet admin surface, wired to this engine's chain and re-sync
+    /// source (the semantics live in `mirror-devnet`; the wiring is the
+    /// profile's: T's chain, reth-as-source, the configured chunk size, and a
+    /// journal that holds the applier's parent before-values, not the engine's
+    /// own writes).
     pub fn admin(&self) -> AdminSurface<'_> {
-        AdminSurface {
-            target: &self.anvil_t,
-            source: self.source.as_ref(),
-            shadow: &self.shadow,
-            shadow_path: &self.shadow_path,
-            journal: &self.journal,
-            state: &self.state,
-            metrics: &self.metrics,
-            time_offset: &self.time_offset,
-            halted: &self.halted,
-            frozen: &self.frozen,
-            reapply_from: &self.reapply_from,
-            scanned_upto: &self.shadow_scanned_upto,
-            chunk_size: self.engine.loops.chunk_size,
-            journal_writes: false,
-        }
+        self.plane.admin(
+            &self.anvil_t,
+            self.source.as_ref(),
+            self.engine.loops.chunk_size,
+            false,
+        )
     }
 
     pub fn is_shadowed(&self, w: &crate::bal::Write) -> Result<bool> {
-        Ok(self.shadow.lock()?.is_shadowed(w))
-    }
-
-    pub fn is_halted(&self) -> bool {
-        self.halted.load(Ordering::Relaxed)
+        Ok(self.plane.shadow.lock()?.is_shadowed(w))
     }
 
     /// reth follow head (safe/latest/finalized per config).
@@ -274,14 +211,14 @@ impl Ctx {
         tracing::error!(reason, "DIVERGENCE");
         match self.engine.loops.on_divergence {
             mirror_config::OnDivergence::FreezeM => {
-                self.frozen.store(true, Ordering::SeqCst);
-                self.metrics.set(&self.metrics.frozen, 1);
+                self.plane.frozen.store(true, Ordering::SeqCst);
+                self.plane.metrics.set(&self.plane.metrics.frozen, 1);
             }
             mirror_config::OnDivergence::HaltAll => {
-                self.frozen.store(true, Ordering::SeqCst);
-                self.halted.store(true, Ordering::SeqCst);
-                self.metrics.set(&self.metrics.frozen, 1);
-                self.metrics.set(&self.metrics.halted, 1);
+                self.plane.frozen.store(true, Ordering::SeqCst);
+                self.plane.halted.store(true, Ordering::SeqCst);
+                self.plane.metrics.set(&self.plane.metrics.frozen, 1);
+                self.plane.metrics.set(&self.plane.metrics.halted, 1);
             }
             mirror_config::OnDivergence::Continue => {}
         }
@@ -301,14 +238,14 @@ impl Ctx {
 
     pub fn set_blob_form(&self, form: BlobForm) -> Result<()> {
         *self.blob_pref.lock()? = Some(form);
-        let mut st = self.state.lock()?;
+        let mut st = self.plane.state.lock()?;
         st.data.blob_wrapper = Some(form.as_str().to_string());
         Ok(())
     }
 
     /// Restore a learned blob form from the persisted state.
     pub fn restore_blob_form(&self) -> Result<()> {
-        let persisted = self.state.lock()?.data.blob_wrapper.clone();
+        let persisted = self.plane.state.lock()?.data.blob_wrapper.clone();
         if let Some(s) = persisted {
             if let Some(f) = BlobForm::from_str(&s) {
                 *self.blob_pref.lock()? = Some(f);

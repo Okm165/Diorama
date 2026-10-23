@@ -24,8 +24,8 @@ pub mod driver;
 pub mod error;
 pub mod feed;
 pub mod http;
+pub mod metrics;
 pub mod sim;
-pub mod store;
 pub mod venue_source;
 pub mod wire;
 
@@ -45,7 +45,7 @@ mod design_assertions {
 
     #[test]
     fn public_types_are_normal() {
-        is_normal::<crate::ctx::VenueMetrics>();
+        is_normal::<crate::metrics::VenueMetrics>();
         is_normal::<crate::feed::MarketFeed>();
         is_normal::<crate::feed::Overrides>();
         is_normal::<crate::feed::PriceOverride>();

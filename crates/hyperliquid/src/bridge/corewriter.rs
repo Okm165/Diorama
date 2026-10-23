@@ -118,67 +118,102 @@ pub fn decode(input: &[u8]) -> CoreAction {
     let id = u32::from_be_bytes([0, input[1], input[2], input[3]]);
     let payload = &input[4..];
     match id {
-        1 => match words(payload, 7) {
-            Some(w) => CoreAction::LimitOrder {
-                asset: u32_of(&w[0]),
-                is_buy: !w[1].is_zero(),
-                limit_px: u64_of(&w[2]),
-                sz: u64_of(&w[3]),
-                reduce_only: !w[4].is_zero(),
-                tif: u8_of(&w[5]),
-                cloid: u128_of(&w[6]),
-            },
-            None => CoreAction::Malformed,
-        },
-        6 => match words(payload, 3) {
-            Some(w) => CoreAction::SpotSend {
-                destination: address_of(&w[0]),
-                token: u64_of(&w[1]),
-                wei: u64_of(&w[2]),
-            },
-            None => CoreAction::Malformed,
-        },
-        7 => match words(payload, 2) {
-            Some(w) => CoreAction::UsdClassTransfer {
-                ntl: u64_of(&w[0]),
-                to_perp: !w[1].is_zero(),
-            },
-            None => CoreAction::Malformed,
-        },
+        1 => decode_limit_order(payload),
+        6 => decode_spot_send(payload),
+        7 => decode_usd_class_transfer(payload),
         9 => decode_add_api_wallet(payload).unwrap_or(CoreAction::Malformed),
-        10 => match words(payload, 2) {
-            Some(w) => CoreAction::CancelByOid {
-                asset: u32_of(&w[0]),
-                oid: u64_of(&w[1]),
-            },
-            None => CoreAction::Malformed,
-        },
-        11 => match words(payload, 2) {
-            Some(w) => CoreAction::CancelByCloid {
-                asset: u32_of(&w[0]),
-                cloid: u128_of(&w[1]),
-            },
-            None => CoreAction::Malformed,
-        },
-        13 => match words(payload, 6) {
-            Some(w) => CoreAction::SendAsset {
-                destination: address_of(&w[0]),
-                sub_account: address_of(&w[1]),
-                source_dex: u32_of(&w[2]),
-                destination_dex: u32_of(&w[3]),
-                token: u64_of(&w[4]),
-                wei: u64_of(&w[5]),
-            },
-            None => CoreAction::Malformed,
-        },
-        16 => match words(payload, 2) {
-            Some(w) => CoreAction::SetAbstraction {
-                user: address_of(&w[0]),
-                abstraction: u8_of(&w[1]),
-            },
-            None => CoreAction::Malformed,
-        },
+        10 => decode_cancel_by_oid(payload),
+        11 => decode_cancel_by_cloid(payload),
+        13 => decode_send_asset(payload),
+        16 => decode_set_abstraction(payload),
         other => CoreAction::Unmodeled { id: other },
+    }
+}
+
+/// Action 1: `limitOrder` (7 words).
+fn decode_limit_order(payload: &[u8]) -> CoreAction {
+    match words(payload, 7) {
+        Some(w) => CoreAction::LimitOrder {
+            asset: u32_of(&w[0]),
+            is_buy: !w[1].is_zero(),
+            limit_px: u64_of(&w[2]),
+            sz: u64_of(&w[3]),
+            reduce_only: !w[4].is_zero(),
+            tif: u8_of(&w[5]),
+            cloid: u128_of(&w[6]),
+        },
+        None => CoreAction::Malformed,
+    }
+}
+
+/// Action 6: `spotSend` (3 words).
+fn decode_spot_send(payload: &[u8]) -> CoreAction {
+    match words(payload, 3) {
+        Some(w) => CoreAction::SpotSend {
+            destination: address_of(&w[0]),
+            token: u64_of(&w[1]),
+            wei: u64_of(&w[2]),
+        },
+        None => CoreAction::Malformed,
+    }
+}
+
+/// Action 7: `usdClassTransfer` (2 words).
+fn decode_usd_class_transfer(payload: &[u8]) -> CoreAction {
+    match words(payload, 2) {
+        Some(w) => CoreAction::UsdClassTransfer {
+            ntl: u64_of(&w[0]),
+            to_perp: !w[1].is_zero(),
+        },
+        None => CoreAction::Malformed,
+    }
+}
+
+/// Action 10: `cancelByOid` (2 words).
+fn decode_cancel_by_oid(payload: &[u8]) -> CoreAction {
+    match words(payload, 2) {
+        Some(w) => CoreAction::CancelByOid {
+            asset: u32_of(&w[0]),
+            oid: u64_of(&w[1]),
+        },
+        None => CoreAction::Malformed,
+    }
+}
+
+/// Action 11: `cancelByCloid` (2 words).
+fn decode_cancel_by_cloid(payload: &[u8]) -> CoreAction {
+    match words(payload, 2) {
+        Some(w) => CoreAction::CancelByCloid {
+            asset: u32_of(&w[0]),
+            cloid: u128_of(&w[1]),
+        },
+        None => CoreAction::Malformed,
+    }
+}
+
+/// Action 13: `sendAsset` (6 words).
+fn decode_send_asset(payload: &[u8]) -> CoreAction {
+    match words(payload, 6) {
+        Some(w) => CoreAction::SendAsset {
+            destination: address_of(&w[0]),
+            sub_account: address_of(&w[1]),
+            source_dex: u32_of(&w[2]),
+            destination_dex: u32_of(&w[3]),
+            token: u64_of(&w[4]),
+            wei: u64_of(&w[5]),
+        },
+        None => CoreAction::Malformed,
+    }
+}
+
+/// Action 16: `setAbstraction` (2 words).
+fn decode_set_abstraction(payload: &[u8]) -> CoreAction {
+    match words(payload, 2) {
+        Some(w) => CoreAction::SetAbstraction {
+            user: address_of(&w[0]),
+            abstraction: u8_of(&w[1]),
+        },
+        None => CoreAction::Malformed,
     }
 }
 

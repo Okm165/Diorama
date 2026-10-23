@@ -13,33 +13,14 @@ use mirror_config::boot;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(boot::WORKER_STACK_SIZE)
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            boot::report_error(&e);
-            return ExitCode::FAILURE;
-        }
-    };
-    runtime.block_on(async move {
-        match run().await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                boot::report_error(&e);
-                ExitCode::FAILURE
-            }
-        }
-    })
+    boot::run_main(run())
 }
 
 async fn run() -> mirror_hyperliquid::Result<()> {
     boot::init_logging();
     let config = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/etc/mirror/instance.toml".to_string());
+        .unwrap_or_else(|| boot::DEFAULT_INSTANCE_PATH.to_string());
     // One instance file, many readers: this pod provides only the venue
     // engine's wiring. `inspect` reports the other services' unresolved
     // references instead of failing on them; the engine's own sections are

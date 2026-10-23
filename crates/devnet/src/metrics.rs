@@ -19,22 +19,27 @@ pub struct Metrics {
     pub frozen: AtomicU64,
 }
 
-#[allow(
-    clippy::unused_self,
-    reason = "the registry is the namespace; the field is the operand (call sites stay `metrics.set(...)`)"
-)]
-impl Metrics {
-    pub fn set(&self, field: &AtomicU64, v: u64) {
+/// The registry convention, one implementation for every registry: the shared
+/// admin gauges, the ethereum profile's `EthereumMetrics`, the venue's
+/// `VenueMetrics`. `set`/`add`/`inc` take the field as the operand, so the
+/// receiver is the namespace, not the state — the call sites read
+/// `registry.add(&registry.field, n)` and a profile's registry can never grow
+/// its own variant of the convention.
+pub trait Registry {
+    fn set(&self, field: &AtomicU64, v: u64) {
         field.store(v, Ordering::Relaxed);
     }
-    pub fn add(&self, field: &AtomicU64, v: u64) {
+    fn add(&self, field: &AtomicU64, v: u64) {
         field.fetch_add(v, Ordering::Relaxed);
     }
-
-    pub fn inc(&self, field: &AtomicU64) {
+    fn inc(&self, field: &AtomicU64) {
         field.fetch_add(1, Ordering::Relaxed);
     }
+}
 
+impl Registry for Metrics {}
+
+impl Metrics {
     /// The shared admin gauges: the whole of this crate's exposition. Each
     /// profile renders these beside its own set (the ethereum engine's
     /// `EthereumMetrics`, the venue's `VenueMetrics`).

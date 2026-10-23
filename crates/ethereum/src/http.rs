@@ -1,6 +1,6 @@
 //! Engine HTTP API: health, status, Prometheus metrics, and the admin surface
-//! (rewind / resume / pause / time / shadow / deal) — the fork controls that
-//! belong to the mirror itself rather than to Anvil.
+//! (rewind / resume / pause / time / shadow / deal / epoch / probes) — the
+//! fork controls that belong to the mirror itself rather than to Anvil.
 //!
 //! The routes are wired here (axum binds [`Ctx`]); the admin *semantics* live
 //! in `mirror-devnet`'s admin surface, which both projects share.
@@ -24,6 +24,7 @@ use mirror_devnet::admin::{
     ShadowRequest, TimeRequest,
 };
 use mirror_devnet::deal::DealRequest;
+use mirror_devnet::metrics::Registry as _;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -137,7 +138,7 @@ pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()>
 }
 
 async fn healthz(State(ctx): State<Arc<Ctx>>) -> impl IntoResponse {
-    if ctx.is_halted() {
+    if ctx.plane.is_halted() {
         (StatusCode::SERVICE_UNAVAILABLE, "halted")
     } else {
         (StatusCode::OK, "ok")
@@ -163,7 +164,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     let t_head = ctx.anvil_t.block_number().await.unwrap_or(0);
     let cm = ctx.cursor_m()?;
     let ct = ctx.cursor_t()?;
-    let shadow = ctx.shadow.lock()?;
+    let shadow = ctx.plane.shadow.lock()?;
     Ok(Json(StatusResponse {
         reth_head,
         follow_head: follow,
@@ -173,14 +174,14 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
         cursor: cm.as_ref().map(|c| c.block),
         cursor_t: ct.as_ref().map(|c| c.block),
         lag: follow.saturating_sub(cm.as_ref().map(|c| c.block).unwrap_or(follow)),
-        frozen: ctx.frozen.load(Ordering::Relaxed),
-        halted: ctx.is_halted(),
+        frozen: ctx.plane.frozen.load(Ordering::Relaxed),
+        halted: ctx.plane.is_halted(),
         watchlist: ctx.watchlist.len(),
         shadowed_slots: shadow.slot_count(),
         shadowed_accounts: shadow.accounts.len(),
         shadowed: shadow.shadowed_addresses(),
         blob_form: ctx.blob_form()?.map(crate::blob::BlobForm::as_str),
-        time_offset_seconds: ctx.time_offset.load(Ordering::Relaxed),
+        time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
     }))
 }
 
@@ -189,7 +190,7 @@ async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
     // the shared admin gauges (one definition — `Metrics::render`), then the
     // feed bridge's counters.
     let mut out = ctx.eth_metrics.render();
-    out.push_str(&ctx.metrics.render());
+    out.push_str(&ctx.plane.metrics.render());
     out.push_str(&ctx.feed_bridge_metrics.render());
     out
 }

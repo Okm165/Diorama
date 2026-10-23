@@ -3,7 +3,9 @@ use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-use crate::sections::{CctpSection, EngineSection, Services, SimSection, VenueSection};
+use crate::sections::{
+    CctpSection, EngineSection, FeedBridgeSection, Services, SimSection, VenueSection,
+};
 use crate::ConfigError;
 
 /// One mirror deployment: identity, chains, watchlist, service sections.
@@ -205,85 +207,13 @@ impl Instance {
 
     fn check_services(&self, issues: &mut Vec<String>) {
         if let Some(eng) = &self.services.engine {
-            check_http_url("services.engine.anvil.m_url", &eng.anvil.m_url, issues);
-            check_http_url("services.engine.anvil.t_url", &eng.anvil.t_url, issues);
-            for (i, url) in eng.blobs.beacon_urls.iter().enumerate() {
-                check_http_url(
-                    &format!("services.engine.blobs.beacon_urls[{i}]"),
-                    url,
-                    issues,
-                );
-            }
-            if let Some(url) = &eng.source_sync.engine_url {
-                check_http_url("services.engine.source_sync.engine_url", url, issues);
-            }
-            if let Some(path) = &eng.source_sync.jwt_path {
-                if looks_like_secret(&path.to_string_lossy()) {
-                    issues.push(
-                        "services.engine.source_sync.jwt_path must be a file path, \
-                         not the secret itself"
-                            .into(),
-                    );
-                }
-            }
-            if eng.state_dir.as_os_str().is_empty() {
-                issues.push("services.engine.state_dir must not be empty".into());
-            }
-            if let Some(fb) = &eng.feed_bridge {
-                if fb.poll_interval_ms == 0 {
-                    issues.push("services.engine.feed_bridge.poll_interval_ms must be > 0".into());
-                }
-                if fb.confirm_window_ms < fb.poll_interval_ms {
-                    issues.push(
-                        "services.engine.feed_bridge.confirm_window_ms must be >= poll_interval_ms"
-                            .into(),
-                    );
-                }
-                if fb.feeds.is_empty() {
-                    issues.push("services.engine.feed_bridge.feeds must not be empty".into());
-                }
-                let mut names = std::collections::HashSet::new();
-                for (i, feed) in fb.feeds.iter().enumerate() {
-                    if feed.name.is_empty() {
-                        issues.push(format!("services.engine.feed_bridge.feeds[{i}].name must not be empty"));
-                    }
-                    if !names.insert(feed.name.clone()) {
-                        issues.push(format!("services.engine.feed_bridge.feeds[{i}].name `{}` is duplicated", feed.name));
-                    }
-                }
-            }
-            if eng.journal.dir.as_os_str().is_empty() {
-                issues.push("services.engine.journal.dir must not be empty".into());
-            }
+            check_engine(eng, issues);
         }
         if let Some(venue) = &self.services.venue {
-            check_http_url("services.venue.anvil_url", &venue.anvil_url, issues);
-            if venue.state_dir.as_os_str().is_empty() {
-                issues.push("services.venue.state_dir must not be empty".into());
-            }
-            if venue.poll_interval_ms == 0 {
-                issues.push("services.venue.poll_interval_ms must be > 0".into());
-            }
-            if venue.chunk_size == 0 {
-                issues.push("services.venue.chunk_size must be > 0".into());
-            }
+            check_venue(venue, issues);
         }
         if let Some(sim) = &self.services.sim {
-            if sim.state_dir.as_os_str().is_empty() {
-                issues.push("services.sim.state_dir must not be empty".into());
-            }
-            if sim.markets.is_empty() {
-                issues.push("services.sim.markets must name at least one market".into());
-            }
-            if sim.poll_interval_ms == 0 {
-                issues.push("services.sim.poll_interval_ms must be > 0".into());
-            }
-            if let Some(url) = &sim.engine_admin_url {
-                check_http_url("services.sim.engine_admin_url", url, issues);
-            }
-            if let Some(url) = &sim.anvil_url {
-                check_http_url("services.sim.anvil_url", url, issues);
-            }
+            check_sim(sim, issues);
         }
         if let Some(cctp) = &self.services.cctp {
             check_cctp(cctp, issues);
@@ -491,4 +421,103 @@ fn check_ws_url(key: &str, value: &str, issues: &mut Vec<String>) {
 fn looks_like_secret(value: &str) -> bool {
     let hex = value.trim().strip_prefix("0x").unwrap_or(value.trim());
     hex.len() >= 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The ethereum engine's section: URLs, the beacon list, the source-sync
+/// boundary, the state dirs, and the feed bridge.
+fn check_engine(eng: &EngineSection, issues: &mut Vec<String>) {
+    check_http_url("services.engine.anvil.m_url", &eng.anvil.m_url, issues);
+    check_http_url("services.engine.anvil.t_url", &eng.anvil.t_url, issues);
+    for (i, url) in eng.blobs.beacon_urls.iter().enumerate() {
+        check_http_url(
+            &format!("services.engine.blobs.beacon_urls[{i}]"),
+            url,
+            issues,
+        );
+    }
+    if let Some(url) = &eng.source_sync.engine_url {
+        check_http_url("services.engine.source_sync.engine_url", url, issues);
+    }
+    if let Some(path) = &eng.source_sync.jwt_path {
+        if looks_like_secret(&path.to_string_lossy()) {
+            issues.push(
+                "services.engine.source_sync.jwt_path must be a file path, \
+                 not the secret itself"
+                    .into(),
+            );
+        }
+    }
+    if eng.state_dir.as_os_str().is_empty() {
+        issues.push("services.engine.state_dir must not be empty".into());
+    }
+    if eng.journal.dir.as_os_str().is_empty() {
+        issues.push("services.engine.journal.dir must not be empty".into());
+    }
+    if let Some(fb) = &eng.feed_bridge {
+        check_feed_bridge(fb, issues);
+    }
+}
+
+/// One feed bridge: cadence coherence, at least one feed, unique names.
+fn check_feed_bridge(fb: &FeedBridgeSection, issues: &mut Vec<String>) {
+    if fb.poll_interval_ms == 0 {
+        issues.push("services.engine.feed_bridge.poll_interval_ms must be > 0".into());
+    }
+    if fb.confirm_window_ms < fb.poll_interval_ms {
+        issues.push(
+            "services.engine.feed_bridge.confirm_window_ms must be >= poll_interval_ms".into(),
+        );
+    }
+    if fb.feeds.is_empty() {
+        issues.push("services.engine.feed_bridge.feeds must not be empty".into());
+    }
+    let mut names = HashSet::new();
+    for (i, feed) in fb.feeds.iter().enumerate() {
+        if feed.name.is_empty() {
+            issues.push(format!(
+                "services.engine.feed_bridge.feeds[{i}].name must not be empty"
+            ));
+        }
+        if !names.insert(feed.name.clone()) {
+            issues.push(format!(
+                "services.engine.feed_bridge.feeds[{i}].name `{}` is duplicated",
+                feed.name
+            ));
+        }
+    }
+}
+
+/// The venue engine's section: the chain URL, the state dir, the cadence and
+/// the write chunk size.
+fn check_venue(venue: &VenueSection, issues: &mut Vec<String>) {
+    check_http_url("services.venue.anvil_url", &venue.anvil_url, issues);
+    if venue.state_dir.as_os_str().is_empty() {
+        issues.push("services.venue.state_dir must not be empty".into());
+    }
+    if venue.poll_interval_ms == 0 {
+        issues.push("services.venue.poll_interval_ms must be > 0".into());
+    }
+    if venue.chunk_size == 0 {
+        issues.push("services.venue.chunk_size must be > 0".into());
+    }
+}
+
+/// The simulator's section: the state dir, at least one market, the cadence
+/// and the optional chain URLs.
+fn check_sim(sim: &SimSection, issues: &mut Vec<String>) {
+    if sim.state_dir.as_os_str().is_empty() {
+        issues.push("services.sim.state_dir must not be empty".into());
+    }
+    if sim.markets.is_empty() {
+        issues.push("services.sim.markets must name at least one market".into());
+    }
+    if sim.poll_interval_ms == 0 {
+        issues.push("services.sim.poll_interval_ms must be > 0".into());
+    }
+    if let Some(url) = &sim.engine_admin_url {
+        check_http_url("services.sim.engine_admin_url", url, issues);
+    }
+    if let Some(url) = &sim.anvil_url {
+        check_http_url("services.sim.anvil_url", url, issues);
+    }
 }

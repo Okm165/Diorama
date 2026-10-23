@@ -8,24 +8,5 @@ use mirror_config::boot;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(boot::WORKER_STACK_SIZE)
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            boot::report_error(&e);
-            return ExitCode::FAILURE;
-        }
-    };
-    runtime.block_on(async move {
-        match mirror_ethereum::main_entry(std::env::args().skip(1).collect()).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                boot::report_error(&e);
-                ExitCode::FAILURE
-            }
-        }
-    })
+    boot::run_main(mirror_ethereum::main_entry(std::env::args().skip(1).collect()))
 }

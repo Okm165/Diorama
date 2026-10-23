@@ -9,6 +9,7 @@
 use crate::error::{Error, Result};
 use crate::transfer::{eth_call, FeeSurface, IMessageTransmitterV2, ITokenMessengerV2, IERC20};
 use alloy_primitives::{address, Address, B256, U256};
+use alloy_sol_types::SolCall;
 use mirror_anvil::Rpc;
 use std::time::Duration;
 
@@ -111,63 +112,48 @@ impl Chain {
         if chain_id != self.chain_id {
             return Err(self.wiring("chain id", chain_id, self.chain_id));
         }
-        let local_domain = eth_call(
-            &self.rpc,
-            MESSAGE_TRANSMITTER_V2,
-            &IMessageTransmitterV2::localDomainCall {},
-        )
-        .await?;
-        if local_domain != self.domain {
-            return Err(self.wiring("localDomain", local_domain, self.domain));
-        }
-        let version = eth_call(
-            &self.rpc,
-            MESSAGE_TRANSMITTER_V2,
-            &IMessageTransmitterV2::versionCall {},
-        )
-        .await?;
-        if version != MESSAGE_VERSION {
-            return Err(self.wiring("message version", version, MESSAGE_VERSION));
-        }
-        let body_version = eth_call(
-            &self.rpc,
-            TOKEN_MESSENGER_V2,
-            &ITokenMessengerV2::messageBodyVersionCall {},
-        )
-        .await?;
-        if body_version != MESSAGE_VERSION {
-            return Err(self.wiring("messageBodyVersion", body_version, MESSAGE_VERSION));
-        }
-        let local_transmitter = eth_call(
-            &self.rpc,
-            TOKEN_MESSENGER_V2,
-            &ITokenMessengerV2::localMessageTransmitterCall {},
-        )
-        .await?;
-        if local_transmitter != MESSAGE_TRANSMITTER_V2 {
-            return Err(Error::Wiring {
-                chain: self.name,
-                what: "TM.localMessageTransmitter()",
-                got: local_transmitter.to_string(),
-                want: MESSAGE_TRANSMITTER_V2.to_string(),
-            });
-        }
-        let peer_messenger = eth_call(
-            &self.rpc,
-            TOKEN_MESSENGER_V2,
-            &ITokenMessengerV2::remoteTokenMessengersCall {
-                domain: peer.domain,
-            },
-        )
-        .await?;
-        if peer_messenger != TOKEN_MESSENGER_V2.into_word() {
-            return Err(Error::Wiring {
-                chain: self.name,
-                what: "TM.remoteTokenMessengers(peer)",
-                got: peer_messenger.to_string(),
-                want: TOKEN_MESSENGER_V2.into_word().to_string(),
-            });
-        }
+        let local_domain = self
+            .assert_getter(
+                MESSAGE_TRANSMITTER_V2,
+                &IMessageTransmitterV2::localDomainCall {},
+                self.domain,
+                "localDomain",
+            )
+            .await?;
+        let version = self
+            .assert_getter(
+                MESSAGE_TRANSMITTER_V2,
+                &IMessageTransmitterV2::versionCall {},
+                MESSAGE_VERSION,
+                "message version",
+            )
+            .await?;
+        let body_version = self
+            .assert_getter(
+                TOKEN_MESSENGER_V2,
+                &ITokenMessengerV2::messageBodyVersionCall {},
+                MESSAGE_VERSION,
+                "messageBodyVersion",
+            )
+            .await?;
+        let local_transmitter = self
+            .assert_getter(
+                TOKEN_MESSENGER_V2,
+                &ITokenMessengerV2::localMessageTransmitterCall {},
+                MESSAGE_TRANSMITTER_V2,
+                "TM.localMessageTransmitter()",
+            )
+            .await?;
+        let peer_messenger = self
+            .assert_getter(
+                TOKEN_MESSENGER_V2,
+                &ITokenMessengerV2::remoteTokenMessengersCall {
+                    domain: peer.domain,
+                },
+                TOKEN_MESSENGER_V2.into_word(),
+                "TM.remoteTokenMessengers(peer)",
+            )
+            .await?;
         let fees = FeeSurface::probe(&self.rpc, TOKEN_MESSENGER_V2).await?;
         Ok(Wiring {
             chain_id,
@@ -178,6 +164,25 @@ impl Chain {
             peer_messenger,
             min_fee: fees.min_fee,
         })
+    }
+
+    /// One wiring assert: `eth_call` the getter and compare it, naming the
+    /// field on mismatch.
+    async fn assert_getter<C: SolCall>(
+        &self,
+        to: Address,
+        call: &C,
+        want: C::Return,
+        what: &'static str,
+    ) -> Result<C::Return>
+    where
+        C::Return: PartialEq + std::fmt::Display,
+    {
+        let got = eth_call(&self.rpc, to, call).await?;
+        if got != want {
+            return Err(self.wiring(what, &got, &want));
+        }
+        Ok(got)
     }
 
     fn wiring(&self, what: &'static str, got: impl std::fmt::Display, want: impl std::fmt::Display) -> Error {

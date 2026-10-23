@@ -486,11 +486,11 @@ mod tests {
         assert_eq!(iso8601_ms(1_709_164_800_000), "2024-02-29T00:00:00.000Z");
     }
 
-    /// The messages handler's three answers: unknown → the exact 404 (daloc's
-    /// "keep polling"), pending → `attestation: null`, signed → the hex.
-    #[tokio::test]
-    async fn messages_handler_serves_404_pending_and_signed() {
-        let dir = std::env::temp_dir().join(format!("mirror-cctp-iris-{}", std::process::id()));
+    /// A scratch Iris state on a fresh per-test temp dir (the tests may run
+    /// concurrently).
+    fn iris_state(name: &str) -> (Arc<IrisState>, Arc<Store>, std::path::PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("mirror-cctp-iris-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Arc::new(Store::load(dir.join("cctp.json")).unwrap());
         let state = Arc::new(IrisState {
@@ -499,6 +499,15 @@ mod tests {
             chains: Vec::new(),
             expiration_blocks: 0,
         });
+        (state, store, dir)
+    }
+
+    /// The messages handler's three answers: unknown → the exact 404 (daloc's
+    /// "keep polling"), pending → `attestation: null`, signed → the hex; a
+    /// wrong domain is not the same lookup.
+    #[tokio::test]
+    async fn messages_handler_serves_404_pending_and_signed() {
+        let (state, store, dir) = iris_state("messages");
         let tx = B256::repeat_byte(0xab);
         let query = || MessageQuery {
             transaction_hash: Some(tx.to_string()),
@@ -536,29 +545,31 @@ mod tests {
             Some(format!("0x{}", "09".repeat(65)).as_str())
         );
 
-        // A wrong domain is not the same lookup.
-        let err = messages(State(Arc::new(IrisState {
-            store: store.clone(),
-            attester: Arc::new(crate::attester::Attester::from_seed("iris-test").unwrap()),
-            chains: Vec::new(),
-            expiration_blocks: 0,
-        })), Path(19), Query(query()))
+        let err = messages(State(state), Path(19), Query(query()))
             .await
             .unwrap_err();
         assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        // `POST /v2/reattest/{nonce}`: a parked message is re-signed and
-        // re-armed (`signed`), the expiration window is fresh, and the
-        // attestation covers the new message bytes (with `expiration_blocks`
-        // at its default 0 the window stays 0 = no expiry).
+    /// `POST /v2/reattest/{nonce}`: a parked message is re-signed and re-armed
+    /// (`signed`), the expiration window is fresh, the attestation covers the
+    /// new message bytes (with `expiration_blocks` at its default 0 the window
+    /// stays 0 = no expiry); an unknown nonce is the live 404 body.
+    #[tokio::test]
+    async fn reattest_rearms_a_parked_message() {
+        let (state, store, dir) = iris_state("reattest");
+        let tx = B256::repeat_byte(0xab);
         store
             .with(|s| {
+                s.messages.push(record(false));
                 s.messages[0].state = RelayState::Parked;
                 s.messages[0].park_reason = Some("must be re-signed".into());
                 s.messages[0].relay_tx = Some(B256::repeat_byte(0x11));
                 Ok(())
             })
             .unwrap();
+
         let refreshed = reattest(State(state.clone()), Path(tx.to_string()))
             .await
             .unwrap();
@@ -573,7 +584,7 @@ mod tests {
             U256::ZERO,
             "0 = no expiry, unchanged"
         );
-        // An unknown nonce is the live 404 body.
+
         let err = reattest(State(state), Path(B256::repeat_byte(0x77).to_string()))
             .await
             .unwrap_err();

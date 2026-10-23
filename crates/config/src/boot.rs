@@ -51,6 +51,41 @@ pub fn report_error(error: &dyn StdError) {
     }
 }
 
+/// The default instance path every service boots from when no argument is
+/// given (`--config` for the engine; the first positional for the others).
+pub const DEFAULT_INSTANCE_PATH: &str = "/etc/mirror/instance.toml";
+
+/// The shared `main()` shell: build the runtime with the measured worker-stack
+/// budget, run the service future, report a fatal error with its cause chain.
+/// The bins keep their own `run()` — the planes, boot orders and final saves
+/// are theirs; this is only the runtime shell they all share.
+pub fn run_main<F, E>(service: F) -> std::process::ExitCode
+where
+    F: std::future::Future<Output = Result<(), E>>,
+    E: StdError,
+{
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_SIZE)
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            report_error(&e);
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    runtime.block_on(async move {
+        match service.await {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(e) => {
+                report_error(&e);
+                std::process::ExitCode::FAILURE
+            }
+        }
+    })
+}
+
 /// Wait for a shutdown signal: SIGINT (Ctrl-C) **or SIGTERM**.
 ///
 /// Kubernetes sends SIGTERM on pod termination (then SIGKILL after the grace

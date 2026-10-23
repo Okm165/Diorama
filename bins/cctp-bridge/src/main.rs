@@ -21,26 +21,7 @@ use mirror_config::boot;
 use mirror_config::CctpSection;
 
 fn main() -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_stack_size(boot::WORKER_STACK_SIZE)
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            boot::report_error(&e);
-            return ExitCode::FAILURE;
-        }
-    };
-    runtime.block_on(async move {
-        match run().await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                boot::report_error(&e);
-                ExitCode::FAILURE
-            }
-        }
-    })
+    boot::run_main(run())
 }
 
 /// The shared runtime every spawned plane reads.
@@ -59,37 +40,59 @@ async fn run() -> mirror_cctp::Result<()> {
     boot::init_logging();
     let config = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "/etc/mirror/instance.toml".to_string());
-    // One instance file, many readers: the bridge reads only
-    // `[services.cctp]`, so the venue engine's / simulator's `${VAR}` wiring
-    // is not this pod's to provide. `inspect` reports unresolved references
-    // instead of failing on them; the cctp section's own wiring is then
-    // required here, by name.
-    let (mut cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(&config))?;
-    let section = cfg.take_cctp()?;
-    {
-        let state_dir = section.state_dir.to_string_lossy().to_string();
-        mirror_config::require_resolved(
-            "cctp wiring",
-            &[
-                &state_dir,
-                &section.t_url,
-                &section.v_url,
-                &section.relay_key,
-                &section.attester_seed,
-            ],
-        )
-        .inspect_err(|e| {
-            tracing::error!(unresolved = %unresolved.join(", "), error = %e, "cctp wiring is incomplete");
-        })?;
-    }
-    let receipt_timeout = Duration::from_secs(section.receipt_timeout_secs);
+        .unwrap_or_else(|| boot::DEFAULT_INSTANCE_PATH.to_string());
+    let section = load_wiring(&config)?;
+    let (bridge, min_fees) = boot_bridge(section).await?;
 
+    bridge.spawn_watchers();
+    let relayer = bridge.spawn_relayer();
+    let (iris, control) = bridge.spawn_apis(min_fees, relayer);
+
+    boot::shutdown_signal().await;
+    tracing::info!("shutdown signal received");
+    iris.abort();
+    control.abort();
+    bridge.store.save()?;
+    Ok(())
+}
+
+/// Load the instance and require this pod's wiring: one instance file, many
+/// readers — the bridge reads only `[services.cctp]`, so the venue engine's /
+/// simulator's `${VAR}` wiring is not this pod's to provide (`inspect` reports
+/// unresolved references instead of failing on them; the cctp section's own
+/// wiring is then required here, by name).
+fn load_wiring(config: &str) -> mirror_cctp::Result<CctpSection> {
+    let (mut cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(config))?;
+    let section = cfg.take_cctp()?;
+    let state_dir = section.state_dir.to_string_lossy().to_string();
+    mirror_config::require_resolved(
+        "cctp wiring",
+        &[
+            &state_dir,
+            &section.t_url,
+            &section.v_url,
+            &section.relay_key,
+            &section.attester_seed,
+        ],
+    )
+    .inspect_err(|e| {
+        tracing::error!(unresolved = %unresolved.join(", "), error = %e, "cctp wiring is incomplete");
+    })?;
+    Ok(section)
+}
+
+/// Boot the bridge's boundary: wait (bounded) for each chain — the same boot
+/// convention as both engines, so a coordinated restart (the anvil re-forking,
+/// the node unwinding) does not turn the bridge into CrashLoopBackOff — verify
+/// the wiring, install the devnet attester through the contracts' own setters,
+/// load the relay wallet (with the plan's low-balance top-up: a failed top-up
+/// is not fatal, the Iris API still serves), the store, and the hook wrappers.
+/// Returns the bridge and the measured per-domain minimum fees the APIs serve.
+async fn boot_bridge(
+    section: CctpSection,
+) -> mirror_cctp::Result<(Bridge, BTreeMap<u32, Option<U256>>)> {
+    let receipt_timeout = Duration::from_secs(section.receipt_timeout_secs);
     let chains = build_chains(&section, Duration::from_secs(30))?;
-    // The same boot convention as both engines: wait (bounded) for each chain
-    // before the first read, so a coordinated restart — the anvil re-forking,
-    // the node unwinding — does not turn the bridge into CrashLoopBackOff.
-    // Five minutes: a devnet chain forks in seconds; this covers a restart.
     for chain in &chains {
         chain
             .rpc
@@ -104,9 +107,6 @@ async fn run() -> mirror_cctp::Result<()> {
 
     let wallet = Wallet::from_secret(&section.relay_key)?;
     tracing::info!(relayer = %wallet.address(), "cctp relay wallet loaded");
-    // The plan's boot step: a devnet deployment tops the relay wallet up when
-    // it starts below the alert threshold. A failed top-up is not fatal (the
-    // Iris API still serves); the gas alerts keep it visible.
     if let Err(e) = fund_relayer(&chains, wallet.address(), section.balance_low_wei).await {
         tracing::error!(error = %e, "relay wallet top-up failed; the gas alerts stay on");
     }
@@ -125,17 +125,7 @@ async fn run() -> mirror_cctp::Result<()> {
         poll: Duration::from_millis(section.poll_interval_ms),
         section,
     };
-
-    bridge.spawn_watchers();
-    let relayer = bridge.spawn_relayer();
-    let (iris, control) = bridge.spawn_apis(min_fees, relayer);
-
-    boot::shutdown_signal().await;
-    tracing::info!("shutdown signal received");
-    iris.abort();
-    control.abort();
-    bridge.store.save()?;
-    Ok(())
+    Ok((bridge, min_fees))
 }
 
 impl Bridge {
@@ -350,32 +340,15 @@ async fn deploy_wrapper(
     };
     match mirror_cctp::transfer::wait_for_receipt(&chain.rpc, hash, receipt_timeout).await {
         Ok(Some(receipt)) if receipt.status() => {
-            let Some(wrapper) = receipt.contract_address else {
-                tracing::warn!(chain = chain.name, tx = %hash, "hook wrapper deploy mined without a contract address");
-                return;
-            };
-            if let Err(e) = mirror_cctp::hook::verify(
-                &chain.rpc,
-                wrapper,
-                sender.address(),
-                mirror_cctp::chains::MESSAGE_TRANSMITTER_V2,
-            )
-            .await
-            {
-                tracing::warn!(chain = chain.name, wrapper = %wrapper, error = %e, "freshly deployed hook wrapper failed verification");
-                return;
+            if let Some(wrapper) = receipt.contract_address {
+                record_wrapper(chain, store, sender, wrapper).await;
+            } else {
+                tracing::warn!(
+                    chain = chain.name,
+                    tx = %hash,
+                    "hook wrapper deploy mined without a contract address"
+                );
             }
-            if let Err(e) = store.with(|state| {
-                state.hooks.insert(chain.domain, wrapper);
-                Ok(())
-            }) {
-                tracing::warn!(error = %e, "recording the hook wrapper failed");
-                return;
-            }
-            if let Err(e) = store.save() {
-                tracing::warn!(error = %e, "persisting the hook wrapper failed");
-            }
-            tracing::info!(chain = chain.name, wrapper = %wrapper, "cctp hook wrapper deployed");
         }
         Ok(Some(_)) => {
             tracing::warn!(chain = chain.name, tx = %hash, "hook wrapper deploy reverted");
@@ -393,6 +366,39 @@ async fn deploy_wrapper(
             "hook wrapper deploy receipt read failed"
         ),
     }
+}
+
+/// Verify a freshly deployed wrapper and record it. A failed verification is
+/// warned, never recorded: the recorded address must be one the credit path
+/// can actually call.
+async fn record_wrapper(
+    chain: &Chain,
+    store: &Arc<mirror_cctp::store::Store>,
+    sender: &TxSender,
+    wrapper: Address,
+) {
+    if let Err(e) = mirror_cctp::hook::verify(
+        &chain.rpc,
+        wrapper,
+        sender.address(),
+        mirror_cctp::chains::MESSAGE_TRANSMITTER_V2,
+    )
+    .await
+    {
+        tracing::warn!(chain = chain.name, wrapper = %wrapper, error = %e, "freshly deployed hook wrapper failed verification");
+        return;
+    }
+    if let Err(e) = store.with(|state| {
+        state.hooks.insert(chain.domain, wrapper);
+        Ok(())
+    }) {
+        tracing::warn!(error = %e, "recording the hook wrapper failed");
+        return;
+    }
+    if let Err(e) = store.save() {
+        tracing::warn!(error = %e, "persisting the hook wrapper failed");
+    }
+    tracing::info!(chain = chain.name, wrapper = %wrapper, "cctp hook wrapper deployed");
 }
 
 /// Deploy the hook wrapper on every served chain that lacks one (§15.4's boot

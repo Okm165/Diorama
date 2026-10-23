@@ -274,69 +274,28 @@ impl FeedBridge {
         let source_now = read_answer(&ctx.reth, feed.section.source).await?;
         let target_now = match read_answer(&ctx.anvil_t, feed.section.target).await {
             Ok(value) => value,
-            // The target's code is gone: a re-pin (epoch) wiped the devnet's
-            // fixture deploy, or the operator re-pointed the feed. Forget the
-            // resolved decimals *and* the value state, and wait for the target
-            // to reappear — the reappeared target is first contact again (the
-            // epoch rule: the devnet's values are gone with the old base). A
-            // transport fault stays a fault.
             Err(e @ Error::FeedBridgeAbi { .. }) => {
-                *feed
-                    .decimals
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                *feed
-                    .values
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = ValueState::default();
-                tracing::warn!(
-                    feed = %feed.section.name,
-                    target = %feed.section.target,
-                    error = %e,
-                    "feed target vanished; waiting for it to reappear"
-                );
+                forget_target(feed, &e);
                 return Ok(());
             }
             Err(e) => return Err(e),
         };
-        let state = *feed.values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = feed_state(feed);
         let now = mirror_config::boot::now_ms();
         match step(state, target_now, source_now, now, self.confirm_window_ms) {
             Step::Confirm => {
-                let mut state = feed.values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.confirmed = state.pending;
-                state.pending = None;
-                state.pending_since_ms = None;
+                confirm(feed);
                 Ok(())
             }
             Step::WaitPending | Step::SkipUnchanged => Ok(()),
             Step::Publish(answer) => {
                 publish(&ctx.anvil_t, feed.section.target, self.writer, answer).await?;
-                let mut state = feed.values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if state.pending.is_some() {
-                    tracing::warn!(
-                        feed = %feed.section.name,
-                        age_ms = now.saturating_sub(state.pending_since_ms.unwrap_or(now)),
-                        answer,
-                        "the pending publish did not land within the confirmation window; re-publishing"
-                    );
-                }
-                state.pending = Some(answer);
-                state.pending_since_ms = Some(now);
-                FeedBridgeMetrics::count(&self.metrics.updates, &feed.section.name);
+                record_publish(feed, &self.metrics, answer, now);
                 tracing::info!(feed = %feed.section.name, answer, decimals, "feed bridge published");
                 Ok(())
             }
             Step::Pause { found } => {
-                feed.paused.store(true, Ordering::Relaxed);
-                FeedBridgeMetrics::count(&self.metrics.pauses, &feed.section.name);
-                tracing::warn!(
-                    feed = %feed.section.name,
-                    confirmed = ?state.confirmed,
-                    pending = ?state.pending,
-                    found,
-                    "a scenario owns this feed's value now; the bridge paused it (resume to hand back)"
-                );
+                pause_feed(feed, &self.metrics, state, found);
                 Ok(())
             }
         }
@@ -420,6 +379,82 @@ impl FeedBridge {
                 feed: name.to_string(),
             })
     }
+}
+
+/// The feed's value state (a poisoned lock is recovered: the state is a plain
+/// value, not a registry).
+fn feed_state(feed: &FeedRuntime) -> ValueState {
+    *feed
+        .values
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The confirmation window elapsed: the pending answer becomes confirmed.
+fn confirm(feed: &FeedRuntime) {
+    let mut state = feed
+        .values
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.confirmed = state.pending;
+    state.pending = None;
+    state.pending_since_ms = None;
+}
+
+/// Record the published answer; a pending publish that did not land within the
+/// window is re-published (warned).
+fn record_publish(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, answer: i128, now: u64) {
+    let mut state = feed
+        .values
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.pending.is_some() {
+        tracing::warn!(
+            feed = %feed.section.name,
+            age_ms = now.saturating_sub(state.pending_since_ms.unwrap_or(now)),
+            answer,
+            "the pending publish did not land within the confirmation window; re-publishing"
+        );
+    }
+    state.pending = Some(answer);
+    state.pending_since_ms = Some(now);
+    FeedBridgeMetrics::count(&metrics.updates, &feed.section.name);
+}
+
+/// Forget the resolved decimals *and* the value state: the target's code is
+/// gone (a re-pin wiped the devnet's fixture deploy, or the operator
+/// re-pointed the feed). The reappeared target is first contact again — the
+/// epoch rule: the devnet's values are gone with the old base. A transport
+/// fault stays a fault (the caller only routes ABI faults here).
+fn forget_target(feed: &FeedRuntime, error: &Error) {
+    *feed
+        .decimals
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *feed
+        .values
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = ValueState::default();
+    tracing::warn!(
+        feed = %feed.section.name,
+        target = %feed.section.target,
+        error = %error,
+        "feed target vanished; waiting for it to reappear"
+    );
+}
+
+/// A scenario owns this feed's value now; the bridge pauses it (resume hands
+/// back).
+fn pause_feed(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, state: ValueState, found: i128) {
+    feed.paused.store(true, Ordering::Relaxed);
+    FeedBridgeMetrics::count(&metrics.pauses, &feed.section.name);
+    tracing::warn!(
+        feed = %feed.section.name,
+        confirmed = ?state.confirmed,
+        pending = ?state.pending,
+        found,
+        "a scenario owns this feed's value now; the bridge paused it (resume to hand back)"
+    );
 }
 
 /// The pass decision, pure so the pause rule is testable without a chain.

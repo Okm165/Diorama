@@ -5,12 +5,13 @@
 //! scans V — same code, different anvil client. The high-water mark lives with
 //! the caller (it shares it with its inline scans).
 use crate::error::{Error, Result};
+use crate::plane::Plane;
 use crate::shadow::Shadow;
 use crate::shared::Shared;
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::{Block, Transaction};
 use mirror_anvil::Rpc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 /// Transactions of a full block (the scanner always requests full=true).
 pub fn block_txs(block: &Block) -> &[Transaction] {
@@ -37,17 +38,11 @@ pub fn scan_anchor(watermark: u64, pin: u64) -> u64 {
 /// Returns the number of blocks walked (an empty block costs one header read,
 /// no traces — the harness mines one block per poll, so this is the scan-cost
 /// reading both profiles count).
-pub async fn scan_range(
-    target: &Rpc,
-    shadow: &Shared<Shadow>,
-    scanned_upto: &AtomicU64,
-    from: u64,
-    to: u64,
-) -> Result<u64> {
+pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Result<u64> {
     let mut walked = 0u64;
     for n in (from + 1)..=to {
-        scan_block(target, shadow, n).await?;
-        scanned_upto.fetch_max(n, Ordering::Relaxed);
+        scan_block(target, &plane.shadow, n).await?;
+        plane.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
         walked += 1;
     }
     Ok(walked)
@@ -65,23 +60,16 @@ pub async fn scan_range(
 /// A fresh mark is *set*, never left at 0: the policy is the watermark's
 /// starting value, and leaving it unset would let the next scan re-run the
 /// policy against a moved head and skip blocks written in between.
-pub async fn scan_to(
-    target: &Rpc,
-    shadow: &Shared<Shadow>,
-    scanned_upto: &AtomicU64,
-    pin: u64,
-    head: u64,
-    first: u64,
-) -> Result<u64> {
-    let mark = scanned_upto.load(Ordering::Relaxed);
+pub async fn scan_to(plane: &Plane, target: &Rpc, pin: u64, head: u64, first: u64) -> Result<u64> {
+    let mark = plane.shadow_scanned_upto.load(Ordering::Relaxed);
     let from = if mark == 0 {
         let from = scan_anchor(first, pin);
-        scanned_upto.store(from, Ordering::Relaxed);
+        plane.shadow_scanned_upto.store(from, Ordering::Relaxed);
         from
     } else {
         scan_anchor(mark, pin)
     };
-    scan_range(target, shadow, scanned_upto, from, head).await
+    scan_range(plane, target, from, head).await
 }
 
 /// Mark one block's writes devnet-owned: every sender's account fields, the

@@ -14,8 +14,7 @@ use crate::metrics::{render_counts, CctpMetrics};
 use crate::relayer::Relayer;
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{
-    deposit_for_burn_calldata, deposit_for_burn_with_hook_calldata, wait_for_receipt, FeeSurface,
-    IERC20, TxSender,
+    wait_for_receipt, FeeSurface, IERC20, ITokenMessengerV2, TxSender,
 };
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
@@ -282,7 +281,10 @@ fn hook_pin(state: &ControlState, request: &TransferRequest) -> Result<(B256, Op
     }
 }
 
-/// The source-side burn calldata: `depositForBurn` or its hook variant.
+/// The source-side burn calldata: `depositForBurn` or its hook variant. The
+/// `sol!` call types *are* §15.1's signatures — their `mintRecipient` is the
+/// destination-domain address as bytes32 (the contracts' `toBytes32`
+/// convention) — so building the typed call is the whole builder.
 fn burn_calldata(
     chain: &Chain,
     request: &TransferRequest,
@@ -291,25 +293,29 @@ fn burn_calldata(
     hook_data: Option<&Bytes>,
 ) -> Bytes {
     match hook_data {
-        Some(hook_data) => deposit_for_burn_with_hook_calldata(
-            request.amount,
-            request.destination,
-            mint_recipient,
-            chain.usdc,
-            destination_caller,
-            U256::ZERO,
-            FINALITY_THRESHOLD_FINALIZED,
-            hook_data,
-        ),
-        None => deposit_for_burn_calldata(
-            request.amount,
-            request.destination,
-            mint_recipient,
-            chain.usdc,
-            destination_caller,
-            U256::ZERO,
-            FINALITY_THRESHOLD_FINALIZED,
-        ),
+        Some(hook_data) => ITokenMessengerV2::depositForBurnWithHookCall {
+            amount: request.amount,
+            destinationDomain: request.destination,
+            mintRecipient: mint_recipient.into_word(),
+            burnToken: chain.usdc,
+            destinationCaller: destination_caller,
+            maxFee: U256::ZERO,
+            minFinalityThreshold: FINALITY_THRESHOLD_FINALIZED,
+            hookData: hook_data.clone(),
+        }
+        .abi_encode()
+        .into(),
+        None => ITokenMessengerV2::depositForBurnCall {
+            amount: request.amount,
+            destinationDomain: request.destination,
+            mintRecipient: mint_recipient.into_word(),
+            burnToken: chain.usdc,
+            destinationCaller: destination_caller,
+            maxFee: U256::ZERO,
+            minFinalityThreshold: FINALITY_THRESHOLD_FINALIZED,
+        }
+        .abi_encode()
+        .into(),
     }
 }
 
@@ -318,81 +324,13 @@ pub async fn transfer(
     Json(request): Json<TransferRequest>,
 ) -> Result<Json<TransferResponse>> {
     let chain = by_domain(&state.chains, request.source)?;
-    if request.destination == request.source {
-        return Err(Error::BadRequest {
-            reason: "source and destination are the same domain".into(),
-        });
-    }
-    by_domain(&state.chains, request.destination)?;
-    if request.amount.is_zero() {
-        return Err(Error::BadRequest {
-            reason: "amount must be nonzero".into(),
-        });
-    }
+    validate_request(&state, &request)?;
     let mint_recipient = request.mint_recipient.unwrap_or(state.sender.address());
     let (destination_caller, hook_data) = hook_pin(&state, &request)?;
-
-    // The source-side validation the contract performs, refused here with the
-    // numbers instead of paying for a revert (devnet maxFee is 0).
-    let surface = FeeSurface {
-        min_fee: state.min_fees.get(&request.source).copied().flatten(),
-    };
-    surface.validate_max_fee(request.amount, U256::ZERO)?;
-
-    // Funding and allowance: the messenger pulls from the sender's balance
-    // (`_depositAndBurn`), so both must be in place before the burn.
-    let balance = chain.usdc_balance(state.sender.address()).await?;
-    if balance < request.amount {
-        return Err(Error::BadRequest {
-            reason: format!(
-                "sender {} holds {balance} USDC on {}, needs {} (deal via the chain's admin surface)",
-                state.sender.address(),
-                chain.name,
-                request.amount
-            ),
-        });
-    }
-    let allowance = chain
-        .usdc_allowance(state.sender.address(), TOKEN_MESSENGER_V2)
-        .await?;
-    if allowance < request.amount {
-        let approve = IERC20::approveCall {
-            spender: TOKEN_MESSENGER_V2,
-            amount: U256::MAX,
-        }
-        .abi_encode();
-        let hash = state
-            .sender
-            .send(&chain.rpc, chain.usdc, &approve, U256::ZERO)
-            .await?;
-        match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
-            Some(receipt) if receipt.status() => {}
-            Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
-            None => {
-                return Err(Error::BadRequest {
-                    reason: format!(
-                        "approve tx {hash} was not mined within {}s; retry the transfer",
-                        state.receipt_timeout.as_secs()
-                    ),
-                })
-            }
-        }
-        tracing::info!(chain = chain.name, tx = %hash, "cctp approve submitted");
-    }
+    ensure_allowance(&state, chain, request.amount).await?;
 
     let calldata = burn_calldata(chain, &request, mint_recipient, destination_caller, hook_data.as_ref());
-    let hash = state
-        .sender
-        .send(&chain.rpc, TOKEN_MESSENGER_V2, &calldata, U256::ZERO)
-        .await?;
-    tracing::info!(
-        chain = chain.name,
-        tx = %hash,
-        source = request.source,
-        destination = request.destination,
-        amount = %request.amount,
-        "cctp depositForBurn submitted"
-    );
+    let hash = submit_burn(&state, chain, &calldata).await?;
     let mined = match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
         Some(receipt) if receipt.status() => true,
         Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
@@ -407,6 +345,87 @@ pub async fn transfer(
         mint_recipient,
         hook: hook_data.is_some(),
     }))
+}
+
+/// The request's own invariants, checked before any chain read: distinct
+/// domains, a known destination, a nonzero amount, and the source-side fee
+/// rule the contract would enforce — refused here with the numbers instead of
+/// paying for a revert (devnet maxFee is 0).
+fn validate_request(state: &ControlState, request: &TransferRequest) -> Result<()> {
+    if request.destination == request.source {
+        return Err(Error::BadRequest {
+            reason: "source and destination are the same domain".into(),
+        });
+    }
+    by_domain(&state.chains, request.destination)?;
+    if request.amount.is_zero() {
+        return Err(Error::BadRequest {
+            reason: "amount must be nonzero".into(),
+        });
+    }
+    let surface = FeeSurface {
+        min_fee: state.min_fees.get(&request.source).copied().flatten(),
+    };
+    surface.validate_max_fee(request.amount, U256::ZERO)
+}
+
+/// Funding and allowance: the messenger pulls from the sender's balance
+/// (`_depositAndBurn`), so both must be in place before the burn — the approve
+/// is sent only when the allowance is short.
+async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> Result<()> {
+    let balance = chain.usdc_balance(state.sender.address()).await?;
+    if balance < amount {
+        return Err(Error::BadRequest {
+            reason: format!(
+                "sender {} holds {balance} USDC on {}, needs {amount} (deal via the chain's admin surface)",
+                state.sender.address(),
+                chain.name,
+            ),
+        });
+    }
+    let allowance = chain
+        .usdc_allowance(state.sender.address(), TOKEN_MESSENGER_V2)
+        .await?;
+    if allowance >= amount {
+        return Ok(());
+    }
+    let approve = IERC20::approveCall {
+        spender: TOKEN_MESSENGER_V2,
+        amount: U256::MAX,
+    }
+    .abi_encode();
+    let hash = state
+        .sender
+        .send(&chain.rpc, chain.usdc, &approve, U256::ZERO)
+        .await?;
+    match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
+        Some(receipt) if receipt.status() => {}
+        Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
+        None => {
+            return Err(Error::BadRequest {
+                reason: format!(
+                    "approve tx {hash} was not mined within {}s; retry the transfer",
+                    state.receipt_timeout.as_secs()
+                ),
+            })
+        }
+    }
+    tracing::info!(chain = chain.name, tx = %hash, "cctp approve submitted");
+    Ok(())
+}
+
+/// Submit `depositForBurn` and log it.
+async fn submit_burn(state: &ControlState, chain: &Chain, calldata: &Bytes) -> Result<B256> {
+    let hash = state
+        .sender
+        .send(&chain.rpc, TOKEN_MESSENGER_V2, calldata, U256::ZERO)
+        .await?;
+    tracing::info!(
+        chain = chain.name,
+        tx = %hash,
+        "cctp depositForBurn submitted"
+    );
+    Ok(hash)
 }
 
 #[cfg(test)]

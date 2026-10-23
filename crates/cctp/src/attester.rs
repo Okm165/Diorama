@@ -104,6 +104,52 @@ pub async fn install(
     attester: Address,
     timeout: Duration,
 ) -> Result<InstallOutcome> {
+    let (manager, enabled, threshold) = read_state(rpc, attester).await?;
+    if enabled && threshold == U256::ONE {
+        tracing::info!(
+            chain,
+            %attester,
+            %manager,
+            "devnet attester already installed (threshold 1)"
+        );
+        return Ok(InstallOutcome::Already);
+    }
+
+    // Impersonate the live attester manager: the same substitution §15.3
+    // proved through the real setters. A manager with no gas on the fork gets
+    // a devnet stipend (the pool refuses unfunded senders).
+    ensure_manager_gas(rpc, chain, manager).await?;
+    rpc.call_raw("anvil_impersonateAccount", (manager,)).await?;
+    if !enabled {
+        let input = IMessageTransmitterV2::enableAttesterCall { newAttester: attester }.abi_encode();
+        send_impersonated(rpc, chain, manager, input, timeout).await?;
+    }
+    if threshold != U256::ONE {
+        let input =
+            IMessageTransmitterV2::setSignatureThresholdCall { newSignatureThreshold: U256::ONE }
+                .abi_encode();
+        send_impersonated(rpc, chain, manager, input, timeout).await?;
+    }
+    rpc.call_raw("anvil_stopImpersonatingAccount", (manager,))
+        .await?;
+
+    // Verify what the setters claim: a failed installation must not serve.
+    let (_, enabled, threshold) = read_state(rpc, attester).await?;
+    if !enabled || threshold != U256::ONE {
+        return Err(Error::AttesterInstall {
+            chain,
+            reason: format!(
+                "post-state not verified: isEnabledAttester={enabled}, signatureThreshold={threshold}"
+            ),
+        });
+    }
+    tracing::info!(chain, %attester, %manager, "devnet attester installed (threshold 1)");
+    Ok(InstallOutcome::Installed)
+}
+
+/// The transmitter's attester state: the manager, whether `attester` is
+/// enabled, and the signature threshold (read before and after the install).
+async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, bool, U256)> {
     let manager = eth_call(
         rpc,
         MESSAGE_TRANSMITTER_V2,
@@ -122,19 +168,12 @@ pub async fn install(
         &IMessageTransmitterV2::signatureThresholdCall {},
     )
     .await?;
-    if enabled && threshold == U256::ONE {
-        tracing::info!(
-            chain,
-            %attester,
-            %manager,
-            "devnet attester already installed (threshold 1)"
-        );
-        return Ok(InstallOutcome::Already);
-    }
+    Ok((manager, enabled, threshold))
+}
 
-    // Impersonate the live attester manager: the same substitution §15.3
-    // proved through the real setters. A manager with no gas on the fork gets
-    // a devnet stipend (the pool refuses unfunded senders).
+/// A manager with no gas on the fork gets a devnet stipend (the pool refuses
+/// unfunded senders).
+async fn ensure_manager_gas(rpc: &Rpc, chain: &'static str, manager: Address) -> Result<()> {
     let balance = rpc
         .call::<U256>("eth_getBalance", (manager, "latest"))
         .await?;
@@ -143,43 +182,7 @@ pub async fn install(
         rpc.anvil_set_balance(manager, U256::from(MANAGER_GAS_STIPEND))
             .await?;
     }
-    rpc.call_raw("anvil_impersonateAccount", (manager,)).await?;
-    if !enabled {
-        let input = IMessageTransmitterV2::enableAttesterCall { newAttester: attester }.abi_encode();
-        send_impersonated(rpc, chain, manager, input, timeout).await?;
-    }
-    if threshold != U256::ONE {
-        let input =
-            IMessageTransmitterV2::setSignatureThresholdCall { newSignatureThreshold: U256::ONE }
-                .abi_encode();
-        send_impersonated(rpc, chain, manager, input, timeout).await?;
-    }
-    rpc.call_raw("anvil_stopImpersonatingAccount", (manager,))
-        .await?;
-
-    // Verify what the setters claim: a failed installation must not serve.
-    let enabled = eth_call(
-        rpc,
-        MESSAGE_TRANSMITTER_V2,
-        &IMessageTransmitterV2::isEnabledAttesterCall { attester },
-    )
-    .await?;
-    let threshold = eth_call(
-        rpc,
-        MESSAGE_TRANSMITTER_V2,
-        &IMessageTransmitterV2::signatureThresholdCall {},
-    )
-    .await?;
-    if !enabled || threshold != U256::ONE {
-        return Err(Error::AttesterInstall {
-            chain,
-            reason: format!(
-                "post-state not verified: isEnabledAttester={enabled}, signatureThreshold={threshold}"
-            ),
-        });
-    }
-    tracing::info!(chain, %attester, %manager, "devnet attester installed (threshold 1)");
-    Ok(InstallOutcome::Installed)
+    Ok(())
 }
 
 /// One impersonated `eth_sendTransaction`, waited to a mined receipt.

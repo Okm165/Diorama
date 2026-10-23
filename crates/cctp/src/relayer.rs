@@ -22,9 +22,9 @@ use crate::error::{Error, Result};
 use crate::metrics::CctpMetrics;
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{
-    receipt, receive_message_calldata, wait_for_receipt, IMessageTransmitterV2, TxSender,
+    receipt, receive_message_calldata, wait_for_receipt, IMessageTransmitterV2, Message, TxSender,
 };
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::TransactionReceipt;
 use mirror_config::RelayerMode;
 use std::sync::atomic::Ordering;
@@ -57,6 +57,13 @@ pub struct Relayer {
     /// derivation, I6; `POST /v2/reattest/{nonce}` is the deliberate way
     /// back).
     pub heads: Vec<std::sync::atomic::AtomicU64>,
+}
+
+/// Whether the message pins a `destinationCaller` this bridge cannot serve
+/// (zero = anyone): such a message is parked instead of paying for the real
+/// revert — the Iris still serves it, it is just not relayable here.
+fn caller_mismatch(caller: B256, consumer: Address) -> bool {
+    caller != B256::ZERO && caller != consumer.into_word()
 }
 
 impl Relayer {
@@ -197,43 +204,22 @@ impl Relayer {
     /// already consumed); `Ok(false)` = still in flight, re-checked next tick.
     async fn relay(&self, record: &MessageRecord) -> Result<bool> {
         let chain = by_domain(&self.chains, record.destination_domain)?;
-        // Hook-carrying messages are consumed through the wrapper (their
-        // `destinationCaller` pins it, §15.4); plain ones by this bridge's
-        // key. A message pinned to someone else is served by the Iris but
-        // never relayable here: park it instead of paying for the real
-        // revert.
         let decoded = record.decoded()?;
-        let caller = decoded.header.destination_caller;
-        let (target, consumer) = if decoded.body.hook_data.is_empty() {
-            (MESSAGE_TRANSMITTER_V2, self.sender.address())
-        } else {
-            let wrapper = self
-                .store
-                .with(|state| Ok(state.hooks.get(&record.destination_domain).copied()))?
-                .ok_or_else(|| Error::BadRequest {
-                    reason: format!(
-                        "message {} carries a hook but domain {} has no wrapper (the boot step deploys one)",
-                        record.nonce, record.destination_domain
-                    ),
-                })?;
-            (wrapper, wrapper)
-        };
-        if caller != B256::ZERO && caller != consumer.into_word() {
+        let (target, consumer) = self.consumer(record, &decoded)?;
+        if caller_mismatch(decoded.header.destination_caller, consumer) {
             self.park(
                 record.nonce,
-                format!("destinationCaller {caller} is not this bridge's consumer ({consumer})"),
+                format!(
+                    "destinationCaller {} is not this bridge's consumer ({consumer})",
+                    decoded.header.destination_caller
+                ),
             )?;
             return Ok(false);
         }
         // The burn must still exist on the source: a reattest of a record
         // whose burn a re-pin or rewind removed must never mint (I6 — stale
         // derivations are parked, never re-owned).
-        let source = by_domain(&self.chains, record.source_domain)?;
-        let burn: Option<Box<serde_json::value::RawValue>> = source
-            .rpc
-            .call("eth_getTransactionByHash", (record.burn_tx,))
-            .await?;
-        if burn.is_none() {
+        if !self.burn_exists(record).await? {
             self.park(
                 record.nonce,
                 "the source burn no longer exists (a re-pin or rewind); re-run the transfer".into(),
@@ -245,20 +231,74 @@ impl Relayer {
             tracing::info!(nonce = %record.nonce, chain = chain.name, "cctp nonce already consumed on-chain; reconciled as relayed");
             return Ok(true);
         }
-        if let Some(hash) = record.relay_tx {
-            if let Some(receipt) = receipt(&chain.rpc, hash).await? {
-                return self.settle(chain, record, &receipt).await;
-            }
-            if self.sender.in_pool(&chain.rpc, hash).await? {
-                return Ok(false);
-            }
-            tracing::warn!(
-                nonce = %record.nonce,
-                tx = %hash,
-                chain = chain.name,
-                "cctp relay tx left the pool without a receipt (restart?); re-sending"
-            );
+        if let Some(settled) = self.resume_in_flight(chain, record).await? {
+            return Ok(settled);
         }
+        self.submit(chain, record, target, &decoded).await
+    }
+
+    /// The call target and the caller the message pins: the transmitter for a
+    /// plain message, the hook wrapper for a hook-carrying one (§15.4 pins the
+    /// wrapper as `destinationCaller`). A hook without a deployed wrapper is a
+    /// named refusal — the boot step deploys one.
+    fn consumer(&self, record: &MessageRecord, decoded: &Message) -> Result<(Address, Address)> {
+        if decoded.body.hook_data.is_empty() {
+            return Ok((MESSAGE_TRANSMITTER_V2, self.sender.address()));
+        }
+        let wrapper = self
+            .store
+            .with(|state| Ok(state.hooks.get(&record.destination_domain).copied()))?
+            .ok_or_else(|| Error::BadRequest {
+                reason: format!(
+                    "message {} carries a hook but domain {} has no wrapper (the boot step deploys one)",
+                    record.nonce, record.destination_domain
+                ),
+            })?;
+        Ok((wrapper, wrapper))
+    }
+
+    /// Whether the source chain still carries the burn transaction.
+    async fn burn_exists(&self, record: &MessageRecord) -> Result<bool> {
+        let source = by_domain(&self.chains, record.source_domain)?;
+        let burn: Option<alloy_rpc_types_eth::Transaction> = source
+            .rpc
+            .call("eth_getTransactionByHash", (record.burn_tx,))
+            .await?;
+        Ok(burn.is_some())
+    }
+
+    /// A previous attempt's tx: a receipt settles it; still in the pool is
+    /// "in flight"; left the pool without a receipt (a restart) means the
+    /// caller re-sends. `None` = no previous attempt (or re-send).
+    async fn resume_in_flight(&self, chain: &Chain, record: &MessageRecord) -> Result<Option<bool>> {
+        let Some(hash) = record.relay_tx else {
+            return Ok(None);
+        };
+        if let Some(receipt) = receipt(&chain.rpc, hash).await? {
+            return Ok(Some(self.settle(chain, record, &receipt).await?));
+        }
+        if self.sender.in_pool(&chain.rpc, hash).await? {
+            return Ok(Some(false));
+        }
+        tracing::warn!(
+            nonce = %record.nonce,
+            tx = %hash,
+            chain = chain.name,
+            "cctp relay tx left the pool without a receipt (restart?); re-sending"
+        );
+        Ok(None)
+    }
+
+    /// Submit `receiveMessage` (plain) or the wrapper's `relay` (hook), record
+    /// the attempt, and settle it or keep it in flight. A send refused after
+    /// `MAX_SEND_ATTEMPTS` transport faults is parked, never retried forever.
+    async fn submit(
+        &self,
+        chain: &Chain,
+        record: &MessageRecord,
+        target: Address,
+        decoded: &Message,
+    ) -> Result<bool> {
         let attestation = record.attestation.clone().ok_or_else(|| Error::BadRequest {
             reason: format!("message {} is signed without an attestation", record.nonce),
         })?;

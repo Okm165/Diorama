@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::journal::{entry_for_write, BeforeValue, JournalEntry};
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Block;
+use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::ProbeRunner;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -58,14 +59,14 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // A journal rewind rolled T's values back without moving its head: those
     // blocks must be re-applied even though `t_head >= n`, otherwise the
     // late-completion skip below leaves the rolled-back values stale.
-    let reapply = *ctx.reapply_from.lock()?;
+    let reapply = *ctx.plane.reapply_from.lock()?;
     let needs_reapply = matches!(reapply, Some((from, _)) if n >= from);
     // The journal is the discriminator between "this block's writes are already
     // in" (a timed-out apply that finished late) and "T's head is ahead because
     // devnet txs were mined in their own prepend block". A journal fault is an
     // error, never "no journal": guessing would re-journal already-applied
     // values as before-values.
-    let journaled = ctx.journal.has_entry(n)?;
+    let journaled = ctx.plane.journal.has_entry(n)?;
     if t_head >= n && journaled && !needs_reapply {
         return late_completion(ctx, n, t_head, started).await;
     }
@@ -97,8 +98,8 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
 
     align_context_and_mine(ctx, &block).await?;
 
-    ctx.journal.record(n, &entries)?;
-    ctx.journal.prune(n);
+    ctx.plane.journal.record(n, &entries)?;
+    ctx.plane.journal.prune(n);
 
     // Scan this apply's own devnet blocks *before* asserting parity: the
     // prepend loop may have mined devnet txs whose writes are not marked
@@ -162,12 +163,12 @@ async fn finalize(
     let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
     ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
     ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);
-    ctx.save_state()?;
+    ctx.plane.save_state()?;
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
     ctx.eth_metrics.set(&ctx.eth_metrics.bal_writes, facts.applied as u64);
-    ctx.metrics
+    ctx.plane.metrics
         .set(&ctx.eth_metrics.bal_filtered_out, facts.stats.not_watched as u64);
-    ctx.metrics
+    ctx.plane.metrics
         .set(&ctx.eth_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
     let duration_ms = started.elapsed().as_millis() as u64;
     ctx.eth_metrics.set(&ctx.eth_metrics.last_apply_ms, duration_ms);
@@ -176,7 +177,7 @@ async fn finalize(
     // The rewound range is fully re-applied: resume normal late-completion skips.
     if let Some((_, until)) = facts.reapply {
         if n >= until {
-            *ctx.reapply_from.lock()? = None;
+            *ctx.plane.reapply_from.lock()? = None;
             tracing::info!(block = n, until, "rewound range re-applied");
         }
     }
@@ -230,7 +231,7 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;
     let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
     ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
-    ctx.save_state()?;
+    ctx.plane.save_state()?;
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
     ctx.eth_metrics.set(&ctx.eth_metrics.t_head, t_head);
     ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);
@@ -374,7 +375,7 @@ async fn read_before_values(
 /// its own default and the context would silently drift (measured).
 async fn align_context_and_mine(ctx: &Ctx, block: &Block) -> Result<()> {
     let h = &block.header;
-    let offset = ctx.time_offset.load(Ordering::Relaxed);
+    let offset = ctx.plane.time_offset.load(Ordering::Relaxed);
     let last_ts = ctx
         .anvil_t
         .block_by_number(ctx.anvil_t.block_number().await?, false)
@@ -396,8 +397,7 @@ async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
     let now = ctx.anvil_t.block_number().await?;
     let pin = ctx.anvil_t.fork_block().await?.unwrap_or(0);
     let from = mirror_devnet::scan::scan_anchor(from, pin);
-    let walked = mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, from, now)
-        .await?;
+    let walked = mirror_devnet::scan::scan_range(&ctx.plane, &ctx.anvil_t, from, now).await?;
     ctx.eth_metrics.add(&ctx.eth_metrics.shadow_scanned_blocks, walked);
     Ok(())
 }
@@ -439,17 +439,17 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
 async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     let probes = ProbeRunner::devnet(
         &ctx.engine.verifier.probes,
-        &ctx.shadow,
-        ctx.time_offset.load(Ordering::Relaxed) != 0,
+        &ctx.plane.shadow,
+        ctx.plane.time_offset.load(Ordering::Relaxed) != 0,
     )
     .parity(&ctx.reth, n, &ctx.anvil_t)
     .await?;
     ctx.eth_metrics.add(&ctx.eth_metrics.t_convergence_ok, probes.ok as u64);
-    ctx.metrics
+    ctx.eth_metrics
         .add(&ctx.eth_metrics.t_convergence_failed, probes.failed as u64);
-    ctx.metrics
+    ctx.eth_metrics
         .set(&ctx.eth_metrics.t_convergence_last_failed, probes.failed as u64);
-    ctx.metrics
+    ctx.eth_metrics
         .add(&ctx.eth_metrics.t_probe_skipped, probes.skipped as u64);
     Ok(())
 }

@@ -11,8 +11,9 @@
 use mirror_anvil::{Rpc, Write};
 use alloy_primitives::{Address, Bytes, U256};
 use crate::error::{Error, Result};
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, Registry};
 use crate::shared::Shared;
+use crate::store;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -260,6 +261,15 @@ impl Shadow {
         self.slots.values().map(std::collections::BTreeSet::len).sum()
     }
 
+    /// Any recorded state at all (marks, before-values, account values): the
+    /// epoch rule's restore gate and the registry's emptiness test.
+    pub fn has_recorded(&self) -> bool {
+        self.slot_count() > 0
+            || !self.accounts.is_empty()
+            || !self.values.is_empty()
+            || !self.account_values.is_empty()
+    }
+
     /// The shadowed addresses as the `/status` surface reports them: every
     /// slot-marked and whole-account-owned address, lowercase, sorted, deduped
     /// (one presentation for both engines).
@@ -351,31 +361,13 @@ impl Shadow {
         (slots, accounts)
     }
 
-    /// Load the registry from its state file.
-    ///
-    /// Three answers (boundary-discipline): **absent** is a fact — first boot
-    /// starts empty; an **IO fault** is not emptiness; **corrupt** bytes die
-    /// here, at the load point, with the path named. Collapsing either failure
-    /// into an empty registry would let the next parent diffs clobber devnet
-    /// writes whose marks just vanished.
+    /// Load the registry from its state file ([`crate::store`]'s three
+    /// answers; collapsing a fault or corruption into an empty registry would
+    /// let the next parent diffs clobber devnet writes whose marks just
+    /// vanished). Heals state files from the era when unmark kept recorded
+    /// values: orphans are dropped, never re-owned (see `prune_orphans`).
     pub fn load(path: &Path) -> Result<Self> {
-        let mut s = match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|source| Error::Corrupt {
-                what: "shadow registry",
-                path: path.to_path_buf(),
-                source,
-            })?,
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(source) => {
-                return Err(Error::Io {
-                    what: "shadow registry",
-                    path: path.to_path_buf(),
-                    source,
-                })
-            }
-        };
-        // Heal state files from the era when unmark kept recorded values:
-        // orphans are dropped, never re-owned (see `prune_orphans`).
+        let mut s: Self = store::load(path, "shadow registry")?.unwrap_or_default();
         let (slots, accounts) = s.prune_orphans();
         if slots > 0 || accounts > 0 {
             tracing::warn!(
@@ -388,28 +380,7 @@ impl Shadow {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| Error::Io {
-                what: "shadow registry directory",
-                path: parent.to_path_buf(),
-                source,
-            })?;
-        }
-        let tmp = path.with_extension("tmp");
-        let bytes = serde_json::to_vec_pretty(self).map_err(|source| Error::Encode {
-            what: "shadow registry",
-            source,
-        })?;
-        std::fs::write(&tmp, bytes).map_err(|source| Error::Io {
-            what: "shadow registry",
-            path: tmp.clone(),
-            source,
-        })?;
-        std::fs::rename(&tmp, path).map_err(|source| Error::Io {
-            what: "shadow registry",
-            path: path.to_path_buf(),
-            source,
-        })
+        store::save(path, self, "shadow registry")
     }
 }
 

@@ -5,16 +5,14 @@
 //! mined state. This one discovers the slot with `eth_call` + a `stateDiff`
 //! override — no mining involved — then writes it silently and marks it
 //! devnet-owned so parent diffs can never overwrite it.
+use crate::admin::AdminSurface;
 use crate::error::Result;
 use crate::journal::{Journal, JournalEntry};
-use crate::metrics::Metrics;
-use crate::shadow::{save_registry, Shadow};
-use crate::shared::Shared;
+use crate::plane::Plane;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
 use mirror_anvil::Rpc;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DealRequest {
@@ -51,10 +49,10 @@ pub struct ProbeRecord {
     pub want: String,
 }
 
-/// Discover the token's balance slot and write `amount` silently, marking the
-/// write devnet-owned. A probe that could not run is a fault, not "this slot is
-/// not the balance slot" (boundary-discipline): if no slot matches, the fault
-/// is reported instead of a layout verdict.
+/// Discover the token's balance slot, write `amount` silently and verify it,
+/// marking the write devnet-owned. A probe that could not run is a fault, not
+/// "this slot is not the balance slot" (boundary-discipline): if no slot
+/// matches, the fault is reported instead of a layout verdict.
 ///
 /// `journal` records the write's before-value so `/admin/rewind` can undo it:
 /// `Some((journal, block))` on a deployment whose journal is its *own* writes
@@ -62,31 +60,15 @@ pub struct ProbeRecord {
 /// (its journal is the applier's parent before-values; mixing engine writes in
 /// would change what a rewind means).
 pub async fn deal(
-    target: &Rpc,
-    shadow: &Shared<Shadow>,
-    shadow_path: &Path,
-    metrics: &Metrics,
-    chunk_size: usize,
+    surface: &AdminSurface<'_>,
     journal: Option<(&Journal, u64)>,
     req: &DealRequest,
 ) -> Result<DealOutcome> {
     let data = balance_of_calldata(req.to);
     let (found, probes, fault) =
-        discover_balance_slot(target, req.token, req.to, &data, deal_sentinel()).await;
+        discover_balance_slot(surface.target, req, &data, deal_sentinel()).await;
     let Some((slot, slot_hex)) = found else {
-        let error = match fault {
-            Some(e) => format!("balance-slot probe failed: {e}"),
-            None => "no standard balance slot found in slots 0..16 (non-standard layout): \
-                     write the slot yourself with anvil_setStorageAt"
-                .to_string(),
-        };
-        return Ok(DealOutcome {
-            ok: false,
-            slot: None,
-            balance: None,
-            error: Some(error),
-            probes,
-        });
+        return Ok(no_slot(fault, probes));
     };
     let write = mirror_anvil::Write::Storage {
         address: req.token,
@@ -96,41 +78,19 @@ pub async fn deal(
     // The undo entry's before-value must be read *before* the write; a fault
     // here refuses the deal with nothing written (fail-closed: an unjournaled
     // write on a journaling deployment is an undo that later writes a wrong
-    // value). The mainnet does not journal its deals (`None`) — frozen.
-    let before = match journal {
-        Some(_) => Some(target.storage_at_latest(req.token, slot).await?),
-        None => None,
-    };
-    match mirror_anvil::apply_writes(target, std::slice::from_ref(&write), chunk_size).await {
-        Ok(1) => {}
-        // A refused write (e.g. `-32602`) must not be marked: a mark on a
-        // slot whose write never landed would freeze mainnet's value under a
-        // devnet mark — the worst of both worlds.
-        Ok(applied) => {
-            return Ok(write_refused(
-                slot_hex,
-                format!("write refused ({applied} of 1 applied)"),
-            ))
-        }
-        Err(e) => return Ok(write_refused(slot_hex, format!("write failed: {e}"))),
+    // value).
+    let before = read_before(surface.target, journal.is_some(), req.token, slot).await?;
+    if let Err(refused) = write_slot(surface.target, surface.chunk_size, &write, &slot_hex).await {
+        return Ok(refused);
     }
     // Read back *before* marking: only a verified write becomes devnet-owned.
     // A read fault leaves the slot unmarked (nothing was claimed) and the
     // balance absent, never an empty string that looks like a value.
-    let after = target.call_latest(req.token, &data).await.ok();
+    let after = surface.target.call_latest(req.token, &data).await.ok();
     let ok = after.as_ref() == Some(&req.amount.to_be_bytes::<32>().into());
     if ok {
-        mark_owned(shadow, shadow_path, metrics, &write)?;
-        if let (Some((journal, block)), Some(before)) = (journal, before) {
-            journal.record(
-                block,
-                &[JournalEntry::Storage {
-                    address: req.token,
-                    slot,
-                    before: U256::from_be_bytes(before.0),
-                }],
-            )?;
-        }
+        mark_owned(surface.plane, &write)?;
+        record_undo(journal, req.token, slot, before)?;
     }
     tracing::info!(
         token = %req.token,
@@ -148,6 +108,85 @@ pub async fn deal(
     })
 }
 
+/// The no-slot outcome: the probe fault when one occurred, else the layout
+/// verdict — a probe that could not run is never reported as a verdict.
+fn no_slot(fault: Option<mirror_anvil::Error>, probes: Vec<ProbeRecord>) -> DealOutcome {
+    let error = match fault {
+        Some(e) => format!("balance-slot probe failed: {e}"),
+        None => "no standard balance slot found in slots 0..16 (non-standard layout): \
+                 write the slot yourself with anvil_setStorageAt"
+            .to_string(),
+    };
+    DealOutcome {
+        ok: false,
+        slot: None,
+        balance: None,
+        error: Some(error),
+        probes,
+    }
+}
+
+/// Read the slot's before-value when the deployment journals its own writes
+/// (the rewind undo entry); `None` otherwise — the mainnet does not journal
+/// its deals (frozen behavior).
+async fn read_before(
+    target: &Rpc,
+    journaling: bool,
+    token: Address,
+    slot: U256,
+) -> Result<Option<U256>> {
+    match journaling {
+        true => Ok(Some(U256::from_be_bytes(
+            target.storage_at_latest(token, slot).await?.0,
+        ))),
+        false => Ok(None),
+    }
+}
+
+/// Apply the write. `Err(outcome)` is the shaped refusal for a slot whose
+/// write did not land: a refused write (e.g. `-32602`) must not be marked — a
+/// mark on a slot whose write never landed would freeze the source's value
+/// under a devnet mark, the worst of both worlds.
+async fn write_slot(
+    target: &Rpc,
+    chunk_size: usize,
+    write: &mirror_anvil::Write,
+    slot_hex: &str,
+) -> std::result::Result<(), DealOutcome> {
+    match mirror_anvil::apply_writes(target, std::slice::from_ref(write), chunk_size).await {
+        Ok(1) => Ok(()),
+        Ok(applied) => Err(write_refused(
+            slot_hex.to_string(),
+            format!("write refused ({applied} of 1 applied)"),
+        )),
+        Err(e) => Err(write_refused(
+            slot_hex.to_string(),
+            format!("write failed: {e}"),
+        )),
+    }
+}
+
+/// Journal the undo entry (the before-value) when the deployment journals its
+/// own writes.
+fn record_undo(
+    journal: Option<(&Journal, u64)>,
+    token: Address,
+    slot: U256,
+    before: Option<U256>,
+) -> Result<()> {
+    if let (Some((journal, block)), Some(before)) = (journal, before) {
+        journal.record(
+            block,
+            &[JournalEntry::Storage {
+                address: token,
+                slot,
+                before,
+            }],
+        )?;
+    }
+    Ok(())
+}
+
 /// The outcome for a discovered slot whose write did not land: nothing is
 /// marked, and the reason is named.
 fn write_refused(slot: String, error: String) -> DealOutcome {
@@ -161,14 +200,9 @@ fn write_refused(slot: String, error: String) -> DealOutcome {
 }
 
 /// Mark the verified write devnet-owned and persist the registry.
-fn mark_owned(
-    shadow: &Shared<Shadow>,
-    shadow_path: &Path,
-    metrics: &Metrics,
-    write: &mirror_anvil::Write,
-) -> Result<()> {
-    shadow.lock()?.mark(write);
-    save_registry(shadow, shadow_path, metrics)
+fn mark_owned(plane: &Plane, write: &mirror_anvil::Write) -> Result<()> {
+    plane.shadow.lock()?.mark(write);
+    plane.save_shadow()
 }
 
 /// ABI `balanceOf(address)` calldata: selector + the 32-byte left-padded
@@ -202,8 +236,7 @@ fn deal_sentinel() -> U256 {
 /// could not run is not "this is not the balance slot" (boundary-discipline).
 async fn discover_balance_slot(
     target: &Rpc,
-    token: Address,
-    to: Address,
+    req: &DealRequest,
     data: &Bytes,
     sentinel: U256,
 ) -> (
@@ -211,6 +244,7 @@ async fn discover_balance_slot(
     Vec<ProbeRecord>,
     Option<mirror_anvil::Error>,
 ) {
+    let (token, to) = (req.token, req.to);
     let sentinel_hex = format!("0x{sentinel:064x}");
     let sentinel_bytes = sentinel.to_be_bytes::<32>();
     let mut probes: Vec<ProbeRecord> = Vec::new();

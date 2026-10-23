@@ -112,9 +112,43 @@ impl Watcher {
     pub async fn scan(&self) -> Result<usize> {
         let head = self.chain.rpc.block_number().await?;
         let pin = self.chain.rpc.fork_block().await?;
-        let floor = pin.map(|pin| pin.saturating_add(1));
         let last = self.scanned_upto.load(std::sync::atomic::Ordering::Relaxed);
+        let mut from = self.resume_from(last, head, pin).await?;
+        let mut seen = 0usize;
+        while from <= head {
+            let to = from.saturating_add(self.chunk_blocks - 1).min(head);
+            let logs = self.message_logs(from, to).await?;
+            // One head read per chunk: the expiration window's anchor (the
+            // destination's block coordinate, §15.1).
+            let expiration = self.expiration_block().await?;
+            for log in &logs {
+                seen += self.absorb(log, expiration)?;
+            }
+            from = to + 1;
+        }
+        // The cursor is the highest scanned block of the *current* chain:
+        // a re-pin or a rewind resets it to the new base (the rescan above),
+        // so it never skips a block.
+        self.scanned_upto
+            .store(head, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .last_scan_block
+            .store(head, std::sync::atomic::Ordering::Relaxed);
+        Ok(seen)
+    }
 
+    /// Where this scan resumes: the in-run cursor + 1 (the configured start on
+    /// boot), clamped at the fork base.
+    ///
+    /// The scan never reads below the fork base: pre-pin blocks are the
+    /// *source's* history — anvil forwards such ranges upstream, which
+    /// rejects them (measured: the public HyperEVM RPC caps at 1000 blocks,
+    /// drpc refuses ranges over 10000) and their events are real source
+    /// burns, not this devnet's. A fork base above the cursor (a re-pin) or a
+    /// head below it (a snapshot revert) means the blocks the cursor points
+    /// at are gone: their records are parked (stale derivations, I6 — never
+    /// relayed) and the scan restarts from the base.
+    async fn resume_from(&self, last: u64, head: u64, pin: Option<u64>) -> Result<u64> {
         let cursor_off_base = cursor_off_base(last, head, pin);
         if cursor_off_base {
             tracing::warn!(
@@ -141,7 +175,8 @@ impl Watcher {
                 n => (n + 1).max(self.start_block),
             }
         };
-        let mut from = match floor {
+        let floor = pin.map(|pin| pin.saturating_add(1));
+        Ok(match floor {
             Some(floor) if self.start_block < floor => {
                 if self.clamp_warned.swap(floor, std::sync::atomic::Ordering::Relaxed) != floor {
                     tracing::warn!(
@@ -154,33 +189,18 @@ impl Watcher {
                 base.max(floor)
             }
             _ => base,
-        };
-        let mut seen = 0usize;
-        while from <= head {
-            let to = from.saturating_add(self.chunk_blocks - 1).min(head);
-            let filter = Filter::new()
-                .address(MESSAGE_TRANSMITTER_V2)
-                .event_signature(IMessageTransmitterV2::MessageSent::SIGNATURE_HASH)
-                .from_block(from)
-                .to_block(to);
-            let logs: Vec<Log> = self.chain.rpc.call("eth_getLogs", (filter,)).await?;
-            // One head read per chunk: the expiration window's anchor (the
-            // destination's block coordinate, §15.1).
-            let expiration = self.expiration_block().await?;
-            for log in &logs {
-                seen += self.absorb(log, expiration)?;
-            }
-            from = to + 1;
-        }
-        // The cursor is the highest scanned block of the *current* chain:
-        // a re-pin or a rewind resets it to the new base (the rescan above),
-        // so it never skips a block.
-        self.scanned_upto
-            .store(head, std::sync::atomic::Ordering::Relaxed);
-        self.metrics
-            .last_scan_block
-            .store(head, std::sync::atomic::Ordering::Relaxed);
-        Ok(seen)
+        })
+    }
+
+    /// The `MessageSent` logs of one block range.
+    async fn message_logs(&self, from: u64, to: u64) -> Result<Vec<Log>> {
+        let filter = Filter::new()
+            .address(MESSAGE_TRANSMITTER_V2)
+            .event_signature(IMessageTransmitterV2::MessageSent::SIGNATURE_HASH)
+            .from_block(from)
+            .to_block(to);
+        let logs: Vec<Log> = self.chain.rpc.call("eth_getLogs", (filter,)).await?;
+        Ok(logs)
     }
 
     /// Park the non-relayed records this chain's history no longer backs: a
@@ -200,7 +220,7 @@ impl Watcher {
         })?;
         let mut parked = 0usize;
         for burn_tx in candidates {
-            let exists: Option<Box<serde_json::value::RawValue>> = self
+            let exists: Option<alloy_rpc_types_eth::Transaction> = self
                 .chain
                 .rpc
                 .call("eth_getTransactionByHash", (burn_tx,))
@@ -246,8 +266,9 @@ impl Watcher {
     }
 
     /// Decode one `MessageSent` log into a record. The log must carry its
-    /// transaction hash (it is the deterministic nonce) and its block.
-    fn absorb(&self, log: &Log, expiration: U256) -> Result<usize> {
+    /// transaction hash (it is the deterministic nonce) and its block; a log
+    /// outside this bridge's lanes is skipped (`None`).
+    fn decode_record(&self, log: &Log, expiration: U256) -> Result<Option<MessageRecord>> {
         let decoded =
             IMessageTransmitterV2::MessageSent::decode_log(&log.inner).map_err(|source| {
                 Error::Abi {
@@ -273,7 +294,7 @@ impl Watcher {
                 destination = parsed.header.destination_domain,
                 "MessageSent outside this bridge's lanes; skipped"
             );
-            return Ok(0);
+            return Ok(None);
         }
         // The deterministic nonce: the burn tx hash (§15.3). The raw event
         // message carries EMPTY_NONCE; the served artifact fills it.
@@ -284,7 +305,7 @@ impl Watcher {
             expiration,
         );
         let now = crate::now_ms();
-        let record = MessageRecord {
+        Ok(Some(MessageRecord {
             source_domain: parsed.header.source_domain,
             destination_domain: parsed.header.destination_domain,
             nonce: burn_tx,
@@ -301,7 +322,13 @@ impl Watcher {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
-        };
+        }))
+    }
+
+    /// Insert one record (or reconcile a re-scan of it) and report it.
+    fn insert(&self, record: MessageRecord) -> Result<usize> {
+        let burn_tx = record.burn_tx;
+        let burn_block = record.burn_block;
         let source_domain = record.source_domain;
         let destination_domain = record.destination_domain;
         // `Some(true)` = the same event re-scanned (the restart backfill,
@@ -342,6 +369,14 @@ impl Watcher {
                 );
                 Ok(0)
             }
+        }
+    }
+
+    /// Decode one `MessageSent` log into a record.
+    fn absorb(&self, log: &Log, expiration: U256) -> Result<usize> {
+        match self.decode_record(log, expiration)? {
+            Some(record) => self.insert(record),
+            None => Ok(0),
         }
     }
 

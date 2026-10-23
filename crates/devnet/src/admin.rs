@@ -8,41 +8,26 @@
 use crate::deal;
 use crate::error::{Error, Result};
 use crate::journal::Journal;
-use crate::metrics::Metrics;
-use crate::shadow::{save_registry, Shadow};
-use crate::shared::Shared;
+use crate::metrics::Registry;
+use crate::plane::Plane;
 use crate::source::Source;
-use crate::state::StateFile;
 use alloy_primitives::{Address, U256};
 use mirror_anvil::Rpc;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
-/// The devnet admin surface's wiring: the chain the devnet writes to, the
-/// unshadow re-sync source, and the devnet registries. Constructed per request
-/// from the engine's context (references only).
+/// The devnet admin surface's wiring: the devnet plane (registry, journal,
+/// cursor state, gauges and flags) plus the profile's own facts — the chain
+/// the devnet writes to, the unshadow re-sync source, the write chunk size,
+/// and whether this deployment journals the engine's own writes. Constructed
+/// per request from the engine's context (references only).
 pub struct AdminSurface<'a> {
+    /// The devnet plane both engines embed (one home for the registries).
+    pub plane: &'a Plane,
     /// The chain the devnet writes to (T / V).
     pub target: &'a Rpc,
     /// The unshadow re-sync source (reth at the cursor / fork source at the pin).
     pub source: &'a dyn Source,
-    pub shadow: &'a Shared<Shadow>,
-    pub shadow_path: &'a Path,
-    pub journal: &'a Journal,
-    pub state: &'a Shared<StateFile>,
-    pub metrics: &'a Metrics,
-    pub time_offset: &'a AtomicU64,
-    pub halted: &'a AtomicBool,
-    pub frozen: &'a AtomicBool,
-    /// Set by [`AdminSurface::rewind`]: blocks whose writes were rolled back
-    /// but whose chain head is already past them. The applier's normal
-    /// late-completion skip would leave them stale, so it re-applies the range
-    /// (idempotent writes; re-journaling records the rolled-back values as the
-    /// new before-values). Cleared once the whole range is re-applied.
-    pub reapply_from: &'a Shared<Option<(u64, u64)>>,
-    /// The shadow scan's high-water mark (shared with the engine's scan loop).
-    pub scanned_upto: &'a AtomicU64,
     pub chunk_size: usize,
     /// Whether this deployment journals the engine's *own* writes (deal), so
     /// `/admin/rewind` can undo them. The venue sets this: it has no parent
@@ -58,16 +43,7 @@ impl AdminSurface<'_> {
     /// `POST /admin/deal` — the unlimited ERC20 faucet.
     pub async fn deal(&self, req: &deal::DealRequest) -> Result<deal::DealOutcome> {
         let journal = self.journal_sink().await?;
-        deal::deal(
-            self.target,
-            self.shadow,
-            self.shadow_path,
-            self.metrics,
-            self.chunk_size,
-            journal,
-            req,
-        )
-        .await
+        deal::deal(self, journal, req).await
     }
 
     /// Force the shadow scan up to the chain head — the hand-back's pre-step.
@@ -85,7 +61,7 @@ impl AdminSurface<'_> {
         let pin = self.target.fork_block().await?.unwrap_or(0);
         // A fresh mark starts at the head: the hand-back's job is the recent
         // devnet writes, not history (the registry was persisted).
-        crate::scan::scan_to(self.target, self.shadow, self.scanned_upto, pin, head, head).await
+        crate::scan::scan_to(self.plane, self.target, pin, head, head).await
     }
 
     /// `POST /admin/epoch` — re-pin the devnet chain to its fork source's
@@ -127,12 +103,12 @@ impl AdminSurface<'_> {
         if !self.journal_writes {
             return Ok(None);
         }
-        let cursor = self.state.lock()?.data.t.as_ref().map(|c| c.block);
+        let cursor = self.plane.state.lock()?.data.t.as_ref().map(|c| c.block);
         let block = match cursor {
             Some(block) => block,
             None => self.target.block_number().await?,
         };
-        Ok(Some((self.journal, block)))
+        Ok(Some((&self.plane.journal, block)))
     }
 
     /// `POST /admin/shadow` — register devnet-owned keys, or hand them back
@@ -156,7 +132,7 @@ impl AdminSurface<'_> {
             self.register(req)?;
             0
         };
-        let shadow = self.shadow.lock()?;
+        let shadow = self.plane.shadow.lock()?;
         Ok(ShadowOutcome {
             address: req.address,
             cleared: req.clear,
@@ -181,7 +157,7 @@ impl AdminSurface<'_> {
 
     /// Register the devnet-owned keys (`clear: false`).
     fn register(&self, req: &ShadowRequest) -> Result<()> {
-        let mut s = self.shadow.lock()?;
+        let mut s = self.plane.shadow.lock()?;
         if req.account_fields {
             s.mark_account_fields(req.address);
         }
@@ -189,7 +165,7 @@ impl AdminSurface<'_> {
             s.mark_slot(req.address, *slot);
         }
         drop(s);
-        save_registry(self.shadow, self.shadow_path, self.metrics)
+        self.plane.save_shadow()
     }
 
     /// Hand the keys back to parent sync and re-sync the source's truth
@@ -201,7 +177,7 @@ impl AdminSurface<'_> {
         // `all` hands every shadowed key of the account back to the source.
         let mut slots = req.slots.clone();
         if req.all {
-            let s = self.shadow.lock()?;
+            let s = self.plane.shadow.lock()?;
             if let Some(set) = s.slots.get(&req.address) {
                 for slot in set {
                     if !slots.contains(slot) {
@@ -215,6 +191,7 @@ impl AdminSurface<'_> {
         // re-sync from *that* block - reading the source's head would leave
         // the devnet holding a future value.
         let anchor = self
+            .plane
             .state
             .lock()?
             .data
@@ -252,7 +229,7 @@ impl AdminSurface<'_> {
             });
         }
         {
-            let mut s = self.shadow.lock()?;
+            let mut s = self.plane.shadow.lock()?;
             if account_fields {
                 s.unmark_account_fields(req.address);
             }
@@ -265,7 +242,7 @@ impl AdminSurface<'_> {
         // them (conservative: the key stays devnet-owned), and the next request
         // retries - the writes are absolute and idempotent.
         let resynced = mirror_anvil::apply_writes(self.target, &writes, self.chunk_size).await?;
-        save_registry(self.shadow, self.shadow_path, self.metrics)?;
+        self.plane.save_shadow()?;
         Ok(resynced)
     }
 
@@ -279,13 +256,13 @@ impl AdminSurface<'_> {
         // (the shared surface's symmetry; measured: with the cursor check
         // first, a chain without a cursor answered "no cursor" while its peer
         // answered "beyond the ring").
-        if blocks > self.journal.keep() {
+        if blocks > self.plane.journal.keep() {
             return Err(Error::RewindBeyondRing {
                 blocks,
-                keep: self.journal.keep(),
+                keep: self.plane.journal.keep(),
             });
         }
-        let Some(cursor) = self.state.lock()?.data.t.clone() else {
+        let Some(cursor) = self.plane.state.lock()?.data.t.clone() else {
             return Err(Error::NoCursor);
         };
         if blocks == 0 || blocks > cursor.block {
@@ -300,7 +277,7 @@ impl AdminSurface<'_> {
         // the first undo, or a concurrent apply in this window could skip a
         // block that is never re-applied.
         {
-            let mut ra = self.reapply_from.lock()?;
+            let mut ra = self.plane.reapply_from.lock()?;
             *ra = Some(match *ra {
                 Some((f, u)) => (f.min(from), u.max(cursor.block)),
                 None => (from, cursor.block),
@@ -311,8 +288,9 @@ impl AdminSurface<'_> {
         // fault, and a large range costs one directory read, not one probe per
         // block.
         let mut restored = 0usize;
-        for b in self.journal.blocks_in(from, cursor.block)? {
+        for b in self.plane.journal.blocks_in(from, cursor.block)? {
             restored += self
+                .plane
                 .journal
                 .undo_block(b, self.target, self.chunk_size)
                 .await?;
@@ -324,6 +302,7 @@ impl AdminSurface<'_> {
         match self.target.block_by_number_opt(target, false).await? {
             Some(b) => {
                 let first = self
+                    .plane
                     .state
                     .lock()?
                     .data
@@ -331,14 +310,14 @@ impl AdminSurface<'_> {
                     .as_ref()
                     .map(|c| c.first_block)
                     .unwrap_or(target);
-                self.state.lock()?.data.t =
+                self.plane.state.lock()?.data.t =
                     Some(crate::state::cursor_from(&b, first));
             }
             None => {
-                self.state.lock()?.data.t = None;
+                self.plane.state.lock()?.data.t = None;
             }
         }
-        self.state.lock()?.save()?;
+        self.plane.state.lock()?.save()?;
         // The chain's *head* is still where it was - only the values were
         // rolled back - so the main loop's "diffs already applied"
         // late-completion path would skip the re-application and leave the
@@ -371,11 +350,11 @@ impl AdminSurface<'_> {
     /// are monotonic: the clamp lets the clock converge back rather than
     /// jumping backwards.
     pub async fn time(&self, seconds: u64) -> Result<TimeOutcome> {
-        self.time_offset.store(seconds, Ordering::Relaxed);
+        self.plane.time_offset.store(seconds, Ordering::Relaxed);
         // Persist it: the offset is part of the devnet's state contract (its
         // blocks carry it), so a restart must keep it.
-        self.state.lock()?.data.time_offset_seconds = Some(seconds);
-        self.state.lock()?.save()?;
+        self.plane.state.lock()?.data.time_offset_seconds = Some(seconds);
+        self.plane.state.lock()?.save()?;
         // Informational: the offset is already set and persisted; a head gauge
         // that cannot be read degrades the report, it must not fail the write.
         let head = self.target.block_number().await.unwrap_or(0);
@@ -396,8 +375,8 @@ impl AdminSurface<'_> {
     pub fn pause(&self) {
         // A gate read by the loops: SeqCst, like the divergence flags (rule
         // 14 - simplicity over minimal ordering for control gates).
-        self.halted.store(true, Ordering::SeqCst);
-        self.metrics.set(&self.metrics.halted, 1);
+        self.plane.halted.store(true, Ordering::SeqCst);
+        self.plane.metrics.set(&self.plane.metrics.halted, 1);
     }
 
     /// `POST /admin/resume` — clear the halt *and* the divergence freeze.
@@ -405,10 +384,10 @@ impl AdminSurface<'_> {
     /// resuming is the operator's acknowledgement that it was investigated:
     /// the two flags are cleared together, as they always have been.
     pub fn resume(&self) {
-        self.frozen.store(false, Ordering::SeqCst);
-        self.halted.store(false, Ordering::SeqCst);
-        self.metrics.set(&self.metrics.frozen, 0);
-        self.metrics.set(&self.metrics.halted, 0);
+        self.plane.frozen.store(false, Ordering::SeqCst);
+        self.plane.halted.store(false, Ordering::SeqCst);
+        self.plane.metrics.set(&self.plane.metrics.frozen, 0);
+        self.plane.metrics.set(&self.plane.metrics.halted, 0);
     }
 }
 
