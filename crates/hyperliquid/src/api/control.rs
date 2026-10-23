@@ -42,6 +42,16 @@ fn require_tracked(feed: &crate::feed::MarketFeed, coin: &str) -> Result<()> {
 pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
     let mut out = state.sim.metrics.render();
     out.push_str(&state.feed.metrics.render());
+    // Computed at scrape time from the overrides themselves: an owned-count
+    // gauge maintained by hand would drift the first time a mutation site
+    // forgot it (plan §7.8's `venue_feed_overrides`).
+    mirror_devnet::metrics::push_metric(
+        &mut out,
+        "gauge",
+        "venue_feed_overrides",
+        "scenario-owned feed values (crash prices + funding + books)",
+        state.feed.owned_count(),
+    );
     if let Some(bridge) = &state.bridge {
         out.push_str(&bridge.render());
     }

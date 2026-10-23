@@ -59,6 +59,9 @@ pub struct SimMetrics {
     /// Served states that failed the identity re-check (the client's own
     /// gate): any nonzero value is a construction regression to page on.
     pub identity_violations: AtomicU64,
+    /// The scenario's explicit `advance` steps (the 1 Hz tick is the
+    /// automaton; its work shows in the funding/liquidation counters).
+    pub advances_total: AtomicU64,
 }
 
 impl SimMetrics {
@@ -69,6 +72,7 @@ impl SimMetrics {
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_liquidations_total", "liquidations executed by the sim", self.liquidations_total.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_funding_payments_total", "funding payments applied", self.funding_payments_total.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_identity_violations_total", "served states that failed the identity re-check (must stay 0)", self.identity_violations.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_advances_total", "scenario advance() steps", self.advances_total.load(Ordering::Relaxed));
         out
     }
 }
@@ -390,6 +394,7 @@ impl Sim {
             liquidations.extend(self.check_all(feed, now)?);
         }
         self.save()?;
+        self.metrics.advances_total.fetch_add(1, Ordering::Relaxed);
         Ok(AdvanceOutcome {
             advanced_ms: jump_ms,
             blocks,

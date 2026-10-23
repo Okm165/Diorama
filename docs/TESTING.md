@@ -460,6 +460,18 @@ The behavioral checks, not just shapes:
   present on both, and `cursor` means the *devnet chain's* cursor on both
   (T-height; the plan's clock-labels rule). The ethereum profile names its
   clocks explicitly: `cursor_t` is T's, `cursor_m` is M's replay cursor.
+- **the venue plane's alarm set** — the plan §7.8 alarms are served under the
+  sim's own spellings: API lag as `venue_sim_stale_ms{coin}` (per coin, ms —
+  finer-grained than a per-feed seconds gauge); the rate budget as
+  `venue_sim_budget_weight_used` (with `venue_sim_budget_skips_total`); the
+  invariant-violation page as `venue_sim_identity_violations_total`; the
+  bridge's actions as the typed `venue_bridge_*_total` family and its pending
+  window as `cctp_messages_pending`. `venue_feed_overrides` and
+  `venue_sim_advances_total` are served under those names. There is no
+  `venue-closure` target: the venue side has no diff applier/watchlist by
+  chain nature (no BALs on HyperEVM), and its V-side wiring is verified at
+  boot by the bridge's `verify_wiring` (chain id, contracts, roles) — the
+  closure check that applies.
 - **rewind semantics** (deliberate): T's journal holds the applier's
   parent-diff before-values, so `/admin/rewind` on T undoes *applied parent
   blocks*; a T-side engine write (the deal faucet) is undone by the hand-back

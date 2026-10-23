@@ -173,6 +173,14 @@ impl MarketFeed {
         self.persist()
     }
 
+    /// The number of scenario-owned feed values (`crash` prices + `set_funding`
+    /// rates + `set_book` books) — the `venue_feed_overrides` gauge, computed
+    /// from the overrides themselves so it cannot drift.
+    pub fn owned_count(&self) -> u64 {
+        let o = self.read_overrides();
+        (o.prices.len() + o.funding.len() + o.books.len()) as u64
+    }
+
     // ---- composed reads ---------------------------------------------------
 
     /// The coin's mark: the owned price wins, else the live context.
