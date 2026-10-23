@@ -14,6 +14,8 @@ toml = { workspace = true }
 tracing = { workspace = true }
 # boot::init_logging (the binaries' shared logging convention).
 tracing-subscriber = { workspace = true }
+# boot::shutdown_signal (SIGINT + SIGTERM: what Kubernetes actually sends).
+tokio = { workspace = true }
 # The mirror-config CLI.
 clap = { workspace = true }
 

@@ -51,6 +51,38 @@ pub fn report_error(error: &dyn StdError) {
     }
 }
 
+/// Wait for a shutdown signal: SIGINT (Ctrl-C) **or SIGTERM**.
+///
+/// Kubernetes sends SIGTERM on pod termination (then SIGKILL after the grace
+/// period), so a `tokio::signal::ctrl_c`-only wait — which listens for SIGINT
+/// — would never fire under a rollout and the graceful path would be dead
+/// code in production. Measured 2026-10-23: no service log had ever shown its
+/// "shutdown signal received" line, because every `kill` is SIGTERM.
+pub async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.ok();
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "SIGTERM handler unavailable; SIGINT still shuts down");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

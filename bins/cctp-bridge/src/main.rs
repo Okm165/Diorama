@@ -117,13 +117,8 @@ async fn run() -> mirror_cctp::Result<()> {
     let relayer = bridge.spawn_relayer();
     let (iris, control) = bridge.spawn_apis(min_fees, relayer);
 
-    tokio::signal::ctrl_c().await.map_err(|source| {
-        mirror_cctp::Error::Io {
-            what: "signal handler",
-            path: "ctrl_c".into(),
-            source,
-        }
-    })?;
+    boot::shutdown_signal().await;
+    tracing::info!("shutdown signal received");
     iris.abort();
     control.abort();
     bridge.store.save()?;

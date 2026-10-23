@@ -193,7 +193,7 @@ async fn run(config: PathBuf) -> Result<()> {
         }));
     }
 
-    tokio::signal::ctrl_c().await.ok();
+    mirror_config::boot::shutdown_signal().await;
     tracing::info!("shutdown signal received");
     for t in tasks {
         t.abort();

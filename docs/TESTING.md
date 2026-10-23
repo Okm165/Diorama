@@ -414,11 +414,15 @@ T-side shadow round-trip on the extracted path (`register` → `clear` →
 Entry shape follows the need, not symmetry for its own sake: the ethereum's
 lib owns a `main_entry` with subcommands (`run` / `selftest` / `rewind`), while
 the venue has no subcommands and its bin is the composition root (plan §11.3
-rule 10) — with the same shutdown path (the signal aborts the tasks; every
-mutation persists as it happens). `make venue-closure` has no script: the
-venue has no incoming parent diffs to close a scope over — its standing scope
-check is the at-pin probe set (`/admin/probes`, `venue_probe_*`), which the
-venue-drill and smoke exercise.
+rule 10) — with the same shutdown path, shared by all four binaries:
+`boot::shutdown_signal` waits for **SIGINT *and* SIGTERM** (Kubernetes sends
+SIGTERM; measured 2026-10-23: before the fix, no service log had ever shown
+its shutdown line — a `ctrl_c`-only wait was dead code under a rollout), then
+the engine aborts its tasks (every mutation persists as it happens), the sim
+saves its state, and the CCTP bridge saves its store. `make venue-closure` has
+no script: the venue has no incoming parent diffs to close a scope over — its
+standing scope check is the at-pin probe set (`/admin/probes`,
+`venue_probe_*`), which the venue-drill and smoke exercise.
 
 ## The feed bridge — measured behavior (Phase 0)
 

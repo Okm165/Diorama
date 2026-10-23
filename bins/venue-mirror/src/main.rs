@@ -63,7 +63,7 @@ async fn run() -> mirror_hyperliquid::Result<()> {
         }));
     }
 
-    tokio::signal::ctrl_c().await.ok();
+    boot::shutdown_signal().await;
     tracing::info!("shutdown signal received");
     for t in tasks {
         t.abort();

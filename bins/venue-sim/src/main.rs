@@ -114,13 +114,8 @@ async fn run() -> mirror_hyperliquid::Result<()> {
         "venue simulator listening"
     );
 
-    tokio::signal::ctrl_c().await.map_err(|source| {
-        mirror_hyperliquid::Error::Io {
-            what: "signal handler",
-            path: "ctrl_c".into(),
-            source,
-        }
-    })?;
+    boot::shutdown_signal().await;
+    tracing::info!("shutdown signal received");
     info.abort();
     control.abort();
     sim.save()?;
