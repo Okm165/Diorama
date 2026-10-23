@@ -19,7 +19,7 @@ use mirror_devnet::probes::ProbeRunner;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-pub struct ApplyOutcome {
+pub(crate) struct ApplyOutcome {
     pub source: &'static str,
     pub writes: usize,
     pub filtered: usize,
@@ -142,7 +142,7 @@ async fn mark_own_writes(ctx: &Ctx) -> Result<()> {
     scan_own_blocks(ctx, watermark).await
 }
 
-pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
+pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let started = Instant::now();
     let block = ctx.reth.block_by_number(n, false).await?;
 

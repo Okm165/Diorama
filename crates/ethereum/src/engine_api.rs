@@ -82,7 +82,7 @@ pub enum EngineApiError {
 }
 
 #[derive(Clone)]
-pub struct EngineClient {
+pub(crate) struct EngineClient {
     http: reqwest::Client,
     url: String,
     secret: JwtSecret,

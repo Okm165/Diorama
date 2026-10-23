@@ -175,7 +175,7 @@ impl WsClient {
 
 /// The WS lane's faults (logged by the reconnect loop, never propagated).
 #[derive(Debug, thiserror::Error)]
-pub enum WsError {
+pub(crate) enum WsError {
     /// The handshake did not answer inside [`CONNECT_TIMEOUT`] (a hung
     /// accept): a retryable failure, never an unbounded wait.
     #[error("connecting the market websocket: no answer in {CONNECT_TIMEOUT:?}")]

@@ -25,7 +25,7 @@ pub mod weight {
 }
 
 #[derive(Default)]
-pub struct Budget {
+pub(crate) struct Budget {
     spends: Mutex<VecDeque<(Instant, u64)>>,
 }
 

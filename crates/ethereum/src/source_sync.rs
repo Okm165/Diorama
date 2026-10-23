@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 const MAINNET_GENESIS_TIME: u64 = 1_606_824_023;
 const SECONDS_PER_SLOT: u64 = 12;
 
-pub async fn source_sync_loop(ctx: Arc<Ctx>) {
+pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
     let Some(engine) = ctx.engine_api.clone() else {
         return;
     };

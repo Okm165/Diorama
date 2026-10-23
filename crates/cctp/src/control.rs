@@ -77,7 +77,7 @@ impl IntoResponse for Error {
 // ---- health / metrics ------------------------------------------------------
 
 #[derive(Debug, Serialize)]
-pub struct HealthResponse {
+pub(crate) struct HealthResponse {
     /// `ok` with no parked messages, `degraded` when one is parked (never
     /// dropped, never hidden).
     pub status: &'static str,
@@ -89,12 +89,12 @@ pub struct HealthResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub struct ChainHealth {
+pub(crate) struct ChainHealth {
     pub name: &'static str,
     pub domain: Domain,
 }
 
-pub async fn health(State(state): State<Arc<ControlState>>) -> Result<Json<HealthResponse>> {
+pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Json<HealthResponse>> {
     let counts = state.store.counts()?;
     Ok(Json(HealthResponse {
         status: if counts.parked == 0 { "ok" } else { "degraded" },
@@ -123,7 +123,7 @@ pub async fn metrics(State(state): State<Arc<ControlState>>) -> Result<String> {
 // ---- the message listing ---------------------------------------------------
 
 #[derive(Debug, Serialize)]
-pub struct MessageSummary {
+pub(crate) struct MessageSummary {
     pub source_domain: Domain,
     pub destination_domain: Domain,
     pub burn_tx: B256,
@@ -157,10 +157,10 @@ impl MessageSummary {
 
 #[derive(Debug, Serialize)]
 pub struct StateResponse {
-    pub messages: Vec<MessageSummary>,
+    pub(crate) messages: Vec<MessageSummary>,
 }
 
-pub async fn state_listing(State(state): State<Arc<ControlState>>) -> Result<Json<StateResponse>> {
+pub(crate) async fn state_listing(State(state): State<Arc<ControlState>>) -> Result<Json<StateResponse>> {
     let messages = state
         .store
         .with(|s| Ok(s.messages.iter().map(MessageSummary::of).collect::<Vec<_>>()))?;
@@ -173,20 +173,20 @@ pub async fn state_listing(State(state): State<Arc<ControlState>>) -> Result<Jso
 /// SIGNED message. Manual mode's only driver (§15.4); in auto mode a nudge
 /// that skips the poll interval.
 #[derive(Debug, Deserialize)]
-pub struct RelayRequest {
+pub(crate) struct RelayRequest {
     /// Absent = every SIGNED message.
     #[serde(default)]
     pub nonce: Option<B256>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct RelayResponse {
+pub(crate) struct RelayResponse {
     /// Messages confirmed by this pass (`receiveMessage` mined, or the nonce
     /// already consumed on-chain).
     pub confirmed: usize,
 }
 
-pub async fn relay(
+pub(crate) async fn relay(
     State(state): State<Arc<ControlState>>,
     Json(request): Json<RelayRequest>,
 ) -> Result<Json<RelayResponse>> {
@@ -213,7 +213,7 @@ pub async fn relay(
 // ---- transfer --------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct TransferRequest {
+pub(crate) struct TransferRequest {
     /// The source CCTP domain (0 = T, 19 = V).
     pub source: Domain,
     /// The destination CCTP domain (must be the other mirror).
@@ -232,7 +232,7 @@ pub struct TransferRequest {
 
 /// The hook a transfer carries — the credit-carrying lane.
 #[derive(Debug, Deserialize)]
-pub struct HookSpec {
+pub(crate) struct HookSpec {
     /// The contract the wrapper calls after the mint (e.g. daloc's
     /// `ProofExecutor.receiveRecovery(positionId, amount)`).
     pub target: Address,
@@ -242,7 +242,7 @@ pub struct HookSpec {
 }
 
 #[derive(Debug, Serialize)]
-pub struct TransferResponse {
+pub(crate) struct TransferResponse {
     pub burn_tx: B256,
     /// Whether the burn was mined within the receipt window (a test may also
     /// poll the tx; the watcher absorbs it either way).
@@ -331,7 +331,7 @@ fn burn_calldata(
     }
 }
 
-pub async fn transfer(
+pub(crate) async fn transfer(
     State(state): State<Arc<ControlState>>,
     Json(request): Json<TransferRequest>,
 ) -> Result<Json<TransferResponse>> {

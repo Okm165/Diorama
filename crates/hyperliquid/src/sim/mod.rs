@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The persisted simulator state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct SimState {
+pub(crate) struct SimState {
     /// The scenario epoch: `reset` bumps it (state files say which run they
     /// belong to).
     #[serde(default)]
@@ -47,7 +47,7 @@ pub struct SimState {
 
 /// The sim's metrics (rendered beside the feed's).
 #[derive(Default)]
-pub struct SimMetrics {
+pub(crate) struct SimMetrics {
     /// Registered (touched) accounts.
     pub accounts: AtomicU64,
     /// The scenario epoch.
@@ -84,7 +84,7 @@ impl SimMetrics {
 /// wire and the call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Deal {
+pub(crate) struct Deal {
     pub address: Address,
     pub class: DealClass,
     /// The spot coin (`None` = USDC).
@@ -97,7 +97,7 @@ pub struct Deal {
 /// state maps by and the venue's name (served on the rows) — one argument
 /// instead of two that always travel together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TokenRef<'a> {
+pub(crate) struct TokenRef<'a> {
     pub index: u32,
     pub coin: &'a str,
 }
@@ -105,7 +105,7 @@ pub struct TokenRef<'a> {
 /// Which side of the venue `deal` mints into.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum DealClass {
+pub(crate) enum DealClass {
     /// The perp wallet (`totalRawUsd`; the enforcement's recall source).
     Perp,
     /// The spot wallet (by token; USDC is token 0).
@@ -121,7 +121,7 @@ pub struct Sim {
     /// the client's own rule is `chain_time = max(wall, head)` — a served
     /// `time` that stayed at wall would read as stale after a V jump.
     chain_time_ms: AtomicU64,
-    pub metrics: SimMetrics,
+    pub(crate) metrics: SimMetrics,
 }
 
 impl Sim {
@@ -152,7 +152,7 @@ impl Sim {
 
     /// The account, or `None` when it was never touched (the caller passes
     /// the read through to the real venue).
-    pub fn account(&self, address: Address) -> Result<Option<Account>> {
+    pub(crate) fn account(&self, address: Address) -> Result<Option<Account>> {
         Ok(self.state.lock()?.accounts.get(&address).cloned())
     }
 
@@ -226,7 +226,7 @@ impl Sim {
         f(state.accounts.entry(address).or_default())
     }
 
-    pub fn deal(&self, feed: &MarketFeed, deal: &Deal) -> Result<Decimal> {
+    pub(crate) fn deal(&self, feed: &MarketFeed, deal: &Deal) -> Result<Decimal> {
         let now = crate::now_ms();
         let clock = self.clock(now)?;
         let after = self.with_account(deal.address, |account| {
@@ -261,7 +261,7 @@ impl Sim {
     /// balances. The field names are the patch shape's (`userAbstraction`,
     /// `spotBalances`). An all-empty seed is refused: it would silently
     /// register a zero account.
-    pub fn set_account(&self, address: Address, seed: AccountSeed) -> Result<()> {
+    pub(crate) fn set_account(&self, address: Address, seed: AccountSeed) -> Result<()> {
         if seed.is_empty() {
             return Err(Error::BadRequest {
                 reason: "the patch is empty (no field named)".into(),
@@ -282,7 +282,7 @@ impl Sim {
     }
 
     /// The account's control fixture (the merged patch), when set.
-    pub fn control_fixture(&self, address: Address) -> Result<Option<AccountSeed>> {
+    pub(crate) fn control_fixture(&self, address: Address) -> Result<Option<AccountSeed>> {
         Ok(self
             .state
             .lock()?
@@ -294,7 +294,7 @@ impl Sim {
     // ---- the Core↔EVM bridge's effects -----------------------------------
 
     /// EVM→Core: credit a spot token (creates the account on first touch).
-    pub fn credit_spot(&self, address: Address, token: TokenRef<'_>, amount: Decimal) -> Result<()> {
+    pub(crate) fn credit_spot(&self, address: Address, token: TokenRef<'_>, amount: Decimal) -> Result<()> {
         // Read the clock *before* taking the state lock: `clock()` locks the
         // same mutex, and a std Mutex is not reentrant.
         let clock = self.clock(crate::now_ms())?;
@@ -331,7 +331,7 @@ impl Sim {
 
     /// USD class transfer (CoreWriter action 7): spot USDC ↔ perp wallet.
     /// `false` when the source side is short.
-    pub fn usd_class_transfer(&self, address: Address, token: TokenRef<'_>, amount: Decimal, to_perp: bool) -> Result<bool> {
+    pub(crate) fn usd_class_transfer(&self, address: Address, token: TokenRef<'_>, amount: Decimal, to_perp: bool) -> Result<bool> {
         let clock = self.clock(crate::now_ms())?;
         let applied = self.with_account(address, |account| {
             stamp_funding_baseline(account, clock);
@@ -362,7 +362,7 @@ impl Sim {
 
     /// Core spot send: debit the sender, credit the recipient. `false` when
     /// the sender is short.
-    pub fn spot_send(&self, from: Address, to: Address, token: TokenRef<'_>, amount: Decimal) -> Result<bool> {
+    pub(crate) fn spot_send(&self, from: Address, to: Address, token: TokenRef<'_>, amount: Decimal) -> Result<bool> {
         {
             let mut state = self.state.lock()?;
             let Some(sender) = state.accounts.get_mut(&from) else {
@@ -396,7 +396,7 @@ impl Sim {
     }
 
     /// Set the account's abstraction mode (CoreWriter action 16).
-    pub fn set_mode(&self, address: Address, mode: crate::wire::UserAbstraction) -> Result<()> {
+    pub(crate) fn set_mode(&self, address: Address, mode: crate::wire::UserAbstraction) -> Result<()> {
         self.with_account(address, |account| {
             account.mode = mode;
             Ok(())
@@ -420,7 +420,7 @@ impl Sim {
 
     /// `advance`: script a clock jump (`seconds`) with `blocks` liquidation
     /// checks inside it — the deterministic complement to self-advance.
-    pub fn advance(&self, feed: &MarketFeed, seconds: u64, blocks: u64) -> Result<AdvanceOutcome> {
+    pub(crate) fn advance(&self, feed: &MarketFeed, seconds: u64, blocks: u64) -> Result<AdvanceOutcome> {
         let jump_ms = seconds.saturating_mul(1_000);
         {
             let mut state = self.state.lock()?;
@@ -549,7 +549,7 @@ impl Sim {
 /// What `advance` moved.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AdvanceOutcome {
+pub(crate) struct AdvanceOutcome {
     pub advanced_ms: u64,
     pub blocks: u64,
     pub liquidations: Vec<Liquidation>,

@@ -16,7 +16,7 @@ use std::error::Error as StdError;
 /// is exactly tokio's 2 MiB worker default — the first blob block overflowed
 /// it. The binaries own an explicit budget with headroom; release builds use
 /// a fraction of it, and the cost is address space, not resident memory.
-pub const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+pub(crate) const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// The budget must keep headroom over the measured ~2.1 MiB blob/KZG chain
 /// (debug builds) — a compile-time fact, not a runtime test.
@@ -42,7 +42,7 @@ pub fn init_logging() {
 /// Print a fatal error and its full cause chain: the typed sources are the
 /// point (the operator sees the boundary that failed, not a flattened
 /// string).
-pub fn report_error(error: &dyn StdError) {
+pub(crate) fn report_error(error: &dyn StdError) {
     eprintln!("Error: {error}");
     let mut source = error.source();
     while let Some(s) = source {
@@ -60,7 +60,7 @@ pub const DEFAULT_INSTANCE_PATH: &str = "/etc/mirror/instance.toml";
 /// is parsed here — one definition, and the four bins cannot drift apart in
 /// usage. (The ethereum engine's richer CLI — `selftest`, `rewind` — keeps
 /// its own clap subcommands on top of the same `run --config` shape.)
-pub fn service_config(args: &[String]) -> Result<std::path::PathBuf, String> {
+pub(crate) fn service_config(args: &[String]) -> Result<std::path::PathBuf, String> {
     let mut rest = args.iter().map(String::as_str);
     match rest.next() {
         Some("run") => {}

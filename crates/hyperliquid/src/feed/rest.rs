@@ -32,7 +32,7 @@ impl RestClient {
 
     /// One typed info call. A non-2xx answer is a typed refusal carrying the
     /// body (the venue's error strings are the diagnostics).
-    pub async fn info<T: DeserializeOwned>(&self, req: &InfoRequest) -> Result<T> {
+    pub(crate) async fn info<T: DeserializeOwned>(&self, req: &InfoRequest) -> Result<T> {
         let resp = self
             .http
             .post(format!("{}/info", self.api_url))

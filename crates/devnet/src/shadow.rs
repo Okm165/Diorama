@@ -33,7 +33,7 @@ pub struct Shadow {
     /// optional: a marked account whose balance was never *recorded* must not
     /// have a default zero restored over a real value on a re-fork.
     #[serde(default)]
-    pub account_values: BTreeMap<Address, AccountValues>,
+    pub(crate) account_values: BTreeMap<Address, AccountValues>,
     /// Whole-account ownership for the devnet's fixtures (plan §14.1): the
     /// canonical addresses daloc's deploy replaces via `anvil_setCode` write
     /// through *cheatcodes*, which the tx scanner cannot see — without this,
@@ -46,7 +46,7 @@ pub struct Shadow {
 /// The recorded account fields of one shadowed account (any subset).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(from = "RawAccountValues")]
-pub struct AccountValues {
+pub(crate) struct AccountValues {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance: Option<U256>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -387,7 +387,7 @@ impl Shadow {
 /// Persist the registry and update its gauge: the one save path (the shadow
 /// loop, hand-backs and deals all go through it, so the gauge never lags a
 /// save).
-pub fn save_registry(shadow: &Shared<Shadow>, path: &Path, metrics: &Metrics) -> Result<()> {
+pub(crate) fn save_registry(shadow: &Shared<Shadow>, path: &Path, metrics: &Metrics) -> Result<()> {
     let s = shadow.lock()?;
     s.save(path)?;
     metrics.set(&metrics.shadowed_slots, s.slot_count() as u64);
@@ -397,11 +397,9 @@ pub fn save_registry(shadow: &Shared<Shadow>, path: &Path, metrics: &Metrics) ->
 
 /// What a same-pin restore moved, for the caller's log and metrics.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct RestoreStats {
+pub(crate) struct RestoreStats {
     pub slots: usize,
     pub accounts: usize,
-    pub storage_accounts: usize,
-    pub account_values: usize,
     pub restored: usize,
     pub orphan_slots: usize,
     pub orphan_accounts: usize,
@@ -417,20 +415,15 @@ pub struct RestoreStats {
 /// values, and hand back marked keys with no recorded value (they would hold
 /// pin-era source values under a devnet mark). The caller persists the
 /// registry; a fault leaves the marks in memory, so a retry is idempotent.
-pub async fn restore_recorded(
+pub(crate) async fn restore_recorded(
     target: &Rpc,
     shadow: &Shared<Shadow>,
     chunk_size: usize,
 ) -> Result<RestoreStats> {
     let (orphan_slots, orphan_accounts) = shadow.lock()?.prune_orphans();
-    let counts = {
+    let (slots, accounts) = {
         let s = shadow.lock()?;
-        (
-            s.slot_count(),
-            s.accounts.len(),
-            s.values.len(),
-            s.account_values.len(),
-        )
+        (s.slot_count(), s.accounts.len())
     };
     // Clone out: the re-apply awaits, and a MutexGuard must not be held across
     // it (the loops must stay Send).
@@ -438,10 +431,8 @@ pub async fn restore_recorded(
     let restored = snapshot.reapply(target, chunk_size).await?;
     let (unknown_slots, unknown_accounts) = shadow.lock()?.unrecorded();
     Ok(RestoreStats {
-        slots: counts.0,
-        accounts: counts.1,
-        storage_accounts: counts.2,
-        account_values: counts.3,
+        slots,
+        accounts,
         restored,
         orphan_slots,
         orphan_accounts,

@@ -54,7 +54,7 @@ impl Write {
 /// is therefore a write to zero — without this the shadow registry records a
 /// stale non-zero value, and a same-pin restore resurrects it (measured: a
 /// drained balance came back after a reset).
-pub fn flatten_trace_diff(frame: &PreStateFrame) -> Vec<Write> {
+pub(crate) fn flatten_trace_diff(frame: &PreStateFrame) -> Vec<Write> {
     let Some(diff) = frame.as_diff() else {
         return Vec::new();
     };

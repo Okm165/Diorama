@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Default)]
-pub struct FeedMetrics {
+pub(crate) struct FeedMetrics {
     /// WS client connected (1/0).
     ws_connected: AtomicBool,
     /// REST poller transport/parse faults.

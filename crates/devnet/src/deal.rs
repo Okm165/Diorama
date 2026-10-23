@@ -35,14 +35,14 @@ pub struct DealOutcome {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub probes: Vec<ProbeRecord>,
+    pub(crate) probes: Vec<ProbeRecord>,
 }
 
 /// One slot-probe record (diagnostics carried by the error shape): the slot
 /// tried, the node's answer (absent when the probe faulted), and the sentinel
 /// it was looking for.
 #[derive(Debug, Clone, Serialize)]
-pub struct ProbeRecord {
+pub(crate) struct ProbeRecord {
     pub slot: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Bytes>,

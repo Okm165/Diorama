@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 /// One recorded API wallet (the agent identity daloc's cosigner registers).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AgentWallet {
+pub(crate) struct AgentWallet {
     pub wallet: Address,
     pub name: String,
 }
@@ -34,7 +34,7 @@ pub struct AgentWallet {
 /// One simulated account (persisted). The fields are the *inputs*; the wire
 /// shape is derived per read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct Account {
+pub(crate) struct Account {
     /// The perp wallet's raw USDC balance (before cost basis).
     #[serde(default)]
     pub perp_balance: Decimal,
@@ -64,7 +64,7 @@ fn default_mode() -> UserAbstraction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Position {
+pub(crate) struct Position {
     /// Signed size (negative = short).
     pub szi: Decimal,
     /// Size-weighted entry price.
@@ -114,12 +114,12 @@ pub fn sub(a: Decimal, b: Decimal, what: &'static str) -> Result<Decimal> {
     a.checked_sub(b).ok_or(crate::error::Error::Overflow { what })
 }
 
-pub fn mul(a: Decimal, b: Decimal, what: &'static str) -> Result<Decimal> {
+pub(crate) fn mul(a: Decimal, b: Decimal, what: &'static str) -> Result<Decimal> {
     a.checked_mul(b).ok_or(crate::error::Error::Overflow { what })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SpotEntry {
+pub(crate) struct SpotEntry {
     pub coin: String,
     pub total: Decimal,
     #[serde(default)]
@@ -131,7 +131,7 @@ pub struct SpotEntry {
 /// The account's spot entry for `token`, created zeroed on first touch — the
 /// one place the entry's shape is built (the deal, the bridge's credit and
 /// the USD class transfer's two directions all go through it).
-pub fn spot_entry<'a>(account: &'a mut Account, token: crate::sim::TokenRef<'_>) -> &'a mut SpotEntry {
+pub(crate) fn spot_entry<'a>(account: &'a mut Account, token: crate::sim::TokenRef<'_>) -> &'a mut SpotEntry {
     account.spot.entry(token.index).or_insert_with(|| SpotEntry {
         coin: token.coin.to_string(),
         total: Decimal::ZERO,
@@ -163,7 +163,7 @@ pub fn spot_entry<'a>(account: &'a mut Account, token: crate::sim::TokenRef<'_>)
 /// silently ignored.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct AccountSeed {
+pub(crate) struct AccountSeed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub margin_summary: Option<MarginSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -285,7 +285,7 @@ impl AccountSeed {
 /// read this; live marks must not move a fixture read), while a never-patched
 /// account still reads sensibly. `/info` is unaffected: it always serves the
 /// live view.
-pub fn control_view(
+pub(crate) fn control_view(
     fixture: Option<&AccountSeed>,
     account: &Account,
     feed: &MarketFeed,
@@ -351,7 +351,7 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
 }
 
 /// The computed account figures, one pass over the positions.
-pub struct AccountView {
+pub(crate) struct AccountView {
     pub margin_summary: MarginSummary,
     pub cross_margin_summary: MarginSummary,
     pub cross_maintenance_margin_used: Decimal,
@@ -439,7 +439,7 @@ fn position_row(
         LeverageType::Isolated => Some(liquidation_px(
             p,
             facts.mark,
-            maintenance_rate(coin, facts.value, meta)?,
+            maintenance_rate(coin, facts.value, meta),
         )?),
         LeverageType::Cross => None,
     };
@@ -508,7 +508,7 @@ fn assemble(
 }
 
 /// Compute the served figures at the feed's current marks.
-pub fn view(account: &Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<AccountView> {
+pub(crate) fn view(account: &Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<AccountView> {
     let mut totals = PositionTotals::default();
     let mut rows = Vec::with_capacity(account.positions.len());
     let mut by_coin = BTreeMap::new();
@@ -527,7 +527,7 @@ pub fn view(account: &Account, feed: &MarketFeed, meta: Option<&crate::wire::Met
 }
 
 /// The served `clearinghouseState` (fresh `time` from the caller's wall clock).
-pub fn clearinghouse(account: &Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>, time_ms: u64) -> Result<ClearinghouseState> {
+pub(crate) fn clearinghouse(account: &Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>, time_ms: u64) -> Result<ClearinghouseState> {
     let v = view(account, feed, meta)?;
     Ok(ClearinghouseState {
         margin_summary: v.margin_summary,
@@ -544,7 +544,7 @@ pub fn clearinghouse(account: &Account, feed: &MarketFeed, meta: Option<&crate::
 /// construction makes it hold by definition — the counter exists so a
 /// regression in the construction is *visible* instead of silently failing
 /// daloc's client gate (plan §7.8's invariant counter).
-pub fn identity_holds(state: &ClearinghouseState) -> bool {
+pub(crate) fn identity_holds(state: &ClearinghouseState) -> bool {
     let mut signed = Decimal::ZERO;
     for asset in &state.asset_positions {
         let value = if asset.position.szi.is_sign_negative() {
@@ -569,7 +569,7 @@ pub fn identity_holds(state: &ClearinghouseState) -> bool {
 }
 
 /// The served spot balances (USDC token 0 sorts first, like the venue's).
-pub fn spot_balances(account: &Account) -> Vec<SpotBalance> {
+pub(crate) fn spot_balances(account: &Account) -> Vec<SpotBalance> {
     let mut rows: Vec<SpotBalance> = account
         .spot
         .iter()
@@ -587,14 +587,14 @@ pub fn spot_balances(account: &Account) -> Vec<SpotBalance> {
 
 /// USDC: the venue's collateral token for the default dex (daloc's client
 /// default, `collateral_token = 0`).
-pub const COLLATERAL_TOKEN: u32 = 0;
+pub(crate) const COLLATERAL_TOKEN: u32 = 0;
 
 /// The unified account's `tokenToAvailableAfterMaintenance`: the collateral
 /// token's balance minus the perp maintenance — the identity daloc's client
 /// reconciles (`available + maintenance == the token's balance`, its hard
 /// gate, measured live against the venue). Standard accounts serve none: their
 /// spot side is not read for equity.
-pub fn available_after_maintenance(
+pub(crate) fn available_after_maintenance(
     account: &Account,
     feed: &MarketFeed,
     meta: Option<&crate::wire::Meta>,
@@ -622,12 +622,12 @@ pub fn available_after_maintenance(
 
 /// The maintenance-margin rate for a notional: the margin tier's
 /// `1/(2·maxLeverage)` (maintenance = ½ initial, plan §16.3).
-pub fn maintenance_rate(coin: &str, notional: Decimal, meta: Option<&crate::wire::Meta>) -> Result<Decimal> {
+pub(crate) fn maintenance_rate(coin: &str, notional: Decimal, meta: Option<&crate::wire::Meta>) -> Decimal {
     let Some(meta) = meta else {
-        return Ok(Decimal::ZERO);
+        return Decimal::ZERO;
     };
     let Some(asset) = meta.universe.iter().find(|a| a.name == coin) else {
-        return Ok(Decimal::ZERO);
+        return Decimal::ZERO;
     };
     let table = asset
         .margin_table_id
@@ -643,13 +643,13 @@ pub fn maintenance_rate(coin: &str, notional: Decimal, meta: Option<&crate::wire
         })
         .unwrap_or(asset.max_leverage);
     if max_leverage == 0 {
-        return Ok(Decimal::ZERO);
+        return Decimal::ZERO;
     }
-    Ok(Decimal::ONE / (Decimal::from(2 * max_leverage)))
+    Decimal::ONE / (Decimal::from(2 * max_leverage))
 }
 
-pub fn maintenance_margin(coin: &str, notional: Decimal, meta: Option<&crate::wire::Meta>) -> Result<Decimal> {
-    mul(notional, maintenance_rate(coin, notional, meta)?, "maintenance margin")
+pub(crate) fn maintenance_margin(coin: &str, notional: Decimal, meta: Option<&crate::wire::Meta>) -> Result<Decimal> {
+    mul(notional, maintenance_rate(coin, notional, meta), "maintenance margin")
 }
 
 /// The coin's live max leverage — `None` when the live meta does not carry
@@ -664,7 +664,7 @@ fn max_leverage(coin: &str, meta: Option<&crate::wire::Meta>) -> Option<u32> {
 /// The isolated liquidation price (exact formula, plan §16.3):
 /// `price − side·margin_available/position_size/(1 − l·side)`,
 /// with the isolated position's own margin as `margin_available`.
-pub fn liquidation_px(p: &Position, mark: Decimal, maintenance_rate: Decimal) -> Result<Decimal> {
+pub(crate) fn liquidation_px(p: &Position, mark: Decimal, maintenance_rate: Decimal) -> Result<Decimal> {
     if p.szi.is_zero() {
         return Ok(mark);
     }
@@ -686,7 +686,7 @@ pub fn liquidation_px(p: &Position, mark: Decimal, maintenance_rate: Decimal) ->
 /// All-or-nothing per account: if any position's coin has no live context,
 /// the stamp stays where it is — a partially accrued account would silently
 /// lose the skipped positions' funding forever.
-pub fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u64) -> Result<usize> {
+pub(crate) fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u64) -> Result<usize> {
     if account.funded_at_ms == 0 {
         account.funded_at_ms = to_ms;
         return Ok(0);
@@ -730,7 +730,7 @@ pub fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u64) -> R
 /// waterfall — partial closes, the backstop, ADL — is Phase 2). An account
 /// with no positions is never "below maintenance": negative equity alone is a
 /// state the venue reports, not a liquidation to re-run every tick.
-pub fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<Option<Liquidation>> {
+pub(crate) fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<Option<Liquidation>> {
     if account.positions.is_empty() {
         return Ok(None);
     }
@@ -787,13 +787,13 @@ pub struct Liquidation {
 
 /// The account's mode for `userAbstraction` (unknown users are the caller's
 /// business — the sim only answers for accounts it owns).
-pub fn mode_of(account: &Account) -> UserAbstraction {
+pub(crate) fn mode_of(account: &Account) -> UserAbstraction {
     account.mode
 }
 
 /// The coin's live context for `activeAssetData`'s mark (the full live ctx
 /// when the feed has one, else a minimal shape from the composed prices).
-pub fn ctx_of(feed: &MarketFeed, coin: &str) -> Option<AssetCtx> {
+pub(crate) fn ctx_of(feed: &MarketFeed, coin: &str) -> Option<AssetCtx> {
     let (mark, oracle) = feed.required_prices(coin)?;
     if let Some((_, ctxs)) = feed.meta_and_ctxs() {
         if let Some(found) = ctxs.iter().find(|c| c.mark_px == mark && c.oracle_px == oracle) {
@@ -818,7 +818,7 @@ pub fn ctx_of(feed: &MarketFeed, coin: &str) -> Option<AssetCtx> {
 }
 
 /// The address-keyed registry type (shared by the sim state and the API).
-pub type Accounts = BTreeMap<Address, Account>;
+pub(crate) type Accounts = BTreeMap<Address, Account>;
 
 #[cfg(test)]
 mod tests {

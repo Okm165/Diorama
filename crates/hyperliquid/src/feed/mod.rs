@@ -32,7 +32,7 @@ use std::sync::RwLock;
 
 /// The scenario's owned market values (persisted).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct Overrides {
+pub(crate) struct Overrides {
     /// `crash`: owned mark + oracle per coin.
     #[serde(default)]
     pub prices: BTreeMap<String, PriceOverride>,
@@ -45,7 +45,7 @@ pub struct Overrides {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
-pub struct PriceOverride {
+pub(crate) struct PriceOverride {
     pub mark: Decimal,
     pub oracle: Decimal,
 }
@@ -69,8 +69,8 @@ pub struct MarketFeed {
     cache: RwLock<Cache>,
     overrides: RwLock<Overrides>,
     /// The rate budget meter (shared with the passthrough reads).
-    pub budget: Budget,
-    pub metrics: FeedMetrics,
+    pub(crate) budget: Budget,
+    pub(crate) metrics: FeedMetrics,
     /// The configured markets (books are cached for these; the staleness
     /// gauges are per-coin over this set).
     pub markets: Vec<String>,
@@ -106,23 +106,23 @@ impl MarketFeed {
 
     // ---- writes (the poller / WS client / control plane) ------------------
 
-    pub fn put_meta(&self, meta: Meta, now_ms: u64) {
+    pub(crate) fn put_meta(&self, meta: Meta, now_ms: u64) {
         let mut c = self.write();
         c.meta = Some(meta);
         c.meta_at = Some(now_ms);
     }
 
-    pub fn put_spot_meta(&self, spot: crate::wire::SpotMeta) {
+    pub(crate) fn put_spot_meta(&self, spot: crate::wire::SpotMeta) {
         self.write().spot_meta = Some(spot);
     }
 
-    pub fn put_ctx(&self, coin: String, ctx: AssetCtx, now_ms: u64) {
+    pub(crate) fn put_ctx(&self, coin: String, ctx: AssetCtx, now_ms: u64) {
         let mut c = self.write();
         c.ctx_at.insert(coin.clone(), now_ms);
         c.ctxs.insert(coin, ctx);
     }
 
-    pub fn put_book(&self, book: L2Book, now_ms: u64) {
+    pub(crate) fn put_book(&self, book: L2Book, now_ms: u64) {
         let mut c = self.write();
         c.book_at.insert(book.coin.clone(), now_ms);
         c.books.insert(book.coin.clone(), book);
@@ -136,7 +136,7 @@ impl MarketFeed {
 
     /// `crash`: own this coin's mark and oracle (live updates stop mattering
     /// until [`Self::clear_price`]).
-    pub fn own_price(&self, coin: &str, price: PriceOverride) -> Result<()> {
+    pub(crate) fn own_price(&self, coin: &str, price: PriceOverride) -> Result<()> {
         self.write_overrides().prices.insert(coin.to_string(), price);
         self.persist()
     }
@@ -156,7 +156,7 @@ impl MarketFeed {
         self.persist()
     }
 
-    pub fn own_book(&self, book: L2Book) -> Result<()> {
+    pub(crate) fn own_book(&self, book: L2Book) -> Result<()> {
         self.write_overrides().books.insert(book.coin.clone(), book);
         self.persist()
     }
@@ -209,7 +209,7 @@ impl MarketFeed {
 
     /// The coin's book: the scripted book wins; a scripted book is stamped
     /// `now` at serve time (it is the scenario's present, not a snapshot).
-    pub fn book(&self, coin: &str, now_ms: u64) -> Option<L2Book> {
+    pub(crate) fn book(&self, coin: &str, now_ms: u64) -> Option<L2Book> {
         if let Some(b) = self.read_overrides().books.get(coin) {
             let mut b = b.clone();
             b.time = now_ms;
@@ -220,12 +220,12 @@ impl MarketFeed {
 
     /// The perp universe + margin tables (the live meta; `None` until the
     /// first poll lands — a read that needs it is a 503, never a guess).
-    pub fn meta(&self) -> Option<Meta> {
+    pub(crate) fn meta(&self) -> Option<Meta> {
         self.read().meta.clone()
     }
 
     /// The spot token registry (`None` until the first poll lands).
-    pub fn spot_meta(&self) -> Option<crate::wire::SpotMeta> {
+    pub(crate) fn spot_meta(&self) -> Option<crate::wire::SpotMeta> {
         self.read().spot_meta.clone()
     }
 
@@ -242,7 +242,7 @@ impl MarketFeed {
 
     /// `metaAndAssetCtxs` with the overrides applied: the served contexts are
     /// exactly what the account plane prices from.
-    pub fn meta_and_ctxs(&self) -> Option<(Meta, Vec<AssetCtx>)> {
+    pub(crate) fn meta_and_ctxs(&self) -> Option<(Meta, Vec<AssetCtx>)> {
         let meta = self.meta()?;
         let overrides = self.read_overrides().clone();
         let c = self.read();
@@ -265,7 +265,7 @@ impl MarketFeed {
     }
 
     /// `allMids` with the overrides applied.
-    pub fn all_mids(&self) -> AllMids {
+    pub(crate) fn all_mids(&self) -> AllMids {
         let overrides = self.read_overrides().clone();
         let c = self.read();
         let mut mids = c.mids.clone();

@@ -82,7 +82,7 @@ impl CctpMetrics {
 
 /// The store-derived gauges (what the records say right now), rendered beside
 /// the counters.
-pub fn render_counts(out: &mut String, counts: &Counts) {
+pub(crate) fn render_counts(out: &mut String, counts: &Counts) {
     out.push_str(&format!(
         "# HELP cctp_messages_pending the emulated PENDING window has not elapsed\n# TYPE cctp_messages_pending gauge\ncctp_messages_pending {}\n",
         counts.pending

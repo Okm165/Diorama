@@ -1056,7 +1056,8 @@ action is attributed to the contract - the calling address is the Core
 account); a trace fault degrades to top-level txs only and is counted
 (`venue_bridge_trace_faults_total`) - internal calls are missed that block,
 never silently dropped. Applied to the sim: USD-class transfer, spot send,
-sendAsset (spot→spot), API-wallet registration, abstraction mode;
+sendAsset (spot→spot — a perp-dex `sendAsset`, a multi-dex move, is refused by
+name, Phase 2), API-wallet registration, abstraction mode;
 insufficient-balance refusals are counted, not retried; orders/cancels wait for
 the matching lane (Phase 2) and are counted by id
 (`venue_bridge_actions_total{id}`).

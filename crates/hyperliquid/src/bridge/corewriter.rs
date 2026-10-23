@@ -13,7 +13,7 @@ use alloy_sol_types::{sol, SolCall, SolValue};
 use serde::{Deserialize, Serialize};
 
 /// The CoreWriter system contract.
-pub const CORE_WRITER: Address = alloy_primitives::address!("3333333333333333333333333333333333333333");
+pub(crate) const CORE_WRITER: Address = alloy_primitives::address!("3333333333333333333333333333333333333333");
 
 sol! {
     /// The call wrapper (the docs' own example): a CoreWriter call's calldata
@@ -72,13 +72,13 @@ sol! {
 const VERSION: u8 = 1;
 
 /// `uint32::MAX` marks the spot dex in `sendAsset`'s dex fields (docs).
-pub const SPOT_DEX: u32 = u32::MAX;
+pub(crate) const SPOT_DEX: u32 = u32::MAX;
 
 /// One decoded action. The payloads are decoded from their ABI words; a short
 /// or malformed payload is [`CoreAction::Malformed`] (counted, never applied).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub enum CoreAction {
+pub(crate) enum CoreAction {
     /// 1: `(uint32 asset, bool isBuy, uint64 limitPx, uint64 sz, bool reduceOnly, uint8 tif, uint128 cloid)`.
     LimitOrder {
         asset: u32,
@@ -142,7 +142,7 @@ impl CoreAction {
 /// Decode a CoreWriter *call*: the `sendRawAction(bytes)` wrapper (selector +
 /// ABI bytes argument), or — for a caller that low-level-calls the contract —
 /// the raw stream itself.
-pub fn decode_calldata(input: &[u8]) -> CoreAction {
+pub(crate) fn decode_calldata(input: &[u8]) -> CoreAction {
     if input.len() >= 4 && input[..4] == sendRawActionCall::SELECTOR {
         return match sendRawActionCall::abi_decode(input) {
             Ok(call) => decode(&call.data),
@@ -153,7 +153,7 @@ pub fn decode_calldata(input: &[u8]) -> CoreAction {
 }
 
 /// Decode one action stream (the raw bytes of a `sendRawAction` argument).
-pub fn decode(input: &[u8]) -> CoreAction {
+pub(crate) fn decode(input: &[u8]) -> CoreAction {
     if input.len() < 4 || input[0] != VERSION {
         return CoreAction::Malformed;
     }

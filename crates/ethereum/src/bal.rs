@@ -12,7 +12,7 @@ use alloy_eips::eip7928::BlockAccessList;
 pub use mirror_anvil::{flatten_trace_block, Write};
 
 /// Flatten a BAL into post-state writes (last change per key).
-pub fn flatten_bal(bal: &BlockAccessList) -> Vec<Write> {
+pub(crate) fn flatten_bal(bal: &BlockAccessList) -> Vec<Write> {
     let mut out = Vec::new();
     for acct in bal.iter() {
         if !acct.has_changes() {

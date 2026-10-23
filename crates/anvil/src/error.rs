@@ -51,7 +51,7 @@ pub(crate) fn bad_result(method: &str, detail: &str) -> RpcError {
 /// The measured policy predicates over the node's error payload — the
 /// classification half of the boundary (`Error` carries the endpoint and
 /// method; the payload carries the node's own vocabulary).
-pub trait RpcErrorPolicy {
+pub(crate) trait RpcErrorPolicy {
     /// The node's internal error: plausibly transient. Deliberately a narrow
     /// *positive* rule — measured: `-32603 Internal error` is the only code
     /// worth retrying, while `-32600 Invalid request` (body ≥ 2 MB),

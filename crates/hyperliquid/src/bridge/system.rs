@@ -33,10 +33,10 @@ sol! {
 }
 
 /// The native HYPE system address (transfers as tx value; `Received` event).
-pub const HYPE_SYSTEM: Address = address!("2222222222222222222222222222222222222222");
+pub(crate) const HYPE_SYSTEM: Address = address!("2222222222222222222222222222222222222222");
 
 /// The system address for a token index.
-pub fn system_address(token_index: u64) -> Address {
+pub(crate) fn system_address(token_index: u64) -> Address {
     let mut bytes = [0u8; 20];
     bytes[0] = 0x20;
     bytes[12..20].copy_from_slice(&token_index.to_be_bytes());
@@ -44,7 +44,7 @@ pub fn system_address(token_index: u64) -> Address {
 }
 
 /// The token index a system address encodes (`None` when it is not one).
-pub fn token_index_of(address: Address) -> Option<u64> {
+pub(crate) fn token_index_of(address: Address) -> Option<u64> {
     if address.0[0] != 0x20 || address == HYPE_SYSTEM {
         return None;
     }
@@ -55,7 +55,7 @@ pub fn token_index_of(address: Address) -> Option<u64> {
 
 /// One spot token as the bridge needs it: the Core wei scale and the EVM link.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TokenInfo {
+pub(crate) struct TokenInfo {
     pub index: u32,
     pub name: String,
     pub wei_decimals: u32,
@@ -71,7 +71,7 @@ impl TokenInfo {
 }
 
 /// The token registry view (spotMeta → the bridge's lookup).
-pub fn token_registry(spot: &SpotMeta) -> Vec<TokenInfo> {
+pub(crate) fn token_registry(spot: &SpotMeta) -> Vec<TokenInfo> {
     spot.tokens
         .iter()
         .map(|t| TokenInfo {
@@ -87,23 +87,23 @@ pub fn token_registry(spot: &SpotMeta) -> Vec<TokenInfo> {
 }
 
 /// Find a token by index.
-pub fn by_index(tokens: &[TokenInfo], index: u32) -> Option<&TokenInfo> {
+pub(crate) fn by_index(tokens: &[TokenInfo], index: u32) -> Option<&TokenInfo> {
     tokens.iter().find(|t| t.index == index)
 }
 
 /// Find a token by name.
-pub fn by_name<'a>(tokens: &'a [TokenInfo], name: &str) -> Option<&'a TokenInfo> {
+pub(crate) fn by_name<'a>(tokens: &'a [TokenInfo], name: &str) -> Option<&'a TokenInfo> {
     tokens.iter().find(|t| t.name == name)
 }
 
 /// An EVM-unit amount as the human decimal the sim keeps (`value / 10^d`).
-pub fn evm_to_human(value: U256, evm_decimals: i32) -> Decimal {
+pub(crate) fn evm_to_human(value: U256, evm_decimals: i32) -> Decimal {
     let amount = decimal_of(value);
     amount / pow10(evm_decimals)
 }
 
 /// A Core wei amount as the human decimal (`wei / 10^d`).
-pub fn core_to_human(wei: u64, wei_decimals: u32) -> Decimal {
+pub(crate) fn core_to_human(wei: u64, wei_decimals: u32) -> Decimal {
     Decimal::from(wei) / pow10(wei_decimals as i32)
 }
 
@@ -111,7 +111,7 @@ pub fn core_to_human(wei: u64, wei_decimals: u32) -> Decimal {
 /// chain burns the sub-wei remainder of a non-round amount (plan §16.3), so
 /// the bridge does the same rather than refusing a transfer the chain would
 /// complete. `None` only for a negative amount or an unrepresentable one.
-pub fn human_to_evm(amount: Decimal, evm_decimals: i32) -> Option<U256> {
+pub(crate) fn human_to_evm(amount: Decimal, evm_decimals: i32) -> Option<U256> {
     if amount.is_sign_negative() {
         return None;
     }
@@ -121,19 +121,19 @@ pub fn human_to_evm(amount: Decimal, evm_decimals: i32) -> Option<U256> {
 /// Floor a human amount at the Core wei (`wei_decimals`): EVM→Core credits
 /// are floored the same way (the sub-wei remainder is burned on the real
 /// chain).
-pub fn floor_to_core_wei(amount: Decimal, wei_decimals: u32) -> Decimal {
+pub(crate) fn floor_to_core_wei(amount: Decimal, wei_decimals: u32) -> Decimal {
     (amount * pow10(wei_decimals as i32)).trunc() / pow10(wei_decimals as i32)
 }
 
 /// `transfer(address,uint256)` calldata — alloy's own encoder.
-pub fn transfer_calldata(to: Address, amount: U256) -> Bytes {
+pub(crate) fn transfer_calldata(to: Address, amount: U256) -> Bytes {
     transferCall { to, amount }.abi_encode().into()
 }
 
 /// Decode a log as an ERC-20 `Transfer`: alloy's validating decoder (the
 /// topic0 hash, the indexed-address count and the data length), so a
 /// look-alike or malformed event decodes to `None` instead of a credit.
-pub fn transfer_of(log: &LogData) -> Option<Transfer> {
+pub(crate) fn transfer_of(log: &LogData) -> Option<Transfer> {
     Transfer::decode_log_data_validate(log).ok()
 }
 
@@ -144,7 +144,7 @@ pub fn transfer_of(log: &LogData) -> Option<Transfer> {
 /// than the token's *linked* EVM contract (a malicious or unrelated emitter
 /// could mint Core balances with a look-alike event; the docs' rule is the
 /// linked contract's own log).
-pub fn credit_of<'a>(
+pub(crate) fn credit_of<'a>(
     transfer: &Transfer,
     tokens: &'a [TokenInfo],
     emitter: Address,
@@ -183,7 +183,7 @@ fn pow10(decimals: i32) -> Decimal {
 
 /// The system address's completion send cannot be built: a typed fault the
 /// bridge counts rather than a silent drop.
-pub fn no_evm_link(token: &TokenInfo) -> Error {
+pub(crate) fn no_evm_link(token: &TokenInfo) -> Error {
     Error::BadRequest {
         reason: format!(
             "token `{}` (index {}) has no EVM link; cannot complete Core→EVM",

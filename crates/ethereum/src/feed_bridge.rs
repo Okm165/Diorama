@@ -114,7 +114,7 @@ impl FeedRuntime {
 
 /// The bridge's metrics.
 #[derive(Default)]
-pub struct FeedBridgeMetrics {
+pub(crate) struct FeedBridgeMetrics {
     updates: Mutex<Vec<(String, u64)>>,
     pauses: Mutex<Vec<(String, u64)>>,
     /// Pass faults, whatever the stage: a source read, a target read, a
@@ -165,7 +165,7 @@ impl FeedBridgeMetrics {
 // every consumer), and a value the bridge did not write pauses the feed — a
 // scenario's crash is never overwritten.
 
-pub struct FeedBridge {
+pub(crate) struct FeedBridge {
     feeds: Vec<FeedRuntime>,
     /// The account that submits `updateAnswer` on T (auto-impersonate makes
     /// any address usable; the mock's own access control decides who may).
@@ -553,7 +553,7 @@ async fn publish(rpc: &mirror_anvil::Rpc, aggregator: Address, writer: Address, 
 
 /// The `/admin/feed` list row.
 #[derive(Debug, serde::Serialize)]
-pub struct FeedStatus {
+pub(crate) struct FeedStatus {
     pub name: String,
     pub target: String,
     pub source: String,

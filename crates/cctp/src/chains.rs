@@ -39,39 +39,43 @@ pub const DOMAIN_ETHEREUM: Domain = Domain(0);
 pub const DOMAIN_HYPER_EVM: Domain = Domain(19);
 /// T forks Ethereum mainnet: chain id 1 (the measured numeric pin; the
 /// official `ChainId` wraps it at the struct boundary).
-pub const CHAIN_ID_ETHEREUM: u64 = 1;
+pub(crate) const CHAIN_ID_ETHEREUM: u64 = 1;
 /// V forks HyperEVM: chain id 999.
-pub const CHAIN_ID_HYPER_EVM: u64 = 999;
+pub(crate) const CHAIN_ID_HYPER_EVM: u64 = 999;
 
 /// `TOKEN_MESSENGER_MIN_FINALITY_THRESHOLD` (FinalityThresholds.sol): the
-/// messenger accepts the unfinalized path only at ≥ 500.
-pub const FINALITY_THRESHOLD_MIN: u32 = 500;
+/// messenger accepts the unfinalized path only at ≥ 500. The bridge's own lane
+/// is the finalized one; these two are the unit test's pins.
+#[cfg(test)]
+const FINALITY_THRESHOLD_MIN: u32 = 500;
 /// Confirmed / Fast (FinalityThresholds.sol).
-pub const FINALITY_THRESHOLD_CONFIRMED: u32 = 1000;
+#[cfg(test)]
+const FINALITY_THRESHOLD_CONFIRMED: u32 = 1000;
 /// Finalized / Standard (FinalityThresholds.sol).
-pub const FINALITY_THRESHOLD_FINALIZED: u32 = 2000;
+pub(crate) const FINALITY_THRESHOLD_FINALIZED: u32 = 2000;
 /// `BaseTokenMessenger.MIN_FEE_MULTIPLIER`: `minFee` is in 1/1000 bps.
-pub const MIN_FEE_MULTIPLIER: u64 = 10_000_000;
+pub(crate) const MIN_FEE_MULTIPLIER: u64 = 10_000_000;
 /// The message format version both transmitters report (`MT.version()`,
 /// `TM.messageBodyVersion()`, both measured = 1).
-pub const MESSAGE_VERSION: u32 = 1;
+pub(crate) const MESSAGE_VERSION: u32 = 1;
 // The five contracts, identical on both chains (verified live, §15.1/§15.2).
 /// TokenMessengerV2 — `depositForBurn` / `handleReceive*`.
-pub const TOKEN_MESSENGER_V2: Address = address!("28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
+pub(crate) const TOKEN_MESSENGER_V2: Address = address!("28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
 /// MessageTransmitterV2 — `sendMessage` / `receiveMessage` / attester admin.
 pub const MESSAGE_TRANSMITTER_V2: Address = address!("81D40F21F12A8F0E3252Bccb954D722d4c464B64");
 /// TokenMinterV2 — burns the local token, mints the remote one.
-pub const TOKEN_MINTER_V2: Address = address!("fd78EE919681417d192449715b2594ab58f5D002");
+pub(crate) const TOKEN_MINTER_V2: Address = address!("fd78EE919681417d192449715b2594ab58f5D002");
 /// MessageV2 — the message library contract (no call surface this bridge
-/// needs; pinned because §15.1 lists it).
-pub const MESSAGE_V2: Address = address!("ec546b6B005471ECf012e5aF77FBeC07e0FD8f78");
+/// needs; the unit test pins it because §15.1 lists it).
+#[cfg(test)]
+const MESSAGE_V2: Address = address!("ec546b6B005471ECf012e5aF77FBeC07e0FD8f78");
 
 /// Ethereum USDC (the burn token on domain 0).
-pub const USDC_ETHEREUM: Address = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
+pub(crate) const USDC_ETHEREUM: Address = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 /// HyperEVM USDC — Circle's native USDC, the CCTP local token
 /// (`getLocalToken(0, eth-USDC)` = this, §15.1). The venue's `spotMeta` link
 /// `0x6b9e…` is **not** an ERC-20 and is never used here.
-pub const USDC_HYPER_EVM: Address = address!("b88339CB7199b77E23DB6E890353E22632Ba630f");
+pub(crate) const USDC_HYPER_EVM: Address = address!("b88339CB7199b77E23DB6E890353E22632Ba630f");
 
 /// One served chain: its protocol identity plus the RPC the bridge talks to.
 #[derive(Clone)]
@@ -288,7 +292,7 @@ pub struct Wiring {
 }
 
 /// The chain serving `domain`, or a named refusal.
-pub fn by_domain(chains: &[Chain], domain: Domain) -> Result<&Chain> {
+pub(crate) fn by_domain(chains: &[Chain], domain: Domain) -> Result<&Chain> {
     chains
         .iter()
         .find(|chain| chain.domain == domain)

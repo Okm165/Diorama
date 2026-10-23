@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 #[non_exhaustive]
-pub enum InfoRequest {
+pub(crate) enum InfoRequest {
     #[serde(rename = "clearinghouseState")]
     ClearinghouseState {
         user: Address,
@@ -83,8 +83,10 @@ pub enum InfoRequest {
 }
 
 impl InfoRequest {
-    /// The request's `type` tag, for logs and the unrouted refusal.
-    pub fn kind(&self) -> &'static str {
+    /// The request's `type` tag: the unit test pins the map against the wire
+    /// names (nothing in production needs the tags by name).
+    #[cfg(test)]
+    fn kind(&self) -> &'static str {
         match self {
             InfoRequest::ClearinghouseState { .. } => "clearinghouseState",
             InfoRequest::SpotClearinghouseState { .. } => "spotClearinghouseState",
@@ -105,7 +107,8 @@ impl InfoRequest {
 
     /// The perp dex this request scopes to (empty/absent = the first dex).
     /// Spot reads are only defined on the first dex.
-    pub fn dex(&self) -> &str {
+    #[cfg(test)]
+    fn dex(&self) -> &str {
         match self {
             InfoRequest::ClearinghouseState { dex, .. }
             | InfoRequest::OpenOrders { dex, .. }
@@ -124,7 +127,7 @@ impl InfoRequest {
 /// identity holds by construction: `accountValue = totalRawUsd + Σ szi·mark`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct MarginSummary {
+pub(crate) struct MarginSummary {
     pub account_value: Decimal,
     pub total_ntl_pos: Decimal,
     pub total_raw_usd: Decimal,
@@ -136,7 +139,7 @@ pub struct MarginSummary {
 /// for isolated positions only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Position {
+pub(crate) struct Position {
     pub coin: String,
     #[serde(default)]
     pub entry_px: Option<Decimal>,
@@ -159,7 +162,7 @@ pub struct Position {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Leverage {
+pub(crate) struct Leverage {
     #[serde(rename = "type")]
     pub kind: LeverageType,
     pub value: u32,
@@ -171,14 +174,14 @@ pub struct Leverage {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
-pub enum LeverageType {
+pub(crate) enum LeverageType {
     Cross,
     Isolated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct CumFunding {
+pub(crate) struct CumFunding {
     pub all_time: Decimal,
     pub since_open: Decimal,
     pub since_change: Decimal,
@@ -186,7 +189,7 @@ pub struct CumFunding {
 
 /// The `assetPositions` wrapper (`type: "oneWay"` today).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AssetPosition {
+pub(crate) struct AssetPosition {
     #[serde(rename = "type")]
     pub kind: PositionKind,
     pub position: Position,
@@ -194,7 +197,7 @@ pub struct AssetPosition {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum PositionKind {
+pub(crate) enum PositionKind {
     #[serde(rename = "oneWay")]
     OneWay,
 }
@@ -202,7 +205,7 @@ pub enum PositionKind {
 /// `clearinghouseState`: the venue account read (daloc's equity + recall).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ClearinghouseState {
+pub(crate) struct ClearinghouseState {
     pub margin_summary: MarginSummary,
     pub cross_margin_summary: MarginSummary,
     pub cross_maintenance_margin_used: Decimal,
@@ -214,7 +217,7 @@ pub struct ClearinghouseState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SpotClearinghouseState {
+pub(crate) struct SpotClearinghouseState {
     pub balances: Vec<SpotBalance>,
     /// The venue's "available after maintenance", per token, as `[token, value]`
     /// pairs. Served for **unified** accounts — it is the input daloc's client
@@ -227,7 +230,7 @@ pub struct SpotClearinghouseState {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SpotBalance {
+pub(crate) struct SpotBalance {
     pub coin: String,
     pub token: u32,
     pub hold: Decimal,
@@ -239,7 +242,7 @@ pub struct SpotBalance {
 /// it serves the empty list; the type is complete for the day it does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Order {
+pub(crate) struct Order {
     pub coin: String,
     pub oid: u64,
     pub side: Side,
@@ -269,7 +272,7 @@ pub struct Order {
 /// `A` = ask/sell, `B` = bid/buy.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum Side {
+pub(crate) enum Side {
     #[serde(rename = "A")]
     Ask,
     #[serde(rename = "B")]
@@ -280,7 +283,7 @@ pub enum Side {
 /// `universe[].szDecimals` for the wire `sz` of unwind orders.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Meta {
+pub(crate) struct Meta {
     pub universe: Vec<AssetInfo>,
     /// `[[id, table], …]` on the wire (measured).
     #[serde(default)]
@@ -291,7 +294,7 @@ pub struct Meta {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct AssetInfo {
+pub(crate) struct AssetInfo {
     pub name: String,
     pub sz_decimals: u8,
     pub max_leverage: u32,
@@ -307,14 +310,14 @@ pub struct AssetInfo {
 /// margin of the tier the position's notional sits in (plan §16.3).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct MarginTable {
+pub(crate) struct MarginTable {
     pub description: String,
     pub margin_tiers: Vec<MarginTier>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct MarginTier {
+pub(crate) struct MarginTier {
     pub lower_bound: Decimal,
     pub max_leverage: u32,
 }
@@ -322,7 +325,7 @@ pub struct MarginTier {
 /// One asset's market context (`metaAndAssetCtxs[1][i]`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct AssetCtx {
+pub(crate) struct AssetCtx {
     /// The published hourly rate (⅛ of the 8 h rate).
     pub funding: Decimal,
     pub open_interest: Decimal,
@@ -361,13 +364,13 @@ pub(crate) fn test_ctx(mark: &str, oracle: &str) -> AssetCtx {
 
 /// `metaAndAssetCtxs`: a `[meta, ctxs]` tuple on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct MetaAndAssetCtxs(pub Meta, pub Vec<AssetCtx>);
+pub(crate) struct MetaAndAssetCtxs(pub Meta, pub Vec<AssetCtx>);
 
 /// `perpDexs`: `[null, …]` (the first dex is null). The sim serves the first
 /// dex only until the multi-dex mechanics land (Phase 2).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct PerpDex {
+pub(crate) struct PerpDex {
     pub name: String,
     pub full_name: String,
     pub deployer: Address,
@@ -396,7 +399,7 @@ pub struct PerpDex {
 /// order count per level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct L2Book {
+pub(crate) struct L2Book {
     pub coin: String,
     pub time: u64,
     pub levels: [Vec<Level>; 2],
@@ -405,7 +408,7 @@ pub struct L2Book {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Level {
+pub(crate) struct Level {
     pub px: Decimal,
     pub sz: Decimal,
     pub n: u64,
@@ -414,7 +417,7 @@ pub struct Level {
 /// `activeAssetData`: per-coin leverage + trade limits for a user.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ActiveAssetData {
+pub(crate) struct ActiveAssetData {
     pub user: Address,
     pub coin: String,
     pub leverage: Leverage,
@@ -426,7 +429,7 @@ pub struct ActiveAssetData {
 /// `exchangeStatus`: the venue's health probe.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct ExchangeStatus {
+pub(crate) struct ExchangeStatus {
     /// The venue serves `null` in normal operation; the sim always serves
     /// `null` (a chain halt is a real-venue fact, not a simulated one).
     pub special_statuses: Option<Vec<SpecialStatus>>,
@@ -435,7 +438,7 @@ pub struct ExchangeStatus {
 
 /// One degraded-subsystem note (shape pinned from the live API when set).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SpecialStatus {
+pub(crate) struct SpecialStatus {
     #[serde(rename = "type")]
     pub kind: String,
     pub status: String,
@@ -443,19 +446,19 @@ pub struct SpecialStatus {
 
 /// `allMids`: a plain `{coin: px}` map (HIP-3 keys are `"#<id>"`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AllMids(pub BTreeMap<String, Decimal>);
+pub(crate) struct AllMids(pub BTreeMap<String, Decimal>);
 
 /// `spotMeta`: the spot token registry (`token` indices the spot state keys
 /// by) + the pair universe.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SpotMeta {
+pub(crate) struct SpotMeta {
     pub tokens: Vec<SpotToken>,
     pub universe: Vec<SpotPair>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SpotToken {
+pub(crate) struct SpotToken {
     pub name: String,
     pub sz_decimals: u8,
     pub wei_decimals: u8,
@@ -483,14 +486,14 @@ pub struct SpotToken {
 /// camelCase (measured) — hence the explicit rename.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct SpotEvmContract {
+pub(crate) struct SpotEvmContract {
     pub address: Address,
     #[serde(rename = "evm_extra_wei_decimals")]
     pub evm_extra_wei_decimals: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SpotPair {
+pub(crate) struct SpotPair {
     /// `[base, quote]` token indices.
     pub tokens: [u32; 2],
     pub name: String,
@@ -504,7 +507,7 @@ pub struct SpotPair {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
-pub enum UserAbstraction {
+pub(crate) enum UserAbstraction {
     #[default]
     #[serde(rename = "default")]
     Default,

@@ -121,7 +121,7 @@ pub enum BlobError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum BlobForm {
+pub(crate) enum BlobForm {
     /// 0x03 || rlp([payload, blobs, commitments, proofs])   (EIP-4844)
     #[default]
     Legacy,
@@ -161,7 +161,7 @@ impl BlobForm {
 /// source includes them (Lighthouse on Fulu). Unknown extra fields are
 /// ignored by serde, so a newer API revision cannot break the decode.
 #[derive(Debug, Clone, Deserialize)]
-pub struct SidecarItem {
+pub(crate) struct SidecarItem {
     #[serde(flatten)]
     pub data: BlobData,
     #[serde(default)]
@@ -180,7 +180,7 @@ struct SidecarResponse {
 /// through alloy's official beacon↔engine converter (`beacon_payload_v3`),
 /// so the engine never rewrites payload JSON by hand.
 #[derive(Debug, Clone, Deserialize)]
-pub struct TopUpBody {
+pub(crate) struct TopUpBody {
     #[serde(default, deserialize_with = "deserialize_opt_payload")]
     pub execution_payload: Option<ExecutionPayloadV3>,
     #[serde(default)]
@@ -236,9 +236,9 @@ impl TopUpBody {
 /// A beacon block response, narrowed to the top-up fields: the official
 /// `BlockResponse` envelope (version, flags, signed block) with the narrow
 /// body above.
-pub type BeaconBlock = BlockResponse<TopUpBody>;
+pub(crate) type BeaconBlock = BlockResponse<TopUpBody>;
 
-pub struct BeaconClient {
+pub(crate) struct BeaconClient {
     http: reqwest::Client,
     urls: Vec<String>,
 }
@@ -429,7 +429,7 @@ impl BeaconClient {
 }
 
 /// Map a KZG commitment to its versioned hash: 0x01 || sha256(commitment)[1..].
-pub fn commitment_to_versioned_hash(commitment: &Bytes48) -> B256 {
+pub(crate) fn commitment_to_versioned_hash(commitment: &Bytes48) -> B256 {
     let mut hasher = Sha256::new();
     hasher.update(commitment.as_slice());
     let digest = hasher.finalize();
@@ -440,7 +440,7 @@ pub fn commitment_to_versioned_hash(commitment: &Bytes48) -> B256 {
 }
 
 /// Select the sidecar items matching a tx's versioned hashes, in tx order.
-pub fn select_sidecars<'a>(
+pub(crate) fn select_sidecars<'a>(
     items: &'a [SidecarItem],
     versioned_hashes: &[B256],
 ) -> Result<Vec<&'a SidecarItem>, BlobError> {
@@ -531,7 +531,7 @@ pub fn repair_proofs(
 }
 
 /// Which forms are actually encodable from the fetched sidecars.
-pub fn available_forms(items: &[&SidecarItem], blobs_per_tx: usize) -> Vec<BlobForm> {
+pub(crate) fn available_forms(items: &[&SidecarItem], blobs_per_tx: usize) -> Vec<BlobForm> {
     let mut forms = Vec::new();
     let all_cells = items.iter().all(|i| {
         i.proofs

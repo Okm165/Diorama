@@ -63,7 +63,7 @@ pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DealRequest {
     pub address: Address,
-    pub class: DealClass,
+    pub(crate) class: DealClass,
     #[serde(default)]
     pub coin: Option<String>,
     pub amount: Decimal,
@@ -81,14 +81,14 @@ impl From<DealRequest> for crate::sim::Deal {
 }
 
 #[derive(Debug, Serialize)]
-pub struct DealResponse {
+pub(crate) struct DealResponse {
     pub address: Address,
     pub class: DealClass,
     /// The affected balance after the mint (perp wallet or spot token).
     pub balance_after: Decimal,
 }
 
-pub async fn deal(State(state): State<Arc<ApiState>>, Json(req): Json<DealRequest>) -> Result<Json<DealResponse>> {
+pub(crate) async fn deal(State(state): State<Arc<ApiState>>, Json(req): Json<DealRequest>) -> Result<Json<DealResponse>> {
     let after = state.sim.deal(&state.feed, &req.clone().into())?;
     tracing::info!(address = %req.address, class = ?req.class, amount = %req.amount, after = %after, "sim deal");
     Ok(Json(DealResponse {
@@ -101,7 +101,7 @@ pub async fn deal(State(state): State<Arc<ApiState>>, Json(req): Json<DealReques
 // ---- advance -------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct AdvanceRequest {
+pub(crate) struct AdvanceRequest {
     /// Total simulated seconds to jump (default: `blocks` seconds).
     #[serde(default)]
     pub seconds: Option<u64>,
@@ -111,20 +111,20 @@ pub struct AdvanceRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct AdvanceResponse {
+pub(crate) struct AdvanceResponse {
     pub advanced_ms: u64,
     pub blocks: u64,
     pub liquidations: Vec<LiquidationReport>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct LiquidationReport {
+pub(crate) struct LiquidationReport {
     pub positions_closed: Vec<String>,
     pub account_value: Decimal,
     pub maintenance: Decimal,
 }
 
-pub async fn advance(
+pub(crate) async fn advance(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<AdvanceRequest>,
 ) -> Result<Json<AdvanceResponse>> {
@@ -149,7 +149,7 @@ pub async fn advance(
 // ---- crash / set_funding / set_book --------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct CrashRequest {
+pub(crate) struct CrashRequest {
     pub coin: String,
     /// Percent below the current mark; absent = hand the coin back to live
     /// updates.
@@ -158,7 +158,7 @@ pub struct CrashRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct CrashResponse {
+pub(crate) struct CrashResponse {
     pub coin: String,
     pub owned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -167,7 +167,7 @@ pub struct CrashResponse {
     pub oracle: Option<Decimal>,
 }
 
-pub async fn crash(State(state): State<Arc<ApiState>>, Json(req): Json<CrashRequest>) -> Result<Json<CrashResponse>> {
+pub(crate) async fn crash(State(state): State<Arc<ApiState>>, Json(req): Json<CrashRequest>) -> Result<Json<CrashResponse>> {
     let feed = &state.feed;
     match req.pct {
         None => {
@@ -206,7 +206,7 @@ pub async fn crash(State(state): State<Arc<ApiState>>, Json(req): Json<CrashRequ
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SetFundingRequest {
+pub(crate) struct SetFundingRequest {
     pub coin: String,
     /// The hourly rate to own; absent = hand back to live.
     #[serde(default)]
@@ -214,14 +214,14 @@ pub struct SetFundingRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SetFundingResponse {
+pub(crate) struct SetFundingResponse {
     pub coin: String,
     pub owned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate: Option<Decimal>,
 }
 
-pub async fn set_funding(
+pub(crate) async fn set_funding(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<SetFundingRequest>,
 ) -> Result<Json<SetFundingResponse>> {
@@ -247,7 +247,7 @@ pub async fn set_funding(
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SetBookRequest {
+pub(crate) struct SetBookRequest {
     pub coin: String,
     /// The scripted levels (`[[bids], [asks]]`, ≤20 per side); absent = hand
     /// back to live depth.
@@ -256,13 +256,13 @@ pub struct SetBookRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SetBookResponse {
+pub(crate) struct SetBookResponse {
     pub coin: String,
     pub owned: bool,
     pub levels: usize,
 }
 
-pub async fn set_book(
+pub(crate) async fn set_book(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<SetBookRequest>,
 ) -> Result<Json<SetBookResponse>> {
@@ -304,7 +304,7 @@ pub async fn set_book(
 // ---- accounts ------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-pub struct SetAccountRequest {
+pub(crate) struct SetAccountRequest {
     pub address: Address,
     pub state: AccountSeed,
 }
@@ -314,9 +314,9 @@ pub struct SetAccountRequest {
 #[derive(Debug, Serialize)]
 pub struct StateResponse {
     #[serde(flatten)]
-    pub clearinghouse: ClearinghouseState,
-    pub balances: Vec<SpotBalance>,
-    pub abstraction: UserAbstraction,
+    pub(crate) clearinghouse: ClearinghouseState,
+    pub(crate) balances: Vec<SpotBalance>,
+    pub(crate) abstraction: UserAbstraction,
 }
 
 impl StateResponse {
@@ -339,7 +339,7 @@ impl StateResponse {
     }
 }
 
-pub async fn set_account(
+pub(crate) async fn set_account(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<SetAccountRequest>,
 ) -> Result<Json<StateResponse>> {
@@ -353,7 +353,7 @@ pub async fn set_account(
 /// view — the two are deliberately different: the control read is "what the
 /// scenario set" (daloc's `resolved_equity` assertions read it), the info read
 /// is the venue's live report.
-pub async fn post_state(
+pub(crate) async fn post_state(
     State(state): State<Arc<ApiState>>,
     Path(address): Path<Address>,
     Json(seed): Json<AccountSeed>,
@@ -366,7 +366,7 @@ pub async fn post_state(
 /// address the sim has never seen answers hl_mock's default (mode `disabled`,
 /// the empty account) — a 404 would break the read-back pattern the harness
 /// uses (`venue_account()` asserts success).
-pub async fn get_state(
+pub(crate) async fn get_state(
     State(state): State<Arc<ApiState>>,
     Path(address): Path<Address>,
 ) -> Result<Json<AccountSeed>> {
@@ -396,19 +396,19 @@ fn control_state(state: &ApiState, address: Address) -> Result<AccountSeed> {
 // ---- reset / epoch_new ---------------------------------------------------
 
 #[derive(Debug, Serialize)]
-pub struct ResetResponse {
+pub(crate) struct ResetResponse {
     pub epoch: u64,
     pub accounts: usize,
 }
 
-pub async fn reset(State(state): State<Arc<ApiState>>) -> Result<Json<ResetResponse>> {
+pub(crate) async fn reset(State(state): State<Arc<ApiState>>) -> Result<Json<ResetResponse>> {
     let epoch = state.sim.reset()?;
     state.feed.clear_overrides()?;
     Ok(Json(ResetResponse { epoch, accounts: 0 }))
 }
 
 #[derive(Debug, Serialize)]
-pub struct EpochNewResponse {
+pub(crate) struct EpochNewResponse {
     pub epoch: u64,
     /// The engine accepted the re-pin (`POST {engine_admin}/admin/epoch`).
     pub engine_repinned: bool,
@@ -426,7 +426,7 @@ pub struct EpochNewResponse {
 /// (a 502 means "retry the whole thing"), and a retry after a success is
 /// idempotent on both sides (reset blanks an already-blank scenario; the
 /// engine re-pins to the then-current latest).
-pub async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json<EpochNewResponse>> {
+pub(crate) async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json<EpochNewResponse>> {
     let Some(base) = &state.engine_admin else {
         return Err(Error::NotConfigured {
             what: "services.sim.engine_admin_url (needed to re-pin V)",

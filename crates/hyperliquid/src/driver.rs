@@ -326,7 +326,7 @@ pub async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
 /// Run the at-pin probe set and return the run's outcome (the cumulative
 /// counters are updated here — an at-pin run is the only probe source on the
 /// venue side). The route reports the run; `/metrics` carries the totals.
-pub async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> {
+pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> {
     let skipped_all = || ProbeOutcome {
         skipped: ctx.venue.probes.len(),
         ..Default::default()

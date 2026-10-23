@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 const ROTATE_BYTES: u64 = 16 * 1024 * 1024;
 
-pub struct Drift {
+pub(crate) struct Drift {
     path: PathBuf,
     /// Serializes whole-line writes. It protects nothing but ordering, so a
     /// poisoned lock is recovered by construction (there is no value a panic

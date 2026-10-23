@@ -225,10 +225,15 @@ impl Bridge {
             }
             CoreAction::SendAsset {
                 destination,
+                source_dex,
+                destination_dex,
                 token,
                 wei,
                 ..
             } => {
+                if self.refuse_off_spot_send_asset(caller, source_dex, destination_dex) {
+                    return Ok(());
+                }
                 if let Some(info) = self.token_info(tokens, token) {
                     self.send_asset(caller, destination, info, wei).await?;
                 }
@@ -274,6 +279,23 @@ impl Bridge {
             tracing::warn!(account = %caller, amount = %amount, to_perp, "bridge: USD class transfer refused (insufficient balance)");
         }
         Ok(())
+    }
+
+    /// The `sendAsset` dex guard: this sim models the spot dex, so a perp-dex
+    /// move (plan §18.4's multi-dex Phase 2) is refused by name and counted —
+    /// never applied as a spot send. `true` when the action was refused.
+    fn refuse_off_spot_send_asset(&self, caller: Address, source_dex: u32, destination_dex: u32) -> bool {
+        if source_dex == corewriter::SPOT_DEX && destination_dex == corewriter::SPOT_DEX {
+            return false;
+        }
+        self.metrics.inc_refusals();
+        tracing::warn!(
+            caller = %caller,
+            source_dex,
+            destination_dex,
+            "bridge: sendAsset outside the spot dex refused (multi-dex is Phase 2)"
+        );
+        true
     }
 
     /// The registry entry for a wire token index; an unknown index is counted

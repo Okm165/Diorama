@@ -105,36 +105,36 @@ sol! {
 }
 
 /// The V2 message header length (`MessageV2.MESSAGE_BODY_INDEX`).
-pub const HEADER_LEN: usize = 148;
+pub(crate) const HEADER_LEN: usize = 148;
 /// The fixed BurnMessageV2 body length up to (excluding) `hookData`.
-pub const BURN_BODY_LEN: usize = 228;
+pub(crate) const BURN_BODY_LEN: usize = 228;
 
 // The contract's index table, one constant per field (MessageV2.sol /
 // BurnMessageV2.sol; the offsets §15.1 records). Body offsets are relative to
 // the start of the body (absolute offset = [`HEADER_LEN`] + these).
-pub const HEADER_VERSION_AT: usize = 0;
-pub const HEADER_SOURCE_DOMAIN_AT: usize = 4;
-pub const HEADER_DESTINATION_DOMAIN_AT: usize = 8;
-pub const HEADER_NONCE_AT: usize = 12;
-pub const HEADER_SENDER_AT: usize = 44;
-pub const HEADER_RECIPIENT_AT: usize = 76;
-pub const HEADER_DESTINATION_CALLER_AT: usize = 108;
-pub const HEADER_MIN_FINALITY_THRESHOLD_AT: usize = 140;
-pub const HEADER_FINALITY_THRESHOLD_EXECUTED_AT: usize = 144;
+pub(crate) const HEADER_VERSION_AT: usize = 0;
+pub(crate) const HEADER_SOURCE_DOMAIN_AT: usize = 4;
+pub(crate) const HEADER_DESTINATION_DOMAIN_AT: usize = 8;
+pub(crate) const HEADER_NONCE_AT: usize = 12;
+pub(crate) const HEADER_SENDER_AT: usize = 44;
+pub(crate) const HEADER_RECIPIENT_AT: usize = 76;
+pub(crate) const HEADER_DESTINATION_CALLER_AT: usize = 108;
+pub(crate) const HEADER_MIN_FINALITY_THRESHOLD_AT: usize = 140;
+pub(crate) const HEADER_FINALITY_THRESHOLD_EXECUTED_AT: usize = 144;
 
-pub const BODY_VERSION_AT: usize = 0;
-pub const BODY_BURN_TOKEN_AT: usize = 4;
-pub const BODY_MINT_RECIPIENT_AT: usize = 36;
-pub const BODY_AMOUNT_AT: usize = 68;
-pub const BODY_MESSAGE_SENDER_AT: usize = 100;
-pub const BODY_MAX_FEE_AT: usize = 132;
-pub const BODY_FEE_EXECUTED_AT: usize = 164;
-pub const BODY_EXPIRATION_BLOCK_AT: usize = 196;
-pub const BODY_HOOK_DATA_AT: usize = 228;
+pub(crate) const BODY_VERSION_AT: usize = 0;
+pub(crate) const BODY_BURN_TOKEN_AT: usize = 4;
+pub(crate) const BODY_MINT_RECIPIENT_AT: usize = 36;
+pub(crate) const BODY_AMOUNT_AT: usize = 68;
+pub(crate) const BODY_MESSAGE_SENDER_AT: usize = 100;
+pub(crate) const BODY_MAX_FEE_AT: usize = 132;
+pub(crate) const BODY_FEE_EXECUTED_AT: usize = 164;
+pub(crate) const BODY_EXPIRATION_BLOCK_AT: usize = 196;
+pub(crate) const BODY_HOOK_DATA_AT: usize = 228;
 
 /// The `MessageV2` header as typed fields (offsets above).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MessageHeader {
+pub(crate) struct MessageHeader {
     pub version: u32,
     pub source_domain: Domain,
     pub destination_domain: Domain,
@@ -148,7 +148,7 @@ pub struct MessageHeader {
 
 /// The `BurnMessageV2` body as typed fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BurnMessageBody {
+pub(crate) struct BurnMessageBody {
     pub version: u32,
     pub burn_token: B256,
     pub mint_recipient: B256,
@@ -163,8 +163,8 @@ pub struct BurnMessageBody {
 /// A CCTP V2 burn message, header + body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
-    pub header: MessageHeader,
-    pub body: BurnMessageBody,
+    pub(crate) header: MessageHeader,
+    pub(crate) body: BurnMessageBody,
 }
 
 impl Message {
@@ -268,7 +268,7 @@ fn word_at(raw: &[u8], at: usize) -> B256 {
 /// threshold 1000, standard is free; `19→0` is free on both thresholds
 /// (HyperEVM has no fast lane — its standard attestation is already fast).
 /// `None` = the pair is not served (the Iris 404 arm).
-pub fn measured_fees(source: u32, destination: u32) -> Option<[(u32, u64); 2]> {
+pub(crate) fn measured_fees(source: u32, destination: u32) -> Option<[(u32, u64); 2]> {
     match (source, destination) {
         (0, 19) => Some([(1000, 1), (2000, 0)]),
         (19, 0) => Some([(1000, 0), (2000, 0)]),
@@ -279,7 +279,7 @@ pub fn measured_fees(source: u32, destination: u32) -> Option<[(u32, u64); 2]> {
 // ---- the source-side builder ---------------------------------------------
 
 /// `receiveMessage(message, attestation)` calldata.
-pub fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> Bytes {
+pub(crate) fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> Bytes {
     IMessageTransmitterV2::receiveMessageCall {
         message: message.clone(),
         attestation: attestation.clone(),
@@ -296,7 +296,7 @@ pub fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> Bytes {
 /// and a call to it *succeeds vacuously* — so both the burn path and the
 /// relay path must check this rather than trust a status (measured
 /// 2026-10-23: a stale wrapper made a hook relay land as a no-op).
-pub async fn has_code(rpc: &Rpc, address: Address) -> Result<bool> {
+pub(crate) async fn has_code(rpc: &Rpc, address: Address) -> Result<bool> {
     let code: Bytes = rpc.call("eth_getCode", (address, "latest")).await?;
     Ok(!code.is_empty())
 }
@@ -311,7 +311,7 @@ pub async fn eth_call<C: SolCall>(rpc: &Rpc, to: Address, call: &C) -> Result<C:
 
 /// The revision-dependent min-fee surface, capability-probed at boot (§15.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FeeSurface {
+pub(crate) struct FeeSurface {
     pub min_fee: Option<U256>,
 }
 
@@ -362,7 +362,7 @@ impl FeeSurface {
 
 /// The contract's `_calcMinFeeAmount`: `max(1, amount·minFee/MIN_FEE_MULTIPLIER)`,
 /// defined for `amount > 1` (its `getMinFeeAmount` guard).
-pub fn required_min_fee(amount: U256, min_fee: U256) -> Result<U256> {
+pub(crate) fn required_min_fee(amount: U256, min_fee: U256) -> Result<U256> {
     if amount <= U256::ONE {
         return Err(Error::BadRequest {
             reason: format!("amount {amount} must be greater than 1 when minFee {min_fee} is nonzero"),

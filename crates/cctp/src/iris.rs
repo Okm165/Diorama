@@ -86,13 +86,13 @@ pub async fn serve(addr: String, router: Router) -> Result<()> {
 // ---- response shapes (the measured wire forms, §16.2) ----------------------
 
 #[derive(Debug, Serialize)]
-pub struct PublicKeysResponse {
+pub(crate) struct PublicKeysResponse {
     #[serde(rename = "publicKeys")]
     pub public_keys: Vec<PublicKeyEntry>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PublicKeyEntry {
+pub(crate) struct PublicKeyEntry {
     #[serde(rename = "publicKey")]
     pub public_key: String,
     #[serde(rename = "cctpVersion")]
@@ -100,7 +100,7 @@ pub struct PublicKeyEntry {
 }
 
 #[derive(Debug, Serialize)]
-pub struct FeeEntry {
+pub(crate) struct FeeEntry {
     #[serde(rename = "finalityThreshold")]
     pub finality_threshold: u32,
     #[serde(rename = "minimumFee")]
@@ -108,19 +108,19 @@ pub struct FeeEntry {
 }
 
 #[derive(Debug, Serialize)]
-pub struct AllowanceResponse {
+pub(crate) struct AllowanceResponse {
     pub allowance: f64,
     #[serde(rename = "lastUpdated")]
     pub last_updated: String,
 }
 
 #[derive(Debug, Serialize)]
-pub struct MessagesResponse {
+pub(crate) struct MessagesResponse {
     pub messages: Vec<MessageEntry>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct MessageEntry {
+pub(crate) struct MessageEntry {
     pub message: String,
     /// `null` while pending; the 65-byte hex once signed.
     pub attestation: Option<String>,
@@ -134,7 +134,7 @@ struct IrisErrorBody {
 /// The Iris boundary's own refusal vocabulary (status + the exact body the
 /// live API serves for it).
 #[derive(Debug)]
-pub struct IrisError {
+pub(crate) struct IrisError {
     status: axum::http::StatusCode,
     error: String,
 }
@@ -215,7 +215,7 @@ async fn fees(
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AllowanceQuery {
+pub(crate) struct AllowanceQuery {
     #[serde(rename = "sourceDomain")]
     pub source_domain: Option<Domain>,
 }
@@ -241,7 +241,7 @@ async fn allowance(Query(query): Query<AllowanceQuery>) -> Result<Json<Allowance
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MessageQuery {
+pub(crate) struct MessageQuery {
     #[serde(rename = "transactionHash")]
     pub transaction_hash: Option<String>,
 }
@@ -380,7 +380,7 @@ fn entry(record: &MessageRecord) -> MessageEntry {
 
 /// UTC `YYYY-MM-DDTHH:MM:SS.mmmZ` from epoch milliseconds (Howard Hinnant's
 /// civil-from-days).
-pub fn iso8601_ms(ms: u64) -> String {
+pub(crate) fn iso8601_ms(ms: u64) -> String {
     let secs = ms / 1000;
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;

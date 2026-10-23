@@ -38,7 +38,7 @@ use serde::Deserialize;
 
 /// The workspace defaults: the single home of every shared number. Embedded
 /// so services and the CLI read the same file without a second mount.
-pub const DEFAULTS: &str = include_str!("../../../config/defaults.toml");
+pub(crate) const DEFAULTS: &str = include_str!("../../../config/defaults.toml");
 
 /// Rejected at the load point (no partial config ever escapes).
 #[derive(Debug, thiserror::Error)]

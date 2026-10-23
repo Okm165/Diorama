@@ -24,14 +24,14 @@ const TYPE4_REFUND_PER_AUTH: u64 = 12_500;
 ///     incrementCounter uses blockhash(number-1) as a quasi-random interval).
 ///   - `Fatal`: counts, order, statuses, gas, withdrawals or probes differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DivergenceClass {
+pub(crate) enum DivergenceClass {
     None,
     ValueLevel,
     Fatal,
 }
 
 #[derive(Debug, Default)]
-pub struct Verification {
+pub(crate) struct Verification {
     pub ok: bool,
     pub checks: Vec<(String, bool, String)>,
     pub divergences: Vec<String>,
@@ -116,7 +116,7 @@ fn log_key(l: &Log) -> String {
     s
 }
 
-pub async fn verify_block(
+pub(crate) async fn verify_block(
     ctx: &Ctx,
     n: u64,
     reth_block: &Block,

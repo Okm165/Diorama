@@ -19,7 +19,7 @@ use std::sync::Mutex;
 /// (`/control/state` serves it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RelayState {
+pub(crate) enum RelayState {
     /// Watched; the emulated PENDING window has not elapsed yet.
     Pending,
     /// Attestation produced; waiting for the relayer.
@@ -33,7 +33,7 @@ pub enum RelayState {
 
 /// One watched burn and everything the service knows about it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MessageRecord {
+pub(crate) struct MessageRecord {
     pub source_domain: Domain,
     pub destination_domain: Domain,
     /// The deterministic nonce: the burn transaction hash (§15.3 — the
@@ -97,7 +97,7 @@ impl MessageRecord {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CctpState {
     #[serde(default)]
-    pub messages: Vec<MessageRecord>,
+    pub(crate) messages: Vec<MessageRecord>,
     /// The deployed hook wrapper per domain (the boot step deploys one per
     /// served chain, §15.4): hook-carrying messages are consumed through it.
     /// `serde(default)` keeps pre-hook state files loadable.
@@ -189,7 +189,7 @@ impl Store {
     /// Mutate the message record for `nonce` and persist, one atomic step.
     /// Absent is `None`, not an error: the watcher is the only creator, and
     /// every caller here refines a record that already exists.
-    pub fn update_message<T>(
+    pub(crate) fn update_message<T>(
         &self,
         nonce: B256,
         f: impl FnOnce(&mut MessageRecord) -> T,

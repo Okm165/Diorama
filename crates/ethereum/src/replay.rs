@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
-pub struct ReplayOutcome {
+pub(crate) struct ReplayOutcome {
     pub txs: usize,
     pub replayed: usize,
     /// Always 0: a block whose sidecars are missing is never mined (the replay
@@ -38,7 +38,7 @@ struct RawTx {
     blob: Option<(TxEip4844, Signature, B256, Vec<SidecarItem>)>,
 }
 
-pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
+pub(crate) async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     let started = Instant::now();
     let block = ctx.reth.block_by_number(n, true).await?;
 

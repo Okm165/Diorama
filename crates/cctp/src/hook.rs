@@ -62,7 +62,7 @@ fn decode_hex(hex: &str) -> Result<Vec<u8>> {
 /// The deployment code: the creation bytecode ‖ the ABI-encoded constructor
 /// argument (the local `MessageTransmitterV2` — the wrapper calls it for
 /// `receiveMessage`; the deployer becomes the owner through `Ownable2Step`).
-pub fn creation_code(message_transmitter: Address) -> Result<Bytes> {
+pub(crate) fn creation_code(message_transmitter: Address) -> Result<Bytes> {
     let artifact = artifact()?;
     let mut code = decode_hex(&artifact.creation_bytecode)?;
     code.extend_from_slice(message_transmitter.into_word().as_slice());
@@ -70,7 +70,7 @@ pub fn creation_code(message_transmitter: Address) -> Result<Bytes> {
 }
 
 /// `hookData` in the wrapper's own format: `target(20) ‖ calldata`.
-pub fn hook_data(target: Address, calldata: &[u8]) -> Bytes {
+pub(crate) fn hook_data(target: Address, calldata: &[u8]) -> Bytes {
     let mut out = Vec::with_capacity(20 + calldata.len());
     out.extend_from_slice(target.as_slice());
     out.extend_from_slice(calldata);
@@ -80,7 +80,7 @@ pub fn hook_data(target: Address, calldata: &[u8]) -> Bytes {
 /// `relay(message, attestation)` calldata — the wrapper calls
 /// `receiveMessage` itself, so a hook message is never submitted to the
 /// transmitter directly (its `destinationCaller` pins consumption here).
-pub fn relay_calldata(message: &[u8], attestation: &[u8]) -> Bytes {
+pub(crate) fn relay_calldata(message: &[u8], attestation: &[u8]) -> Bytes {
     ICCTPHookWrapper::relayCall {
         message: Bytes::copy_from_slice(message),
         attestation: Bytes::copy_from_slice(attestation),

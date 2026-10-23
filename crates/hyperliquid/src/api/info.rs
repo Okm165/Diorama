@@ -36,7 +36,7 @@ pub async fn healthz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-pub async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     if state.sim.is_poisoned() {
         return (StatusCode::SERVICE_UNAVAILABLE, "sim state poisoned");
     }
@@ -54,7 +54,7 @@ pub async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
 /// (`{"status":"err","response":"…"}`, HTTP 200 — the shape their client
 /// already parses), so a redesign probing the lane learns why it is absent,
 /// not just that it is.
-pub async fn exchange() -> Json<ExchangeResponse> {
+pub(crate) async fn exchange() -> Json<ExchangeResponse> {
     Json(ExchangeResponse {
         status: "err",
         response: "venue-sim: the matching lane is not implemented (plan §18.4: no service \
@@ -66,7 +66,7 @@ pub async fn exchange() -> Json<ExchangeResponse> {
 /// The `/exchange` envelope (the refusal above; complete for the err shape
 /// their client reads).
 #[derive(Debug, serde::Serialize)]
-pub struct ExchangeResponse {
+pub(crate) struct ExchangeResponse {
     pub status: &'static str,
     pub response: &'static str,
 }
@@ -216,7 +216,7 @@ fn exchange_status(state: &ApiState) -> Result<Response> {
 /// The served `clearinghouseState` for a touched account: accrual *first*,
 /// then the read (the verifier caught the reverse order: the served figures
 /// lagged one accrual window behind the stored state).
-pub fn clearinghouse_of(state: &ApiState, address: Address) -> Result<Option<ClearinghouseState>> {
+pub(crate) fn clearinghouse_of(state: &ApiState, address: Address) -> Result<Option<ClearinghouseState>> {
     let now = crate::now_ms();
     let served_time = state.sim.served_time(now)?;
     state.sim.evaluate(&state.feed)?;
