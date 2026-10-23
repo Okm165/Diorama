@@ -16,7 +16,9 @@ layered instance loader), `crates/devnet` (the substrate both mirrors share:
 shadow registry, journal, cursor state with `epoch_pin`, admin surface,
 chain-generic scanner, probes, metrics), the two projects `crates/ethereum`
 and `crates/hyperliquid`, and the binaries `bins/{mirror-engine,venue-mirror,
-venue-sim}`. The projects are siblings - they share the common crates and
+venue-sim,cctp-bridge}` — the fourth is element 3 (`crates/cctp` on the common
+client + config only; it does not depend on the devnet substrate or either
+project). The projects are siblings - they share the common crates and
 never each other; `scripts/closure-matrix.sh` is the structural contract that
 enforces it. The table above is the Mainnet Mirror's component set; the Venue
 Mirror's components and data flow are in "The Venue Mirror" below.

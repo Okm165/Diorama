@@ -90,7 +90,7 @@ covers the ones that page someone; these are the rest.
 | `mirror_bal_filtered_out_last_block` | BAL entries for accounts outside the watchlist in the last block (skipped by design) |
 | `mirror_bal_skipped_shadowed_last_block` | BAL entries skipped in the last block because the devnet owns the key (copy-on-write) |
 | `mirror_shadowed_slots` | devnet-owned storage keys (see `/status.shadowed` for the accounts) |
-| `mirror_shadow_scanned_blocks_total` | T blocks the shadow scan walked (empty blocks cost one header read, no traces — the harness mines one block per poll, so this is the scan-cost reading) |
+| `mirror_shadow_scanned_blocks_total` / `mirror_shadow_skipped_empty_blocks_total` | T blocks the shadow scan walked / the empty share of the walk (one call, no traces — the harness mines one block per poll, so this is the scan-cost reading) |
 | `mirror_m_repair_writes_total` | parent-BAL writes applied to M by the convergence repair (gated on the previous block's verification) |
 | `mirror_m_rebase_skipped_blocks_total` | parent blocks an M re-base skipped. Their state is exact (the fresh fork's base *is* mainnet's state), but the engine did not re-execute them, so their tx-level verification is skipped. Bounded by `fork_offset` per re-base; a rise simply means M re-based (OOM recovery, reorg) |
 | `mirror_m_convergence_ok_total` / `mirror_m_convergence_failures_total` | the 12 state probes against reth at n-1, run every block |
@@ -551,7 +551,7 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_fork_pin` / `venue_pin_age_blocks` | V's fork base / blocks since this epoch's first scanned block |
 | `venue_epochs_total` | times V was found re-forked under the driver (the epoch rule ran) |
 | `venue_restore_writes_total` | writes re-applied by same-pin restores |
-| `venue_scanned_blocks_total` / `venue_mined_blocks_total` | V blocks the shadow scan walked / V blocks the engine mined (the pool was non-empty — the engine is V's block producer; T's is the applier) |
+| `venue_scanned_blocks_total` / `venue_skipped_empty_blocks_total` / `venue_mined_blocks_total` | V blocks the shadow scan walked / the empty share of the walk (one call, no traces) / V blocks the engine mined (the pool was non-empty — the engine is V's block producer; T's is the applier) |
 | `venue_probe_ok_total` / `venue_probe_failures_total` | at-pin probes matching / diverging from the fork source |
 | `venue_probe_skipped_total` / `venue_probe_last_failed` | probes skipped (devnet-owned target, or a pin the source cannot serve) / diverged in the last run |
 | `venue_bridge_lag_blocks` | V head minus the bridge's processed cursor (growing = stuck) |
@@ -627,6 +627,21 @@ installs the devnet attester on both chains and deploys the hook wrapper
 | the relay's gas | `/metrics` `cctp_*`; the boot tops the key up to the low threshold |
 | the attester / wrapper wiring | the boot log lines (`devnet attester installed`, `hook wrapper present/deployed`) |
 | a transfer end-to-end | `POST /control/transfer {source, destination, amount}` |
+
+The bridge's series (all `cctp_*`, on the control port):
+
+| Metric | Meaning |
+|---|---|
+| `cctp_messages_seen_total` | `MessageSent` logs absorbed (new records) |
+| `cctp_messages_signed_total` | records transitioned PENDING → SIGNED |
+| `cctp_messages_pending` / `cctp_messages_signed` / `cctp_messages_parked` | the queue's current state counts (what `/health` reports) |
+| `cctp_relays_confirmed_total` | `receiveMessage` landed (a consumed nonce reconciles as confirmed) |
+| `cctp_relays_parked_total` | definitive failures parked for an operator |
+| `cctp_relay_attempts_total` | signed records re-checked by the relayer (one per tick per record) |
+| `cctp_scan_errors_total` | scan passes that failed (logged with the chain) |
+| `cctp_last_scan_block` | the last head the watcher scanned (a coarse liveness gauge) |
+| `cctp_gas_low_total` / `cctp_gas_critical_total` | gas-alert crossings (each observation below the threshold counts) |
+| `cctp_relay_balance_wei{chain}` | the relay key's native balance per chain (full-width wei — a devnet balance can exceed `u64`) |
 
 **A parked message.** A message parks on a definitive failure (an expired
 window, a reverted `receiveMessage`, a vanished burn after a re-pin, a rewound
