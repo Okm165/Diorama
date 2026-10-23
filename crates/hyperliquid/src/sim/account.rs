@@ -180,22 +180,7 @@ impl AccountSeed {
             sub(account.perp_balance, existing, "raw usdc")?
         };
         if let Some(positions) = &self.asset_positions {
-            account.positions.clear();
-            for asset in positions {
-                let p = &asset.position;
-                let entry = p.entry_px.unwrap_or_default();
-                let position = Position {
-                    szi: p.szi,
-                    entry_px: entry,
-                    leverage: p.leverage.kind,
-                    leverage_value: p.leverage.value,
-                    margin_used: p.margin_used,
-                    funding_all_time: p.cum_funding.all_time,
-                    funding_since_open: p.cum_funding.since_open,
-                    funding_since_change: p.cum_funding.since_change,
-                };
-                account.positions.insert(p.coin.clone(), position);
-            }
+            apply_positions(account, positions)?;
         }
         if perp_changed {
             let cost_basis = account
@@ -226,6 +211,43 @@ impl AccountSeed {
     }
 }
 
+/// Replace the account's positions from the seed's rows. A non-flat row
+/// without an entry price cannot reconstruct the raw base
+/// (`perp_balance = totalRawUsd + Σ szi·entryPx`): refused loudly, never a
+/// zero-cost basis; a flat row's entry price is irrelevant.
+fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result<()> {
+    account.positions.clear();
+    for asset in positions {
+        let p = &asset.position;
+        let entry = match p.entry_px {
+            Some(px) => px,
+            None if p.szi.is_zero() => Decimal::ZERO,
+            None => {
+                return Err(crate::error::Error::BadRequest {
+                    reason: format!(
+                        "position {} has size {} but no entryPx (the raw base needs it)",
+                        p.coin, p.szi
+                    ),
+                })
+            }
+        };
+        account.positions.insert(
+            p.coin.clone(),
+            Position {
+                szi: p.szi,
+                entry_px: entry,
+                leverage: p.leverage.kind,
+                leverage_value: p.leverage.value,
+                margin_used: p.margin_used,
+                funding_all_time: p.cum_funding.all_time,
+                funding_since_open: p.cum_funding.since_open,
+                funding_since_change: p.cum_funding.since_change,
+            },
+        );
+    }
+    Ok(())
+}
+
 /// The computed account figures, one pass over the positions.
 pub struct AccountView {
     pub margin_summary: MarginSummary,
@@ -233,8 +255,12 @@ pub struct AccountView {
     pub cross_maintenance_margin_used: Decimal,
     pub withdrawable: Decimal,
     pub asset_positions: Vec<AssetPosition>,
-    /// Per-position mark, for the liquidation check (not served).
-    pub marks: BTreeMap<String, Decimal>,
+    /// Per-position facts for the liquidation check (not served): the same
+    /// pass that builds the served rows, so the check reuses their marks and
+    /// maintenance instead of recomputing them. A missing entry means exactly
+    /// "flat row" — the view skips flat rows, and a missing *price* fails the
+    /// view outright ([`PositionFacts::of`]).
+    facts: BTreeMap<String, PositionFacts>,
 }
 
 /// One position's derived facts: the feed's mark, the unsigned notional
@@ -349,7 +375,7 @@ fn assemble(
     account: &Account,
     totals: &PositionTotals,
     rows: Vec<AssetPosition>,
-    marks: BTreeMap<String, Decimal>,
+    facts: BTreeMap<String, PositionFacts>,
 ) -> AccountView {
     let total_raw = account.perp_balance - totals.cost_basis;
     let account_value = total_raw + totals.signed_value;
@@ -372,7 +398,7 @@ fn assemble(
         cross_maintenance_margin_used: totals.cross_maintenance,
         withdrawable: cross_account_value,
         asset_positions: rows,
-        marks,
+        facts,
     }
 }
 
@@ -380,7 +406,7 @@ fn assemble(
 pub fn view(account: &Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<AccountView> {
     let mut totals = PositionTotals::default();
     let mut rows = Vec::with_capacity(account.positions.len());
-    let mut marks = BTreeMap::new();
+    let mut by_coin = BTreeMap::new();
     for (coin, p) in &account.positions {
         // Flat rows are dropped from the served state (daloc's gate): a
         // zero-size position is a closed one, not a row.
@@ -388,11 +414,11 @@ pub fn view(account: &Account, feed: &MarketFeed, meta: Option<&crate::wire::Met
             continue;
         }
         let facts = PositionFacts::of(coin, p, feed, meta)?;
-        marks.insert(coin.clone(), facts.mark);
         totals.add(p, &facts)?;
         rows.push(position_row(coin, p, &facts, meta)?);
+        by_coin.insert(coin.clone(), facts);
     }
-    Ok(assemble(account, &totals, rows, marks))
+    Ok(assemble(account, &totals, rows, by_coin))
 }
 
 /// The served `clearinghouseState` (fresh `time` from the caller's wall clock).
@@ -603,7 +629,7 @@ pub fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta: Optio
     let v = view(account, feed, meta)?;
     let maintenance = add(
         v.cross_maintenance_margin_used,
-        isolated_maintenance(account, &v, meta)?,
+        isolated_maintenance(account, &v)?,
         "maintenance total",
     )?;
     if v.margin_summary.account_value >= maintenance {
@@ -611,9 +637,11 @@ pub fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta: Optio
     }
     let closed: Vec<String> = account.positions.keys().cloned().collect();
     let mut realized = Decimal::ZERO;
-    for coin in &closed {
-        if let (Some(p), Some(mark)) = (account.positions.get(coin), v.marks.get(coin)) {
-            realized = add(realized, p.unrealized_pnl(*mark)?, "realized PnL")?;
+    for (coin, p) in &account.positions {
+        // The facts cover every non-flat position; a flat row contributes no
+        // PnL (and has no facts — the view skips flat rows).
+        if let Some(facts) = v.facts.get(coin) {
+            realized = add(realized, p.unrealized_pnl(facts.mark)?, "realized PnL")?;
         }
     }
     account.positions.clear();
@@ -625,12 +653,18 @@ pub fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta: Optio
     }))
 }
 
-fn isolated_maintenance(account: &Account, v: &AccountView, meta: Option<&crate::wire::Meta>) -> Result<Decimal> {
+/// The isolated positions' maintenance total, from the view's own facts (the
+/// cross side is already in `cross_maintenance_margin_used`). A flat isolated
+/// row has no facts and contributes zero.
+fn isolated_maintenance(account: &Account, v: &AccountView) -> Result<Decimal> {
     let mut total = Decimal::ZERO;
-    for (coin, p) in account.positions.iter().filter(|(_, p)| p.leverage == LeverageType::Isolated) {
-        let mark = v.marks.get(coin).copied().unwrap_or_default();
-        let value = p.position_value(mark)?;
-        total = add(total, maintenance_margin(coin, value, meta)?, "isolated maintenance")?;
+    for (coin, p) in &account.positions {
+        if p.leverage != LeverageType::Isolated {
+            continue;
+        }
+        if let Some(facts) = v.facts.get(coin) {
+            total = add(total, facts.maintenance, "isolated maintenance")?;
+        }
     }
     Ok(total)
 }

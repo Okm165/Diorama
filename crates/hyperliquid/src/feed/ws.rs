@@ -99,7 +99,7 @@ impl WsClient {
             .await
             .map_err(WsError::Connect)?;
         let (mut sink, mut source) = stream.split();
-        for sub in self.subscriptions() {
+        for sub in self.subscriptions()? {
             sink.send(Message::Text(sub.into())).await.map_err(WsError::Send)?;
         }
         self.feed.metrics.set_ws_connected(true);
@@ -122,13 +122,23 @@ impl WsClient {
         }
     }
 
-    fn subscriptions(&self) -> Vec<String> {
+    /// The session's subscription messages. An encode fault is a session
+    /// fault (the reconnect retries), never an empty message: a silent `""`
+    /// would leave the socket "connected" with no data flowing.
+    fn subscriptions(&self) -> Result<Vec<String>, WsError> {
         let mut subs = Vec::with_capacity(self.feed.markets.len() + 1);
-        subs.push(serde_json::to_string(&Subscribe { method: "subscribe", subscription: Subscription::AllMids }).unwrap_or_default());
+        let encode = |sub: Subscription<'_>| {
+            serde_json::to_string(&Subscribe {
+                method: "subscribe",
+                subscription: sub,
+            })
+            .map_err(WsError::Encode)
+        };
+        subs.push(encode(Subscription::AllMids)?);
         for coin in &self.feed.markets {
-            subs.push(serde_json::to_string(&Subscribe { method: "subscribe", subscription: Subscription::ActiveAssetCtx { coin } }).unwrap_or_default());
+            subs.push(encode(Subscription::ActiveAssetCtx { coin })?);
         }
-        subs
+        Ok(subs)
     }
 
     fn handle_text(&self, text: &str) {
@@ -191,7 +201,7 @@ mod tests {
             Arc::new(MarketFeed::memory(vec!["BTC".into()])),
             "wss://example.invalid/ws".into(),
         );
-        let subs = client.subscriptions();
+        let subs = client.subscriptions().unwrap();
         assert_eq!(subs[0], r#"{"method":"subscribe","subscription":{"type":"allMids"}}"#);
         assert_eq!(subs[1], r#"{"method":"subscribe","subscription":{"type":"activeAssetCtx","coin":"BTC"}}"#);
     }
