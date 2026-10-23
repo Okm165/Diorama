@@ -12,7 +12,7 @@ KUBECTL        := kubectl -n $(NS)
 # that deploys it - the deployed manifest stays the single source of truth.
 # mainnet-mirror runs the ethereum engine, venue-mirror the venue engine: one
 # deployment shape per profile, one image per binary.
-ENGINE_MANIFEST := $(if $(filter mainnet-mirror,$(INSTANCE)),k8s/base/engine.yaml,k8s/base/venue/venue-engine.yaml)
+ENGINE_MANIFEST := k8s/base/$(INSTANCE)/engine.yaml
 ENGINE_REF      := $(shell grep -ohE 'image: localhost/[^ ]+' $(ENGINE_MANIFEST) | head -1 | awk '{print $$2}')
 ENGINE_IMAGE    := $(word 1,$(subst :, ,$(ENGINE_REF)))
 ENGINE_TAG      := $(lastword $(subst :, ,$(ENGINE_REF)))
@@ -21,9 +21,9 @@ ENGINE_BIN      := $(notdir $(ENGINE_IMAGE))
 # The anvil components of the selected instance (pin-show).
 ANVILS := $(if $(filter mainnet-mirror,$(INSTANCE)),anvil-m anvil-t,anvil-v)
 
-# The selected instance's Namespace manifest: mainnet-mirror's lives in base
-# (bootstrap order), the venue overlay owns its own (instance identity).
-NS_MANIFEST := $(if $(filter mainnet-mirror,$(INSTANCE)),k8s/base/namespace.yaml,$(OVERLAY)/namespace.yaml)
+# The selected instance's Namespace manifest: the overlay owns it (instance
+# identity, not a service template) - one rule for both mirrors.
+NS_MANIFEST := $(OVERLAY)/namespace.yaml
 
 .DEFAULT_GOAL := help
 
@@ -31,7 +31,7 @@ NS_MANIFEST := $(if $(filter mainnet-mirror,$(INSTANCE)),k8s/base/namespace.yaml
 
 ns: ## Create namespace + StorageClass (idempotent)
 	kubectl apply -f $(NS_MANIFEST)
-	kubectl apply -f k8s/base/storageclass.yaml
+	kubectl apply -f k8s/base/shared/storageclass.yaml
 
 secrets: ## Create the reth<->lighthouse JWT secret if missing
 	NS=$(NS) ./scripts/gen-secret.sh
@@ -63,7 +63,7 @@ snapshot-status: ## Show snapshot job status + progress
 	@$(KUBECTL) logs job/reth-snapshot --tail=3 2>/dev/null || true
 
 bootstrap: ns secrets images ## First-time setup: namespace, secrets, images, snapshot, full stack
-	kubectl apply -f k8s/base/pvcs.yaml
+	kubectl apply -f k8s/base/mainnet-mirror/pvcs.yaml
 	$(MAKE) snapshot
 	$(MAKE) apply
 	@echo "bootstrap complete. watch: make status"

@@ -144,7 +144,7 @@ mainnet users need not upgrade, and the mirror follows a mainnet CL, so the
 Hoodi schedule was never ours. The bump is a two-step rollout (pull + import
 the new tag+digest, then `make apply` with the manifest edit) and therefore
 rides the **next rollout window**, together with the venue overlay: replace
-the line in `k8s/base/lighthouse.yaml` with
+the line in `k8s/base/mainnet-mirror/lighthouse.yaml` with
 
 ```
 image: docker.io/sigp/lighthouse:v8.3.2@sha256:1fda7c2d9c067dcfab20a0bfb83cb3c351a05673859455df4516e5708c5fa031
@@ -465,7 +465,7 @@ All PVCs use the `mirror-retain` StorageClass (`reclaimPolicy: Retain`):
 the same name to re-attach it, or delete the PV explicitly to free the space.
 
 - Inspect on the host: `/var/lib/rancher/k3s/storage/pvc-*`.
-- Grow a PVC: edit `k8s/base/pvcs.yaml` and `make apply`. With `local-path` the
+- Grow a PVC: edit `k8s/base/mainnet-mirror/pvcs.yaml` and `make apply`. With `local-path` the
   numbers are **nominal**: `allowVolumeExpansion` lets the *request* be raised,
   but the driver never resizes anything, so `status.capacity` can lag it
   (measured: `lighthouse-data` request 1500Gi, capacity 500Gi, no condition).
@@ -577,7 +577,7 @@ contract-internal CoreWriter calls are being missed that block.
 ### The daloc-facing endpoints
 
 The harness's external-mode env block lives in the manifests: the
-`test-endpoints` ConfigMap of each overlay (`k8s/base/nodeports.yaml` for the
+`test-endpoints` ConfigMap of each overlay (`k8s/overlays/mainnet-mirror/nodeports.yaml` for the
 L1 side — `CHAIN_RPC_URL`/`CHAIN_WS_URL`/`MIRROR_ADMIN_URL` — and
 `k8s/overlays/venue-mirror/nodeports.yaml` for the venue side, whose keys carry
 the second chain's `CHAIN_1_` prefix so sourcing both blocks yields one

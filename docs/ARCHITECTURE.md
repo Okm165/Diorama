@@ -205,7 +205,7 @@ State (266 GB), headers (14 GB), last 50k blocks of transactions (2 GB) +
 receipts (1 GB) + changesets (1 GB). Chosen over `--full` (728 GB / 990 GB)
 because the mirror only replays *live* blocks.
 
-**Runtime pruning** (`k8s/base/reth-config.yaml`):
+**Runtime pruning** (`k8s/base/mainnet-mirror/reth-config.yaml`):
 
 | Segment | Retained | Why |
 |---|---|---|
@@ -395,6 +395,21 @@ follow from this and both were bugs once: a hash-validated cursor always wins
 silently skipped parent blocks and stalled T), and after a reset T resumes from
 the fork pin (`pin + 1`), because its state *is* the pin's state.
 
+**The layout is symmetric by construction.** Every layer names the two mirrors
+the same way: `crates/ethereum` + `crates/hyperliquid` (the mirror projects —
+siblings that never depend on each other), `bins/mirror-engine` +
+`bins/venue-mirror` (thin shells, each over its own crate's `main_entry`; the
+simulator and the bridge are the venue stack's own services), and
+`k8s/base/mainnet-mirror` + `k8s/base/venue-mirror` (service templates, with
+the shared cluster-scoped `k8s/base/shared` and one overlay per instance
+owning the namespace, the instance ConfigMap and the NodePorts). The instance
+files `config/instances/{mainnet-mirror,venue-mirror}.toml` are the single
+home of each mirror's wiring, and the Makefile reads one uniform path per
+instance (`k8s/base/$(INSTANCE)/engine.yaml`, `$(OVERLAY)/namespace.yaml`) —
+no per-mirror conditionals. The one deliberate name difference: the mainnet
+engine binary keeps the project's own name (`mirror-engine`); every other
+layer uses the instance name.
+
 **Measured rules baked into the code** (each cost a real run to discover):
 padding all hex to 32 bytes / even length (anvil rejects odd-length hex with
 `-32602`); JSON-RPC batches chunked by bytes as well as items (bodies ≥2 MB are
@@ -530,7 +545,7 @@ registry access** (measured: `Container image ... already present on machine`).
 | Lighthouse | `docker.io/sigp/lighthouse:v8.3.0@sha256:ca59d3a3…` | latest release; **v8.3.1 is the standing maintenance item** (the eMudhra CA certificate mitigation — High for stakers, Medium for a non-staking mirror; plan §16.4). Bump via `make images` + the manifest pin when the rollout window allows |
 | Foundry (anvil) | `ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f…` | latest release |
 | init containers / wipe job | `docker.io/library/alpine:3.24.2@sha256:294b683c…` | 3.24.3 exists but the registry was unreachable from this node (DNS/IPv6: `dial tcp [2600:…]: connect: network is unreachable`). Bump with `make images` once it is; the running set is complete without it |
-| engine | `localhost/mirror-engine:v1` | built from this repo; the tag lives in `k8s/base/engine.yaml` and the Makefile reads it from there |
+| engine | `localhost/mirror-engine:v1` | built from this repo; the tag lives in `k8s/base/mainnet-mirror/engine.yaml` and the Makefile reads it from there |
 
 **Single source of truth.** The Makefile derives the image list for `make images`
 from the manifests (`grep 'image:' k8s/`), so a version bump is a one-line

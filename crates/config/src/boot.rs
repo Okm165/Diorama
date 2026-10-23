@@ -51,17 +51,32 @@ pub fn report_error(error: &dyn StdError) {
     }
 }
 
-/// The default instance path every service boots from when no argument is
-/// given (`--config` for the engine; the first positional for the others).
+/// The default instance path every service boots from when `--config` is not
+/// given.
 pub const DEFAULT_INSTANCE_PATH: &str = "/etc/mirror/instance.toml";
 
-/// The instance path: the first positional argument, else the deployed
-/// default. One definition — every positional-arg bin reads the same
-/// convention (the engine's clap subcommand owns its own).
-pub fn instance_path() -> String {
-    std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_INSTANCE_PATH.to_string())
+/// The shared service CLI: `run [--config <path>]`. Every service binary has
+/// exactly one mode today and the instance file is its one flag, so the shape
+/// is parsed here — one definition, and the four bins cannot drift apart in
+/// usage. (The ethereum engine's richer CLI — `selftest`, `rewind` — keeps
+/// its own clap subcommands on top of the same `run --config` shape.)
+pub fn service_config(args: &[String]) -> Result<std::path::PathBuf, String> {
+    let mut rest = args.iter().map(String::as_str);
+    match rest.next() {
+        Some("run") => {}
+        other => return Err(format!("usage: run [--config <path>] (got {other:?})")),
+    }
+    let mut config = std::path::PathBuf::from(DEFAULT_INSTANCE_PATH);
+    while let Some(arg) = rest.next() {
+        match arg {
+            "--config" => match rest.next() {
+                Some(path) => config = std::path::PathBuf::from(path),
+                None => return Err("usage: run [--config <path>] (--config needs a path)".into()),
+            },
+            other => return Err(format!("usage: run [--config <path>] (unexpected {other:?})")),
+        }
+    }
+    Ok(config)
 }
 
 /// The shared `main()` shell: build the runtime with the measured worker-stack

@@ -1,12 +1,7 @@
-# The Venue Mirror instance overlay: V (the fork-mode anvil), the venue engine,
-# the simulator and the CCTP bridge, composed from k8s/base/venue + the
-# instance ConfigMap + the harness NodePorts (plan §11.5). The mainnet-mirror
-# overlay is untouched: the two mirrors share the cluster and the
-# mirror-retain StorageClass, not a namespace.
-#
-# The mirror-retain StorageClass is cluster-scoped and shared with
-# mainnet-mirror (created once by `make ns` / the mainnet base); it is not
-# re-declared here.
+# The Venue Mirror instance overlay: the venue base + the instance ConfigMap +
+# the harness NodePorts. The mainnet-mirror overlay is untouched: the two
+# mirrors share the cluster and the mirror-retain StorageClass, not a
+# namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -14,7 +9,7 @@ namespace: venue-mirror
 
 resources:
   - namespace.yaml
-  - ../../base/venue
+  - ../../base/venue-mirror
   # The instance ConfigMap generator (config/instances/kustomization.yaml):
   # every pod of this instance mounts /etc/mirror/instance.toml from it.
   - ../../../config/instances

@@ -33,7 +33,13 @@ univ3_slot0       0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640 0x3850c7bd
 aave_income_usdc  0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2 0xd15e0053000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 aave_income_weth  0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2 0xd15e0053000000000000000000000000C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
 "
-WATCH=$(grep -oE '0x[0-9a-fA-F]{40}' k8s/base/engine-config.yaml | tr 'A-F' 'a-f' | sort -u)
+# The watchlist's single home is the instance file the engine loads (measured:
+# the old k8s/base/engine-config.yaml path went stale with the config move and
+# made every view look unwatched). Only the [[watchlist]] blocks count: the
+# file's other 0x addresses (fixtures, contracts) are not watched accounts.
+INSTANCE_TOML="${INSTANCE_TOML:-config/instances/mainnet-mirror.toml}"
+WATCH=$(awk '/^\[\[watchlist\]\]/{f=1;next} /^\[/{f=0} f' "$INSTANCE_TOML" \
+  | grep -oE '0x[0-9a-fA-F]{40}' | tr 'A-F' 'a-f' | sort -u)
 
 echo "== watchlist closure audit ($(echo "$WATCH" | wc -l) watched accounts, $(echo "$VIEWS" | grep -c .) views) =="
 gaps=0
@@ -60,5 +66,5 @@ EOF
 echo
 [ "$gaps" -eq 0 ] \
   && ok "closure: all views' storage dependencies are watched" \
-  || bad "closure: $gaps views read unwatched storage - add the addresses to k8s/base/engine-config.yaml's watchlist"
+  || bad "closure: $gaps views read unwatched storage - add the addresses to $INSTANCE_TOML's watchlist"
 [ "$fail" -eq 0 ]

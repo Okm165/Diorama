@@ -61,7 +61,7 @@ spec:
               echo "resolved pin=$PIN (source head=$HEAD)"
           env:
             - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: venue-config, key: HL_RPC_URL } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: HL_RPC_URL } }
           volumeMounts:
             - { name: state, mountPath: /state }
       containers:
@@ -121,7 +121,7 @@ spec:
                 --no-fork-node-info
           env:
             - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: venue-config, key: HL_RPC_URL } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: HL_RPC_URL } }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

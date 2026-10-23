@@ -35,17 +35,17 @@ spec:
         - name: cctp-bridge
           image: localhost/cctp-bridge:v1
           imagePullPolicy: IfNotPresent
-          args: ["/etc/mirror/instance.toml"]
+          args: ["run", "--config", "/etc/mirror/instance.toml"]
           env:
             - name: CCTP_STATE_DIR
-              valueFrom: { configMapKeyRef: { name: venue-config, key: CCTP_STATE_DIR } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: CCTP_STATE_DIR } }
             # The Ethereum fork the bridge burns on: anvil-t lives in the
             # mainnet-mirror namespace (the venue namespace has no T of its
             # own), so the bridge reaches it over cross-namespace service DNS.
             - name: T_RPC_URL
-              valueFrom: { configMapKeyRef: { name: venue-config, key: T_RPC_URL } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: T_RPC_URL } }
             - name: ANVIL_V_URL
-              valueFrom: { configMapKeyRef: { name: venue-config, key: ANVIL_V_URL } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: ANVIL_V_URL } }
             # The funded relay wallet's hex key: a Secret, never a manifest
             # literal (the instance reads it as ${CCTP_RELAY_KEY}); create it
             # once with `make venue-secrets CCTP_RELAY_KEY=0x…`.

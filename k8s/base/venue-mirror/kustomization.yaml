@@ -1,0 +1,15 @@
+# The Venue Mirror's manifest base: V (the fork-mode anvil), the venue engine,
+# the simulator, the CCTP bridge. The namespace, the instance ConfigMap and
+# the harness NodePorts are the overlay's — the same split as
+# k8s/base/mainnet-mirror.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../shared
+  - mirror-config.yaml
+  - pvcs.yaml
+  - anvil-v.yaml
+  - engine.yaml
+  - venue-sim.yaml
+  - cctp-bridge.yaml

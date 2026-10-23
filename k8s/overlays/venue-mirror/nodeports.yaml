@@ -1,7 +1,7 @@
 # NodePort exposure for the daloc harness (plan §11.5): the venue mirror's
 # services, reachable from the test host. The 31xxx range keeps the two
 # mirrors' exposures distinct on one node (mainnet-mirror uses 30xxx; see
-# k8s/base/nodeports.yaml for the convention).
+# k8s/overlays/mainnet-mirror/nodeports.yaml for the convention).
 ---
 apiVersion: v1
 kind: Service
@@ -69,7 +69,7 @@ data:
   #
   # The venue is the *second* chain: its keys carry the `CHAIN_1_` prefix of
   # the merge script's convention, so sourcing this block beside the mainnet's
-  # (k8s/base/nodeports.yaml) yields one collision-free env — unprefixed keys
+  # (k8s/overlays/mainnet-mirror/nodeports.yaml) yields one collision-free env — unprefixed keys
   # here would silently overwrite the L1 endpoints (their merge prefixes every
   # chain after the first, §17.3).
   test-endpoints.env: |

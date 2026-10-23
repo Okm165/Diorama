@@ -13,7 +13,7 @@ set -uo pipefail
 
 source "$(dirname "$0")/lib.sh"
 
-# The probes mirror k8s/base/engine-config.yaml:verifier.probes (all watched
+# The probes mirror config/instances/mainnet-mirror.toml:probes (all watched
 # accounts, so T must match reth exactly; none is blockhash-dependent, so M must
 # too - the engine's convergence repair is what makes that true).
 probe() { # probe <rpc-url> <block-hex> <to> <data>

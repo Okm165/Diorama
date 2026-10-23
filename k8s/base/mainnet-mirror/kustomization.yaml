@@ -1,0 +1,17 @@
+# The Mainnet Mirror's manifest base: reth + the local CL, the two anvils, the
+# engine. The namespace, the instance ConfigMap and the harness NodePorts are
+# the overlay's (instance identity/topology, not service templates) — the same
+# split as k8s/base/venue-mirror.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../shared
+  - mirror-config.yaml
+  - reth-config.yaml
+  - pvcs.yaml
+  - reth.yaml
+  - lighthouse.yaml
+  - anvil-m.yaml
+  - anvil-t.yaml
+  - engine.yaml

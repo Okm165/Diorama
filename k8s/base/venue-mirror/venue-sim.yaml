@@ -33,19 +33,19 @@ spec:
         - name: venue-sim
           image: localhost/venue-sim:v1
           imagePullPolicy: IfNotPresent
-          args: ["/etc/mirror/instance.toml"]
+          args: ["run", "--config", "/etc/mirror/instance.toml"]
           env:
             - name: SIM_STATE_DIR
-              valueFrom: { configMapKeyRef: { name: venue-config, key: SIM_STATE_DIR } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: SIM_STATE_DIR } }
             - name: ANVIL_V_URL
-              valueFrom: { configMapKeyRef: { name: venue-config, key: ANVIL_V_URL } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: ANVIL_V_URL } }
             - name: ENGINE_ADMIN_URL
-              valueFrom: { configMapKeyRef: { name: venue-config, key: ENGINE_ADMIN_URL } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: ENGINE_ADMIN_URL } }
             # The instance's [chains.venue] source_url is ${HL_RPC_URL}: the
             # loader expands every reference at load time, so the variable must
             # resolve even though the sim's reads go through api_url/ws_url.
             - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: venue-config, key: HL_RPC_URL } }
+              valueFrom: { configMapKeyRef: { name: mirror-config, key: HL_RPC_URL } }
           ports:
             - { name: info, containerPort: 8090 }
             - { name: control, containerPort: 8091 }

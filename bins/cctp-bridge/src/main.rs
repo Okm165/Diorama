@@ -21,7 +21,7 @@ use mirror_config::boot;
 use mirror_config::CctpSection;
 
 fn main() -> ExitCode {
-    boot::run_main(run())
+    boot::run_main(run(std::env::args().skip(1).collect()))
 }
 
 /// The shared runtime every spawned plane reads.
@@ -36,9 +36,15 @@ struct Bridge {
     poll: Duration,
 }
 
-async fn run() -> mirror_cctp::Result<()> {
+async fn run(args: Vec<String>) -> mirror_cctp::Result<()> {
     boot::init_logging();
-    let config = boot::instance_path();
+    let config = match boot::service_config(&args) {
+        Ok(config) => config,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
     let section = load_wiring(&config)?;
     let (bridge, min_fees) = boot_bridge(section).await?;
 
@@ -59,8 +65,8 @@ async fn run() -> mirror_cctp::Result<()> {
 /// simulator's `${VAR}` wiring is not this pod's to provide (`inspect` reports
 /// unresolved references instead of failing on them; the cctp section's own
 /// wiring is then required here, by name).
-fn load_wiring(config: &str) -> mirror_cctp::Result<CctpSection> {
-    let (mut cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(config))?;
+fn load_wiring(config: &std::path::Path) -> mirror_cctp::Result<CctpSection> {
+    let (mut cfg, unresolved) = mirror_config::Instance::inspect(config)?;
     let section = cfg.take_cctp()?;
     let state_dir = section.state_dir.to_string_lossy().to_string();
     mirror_config::require_resolved_logged(

@@ -14,12 +14,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 fn main() -> ExitCode {
-    boot::run_main(run())
+    boot::run_main(run(std::env::args().skip(1).collect()))
 }
 
-async fn run() -> mirror_hyperliquid::Result<()> {
+async fn run(args: Vec<String>) -> mirror_hyperliquid::Result<()> {
     boot::init_logging();
-    let config = boot::instance_path();
+    let config = match boot::service_config(&args) {
+        Ok(config) => config,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    };
     let mut cfg = load_wiring(&config)?;
     let (chain, sim_section) = cfg.take_sim()?;
 
@@ -64,8 +70,8 @@ async fn run() -> mirror_hyperliquid::Result<()> {
 /// Load the instance and require this pod's wiring to be resolved: one
 /// instance file, many readers — the venue engine's and the bridge's
 /// references stay unresolved here, by design.
-fn load_wiring(config: &str) -> mirror_hyperliquid::Result<mirror_config::Instance> {
-    let (cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(config))?;
+fn load_wiring(config: &std::path::Path) -> mirror_hyperliquid::Result<mirror_config::Instance> {
+    let (cfg, unresolved) = mirror_config::Instance::inspect(config)?;
     if let (Some(chain), Some(sim)) = (cfg.chains.venue.as_ref(), cfg.services.sim.as_ref()) {
         let state_dir = sim.state_dir.to_string_lossy().to_string();
         mirror_config::require_resolved_logged(
