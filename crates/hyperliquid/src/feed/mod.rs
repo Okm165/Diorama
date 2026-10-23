@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The scenario's owned market values (persisted).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -95,6 +96,9 @@ pub struct MarketFeed {
     pub markets: Vec<String>,
     /// The overrides' state file; `None` keeps them in memory only.
     path: Option<PathBuf>,
+    /// The staleness drill: live writes are dropped until this deadline
+    /// (0 = not stalled). The scripted plane is never gated.
+    stalled_until_ms: AtomicU64,
 }
 
 impl MarketFeed {
@@ -108,6 +112,7 @@ impl MarketFeed {
             metrics: FeedMetrics::new(&markets),
             markets,
             path: Some(path),
+            stalled_until_ms: AtomicU64::new(0),
         })
     }
 
@@ -120,12 +125,52 @@ impl MarketFeed {
             metrics: FeedMetrics::new(&markets),
             markets,
             path: None,
+            stalled_until_ms: AtomicU64::new(0),
         }
+    }
+
+    /// The staleness window every consumer shares (`readyz`, the order
+    /// lane): live data older than this is stale — and stale is not tradable.
+    pub const MAX_STALE_MS: u64 = 30_000;
+
+    /// `stall`: hold the live market plane for `seconds` (0 clears) — the
+    /// staleness drill. Live writes are dropped while stalled (a real stall
+    /// serves nothing new); the control plane's scripted writes are never
+    /// gated. Returns the deadline in ms since the epoch (0 = not stalled).
+    pub(crate) fn stall(&self, seconds: u64) -> u64 {
+        let until = if seconds == 0 {
+            0
+        } else {
+            crate::now_ms().saturating_add(seconds.saturating_mul(1_000))
+        };
+        self.stalled_until_ms.store(until, Ordering::Relaxed);
+        until
+    }
+
+    /// Whether the live plane is currently held (the staleness drill).
+    pub(crate) fn stalled(&self) -> bool {
+        let until = self.stalled_until_ms.load(Ordering::Relaxed);
+        until != 0 && crate::now_ms() < until
+    }
+
+    /// The served book's age when it is live-sourced and older than `max_ms`:
+    /// `None` for a scripted book (the scenario's present is never stale) and
+    /// for a coin whose live base has not landed yet (that read is `Warming`,
+    /// a different fault — absence, not staleness).
+    pub fn book_stale_ms(&self, coin: &str, now_ms: u64, max_ms: u64) -> Option<u64> {
+        if self.read_overrides().books.contains_key(coin) {
+            return None;
+        }
+        self.stale_ms(coin, now_ms).filter(|age| *age > max_ms)
     }
 
     // ---- writes (the poller / WS client / control plane) ------------------
 
     pub(crate) fn put_meta(&self, meta: Meta, now_ms: u64) {
+        if self.stalled() {
+            tracing::debug!("live meta dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
         let mut c = self.write();
         c.meta = Some(meta);
         c.meta_at = Some(now_ms);
@@ -136,12 +181,20 @@ impl MarketFeed {
     }
 
     pub(crate) fn put_ctx(&self, coin: String, ctx: AssetCtx, now_ms: u64) {
+        if self.stalled() {
+            tracing::debug!(coin = %coin, "live ctx dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
         let mut c = self.write();
         c.ctx_at.insert(coin.clone(), now_ms);
         c.ctxs.insert(coin, ctx);
     }
 
     pub(crate) fn put_book(&self, book: L2Book, now_ms: u64) {
+        if self.stalled() {
+            tracing::debug!(coin = %book.coin, "live book dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
         // I2/I6 are scoped to the *served* base: a live update refreshes
         // (and can prune against) the book only while live is what the coin
         // serves. A scripted book owns the coin until its hand-back — the
@@ -187,6 +240,10 @@ impl MarketFeed {
     }
 
     pub fn put_mids(&self, mids: BTreeMap<String, Decimal>, now_ms: u64) {
+        if self.stalled() {
+            tracing::debug!("live mids dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
         let mut c = self.write();
         c.mids = mids;
         c.mids_at = Some(now_ms);
@@ -551,6 +608,50 @@ mod tests {
         assert_eq!(served.levels[0][0].px, Decimal::from(99));
         feed.clear_book("BTC").unwrap();
         assert_eq!(feed.book("BTC", 6_000).unwrap().levels[0][0].px, Decimal::from(100));
+    }
+
+    /// The stall holds the live plane (scripted writes still land) and the
+    /// served-book freshness is live-only: a scripted book is never stale.
+    #[test]
+    fn a_stall_drops_live_updates_and_book_freshness_is_live_only() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        let now = crate::now_ms();
+        let book = |px: &str| L2Book {
+            coin: "BTC".into(),
+            time: 1,
+            levels: [
+                vec![Level { px: px.parse().unwrap(), sz: Decimal::ONE, n: 1 }],
+                vec![],
+            ],
+            spread: None,
+        };
+        feed.put_ctx("BTC".into(), test_ctx("100", "101"), now);
+        feed.put_book(book("100"), now);
+        assert_eq!(feed.book_stale_ms("BTC", now, MarketFeed::MAX_STALE_MS), None);
+        assert_eq!(
+            feed.book_stale_ms("BTC", now + MarketFeed::MAX_STALE_MS + 1, MarketFeed::MAX_STALE_MS),
+            Some(MarketFeed::MAX_STALE_MS + 1),
+            "an aged live book is stale"
+        );
+        // The stall: live writes drop, scripted writes land.
+        assert_eq!(feed.stall(30), now + 30_000);
+        assert!(feed.stalled());
+        feed.put_ctx("BTC".into(), test_ctx("999", "999"), now);
+        feed.put_book(book("999"), now);
+        assert_eq!(feed.mark("BTC"), Some(Decimal::from(100)), "the live ctx was dropped");
+        assert_eq!(feed.book("BTC", now).unwrap().levels[0][0].px, Decimal::from(100));
+        feed.own_book(&book("77")).unwrap();
+        assert_eq!(
+            feed.book("BTC", now).unwrap().levels[0][0].px,
+            Decimal::from(77),
+            "the scripted plane is never gated"
+        );
+        assert_eq!(feed.book_stale_ms("BTC", now + 60_000, MarketFeed::MAX_STALE_MS), None);
+        // Clearing the stall lets the live plane back in.
+        feed.stall(0);
+        assert!(!feed.stalled());
+        feed.put_ctx("BTC".into(), test_ctx("999", "999"), now);
+        assert_eq!(feed.mark("BTC"), Some(Decimal::from(999)));
     }
 
     #[test]

@@ -68,7 +68,10 @@ refused by name (the devnet has no resting book — nothing ever rests, so
 envelope (`{"status":"err","response":"…"}`, HTTP 200 — the shape their
 client already parses), never a 404. The signature is accepted, never
 verified (the devnet has no keys — the anvil-impersonation analogue); the
-acting account is read from the body's `user`.
+acting account is read from the body's `user` — optional in the body so the
+SDK's `noop` (which carries none) parses; an *order* without it refuses by
+name. `noop` itself is modeled: `{"type":"noop"}` answers the venue's no-data
+success (`{"status":"ok","response":{"type":"default"}}`).
 
 ## 3. The CCTP bridge (Iris :8095, control :8096)
 
@@ -102,7 +105,7 @@ vanished-burn/keeper caveats.
 | Boundary | Refusal |
 |---|---|
 | sim `/info` | an unknown type answers `"unrouted"` (200) |
-| sim `/exchange` | an order fills, or refuses per-order by name (IOC only); a non-order action answers HL's err envelope naming the boundary (200) |
+| sim `/exchange` | an order fills, or refuses per-order by name (IOC only); `noop` answers the no-data success; any other action answers HL's err envelope naming the boundary (200) |
 | sim readiness | 503, naming the cause (`market plane warming up` / `sim state poisoned`) |
 | engine `/admin/deal` | 400 naming the numbers (`holds 0 USDC on ethereum, needs 1000000 (deal via the chain's admin surface)`) |
 | engine `/admin/shadow` | 400 naming the missing keys (`clear` needs `slots`, `account_fields`, or `all`) |

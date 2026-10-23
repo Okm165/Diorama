@@ -905,7 +905,13 @@ weights (metaAndAssetCtxs + spotMeta at 20, four books + allMids at 2), well
 inside the cap. Per-coin staleness gauges
 (`venue_sim_stale_ms{coin}`) are the freshness signal, and `/readyz` gates on it
 (meta present + every configured market fresher than 30 s; the client's own gate
-is ≤6 s).
+is ≤6 s). The same window (`MarketFeed::MAX_STALE_MS`, one home) gates the
+**order lane**: a fill on a live-sourced book older than it refuses by name
+(a scripted book is the scenario's present and never stale), so trading on
+stale data is impossible, not merely discouraged. `POST /control/stall
+{seconds}` holds the live plane for the drill (0 clears): live writes drop,
+the gauges keep counting, and `/readyz` and the lane both see the stall
+exactly as they would a real one — the scripted plane is never gated.
 
 Scenario overrides compose over the cache: `crash` owns a coin's **mark and
 oracle**, `set_funding` the hourly rate, `set_book` the book (a scripted book is
@@ -970,6 +976,7 @@ own clock — the COW overlay's split, by design.
 | `POST /control/advance` | `{seconds?, n?}` | jump the sim clock and run `n` liquidation checks inside it |
 | `POST /control/crash` | `{coin, pct?}` | own the coin's mark + oracle (absent = hand back to live) |
 | `POST /control/set_book` | `{coin, levels?}` | scripted book, ≤20 levels per side (absent = hand back) |
+| `POST /control/stall` | `{seconds}` | hold the live market plane (0 clears) — the staleness drill; scripted writes are never gated |
 | `POST /control/set_funding` | `{coin, rate?}` | own the hourly rate (absent = hand back) |
 | `POST /control/set_account` | `{address, state}` | hl_mock-compatible seeding (`totalRawUsd` + positions); a **patch** in their shape's field names (`userAbstraction`, `spotBalances`; unnamed fields keep their value) |
 | `GET /control/state/{address}` | - | the account's control (fixture) view — the hl_mock-compatible patch shape; an untouched address answers hl_mock's default (mode `disabled`), never a 404 |
@@ -1052,7 +1059,10 @@ Unknown types answer `"unrouted"` (hl_mock's contract).
 
 **The order lane (plan §4.5 — the market-impact axiom).** One lane, three
 doors: `POST /exchange`'s `order` action, `POST /control/order`, and the
-CoreWriter limit order (id 1) decoded from V's blocks. An IOC order walks the
+CoreWriter limit order (id 1) decoded from V's blocks. `/exchange` also
+models the `noop` action (the venue's no-data success envelope) — `user` is
+optional in the body so the SDK's noop parses, and an *order* without it
+refuses by name (the devnet has no keys to derive the signer). An IOC order walks the
 **served book** — the live depth the feed caches minus what the devnet already
 consumed — in price order, taking each level's size up to the order's size and
 limit; the fill's average is size-weighted across the levels it took. The

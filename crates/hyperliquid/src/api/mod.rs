@@ -97,6 +97,7 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
         .route("/control/order", post(control::order))
         .route("/control/advance", post(control::advance))
         .route("/control/crash", post(control::crash))
+        .route("/control/stall", post(control::stall))
         .route("/control/set_book", post(control::set_book))
         .route("/control/set_funding", post(control::set_funding))
         .route("/control/set_account", post(control::set_account))

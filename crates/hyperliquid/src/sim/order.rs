@@ -203,6 +203,17 @@ fn walk_served_book(
     validate_tick_lot(meta, req)?;
     validate_min_notional(feed, req)?;
     let now = crate::now_ms();
+    // The freshness discipline (stale ≠ absent): a live-sourced book older
+    // than the shared window is not tradable — the fill would price off a
+    // snapshot the venue has already left. A scripted book is the scenario's
+    // present and never stale.
+    if let Some(age) = feed.book_stale_ms(&req.coin, now, MarketFeed::MAX_STALE_MS) {
+        tracing::warn!(coin = %req.coin, age_ms = age, "order refused: stale book");
+        return Err(Error::bad_request(format!(
+            "the {} book is stale ({age} ms since the last live update); trading on stale data is refused",
+            req.coin
+        )));
+    }
     let book = feed.book(&req.coin, now).ok_or(Error::Warming)?;
     let (filled, avg_px, consumed) = walk(&book, req)?;
     if filled <= Decimal::ZERO {
@@ -378,7 +389,10 @@ mod tests {
     /// margin check values positions against it.
     fn feed_with_book(book: L2Book, meta: Meta) -> MarketFeed {
         let feed = MarketFeed::memory(vec!["ETH".to_string()]);
-        feed.put_meta(meta, 0);
+        // Honest stamps: the lane's freshness gate reads the ctx age, and a
+        // fixture stamped at the epoch would read as permanently stale.
+        let now = crate::now_ms();
+        feed.put_meta(meta, now);
         let mark = book.levels[1]
             .first()
             .map(|l| l.px)
@@ -386,9 +400,9 @@ mod tests {
         feed.put_ctx(
             "ETH".into(),
             crate::wire::test_ctx(&mark.to_string(), &mark.to_string()),
-            0,
+            now,
         );
-        feed.put_book(book, 0);
+        feed.put_book(book, now);
         feed
     }
 
@@ -515,6 +529,10 @@ mod tests {
     #[test]
     fn a_reduce_realizes_pnl() {
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        // The test is the PnL identity, not funding: the fills settle funding
+        // (a sub-nano term with the fixture's tiny rate) — pin it to zero so
+        // the assertion is exact.
+        feed.own_funding("ETH", Decimal::ZERO).unwrap();
         let (sim, a) = funded_sim(&feed, "1000");
         sim.order(&feed, a, &ioc(true, "2")).unwrap();
         let before = sim.account(a).unwrap().unwrap().perp_balance;
@@ -543,6 +561,27 @@ mod tests {
         o.limit_px = Some("100.5".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
         assert!(format!("{err}").contains("could not immediately match"), "{err}");
+    }
+
+    /// A stale live book refuses by name; a scripted book for the same coin
+    /// is the scenario's present and fills.
+    #[test]
+    fn a_stale_live_book_refuses_but_a_scripted_one_fills() {
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let (sim, a) = funded_sim(&feed, "1000");
+        // Age the live ctx past the shared window.
+        let old = crate::now_ms() - MarketFeed::MAX_STALE_MS - 1_000;
+        feed.put_ctx(
+            "ETH".into(),
+            crate::wire::test_ctx("100", "100"),
+            old,
+        );
+        let err = sim.order(&feed, a, &ioc(true, "0.1")).unwrap_err();
+        assert!(format!("{err}").contains("stale"), "{err}");
+        // The scenario scripts the coin: its present is never stale.
+        feed.own_book(&book("ETH", &[("100", "5")], &[("101", "5")])).unwrap();
+        let fill = sim.order(&feed, a, &ioc(true, "0.1")).unwrap();
+        assert_eq!(fill.total_sz, "0.1".parse().unwrap());
     }
 
     /// The venue settles funding at the trade: a fill accrues to now on the

@@ -17,6 +17,12 @@
 #      at the touch (the scripted base handed back first)
 #   F. the owned mark is never moved - with the mark owned by a crash, a fill
 #      leaves it identical (I3), and the hand-back clears the consumptions
+#   G. the noop action            - the venue's no-data success envelope; an
+#      order without `user` refuses by name (the field is optional so the
+#      SDK's noop, which carries none, parses)
+#   H. the freshness gate         - a stalled live plane refuses by name and
+#      answers readyz 503; the hand-back restores both (the shared window;
+#      this leg sleeps past it, ~31 s)
 #
 # Run from the repo root:
 #   make venue-order-proof
@@ -194,6 +200,35 @@ own=$(metric venue_sim_owned_levels)
 [ "$own" = "0" ] && ok "owned_levels is 0 after the hand-back" || bad "owned_levels=$own"
 filled1=$(metric venue_sim_orders_filled_total)
 [ "$filled1" -gt "$filled0" ] && ok "the fill counter moved ($filled0 -> $filled1)" || bad "orders_filled=$filled1"
+
+echo "-- G. the noop action (the venue's no-data success)"
+x=$(sipost /exchange "{\"action\":{\"type\":\"noop\"},\"nonce\":1705234567890,\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")
+[ "$(echo "$x" | json 'd.get("status")')" = "ok" ] && [ "$(echo "$x" | json 'd["response"]["type"]')" = "default" ] \
+  && ok "noop answers the venue's default envelope (no user field needed)" || bad "noop: $x"
+x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":true,\"s\":\"0.01\"}]},\"nonce\":1705234567891}")
+echo "$x" | json 'd.get("status")' | grep -q err \
+  && echo "$x" | json 'd["response"]' | grep -q "must name the acting account" \
+  && ok "an order without \`user\` refuses by name (the devnet has no keys)" || bad "user-less order: $x"
+
+echo "-- H. the freshness gate (a stalled live plane refuses by name)"
+x=$(spost /control/stall '{"seconds":45}')
+[ "$(echo "$x" | json 'd["stalled_until_ms"]')" != "0" ] && ok "the live plane is stalled" || bad "stall: $x"
+sleep 31
+code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$SIM_INFO/readyz")
+[ "$code" = "503" ] && ok "readyz answers 503 on the stalled plane" || bad "readyz during stall: $code"
+x=$(spost /control/order "{\"address\":\"$ORDER_ACCT\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"0.01\"}" || true)
+echo "$x" | grep -q "stale" && ok "an order on the stale book refuses by name" || bad "stale order: $x"
+spost /control/stall '{"seconds":0}' > /dev/null
+code=""
+for _ in $(seq 1 20); do
+  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$SIM_INFO/readyz")
+  [ "$code" = "200" ] && break
+  sleep 1
+done
+[ "$code" = "200" ] && ok "the hand-back restored the live plane (readyz 200)" || bad "readyz after: $code"
+f=$(spost /control/order "{\"address\":\"$ORDER_ACCT\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"0.01\"}")
+[ "$(echo "$f" | json 'd.get("totalSz")')" = "0.01" ] && ok "an order fills again after the hand-back" || bad "post-stall fill: $f"
+spost /control/order "{\"address\":\"$ORDER_ACCT\",\"coin\":\"$COIN\",\"is_buy\":false,\"size\":\"0.01\",\"reduce_only\":true}" > /dev/null || true
 
 echo "== venue order-lane proof: $pass passed, $fail failed"
 [ "$fail" = "0" ]

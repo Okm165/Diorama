@@ -367,6 +367,29 @@ chain facts:
   credit), then a `sendAsset` naming that address (the completion — the system
   address sends the ERC-20 back), exact balances end to end.
 
+### The freshness gate and the local feed bridge (measured live, 2026-10-23)
+
+- **The staleness drill** (`venue-order-proof` H, live): `POST
+  /control/stall {"seconds":45}` holds the live plane; past the shared 30 s
+  window `/readyz` answers 503 and an order refuses by name ("the ETH book is
+  stale (31340 ms since the last live update)"); clearing the stall restores
+  readyz 200 and fills again. A scripted book is exempt — it is the scenario's
+  present, never stale.
+- **The T-side feed bridge, locally** (`make mainnet-feed-local`, 6 checks):
+  the scratch T's feed targets are empty (daloc's fixture deploy installs the
+  mocks on the cluster), so the proof installs a hand-assembled
+  Chainlink-shaped stub (`decimals`/`latestRoundData`/`updateAnswer`) at each
+  configured target — then the bridge publishes the *live mainnet* answers
+  (measured: WETH $2396.35, WBTC $81640.39, USDC $0.9999, USDT $0.9989,
+  wstETH $2400.25), a scenario's write pauses the feed with its value
+  preserved (never overwritten), and the hand-back republishes the live value.
+  A publish's tx mines on the next applied parent block, so the waits are
+  budgeted past one mainnet block.
+- **`noop` and the user-less order** (live): `{"type":"noop"}` answers
+  `{"status":"ok","response":{"type":"default"}}` with no `user` field (the
+  SDK's shape); an *order* without `user` refuses by name in the err envelope
+  (HTTP 200) — the devnet has no keys to derive the signer.
+
 ### The unified-margin and CoreWriter doors (measured live, 2026-10-23)
 
 `make cctp-margin-cycle` now runs 34 checks and carries the axiom's two
@@ -424,7 +447,7 @@ the bridge documents, never a silent retry).
 
 ### The order lane (measured live, 2026-10-23)
 
-`make venue-order-proof` (30 checks, direct mode against the scratch stack) is
+`make venue-order-proof` (37 checks, direct mode against the scratch stack) is
 the §4.5 impact lane's acceptance: with a **scripted** base the walk is
 deterministic — a 2.5 buy across asks `3001×2, 3002×1` filled at the
 size-weighted `3001.20`, the fill's `consumed` recorded the two levels

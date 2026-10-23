@@ -19,7 +19,9 @@
 //! ethereum stack is never compiled here (the closure matrix enforces it).
 //! Clocks: `block` = the **V height** (HyperEVM blocks; the venue profile has
 //! no second chain); the simulator's clock is its served `time` (ms,
-//! self-advancing), never a block label.
+//! self-advancing), never a block label; `age_ms` = the served book's
+//! staleness age (wall ms since the last live context update — the freshness
+//! gate's figure, not a clock).
 pub mod api;
 pub mod bridge;
 pub mod ctx;

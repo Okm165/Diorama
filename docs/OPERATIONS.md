@@ -742,7 +742,11 @@ curl -s -X POST localhost:31091/control/crash -d '{"coin":"ETH"}'   # hand back
 The crash owns mark *and* oracle until handed back; a position below maintenance
 closes at the mark (v1). The L1 analog is the feed bridge: a scenario's write to
 a mock aggregator pauses that feed automatically; `POST .../admin/feed/resume`
-hands it back, and `GET .../admin/feed` shows confirmed/pending state.
+hands it back, and `GET .../admin/feed` shows confirmed/pending state. Locally
+the mocks are absent (daloc's fixture deploy installs them on the cluster), so
+`make mainnet-feed-local` installs a minimal Chainlink-shaped stub at each
+configured target and proves the whole lane — live parent answers published,
+a scenario's write paused (its value preserved), the hand-back restored.
 
 **The bridge round-trip.**
 
@@ -787,5 +791,5 @@ StorageClass as the mainnet mirror; the state layout is the shared one
 | `feed_bridge_pass_errors_total` climbing | a feed's pass keeps failing: a source read (reth down, bad address), a target read, a publish, or a decimals mismatch | `GET /admin/feed`'s `last_error` names the cause; check reth and the feed's addresses in the instance file |
 | `venue_bridge_credits_total` flat while a transfer landed on V | the bridge is not anchored, or the block predates the pin (source blocks are never scanned) | check `sim.json`'s `bridge_cursor` (0 = not anchored; the first pass anchors at `head.max(pin)`); check `venue_bridge_trace_faults_total` |
 | `venue_bridge_trace_faults_total` rising | V's callTracer failed: contract-internal CoreWriter calls are missed that block | check V's health; the block is counted, not half-applied - re-mine the activity |
-| `venue_sim_stale_ms{coin}` above the freshness window | the market plane is behind (WS down, REST budget exhausted) | check `venue_sim_ws_connected` / `venue_sim_budget_skips_total`; `/readyz` reflects it |
+| `venue_sim_stale_ms{coin}` above the freshness window | the market plane is behind (WS down, REST budget exhausted) | check `venue_sim_ws_connected` / `venue_sim_budget_skips_total`; `/readyz` reflects it, and the order lane refuses stale fills by name. Drill: `POST /control/stall {"seconds":45}`, wait past the window, watch `/readyz` 503 + the refusal, clear with `{"seconds":0}` (venue-order-proof's H leg does exactly this) |
 | `venue_sim_budget_weight_used` pinned at 1200 | the rate budget is exhausted: REST calls are being skipped | raise the poll interval or trim `markets`; WS pushes keep carrying marks |

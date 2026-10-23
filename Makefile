@@ -241,6 +241,9 @@ mainnet-scenario: ## Scenario test: self-containment, live parity (M+T), devnet 
 mainnet-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
 	NS=mainnet-mirror ./scripts/mainnet-proof.sh
 
+mainnet-feed-local: ## Local feed-bridge proof (live parent answers -> mock aggregators, scenario pause/resume)
+	./scripts/mainnet-feed-local.sh
+
 mainnet-product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T
 	NS=mainnet-mirror ./scripts/mainnet-product-sim.sh
 
@@ -317,5 +320,5 @@ help: ## Show this help
 	images build venue-build import deploy-engine test-engine config-check \
 	status logs mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-drill \
 	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
-	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check \
+	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
 	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help

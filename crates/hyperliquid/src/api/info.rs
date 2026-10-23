@@ -25,8 +25,6 @@ use std::sync::Arc;
 
 /// The readiness gate's freshness window (the plan's ≤6 s client gate, with
 /// margin for a poll interval).
-const READY_MAX_STALE_MS: u64 = 30_000;
-
 pub async fn healthz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     if state.sim.is_poisoned() {
         // The account plane refuses every read; a 200 here would hide an
@@ -40,7 +38,7 @@ pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoRespo
     if state.sim.is_poisoned() {
         return (StatusCode::SERVICE_UNAVAILABLE, "sim state poisoned");
     }
-    if state.ready(READY_MAX_STALE_MS) {
+    if state.ready(crate::feed::MarketFeed::MAX_STALE_MS) {
         (StatusCode::OK, "ready")
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "market plane warming up")
@@ -58,12 +56,24 @@ pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoRespo
 /// analogue), and the acting account is read from `user`.
 pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
     let req: ExchangeBody = serde_json::from_slice(&body).map_err(|source| Error::bad_request(format!("invalid exchange request: {source}"),))?;
+    // The noop action (docs): no side effects, the venue's no-data success.
+    if matches!(req.action, ExchangeAction::Noop) {
+        return Ok(noop_response(&req));
+    }
+    let Some(user) = req.user else {
+        return Ok(err_envelope(
+            "venue-sim: an order must name the acting account in `user` — the devnet has no \
+             keys to derive it from the signature (plan §17). See docs/INTEGRATION.md."
+                .to_string(),
+        )
+        .into_response());
+    };
     let (orders, grouping) = match order_parts(&body, &req.action) {
         Ok(parts) => parts,
         Err(reason) => return Ok(err_envelope(reason).into_response()),
     };
     tracing::info!(
-        user = %req.user,
+        user = %user,
         nonce = ?req.nonce,
         expires_after = ?req.expires_after,
         signed = req.signature.as_ref().is_some_and(Signature::is_shaped),
@@ -76,7 +86,7 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
     let meta = state.feed.meta();
     let statuses = orders
         .iter()
-        .map(|action| fill_status(&state, req.user, meta.as_ref(), action))
+        .map(|action| fill_status(&state, user, meta.as_ref(), action))
         .collect();
     Ok(Json(ExchangeOk {
         status: "ok",
@@ -86,6 +96,22 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
         },
     })
     .into_response())
+}
+
+/// The noop's answer: the venue's no-data success envelope, logged in the
+/// same shape every exchange call is.
+fn noop_response(req: &ExchangeBody) -> Response {
+    tracing::info!(
+        user = ?req.user,
+        nonce = ?req.nonce,
+        signed = req.signature.as_ref().is_some_and(Signature::is_shaped),
+        "exchange noop accepted (the signature is accepted, never verified)"
+    );
+    Json(ExchangeOk {
+        status: "ok",
+        response: DefaultBody { r#type: "default" },
+    })
+    .into_response()
 }
 
 /// The action's orders after the boundary checks, or the refusal reason the
@@ -106,8 +132,8 @@ fn order_parts<'a>(
             .map(|t| t.action.r#type)
             .unwrap_or_else(|_| "unknown".into());
         return Err(format!(
-            "venue-sim: only the order action is modeled (plan §4.5/§5, Phase 2); `{tag}` is \
-             not. See docs/INTEGRATION.md."
+            "venue-sim: only the order and noop actions are modeled (plan §4.5/§5, Phase 2); \
+             `{tag}` is not. See docs/INTEGRATION.md."
         ));
     };
     if let Some(builder) = builder {
@@ -165,7 +191,10 @@ pub(crate) struct ExchangeBody {
     pub action: ExchangeAction,
     /// The acting account. The real venue derives it from the signature; the
     /// devnet has no keys, so it reads the field (the documented analogue).
-    pub user: Address,
+    /// Optional in the body so the SDK's `noop` (which carries no `user`)
+    /// parses; an order without it refuses by name.
+    #[serde(default)]
+    pub user: Option<Address>,
     #[serde(default)]
     pub nonce: Option<u64>,
     #[serde(default)]
@@ -208,11 +237,14 @@ impl Signature {
     }
 }
 
-/// The action, tagged by `type`. Only `order` is modeled; every other tag the
-/// venue defines lands in `Unmodeled` and is refused by name.
+/// The action, tagged by `type`. `order` and `noop` are modeled; every other
+/// tag the venue defines lands in `Unmodeled` and is refused by name.
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub(crate) enum ExchangeAction {
+    /// The no-operation action (docs): signature-authentication testing with
+    /// no side effects. Answers the venue's no-data success envelope.
+    Noop,
     Order {
         orders: Vec<OrderAction>,
         /// The batch's grouping (docs: `"na" | "normalTpsl" | "positionTpsl"`).
@@ -328,11 +360,17 @@ impl OrderAction {
     }
 }
 
-/// The ok envelope (the venue's own shape; the per-order results inside).
+/// The ok envelope (the venue's own shape; the body varies by action).
 #[derive(Debug, serde::Serialize)]
-pub(crate) struct ExchangeOk {
+pub(crate) struct ExchangeOk<T> {
     pub status: &'static str,
-    pub response: OrderResponseBody,
+    pub response: T,
+}
+
+/// The venue's no-data success body (`noop` and friends: `{"type":"default"}`).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct DefaultBody {
+    pub r#type: &'static str,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -844,7 +882,32 @@ mod tests {
         assert_eq!(req.expires_after, Some(1_792_750_000_000));
     }
 
-    /// Every non-order action lands in `Unmodeled` (the named refusal path),
+    /// `noop` parses without a `user` (the SDK's shape) and answers the
+    /// venue's no-data success envelope; an order without one refuses by name.
+    #[test]
+    fn noop_answers_the_venues_default_envelope() {
+        let body: ExchangeBody = serde_json::from_str(
+            r#"{"action":{"type":"noop"},"nonce":1705234567890,"signature":{"r":"0x01","s":"0x02","v":27}}"#,
+        )
+        .unwrap();
+        assert!(matches!(body.action, ExchangeAction::Noop));
+        assert!(body.user.is_none(), "the SDK's noop carries no user");
+        let out = serde_json::to_value(ExchangeOk {
+            status: "ok",
+            response: DefaultBody { r#type: "default" },
+        })
+        .unwrap();
+        assert_eq!(out, serde_json::json!({"status": "ok", "response": {"type": "default"}}));
+        // An order without `user`: parsed (the field is optional) but refused
+        // by name on the way in — the devnet cannot derive it.
+        let order: ExchangeBody = serde_json::from_str(
+            r#"{"action":{"type":"order","orders":[]},"nonce":1705234567890}"#,
+        )
+        .unwrap();
+        assert!(order.user.is_none());
+    }
+
+    /// Every other action tag lands in `Unmodeled` (the named refusal path),
     /// and the filled status serializes in the venue's own shape.
     #[test]
     fn unmodeled_actions_and_the_fill_shape() {

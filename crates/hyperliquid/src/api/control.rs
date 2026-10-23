@@ -199,6 +199,29 @@ pub(crate) struct CrashResponse {
     pub oracle: Option<Decimal>,
 }
 
+/// `stall`: hold the live market plane for `seconds` (0 clears) — the
+/// staleness drill. Live writes drop (the staleness gauges keep counting, so
+/// `readyz` and the order lane see the stall exactly as they would a real
+/// one); the scripted plane is never gated.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct StallRequest {
+    pub seconds: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct StallResponse {
+    /// The deadline (ms since the epoch; 0 = not stalled).
+    pub stalled_until_ms: u64,
+}
+
+pub(crate) async fn stall(State(state): State<Arc<ApiState>>, Json(req): Json<StallRequest>) -> Result<Json<StallResponse>> {
+    let until = state.feed.stall(req.seconds);
+    tracing::info!(seconds = req.seconds, stalled_until_ms = until, "live market plane stall set");
+    Ok(Json(StallResponse {
+        stalled_until_ms: until,
+    }))
+}
+
 pub(crate) async fn crash(State(state): State<Arc<ApiState>>, Json(req): Json<CrashRequest>) -> Result<Json<CrashResponse>> {
     let feed = &state.feed;
     match req.pct {
