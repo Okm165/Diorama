@@ -47,7 +47,8 @@ spec:
             - name: ANVIL_V_URL
               valueFrom: { configMapKeyRef: { name: venue-config, key: ANVIL_V_URL } }
             # The funded relay wallet's hex key: a Secret, never a manifest
-            # literal (the instance reads it as ${CCTP_RELAY_KEY}).
+            # literal (the instance reads it as ${CCTP_RELAY_KEY}); create it
+            # once with `make venue-secrets CCTP_RELAY_KEY=0x…`.
             - name: CCTP_RELAY_KEY
               valueFrom: { secretKeyRef: { name: cctp-relay-key, key: relay-key } }
           ports:

@@ -36,6 +36,9 @@ ns: ## Create namespace + StorageClass (idempotent)
 secrets: ## Create the reth<->lighthouse JWT secret if missing
 	NS=$(NS) ./scripts/gen-secret.sh
 
+venue-secrets: ## Create the CCTP relay-wallet secret (CCTP_RELAY_KEY=0x…; venue namespace)
+	NS=venue-mirror ./scripts/gen-venue-secret.sh
+
 apply: ## Apply the selected instance's stack (INSTANCE selects the overlay)
 	kubectl apply -k $(OVERLAY)
 

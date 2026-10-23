@@ -410,7 +410,11 @@ The behavioral checks, not just shapes:
   `DEAL_LAYOUT_TOLERANT=1`, which keeps the behavioral symmetry required.
 - **the documented absences**: `/admin/time` — the ethereum's persistent clock
   offset; V's clock is native anvil (`setNextBlockTimestamp`/`evm_mine`), so a
-  route nobody re-aligns would be a no-op. `/admin/feed*` — the L1 feed
+  route nobody re-aligns would be a no-op (measured: engine-mined venue blocks
+  advance the clock ~1 s each, so the head's lag behind wall is the time since
+  the last mine, while T's applier stamps each block at its parent's time —
+  the harness's own mining drives V's clock, and its boot `setTime` pins it to
+  wall). `/admin/feed*` — the L1 feed
   bridge's routes; the venue's counterpart is the simulator's control plane
   (`/control/crash`, `/control/deal`, …).
 - **`/status`** — each engine reports its own facts (reth/M/T vs fork

@@ -77,25 +77,15 @@ fn expand_str(s: &str, vars: &[(String, String)], unresolved: &mut Vec<String>) 
 /// `Instance::load`: the venue engine, the simulator and the CCTP bridge all
 /// boot from the same instance file with only their own wiring present.
 pub fn require_resolved(what: &'static str, values: &[&str]) -> Result<(), ConfigError> {
-    let mut missing: Vec<String> = Vec::new();
+    // The same scanner the loader uses, with an empty environment: every
+    // `${VAR}` it meets is by definition unresolved. `${}` stays literal.
+    let mut missing = Vec::new();
     for value in values {
-        let mut rest = *value;
-        while let Some(start) = rest.find("${") {
-            let after = &rest[start + 2..];
-            match after.find('}') {
-                Some(end) if !after[..end].is_empty() => {
-                    let name = &after[..end];
-                    if !missing.iter().any(|m| m == name) {
-                        missing.push(name.to_string());
-                    }
-                    rest = &after[end + 1..];
-                }
-                // `${}` is not a reference (the loader keeps it literal).
-                Some(end) => rest = &after[end + 1..],
-                None => break,
-            }
-        }
+        expand_str(value, &[], &mut missing);
     }
+    // One report per variable, in first-appearance order (the loader's rule).
+    let mut seen = std::collections::HashSet::new();
+    missing.retain(|name| seen.insert(name.clone()));
     if missing.is_empty() {
         return Ok(());
     }

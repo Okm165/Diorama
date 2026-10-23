@@ -456,6 +456,14 @@ so both mirrors fit on one node. There is no `reth`/`lighthouse`/`anvil-m` here
 and no M/T split: V is a single fork-mode chain, and the engine's job is the
 fork lifecycle plus the devnet's own blocks.
 
+**First rollout**: `make ns INSTANCE=venue-mirror` creates the namespace, and
+`make venue-secrets CCTP_RELAY_KEY=0x…` creates the bridge's relay-wallet
+Secret (`cctp-relay-key`, referenced by the manifest but not in the k8s tree —
+a key is not a manifest). Use a dedicated key, never the deployer's; on the
+devnet the bridge self-funds the wallet at boot, so it needs no balance yet.
+Without the Secret the bridge pod waits in `CreateContainerConfigError`; the
+engine and the simulator boot without it.
+
 **V's block production is the engine's** — the counterpart of T's applier
 (one block per applied parent block): the driver mines a non-empty pool once
 per pass (`venue_mined_blocks_total`). The bridge's boot txs and relay mints
