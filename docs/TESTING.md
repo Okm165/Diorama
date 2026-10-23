@@ -345,6 +345,14 @@ admin gauges in `/metrics`, and exactly the documented absences:
 - `/admin/time` — the ethereum's persistent clock offset; V's clock is native
   anvil (`setNextBlockTimestamp`/`evm_mine`), so a route nobody re-aligns
   would be a no-op.
+The script checks the HTTP surface; the **behavioral contracts** behind it are
+verified separately (measured live 2026-10-23): `pause` freezes both engines'
+cursors (T's head held for 12 s; V's pool accumulated while the cursor stayed)
+and `resume` drains and advances; `/admin/deal {amount:"0"}` is the drain
+(0 on both chains, the same per-account slot); a successful `rewind` restores
+the journal's before-values (the venue: `restored_values: 1`, the balance
+returned to its pre-deal value).
+
 - `/admin/feed*` — the L1 feed bridge's routes; the venue's counterpart is the
   simulator's control plane (`/control/crash`, `/control/deal`, …).
 - `/status` — each engine reports its own facts (reth/M/T vs fork pin/probes/
