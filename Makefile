@@ -192,6 +192,9 @@ venue-drill: ## The venue epoch drill (same-pin restore, new-pin epoch, driver l
 venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation, bridge round-trip)
 	NS=venue-mirror ./scripts/venue-proof.sh
 
+venue-product-sim: ## The daloc use-case simulation against the venue stack (endpoints via env)
+	python3 scripts/daloc-sim.py
+
 feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
 	./scripts/feed-bridge.sh $(ARGS)
 

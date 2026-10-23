@@ -35,7 +35,10 @@ Devnet reality then bites where the real lane never sees it:
   never re-owned (the mirror's I6 rule).
 - **`POST /v2/reattest/{nonce}` is the deliberate way back.** It re-signs the
   watched message with a fresh expiration window and re-arms the record
-  (`signed`) — the only path the relayer acts on after a park.
+  (`signed`) — the only path the relayer acts on after a park. The relayer
+  still refuses to mint when the source burn no longer exists (a re-pin
+  removed it), re-parking with that reason: a reattest can revive an expired
+  message, never a vanished burn.
 - **The hook lane is the official wrapper.** A credit-carrying transfer burns
   `depositForBurnWithHook` with `hookData = target(20) ‖ calldata` and
   `destinationCaller = wrapper`; the relay calls the owner-gated

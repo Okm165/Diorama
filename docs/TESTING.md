@@ -337,7 +337,8 @@ Iris. Proven live on scratch forks:
 - source rewind: a reverted-away burn is parked by the watcher ("the burn
   transaction no longer exists"); destination rewind: a rewound mint is parked
   by the relayer ("the mint is no longer on-chain"); reattest re-arms it and
-  the mint lands again;
+  the mint lands again — but a reattest of a *vanished* burn is re-parked by
+  the relayer ("the source burn no longer exists"), never minted;
 - the hook lane: `depositForBurnWithHook` + `destinationCaller = wrapper` →
   `wrapper.relay` mints **and** runs the encoded call in one tx (a USDC
   transfer hook moved the mint through the wrapper to the recipient); a

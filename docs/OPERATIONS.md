@@ -489,6 +489,16 @@ for >1 min means the market plane is on the REST lane (watch
 window means `/readyz` will fail; `venue_bridge_trace_faults_total` rising means
 contract-internal CoreWriter calls are being missed that block.
 
+### The daloc-facing endpoints
+
+The harness's external-mode env block lives in the manifests: the
+`test-endpoints` ConfigMap of each overlay (`k8s/base/nodeports.yaml` for the
+L1 side — `CHAIN_RPC_URL`/`CHAIN_WS_URL`/`MIRROR_ADMIN_URL` — and
+`k8s/overlays/venue-mirror/nodeports.yaml` for the venue side, whose keys carry
+the second chain's `CHAIN_1_` prefix so sourcing both blocks yields one
+collision-free env). The NodePorts are the services' own (`kubectl get svc`),
+so the ConfigMaps and the Services cannot drift.
+
 ### The CCTP bridge
 
 The bridge (`cctp-bridge`, Iris 8095 / control 8096; 31095/31096 in-cluster)

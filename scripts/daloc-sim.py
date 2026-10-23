@@ -12,6 +12,7 @@ Usage:
   python3 sim.py --lane all
   python3 sim.py --lane operator     # one role, for a focused run
 """
+import os
 import argparse
 import json
 import subprocess
@@ -20,13 +21,16 @@ import time
 import urllib.request
 from decimal import Decimal
 
-T_RPC = "http://127.0.0.1:18602"          # the dry-run T (Ethereum devnet fork)
-T_ADMIN = "http://127.0.0.1:18680"        # the dry-run engine's admin API
-V_RPC = "http://127.0.0.1:18610"          # the venue V (HyperEVM fork)
-V_ADMIN = "http://127.0.0.1:18681"        # the venue engine's admin API
-SIM_INFO = "http://127.0.0.1:18790"       # venue-sim info (what daloc reads)
-SIM_CTRL = "http://127.0.0.1:18791"       # venue-sim control
-CAST = "/tmp/opencode/foundry-bin/cast"
+# Defaults are the session's scratch stack (T + both engines + the sim); every
+# endpoint is env-overridable, so the same script runs against a deployed
+# namespace once its NodePorts are known.
+T_RPC = os.environ.get("T_RPC", "http://127.0.0.1:18602")          # the devnet T (Ethereum fork)
+T_ADMIN = os.environ.get("T_ADMIN", "http://127.0.0.1:18680")      # the T engine's admin API
+V_RPC = os.environ.get("V_RPC", "http://127.0.0.1:18610")          # the venue V (HyperEVM fork)
+V_ADMIN = os.environ.get("V_ADMIN", "http://127.0.0.1:18681")      # the venue engine's admin API
+SIM_INFO = os.environ.get("SIM_INFO", "http://127.0.0.1:18790")    # venue-sim info (what daloc reads)
+SIM_CTRL = os.environ.get("SIM_CTRL", "http://127.0.0.1:18791")    # venue-sim control
+CAST = os.environ.get("CAST", "/tmp/opencode/foundry-bin/cast")
 
 AGENT = "0x00000000000000000000000000000000000000aa"       # the margin agent
 UNCONFIGURED = "0x7a3f8d2c9e1b4f6a0d5c8e2f9b3a7d4c1e6f0b5a"

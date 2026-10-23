@@ -209,6 +209,21 @@ impl Relayer {
             )?;
             return Ok(false);
         }
+        // The burn must still exist on the source: a reattest of a record
+        // whose burn a re-pin or rewind removed must never mint (I6 — stale
+        // derivations are parked, never re-owned).
+        let source = by_domain(&self.chains, record.source_domain)?;
+        let burn: Option<Box<serde_json::value::RawValue>> = source
+            .rpc
+            .call("eth_getTransactionByHash", (record.burn_tx,))
+            .await?;
+        if burn.is_none() {
+            self.park(
+                record.nonce,
+                "the source burn no longer exists (a re-pin or rewind); re-run the transfer".into(),
+            )?;
+            return Ok(false);
+        }
         if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
             self.mark_relayed(record.nonce, None)?;
             tracing::info!(nonce = %record.nonce, chain = chain.name, "cctp nonce already consumed on-chain; reconciled as relayed");
