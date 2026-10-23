@@ -239,30 +239,9 @@ async fn admin_shadow(
     Json(req): Json<ShadowRequest>,
 ) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
     if req.clear {
-        // The shadow scanner is a ~2 s poll: a devnet write mined moments ago
-        // may not be marked yet. Clearing before it is marked would let the
-        // scanner re-mark the key *with the devnet's value* right after this
-        // re-sync - the "poisoned source" race (measured: an oracle crash tx
-        // mined <2 s before the unshadow, re-marked with the crashed source,
-        // and the borrow that followed reverted on the crashed price). Force
-        // the scan up to the current head first, so the registry reflects every
-        // mined write and `all` really collects them all. A scan that cannot
-        // complete fails the request: a partial registry would let the race
-        // through (marks intact, so the caller can retry).
-        let t_head = ctx.anvil_t.block_number().await?;
-        let from = ctx.shadow_scanned_upto.load(Ordering::Relaxed);
-        if from == 0 {
-            ctx.shadow_scanned_upto.store(t_head, Ordering::Relaxed);
-        } else {
-            mirror_devnet::scan::scan_range(
-                &ctx.anvil_t,
-                &ctx.shadow,
-                &ctx.shadow_scanned_upto,
-                from,
-                t_head,
-            )
-            .await?;
-        }
+        // Force the scan to the head first: the hand-back's poisoned-source
+        // race guard (shared semantics; see AdminSurface::scan_to_head).
+        ctx.admin().scan_to_head().await?;
     }
     Ok(Json(ctx.admin().shadow(&req).await?))
 }
@@ -280,27 +259,7 @@ async fn admin_deal(
 /// same base = re-apply the recorded writes), so this route never replicates
 /// that logic.
 async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
-    // The reset rides a public RPC and can outlive the client's timeout: on
-    // a transport fault, check whether the fork base actually moved — an
-    // applied-but-unanswered reset is a success, not a failure (the
-    // retry-discipline rule: never report a fault for a completed effect).
-    let before = ctx.anvil_t.fork_config().await?.map(|(_, block)| block);
-    if let Err(e) = ctx.anvil_t.anvil_reset_fork_latest(&ctx.l1.source_url).await {
-        let after = ctx.anvil_t.fork_config().await?.map(|(_, block)| block);
-        if after == before {
-            return Err(e.into());
-        }
-        tracing::warn!(
-            error = %e,
-            before = ?before,
-            after = ?after,
-            "anvil_reset answered with a transport fault but the fork base moved; treating it as applied"
-        );
-    }
-    tracing::warn!(
-        source = %ctx.l1.source_url,
-        "T was re-pinned to the source's latest block; the engine reconciles on its next pass"
-    );
+    mirror_devnet::admin::AdminSurface::epoch_repin(&ctx.anvil_t, &ctx.l1.source_url).await?;
     Ok(Json(EpochResponse {
         reset: true,
         source: ctx.l1.source_url.clone(),

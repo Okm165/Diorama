@@ -170,6 +170,7 @@ impl Ctx {
             halted: &self.halted,
             frozen: &self.frozen,
             reapply_from: &self.reapply_from,
+            scanned_upto: &self.shadow_scanned_upto,
             chunk_size: self.venue.chunk_size,
             journal_writes: true,
         }

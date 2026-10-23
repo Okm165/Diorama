@@ -201,26 +201,9 @@ async fn admin_shadow(
     Json(req): Json<ShadowRequest>,
 ) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
     if req.clear {
-        // The scanner is a ~1 s poll: a devnet write mined moments ago may not
-        // be marked yet. Clearing before it is marked would let the scanner
-        // re-mark the key *with the devnet's value* right after this re-sync -
-        // the poisoned-source race. Force the scan up to the current head
-        // first; a scan that cannot complete fails the request (marks intact,
-        // so the caller can retry).
-        let head = ctx.v.block_number().await?;
-        let from = ctx.shadow_scanned_upto.load(Ordering::Relaxed);
-        if from == 0 {
-            ctx.shadow_scanned_upto.store(head, Ordering::Relaxed);
-        } else {
-            mirror_devnet::scan::scan_range(
-                &ctx.v,
-                &ctx.shadow,
-                &ctx.shadow_scanned_upto,
-                from,
-                head,
-            )
-            .await?;
-        }
+        // Force the scan to the head first: the hand-back's poisoned-source
+        // race guard (shared semantics; see AdminSurface::scan_to_head).
+        ctx.admin().scan_to_head().await?;
     }
     Ok(Json(ctx.admin().shadow(&req).await?))
 }
@@ -237,27 +220,7 @@ async fn admin_deal(
 /// epoch rule (new base = new epoch, same base = restore), so this route
 /// never needs to replicate that logic.
 async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
-    // The reset rides a public RPC and can outlive the client's timeout: on
-    // a transport fault, check whether the fork base actually moved — an
-    // applied-but-unanswered reset is a success, not a failure (the
-    // retry-discipline rule: never report a fault for a completed effect).
-    let before = ctx.v.fork_config().await?.map(|(_, block)| block);
-    if let Err(e) = ctx.v.anvil_reset_fork_latest(&ctx.chain.source_url).await {
-        let after = ctx.v.fork_config().await?.map(|(_, block)| block);
-        if after == before {
-            return Err(e.into());
-        }
-        tracing::warn!(
-            error = %e,
-            before = ?before,
-            after = ?after,
-            "anvil_reset answered with a transport fault but the fork base moved; treating it as applied"
-        );
-    }
-    tracing::warn!(
-        source = %ctx.chain.source_url,
-        "V was re-pinned to the source's latest block; the driver reconciles on its next pass"
-    );
+    mirror_devnet::admin::AdminSurface::epoch_repin(&ctx.v, &ctx.chain.source_url).await?;
     Ok(Json(EpochResponse {
         reset: true,
         source: ctx.chain.source_url.clone(),

@@ -41,6 +41,8 @@ pub struct AdminSurface<'a> {
     /// (idempotent writes; re-journaling records the rolled-back values as the
     /// new before-values). Cleared once the whole range is re-applied.
     pub reapply_from: &'a Shared<Option<(u64, u64)>>,
+    /// The shadow scan's high-water mark (shared with the engine's scan loop).
+    pub scanned_upto: &'a AtomicU64,
     pub chunk_size: usize,
     /// Whether this deployment journals the engine's *own* writes (deal), so
     /// `/admin/rewind` can undo them. The venue sets this: it has no parent
@@ -66,6 +68,52 @@ impl AdminSurface<'_> {
             req,
         )
         .await
+    }
+
+    /// Force the shadow scan up to the chain head — the hand-back's pre-step.
+    /// A devnet write mined moments ago may not be marked yet, and clearing
+    /// before it is marked would let the scanner re-mark the key *with the
+    /// devnet's value* right after the re-sync — the poisoned-source race
+    /// (measured: an oracle crash tx mined <2 s before the unshadow, re-marked
+    /// with the crashed source, and the borrow that followed reverted on the
+    /// crashed price). A scan that cannot complete fails the request: a
+    /// partial registry would let the race through (marks intact, so the
+    /// caller can retry).
+    pub async fn scan_to_head(&self) -> Result<()> {
+        let head = self.target.block_number().await?;
+        let from = self.scanned_upto.load(Ordering::Relaxed);
+        if from == 0 {
+            self.scanned_upto.store(head, Ordering::Relaxed);
+            return Ok(());
+        }
+        crate::scan::scan_range(self.target, self.shadow, self.scanned_upto, from, head).await
+    }
+
+    /// `POST /admin/epoch` — re-pin the devnet chain to its fork source's
+    /// latest block. One anvil call; the engine's loop notices the reset and
+    /// runs the epoch rule (new base = new epoch, same base = restore). On a
+    /// transport fault, re-read the fork base: an applied-but-unanswered reset
+    /// is a success, not a failure (the retry-discipline rule: never report a
+    /// fault for a completed effect).
+    pub async fn epoch_repin(target: &Rpc, source_url: &str) -> Result<()> {
+        let before = target.fork_config().await?.map(|(_, block)| block);
+        if let Err(e) = target.anvil_reset_fork_latest(source_url).await {
+            let after = target.fork_config().await?.map(|(_, block)| block);
+            if after == before {
+                return Err(e.into());
+            }
+            tracing::warn!(
+                error = %e,
+                before = ?before,
+                after = ?after,
+                "anvil_reset answered with a transport fault but the fork base moved; treating it as applied"
+            );
+        }
+        tracing::warn!(
+            source = %source_url,
+            "the devnet chain was re-pinned to the source's latest block; the engine reconciles on its next pass"
+        );
+        Ok(())
     }
 
     /// The journaling sink for the engine's own writes, when this deployment

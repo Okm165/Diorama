@@ -361,6 +361,12 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
 - **Pass-through reads spend the rate budget**: an untouched account's `/info` is forwarded to the
   live venue and accounted at the conservative heavy weight, so test reads and the poller share one
   budget (plan §18.3).
+- **The venue's hand-back needs a fresh pin**: `/admin/shadow {clear}` re-syncs the source's truth
+  at the pin, and the public RPC serves its *latest* state for `eth_call` (measured — the block
+  parameter is ignored), so the re-sync is refused while the pin lags the source head ("re-pin
+  before handing keys back"). The mainnet's reth can serve the cursor's state, so its hand-back
+  works at any time — the one deliberate asymmetry, and it is fail-closed: the refusal names the
+  remedy (an epoch re-pin), it never writes a wrong value.
 
 ## Known limitations (accepted)
 
