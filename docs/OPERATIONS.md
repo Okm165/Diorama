@@ -91,6 +91,20 @@ covers the ones that page someone; these are the rest.
 | `mirror_bal_skipped_shadowed_last_block` | BAL entries skipped in the last block because the devnet owns the key (copy-on-write) |
 | `mirror_shadowed_slots` | devnet-owned storage keys (see `/status.shadowed` for the accounts) |
 | `mirror_shadow_scanned_blocks_total` / `mirror_shadow_skipped_empty_blocks_total` | T blocks the shadow scan walked / the empty share of the walk (one call, no traces — the harness mines one block per poll, so this is the scan-cost reading) |
+
+The shadow scan fails **closed** on a block whose `callTracer` trace it cannot
+get, and retries from the last clean block: an owned-key registry that skipped
+a block would let parent diffs clobber devnet writes silently. The one way to
+deadlock it is a cursor that falls further behind than anvil's
+`--prune-history` window (measured: a 390-block lag put the poison block's
+pre-state out of reach, the scan retried forever, and every hand-back answered
+a bare 500). The surfaces now answer **503** for that state (retryable, the
+block named in the body — `Error::ShadowScan` is in the shared unavailable
+taxonomy), and the remedy is the epoch reset: `POST /admin/epoch` re-forks T at
+the source head, the registry clears, and the scan re-anchors at the new pin
+(measured live: after the re-pin the same hand-back answered 400, the same as
+V's). Keep the scan's cursor within the prune window by letting it run — a
+long engine stop with the harness still mining T is the way to fall behind.
 | `mirror_m_repair_writes_total` | parent-BAL writes applied to M by the convergence repair (gated on the previous block's verification) |
 | `mirror_m_rebase_skipped_blocks_total` | parent blocks an M re-base skipped. Their state is exact (the fresh fork's base *is* mainnet's state), but the engine did not re-execute them, so their tx-level verification is skipped. Bounded by `fork_offset` per re-base; a rise simply means M re-based (OOM recovery, reorg) |
 | `mirror_m_convergence_ok_total` / `mirror_m_convergence_failures_total` | the 12 state probes against reth at n-1, run every block |

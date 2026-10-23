@@ -93,10 +93,15 @@ impl Error {
         )
     }
 
-    /// A server-side state that blocks correct answers until a restart: the
-    /// HTTP surfaces answer 503.
+    /// A server-side state that blocks correct answers until it clears: the
+    /// HTTP surfaces answer 503 (retryable — never a 500, which would read as
+    /// a bug). [`Error::ShadowScan`] is here because the shadow scan fails
+    /// closed on a block whose trace it cannot get (measured: a cursor that
+    /// fell further behind than anvil's `--prune-history` window deadlocked
+    /// the scan and 500'd every hand-back; the re-pin remedy clears it, and
+    /// until then the surface says "not now", with the block named).
     pub fn is_unavailable(&self) -> bool {
-        matches!(self, Error::Poisoned { .. })
+        matches!(self, Error::Poisoned { .. } | Error::ShadowScan { .. })
     }
 }
 
@@ -106,6 +111,14 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shadow_scan_is_unavailable_not_a_bug() {
+        let e = Error::ShadowScan { block: 7, failed: 1 };
+        assert!(e.is_unavailable(), "a stuck scan is a retryable state");
+        assert!(!e.is_request_refusal(), "nothing about the request is wrong");
+        assert!(e.to_string().contains('7'), "{e}");
+    }
 
     #[test]
     fn request_refusals_render_the_numbers_they_refuse() {
