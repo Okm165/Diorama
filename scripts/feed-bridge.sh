@@ -29,7 +29,8 @@ api() { # api <path> [body]
 
 case "$cmd" in
   list)
-    api /admin/feed | run python3 -m json.tool
+    # jq runs on the host: the engine image carries no python3/jq.
+    api /admin/feed | python3 -m json.tool
     ;;
   pause)
     name="${2:?usage: feed-bridge pause <feed>}"

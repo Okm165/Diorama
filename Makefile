@@ -186,6 +186,9 @@ smoke-venue: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridg
 venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/epoch)
 	kubectl -n venue-mirror exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
 
+venue-drill: ## The venue epoch drill (same-pin restore, new-pin epoch, driver liveness)
+	NS=venue-mirror ./scripts/venue-drill.sh
+
 feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
 	./scripts/feed-bridge.sh $(ARGS)
 
