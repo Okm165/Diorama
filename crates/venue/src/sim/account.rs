@@ -753,26 +753,11 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
         .get(&fill.coin)
         .map(|p| p.szi)
         .unwrap_or(Decimal::ZERO);
-    if fill.reduce_only && (old.is_zero() || sign(old) == sign(signed) || fill.size > old.abs()) {
-        // The venue's own string (plan §16.3).
-        return Err(Error::bad_request(
-            "Reduce only order would increase position.",
-        ));
-    }
+    refuse_non_reducing(old, signed, fill)?;
     let position = account
         .positions
         .entry(fill.coin.clone())
-        .or_insert_with(|| Position {
-            szi: Decimal::ZERO,
-            entry_px: fill.px,
-            leverage: LeverageType::Cross,
-            leverage_value: fill.leverage.max(1),
-            margin_used: Decimal::ZERO,
-            isolated_margin: Decimal::ZERO,
-            funding_all_time: Decimal::ZERO,
-            funding_since_open: Decimal::ZERO,
-            funding_since_change: Decimal::ZERO,
-        });
+        .or_insert_with(|| fresh_position(fill));
     if old.is_zero() || sign(old) == sign(signed) {
         apply_increase(position, old, fill)?;
     } else {
@@ -789,23 +774,55 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
         return Ok(());
     }
     if let Some(position) = account.positions.get_mut(&fill.coin) {
-        // The venue's `cumFunding.sinceChange` restarts at every size change
-        // (the fill *is* the change; the funding up to it is settled first —
-        // the lane accrues before applying, see `land_fill`).
-        position.funding_since_change = Decimal::ZERO;
-        // `.max(1)` guards the decimal division (rust_decimal panics on a
-        // zero divisor; a leverage of 0 is not a state this plane creates).
-        // An isolated margin the account moved on (`updateIsolatedMargin`) is
-        // the position's margin, exactly as the venue serves `leverage.rawUsd`.
-        position.margin_used = if position.leverage == LeverageType::Isolated
-            && !position.isolated_margin.is_zero()
-        {
-            position.isolated_margin
-        } else {
-            mul(position.szi.abs(), position.entry_px, "margin notional")?
-                / Decimal::from(position.leverage_value.max(1))
-        };
+        settle_margin(position)?;
     }
+    Ok(())
+}
+
+/// The reduce-only guard: the venue's own string (plan §16.3) when the fill
+/// would not reduce the position it names.
+fn refuse_non_reducing(old: Decimal, signed: Decimal, fill: &FillFacts) -> Result<()> {
+    if fill.reduce_only && (old.is_zero() || sign(old) == sign(signed) || fill.size > old.abs()) {
+        return Err(Error::bad_request(
+            "Reduce only order would increase position.",
+        ));
+    }
+    Ok(())
+}
+
+/// A position's first appearance: cross, at the fill's price and the fill's
+/// leverage (the account's setting decides later fills' leverage, not this).
+fn fresh_position(fill: &FillFacts) -> Position {
+    Position {
+        szi: Decimal::ZERO,
+        entry_px: fill.px,
+        leverage: LeverageType::Cross,
+        leverage_value: fill.leverage.max(1),
+        margin_used: Decimal::ZERO,
+        isolated_margin: Decimal::ZERO,
+        funding_all_time: Decimal::ZERO,
+        funding_since_open: Decimal::ZERO,
+        funding_since_change: Decimal::ZERO,
+    }
+}
+
+/// The post-fill margin settlement: `cumFunding.sinceChange` restarts at every
+/// size change (the fill *is* the change; the funding up to it is settled
+/// first — the lane accrues before applying, see `land_fill`), and the margin
+/// follows — the isolated margin when the account moved one on
+/// (`updateIsolatedMargin`, the docs' `leverage.rawUsd`), else notional over
+/// leverage (`.max(1)` guards the decimal division; a leverage of 0 is not a
+/// state this plane creates).
+fn settle_margin(position: &mut Position) -> Result<()> {
+    position.funding_since_change = Decimal::ZERO;
+    position.margin_used = if position.leverage == LeverageType::Isolated
+        && !position.isolated_margin.is_zero()
+    {
+        position.isolated_margin
+    } else {
+        mul(position.szi.abs(), position.entry_px, "margin notional")?
+            / Decimal::from(position.leverage_value.max(1))
+    };
     Ok(())
 }
 
