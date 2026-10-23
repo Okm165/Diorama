@@ -7,8 +7,11 @@
 //!   `l2Book`/`allMids` snapshots from the REST poller and the WS client —
 //!   with per-coin update stamps (the staleness metrics);
 //! - [`Overrides`] holds the scenario's owned values (`crash` prices,
-//!   `set_funding`, `set_book`), persisted to `feed.json` so a sim restart
-//!   mid-scenario does not lose the scenario.
+//!   `set_funding`, `set_book`) *and* the order lane's level consumptions
+//!   ([`Consumption`] — the plan §4.5 COW analogue: a devnet order owns the
+//!   sizes it took, per level, and the served book shows the remainder while
+//!   the live feed keeps refreshing every other level), persisted to
+//!   `feed.json` so a sim restart mid-scenario does not lose either.
 //!
 //! Every read goes through the composed view ([`MarketFeed::mark`] and
 //! friends): a crash owns both mark and oracle, and `metaAndAssetCtxs` serves
@@ -42,6 +45,22 @@ pub(crate) struct Overrides {
     /// `set_book`: scripted books per coin.
     #[serde(default)]
     pub books: BTreeMap<String, L2Book>,
+    /// The order lane's consumed levels (devnet-owned sizes).
+    #[serde(default)]
+    pub consumptions: Vec<Consumption>,
+}
+
+/// One consumed book level (plan §4.5: per-level ownership + consumption
+/// deltas). Level-scoped: a live update that no longer carries the price
+/// prunes it (I6 — pruned, never re-owned); the *mark is never moved* (I3).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Consumption {
+    pub coin: String,
+    /// The wire side index: 0 = bids, 1 = asks (the order in `L2Book.levels`).
+    pub side: u8,
+    pub price: Decimal,
+    /// The size the devnet took at this level (summed across orders).
+    pub size: Decimal,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -123,9 +142,48 @@ impl MarketFeed {
     }
 
     pub(crate) fn put_book(&self, book: L2Book, now_ms: u64) {
+        // I2/I6 are scoped to the *served* base: a live update refreshes
+        // (and can prune against) the book only while live is what the coin
+        // serves. A scripted book owns the coin until its hand-back — the
+        // live feed neither refreshes nor prunes it (measured: an unscoped
+        // prune dropped a scripted level's consumption on the next live
+        // update, and the level reappeared).
+        if !self.read_overrides().books.contains_key(&book.coin) {
+            let (skipped, pruned) = self.prune_consumptions(&book);
+            if skipped > 0 {
+                self.metrics.add_owned_skips(skipped as u64);
+            }
+            if pruned > 0 {
+                self.metrics.add_owned_pruned(pruned as u64);
+                self.metrics.set_owned_levels(self.owned_levels());
+            }
+        }
         let mut c = self.write();
         c.book_at.insert(book.coin.clone(), now_ms);
         c.books.insert(book.coin.clone(), book);
+    }
+
+    /// Prune the coin's consumptions against the base it will serve (a live
+    /// update, or a freshly scripted book): records whose price the base
+    /// carries stay, the rest are pruned; returns (owned levels the base met,
+    /// pruned records).
+    fn prune_consumptions(&self, book: &L2Book) -> (usize, usize) {
+        let mut o = self.write_overrides();
+        let before = o.consumptions.len();
+        let mut met = 0usize;
+        o.consumptions.retain(|c| {
+            if c.coin != book.coin {
+                return true;
+            }
+            let live = book.levels[usize::from(c.side.min(1))]
+                .iter()
+                .any(|l| l.px == c.price);
+            if live {
+                met += 1;
+            }
+            live
+        });
+        (met, before - o.consumptions.len())
     }
 
     pub fn put_mids(&self, mids: BTreeMap<String, Decimal>, now_ms: u64) {
@@ -156,13 +214,62 @@ impl MarketFeed {
         self.persist()
     }
 
-    pub(crate) fn own_book(&self, book: L2Book) -> Result<()> {
-        self.write_overrides().books.insert(book.coin.clone(), book);
+    /// Record one consumed level (the order lane's ownership write): sizes at
+    /// the same (coin, side, price) accumulate, exactly as a second order
+    /// would take more of the same level.
+    pub(crate) fn consume(&self, c: Consumption) -> Result<()> {
+        {
+            let mut o = self.write_overrides();
+            match o
+                .consumptions
+                .iter_mut()
+                .find(|x| x.coin == c.coin && x.side == c.side && x.price == c.price)
+            {
+                Some(x) => {
+                    x.size = x
+                        .size
+                        .checked_add(c.size)
+                        .ok_or(crate::error::Error::Overflow {
+                            what: "consumed level size",
+                        })?;
+                }
+                None => o.consumptions.push(c),
+            }
+        }
+        self.metrics.set_owned_levels(self.owned_levels());
+        self.persist()
+    }
+
+    /// The devnet-owned book level count (the `venue_sim_owned_levels` gauge).
+    pub fn owned_levels(&self) -> u64 {
+        self.read_overrides().consumptions.len() as u64
+    }
+
+    pub(crate) fn own_book(&self, book: &L2Book) -> Result<()> {
+        {
+            let mut o = self.write_overrides();
+            o.books.insert(book.coin.clone(), book.clone());
+        }
+        // A new scripted base re-scopes the coin's consumptions: the deltas
+        // for prices it still carries stay, the rest are pruned (I6 — pruned,
+        // never re-owned).
+        let (_, pruned) = self.prune_consumptions(book);
+        if pruned > 0 {
+            self.metrics.add_owned_pruned(pruned as u64);
+        }
+        self.metrics.set_owned_levels(self.owned_levels());
         self.persist()
     }
 
     pub fn clear_book(&self, coin: &str) -> Result<()> {
-        self.write_overrides().books.remove(coin);
+        {
+            let mut o = self.write_overrides();
+            o.books.remove(coin);
+            // I4: the hand-back restores the live book — the coin's consumed
+            // levels are part of what the devnet owned, so they drop with it.
+            o.consumptions.retain(|c| c.coin != coin);
+        }
+        self.metrics.set_owned_levels(self.owned_levels());
         self.persist()
     }
 
@@ -170,6 +277,7 @@ impl MarketFeed {
     /// not the scenario's).
     pub fn clear_overrides(&self) -> Result<()> {
         *self.write_overrides() = Overrides::default();
+        self.metrics.set_owned_levels(0);
         self.persist()
     }
 
@@ -210,12 +318,16 @@ impl MarketFeed {
     /// The coin's book: the scripted book wins; a scripted book is stamped
     /// `now` at serve time (it is the scenario's present, not a snapshot).
     pub(crate) fn book(&self, coin: &str, now_ms: u64) -> Option<L2Book> {
-        if let Some(b) = self.read_overrides().books.get(coin) {
-            let mut b = b.clone();
-            b.time = now_ms;
-            return Some(b);
-        }
-        self.read().books.get(coin).cloned()
+        let overrides = self.read_overrides();
+        let base = match overrides.books.get(coin) {
+            Some(b) => {
+                let mut b = b.clone();
+                b.time = now_ms;
+                b
+            }
+            None => self.read().books.get(coin).cloned()?,
+        };
+        Some(apply_consumptions(base, &overrides.consumptions))
     }
 
     /// The perp universe + margin tables (the live meta; `None` until the
@@ -326,10 +438,73 @@ impl MarketFeed {
     }
 }
 
+/// The served book: the base book minus the consumed sizes — level-scoped, so
+/// a level the devnet never touched serves the live size verbatim. A fully
+/// consumed level leaves the book (the wire never carries a zero size); the
+/// order count `n` stays the live level's (a consumption takes size, not
+/// orders).
+fn apply_consumptions(mut book: L2Book, consumptions: &[Consumption]) -> L2Book {
+    for side in 0..2usize {
+        for level in book.levels[side].iter_mut() {
+            let taken: Decimal = consumptions
+                .iter()
+                .filter(|c| c.coin == book.coin && usize::from(c.side) == side && c.price == level.px)
+                .map(|c| c.size)
+                .sum();
+            if taken > Decimal::ZERO {
+                level.sz = (level.sz - taken).max(Decimal::ZERO);
+            }
+        }
+        book.levels[side].retain(|l| l.sz > Decimal::ZERO);
+    }
+    book
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wire::{test_ctx, Level};
+
+    /// A scripted book owns the coin until its hand-back: live updates are
+    /// not the served base, so they neither refresh nor prune its consumed
+    /// levels (the measured bug: an unscoped prune dropped a scripted level's
+    /// consumption on the next live update and the level reappeared).
+    #[test]
+    fn live_updates_leave_a_scripted_books_consumptions_alone() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        let scripted = |px: &str| L2Book {
+            coin: "BTC".into(),
+            time: 1,
+            levels: [
+                vec![],
+                vec![Level { px: px.parse().unwrap(), sz: Decimal::ONE, n: 1 }],
+            ],
+            spread: None,
+        };
+        feed.own_book(&scripted("100")).unwrap();
+        feed.consume(Consumption {
+            coin: "BTC".into(),
+            side: 1,
+            price: "100".parse().unwrap(),
+            size: "0.5".parse().unwrap(),
+        })
+        .unwrap();
+        // A live update that cannot carry the scripted price: no prune.
+        feed.put_book(scripted("50"), 2);
+        assert_eq!(feed.owned_levels(), 1, "the scripted consumption survives");
+        assert_eq!(
+            feed.book("BTC", 0).unwrap().levels[1][0].sz,
+            "0.5".parse().unwrap(),
+            "served = scripted − consumed"
+        );
+        // Re-scripting the book without the price re-scopes: pruned.
+        feed.own_book(&scripted("50")).unwrap();
+        assert_eq!(feed.owned_levels(), 0);
+        assert_eq!(
+            feed.book("BTC", 0).unwrap().levels[1][0].sz,
+            "1".parse().unwrap()
+        );
+    }
 
     #[test]
     fn overrides_compose_over_the_cache() {
@@ -370,7 +545,7 @@ mod tests {
         };
         feed.put_book(book("100"), 1_000);
         assert_eq!(feed.book("BTC", 5_000).unwrap().time, 1, "live book keeps its stamp");
-        feed.own_book(book("99")).unwrap();
+        feed.own_book(&book("99")).unwrap();
         let served = feed.book("BTC", 5_000).unwrap();
         assert_eq!(served.time, 5_000, "scripted book is the scenario's present");
         assert_eq!(served.levels[0][0].px, Decimal::from(99));

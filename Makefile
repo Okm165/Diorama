@@ -214,6 +214,9 @@ venue-drill: ## The venue epoch drill (same-pin restore, new-pin epoch, driver l
 venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation, bridge round-trip, block production)
 	NS=venue-mirror ./scripts/venue-proof.sh
 
+venue-order-proof: ## The venue order-lane proof (fills vs the real book, the §4.5 impact invariants, hand-back)
+	NS=venue-mirror ./scripts/venue-order-proof.sh
+
 venue-product-sim: ## The daloc use-case simulation against the venue stack (endpoints via env)
 	python3 scripts/daloc-sim.py
 
@@ -222,6 +225,9 @@ cctp-smoke: ## The CCTP bridge smoke (health, store coherence, metric set)
 
 cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTINATION/AMOUNT env)
 	NS=venue-mirror ./scripts/cctp-roundtrip.sh
+
+cctp-margin-cycle: ## The crosschain unified-margin cycle (T mint -> CCTP -> venue collateral -> trade -> CCTP back)
+	NS=venue-mirror ./scripts/cctp-margin-cycle.sh
 
 engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fitness function)
 	./scripts/engine-symmetry.sh
@@ -310,6 +316,6 @@ help: ## Show this help
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build import deploy-engine test-engine config-check \
 	status logs mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-drill \
-	venue-proof venue-product-sim cctp-smoke cctp-roundtrip engine-symmetry \
+	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check \
 	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help

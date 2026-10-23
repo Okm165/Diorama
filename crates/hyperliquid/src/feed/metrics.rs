@@ -21,6 +21,16 @@ pub(crate) struct FeedMetrics {
     budget_used: AtomicU64,
     /// Milliseconds since each coin's last live context update.
     stale_ms: BTreeMap<String, AtomicU64>,
+    /// Devnet-owned book levels (the order lane's consumption records): live
+    /// updates keep the consumed delta — the venue analogue of
+    /// `mirror_shadowed_slots`.
+    owned_levels: AtomicU64,
+    /// Live book updates that met a devnet-owned level (plan §4.5.4 I2's skip
+    /// counter).
+    owned_skips: AtomicU64,
+    /// Owned levels pruned because the live book no longer carries the price
+    /// (I6: pruned, never re-owned).
+    owned_pruned: AtomicU64,
 }
 
 impl FeedMetrics {
@@ -57,6 +67,18 @@ impl FeedMetrics {
         }
     }
 
+    pub fn set_owned_levels(&self, levels: u64) {
+        self.owned_levels.store(levels, Ordering::Relaxed);
+    }
+
+    pub fn add_owned_skips(&self, n: u64) {
+        self.owned_skips.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub fn add_owned_pruned(&self, n: u64) {
+        self.owned_pruned.fetch_add(n, Ordering::Relaxed);
+    }
+
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
         push_gauge(&mut out, "venue_sim_ws_connected", "market websocket connected (1/0)", &[], self.ws_connected.load(Ordering::Relaxed) as u64);
@@ -64,6 +86,9 @@ impl FeedMetrics {
         push_counter(&mut out, "venue_sim_ws_reconnects_total", "market websocket reconnects", &[], self.ws_reconnects.load(Ordering::Relaxed));
         push_counter(&mut out, "venue_sim_budget_skips_total", "REST calls skipped at the rate budget", &[], self.budget_skips.load(Ordering::Relaxed));
         push_gauge(&mut out, "venue_sim_budget_weight_used", "REST weight spent in the rolling minute", &[], self.budget_used.load(Ordering::Relaxed));
+        push_gauge(&mut out, "venue_sim_owned_levels", "book levels the devnet has consumed (live updates keep the consumed delta)", &[], self.owned_levels.load(Ordering::Relaxed));
+        push_counter(&mut out, "venue_sim_owned_skips_total", "live book updates that met a devnet-owned level", &[], self.owned_skips.load(Ordering::Relaxed));
+        push_counter(&mut out, "venue_sim_owned_pruned_total", "owned levels pruned because the live book moved past them", &[], self.owned_pruned.load(Ordering::Relaxed));
         // One family, one HELP/TYPE, then every series (strict scrapers
         // reject a repeated header — the verifier caught it).
         if !self.stale_ms.is_empty() {

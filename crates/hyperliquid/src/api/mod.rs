@@ -94,6 +94,7 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
         .route("/health", get(control::health))
         .route("/metrics", get(control::metrics))
         .route("/control/deal", post(control::deal))
+        .route("/control/order", post(control::order))
         .route("/control/advance", post(control::advance))
         .route("/control/crash", post(control::crash))
         .route("/control/set_book", post(control::set_book))

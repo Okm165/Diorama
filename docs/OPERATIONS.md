@@ -561,6 +561,8 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_sim_ws_connected` / `venue_sim_ws_reconnects_total` | the market WS lane's health |
 | `venue_sim_rest_errors_total` / `venue_sim_budget_skips_total` / `venue_sim_budget_weight_used` | REST faults / calls skipped at the rate budget / weight spent in the rolling minute |
 | `venue_sim_stale_ms{coin}` | milliseconds since the coin's last live context update |
+| `venue_sim_owned_levels` / `venue_sim_owned_skips_total` / `venue_sim_owned_pruned_total` | book levels the devnet has consumed (the order lane's ownership; live updates keep the consumed delta) / live updates that met an owned level / owned levels pruned because the live book moved past them |
+| `venue_sim_orders_filled_total` | orders filled against the real book (the impact lane) |
 | `venue_bridge_credits_total` / `venue_bridge_completions_total` | EVM→Core credits / Core→EVM completions |
 | `venue_bridge_refusals_total` / `venue_bridge_malformed_total` / `venue_bridge_trace_faults_total` | refused effects / undecodable actions / blocks whose callTracer failed |
 | `venue_bridge_actions_total{id}` | decoded CoreWriter actions by id |

@@ -363,6 +363,42 @@ chain facts:
   credit), then a `sendAsset` naming that address (the completion — the system
   address sends the ERC-20 back), exact balances end to end.
 
+### The order lane (measured live, 2026-10-23)
+
+`make venue-order-proof` (30 checks, direct mode against the scratch stack) is
+the §4.5 impact lane's acceptance: with a **scripted** base the walk is
+deterministic — a 2.5 buy across asks `3001×2, 3002×1` filled at the
+size-weighted `3001.20`, the fill's `consumed` recorded the two levels
+exactly, the fully consumed level left the served book (asks `3002×0.5`), the
+bid side served verbatim, and a second 0.5 buy walked to `3002`. The mark was
+scenario-owned for the check and identical after the fill (I3 — a live mark
+legitimately moves between reads, so the strict check owns it first). The
+impact persisted through live updates while the scripted base owned the coin
+(measured: an unscoped prune dropped a scripted level's consumption on the
+next live update and the level reappeared — the fix scopes I2/I6 to the
+*served* base), a re-scripted base prunes records it no longer carries, and
+`set_book` without levels clears the coin's consumptions (`owned_levels` back
+to 0). The trader's state: 3 long at the weighted entry, the identity exact
+(`accountValue == totalRawUsd + Σ signed positionValue`, within the served
+`positionValue`'s 2dp rounding), a reduce-only sell realizing at the bid,
+then flat. The `/exchange` door served the venue's own envelopes: a filled
+status, a `Gtc` refusal per-order by name ("resting orders are not modeled"),
+a non-order action answering the `err` envelope. A live order filled at the
+touch (`2400.0`-class prints) — the real depth, not a simulation of it.
+
+`make cctp-margin-cycle` (26 checks) is the crosschain unified-margin cycle,
+measured live end to end: the T faucet funded the bridge wallet (the deal
+*set* the slot to exactly the amount — used only when short, the roundtrip's
+own pattern), the T→V burn relayed and V minted exactly to the trader, the
+venue-side spot ledger was credited (the mint analogue — the EVM→Core USDC
+path is faithfully refused, see "the bridge's token door"), a **real
+CoreWriter USD-class transfer** on V (action 7, 10^8 core-wei units) moved it
+spot → perp through the bridge's decoder with exact deltas, an order filled
+`0.01 ETH` at the live touch with the identity exact, the reduce-only close
+flattened, the trader returned the V USDC and the V→T burn closed the cycle
+exactly on T (the burn left the source, the return mint restored it), and the
+hand-back cleared the consumptions.
+
 ### The served clock after a harness time jump (measured 2026-10-23)
 
 Their harness jumps every chain forward (`anvil_setTime` + mine) and then reads

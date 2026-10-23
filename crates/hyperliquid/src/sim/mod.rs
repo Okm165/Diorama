@@ -15,6 +15,7 @@
 //! wire's `time` field stays *wall* now: it is the read's freshness, which the
 //! client's ≤6 s staleness gate compares against its own clock.
 pub mod account;
+pub mod order;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
@@ -41,6 +42,9 @@ pub(crate) struct SimState {
     /// a sim restart does not lose the boundary activity mined meanwhile.
     #[serde(default)]
     pub bridge_cursor: u64,
+    /// The matching lane's order-id counter (monotonic across the scenario).
+    #[serde(default)]
+    pub next_oid: u64,
     #[serde(default)]
     pub accounts: Accounts,
 }
@@ -62,6 +66,8 @@ pub(crate) struct SimMetrics {
     /// The scenario's explicit `advance` steps (the 1 Hz tick is the
     /// automaton; its work shows in the funding/liquidation counters).
     pub advances_total: AtomicU64,
+    /// Orders the matching lane filled (the impact lane's liveness).
+    pub orders_filled_total: AtomicU64,
 }
 
 impl SimMetrics {
@@ -73,6 +79,7 @@ impl SimMetrics {
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_funding_payments_total", "funding payments applied", self.funding_payments_total.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_identity_violations_total", "served states that failed the identity re-check (must stay 0)", self.identity_violations.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_advances_total", "scenario advance() steps", self.advances_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_orders_filled_total", "orders filled against the real book (the impact lane)", self.orders_filled_total.load(Ordering::Relaxed));
         out
     }
 }

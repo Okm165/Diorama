@@ -124,6 +124,8 @@ Venue Mirror counterparts:
 make smoke-venue         # the venue stack end to end (V, engine, sim, bridge)
 make venue-drill         # epoch drill: a write survives a same-pin reset, dies with a new pin
 make venue-proof         # capability proof: mint, sim deal, crash⇒liquidation, bridge round-trip
+make venue-order-proof   # order-lane proof: fills vs the real book, the §4.5 impact invariants
+make cctp-margin-cycle   # crosschain unified-margin cycle: T mint -> CCTP -> venue trade -> CCTP back
 make engine-symmetry     # both engines' shared verbs answer identically (fitness function)
 ```
 

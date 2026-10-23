@@ -46,14 +46,27 @@ flat; `positionValue` is unsigned with the sign in `szi`.
 `activeAssetCtx` and `l2Book` (per coin; an unknown coin answers an error).
 
 **Control API (§7.3):** `deal` (`{address, class: spot|perp, coin?, amount}`),
-`advance`, `crash` (`{coin, pct}`; no `pct` hands the mark back), `set_book`,
-`set_funding`, `set_account` (the hl_mock patch shape), `reset`, `epoch_new`,
-`GET/POST /control/state/{address}`, plus `/health` and `/metrics`.
+`order` (`{address, coin, is_buy, size, limit_px?, tif?, reduce_only?}` — the
+same lane `/exchange` drives; the response carries `totalSz`/`avgPx`/`oid`
+and the consumed levels), `advance`, `crash` (`{coin, pct}`; no `pct` hands
+the mark back), `set_book`, `set_funding`, `set_account` (the hl_mock patch
+shape), `reset`, `epoch_new`, `GET/POST /control/state/{address}`, plus
+`/health` and `/metrics`.
 
-**`POST /exchange`** answers a *named* refusal in HL's own envelope
-(`{"status":"err","response":"…"}`, HTTP 200 — the shape their client already
-parses), never a 404: the matching lane is Phase 2 (§18.4's verdict — no
-service submits HL actions; positions come from the control API).
+**`POST /exchange`** models the `order` action end to end: a compact order
+(`{"type":"order","orders":[{"a","b","p","s","r","t":{"limit":{"tif"}}}]}`)
+fills against the **real book** — the live depth the feed caches — with
+per-level consumption (plan §4.5's impact lane: the order moves the *book*,
+never the *mark*), answered in HL's own ok envelope
+(`{"status":"ok","response":{"type":"order","data":{"statuses":
+[{"filled":{"totalSz","avgPx","oid"}}]}}}`; a per-order refusal rides as
+`{"error":"…"}` inside the statuses). Only IOC fills: a `Gtc`/`Alo` order is
+refused by name (the devnet has no resting book — nothing ever rests, so
+`openOrders` is exact at empty), and every other action tag answers HL's err
+envelope (`{"status":"err","response":"…"}`, HTTP 200 — the shape their
+client already parses), never a 404. The signature is accepted, never
+verified (the devnet has no keys — the anvil-impersonation analogue); the
+acting account is read from the body's `user`.
 
 ## 3. The CCTP bridge (Iris :8095, control :8096)
 
@@ -87,7 +100,7 @@ vanished-burn/keeper caveats.
 | Boundary | Refusal |
 |---|---|
 | sim `/info` | an unknown type answers `"unrouted"` (200) |
-| sim `/exchange` | HL's err envelope naming the Phase-2 deferral (200) |
+| sim `/exchange` | an order fills, or refuses per-order by name (IOC only); a non-order action answers HL's err envelope naming the boundary (200) |
 | sim readiness | 503, naming the cause (`market plane warming up` / `sim state poisoned`) |
 | engine `/admin/deal` | 400 naming the numbers (`holds 0 USDC on ethereum, needs 1000000 (deal via the chain's admin surface)`) |
 | engine `/admin/shadow` | 400 naming the missing keys (`clear` needs `slots`, `account_fields`, or `all`) |
@@ -99,7 +112,7 @@ vanished-burn/keeper caveats.
 
 | Lane | Plan | What it would add |
 |---|---|---|
-| Phase 2 venue mechanics + `/exchange` | §5, §7.1, §18.4 | matching, order types, validation constants/error strings, nonces, API wallets, multi-dex, spot ledger, OI caps, fees; the book consumption and the §4.5 order-impact invariants |
+| Remaining venue mechanics | §5, §7.1, §18.4 | resting orders (`Gtc`/`Alo`) + cancels (both refused by name today), the venue's exact order-error strings (the tick/lot rules and the $10 minimum are enforced with named refusals), nonces/API wallets, multi-dex, spot ledger, OI caps, fees (a research lane per §16.3 — daloc's paths don't read venue fees). Landed: the `order` action end to end — IOC fills against the real book with per-level consumption, the §4.5 impact invariants (I1–I6), three doors (see ARCHITECTURE) |
 | Phase 4 lanes | §7.1 | the HIP-3 star venue on testnet; the real-data replay lane |
 | Phase 5 facade | §7.1 | one deal/crash/reset surface across both mirrors (each mirror's own admin works today) |
 | `venue-closure` | §7.8 | the V-side closure audit (no BALs on HyperEVM; `make engine-symmetry` covers the shared verbs) |

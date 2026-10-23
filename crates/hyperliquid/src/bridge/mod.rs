@@ -244,14 +244,48 @@ impl Bridge {
             CoreAction::SetAbstraction { user, abstraction } => {
                 self.set_abstraction(user, abstraction)?;
             }
-            // Orders and cancels need the matching lane (Phase 2): counted.
-            CoreAction::LimitOrder { .. }
-            | CoreAction::CancelByOid { .. }
-            | CoreAction::CancelByCloid { .. }
-            | CoreAction::Unmodeled { .. } => {}
+            order @ CoreAction::LimitOrder { .. } => self.limit_order(caller, &order),
+            // Cancels have nothing to act on: the lane is IOC-only, so no
+            // order ever rests — refused by name and counted, never a silent
+            // no-op (a cancel of a resting order cannot exist here).
+            CoreAction::CancelByOid { .. } | CoreAction::CancelByCloid { .. } => {
+                self.metrics.inc_refusals();
+                tracing::warn!(account = %caller, "bridge: cancel refused (no resting orders)");
+            }
+            CoreAction::Unmodeled { .. } => {}
             CoreAction::Malformed => self.metrics.inc_malformed(),
         }
         Ok(())
+    }
+
+    /// The CoreWriter limit order (id 1): prices and sizes arrive as 10^8 ×
+    /// the human value and the tif byte is the docs' own (1 `Alo`, 2 `Gtc`,
+    /// 3 `Ioc`). The order fills against the real book through the same lane
+    /// as `/exchange` and `/control/order` — one lane, three doors. A
+    /// resting tif is refused by name (the devnet has no resting book), and a
+    /// refused fill (no depth, no margin, unknown asset) is counted, never
+    /// retried.
+    fn limit_order(&self, caller: Address, action: &CoreAction) {
+        let CoreAction::LimitOrder { asset, tif, .. } = action else {
+            return;
+        };
+        if *tif != 3 {
+            self.metrics.inc_refusals();
+            tracing::warn!(account = %caller, tif, "bridge: CoreWriter order refused (IOC fills only)");
+            return;
+        }
+        let Some(order) = core_order(self.feed.meta().as_ref(), action) else {
+            self.metrics.inc_refusals();
+            tracing::warn!(account = %caller, asset, "bridge: CoreWriter order for an unknown asset refused");
+            return;
+        };
+        match self.sim.order(&self.feed, caller, &order) {
+            Ok(fill) => tracing::info!(account = %caller, coin = %order.coin, sz = %fill.total_sz, avg_px = %fill.avg_px, "bridge: CoreWriter order filled"),
+            Err(e) => {
+                self.metrics.inc_refusals();
+                tracing::warn!(account = %caller, coin = %order.coin, error = %e, "bridge: CoreWriter order refused");
+            }
+        }
     }
 
     /// `usdClassTransfer`: USDC between the spot and perp wallets.
@@ -441,6 +475,36 @@ fn walk_frame(frame: &CallFrame, out: &mut Vec<(Address, CoreAction)>) {
     }
 }
 
+/// The CoreWriter order's units (docs, pinned): prices and sizes are 10^8 ×
+/// the human value, and the asset index resolves through the live meta
+/// (`None` = an index the meta does not carry — a named refusal upstream).
+fn core_order(
+    meta: Option<&crate::wire::Meta>,
+    action: &CoreAction,
+) -> Option<crate::sim::order::Order> {
+    let CoreAction::LimitOrder {
+        asset,
+        is_buy,
+        limit_px,
+        sz,
+        reduce_only,
+        ..
+    } = action
+    else {
+        return None;
+    };
+    let coin = meta?.universe.get(*asset as usize)?.name.clone();
+    let scale = Decimal::from(100_000_000u64);
+    Some(crate::sim::order::Order {
+        coin,
+        is_buy: *is_buy,
+        size: Decimal::from(*sz) / scale,
+        limit_px: Some(Decimal::from(*limit_px) / scale),
+        tif: crate::sim::order::Tif::Ioc,
+        reduce_only: *reduce_only,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,6 +514,48 @@ mod tests {
         input.extend_from_slice(&U256::from(ntl).to_be_bytes::<32>());
         input.extend_from_slice(&U256::from(1u64).to_be_bytes::<32>());
         input
+    }
+
+    /// The CoreWriter order's units are the docs' own: 10^8 × human for both
+    /// price and size, resolved against the live meta.
+    #[test]
+    fn corewriter_orders_scale_by_1e8() {
+        let mut meta: crate::wire::Meta = serde_json::from_str(r#"{"universe": []}"#).unwrap();
+        meta.universe.push(crate::wire::AssetInfo {
+            name: "ETH".into(),
+            sz_decimals: 4,
+            max_leverage: 20,
+            margin_table_id: None,
+            only_isolated: None,
+            is_delisted: None,
+        });
+        let action = CoreAction::LimitOrder {
+            asset: 0,
+            is_buy: true,
+            limit_px: 10_150_000_000,
+            sz: 250_000_000,
+            reduce_only: false,
+            tif: 3,
+            cloid: 0,
+        };
+        let order = core_order(Some(&meta), &action).expect("a modeled order");
+        assert_eq!(order.coin, "ETH");
+        assert!(order.is_buy);
+        assert_eq!(order.size, "2.5".parse().unwrap());
+        assert_eq!(order.limit_px, Some("101.5".parse().unwrap()));
+        assert_eq!(order.tif, crate::sim::order::Tif::Ioc);
+        // An index the meta does not carry is a refusal, not a guess.
+        let oob = CoreAction::LimitOrder {
+            asset: 9,
+            is_buy: true,
+            limit_px: 1,
+            sz: 1,
+            reduce_only: false,
+            tif: 3,
+            cloid: 0,
+        };
+        assert!(core_order(Some(&meta), &oob).is_none());
+        assert!(core_order(None, &action).is_none());
     }
 
     #[test]

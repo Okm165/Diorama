@@ -1035,14 +1035,43 @@ The served info surface: `clearinghouseState`, `spotClearinghouseState`
 (`balances`; unified accounts also carry `tokenToAvailableAfterMaintenance` —
 the figure daloc's client reconciles: `available + maintenance == the
 collateral token's balance`), `userAbstraction`, `openOrders` (empty for a
-touched account - the matching lane is Phase 2 and, per the plan's §18.4, not
-required for daloc's suite: none of its flows place an order, so the account
-plane is complete without `/exchange`), `activeAssetData` (touched accounts) /
+touched account — the order lane fills IOC orders against the real book
+immediately and nothing ever rests, so the empty shape is exact),
+`activeAssetData` (touched accounts) /
 `meta`, `metaAndAssetCtxs`, `spotMeta`, `allMids`, `l2Book`, `marginTable`,
 `exchangeStatus`, `perpDexs`
 (`[null]` - the first dex only until multi-dex lands; an account read scoped to
 a non-default dex answers the empty shape, a market read scoped to one is a 400).
 Unknown types answer `"unrouted"` (hl_mock's contract).
+
+**The order lane (plan §4.5 — the market-impact axiom).** One lane, three
+doors: `POST /exchange`'s `order` action, `POST /control/order`, and the
+CoreWriter limit order (id 1) decoded from V's blocks. An IOC order walks the
+**served book** — the live depth the feed caches minus what the devnet already
+consumed — in price order, taking each level's size up to the order's size and
+limit; the fill's average is size-weighted across the levels it took. The
+consumptions are recorded per level (`{coin, side, price, size}`) and
+**persisted with the scenario**: a live book update refreshes every unowned
+level verbatim while an owned level keeps its delta (served = live − consumed,
+a fully consumed level leaves the book); an owned price the live book no longer
+carries is **pruned, never re-owned** (I6), and the book hand-back
+(`clear_book`/reset) restores the live book exactly (I4). The mark is never
+touched by a fill (I3) — the pricing oracle moves only by an explicit crash.
+The trader's own state moves the way the venue's would: size and size-weighted
+entry update, a reducing fill realizes its closed part's PnL into the perp
+balance (so the measured identity `accountValue == totalRawUsd + Σ signed
+positionValue` stays exact), and the initial margin follows
+`|szi|·entry/leverage`. The opening check runs on a clone — a refused order
+leaves no trace — and refusals are by name (resting tif, reduce-only that
+would not reduce, no depth within the limit, insufficient margin with the
+numbers). The venue's tick/lot rules are enforced with named refusals: a size
+carries at most the asset's `szDecimals` decimals, a price at most 5
+significant figures and at most `6 − szDecimals` decimals (an integer price
+is always valid), and a perp order's notional is at least $10 — the venue's
+exact error strings are a Phase-2 pin (they need a live probe). Metrics: `venue_sim_owned_levels`, `venue_sim_owned_skips_total`,
+`venue_sim_owned_pruned_total`, `venue_sim_orders_filled_total`. The
+signature is accepted, never verified (the devnet has no keys — the
+anvil-impersonation analogue; the acting account rides the body's `user`).
 
 ## The Core↔EVM bridge
 
@@ -1074,9 +1103,14 @@ account); a trace fault degrades to top-level txs only and is counted
 never silently dropped. Applied to the sim: USD-class transfer, spot send,
 sendAsset (spot→spot — a perp-dex `sendAsset`, a multi-dex move, is refused by
 name, Phase 2), API-wallet registration, abstraction mode;
-insufficient-balance refusals are counted, not retried; orders/cancels wait for
-the matching lane (Phase 2) and are counted by id
-(`venue_bridge_actions_total{id}`).
+insufficient-balance refusals are counted, not retried. The CoreWriter limit
+order (id 1) fills through the **same lane** as `/exchange` and
+`/control/order`: prices and sizes arrive as 10^8 × the human value and the
+tif byte is the docs' own (1 `Alo`, 2 `Gtc`, 3 `Ioc`) — a resting tif is
+refused by name, a fill that cannot land (no depth, no margin, unknown asset)
+is counted as a refusal, never retried. Cancels (10/11) have nothing to act
+on (no order ever rests) and are refused by name and counted; the remaining
+unmodeled ids are counted by id (`venue_bridge_actions_total{id}`).
 
 **Core→EVM.** A `sendAsset` naming the token's system address debits the sim and
 is completed the way the chain does it: a `transfer(recipient, amount)` call on

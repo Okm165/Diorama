@@ -98,6 +98,38 @@ pub(crate) async fn deal(State(state): State<Arc<ApiState>>, Json(req): Json<Dea
     }))
 }
 
+// ---- order ---------------------------------------------------------------
+
+/// The `order` route's body: the account plus the order's own fields (the
+/// matching lane fills against the real book; plan §4.5).
+#[derive(Debug, Deserialize)]
+pub(crate) struct OrderRequest {
+    pub address: Address,
+    #[serde(flatten)]
+    pub order: crate::sim::order::Order,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct OrderResponse {
+    pub address: Address,
+    #[serde(flatten)]
+    pub fill: crate::sim::order::Fill,
+}
+
+pub(crate) async fn order(State(state): State<Arc<ApiState>>, Json(req): Json<OrderRequest>) -> Result<Json<OrderResponse>> {
+    let fill = state.sim.order(&state.feed, req.address, &req.order)?;
+    tracing::info!(
+        address = %req.address,
+        coin = %req.order.coin,
+        is_buy = req.order.is_buy,
+        sz = %fill.total_sz,
+        avg_px = %fill.avg_px,
+        consumed = fill.consumed.len(),
+        "sim order filled"
+    );
+    Ok(Json(OrderResponse { address: req.address, fill }))
+}
+
 // ---- advance -------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -291,7 +323,7 @@ pub(crate) async fn set_book(
                 spread: None,
             };
             let count = book.levels[0].len() + book.levels[1].len();
-            state.feed.own_book(book)?;
+            state.feed.own_book(&book)?;
             Ok(Json(SetBookResponse {
                 coin: req.coin,
                 owned: true,

@@ -13,7 +13,7 @@
 //! ```
 //!
 //! (verified exact on the live sample, `wire::tests::live_sample_identity_holds`).
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
 use crate::wire::{
     AssetCtx, AssetPosition, ClearinghouseState, CumFunding, Leverage, LeverageType, MarginSummary,
@@ -676,6 +676,111 @@ pub(crate) fn liquidation_px(p: &Position, mark: Decimal, maintenance_rate: Deci
     }
     let distance = mul(side, p.margin_used, "liquidation margin")? / position_size / denominator;
     sub(mark, distance, "liquidation price")
+}
+
+/// Apply one fill to the account (the matching lane's single mutation): the
+/// position's size and size-weighted entry update; a reducing fill realizes
+/// its closed part's PnL into the perp balance, so the measured identity
+/// (`accountValue == totalRawUsd + Σ signed positionValue`) stays exact; the
+/// initial margin follows `|szi|·entry/leverage`. A flip (through zero) opens
+/// the remainder at the fill price.
+/// The sign of a decimal (−1/0/1); `rust_decimal` has no `signum`.
+fn sign(d: Decimal) -> i8 {
+    if d > Decimal::ZERO {
+        1
+    } else if d < Decimal::ZERO {
+        -1
+    } else {
+        0
+    }
+}
+
+/// One fill's facts (what the matching lane hands the account math): the
+/// market, the direction, the filled size, the size-weighted price, the
+/// leverage a new position takes, and the reduce-only flag.
+#[derive(Debug, Clone)]
+pub(crate) struct FillFacts {
+    pub coin: String,
+    pub is_buy: bool,
+    pub size: Decimal,
+    pub px: Decimal,
+    pub leverage: u32,
+    pub reduce_only: bool,
+}
+
+pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> {
+    let signed = if fill.is_buy { fill.size } else { -fill.size };
+    let old = account
+        .positions
+        .get(&fill.coin)
+        .map(|p| p.szi)
+        .unwrap_or(Decimal::ZERO);
+    if fill.reduce_only && (old.is_zero() || sign(old) == sign(signed) || fill.size > old.abs()) {
+        return Err(Error::BadRequest {
+            reason: format!("reduce-only order would not reduce the {} position", fill.coin),
+        });
+    }
+    let position = account
+        .positions
+        .entry(fill.coin.clone())
+        .or_insert_with(|| Position {
+            szi: Decimal::ZERO,
+            entry_px: fill.px,
+            leverage: LeverageType::Cross,
+            leverage_value: fill.leverage.max(1),
+            margin_used: Decimal::ZERO,
+            funding_all_time: Decimal::ZERO,
+            funding_since_open: Decimal::ZERO,
+            funding_since_change: Decimal::ZERO,
+        });
+    if old.is_zero() || sign(old) == sign(signed) {
+        apply_increase(position, old, fill)?;
+    } else {
+        let realized = apply_reduction(position, old, fill)?;
+        account.perp_balance = add(account.perp_balance, realized, "realized PnL")?;
+    }
+    if position.szi.is_zero() {
+        account.positions.remove(&fill.coin);
+        return Ok(());
+    }
+    if let Some(position) = account.positions.get_mut(&fill.coin) {
+        // `.max(1)` guards the decimal division (rust_decimal panics on a
+        // zero divisor; a leverage of 0 is not a state this plane creates).
+        position.margin_used = mul(position.szi.abs(), position.entry_px, "margin notional")?
+            / Decimal::from(position.leverage_value.max(1));
+    }
+    Ok(())
+}
+
+/// An increase (or a fresh position): the entry becomes the size-weighted
+/// average of the old notional and the fill.
+fn apply_increase(position: &mut Position, old: Decimal, fill: &FillFacts) -> Result<()> {
+    let signed = if fill.is_buy { fill.size } else { -fill.size };
+    let old_notional = mul(old.abs(), position.entry_px, "entry notional")?;
+    let fill_notional = mul(fill.size, fill.px, "fill notional")?;
+    let new_szi = add(old, signed, "position size")?;
+    position.entry_px = add(old_notional, fill_notional, "entry notional total")? / new_szi.abs();
+    position.szi = new_szi;
+    Ok(())
+}
+
+/// A reduction (or a flip): the closed part's realized PnL (returned for the
+/// caller to credit — the measured identity stays exact); a flip opens the
+/// remainder at the fill price.
+fn apply_reduction(position: &mut Position, old: Decimal, fill: &FillFacts) -> Result<Decimal> {
+    let signed = if fill.is_buy { fill.size } else { -fill.size };
+    let closed = old.abs().min(fill.size);
+    let realized = mul(
+        mul(closed, sub(fill.px, position.entry_px, "px − entry")?, "closed PnL")?,
+        Decimal::from(sign(old)),
+        "signed PnL",
+    )?;
+    let new_szi = add(old, signed, "position size")?;
+    if sign(new_szi) != sign(old) && !new_szi.is_zero() {
+        position.entry_px = fill.px;
+    }
+    position.szi = new_szi;
+    Ok(realized)
 }
 
 /// Accrue funding from the account's stamp to `to_ms` at the live rates
