@@ -14,7 +14,7 @@ alloy-consensus = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 alloy-rpc-types-trace = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
 rust_decimal = { workspace = true }

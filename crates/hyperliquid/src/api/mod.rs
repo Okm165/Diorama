@@ -8,6 +8,7 @@
 //! 4xx, a warming market plane is 503, a venue fault is 502.
 pub mod control;
 pub mod info;
+pub mod ws;
 
 use crate::error::{Error, Result};
 use crate::feed::rest::RestClient;
@@ -78,6 +79,8 @@ pub fn info_router(state: Arc<ApiState>) -> Router {
         .route("/healthz", axum::routing::get(info::healthz))
         .route("/readyz", axum::routing::get(info::readyz))
         .route("/info", axum::routing::post(info::info))
+        // The venue's websocket lane (plan §7.5: "info + WS" on this port).
+        .route("/ws", axum::routing::get(ws::ws))
         .with_state(state)
 }
 

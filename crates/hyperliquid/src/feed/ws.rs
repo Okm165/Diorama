@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// One server push (or ack). `channel` tags the payload.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "channel")]
-enum WsMessage {
+pub(crate) enum WsMessage {
     #[serde(rename = "allMids")]
     AllMids { data: WsAllMids },
     #[serde(rename = "activeAssetCtx")]
@@ -34,12 +34,12 @@ enum WsMessage {
 }
 
 #[derive(Debug, Deserialize)]
-struct WsAllMids {
+pub(crate) struct WsAllMids {
     mids: BTreeMap<String, Decimal>,
 }
 
 #[derive(Debug, Deserialize)]
-struct WsAssetCtx {
+pub(crate) struct WsAssetCtx {
     coin: String,
     ctx: AssetCtx,
 }
