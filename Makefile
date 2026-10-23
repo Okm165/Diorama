@@ -189,6 +189,9 @@ venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/
 venue-drill: ## The venue epoch drill (same-pin restore, new-pin epoch, driver liveness)
 	NS=venue-mirror ./scripts/venue-drill.sh
 
+venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation, bridge round-trip)
+	NS=venue-mirror ./scripts/venue-proof.sh
+
 feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
 	./scripts/feed-bridge.sh $(ARGS)
 

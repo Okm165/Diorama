@@ -297,6 +297,24 @@ curl -s -X POST localhost:8091/control/deal \
   `venue_sim_ws_connected`, the `venue_bridge_*` counters, and the `meta`
   shape.
 
+### The bridge's token door (measured on the live chain)
+
+The bridge credits EVM→Core only from a `Transfer` log emitted by the token's
+*linked* EVM contract (`spotMeta.evmContract`) — and that rule meets two real
+chain facts:
+
+- **Circle's USDC blacklists the system addresses** (`isBlacklisted(0x2000…0000)
+  == true` live), so a plain USDC transfer to the system address reverts
+  ("Blacklistable: account is blacklisted") — and USDC's `spotMeta` link
+  (`0x6b9e…`) is a phantom that cannot emit `Transfer` logs at all. USDC moves
+  to HyperCore by CCTP mints, never by the system-address ERC-20 path; the
+  bridge's refusal is the faithful behavior.
+- The faithful proof token is **PURR** (spot index 1, link `0x9b498c…` — a real
+  18-dec ERC-20 whose system address is permitted; core wei 5). `make
+  venue-proof` uses it for the round trip: transfer 5 PURR to `0x20…01` (the
+  credit), then a `sendAsset` naming that address (the completion — the system
+  address sends the ERC-20 back), exact balances end to end.
+
 ## The CCTP bridge — measured facts and acceptance
 
 The real lane (`cctp-bridge`, Iris 8095 / control 8096) moves native USDC
@@ -328,7 +346,11 @@ Iris. Proven live on scratch forks:
   non-atomicity;
 - the pin clamp: a start block below the fork pin is clamped to the pin with
   one warning (anvil forwards pre-pin `eth_getLogs` ranges upstream, which
-  rejects them — measured).
+  rejects them — measured);
+- the real reverts, string for string: source-side `Max fee must be less than
+  amount`, `Mint recipient must be nonzero`, `Hook data is empty`; a message
+  pinned to another `destinationCaller` → `Invalid caller for message` (the
+  relayer pre-parks such records instead of paying for the revert).
 
 Operator surface: `GET /health` (parked counts), `GET /control/state`,
 `POST /control/transfer` (`hook: {target, calldata}` for the credit lane).
