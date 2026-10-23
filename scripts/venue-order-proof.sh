@@ -158,15 +158,28 @@ nonce=$(date +%s%3N)
 x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":false,\"p\":\"3000\",\"s\":\"0.2\",\"t\":{\"limit\":{\"tif\":\"Ioc\"}}}]},\"user\":\"$ORDER_ACCT\",\"nonce\":$nonce,\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")
 st=$(echo "$x" | json 'd["response"]["data"]["statuses"][0].get("filled",{}).get("totalSz")')
 [ "$st" = "0.2" ] && ok "the compact order filled through /exchange (totalSz 0.2)" || bad "exchange: $x"
+# A resting tif needs its own price: the venue never walks a Gtc as a market
+# order (it would fill instead of rest).
 x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":true,\"s\":\"0.1\",\"t\":{\"limit\":{\"tif\":\"Gtc\"}}}]},\"user\":\"$ORDER_ACCT\"}")
 err=$(echo "$x" | json 'd["response"]["data"]["statuses"][0].get("error","")')
-case "$err" in
-  *"resting orders are not modeled"*) ok "a resting tif refuses per-order, by name" ;;
-  *) bad "gtc: $x" ;;
-esac
+[ "$err" = "Order has invalid price." ] && ok "a price-less Gtc refuses by name" \
+  || bad "gtc: $x"
+# The resting lane: a priced Gtc rests, openOrders serves it, cancel closes it,
+# orderStatus reports the terminal state.
+px=$(book | json 'float(d["levels"][0][0]["px"]) * 0.95')
+x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":true,\"p\":\"$px\",\"s\":\"0.1\",\"t\":{\"limit\":{\"tif\":\"Gtc\"}}}]},\"user\":\"$ORDER_ACCT\",\"nonce\":$(date +%s%3N)}")
+oid=$(echo "$x" | json 'd["response"]["data"]["statuses"][0].get("resting",{}).get("oid")')
+[ -n "$oid" ] && [ "$oid" != "None" ] && ok "a priced Gtc rests (oid $oid)" || bad "rest: $x"
+op=$(sipost /info "{\"type\":\"openOrders\",\"user\":\"$ORDER_ACCT\"}")
+[ "$(echo "$op" | json 'len(d)')" = "1" ] && ok "openOrders serves the resting order" || bad "openOrders: $op"
+x=$(sipost /exchange "{\"action\":{\"type\":\"cancel\",\"cancels\":[{\"a\":$idx,\"o\":$oid}]},\"user\":\"$ORDER_ACCT\",\"nonce\":$(date +%s%3N)}")
+st=$(echo "$x" | json 'd["response"]["data"]["statuses"][0]')
+[ "$st" = "success" ] && ok "the cancel succeeds (the venue's success token)" || bad "cancel: $x"
+os=$(sipost /info "{\"type\":\"orderStatus\",\"user\":\"$ORDER_ACCT\",\"oid\":$oid}")
+[ "$(echo "$os" | json 'd["order"]["status"]')" = "canceled" ] && ok "orderStatus reports canceled" || bad "orderStatus: $os"
 x=$(sipost /exchange "{\"action\":{\"type\":\"cancel\",\"cancels\":[]},\"user\":\"$ORDER_ACCT\"}")
 s=$(echo "$x" | json 'd["status"]')
-[ "$s" = "err" ] && ok "a non-order action answers the venue's err envelope" || bad "cancel: $x"
+[ "$s" = "err" ] && ok "an empty cancel batch answers the venue's err envelope" || bad "cancel: $x"
 
 echo "-- E. the live book (real depth, handed back)"
 spost /control/set_book "{\"coin\":\"$COIN\"}" > /dev/null

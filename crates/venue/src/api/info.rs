@@ -281,6 +281,12 @@ fn coin_of(meta: Option<&crate::wire::Meta>, asset: u32) -> Option<String> {
 
 /// `cancel`: per-entry statuses in the venue's own shape.
 fn cancel_action(state: &ApiState, user: Address, cancels: &[CancelAction]) -> Response {
+    if cancels.is_empty() {
+        // The venue's batched actions answer an error for an empty payload
+        // (the order action's pre-validation carries the same rule).
+        return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string())
+            .into_response();
+    }
     let meta = state.feed.meta();
     let statuses = cancels
         .iter()
@@ -310,6 +316,10 @@ fn cancel_by_cloid_action(
     user: Address,
     cancels: &[CancelByCloidAction],
 ) -> Response {
+    if cancels.is_empty() {
+        return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string())
+            .into_response();
+    }
     let meta = state.feed.meta();
     let statuses = cancels
         .iter()

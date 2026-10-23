@@ -1103,6 +1103,11 @@ pub(crate) fn validate_order(
     if req.size <= Decimal::ZERO {
         return Err(Error::bad_request("order size must be > 0"));
     }
+    // A resting or post-only order needs its own price: the venue never walks
+    // a Gtc/Alo as a market order (it would fill instead of rest).
+    if req.limit_px.is_none() && req.trigger.is_none() && req.tif != Tif::Ioc {
+        return Err(Error::bad_request("Order has invalid price."));
+    }
     validate_tick_lot(meta, req)?;
     validate_min_notional(feed, req)?;
     validate_price_band(feed, req)?;
