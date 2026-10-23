@@ -151,7 +151,7 @@ config-check: ## Validate every instance file through the layered loader (struct
 	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check "$$f" || exit 1; \
 	done
 
-fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels config-check ## Run every structural fitness function (plan §11.3)
+fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels no-panics config-check ## Run every structural fitness function (plan §11.3)
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
@@ -173,6 +173,9 @@ trust-audit: ## Every `// TRUST:` marker names its guard (doctrine rule 6)
 
 clock-labels: ## Every logged block label names its clock (doctrine `block-numbering`)
 	./scripts/clock-labels.sh
+
+no-panics: ## No panic-family site in production code outside the named allow-list
+	./scripts/no-panics.sh
 
 ##@ Ops
 

@@ -683,6 +683,19 @@ edge; `venue-sim` likewise) and fails any undeclared dependency. With one
 package every build compiled the whole graph (measured, plan §11.3); a
 profile-routing binary would link both projects into every venue build.
 
+**The structural fitness functions.** `make fitness` runs the gates the
+doctrine makes checkable, each a script in `scripts/`: `lint` (clippy at the
+committed 50-line / 5-arg ratchet), `design-assertions` (`is_normal` over every
+public type), `closure-matrix` (the dependency law above), `no-orphans` (no
+`utils`/`common`/`helpers` homes), `docs-metrics` (every metric the docs name
+exists in the code), `trust-audit` (every `// TRUST:` names its guard),
+`clock-labels` (every logged block label appears in its crate's `//! Clocks:`
+ledger), `no-panics` (the production code carries exactly two panic-family
+sites, both named invariants in the script's allow-list — a service that panics
+on an upstream answer is a crash loop, not a degradation) and `config-check`
+(every instance file through the layered loader). Each fails on drift; adding a
+gate is adding a script and one Makefile line.
+
 **Boot asserts.** The engine waits for V (a coordinated restart must not become
 CrashLoopBackOff), asserts the chain id is 999 (a profile over the wrong chain
 must not serve), and re-asserts `anvil_setAutomine(false)` - an Anvil restart
