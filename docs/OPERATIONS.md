@@ -136,23 +136,57 @@ are the gate; the anvil pods pick the offset up from the mounted instance file
 
 ### Standing maintenance item: the Lighthouse pin
 
-The running pin is **Lighthouse v8.3.0**. v8.3.1 is the current patch — the
-**eMudhra CA certificate mitigation** (rated High for stakers, Medium for a
-non-staking mirror) — and v8.3.x also satisfies the Hoodi-Oct-26 requirement.
-The bump is a two-step rollout (pull + import the new tag+digest, then
-`make apply` with the manifest edit) and therefore rides the **next rollout
-window**, together with the venue overlay: replace the line in
-`k8s/base/lighthouse.yaml` with
+The running pin is **Lighthouse v8.3.0**. The current patch is **v8.3.2**
+(2026-10-23): it carries v8.3.1's **eMudhra CA certificate mitigation**
+(rated High for stakers, Medium for a non-staking mirror) and **cancels the
+scheduled Gloas fork on Hoodi** — the 2026-10-26 activation was called off,
+mainnet users need not upgrade, and the mirror follows a mainnet CL, so the
+Hoodi schedule was never ours. The bump is a two-step rollout (pull + import
+the new tag+digest, then `make apply` with the manifest edit) and therefore
+rides the **next rollout window**, together with the venue overlay: replace
+the line in `k8s/base/lighthouse.yaml` with
 
 ```
-image: docker.io/sigp/lighthouse:v8.3.1@sha256:05b5068268ea3fbd64389309d1d7c15b8f18a53f28d0886f098316302f4cdb41
+image: docker.io/sigp/lighthouse:v8.3.2@sha256:1fda7c2d9c067dcfab20a0bfb83cb3c351a05673859455df4516e5708c5fa031
 ```
 
 (the multi-arch index digest — the same form the v8.3.0 pin uses), then
 `make images` (the pull), `make check-pins`, `make apply`. Until then the
 running mirror is unaffected (the mitigation is a CA trust change, not a
-consensus change). reth v2.8.0 and foundry v1.8.6 are the current releases
-and stay as pinned.
+consensus change). reth v2.8.0 stays as pinned; **foundry v1.8.6** is still the
+latest release (a security-only patch on v1.8.5) — **v1.8.7 is imminent** (the
+2026-10-22 nightly already bumps the version) and its anvil fixes touch ground
+we stand on: log-filter expiry refresh (#17617 — the long-running log-delivery
+class), fork RPC connection isolation (#17598), fork `prefetch` (#17673),
+delegated-EOA nonce reset (#17686, EIP-7702), the EIP-8037 state-gas reservoir
+(#17719), genesis-number RPC lookups (#17731), and fork blob-fee params
+(#17754/#17756). Watch for the tag and ride the same rollout; re-run the §17.4
+WS acceptance after the bump (a long-running instance is the case to re-check).
+
+### Watch item: the Amsterdam (Glamsterdam) activation
+
+Mainnet is not scheduled (Hoodi's 2026-10-26 activation was **cancelled**
+2026-10-23 — Lighthouse v8.3.2 carries the cancellation; Sepolia activated
+2026-10-06). When mainnet lands, three things move together:
+
+- **EIP-7708** — ETH transfers emit a `Transfer` log from
+  `SYSTEM_ADDRESS (0xffff…fffe)` at tx level, before the EVM logs, withdrawals
+  excluded. The source's `eth_getLogs` then carries logs a replayed block
+  cannot produce on a pre-Amsterdam anvil, so the verifier's `log_set` and
+  `logs_bloom` checks diverge by construction until the anvil hardfork is
+  raised.
+- **EIP-7778 + 8037** — `gasUsed = max(exec_gas, state_gas)` and refunds no
+  longer subtracted: receipt `gas_used` parity and the gas-limit rules change.
+- **EIP-7928** — BALs leave reth's computed `eth_getBlockAccessList` and become
+  consensus-carried (`ExecutionPayloadV4`; header `block_access_list_hash`;
+  `engine_newPayloadV5` / `getPayloadV6` / `getPayloadBodiesBy*V2`). The BAL
+  source in `crates/ethereum` switches from the RPC method to the engine
+  payload at that point. The EIP's Last Call deadline is 2026-11-01.
+
+Anvil's Amsterdam support is mapped from foundry v1.8.0 (EIP-8037 state gas in
+v1.8.3, EIP-7928 BAL production in v1.8.4): pin a foundry release carrying
+them before the activation, then re-run the capability proof and review
+`/state/drift.jsonl` on a post-Amsterdam fork base.
 
 Read the flight recorder:
 
@@ -597,6 +631,27 @@ name the case.
 tx then mints and runs the call (non-atomic: a failing hook cannot lose the
 mint). `mint_recipient` is usually the wrapper itself when the hook forwards
 the funds.
+
+**Pointing daloc's `cctp-relay` at this service — one known fix needed.** Their
+relay is written against their own mock lane, which serves the *event* message
+verbatim; a protocol-faithful Iris (Circle's, and ours) serves the
+**attester-patched** message — nonce and `finalityThresholdExecuted` filled, so
+it is the artifact `receiveMessage` verifies. Measured on a live round trip
+through this bridge (the store keeps both): event message nonce `0x00…00`,
+served nonce `0x0d297d…48f1` (the burn-tx hash), event
+`finalityThresholdExecuted = 0`, served `= 2000`; `keccak256(event) =
+0xa5498934…` ≠ `keccak256(served) = 0x3332df64…`. Their
+`services/cctp-relay/src/relay.rs` therefore (a) never matches — the `find` at
+`keccak256(&m.message) == hash` compares the served keccak against the event
+keccak and the attempt stays `AwaitingAttestation` forever — and (b) even on a
+match would submit the stored **event** message (`message.clone()`), which
+reverts `Nonce already used` (the zero-nonce pre-block; proven live). The fix
+on their side is two lines: take the message the tx-scoped query returns (the
+query is `?transactionHash=<burn>`; if a tx carries several burns, match on the
+fields the attester never patches — `burnToken`, `amount`, `mintRecipient`,
+`messageSender`, the header's `sender`/`recipient`/`destinationDomain`), and
+submit `matched.message`, not the event payload. Their mock lane is unaffected;
+this is the delta for the real lane only.
 
 ### Drills
 

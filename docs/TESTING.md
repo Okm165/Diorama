@@ -790,6 +790,9 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   subscriber on the WETH address (their filter) stayed connected while a devnet tx emitted a
   `Transfer` — the log was delivered (block 26253639, `logIndex 0`), so the anomaly does not
   persist after an anvil restart; the HTTP backup stays the fallback for empty blocks.
+  Re-confirmed on the **7-hour-old scratch T with no restart** (a second run: the WETH
+  `Transfer` at block 26254224 delivered live) — long uptime alone does not silence the
+  subscription; v1.8.7's log-filter-expiry fix is the watch item (OPERATIONS).
 - **`eth_getLogs` ranges on T**: a 2000-block range answers locally (their chain-1 setting);
   a range reaching below the fork pin is forwarded to reth, which refuses above its 20 000-result
   cap with `query exceeds max results …, retry with the range …` — a wording their detector's
