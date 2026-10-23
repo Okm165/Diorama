@@ -22,6 +22,8 @@ axum = { workspace = true }
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The provenance test pins the embedded wrapper bytecode's sha256.
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

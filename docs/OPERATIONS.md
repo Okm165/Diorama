@@ -489,6 +489,44 @@ for >1 min means the market plane is on the REST lane (watch
 window means `/readyz` will fail; `venue_bridge_trace_faults_total` rising means
 contract-internal CoreWriter calls are being missed that block.
 
+### The CCTP bridge
+
+The bridge (`cctp-bridge`, Iris 8095 / control 8096; 31095/31096 in-cluster)
+serves the real CCTP lane beside daloc's untouched `0x17` mock. Its boot
+installs the devnet attester on both chains and deploys the hook wrapper
+(owner = the relay key); both are idempotent and verified read-back.
+
+| Check | Where |
+|---|---|
+| parked messages (never dropped) | `GET /health` (`parked` count), `GET /control/state` |
+| the relay's gas | `/metrics` `cctp_*`; the boot tops the key up to the low threshold |
+| the attester / wrapper wiring | the boot log lines (`devnet attester installed`, `hook wrapper present/deployed`) |
+| a transfer end-to-end | `POST /control/transfer {source, destination, amount}` |
+
+**A parked message.** A message parks on a definitive failure (an expired
+window, a reverted `receiveMessage`, a vanished burn after a re-pin, a rewound
+mint on the destination). It is never re-relayed silently. To recover one
+whose burn still exists on the source:
+
+```bash
+curl -s -X POST localhost:31095/v2/reattest/<burn-tx-hash>   # fresh window, re-armed
+```
+
+The relayer picks it up on its next pass. A burn that a re-pin removed cannot
+be recovered — re-run the transfer.
+
+**A re-pin or a snapshot revert.** The watcher clamps its scan at the fork pin
+and parks records whose burn vanished; the relayer parks relayed records whose
+mint was rewound. Watch `cctp_*` metrics and the `parked` count; the reasons
+name the case.
+
+**The hook (credit-carrying) lane.** `POST /control/transfer` with
+`"hook": {"target": "0x…", "calldata": "0x…"}` burns with
+`depositForBurnWithHook` and pins `destinationCaller` to the wrapper; one relay
+tx then mints and runs the call (non-atomic: a failing hook cannot lose the
+mint). `mint_recipient` is usually the wrapper itself when the hook forwards
+the funds.
+
 ### Drills
 
 **Revert to blank - `epoch_new` (one call, both halves).**

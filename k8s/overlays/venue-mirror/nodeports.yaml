@@ -66,9 +66,15 @@ data:
   # The values the daloc harness sources (their external-mode env, plan §7.7).
   # The single-node k3s node *is* the test host; a remote harness overrides
   # the host and keeps the ports.
+  #
+  # The venue is the *second* chain: its keys carry the `CHAIN_1_` prefix of
+  # the merge script's convention, so sourcing this block beside the mainnet's
+  # (k8s/base/nodeports.yaml) yields one collision-free env — unprefixed keys
+  # here would silently overwrite the L1 endpoints (their merge prefixes every
+  # chain after the first, §17.3).
   test-endpoints.env: |
-    CHAIN_RPC_URL=http://localhost:31545
-    CHAIN_WS_URL=ws://localhost:31545
+    CHAIN_1_CHAIN_RPC_URL=http://localhost:31545
+    CHAIN_1_CHAIN_WS_URL=ws://localhost:31545
     HL_INFO_API_URL=http://localhost:31090
     VENUE_CONTROL_URL=http://localhost:31091
     IRIS_API_URL=http://localhost:31095

@@ -21,12 +21,14 @@
 //! This module owns only the Iris vocabulary: the store's faults map to 500s
 //! here, and the exact 404 body lives in one place ([`IrisError::not_found`]).
 use crate::attester::Attester;
+use crate::chains::FINALITY_THRESHOLD_FINALIZED;
 use crate::error::{Error, Result};
-use crate::store::{MessageRecord, Store};
+use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::measured_fees;
+use alloy_primitives::{B256, U256};
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -40,6 +42,12 @@ const FAST_BURN_ALLOWANCE: f64 = 1_000_000_000.0;
 pub struct IrisState {
     pub store: Arc<Store>,
     pub attester: Arc<Attester>,
+    /// Both served chains: the reattest route anchors the fresh expiration at
+    /// the *destination's* head (the field is checked there, §15.1).
+    pub chains: Vec<crate::chains::Chain>,
+    /// The configured expiration window (0 = no expiry; the same value the
+    /// watcher signs with).
+    pub expiration_blocks: u64,
 }
 
 /// The Iris router (8095).
@@ -50,6 +58,7 @@ pub fn router(state: Arc<IrisState>) -> Router {
         .route("/v2/burn/USDC/fees/{source}/{destination}", get(fees))
         .route("/v2/fastBurn/USDC/allowance", get(allowance))
         .route("/v2/messages/{source_domain}", get(messages))
+        .route("/v2/reattest/{nonce}", post(reattest))
         .with_state(state)
 }
 
@@ -265,6 +274,75 @@ async fn messages(
     }))
 }
 
+/// `POST /v2/reattest/{nonce}` — re-sign a watched message with a *fresh*
+/// expiration window (§15.4/§15.5). The expiry revert rolled back, so the
+/// nonce is unconsumed and the same nonce can be re-served; the refreshed
+/// record goes back to `signed`, which is what re-arms the relayer (a
+/// deliberate operator action, never a silent retry). The nonce is the burn
+/// tx hash (the deterministic policy, §15.3), so the lookup matches the GET's.
+async fn reattest(
+    State(state): State<Arc<IrisState>>,
+    Path(nonce): Path<String>,
+) -> Result<Json<MessagesResponse>, IrisError> {
+    let nonce = nonce
+        .parse::<B256>()
+        .map_err(|_| IrisError::bad_request(format!("nonce `{nonce}` is not a 32-byte hex hash")))?;
+    let record = state
+        .store
+        .with(|s| Ok(s.messages.iter().find(|m| m.nonce == nonce).cloned()))
+        .map_err(|e| IrisError::internal(&e))?;
+    let Some(record) = record else {
+        return Err(IrisError::not_found());
+    };
+    let expiration = if state.expiration_blocks == 0 {
+        U256::ZERO
+    } else {
+        let destination = state
+            .chains
+            .iter()
+            .find(|c| c.domain == record.destination_domain)
+            .ok_or_else(|| IrisError::bad_request("no served chain for the message's destination".into()))?;
+        let head = destination
+            .rpc
+            .block_number()
+            .await
+            .map_err(|e| IrisError::internal(&Error::Rpc(e)))?;
+        U256::from(head.saturating_add(state.expiration_blocks))
+    };
+    let message = record
+        .decoded()
+        .map_err(|e| IrisError::internal(&e))?
+        .with_attester_fields(nonce, FINALITY_THRESHOLD_FINALIZED, U256::ZERO, expiration);
+    let attestation = state
+        .attester
+        .sign(&message.encode())
+        .map_err(|e| IrisError::internal(&e))?;
+    let refreshed = state
+        .store
+        .with(|s| {
+            let Some(rec) = s.messages.iter_mut().find(|m| m.nonce == nonce) else {
+                return Ok(None);
+            };
+            rec.message_hash = message.keccak();
+            rec.message = message.encode();
+            rec.attestation = Some(attestation.clone());
+            rec.state = RelayState::Signed;
+            rec.park_reason = None;
+            rec.relay_tx = None;
+            rec.attempts = 0;
+            Ok(Some(rec.clone()))
+        })
+        .map_err(|e| IrisError::internal(&e))?;
+    let Some(refreshed) = refreshed else {
+        return Err(IrisError::not_found());
+    };
+    state.store.save().map_err(|e| IrisError::internal(&e))?;
+    tracing::warn!(%nonce, expiration = %expiration, "cctp message re-attested with a fresh expiration");
+    Ok(Json(MessagesResponse {
+        messages: vec![entry(&refreshed)],
+    }))
+}
+
 fn entry(record: &MessageRecord) -> MessageEntry {
     MessageEntry {
         message: record.message_hex(),
@@ -418,6 +496,8 @@ mod tests {
         let state = Arc::new(IrisState {
             store: store.clone(),
             attester: Arc::new(crate::attester::Attester::from_seed("iris-test").unwrap()),
+            chains: Vec::new(),
+            expiration_blocks: 0,
         });
         let tx = B256::repeat_byte(0xab);
         let query = || MessageQuery {
@@ -448,7 +528,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let served = messages(State(state), Path(0), Query(query()))
+        let served = messages(State(state.clone()), Path(0), Query(query()))
             .await
             .unwrap();
         assert_eq!(
@@ -458,12 +538,47 @@ mod tests {
 
         // A wrong domain is not the same lookup.
         let err = messages(State(Arc::new(IrisState {
-            store,
+            store: store.clone(),
             attester: Arc::new(crate::attester::Attester::from_seed("iris-test").unwrap()),
+            chains: Vec::new(),
+            expiration_blocks: 0,
         })), Path(19), Query(query()))
             .await
             .unwrap_err();
         assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+
+        // `POST /v2/reattest/{nonce}`: a parked message is re-signed and
+        // re-armed (`signed`), the expiration window is fresh, and the
+        // attestation covers the new message bytes (with `expiration_blocks`
+        // at its default 0 the window stays 0 = no expiry).
+        store
+            .with(|s| {
+                s.messages[0].state = RelayState::Parked;
+                s.messages[0].park_reason = Some("must be re-signed".into());
+                s.messages[0].relay_tx = Some(B256::repeat_byte(0x11));
+                Ok(())
+            })
+            .unwrap();
+        let refreshed = reattest(State(state.clone()), Path(tx.to_string()))
+            .await
+            .unwrap();
+        let attestation = refreshed.0.messages[0].attestation.clone().unwrap();
+        assert_eq!(attestation.len(), 132, "0x + 65 bytes");
+        let record = store.with(|s| Ok(s.messages[0].clone())).unwrap();
+        assert_eq!(record.state, RelayState::Signed, "re-armed for the relayer");
+        assert!(record.park_reason.is_none());
+        assert!(record.relay_tx.is_none());
+        assert_eq!(
+            record.decoded().unwrap().body.expiration_block,
+            U256::ZERO,
+            "0 = no expiry, unchanged"
+        );
+        // An unknown nonce is the live 404 body.
+        let err = reattest(State(state), Path(B256::repeat_byte(0x77).to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(err.error, "Message not found for provided parameters");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

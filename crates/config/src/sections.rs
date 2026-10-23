@@ -49,7 +49,11 @@ pub struct CctpSection {
     pub poll_interval_ms: u64,
     /// The emulated PENDING window (0 = attest immediately).
     pub finality_delay_secs: u64,
-    /// The served `expirationBlock` (0 = no expiry).
+    /// The served `expirationBlock` window in destination blocks (0 = no
+    /// expiry). Anchored at the destination's head at signing/reattest time;
+    /// the contract rejects at `block.number == expirationBlock` and the
+    /// relay's estimate runs at the pending block (head + 1), so a relayable
+    /// window needs `>= 2` (measured, ADR 0007).
     pub expiration_blocks: u64,
     /// `eth_getLogs` range per scan call.
     pub scan_chunk_blocks: u64,

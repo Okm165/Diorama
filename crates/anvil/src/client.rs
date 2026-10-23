@@ -40,6 +40,10 @@ use std::time::Duration;
 /// discouraged alternative is `null`, which not every node accepts).
 const NO_PARAMS: [u8; 0] = [];
 
+/// The JSON-RPC code a node answers when it does not implement a method
+/// (measured: drpc answers `-32601` on HTTP 400 — see the module docs).
+const METHOD_NOT_FOUND: i64 = -32601;
+
 /// One call to send: a method and its typed positional params, serialized
 /// once. Params are method-specific, so a batch erases them to the official
 /// `RawValue` — exactly `alloy_json_rpc::Request::box_params`' contract.
@@ -595,6 +599,22 @@ impl Rpc {
             .fork_config
             .fork_url
             .zip(info.fork_config.fork_block_number))
+    }
+
+    /// The fork base block (`anvil_nodeInfo.forkConfig.forkBlockNumber`).
+    ///
+    /// Three answers, per boundary discipline: `Some(base)` on an anvil fork;
+    /// `None` when the method is absent (a real chain — the caller's own
+    /// configured start governs) or the chain is not forked; a *fault*
+    /// (transport, malformed answer) propagates — a fault must never read as
+    /// a fact. Callers scanning below a fork base must know: anvil forwards
+    /// such ranges upstream, and pre-pin blocks are the *source's* history.
+    pub async fn fork_block(&self) -> Result<Option<u64>> {
+        match self.anvil_node_info().await {
+            Ok(info) => Ok(info.fork_config.fork_block_number),
+            Err(Error::Rpc { payload, .. }) if payload.code == METHOD_NOT_FOUND => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// `anvil_reset` with a fresh fork: re-bases the chain at `block` from `url`.

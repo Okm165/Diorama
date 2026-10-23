@@ -46,6 +46,12 @@ pub struct Relayer {
     /// How long one tick waits for a submitted tx's receipt before leaving it
     /// for the next tick.
     pub receipt_timeout: Duration,
+    /// Last head seen per chain (parallel to `chains`): a head below the
+    /// watermark is a rewind (a snapshot revert) that un-minted relayed
+    /// messages — their records are parked, never re-relayed (a stale
+    /// derivation, I6; `POST /v2/reattest/{nonce}` is the deliberate way
+    /// back).
+    pub heads: Vec<std::sync::atomic::AtomicU64>,
 }
 
 impl Relayer {
@@ -61,10 +67,14 @@ impl Relayer {
         }
     }
 
-    /// One pass: gas alerts, then every SIGNED record once.
+    /// One pass: gas alerts, destination-rewind reconciliation, then every
+    /// SIGNED record once.
     pub async fn tick(&self) -> Result<usize> {
         if let Err(e) = self.gas_alerts().await {
             tracing::warn!(error = %e, "cctp gas alert read failed");
+        }
+        if let Err(e) = self.reconcile_rewinds().await {
+            tracing::warn!(error = %e, "cctp destination rewind check failed");
         }
         let signed = self.store.with(|state| {
             Ok(state
@@ -86,6 +96,57 @@ impl Relayer {
             }
         }
         Ok(confirmed)
+    }
+
+    /// A destination head below its watermark is a rewind: any relayed
+    /// message whose nonce is no longer consumed has lost its mint — park it
+    /// (the destination's rollback is a deliberate test action; re-minting
+    /// into it would fight the revert). The chain stays the dedup truth: a
+    /// still-consumed nonce means the mint predates the rewind and stands.
+    async fn reconcile_rewinds(&self) -> Result<()> {
+        for (index, chain) in self.chains.iter().enumerate() {
+            let head = chain.rpc.block_number().await?;
+            let watermark = self.heads[index].load(Ordering::Relaxed);
+            let rewound = watermark > 0 && head < watermark;
+            if watermark > 0 && !rewound {
+                self.heads[index].store(head, Ordering::Relaxed);
+                continue;
+            }
+            if rewound {
+                tracing::warn!(
+                    chain = chain.name,
+                    head,
+                    watermark,
+                    "destination rewound; reconciling relayed messages"
+                );
+            }
+            // The full pass also runs at boot (`watermark == 0`): a restart
+            // after a revert or a re-pin must reconcile, not only a live
+            // regression. After the first tick the watermark gates it.
+            let relayed: Vec<MessageRecord> = self.store.with(|state| {
+                Ok(state
+                    .messages
+                    .iter()
+                    .filter(|m| {
+                        m.destination_domain == chain.domain && m.state == RelayState::Relayed
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>())
+            })?;
+            for record in relayed {
+                if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
+                    continue;
+                }
+                self.park(
+                    record.nonce,
+                    format!(
+                        "destination rewound or re-pinned: the mint is no longer on-chain at block {head} (re-run the transfer, or reattest to re-arm)"
+                    ),
+                )?;
+            }
+            self.heads[index].store(head, Ordering::Relaxed);
+        }
+        Ok(())
     }
 
     /// Read the relay key's balance on every chain and raise the alerts.
@@ -120,14 +181,31 @@ impl Relayer {
     /// already consumed); `Ok(false)` = still in flight, re-checked next tick.
     async fn relay(&self, record: &MessageRecord) -> Result<bool> {
         let chain = by_domain(&self.chains, record.destination_domain)?;
-        // A message can pin its caller (`destinationCaller`, §15.1). One
-        // pinned to someone else is served by the Iris but never relayable by
-        // this key: park it instead of paying for the real revert.
-        let caller = record.decoded()?.header.destination_caller;
-        if caller != B256::ZERO && caller != self.sender.address().into_word() {
+        // Hook-carrying messages are consumed through the wrapper (their
+        // `destinationCaller` pins it, §15.4); plain ones by this bridge's
+        // key. A message pinned to someone else is served by the Iris but
+        // never relayable here: park it instead of paying for the real
+        // revert.
+        let decoded = record.decoded()?;
+        let caller = decoded.header.destination_caller;
+        let (target, consumer) = if decoded.body.hook_data.is_empty() {
+            (MESSAGE_TRANSMITTER_V2, self.sender.address())
+        } else {
+            let wrapper = self
+                .store
+                .with(|state| Ok(state.hooks.get(&record.destination_domain).copied()))?
+                .ok_or_else(|| Error::BadRequest {
+                    reason: format!(
+                        "message {} carries a hook but domain {} has no wrapper (the boot step deploys one)",
+                        record.nonce, record.destination_domain
+                    ),
+                })?;
+            (wrapper, wrapper)
+        };
+        if caller != B256::ZERO && caller != consumer.into_word() {
             self.park(
                 record.nonce,
-                format!("destinationCaller {caller} is not this bridge's relay key"),
+                format!("destinationCaller {caller} is not this bridge's consumer ({consumer})"),
             )?;
             return Ok(false);
         }
@@ -153,10 +231,14 @@ impl Relayer {
         let attestation = record.attestation.clone().ok_or_else(|| Error::BadRequest {
             reason: format!("message {} is signed without an attestation", record.nonce),
         })?;
-        let calldata = receive_message_calldata(&record.message, &attestation);
+        let calldata = if decoded.body.hook_data.is_empty() {
+            receive_message_calldata(&record.message, &attestation)
+        } else {
+            crate::hook::relay_calldata(&record.message, &attestation)
+        };
         match self
             .sender
-            .send(&chain.rpc, MESSAGE_TRANSMITTER_V2, &calldata, U256::ZERO)
+            .send(&chain.rpc, target, &calldata, U256::ZERO)
             .await
         {
             Ok(hash) => {

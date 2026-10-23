@@ -50,6 +50,18 @@ sol! {
             uint32 minFinalityThreshold
         ) external;
 
+        /// §15.1's hook variant: the contract reverts on empty `hookData`.
+        function depositForBurnWithHook(
+            uint256 amount,
+            uint32 destinationDomain,
+            bytes32 mintRecipient,
+            address burnToken,
+            bytes32 destinationCaller,
+            uint256 maxFee,
+            uint32 minFinalityThreshold,
+            bytes hookData
+        ) external;
+
         function minFee() external view returns (uint256);
         function getMinFeeAmount(uint256 amount) external view returns (uint256);
         function localMessageTransmitter() external view returns (address);
@@ -287,6 +299,34 @@ pub fn deposit_for_burn_calldata(
     .into()
 }
 
+/// `depositForBurnWithHook` calldata — `depositForBurn` plus the hook
+/// payload; the caller pins `destinationCaller` to the hook wrapper (§15.4),
+/// so only the wrapper can consume the message.
+#[allow(clippy::too_many_arguments)]
+pub fn deposit_for_burn_with_hook_calldata(
+    amount: U256,
+    destination_domain: u32,
+    mint_recipient: Address,
+    burn_token: Address,
+    destination_caller: B256,
+    max_fee: U256,
+    min_finality_threshold: u32,
+    hook_data: &[u8],
+) -> Bytes {
+    ITokenMessengerV2::depositForBurnWithHookCall {
+        amount,
+        destinationDomain: destination_domain,
+        mintRecipient: mint_recipient.into_word(),
+        burnToken: burn_token,
+        destinationCaller: destination_caller,
+        maxFee: max_fee,
+        minFinalityThreshold: min_finality_threshold,
+        hookData: Bytes::copy_from_slice(hook_data),
+    }
+    .abi_encode()
+    .into()
+}
+
 /// `receiveMessage(message, attestation)` calldata.
 pub fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> Bytes {
     IMessageTransmitterV2::receiveMessageCall {
@@ -479,6 +519,17 @@ impl TxSender {
     /// other submitter); gas estimated with a margin; fees from
     /// `eth_gasPrice`.
     pub async fn send(&self, rpc: &Rpc, to: Address, input: &[u8], value: U256) -> Result<B256> {
+        self.submit(rpc, TxKind::Call(to), input, value).await
+    }
+
+    /// Submit a signed contract creation (the hook wrapper, §15.4). Same
+    /// discipline as [`TxSender::send`]: nonce from `pending`, estimated gas,
+    /// one submission at a time.
+    pub async fn deploy(&self, rpc: &Rpc, code: &[u8], value: U256) -> Result<B256> {
+        self.submit(rpc, TxKind::Create, code, value).await
+    }
+
+    async fn submit(&self, rpc: &Rpc, to: TxKind, input: &[u8], value: U256) -> Result<B256> {
         let _submitting = self.send_lock.lock().await;
         let chain_id = rpc.chain_id().await?;
         let nonce: U64 = rpc
@@ -492,7 +543,7 @@ impl TxSender {
             gas_limit,
             max_fee_per_gas: gas_price.saturating_mul(U256::from(2)).to::<u128>(),
             max_priority_fee_per_gas: gas_price.min(U256::from(1_000_000_000u64)).to::<u128>(),
-            to: TxKind::Call(to),
+            to,
             value,
             input: Bytes::copy_from_slice(input),
             access_list: Default::default(),
@@ -505,12 +556,14 @@ impl TxSender {
         Ok(hash)
     }
 
-    async fn estimate_gas(&self, rpc: &Rpc, to: Address, input: &[u8], value: U256) -> Result<u64> {
-        let request = TransactionRequest::default()
+    async fn estimate_gas(&self, rpc: &Rpc, to: TxKind, input: &[u8], value: U256) -> Result<u64> {
+        let mut request = TransactionRequest::default()
             .from(self.wallet.address())
-            .to(to)
             .input(input.to_vec().into())
             .value(value);
+        if let TxKind::Call(to) = to {
+            request = request.to(to);
+        }
         let estimate: U64 = rpc.call("eth_estimateGas", (request,)).await?;
         let gas = estimate.to::<u64>();
         Ok(gas.saturating_mul(GAS_MARGIN_NUM) / GAS_MARGIN_DEN + 21_000)

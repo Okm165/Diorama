@@ -13,9 +13,10 @@ use crate::error::{Error, Result};
 use crate::metrics::{render_counts, CctpMetrics};
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{
-    deposit_for_burn_calldata, wait_for_receipt, FeeSurface, IERC20, TxSender,
+    deposit_for_burn_calldata, deposit_for_burn_with_hook_calldata, wait_for_receipt, FeeSurface,
+    IERC20, TxSender,
 };
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -170,6 +171,22 @@ pub struct TransferRequest {
     /// Defaults to the relay wallet (a self-bridge).
     #[serde(default)]
     pub mint_recipient: Option<Address>,
+    /// Optional protocol-native credit (§15.4): the burn carries
+    /// `hookData = target(20) ‖ calldata` and pins `destinationCaller` to the
+    /// hook wrapper, so one relay tx mints **and** calls the target.
+    #[serde(default)]
+    pub hook: Option<HookSpec>,
+}
+
+/// The hook a transfer carries — the credit-carrying lane.
+#[derive(Debug, Deserialize)]
+pub struct HookSpec {
+    /// The contract the wrapper calls after the mint (e.g. daloc's
+    /// `ProofExecutor.receiveRecovery(positionId, amount)`).
+    pub target: Address,
+    /// The call's calldata.
+    #[serde(default)]
+    pub calldata: Bytes,
 }
 
 #[derive(Debug, Serialize)]
@@ -182,6 +199,65 @@ pub struct TransferResponse {
     pub destination_domain: u32,
     pub amount: U256,
     pub mint_recipient: Address,
+    /// Whether the burn carried a hook (the relay then goes through the
+    /// wrapper).
+    pub hook: bool,
+}
+
+/// The destination-side pin a burn carries: the hook wrapper for
+/// hook-carrying transfers (their `destinationCaller`, §15.4), zero for plain
+/// ones. A hook without a deployed wrapper is refused by name — never sent
+/// as a plain burn that would drop the credit.
+fn hook_pin(state: &ControlState, request: &TransferRequest) -> Result<(B256, Option<Bytes>)> {
+    match &request.hook {
+        Some(hook) => {
+            let wrapper = state
+                .store
+                .with(|s| Ok(s.hooks.get(&request.destination).copied()))?
+                .ok_or_else(|| Error::BadRequest {
+                    reason: format!(
+                        "no hook wrapper deployed on domain {} (its boot step deploys one; the bridge log names the outcome)",
+                        request.destination
+                    ),
+                })?;
+            Ok((
+                wrapper.into_word(),
+                Some(crate::hook::hook_data(hook.target, &hook.calldata)),
+            ))
+        }
+        None => Ok((B256::ZERO, None)),
+    }
+}
+
+/// The source-side burn calldata: `depositForBurn` or its hook variant.
+fn burn_calldata(
+    chain: &Chain,
+    request: &TransferRequest,
+    mint_recipient: Address,
+    destination_caller: B256,
+    hook_data: Option<&Bytes>,
+) -> Bytes {
+    match hook_data {
+        Some(hook_data) => deposit_for_burn_with_hook_calldata(
+            request.amount,
+            request.destination,
+            mint_recipient,
+            chain.usdc,
+            destination_caller,
+            U256::ZERO,
+            FINALITY_THRESHOLD_FINALIZED,
+            hook_data,
+        ),
+        None => deposit_for_burn_calldata(
+            request.amount,
+            request.destination,
+            mint_recipient,
+            chain.usdc,
+            destination_caller,
+            U256::ZERO,
+            FINALITY_THRESHOLD_FINALIZED,
+        ),
+    }
 }
 
 pub async fn transfer(
@@ -201,6 +277,7 @@ pub async fn transfer(
         });
     }
     let mint_recipient = request.mint_recipient.unwrap_or(state.sender.address());
+    let (destination_caller, hook_data) = hook_pin(&state, &request)?;
 
     // The source-side validation the contract performs, refused here with the
     // numbers instead of paying for a revert (devnet maxFee is 0).
@@ -250,15 +327,7 @@ pub async fn transfer(
         tracing::info!(chain = chain.name, tx = %hash, "cctp approve submitted");
     }
 
-    let calldata = deposit_for_burn_calldata(
-        request.amount,
-        request.destination,
-        mint_recipient,
-        chain.usdc,
-        B256::ZERO,
-        U256::ZERO,
-        FINALITY_THRESHOLD_FINALIZED,
-    );
+    let calldata = burn_calldata(chain, &request, mint_recipient, destination_caller, hook_data.as_ref());
     let hash = state
         .sender
         .send(&chain.rpc, TOKEN_MESSENGER_V2, &calldata, U256::ZERO)
@@ -283,6 +352,7 @@ pub async fn transfer(
         destination_domain: request.destination,
         amount: request.amount,
         mint_recipient,
+        hook: hook_data.is_some(),
     }))
 }
 

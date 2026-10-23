@@ -46,6 +46,15 @@ pub enum Error {
         source: serde_json::Error,
     },
 
+    /// A hex literal in an embedded artifact did not decode: corrupt at the
+    /// load point, named (the wrapper bytecode is the only such literal).
+    #[error("decoding hex for {what}")]
+    Hex {
+        what: &'static str,
+        #[source]
+        source: alloy_primitives::hex::FromHexError,
+    },
+
     /// A panic happened while a shared registry was locked: the value may be
     /// mid-update, so it is refused loudly, never recovered silently.
     #[error("shared state `{what}` is poisoned (a panic occurred mid-update)")]

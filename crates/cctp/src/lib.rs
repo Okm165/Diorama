@@ -27,6 +27,7 @@ pub mod attester;
 pub mod chains;
 pub mod control;
 pub mod error;
+pub mod hook;
 pub mod iris;
 pub mod metrics;
 pub mod relayer;

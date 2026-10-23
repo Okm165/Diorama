@@ -297,6 +297,42 @@ curl -s -X POST localhost:8091/control/deal \
   `venue_sim_ws_connected`, the `venue_bridge_*` counters, and the `meta`
   shape.
 
+## The CCTP bridge — measured facts and acceptance
+
+The real lane (`cctp-bridge`, Iris 8095 / control 8096) moves native USDC
+between T and V over the real V2 contracts; the only substitutions are the
+devnet attester (installed through the contracts' own setters) and the local
+Iris. Proven live on scratch forks:
+
+- bidirectional burns with exact mints; replay → `Nonce already used`;
+  tampered signatures and empty attestations rejected by the real verification;
+- PENDING emulation (`finality_delay_secs`): the Iris serves
+  `{messages:[{message, attestation:null}]}` until the window elapses;
+- `expiration_blocks` (anchored at the destination's head): measured — the
+  contract rejects at `block.number == expirationBlock` and the relay's
+  estimate runs at the pending block (head + 1), so a relayable window needs
+  `N ≥ 2`. An expired message reverts "Message expired and must be re-signed"
+  and the record parks after the send-refusal budget;
+- `POST /v2/reattest/{nonce}` re-signs with a fresh window and re-arms the
+  record; the relayer then mints — the full expiry → park → reattest → mint
+  loop is proven;
+- source rewind: a reverted-away burn is parked by the watcher ("the burn
+  transaction no longer exists"); destination rewind: a rewound mint is parked
+  by the relayer ("the mint is no longer on-chain"); reattest re-arms it and
+  the mint lands again;
+- the hook lane: `depositForBurnWithHook` + `destinationCaller = wrapper` →
+  `wrapper.relay` mints **and** runs the encoded call in one tx (a USDC
+  transfer hook moved the mint through the wrapper to the recipient); a
+  deliberately failing hook still mints (tx status 1, the wrapper kept the
+  funds, the hook failure is isolated) — the wrapper's documented
+  non-atomicity;
+- the pin clamp: a start block below the fork pin is clamped to the pin with
+  one warning (anvil forwards pre-pin `eth_getLogs` ranges upstream, which
+  rejects them — measured).
+
+Operator surface: `GET /health` (parked counts), `GET /control/state`,
+`POST /control/transfer` (`hook: {target, calldata}` for the credit lane).
+
 ## Plan axioms → how they are covered
 
 | # | Fact | Coverage |

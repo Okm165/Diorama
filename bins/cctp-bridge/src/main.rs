@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mirror_cctp::chains::{Chain, DOMAIN_ETHEREUM, DOMAIN_HYPER_EVM};
+use mirror_cctp::Address;
 use mirror_cctp::transfer::{TxSender, Wallet};
 use mirror_cctp::U256;
 use mirror_config::CctpSection;
@@ -88,13 +89,16 @@ async fn run() -> mirror_cctp::Result<()> {
     if let Err(e) = fund_relayer(&chains, wallet.address(), section.balance_low_wei).await {
         tracing::error!(error = %e, "relay wallet top-up failed; the gas alerts stay on");
     }
+    let sender = Arc::new(TxSender::new(wallet));
+    let store = Arc::new(mirror_cctp::store::Store::load(
+        section.state_dir.join("cctp.json"),
+    )?);
+    install_hooks(&chains, &store, &sender, receipt_timeout).await;
     let bridge = Bridge {
         chains,
-        store: Arc::new(mirror_cctp::store::Store::load(
-            section.state_dir.join("cctp.json"),
-        )?),
+        store,
         attester,
-        sender: Arc::new(TxSender::new(wallet)),
+        sender,
         metrics: Arc::new(mirror_cctp::metrics::CctpMetrics::default()),
         receipt_timeout,
         poll: Duration::from_millis(section.poll_interval_ms),
@@ -127,9 +131,16 @@ impl Bridge {
             } else {
                 (DOMAIN_ETHEREUM, self.section.v_start_block.unwrap_or(0))
             };
+            let destination = self
+                .chains
+                .iter()
+                .find(|c| c.domain == destination_domain)
+                .expect("both served chains are configured (checked at boot)")
+                .clone();
             let watcher = mirror_cctp::watcher::Watcher {
                 chain: chain.clone(),
                 destination_domain,
+                destination,
                 store: self.store.clone(),
                 attester: self.attester.clone(),
                 start_block,
@@ -137,6 +148,7 @@ impl Bridge {
                 chunk_blocks: self.section.scan_chunk_blocks,
                 finality_delay: Duration::from_secs(self.section.finality_delay_secs),
                 expiration_blocks: self.section.expiration_blocks,
+                clamp_warned: std::sync::atomic::AtomicU64::new(0),
                 metrics: self.metrics.clone(),
             };
             tokio::spawn(watcher.run(self.poll));
@@ -152,6 +164,11 @@ impl Bridge {
             balance_low: self.section.balance_low_wei,
             balance_critical: self.section.balance_critical_wei,
             receipt_timeout: self.receipt_timeout,
+            heads: self
+                .chains
+                .iter()
+                .map(|_| std::sync::atomic::AtomicU64::new(0))
+                .collect(),
         };
         tokio::spawn(relayer.run(self.poll));
     }
@@ -173,6 +190,8 @@ impl Bridge {
         let iris_state = Arc::new(mirror_cctp::iris::IrisState {
             store: self.store.clone(),
             attester: self.attester.clone(),
+            chains: self.chains.clone(),
+            expiration_blocks: self.section.expiration_blocks,
         });
         let control_state = Arc::new(mirror_cctp::control::ControlState {
             store: self.store.clone(),
@@ -257,6 +276,144 @@ async fn verify_wiring(chains: &[Chain]) -> mirror_cctp::Result<BTreeMap<u32, Op
         min_fees.insert(chain.domain, wiring.min_fee);
     }
     Ok(min_fees)
+}
+
+/// The recorded wrapper, reused only when its code is present and its wiring
+/// verifies — a re-pin drops deployments, and a stale record must not serve.
+async fn existing_wrapper(
+    chain: &Chain,
+    store: &Arc<mirror_cctp::store::Store>,
+    sender: &TxSender,
+) -> Option<Address> {
+    let wrapper = store
+        .with(|state| Ok(state.hooks.get(&chain.domain).copied()))
+        .ok()
+        .flatten()?;
+    let present = match chain.rpc.block_number().await {
+        Ok(head) => matches!(
+            chain.rpc.code_at(wrapper, head).await,
+            Ok(code) if !code.is_empty()
+        ),
+        Err(_) => false,
+    };
+    if !present {
+        tracing::warn!(
+            chain = chain.name,
+            wrapper = %wrapper,
+            "recorded hook wrapper is not deployed (a re-pin?); redeploying"
+        );
+        return None;
+    }
+    match mirror_cctp::hook::verify(
+        &chain.rpc,
+        wrapper,
+        sender.address(),
+        mirror_cctp::chains::MESSAGE_TRANSMITTER_V2,
+    )
+    .await
+    {
+        Ok(()) => Some(wrapper),
+        Err(e) => {
+            tracing::warn!(
+                chain = chain.name,
+                wrapper = %wrapper,
+                error = %e,
+                "recorded hook wrapper failed verification; redeploying"
+            );
+            None
+        }
+    }
+}
+
+/// Deploy the wrapper (owner = the relay key, transmitter = the local
+/// `MessageTransmitterV2`), verify it, and record it in the state.
+async fn deploy_wrapper(
+    chain: &Chain,
+    store: &Arc<mirror_cctp::store::Store>,
+    sender: &TxSender,
+    receipt_timeout: Duration,
+) {
+    let hash = match mirror_cctp::hook::deploy(
+        &chain.rpc,
+        sender,
+        mirror_cctp::chains::MESSAGE_TRANSMITTER_V2,
+    )
+    .await
+    {
+        Ok(hash) => hash,
+        Err(e) => {
+            tracing::warn!(
+                chain = chain.name,
+                error = %e,
+                "hook wrapper deploy submission failed; hook transfers will refuse until it lands"
+            );
+            return;
+        }
+    };
+    match mirror_cctp::transfer::wait_for_receipt(&chain.rpc, hash, receipt_timeout).await {
+        Ok(Some(receipt)) if receipt.status() => {
+            let Some(wrapper) = receipt.contract_address else {
+                tracing::warn!(chain = chain.name, tx = %hash, "hook wrapper deploy mined without a contract address");
+                return;
+            };
+            if let Err(e) = mirror_cctp::hook::verify(
+                &chain.rpc,
+                wrapper,
+                sender.address(),
+                mirror_cctp::chains::MESSAGE_TRANSMITTER_V2,
+            )
+            .await
+            {
+                tracing::warn!(chain = chain.name, wrapper = %wrapper, error = %e, "freshly deployed hook wrapper failed verification");
+                return;
+            }
+            if let Err(e) = store.with(|state| {
+                state.hooks.insert(chain.domain, wrapper);
+                Ok(())
+            }) {
+                tracing::warn!(error = %e, "recording the hook wrapper failed");
+                return;
+            }
+            if let Err(e) = store.save() {
+                tracing::warn!(error = %e, "persisting the hook wrapper failed");
+            }
+            tracing::info!(chain = chain.name, wrapper = %wrapper, "cctp hook wrapper deployed");
+        }
+        Ok(Some(_)) => {
+            tracing::warn!(chain = chain.name, tx = %hash, "hook wrapper deploy reverted");
+        }
+        Ok(None) => tracing::warn!(
+            chain = chain.name,
+            tx = %hash,
+            timeout = receipt_timeout.as_secs(),
+            "hook wrapper deploy not mined within the window; the next boot retries"
+        ),
+        Err(e) => tracing::warn!(
+            chain = chain.name,
+            tx = %hash,
+            error = %e,
+            "hook wrapper deploy receipt read failed"
+        ),
+    }
+}
+
+/// Deploy the hook wrapper on every served chain that lacks one (§15.4's boot
+/// step). A chain that fails is warned about, never fatal: the Iris API still
+/// serves, and hook transfers refuse by name until a later boot lands the
+/// deployment.
+async fn install_hooks(
+    chains: &[Chain],
+    store: &Arc<mirror_cctp::store::Store>,
+    sender: &TxSender,
+    receipt_timeout: Duration,
+) {
+    for chain in chains {
+        if let Some(wrapper) = existing_wrapper(chain, store, sender).await {
+            tracing::info!(chain = chain.name, wrapper = %wrapper, "cctp hook wrapper present");
+            continue;
+        }
+        deploy_wrapper(chain, store, sender, receipt_timeout).await;
+    }
 }
 
 /// The devnet attester, installed through the real setters (idempotent).

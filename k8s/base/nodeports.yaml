@@ -45,7 +45,9 @@ metadata:
 data:
   # The values the daloc harness sources (their external-mode env, plan §7.7).
   # The single-node k3s node *is* the test host; a remote harness overrides
-  # the host and keeps the ports.
+  # the host and keeps the ports. This is the *first* chain's block; the
+  # venue's (the second chain) lives in overlays/venue-mirror/nodeports.yaml
+  # with the `CHAIN_1_` prefix — source both for the complete env.
   test-endpoints.env: |
     CHAIN_RPC_URL=http://localhost:30545
     CHAIN_WS_URL=ws://localhost:30545

@@ -27,7 +27,7 @@ use crate::error::{Error, Result};
 use crate::metrics::CctpMetrics;
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{Message, IMessageTransmitterV2};
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::SolEvent;
 use std::sync::Arc;
@@ -40,6 +40,10 @@ pub struct Watcher {
     /// mirror's domain): a burn to a third chain is not this bridge's to
     /// relay, and is skipped with a warning (never silently).
     pub destination_domain: u32,
+    /// The peer chain — the *destination* of this watcher's messages, whose
+    /// head anchors the served `expirationBlock` (the field is checked
+    /// against `block.number` on the destination, §15.1).
+    pub destination: Chain,
     pub store: Arc<Store>,
     pub attester: Arc<Attester>,
     /// First block scanned every boot (the deploy block of the CCTP contracts
@@ -56,9 +60,16 @@ pub struct Watcher {
     /// The emulated PENDING window: an attestation is produced this long after
     /// the burn is watched (0 = immediately, §15.5's PENDING emulation).
     pub finality_delay: Duration,
-    /// The served `expirationBlock` (0 = no expiry; short values exercise the
-    /// "must be re-signed" path).
+    /// The served `expirationBlock` window in blocks (0 = no expiry, the
+    /// contract's own rule). Relative to the *destination's* head: the field
+    /// is compared against `block.number` at receive time, so an absolute
+    /// value would be meaningless on a real-height chain (the scratch chains
+    /// sit at ~49M — measured).
     pub expiration_blocks: u64,
+    /// The last fork base the below-pin warning named (0 = none yet): the
+    /// scan runs every tick, but the clamp is a fact about the config, not
+    /// per-pass news.
+    pub clamp_warned: std::sync::atomic::AtomicU64,
     pub metrics: Arc<CctpMetrics>,
 }
 
@@ -89,12 +100,64 @@ impl Watcher {
 
     /// Scan from the in-run cursor (boot: `start_block`) to head in chunks;
     /// returns the number of new records.
+    ///
+    /// The scan never reads below the fork base: pre-pin blocks are the
+    /// *source's* history — anvil forwards such ranges upstream, which
+    /// rejects them (measured: the public HyperEVM RPC caps at 1000 blocks,
+    /// drpc refuses ranges over 10000) and their events are real source
+    /// burns, not this devnet's. A fork base above the cursor (a re-pin) or a
+    /// head below it (a snapshot revert) means the blocks the cursor points
+    /// at are gone: their records are parked (stale derivations, I6 — never
+    /// relayed) and the scan restarts from the base.
     pub async fn scan(&self) -> Result<usize> {
         let head = self.chain.rpc.block_number().await?;
+        let floor = self
+            .chain
+            .rpc
+            .fork_block()
+            .await?
+            .map(|pin| pin.saturating_add(1));
         let last = self.scanned_upto.load(std::sync::atomic::Ordering::Relaxed);
-        let mut from = match last {
-            0 => self.start_block,
-            n => (n + 1).max(self.start_block),
+
+        let cursor_above_base = last > 0 && (last > head || floor.is_some_and(|floor| floor > last));
+        if cursor_above_base {
+            tracing::warn!(
+                chain = self.chain.name,
+                head,
+                cursor = last,
+                pin = ?floor.map(|floor| floor - 1),
+                "scan cursor is above the chain's base (re-pin or rewind); rescanning and parking stale records"
+            );
+        }
+        // Also on boot: a restart after a re-pin inherits records from a
+        // world that no longer exists — reconcile them, don't trust them.
+        if cursor_above_base || last == 0 {
+            self.park_vanished().await?;
+        }
+        let base = if last > 0 && last > head {
+            // A rewind: everything above the head is invalid, so the cursor
+            // cannot resume — restart at the configured start (the pin clamp
+            // below still applies).
+            self.start_block
+        } else {
+            match last {
+                0 => self.start_block,
+                n => (n + 1).max(self.start_block),
+            }
+        };
+        let mut from = match floor {
+            Some(floor) if self.start_block < floor => {
+                if self.clamp_warned.swap(floor, std::sync::atomic::Ordering::Relaxed) != floor {
+                    tracing::warn!(
+                        chain = self.chain.name,
+                        configured_start = self.start_block,
+                        pin = floor - 1,
+                        "configured start block is below the fork pin; scanning from the pin"
+                    );
+                }
+                base.max(floor)
+            }
+            _ => base,
         };
         let mut seen = 0usize;
         while from <= head {
@@ -105,24 +168,90 @@ impl Watcher {
                 .from_block(from)
                 .to_block(to);
             let logs: Vec<Log> = self.chain.rpc.call("eth_getLogs", (filter,)).await?;
+            // One head read per chunk: the expiration window's anchor (the
+            // destination's block coordinate, §15.1).
+            let expiration = self.expiration_block().await?;
             for log in &logs {
-                seen += self.absorb(log)?;
+                seen += self.absorb(log, expiration)?;
             }
             from = to + 1;
         }
-        // Monotonic within a run: a head that moved backward (a re-fork) is
-        // not re-scanned from a regressed cursor.
+        // The cursor is the highest scanned block of the *current* chain:
+        // a re-pin or a rewind resets it to the new base (the rescan above),
+        // so it never skips a block.
         self.scanned_upto
-            .store(head.max(last), std::sync::atomic::Ordering::Relaxed);
+            .store(head, std::sync::atomic::Ordering::Relaxed);
         self.metrics
             .last_scan_block
             .store(head, std::sync::atomic::Ordering::Relaxed);
         Ok(seen)
     }
 
+    /// Park the non-relayed records this chain's history no longer backs: a
+    /// re-pin or a rewind leaves their burn transactions absent, so they are
+    /// stale derivations (I6) — kept visible, never relayed.
+    async fn park_vanished(&self) -> Result<usize> {
+        let candidates: Vec<B256> = self.store.with(|state| {
+            Ok(state
+                .messages
+                .iter()
+                .filter(|m| {
+                    m.source_domain == self.chain.domain
+                        && matches!(m.state, RelayState::Pending | RelayState::Signed)
+                })
+                .map(|m| m.burn_tx)
+                .collect::<Vec<_>>())
+        })?;
+        let mut parked = 0usize;
+        for burn_tx in candidates {
+            let exists: Option<Box<serde_json::value::RawValue>> = self
+                .chain
+                .rpc
+                .call("eth_getTransactionByHash", (burn_tx,))
+                .await?;
+            if exists.is_some() {
+                continue;
+            }
+            self.store.with(|state| {
+                if let Some(record) = state.messages.iter_mut().find(|m| m.burn_tx == burn_tx) {
+                    record.state = RelayState::Parked;
+                    record.park_reason = Some(
+                        "source chain re-pinned or rewound: the burn transaction no longer exists"
+                            .into(),
+                    );
+                }
+                Ok(())
+            })?;
+            parked += 1;
+        }
+        if parked > 0 {
+            self.metrics
+                .relays_parked
+                .fetch_add(parked as u64, std::sync::atomic::Ordering::Relaxed);
+            self.store.save()?;
+            tracing::warn!(
+                chain = self.chain.name,
+                parked,
+                "stale cctp records parked (their burn transactions vanished)"
+            );
+        }
+        Ok(parked)
+    }
+
+    /// The served `expirationBlock`: 0 = no expiry; otherwise the
+    /// destination's head plus the configured window — the reattest route
+    /// re-anchors it the same way (iris.rs).
+    async fn expiration_block(&self) -> Result<U256> {
+        if self.expiration_blocks == 0 {
+            return Ok(U256::ZERO);
+        }
+        let head = self.destination.rpc.block_number().await?;
+        Ok(U256::from(head.saturating_add(self.expiration_blocks)))
+    }
+
     /// Decode one `MessageSent` log into a record. The log must carry its
     /// transaction hash (it is the deterministic nonce) and its block.
-    fn absorb(&self, log: &Log) -> Result<usize> {
+    fn absorb(&self, log: &Log, expiration: U256) -> Result<usize> {
         let decoded =
             IMessageTransmitterV2::MessageSent::decode_log(&log.inner).map_err(|source| {
                 Error::Abi {
@@ -156,7 +285,7 @@ impl Watcher {
             burn_tx,
             FINALITY_THRESHOLD_FINALIZED,
             U256::ZERO,
-            U256::from(self.expiration_blocks),
+            expiration,
         );
         let now = crate::now_ms();
         let record = MessageRecord {
@@ -260,6 +389,9 @@ mod tests {
         Watcher {
             chain: Chain::ethereum("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
             destination_domain,
+            // Never read with `expiration_blocks = 0` (the tests' window): the
+            // dummy URL would fault, which is the point of keeping it unused.
+            destination: Chain::hyper_evm("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
             store: Arc::new(Store::load(dir.join("cctp.json")).unwrap()),
             attester: Arc::new(Attester::from_seed("watcher-test").unwrap()),
             start_block: 0,
@@ -267,6 +399,7 @@ mod tests {
             chunk_blocks: 2000,
             finality_delay,
             expiration_blocks: 0,
+            clamp_warned: std::sync::atomic::AtomicU64::new(0),
             metrics: Arc::new(CctpMetrics::default()),
         }
     }
@@ -306,8 +439,16 @@ mod tests {
         let watcher = watcher(&dir, 19, Duration::ZERO);
         let tx = B256::repeat_byte(0xab);
 
-        assert_eq!(watcher.absorb(&log(tx, 0, 19)).unwrap(), 1, "first absorb inserts");
-        assert_eq!(watcher.absorb(&log(tx, 0, 19)).unwrap(), 0, "re-scan is idempotent");
+        assert_eq!(
+            watcher.absorb(&log(tx, 0, 19), U256::ZERO).unwrap(),
+            1,
+            "first absorb inserts"
+        );
+        assert_eq!(
+            watcher.absorb(&log(tx, 0, 19), U256::ZERO).unwrap(),
+            0,
+            "re-scan is idempotent"
+        );
         let record = watcher
             .store
             .with(|s| Ok(s.messages[0].clone()))
@@ -343,8 +484,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mirror-cctp-lanes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let watcher = watcher(&dir, 19, Duration::ZERO);
-        assert_eq!(watcher.absorb(&log(B256::repeat_byte(1), 0, 3)).unwrap(), 0);
-        assert_eq!(watcher.absorb(&log(B256::repeat_byte(2), 7, 19)).unwrap(), 0);
+        assert_eq!(watcher.absorb(&log(B256::repeat_byte(1), 0, 3), U256::ZERO).unwrap(), 0);
+        assert_eq!(watcher.absorb(&log(B256::repeat_byte(2), 7, 19), U256::ZERO).unwrap(), 0);
         assert_eq!(watcher.store.counts().unwrap().pending, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -355,7 +496,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mirror-cctp-pending-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let watcher = watcher(&dir, 19, Duration::from_secs(3600));
-        watcher.absorb(&log(B256::repeat_byte(3), 0, 19)).unwrap();
+        watcher.absorb(&log(B256::repeat_byte(3), 0, 19), U256::ZERO).unwrap();
         assert_eq!(watcher.sign_due().unwrap(), 0, "window still open");
         assert_eq!(
             watcher.store.with(|s| Ok(s.messages[0].state)).unwrap(),

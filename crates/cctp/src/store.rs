@@ -9,7 +9,7 @@
 //! dropped: a failed mint is a fact an operator must see (§15.4).
 use crate::error::{Error, Result};
 use crate::transfer::Message;
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{Address, Bytes, B256};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -97,6 +97,11 @@ impl MessageRecord {
 pub struct CctpState {
     #[serde(default)]
     pub messages: Vec<MessageRecord>,
+    /// The deployed hook wrapper per domain (the boot step deploys one per
+    /// served chain, §15.4): hook-carrying messages are consumed through it.
+    /// `serde(default)` keeps pre-hook state files loadable.
+    #[serde(default)]
+    pub hooks: std::collections::BTreeMap<u32, Address>,
 }
 
 /// Per-state counts (the `/health` and `/metrics` diagnostics).

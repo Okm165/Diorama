@@ -12,3 +12,4 @@ truth, and a decision that cost a real run gets a record here.
 | [0004](0004-sim-served-identity.md) | The simulator's served identity is computed, never seeded |
 | [0005](0005-bridge-block-atomicity.md) | The bridge applies a block's effects and its cursor atomically |
 | [0006](0006-ws-first-market-data.md) | WS-first market data with a budget-gated REST backfill |
+| [0007](0007-cctp-devnet-lanes.md) | The CCTP lanes: real contracts, a substituted attester, rewind parking |
