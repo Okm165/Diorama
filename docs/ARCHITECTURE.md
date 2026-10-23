@@ -905,9 +905,11 @@ The served info surface: `clearinghouseState`, `spotClearinghouseState`
 (`balances`; unified accounts also carry `tokenToAvailableAfterMaintenance` —
 the figure daloc's client reconciles: `available + maintenance == the
 collateral token's balance`), `userAbstraction`, `openOrders` (empty for a
-touched account - the matching lane
-is Phase 2), `activeAssetData` (touched accounts) / `meta`, `metaAndAssetCtxs`,
-`spotMeta`, `allMids`, `l2Book`, `marginTable`, `exchangeStatus`, `perpDexs`
+touched account - the matching lane is Phase 2 and, per the plan's §18.4, not
+required for daloc's suite: none of its flows place an order, so the account
+plane is complete without `/exchange`), `activeAssetData` (touched accounts) /
+`meta`, `metaAndAssetCtxs`, `spotMeta`, `allMids`, `l2Book`, `marginTable`,
+`exchangeStatus`, `perpDexs`
 (`[null]` - the first dex only until multi-dex lands; an account read scoped to
 a non-default dex answers the empty shape, a market read scoped to one is a 400).
 Unknown types answer `"unrouted"` (hl_mock's contract).
