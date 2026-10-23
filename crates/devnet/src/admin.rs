@@ -406,6 +406,27 @@ pub struct EpochResponse {
     pub source: String,
 }
 
+/// `/admin/rewind`'s wire shape (both engines): `cursor` is the profile's
+/// devnet-chain cursor after the rewind — T's on the ethereum, V's on the
+/// venue — named as `/status` names it (one fact, one name).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RewindResponse {
+    pub rewound_blocks: u64,
+    pub restored_values: usize,
+    pub cursor: u64,
+}
+
+/// `/admin/pause` / `/admin/resume`'s wire shapes (both engines).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PauseResponse {
+    pub paused: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResumeResponse {
+    pub resumed: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ShadowRequest {
     pub address: Address,

@@ -25,7 +25,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mirror_devnet::admin::{EpochResponse, RewindRequest, ShadowRequest};
+use mirror_devnet::admin::{
+    EpochResponse, PauseResponse, ResumeResponse, RewindRequest, RewindResponse,
+    ShadowRequest,
+};
 use mirror_devnet::deal::DealRequest;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -160,19 +163,7 @@ async fn admin_resume(State(ctx): State<Arc<Ctx>>) -> Json<ResumeResponse> {
 async fn admin_pause(State(ctx): State<Arc<Ctx>>) -> Json<PauseResponse> {
     ctx.admin().pause();
     Json(PauseResponse { paused: true })
-}
-
-#[derive(Debug, Serialize)]
-struct ResumeResponse {
-    resumed: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct PauseResponse {
-    paused: bool,
-}
-
-/// `/admin/rewind`: undo the engine's journaled writes (the deal faucet's
+}/// `/admin/rewind`: undo the engine's journaled writes (the deal faucet's
 /// silent storage writes) over the last `blocks` scanned blocks, newest first.
 async fn admin_rewind(
     State(ctx): State<Arc<Ctx>>,
@@ -182,18 +173,9 @@ async fn admin_rewind(
     Ok(Json(RewindResponse {
         rewound_blocks: req.blocks,
         restored_values: out.restored,
-        cursor_v: out.cursor,
+        cursor: out.cursor,
     }))
 }
-
-#[derive(Debug, Serialize)]
-struct RewindResponse {
-    rewound_blocks: u64,
-    restored_values: usize,
-    /// V's scan cursor after the rewind (the rewound range's first block − 1).
-    cursor_v: u64,
-}
-
 async fn admin_shadow(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<ShadowRequest>,

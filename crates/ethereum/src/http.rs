@@ -19,7 +19,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mirror_devnet::admin::{EpochResponse, RewindRequest, ShadowRequest, TimeRequest};
+use mirror_devnet::admin::{
+    EpochResponse, PauseResponse, ResumeResponse, RewindRequest, RewindResponse,
+    ShadowRequest, TimeRequest,
+};
 use mirror_devnet::deal::DealRequest;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -50,26 +53,6 @@ struct StatusResponse {
     shadowed: Vec<String>,
     blob_form: Option<&'static str>,
     time_offset_seconds: u64,
-}
-
-/// `/admin/rewind` — the journal rewind's report.
-#[derive(Debug, Serialize)]
-struct RewindResponse {
-    rewound_blocks: u64,
-    restored_values: usize,
-    cursor_t: u64,
-}
-
-/// `/admin/pause` — the loops are held (plan §4.4 stop-sync).
-#[derive(Debug, Serialize)]
-struct PauseResponse {
-    paused: bool,
-}
-
-/// `/admin/resume` — the halt and the divergence freeze are both cleared.
-#[derive(Debug, Serialize)]
-struct ResumeResponse {
-    resumed: bool,
 }
 
 /// `/admin/time` — the devnet clock offset is set (and persisted).
@@ -212,7 +195,7 @@ async fn admin_rewind(
     Ok(Json(RewindResponse {
         rewound_blocks: req.blocks,
         restored_values: out.restored,
-        cursor_t: out.cursor,
+        cursor: out.cursor,
     }))
 }
 
