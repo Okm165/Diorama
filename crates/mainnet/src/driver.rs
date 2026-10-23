@@ -139,6 +139,23 @@ async fn validate_cursor(
         below_base,
         "cursor not found on chain (reset or re-pin) - rebasing"
     );
+    rebase(ctx, chain, rpc, c.block, head).await?;
+    Ok(None)
+}
+
+/// The invalid cursor's consequences, one step per effect: T's epoch rule (a
+/// fresh pin drops marks and values, the same pin re-applies the recorded
+/// writes), M's bounded re-base gap (counted, never invisible), and the
+/// persisted cursor's drop (`first_block` is an epoch marker; the next
+/// processed block sets a fresh one, or `mirror_pin_age_blocks` counts across
+/// epochs).
+async fn rebase(
+    ctx: &Ctx,
+    chain: Chain,
+    rpc: &mirror_anvil::Rpc,
+    block: u64,
+    head: u64,
+) -> Result<()> {
     if matches!(chain, Chain::T) {
         // The epoch rule (shared with the venue engine, `mirror-devnet::epoch`):
         // a fresh pin drops marks and values, the same pin re-applies the
@@ -155,11 +172,8 @@ async fn validate_cursor(
     // tx-level verification is skipped. Bounded by `fork_offset`; counted and
     // logged so the gap is never invisible.
     if matches!(chain, Chain::M) {
-        account_m_rebase_skip(&ctx.eth_metrics, c.block, head);
+        account_m_rebase_skip(&ctx.eth_metrics, block, head);
     }
-    // Drop it from the persisted state too: `first_block` is an epoch marker,
-    // and the next processed block must set a fresh one (otherwise
-    // `mirror_pin_age_blocks` counts across epochs).
     {
         let mut state = ctx.plane.state.lock()?;
         match chain {
@@ -168,7 +182,7 @@ async fn validate_cursor(
         }
     }
     ctx.plane.save_state()?;
-    Ok(None)
+    Ok(())
 }
 
 /// Is the cursor below the chain's fork base? A re-pin moves the base past the
