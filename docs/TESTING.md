@@ -371,7 +371,7 @@ taxonomy is shared too: `mirror_devnet::Error::{is_request_refusal,
 is_unavailable}` classify 4xx vs 503 once, and both engines map an upstream
 transport fault (anvil, the venue API) to 502.
 
-`make engine-symmetry` (`scripts/engine-symmetry.sh`, 18 checks) is the
+`make engine-symmetry` (`scripts/engine-symmetry.sh`, 19 checks) is the
 fitness function: it drives both engines' shared verbs live and requires
 identical statuses, shapes and refusal wording (digits normalized — a message
 may embed each chain's own cursor or ring size), the shared `/status` fields,
@@ -380,7 +380,10 @@ The behavioral checks, not just shapes:
 
 - **pause/resume effect**: while paused both report `halted`, refuse
   `/healthz` with 503, and raise `mirror_halted` to 1; resume restores all
-  three (measured live).
+  three (measured live). `/livez` stays 200 throughout — it is the
+  orchestrator's probe, deliberately pause-agnostic (a probe on `/healthz`
+  would drop the engine — NodePort included — out of the Service and restart
+  the pod mid-pause).
 - **rewind**: a beyond-ring request is one named refusal byte-for-byte; a
   1-block rewind returns the same wire shape on both (direct mode only — on
   the cluster it is a live mutation; the counts legitimately differ: T's

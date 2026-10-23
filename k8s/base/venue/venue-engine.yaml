@@ -46,12 +46,15 @@ spec:
           volumeMounts:
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
             - { name: state, mountPath: /state }
+          # `/livez`, not `/healthz` (see the mainnet engine's manifest): the
+          # paused state must not take the engine out of the Service or
+          # restart the pod.
           readinessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:

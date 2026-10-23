@@ -77,6 +77,9 @@ echo "== engine symmetry (T: ${ENGINE_T_URL:-ns $NS_T} / V: ${ENGINE_V_URL:-ns $
 
 echo "-- the shared read surface"
 same /healthz
+# /livez is the orchestrator's liveness signal (pause-agnostic; the k8s probes
+# use it, not /healthz).
+same /livez
 same /metrics
 # /status reports each mirror's own facts; the *shared* fields must be present
 # on both (the scripts read them by name).

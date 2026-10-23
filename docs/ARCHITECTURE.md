@@ -617,7 +617,8 @@ the engine's equivalent today is the HTTP surface above plus the cheatcodes.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /healthz` | 200 unless halted on divergence |
+| `GET /healthz` | 200 unless halted on divergence (an operator *state* signal) |
+| `GET /livez` | always 200 — the orchestrator's liveness signal; the k8s probes use this, not `/healthz` (a paused engine must not leave the Service or restart) |
 | `GET /status` | heads, cursors, lag, frozen, shadow counts, blob form |
 | `GET /metrics` | Prometheus text: heads, lag, durations, divergences (structural + behavioral), repair writes, convergence probes, writes, pin age, the feed bridge's counters |
 | `POST /admin/rewind` | `{"blocks": N}` – journal-based rewind of T |
@@ -739,6 +740,7 @@ the base truth lives in the registry) lands with the venue's journaling slice.
 | Route | Purpose |
 |---|---|
 | `GET /healthz` | 200 unless halted |
+| `GET /livez` | always 200 — the orchestrator's liveness signal (the k8s probes use it, not `/healthz`) |
 | `GET /status` | `head`, `cursor`, `fork_pin`, `epoch_pin`, `halted`, `shadowed_slots`, `shadowed_accounts`, `shadowed` (the list), `probes`, `source` |
 | `GET /metrics` | the `venue_*` set (below) + the shared admin gauges (`mirror_shadowed_slots`, `mirror_halted`, `mirror_frozen`) |
 | `POST /admin/deal`, `POST /admin/shadow` | the shared devnet surface, verbatim |

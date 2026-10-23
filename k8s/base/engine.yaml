@@ -44,12 +44,17 @@ spec:
             # (Engine API) to run the top-up loop that keeps reth at the CL head
             # without any P2P peers.
             - { name: jwt, mountPath: /secrets, readOnly: true }
+          # `/livez`, not `/healthz`: the engine's healthz reports its own
+          # state (503 while paused), and probing it would drop the pod (and
+          # its NodePort) out of rotation — and eventually restart it — in the
+          # middle of a documented pause drill, while the contract says a
+          # paused engine keeps serving reads and writes.
           readinessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:

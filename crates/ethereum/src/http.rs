@@ -108,6 +108,7 @@ pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()>
         });
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/livez", get(livez))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/admin/rewind", post(admin_rewind))
@@ -141,6 +142,16 @@ async fn healthz(State(ctx): State<Arc<Ctx>>) -> impl IntoResponse {
     } else {
         (StatusCode::OK, "ok")
     }
+}
+
+/// `/livez` — the orchestrator's liveness signal: the process and its HTTP
+/// runtime are answering. Deliberately *not* `/healthz`: that reports the
+/// engine's own state (503 while paused), and probing it would take the engine
+/// out of the Service (its NodePort included) and eventually restart the pod
+/// in the middle of the documented pause drill — while the contract says a
+/// paused engine keeps serving reads and writes.
+async fn livez() -> &'static str {
+    "ok"
 }
 
 async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
