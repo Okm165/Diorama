@@ -8,6 +8,16 @@ pub fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, v: u64)
     out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {v}\n"));
 }
 
+/// A gauge line: the render shorthand every registry uses.
+pub fn gauge(out: &mut String, name: &str, help: &str, v: u64) {
+    push_metric(out, "gauge", name, help, v);
+}
+
+/// A counter line: the render shorthand every registry uses.
+pub fn counter(out: &mut String, name: &str, help: &str, v: u64) {
+    push_metric(out, "counter", name, help, v);
+}
+
 /// The shared admin surface's gauges (plan §11.3): what the devnet plane
 /// itself owns. Each profile renders its own set beside these (the ethereum
 /// engine's `EthereumMetrics`, the venue's `VenueMetrics`), so this crate

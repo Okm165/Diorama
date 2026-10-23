@@ -119,7 +119,7 @@ pub async fn install(
     // proved through the real setters. A manager with no gas on the fork gets
     // a devnet stipend (the pool refuses unfunded senders).
     ensure_manager_gas(rpc, chain, manager).await?;
-    rpc.call_raw("anvil_impersonateAccount", (manager,)).await?;
+    rpc.anvil_impersonate_account(manager).await?;
     if !enabled {
         let input = IMessageTransmitterV2::enableAttesterCall { newAttester: attester }.abi_encode();
         send_impersonated(rpc, chain, manager, input, timeout).await?;
@@ -130,8 +130,7 @@ pub async fn install(
                 .abi_encode();
         send_impersonated(rpc, chain, manager, input, timeout).await?;
     }
-    rpc.call_raw("anvil_stopImpersonatingAccount", (manager,))
-        .await?;
+    rpc.anvil_stop_impersonating_account(manager).await?;
 
     // Verify what the setters claim: a failed installation must not serve.
     let (_, enabled, threshold) = read_state(rpc, attester).await?;

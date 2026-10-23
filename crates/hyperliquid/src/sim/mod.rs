@@ -595,6 +595,9 @@ mod tests {
                 index: 0,
                 is_canonical: true,
                 evm_contract: None,
+                token_id: None,
+                full_name: None,
+                deployer_trading_fee_share: Decimal::ZERO,
             }],
             universe: vec![],
         });
@@ -664,6 +667,9 @@ mod tests {
                 index: 0,
                 is_canonical: true,
                 evm_contract: None,
+                token_id: None,
+                full_name: None,
+                deployer_trading_fee_share: Decimal::ZERO,
             }],
             universe: vec![],
         });

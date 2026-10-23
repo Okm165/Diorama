@@ -693,6 +693,19 @@ impl Rpc {
         Ok(())
     }
 
+    /// `anvil_impersonateAccount` — the devnet's substitution path (the
+    /// attester manager, the bridge's system-address senders).
+    pub async fn anvil_impersonate_account(&self, addr: Address) -> Result<()> {
+        self.call_raw("anvil_impersonateAccount", (addr,)).await?;
+        Ok(())
+    }
+
+    /// `anvil_stopImpersonatingAccount`.
+    pub async fn anvil_stop_impersonating_account(&self, addr: Address) -> Result<()> {
+        self.call_raw("anvil_stopImpersonatingAccount", (addr,)).await?;
+        Ok(())
+    }
+
     /// `anvil_setBalance` — the impersonated senders (the bridge's system
     /// addresses) need gas on V.
     pub async fn anvil_set_balance(&self, addr: Address, balance: U256) -> Result<()> {

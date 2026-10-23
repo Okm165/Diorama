@@ -3,7 +3,7 @@
 //! shared admin gauges (`mirror_devnet::metrics::Metrics::render`) — the split
 //! keeps the shared crate's exposition to exactly what both profiles own (the
 //! ethereum engine's mirror of this file is `EthereumMetrics`).
-use mirror_devnet::metrics::push_metric;
+use mirror_devnet::metrics::{counter, gauge};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
@@ -43,20 +43,18 @@ impl mirror_devnet::metrics::Registry for VenueMetrics {}
 impl VenueMetrics {
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
-        let g = |out: &mut String, name: &str, help: &str, v: u64| push_metric(out, "gauge", name, help, v);
-        let c = |out: &mut String, name: &str, help: &str, v: u64| push_metric(out, "counter", name, help, v);
-        g(&mut out, "venue_head", "anvil-v head", self.head.load(Ordering::Relaxed));
-        g(&mut out, "venue_cursor", "last scanned V block", self.cursor.load(Ordering::Relaxed));
-        g(&mut out, "venue_fork_pin", "V's fork base (the pin)", self.fork_pin.load(Ordering::Relaxed));
-        g(&mut out, "venue_pin_age_blocks", "blocks since the first scanned block in this epoch", self.pin_age_blocks.load(Ordering::Relaxed));
-        c(&mut out, "venue_epochs_total", "times V was found re-forked under the driver (epoch rule ran)", self.epochs_total.load(Ordering::Relaxed));
-        c(&mut out, "venue_restore_writes_total", "writes re-applied by same-pin restores", self.restore_writes_total.load(Ordering::Relaxed));
-        c(&mut out, "venue_scanned_blocks_total", "V blocks the shadow scan walked", self.scanned_blocks_total.load(Ordering::Relaxed));
-        c(&mut out, "venue_mined_blocks_total", "V blocks the engine mined (the pool was non-empty; the engine is V's block producer)", self.mined_blocks_total.load(Ordering::Relaxed));
-        c(&mut out, "venue_probe_ok_total", "at-pin probes matching the fork source", self.probe_ok.load(Ordering::Relaxed));
-        c(&mut out, "venue_probe_failures_total", "at-pin probes diverging from the fork source (devnet-owned skipped)", self.probe_failed.load(Ordering::Relaxed));
-        c(&mut out, "venue_probe_skipped_total", "probes skipped because their target is devnet-owned", self.probe_skipped.load(Ordering::Relaxed));
-        g(&mut out, "venue_probe_last_failed", "probes that diverged in the last at-pin run", self.probe_last_failed.load(Ordering::Relaxed));
+        gauge(&mut out, "venue_head", "anvil-v head", self.head.load(Ordering::Relaxed));
+        gauge(&mut out, "venue_cursor", "last scanned V block", self.cursor.load(Ordering::Relaxed));
+        gauge(&mut out, "venue_fork_pin", "V's fork base (the pin)", self.fork_pin.load(Ordering::Relaxed));
+        gauge(&mut out, "venue_pin_age_blocks", "blocks since the first scanned block in this epoch", self.pin_age_blocks.load(Ordering::Relaxed));
+        counter(&mut out, "venue_epochs_total", "times V was found re-forked under the driver (epoch rule ran)", self.epochs_total.load(Ordering::Relaxed));
+        counter(&mut out, "venue_restore_writes_total", "writes re-applied by same-pin restores", self.restore_writes_total.load(Ordering::Relaxed));
+        counter(&mut out, "venue_scanned_blocks_total", "V blocks the shadow scan walked", self.scanned_blocks_total.load(Ordering::Relaxed));
+        counter(&mut out, "venue_mined_blocks_total", "V blocks the engine mined (the pool was non-empty; the engine is V's block producer)", self.mined_blocks_total.load(Ordering::Relaxed));
+        counter(&mut out, "venue_probe_ok_total", "at-pin probes matching the fork source", self.probe_ok.load(Ordering::Relaxed));
+        counter(&mut out, "venue_probe_failures_total", "at-pin probes diverging from the fork source (devnet-owned skipped)", self.probe_failed.load(Ordering::Relaxed));
+        counter(&mut out, "venue_probe_skipped_total", "probes skipped because their target is devnet-owned", self.probe_skipped.load(Ordering::Relaxed));
+        gauge(&mut out, "venue_probe_last_failed", "probes that diverged in the last at-pin run", self.probe_last_failed.load(Ordering::Relaxed));
         out
     }
 }

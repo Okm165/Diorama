@@ -412,8 +412,20 @@ pub struct SpotToken {
     pub index: u32,
     #[serde(default)]
     pub is_canonical: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The token's EVM link; the live API serves `null` for unlinked tokens
+    /// (the sim serves the cached live shape verbatim).
     pub evm_contract: Option<SpotEvmContract>,
+    /// The venue's token id: a 16-byte hex string, distinct from the `index`
+    /// the spot state keys by (measured on the live API).
+    #[serde(default)]
+    pub token_id: Option<String>,
+    /// The token's display name; `null` on every live token (measured).
+    #[serde(default)]
+    pub full_name: Option<String>,
+    /// The deployer's trading-fee share (HIP-1 tokens); a decimal string on
+    /// the wire (`"0.0"` on the live sample).
+    #[serde(default)]
+    pub deployer_trading_fee_share: Decimal,
 }
 
 /// A token's EVM link (`evm_extra_wei_decimals` is measured: USDC carries −2).
