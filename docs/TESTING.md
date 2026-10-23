@@ -622,6 +622,17 @@ host's `forge`/`cast`/`jq`; the repo's submodules `lib/hyper-evm-lib` +
   DAI — the fixture list's set), five `MockChainlinkAggregator`s (the
   `CHAINLINK_FEEDS` addresses the feed bridge publishes to), the CCTP mock at
   `0x17`, the mock swap router, and seeded Aave reserves.
+- **the fixture lists are exact against the deploy script's source** (audited
+  2026-10-23): the only invisible writes are its `set_code` calls —
+  `install_token` for USDC/WETH/WBTC/DAI on **every** chain, plus WHYPE/wstHYPE
+  when `CHAIN_ID=999` (so the chain-999 list is those six and no more). Two
+  subtleties the audit pinned: **USDT is declared as an env var but never
+  installed** (never add it "for completeness"), and the aToken "seeding" is a
+  **tx** (`fund_token` mints the underlying *to* the aToken) — auto-marked, so
+  the L1 list's aToken entries exist for *scenario* cheatcode writes, not the
+  deploy. The CCTP mock at `0x17` needs no entry: it is not in the watchlist
+  (the closure derives from market-data views) and the address is empty on
+  mainnet, so no diff can reach it.
 - **the protocol set is the devnet's own**: the hub/registries/underwriter/
   executors land at *deployer-derived* addresses (their `DeployFactory` is
   deployed by the devnet deployer), **not** the addresses in their
@@ -797,6 +808,24 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   a range reaching below the fork pin is forwarded to reth, which refuses above its 20 000-result
   cap with `query exceeds max results …, retry with the range …` — a wording their detector's
   `range`+`exceed` pattern already matches.
+- **The hook (credit-carrying) lane is proven live** (§15.5's acceptance, measured
+  2026-10-23 on the scratch stack): a burn with `hookData = USDC(20) ‖ approve(spender, 1)`
+  and `destinationCaller` = the wrapper was relayed through the wrapper; one relay tx
+  produced the mint (**5,000,000 at the wrapper**) *and* the encoded call
+  (`allowance(wrapper, spender) == 1`) — the protocol-native `receiveRecovery` shape.
+- **The relay settles by the *effect*, never the tx status** — a bug found by that
+  proof. A `daloc-sim` epoch re-pins V, which removes the wrapper's code (it was
+  deployed on the old base); a hook relay then called a **code-less address** — a
+  vacuous *success* with no logs. The old `settle` trusted `receipt.status()` and
+  marked the lost message `relayed` (a false confirmation). Now `settle` checks the
+  chain's dedup truth first (**the destination nonce consumed ⟺ the mint happened**,
+  for both the atomic `receiveMessage` and the non-atomic wrapper `relay`) and parks
+  "succeeded but unconsumed" by name. The boot reconciler already handled the fallout:
+  it parked both affected records ("destination rewound or re-pinned: the mint is no
+  longer on-chain…") on the next restart. Two guards close the stale-wrapper window:
+  the control path refuses to burn to a wrapper with **no code** (naming the re-pin),
+  and the relay path parks the same case; a restart redeploys the wrapper, reinstalls
+  the attester (both are re-pin-sensitive devnet deployments) and reconciles.
 - **Negative equity flows end-to-end** (the master plan's venue-term requirement): seeding
   `totalRawUsd = -80000` with a long BTC position and crashing the mark served signed
   `accountValue = -2771.65…`; the next evaluation (an account read, the 1 Hz tick, or `advance` —

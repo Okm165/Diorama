@@ -260,7 +260,7 @@ pub struct TransferResponse {
 /// hook-carrying transfers (their `destinationCaller`, §15.4), zero for plain
 /// ones. A hook without a deployed wrapper is refused by name — never sent
 /// as a plain burn that would drop the credit.
-fn hook_pin(state: &ControlState, request: &TransferRequest) -> Result<(B256, Option<Bytes>)> {
+async fn hook_pin(state: &ControlState, request: &TransferRequest) -> Result<(B256, Option<Bytes>)> {
     match &request.hook {
         Some(hook) => {
             let wrapper = state
@@ -272,6 +272,18 @@ fn hook_pin(state: &ControlState, request: &TransferRequest) -> Result<(B256, Op
                         request.destination
                     ),
                 })?;
+            // A re-pin removes the wrapper's code: pinning `destinationCaller`
+            // to a dead address would make the burn unrelayable. Refuse by
+            // name before spending the burn.
+            let chain = by_domain(&state.chains, request.destination)?;
+            if !crate::transfer::has_code(&chain.rpc, wrapper).await? {
+                return Err(Error::BadRequest {
+                    reason: format!(
+                        "the hook wrapper {wrapper} has no code on {} (a re-pin?); restart the bridge to redeploy it",
+                        chain.name
+                    ),
+                });
+            }
             Ok((
                 wrapper.into_word(),
                 Some(crate::hook::hook_data(hook.target, &hook.calldata)),
@@ -326,7 +338,7 @@ pub async fn transfer(
     let chain = by_domain(&state.chains, request.source)?;
     validate_request(&state, &request)?;
     let mint_recipient = request.mint_recipient.unwrap_or(state.sender.address());
-    let (destination_caller, hook_data) = hook_pin(&state, &request)?;
+    let (destination_caller, hook_data) = hook_pin(&state, &request).await?;
     ensure_allowance(&state, chain, request.amount).await?;
 
     let calldata = burn_calldata(chain, &request, mint_recipient, destination_caller, hook_data.as_ref());

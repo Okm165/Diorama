@@ -216,6 +216,22 @@ impl Relayer {
             )?;
             return Ok(false);
         }
+        // A re-pin removes the wrapper's code (it was deployed on the old
+        // base): a call to it would succeed vacuously and the mint would be
+        // lost while the record read `relayed`. Refuse by name instead — the
+        // boot redeploys on the next restart.
+        if !decoded.body.hook_data.is_empty()
+            && !crate::transfer::has_code(&chain.rpc, target).await?
+        {
+            self.park(
+                record.nonce,
+                format!(
+                    "the hook wrapper {target} has no code on {} (a re-pin?); restart the bridge to redeploy it",
+                    chain.name
+                ),
+            )?;
+            return Ok(false);
+        }
         // The burn must still exist on the source: a reattest of a record
         // whose burn a re-pin or rewind removed must never mint (I6 — stale
         // derivations are parked, never re-owned).
@@ -317,7 +333,13 @@ impl Relayer {
                     m.relay_tx = Some(hash);
                     m.attempts += 1;
                 })?;
-                tracing::info!(nonce = %record.nonce, chain = chain.name, tx = %hash, "cctp receiveMessage submitted");
+                tracing::info!(
+                    nonce = %record.nonce,
+                    chain = chain.name,
+                    tx = %hash,
+                    consumer = if decoded.body.hook_data.is_empty() { "transmitter" } else { "hook wrapper" },
+                    "cctp relay submitted"
+                );
                 match wait_for_receipt(&chain.rpc, hash, self.receipt_timeout).await? {
                     Some(receipt) => self.settle(chain, record, &receipt).await,
                     None => Ok(false),
@@ -343,20 +365,31 @@ impl Relayer {
         record: &MessageRecord,
         receipt: &TransactionReceipt,
     ) -> Result<bool> {
-        if receipt.status() {
+        // Settle by the *effect*, never the status: the nonce is the chain's
+        // dedup truth, consumed exactly when the mint happened. A status alone
+        // cannot prove a mint — the wrapper's `relay` is non-atomic by design
+        // and a call to a code-less address (a wrapper a re-pin removed)
+        // succeeds vacuously; trusting the status would mark a lost message
+        // relayed (measured 2026-10-23).
+        if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
             self.mark_relayed(record.nonce, Some(receipt.transaction_hash))?;
             tracing::info!(
                 nonce = %record.nonce,
                 chain = chain.name,
                 tx = %receipt.transaction_hash,
-                "cctp mint confirmed (MessageReceived)"
+                "cctp mint confirmed (the destination nonce is consumed)"
             );
             return Ok(true);
         }
-        if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
-            self.mark_relayed(record.nonce, Some(receipt.transaction_hash))?;
-            tracing::info!(nonce = %record.nonce, chain = chain.name, "cctp relay reverted but the nonce is consumed; reconciled as relayed");
-            return Ok(true);
+        if receipt.status() {
+            self.park(
+                record.nonce,
+                format!(
+                    "relay tx {} succeeded but the nonce is unconsumed — the consumer did not mint (a stale hook wrapper after a re-pin?)",
+                    receipt.transaction_hash
+                ),
+            )?;
+            return Ok(false);
         }
         self.park(
             record.nonce,

@@ -287,6 +287,16 @@ pub fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> Bytes {
 /// `eth_call` a typed view function and decode its answer. A node refusal
 /// stays a typed RPC fault (the capability probe matches on it); a decoded
 /// answer that does not parse is [`Error::Abi`], never a guessed value.
+/// Whether `address` carries code on its chain. A re-pin removes a devnet
+/// deployment (the wrapper, the attester install): the address is left empty,
+/// and a call to it *succeeds vacuously* — so both the burn path and the
+/// relay path must check this rather than trust a status (measured
+/// 2026-10-23: a stale wrapper made a hook relay land as a no-op).
+pub async fn has_code(rpc: &Rpc, address: Address) -> Result<bool> {
+    let code: Bytes = rpc.call("eth_getCode", (address, "latest")).await?;
+    Ok(!code.is_empty())
+}
+
 pub async fn eth_call<C: SolCall>(rpc: &Rpc, to: Address, call: &C) -> Result<C::Return> {
     let ret = rpc.call_latest(to, &Bytes::from(call.abi_encode())).await?;
     C::abi_decode_returns(&ret).map_err(|source| Error::Abi {

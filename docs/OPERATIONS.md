@@ -625,6 +625,17 @@ and parks records whose burn vanished; the relayer parks relayed records whose
 mint was rewound. Watch `cctp_*` metrics and the `parked` count; the reasons
 name the case.
 
+A re-pin also removes the bridge's own devnet deployments — the **attester
+install** and the **hook wrapper** live on the old base. The bridge detects
+this at the points that matter: the control path refuses a hook transfer to a
+wrapper with no code, and the relay path parks a hook message whose wrapper
+vanished (both name the re-pin); a **restart** redeploys the wrapper,
+reinstalls the attester on both chains, and runs the reconciler's full pass
+(parking any record whose mint the re-pin wiped). So after any re-pin of T or
+V: **restart the bridge** (`kubectl rollout restart deploy/cctp-bridge`), then
+`GET /health` — `parked` should explain itself and stay flat. A parked record
+whose burn still exists re-arms with `POST /v2/reattest/<burn-tx-hash>`.
+
 **The hook (credit-carrying) lane.** `POST /control/transfer` with
 `"hook": {"target": "0x…", "calldata": "0x…"}` burns with
 `depositForBurnWithHook` and pins `destinationCaller` to the wrapper; one relay
