@@ -44,26 +44,20 @@ const NO_PARAMS: [u8; 0] = [];
 /// (measured: drpc answers `-32601` on HTTP 400 — see the module docs).
 const METHOD_NOT_FOUND: i64 = -32601;
 
-/// One call to send: a method and its typed positional params, serialized
-/// once. Params are method-specific, so a batch erases them to the official
-/// `RawValue` — exactly `alloy_json_rpc::Request::box_params`' contract.
-#[derive(Debug, Clone)]
-pub struct Call {
-    method: &'static str,
-    params: Box<RawValue>,
-}
+/// One call to send: alloy's own request object, params erased to the
+/// official `RawValue` — exactly the shape a request serializes to. The id is
+/// assigned per send; while staging, `Id::None`.
+pub type Call = Request<Box<RawValue>>;
 
-impl Call {
-    /// Build a call. Params serialize to the JSON-RPC positional form: a
-    /// tuple for several (`(U64::from(n), true)`), a 1-tuple for one
-    /// (`(raw,)`), [`NO_PARAMS`] for none.
-    pub fn new(method: &'static str, params: impl Serialize) -> Result<Self> {
-        let params = serde_json::value::to_raw_value(&params).map_err(|source| Error::Encode {
-            method: method.to_string(),
-            source,
-        })?;
-        Ok(Self { method, params })
-    }
+/// Stage a call. Params serialize to the JSON-RPC positional form: a tuple
+/// for several (`(U64::from(n), true)`), a 1-tuple for one (`(raw,)`),
+/// [`NO_PARAMS`] for none.
+pub fn call(method: &'static str, params: impl Serialize) -> Result<Call> {
+    let params = serde_json::value::to_raw_value(&params).map_err(|source| Error::Encode {
+        method: method.to_string(),
+        source,
+    })?;
+    Ok(Request::new(method, Id::None, params))
 }
 
 /// One HTTP client + URL, cloned cheaply (reqwest's client is `Arc`-backed).
@@ -278,7 +272,7 @@ impl Rpc {
             while end < calls.len() && (end - start) < max_items {
                 // The params are already serialized JSON, so the size estimate
                 // is exact enough for the chunk decision.
-                let estimate = calls[end].method.len() + calls[end].params.get().len() + 64;
+                let estimate = calls[end].meta.method.len() + calls[end].params.get().len() + 64;
                 if end > start && bytes + estimate > max_bytes {
                     break;
                 }
@@ -315,9 +309,9 @@ impl Rpc {
             .iter()
             .zip(&ids)
             .map(|(call, id)| {
-                Request::new(call.method, Id::Number(*id), call.params.clone())
-                    .box_params()
-                    .serialize()
+                let mut call = call.clone();
+                call.meta.id = Id::Number(*id);
+                call.serialize()
             })
             .collect::<serde_json::Result<Vec<SerializedRequest>>>()
             .map_err(|source| self.encode("batch", source))?;
@@ -529,7 +523,7 @@ impl Rpc {
     pub async fn send_raw_batch(&self, raws: &[Bytes]) -> Result<Vec<std::result::Result<B256, RpcError>>> {
         let calls: Vec<Call> = raws
             .iter()
-            .map(|raw| Call::new("eth_sendRawTransaction", (raw,)))
+            .map(|raw| call("eth_sendRawTransaction", (raw,)))
             .collect::<Result<_>>()?;
         let results = self.batch_limited(&calls, 500, 1 << 20).await?;
         Ok(results
@@ -596,7 +590,7 @@ impl Rpc {
     /// its own gas limit.
     pub async fn set_next_block_env(&self, timestamp: u64, header: &Header) -> Result<()> {
         let mut calls = Self::context_calls(timestamp, header)?;
-        calls.push(Call::new(
+        calls.push(call(
             "anvil_setBlockGasLimit",
             (U64::from(header.gas_limit),),
         )?);
@@ -612,12 +606,12 @@ impl Rpc {
     /// The context fields shared by both chains (the parent header verbatim).
     fn context_calls(timestamp: u64, header: &Header) -> Result<Vec<Call>> {
         let mut calls = vec![
-            Call::new("anvil_setNextBlockTimestamp", (U64::from(timestamp),))?,
-            Call::new("anvil_setCoinbase", (header.beneficiary,))?,
-            Call::new("anvil_setNextBlockPrevRandao", (header.mix_hash,))?,
+            call("anvil_setNextBlockTimestamp", (U64::from(timestamp),))?,
+            call("anvil_setCoinbase", (header.beneficiary,))?,
+            call("anvil_setNextBlockPrevRandao", (header.mix_hash,))?,
         ];
         if let Some(base_fee) = header.base_fee_per_gas {
-            calls.push(Call::new(
+            calls.push(call(
                 "anvil_setNextBlockBaseFeePerGas",
                 (U256::from(base_fee),),
             )?);
@@ -631,7 +625,7 @@ impl Rpc {
         let results = self.batch(&calls).await?;
         for (call, result) in calls.iter().zip(results) {
             if let Err(payload) = result {
-                return Err(self.rpc(call.method, payload));
+                return Err(self.rpc(&call.meta.method, payload));
             }
         }
         Ok(())
@@ -752,8 +746,10 @@ impl Rpc {
 }
 
 /// The `anvil_reset` params envelope: `alloy-rpc-types-anvil` models the
-/// `Forking` object; the `{ "forking": … }` wrapper is the method's own shape
-/// (the same one the official client sends).
+/// `Forking` object, and alloy's own client sends it *untagged* — measured,
+/// anvil accepts only the tagged `{ "forking": … }` wrapper, so the wrapper
+/// is ours (their `Forking` deserializer accepts both forms; its serializer
+/// does not emit the tag).
 #[derive(serde::Serialize)]
 struct ResetParams {
     forking: Forking,

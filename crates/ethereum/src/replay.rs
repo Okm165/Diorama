@@ -15,7 +15,7 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_consensus::Transaction as _;
 use alloy_network_primitives::TransactionResponse;
 use alloy_primitives::{Address, Bytes, Signature, B256, U256, U64};
-use mirror_anvil::Call;
+use mirror_anvil::{call, Call};
 use mirror_devnet::metrics::Registry as _;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicU64;
@@ -167,7 +167,7 @@ async fn credit_withdrawals(
     let credits = withdrawal_credits(withdrawals);
     let reads: Vec<Call> = credits
         .keys()
-        .map(|address| Call::new("eth_getBalance", (*address, U64::from(n - 1))))
+        .map(|address| call("eth_getBalance", (*address, U64::from(n - 1))))
         .collect::<mirror_anvil::Result<_>>()?;
     let mut pre_balances: Vec<U256> = Vec::with_capacity(reads.len());
     for chunk in reads.chunks(ctx.engine.loops.chunk_size) {
@@ -183,7 +183,7 @@ async fn credit_withdrawals(
     }
     let mut calls: Vec<Call> = Vec::with_capacity(credits.len());
     for ((address, amount), pre) in credits.iter().zip(pre_balances) {
-        calls.push(Call::new("anvil_setBalance", (*address, pre + *amount))?);
+        calls.push(call("anvil_setBalance", (*address, pre + *amount))?);
     }
     for chunk in calls.chunks(ctx.engine.loops.chunk_size) {
         for result in ctx.anvil_m.batch(chunk).await? {

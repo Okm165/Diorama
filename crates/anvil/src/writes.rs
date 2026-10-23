@@ -7,7 +7,7 @@
 //! odd-length or quantized hex with `-32602`), balances/nonces are quantities
 //! (`U256`/`U64` serialize minimal-hex), and code is bytes. Batching chunks at
 //! the anvil contract's 500 items / 1 MB on top of the configured chunk size.
-use crate::client::{Call, Rpc};
+use crate::client::{call, Call, Rpc};
 use crate::error::Result;
 use crate::trace::Write;
 use alloy_primitives::{B256, U64};
@@ -36,7 +36,7 @@ fn write_call(write: &Write) -> Result<Call> {
             address,
             slot,
             value,
-        } => Call::new(
+        } => call(
             "anvil_setStorageAt",
             (
                 *address,
@@ -44,10 +44,10 @@ fn write_call(write: &Write) -> Result<Call> {
                 B256::from(value.to_be_bytes::<32>()),
             ),
         ),
-        Write::Balance { address, value } => Call::new("anvil_setBalance", (*address, *value)),
+        Write::Balance { address, value } => call("anvil_setBalance", (*address, *value)),
         Write::Nonce { address, value } => {
-            Call::new("anvil_setNonce", (*address, U64::from(*value)))
+            call("anvil_setNonce", (*address, U64::from(*value)))
         }
-        Write::Code { address, value } => Call::new("anvil_setCode", (*address, value.clone())),
+        Write::Code { address, value } => call("anvil_setCode", (*address, value.clone())),
     }
 }

@@ -8,26 +8,65 @@ pub fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, v: u64)
     out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {v}\n"));
 }
 
-/// A gauge line: the render shorthand every registry uses.
-pub fn gauge(out: &mut String, name: &str, help: &str, v: u64) {
-    push_metric(out, "gauge", name, help, v);
+/// Declare a registry: one line per series, expanding to the atomic fields and
+/// the declared exposition. The field, the series name and the render line can
+/// never drift apart — the pattern used to be written twice per metric (a
+/// field and a render line), and a missed pair was a silently unreported
+/// series.
+///
+/// A pair may carry a unit divisor (`field = "series", "help" / 1000`), for a
+/// series the field stores in a finer unit. The generated `render_declared`
+/// writes the declared lines in declaration order; a registry with a computed
+/// series (the ethereum engine's `mirror_lag_blocks`, a difference of two
+/// fields) writes its own `render` beside it.
+#[macro_export]
+macro_rules! registry {
+    (
+        $(#[$sattr:meta])*
+        pub struct $name:ident {
+            $(
+                $(#[$fattr:meta])*
+                $kind:ident $field:ident = $series:literal, $help:literal $(/ $div:literal)?;
+            )*
+        }
+    ) => {
+        $(#[$sattr])*
+        #[derive(Default)]
+        pub struct $name {
+            $(
+                $(#[$fattr])*
+                pub $field: std::sync::atomic::AtomicU64,
+            )*
+        }
+
+        impl $name {
+            /// The declared series, in declaration order.
+            fn render_declared(&self, out: &mut String) {
+                $(
+                    $crate::metrics::push_metric(
+                        out,
+                        stringify!($kind),
+                        $series,
+                        $help,
+                        self.$field.load(std::sync::atomic::Ordering::Relaxed) $(/ $div)?,
+                    );
+                )*
+            }
+        }
+    };
 }
 
-/// A counter line: the render shorthand every registry uses.
-pub fn counter(out: &mut String, name: &str, help: &str, v: u64) {
-    push_metric(out, "counter", name, help, v);
-}
-
-/// The shared admin surface's gauges (plan §11.3): what the devnet plane
-/// itself owns. Each profile renders its own set beside these (the ethereum
-/// engine's `EthereumMetrics`, the venue's `VenueMetrics`), so this crate
-/// knows nothing about reth, M/T or the venue's chain.
-#[derive(Default)]
-pub struct Metrics {
-    pub shadowed_slots: AtomicU64,
-    pub shadowed_accounts: AtomicU64,
-    pub halted: AtomicU64,
-    pub frozen: AtomicU64,
+registry! {
+    /// The shared admin surface's gauges (plan §11.3): what the devnet plane
+    /// itself owns. Each profile renders its own set beside these (the ethereum
+    /// engine's `EthereumMetrics`, the venue's `VenueMetrics`), so this crate
+    /// knows nothing about reth, M/T or the venue's chain.
+    pub struct Metrics {
+        gauge shadowed_slots = "mirror_shadowed_slots", "storage slots shadowed by the devnet";
+        gauge shadowed_accounts = "mirror_shadowed_accounts", "accounts with devnet-owned keys (whole-account marks or per-slot marks)";
+        gauge halted = "mirror_halted", "1 while the driver is halted";
+        gauge frozen = "mirror_frozen", "1 while the driver is frozen";
+    }
 }
 
 /// The registry convention, one implementation for every registry: the shared
@@ -64,10 +103,7 @@ impl Metrics {
     /// `EthereumMetrics`, the venue's `VenueMetrics`).
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(256);
-        push_metric(&mut out, "gauge", "mirror_shadowed_slots", "storage slots shadowed by the devnet", self.shadowed_slots.load(Ordering::Relaxed));
-        push_metric(&mut out, "gauge", "mirror_shadowed_accounts", "accounts with devnet-owned keys (whole-account marks or per-slot marks)", self.shadowed_accounts.load(Ordering::Relaxed));
-        push_metric(&mut out, "gauge", "mirror_halted", "1 while the driver is halted", self.halted.load(Ordering::Relaxed));
-        push_metric(&mut out, "gauge", "mirror_frozen", "1 while the driver is frozen", self.frozen.load(Ordering::Relaxed));
+        self.render_declared(&mut out);
         out
     }
 }

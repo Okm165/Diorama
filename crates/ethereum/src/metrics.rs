@@ -4,58 +4,58 @@
 //! (`mirror_devnet::metrics::Metrics::render`) and the feed bridge's own set —
 //! the split keeps the shared crate's exposition to exactly what both
 //! profiles own (the venue's mirror of this file is `VenueMetrics`).
-use mirror_devnet::metrics::{counter, gauge};
-use std::sync::atomic::{AtomicU64, Ordering};
+use mirror_devnet::metrics::push_metric;
+use std::sync::atomic::Ordering;
 
-#[derive(Default)]
-pub struct EthereumMetrics {
-    pub reth_head: AtomicU64,
-    pub reth_follow_head: AtomicU64,
-    pub m_head: AtomicU64,
-    pub t_head: AtomicU64,
-    pub cursor_m: AtomicU64,
-    pub cursor_t: AtomicU64,
-    pub blocks_replayed: AtomicU64,
-    pub blocks_applied: AtomicU64,
-    pub divergences: AtomicU64,
-    pub value_divergences: AtomicU64,
-    pub bal_writes: AtomicU64,
-    pub m_repair_writes: AtomicU64,
-    pub m_rebase_skipped: AtomicU64,
-    pub m_convergence_ok: AtomicU64,
-    pub m_convergence_failed: AtomicU64,
-    pub m_convergence_last_failed: AtomicU64,
-    pub t_convergence_ok: AtomicU64,
-    pub t_convergence_failed: AtomicU64,
-    pub t_convergence_last_failed: AtomicU64,
-    pub t_probe_skipped: AtomicU64,
-    pub bal_filtered_out: AtomicU64,
-    pub bal_skipped_shadowed: AtomicU64,
-    /// T blocks the shadow scan walked (empty blocks cost one header read; no
-    /// traces). The scan-cost reading: it grows ~1 per harness-mined block.
-    pub shadow_scanned_blocks: AtomicU64,
-    /// The empty share of the walk: one call, no traces (plan §17.4's
-    /// empty-block cost reading — the harness mines one block per poll).
-    pub shadow_skipped_empty_blocks: AtomicU64,
-
-    pub last_replay_ms: AtomicU64,
-    pub last_apply_ms: AtomicU64,
-    pub pin_age_blocks: AtomicU64,
-    /// `T's head - T's fork block`: reads below the fork block are served by
-    /// reth, whose state window is 10,064 blocks. Past that, any slot T has
-    /// not written cannot be read at all - re-pin (make repin) before it.
-    pub t_fork_age_blocks: AtomicU64,
-    /// Times T was found re-forked under the engine (its OOM restart, a re-pin).
-    /// The engine re-applies the devnet's recorded writes; the chain history is
-    /// gone. A steady increase means T is restarting often (check its RSS).
-    pub t_resets_total: AtomicU64,
-    pub blob_failures: AtomicU64,
-    pub receipts_unverified: AtomicU64,
-    pub reorgs_detected: AtomicU64,
-    /// EIP-8379 top-up: payloads delivered to reth and the remaining gap to the
-    /// CL's head (what "self-contained catch-up" looks like in monitoring).
-    pub source_sync_delivered: AtomicU64,
-    pub source_sync_gap_blocks: AtomicU64,
+mirror_devnet::registry! {
+    pub struct EthereumMetrics {
+        gauge reth_head = "mirror_reth_head", "reth chain head";
+        gauge reth_follow_head = "mirror_reth_follow_head", "reth follow head (safe/latest/finalized)";
+        gauge source_sync_gap_blocks = "mirror_source_sync_gap_blocks", "CL head execution block - reth head (top-up catch-up progress)";
+        /// EIP-8379 top-up: payloads delivered to reth and the remaining gap to the
+        /// CL's head (what "self-contained catch-up" looks like in monitoring).
+        counter source_sync_delivered = "mirror_source_sync_delivered_total", "execution payloads delivered to reth via the Engine API (EIP-8379 top-up)";
+        gauge m_head = "mirror_m_head", "anvil-m head";
+        gauge t_head = "mirror_t_head", "anvil-t head";
+        gauge cursor_m = "mirror_cursor_block", "last replayed parent block";
+        gauge cursor_t = "mirror_cursor_block_t", "last applied parent block";
+        /// Times T was found re-forked under the engine (its OOM restart, a re-pin).
+        /// The engine re-applies the devnet's recorded writes; the chain history is
+        /// gone. A steady increase means T is restarting often (check its RSS).
+        counter t_resets_total = "mirror_t_resets_total", "times T was re-forked under the engine (devnet writes re-applied)";
+        /// `T's head - T's fork block`: reads below the fork block are served by
+        /// reth, whose state window is 10,064 blocks. Past that, any slot T has
+        /// not written cannot be read at all - re-pin (make repin) before it.
+        gauge t_fork_age_blocks = "mirror_t_fork_age_blocks", "T head - T fork block (reth serves below it; 10,064-block window)";
+        gauge pin_age_blocks = "mirror_pin_age_blocks", "blocks since the first processed block in this epoch";
+        /// T blocks the shadow scan walked (empty blocks cost one header read; no
+        /// traces). The scan-cost reading: it grows ~1 per harness-mined block.
+        counter shadow_scanned_blocks = "mirror_shadow_scanned_blocks_total", "T blocks the shadow scan walked (empty blocks cost one header read, no traces)";
+        /// The empty share of the walk: one call, no traces (plan §17.4's
+        /// empty-block cost reading — the harness mines one block per poll).
+        counter shadow_skipped_empty_blocks = "mirror_shadow_skipped_empty_blocks_total", "empty blocks the shadow scan skipped (one call, no traces)";
+        gauge last_replay_ms = "mirror_last_replay_seconds", "duration of the last block replay" / 1000;
+        gauge last_apply_ms = "mirror_last_apply_seconds", "duration of the last block diff application" / 1000;
+        counter blocks_replayed = "mirror_blocks_replayed_total", "blocks replayed into M";
+        counter blocks_applied = "mirror_blocks_applied_total", "parent blocks applied into T";
+        counter divergences = "mirror_divergences_total", "fatal verification divergences";
+        counter value_divergences = "mirror_value_divergences_total", "value-level divergences (blockhash-dependent; not fatal)";
+        counter reorgs_detected = "mirror_reorgs_detected_total", "upstream reorgs detected";
+        gauge bal_writes = "mirror_bal_writes_last_block", "watch-list writes applied to T in the last applied parent block";
+        counter m_repair_writes = "mirror_m_repair_writes_total", "BAL writes applied to converge M";
+        counter m_rebase_skipped = "mirror_m_rebase_skipped_blocks_total", "parent blocks an M re-base skipped (fork base: state exact, tx verification skipped)";
+        counter m_convergence_ok = "mirror_m_convergence_ok_total", "post-repair probes matching mainnet";
+        counter m_convergence_failed = "mirror_m_convergence_failures_total", "post-repair probes diverging (repair incomplete)";
+        gauge m_convergence_last_failed = "mirror_m_convergence_last_failed", "post-repair probes diverging in the last block";
+        counter t_convergence_ok = "mirror_t_convergence_ok_total", "devnet probes matching mainnet at the applied parent block";
+        counter t_convergence_failed = "mirror_t_convergence_failures_total", "devnet probes diverging from mainnet (devnet-owned accounts skipped)";
+        gauge t_convergence_last_failed = "mirror_t_convergence_last_failed", "devnet probes that diverged in the last applied block";
+        counter t_probe_skipped = "mirror_t_probe_skipped_total", "probes skipped because their target is devnet-owned (a devnet write to a shared contract hides that contract's probes until it is handed back)";
+        gauge bal_filtered_out = "mirror_bal_filtered_out_last_block", "BAL writes in the last parent block filtered out (not watched)";
+        gauge bal_skipped_shadowed = "mirror_bal_skipped_shadowed_last_block", "BAL writes in the last parent block skipped (shadowed by devnet)";
+        counter blob_failures = "mirror_blob_failures_total", "blocks with blob sidecar/replay failures";
+        counter receipts_unverified = "mirror_receipts_unverified_total", "blocks replayed without receipts verification";
+    }
 }
 
 /// The registry convention (`set`/`add`/`inc`) is the shared trait's; this
@@ -65,41 +65,8 @@ impl mirror_devnet::metrics::Registry for EthereumMetrics {}
 impl EthereumMetrics {
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
-        gauge(&mut out, "mirror_reth_head", "reth chain head", self.reth_head.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_reth_follow_head", "reth follow head (safe/latest/finalized)", self.reth_follow_head.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_source_sync_gap_blocks", "CL head execution block - reth head (top-up catch-up progress)", self.source_sync_gap_blocks.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_source_sync_delivered_total", "execution payloads delivered to reth via the Engine API (EIP-8379 top-up)", self.source_sync_delivered.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_m_head", "anvil-m head", self.m_head.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_t_head", "anvil-t head", self.t_head.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_cursor_block", "last replayed parent block", self.cursor_m.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_cursor_block_t", "last applied parent block", self.cursor_t.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_lag_blocks", "follow head - replay cursor", self.reth_follow_head.load(Ordering::Relaxed).saturating_sub(self.cursor_m.load(Ordering::Relaxed)));
-        counter(&mut out, "mirror_t_resets_total", "times T was re-forked under the engine (devnet writes re-applied)", self.t_resets_total.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_t_fork_age_blocks", "T head - T fork block (reth serves below it; 10,064-block window)", self.t_fork_age_blocks.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_pin_age_blocks", "blocks since the first processed block in this epoch", self.pin_age_blocks.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_shadow_scanned_blocks_total", "T blocks the shadow scan walked (empty blocks cost one header read, no traces)", self.shadow_scanned_blocks.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_shadow_skipped_empty_blocks_total", "empty blocks the shadow scan skipped (one call, no traces)", self.shadow_skipped_empty_blocks.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_last_replay_seconds", "duration of the last block replay", self.last_replay_ms.load(Ordering::Relaxed) / 1000);
-        gauge(&mut out, "mirror_last_apply_seconds", "duration of the last block diff application", self.last_apply_ms.load(Ordering::Relaxed) / 1000);
-        counter(&mut out, "mirror_blocks_replayed_total", "blocks replayed into M", self.blocks_replayed.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_blocks_applied_total", "parent blocks applied into T", self.blocks_applied.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_divergences_total", "fatal verification divergences", self.divergences.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_value_divergences_total", "value-level divergences (blockhash-dependent; not fatal)", self.value_divergences.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_reorgs_detected_total", "upstream reorgs detected", self.reorgs_detected.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_bal_writes_last_block", "watch-list writes applied to T in the last applied parent block", self.bal_writes.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_m_repair_writes_total", "BAL writes applied to converge M", self.m_repair_writes.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_m_rebase_skipped_blocks_total", "parent blocks an M re-base skipped (fork base: state exact, tx verification skipped)", self.m_rebase_skipped.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_m_convergence_ok_total", "post-repair probes matching mainnet", self.m_convergence_ok.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_m_convergence_failures_total", "post-repair probes diverging (repair incomplete)", self.m_convergence_failed.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_m_convergence_last_failed", "post-repair probes diverging in the last block", self.m_convergence_last_failed.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_t_convergence_ok_total", "devnet probes matching mainnet at the applied parent block", self.t_convergence_ok.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_t_convergence_failures_total", "devnet probes diverging from mainnet (devnet-owned accounts skipped)", self.t_convergence_failed.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_t_convergence_last_failed", "devnet probes that diverged in the last applied block", self.t_convergence_last_failed.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_t_probe_skipped_total", "probes skipped because their target is devnet-owned (a devnet write to a shared contract hides that contract's probes until it is handed back)", self.t_probe_skipped.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_bal_filtered_out_last_block", "BAL writes in the last parent block filtered out (not watched)", self.bal_filtered_out.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_bal_skipped_shadowed_last_block", "BAL writes in the last parent block skipped (shadowed by devnet)", self.bal_skipped_shadowed.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_blob_failures_total", "blocks with blob sidecar/replay failures", self.blob_failures.load(Ordering::Relaxed));
-        counter(&mut out, "mirror_receipts_unverified_total", "blocks replayed without receipts verification", self.receipts_unverified.load(Ordering::Relaxed));
+        self.render_declared(&mut out);
+        push_metric(&mut out, "gauge", "mirror_lag_blocks", "follow head - replay cursor", self.reth_follow_head.load(Ordering::Relaxed).saturating_sub(self.cursor_m.load(Ordering::Relaxed)));
         out
     }
 }
