@@ -34,6 +34,9 @@ pub struct EthereumMetrics {
     /// T blocks the shadow scan walked (empty blocks cost one header read; no
     /// traces). The scan-cost reading: it grows ~1 per harness-mined block.
     pub shadow_scanned_blocks: AtomicU64,
+    /// The empty share of the walk: one call, no traces (plan §17.4's
+    /// empty-block cost reading — the harness mines one block per poll).
+    pub shadow_skipped_empty_blocks: AtomicU64,
     pub last_replay_ms: AtomicU64,
     pub last_apply_ms: AtomicU64,
     pub pin_age_blocks: AtomicU64,
@@ -74,6 +77,7 @@ impl EthereumMetrics {
         gauge(&mut out, "mirror_t_fork_age_blocks", "T head - T fork block (reth serves below it; 10,064-block window)", self.t_fork_age_blocks.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_pin_age_blocks", "blocks since the first processed block in this epoch", self.pin_age_blocks.load(Ordering::Relaxed));
         counter(&mut out, "mirror_shadow_scanned_blocks_total", "T blocks the shadow scan walked (empty blocks cost one header read, no traces)", self.shadow_scanned_blocks.load(Ordering::Relaxed));
+        counter(&mut out, "mirror_shadow_skipped_empty_blocks_total", "empty blocks the shadow scan skipped (one call, no traces)", self.shadow_skipped_empty_blocks.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_last_replay_seconds", "duration of the last block replay", self.last_replay_ms.load(Ordering::Relaxed) / 1000);
         gauge(&mut out, "mirror_last_apply_seconds", "duration of the last block diff application", self.last_apply_ms.load(Ordering::Relaxed) / 1000);
         counter(&mut out, "mirror_blocks_replayed_total", "blocks replayed into M", self.blocks_replayed.load(Ordering::Relaxed));

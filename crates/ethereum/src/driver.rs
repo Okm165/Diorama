@@ -480,9 +480,12 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
         // down). The applier's inline scan shares this high-water mark, so its
         // blocks are not re-traced.
         match mirror_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await {
-            Ok(walked) => ctx
-                .eth_metrics
-                .add(&ctx.eth_metrics.shadow_scanned_blocks, walked),
+            Ok(walk) => {
+                ctx.eth_metrics
+                    .add(&ctx.eth_metrics.shadow_scanned_blocks, walk.walked);
+                ctx.eth_metrics
+                    .add(&ctx.eth_metrics.shadow_skipped_empty_blocks, walk.empty);
+            }
             Err(e) => tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block"),
         }
         // A save fault is logged, not swallowed: the marks are in memory and

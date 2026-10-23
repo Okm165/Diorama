@@ -236,9 +236,11 @@ async fn admin_shadow(
 ) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
     // The hand-back carries its own race guard (AdminSurface::shadow_hand_back);
     // the scan cost its pre-step paid lands in this profile's counter.
-    let (out, walked) = ctx.admin().shadow_hand_back(&req).await?;
+    let (out, walk) = ctx.admin().shadow_hand_back(&req).await?;
     ctx.eth_metrics
-        .add(&ctx.eth_metrics.shadow_scanned_blocks, walked);
+        .add(&ctx.eth_metrics.shadow_scanned_blocks, walk.walked);
+    ctx.eth_metrics
+        .add(&ctx.eth_metrics.shadow_skipped_empty_blocks, walk.empty);
     Ok(Json(out))
 }
 

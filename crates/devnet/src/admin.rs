@@ -56,7 +56,7 @@ impl AdminSurface<'_> {
     /// partial registry would let the race through (marks intact, so the
     /// caller can retry). Returns the blocks walked — the profile records
     /// them in its own scan-cost counter.
-    pub async fn scan_to_head(&self) -> Result<u64> {
+    pub async fn scan_to_head(&self) -> Result<crate::scan::ScanWalk> {
         let head = self.target.block_number().await?;
         let pin = self.target.fork_block().await?.unwrap_or(0);
         // A fresh mark starts at the head: the hand-back's job is the recent
@@ -150,9 +150,13 @@ impl AdminSurface<'_> {
     /// that predates the devnet's own writes and re-mark the stale value.
     /// Returns the outcome and the blocks the pre-step scan walked (0 when
     /// there was nothing to flush); the profile records the count.
-    pub async fn shadow_hand_back(&self, req: &ShadowRequest) -> Result<(ShadowOutcome, u64)> {
-        let walked = if req.clear { self.scan_to_head().await? } else { 0 };
-        Ok((self.shadow(req).await?, walked))
+    pub async fn shadow_hand_back(&self, req: &ShadowRequest) -> Result<(ShadowOutcome, crate::scan::ScanWalk)> {
+        let walk = if req.clear {
+            self.scan_to_head().await?
+        } else {
+            crate::scan::ScanWalk { walked: 0, empty: 0 }
+        };
+        Ok((self.shadow(req).await?, walk))
     }
 
     /// Register the devnet-owned keys (`clear: false`).

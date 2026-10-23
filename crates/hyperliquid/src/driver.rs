@@ -135,7 +135,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // which would stall the watermark below the pin and livelock the driver
     // after a rewind or a re-pin.
     let first = cursor.as_ref().map(|c| c.block).unwrap_or(head);
-    let walked = scan::scan_to(
+    let walk = scan::scan_to(
         &ctx.plane,
         &ctx.v,
         ctx.pin.load(Ordering::Relaxed),
@@ -143,9 +143,11 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
         first,
     )
     .await?;
-    if walked > 0 {
+    if walk.walked > 0 {
         ctx.venue_metrics
-            .add(&ctx.venue_metrics.scanned_blocks_total, walked);
+            .add(&ctx.venue_metrics.scanned_blocks_total, walk.walked);
+        ctx.venue_metrics
+            .add(&ctx.venue_metrics.skipped_empty_blocks_total, walk.empty);
         ctx.plane.save_shadow()?;
         // Ring the journal like the applier does on T: the rewind window is
         // the same 1024 blocks on both mirrors (files older than head - keep

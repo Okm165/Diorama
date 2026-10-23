@@ -397,8 +397,10 @@ async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
     let now = ctx.anvil_t.block_number().await?;
     let pin = ctx.anvil_t.fork_block().await?.unwrap_or(0);
     let from = mirror_devnet::scan::scan_anchor(from, pin);
-    let walked = mirror_devnet::scan::scan_range(&ctx.plane, &ctx.anvil_t, from, now).await?;
-    ctx.eth_metrics.add(&ctx.eth_metrics.shadow_scanned_blocks, walked);
+    let walk = mirror_devnet::scan::scan_range(&ctx.plane, &ctx.anvil_t, from, now).await?;
+    ctx.eth_metrics.add(&ctx.eth_metrics.shadow_scanned_blocks, walk.walked);
+    ctx.eth_metrics
+        .add(&ctx.eth_metrics.shadow_skipped_empty_blocks, walk.empty);
     Ok(())
 }
 

@@ -35,17 +35,27 @@ pub fn scan_anchor(watermark: u64, pin: u64) -> u64 {
 /// overwrite the devnet's state, the exact COW failure the registry exists to
 /// prevent.
 ///
-/// Returns the number of blocks walked (an empty block costs one header read,
-/// no traces — the harness mines one block per poll, so this is the scan-cost
-/// reading both profiles count).
-pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Result<u64> {
-    let mut walked = 0u64;
+/// Returns the walk's counts — the scan-cost reading both profiles count. An
+/// empty block is one call and no traces, and the harness mines one block per
+/// poll, so the empty share is what the counters are for (plan §17.4).
+pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Result<ScanWalk> {
+    let mut walk = ScanWalk { walked: 0, empty: 0 };
     for n in (from + 1)..=to {
-        scan_block(target, &plane.shadow, n).await?;
+        if !scan_block(target, &plane.shadow, n).await? {
+            walk.empty += 1;
+        }
         plane.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
-        walked += 1;
+        walk.walked += 1;
     }
-    Ok(walked)
+    Ok(walk)
+}
+
+/// One scan walk's counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanWalk {
+    pub walked: u64,
+    /// Blocks with no txs: one call, no traces.
+    pub empty: u64,
 }
 
 /// The one shadow-scan walk (both profiles, both call shapes): from the
@@ -60,7 +70,7 @@ pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Resu
 /// A fresh mark is *set*, never left at 0: the policy is the watermark's
 /// starting value, and leaving it unset would let the next scan re-run the
 /// policy against a moved head and skip blocks written in between.
-pub async fn scan_to(plane: &Plane, target: &Rpc, pin: u64, head: u64, first: u64) -> Result<u64> {
+pub async fn scan_to(plane: &Plane, target: &Rpc, pin: u64, head: u64, first: u64) -> Result<ScanWalk> {
     let mark = plane.shadow_scanned_upto.load(Ordering::Relaxed);
     let from = if mark == 0 {
         let from = scan_anchor(first, pin);
@@ -74,12 +84,13 @@ pub async fn scan_to(plane: &Plane, target: &Rpc, pin: u64, head: u64, first: u6
 
 /// Mark one block's writes devnet-owned: every sender's account fields, the
 /// recipients of value transfers, and the storage writes from the tx traces
-/// (prestateTracer diffMode — measured on anvil 1.8.6).
-pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<()> {
+/// (prestateTracer diffMode — measured on anvil 1.8.6). Returns whether the
+/// block had any txs — `false` is the empty-block skip the caller counts.
+pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<bool> {
     let block = target.block_by_number(n, true).await?;
     let txs = block_txs(&block);
     if txs.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let mut shadowed = 0usize;
     let mut trace_failures = 0usize;
@@ -124,7 +135,7 @@ pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result
         shadowed_writes = shadowed,
         "scanned devnet block for shadow writes"
     );
-    Ok(())
+    Ok(true)
 }
 
 /// Read a block's hash (for cursor validation).
