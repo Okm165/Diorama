@@ -274,9 +274,13 @@ done
   && ok "the served clock never moved backwards ($served0 -> $served1)" \
   || bad "served clock regressed: $served0 -> $served1"
 raw_time=$(sim_account "$UNTOUCHED" | json 'd["time"]//1000')
-[ "$raw_time" -lt "$jump" ] \
-  && ok "an untouched account still serves the venue's own time (pass-through)" \
-  || bad "untouched account followed the jump: time=$raw_time jump=$jump"
+wall_now=$(date +%s)
+# The pass-through serves the *real venue's* clock (~wall), never V's jumped
+# one; comparing against wall keeps the check true when V's head timestamp
+# lags (a fresh fork's pin age).
+[ "$raw_time" -ge $((wall_now - 10)) ] && [ "$raw_time" -le $((wall_now + 10)) ] \
+  && ok "an untouched account still serves the venue's own time (pass-through, $raw_time ~ wall)" \
+  || bad "untouched account did not serve the venue's clock: time=$raw_time wall=$wall_now jump=$jump"
 
 echo "== venue capability proof: $pass passed, $fail failed"
 [ "$fail" = "0" ]

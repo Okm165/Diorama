@@ -367,6 +367,35 @@ chain facts:
   credit), then a `sendAsset` naming that address (the completion — the system
   address sends the ERC-20 back), exact balances end to end.
 
+### The bringup parity their harness needs (measured live, 2026-10-23)
+
+The daloc harness's own chains run with `--code-size-limit 99999` +
+`--transaction-block-keeper 1000000` (T and V) and `--gas-limit 100000000` (V)
+— their margin-agent deploys exceed EIP-170, and their failing-run forensics
+read the run's own chain. Both manifests carry them (anvil-t.yaml, anvil-v.yaml)
+and the direct-mode scratch launch matches. Measured with the flags in place:
+a **25,000-byte runtime deploy** lands on both chains (T with a bpo2-compliant
+tx gas; V as-is). Two facts the redesign must respect, both measured:
+
+- **T (bpo2) enforces EIP-7825's 16,777,216 per-transaction gas cap** — a tx
+  *declaring* more sits pending forever (measured: gas 30,000,000 stayed
+  pending while the identical deploy with 16,000,000 landed). V (cancun) has
+  no cap. Alloy's estimator stays under the cap for normal txs; a hand-built
+  tx must.
+- **A fresh fork's head timestamp is the pin's age** (V's head read 30 min
+  behind wall right after a same-pin re-fork; the head *block* is the source
+  pin until something is mined). Their boot contract pins `anvil_setTime(wall)`
+  on every chain, so this is theirs to set; the untouched pass-through check in
+  `venue-proof` compares against wall (the real venue's clock), never against
+  V's jumped head — the two are independent clocks.
+
+The CCTP expiration window is a config knob with two honest settings: **0 = no
+expiry** (the product instances and every proof here) and a short window
+(measured with 3 destination blocks) for the re-attestation drill — a record
+that expires parks with the contract's own "Message expired and must be
+re-signed" and is re-armed by `POST /v2/reattest/{nonce}` (the operator action
+the bridge documents, never a silent retry).
+
 ### The order lane (measured live, 2026-10-23)
 
 `make venue-order-proof` (30 checks, direct mode against the scratch stack) is
