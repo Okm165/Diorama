@@ -13,3 +13,5 @@ truth, and a decision that cost a real run gets a record here.
 | [0005](0005-bridge-block-atomicity.md) | The bridge applies a block's effects and its cursor atomically |
 | [0006](0006-ws-first-market-data.md) | WS-first market data with a budget-gated REST backfill |
 | [0007](0007-cctp-devnet-lanes.md) | The CCTP lanes: real contracts, a substituted attester, rewind parking |
+| [0008](0008-base-anchored-validation.md) | The base is the anchor: scans, cursors and applies clamp at the fork pin |
+| [0009](0009-venue-unshadow-truth.md) | The venue's unshadow truth: the pin's window, the journal's before-values |
