@@ -91,12 +91,17 @@ for m in d.get('messages', []):
   case "$state" in
     relayed) ok "the record relayed"; break ;;
     parked)  bad "the record parked: ${rec#*| }"; break ;;
-    "")      bad "no record for the burn in the store"; break ;;
   esac
   i=$((i + 1))
   sleep 1
 done
-[ "$state" = "relayed" ] || bad "not relayed within ${BUDGET}s (state=$state; a scratch destination needs a miner)"
+# An empty store entry is the normal pending case (the watcher absorbs the
+# burn only after the finality window), not a terminal one — the loop above
+# keeps polling for it; only the budget running out is a failure.
+case "$state" in
+  relayed | parked) ;;
+  *) bad "not relayed within ${BUDGET}s (state=${state:-no record yet}; a scratch destination needs a miner)" ;;
+esac
 
 dst_after=$(balance "$DST_USDC" "$RELAY" "$DST_URL")
 [ -n "$dst_before" ] && [ "$dst_after" = "$((dst_before + AMOUNT))" ] \
