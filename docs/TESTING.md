@@ -29,9 +29,11 @@ each module documents:
   pin-base predicate (`scan_anchor` clamps at the pin), the shared admin wire
   types.
 - `mirror-config` — the layered merge (arrays replace, never concatenate),
-  `${ENV}` expansion (unresolved is reported, then fatal for services),
-  `MIRROR__*` overrides, profile coherence, fork-offset bounds; the real
-  instance files load and check.
+  `${ENV}` expansion (unresolved is reported, then fatal for services; the
+  per-pod contract is `inspect` + `require_resolved` over the pod's own
+  sections — one instance file, many readers, each pod carrying only its own
+  wiring), `MIRROR__*` overrides, profile coherence, fork-offset bounds; the
+  real instance files load and check.
 - `mirror-ethereum` — BAL flattening (post-states, last-change-wins), the
   KZG sidecar path (build → validate → corrupt → reject; the proof repair is
   correct, so "invalid KZG proof" from a source means the source's data is
