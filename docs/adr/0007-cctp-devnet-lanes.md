@@ -45,6 +45,11 @@ Devnet reality then bites where the real lane never sees it:
   `CCTPHookWrapper.relay` (Circle's Apache-2.0 sample, bytecode embedded with
   its provenance hash), which mints and then calls the hook — non-atomic by
   design: a failed hook cannot lose the mint.
+- **The relayer runs `auto` or `manual`.** `relayer = "manual"` keeps the tick
+  to the gas alerts and the rewind check; `POST /control/relay {nonce?}` (the
+  one shared relayer instance) is then the only driver — the deterministic way
+  to test expiry and reattestation windows. `auto` (the default) relays every
+  signed record once per tick.
 
 ## Consequences
 
@@ -60,3 +65,10 @@ Devnet reality then bites where the real lane never sees it:
 - Wrapper deployment is a boot step (owner = the relay key, transmitter read
   back); a failed deployment is a warning, and hook transfers refuse by name
   until a later boot lands it.
+- The vanished-burn guard (the reattest rule above) reads
+  `eth_getTransactionByHash` on the source, so it needs the source to *retain*
+  tx lookups: measured on anvil 1.8.6, `--transaction-block-keeper 2` prunes tx
+  bodies, receipts and logs beyond 2 blocks — every burn older than that
+  false-parks. The parity flags set keeper 1000000 on both chains (plan
+  §17.6), which holds for any realistic test window; a false park is safe
+  (never minted) and the transfer is simply re-run.

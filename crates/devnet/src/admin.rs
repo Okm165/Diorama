@@ -86,7 +86,10 @@ impl AdminSurface<'_> {
             self.scanned_upto.store(head, Ordering::Relaxed);
             return Ok(());
         }
-        crate::scan::scan_range(self.target, self.shadow, self.scanned_upto, from, head).await
+        let walked =
+            crate::scan::scan_range(self.target, self.shadow, self.scanned_upto, from, head).await?;
+        self.metrics.add(&self.metrics.shadow_scanned_blocks, walked);
+        Ok(())
     }
 
     /// `POST /admin/epoch` — re-pin the devnet chain to its fork source's

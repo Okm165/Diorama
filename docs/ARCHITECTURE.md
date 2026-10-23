@@ -751,9 +751,11 @@ the base truth lives in the registry) lands with the venue's journaling slice.
 verb — `make engine-symmetry` is the fitness function): `/admin/time` is the
 ethereum's (V's clock is native anvil; a route nobody re-aligns would be a
 no-op), the `/admin/feed*` routes belong to the L1 feed bridge (the venue's
-counterpart is the simulator's control plane), and `/status` reports each
+counterpart is the simulator's control plane), `/status` reports each
 engine's own facts around the shared fields (`cursor`, `halted`,
-`shadowed*`).
+`shadowed*`), and block production differs by chain nature: T's applier mines
+one block per applied parent block, V's driver mines a non-empty pool
+(`venue_mined_blocks_total`).
 
 | Metric | Meaning |
 |---|---|
@@ -761,6 +763,7 @@ engine's own facts around the shared fields (`cursor`, `halted`,
 | `venue_fork_pin` / `venue_pin_age_blocks` | V's fork base / blocks since the first scanned block in this epoch |
 | `venue_epochs_total` | times V was found re-forked under the driver (the epoch rule ran) |
 | `venue_restore_writes_total` | writes re-applied by same-pin restores |
+| `venue_scanned_blocks_total` / `venue_mined_blocks_total` | V blocks the shadow scan walked / V blocks the engine mined (the pool was non-empty — the engine is V's block producer, the counterpart of T's applier) |
 | `venue_probe_ok_total` / `venue_probe_failures_total` / `venue_probe_skipped_total` / `venue_probe_last_failed` | the at-pin probes (skipped = a devnet-owned target, or a pin the source cannot serve) |
 
 **Profile-coherent config.** The instance file is the deployment's single home

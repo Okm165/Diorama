@@ -383,8 +383,9 @@ async fn align_context_and_mine(ctx: &Ctx, block: &Block) -> Result<()> {
 /// blocks included).
 async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
     let now = ctx.anvil_t.block_number().await?;
-    mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, from, now)
+    let walked = mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, from, now)
         .await?;
+    ctx.metrics.add(&ctx.metrics.shadow_scanned_blocks, walked);
     Ok(())
 }
 

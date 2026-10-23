@@ -35,6 +35,9 @@ pub struct Metrics {
     pub bal_filtered_out: AtomicU64,
     pub bal_skipped_shadowed: AtomicU64,
     pub shadowed_slots: AtomicU64,
+    /// T blocks the shadow scan walked (empty blocks cost one header read; no
+    /// traces). The scan-cost reading: it grows ~1 per harness-mined block.
+    pub shadow_scanned_blocks: AtomicU64,
     pub last_replay_ms: AtomicU64,
     pub last_apply_ms: AtomicU64,
     pub pin_age_blocks: AtomicU64,
@@ -116,6 +119,7 @@ impl Metrics {
         gauge(&mut out, "mirror_frozen", "1 while the replay loop is frozen on divergence", self.frozen.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_halted", "1 while both loops are halted", self.halted.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_shadowed_slots", "storage slots shadowed by the devnet", self.shadowed_slots.load(Ordering::Relaxed));
+        counter(&mut out, "mirror_shadow_scanned_blocks_total", "T blocks the shadow scan walked (empty blocks cost one header read, no traces)", self.shadow_scanned_blocks.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_last_replay_seconds", "duration of the last block replay", self.last_replay_ms.load(Ordering::Relaxed) / 1000);
         gauge(&mut out, "mirror_last_apply_seconds", "duration of the last block diff application", self.last_apply_ms.load(Ordering::Relaxed) / 1000);
         counter(&mut out, "mirror_blocks_replayed_total", "blocks replayed into M", self.blocks_replayed.load(Ordering::Relaxed));

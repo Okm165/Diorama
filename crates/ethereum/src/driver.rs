@@ -548,11 +548,11 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
             ctx.shadow_scanned_upto.store(t_head, Ordering::Relaxed);
             continue;
         }
-        if let Err(e) =
-            mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, last, t_head)
-                .await
+        match mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, last, t_head)
+            .await
         {
-            tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block");
+            Ok(walked) => ctx.metrics.add(&ctx.metrics.shadow_scanned_blocks, walked),
+            Err(e) => tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block"),
         }
         // A save fault is logged, not swallowed: the marks are in memory and
         // the next pass retries the write (bounded: one warn per poll).

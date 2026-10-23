@@ -26,8 +26,8 @@ pub use instance::{
 };
 pub use sections::{
     BlobsSection, CctpSection, EngineAnvil, EngineReth, EngineSection, FeedBridgeSection,
-    FeedSection, HttpSection, JournalSection, LoopsSection, OnDivergence, Probe, Services,
-    SimSection, SourceSyncSection, VenueSection, VerifierSection,
+    FeedSection, HttpSection, JournalSection, LoopsSection, OnDivergence, Probe, RelayerMode,
+    Services, SimSection, SourceSyncSection, VenueSection, VerifierSection,
 };
 
 use std::path::Path;
@@ -327,6 +327,42 @@ port = 8080
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
         assert_eq!(engine(&inst).blobs.beacon_urls.len(), 2);
+    }
+
+    #[test]
+    fn cctp_relayer_mode_defaults_to_auto_and_the_instance_can_drive_it_manually() {
+        let src = minimal_venue_instance().replace(
+            "[services.venue.http]",
+            r#"[services.cctp]
+state_dir = "/state/cctp"
+t_url = "http://t:8545"
+v_url = "http://v:8545"
+relay_key = "0x11"
+attester_seed = "seed"
+
+[services.cctp.iris]
+port = 8095
+
+[services.cctp.control]
+port = 8096
+
+[services.venue.http]"#,
+        );
+        let (inst, _) = load_str(&src, &wiring()).unwrap();
+        let cctp = inst.services.cctp.as_ref().expect("[services.cctp]");
+        assert_eq!(cctp.relayer, RelayerMode::Auto, "defaults.toml drives the mode");
+        assert_eq!(cctp.poll_interval_ms, 1000, "shared defaults merge in");
+
+        let src = src.replace(
+            "attester_seed = \"seed\"",
+            "attester_seed = \"seed\"\nrelayer = \"manual\"",
+        );
+        let (inst, _) = load_str(&src, &wiring()).unwrap();
+        assert_eq!(
+            inst.services.cctp.as_ref().unwrap().relayer,
+            RelayerMode::Manual,
+            "the instance can drive relays by hand"
+        );
     }
 
     #[test]

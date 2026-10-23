@@ -147,7 +147,7 @@ test-engine: ## Run workspace unit tests on the host (cargo)
 config-check: ## Validate the selected instance's config through the layered loader
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check $(INSTANCE_FILE)
 
-fitness: lint design-assertions closure-matrix no-orphans ## Run every structural fitness function (plan §11.3)
+fitness: lint design-assertions closure-matrix no-orphans docs-metrics ## Run every structural fitness function (plan §11.3)
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
@@ -160,6 +160,9 @@ closure-matrix: ## Every internal dependency edge is declared (plan §11.3)
 
 no-orphans: ## No utils/common/helpers crate or module (Lesson 101)
 	./scripts/no-orphans.sh
+
+docs-metrics: ## docs<->metrics: every metric the docs name exists in the code
+	./scripts/docs-metrics.sh
 
 ##@ Ops
 

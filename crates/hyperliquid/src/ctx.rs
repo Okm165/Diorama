@@ -40,6 +40,10 @@ pub struct VenueMetrics {
     /// empty blocks are skipped cheaply — this counter makes the cost visible,
     /// plan §17.4).
     pub scanned_blocks_total: AtomicU64,
+    /// V blocks the engine mined because the pool was non-empty: the engine is
+    /// V's block producer (T's is the applier), so the bridge's boot txs and
+    /// relay mints land without a harness mine.
+    pub mined_blocks_total: AtomicU64,
     pub probe_ok: AtomicU64,
     pub probe_failed: AtomicU64,
     pub probe_skipped: AtomicU64,
@@ -71,6 +75,7 @@ impl VenueMetrics {
         c(&mut out, "venue_epochs_total", "times V was found re-forked under the driver (epoch rule ran)", self.epochs_total.load(Ordering::Relaxed));
         c(&mut out, "venue_restore_writes_total", "writes re-applied by same-pin restores", self.restore_writes_total.load(Ordering::Relaxed));
         c(&mut out, "venue_scanned_blocks_total", "V blocks the shadow scan walked", self.scanned_blocks_total.load(Ordering::Relaxed));
+        c(&mut out, "venue_mined_blocks_total", "V blocks the engine mined (the pool was non-empty; the engine is V's block producer)", self.mined_blocks_total.load(Ordering::Relaxed));
         c(&mut out, "venue_probe_ok_total", "at-pin probes matching the fork source", self.probe_ok.load(Ordering::Relaxed));
         c(&mut out, "venue_probe_failures_total", "at-pin probes diverging from the fork source (devnet-owned skipped)", self.probe_failed.load(Ordering::Relaxed));
         c(&mut out, "venue_probe_skipped_total", "probes skipped because their target is devnet-owned", self.probe_skipped.load(Ordering::Relaxed));

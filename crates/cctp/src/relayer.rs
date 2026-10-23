@@ -26,6 +26,7 @@ use crate::transfer::{
 };
 use alloy_primitives::{B256, U256};
 use alloy_rpc_types_eth::TransactionReceipt;
+use mirror_config::RelayerMode;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +41,10 @@ pub struct Relayer {
     pub store: Arc<Store>,
     pub sender: Arc<TxSender>,
     pub metrics: Arc<CctpMetrics>,
+    /// `Auto`: the tick relays every SIGNED record. `Manual`: only
+    /// [`Relayer::relay_now`] (the control trigger) relays — expiry and
+    /// reattestation tests then decide the exact block a message lands.
+    pub mode: RelayerMode,
     /// Gas-alert thresholds (daloc's defaults, wei).
     pub balance_low: U256,
     pub balance_critical: U256,
@@ -57,7 +62,7 @@ pub struct Relayer {
 impl Relayer {
     /// The steady loop: one pass per interval; per-message failures are logged
     /// and counted, never fatal.
-    pub async fn run(self, poll: Duration) {
+    pub async fn run(self: Arc<Self>, poll: Duration) {
         let mut ticker = tokio::time::interval(poll);
         loop {
             ticker.tick().await;
@@ -67,8 +72,9 @@ impl Relayer {
         }
     }
 
-    /// One pass: gas alerts, destination-rewind reconciliation, then every
-    /// SIGNED record once.
+    /// One pass: gas alerts, destination-rewind reconciliation, then (in
+    /// `auto` mode) every SIGNED record once. Manual mode keeps the alerts and
+    /// the rewind check — both only *park*, never relay.
     pub async fn tick(&self) -> Result<usize> {
         if let Err(e) = self.gas_alerts().await {
             tracing::warn!(error = %e, "cctp gas alert read failed");
@@ -76,11 +82,21 @@ impl Relayer {
         if let Err(e) = self.reconcile_rewinds().await {
             tracing::warn!(error = %e, "cctp destination rewind check failed");
         }
+        if self.mode == RelayerMode::Manual {
+            return Ok(0);
+        }
+        self.relay_now(None).await
+    }
+
+    /// Relay the SIGNED records now: one by `nonce`, every one when `None`
+    /// (the auto tick and the manual trigger share this path). Returns the
+    /// number confirmed in this pass.
+    pub async fn relay_now(&self, nonce: Option<B256>) -> Result<usize> {
         let signed = self.store.with(|state| {
             Ok(state
                 .messages
                 .iter()
-                .filter(|m| m.state == RelayState::Signed)
+                .filter(|m| m.state == RelayState::Signed && nonce.is_none_or(|n| m.nonce == n))
                 .cloned()
                 .collect::<Vec<_>>())
         })?;

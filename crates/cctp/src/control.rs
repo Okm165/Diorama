@@ -11,6 +11,7 @@
 use crate::chains::{by_domain, Chain, FINALITY_THRESHOLD_FINALIZED, TOKEN_MESSENGER_V2};
 use crate::error::{Error, Result};
 use crate::metrics::{render_counts, CctpMetrics};
+use crate::relayer::Relayer;
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{
     deposit_for_burn_calldata, deposit_for_burn_with_hook_calldata, wait_for_receipt, FeeSurface,
@@ -33,6 +34,9 @@ pub struct ControlState {
     pub chains: Vec<Chain>,
     pub sender: Arc<TxSender>,
     pub metrics: Arc<CctpMetrics>,
+    /// The one relayer: the manual trigger drives it, the auto tick shares it
+    /// (one dedup truth — the destination's nonce table).
+    pub relayer: Arc<Relayer>,
     /// The boot-probed min-fee surface per source domain (§15.2: absent on
     /// Ethereum, `0` on HyperEVM).
     pub min_fees: BTreeMap<u32, Option<U256>>,
@@ -46,6 +50,7 @@ pub fn router(state: Arc<ControlState>) -> Router {
         .route("/metrics", get(metrics))
         .route("/control/state", get(state_listing))
         .route("/control/transfer", post(transfer))
+        .route("/control/relay", post(relay))
         .with_state(state)
 }
 
@@ -156,6 +161,49 @@ pub async fn state_listing(State(state): State<Arc<ControlState>>) -> Result<Jso
         .store
         .with(|s| Ok(s.messages.iter().map(MessageSummary::of).collect::<Vec<_>>()))?;
     Ok(Json(StateResponse { messages }))
+}
+
+// ---- relay ----------------------------------------------------------------
+
+/// `POST /control/relay`: relay now — one SIGNED message by nonce, or every
+/// SIGNED message. Manual mode's only driver (§15.4); in auto mode a nudge
+/// that skips the poll interval.
+#[derive(Debug, Deserialize)]
+pub struct RelayRequest {
+    /// Absent = every SIGNED message.
+    #[serde(default)]
+    pub nonce: Option<B256>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RelayResponse {
+    /// Messages confirmed by this pass (`receiveMessage` mined, or the nonce
+    /// already consumed on-chain).
+    pub confirmed: usize,
+}
+
+pub async fn relay(
+    State(state): State<Arc<ControlState>>,
+    Json(request): Json<RelayRequest>,
+) -> Result<Json<RelayResponse>> {
+    if let Some(nonce) = request.nonce {
+        let record = state
+            .store
+            .with(|s| Ok(s.messages.iter().find(|m| m.nonce == nonce).cloned()))?
+            .ok_or_else(|| Error::BadRequest {
+                reason: format!("no watched message with nonce {nonce}"),
+            })?;
+        if record.state != RelayState::Signed {
+            return Err(Error::BadRequest {
+                reason: format!(
+                    "message {nonce} is {:?}; only SIGNED messages relay (reattest an expired one first)",
+                    record.state
+                ),
+            });
+        }
+    }
+    let confirmed = state.relayer.relay_now(request.nonce).await?;
+    Ok(Json(RelayResponse { confirmed }))
 }
 
 // ---- transfer --------------------------------------------------------------

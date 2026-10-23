@@ -287,6 +287,13 @@ curl -s -X POST localhost:8091/control/deal \
   is the alarm.
 - `/status.fork_pin` and `epoch_pin` are both set once boot's reconcile ran; a
   deal marks the slot it writes, so `shadowed_slots` grows with it.
+- **The engine is V's block producer**: the driver mines a non-empty pool once
+  per pass (`venue_mined_blocks_total`). T's producer is the applier (one block
+  per applied parent block), but V has no parent stream — without the mine the
+  bridge's boot txs sit in the pool forever (measured: the attester install
+  failed `… was not mined within 120s` on a chain nobody mined). An idle chain
+  stays static; the harness's own `anvil_mine` calls are just extra (empty)
+  blocks.
 - The epoch drill: `curl -s -X POST localhost:8091/control/epoch_new`, then
   watch `fork_pin` advance and `venue_epochs_total` increment.
 - In-cluster: `kubectl apply -k k8s/overlays/venue-mirror` (namespace
@@ -375,6 +382,20 @@ Iris. Proven live on scratch forks:
   by the relayer ("the mint is no longer on-chain"); reattest re-arms it and
   the mint lands again — but a reattest of a *vanished* burn is re-parked by
   the relayer ("the source burn no longer exists"), never minted;
+- the manual relay mode (`relayer = "manual"` in `[services.cctp]`): a burn
+  reaches `signed` and stays there (the tick keeps only the gas alerts and the
+  rewind check); `POST /control/relay {nonce}` relays it on demand —
+  `{"confirmed":1}`, minted — the deterministic way to test expiry/reattest
+  windows. In `auto` (the default) the same burn relays within one tick of
+  signing. Refusals are 400s naming the state (`no watched message with nonce
+  …`, `… is Relayed; only SIGNED messages relay`); `{}` relays every signed
+  record (a nudge that skips the poll interval in auto mode);
+- the vanished-burn guard reads `eth_getTransactionByHash` on the source and
+  is **keeper-sensitive**: with `--transaction-block-keeper 2` anvil prunes tx
+  bodies, receipts *and* logs beyond 2 blocks (measured), so any burn older
+  than 2 blocks false-parks ("the source burn no longer exists"); the parity
+  flags set keeper 1000000 on both chains (plan §17.6) and the lookup survives
+  (re-verified live: a burn 10 blocks old relayed);
 - the hook lane: `depositForBurnWithHook` + `destinationCaller = wrapper` →
   `wrapper.relay` mints **and** runs the encoded call in one tx (a USDC
   transfer hook moved the mint through the wrapper to the recipient); a
@@ -390,7 +411,8 @@ Iris. Proven live on scratch forks:
   relayer pre-parks such records instead of paying for the revert).
 
 Operator surface: `GET /health` (parked counts), `GET /control/state`,
-`POST /control/transfer` (`hook: {target, calldata}` for the credit lane).
+`POST /control/transfer` (`hook: {target, calldata}` for the credit lane),
+`POST /control/relay` (`{nonce?}` — relay now).
 
 ## Plan axioms → how they are covered
 

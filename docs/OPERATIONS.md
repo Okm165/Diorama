@@ -90,6 +90,7 @@ covers the ones that page someone; these are the rest.
 | `mirror_bal_filtered_out_last_block` | BAL entries for accounts outside the watchlist in the last block (skipped by design) |
 | `mirror_bal_skipped_shadowed_last_block` | BAL entries skipped in the last block because the devnet owns the key (copy-on-write) |
 | `mirror_shadowed_slots` | devnet-owned storage keys (see `/status.shadowed` for the accounts) |
+| `mirror_shadow_scanned_blocks_total` | T blocks the shadow scan walked (empty blocks cost one header read, no traces — the harness mines one block per poll, so this is the scan-cost reading) |
 | `mirror_m_repair_writes_total` | parent-BAL writes applied to M by the convergence repair (gated on the previous block's verification) |
 | `mirror_m_rebase_skipped_blocks_total` | parent blocks an M re-base skipped. Their state is exact (the fresh fork's base *is* mainnet's state), but the engine did not re-execute them, so their tx-level verification is skipped. Bounded by `fork_offset` per re-base; a rise simply means M re-based (OOM recovery, reorg) |
 | `mirror_m_convergence_ok_total` / `mirror_m_convergence_failures_total` | the 12 state probes against reth at n-1, run every block |
@@ -442,6 +443,14 @@ so both mirrors fit on one node. There is no `reth`/`lighthouse`/`anvil-m` here
 and no M/T split: V is a single fork-mode chain, and the engine's job is the
 fork lifecycle plus the devnet's own blocks.
 
+**V's block production is the engine's** — the counterpart of T's applier
+(one block per applied parent block): the driver mines a non-empty pool once
+per pass (`venue_mined_blocks_total`). The bridge's boot txs and relay mints
+land without waiting for a harness mine (measured: without it the attester
+install failed `… was not mined within 120s` on a chain nobody mined); an idle
+chain stays static, and the harness's own `anvil_mine` calls are just extra
+(empty) blocks.
+
 ### The venue engine's `/status`
 
 | Field | Meaning |
@@ -467,6 +476,7 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_fork_pin` / `venue_pin_age_blocks` | V's fork base / blocks since this epoch's first scanned block |
 | `venue_epochs_total` | times V was found re-forked under the driver (the epoch rule ran) |
 | `venue_restore_writes_total` | writes re-applied by same-pin restores |
+| `venue_scanned_blocks_total` / `venue_mined_blocks_total` | V blocks the shadow scan walked / V blocks the engine mined (the pool was non-empty — the engine is V's block producer; T's is the applier) |
 | `venue_probe_ok_total` / `venue_probe_failures_total` | at-pin probes matching / diverging from the fork source |
 | `venue_probe_skipped_total` / `venue_probe_last_failed` | probes skipped (devnet-owned target, or a pin the source cannot serve) / diverged in the last run |
 | `mirror_shadowed_slots` / `mirror_halted` / `mirror_frozen` | the shared admin gauges, rendered beside the venue's own |

@@ -104,8 +104,8 @@ async fn run() -> mirror_cctp::Result<()> {
     };
 
     bridge.spawn_watchers();
-    bridge.spawn_relayer();
-    let (iris, control) = bridge.spawn_apis(min_fees);
+    let relayer = bridge.spawn_relayer();
+    let (iris, control) = bridge.spawn_apis(min_fees, relayer);
 
     tokio::signal::ctrl_c().await.map_err(|source| {
         mirror_cctp::Error::Io {
@@ -153,12 +153,15 @@ impl Bridge {
         }
     }
 
-    fn spawn_relayer(&self) {
-        let relayer = mirror_cctp::relayer::Relayer {
+    /// The one relayer, shared with the control API: manual mode's trigger
+    /// and the auto tick drive the same instance.
+    fn spawn_relayer(&self) -> Arc<mirror_cctp::relayer::Relayer> {
+        let relayer = Arc::new(mirror_cctp::relayer::Relayer {
             chains: self.chains.clone(),
             store: self.store.clone(),
             sender: self.sender.clone(),
             metrics: self.metrics.clone(),
+            mode: self.section.relayer,
             balance_low: self.section.balance_low_wei,
             balance_critical: self.section.balance_critical_wei,
             receipt_timeout: self.receipt_timeout,
@@ -167,8 +170,9 @@ impl Bridge {
                 .iter()
                 .map(|_| std::sync::atomic::AtomicU64::new(0))
                 .collect(),
-        };
-        tokio::spawn(relayer.run(self.poll));
+        });
+        tokio::spawn(relayer.clone().run(self.poll));
+        relayer
     }
 
     /// Two listeners: the Iris API daloc's relay reads (8095), the control
@@ -176,6 +180,7 @@ impl Bridge {
     fn spawn_apis(
         &self,
         min_fees: BTreeMap<u32, Option<U256>>,
+        relayer: Arc<mirror_cctp::relayer::Relayer>,
     ) -> (
         tokio::task::JoinHandle<mirror_cctp::Result<()>>,
         tokio::task::JoinHandle<mirror_cctp::Result<()>>,
@@ -196,6 +201,7 @@ impl Bridge {
             chains: self.chains.clone(),
             sender: self.sender.clone(),
             metrics: self.metrics.clone(),
+            relayer,
             min_fees,
             receipt_timeout: self.receipt_timeout,
         });

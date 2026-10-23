@@ -126,6 +126,9 @@ expiration_blocks = 0
 scan_chunk_blocks = 2000
 # How long a submitted tx may wait for a receipt inside one tick.
 receipt_timeout_secs = 30
+# Who drives relays: `auto` (the relayer's tick) or `manual` (only
+# `POST /control/relay` — deterministic expiry/reattest tests).
+relayer = "auto"
 # Gas alerts, daloc's defaults: warn below 0.1 ETH, error below 0.01 ETH.
 balance_low_wei = "100000000000000000"
 balance_critical_wei = "10000000000000000"

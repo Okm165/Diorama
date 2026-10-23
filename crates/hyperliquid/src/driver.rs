@@ -90,6 +90,12 @@ enum Pass {
 }
 
 async fn pass(ctx: &Ctx) -> Result<Pass> {
+    // V's block production (T's is the applier's): the pool is mined once per
+    // pass, so the bridge's boot txs and relay mints land without waiting for
+    // a harness mine; an idle chain stays static.
+    if let Err(e) = mine_pending(ctx).await {
+        tracing::warn!(error = %e, "pending-tx mine failed; the next pass retries");
+    }
     let head = ctx.v.block_number().await?;
     ctx.venue_metrics.set(&ctx.venue_metrics.head, head);
 
@@ -112,8 +118,9 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
 
     // Scan the devnet's own blocks: every tx's writes become shadowed (COW).
     // The watermark starts from the persisted cursor, so blocks the devnet
-    // mined while the driver was down are scanned too (V's head only advances
-    // when someone mines explicitly - the chain runs with automine off).
+    // mined while the driver was down are scanned too (V's head advances when
+    // someone mines: this loop mines a non-empty pool, the tests mine
+    // explicitly — the chain runs with automine off).
     let mut last = ctx.shadow_scanned_upto.load(Ordering::Relaxed);
     if last == 0 {
         last = cursor.as_ref().map(|c| c.block).unwrap_or(head);
@@ -126,9 +133,9 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     last = scan_anchor(last, ctx.pin.load(Ordering::Relaxed));
     ctx.shadow_scanned_upto.store(last, Ordering::Relaxed);
     if head > last {
-        scan::scan_range(&ctx.v, &ctx.shadow, &ctx.shadow_scanned_upto, last, head).await?;
+        let walked = scan::scan_range(&ctx.v, &ctx.shadow, &ctx.shadow_scanned_upto, last, head).await?;
         ctx.venue_metrics
-            .add(&ctx.venue_metrics.scanned_blocks_total, head - last);
+            .add(&ctx.venue_metrics.scanned_blocks_total, walked);
         ctx.save_shadow()?;
         // Ring the journal like the applier does on T: the rewind window is
         // the same 1024 blocks on both mirrors (files older than head - keep
@@ -161,6 +168,24 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
 /// pin's own block is the source's state; the devnet's blocks start at pin+1).
 fn scan_anchor(watermark: u64, pin: u64) -> u64 {
     watermark.max(pin)
+}
+
+/// V's block production: T has the applier (one block per applied parent
+/// block), V has no parent stream — so the engine mines a non-empty pool,
+/// once per pass. Without it the bridge's boot txs (the attester install, the
+/// wrapper deploy) and its relay mints sit in the pool forever on a chain
+/// nobody else mines (measured: `attester installation failed: … was not
+/// mined within 120s`); with it an idle chain stays static and the harness's
+/// own explicit mines are just extra (empty) blocks.
+async fn mine_pending(ctx: &Ctx) -> Result<()> {
+    let status = ctx.v.txpool_status().await?;
+    if status.pending == 0 {
+        return Ok(());
+    }
+    ctx.v.anvil_mine(1).await?;
+    ctx.venue_metrics.inc(&ctx.venue_metrics.mined_blocks_total);
+    tracing::debug!(pending = %status.pending, "mined V's pending transactions");
+    Ok(())
 }
 
 /// The canary word: `Some(pin)` when the recorded chain instance wrote it,

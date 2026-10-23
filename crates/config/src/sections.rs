@@ -23,6 +23,15 @@ pub struct Services {
     pub cctp: Option<CctpSection>,
 }
 
+/// Who drives relays: the relayer's own tick (`auto`) or only the control
+/// trigger (`manual`) — the deterministic mode for expiry/reattest tests.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RelayerMode {
+    Auto,
+    Manual,
+}
+
 /// `[services.cctp]`: the CCTP bridge (plan §15): Iris-compatible API (8095)
 /// + control API (8096), one watcher per chain and one relayer.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -59,6 +68,10 @@ pub struct CctpSection {
     pub scan_chunk_blocks: u64,
     /// How long a submitted tx may wait for a receipt inside one tick.
     pub receipt_timeout_secs: u64,
+    /// Who drives relays: the relayer's own tick (`auto`) or only
+    /// `POST /control/relay` (`manual`) — the deterministic mode for
+    /// expiry/reattest tests (§15.4).
+    pub relayer: RelayerMode,
     /// Gas alerts (daloc's defaults: 0.1 ETH low / 0.01 ETH critical, wei).
     pub balance_low_wei: U256,
     pub balance_critical_wei: U256,

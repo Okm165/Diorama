@@ -23,18 +23,24 @@ pub fn block_txs(block: &Block) -> &[Transaction] {
 /// would lose its devnet writes silently — and the next parent diff would then
 /// overwrite the devnet's state, the exact COW failure the registry exists to
 /// prevent.
+///
+/// Returns the number of blocks walked (an empty block costs one header read,
+/// no traces — the harness mines one block per poll, so this is the scan-cost
+/// reading both profiles count).
 pub async fn scan_range(
     target: &Rpc,
     shadow: &Shared<Shadow>,
     scanned_upto: &AtomicU64,
     from: u64,
     to: u64,
-) -> Result<()> {
+) -> Result<u64> {
+    let mut walked = 0u64;
     for n in (from + 1)..=to {
         scan_block(target, shadow, n).await?;
         scanned_upto.fetch_max(n, Ordering::Relaxed);
+        walked += 1;
     }
-    Ok(())
+    Ok(walked)
 }
 
 /// Mark one block's writes devnet-owned: every sender's account fields, the
