@@ -146,6 +146,21 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     };
 
     prepend_devnet_txs(&ctx.anvil_t, n).await?;
+    // Mark the devnet's own writes *before* the parent's are filtered. The
+    // scan used to run only after `write_and_mine`, which left a hole with
+    // two shapes: a devnet tx the prepend mined in *this* pass is written
+    // before the parent's writes are applied with the *previous* pass's
+    // marks — deterministic clobbering when the parent block wrote the same
+    // key (a pool's `slot0` is written by essentially every block); and a
+    // block the harness mined out-of-band waits for the shadow loop's next
+    // tick, so a parent apply landing in that window clobbers it too. A scan
+    // fault holds the apply — writing on stale marks is exactly the clobber
+    // this prevents.
+    let watermark = ctx
+        .plane
+        .shadow_scanned_upto
+        .load(std::sync::atomic::Ordering::Relaxed);
+    scan_own_blocks(ctx, watermark).await?;
 
     let (writes, source) = fetch_diffs(&ctx.reth, n).await?;
     if ctx.anvil_t.fork_block().await? != base {

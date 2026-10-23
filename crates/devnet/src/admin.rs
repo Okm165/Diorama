@@ -126,6 +126,12 @@ impl AdminSurface<'_> {
                 reason: "`all` requires `clear` (it collects the keys to hand back)",
             });
         }
+        if req.clear && req.slots.is_empty() && !req.account_fields && !req.all {
+            return Err(Error::InvalidShadow {
+                reason: "`clear` needs keys to hand back: name `slots`, `account_fields`, \
+                         or `all` (a bare clear hands back nothing and looks like success)",
+            });
+        }
         let resynced = if req.clear {
             self.hand_back(req).await?
         } else {

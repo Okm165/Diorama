@@ -800,6 +800,40 @@ Operator surface: `GET /health` (parked counts), `GET /control/state`,
 | A19 | scoped manipulation leaves replay intact | scenario: a shadowed slot survives further parent diffs; unshadow re-syncs from reth; M's probes stay green |
 | A20 | journal round-trip is faithful | scenario: snapshot/revert + `/admin/rewind` restore T's cursor and re-apply cleanly |
 
+### The market-impact chain, measured live on T (2026-10-23)
+
+The §4.5 invariants were run end-to-end against the running stack: a real
+Uniswap V3 swap on the **watched** USDC/WETH 0.05% pool (50 WETH → 119,608
+USDC, fee 500, via the canonical SwapRouter; the actor and its WETH came from
+`/admin/deal`). Measured:
+
+- **I1 scope** — the swap's 13 keys (the pool's `slot0` / `liquidity` /
+  `feeGrowth` / `observations` / balances + the actor's) entered the registry
+  (`shadowed_slots` 15 → 28); untouched neighbours kept following mainnet.
+- **I2 persistence** — after 90 s of applied parent blocks the pool's `slot0`
+  still held the swap's value while mainnet's own had moved on (drpc
+  `16173…` vs T `16201…`); the passes that wrote those keys logged
+  `skipped_shadowed=4`.
+- **I3 oracle independence** — the Chainlink WETH/USD feed never moved across
+  the swaps (`239282207741` before and after); the pool moved, the feed did
+  not.
+- **I4 reversibility** — `POST /admin/shadow {clear, all}` re-synced 13 keys
+  (28 → 17) and restored reth's value at the cursor (`16184…` — the last
+  applied parent, not the source head, by design).
+- **I5 isolation** — every mainnet comparison above reads drpc; nothing was
+  written to it.
+
+The run forced a **fix**: the shadow scan used to run only *after* the pass's
+parent writes, so the filter saw the previous pass's marks. A devnet tx mined
+by the pass's own prepend — or out-of-band by the harness — could therefore be
+clobbered before its mark existed, and a hot key like a pool's `slot0` is
+written by essentially every parent block. The apply now scans (marking the
+devnet's blocks) **before** the parent's writes are filtered, and a scan fault
+holds the apply (writing on stale marks is the clobber). One footgun surfaced
+and closed with it: a bare `{clear: true}` with no keys silently returned
+`resynced_keys: 0` — it now refuses, naming `slots` / `account_fields` /
+`all`.
+
 ### The same axioms on the Venue Mirror (plan §12.6)
 
 The venue mirror shares the substrate axioms by **construction** (`crates/anvil` +
