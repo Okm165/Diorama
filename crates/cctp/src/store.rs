@@ -7,6 +7,7 @@
 //! `MessageSent` log, the attester transitions it PENDING → SIGNED, the
 //! relayer marks it RELAYED or PARKED. Parked records are kept, never
 //! dropped: a failed mint is a fact an operator must see (§15.4).
+use crate::chains::Domain;
 use crate::error::{Error, Result};
 use crate::transfer::Message;
 use alloy_primitives::{Address, Bytes, B256};
@@ -33,8 +34,8 @@ pub enum RelayState {
 /// One watched burn and everything the service knows about it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageRecord {
-    pub source_domain: u32,
-    pub destination_domain: u32,
+    pub source_domain: Domain,
+    pub destination_domain: Domain,
     /// The deterministic nonce: the burn transaction hash (§15.3 — the
     /// attester fills `nonce = burn-tx hash`, stable across re-attestation).
     pub nonce: B256,
@@ -101,7 +102,7 @@ pub struct CctpState {
     /// served chain, §15.4): hook-carrying messages are consumed through it.
     /// `serde(default)` keeps pre-hook state files loadable.
     #[serde(default)]
-    pub hooks: std::collections::BTreeMap<u32, Address>,
+    pub hooks: std::collections::BTreeMap<Domain, Address>,
 }
 
 /// Per-state counts (the `/health` and `/metrics` diagnostics).
@@ -247,8 +248,8 @@ mod tests {
     fn sample_record() -> MessageRecord {
         let message = sample_message();
         MessageRecord {
-            source_domain: 0,
-            destination_domain: 19,
+            source_domain: Domain(0),
+            destination_domain: Domain(19),
             nonce: B256::repeat_byte(0xab),
             burn_tx: B256::repeat_byte(0xab),
             burn_block: 7,

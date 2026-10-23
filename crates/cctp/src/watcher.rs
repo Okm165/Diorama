@@ -22,7 +22,7 @@
 //! transaction emitting **two** burns collides on the nonce: the second is
 //! refused with a warning (the devnet lanes burn once per tx).
 use crate::attester::Attester;
-use crate::chains::{Chain, FINALITY_THRESHOLD_FINALIZED, MESSAGE_TRANSMITTER_V2};
+use crate::chains::{Chain, Domain, FINALITY_THRESHOLD_FINALIZED, MESSAGE_TRANSMITTER_V2};
 use crate::error::{Error, Result};
 use crate::metrics::CctpMetrics;
 use crate::store::{MessageRecord, RelayState, Store};
@@ -39,7 +39,7 @@ pub struct Watcher {
     /// The only destination this chain's messages are served for (the peer
     /// mirror's domain): a burn to a third chain is not this bridge's to
     /// relay, and is skipped with a warning (never silently).
-    pub destination_domain: u32,
+    pub destination_domain: Domain,
     /// The peer chain — the *destination* of this watcher's messages, whose
     /// head anchors the served `expirationBlock` (the field is checked
     /// against `block.number` on the destination, §15.1).
@@ -277,8 +277,8 @@ impl Watcher {
             tracing::warn!(
                 chain = self.chain.name,
                 tx = %sent.burn_tx,
-                source = parsed.header.source_domain,
-                destination = parsed.header.destination_domain,
+                source = %parsed.header.source_domain,
+                destination = %parsed.header.destination_domain,
                 "MessageSent outside this bridge's lanes; skipped"
             );
             return Ok(None);
@@ -347,8 +347,8 @@ impl Watcher {
                     chain = self.chain.name,
                     tx = %burn_tx,
                     block = burn_block,
-                    source = source_domain,
-                    destination = destination_domain,
+                    source = %source_domain,
+                    destination = %destination_domain,
                     "cctp burn watched"
                 );
                 Ok(1)
@@ -388,7 +388,7 @@ impl Watcher {
                 signed += 1;
                 tracing::info!(
                     nonce = %record.nonce,
-                    destination = record.destination_domain,
+                    destination = %record.destination_domain,
                     "cctp message attested (PENDING -> SIGNED)"
                 );
             }
@@ -466,7 +466,7 @@ mod tests {
         assert!(cursor_off_base(150, 100, None), "a rewind on a real chain still parks");
     }
 
-    fn watcher(dir: &std::path::Path, destination_domain: u32, finality_delay: Duration) -> Watcher {
+    fn watcher(dir: &std::path::Path, destination_domain: Domain, finality_delay: Duration) -> Watcher {
         Watcher {
             chain: Chain::ethereum("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
             destination_domain,
@@ -489,8 +489,8 @@ mod tests {
     /// given lane.
     fn log(tx: B256, source: u32, destination: u32) -> Log {
         let mut message = Message::decode(&sample_raw_message()).unwrap();
-        message.header.source_domain = source;
-        message.header.destination_domain = destination;
+        message.header.source_domain = Domain(source);
+        message.header.destination_domain = Domain(destination);
         let event = IMessageTransmitterV2::MessageSent {
             message: message.encode(),
         };
@@ -517,7 +517,7 @@ mod tests {
     fn absorb_patches_dedupes_and_signs() {
         let dir = crate::test_dir("watcher");
         let _ = std::fs::remove_dir_all(&dir);
-        let watcher = watcher(&dir, 19, Duration::ZERO);
+        let watcher = watcher(&dir, Domain(19), Duration::ZERO);
         let tx = B256::repeat_byte(0xab);
 
         assert_eq!(
@@ -564,7 +564,7 @@ mod tests {
     fn absorb_skips_foreign_lanes() {
         let dir = crate::test_dir("lanes");
         let _ = std::fs::remove_dir_all(&dir);
-        let watcher = watcher(&dir, 19, Duration::ZERO);
+        let watcher = watcher(&dir, Domain(19), Duration::ZERO);
         assert_eq!(watcher.absorb(&log(B256::repeat_byte(1), 0, 3), U256::ZERO).unwrap(), 0);
         assert_eq!(watcher.absorb(&log(B256::repeat_byte(2), 7, 19), U256::ZERO).unwrap(), 0);
         assert_eq!(watcher.store.counts().unwrap().pending, 0);
@@ -576,7 +576,7 @@ mod tests {
     fn sign_due_respects_the_pending_window() {
         let dir = crate::test_dir("pending");
         let _ = std::fs::remove_dir_all(&dir);
-        let watcher = watcher(&dir, 19, Duration::from_secs(3600));
+        let watcher = watcher(&dir, Domain(19), Duration::from_secs(3600));
         watcher.absorb(&log(B256::repeat_byte(3), 0, 19), U256::ZERO).unwrap();
         assert_eq!(watcher.sign_due().unwrap(), 0, "window still open");
         assert_eq!(

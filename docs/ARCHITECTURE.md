@@ -943,6 +943,17 @@ silent mismatch. What stays ours is what no crate defines: the HL info/WS
 shapes (complete, unused fields included, each pinned by a test that parses a
 trimmed **live sample**), the sim's mechanics, the admin/control HTTP bodies,
 the config sections, and the CCTP message codec (a packed custom format).
+Newtypes mark the namespaces the compiler can police: `mirror_cctp::chains::Domain`
+is ours (Circle publishes no Rust crate) because the message header carries the
+source and destination domains *side by side* — a swap is now a type error, and
+the raw `u32` survives only at the ABI boundary (`.0` in the `sol!` call) and in
+test fixtures that speak wire bytes. Chain ids use alloy's official type
+(`alloy_chains::Chain`, aliased `ChainId` because cctp already has a `Chain`);
+the measured numeric pins stay `u64` consts and are wrapped at the struct
+boundary. Both changes made the compiler walk every site: the control API's
+request fields and min-fee map, the persisted record, the watcher's lane check,
+and the two `depositForBurn` builders — the silent-mixing class, enumerated.
+
 The measured lesson behind the shape tests: `PerpDex` had never parsed the
 live `perpDexs` (the sim serves `[null]`), so a missing camelCase rename sat
 undetected - a wire type that only ever *serializes* is unverified until a

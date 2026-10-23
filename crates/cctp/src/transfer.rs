@@ -20,7 +20,7 @@
 //! The attester fills all four fields on the *served* message (§15.1/§15.3);
 //! [`Message::with_attester_fields`] is that substitution, and the signature
 //! covers the served bytes.
-use crate::chains::MIN_FEE_MULTIPLIER;
+use crate::chains::{Domain, MIN_FEE_MULTIPLIER};
 use crate::error::{Error, Result};
 use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::eip2718::Encodable2718;
@@ -132,8 +132,8 @@ pub const BODY_HOOK_DATA_AT: usize = 228;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageHeader {
     pub version: u32,
-    pub source_domain: u32,
-    pub destination_domain: u32,
+    pub source_domain: Domain,
+    pub destination_domain: Domain,
     pub nonce: B256,
     pub sender: B256,
     pub recipient: B256,
@@ -178,8 +178,8 @@ impl Message {
         Ok(Self {
             header: MessageHeader {
                 version: u32_at(raw, HEADER_VERSION_AT),
-                source_domain: u32_at(raw, HEADER_SOURCE_DOMAIN_AT),
-                destination_domain: u32_at(raw, HEADER_DESTINATION_DOMAIN_AT),
+                source_domain: Domain(u32_at(raw, HEADER_SOURCE_DOMAIN_AT)),
+                destination_domain: Domain(u32_at(raw, HEADER_DESTINATION_DOMAIN_AT)),
                 nonce: word_at(raw, HEADER_NONCE_AT),
                 sender: word_at(raw, HEADER_SENDER_AT),
                 recipient: word_at(raw, HEADER_RECIPIENT_AT),
@@ -206,8 +206,8 @@ impl Message {
         let mut out = Vec::with_capacity(HEADER_LEN + BURN_BODY_LEN + self.body.hook_data.len());
         let h = &self.header;
         out.extend_from_slice(&h.version.to_be_bytes());
-        out.extend_from_slice(&h.source_domain.to_be_bytes());
-        out.extend_from_slice(&h.destination_domain.to_be_bytes());
+        out.extend_from_slice(&h.source_domain.0.to_be_bytes());
+        out.extend_from_slice(&h.destination_domain.0.to_be_bytes());
         out.extend_from_slice(h.nonce.as_slice());
         out.extend_from_slice(h.sender.as_slice());
         out.extend_from_slice(h.recipient.as_slice());
@@ -560,8 +560,8 @@ pub(crate) mod tests_support {
         let message = Message {
             header: MessageHeader {
                 version: 1,
-                source_domain: 0,
-                destination_domain: 19,
+                source_domain: Domain(0),
+                destination_domain: Domain(19),
                 nonce: B256::ZERO,
                 sender: Address::repeat_byte(0x11).into_word(),
                 recipient: crate::chains::TOKEN_MESSENGER_V2.into_word(),
@@ -587,8 +587,8 @@ pub(crate) mod tests_support {
     /// A 19 → 0 message (the reverse direction, §15.3).
     pub fn sample_reverse_message() -> Bytes {
         let mut message = Message::decode(&sample_raw_message()).unwrap();
-        message.header.source_domain = 19;
-        message.header.destination_domain = 0;
+        message.header.source_domain = Domain(19);
+        message.header.destination_domain = Domain(0);
         message.body.burn_token = USDC_HYPER_EVM.into_word();
         message.encode()
     }
@@ -661,8 +661,8 @@ mod tests {
         let message = Message::decode(&raw).expect("sample decodes");
         assert_eq!(message.encode(), raw, "encode ∘ decode = identity");
         assert_eq!(message.header.version, 1);
-        assert_eq!(message.header.source_domain, 0);
-        assert_eq!(message.header.destination_domain, 19);
+        assert_eq!(message.header.source_domain, Domain(0));
+        assert_eq!(message.header.destination_domain, Domain(19));
         assert_eq!(message.header.min_finality_threshold, 2000);
         assert_eq!(message.header.finality_threshold_executed, 0);
         assert_eq!(message.body.burn_token, USDC_ETHEREUM.into_word());
@@ -688,8 +688,8 @@ mod tests {
     fn reverse_message_carries_the_hyperevm_token() {
         let raw = sample_reverse_message();
         let message = Message::decode(&raw).unwrap();
-        assert_eq!(message.header.source_domain, 19);
-        assert_eq!(message.header.destination_domain, 0);
+        assert_eq!(message.header.source_domain, Domain(19));
+        assert_eq!(message.header.destination_domain, Domain(0));
         assert_eq!(message.body.burn_token, USDC_HYPER_EVM.into_word());
     }
 

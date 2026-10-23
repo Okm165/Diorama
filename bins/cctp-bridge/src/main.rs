@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mirror_cctp::chains::{Chain, DOMAIN_ETHEREUM, DOMAIN_HYPER_EVM};
+use mirror_cctp::chains::{Chain, Domain, DOMAIN_ETHEREUM, DOMAIN_HYPER_EVM};
 use mirror_cctp::Address;
 use mirror_cctp::transfer::{TxSender, Wallet};
 use mirror_cctp::U256;
@@ -86,7 +86,7 @@ fn load_wiring(config: &str) -> mirror_cctp::Result<CctpSection> {
 /// Returns the bridge and the measured per-domain minimum fees the APIs serve.
 async fn boot_bridge(
     section: CctpSection,
-) -> mirror_cctp::Result<(Bridge, BTreeMap<u32, Option<U256>>)> {
+) -> mirror_cctp::Result<(Bridge, BTreeMap<Domain, Option<U256>>)> {
     let receipt_timeout = Duration::from_secs(section.receipt_timeout_secs);
     let chains = build_chains(&section, Duration::from_secs(30))?;
     for chain in &chains {
@@ -183,7 +183,7 @@ impl Bridge {
     /// API tests drive (8096).
     fn spawn_apis(
         &self,
-        min_fees: BTreeMap<u32, Option<U256>>,
+        min_fees: BTreeMap<Domain, Option<U256>>,
         relayer: Arc<mirror_cctp::relayer::Relayer>,
     ) -> (
         tokio::task::JoinHandle<mirror_cctp::Result<()>>,
@@ -237,7 +237,7 @@ fn build_chains(section: &CctpSection, timeout: Duration) -> mirror_cctp::Result
 
 /// The wiring asserts + the per-domain min-fee probe (§15.2: absent on
 /// Ethereum, `0` on HyperEVM). A mismatch is a boot refusal.
-async fn verify_wiring(chains: &[Chain]) -> mirror_cctp::Result<BTreeMap<u32, Option<U256>>> {
+async fn verify_wiring(chains: &[Chain]) -> mirror_cctp::Result<BTreeMap<Domain, Option<U256>>> {
     let mut min_fees = BTreeMap::new();
     for chain in chains {
         let peer = chains
@@ -247,9 +247,9 @@ async fn verify_wiring(chains: &[Chain]) -> mirror_cctp::Result<BTreeMap<u32, Op
         let wiring = chain.verify_wiring(peer).await?;
         tracing::info!(
             chain = chain.name,
-            domain = chain.domain,
-            chain_id = wiring.chain_id,
-            local_domain = wiring.local_domain,
+            domain = %chain.domain,
+            chain_id = %wiring.chain_id,
+            local_domain = %wiring.local_domain,
             version = wiring.version,
             body_version = wiring.body_version,
             transmitter = %wiring.local_transmitter,

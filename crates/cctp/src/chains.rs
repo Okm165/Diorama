@@ -8,16 +8,37 @@
 //! state dir) — never an address a typo could move value on.
 use crate::error::{Error, Result};
 use crate::transfer::{eth_call, FeeSurface, IMessageTransmitterV2, ITokenMessengerV2, IERC20};
+// alloy's official chain-id type: a known chain by name, or a raw EIP-155 id
+// (`Chain::from_id`). Aliased to `ChainId` because this crate already has a
+// `Chain` (the served chain) — same type, unambiguous name.
+use alloy_chains::Chain as ChainId;
 use alloy_primitives::{address, Address, B256, U256};
 use alloy_sol_types::SolCall;
 use mirror_anvil::Rpc;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// A CCTP domain id: a namespace of its own, deliberately not a chain id and
+/// deliberately not a bare `u32` — the message header carries the source and
+/// destination domains side by side, so a swap must be a type error, never a
+/// wrong-domain mint. Circle publishes no Rust crate (their SDKs are
+/// TypeScript/Python/Java), so the newtype is ours; the values are measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Domain(pub u32);
+
+impl std::fmt::Display for Domain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Ethereum's CCTP domain (`MT.localDomain()` = 0 on T, measured).
-pub const DOMAIN_ETHEREUM: u32 = 0;
+pub const DOMAIN_ETHEREUM: Domain = Domain(0);
 /// HyperEVM's CCTP domain (`MT.localDomain()` = 19 on V, measured).
-pub const DOMAIN_HYPER_EVM: u32 = 19;
-/// T forks Ethereum mainnet: chain id 1.
+pub const DOMAIN_HYPER_EVM: Domain = Domain(19);
+/// T forks Ethereum mainnet: chain id 1 (the measured numeric pin; the
+/// official `ChainId` wraps it at the struct boundary).
 pub const CHAIN_ID_ETHEREUM: u64 = 1;
 /// V forks HyperEVM: chain id 999.
 pub const CHAIN_ID_HYPER_EVM: u64 = 999;
@@ -61,8 +82,10 @@ pub const USDC_HYPER_EVM: Address = address!("b88339CB7199b77E23DB6E890353E22632
 pub struct Chain {
     /// The human name (`ethereum`, `hyper_evm`) for logs and metrics.
     pub name: &'static str,
-    pub domain: u32,
-    pub chain_id: u64,
+    /// The CCTP domain this chain serves.
+    pub domain: Domain,
+    /// The chain id the boot assert pins (alloy's official newtype).
+    pub chain_id: ChainId,
     pub rpc: Rpc,
     /// The burn/mint token on this domain.
     pub usdc: Address,
@@ -85,7 +108,7 @@ impl Chain {
         Ok(Self {
             name: "ethereum",
             domain: DOMAIN_ETHEREUM,
-            chain_id: CHAIN_ID_ETHEREUM,
+            chain_id: ChainId::from_id(CHAIN_ID_ETHEREUM),
             rpc: Rpc::new(url, timeout)?,
             usdc: USDC_ETHEREUM,
         })
@@ -96,7 +119,7 @@ impl Chain {
         Ok(Self {
             name: "hyper_evm",
             domain: DOMAIN_HYPER_EVM,
-            chain_id: CHAIN_ID_HYPER_EVM,
+            chain_id: ChainId::from_id(CHAIN_ID_HYPER_EVM),
             rpc: Rpc::new(url, timeout)?,
             usdc: USDC_HYPER_EVM,
         })
@@ -108,7 +131,7 @@ impl Chain {
     /// before the bridge will move value. The min-fee surface is probed, not
     /// assumed (it is revision-dependent, §15.2).
     pub async fn verify_wiring(&self, peer: &Chain) -> Result<Wiring> {
-        let chain_id = self.rpc.chain_id().await?;
+        let chain_id = ChainId::from_id(self.rpc.chain_id().await?);
         if chain_id != self.chain_id {
             return Err(self.wiring("chain id", chain_id, self.chain_id));
         }
@@ -129,12 +152,12 @@ impl Chain {
     /// The version assertions: the transmitter's `localDomain` and `version`,
     /// and the messenger's `messageBodyVersion` — both sides must pin the
     /// domain and the message version this bridge speaks.
-    async fn verify_versions(&self) -> Result<(u32, u32, u32)> {
+    async fn verify_versions(&self) -> Result<(Domain, u32, u32)> {
         let local_domain = self
             .assert_getter(
                 MESSAGE_TRANSMITTER_V2,
                 &IMessageTransmitterV2::localDomainCall {},
-                self.domain,
+                self.domain.0,
                 "localDomain",
             )
             .await?;
@@ -154,7 +177,7 @@ impl Chain {
                 "messageBodyVersion",
             )
             .await?;
-        Ok((local_domain, version, body_version))
+        Ok((Domain(local_domain), version, body_version))
     }
 
     /// The messenger assertions: the local transmitter must be the pinned one,
@@ -173,7 +196,7 @@ impl Chain {
             .assert_getter(
                 TOKEN_MESSENGER_V2,
                 &ITokenMessengerV2::remoteTokenMessengersCall {
-                    domain: peer.domain,
+                    domain: peer.domain.0,
                 },
                 TOKEN_MESSENGER_V2.into_word(),
                 "TM.remoteTokenMessengers(peer)",
@@ -248,8 +271,8 @@ impl Chain {
 /// What a successful [`Chain::verify_wiring`] observed (logged at boot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wiring {
-    pub chain_id: u64,
-    pub local_domain: u32,
+    pub chain_id: ChainId,
+    pub local_domain: Domain,
     pub version: u32,
     pub body_version: u32,
     pub local_transmitter: Address,
@@ -260,7 +283,7 @@ pub struct Wiring {
 }
 
 /// The chain serving `domain`, or a named refusal.
-pub fn by_domain(chains: &[Chain], domain: u32) -> Result<&Chain> {
+pub fn by_domain(chains: &[Chain], domain: Domain) -> Result<&Chain> {
     chains
         .iter()
         .find(|chain| chain.domain == domain)
@@ -273,8 +296,8 @@ mod tests {
 
     #[test]
     fn domains_and_addresses_are_the_measured_ones() {
-        assert_eq!(DOMAIN_ETHEREUM, 0);
-        assert_eq!(DOMAIN_HYPER_EVM, 19);
+        assert_eq!(DOMAIN_ETHEREUM, Domain(0));
+        assert_eq!(DOMAIN_HYPER_EVM, Domain(19));
         assert_eq!(CHAIN_ID_ETHEREUM, 1);
         assert_eq!(CHAIN_ID_HYPER_EVM, 999);
         assert_eq!(FINALITY_THRESHOLD_MIN, 500);
@@ -314,21 +337,21 @@ mod tests {
             Chain {
                 name: "ethereum",
                 domain: DOMAIN_ETHEREUM,
-                chain_id: CHAIN_ID_ETHEREUM,
+                chain_id: ChainId::from_id(CHAIN_ID_ETHEREUM),
                 rpc: Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
                 usdc: USDC_ETHEREUM,
             },
             Chain {
                 name: "hyper_evm",
                 domain: DOMAIN_HYPER_EVM,
-                chain_id: CHAIN_ID_HYPER_EVM,
+                chain_id: ChainId::from_id(CHAIN_ID_HYPER_EVM),
                 rpc: Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
                 usdc: USDC_HYPER_EVM,
             },
         ];
-        assert_eq!(by_domain(&chains, 0).unwrap().name, "ethereum");
-        assert_eq!(by_domain(&chains, 19).unwrap().name, "hyper_evm");
-        let err = by_domain(&chains, 7).unwrap_err();
-        assert!(matches!(err, Error::UnknownDomain { domain: 7 }), "{err}");
+        assert_eq!(by_domain(&chains, Domain(0)).unwrap().name, "ethereum");
+        assert_eq!(by_domain(&chains, Domain(19)).unwrap().name, "hyper_evm");
+        let err = by_domain(&chains, Domain(7)).unwrap_err();
+        assert!(matches!(err, Error::UnknownDomain { domain: Domain(7) }), "{err}");
     }
 }

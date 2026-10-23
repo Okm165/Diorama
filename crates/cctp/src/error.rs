@@ -12,6 +12,7 @@
 //!   dies at the load point, path named);
 //! - a **refusal** ([`Error::BadRequest`], [`Error::AttesterInstall`]) names
 //!   its reason and the numbers it refused.
+use crate::chains::Domain;
 use alloy_primitives::B256;
 use std::path::PathBuf;
 
@@ -75,7 +76,7 @@ pub enum Error {
     /// A domain that is not one this bridge serves (a message's destination,
     /// or a control request's source/destination).
     #[error("domain {domain} is not one this bridge serves")]
-    UnknownDomain { domain: u32 },
+    UnknownDomain { domain: Domain },
 
     /// Fewer bytes than a V2 message's fixed part: decoding further would
     /// misread fields (the contracts' own `_validateMessageFormat` guard).

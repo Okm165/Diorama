@@ -8,7 +8,7 @@
 //! self-bridge). The watcher picks the `MessageSent` event up from the chain —
 //! the control route never inserts records itself (the chain stays the source
 //! of truth).
-use crate::chains::{by_domain, Chain, FINALITY_THRESHOLD_FINALIZED, TOKEN_MESSENGER_V2};
+use crate::chains::{by_domain, Chain, Domain, FINALITY_THRESHOLD_FINALIZED, TOKEN_MESSENGER_V2};
 use crate::error::{Error, Result};
 use crate::metrics::{render_counts, CctpMetrics};
 use crate::relayer::Relayer;
@@ -38,7 +38,7 @@ pub struct ControlState {
     pub relayer: Arc<Relayer>,
     /// The boot-probed min-fee surface per source domain (§15.2: absent on
     /// Ethereum, `0` on HyperEVM).
-    pub min_fees: BTreeMap<u32, Option<U256>>,
+    pub min_fees: BTreeMap<Domain, Option<U256>>,
     pub receipt_timeout: Duration,
 }
 
@@ -91,7 +91,7 @@ pub struct HealthResponse {
 #[derive(Debug, Serialize)]
 pub struct ChainHealth {
     pub name: &'static str,
-    pub domain: u32,
+    pub domain: Domain,
 }
 
 pub async fn health(State(state): State<Arc<ControlState>>) -> Result<Json<HealthResponse>> {
@@ -124,8 +124,8 @@ pub async fn metrics(State(state): State<Arc<ControlState>>) -> Result<String> {
 
 #[derive(Debug, Serialize)]
 pub struct MessageSummary {
-    pub source_domain: u32,
-    pub destination_domain: u32,
+    pub source_domain: Domain,
+    pub destination_domain: Domain,
     pub burn_tx: B256,
     pub burn_block: u64,
     pub nonce: B256,
@@ -215,9 +215,9 @@ pub async fn relay(
 #[derive(Debug, Deserialize)]
 pub struct TransferRequest {
     /// The source CCTP domain (0 = T, 19 = V).
-    pub source: u32,
+    pub source: Domain,
     /// The destination CCTP domain (must be the other mirror).
-    pub destination: u32,
+    pub destination: Domain,
     /// Base units (100 USDC = 100_000_000).
     pub amount: U256,
     /// Defaults to the relay wallet (a self-bridge).
@@ -247,8 +247,8 @@ pub struct TransferResponse {
     /// Whether the burn was mined within the receipt window (a test may also
     /// poll the tx; the watcher absorbs it either way).
     pub mined: bool,
-    pub source_domain: u32,
-    pub destination_domain: u32,
+    pub source_domain: Domain,
+    pub destination_domain: Domain,
     pub amount: U256,
     pub mint_recipient: Address,
     /// Whether the burn carried a hook (the relay then goes through the
@@ -295,7 +295,7 @@ fn burn_calldata(
     match hook_data {
         Some(hook_data) => ITokenMessengerV2::depositForBurnWithHookCall {
             amount: request.amount,
-            destinationDomain: request.destination,
+            destinationDomain: request.destination.0,
             mintRecipient: mint_recipient.into_word(),
             burnToken: chain.usdc,
             destinationCaller: destination_caller,
@@ -307,7 +307,7 @@ fn burn_calldata(
         .into(),
         None => ITokenMessengerV2::depositForBurnCall {
             amount: request.amount,
-            destinationDomain: request.destination,
+            destinationDomain: request.destination.0,
             mintRecipient: mint_recipient.into_word(),
             burnToken: chain.usdc,
             destinationCaller: destination_caller,
@@ -438,8 +438,8 @@ mod tests {
     fn message_summary_serves_hex_and_state() {
         let message = Message::decode(&sample_raw_message()).unwrap();
         let record = MessageRecord {
-            source_domain: 0,
-            destination_domain: 19,
+            source_domain: Domain(0),
+            destination_domain: Domain(19),
             nonce: B256::repeat_byte(0xab),
             burn_tx: B256::repeat_byte(0xab),
             burn_block: 5,
@@ -478,7 +478,7 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            status(Error::UnknownDomain { domain: 5 }),
+            status(Error::UnknownDomain { domain: Domain(5) }),
             StatusCode::NOT_FOUND
         );
         assert_eq!(

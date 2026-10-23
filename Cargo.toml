@@ -29,6 +29,10 @@ alloy-rpc-types-engine = { version = "2.5", features = ["jwt", "serde"] }
 # The official JSON-RPC 2.0 wire model (request/response/error/id/batch) both
 # clients share - the envelope is a protocol, not our vocabulary.
 alloy-json-rpc = { version = "2.5" }
+# The official chain-id newtype (`alloy_chains::ChainId`): a chain id is a
+# namespace of its own, never a bare u64 and never a CCTP domain
+# (`mirror-cctp::chains::Domain`).
+alloy-chains = { version = "0.2" }
 # Quantity (0x-hex) and other wire serde helpers.
 alloy-serde = { version = "2.5" }
 # ABI encode/decode for the few plain contracts the mirror calls directly

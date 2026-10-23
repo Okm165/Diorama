@@ -21,7 +21,7 @@
 //! This module owns only the Iris vocabulary: the store's faults map to 500s
 //! here, and the exact 404 body lives in one place ([`IrisError::not_found`]).
 use crate::attester::Attester;
-use crate::chains::FINALITY_THRESHOLD_FINALIZED;
+use crate::chains::{Domain, FINALITY_THRESHOLD_FINALIZED};
 use crate::error::{Error, Result};
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::measured_fees;
@@ -217,7 +217,7 @@ async fn fees(
 #[derive(Debug, Deserialize)]
 pub struct AllowanceQuery {
     #[serde(rename = "sourceDomain")]
-    pub source_domain: Option<u32>,
+    pub source_domain: Option<Domain>,
 }
 
 async fn allowance(Query(query): Query<AllowanceQuery>) -> Result<Json<AllowanceResponse>, IrisError> {
@@ -248,7 +248,7 @@ pub struct MessageQuery {
 
 async fn messages(
     State(state): State<Arc<IrisState>>,
-    Path(source_domain): Path<u32>,
+    Path(source_domain): Path<Domain>,
     Query(query): Query<MessageQuery>,
 ) -> Result<Json<MessagesResponse>, IrisError> {
     let Some(raw_hash) = query.transaction_hash else {
@@ -424,8 +424,8 @@ mod tests {
             .unwrap()
             .with_attester_fields(B256::repeat_byte(0xab), 2000, Default::default(), Default::default());
         MessageRecord {
-            source_domain: 0,
-            destination_domain: 19,
+            source_domain: Domain(0),
+            destination_domain: Domain(19),
             nonce: B256::repeat_byte(0xab),
             burn_tx: B256::repeat_byte(0xab),
             burn_block: 1,
@@ -538,7 +538,7 @@ mod tests {
             transaction_hash: Some(tx.to_string()),
         };
 
-        let err = messages(State(state.clone()), Path(0), Query(query()))
+        let err = messages(State(state.clone()), Path(Domain(0)), Query(query()))
             .await
             .unwrap_err();
         assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
@@ -550,7 +550,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let served = messages(State(state.clone()), Path(0), Query(query()))
+        let served = messages(State(state.clone()), Path(Domain(0)), Query(query()))
             .await
             .unwrap();
         assert!(served.0.messages[0].attestation.is_none(), "pending serves null");
@@ -562,7 +562,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        let served = messages(State(state.clone()), Path(0), Query(query()))
+        let served = messages(State(state.clone()), Path(Domain(0)), Query(query()))
             .await
             .unwrap();
         assert_eq!(
@@ -570,7 +570,7 @@ mod tests {
             Some(format!("0x{}", "09".repeat(65)).as_str())
         );
 
-        let err = messages(State(state), Path(19), Query(query()))
+        let err = messages(State(state), Path(Domain(19)), Query(query()))
             .await
             .unwrap_err();
         assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);

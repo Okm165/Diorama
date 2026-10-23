@@ -63,6 +63,7 @@ mod design_assertions {
 
     #[test]
     fn public_types_are_normal() {
+        is_normal::<crate::chains::Domain>();
         is_normal::<crate::chains::Chain>();
         is_normal::<crate::chains::Wiring>();
         is_normal::<crate::transfer::MessageHeader>();
