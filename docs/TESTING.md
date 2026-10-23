@@ -418,7 +418,10 @@ Iris. Proven live on scratch forks:
 - the real reverts, string for string: source-side `Max fee must be less than
   amount`, `Mint recipient must be nonzero`, `Hook data is empty`; a message
   pinned to another `destinationCaller` → `Invalid caller for message` (the
-  relayer pre-parks such records instead of paying for the revert).
+  relayer pre-parks such records instead of paying for the revert); a message
+  for domain 19 delivered to T (the wrong destination chain) reverts
+  `Invalid destination domain` — proven with a *valid* attestation via
+  `eth_call`, so the check is the contract's own, not the signature's.
 
 Operator surface: `GET /health` (parked counts), `GET /control/state`,
 `POST /control/transfer` (`hook: {target, calldata}` for the credit lane),
@@ -474,9 +477,15 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   credit path runs over the harness's fixture mocks (which replace the canonical ERC20s), and the
   bridge only credits a `Transfer` log emitted by the token's *linked* contract.
 - **WS delivery works on both mirror chains**: subscribing `newHeads` + `logs`, two empty mines and
-  one log-emitting tx (a WETH/WHYPE `deposit()`) delivered **3 newHeads + 1 log on T and on V**
-  (the live-T silence recorded earlier did not reproduce on the copies; their scanner's
-  logs-filter + HTTP backup is unaffected either way).
+  one log-emitting tx (a WETH/WHYPE `deposit()`) delivered **3 newHeads + 1 log on T and on V**.
+  **Re-tested on the *live* T (read-only, 2026-10-23): 4 `newHeads` in 50 s** (the applier mines
+  every ~12 s) and **0 `logs`** — the earlier live-T silence was a no-mining window, not the WS,
+  and 0 logs is by design (the applied blocks carry no txs; §A18). Their scanner's logs-filter +
+  HTTP backup is unaffected either way.
+- **`eth_getLogs` ranges on T**: a 2000-block range answers locally (their chain-1 setting);
+  a range reaching below the fork pin is forwarded to reth, which refuses above its 20 000-result
+  cap with `query exceeds max results …, retry with the range …` — a wording their detector's
+  `range`+`exceed` pattern already matches.
 - **Negative equity flows end-to-end** (the master plan's venue-term requirement): seeding
   `totalRawUsd = -80000` with a long BTC position and crashing the mark served signed
   `accountValue = -2771.65…`; after the 1 Hz tick liquidated it, the bare negative balance

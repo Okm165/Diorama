@@ -266,6 +266,19 @@ impl AdminSurface<'_> {
     /// `POST /admin/rewind` — undo the last N applied parent blocks using the
     /// journal. Returns the new cursor block and the number of restored values.
     pub async fn rewind(&self, blocks: u64) -> Result<RewindOutcome> {
+        // The ring bounds the rewindable window; beyond it the older
+        // before-values are pruned, so a partial restore would be a lie. This
+        // refusal is a *static* property of the request — checked before the
+        // state reads so the same request gets the same answer on every chain
+        // (the shared surface's symmetry; measured: with the cursor check
+        // first, a chain without a cursor answered "no cursor" while its peer
+        // answered "beyond the ring").
+        if blocks > self.journal.keep() {
+            return Err(Error::RewindBeyondRing {
+                blocks,
+                keep: self.journal.keep(),
+            });
+        }
         let Some(cursor) = self.state.lock()?.data.t.clone() else {
             return Err(Error::NoCursor);
         };
@@ -273,14 +286,6 @@ impl AdminSurface<'_> {
             return Err(Error::InvalidRewind {
                 blocks,
                 cursor: cursor.block,
-            });
-        }
-        if blocks > self.journal.keep() {
-            // The ring bounds the rewindable window; beyond it the older
-            // before-values are pruned, so a partial restore would be a lie.
-            return Err(Error::RewindBeyondRing {
-                blocks,
-                keep: self.journal.keep(),
             });
         }
         let from = cursor.block - blocks + 1;

@@ -11,6 +11,8 @@
 #                        address (the counters move, the balances round-trip)
 #   E. block production - a tx left in the pool (no manual mine) is mined by
 #                        the engine on its next pass (`venue_mined_blocks_total`)
+#   F. scenario controls - the scripted book and the funding override are served
+#                        exactly, and their hand-backs restore live data
 #
 # Run from the repo root:
 #   make venue-proof                    # against the deployed venue-mirror
@@ -229,6 +231,36 @@ m1=$(eget /metrics | awk '$1 == "venue_mined_blocks_total" {print $2}')
   || bad "tx $tx stayed in the pool: no block producer"
 [ "${m1:-0}" -gt "${m0:-0}" ] 2>/dev/null && ok "venue_mined_blocks_total moved ($m0 -> $m1)" \
   || bad "venue_mined_blocks_total did not move ($m0 -> $m1)"
+
+echo "-- F. scenario controls (scripted book + funding override, and their hand-backs)"
+spost /control/set_book '{"coin":"BTC","levels":[[{"px":"100000","sz":"1.5","n":3}],[{"px":"100100","sz":"2","n":5}]]}' > /dev/null
+book=$(sipost /info '{"type":"l2Book","coin":"BTC"}')
+px=$(echo "$book" | json 'd["levels"][0][0]["px"]')
+sz=$(echo "$book" | json 'd["levels"][1][0]["sz"]')
+n=$(echo "$book" | json 'd["levels"][0][0]["n"]')
+[ "$px" = "100000" ] && [ "$sz" = "2" ] && [ "$n" = "3" ] \
+  && ok "the scripted book is served exactly (px/sz/n)" \
+  || bad "scripted book not served: px=$px sz=$sz n=$n"
+spost /control/set_book '{"coin":"BTC"}' > /dev/null
+levels=$(sipost /info '{"type":"l2Book","coin":"BTC"}' | json 'len(d["levels"][0])')
+[ "$levels" = "20" ] && ok "the hand-back restored the live depth ($levels levels/side)" \
+  || bad "live depth not restored: $levels levels"
+spost /control/set_funding '{"coin":"BTC","rate":"0.0001"}' > /dev/null
+funding=$(sipost /info '{"type":"metaAndAssetCtxs"}' | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+i=[k for k,u in enumerate(d[0]['universe']) if u['name']=='BTC'][0]
+print(d[1][i]['funding'])")
+[ "$funding" = "0.0001" ] && ok "the funding override is served ($funding)" \
+  || bad "funding override not served: $funding"
+spost /control/set_funding '{"coin":"BTC"}' > /dev/null
+live=$(sipost /info '{"type":"metaAndAssetCtxs"}' | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+i=[k for k,u in enumerate(d[0]['universe']) if u['name']=='BTC'][0]
+print(d[1][i]['funding'])")
+[ "$live" != "0.0001" ] && ok "the hand-back returned funding to live ($live)" \
+  || bad "funding still overridden: $live"
 
 echo "== venue capability proof: $pass passed, $fail failed"
 [ "$fail" = "0" ]
