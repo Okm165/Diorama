@@ -22,7 +22,7 @@ use crate::error::{Error, Result};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
 use mirror_devnet::scan;
-use mirror_devnet::state::cursor_from;
+use mirror_devnet::state::{cursor_from, ChainCursor};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,12 +108,8 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     ctx.venue_metrics.set(&ctx.venue_metrics.head, head);
 
     // Reset detection: the canary must read back the recorded pin (see
-    // CANARY_ADDRESS). Anything else — a re-pin, a same-pin restart, a wiped
-    // state — means this is no longer the chain instance the registry was
-    // built against, and the epoch rule must run.
-    let expected = ctx.plane.state.lock()?.data.epoch_pin;
-    let canary = read_canary(ctx).await?;
-    if canary != expected {
+    // CANARY_ADDRESS) — anything else runs the epoch rule.
+    if chain_instance_moved(ctx).await? {
         return Ok(Pass::Reset);
     }
 
@@ -124,42 +120,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
             .set(&ctx.venue_metrics.pin_age_blocks, head.saturating_sub(c.first_block) + 1);
     }
 
-    // Scan the devnet's own blocks: every tx's writes become shadowed (COW).
-    // The watermark starts from the persisted cursor, so blocks the devnet
-    // mined while the driver was down are scanned too (V's head advances when
-    // someone mines: this loop mines a non-empty pool, the tests mine
-    // explicitly — the chain runs with automine off). Never at or below the
-    // fork pin (the bridge anchors the same way): those blocks are the
-    // source's, their txs are not in this chain, and tracing one fails —
-    // anvil answers an unknown tx with `-32601 Method not found` (measured),
-    // which would stall the watermark below the pin and livelock the driver
-    // after a rewind or a re-pin.
-    let first = cursor.as_ref().map(|c| c.block).unwrap_or(head);
-    let walk = scan::scan_to(
-        &ctx.plane,
-        &ctx.v,
-        ctx.pin.load(Ordering::Relaxed),
-        head,
-        first,
-    )
-    .await?;
-    if walk.walked > 0 {
-        ctx.venue_metrics.record_scan(
-            &walk,
-            &ctx.venue_metrics.scanned_blocks_total,
-            &ctx.venue_metrics.skipped_empty_blocks_total,
-        );
-        ctx.plane.save_shadow()?;
-        // Ring the journal like the applier does on T: the rewind window is
-        // the same 1024 blocks on both mirrors (files older than head - keep
-        // are pruned; the venue's journal holds its own writes — the deal).
-        ctx.plane.journal.prune(head);
-        let block = ctx.v.block_by_number(head, false).await?;
-        let first_block = cursor.as_ref().map(|c| c.first_block).unwrap_or(head);
-        ctx.set_cursor_v(cursor_from(&block, first_block))?;
-        ctx.plane.save_state()?;
-        ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
-    }
+    scan_and_advance(ctx, cursor.as_ref(), head).await?;
 
     // A journal rewind on the venue restores before-values without moving the
     // head; the range marker clears once the head is past it (there is no
@@ -175,6 +136,56 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
         }
     }
     Ok(Pass::Steady)
+}
+
+/// The reset-detection canary: the recorded chain instance must read back
+/// from [`CANARY_ADDRESS`]. Anything else — a re-pin, a same-pin restart, a
+/// wiped state — means the registry belongs to a chain that no longer
+/// exists, and the epoch rule must run.
+async fn chain_instance_moved(ctx: &Ctx) -> Result<bool> {
+    let expected = ctx.plane.state.lock()?.data.epoch_pin;
+    Ok(read_canary(ctx).await? != expected)
+}
+
+/// Scan V's own blocks since `cursor` and persist the walk: the shadow
+/// registry, the journal prune and the cursor advance land together (a crash
+/// mid-way re-scans; the scan is idempotent). The watermark starts from the
+/// persisted cursor, so blocks the devnet mined while the driver was down
+/// are scanned too, and it never reaches at or below the fork pin (the
+/// bridge anchors the same way): those blocks are the source's, their txs
+/// are not in this chain, and tracing one fails — anvil answers an unknown
+/// tx with `-32601 Method not found` (measured), which would stall the
+/// watermark below the pin and livelock the driver after a rewind or a
+/// re-pin.
+async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) -> Result<()> {
+    let first = cursor.map(|c| c.block).unwrap_or(head);
+    let walk = scan::scan_to(
+        &ctx.plane,
+        &ctx.v,
+        ctx.pin.load(Ordering::Relaxed),
+        head,
+        first,
+    )
+    .await?;
+    if walk.walked == 0 {
+        return Ok(());
+    }
+    ctx.venue_metrics.record_scan(
+        &walk,
+        &ctx.venue_metrics.scanned_blocks_total,
+        &ctx.venue_metrics.skipped_empty_blocks_total,
+    );
+    ctx.plane.save_shadow()?;
+    // Ring the journal like the applier does on T: the rewind window is the
+    // same 1024 blocks on both mirrors (files older than head - keep are
+    // pruned; the venue's journal holds its own writes — the deal).
+    ctx.plane.journal.prune(head);
+    let block = ctx.v.block_by_number(head, false).await?;
+    let first_block = cursor.map(|c| c.first_block).unwrap_or(head);
+    ctx.set_cursor_v(cursor_from(&block, first_block))?;
+    ctx.plane.save_state()?;
+    ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
+    Ok(())
 }
 
 /// V's block production: T has the applier (one block per applied parent
