@@ -80,9 +80,10 @@ impl IntoResponse for Error {
     }
 }
 
-pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
-    let addr = format!("{}:{}", ctx.venue.http.addr, ctx.venue.http.port);
-    let app = Router::new()
+/// The engine's control surface: the exact routes this process serves (the
+/// table the control-plane docs list; the mirror's twin keeps the same shape).
+fn app(ctx: Arc<Ctx>) -> Router {
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
         .route("/status", get(status))
@@ -94,7 +95,13 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
         .route("/admin/deal", post(admin_deal))
         .route("/admin/epoch", post(admin_epoch))
         .route("/admin/probes", post(admin_probes))
-        .with_state(ctx);
+        .with_state(ctx)
+}
+
+/// Bind the configured address and serve the control surface until the
+/// process is torn down.
+pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
+    let addr = format!("{}:{}", ctx.venue.http.addr, ctx.venue.http.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|source| Error::Bind {
@@ -102,11 +109,13 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
             source,
         })?;
     tracing::info!(addr, "venue http api listening");
-    axum::serve(listener, app).await.map_err(|source| Error::Io {
-        what: "http api",
-        path: addr.into(),
-        source,
-    })?;
+    axum::serve(listener, app(ctx))
+        .await
+        .map_err(|source| Error::Io {
+            what: "http api",
+            path: addr.into(),
+            source,
+        })?;
     Ok(())
 }
 

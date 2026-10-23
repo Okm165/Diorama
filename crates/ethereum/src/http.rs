@@ -101,8 +101,9 @@ struct FeedState {
     bridge: Option<Arc<FeedBridge>>,
 }
 
-pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()> {
-    let addr = format!("{}:{}", ctx.engine.http.addr, ctx.engine.http.port);
+/// The engine's control surface: the exact routes this process serves (the
+/// table the control-plane docs list; the mirror's twin keeps the same shape).
+fn app(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Router {
     let feed_routes = Router::new()
         .route("/admin/feed", get(feed_list))
         .route("/admin/feed/pause", post(feed_pause))
@@ -112,7 +113,7 @@ pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()>
             ctx: ctx.clone(),
             bridge,
         });
-    let app = Router::new()
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/livez", get(livez))
         .route("/status", get(status))
@@ -126,7 +127,13 @@ pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()>
         .route("/admin/epoch", post(admin_epoch))
         .route("/admin/probes", post(admin_probes))
         .with_state(ctx)
-        .merge(feed_routes);
+        .merge(feed_routes)
+}
+
+/// Bind the configured address and serve the control surface until the
+/// process is torn down.
+pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()> {
+    let addr = format!("{}:{}", ctx.engine.http.addr, ctx.engine.http.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|source| Error::Bind {
@@ -134,11 +141,13 @@ pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()>
             source,
         })?;
     tracing::info!(addr, "engine http api listening");
-    axum::serve(listener, app).await.map_err(|source| Error::Io {
-        what: "http api",
-        path: addr.into(),
-        source,
-    })?;
+    axum::serve(listener, app(ctx, bridge))
+        .await
+        .map_err(|source| Error::Io {
+            what: "http api",
+            path: addr.into(),
+            source,
+        })?;
     Ok(())
 }
 

@@ -42,11 +42,25 @@ FAILURES = []
 CHECKS = 0
 
 
+def http_error(what, url, err):
+    """A non-2xx answer as a *named* failure: the call, the endpoint, the body
+    (a transient 5xx from a node or an upstream must not surface as a bare
+    `HTTPError` with no context)."""
+    try:
+        body = err.read().decode(errors="replace")
+    except Exception:  # noqa: BLE001
+        body = "<no body>"
+    return RuntimeError(f"{what} {url}: HTTP {err.code} {err.reason}: {body[:300]}")
+
+
 def rpc(url, method, params=()):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)}).encode()
     req = urllib.request.Request(url, data=body, headers={"content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        out = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            out = json.loads(resp.read())
+    except urllib.error.HTTPError as err:
+        raise http_error(method, url, err) from err
     if "error" in out:
         raise RuntimeError(f"{method}: {out['error']}")
     return out.get("result")
@@ -55,12 +69,15 @@ def rpc(url, method, params=()):
 def post(url, payload, timeout=20):
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers={"content-type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-        try:
-            return resp.status, json.loads(raw)
-        except json.JSONDecodeError:
-            return resp.status, raw.decode()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            try:
+                return resp.status, json.loads(raw)
+            except json.JSONDecodeError:
+                return resp.status, raw.decode()
+    except urllib.error.HTTPError as err:
+        raise http_error("POST", url, err) from err
 
 
 def check(name, ok, evidence=""):
@@ -90,8 +107,11 @@ def sim_account(addr):
 # ---- roles ----------------------------------------------------------------
 
 def get(url, timeout=20):
-    with urllib.request.urlopen(url, timeout=timeout) as resp:
-        return resp.status, resp.read().decode()
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return resp.status, resp.read().decode()
+    except urllib.error.HTTPError as err:
+        raise http_error("GET", url, err) from err
 
 
 def role_boot():

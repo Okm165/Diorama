@@ -52,20 +52,15 @@ pub(crate) fn bad_result(method: &str, detail: &str) -> RpcError {
 /// classification half of the boundary (`Error` carries the endpoint and
 /// method; the payload carries the node's own vocabulary).
 pub trait RpcErrorPolicy {
-    /// A content refusal: retrying the same bytes reproduces it. Measured:
-    /// `-32600 Invalid request` (body ≥ 2 MB), `-32601 method not found`,
-    /// `-32602 Invalid params` (e.g. odd-length hex).
-    fn is_content_error(&self) -> bool;
-
-    /// The node's internal error: plausibly transient.
+    /// The node's internal error: plausibly transient. Deliberately a narrow
+    /// *positive* rule — measured: `-32603 Internal error` is the only code
+    /// worth retrying, while `-32600 Invalid request` (body ≥ 2 MB),
+    /// `-32601 method not found` and `-32602 Invalid params` (e.g. odd-length
+    /// hex) are content refusals that reproduce identically.
     fn is_retryable(&self) -> bool;
 }
 
 impl RpcErrorPolicy for RpcError {
-    fn is_content_error(&self) -> bool {
-        matches!(self.code, -32602..=-32600)
-    }
-
     fn is_retryable(&self) -> bool {
         self.code == -32603
     }
@@ -291,7 +286,6 @@ mod tests {
                 message: "refused".into(),
                 data: None,
             };
-            assert!(e.is_content_error(), "code {code}");
             assert!(!e.is_retryable(), "code {code}");
         }
         assert!(RpcError {
