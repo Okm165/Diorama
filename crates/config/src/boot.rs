@@ -55,6 +55,15 @@ pub fn report_error(error: &dyn StdError) {
 /// given (`--config` for the engine; the first positional for the others).
 pub const DEFAULT_INSTANCE_PATH: &str = "/etc/mirror/instance.toml";
 
+/// The instance path: the first positional argument, else the deployed
+/// default. One definition — every positional-arg bin reads the same
+/// convention (the engine's clap subcommand owns its own).
+pub fn instance_path() -> String {
+    std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| DEFAULT_INSTANCE_PATH.to_string())
+}
+
 /// The shared `main()` shell: build the runtime with the measured worker-stack
 /// budget, run the service future, report a fatal error with its cause chain.
 /// The bins keep their own `run()` — the planes, boot orders and final saves

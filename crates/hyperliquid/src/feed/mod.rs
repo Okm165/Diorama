@@ -321,27 +321,12 @@ impl MarketFeed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::Level;
-
-    fn ctx(mark: &str, oracle: &str) -> AssetCtx {
-        AssetCtx {
-            funding: Decimal::new(125, 7),
-            open_interest: Decimal::ZERO,
-            prev_day_px: Decimal::ZERO,
-            day_ntl_vlm: Decimal::ZERO,
-            premium: None,
-            oracle_px: oracle.parse().unwrap(),
-            mark_px: mark.parse().unwrap(),
-            mid_px: None,
-            impact_pxs: None,
-            day_base_vlm: Decimal::ZERO,
-        }
-    }
+    use crate::wire::{test_ctx, Level};
 
     #[test]
     fn overrides_compose_over_the_cache() {
         let feed = MarketFeed::memory(vec!["BTC".into()]);
-        feed.put_ctx("BTC".into(), ctx("100", "101"), 1_000);
+        feed.put_ctx("BTC".into(), test_ctx("100", "101"), 1_000);
         assert_eq!(feed.mark("BTC"), Some(Decimal::from(100)));
         assert_eq!(feed.oracle("BTC"), Some(Decimal::from(101)));
 
@@ -356,7 +341,7 @@ mod tests {
         assert_eq!(feed.mark("BTC"), Some(Decimal::from(90)));
         assert_eq!(feed.oracle("BTC"), Some(Decimal::from(91)));
         // A live update no longer changes the owned read.
-        feed.put_ctx("BTC".into(), ctx("200", "201"), 2_000);
+        feed.put_ctx("BTC".into(), test_ctx("200", "201"), 2_000);
         assert_eq!(feed.mark("BTC"), Some(Decimal::from(90)));
 
         feed.clear_price("BTC").unwrap();
@@ -389,7 +374,7 @@ mod tests {
     fn staleness_tracks_ctx_updates() {
         let feed = MarketFeed::memory(vec!["BTC".into(), "ETH".into()]);
         assert_eq!(feed.stale_ms("BTC", 10_000), None);
-        feed.put_ctx("BTC".into(), ctx("100", "101"), 8_000);
+        feed.put_ctx("BTC".into(), test_ctx("100", "101"), 8_000);
         assert_eq!(feed.stale_ms("BTC", 10_000), Some(2_000));
         assert_eq!(feed.stale_ms("ETH", 10_000), None);
     }

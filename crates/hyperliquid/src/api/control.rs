@@ -7,7 +7,7 @@
 use super::ApiState;
 use crate::error::{Error, Result};
 use crate::feed::PriceOverride;
-use crate::sim::account::AccountSeed;
+use crate::sim::account::{self, Account, AccountSeed};
 use crate::sim::DealClass;
 use crate::wire::{ClearinghouseState, Level, L2Book, SpotBalance, UserAbstraction};
 use alloy_primitives::Address;
@@ -328,23 +328,50 @@ pub async fn set_account(
     Ok(Json(StateResponse::of(&state, req.address)?))
 }
 
-/// hl_mock's `POST /control/state/{address}`: the body is the state seed.
+/// hl_mock's `POST /control/state/{address}`: the body is the state patch; the
+/// answer is the resolved **control view** (the fixture where the scenario owns
+/// it, the sim's derivation where it does not). `/info` keeps serving the live
+/// view — the two are deliberately different: the control read is "what the
+/// scenario set" (daloc's `resolved_equity` assertions read it), the info read
+/// is the venue's live report.
 pub async fn post_state(
     State(state): State<Arc<ApiState>>,
     Path(address): Path<Address>,
     Json(seed): Json<AccountSeed>,
-) -> Result<Json<StateResponse>> {
+) -> Result<Json<AccountSeed>> {
     state.sim.set_account(address, seed)?;
-    Ok(Json(StateResponse::of(&state, address)?))
+    control_state(&state, address).map(Json)
 }
 
-/// hl_mock's `GET /control/state/{address}` (404 when untouched — the read
-/// that would otherwise go to the real venue).
+/// hl_mock's `GET /control/state/{address}`: the resolved control view. An
+/// address the sim has never seen answers hl_mock's default (mode `disabled`,
+/// the empty account) — a 404 would break the read-back pattern the harness
+/// uses (`venue_account()` asserts success).
 pub async fn get_state(
     State(state): State<Arc<ApiState>>,
     Path(address): Path<Address>,
-) -> Result<Json<StateResponse>> {
-    Ok(Json(StateResponse::of(&state, address)?))
+) -> Result<Json<AccountSeed>> {
+    control_state(&state, address).map(Json)
+}
+
+/// The resolved control view for `address` — `/control/state`'s one builder.
+/// Read-time evaluation runs first, like every account-scoped read (§14.8).
+fn control_state(state: &ApiState, address: Address) -> Result<AccountSeed> {
+    state.sim.evaluate(&state.feed)?;
+    let Some(account) = state.sim.account(address)? else {
+        let empty = Account {
+            mode: UserAbstraction::Disabled,
+            ..Default::default()
+        };
+        return account::control_view(None, &empty, &state.feed, state.feed.meta().as_ref());
+    };
+    let fixture = state.sim.control_fixture(address)?;
+    account::control_view(
+        fixture.as_ref(),
+        &account,
+        &state.feed,
+        state.feed.meta().as_ref(),
+    )
 }
 
 // ---- reset / epoch_new ---------------------------------------------------

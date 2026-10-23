@@ -19,9 +19,7 @@ fn main() -> ExitCode {
 
 async fn run() -> mirror_hyperliquid::Result<()> {
     boot::init_logging();
-    let config = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| boot::DEFAULT_INSTANCE_PATH.to_string());
+    let config = boot::instance_path();
     let mut cfg = load_wiring(&config)?;
     let (chain, sim_section) = cfg.take_sim()?;
 
@@ -70,7 +68,7 @@ fn load_wiring(config: &str) -> mirror_hyperliquid::Result<mirror_config::Instan
     let (cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(config))?;
     if let (Some(chain), Some(sim)) = (cfg.chains.venue.as_ref(), cfg.services.sim.as_ref()) {
         let state_dir = sim.state_dir.to_string_lossy().to_string();
-        mirror_config::require_resolved(
+        mirror_config::require_resolved_logged(
             "venue simulator wiring",
             &[
                 &chain.source_url,
@@ -78,14 +76,8 @@ fn load_wiring(config: &str) -> mirror_hyperliquid::Result<mirror_config::Instan
                 sim.engine_admin_url.as_deref().unwrap_or_default(),
                 sim.anvil_url.as_deref().unwrap_or_default(),
             ],
-        )
-        .inspect_err(|e| {
-            tracing::error!(
-                unresolved = %unresolved.join(", "),
-                error = %e,
-                "venue simulator wiring is incomplete"
-            );
-        })?;
+            &unresolved,
+        )?;
     }
     Ok(cfg)
 }

@@ -51,6 +51,12 @@ pub struct Account {
     /// API wallets the CoreWriter registered for this account.
     #[serde(default)]
     pub agents: Vec<AgentWallet>,
+    /// The control fixture: the merged `/control/state` patch, when the
+    /// harness has set one. The control surface serves it (what the scenario
+    /// set is what it reads back — daloc's `resolved_equity` assertions);
+    /// `/info` never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<AccountSeed>,
 }
 
 fn default_mode() -> UserAbstraction {
@@ -122,9 +128,28 @@ pub struct SpotEntry {
     pub entry_ntl: Decimal,
 }
 
-/// The seeding shape: hl_mock serves the venue's own state, so the seed is a
-/// (possibly partial) `clearinghouseState` — the sim reads `totalRawUsd` and
-/// the positions and derives the rest at serve time.
+/// The account's spot entry for `token`, created zeroed on first touch — the
+/// one place the entry's shape is built (the deal, the bridge's credit and
+/// the USD class transfer's two directions all go through it).
+pub fn spot_entry<'a>(account: &'a mut Account, token: u32, coin: &str) -> &'a mut SpotEntry {
+    account.spot.entry(token).or_insert_with(|| SpotEntry {
+        coin: coin.to_string(),
+        total: Decimal::ZERO,
+        hold: Decimal::ZERO,
+        entry_ntl: Decimal::ZERO,
+    })
+}
+
+/// The seeding shape — and the **control fixture**: hl_mock serves the venue's
+/// own state, so a seed is a (possibly partial) `clearinghouseState` in the
+/// control patch shape. The sim reads the mechanical fields (`totalRawUsd`,
+/// the positions, the spot side, the mode) and derives the rest at serve time;
+/// the fixture-only fields (`crossMarginSummary`, `crossMaintenanceMarginUsed`,
+/// `withdrawable`, `tokenToAvailableAfterMaintenance`, `spotToken`, `dex`) are
+/// kept verbatim and served back by `/control/state` — the control surface is
+/// "what the scenario set" (daloc's `resolved_equity` assertions read it; live
+/// marks must not move a fixture read), while `/info` is the simulator's live
+/// view.
 ///
 /// **Patch semantics** (their `venue_mock::set_venue_account` contract, and
 /// their mock's own `AccountState::apply`): a field the caller does not name
@@ -136,28 +161,71 @@ pub struct SpotEntry {
 /// deal-spot-then-seed sequence lost the deal), and the mode/spot fields
 /// carried the served names, so a `userAbstraction`/`spotBalances` patch was
 /// silently ignored.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSeed {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub margin_summary: Option<MarginSummary>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_positions: Option<Vec<AssetPosition>>,
     /// The spot side, in the patch shape (`spotBalances`).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spot_balances: Option<Vec<SpotBalance>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_abstraction: Option<UserAbstraction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_margin_summary: Option<MarginSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_maintenance_margin_used: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub withdrawable: Option<Decimal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_to_available_after_maintenance: Option<Vec<(u32, Decimal)>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spot_token: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dex: Option<String>,
 }
 
 impl AccountSeed {
-    /// Nothing named at all: an all-empty seed would silently register a zero
+    /// Nothing named at all: an all-empty patch would silently register a zero
     /// account (a named-but-empty field, `Some([])`, is a legitimate clear).
     pub fn is_empty(&self) -> bool {
         self.margin_summary.is_none()
             && self.asset_positions.is_none()
             && self.spot_balances.is_none()
             && self.user_abstraction.is_none()
+            && self.cross_margin_summary.is_none()
+            && self.cross_maintenance_margin_used.is_none()
+            && self.withdrawable.is_none()
+            && self.token_to_available_after_maintenance.is_none()
+            && self.spot_token.is_none()
+            && self.dex.is_none()
+    }
+
+    /// hl_mock's patch merge (their `AccountState::apply`): a named field
+    /// replaces, an unnamed one keeps its previous value — the control
+    /// fixture's rule, so a mode-only patch does not erase the book.
+    pub fn merged_with(self, previous: Option<Self>) -> Self {
+        let Some(p) = previous else {
+            return self;
+        };
+        Self {
+            margin_summary: self.margin_summary.or(p.margin_summary),
+            asset_positions: self.asset_positions.or(p.asset_positions),
+            spot_balances: self.spot_balances.or(p.spot_balances),
+            user_abstraction: self.user_abstraction.or(p.user_abstraction),
+            cross_margin_summary: self.cross_margin_summary.or(p.cross_margin_summary),
+            cross_maintenance_margin_used: self
+                .cross_maintenance_margin_used
+                .or(p.cross_maintenance_margin_used),
+            withdrawable: self.withdrawable.or(p.withdrawable),
+            token_to_available_after_maintenance: self
+                .token_to_available_after_maintenance
+                .or(p.token_to_available_after_maintenance),
+            spot_token: self.spot_token.or(p.spot_token),
+            dex: self.dex.or(p.dex),
+        }
     }
 
     /// Fold the seed into the account as a **patch**: named fields replace,
@@ -166,7 +234,7 @@ impl AccountSeed {
     /// totalRawUsd round-trips byte-for-byte (the operator's recall amount).
     /// Fallible: absurd seeds must refuse, not panic (the overflow-poison
     /// lesson).
-    pub fn apply_to(self, account: &mut Account, clock: u64) -> Result<()> {
+    pub fn apply_to(&self, account: &mut Account, clock: u64) -> Result<()> {
         let perp_changed = self.margin_summary.is_some() || self.asset_positions.is_some();
         // The raw USDC base: the named summary's totalRawUsd, else the
         // existing one (reverse the current cost-basis fold).
@@ -209,6 +277,40 @@ impl AccountSeed {
         }
         Ok(())
     }
+}
+
+/// The `/control/state` view: the fixture's fields where the scenario owns
+/// them, the sim's derivation where it does not — so a patched account reads
+/// back exactly what the harness set (daloc's `resolved_equity` assertions
+/// read this; live marks must not move a fixture read), while a never-patched
+/// account still reads sensibly. `/info` is unaffected: it always serves the
+/// live view.
+pub fn control_view(
+    fixture: Option<&AccountSeed>,
+    account: &Account,
+    feed: &MarketFeed,
+    meta: Option<&crate::wire::Meta>,
+) -> Result<AccountSeed> {
+    let f = fixture.cloned().unwrap_or_default();
+    let v = view(account, feed, meta)?;
+    // hl_mock's `effective`: an unnamed cross view mirrors the margin summary.
+    let mirror = f.margin_summary.clone();
+    Ok(AccountSeed {
+        user_abstraction: f.user_abstraction.or(Some(account.mode)),
+        margin_summary: f.margin_summary.or(Some(v.margin_summary)),
+        cross_margin_summary: f.cross_margin_summary.or(mirror).or(Some(v.cross_margin_summary)),
+        cross_maintenance_margin_used: f
+            .cross_maintenance_margin_used
+            .or(Some(v.cross_maintenance_margin_used)),
+        withdrawable: f.withdrawable.or(Some(v.withdrawable)),
+        asset_positions: f.asset_positions.or(Some(v.asset_positions)),
+        spot_balances: f.spot_balances.or_else(|| Some(spot_balances(account))),
+        token_to_available_after_maintenance: f
+            .token_to_available_after_maintenance
+            .or(Some(available_after_maintenance(account, feed, meta)?)),
+        spot_token: f.spot_token.or(Some(COLLATERAL_TOKEN)),
+        dex: f.dex,
+    })
 }
 
 /// Replace the account's positions from the seed's rows. A non-flat row
@@ -712,30 +814,8 @@ pub type Accounts = BTreeMap<Address, Account>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::feed_with;
     use crate::wire::{AssetInfo, MarginTable, MarginTier, Meta};
-
-    fn feed_with(marks: &[(&str, &str, &str)]) -> MarketFeed {
-        let feed = MarketFeed::memory(marks.iter().map(|(c, _, _)| c.to_string()).collect());
-        for (coin, mark, oracle) in marks {
-            feed.put_ctx(
-                coin.to_string(),
-                AssetCtx {
-                    funding: Decimal::new(125, 7),
-                    open_interest: Decimal::ZERO,
-                    prev_day_px: Decimal::ZERO,
-                    day_ntl_vlm: Decimal::ZERO,
-                    premium: None,
-                    oracle_px: oracle.parse().unwrap(),
-                    mark_px: mark.parse().unwrap(),
-                    mid_px: None,
-                    impact_pxs: None,
-                    day_base_vlm: Decimal::ZERO,
-                },
-                1,
-            );
-        }
-        feed
-    }
 
     fn meta_for(coin: &str, max_leverage: u32) -> Meta {
         Meta {
@@ -861,6 +941,74 @@ mod tests {
         let mode: AccountSeed = serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap();
         mode.apply_to(&mut account, 9).unwrap();
         assert_eq!(account.mode, UserAbstraction::UnifiedAccount);
+    }
+
+    /// The hl_mock control patch shape — daloc's `standard_cross` output: no
+    /// `maxLeverage`, no `returnOnEquity`, `entryPx: "0.0"`, a cross short, and
+    /// the fixture-only fields the info surface never reads. It must parse (the
+    /// parser is a superset), apply (the raw base round-trips), and read back
+    /// through `/control/state` *exactly as set* while the live view follows the
+    /// mark — the two surfaces are deliberately different.
+    #[test]
+    fn hl_mock_patch_parses_and_reads_back_as_the_fixture() {
+        let seed: AccountSeed = serde_json::from_str(
+            r#"{
+                "userAbstraction": "disabled",
+                "marginSummary": {"accountValue": "50000.0", "totalNtlPos": "30000.0", "totalRawUsd": "80000.0", "totalMarginUsed": "0.0"},
+                "crossMaintenanceMarginUsed": "0.0",
+                "withdrawable": "50000.0",
+                "assetPositions": [{
+                    "type": "oneWay",
+                    "position": {
+                        "coin": "HYPE", "szi": "-100.00", "leverage": {"type": "cross", "value": 0},
+                        "entryPx": "0.0", "positionValue": "30000.0", "unrealizedPnl": "0.0",
+                        "marginUsed": "0.0",
+                        "cumFunding": {"allTime": "0.0", "sinceOpen": "0.0", "sinceChange": "0.0"}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let mut account = Account::default();
+        seed.apply_to(&mut account, 0).unwrap();
+        assert_eq!(account.perp_balance, Decimal::from(80_000), "entryPx 0.0: raw == perp balance");
+
+        let feed = feed_with(&[("HYPE", "300", "300")]);
+        let before = control_view(Some(&seed), &account, &feed, None).unwrap();
+        assert_eq!(before.margin_summary.unwrap().account_value, Decimal::from(50_000));
+        let live = view(&account, &feed, None).unwrap();
+        assert_eq!(live.margin_summary.account_value, Decimal::from(50_000), "the live view agrees at the setup mark");
+
+        feed.put_ctx("HYPE".into(), crate::wire::test_ctx("310", "310"), 2);
+        let after = control_view(Some(&seed), &account, &feed, None).unwrap();
+        assert_eq!(
+            after.margin_summary.unwrap().account_value,
+            Decimal::from(50_000),
+            "the fixture read must not move with the mark"
+        );
+        let live = view(&account, &feed, None).unwrap();
+        assert_eq!(live.margin_summary.account_value, Decimal::from(49_000), "the live view follows the mark");
+    }
+
+    /// hl_mock's patch merge: a mode-only patch must not erase the book (the
+    /// control fixture keeps the unnamed fields); a named-but-empty field is a
+    /// clear, not a keep.
+    #[test]
+    fn seed_merge_keeps_unnamed_fields() {
+        let first: AccountSeed = serde_json::from_str(
+            r#"{"marginSummary": {"accountValue": "10", "totalNtlPos": "0", "totalRawUsd": "10", "totalMarginUsed": "0"}}"#,
+        )
+        .unwrap();
+        let second: AccountSeed =
+            serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap();
+        let merged = second.merged_with(Some(first));
+        assert!(merged.margin_summary.is_some(), "the unnamed summary keeps its value");
+        assert_eq!(merged.user_abstraction, Some(UserAbstraction::UnifiedAccount));
+
+        let clear: AccountSeed = serde_json::from_str(r#"{"spotBalances": []}"#).unwrap();
+        let merged = clear.merged_with(Some(merged));
+        assert_eq!(merged.spot_balances, Some(Vec::new()), "a named empty field clears in the fixture too");
+        assert!(merged.margin_summary.is_some(), "and the other fields keep");
     }
 
     /// The unified account's `tokenToAvailableAfterMaintenance` closes daloc's

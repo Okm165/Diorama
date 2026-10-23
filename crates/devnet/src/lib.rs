@@ -18,3 +18,11 @@ pub mod store;
 
 pub use error::{Error, Result};
 pub use shared::Shared;
+
+/// A scratch directory for one test (per test + process: the tests may run
+/// concurrently). One definition, so no test forgets the process id and
+/// collides with a parallel run.
+#[cfg(test)]
+pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("mirror-devnet-{tag}-{}", std::process::id()))
+}

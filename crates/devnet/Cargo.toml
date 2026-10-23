@@ -12,6 +12,7 @@ mirror-config = { path = "../config" }
 alloy-consensus = { workspace = true }
 alloy-network-primitives = { workspace = true }
 alloy-primitives = { workspace = true }
+alloy-serde = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

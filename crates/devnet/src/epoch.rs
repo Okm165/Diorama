@@ -147,7 +147,7 @@ mod tests {
 
     /// A plane on a fresh temp dir (per test: they may run concurrently).
     fn test_plane(name: &str) -> Plane {
-        let dir = std::env::temp_dir().join(format!("mirror-epoch-{name}-{}", std::process::id()));
+        let dir = crate::test_dir(&format!("epoch-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         Plane {
             shadow: Shared::new("shadow registry", Shadow::default()),

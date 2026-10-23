@@ -38,9 +38,7 @@ struct Bridge {
 
 async fn run() -> mirror_cctp::Result<()> {
     boot::init_logging();
-    let config = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| boot::DEFAULT_INSTANCE_PATH.to_string());
+    let config = boot::instance_path();
     let section = load_wiring(&config)?;
     let (bridge, min_fees) = boot_bridge(section).await?;
 
@@ -65,7 +63,7 @@ fn load_wiring(config: &str) -> mirror_cctp::Result<CctpSection> {
     let (mut cfg, unresolved) = mirror_config::Instance::inspect(std::path::Path::new(config))?;
     let section = cfg.take_cctp()?;
     let state_dir = section.state_dir.to_string_lossy().to_string();
-    mirror_config::require_resolved(
+    mirror_config::require_resolved_logged(
         "cctp wiring",
         &[
             &state_dir,
@@ -74,10 +72,8 @@ fn load_wiring(config: &str) -> mirror_cctp::Result<CctpSection> {
             &section.relay_key,
             &section.attester_seed,
         ],
-    )
-    .inspect_err(|e| {
-        tracing::error!(unresolved = %unresolved.join(", "), error = %e, "cctp wiring is incomplete");
-    })?;
+        &unresolved,
+    )?;
     Ok(section)
 }
 

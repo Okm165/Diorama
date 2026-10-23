@@ -154,6 +154,19 @@ fn parse_scalar(raw: &str) -> toml::Value {
     }
 }
 
+/// [`require_resolved`], plus the bins' boot log: a refusal prints the
+/// loader's full unresolved list next to the error, so the operator sees
+/// every missing variable — not only this section's.
+pub fn require_resolved_logged(
+    what: &'static str,
+    values: &[&str],
+    unresolved: &[String],
+) -> Result<(), ConfigError> {
+    require_resolved(what, values).inspect_err(|error| {
+        tracing::error!(unresolved = %unresolved.join(", "), %error, "{what} is incomplete");
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

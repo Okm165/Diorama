@@ -46,6 +46,14 @@ pub use alloy_primitives::{Address, Bytes, B256, U256};
 /// shared definition lives in `mirror-config`'s boot module.
 pub use mirror_config::boot::now_ms;
 
+/// A scratch directory for one test (per test + process: the tests may run
+/// concurrently). One definition, so no test forgets the process id and
+/// collides with a parallel run.
+#[cfg(test)]
+pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("mirror-cctp-{tag}-{}", std::process::id()))
+}
+
 #[cfg(test)]
 mod design_assertions {
     /// The Rust-for-Rustaceans pin (plan §11.3 rule 11).

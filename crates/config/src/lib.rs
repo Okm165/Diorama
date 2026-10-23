@@ -21,7 +21,7 @@ mod env;
 mod instance;
 mod sections;
 
-pub use env::require_resolved;
+pub use env::{require_resolved, require_resolved_logged};
 
 pub use instance::{
     ChainKind, ChainL1, ChainVenue, Chains, FollowHead, Instance, InstanceMeta, Profile, WatchEntry,

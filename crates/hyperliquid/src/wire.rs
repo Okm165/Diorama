@@ -132,13 +132,19 @@ pub struct MarginSummary {
 #[serde(rename_all = "camelCase")]
 pub struct Position {
     pub coin: String,
+    #[serde(default)]
     pub entry_px: Option<Decimal>,
     pub leverage: Leverage,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liquidation_px: Option<Decimal>,
     pub margin_used: Decimal,
+    /// `Option` on the *parse* side only: hl_mock's control patches omit it
+    /// (`VenuePositionState.maxLeverage` is optional); the sim always serves it.
+    #[serde(default)]
     pub max_leverage: u32,
     pub position_value: Decimal,
+    /// Same: the control patch shape has no `returnOnEquity`; the sim serves it.
+    #[serde(default)]
     pub return_on_equity: Decimal,
     pub szi: Decimal,
     pub unrealized_pnl: Decimal,
@@ -152,6 +158,7 @@ pub struct Leverage {
     pub kind: LeverageType,
     pub value: u32,
     /// `marginUsed − positionValue` (measured exact on the live sample).
+    #[serde(default)]
     pub raw_usd: Option<Decimal>,
 }
 
@@ -322,6 +329,25 @@ pub struct AssetCtx {
     pub impact_pxs: Option<[Decimal; 2]>,
     #[serde(default)]
     pub day_base_vlm: Decimal,
+}
+
+/// The tests' `AssetCtx` fixture (funding ⅛e-7, marks/oracle from the args):
+/// one definition — the feed tests, the sim tests and the account tests all
+/// build on it.
+#[cfg(test)]
+pub(crate) fn test_ctx(mark: &str, oracle: &str) -> AssetCtx {
+    AssetCtx {
+        funding: Decimal::new(125, 7),
+        open_interest: Decimal::ZERO,
+        prev_day_px: Decimal::ZERO,
+        day_ntl_vlm: Decimal::ZERO,
+        premium: None,
+        oracle_px: oracle.parse().unwrap(),
+        mark_px: mark.parse().unwrap(),
+        mid_px: None,
+        impact_pxs: None,
+        day_base_vlm: Decimal::ZERO,
+    }
 }
 
 /// `metaAndAssetCtxs`: a `[meta, ctxs]` tuple on the wire.

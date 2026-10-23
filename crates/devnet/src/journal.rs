@@ -28,7 +28,10 @@ pub enum JournalEntry {
     },
     Nonce {
         address: Address,
-        before: HexU64,
+        /// The node's own quantity encoding (`alloy_serde::quantity`: `0x`-hex,
+        /// zero as `0x0`), so a nonce before-value round-trips like the others.
+        #[serde(with = "alloy_serde::quantity")]
+        before: u64,
     },
     Code {
         address: Address,
@@ -55,35 +58,13 @@ impl JournalEntry {
             },
             JournalEntry::Nonce { address, before } => Write::Nonce {
                 address: *address,
-                value: before.0,
+                value: *before,
             },
             JournalEntry::Code { address, before } => Write::Code {
                 address: *address,
                 value: before.clone(),
             },
         }
-    }
-}
-
-/// `u64` as a `0x`-quantized hex string (the node's own quantity encoding),
-/// so a nonce before-value round-trips through serde like the others.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct HexU64(pub u64);
-
-impl TryFrom<String> for HexU64 {
-    type Error = String;
-
-    fn try_from(s: String) -> std::result::Result<Self, Self::Error> {
-        u64::from_str_radix(s.trim_start_matches("0x"), 16)
-            .map(HexU64)
-            .map_err(|e| format!("not a hex quantity: {s:?} ({e})"))
-    }
-}
-
-impl From<HexU64> for String {
-    fn from(v: HexU64) -> Self {
-        format!("0x{:x}", v.0)
     }
 }
 
@@ -310,7 +291,7 @@ pub fn entry_for_write(w: &Write, before: BeforeValue) -> Result<JournalEntry> {
         }),
         (Write::Nonce { address, .. }, BeforeValue::Nonce(v)) => Ok(JournalEntry::Nonce {
             address: *address,
-            before: HexU64(v),
+            before: v,
         }),
         (Write::Code { address, .. }, BeforeValue::Code(v)) => Ok(JournalEntry::Code {
             address: *address,
@@ -357,7 +338,7 @@ mod tests {
 
     #[test]
     fn journal_roundtrip_and_prune() {
-        let dir = std::env::temp_dir().join(format!("mirror-journal-test-{}", std::process::id()));
+        let dir = crate::test_dir("journal-test");
         let j = Journal::new(dir.clone(), 10).unwrap();
         let e = JournalEntry::Storage {
             address: Address::repeat_byte(1),
@@ -380,7 +361,7 @@ mod tests {
     /// first, and a temp file is not a block.
     #[test]
     fn blocks_in_is_sparse_and_newest_first() {
-        let dir = std::env::temp_dir().join(format!("mirror-journal-range-{}", std::process::id()));
+        let dir = crate::test_dir("journal-range");
         let j = Journal::new(dir.clone(), 1024).unwrap();
         let e = JournalEntry::Storage {
             address: Address::repeat_byte(2),
@@ -403,7 +384,7 @@ mod tests {
     /// brick a rewind that spans the old journal's files.
     #[test]
     fn legacy_entries_parse() {
-        let dir = std::env::temp_dir().join(format!("mirror-journal-legacy-{}", std::process::id()));
+        let dir = crate::test_dir("journal-legacy");
         let j = Journal::new(dir.clone(), 10).unwrap();
         let addr = format!("0x{}", alloy_primitives::hex::encode([0x11u8; 20]));
         let legacy = [
@@ -419,7 +400,34 @@ mod tests {
             loaded[0],
             JournalEntry::Storage { before, .. } if before == U256::from(42u64)
         ));
-        assert!(matches!(loaded[2], JournalEntry::Nonce { before, .. } if before.0 == 3));
+        assert!(matches!(loaded[2], JournalEntry::Nonce { before, .. } if before == 3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A nonce before-value is *written* in the node's own quantity encoding
+    /// (`alloy_serde::quantity`, which the field borrows): `0x`-hex, zero as
+    /// `0x0` — the exact text the older hand-rolled newtype wrote, so a
+    /// journal spanning the swap stays one format (the read side is pinned by
+    /// `legacy_entries_parse`).
+    #[test]
+    fn nonce_before_values_write_as_quantities() {
+        let dir = crate::test_dir("journal-nonce-text");
+        let j = Journal::new(dir.clone(), 10).unwrap();
+        let address = Address::repeat_byte(3);
+        j.record(
+            9,
+            std::slice::from_ref(&JournalEntry::Nonce { address, before: 0x1f }),
+        )
+        .unwrap();
+        j.record(
+            10,
+            std::slice::from_ref(&JournalEntry::Nonce { address, before: 0 }),
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.join("9.jsonl")).unwrap();
+        assert!(text.contains(r#""before":"0x1f""#), "unexpected text: {text}");
+        let text = std::fs::read_to_string(dir.join("10.jsonl")).unwrap();
+        assert!(text.contains(r#""before":"0x0""#), "unexpected text: {text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -427,7 +435,7 @@ mod tests {
     /// silently skipped entry: a partial rewind must not report success.
     #[test]
     fn malformed_entries_are_corrupt() {
-        let dir = std::env::temp_dir().join(format!("mirror-journal-bad-{}", std::process::id()));
+        let dir = crate::test_dir("journal-bad");
         let j = Journal::new(dir.clone(), 10).unwrap();
         let addr = format!("0x{}", alloy_primitives::hex::encode([0x11u8; 20]));
         std::fs::write(

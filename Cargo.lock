@@ -2588,6 +2588,7 @@ dependencies = [
  "alloy-network-primitives",
  "alloy-primitives",
  "alloy-rpc-types-eth",
+ "alloy-serde",
  "mirror-anvil",
  "mirror-config",
  "serde",

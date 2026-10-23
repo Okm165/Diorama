@@ -313,14 +313,10 @@ impl Relayer {
             .await
         {
             Ok(hash) => {
-                self.store.with(|state| {
-                    if let Some(m) = state.messages.iter_mut().find(|m| m.nonce == record.nonce) {
-                        m.relay_tx = Some(hash);
-                        m.attempts += 1;
-                    }
-                    Ok(())
+                self.store.update_message(record.nonce, |m| {
+                    m.relay_tx = Some(hash);
+                    m.attempts += 1;
                 })?;
-                self.store.save()?;
                 tracing::info!(nonce = %record.nonce, chain = chain.name, tx = %hash, "cctp receiveMessage submitted");
                 match wait_for_receipt(&chain.rpc, hash, self.receipt_timeout).await? {
                     Some(receipt) => self.settle(chain, record, &receipt).await,
@@ -379,43 +375,38 @@ impl Relayer {
     }
 
     fn mark_relayed(&self, nonce: B256, tx: Option<B256>) -> Result<()> {
-        self.store.with(|state| {
-            if let Some(m) = state.messages.iter_mut().find(|m| m.nonce == nonce) {
-                m.state = RelayState::Relayed;
-                m.relayed_ms = Some(crate::now_ms());
-                if tx.is_some() {
-                    m.relay_tx = tx;
-                }
+        self.store.update_message(nonce, |m| {
+            m.state = RelayState::Relayed;
+            m.relayed_ms = Some(crate::now_ms());
+            if tx.is_some() {
+                m.relay_tx = tx;
             }
-            Ok(())
         })?;
+        // Counted only after the state is persisted: a confirm that failed to
+        // persist must not be counted.
         self.metrics.relays_confirmed.fetch_add(1, Ordering::Relaxed);
-        self.store.save()
+        Ok(())
     }
 
     fn park(&self, nonce: B256, reason: String) -> Result<()> {
         tracing::error!(%nonce, reason, "cctp message PARKED (never dropped; /health shows it)");
-        self.store.with(|state| {
-            if let Some(m) = state.messages.iter_mut().find(|m| m.nonce == nonce) {
-                m.state = RelayState::Parked;
-                m.park_reason = Some(reason);
-            }
-            Ok(())
+        self.store.update_message(nonce, |m| {
+            m.state = RelayState::Parked;
+            m.park_reason = Some(reason);
         })?;
         self.metrics.relays_parked.fetch_add(1, Ordering::Relaxed);
-        self.store.save()
+        Ok(())
     }
 
+    /// One more send attempt on the record; the new count (0 when the record
+    /// does not exist — nothing to count).
     fn bump_attempts(&self, nonce: B256) -> Result<u32> {
-        let attempts = self.store.with(|state| {
-            let mut attempts = 0;
-            if let Some(m) = state.messages.iter_mut().find(|m| m.nonce == nonce) {
+        Ok(self
+            .store
+            .update_message(nonce, |m| {
                 m.attempts += 1;
-                attempts = m.attempts;
-            }
-            Ok(attempts)
-        })?;
-        self.store.save()?;
-        Ok(attempts)
+                m.attempts
+            })?
+            .unwrap_or(0))
     }
 }

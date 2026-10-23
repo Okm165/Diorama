@@ -491,7 +491,7 @@ mod tests {
     /// backfill) is idempotent.
     #[test]
     fn absorb_patches_dedupes_and_signs() {
-        let dir = std::env::temp_dir().join(format!("mirror-cctp-watcher-{}", std::process::id()));
+        let dir = crate::test_dir("watcher");
         let _ = std::fs::remove_dir_all(&dir);
         let watcher = watcher(&dir, 19, Duration::ZERO);
         let tx = B256::repeat_byte(0xab);
@@ -538,7 +538,7 @@ mod tests {
     /// a warning) and never stored.
     #[test]
     fn absorb_skips_foreign_lanes() {
-        let dir = std::env::temp_dir().join(format!("mirror-cctp-lanes-{}", std::process::id()));
+        let dir = crate::test_dir("lanes");
         let _ = std::fs::remove_dir_all(&dir);
         let watcher = watcher(&dir, 19, Duration::ZERO);
         assert_eq!(watcher.absorb(&log(B256::repeat_byte(1), 0, 3), U256::ZERO).unwrap(), 0);
@@ -550,7 +550,7 @@ mod tests {
     /// The emulated PENDING window holds the attestation back.
     #[test]
     fn sign_due_respects_the_pending_window() {
-        let dir = std::env::temp_dir().join(format!("mirror-cctp-pending-{}", std::process::id()));
+        let dir = crate::test_dir("pending");
         let _ = std::fs::remove_dir_all(&dir);
         let watcher = watcher(&dir, 19, Duration::from_secs(3600));
         watcher.absorb(&log(B256::repeat_byte(3), 0, 19), U256::ZERO).unwrap();

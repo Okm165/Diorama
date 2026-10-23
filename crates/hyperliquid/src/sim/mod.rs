@@ -205,12 +205,7 @@ impl Sim {
                 let token = feed.token_of(coin).ok_or_else(|| Error::BadRequest {
                     reason: format!("spot coin `{coin}` is not in the venue's token registry yet"),
                 })?;
-                let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
-                    coin: coin.to_string(),
-                    total: Decimal::ZERO,
-                    hold: Decimal::ZERO,
-                    entry_ntl: Decimal::ZERO,
-                });
+                let entry = account::spot_entry(account, token, coin);
                 entry.total = account::add(entry.total, amount, "spot deal")?;
                 entry.total
             }
@@ -230,8 +225,7 @@ impl Sim {
     pub fn set_account(&self, address: Address, seed: AccountSeed) -> Result<()> {
         if seed.is_empty() {
             return Err(Error::BadRequest {
-                reason: "the seed is empty (no marginSummary, assetPositions, spotBalances or userAbstraction)"
-                    .into(),
+                reason: "the patch is empty (no field named)".into(),
             });
         }
         let now = crate::now_ms();
@@ -239,8 +233,22 @@ impl Sim {
         let mut state = self.state.lock()?;
         let account = state.accounts.entry(address).or_default();
         seed.apply_to(account, clock)?;
+        // Remember the patch as the control fixture, merged over the previous
+        // one (hl_mock's rule: a named field replaces, an unnamed one keeps).
+        let merged = seed.merged_with(account.control.take());
+        account.control = Some(merged);
         drop(state);
         self.mark_dirty()
+    }
+
+    /// The account's control fixture (the merged patch), when set.
+    pub fn control_fixture(&self, address: Address) -> Result<Option<AccountSeed>> {
+        Ok(self
+            .state
+            .lock()?
+            .accounts
+            .get(&address)
+            .and_then(|a| a.control.clone()))
     }
 
     // ---- the Core↔EVM bridge's effects -----------------------------------
@@ -253,12 +261,7 @@ impl Sim {
         let mut state = self.state.lock()?;
         let account = state.accounts.entry(address).or_default();
         stamp_funding_baseline(account, clock);
-        let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
-            coin: coin.to_string(),
-            total: Decimal::ZERO,
-            hold: Decimal::ZERO,
-            entry_ntl: Decimal::ZERO,
-        });
+        let entry = account::spot_entry(account, token, coin);
         entry.total = account::add(entry.total, amount, "spot credit")?;
         drop(state);
         self.touch();
@@ -294,12 +297,7 @@ impl Sim {
         let account = state.accounts.entry(address).or_default();
         stamp_funding_baseline(account, clock);
         if to_perp {
-            let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
-                coin: coin.to_string(),
-                total: Decimal::ZERO,
-                hold: Decimal::ZERO,
-                entry_ntl: Decimal::ZERO,
-            });
+            let entry = account::spot_entry(account, token, coin);
             if entry.total < amount {
                 return Ok(false);
             }
@@ -310,12 +308,7 @@ impl Sim {
                 return Ok(false);
             }
             account.perp_balance = account::sub(account.perp_balance, amount, "usd class transfer")?;
-            let entry = account.spot.entry(token).or_insert_with(|| account::SpotEntry {
-                coin: coin.to_string(),
-                total: Decimal::ZERO,
-                hold: Decimal::ZERO,
-                entry_ntl: Decimal::ZERO,
-            });
+            let entry = account::spot_entry(account, token, coin);
             entry.total = account::add(entry.total, amount, "usd class transfer")?;
         }
         drop(state);
@@ -525,38 +518,28 @@ fn stamp_funding_baseline(account: &mut Account, clock: u64) {
     }
 }
 
+/// The sim tests' feed fixture: one market per triple with a funding ctx
+/// (`crate::wire::test_ctx`), fresh at `now_ms = 1`. The account tests share
+/// it through `super::*`.
+#[cfg(test)]
+pub(crate) fn feed_with(marks: &[(&str, &str, &str)]) -> MarketFeed {
+    let feed = MarketFeed::memory(marks.iter().map(|(c, _, _)| c.to_string()).collect());
+    for (coin, mark, oracle) in marks {
+        feed.put_ctx(coin.to_string(), crate::wire::test_ctx(mark, oracle), 1);
+    }
+    feed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::AssetCtx;
-
-    fn feed_with(coin: &str, mark: &str, oracle: &str) -> MarketFeed {
-        let feed = MarketFeed::memory(vec![coin.to_string()]);
-        feed.put_ctx(
-            coin.to_string(),
-            AssetCtx {
-                funding: Decimal::new(125, 7),
-                open_interest: Decimal::ZERO,
-                prev_day_px: Decimal::ZERO,
-                day_ntl_vlm: Decimal::ZERO,
-                premium: None,
-                oracle_px: oracle.parse().unwrap(),
-                mark_px: mark.parse().unwrap(),
-                mid_px: None,
-                impact_pxs: None,
-                day_base_vlm: Decimal::ZERO,
-            },
-            1,
-        );
-        feed
-    }
 
     /// The bridge's effects take the state lock; a re-entrant lock (calling
     /// `clock()` while holding it) deadlocks the whole service. Guarded with
     /// a timeout so a regression fails the test instead of hanging CI.
     #[test]
     fn bridge_effects_do_not_self_deadlock() {
-        let feed = feed_with("USDC", "1", "1");
+        let feed = feed_with(&[("USDC", "1", "1")]);
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -574,7 +557,7 @@ mod tests {
 
     #[test]
     fn deal_creates_and_raises() {
-        let feed = feed_with("USDC", "1", "1");
+        let feed = feed_with(&[("USDC", "1", "1")]);
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         assert!(sim.account(a).unwrap().is_none());
@@ -592,7 +575,7 @@ mod tests {
     /// cleanly (a panic under the state lock poisons every account path).
     #[test]
     fn overflow_is_refused_not_panicked() {
-        let feed = feed_with("USDC", "1", "1");
+        let feed = feed_with(&[("USDC", "1", "1")]);
         feed.put_spot_meta(crate::wire::SpotMeta {
             tokens: vec![crate::wire::SpotToken {
                 name: "USDC".into(),
@@ -664,7 +647,7 @@ mod tests {
     /// lose the deal).
     #[test]
     fn set_account_is_a_patch_not_a_replace() {
-        let feed = feed_with("USDC", "1", "1");
+        let feed = feed_with(&[("USDC", "1", "1")]);
         feed.put_spot_meta(crate::wire::SpotMeta {
             tokens: vec![crate::wire::SpotToken {
                 name: "USDC".into(),
@@ -712,7 +695,7 @@ mod tests {
 
     #[test]
     fn reset_blanks_and_bumps_the_epoch() {
-        let feed = feed_with("USDC", "1", "1");
+        let feed = feed_with(&[("USDC", "1", "1")]);
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         sim.deal(&feed, a, DealClass::Perp, None, Decimal::ONE).unwrap();
@@ -724,7 +707,7 @@ mod tests {
 
     #[test]
     fn advance_jumps_the_clock_and_accrues() {
-        let feed = feed_with("BTC", "100", "100");
+        let feed = feed_with(&[("BTC", "100", "100")]);
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         sim.set_account(

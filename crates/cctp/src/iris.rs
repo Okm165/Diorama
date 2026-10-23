@@ -489,8 +489,7 @@ mod tests {
     /// A scratch Iris state on a fresh per-test temp dir (the tests may run
     /// concurrently).
     fn iris_state(name: &str) -> (Arc<IrisState>, Arc<Store>, std::path::PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("mirror-cctp-iris-{name}-{}", std::process::id()));
+        let dir = crate::test_dir(&format!("iris-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Arc::new(Store::load(dir.join("cctp.json")).unwrap());
         let state = Arc::new(IrisState {

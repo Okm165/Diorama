@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn absent_is_a_fact_faults_and_corruption_are_errors() {
-        let dir = std::env::temp_dir().join(format!("mirror-store-test-{}", std::process::id()));
+        let dir = crate::test_dir("store-test");
         let path = dir.join("state.json");
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(load::<Sample>(&path, "test state").unwrap(), None);

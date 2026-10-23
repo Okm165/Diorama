@@ -185,6 +185,25 @@ impl Store {
         self.with(|state| Ok(Counts::of(state)))
     }
 
+    /// Mutate the message record for `nonce` and persist, one atomic step.
+    /// Absent is `None`, not an error: the watcher is the only creator, and
+    /// every caller here refines a record that already exists.
+    pub fn update_message<T>(
+        &self,
+        nonce: B256,
+        f: impl FnOnce(&mut MessageRecord) -> T,
+    ) -> Result<Option<T>> {
+        let out = self.with(|state| {
+            Ok(state
+                .messages
+                .iter_mut()
+                .find(|m| m.nonce == nonce)
+                .map(f))
+        })?;
+        self.save()?;
+        Ok(out)
+    }
+
     /// Save atomically (temp + rename); missing parent directories are
     /// created. The snapshot is taken under the lock, the write outside it.
     pub fn save(&self) -> Result<()> {
@@ -251,7 +270,7 @@ mod tests {
     /// point with the path named.
     #[test]
     fn absent_is_a_fact_corruption_dies_at_load() {
-        let dir = std::env::temp_dir().join(format!("mirror-cctp-store-{}", std::process::id()));
+        let dir = crate::test_dir("store");
         let path = dir.join("cctp.json");
         let _ = std::fs::remove_dir_all(&dir);
         let store = Store::load(path.clone()).expect("absent loads empty");
