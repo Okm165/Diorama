@@ -17,6 +17,16 @@ pub fn block_txs(block: &Block) -> &[Transaction] {
     block.transactions.as_transactions().unwrap_or(&[])
 }
 
+/// The scan's anchor: the watermark, never below the fork pin (the pin's own
+/// block is the source's state; the devnet's blocks start at pin + 1). After a
+/// re-pin the watermark can sit below the new base — scanning there would read
+/// the *source's* real blocks (anvil forwards pre-pin ranges upstream) and mark
+/// mainnet's writes devnet-owned (measured: 311 real txs scanned as devnet
+/// writes after a re-pin). `0` = no pin (a real chain): the watermark stands.
+pub fn scan_anchor(watermark: u64, pin: u64) -> u64 {
+    watermark.max(pin)
+}
+
 /// Scan the chain's blocks in `(from, to]`, advancing the high-water mark only
 /// past blocks that scanned cleanly. A trace fault stops the walk: re-scanning
 /// is cheap (the marks are idempotent), while advancing past a failed block
@@ -102,4 +112,21 @@ pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result
 pub async fn block_hash(rpc: &Rpc, n: u64) -> Result<Option<String>> {
     let b = rpc.block_by_number_opt(n, false).await?;
     Ok(b.map(|b| format!("0x{:x}", b.header.hash)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_anchor;
+
+    /// The scan anchor never dips below the pin: a rewound or stale watermark
+    /// must not walk the source's blocks (their txs are untraceable — anvil
+    /// answers an unknown tx with -32601 — and pre-pin reads are the source's
+    /// own state, not this devnet's).
+    #[test]
+    fn scan_anchor_clamps_at_the_pin() {
+        assert_eq!(scan_anchor(0, 100), 100, "a fresh watermark starts at the pin");
+        assert_eq!(scan_anchor(90, 100), 100, "a cursor below the pin is lifted");
+        assert_eq!(scan_anchor(120, 100), 120, "a cursor above the pin is kept");
+        assert_eq!(scan_anchor(7, 0), 7, "no pin: the watermark is the anchor");
+    }
 }

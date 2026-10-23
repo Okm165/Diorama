@@ -48,6 +48,13 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let block = ctx.reth.block_by_number(n, false).await?;
 
     let t_head = ctx.anvil_t.block_number().await?;
+    // The base this apply started under: a re-pin racing the (slow) fetch
+    // below would land parent n's writes on the *new* base — watched state
+    // regressed to an old height and a block mined at the wrong height
+    // (measured: the applier then sat silent on the resetting anvil). The
+    // pre-write check below aborts instead; the next pass reconciles (the
+    // cursor sits below the base → the epoch rule).
+    let base = ctx.anvil_t.fork_block().await?;
     // A journal rewind rolled T's values back without moving its head: those
     // blocks must be re-applied even though `t_head >= n`, otherwise the
     // late-completion skip below leaves the rolled-back values stale.
@@ -73,6 +80,9 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     prepend_devnet_txs(ctx, n).await?;
 
     let (writes, source) = fetch_diffs(ctx, n).await?;
+    if ctx.anvil_t.fork_block().await? != base {
+        return Err(Error::ResetDuringApply { n });
+    }
     let total = writes.len();
     let (filtered, stats) = filter_watched(ctx, writes)?;
     let entries = read_before_values(ctx, &filtered, t_head).await?;
@@ -380,9 +390,12 @@ async fn align_context_and_mine(ctx: &Ctx, block: &Block) -> Result<()> {
 }
 
 /// Scan T's blocks from `from` up to the current head (the apply's own devnet
-/// blocks included).
+/// blocks included). Anchored at the pin like every scan: a re-pin mid-apply
+/// must not walk the source's blocks.
 async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
     let now = ctx.anvil_t.block_number().await?;
+    let pin = ctx.anvil_t.fork_block().await?.unwrap_or(0);
+    let from = mirror_devnet::scan::scan_anchor(from, pin);
     let walked = mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, from, now)
         .await?;
     ctx.metrics.add(&ctx.metrics.shadow_scanned_blocks, walked);

@@ -124,12 +124,25 @@ async fn validate_cursor(
     let Some(c) = cursor else {
         return Ok(None);
     };
-    let hash = mirror_devnet::scan::block_hash(rpc, c.block).await?;
-    if hash.as_deref() == Some(c.hash.as_str()) {
+    // The base check comes first: a cursor *below* the chain's fork base is
+    // definitionally stale (a re-pin moved the base past it), and the base
+    // itself proves it — while the hash read would forward a pre-pin read to
+    // the fork source, which the public RPCs rate-limit or time out on
+    // (measured: a re-pin while the engine ran left the rebase unfired until
+    // the next restart). `cursor == base` is the legitimate rest state right
+    // after a rebase.
+    let below_base = below_fork_base(c.block, rpc.fork_block().await?);
+    let valid = if below_base {
+        false
+    } else {
+        mirror_devnet::scan::block_hash(rpc, c.block).await?.as_deref() == Some(c.hash.as_str())
+    };
+    if valid {
         return Ok(Some(c));
     }
     tracing::warn!(
         block = c.block,
+        below_base,
         "cursor not found on chain (reset or re-pin) - rebasing"
     );
     if matches!(chain, Chain::T) {
@@ -155,6 +168,13 @@ async fn validate_cursor(
     }
     ctx.save_state()?;
     Ok(None)
+}
+
+/// Is the cursor below the chain's fork base? A re-pin moves the base past the
+/// cursor, so the cursor points at blocks the current chain never carried (the
+/// source's own, at best) — a stale derivation by position, no read needed.
+fn below_fork_base(cursor_block: u64, base: Option<u64>) -> bool {
+    base.is_some_and(|base| cursor_block < base)
 }
 
 /// T was re-forked (its OOM restart or a re-pin). Which epoch is this?
@@ -548,6 +568,16 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
             ctx.shadow_scanned_upto.store(t_head, Ordering::Relaxed);
             continue;
         }
+        // Never scan at or below T's fork base: after a re-pin those blocks
+        // are the source's own (anvil forwards pre-pin ranges upstream), and
+        // marking their writes devnet-owned would shadow mainnet's real state
+        // (measured: 311 real txs scanned as devnet writes right after a
+        // re-pin). The venue driver clamps its scan the same way.
+        let pin = match ctx.anvil_t.fork_block().await {
+            Ok(pin) => pin.unwrap_or(0),
+            Err(_) => continue,
+        };
+        let last = mirror_devnet::scan::scan_anchor(last, pin);
         match mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, last, t_head)
             .await
         {
@@ -588,4 +618,23 @@ pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::Probe
         "on-demand probes complete"
     );
     Ok(probes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::below_fork_base;
+
+    /// The cursor-below-base rule: a re-pin moves the base past the cursor,
+    /// which makes the cursor a stale derivation by position — no hash read
+    /// (the read would forward a pre-pin request to the fork source, where the
+    /// public RPCs time out; measured: a re-pin while the engine ran left the
+    /// rebase unfired). `cursor == base` is the rest state right after a
+    /// rebase and must not fire.
+    #[test]
+    fn below_fork_base_is_strict() {
+        assert!(below_fork_base(99, Some(100)), "a re-pin moved the base past the cursor");
+        assert!(!below_fork_base(100, Some(100)), "cursor at the base: the rest state");
+        assert!(!below_fork_base(101, Some(100)), "cursor above the base");
+        assert!(!below_fork_base(99, None), "a real chain has no base");
+    }
 }

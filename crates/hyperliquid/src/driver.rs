@@ -130,7 +130,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // tracing one fails — anvil answers an unknown tx with `-32601 Method not
     // found` (measured), which would stall the watermark below the pin and
     // livelock the driver after a rewind or a re-pin.
-    last = scan_anchor(last, ctx.pin.load(Ordering::Relaxed));
+    last = scan::scan_anchor(last, ctx.pin.load(Ordering::Relaxed));
     ctx.shadow_scanned_upto.store(last, Ordering::Relaxed);
     if head > last {
         let walked = scan::scan_range(&ctx.v, &ctx.shadow, &ctx.shadow_scanned_upto, last, head).await?;
@@ -162,12 +162,6 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
         }
     }
     Ok(Pass::Steady)
-}
-
-/// The shadow scan's anchor: the watermark, never below the fork pin (the
-/// pin's own block is the source's state; the devnet's blocks start at pin+1).
-fn scan_anchor(watermark: u64, pin: u64) -> u64 {
-    watermark.max(pin)
 }
 
 /// V's block production: T has the applier (one block per applied parent
@@ -417,20 +411,4 @@ pub async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> 
         "at-pin probes complete"
     );
     Ok(probes)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::scan_anchor;
-
-    /// The scan anchor never dips below the pin: a rewound or stale cursor
-    /// must not walk the source's blocks (their txs are untraceable — anvil
-    /// answers an unknown tx with -32601 — the livelock this clamp fixes).
-    #[test]
-    fn scan_anchor_clamps_at_the_pin() {
-        assert_eq!(scan_anchor(0, 100), 100, "a fresh watermark starts at the pin");
-        assert_eq!(scan_anchor(90, 100), 100, "a cursor below the pin is lifted");
-        assert_eq!(scan_anchor(120, 100), 120, "a cursor above the pin is kept");
-        assert_eq!(scan_anchor(7, 0), 7, "no pin: the watermark is the anchor");
-    }
 }

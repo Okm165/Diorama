@@ -86,6 +86,12 @@ impl AdminSurface<'_> {
             self.scanned_upto.store(head, Ordering::Relaxed);
             return Ok(());
         }
+        // Anchored at the pin: after a re-pin the watermark can sit below the
+        // base, and walking there would read the source's own blocks (anvil
+        // forwards pre-pin ranges upstream) and mark mainnet's writes as the
+        // devnet's.
+        let pin = self.target.fork_block().await?.unwrap_or(0);
+        let from = crate::scan::scan_anchor(from, pin);
         let walked =
             crate::scan::scan_range(self.target, self.shadow, self.scanned_upto, from, head).await?;
         self.metrics.add(&self.metrics.shadow_scanned_blocks, walked);

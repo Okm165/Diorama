@@ -135,6 +135,13 @@ pub enum Error {
     #[error("T head {t_head} is more than one block behind the parent cursor {n}")]
     ApplierBehind { t_head: u64, n: u64 },
 
+    /// T was re-forked while this block was being applied (a re-pin raced the
+    /// fetch): applying would land parent n's writes on the new base. The next
+    /// pass reconciles — the cursor sits below the base, so the epoch rule
+    /// clears the stale writes and the applier resumes from the new base.
+    #[error("T was re-pinned during the apply of block {n}; the next pass reconciles")]
+    ResetDuringApply { n: u64 },
+
     // ---- top-up sync -----------------------------------------------------
     #[error(
         "top-up gap: reth head {el_head}, next CL payload {number} at slot {slot} \

@@ -111,27 +111,23 @@ impl Watcher {
     /// relayed) and the scan restarts from the base.
     pub async fn scan(&self) -> Result<usize> {
         let head = self.chain.rpc.block_number().await?;
-        let floor = self
-            .chain
-            .rpc
-            .fork_block()
-            .await?
-            .map(|pin| pin.saturating_add(1));
+        let pin = self.chain.rpc.fork_block().await?;
+        let floor = pin.map(|pin| pin.saturating_add(1));
         let last = self.scanned_upto.load(std::sync::atomic::Ordering::Relaxed);
 
-        let cursor_above_base = last > 0 && (last > head || floor.is_some_and(|floor| floor > last));
-        if cursor_above_base {
+        let cursor_off_base = cursor_off_base(last, head, pin);
+        if cursor_off_base {
             tracing::warn!(
                 chain = self.chain.name,
                 head,
                 cursor = last,
-                pin = ?floor.map(|floor| floor - 1),
+                pin = ?pin,
                 "scan cursor is above the chain's base (re-pin or rewind); rescanning and parking stale records"
             );
         }
         // Also on boot: a restart after a re-pin inherits records from a
         // world that no longer exists — reconcile them, don't trust them.
-        if cursor_above_base || last == 0 {
+        if cursor_off_base || last == 0 {
             self.park_vanished().await?;
         }
         let base = if last > 0 && last > head {
@@ -379,11 +375,37 @@ impl Watcher {
     }
 }
 
+/// The scan cursor's validity window: `pin <= cursor <= head` (`0` = never
+/// scanned; the boot path handles it). A cursor strictly below the base is a
+/// forward re-pin, one above the head is a rewind — both park stale records.
+/// `cursor == pin` is the legitimate rest state right after a re-pin: the new
+/// base has no scanned blocks yet (the scan starts at `pin + 1`), so it must
+/// not fire (measured: treating it as off-base warned and re-parked every
+/// pass while the fresh chain sat at its base).
+fn cursor_off_base(cursor: u64, head: u64, pin: Option<u64>) -> bool {
+    cursor > 0 && (cursor > head || pin.is_some_and(|pin| cursor < pin))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transfer::tests_support::sample_raw_message;
     use alloy_primitives::B256;
+
+    /// The cursor's validity window: a re-pin to a fresh base leaves the
+    /// cursor *at* the pin until the first block mines; treating that as
+    /// off-base warned and re-parked every pass (measured on the scratch
+    /// stack after the sim's epoch drill).
+    #[test]
+    fn cursor_off_base_keeps_the_pin_as_the_rest_state() {
+        assert!(!cursor_off_base(0, 100, Some(100)), "never scanned: the boot path handles it");
+        assert!(!cursor_off_base(100, 100, Some(100)), "cursor at the pin: the rest state");
+        assert!(!cursor_off_base(101, 101, Some(100)), "cursor past the pin");
+        assert!(!cursor_off_base(150, 200, None), "a real chain has no pin");
+        assert!(cursor_off_base(50, 100, Some(100)), "cursor below the base: a forward re-pin");
+        assert!(cursor_off_base(150, 100, Some(100)), "cursor above the head: a rewind");
+        assert!(cursor_off_base(150, 100, None), "a rewind on a real chain still parks");
+    }
 
     fn watcher(dir: &std::path::Path, destination_domain: u32, finality_delay: Duration) -> Watcher {
         Watcher {
