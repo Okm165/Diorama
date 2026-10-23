@@ -490,7 +490,13 @@ impl Sim {
     /// book has crossed fill at their own price (they are the maker; the live
     /// levels they take are consumed — the impact lane).
     fn run_resting(&self, feed: &MarketFeed, now_ms: u64) -> Result<()> {
-        // (a) scheduleCancel: the dead-man's switch cancels everything due.
+        self.fire_scheduled_cancels(now_ms)?;
+        self.fire_triggers(feed)?;
+        self.passive_fills(feed, now_ms)
+    }
+
+    /// (a) `scheduleCancel`: the dead-man's switch cancels everything due.
+    fn fire_scheduled_cancels(&self, now_ms: u64) -> Result<()> {
         let due: Vec<Address> = {
             let st = self.state.lock()?;
             st.scheduled_cancels
@@ -511,7 +517,13 @@ impl Sim {
             }
             tracing::info!(account = %account, canceled = n, "scheduled cancel fired (dead-man's switch)");
         }
-        // (b) triggers: fire when the mark crosses the trigger price.
+        Ok(())
+    }
+
+    /// (b) Triggers: fire when the mark crosses the trigger price; the
+    /// trigger leaves the book first (a failed execution cancels it, as the
+    /// venue's does — never a silent re-arm).
+    fn fire_triggers(&self, feed: &MarketFeed) -> Result<()> {
         for r in self.resting_orders(None)? {
             let Some(t) = r.trigger else { continue };
             let Some((mark, _)) = feed.required_prices(&r.coin) else {
@@ -526,8 +538,6 @@ impl Sim {
             if !fires {
                 continue;
             }
-            // The trigger leaves the book first: a failed execution cancels
-            // it, as the venue's does (never a silent re-arm).
             let _ = self.cancel(r.account, &r.coin, r.oid);
             let order = crate::sim::order::Order {
                 coin: r.coin.clone(),
@@ -542,16 +552,19 @@ impl Sim {
             match self.place(feed, r.account, &order) {
                 Ok(placed) => {
                     self.metrics.triggers_fired_total.fetch_add(1, Ordering::Relaxed);
-                    tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid,
-                        filled = placed.fill.as_ref().map(|f| f.total_sz.to_string()).unwrap_or_default(),
-                        "trigger fired");
+                    tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid, filled = placed.fill.as_ref().map(|f| f.total_sz.to_string()).unwrap_or_default(), "trigger fired");
                 }
                 Err(e) => {
-                    tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "trigger execution refused; the trigger is canceled")
+                    tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "trigger execution refused; the trigger is canceled");
                 }
             }
         }
-        // (c) passive fills: a resting order the live book has crossed.
+        Ok(())
+    }
+
+    /// (c) Passive fills: a resting order the live book has crossed fills at
+    /// its own price (the maker side), consuming the crossed live levels.
+    fn passive_fills(&self, feed: &MarketFeed, now_ms: u64) -> Result<()> {
         for r in self.resting_orders(None)? {
             if r.trigger.is_some() {
                 continue;
@@ -571,34 +584,46 @@ impl Sim {
             if take <= Decimal::ZERO {
                 continue;
             }
-            let leverage = self.leverage_for(r.account, &r.coin, feed.meta().as_ref())?;
-            let notional = crate::sim::account::mul(take, r.px, "maker notional")?;
-            let facts = crate::sim::account::FillFacts {
-                coin: r.coin.clone(),
-                is_buy: r.is_buy,
-                size: take,
-                px: r.px,
-                leverage,
-                reduce_only: r.reduce_only,
-                fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
-            };
-            let clock = self.clock(now_ms)?;
-            if let Err(e) = self.with_account(r.account, |account| {
-                crate::sim::account::accrue_funding(account, feed, clock)?;
-                crate::sim::account::apply_fill(account, &facts)
-            }) {
+            if let Err(e) = self.passive_fill(&r, take, best.px, feed) {
                 tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "passive fill refused");
-                continue;
             }
-            feed.consume(crate::feed::Consumption {
-                coin: r.coin.clone(),
-                side: opposite as u8,
-                price: best.px,
-                size: take,
-            })?;
-            self.fill_resting_pub(r.oid, take, r.px)?;
-            tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid, sz = %take, px = %r.px, "resting order filled passively");
         }
+        Ok(())
+    }
+
+    /// One passive fill: the maker's account update (their price, the maker
+    /// fee) plus the live level's consumption and the resting size's reduce.
+    fn passive_fill(
+        &self,
+        r: &crate::sim::order::RestingOrder,
+        take: Decimal,
+        level_px: Decimal,
+        feed: &MarketFeed,
+    ) -> Result<()> {
+        let leverage = self.leverage_for(r.account, &r.coin, feed.meta().as_ref())?;
+        let notional = crate::sim::account::mul(take, r.px, "maker notional")?;
+        let facts = crate::sim::account::FillFacts {
+            coin: r.coin.clone(),
+            is_buy: r.is_buy,
+            size: take,
+            px: r.px,
+            leverage,
+            reduce_only: r.reduce_only,
+            fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
+        };
+        let clock = self.clock(crate::now_ms())?;
+        self.with_account(r.account, |account| {
+            crate::sim::account::accrue_funding(account, feed, clock)?;
+            crate::sim::account::apply_fill(account, &facts)
+        })?;
+        feed.consume(crate::feed::Consumption {
+            coin: r.coin.clone(),
+            side: usize::from(r.is_buy) as u8,
+            price: level_px,
+            size: take,
+        })?;
+        self.fill_resting_pub(r.oid, take, r.px)?;
+        tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid, sz = %take, px = %r.px, "resting order filled passively");
         Ok(())
     }
 

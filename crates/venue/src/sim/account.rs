@@ -51,6 +51,11 @@ pub(crate) struct Account {
     /// API wallets the CoreWriter registered for this account.
     #[serde(default)]
     pub agents: Vec<AgentWallet>,
+    /// The per-coin leverage setting (`updateLeverage`): applied to a
+    /// position when it opens, and to an open position immediately — the
+    /// venue's own behavior (the setting outlives the position).
+    #[serde(default)]
+    pub leverage_settings: BTreeMap<String, LeverageSetting>,
     /// The control fixture: the merged `/control/state` patch, when the
     /// harness has set one. The control surface serves it (what the scenario
     /// set is what it reads back — daloc's `resolved_equity` assertions);
@@ -61,6 +66,15 @@ pub(crate) struct Account {
 
 fn default_mode() -> UserAbstraction {
     UserAbstraction::Default
+}
+
+/// One `updateLeverage` setting (the venue stores cross/isolated + value; it
+/// outlives the position, exactly as the venue's does).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LeverageSetting {
+    pub is_cross: bool,
+    pub leverage: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -696,7 +710,7 @@ pub(crate) fn liquidation_px(p: &Position, mark: Decimal, maintenance_rate: Deci
 /// initial margin follows `|szi|·entry/leverage`. A flip (through zero) opens
 /// the remainder at the fill price.
 /// The sign of a decimal (−1/0/1); `rust_decimal` has no `signum`.
-fn sign(d: Decimal) -> i8 {
+pub(crate) fn sign(d: Decimal) -> i8 {
     if d > Decimal::ZERO {
         1
     } else if d < Decimal::ZERO {

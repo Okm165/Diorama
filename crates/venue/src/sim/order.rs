@@ -101,6 +101,38 @@ pub(crate) enum Tpsl {
     Sl,
 }
 
+/// Move a finished order into the bounded terminal history (`orderStatus`
+/// answers for filled and canceled orders, as the venue's does).
+fn terminalize(
+    terminal: &mut std::collections::BTreeMap<u64, TerminalOrder>,
+    order: RestingOrder,
+    status: TerminalStatus,
+    filled_sz: Decimal,
+) {
+    let avg = if order.filled_sz.is_zero() {
+        Decimal::ZERO
+    } else {
+        order.filled_ntl / order.filled_sz
+    };
+    let oid = order.oid;
+    terminal.insert(
+        oid,
+        TerminalOrder {
+            order,
+            status,
+            filled_sz,
+            avg_px: avg,
+            status_ms: crate::now_ms(),
+        },
+    );
+    while terminal.len() > 1024 {
+        let Some(first) = terminal.keys().next().copied() else {
+            break;
+        };
+        terminal.remove(&first);
+    }
+}
+
 /// The venue's base fee tier (docs, fees page: 4.5 bps taker, 1.5 bps maker).
 /// Volume-based tier discounts are not modeled — the sim serves the base tier,
 /// as a flat account would see.
@@ -195,6 +227,10 @@ impl Sim {
     pub(crate) fn place(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<Placed> {
         let meta = feed.meta();
         validate_order(feed, meta.as_ref(), req)?;
+        if let Some(reason) = self.oi_cap_refusal(feed, address, req)? {
+            tracing::warn!(coin = %req.coin, "order refused: open interest cap");
+            return Err(Error::bad_request(reason));
+        }
         // A trigger arms instead of walking.
         if let Some(trigger) = req.trigger {
             if trigger.trigger_px <= Decimal::ZERO {
@@ -213,22 +249,7 @@ impl Sim {
         }
         // Post-only: a crossing order is canceled instead of matching (docs).
         if req.tif == Tif::Alo {
-            let Some(px) = req.limit_px else {
-                return Err(Error::bad_request(
-                    "Post only order needs a limit price (a market order cannot rest).",
-                ));
-            };
-            let resting = self.resting_orders(Some(address))?;
-            if crosses(feed, req, &resting) {
-                let bbo = bbo(feed, &req.coin, req.is_buy)
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| "none".into());
-                tracing::warn!(coin = %req.coin, bbo = %bbo, "post-only refused");
-                return Err(Error::bad_request(format!(
-                    "Post only order would have immediately matched, bbo was {bbo}."
-                )));
-            }
-            let oid = self.rest_order(address, req, px, req.size)?;
+            let oid = self.place_alo(feed, address, req)?;
             return Ok(Placed {
                 fill: None,
                 resting: Some(oid),
@@ -257,6 +278,27 @@ impl Sim {
         Ok(Placed { fill, resting })
     }
 
+    /// A post-only placement: refuses with the venue's own string (and the
+    /// bbo) when it would cross, else rests.
+    fn place_alo(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<u64> {
+        let Some(px) = req.limit_px else {
+            return Err(Error::bad_request(
+                "Post only order needs a limit price (a market order cannot rest).",
+            ));
+        };
+        let resting = self.resting_orders(Some(address))?;
+        if crosses(feed, req, &resting) {
+            let bbo = bbo(feed, &req.coin, req.is_buy)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".into());
+            tracing::warn!(coin = %req.coin, bbo = %bbo, "post-only refused");
+            return Err(Error::bad_request(format!(
+                "Post only order would have immediately matched, bbo was {bbo}."
+            )));
+        }
+        self.rest_order(address, req, px, req.size)
+    }
+
     /// `order`: the immediate take — fill `req` for `address` against the
     /// served book plus the devnet's resting orders. The taker pays the taker
     /// fee; each maker's account is settled at their own price with the maker
@@ -277,7 +319,7 @@ impl Sim {
             fee: super::account::mul(notional, taker_fee(), "taker fee")?,
         };
         self.land_fill(feed, address, &facts, meta.as_ref())?;
-        let consumed = self.settle_legs(feed, address, req, &legs, meta.as_ref())?;
+        let consumed = self.settle_legs(feed, req, &legs, meta.as_ref())?;
         let oid = self.next_oid()?;
         self.metrics
             .orders_filled_total
@@ -300,7 +342,6 @@ impl Sim {
     fn settle_legs(
         &self,
         feed: &MarketFeed,
-        taker: Address,
         req: &Order,
         legs: &[Leg],
         meta: Option<&crate::wire::Meta>,
@@ -330,7 +371,7 @@ impl Sim {
                         super::account::apply_fill(account, &facts)
                     })?;
                     self.fill_resting(*oid, *sz, *px)?;
-                    tracing::info!(maker = %maker, taker = %taker, oid, "resting order filled");
+                    tracing::info!(maker = %maker, oid, "resting order filled");
                 }
             }
         }
@@ -354,26 +395,10 @@ impl Sim {
         if order.sz > Decimal::ZERO {
             return Ok(());
         }
-        let done = st.resting.remove(&oid).expect("just read");
-        let avg = if done.filled_sz.is_zero() {
-            Decimal::ZERO
-        } else {
-            done.filled_ntl / done.filled_sz
+        let Some(done) = st.resting.remove(&oid) else {
+            return Ok(());
         };
-        st.terminal.insert(
-            oid,
-            TerminalOrder {
-                order: done,
-                status: TerminalStatus::Filled,
-                filled_sz: sz,
-                avg_px: avg,
-                status_ms: crate::now_ms(),
-        },
-        );
-        while st.terminal.len() > 1024 {
-            let first = *st.terminal.keys().next().expect("nonempty");
-            st.terminal.remove(&first);
-        }
+        terminalize(&mut st.terminal, done, TerminalStatus::Filled, sz);
         Ok(())
     }
 
@@ -413,6 +438,69 @@ impl Sim {
             .get(&oid)
             .map(|r| r.reduce_only)
             .unwrap_or(false))
+    }
+
+    /// `updateLeverage`: the account's per-coin setting (docs: "subject to
+    /// leverage constraints on that coin") — applied to an open position
+    /// immediately, and kept for the next one.
+    pub(crate) fn set_leverage(
+        &self,
+        address: Address,
+        coin: &str,
+        is_cross: bool,
+        leverage: u32,
+    ) -> Result<()> {
+        if leverage == 0 {
+            return Err(Error::bad_request("leverage must be at least 1"));
+        }
+        let max = self
+            .state
+            .lock()?
+            .accounts
+            .get(&address)
+            .and_then(|a| a.leverage_settings.get(coin).map(|s| s.leverage))
+            .unwrap_or(0);
+        let _ = max;
+        self.with_account(address, |account| {
+            account.leverage_settings.insert(
+                coin.to_string(),
+                super::account::LeverageSetting { is_cross, leverage },
+            );
+            if let Some(p) = account.positions.get_mut(coin) {
+                p.leverage = if is_cross {
+                    crate::wire::LeverageType::Cross
+                } else {
+                    crate::wire::LeverageType::Isolated
+                };
+                p.leverage_value = leverage;
+                p.margin_used = super::account::mul(p.szi.abs(), p.entry_px, "margin notional")?
+                    / Decimal::from(leverage);
+            }
+            Ok(())
+        })
+    }
+
+    /// The venue's OI-cap refusal: a coin at its cap accepts only orders that
+    /// reduce the position (plan §5's own string).
+    fn oi_cap_refusal(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        req: &Order,
+    ) -> Result<Option<&'static str>> {
+        if !feed.open_interest_caps().iter().any(|c| c == &req.coin) {
+            return Ok(None);
+        }
+        let old = self
+            .account(address)?
+            .and_then(|a| a.positions.get(&req.coin).map(|p| p.szi))
+            .unwrap_or(Decimal::ZERO);
+        let signed = if req.is_buy { req.size } else { -req.size };
+        let increases =
+            old.is_zero() || super::account::sign(old) == super::account::sign(signed);
+        Ok(increases.then_some(
+            "Order would increase open interest while open interest is capped",
+        ))
     }
 
     /// The tick's passive fill (`fill_resting`, one implementation).
@@ -465,7 +553,9 @@ impl Sim {
         let mut st = self.state.lock()?;
         match st.resting.get(&oid) {
             Some(r) if r.account == account && r.coin == coin => {
-                let done = st.resting.remove(&oid).expect("just read");
+                let Some(done) = st.resting.remove(&oid) else {
+                    return Ok(());
+                };
                 st.terminal.insert(
                     oid,
                     TerminalOrder {
@@ -638,6 +728,15 @@ impl Sim {
             .and_then(|a| a.positions.get(coin))
         {
             return Ok(p.leverage_value);
+        }
+        if let Some(s) = self
+            .state
+            .lock()?
+            .accounts
+            .get(&address)
+            .and_then(|a| a.leverage_settings.get(coin))
+        {
+            return Ok(s.leverage.max(1));
         }
         Ok(meta
             .and_then(|m| m.universe.iter().find(|a| a.name == coin))
@@ -819,11 +918,15 @@ fn significant_digits(px: Decimal) -> u32 {
 /// Walk a book in price order: asks ascending for a buy, bids descending for
 /// a sell; the limit stops the walk. Returns (filled size, size-weighted
 /// average, the consumed levels).
-fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Leg>, Decimal, Decimal)> {
+/// The merged opposite side, price-ordered: (px, is_maker, oid, maker, sz).
+/// At the same price the devnet's own resting orders go first (they are
+/// time-stamped; the live level's age is unknowable).
+fn merge_candidates(
+    book: &L2Book,
+    req: &Order,
+    resting: &[RestingOrder],
+) -> Vec<(Decimal, bool, u64, Address, Decimal)> {
     let side = usize::from(req.is_buy);
-    // The merged opposite side: (px, is_maker, oid, maker, sz). At the same
-    // price the devnet's own resting orders go first (they are time-stamped;
-    // the live level's age is unknowable).
     let mut candidates: Vec<(Decimal, bool, u64, Address, Decimal)> = book.levels[side]
         .iter()
         .map(|l| (l.px, false, 0u64, Address::ZERO, l.sz))
@@ -838,6 +941,12 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Leg
         let by_px = if req.is_buy { a.0.cmp(&b.0) } else { b.0.cmp(&a.0) };
         by_px.then_with(|| b.1.cmp(&a.1))
     });
+    candidates
+}
+
+fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Leg>, Decimal, Decimal)> {
+    let side = usize::from(req.is_buy);
+    let candidates = merge_candidates(book, req, resting);
     let mut remaining = req.size;
     let mut notional = Decimal::ZERO;
     let mut legs = Vec::new();

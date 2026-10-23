@@ -95,7 +95,24 @@ impl Poller {
         self.spot_meta().await;
         self.books().await;
         self.mids().await;
+        self.oi_caps().await;
         self.feed.publish_metrics(crate::now_ms());
+    }
+
+    /// `perpsAtOpenInterestCap`: the venue's cap list (light weight; the
+    /// lane refuses OI-increasing orders on a capped coin).
+    async fn oi_caps(&self) {
+        if !self.gated(crate::feed::budget::weight::LIGHT) {
+            return;
+        }
+        match self
+            .api
+            .info::<Vec<String>>(&InfoRequest::PerpsAtOpenInterestCap { dex: None })
+            .await
+        {
+            Ok(caps) => self.feed.put_oi_caps(caps),
+            Err(e) => self.rest_fault("perpsAtOpenInterestCap", &e),
+        }
     }
 
     async fn spot_meta(&self) {

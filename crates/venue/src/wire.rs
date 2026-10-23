@@ -25,6 +25,15 @@ use std::collections::BTreeMap;
 
 /// One `POST /info` request. Unknown types parse to [`InfoRequest::Unrouted`]
 /// (hl_mock answered them as unrouted; the handler keeps that contract).
+/// The docs' `oid` union for `orderStatus`: `uint64 or string` (a 16-byte hex
+/// client order id).
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub(crate) enum OidOrCloid {
+    Oid(u64),
+    Cloid(alloy_primitives::B128),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
 #[non_exhaustive]
@@ -42,6 +51,23 @@ pub(crate) enum InfoRequest {
     #[serde(rename = "openOrders")]
     OpenOrders {
         user: Address,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dex: Option<String>,
+    },
+    #[serde(rename = "frontendOpenOrders")]
+    FrontendOpenOrders {
+        user: Address,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dex: Option<String>,
+    },
+    #[serde(rename = "orderStatus")]
+    OrderStatus {
+        user: Address,
+        /// The docs' union: a u64 order id or a 16-byte hex cloid.
+        oid: OidOrCloid,
+    },
+    #[serde(rename = "perpsAtOpenInterestCap")]
+    PerpsAtOpenInterestCap {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dex: Option<String>,
     },
@@ -95,6 +121,9 @@ impl InfoRequest {
             InfoRequest::Meta { .. } => "meta",
             InfoRequest::MetaAndAssetCtxs { .. } => "metaAndAssetCtxs",
             InfoRequest::PerpDexs => "perpDexs",
+            InfoRequest::FrontendOpenOrders { .. } => "frontendOpenOrders",
+            InfoRequest::OrderStatus { .. } => "orderStatus",
+            InfoRequest::PerpsAtOpenInterestCap { .. } => "perpsAtOpenInterestCap",
             InfoRequest::L2Book { .. } => "l2Book",
             InfoRequest::MarginTable { .. } => "marginTable",
             InfoRequest::ActiveAssetData { .. } => "activeAssetData",
@@ -238,46 +267,6 @@ pub(crate) struct SpotBalance {
     pub entry_ntl: Decimal,
 }
 
-/// One open order. The sim has no order machinery yet (Phase 2 matching), so
-/// it serves the empty list; the type is complete for the day it does.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Order {
-    pub coin: String,
-    pub oid: u64,
-    pub side: Side,
-    pub sz: Decimal,
-    pub limit_px: Decimal,
-    pub timestamp: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trigger_condition: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_trigger: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub trigger_px: Option<Decimal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_position_tpsl: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reduce_only: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub order_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub orig_sz: Option<Decimal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tif: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cloid: Option<String>,
-}
-
-/// `A` = ask/sell, `B` = bid/buy.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[non_exhaustive]
-pub(crate) enum Side {
-    #[serde(rename = "A")]
-    Ask,
-    #[serde(rename = "B")]
-    Bid,
-}
 
 /// `meta`: the perp universe + margin tables. daloc's operator reads
 /// `universe[].szDecimals` for the wire `sz` of unwind orders.

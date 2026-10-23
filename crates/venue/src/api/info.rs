@@ -56,21 +56,128 @@ pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoRespo
 /// analogue), and the acting account is read from `user`.
 pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
     let req: ExchangeBody = serde_json::from_slice(&body).map_err(|source| Error::bad_request(format!("invalid exchange request: {source}"),))?;
-    // The noop action (docs): no side effects, the venue's no-data success.
+    // The noop action (docs): no side effects, the venue's no-data success —
+    // but it still consumes its nonce, as the venue's does.
     if matches!(req.action, ExchangeAction::Noop) {
+        if let (Some(user), Some(nonce)) = (req.user, req.nonce) {
+            if let Err(e) = state.sim.use_nonce(user, nonce, crate::now_ms()) {
+                return Ok(err_envelope(e.to_string()).into_response());
+            }
+        }
         return Ok(noop_response(&req));
     }
-    let Some(user) = req.user else {
-        return Ok(err_envelope(
-            "venue-sim: an order must name the acting account in `user` — the devnet has no \
-             keys to derive it from the signature (plan §17). See docs/INTEGRATION.md."
-                .to_string(),
-        )
-        .into_response());
+    let user = match acting_user(&state, &req) {
+        Ok(user) => user,
+        Err(response) => return Ok(*response),
     };
-    let (orders, grouping) = match order_parts(&body, &req.action) {
+    Ok(dispatch(&state, user, &body, &req))
+}
+
+/// The action dispatch (its own fn: the handler is the parse + the preamble).
+fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBody) -> Response {
+    match &req.action {
+        ExchangeAction::Order { .. } => order_action(state, user, body, req),
+        ExchangeAction::Cancel { cancels, fast } => match flag_omitted("f", *fast) {
+            Ok(()) => cancel_action(state, user, cancels),
+            Err(reason) => err_envelope(reason).into_response(),
+        },
+        ExchangeAction::CancelByCloid { cancels, fast } => match flag_omitted("f", *fast) {
+            Ok(()) => cancel_by_cloid_action(state, user, cancels),
+            Err(reason) => err_envelope(reason).into_response(),
+        },
+        ExchangeAction::Modify {
+            oid,
+            order,
+            always_place,
+        } => modify_action(state, user, oid, order, always_place.unwrap_or(false)),
+        ExchangeAction::BatchModify {
+            modifies,
+            always_place,
+        } => {
+            let always = always_place.unwrap_or(false);
+            for m in modifies {
+                if let Err(e) = modify_one(state, user, &m.oid, &m.order, always) {
+                    return err_envelope(e.to_string()).into_response();
+                }
+            }
+            default_ok()
+        }
+        ExchangeAction::UpdateLeverage {
+            asset,
+            is_cross,
+            leverage,
+        } => match coin_of(state.feed.meta().as_ref(), *asset) {
+            Some(coin) => match state.sim.set_leverage(user, &coin, *is_cross, *leverage) {
+                Ok(()) => default_ok(),
+                Err(e) => err_envelope(e.to_string()).into_response(),
+            },
+            None => err_envelope(format!("unknown asset index {asset}")).into_response(),
+        },
+        ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(user, *time) {
+            Ok(_) => default_ok(),
+            Err(e) => err_envelope(e.to_string()).into_response(),
+        },
+        ExchangeAction::Noop => noop_response(req),
+        ExchangeAction::Unmodeled => err_envelope(unmodeled_reason(body)).into_response(),
+    }
+}
+
+/// The acting account + the venue's nonce rule (plan §5: the 100 highest per
+/// signer, window (T − 2 d, T + 1 d), no reuse). `Err` carries the ready
+/// err-envelope response.
+fn acting_user(
+    state: &Arc<ApiState>,
+    req: &ExchangeBody,
+) -> std::result::Result<Address, Box<Response>> {
+    let Some(user) = req.user else {
+        return Err(Box::new(
+            err_envelope(
+                "venue-sim: an action must name the acting account in `user` — the devnet has \
+                 no keys to derive it from the signature (plan §17). See docs/INTEGRATION.md."
+                    .to_string(),
+            )
+            .into_response(),
+        ));
+    };
+    if let Some(nonce) = req.nonce {
+        if let Err(e) = state.sim.use_nonce(user, nonce, crate::now_ms()) {
+            return Err(Box::new(err_envelope(e.to_string()).into_response()));
+        }
+    }
+    Ok(user)
+}
+
+/// The docs' `isCross` defaults to true when omitted.
+fn default_true() -> bool {
+    true
+}
+
+/// The docs' "must be skipped if false" rule for the `f`/`a` flags: a present
+/// `false` is rejected at the hash, so it is a named refusal here.
+fn flag_omitted(name: &str, flag: Option<bool>) -> Result<(), String> {
+    match flag {
+        Some(false) => Err(format!(
+            "venue-sim: the `{name}` flag must be omitted when false (docs: actions hashed \
+             with {name}: false are rejected). See docs/INTEGRATION.md."
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The venue's no-data success, built once.
+fn default_ok() -> Response {
+    Json(ExchangeOk {
+        status: "ok",
+        response: DefaultBody { r#type: "default" },
+    })
+    .into_response()
+}
+
+/// The `order` action (its own fn so the dispatcher stays small).
+fn order_action(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBody) -> Response {
+    let (orders, grouping) = match order_parts(body, &req.action) {
         Ok(parts) => parts,
-        Err(reason) => return Ok(err_envelope(reason).into_response()),
+        Err(reason) => return err_envelope(reason).into_response(),
     };
     tracing::info!(
         user = %user,
@@ -86,16 +193,146 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
     let meta = state.feed.meta();
     let statuses = orders
         .iter()
-        .map(|action| fill_status(&state, user, meta.as_ref(), action))
+        .map(|action| fill_status(state, user, meta.as_ref(), action))
         .collect();
-    Ok(Json(ExchangeOk {
+    Json(ExchangeOk {
         status: "ok",
         response: OrderResponseBody {
             r#type: "order",
             data: OrderData { statuses },
         },
     })
-    .into_response())
+    .into_response()
+}
+
+/// The unmodeled tag's refusal, naming the tag from the raw body.
+fn unmodeled_reason(body: &Bytes) -> String {
+    let tag = serde_json::from_slice::<ActionTag>(body)
+        .map(|t| t.action.r#type)
+        .unwrap_or_else(|_| "unknown".into());
+    format!(
+        "venue-sim: the `{tag}` action is not modeled (plan §4.5/§5, Phase 2). See \
+         docs/INTEGRATION.md."
+    )
+}
+
+/// The asset index → coin map (one home; `None` = unknown index).
+fn coin_of(meta: Option<&crate::wire::Meta>, asset: u32) -> Option<String> {
+    meta?.universe.get(asset as usize).map(|a| a.name.clone())
+}
+
+/// `cancel`: per-entry statuses in the venue's own shape.
+fn cancel_action(state: &ApiState, user: Address, cancels: &[CancelAction]) -> Response {
+    let meta = state.feed.meta();
+    let statuses = cancels
+        .iter()
+        .map(|c| match coin_of(meta.as_ref(), c.a) {
+            Some(coin) => match state.sim.cancel(user, &coin, c.o) {
+                Ok(()) => CancelStatus::Success(SuccessStatus),
+                Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
+            },
+            None => CancelStatus::Error(Box::new(ErrorStatus {
+                error: format!("unknown asset index {}", c.a),
+            })),
+        })
+        .collect();
+    Json(ExchangeOk {
+        status: "ok",
+        response: CancelResponseBody {
+            r#type: "cancel",
+            data: CancelData { statuses },
+        },
+    })
+    .into_response()
+}
+
+/// `cancelByCloid`: the same, addressed by client id.
+fn cancel_by_cloid_action(
+    state: &ApiState,
+    user: Address,
+    cancels: &[CancelByCloidAction],
+) -> Response {
+    let meta = state.feed.meta();
+    let statuses = cancels
+        .iter()
+        .map(|c| match coin_of(meta.as_ref(), c.asset) {
+            Some(coin) => match state.sim.cancel_by_cloid(user, &coin, c.cloid) {
+                Ok(()) => CancelStatus::Success(SuccessStatus),
+                Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
+            },
+            None => CancelStatus::Error(Box::new(ErrorStatus {
+                error: format!("unknown asset index {}", c.asset),
+            })),
+        })
+        .collect();
+    Json(ExchangeOk {
+        status: "ok",
+        response: CancelResponseBody {
+            r#type: "cancel",
+            data: CancelData { statuses },
+        },
+    })
+    .into_response()
+}
+
+/// `modify` (single): cancel + place, with the docs' `always_place` rules.
+fn modify_action(
+    state: &ApiState,
+    user: Address,
+    oid: &crate::wire::OidOrCloid,
+    order: &OrderAction,
+    always_place: bool,
+) -> Response {
+    match modify_one(state, user, oid, order, always_place) {
+        Ok(()) => default_ok(),
+        Err(e) => err_envelope(e.to_string()).into_response(),
+    }
+}
+
+/// One modify: the cancel of the old order, then the placement. With
+/// `always_place = false` the cancel must succeed, the new order must be
+/// non-trigger, and an executable Gtc is overridden to Alo (docs); with
+/// `always_place = true` the placement happens regardless.
+fn modify_one(
+    state: &ApiState,
+    user: Address,
+    oid: &crate::wire::OidOrCloid,
+    order: &OrderAction,
+    always_place: bool,
+) -> Result<()> {
+    let meta = state.feed.meta();
+    let canceled = match oid {
+        crate::wire::OidOrCloid::Oid(o) => {
+            // The oid's coin is the order's own asset (the docs' `a`).
+            let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
+                Error::bad_request(format!("unknown asset index {}", order.a))
+            })?;
+            state.sim.cancel(user, &coin, *o)
+        }
+        crate::wire::OidOrCloid::Cloid(c) => {
+            let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
+                Error::bad_request(format!("unknown asset index {}", order.a))
+            })?;
+            state.sim.cancel_by_cloid(user, &coin, *c)
+        }
+    };
+    if !always_place {
+        canceled?;
+    }
+    let mut mapped = order.to_order(meta.as_ref())?;
+    if !always_place {
+        if mapped.trigger.is_some() {
+            return Err(Error::bad_request(
+                "always_place=false requires a non-trigger order (docs)",
+            ));
+        }
+        if mapped.tif == crate::sim::order::Tif::Gtc {
+            // The docs' override: a Gtc that could execute becomes post-only.
+            mapped.tif = crate::sim::order::Tif::Alo;
+        }
+    }
+    state.sim.place(&state.feed, user, &mapped)?;
+    Ok(())
 }
 
 /// The noop's answer: the venue's no-data success envelope, logged in the
@@ -262,8 +499,67 @@ pub(crate) enum ExchangeAction {
         #[serde(default)]
         builder: Option<Builder>,
     },
+    /// `{"type":"cancel","cancels":[{"a":asset,"o":oid}]}` (docs); the `f`
+    /// fast flag must be omitted when false, so a present `false` refuses.
+    Cancel {
+        cancels: Vec<CancelAction>,
+        #[serde(default, rename = "f")]
+        fast: Option<bool>,
+    },
+    /// `{"type":"cancelByCloid","cancels":[{"asset":N,"cloid":"0x…"}]}`.
+    CancelByCloid {
+        cancels: Vec<CancelByCloidAction>,
+        #[serde(default, rename = "f")]
+        fast: Option<bool>,
+    },
+    /// `{"type":"modify","oid":N|cloid,"order":{…},"a":always_place}`.
+    Modify {
+        oid: crate::wire::OidOrCloid,
+        order: OrderAction,
+        #[serde(default, rename = "a")]
+        always_place: Option<bool>,
+    },
+    /// `{"type":"batchModify","modifies":[…],"a":always_place}`.
+    BatchModify {
+        modifies: Vec<ModifyItem>,
+        #[serde(default, rename = "a")]
+        always_place: Option<bool>,
+    },
+    /// `{"type":"scheduleCancel","time":ms}` (the dead-man's switch).
+    ScheduleCancel {
+        #[serde(default)]
+        time: Option<u64>,
+    },
+    /// `{"type":"updateLeverage","asset":N,"isCross":bool,"leverage":N}`.
+    UpdateLeverage {
+        asset: u32,
+        #[serde(default = "default_true")]
+        is_cross: bool,
+        leverage: u32,
+    },
     #[serde(other)]
     Unmodeled,
+}
+
+/// One `cancel` entry (docs: `a` asset, `o` oid).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CancelAction {
+    pub a: u32,
+    pub o: u64,
+}
+
+/// One `cancelByCloid` entry (docs: `asset`, `cloid`).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CancelByCloidAction {
+    pub asset: u32,
+    pub cloid: alloy_primitives::B128,
+}
+
+/// One `batchModify` entry (docs).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ModifyItem {
+    pub oid: crate::wire::OidOrCloid,
+    pub order: OrderAction,
 }
 
 /// One compact order (`a` asset index, `b` is_buy, `p` limit price, `s` size,
@@ -338,6 +634,21 @@ impl OrderAction {
             Some(p) => Some(p.parse().map_err(|_| Error::bad_request(format!("limit price `{p}` is not a decimal"),))?),
             None => None,
         };
+        let (tif, trigger) = self.type_of()?;
+        Ok(crate::sim::order::Order {
+            coin,
+            is_buy: self.b,
+            size,
+            limit_px,
+            tif,
+            reduce_only: self.r,
+            cloid: self.c,
+            trigger,
+        })
+    }
+
+    /// The order type: the venue's own shapes (`t.limit.tif` or `t.trigger`).
+    fn type_of(&self) -> Result<(crate::sim::order::Tif, Option<crate::sim::order::Trigger>)> {
         let mut trigger = None;
         let tif = match &self.t {
             None => crate::sim::order::Tif::Ioc,
@@ -371,32 +682,12 @@ impl OrderAction {
                 crate::sim::order::Tif::from_wire(tif).ok_or_else(|| Error::bad_request(format!("unknown tif `{tif}`"),))?
             }
         };
-        Ok(crate::sim::order::Order {
-            coin,
-            is_buy: self.b,
-            size,
-            limit_px,
-            tif,
-            reduce_only: self.r,
-            cloid: self.c,
-            trigger,
-        })
+        Ok((tif, trigger))
     }
 }
 
-/// The ok envelope (the venue's own shape; the body varies by action).
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct ExchangeOk<T> {
-    pub status: &'static str,
-    pub response: T,
-}
-
-/// The venue's no-data success body (`noop` and friends: `{"type":"default"}`).
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct DefaultBody {
-    pub r#type: &'static str,
-}
-
+/// The ok body for the `order` action (the venue's own shape; the per-order
+/// results inside).
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct OrderResponseBody {
     pub r#type: &'static str,
@@ -408,8 +699,8 @@ pub(crate) struct OrderData {
     pub statuses: Vec<OrderStatus>,
 }
 
-/// One per-order status in the venue's own shape: `{"filled": {…}}` or
-/// `{"error": "…"}`.
+/// One per-order status in the venue's own shape: `{"filled": {…}}`, the
+/// `resting` shape, or `{"error": "…"}`.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OrderStatus {
@@ -433,6 +724,56 @@ pub(crate) struct FilledInfo {
     pub oid: u64,
 }
 
+/// The ok envelope (the venue's own shape; the body varies by action).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ExchangeOk<T> {
+    pub status: &'static str,
+    pub response: T,
+}
+
+/// The venue's no-data success body (`noop` and friends: `{"type":"default"}`).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct DefaultBody {
+    pub r#type: &'static str,
+}
+
+/// One cancel's status: the docs' literal `"success"` string or an error
+/// object (the venue's own two shapes).
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum CancelStatus {
+    Success(SuccessStatus),
+    /// Boxed: the error string is far larger than the success marker.
+    Error(Box<ErrorStatus>),
+}
+
+/// The docs' success literal.
+#[derive(Debug)]
+pub(crate) struct SuccessStatus;
+
+impl serde::Serialize for SuccessStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str("success")
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ErrorStatus {
+    pub error: String,
+}
+
+/// The cancel ok body (docs: `{"type":"cancel","data":{"statuses":[…]}}`).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct CancelResponseBody {
+    pub r#type: &'static str,
+    pub data: CancelData,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct CancelData {
+    pub statuses: Vec<CancelStatus>,
+}
+
 /// The `/exchange` err envelope (the named refusal above; complete for the
 /// err shape their client reads).
 #[derive(Debug, serde::Serialize)]
@@ -454,6 +795,13 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         InfoRequest::SpotClearinghouseState { user } => spot_state(&state, body, user).await,
         InfoRequest::UserAbstraction { user } => abstraction(&state, body, user).await,
         InfoRequest::OpenOrders { user, .. } => open_orders(&state, body, user).await,
+        InfoRequest::FrontendOpenOrders { user, .. } => {
+            frontend_open_orders(&state, body, user).await
+        }
+        InfoRequest::OrderStatus { user, oid } => order_status(&state, body, user, oid).await,
+        InfoRequest::PerpsAtOpenInterestCap { .. } => {
+            Ok(Json(state.feed.open_interest_caps()).into_response())
+        }
         InfoRequest::ActiveAssetData { user, coin } => active_asset(&state, body, user, coin).await,
         // ---- market-scoped: the feed's -----------------------------------
         InfoRequest::Meta { dex } => meta(&dex, &state),
@@ -518,13 +866,252 @@ async fn abstraction(state: &ApiState, body: Bytes, user: Address) -> Result<Res
     }
 }
 
-/// `openOrders`: a touched account has no order machinery yet (Phase 2
-/// matching), so its unwind list is empty; untouched accounts pass through.
+/// One `openOrders` row (the docs' shape: coin, limitPx, oid, side, sz,
+/// timestamp; a resting order the devnet's book holds).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OpenOrder {
+    pub coin: String,
+    pub limit_px: String,
+    pub oid: u64,
+    /// "A" (ask) or "B" (bid) — the venue's own letters.
+    pub side: &'static str,
+    pub sz: String,
+    pub timestamp: u64,
+}
+
+/// One `frontendOpenOrders` row (the docs' fuller shape).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FrontendOpenOrder {
+    pub coin: String,
+    pub is_position_tpsl: bool,
+    pub is_trigger: bool,
+    pub limit_px: String,
+    pub oid: u64,
+    pub order_type: &'static str,
+    pub orig_sz: String,
+    pub reduce_only: bool,
+    pub side: &'static str,
+    pub sz: String,
+    pub timestamp: u64,
+    /// "N/A" for a plain order, "Triggered"/"Stop …" for triggers (the
+    /// venue's own vocabulary; ours names the condition).
+    pub trigger_condition: String,
+    pub trigger_px: String,
+}
+
+fn side_letter(is_buy: bool) -> &'static str {
+    if is_buy {
+        "B"
+    } else {
+        "A"
+    }
+}
+
+fn trigger_condition(order: &crate::sim::order::RestingOrder) -> String {
+    match &order.trigger {
+        None => "N/A".into(),
+        Some(t) => {
+            let kind = match t.tpsl {
+                crate::sim::order::Tpsl::Tp => "Take Profit",
+                crate::sim::order::Tpsl::Sl => "Stop",
+            };
+            let dir = if order.is_buy { "Market" } else { "Limit" };
+            format!("{kind} {dir} {}({})", if t.is_market { "Market" } else { "Limit" }, t.trigger_px)
+        }
+    }
+}
+
+/// `openOrders`: the devnet's resting book for a touched account (the venue's
+/// own row shape); untouched accounts pass through.
 async fn open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
     match state.sim.account(user)? {
-        Some(_) => Ok(Json(Vec::<crate::wire::Order>::new()).into_response()),
+        Some(_) => {
+            let rows: Vec<OpenOrder> = state
+                .sim
+                .resting_orders(Some(user))?
+                .into_iter()
+                .map(|r| OpenOrder {
+                    coin: r.coin.clone(),
+                    limit_px: r.px.to_string(),
+                    oid: r.oid,
+                    side: side_letter(r.is_buy),
+                    sz: r.sz.to_string(),
+                    timestamp: r.placed_ms,
+                })
+                .collect();
+            Ok(Json(rows).into_response())
+        }
         None => pass_through(state, &body).await,
     }
+}
+
+/// `frontendOpenOrders`: the same rows with the frontend's extra fields.
+async fn frontend_open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+    match state.sim.account(user)? {
+        Some(_) => {
+            let rows: Vec<FrontendOpenOrder> = state
+                .sim
+                .resting_orders(Some(user))?
+                .into_iter()
+                .map(|r| FrontendOpenOrder {
+                    coin: r.coin.clone(),
+                    is_position_tpsl: false,
+                    is_trigger: r.trigger.is_some(),
+                    limit_px: r.px.to_string(),
+                    oid: r.oid,
+                    order_type: if r.trigger.is_some() {
+                        "Trigger"
+                    } else {
+                        "Limit"
+                    },
+                    orig_sz: r.orig_sz.to_string(),
+                    reduce_only: r.reduce_only,
+                    side: side_letter(r.is_buy),
+                    sz: r.sz.to_string(),
+                    timestamp: r.placed_ms,
+                    trigger_condition: trigger_condition(&r),
+                    trigger_px: r
+                        .trigger
+                        .map(|t| t.trigger_px.to_string())
+                        .unwrap_or_else(|| "0.0".into()),
+                })
+                .collect();
+            Ok(Json(rows).into_response())
+        }
+        None => pass_through(state, &body).await,
+    }
+}
+
+/// One order's status row inside `orderStatus` (the docs' `order` object).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StatusOrderInner {
+    pub coin: String,
+    pub side: &'static str,
+    pub limit_px: String,
+    pub sz: String,
+    pub oid: u64,
+    pub timestamp: u64,
+    pub trigger_condition: String,
+    pub is_trigger: bool,
+    pub trigger_px: String,
+    /// TP/SL children (the devnet never creates them; the shape is the docs').
+    pub children: Vec<ChildOrder>,
+    pub is_position_tpsl: bool,
+    pub reduce_only: bool,
+    pub order_type: &'static str,
+    pub orig_sz: String,
+    pub tif: &'static str,
+    pub cloid: Option<alloy_primitives::B128>,
+}
+
+/// A TP/SL child (docs' `children` element shape).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ChildOrder {
+    pub order: StatusOrderInner,
+    pub r#type: &'static str,
+}
+
+/// The `orderStatus` wrapper (docs: `{order, status, statusTimestamp}`).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StatusOrder {
+    pub order: StatusOrderInner,
+    pub status: &'static str,
+    pub status_timestamp: u64,
+}
+
+/// The `orderStatus` response: the docs' two shapes.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub(crate) enum OrderStatusResponse {
+    /// Boxed: the order row dwarfs the unknown marker (clippy's large-variant
+    /// rule; the enum rides every orderStatus response).
+    Order { order: Box<StatusOrder> },
+    UnknownOid,
+}
+
+fn tif_name(tif: crate::sim::order::Tif) -> &'static str {
+    match tif {
+        crate::sim::order::Tif::Ioc => "Ioc",
+        crate::sim::order::Tif::Gtc => "Gtc",
+        crate::sim::order::Tif::Alo => "Alo",
+    }
+}
+
+fn status_inner(r: &crate::sim::order::RestingOrder, sz: String) -> StatusOrderInner {
+    StatusOrderInner {
+        coin: r.coin.clone(),
+        side: side_letter(r.is_buy),
+        limit_px: r.px.to_string(),
+        sz,
+        oid: r.oid,
+        timestamp: r.placed_ms,
+        trigger_condition: trigger_condition(r),
+        is_trigger: r.trigger.is_some(),
+        trigger_px: r
+            .trigger
+            .map(|t| t.trigger_px.to_string())
+            .unwrap_or_else(|| "0.0".into()),
+        children: Vec::new(),
+        is_position_tpsl: false,
+        reduce_only: r.reduce_only,
+        order_type: if r.trigger.is_some() {
+            "Trigger"
+        } else {
+            "Limit"
+        },
+        orig_sz: r.orig_sz.to_string(),
+        tif: tif_name(r.tif),
+        cloid: r.cloid,
+    }
+}
+
+/// `orderStatus`: open from the book, terminal from the history, else the
+/// docs' `unknownOid`.
+async fn order_status(state: &ApiState, body: Bytes, user: Address, oid: crate::wire::OidOrCloid) -> Result<Response> {
+    if state.sim.account(user)?.is_none() {
+        return pass_through(state, &body).await;
+    }
+    let found = match oid {
+        crate::wire::OidOrCloid::Oid(o) => match state.sim.resting_by_oid(user, o)? {
+            Some(r) => Some((
+                status_inner(&r, r.sz.to_string()),
+                "open",
+                r.placed_ms,
+            )),
+            None => state.sim.terminal_by_oid(user, o)?.map(|t| {
+                let status = match t.status {
+                    crate::sim::order::TerminalStatus::Filled => "filled",
+                    crate::sim::order::TerminalStatus::Canceled => "canceled",
+                };
+                (status_inner(&t.order, t.order.sz.to_string()), status, t.status_ms)
+            }),
+        },
+        crate::wire::OidOrCloid::Cloid(c) => match state.sim.resting_by_cloid(user, c)? {
+            Some(r) => Some((status_inner(&r, r.sz.to_string()), "open", r.placed_ms)),
+            None => state.sim.terminal_by_cloid(user, c)?.map(|t| {
+                let status = match t.status {
+                    crate::sim::order::TerminalStatus::Filled => "filled",
+                    crate::sim::order::TerminalStatus::Canceled => "canceled",
+                };
+                (status_inner(&t.order, t.order.sz.to_string()), status, t.status_ms)
+            }),
+        },
+    };
+    Ok(match found {
+        Some((order, status, status_timestamp)) => Json(OrderStatusResponse::Order {
+            order: Box::new(StatusOrder {
+                order,
+                status,
+                status_timestamp,
+            }),
+        })
+        .into_response(),
+        None => Json(OrderStatusResponse::UnknownOid).into_response(),
+    })
 }
 
 /// `activeAssetData`: the sim's derived row, or the venue's verbatim.
@@ -953,8 +1540,10 @@ mod tests {
     /// and the filled status serializes in the venue's own shape.
     #[test]
     fn unmodeled_actions_and_the_fill_shape() {
+        // A real venue action the devnet does not model (twapOrder) lands in
+        // the named refusal; cancel is modeled now (its own tests cover it).
         let body: ExchangeBody = serde_json::from_str(
-            r#"{"action":{"type":"cancel","cancels":[]},"user":"0x00000000000000000000000000000000000000e1"}"#,
+            r#"{"action":{"type":"twapOrder","twap":{"a":0}},"user":"0x00000000000000000000000000000000000000e1"}"#,
         )
         .unwrap();
         assert!(matches!(body.action, ExchangeAction::Unmodeled));

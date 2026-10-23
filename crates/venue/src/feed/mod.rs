@@ -83,6 +83,8 @@ struct Cache {
     book_at: BTreeMap<String, u64>,
     mids: BTreeMap<String, Decimal>,
     mids_at: Option<u64>,
+    /// `perpsAtOpenInterestCap`'s last answer (the venue's cap list).
+    pub(crate) oi_caps: Vec<String>,
 }
 
 pub struct MarketFeed {
@@ -178,6 +180,23 @@ impl MarketFeed {
 
     pub(crate) fn put_spot_meta(&self, spot: crate::wire::SpotMeta) {
         self.write().spot_meta = Some(spot);
+    }
+
+    /// `perpsAtOpenInterestCap`: the coins at their cap (the venue's own
+    /// list; the order lane refuses orders that would increase their OI).
+    pub(crate) fn put_oi_caps(&self, caps: Vec<String>) {
+        if self.stalled() {
+            tracing::debug!("live OI caps dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
+        self.write().oi_caps = caps;
+    }
+
+    /// The cached cap list (empty until the first poll lands: the refusal is
+    /// conservative — never a false cap, and the venue's own answer follows
+    /// within a poll interval).
+    pub fn open_interest_caps(&self) -> Vec<String> {
+        self.read().oi_caps.clone()
     }
 
     pub(crate) fn put_ctx(&self, coin: String, ctx: AssetCtx, now_ms: u64) {

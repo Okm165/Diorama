@@ -245,43 +245,48 @@ impl Bridge {
                 self.set_abstraction(user, abstraction)?;
             }
             order @ CoreAction::LimitOrder { .. } => self.limit_order(caller, &order),
-            CoreAction::CancelByOid { asset, oid } => {
-                match self.coin_of(asset) {
-                    Some(coin) => match self.sim.cancel(caller, &coin, oid) {
-                        Ok(()) => tracing::info!(account = %caller, coin = %coin, oid, "bridge: CoreWriter cancel executed"),
-                        Err(e) => {
-                            self.metrics.inc_refusals();
-                            tracing::warn!(account = %caller, coin = %coin, oid, error = %e, "bridge: CoreWriter cancel refused");
-                        }
-                    },
-                    None => {
-                        self.metrics.inc_refusals();
-                        tracing::warn!(account = %caller, asset, "bridge: cancel for an unknown asset refused");
-                    }
-                }
-            }
-            CoreAction::CancelByCloid { asset, cloid } => {
-                match self.coin_of(asset) {
-                    Some(coin) => {
-                        let cloid = alloy_primitives::B128::from(cloid);
-                        match self.sim.cancel_by_cloid(caller, &coin, cloid) {
-                            Ok(()) => tracing::info!(account = %caller, coin = %coin, "bridge: CoreWriter cancelByCloid executed"),
-                            Err(e) => {
-                                self.metrics.inc_refusals();
-                                tracing::warn!(account = %caller, coin = %coin, error = %e, "bridge: CoreWriter cancelByCloid refused");
-                            }
-                        }
-                    }
-                    None => {
-                        self.metrics.inc_refusals();
-                        tracing::warn!(account = %caller, asset, "bridge: cancelByCloid for an unknown asset refused");
-                    }
-                }
+            action @ (CoreAction::CancelByOid { .. } | CoreAction::CancelByCloid { .. }) => {
+                self.core_cancel(caller, &action);
             }
             CoreAction::Unmodeled { .. } => {}
             CoreAction::Malformed => self.metrics.inc_malformed(),
         }
         Ok(())
+    }
+
+
+    /// The CoreWriter cancels (ids 10/11): resolve the asset, then the sim's
+    /// own cancel — the venue's refusal string rides the log.
+    fn core_cancel(&self, caller: Address, action: &CoreAction) {
+        let (coin, outcome) = match action {
+            CoreAction::CancelByOid { asset, oid } => {
+                let Some(coin) = self.coin_of(*asset) else {
+                    self.metrics.inc_refusals();
+                    tracing::warn!(account = %caller, asset, "bridge: cancel for an unknown asset refused");
+                    return;
+                };
+                (coin, self.sim.cancel(caller, &self.coin_of(*asset).unwrap_or_default(), *oid))
+            }
+            CoreAction::CancelByCloid { asset, cloid } => {
+                let Some(coin) = self.coin_of(*asset) else {
+                    self.metrics.inc_refusals();
+                    tracing::warn!(account = %caller, asset, "bridge: cancelByCloid for an unknown asset refused");
+                    return;
+                };
+                (
+                    coin,
+                    self.sim.cancel_by_cloid(caller, &self.coin_of(*asset).unwrap_or_default(), alloy_primitives::B128::from(*cloid)),
+                )
+            }
+            _ => return,
+        };
+        match outcome {
+            Ok(()) => tracing::info!(account = %caller, coin = %coin, "bridge: CoreWriter cancel executed"),
+            Err(e) => {
+                self.metrics.inc_refusals();
+                tracing::warn!(account = %caller, coin = %coin, error = %e, "bridge: CoreWriter cancel refused");
+            }
+        }
     }
 
     /// The asset index -> coin map the CoreWriter actions address (`None` =
@@ -546,7 +551,7 @@ fn core_order(
         reduce_only: *reduce_only,
         // The CoreWriter payload carries the cloid as a uint128 (docs,
         // action 1); zero means "none" (the wire's absent value).
-        cloid: (*cloid != 0).then(|| alloy_primitives::B128::from(*cloid as u128)),
+        cloid: (*cloid != 0).then(|| alloy_primitives::B128::from(*cloid)),
         // The CoreWriter has no trigger variant: limit orders only.
         trigger: None,
     })
