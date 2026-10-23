@@ -8,14 +8,23 @@ use crate::error::{Error, Result};
 use crate::replay::replay_block;
 use std::sync::Arc;
 
-pub async fn run(
-    mut cfg: Instance,
-    rpc: String,
-    anvil_m: String,
-    anvil_t: String,
-    beacon: Option<String>,
-    blocks: u64,
-) -> Result<bool> {
+/// The selftest's scratch targets: the source RPC and the two anvil endpoints
+/// (plus the optional beacon for blob sidecars) — one argument for what the
+/// CLI passes together.
+pub struct Targets {
+    pub rpc: String,
+    pub anvil_m: String,
+    pub anvil_t: String,
+    pub beacon: Option<String>,
+}
+
+pub async fn run(mut cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
+    let Targets {
+        rpc,
+        anvil_m,
+        anvil_t,
+        beacon,
+    } = targets;
     if let Some(b) = beacon {
         let engine = cfg.services.engine.as_mut().ok_or_else(|| Error::Config(
             mirror_config::ConfigError::Invalid {

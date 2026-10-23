@@ -190,50 +190,7 @@ impl FeedBridge {
             .ok_or(Error::FeedBridgeUnconfigured)?;
         let mut feeds = Vec::with_capacity(section.feeds.len());
         for feed in &section.feeds {
-            let source = read_decimals(&ctx.reth, feed.source).await.map_err(|e| {
-                Error::FeedBridgeFeed {
-                    feed: feed.name.clone(),
-                    what: "source decimals",
-                    source: Box::new(e),
-                }
-            })?;
-            // The target may not be installed yet (their fixture deploy
-            // installs the mocks): *absence* is a fact the bridge waits on, a
-            // transport fault is a fault, and a present-but-mismatched target
-            // is still a boot fault (a mis-scaled answer poisons consumers).
-            let decimals = match read_decimals(&ctx.anvil_t, feed.target).await {
-                Ok(d) if d == source => Some(d),
-                Ok(d) => {
-                    return Err(Error::FeedBridgeDecimals {
-                        feed: feed.name.clone(),
-                        have: source,
-                        want: d,
-                    })
-                }
-                Err(Error::FeedBridgeAbi { .. }) => {
-                    tracing::warn!(
-                        feed = %feed.name,
-                        target = %feed.target,
-                        "feed target has no code yet; the bridge waits for the devnet's fixture deploy"
-                    );
-                    None
-                }
-                Err(e) => {
-                    return Err(Error::FeedBridgeFeed {
-                        feed: feed.name.clone(),
-                        what: "target decimals",
-                        source: Box::new(e),
-                    })
-                }
-            };
-            feeds.push(FeedRuntime {
-                section: feed.clone(),
-                values: Mutex::new(ValueState::default()),
-                paused: AtomicBool::new(false),
-                last_error: Mutex::new(None),
-                source_decimals: source,
-                decimals: Mutex::new(decimals),
-            });
+            feeds.push(Self::feed_runtime(ctx, feed).await?);
         }
         Ok(Self {
             feeds,
@@ -241,6 +198,56 @@ impl FeedBridge {
             poll: Duration::from_millis(section.poll_interval_ms),
             confirm_window_ms: section.confirm_window_ms,
             metrics: ctx.feed_bridge_metrics.clone(),
+        })
+    }
+
+    /// One feed's runtime: read both sides' decimals up front — a mismatch or
+    /// an unreachable *source* is a boot fault naming it (a silently
+    /// mis-scaled price would poison every scenario).
+    async fn feed_runtime(ctx: &Ctx, feed: &FeedSection) -> Result<FeedRuntime> {
+        let source = read_decimals(&ctx.reth, feed.source).await.map_err(|e| {
+            Error::FeedBridgeFeed {
+                feed: feed.name.clone(),
+                what: "source decimals",
+                source: Box::new(e),
+            }
+        })?;
+        // The target may not be installed yet (their fixture deploy installs
+        // the mocks): *absence* is a fact the bridge waits on, a transport
+        // fault is a fault, and a present-but-mismatched target is still a
+        // boot fault (a mis-scaled answer poisons consumers).
+        let decimals = match read_decimals(&ctx.anvil_t, feed.target).await {
+            Ok(d) if d == source => Some(d),
+            Ok(d) => {
+                return Err(Error::FeedBridgeDecimals {
+                    feed: feed.name.clone(),
+                    have: source,
+                    want: d,
+                })
+            }
+            Err(Error::FeedBridgeAbi { .. }) => {
+                tracing::warn!(
+                    feed = %feed.name,
+                    target = %feed.target,
+                    "feed target has no code yet; the bridge waits for the devnet's fixture deploy"
+                );
+                None
+            }
+            Err(e) => {
+                return Err(Error::FeedBridgeFeed {
+                    feed: feed.name.clone(),
+                    what: "target decimals",
+                    source: Box::new(e),
+                })
+            }
+        };
+        Ok(FeedRuntime {
+            section: feed.clone(),
+            values: Mutex::new(ValueState::default()),
+            paused: AtomicBool::new(false),
+            last_error: Mutex::new(None),
+            source_decimals: source,
+            decimals: Mutex::new(decimals),
         })
     }
 

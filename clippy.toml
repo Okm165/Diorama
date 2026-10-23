@@ -1,5 +1,5 @@
-too-many-lines-threshold = 60
+too-many-lines-threshold = 50
 cognitive-complexity-threshold = 18
-# Methods count `self`; 6 keeps five-argument handlers legal while flagging the
+# Methods count `self`; 5 keeps four-argument handlers legal while flagging the
 # genuinely wide signatures.
-too-many-arguments-threshold = 6
+too-many-arguments-threshold = 5

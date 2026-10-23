@@ -284,31 +284,9 @@ async fn reattest(
     State(state): State<Arc<IrisState>>,
     Path(nonce): Path<String>,
 ) -> Result<Json<MessagesResponse>, IrisError> {
-    let nonce = nonce
-        .parse::<B256>()
-        .map_err(|_| IrisError::bad_request(format!("nonce `{nonce}` is not a 32-byte hex hash")))?;
-    let record = state
-        .store
-        .with(|s| Ok(s.messages.iter().find(|m| m.nonce == nonce).cloned()))
-        .map_err(|e| IrisError::internal(&e))?;
-    let Some(record) = record else {
-        return Err(IrisError::not_found());
-    };
-    let expiration = if state.expiration_blocks == 0 {
-        U256::ZERO
-    } else {
-        let destination = state
-            .chains
-            .iter()
-            .find(|c| c.domain == record.destination_domain)
-            .ok_or_else(|| IrisError::bad_request("no served chain for the message's destination".into()))?;
-        let head = destination
-            .rpc
-            .block_number()
-            .await
-            .map_err(|e| IrisError::internal(&Error::Rpc(e)))?;
-        U256::from(head.saturating_add(state.expiration_blocks))
-    };
+    let nonce = parse_nonce(&nonce)?;
+    let record = find_record(&state, nonce)?;
+    let expiration = fresh_expiration(&state, &record).await?;
     let message = record
         .decoded()
         .map_err(|e| IrisError::internal(&e))?
@@ -317,30 +295,78 @@ async fn reattest(
         .attester
         .sign(&message.encode())
         .map_err(|e| IrisError::internal(&e))?;
-    let refreshed = state
+    let refreshed = refresh_record(&state, nonce, &message, attestation)?;
+    state.store.save().map_err(|e| IrisError::internal(&e))?;
+    tracing::warn!(%nonce, expiration = %expiration, "cctp message re-attested with a fresh expiration");
+    Ok(Json(MessagesResponse {
+        messages: vec![entry(&refreshed)],
+    }))
+}
+
+/// The path's nonce (a 32-byte hash, the burn tx — the deterministic policy).
+fn parse_nonce(raw: &str) -> Result<B256, IrisError> {
+    raw.parse::<B256>()
+        .map_err(|_| IrisError::bad_request(format!("nonce `{raw}` is not a 32-byte hex hash")))
+}
+
+/// The message the nonce names, or the 404.
+fn find_record(state: &IrisState, nonce: B256) -> Result<MessageRecord, IrisError> {
+    state
         .store
-        .with(|s| {
+        .with(|s| Ok(s.messages.iter().find(|m| m.nonce == nonce).cloned()))
+        .map_err(|e| IrisError::internal(&e))?
+        .ok_or_else(IrisError::not_found)
+}
+
+/// The re-attestation's `expirationBlock`: 0 (never expires) or the
+/// destination chain's head plus the configured window. The expiry revert
+/// rolled back, so the nonce is unconsumed and the same nonce can be
+/// re-served; the refreshed record goes back to `signed`, which is what
+/// re-arms the relayer (a deliberate operator action, never a silent retry).
+async fn fresh_expiration(state: &IrisState, record: &MessageRecord) -> Result<U256, IrisError> {
+    if state.expiration_blocks == 0 {
+        return Ok(U256::ZERO);
+    }
+    let destination = state
+        .chains
+        .iter()
+        .find(|c| c.domain == record.destination_domain)
+        .ok_or_else(|| {
+            IrisError::bad_request("no served chain for the message's destination".into())
+        })?;
+    let head = destination
+        .rpc
+        .block_number()
+        .await
+        .map_err(|e| IrisError::internal(&Error::Rpc(e)))?;
+    Ok(U256::from(head.saturating_add(state.expiration_blocks)))
+}
+
+/// Write the fresh signature back and return the refreshed record (the 404
+/// case: the record vanished between the read and the write).
+fn refresh_record(
+    state: &IrisState,
+    nonce: B256,
+    message: &crate::transfer::Message,
+    attestation: alloy_primitives::Bytes,
+) -> Result<MessageRecord, IrisError> {
+    state
+        .store
+        .with(move |s| {
             let Some(rec) = s.messages.iter_mut().find(|m| m.nonce == nonce) else {
                 return Ok(None);
             };
             rec.message_hash = message.keccak();
             rec.message = message.encode();
-            rec.attestation = Some(attestation.clone());
+            rec.attestation = Some(attestation);
             rec.state = RelayState::Signed;
             rec.park_reason = None;
             rec.relay_tx = None;
             rec.attempts = 0;
             Ok(Some(rec.clone()))
         })
-        .map_err(|e| IrisError::internal(&e))?;
-    let Some(refreshed) = refreshed else {
-        return Err(IrisError::not_found());
-    };
-    state.store.save().map_err(|e| IrisError::internal(&e))?;
-    tracing::warn!(%nonce, expiration = %expiration, "cctp message re-attested with a fresh expiration");
-    Ok(Json(MessagesResponse {
-        messages: vec![entry(&refreshed)],
-    }))
+        .map_err(|e| IrisError::internal(&e))?
+        .ok_or_else(IrisError::not_found)
 }
 
 fn entry(record: &MessageRecord) -> MessageEntry {

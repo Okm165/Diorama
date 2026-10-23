@@ -77,6 +77,31 @@ impl SimMetrics {
     }
 }
 
+/// One `deal`: mint funds into the account (perp wallet or spot token).
+/// Absolute-additive: it raises the balance by `amount` (the harness's
+/// `add_erc20` semantics; draining is `amount` negative or a `set_account`
+/// seed). The control route's request body is this type — one shape for the
+/// wire and the call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Deal {
+    pub address: Address,
+    pub class: DealClass,
+    /// The spot coin (`None` = USDC).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coin: Option<String>,
+    pub amount: Decimal,
+}
+
+/// A spot token's identity as the sim's ledger keys it: the index the spot
+/// state maps by and the venue's name (served on the rows) — one argument
+/// instead of two that always travel together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenRef<'a> {
+    pub index: u32,
+    pub coin: &'a str,
+}
+
 /// Which side of the venue `deal` mints into.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -186,31 +211,24 @@ impl Sim {
     /// Absolute-additive: it raises the balance by `amount` (the harness's
     /// `add_erc20` semantics; draining is `amount` negative or a `set_account`
     /// seed).
-    pub fn deal(
-        &self,
-        feed: &MarketFeed,
-        address: Address,
-        class: DealClass,
-        coin: Option<&str>,
-        amount: Decimal,
-    ) -> Result<Decimal> {
+    pub fn deal(&self, feed: &MarketFeed, deal: &Deal) -> Result<Decimal> {
         let now = crate::now_ms();
         let clock = self.clock(now)?;
         let mut state = self.state.lock()?;
-        let account = state.accounts.entry(address).or_default();
+        let account = state.accounts.entry(deal.address).or_default();
         stamp_funding_baseline(account, clock);
-        let after = match class {
+        let after = match deal.class {
             DealClass::Perp => {
-                account.perp_balance = account::add(account.perp_balance, amount, "perp deal")?;
+                account.perp_balance = account::add(account.perp_balance, deal.amount, "perp deal")?;
                 account.perp_balance
             }
             DealClass::Spot => {
-                let coin = coin.unwrap_or("USDC");
-                let token = feed.token_of(coin).ok_or_else(|| Error::BadRequest {
+                let coin = deal.coin.as_deref().unwrap_or("USDC");
+                let index = feed.token_of(coin).ok_or_else(|| Error::BadRequest {
                     reason: format!("spot coin `{coin}` is not in the venue's token registry yet"),
                 })?;
-                let entry = account::spot_entry(account, token, coin);
-                entry.total = account::add(entry.total, amount, "spot deal")?;
+                let entry = account::spot_entry(account, TokenRef { index, coin });
+                entry.total = account::add(entry.total, deal.amount, "spot deal")?;
                 entry.total
             }
         };
@@ -258,14 +276,14 @@ impl Sim {
     // ---- the Core↔EVM bridge's effects -----------------------------------
 
     /// EVM→Core: credit a spot token (creates the account on first touch).
-    pub fn credit_spot(&self, address: Address, token: u32, coin: &str, amount: Decimal) -> Result<()> {
+    pub fn credit_spot(&self, address: Address, token: TokenRef<'_>, amount: Decimal) -> Result<()> {
         // Read the clock *before* taking the state lock: `clock()` locks the
         // same mutex, and a std Mutex is not reentrant.
         let clock = self.clock(crate::now_ms())?;
         let mut state = self.state.lock()?;
         let account = state.accounts.entry(address).or_default();
         stamp_funding_baseline(account, clock);
-        let entry = account::spot_entry(account, token, coin);
+        let entry = account::spot_entry(account, token);
         entry.total = account::add(entry.total, amount, "spot credit")?;
         drop(state);
         self.touch();
@@ -295,13 +313,13 @@ impl Sim {
 
     /// USD class transfer (CoreWriter action 7): spot USDC ↔ perp wallet.
     /// `false` when the source side is short.
-    pub fn usd_class_transfer(&self, address: Address, token: u32, coin: &str, amount: Decimal, to_perp: bool) -> Result<bool> {
+    pub fn usd_class_transfer(&self, address: Address, token: TokenRef<'_>, amount: Decimal, to_perp: bool) -> Result<bool> {
         let clock = self.clock(crate::now_ms())?;
         let mut state = self.state.lock()?;
         let account = state.accounts.entry(address).or_default();
         stamp_funding_baseline(account, clock);
         if to_perp {
-            let entry = account::spot_entry(account, token, coin);
+            let entry = account::spot_entry(account, token);
             if entry.total < amount {
                 return Ok(false);
             }
@@ -312,7 +330,7 @@ impl Sim {
                 return Ok(false);
             }
             account.perp_balance = account::sub(account.perp_balance, amount, "usd class transfer")?;
-            let entry = account::spot_entry(account, token, coin);
+            let entry = account::spot_entry(account, token);
             entry.total = account::add(entry.total, amount, "usd class transfer")?;
         }
         drop(state);
@@ -322,13 +340,13 @@ impl Sim {
 
     /// Core spot send: debit the sender, credit the recipient. `false` when
     /// the sender is short.
-    pub fn spot_send(&self, from: Address, to: Address, token: u32, coin: &str, amount: Decimal) -> Result<bool> {
+    pub fn spot_send(&self, from: Address, to: Address, token: TokenRef<'_>, amount: Decimal) -> Result<bool> {
         {
             let mut state = self.state.lock()?;
             let Some(sender) = state.accounts.get_mut(&from) else {
                 return Ok(false);
             };
-            let Some(entry) = sender.spot.get_mut(&token) else {
+            let Some(entry) = sender.spot.get_mut(&token.index) else {
                 return Ok(false);
             };
             if entry.total < amount {
@@ -336,7 +354,7 @@ impl Sim {
             }
             entry.total = account::sub(entry.total, amount, "spot send")?;
         }
-        self.credit_spot(to, token, coin, amount)?;
+        self.credit_spot(to, token, amount)?;
         Ok(true)
     }
 
@@ -550,13 +568,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let sim = sim;
-            sim.credit_spot(a, 0, "USDC", Decimal::from(5)).unwrap();
-            sim.usd_class_transfer(a, 0, "USDC", Decimal::ONE, true).unwrap();
-            sim.spot_send(a, Address::repeat_byte(0xbb), 0, "USDC", Decimal::ONE).unwrap();
+            sim.credit_spot(a, TokenRef { index: 0, coin: "USDC" }, Decimal::from(5)).unwrap();
+            sim.usd_class_transfer(a, TokenRef { index: 0, coin: "USDC" }, Decimal::ONE, true).unwrap();
+            sim.spot_send(a, Address::repeat_byte(0xbb), TokenRef { index: 0, coin: "USDC" }, Decimal::ONE).unwrap();
             let _ = &feed;
             tx.send(()).unwrap();
         });
-        rx.recv_timeout(std::time::Duration::from_secs(5))
+        // 10 s: a deadlock never answers, so the budget only has to outlast a
+        // loaded parallel test run (5 s flaked once on a full-workspace run).
+        rx.recv_timeout(std::time::Duration::from_secs(10))
             .expect("the bridge effects must not self-deadlock");
     }
 
@@ -567,11 +587,11 @@ mod tests {
         let a = Address::repeat_byte(0xaa);
         assert!(sim.account(a).unwrap().is_none());
         let after = sim
-            .deal(&feed, a, DealClass::Perp, None, "100.5".parse().unwrap())
+            .deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: "100.5".parse().unwrap() })
             .unwrap();
         assert_eq!(after, "100.5".parse::<Decimal>().unwrap());
         let after = sim
-            .deal(&feed, a, DealClass::Perp, None, "0.5".parse().unwrap())
+            .deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: "0.5".parse().unwrap() })
             .unwrap();
         assert_eq!(after, "101".parse::<Decimal>().unwrap());
     }
@@ -598,18 +618,18 @@ mod tests {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         let max = Decimal::MAX;
-        sim.deal(&feed, a, DealClass::Perp, None, max).unwrap();
-        let err = sim.deal(&feed, a, DealClass::Perp, None, Decimal::ONE).unwrap_err();
+        sim.deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: max }).unwrap();
+        let err = sim.deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: Decimal::ONE }).unwrap_err();
         assert!(matches!(err, Error::Overflow { .. }), "{err}");
         // The state is intact and readable (no poison).
         assert!(!sim.is_poisoned());
         assert_eq!(sim.account(a).unwrap().unwrap().perp_balance, max);
         let err = sim
-            .deal(&feed, a, DealClass::Spot, Some("USDC"), max)
+            .deal(&feed, &Deal { address: a, class: DealClass::Spot, coin: Some("USDC".into()), amount: max })
             .unwrap();
         assert_eq!(err, max);
         let err = sim
-            .deal(&feed, a, DealClass::Spot, Some("USDC"), Decimal::ONE)
+            .deal(&feed, &Deal { address: a, class: DealClass::Spot, coin: Some("USDC".into()), amount: Decimal::ONE })
             .unwrap_err();
         assert!(matches!(err, Error::Overflow { .. }), "{err}");
     }
@@ -669,7 +689,7 @@ mod tests {
         });
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
-        sim.deal(&feed, a, DealClass::Spot, Some("USDC"), Decimal::from(250))
+        sim.deal(&feed, &Deal { address: a, class: DealClass::Spot, coin: Some("USDC".into()), amount: Decimal::from(250) })
             .unwrap();
         sim.set_account(
             a,
@@ -703,7 +723,7 @@ mod tests {
         let feed = feed_with(&[("USDC", "1", "1")]);
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
-        sim.deal(&feed, a, DealClass::Perp, None, Decimal::ONE).unwrap();
+        sim.deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: Decimal::ONE }).unwrap();
         assert_eq!(sim.epoch().unwrap(), 0);
         let epoch = sim.reset().unwrap();
         assert_eq!(epoch, 1);

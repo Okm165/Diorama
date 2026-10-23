@@ -514,6 +514,10 @@ mod tests {
     /// The exact live sample (docs, measured): the identity daloc gates on
     /// holds numerically on the real wire shape.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the live sample fixture: one captured response through every field's identity check"
+    )]
     fn live_sample_identity_holds() {
         let raw = r#"{
             "assetPositions": [{

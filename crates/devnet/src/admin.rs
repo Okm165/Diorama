@@ -178,7 +178,26 @@ impl AdminSurface<'_> {
     /// would hand the key back holding a stale devnet value with no mark to
     /// explain it. Returns the number of re-synced keys.
     async fn hand_back(&self, req: &ShadowRequest) -> Result<usize> {
-        // `all` hands every shadowed key of the account back to the source.
+        let (slots, account_fields) = self.hand_back_keys(req)?;
+        let anchor = self.hand_back_anchor().await?;
+        // Read the source's truth *before* touching the marks: a key without a
+        // shadow but with a stale devnet value is the most confusing state
+        // there is, and a read fault must abort the hand-back (retryable), not
+        // skip the key.
+        let writes = self.source_truth(req, &slots, account_fields, anchor).await?;
+        self.unmark_keys(req, &slots, account_fields)?;
+        // Push the source's values now, then persist the registry. A fault
+        // here leaves the marks in memory but not on disk; a restart restores
+        // them (conservative: the key stays devnet-owned), and the next request
+        // retries - the writes are absolute and idempotent.
+        let resynced = mirror_anvil::apply_writes(self.target, &writes, self.chunk_size).await?;
+        self.plane.save_shadow()?;
+        Ok(resynced)
+    }
+
+    /// The keys a hand-back covers: the request's own, plus the account's whole
+    /// set when `all` is named.
+    fn hand_back_keys(&self, req: &ShadowRequest) -> Result<(Vec<U256>, bool)> {
         let mut slots = req.slots.clone();
         if req.all {
             let s = self.plane.shadow.lock()?;
@@ -190,10 +209,13 @@ impl AdminSurface<'_> {
                 }
             }
         }
-        let account_fields = req.account_fields || req.all;
-        // The devnet's state reflects the last applied parent block, so
-        // re-sync from *that* block - reading the source's head would leave
-        // the devnet holding a future value.
+        Ok((slots, req.account_fields || req.all))
+    }
+
+    /// The block to re-sync from: the devnet's state reflects the last applied
+    /// parent block, so reading the source's *head* would leave the devnet
+    /// holding a future value. No cursor (a fresh chain) reads the head.
+    async fn hand_back_anchor(&self) -> Result<u64> {
         let anchor = self
             .plane
             .state
@@ -203,15 +225,23 @@ impl AdminSurface<'_> {
             .as_ref()
             .map(|c| c.block)
             .unwrap_or(0);
-        let anchor = if anchor == 0 {
-            self.source.head().await?
+        if anchor == 0 {
+            Ok(self.source.head().await?)
         } else {
-            anchor
-        };
-        // Read the source's truth *before* touching the marks: a key without a
-        // shadow but with a stale devnet value is the most confusing state
-        // there is, and a read fault must abort the hand-back (retryable), not
-        // skip the key.
+            Ok(anchor)
+        }
+    }
+
+    /// The source's values for the handed-back keys, read before any mark is
+    /// touched (a fault here aborts with the marks intact — the retry re-reads
+    /// the same truth).
+    async fn source_truth(
+        &self,
+        req: &ShadowRequest,
+        slots: &[U256],
+        account_fields: bool,
+        anchor: u64,
+    ) -> Result<Vec<mirror_anvil::Write>> {
         let mut writes: Vec<mirror_anvil::Write> = Vec::new();
         if account_fields {
             writes.push(mirror_anvil::Write::Balance {
@@ -223,7 +253,7 @@ impl AdminSurface<'_> {
                 value: self.source.nonce_at(req.address, anchor).await?,
             });
         }
-        for slot in &slots {
+        for slot in slots {
             writes.push(mirror_anvil::Write::Storage {
                 address: req.address,
                 slot: *slot,
@@ -232,34 +262,50 @@ impl AdminSurface<'_> {
                 ),
             });
         }
-        {
-            let mut s = self.plane.shadow.lock()?;
-            if account_fields {
-                s.unmark_account_fields(req.address);
-            }
-            for slot in &slots {
-                s.unmark_slot(req.address, *slot);
-            }
+        Ok(writes)
+    }
+
+    /// Drop the handed-back keys' marks (the account's whole field set when
+    /// `account_fields`).
+    fn unmark_keys(&self, req: &ShadowRequest, slots: &[U256], account_fields: bool) -> Result<()> {
+        let mut s = self.plane.shadow.lock()?;
+        if account_fields {
+            s.unmark_account_fields(req.address);
         }
-        // Push the source's values now, then persist the registry. A fault
-        // here leaves the marks in memory but not on disk; a restart restores
-        // them (conservative: the key stays devnet-owned), and the next request
-        // retries - the writes are absolute and idempotent.
-        let resynced = mirror_anvil::apply_writes(self.target, &writes, self.chunk_size).await?;
-        self.plane.save_shadow()?;
-        Ok(resynced)
+        for slot in slots {
+            s.unmark_slot(req.address, *slot);
+        }
+        Ok(())
     }
 
     /// `POST /admin/rewind` — undo the last N applied parent blocks using the
     /// journal. Returns the new cursor block and the number of restored values.
     pub async fn rewind(&self, blocks: u64) -> Result<RewindOutcome> {
-        // The ring bounds the rewindable window; beyond it the older
-        // before-values are pruned, so a partial restore would be a lie. This
-        // refusal is a *static* property of the request — checked before the
-        // state reads so the same request gets the same answer on every chain
-        // (the shared surface's symmetry; measured: with the cursor check
-        // first, a chain without a cursor answered "no cursor" while its peer
-        // answered "beyond the ring").
+        let (cursor, from) = self.rewind_plan(blocks)?;
+        self.mark_reapply(from, cursor)?;
+        let restored = self.restore_blocks(from, cursor).await?;
+        self.reset_cursor_to(from - 1).await?;
+        // The chain's *head* is still where it was - only the values were
+        // rolled back - so the main loop's "diffs already applied"
+        // late-completion path would skip the re-application and leave the
+        // rewound range stale (measured: T's probes diverged after a rewind
+        // drill). The range was marked for re-apply before the first undo.
+        tracing::warn!(blocks, restored, "devnet rewound via journal");
+        Ok(RewindOutcome {
+            cursor: from - 1,
+            restored,
+        })
+    }
+
+    /// The rewind's static checks: the ring bounds the window (beyond it the
+    /// older before-values are pruned, so a partial restore would be a lie),
+    /// and the request must fit the cursor. Both are *static* properties of
+    /// the request — checked before the state reads so the same request gets
+    /// the same answer on every chain (the shared surface's symmetry;
+    /// measured: with the cursor check first, a chain without a cursor
+    /// answered "no cursor" while its peer answered "beyond the ring").
+    /// Returns the cursor block and the first block to restore.
+    fn rewind_plan(&self, blocks: u64) -> Result<(u64, u64)> {
         if blocks > self.plane.journal.keep() {
             return Err(Error::RewindBeyondRing {
                 blocks,
@@ -275,34 +321,43 @@ impl AdminSurface<'_> {
                 cursor: cursor.block,
             });
         }
-        let from = cursor.block - blocks + 1;
-        // Mark the range for re-apply *before* rolling anything back: the
-        // applier's late-completion skip must be disabled for these blocks from
-        // the first undo, or a concurrent apply in this window could skip a
-        // block that is never re-applied.
-        {
-            let mut ra = self.plane.reapply_from.lock()?;
-            *ra = Some(match *ra {
-                Some((f, u)) => (f.min(from), u.max(cursor.block)),
-                None => (from, cursor.block),
-            });
-        }
-        // Walk the blocks that actually have before-values (newest first): a
-        // quiet block has no file — skipping it is "nothing to restore", not a
-        // fault, and a large range costs one directory read, not one probe per
-        // block.
+        Ok((cursor.block, cursor.block - blocks + 1))
+    }
+
+    /// Mark the range for re-apply *before* rolling anything back: the
+    /// applier's late-completion skip must be disabled for these blocks from
+    /// the first undo, or a concurrent apply in this window could skip a block
+    /// that is never re-applied.
+    fn mark_reapply(&self, from: u64, upto: u64) -> Result<()> {
+        let mut ra = self.plane.reapply_from.lock()?;
+        *ra = Some(match *ra {
+            Some((f, u)) => (f.min(from), u.max(upto)),
+            None => (from, upto),
+        });
+        Ok(())
+    }
+
+    /// Walk the blocks that actually have before-values (newest first): a
+    /// quiet block has no file — skipping it is "nothing to restore", not a
+    /// fault, and a large range costs one directory read, not one probe per
+    /// block. Returns the values restored.
+    async fn restore_blocks(&self, from: u64, upto: u64) -> Result<usize> {
         let mut restored = 0usize;
-        for b in self.plane.journal.blocks_in(from, cursor.block)? {
+        for b in self.plane.journal.blocks_in(from, upto)? {
             restored += self
                 .plane
                 .journal
                 .undo_block(b, self.target, self.chunk_size)
                 .await?;
         }
-        let target = from - 1;
-        // Fail-closed on the cursor read: a fault must not silently clear the
-        // cursor (the applier would then resume at the chain head + 1 and skip
-        // parent blocks); only a *missing* block means "reset under us".
+        Ok(restored)
+    }
+
+    /// Rewrite the cursor at the restored block. Fail-closed on the read: a
+    /// fault must not silently clear the cursor (the applier would then resume
+    /// at the chain head + 1 and skip parent blocks); only a *missing* block
+    /// means "reset under us".
+    async fn reset_cursor_to(&self, target: u64) -> Result<()> {
         match self.target.block_by_number_opt(target, false).await? {
             Some(b) => {
                 let first = self
@@ -314,24 +369,13 @@ impl AdminSurface<'_> {
                     .as_ref()
                     .map(|c| c.first_block)
                     .unwrap_or(target);
-                self.plane.state.lock()?.data.t =
-                    Some(crate::state::cursor_from(&b, first));
+                self.plane.state.lock()?.data.t = Some(crate::state::cursor_from(&b, first));
             }
             None => {
                 self.plane.state.lock()?.data.t = None;
             }
         }
-        self.plane.state.lock()?.save()?;
-        // The chain's *head* is still where it was - only the values were
-        // rolled back - so the main loop's "diffs already applied"
-        // late-completion path would skip the re-application and leave the
-        // rewound range stale (measured: T's probes diverged after a rewind
-        // drill). The range was marked for re-apply before the first undo.
-        tracing::warn!(blocks, restored, "devnet rewound via journal");
-        Ok(RewindOutcome {
-            cursor: target,
-            restored,
-        })
+        self.plane.state.lock()?.save()
     }
 
     /// `POST /admin/rewind` — the route's response: the request's block count

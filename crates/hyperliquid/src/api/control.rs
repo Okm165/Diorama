@@ -60,13 +60,24 @@ pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
 
 // ---- deal ----------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct DealRequest {
     pub address: Address,
     pub class: DealClass,
     #[serde(default)]
     pub coin: Option<String>,
     pub amount: Decimal,
+}
+
+impl From<DealRequest> for crate::sim::Deal {
+    fn from(req: DealRequest) -> Self {
+        Self {
+            address: req.address,
+            class: req.class,
+            coin: req.coin,
+            amount: req.amount,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -78,9 +89,7 @@ pub struct DealResponse {
 }
 
 pub async fn deal(State(state): State<Arc<ApiState>>, Json(req): Json<DealRequest>) -> Result<Json<DealResponse>> {
-    let after = state
-        .sim
-        .deal(&state.feed, req.address, req.class, req.coin.as_deref(), req.amount)?;
+    let after = state.sim.deal(&state.feed, &req.clone().into())?;
     tracing::info!(address = %req.address, class = ?req.class, amount = %req.amount, after = %after, "sim deal");
     Ok(Json(DealResponse {
         address: req.address,

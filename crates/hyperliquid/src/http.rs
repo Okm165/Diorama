@@ -229,6 +229,10 @@ mod tests {
     /// unavailable/warming state is 503, a named absence/conflict keeps its
     /// 4xx. The sim serves the same mapping (this crate's `Error`).
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the status-mapping table: one row per error variant, all in one place"
+    )]
     fn the_http_status_mapping_follows_the_shared_convention() {
         let status = |e: Error| e.into_response().status();
         let anvil = || mirror_anvil::Error::Status {

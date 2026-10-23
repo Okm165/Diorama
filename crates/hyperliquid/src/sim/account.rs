@@ -131,9 +131,9 @@ pub struct SpotEntry {
 /// The account's spot entry for `token`, created zeroed on first touch — the
 /// one place the entry's shape is built (the deal, the bridge's credit and
 /// the USD class transfer's two directions all go through it).
-pub fn spot_entry<'a>(account: &'a mut Account, token: u32, coin: &str) -> &'a mut SpotEntry {
-    account.spot.entry(token).or_insert_with(|| SpotEntry {
-        coin: coin.to_string(),
+pub fn spot_entry<'a>(account: &'a mut Account, token: crate::sim::TokenRef<'_>) -> &'a mut SpotEntry {
+    account.spot.entry(token.index).or_insert_with(|| SpotEntry {
+        coin: token.coin.to_string(),
         total: Decimal::ZERO,
         hold: Decimal::ZERO,
         entry_ntl: Decimal::ZERO,

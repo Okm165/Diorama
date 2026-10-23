@@ -77,46 +77,9 @@ pub async fn reconcile(
 ) -> Result<Epoch> {
     let known = plane.state.lock()?.data.epoch_pin;
     let epoch = if known != pin {
-        // Classify by what the registry *held* before the clear: `clear_all`
-        // reports the marked counts, and a registry can hold recorded values
-        // with no marks (healed on load, but never assumed) — reporting that
-        // as "nothing to clear" would drop it silently and uncounted.
-        let (had, slots, accounts) = {
-            let mut shadow = plane.shadow.lock()?;
-            let had = shadow.has_recorded();
-            let (slots, accounts) = shadow.clear_all();
-            (had, slots, accounts)
-        };
-        if known.is_none() && !had {
-            Epoch::Steady
-        } else {
-            plane.save_shadow()?;
-            tracing::warn!(
-                pin = ?pin,
-                previous = ?known,
-                cleared_slots = slots,
-                cleared_accounts = accounts,
-                "new epoch: the fork base moved; the devnet's writes are gone with it (re-create state from your journal)"
-            );
-            Epoch::Cleared
-        }
+        clear_for_new_pin(plane, known, pin)?
     } else if pin.is_some() && plane.shadow.lock()?.has_recorded() {
-        let moved = shadow::restore_recorded(target, &plane.shadow, chunk_size).await?;
-        plane.save_shadow()?;
-        tracing::warn!(
-            pin = ?pin,
-            restored = moved.restored,
-            slots = moved.slots,
-            accounts = moved.accounts,
-            orphan_slots = moved.orphan_slots,
-            orphan_accounts = moved.orphan_accounts,
-            unknown_slots = moved.unknown_slots,
-            unknown_accounts = moved.unknown_accounts,
-            "same-pin restore: re-applied the devnet's recorded writes"
-        );
-        Epoch::Restored {
-            restored: moved.restored,
-        }
+        restore_same_pin(plane, target, chunk_size, pin).await?
     } else {
         Epoch::Steady
     };
@@ -131,6 +94,58 @@ pub async fn reconcile(
         tracing::warn!(error = %e, "clearing the journal after a reset failed");
     }
     Ok(epoch)
+}
+
+/// The pin moved: the devnet's writes belong to the old chain. Classify by
+/// what the registry *held* before the clear — `clear_all` reports the marked
+/// counts, and a registry can hold recorded values with no marks (healed on
+/// load, but never assumed); reporting that as "nothing to clear" would drop
+/// it silently and uncounted.
+fn clear_for_new_pin(plane: &Plane, known: Option<u64>, pin: Option<u64>) -> Result<Epoch> {
+    let (had, slots, accounts) = {
+        let mut shadow = plane.shadow.lock()?;
+        let had = shadow.has_recorded();
+        let (slots, accounts) = shadow.clear_all();
+        (had, slots, accounts)
+    };
+    if known.is_none() && !had {
+        return Ok(Epoch::Steady);
+    }
+    plane.save_shadow()?;
+    tracing::warn!(
+        pin = ?pin,
+        previous = ?known,
+        cleared_slots = slots,
+        cleared_accounts = accounts,
+        "new epoch: the fork base moved; the devnet's writes are gone with it (re-create state from your journal)"
+    );
+    Ok(Epoch::Cleared)
+}
+
+/// The pin is unchanged and the registry holds writes: re-apply them over the
+/// re-forked chain (the same-pin restore).
+async fn restore_same_pin(
+    plane: &Plane,
+    target: &Rpc,
+    chunk_size: usize,
+    pin: Option<u64>,
+) -> Result<Epoch> {
+    let moved = shadow::restore_recorded(target, &plane.shadow, chunk_size).await?;
+    plane.save_shadow()?;
+    tracing::warn!(
+        pin = ?pin,
+        restored = moved.restored,
+        slots = moved.slots,
+        accounts = moved.accounts,
+        orphan_slots = moved.orphan_slots,
+        orphan_accounts = moved.orphan_accounts,
+        unknown_slots = moved.unknown_slots,
+        unknown_accounts = moved.unknown_accounts,
+        "same-pin restore: re-applied the devnet's recorded writes"
+    );
+    Ok(Epoch::Restored {
+        restored: moved.restored,
+    })
 }
 
 #[cfg(test)]
@@ -184,6 +199,10 @@ mod tests {
     /// clear (including a values-only registry), the changed-pin clear, the
     /// same-pin steady, and the journal dropped on every reconcile.
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the epoch rule's decision table: every row in one place, so a new pin class cannot land without its verdict"
+    )]
     async fn epoch_decisions_are_fail_closed() {
         let rpc = target();
         let addr = Address::repeat_byte(0x11);

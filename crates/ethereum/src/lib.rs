@@ -89,32 +89,52 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             blocks,
             timeout_secs,
         } => {
-            let mut cfg = Instance::load(&config)?;
-            cfg.services
-                .engine
-                .as_mut()
-                .ok_or_else(|| {
-                    Error::Config(mirror_config::ConfigError::Invalid {
-                        issues: vec!["profile \"ethereum\" requires [services.engine]".into()],
-                    })
-                })?
-                .reth
-                .request_timeout_secs = timeout_secs;
-            let ok = selftest::run(cfg, rpc, anvil_m, anvil_t, beacon, blocks).await?;
-            std::process::exit(if ok { 0 } else { 1 });
+            let targets = selftest::Targets {
+                rpc,
+                anvil_m,
+                anvil_t,
+                beacon,
+            };
+            selftest_cmd(config, targets, blocks, timeout_secs).await
         }
-        Cmd::Rewind { config, blocks } => {
-            let cfg = Instance::load(&config)?;
-            let (reth, m, t) = cfg.ethereum_urls()?;
-            let ctx = Ctx::new(cfg, &reth, &m, &t)?;
-            let out = ctx.admin().rewind(blocks).await?;
-            println!(
-                "rewound {blocks} block(s): {} values restored, cursor_t now {}",
-                out.restored, out.cursor
-            );
-            Ok(())
-        }
+        Cmd::Rewind { config, blocks } => rewind_cmd(config, blocks).await,
     }
+}
+
+/// The `selftest` subcommand: load the instance, apply the CLI's request
+/// timeout, run the scratch-anvil pipeline, and exit with its verdict.
+async fn selftest_cmd(
+    config: std::path::PathBuf,
+    targets: selftest::Targets,
+    blocks: u64,
+    timeout_secs: u64,
+) -> Result<()> {
+    let mut cfg = Instance::load(&config)?;
+    cfg.services
+        .engine
+        .as_mut()
+        .ok_or_else(|| {
+            Error::Config(mirror_config::ConfigError::Invalid {
+                issues: vec!["profile \"ethereum\" requires [services.engine]".into()],
+            })
+        })?
+        .reth
+        .request_timeout_secs = timeout_secs;
+    let ok = selftest::run(cfg, targets, blocks).await?;
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
+/// The `rewind` subcommand: undo the last N applied parent blocks on T.
+async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
+    let cfg = Instance::load(&config)?;
+    let (reth, m, t) = cfg.ethereum_urls()?;
+    let ctx = Ctx::new(cfg, &reth, &m, &t)?;
+    let out = ctx.admin().rewind(blocks).await?;
+    println!(
+        "rewound {blocks} block(s): {} values restored, cursor_t now {}",
+        out.restored, out.cursor
+    );
+    Ok(())
 }
 
 /// 15 minutes: reth unwinding and the anvils re-forking both take minutes on

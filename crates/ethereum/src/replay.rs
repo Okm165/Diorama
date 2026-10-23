@@ -275,7 +275,12 @@ async fn build_raws(
                     });
                     continue;
                 };
-                match encode_from_sources(ctx, t, signature, hash, &sources, preferred) {
+                let blob_tx = BlobTx {
+                    tx: t,
+                    signature,
+                    hash,
+                };
+                match encode_from_sources(ctx, &blob_tx, &sources, preferred) {
                     Ok((bytes, items)) => out.push(RawTx {
                         hash: tx.tx_hash(),
                         bytes,
@@ -324,20 +329,26 @@ async fn blob_sidecar_sources(
     Ok(sources)
 }
 
+/// The blob tx being re-encoded: the consensus tx, its recovered signature
+/// and its hash (its log identity) — one argument instead of three.
+struct BlobTx<'a> {
+    tx: &'a TxEip4844,
+    signature: Signature,
+    hash: B256,
+}
+
 /// Encode one blob tx from the first source whose sidecars select, repair and
 /// encode: returns the network-form bytes with the repaired items, or the last
 /// source's error (reported once per block by the caller).
 fn encode_from_sources(
     ctx: &Ctx,
-    t: &TxEip4844,
-    signature: Signature,
-    hash: B256,
+    blob_tx: &BlobTx<'_>,
     sources: &[(String, Vec<SidecarItem>)],
     preferred: Option<BlobForm>,
 ) -> std::result::Result<(Bytes, Vec<SidecarItem>), String> {
     let mut last_err = String::from("no beacon source returned sidecars");
     for (source, items) in sources {
-        match encode_with_source(t, signature, hash, items, &t.blob_versioned_hashes, preferred) {
+        match encode_with_source(blob_tx, items, &blob_tx.tx.blob_versioned_hashes, preferred) {
             Ok((bytes, form, fixed)) => {
                 ctx.set_blob_form(form).map_err(|e| e.to_string())?;
                 return Ok((bytes, fixed));
@@ -347,10 +358,10 @@ fn encode_from_sources(
                 // answer, not a fault; anything else is a validation failure
                 // worth a warning.
                 if matches!(e, BlobError::NoSidecar { .. }) {
-                    tracing::debug!(tx = %hash, source = %source, error = %e, "source does not hold this tx's sidecar");
+                    tracing::debug!(tx = %blob_tx.hash, source = %source, error = %e, "source does not hold this tx's sidecar");
                 } else {
                     tracing::warn!(
-                        tx = %hash,
+                        tx = %blob_tx.hash,
                         source = %source,
                         error = %e,
                         "blob sidecar failed KZG validation - trying next source"
@@ -366,9 +377,7 @@ fn encode_from_sources(
 /// One source's attempt: select -> repair proofs -> pick the first encodable
 /// form in preference order.
 fn encode_with_source(
-    t: &TxEip4844,
-    signature: Signature,
-    hash: B256,
+    blob_tx: &BlobTx<'_>,
     items: &[SidecarItem],
     versioned_hashes: &[B256],
     preferred: Option<BlobForm>,
@@ -390,7 +399,7 @@ fn encode_with_source(
         if !forms.contains(&form) {
             continue;
         }
-        if let Ok(bytes) = encode_blob_tx(t, signature, hash, &selected, form) {
+        if let Ok(bytes) = encode_blob_tx(blob_tx.tx, blob_tx.signature, blob_tx.hash, &selected, form) {
             return Ok((bytes, form, fixed));
         }
     }

@@ -80,15 +80,26 @@ impl FeedMetrics {
     }
 }
 
+/// One metric line's fields (the render's one shape; the wrappers fill the
+/// kind).
+struct MetricLine<'a> {
+    kind: &'a str,
+    name: &'a str,
+    help: &'a str,
+    labels: &'a [(&'a str, &'a str)],
+    value: u64,
+}
+
 fn push_gauge(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
-    push_metric(out, "gauge", name, help, labels, value);
+    push_metric(out, &MetricLine { kind: "gauge", name, help, labels, value });
 }
 
 fn push_counter(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
-    push_metric(out, "counter", name, help, labels, value);
+    push_metric(out, &MetricLine { kind: "counter", name, help, labels, value });
 }
 
-fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
+fn push_metric(out: &mut String, m: &MetricLine<'_>) {
+    let MetricLine { kind, name, help, labels, value } = m;
     let series = if labels.is_empty() {
         name.to_string()
     } else {

@@ -269,35 +269,28 @@ impl Watcher {
     /// transaction hash (it is the deterministic nonce) and its block; a log
     /// outside this bridge's lanes is skipped (`None`).
     fn decode_record(&self, log: &Log, expiration: U256) -> Result<Option<MessageRecord>> {
-        let decoded =
-            IMessageTransmitterV2::MessageSent::decode_log(&log.inner).map_err(|source| {
-                Error::Abi {
-                    what: "MessageSent event",
-                    source,
-                }
-            })?;
-        let burn_tx = log.transaction_hash.ok_or_else(|| Error::BadRequest {
-            reason: "MessageSent log without a transaction hash".into(),
-        })?;
-        let burn_block = log.block_number.ok_or_else(|| Error::BadRequest {
-            reason: "MessageSent log without a block number".into(),
-        })?;
-        let raw_message: Bytes = decoded.data.message;
-        let parsed = Message::decode(&raw_message)?;
+        let sent = decode_message_sent(log)?;
+        let parsed = Message::decode(&sent.raw_message)?;
         if parsed.header.source_domain != self.chain.domain
             || parsed.header.destination_domain != self.destination_domain
         {
             tracing::warn!(
                 chain = self.chain.name,
-                tx = %burn_tx,
+                tx = %sent.burn_tx,
                 source = parsed.header.source_domain,
                 destination = parsed.header.destination_domain,
                 "MessageSent outside this bridge's lanes; skipped"
             );
             return Ok(None);
         }
-        // The deterministic nonce: the burn tx hash (§15.3). The raw event
-        // message carries EMPTY_NONCE; the served artifact fills it.
+        Ok(Some(self.record_of(sent, &parsed, expiration)))
+    }
+
+    /// The record one in-lane message makes: the deterministic nonce is the
+    /// burn tx hash (§15.3); the raw event message carries `EMPTY_NONCE` and
+    /// the served artifact fills it.
+    fn record_of(&self, sent: MessageSent, parsed: &Message, expiration: U256) -> MessageRecord {
+        let burn_tx = sent.burn_tx;
         let served = parsed.with_attester_fields(
             burn_tx,
             FINALITY_THRESHOLD_FINALIZED,
@@ -305,13 +298,13 @@ impl Watcher {
             expiration,
         );
         let now = crate::now_ms();
-        Ok(Some(MessageRecord {
+        MessageRecord {
             source_domain: parsed.header.source_domain,
             destination_domain: parsed.header.destination_domain,
             nonce: burn_tx,
             burn_tx,
-            burn_block,
-            raw_message,
+            burn_block: sent.burn_block,
+            raw_message: sent.raw_message,
             message_hash: served.keccak(),
             message: served.encode(),
             attestation: None,
@@ -322,7 +315,7 @@ impl Watcher {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
-        }))
+        }
     }
 
     /// Insert one record (or reconcile a re-scan of it) and report it.
@@ -408,6 +401,37 @@ impl Watcher {
         }
         Ok(signed)
     }
+}
+
+/// The `MessageSent` log's parts: its transaction hash (the deterministic
+/// nonce), its block, and the raw message bytes. Both the hash and the block
+/// are required — a log without them cannot be turned into a relayable
+/// record, and skipping it silently would drop a burn.
+fn decode_message_sent(log: &Log) -> Result<MessageSent> {
+    let decoded =
+        IMessageTransmitterV2::MessageSent::decode_log(&log.inner).map_err(|source| Error::Abi {
+            what: "MessageSent event",
+            source,
+        })?;
+    let burn_tx = log.transaction_hash.ok_or_else(|| Error::BadRequest {
+        reason: "MessageSent log without a transaction hash".into(),
+    })?;
+    let burn_block = log.block_number.ok_or_else(|| Error::BadRequest {
+        reason: "MessageSent log without a block number".into(),
+    })?;
+    Ok(MessageSent {
+        burn_tx,
+        burn_block,
+        raw_message: decoded.data.message,
+    })
+}
+
+/// The `MessageSent` log's decoded parts (named, not a tuple: the three travel
+/// together into the record).
+struct MessageSent {
+    burn_tx: B256,
+    burn_block: u64,
+    raw_message: Bytes,
 }
 
 /// The scan cursor's validity window: `pin <= cursor <= head` (`0` = never

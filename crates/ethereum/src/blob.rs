@@ -615,6 +615,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one fixture through every blob call on a measured stack budget: splitting it would split the measurement"
+    )]
     fn blob_path_validates_repairs_and_encodes_on_a_bounded_stack() {
         // One fixture through every call the replay path makes on a blob tx,
         // on a deliberately small stack budget: 4 MiB, a quarter of the

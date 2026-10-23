@@ -44,6 +44,84 @@ struct TDriftEntry<'a> {
     duration_ms: u64,
 }
 
+/// Write the filtered diffs to T (batched; padding is mandatory — measured)
+/// and mine the aligned parent block. Returns the writes applied.
+async fn write_and_mine(
+    ctx: &Ctx,
+    block: &alloy_rpc_types_eth::Block,
+    filtered: &[mirror_anvil::Write],
+) -> Result<usize> {
+    let applied =
+        mirror_anvil::apply_writes(&ctx.anvil_t, filtered, ctx.engine.loops.chunk_size).await?;
+    align_context_and_mine(ctx, block).await?;
+    Ok(applied)
+}
+
+/// Journal the before-values and scan the apply's own devnet blocks.
+///
+/// The scan runs *before* the next parity assertion: the prepend loop may have
+/// mined devnet txs whose writes are not marked shadowed yet (the shadow loop
+/// polls every ~2 s), and the probe parity must skip devnet-owned accounts
+/// (copy-on-write) instead of alarming on the devnet's own writes. Measured:
+/// spurious aave_weth_price / univ3_weth_usdc_slot0 mismatches right after a
+/// venue interaction. A scan that cannot complete keeps the marks already in
+/// memory and the walk retries from the last clean block: a named, bounded
+/// degradation.
+async fn journal_and_scan(
+    ctx: &Ctx,
+    n: u64,
+    entries: &[mirror_devnet::journal::JournalEntry],
+    t_head: u64,
+) -> Result<()> {
+    ctx.plane.journal.record(n, entries)?;
+    ctx.plane.journal.prune(n);
+    if let Err(e) = scan_own_blocks(ctx, t_head).await {
+        tracing::warn!(error = %e, "inline shadow scan incomplete");
+    }
+    Ok(())
+}
+
+/// What the apply's entry checks decided.
+enum ApplyEntry {
+    /// The block's writes are already in (a timed-out apply that finished):
+    /// the outcome is the late-completion one.
+    Late(ApplyOutcome),
+    /// Proceed, with the re-apply state the applier must carry.
+    Proceed {
+        needs_reapply: bool,
+        reapply: Option<(u64, u64)>,
+    },
+}
+
+/// The apply's entry checks, in the order that keeps their measured lessons:
+///
+/// - A journal rewind rolled T's values back without moving its head: those
+///   blocks must be re-applied even though `t_head >= n`, otherwise the
+///   late-completion skip below leaves the rolled-back values stale.
+/// - The journal is the discriminator between "this block's writes are already
+///   in" and "T's head is ahead because devnet txs were mined in their own
+///   prepend block". A journal fault is an error, never "no journal": guessing
+///   would re-journal already-applied values as before-values.
+/// - T's head may be *ahead* of the cursor (devnet prepend blocks) — normal.
+///   Behind by more than one block is not: that means someone reset T outside
+///   the engine (anvil_reset), which the incremental diff applier cannot
+///   recover from — alarm and keep retrying instead of corrupting state.
+async fn apply_entry(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result<ApplyEntry> {
+    let reapply = *ctx.plane.reapply_from.lock()?;
+    let needs_reapply = matches!(reapply, Some((from, _)) if n >= from);
+    let journaled = ctx.plane.journal.has_entry(n)?;
+    if t_head >= n && journaled && !needs_reapply {
+        return Ok(ApplyEntry::Late(late_completion(ctx, n, t_head, started).await?));
+    }
+    if t_head + 1 < n {
+        return Err(Error::ApplierBehind { t_head, n });
+    }
+    Ok(ApplyEntry::Proceed {
+        needs_reapply,
+        reapply,
+    })
+}
+
 pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let started = Instant::now();
     let block = ctx.reth.block_by_number(n, false).await?;
@@ -56,27 +134,13 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // pre-write check below aborts instead; the next pass reconciles (the
     // cursor sits below the base → the epoch rule).
     let base = ctx.anvil_t.fork_block().await?;
-    // A journal rewind rolled T's values back without moving its head: those
-    // blocks must be re-applied even though `t_head >= n`, otherwise the
-    // late-completion skip below leaves the rolled-back values stale.
-    let reapply = *ctx.plane.reapply_from.lock()?;
-    let needs_reapply = matches!(reapply, Some((from, _)) if n >= from);
-    // The journal is the discriminator between "this block's writes are already
-    // in" (a timed-out apply that finished late) and "T's head is ahead because
-    // devnet txs were mined in their own prepend block". A journal fault is an
-    // error, never "no journal": guessing would re-journal already-applied
-    // values as before-values.
-    let journaled = ctx.plane.journal.has_entry(n)?;
-    if t_head >= n && journaled && !needs_reapply {
-        return late_completion(ctx, n, t_head, started).await;
-    }
-    // T's head may be *ahead* of the cursor (devnet prepend blocks) - that is
-    // normal. Behind by more than one block is not: that means someone reset T
-    // outside the engine (anvil_reset), which the incremental diff applier
-    // cannot recover from - alarm and keep retrying instead of corrupting state.
-    if t_head + 1 < n {
-        return Err(Error::ApplierBehind { t_head, n });
-    }
+    let (needs_reapply, reapply) = match apply_entry(ctx, n, t_head, started).await? {
+        ApplyEntry::Late(outcome) => return Ok(outcome),
+        ApplyEntry::Proceed {
+            needs_reapply,
+            reapply,
+        } => (needs_reapply, reapply),
+    };
 
     prepend_devnet_txs(ctx, n).await?;
 
@@ -88,30 +152,8 @@ pub async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let (filtered, stats) = filter_watched(ctx, writes)?;
     let entries = read_before_values(ctx, &filtered, t_head).await?;
 
-    // Batched writes (padding is mandatory - measured).
-    let applied = mirror_anvil::apply_writes(
-        &ctx.anvil_t,
-        &filtered,
-        ctx.engine.loops.chunk_size,
-    )
-    .await?;
-
-    align_context_and_mine(ctx, &block).await?;
-
-    ctx.plane.journal.record(n, &entries)?;
-    ctx.plane.journal.prune(n);
-
-    // Scan this apply's own devnet blocks *before* asserting parity: the
-    // prepend loop may have mined devnet txs whose writes are not marked
-    // shadowed yet (the shadow loop polls every ~2 s), and the probe parity
-    // must skip devnet-owned accounts (copy-on-write) instead of alarming on
-    // the devnet's own writes. Measured: spurious aave_weth_price /
-    // univ3_weth_usdc_slot0 mismatches right after a venue interaction.
-    // A scan that cannot complete keeps the marks already in memory and the
-    // walk retries from the last clean block: a named, bounded degradation.
-    if let Err(e) = scan_own_blocks(ctx, t_head).await {
-        tracing::warn!(error = %e, "inline shadow scan incomplete");
-    }
+    let applied = write_and_mine(ctx, &block, &filtered).await?;
+    journal_and_scan(ctx, n, &entries, t_head).await?;
 
     let t_latest = ctx.anvil_t.block_number().await?;
     let (sampled, sampled_ok) = sample_parity(ctx, n, &filtered, t_latest).await;
@@ -159,28 +201,10 @@ async fn finalize(
     t_latest: u64,
     facts: ApplyFacts,
 ) -> Result<ApplyOutcome> {
-    let t_block = ctx.anvil_t.block_by_number(n, false).await?;
-    let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
-    ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
-    ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);
-    ctx.plane.save_state()?;
-    ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
-    ctx.eth_metrics.set(&ctx.eth_metrics.bal_writes, facts.applied as u64);
-    ctx.plane.metrics
-        .set(&ctx.eth_metrics.bal_filtered_out, facts.stats.not_watched as u64);
-    ctx.plane.metrics
-        .set(&ctx.eth_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
+    advance_cursor(ctx, n).await?;
     let duration_ms = started.elapsed().as_millis() as u64;
-    ctx.eth_metrics.set(&ctx.eth_metrics.last_apply_ms, duration_ms);
-    ctx.eth_metrics.set(&ctx.eth_metrics.t_head, t_latest);
-
-    // The rewound range is fully re-applied: resume normal late-completion skips.
-    if let Some((_, until)) = facts.reapply {
-        if n >= until {
-            *ctx.plane.reapply_from.lock()? = None;
-            tracing::info!(block = n, until, "rewound range re-applied");
-        }
-    }
+    record_apply_metrics(ctx, n, t_latest, &facts, duration_ms);
+    clear_reapply(ctx, n, facts.reapply)?;
 
     let outcome = ApplyOutcome {
         source: facts.source,
@@ -191,24 +215,7 @@ async fn finalize(
         sampled_ok: facts.sampled_ok,
         duration_ms,
     };
-    // Divergence log, not a flight recorder: only anomalies land here (the
-    // re-apply of a rewound range, or a sampled-parity mismatch). Counts live
-    // in the metrics.
-    if facts.needs_reapply || outcome.sampled_ok < outcome.sampled {
-        ctx.drift.append(&TDriftEntry {
-            chain: "t",
-            block: n,
-            source: facts.source,
-            bal_writes: facts.total,
-            applied: facts.applied,
-            filtered: outcome.filtered,
-            not_watched: facts.stats.not_watched,
-            skipped_shadowed: facts.stats.skipped_shadowed,
-            sampled: outcome.sampled,
-            sampled_ok: outcome.sampled_ok,
-            duration_ms,
-        })?;
-    }
+    log_drift_if_anomalous(ctx, n, &facts, &outcome, duration_ms)?;
     tracing::info!(
         block = n,
         source = facts.source,
@@ -224,14 +231,77 @@ async fn finalize(
     Ok(outcome)
 }
 
-/// Late completion after a timeout: the writes are already in (the journal
-/// has the block). Cursor + metrics only.
-async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result<ApplyOutcome> {
-    tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
+/// Advance the devnet cursor to `n` — the applier's and the late-completion
+/// path's shared step: the cursor block's hash is read from the chain and the
+/// state persisted.
+async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;
     let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
     ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
     ctx.plane.save_state()?;
+    Ok(())
+}
+
+/// The applier's per-block gauges (one place; the late-completion path sets
+/// its own subset).
+fn record_apply_metrics(ctx: &Ctx, n: u64, t_latest: u64, facts: &ApplyFacts, duration_ms: u64) {
+    ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);
+    ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
+    ctx.eth_metrics.set(&ctx.eth_metrics.bal_writes, facts.applied as u64);
+    ctx.plane
+        .metrics
+        .set(&ctx.eth_metrics.bal_filtered_out, facts.stats.not_watched as u64);
+    ctx.plane
+        .metrics
+        .set(&ctx.eth_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
+    ctx.eth_metrics.set(&ctx.eth_metrics.last_apply_ms, duration_ms);
+    ctx.eth_metrics.set(&ctx.eth_metrics.t_head, t_latest);
+}
+
+/// The rewound range is fully re-applied: resume normal late-completion skips.
+fn clear_reapply(ctx: &Ctx, n: u64, reapply: Option<(u64, u64)>) -> Result<()> {
+    if let Some((_, until)) = reapply {
+        if n >= until {
+            *ctx.plane.reapply_from.lock()? = None;
+            tracing::info!(block = n, until, "rewound range re-applied");
+        }
+    }
+    Ok(())
+}
+
+/// Divergence log, not a flight recorder: only anomalies land here (the
+/// re-apply of a rewound range, or a sampled-parity mismatch). Counts live in
+/// the metrics.
+fn log_drift_if_anomalous(
+    ctx: &Ctx,
+    n: u64,
+    facts: &ApplyFacts,
+    outcome: &ApplyOutcome,
+    duration_ms: u64,
+) -> Result<()> {
+    if !(facts.needs_reapply || outcome.sampled_ok < outcome.sampled) {
+        return Ok(());
+    }
+    ctx.drift.append(&TDriftEntry {
+        chain: "t",
+        block: n,
+        source: facts.source,
+        bal_writes: facts.total,
+        applied: facts.applied,
+        filtered: outcome.filtered,
+        not_watched: facts.stats.not_watched,
+        skipped_shadowed: facts.stats.skipped_shadowed,
+        sampled: outcome.sampled,
+        sampled_ok: outcome.sampled_ok,
+        duration_ms,
+    })
+}
+
+/// Late completion after a timeout: the writes are already in (the journal
+/// has the block). Cursor + metrics only.
+async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result<ApplyOutcome> {
+    tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
+    advance_cursor(ctx, n).await?;
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
     ctx.eth_metrics.set(&ctx.eth_metrics.t_head, t_head);
     ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);

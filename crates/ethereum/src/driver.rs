@@ -346,6 +346,45 @@ async fn reorg_continuity(ctx: &Ctx, chain: Chain, start: u64) -> Result<bool> {
     Ok(true)
 }
 
+/// One replay attempt's failure handling: count, log at the documented
+/// cadence, ask for an M re-base after ~90 s of the same block failing, and
+/// back off. A block whose raws could not be built (missing blob sidecars)
+/// must NOT be mined: mining "what the pool holds" produces an *empty* block,
+/// breaks the 1:1 block mapping and records a fatal tx-count divergence
+/// (measured: 261 txs lost per block while the beacon ingested the sidecars
+/// seconds behind the head). Hold M at n-1 and retry — `mirror_lag_blocks` is
+/// the alarm.
+async fn hold_replay_failure(
+    ctx: &Ctx,
+    n: u64,
+    attempts: u64,
+    e: &crate::error::Error,
+    poll: Duration,
+) {
+    tracing::error!(block = n, attempt = attempts, error = %e, "replay failed (will retry)");
+    if attempts == 18 {
+        // ~90 s of the same block failing: not transient. Ask `next_block_for`
+        // to re-base M at a fresh pin (blob sidecars older than the CL's prune
+        // window can never be served, so waiting is forever).
+        tracing::error!(
+            block = n,
+            "block unservable for ~90 s; asking for an M re-base"
+        );
+        ctx.force_rebase.store(true, Ordering::Relaxed);
+    }
+    if attempts == 1 || attempts.is_multiple_of(20) {
+        tracing::error!(
+            block = n,
+            attempt = attempts,
+            error = %e,
+            "replay failed; holding M (never mining an empty or partial block)"
+        );
+    } else {
+        tracing::debug!(block = n, attempt = attempts, error = %e, "replay retry");
+    }
+    tokio::time::sleep(poll * 5).await;
+}
+
 pub(crate) async fn replay_loop(ctx: Arc<Ctx>) {
     let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     let mut failing_block = 0u64;
@@ -365,41 +404,7 @@ pub(crate) async fn replay_loop(ctx: Arc<Ctx>) {
                     Ok(_) => attempts = 0,
                     Err(e) => {
                         attempts += 1;
-                        tracing::error!(
-                            block = n,
-                            attempt = attempts,
-                            error = %e,
-                            "replay failed (will retry)"
-                        );
-                        // A block whose raws could not be built (missing blob
-                        // sidecars) must NOT be mined: mining "what the pool
-                        // holds" produces an *empty* block, breaks the 1:1
-                        // block mapping and records a fatal tx-count divergence
-                        // (measured: 261 txs lost per block while the beacon
-                        // ingested the sidecars seconds behind the head). Hold
-                        // M at n-1 and retry - `mirror_lag_blocks` is the alarm.
-                        if attempts == 18 {
-                            // ~90 s of the same block failing: not transient.
-                            // Ask `next_block_for` to re-base M at a fresh pin
-                            // (blob sidecars older than the CL's prune window
-                            // can never be served, so waiting is forever).
-                            tracing::error!(
-                                block = n,
-                                "block unservable for ~90 s; asking for an M re-base"
-                            );
-                            ctx.force_rebase.store(true, Ordering::Relaxed);
-                        }
-                        if attempts == 1 || attempts.is_multiple_of(20) {
-                            tracing::error!(
-                                block = n,
-                                attempt = attempts,
-                                error = %e,
-                                "replay failed; holding M (never mining an empty or partial block)"
-                            );
-                        } else {
-                            tracing::debug!(block = n, attempt = attempts, error = %e, "replay retry");
-                        }
-                        tokio::time::sleep(poll * 5).await;
+                        hold_replay_failure(&ctx, n, attempts, &e, poll).await;
                     }
                 }
             }

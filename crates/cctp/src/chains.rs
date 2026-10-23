@@ -112,6 +112,24 @@ impl Chain {
         if chain_id != self.chain_id {
             return Err(self.wiring("chain id", chain_id, self.chain_id));
         }
+        let (local_domain, version, body_version) = self.verify_versions().await?;
+        let (local_transmitter, peer_messenger) = self.verify_messengers(peer).await?;
+        let fees = FeeSurface::probe(&self.rpc, TOKEN_MESSENGER_V2).await?;
+        Ok(Wiring {
+            chain_id,
+            local_domain,
+            version,
+            body_version,
+            local_transmitter,
+            peer_messenger,
+            min_fee: fees.min_fee,
+        })
+    }
+
+    /// The version assertions: the transmitter's `localDomain` and `version`,
+    /// and the messenger's `messageBodyVersion` — both sides must pin the
+    /// domain and the message version this bridge speaks.
+    async fn verify_versions(&self) -> Result<(u32, u32, u32)> {
         let local_domain = self
             .assert_getter(
                 MESSAGE_TRANSMITTER_V2,
@@ -136,6 +154,13 @@ impl Chain {
                 "messageBodyVersion",
             )
             .await?;
+        Ok((local_domain, version, body_version))
+    }
+
+    /// The messenger assertions: the local transmitter must be the pinned one,
+    /// and the peer's TokenMessenger must be registered before the bridge will
+    /// move value.
+    async fn verify_messengers(&self, peer: &Chain) -> Result<(Address, B256)> {
         let local_transmitter = self
             .assert_getter(
                 TOKEN_MESSENGER_V2,
@@ -154,16 +179,7 @@ impl Chain {
                 "TM.remoteTokenMessengers(peer)",
             )
             .await?;
-        let fees = FeeSurface::probe(&self.rpc, TOKEN_MESSENGER_V2).await?;
-        Ok(Wiring {
-            chain_id,
-            local_domain,
-            version,
-            body_version,
-            local_transmitter,
-            peer_messenger,
-            min_fee: fees.min_fee,
-        })
+        Ok((local_transmitter, peer_messenger))
     }
 
     /// One wiring assert: `eth_call` the getter and compare it, naming the

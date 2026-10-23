@@ -25,7 +25,7 @@ pub mod system;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
-use crate::sim::Sim;
+use crate::sim::{Sim, TokenRef};
 use crate::wire::UserAbstraction;
 use alloy_consensus::Transaction as _;
 use alloy_primitives::{Address, U256};
@@ -191,7 +191,11 @@ impl Bridge {
         let Some((sender, token, amount)) = system::credit_of(transfer, tokens, emitter) else {
             return Ok(());
         };
-        self.sim.credit_spot(sender, token.index, &token.name, amount)?;
+        self.sim.credit_spot(
+            sender,
+            TokenRef { index: token.index, coin: &token.name },
+            amount,
+        )?;
         self.metrics.inc_credits();
         tracing::info!(
             from = %sender,
@@ -214,7 +218,9 @@ impl Bridge {
                 token,
                 wei,
             } => {
-                self.spot_send(caller, destination, token, wei, tokens)?;
+                if let Some(info) = self.token_info(tokens, token) {
+                    self.spot_send(caller, destination, info, wei)?;
+                }
             }
             CoreAction::SendAsset {
                 destination,
@@ -222,7 +228,9 @@ impl Bridge {
                 wei,
                 ..
             } => {
-                self.send_asset(caller, destination, token, wei, tokens).await?;
+                if let Some(info) = self.token_info(tokens, token) {
+                    self.send_asset(caller, destination, info, wei).await?;
+                }
             }
             CoreAction::AddApiWallet { wallet, name } => {
                 self.add_api_wallet(caller, wallet, &name)?;
@@ -252,9 +260,12 @@ impl Bridge {
             return Err(Error::Warming);
         };
         let amount = system::core_to_human(ntl, usdc.wei_decimals);
-        let applied =
-            self.sim
-                .usd_class_transfer(caller, usdc.index, &usdc.name, amount, to_perp)?;
+        let applied = self.sim.usd_class_transfer(
+            caller,
+            TokenRef { index: usdc.index, coin: &usdc.name },
+            amount,
+            to_perp,
+        )?;
         if applied {
             tracing::info!(account = %caller, amount = %amount, to_perp, "bridge: USD class transfer");
         } else {
@@ -264,23 +275,31 @@ impl Bridge {
         Ok(())
     }
 
+    /// The registry entry for a wire token index; an unknown index is counted
+    /// and refused (the bridge never guesses a token).
+    fn token_info<'a>(&self, tokens: &'a [TokenInfo], token: u64) -> Option<&'a TokenInfo> {
+        if let Some(info) = system::by_index(tokens, u32::try_from(token).unwrap_or(u32::MAX)) {
+            return Some(info);
+        }
+        self.metrics.inc_refusals();
+        None
+    }
+
     /// `spotSend`: spot→spot inside Core.
     fn spot_send(
         &self,
         caller: Address,
         destination: Address,
-        token: u64,
+        info: &TokenInfo,
         wei: u64,
-        tokens: &[TokenInfo],
     ) -> Result<()> {
-        let Some(info) = system::by_index(tokens, u32::try_from(token).unwrap_or(u32::MAX)) else {
-            self.metrics.inc_refusals();
-            return Ok(());
-        };
         let amount = system::core_to_human(wei, info.wei_decimals);
-        let applied = self
-            .sim
-            .spot_send(caller, destination, info.index, &info.name, amount)?;
+        let applied = self.sim.spot_send(
+            caller,
+            destination,
+            TokenRef { index: info.index, coin: &info.name },
+            amount,
+        )?;
         if !applied {
             self.metrics.inc_refusals();
             tracing::warn!(account = %caller, amount = %amount, "bridge: spot send refused (insufficient balance)");
@@ -318,16 +337,11 @@ impl Bridge {
         &self,
         caller: Address,
         destination: Address,
-        token: u64,
+        info: &TokenInfo,
         wei: u64,
-        tokens: &[TokenInfo],
     ) -> Result<()> {
-        let Some(info) = system::by_index(tokens, u32::try_from(token).unwrap_or(u32::MAX)) else {
-            self.metrics.inc_refusals();
-            return Ok(());
-        };
         let amount = system::core_to_human(wei, info.wei_decimals);
-        if destination == system::system_address(token) {
+        if destination == system::system_address(u64::from(info.index)) {
             // Core→EVM: debit the caller, then complete on the EVM side.
             let Some(_after) = self.sim.try_debit_spot(caller, info.index, amount)? else {
                 self.metrics.inc_refusals();
@@ -336,7 +350,12 @@ impl Bridge {
             };
             self.complete_core_to_evm(&caller, info, amount).await?;
         } else {
-            let applied = self.sim.spot_send(caller, destination, info.index, &info.name, amount)?;
+            let applied = self.sim.spot_send(
+                caller,
+                destination,
+                TokenRef { index: info.index, coin: &info.name },
+                amount,
+            )?;
             if !applied {
                 self.metrics.inc_refusals();
                 tracing::warn!(account = %caller, amount = %amount, "bridge: sendAsset refused (insufficient balance)");

@@ -262,7 +262,9 @@ mod tests {
         let client = crate::feed::ws::WsClient::new(client_feed.clone(), format!("ws://{addr}/ws"));
         let task = tokio::spawn(client.run());
         let mut filled = false;
-        for _ in 0..50 {
+        // 10 s: the server pushes on a 1 Hz tick; the budget only has to
+        // outlast a loaded parallel test run.
+        for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             if client_feed.mark("BTC") == Some(rust_decimal::Decimal::from(100)) {
                 filled = true;

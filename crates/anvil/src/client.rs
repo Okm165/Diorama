@@ -295,6 +295,21 @@ impl Rpc {
         &self,
         calls: &[Call],
     ) -> Result<Vec<std::result::Result<Box<RawValue>, RpcError>>> {
+        let (ids, body) = self.batch_request(calls)?;
+        let mut by_id = Self::index_by_id(self.post_batch(&body).await?);
+        let mut out = Vec::with_capacity(calls.len());
+        for id in ids {
+            match by_id.remove(&id) {
+                Some(response) => out.push(Self::response_result(response)),
+                None => out.push(Err(missing_from_batch(id))),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The batch request's ids and its serialized body (alloy's request
+    /// packet types; the params are already `RawValue`).
+    fn batch_request(&self, calls: &[Call]) -> Result<(Vec<u64>, Box<RawValue>)> {
         let ids: Vec<u64> = calls.iter().map(|_| self.id()).collect();
         let requests = calls
             .iter()
@@ -309,9 +324,15 @@ impl Rpc {
         let body = RequestPacket::Batch(requests)
             .serialize()
             .map_err(|source| self.encode("batch", source))?;
-        let (status, text) = self.post_raw("batch", &body).await?;
-        // Same boundary rule as `answer`: a body that parses as a batch of
-        // JSON-RPC answers is the answers, whatever the HTTP status.
+        Ok((ids, body))
+    }
+
+    /// Post one batch body and classify the answer — the same boundary rule as
+    /// `answer` (a body that parses as answers *is* the answers, whatever the
+    /// HTTP status); a body that does not is a `BatchDecode` naming the
+    /// request text, and a single answer to a batch call is corrupt.
+    async fn post_batch(&self, body: &RawValue) -> Result<Vec<Response>> {
+        let (status, text) = self.post_raw("batch", body).await?;
         let packet = match self.classify("batch", status, &text) {
             Ok(packet) => packet,
             Err(Error::Decode { source, .. }) => {
@@ -323,33 +344,27 @@ impl Rpc {
             }
             Err(e) => return Err(e),
         };
-        let responses = match packet {
-            ResponsePacket::Batch(responses) => responses,
-            ResponsePacket::Single(_) => {
-                return Err(self.decode(
-                    "batch",
-                    serde_json::Error::custom("a single answer to a batch call"),
-                ))
-            }
-        };
-        // Items without a numeric id are not ours (subscription pushes, a
-        // different client's response); our ids that the node did not answer
-        // surface as `missing_from_batch`, never as a silent skip.
-        let mut by_id: std::collections::HashMap<u64, Response> = responses
+        match packet {
+            ResponsePacket::Batch(responses) => Ok(responses),
+            ResponsePacket::Single(_) => Err(self.decode(
+                "batch",
+                serde_json::Error::custom("a single answer to a batch call"),
+            )),
+        }
+    }
+
+    /// Index a batch's answers by id. Items without a numeric id are not ours
+    /// (subscription pushes, a different client's response); our ids that the
+    /// node did not answer surface as `missing_from_batch`, never as a silent
+    /// skip.
+    fn index_by_id(responses: Vec<Response>) -> std::collections::HashMap<u64, Response> {
+        responses
             .into_iter()
             .filter_map(|response| match response.id {
                 Id::Number(id) => Some((id, response)),
                 Id::String(_) | Id::None => None,
             })
-            .collect();
-        let mut out = Vec::with_capacity(calls.len());
-        for id in ids {
-            match by_id.remove(&id) {
-                Some(response) => out.push(Self::response_result(response)),
-                None => out.push(Err(missing_from_batch(id))),
-            }
-        }
-        Ok(out)
+            .collect()
     }
 
     // ---- eth namespace -------------------------------------------------
