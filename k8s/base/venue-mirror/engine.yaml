@@ -34,13 +34,12 @@ spec:
           image: localhost/venue-mirror:v1
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
-          env:
-            - name: STATE_DIR
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: STATE_DIR } }
-            - name: ANVIL_V_URL
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: ANVIL_V_URL } }
-            - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: HL_RPC_URL } }
+          # The wiring the instance TOML references as ${...} (HL_RPC_URL,
+          # ANVIL_V_URL, STATE_DIR) — the same `envFrom` mechanism as the
+          # mainnet engine: the ConfigMap carries every key, the pod reads the
+          # ones its instance names, and a new wiring var needs no edit here.
+          envFrom:
+            - configMapRef: { name: mirror-config }
           ports:
             - { name: http, containerPort: 8080 }
           volumeMounts:
