@@ -262,7 +262,33 @@ impl FeedBridge {
             return Ok(());
         };
         let source_now = read_answer(&ctx.reth, feed.section.source).await?;
-        let target_now = read_answer(&ctx.anvil_t, feed.section.target).await?;
+        let target_now = match read_answer(&ctx.anvil_t, feed.section.target).await {
+            Ok(value) => value,
+            // The target's code is gone: a re-pin (epoch) wiped the devnet's
+            // fixture deploy, or the operator re-pointed the feed. Forget the
+            // resolved decimals *and* the value state, and wait for the target
+            // to reappear — the reappeared target is first contact again (the
+            // epoch rule: the devnet's values are gone with the old base). A
+            // transport fault stays a fault.
+            Err(e @ Error::FeedBridgeAbi { .. }) => {
+                *feed
+                    .decimals
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *feed
+                    .values
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = ValueState::default();
+                tracing::warn!(
+                    feed = %feed.section.name,
+                    target = %feed.section.target,
+                    error = %e,
+                    "feed target vanished; waiting for it to reappear"
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
         let state = *feed.values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         match step(state, target_now, source_now) {
             Step::Confirm => {

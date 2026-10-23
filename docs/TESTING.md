@@ -411,6 +411,11 @@ aggregator deployed for the test):
   *waits*, reporting `decimals: null`; a transport fault or a
   present-but-mismatched target (decimals must equal the source's) is a fault,
   not a wait;
+- a re-pin (epoch) wipes a devnet-deployed target: the bridge forgets the
+  feed's decimals **and** value state and returns to *waiting* — not an error
+  loop — and the reappeared target is first contact again (the epoch rule:
+  the devnet's values are gone with the old base). Measured: after a T re-pin
+  the bridge recovered cleanly when the target was reinstalled;
 - first contact publishes the source's answer; the next pass confirms it
   (`confirmed_answer`, `feed_bridge_updates_total{feed}`);
 - a scenario write to the target pauses the feed on the next pass
@@ -427,6 +432,46 @@ aggregator deployed for the test):
 - pass faults count in `feed_bridge_pass_errors_total` and the feed's
   `last_error` names the cause — a stuck feed is visible, never a silent stale
   success.
+
+Verified against **their fixture aggregators** (measured 2026-10-23, after
+their `deploy-contracts` ran on the scratch T): all five feeds the fixtures
+install (`CHAINLINK_FEEDS`: WETH/WBTC/USDC/USDT/wstETH, 8 decimals) were
+published and confirmed — each aggregator's `latestRoundData()` then returned
+the *same answer* as the live mainnet source, and its `updatedAt` was a **T
+block timestamp** (chain-native stamping, plan §17.2: the feeds are stamped in
+the devnet chain's own domain).
+
+## daloc's `deploy-contracts` against mirror T (Phase 0 acceptance)
+
+Measured 2026-10-23: their `docker/scripts/deploy-contracts.sh` ran
+end-to-end against the scratch T (`ANVIL_RPC_URL` → T, `CONTRACTS_DIR`, the
+host's `forge`/`cast`/`jq`; the repo's submodules `lib/hyper-evm-lib` +
+`lib/forge-std` and `contracts/lib`'s OZ deps must be present). It emitted a
+54-line `deployed.env`. What it produced and what that taught us:
+
+- **fixtures**: `MockERC20Fixed` over the canonical tokens (USDC/WETH/WBTC/
+  DAI — the fixture list's set), five `MockChainlinkAggregator`s (the
+  `CHAINLINK_FEEDS` addresses the feed bridge publishes to), the CCTP mock at
+  `0x17`, the mock swap router, and seeded Aave reserves.
+- **the protocol set is the devnet's own**: the hub/registries/underwriter/
+  executors land at *deployer-derived* addresses (their `DeployFactory` is
+  deployed by the devnet deployer), **not** the addresses in their
+  `contracts/deployments/ethereum.json` (which records their *mainnet*
+  production deployment). The watchlist carries the mainnet set (faithful
+  mirror); the devnet set is tx-deployed on T and shadow-marked by the
+  scanner, so it needs no static watch.
+- `SCAN_START_BLOCK` is emitted (their scanner's cold-start cursor), the CCTP
+  mock is wired (`CCTP_MESSENGER_ADDRESS=0x17`), and the oracle adapters are
+  recorded.
+- on a no-mining chain the deploy needs blocks: with the engine **paused** and
+  a modest `anvil_mine` loop the run is clean; resuming the engine then scans
+  the deploy's blocks (their writes marked). The fixtures script is **not
+  idempotent across runs** (a second run reverts); the clean path is a fresh
+  re-pin + one run.
+- **`anvil_dealERC20` works against their `MockERC20Fixed`** (the §17.4
+  re-check): deal, lower and drain to 0 all land, and `/admin/deal` discovers
+  the same slot — so their `fund_token_on`/drain paths need no mirror-side
+  shim.
 
 ## The CCTP bridge — measured facts and acceptance
 

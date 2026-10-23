@@ -429,7 +429,10 @@ port = 8096
         ));
         let (inst, unresolved) = Instance::inspect(path).unwrap();
         assert_eq!(inst.instance.name, "mainnet-mirror");
-        assert_eq!(inst.watchlist.len(), 48, "the audited watchlist is complete");
+        // 47 market/protocol entries + the dapp's 41-address mainnet
+        // deployment (contracts/deployments/ethereum.json; measured complete
+        // 2026-10-23). Update this count deliberately when the audit changes.
+        assert_eq!(inst.watchlist.len(), 88, "the audited watchlist is complete");
         assert_eq!(l1(&inst).fork_offset, 128);
         assert_eq!(engine(&inst).verifier.probes.len(), 11);
         let mut names = unresolved.clone();

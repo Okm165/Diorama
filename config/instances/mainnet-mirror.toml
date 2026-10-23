@@ -43,7 +43,9 @@ state_dir = "${STATE_DIR}"
 # to the tx scanner, so whole-account owned here or the parent diffs clobber a
 # mock (plan §14.1/§17.6). Everything else that deploy writes goes through txs
 # (auto-marked) or fresh addresses (never watched). Its mock aggregators and
-# oracle adapters deploy at fresh addresses; its feed writes are txs.
+# oracle adapters deploy at fresh addresses; with `[services.engine.feed_bridge]`
+# enabled the bridge is their live writer (also via txs, auto-marked), so their
+# periodic refresher stays off in mirror mode (§14.5).
 fixture_addresses = [
   "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", # USDC (MockERC20Fixed over it)
   "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", # WETH
@@ -184,14 +186,140 @@ note = "Universal Router"
 address = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
 note = "UniV3 WETH/USDC 0.05%"
 
-# The dapp's own mainnet deployment (plan §3.5). Only the hub is fully
-# specified in the plan; the beacon/factory/timelock/registries are
-# truncated there - add them from contracts/deployments/ethereum.json.
-# (The plan's "whale" addresses hold zero balances today, so they are
-# deliberately not watched; fund scenarios with the cheatcodes instead.)
+# The dapp's own **mainnet production deployment** (plan §3.5/§7), complete:
+# the CREATE2 set from contracts/deployments/ethereum.json (deployed
+# 2026-09-29). Watched so the mirror stays faithful to their live protocol
+# wherever a scenario touches it. Measured 2026-10-23: their *devnet* deploy
+# does NOT reuse this set - DeployDaloc deploys fresh contracts at
+# deployer-derived addresses (deployed.env), which the tx scanner marks
+# devnet-owned, so they need no static watch (and watching them would risk a
+# mainnet collision). The margin-agent factories/beacons are not deployed on
+# mainnet (zero in the JSON) and are absent here; the plan's "whale" addresses
+# hold zero balances today and are deliberately not watched - fund scenarios
+# with the cheatcodes instead.
 [[watchlist]]
 address = "0xDA10C0070a117b6e97EC01E983236F9D39E3152d"
-note = "dapp hub"
+note = "dapp hub (proxy)"
+[[watchlist]]
+address = "0x68668a7A8CbA5ccfa4462415D464F52185797f18"
+note = "dapp hub beacon"
+[[watchlist]]
+address = "0x91dB1a829b4C81a06F83404278f2269874fDdB8f"
+note = "dapp DeployFactory"
+[[watchlist]]
+address = "0x1c5bB1eC377663C2A84De3c6248BeC1D6b5B8639"
+note = "dapp timelock"
+[[watchlist]]
+address = "0xEb968bF3B7BB24DC0B999623356b532624d78c27"
+note = "dapp governance multisig"
+[[watchlist]]
+address = "0x5907ED3A2b95dAE7f200b81c33800C27AB6Af0D7"
+note = "facts registry"
+[[watchlist]]
+address = "0x07A2Af1983Af54687CE3577FcdED810117202D8B"
+note = "facts registry beacon"
+[[watchlist]]
+address = "0x613Fc72972143E6c9A2b87FdC96569D035383156"
+note = "proof executor"
+[[watchlist]]
+address = "0xa6A86b6280d42C900e45a4072bFc7A2D178C747e"
+note = "proof executor beacon"
+[[watchlist]]
+address = "0xc721d53A9533E7011fb87968cE96DC04CCAfE71C"
+note = "commitment registry"
+[[watchlist]]
+address = "0xd5fFAb56D8Ee803A3d4cCd6caf8ca5a7B07b6393"
+note = "commitment registry beacon"
+[[watchlist]]
+address = "0x6B565056EC2A03630D8daCdd508131e873352032"
+note = "authorization flags"
+[[watchlist]]
+address = "0x33Db1109072a5e0051169971a4Cf96eeE636dBF0"
+note = "authorization flags beacon"
+[[watchlist]]
+address = "0x1BD6e752a6E140264cc9E56725248D3d92105cE8"
+note = "underwriter"
+[[watchlist]]
+address = "0x9f2cd9d209042120F0823AbB7aFA5D8E995915CE"
+note = "underwriter beacon"
+[[watchlist]]
+address = "0xeb9a92791F1be4605fA80aE48e6b3b546D4C82CB"
+note = "liquidation executor"
+[[watchlist]]
+address = "0x231F11f6F00FdC1A37C73177FFACAC2bdFc8A198"
+note = "liquidation executor beacon"
+[[watchlist]]
+address = "0x07B63204FeFb5B984DE8f7fC4336Ffa8Ce6607B7"
+note = "lending adapter"
+[[watchlist]]
+address = "0x98c660636Cbf4AF2B98c46B5EE1D40E090d9aab1"
+note = "lending adapter beacon"
+[[watchlist]]
+address = "0x4e14fbFE3D593D922a91FbEFD0f912f1971c7B40"
+note = "debt issuer"
+[[watchlist]]
+address = "0x7B4ec265317b3D6b435158382c2044B0E68CeADD"
+note = "debt issuer beacon"
+[[watchlist]]
+address = "0x20218D28E5699CBF0ffeEb2FA5b56F646B3C9BdF"
+note = "collateral-manager issuer"
+[[watchlist]]
+address = "0xb529aEF000e771143Cce893eA208758AF06c3eab"
+note = "collateral-manager issuer beacon"
+[[watchlist]]
+address = "0xe93AC354a302a871deF36C06D43c645e6a7ece98"
+note = "collateral-manager beacon"
+[[watchlist]]
+address = "0x31cD9c4888b1F20AC6E7aB3A80f4b97AeEeC736d"
+note = "issued-debt beacon"
+[[watchlist]]
+address = "0xAAD5eBb10c764FA39382FA4BF0874B872B99bbD3"
+note = "curator-vault beacon"
+[[watchlist]]
+address = "0x538B1024f734f05329222021C11811cDFe5a27df"
+note = "curator-vault factory"
+[[watchlist]]
+address = "0xAF6967F0757bEe62434417C6a2976dE6a18d88B0"
+note = "curator-vault factory beacon"
+[[watchlist]]
+address = "0xdD736F662003C016C3F583D320914047154A8DBD"
+note = "oracle syncer"
+[[watchlist]]
+address = "0xD344d7bd24cF6d20A1be08164a168bfF56195D76"
+note = "oracle syncer beacon"
+[[watchlist]]
+address = "0x5B4E995B8D5Fb877dE2B65De038DE46c872BEE4a"
+note = "batch executor"
+[[watchlist]]
+address = "0xA65911f8D6FD989dEcCf2C2e7815588CEFD8EC59"
+note = "batch executor beacon"
+[[watchlist]]
+address = "0x7b9BfA64860C473Bd197B43B3730F9296c18510C"
+note = "facts registrar"
+[[watchlist]]
+address = "0xa3Ede4d669b95193C892eE670E4E88243e393c6C"
+note = "oracle adapter ETH"
+[[watchlist]]
+address = "0x47427376fa9C9F2E777412d60132FB05764329eD"
+note = "oracle adapter ETH beacon"
+[[watchlist]]
+address = "0x9Bd1A7A3FC18A3829ADCF1B003A17dd28c1d049B"
+note = "oracle adapter BTC"
+[[watchlist]]
+address = "0x00f0Acd21c9B156c9703f6B28CC9d56a79772C95"
+note = "oracle adapter BTC beacon"
+[[watchlist]]
+address = "0x78b083b7334b8a0D8a151F5570cf437E6dc9CB77"
+note = "oracle adapter USDC"
+[[watchlist]]
+address = "0x49674C0372113BB5ff40e5Da06d63f18Cc98c45B"
+note = "oracle adapter USDC beacon"
+[[watchlist]]
+address = "0x5cB420Ba6aBC649bc2F0b2D8b86aBb1f771F32B2"
+note = "oracle adapter USDT"
+[[watchlist]]
+address = "0x72eA358E86Fa607e504211896053953Ca4863e7e"
+note = "oracle adapter USDT beacon"
 
 # Aave V3 (cascade scenario)
 [[watchlist]]
