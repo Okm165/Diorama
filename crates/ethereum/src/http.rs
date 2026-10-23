@@ -39,8 +39,13 @@ struct StatusResponse {
     follow: &'static str,
     m_head: u64,
     t_head: u64,
+    /// The devnet chain's cursor (T-height, the shared field's meaning on both
+    /// engines; the plan's clock-labels rule).
     cursor: Option<u64>,
+    /// T's cursor by its profile name (the scripts' established spelling).
     cursor_t: Option<u64>,
+    /// M's replay cursor (M-height — the parent stream's own clock).
+    cursor_m: Option<u64>,
     lag: u64,
     frozen: bool,
     halted: bool,
@@ -171,8 +176,9 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
         follow: ctx.follow_tag(),
         m_head,
         t_head,
-        cursor: cm.as_ref().map(|c| c.block),
+        cursor: ct.as_ref().map(|c| c.block),
         cursor_t: ct.as_ref().map(|c| c.block),
+        cursor_m: cm.as_ref().map(|c| c.block),
         lag: follow.saturating_sub(cm.as_ref().map(|c| c.block).unwrap_or(follow)),
         frozen: ctx.plane.frozen.load(Ordering::Relaxed),
         halted: ctx.plane.is_halted(),

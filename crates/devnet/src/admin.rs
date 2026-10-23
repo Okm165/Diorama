@@ -393,8 +393,10 @@ impl AdminSurface<'_> {
 
 /// `/admin/epoch`'s wire shape (both engines): the re-pin applied, and the
 /// source it re-pinned to. Built by [`AdminSurface::epoch_repin`], so the two
-/// engines' handlers serve one shared type — nothing per-crate to drift.
-#[derive(Debug, Clone, serde::Serialize)]
+/// engines' handlers serve one shared type — nothing per-crate to drift — and
+/// the sim's `epoch_new` reads it back as the same type (the channel is ours
+/// on both ends).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EpochResponse {
     pub reset: bool,
     pub source: String,

@@ -457,7 +457,9 @@ The behavioral checks, not just shapes:
   (`/control/crash`, `/control/deal`, …).
 - **`/status`** — each engine reports its own facts (reth/M/T vs fork
   pin/probes/source); the shared fields (`cursor`, `halted`, `shadowed*`) are
-  present on both.
+  present on both, and `cursor` means the *devnet chain's* cursor on both
+  (T-height; the plan's clock-labels rule). The ethereum profile names its
+  clocks explicitly: `cursor_t` is T's, `cursor_m` is M's replay cursor.
 - **rewind semantics** (deliberate): T's journal holds the applier's
   parent-diff before-values, so `/admin/rewind` on T undoes *applied parent
   blocks*; a T-side engine write (the deal faucet) is undone by the hand-back

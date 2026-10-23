@@ -132,8 +132,23 @@ else
 fi
 # The rewind success path has one wire shape on both (the counts differ by
 # content: T's applier journals parent-diff writes, V may have none). Direct
-# mode only — on the cluster a rewind is a live mutation.
+# mode only — on the cluster a rewind is a live mutation. A devnet chain that
+# was just re-pinned (daloc-sim's epoch lane) has no cursor until its applier
+# catches up, and its refusal then differs from its peer's success *by state,
+# not by design*: wait (bounded) for both cursors before comparing, so the
+# check does not race the catch-up.
 if [ -n "${ENGINE_T_URL:-}" ]; then
+  LAST_PATH=/status
+  fetch t > /dev/null; fetch v > /dev/null
+  for _ in $(seq 1 120); do
+    settled=$(python3 -c 'import json
+ok = all(json.load(open(f"/tmp/sym-{s}.out")).get("cursor") is not None for s in ("t", "v"))
+print("yes" if ok else "no")')
+    [ "$settled" = "yes" ] && break
+    sleep 5
+    fetch t > /dev/null; fetch v > /dev/null
+  done
+  [ "$settled" = "yes" ] || echo "  · warning: a devnet cursor is still absent; the rewind check may compare unequal states"
   LAST_PATH=/admin/rewind
   t=$(fetch t -X POST -H 'Content-Type: application/json' -d '{"blocks":1}')
   v=$(fetch v -X POST -H 'Content-Type: application/json' -d '{"blocks":1}')

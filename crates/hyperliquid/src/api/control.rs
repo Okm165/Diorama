@@ -398,15 +398,13 @@ pub async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json<EpochN
     }
     let epoch = state.sim.reset()?;
     state.feed.clear_overrides()?;
-    #[derive(Deserialize)]
-    struct EngineEpoch {
-        reset: bool,
-        source: String,
-    }
-    let engine: EngineEpoch = serde_json::from_str(&text).map_err(|source| Error::Decode {
-        what: "engine epoch response",
-        source,
-    })?;
+    // The engine's own wire type (mirror_devnet::admin), not a local copy:
+    // the channel is ours on both ends, so the compiler keeps them consistent.
+    let engine: mirror_devnet::admin::EpochResponse =
+        serde_json::from_str(&text).map_err(|source| Error::Decode {
+            what: "engine epoch response",
+            source,
+        })?;
     tracing::warn!(epoch, source = %engine.source, "sim epoch_new: scenario blanked, V re-pinned");
     Ok(Json(EpochNewResponse {
         epoch,

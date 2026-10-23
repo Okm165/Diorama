@@ -132,6 +132,7 @@ pub enum BlobForm {
 }
 
 impl BlobForm {
+    /// The persisted name (the state file's `blob_wrapper` field).
     pub fn as_str(self) -> &'static str {
         match self {
             BlobForm::Legacy => "legacy",
@@ -139,6 +140,11 @@ impl BlobForm {
             BlobForm::Bare => "bare",
         }
     }
+
+    /// Parse a persisted name. Unknown values are `None`, never a load
+    /// failure: the form is *learned* (the next replay re-probes the pool), so
+    /// a state file written by a newer engine must not brick an older one —
+    /// the engine falls back to probing and learns again.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "legacy" => Some(BlobForm::Legacy),
