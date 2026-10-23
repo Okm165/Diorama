@@ -8,10 +8,11 @@
 //! restart does not lose a scenario.
 //!
 //! Time: the sim has its own clock (`wall + offset`, offset = 0 until
-//! `advance` scripts a jump). Funding accrues on that clock — lazily on every
-//! read and on the 1 Hz tick — so daloc's set-and-read tests see live
-//! funding/liquidation behavior without ever calling `advance`. The wire's
-//! `time` field stays *wall* now: it is the read's freshness, which the
+//! `advance` scripts a jump). Funding accrues on that clock and liquidations
+//! are checked against current marks — the §14.8 evaluation runs on every
+//! account-scoped read and on the 1 Hz tick — so daloc's set-and-read tests
+//! see live funding/liquidation behavior without ever calling `advance`. The
+//! wire's `time` field stays *wall* now: it is the read's freshness, which the
 //! client's ≤6 s staleness gate compares against its own clock.
 pub mod account;
 

@@ -1,9 +1,11 @@
 //! The Venue Mirror engine binary — the `venue` profile's entrypoint.
 //!
 //! Boot order (plan §7.2): wait for anvil V, assert the chain, reconcile the
-//! registry (reset detection + the epoch rule), run the at-pin probes, then
-//! serve the HTTP surface and the driver loop. A boot fault is fatal: a driver
-//! over the wrong chain or a broken registry must not serve.
+//! registry (reset detection + the epoch rule; the reconcile also anchors the
+//! epoch pin before any writes exist — the counterpart of the ethereum
+//! engine's explicit boot anchor), run the at-pin probes, then serve the HTTP
+//! surface and the driver loop. A boot fault is fatal: a driver over the wrong
+//! chain or a broken registry must not serve.
 //!
 //! Thin shell by design: the runtime is built here, the story lives in
 //! `mirror_hyperliquid`. The shutdown path mirrors the ethereum engine's: the
