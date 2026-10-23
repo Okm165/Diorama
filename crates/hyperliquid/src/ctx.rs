@@ -19,27 +19,27 @@ use std::time::Duration;
 
 pub struct Ctx {
     /// The venue chain's section (the fork source).
-    pub chain: ChainVenue,
+    pub(crate) chain: ChainVenue,
     /// The venue service's section (cadence, chunk size, probes, http).
-    pub venue: VenueSection,
+    pub(crate) venue: VenueSection,
     /// Anvil V (the devnet chain; chain id 999).
-    pub v: Rpc,
+    pub(crate) v: Rpc,
     /// The fork source V derives from (the unshadow re-sync truth at the pin).
-    pub source_rpc: Rpc,
+    pub(crate) source_rpc: Rpc,
     /// V's fork pin (0 = not yet resolved): the anchor `VenueSource` reads at
     /// (V's base state *is* the source's state at the pin) and the driver's
     /// epoch key. Shared with the source, set by the driver's reconcile.
-    pub pin: Arc<AtomicU64>,
+    pub(crate) pin: Arc<AtomicU64>,
     /// The unshadow re-sync source: `VenueSource` reads the fork source at the
     /// pin (one implementation per profile, chosen at boot — rule 15).
-    pub source: Arc<dyn Source>,
+    pub(crate) source: Arc<dyn Source>,
     /// The devnet plane: the shadow registry, the journal, the cursor state,
     /// the shared admin gauges and flags — the same bundle the ethereum engine
     /// embeds. The venue never freezes and has no clock offset; those fields
     /// keep the shared surface's shape (documented on the plane).
-    pub plane: Plane,
+    pub(crate) plane: Plane,
     /// The venue's own gauges/counters.
-    pub venue_metrics: VenueMetrics,
+    pub(crate) venue_metrics: VenueMetrics,
 }
 
 impl Ctx {

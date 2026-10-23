@@ -445,6 +445,12 @@ whose body grows a second dependency cannot compile until its signature says
 so, so contracts cannot silently widen. The audit's false positives are the
 framework's: axum handlers must take `State<Arc<ApiState>>` (the extractor
 dictates the type), and router builders pass the context through to the app.
+The same audit's struct pass narrowed fields rather than signatures: both
+engines' `Ctx` fields, `Plane.shadow_path` and `Chain.usdc` are `pub(crate)`
+(the composition points stay public as types; their fields are crate-internal),
+while `Watcher`/`Relayer` keep `pub` fields because the bridge binary
+constructs them — the compiler named exactly those two when the pass first
+tried them.
 
 ## Source liveness: self-contained by construction
 

@@ -84,7 +84,7 @@ pub struct Chain {
     pub chain_id: ChainId,
     pub rpc: Rpc,
     /// The burn/mint token on this domain.
-    pub usdc: Address,
+    pub(crate) usdc: Address,
 }
 
 impl std::fmt::Debug for Chain {

@@ -27,7 +27,7 @@ pub struct Plane {
     /// The COW registry: devnet-written storage slots and account fields.
     pub shadow: Shared<Shadow>,
     /// The registry's state file (`shadow.json` in the state directory).
-    pub shadow_path: PathBuf,
+    pub(crate) shadow_path: PathBuf,
     /// The engine's own writes (before-values), for `/admin/rewind`.
     pub journal: Journal,
     /// The cursor state (`cursor.json`): the per-chain cursors, `epoch_pin`,

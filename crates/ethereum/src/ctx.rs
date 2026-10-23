@@ -33,54 +33,54 @@ pub use mirror_devnet::scan::block_txs;
 
 pub struct Ctx {
     /// The ethereum chain's section (the source, follow policy, fork offset).
-    pub l1: ChainL1,
+    pub(crate) l1: ChainL1,
     /// The engine's section (the run path moved it out of the instance: the
     /// context carries exactly the sections it reads).
-    pub engine: EngineSection,
-    pub reth: Rpc,
-    pub anvil_m: Rpc,
-    pub anvil_t: Rpc,
+    pub(crate) engine: EngineSection,
+    pub(crate) reth: Rpc,
+    pub(crate) anvil_m: Rpc,
+    pub(crate) anvil_t: Rpc,
     /// The unshadow re-sync source (reth at the applied cursor): one
     /// implementation per profile, chosen at boot (rule 15).
-    pub source: Arc<dyn Source>,
-    pub beacon: BeaconClient,
+    pub(crate) source: Arc<dyn Source>,
+    pub(crate) beacon: BeaconClient,
     /// Engine API client (reth authrpc) for the top-up loop; None when disabled
     /// or unconfigured.
-    pub engine_api: Option<crate::engine_api::EngineClient>,
-    pub watchlist: HashSet<Address>,
+    pub(crate) engine_api: Option<crate::engine_api::EngineClient>,
+    pub(crate) watchlist: HashSet<Address>,
     /// The devnet plane: the shadow registry, the journal, the cursor state,
     /// the shared admin gauges and flags — the same bundle the venue engine
     /// embeds (one home for the wiring that must not drift).
-    pub plane: Plane,
+    pub(crate) plane: Plane,
     /// The profile's own set (reth/M/T heads, the applier's counters, the
     /// probes); rendered beside the shared admin gauges.
-    pub eth_metrics: EthereumMetrics,
+    pub(crate) eth_metrics: EthereumMetrics,
     /// The feed bridge's counters (shared with the bridge task; /metrics
     /// renders them whether or not the bridge is configured).
-    pub feed_bridge_metrics: Arc<crate::feed_bridge::FeedBridgeMetrics>,
-    pub drift: Drift,
+    pub(crate) feed_bridge_metrics: Arc<crate::feed_bridge::FeedBridgeMetrics>,
+    pub(crate) drift: Drift,
     /// The learned blob wrapper form (persisted in the plane's state file).
-    pub blob_pref: Shared<Option<BlobForm>>,
+    pub(crate) blob_pref: Shared<Option<BlobForm>>,
     /// Last (head, follow) pair logged as "M ahead of the follow head": the
     /// poll loop runs every second, so the same stall must not spam the log.
-    pub last_stall: Shared<(u64, u64)>,
+    pub(crate) last_stall: Shared<(u64, u64)>,
     /// Last block whose missing blob sidecars were logged at WARN: with
     /// `follow: latest` the beacon ingests sidecars seconds after the block, so
     /// the first attempt legitimately misses and the retries must not spam.
-    pub blob_warned: std::sync::atomic::AtomicU64,
+    pub(crate) blob_warned: std::sync::atomic::AtomicU64,
     /// Set by the replay loop when the same block has failed long enough that
     /// the cause cannot be transient (measured: Lighthouse prunes blob sidecars
     /// after ~1 epoch, so a hold longer than that can never be served and M
     /// would wait forever). `next_block_for` honours it by re-basing M at a
     /// fresh pin, the same path a receding follow head takes.
-    pub force_rebase: AtomicBool,
+    pub(crate) force_rebase: AtomicBool,
     /// Did the *last* M block's verification find a divergence? The parent-BAL
     /// repair only runs when it did: M's state is then the replay's own product
     /// (the verification means something) and clean blocks cost no RPC churn.
     /// Starts `true` so the first block after a restart is repaired.
-    pub last_m_diverged: AtomicBool,
+    pub(crate) last_m_diverged: AtomicBool,
     /// When M was last re-based (rate-limits `anvil_reset` attempts to 1/min).
-    pub last_rebase: Shared<Option<std::time::Instant>>,
+    pub(crate) last_rebase: Shared<Option<std::time::Instant>>,
 }
 
 impl Ctx {
