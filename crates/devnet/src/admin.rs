@@ -104,7 +104,7 @@ impl AdminSurface<'_> {
     /// transport fault, re-read the fork base: an applied-but-unanswered reset
     /// is a success, not a failure (the retry-discipline rule: never report a
     /// fault for a completed effect).
-    pub async fn epoch_repin(target: &Rpc, source_url: &str) -> Result<()> {
+    pub async fn epoch_repin(target: &Rpc, source_url: &str) -> Result<EpochResponse> {
         let before = target.fork_config().await?.map(|(_, block)| block);
         if let Err(e) = target.anvil_reset_fork_latest(source_url).await {
             let after = target.fork_config().await?.map(|(_, block)| block);
@@ -122,7 +122,10 @@ impl AdminSurface<'_> {
             source = %source_url,
             "the devnet chain was re-pinned to the source's latest block; the engine reconciles on its next pass"
         );
-        Ok(())
+        Ok(EpochResponse {
+            reset: true,
+            source: source_url.to_string(),
+        })
     }
 
     /// The journaling sink for the engine's own writes, when this deployment
@@ -392,6 +395,15 @@ impl AdminSurface<'_> {
         self.metrics.set(&self.metrics.frozen, 0);
         self.metrics.set(&self.metrics.halted, 0);
     }
+}
+
+/// `/admin/epoch`'s wire shape (both engines): the re-pin applied, and the
+/// source it re-pinned to. Built by [`AdminSurface::epoch_repin`], so the two
+/// engines' handlers serve one shared type — nothing per-crate to drift.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EpochResponse {
+    pub reset: bool,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]

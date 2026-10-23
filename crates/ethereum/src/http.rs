@@ -19,7 +19,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mirror_devnet::admin::{RewindRequest, ShadowRequest, TimeRequest};
+use mirror_devnet::admin::{EpochResponse, RewindRequest, ShadowRequest, TimeRequest};
 use mirror_devnet::deal::DealRequest;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -263,36 +263,18 @@ async fn admin_deal(
 /// same base = re-apply the recorded writes), so this route never replicates
 /// that logic.
 async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
-    mirror_devnet::admin::AdminSurface::epoch_repin(&ctx.anvil_t, &ctx.l1.source_url).await?;
-    Ok(Json(EpochResponse {
-        reset: true,
-        source: ctx.l1.source_url.clone(),
-    }))
-}
-
-#[derive(Debug, Serialize)]
-struct EpochResponse {
-    reset: bool,
-    source: String,
+    Ok(Json(
+        mirror_devnet::admin::AdminSurface::epoch_repin(&ctx.anvil_t, &ctx.l1.source_url).await?,
+    ))
 }
 
 /// `/admin/probes`: run the configured probes now (M at the cursor vs reth)
 /// and report the run. The venue's route is the same verb over its at-pin
 /// probe set; the per-block convergence counters stay the loop's.
-async fn admin_probes(State(ctx): State<Arc<Ctx>>) -> Result<Json<ProbeReport>> {
-    let outcome = crate::driver::probes_now(&ctx).await?;
-    Ok(Json(ProbeReport {
-        ok: outcome.ok,
-        failed: outcome.failed,
-        skipped: outcome.skipped,
-    }))
-}
-
-#[derive(Debug, Serialize)]
-struct ProbeReport {
-    ok: usize,
-    failed: usize,
-    skipped: usize,
+async fn admin_probes(
+    State(ctx): State<Arc<Ctx>>,
+) -> Result<Json<mirror_devnet::probes::ProbeOutcome>> {
+    Ok(Json(crate::driver::probes_now(&ctx).await?))
 }
 
 /// `/admin/feed` — the bridged feeds and their state.

@@ -25,7 +25,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mirror_devnet::admin::{RewindRequest, ShadowRequest};
+use mirror_devnet::admin::{EpochResponse, RewindRequest, ShadowRequest};
 use mirror_devnet::deal::DealRequest;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -218,17 +218,9 @@ async fn admin_deal(
 /// epoch rule (new base = new epoch, same base = restore), so this route
 /// never needs to replicate that logic.
 async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
-    mirror_devnet::admin::AdminSurface::epoch_repin(&ctx.v, &ctx.chain.source_url).await?;
-    Ok(Json(EpochResponse {
-        reset: true,
-        source: ctx.chain.source_url.clone(),
-    }))
-}
-
-#[derive(Debug, Serialize)]
-struct EpochResponse {
-    reset: bool,
-    source: String,
+    Ok(Json(
+        mirror_devnet::admin::AdminSurface::epoch_repin(&ctx.v, &ctx.chain.source_url).await?,
+    ))
 }
 
 /// `/admin/probes`: run the at-pin parity probes now and report the run (boot
@@ -236,18 +228,8 @@ struct EpochResponse {
 /// hand-back, when the probes should go green again). The ethereum engine's
 /// route is the same verb over its M-vs-reth probe set; the cumulative
 /// counters live in `/metrics` on both.
-async fn admin_probes(State(ctx): State<Arc<Ctx>>) -> Result<Json<ProbeReport>> {
-    let outcome = crate::driver::probes_now(&ctx).await?;
-    Ok(Json(ProbeReport {
-        ok: outcome.ok,
-        failed: outcome.failed,
-        skipped: outcome.skipped,
-    }))
-}
-
-#[derive(Debug, Serialize)]
-struct ProbeReport {
-    ok: usize,
-    failed: usize,
-    skipped: usize,
+async fn admin_probes(
+    State(ctx): State<Arc<Ctx>>,
+) -> Result<Json<mirror_devnet::probes::ProbeOutcome>> {
+    Ok(Json(crate::driver::probes_now(&ctx).await?))
 }

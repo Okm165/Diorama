@@ -13,7 +13,10 @@ use mirror_anvil::Rpc;
 use mirror_config::Probe;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// One probe run's tally. This is also the `/admin/probes` wire shape on both
+/// engines (the shared route's response): the handlers serve it directly, so
+/// there is no per-crate report struct to drift.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ProbeOutcome {
     pub ok: usize,
     pub failed: usize,
