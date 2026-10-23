@@ -7,11 +7,7 @@ license.workspace = true
 description = "The Venue Mirror's simulator service: live market plane + COW account plane (info 8090, control 8091)"
 
 [dependencies]
-mirror-anvil = { path = "../../crates/anvil" }
 mirror-config = { path = "../../crates/config" }
 mirror-hyperliquid = { path = "../../crates/hyperliquid" }
-tokio = { workspace = true }
-tracing = { workspace = true }
-
 [lints]
 workspace = true

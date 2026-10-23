@@ -94,8 +94,9 @@ pub fn service_config_or_exit(args: &[String]) -> std::path::PathBuf {
 
 /// The shared `main()` shell: build the runtime with the measured worker-stack
 /// budget, run the service future, report a fatal error with its cause chain.
-/// The bins keep their own `run()` — the planes, boot orders and final saves
-/// are theirs; this is only the runtime shell they all share.
+/// The service future is the owning crate's entry (`main_entry`, or the
+/// second service's `<service>_entry`) — the planes, boot orders and final
+/// saves are the crates'; this is only the runtime shell every bin shares.
 pub fn run_main<F, E>(service: F) -> std::process::ExitCode
 where
     F: std::future::Future<Output = Result<(), E>>,

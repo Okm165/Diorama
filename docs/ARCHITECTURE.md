@@ -399,9 +399,11 @@ the fork pin (`pin + 1`), because its state *is* the pin's state.
 
 **The layout is symmetric by construction.** Every layer names the two mirrors
 the same way: `crates/ethereum` + `crates/hyperliquid` (the mirror projects —
-siblings that never depend on each other), `bins/mainnet-engine` +
-`bins/venue-engine` (thin shells, each over its own crate's `main_entry`; the
-simulator and the bridge are the venue stack's own services), and
+siblings that never depend on each other), and the four bins — `mainnet-engine`
++ `venue-engine`, `venue-sim`, `cctp-bridge` — are the *same* thin shell over
+their owning crate's entry (`main_entry`; the venue crate's second service is
+`sim_entry`), each declaring the same two dependencies (`mirror-config` + its
+crate). The simulator and the bridge are the venue stack's own services, and
 `k8s/base/mainnet-mirror` + `k8s/base/venue-mirror` (service templates, with
 the shared cluster-scoped `k8s/base/shared` and one overlay per instance
 owning the namespace, the instance ConfigMap and the NodePorts). The instance
@@ -731,7 +733,8 @@ loop.
 **Two engine binaries, not one profile flag.** The plan sketched one engine
 binary with `profile: ethereum | hyperliquid`; the implementation ships
 per-profile binaries - `bins/mainnet-engine` (ethereum) and `bins/venue-engine`
-(venue) - over sibling project crates, plus `bins/venue-sim`. The reason is
+(venue) - over sibling project crates, plus `bins/venue-sim` and
+`bins/cctp-bridge` (the same shell over their crates' entries). The reason is
 build isolation, and it is a fitness function, not a convention:
 `scripts/closure-matrix.sh` declares the allowed internal edges
 (`venue-engine -> mirror-hyperliquid + devnet + anvil + config`, no ethereum

@@ -7,10 +7,7 @@ license.workspace = true
 description = "The CCTP bridge service: Iris-compatible API (8095) + control API (8096), watcher + relayer (§15)"
 
 [dependencies]
-mirror-cctp = { path = "../../crates/cctp" }
 mirror-config = { path = "../../crates/config" }
-tokio = { workspace = true }
-tracing = { workspace = true }
-
+mirror-cctp = { path = "../../crates/cctp" }
 [lints]
 workspace = true

@@ -34,18 +34,12 @@ spec:
           image: localhost/venue-sim:v1
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
-          env:
-            - name: SIM_STATE_DIR
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: SIM_STATE_DIR } }
-            - name: ANVIL_V_URL
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: ANVIL_V_URL } }
-            - name: ENGINE_ADMIN_URL
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: ENGINE_ADMIN_URL } }
-            # The instance's [chains.venue] source_url is ${HL_RPC_URL}: the
-            # loader expands every reference at load time, so the variable must
-            # resolve even though the sim's reads go through api_url/ws_url.
-            - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: mirror-config, key: HL_RPC_URL } }
+          # The same `envFrom` mechanism as the engines: the ConfigMap carries
+          # every key (SIM_STATE_DIR, ANVIL_V_URL, ENGINE_ADMIN_URL, and the
+          # ${HL_RPC_URL} the instance's source_url names), the pod reads the
+          # ones its instance resolves, and a new wiring var needs no edit here.
+          envFrom:
+            - configMapRef: { name: mirror-config }
           ports:
             - { name: info, containerPort: 8090 }
             - { name: control, containerPort: 8091 }

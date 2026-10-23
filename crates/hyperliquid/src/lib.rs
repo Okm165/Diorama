@@ -28,12 +28,14 @@ pub mod error;
 pub mod feed;
 pub mod http;
 pub mod metrics;
+pub mod service;
 pub mod sim;
 pub mod venue_source;
 pub mod wire;
 
 pub use ctx::Ctx;
 pub use error::{Error, Result};
+pub use service::sim_entry;
 
 /// Wall-clock milliseconds (the wire's `time` fields and the sim clock's
 /// base) — the shared definition lives in `mirror-config`'s boot module; this

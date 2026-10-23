@@ -1067,8 +1067,6 @@ version = "0.1.0"
 dependencies = [
  "mirror-cctp",
  "mirror-config",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -2507,7 +2505,6 @@ version = "0.1.0"
 dependencies = [
  "mirror-config",
  "mirror-ethereum",
- "tokio",
 ]
 
 [[package]]
@@ -4488,19 +4485,14 @@ version = "0.1.0"
 dependencies = [
  "mirror-config",
  "mirror-hyperliquid",
- "tokio",
- "tracing",
 ]
 
 [[package]]
 name = "venue-sim"
 version = "0.1.0"
 dependencies = [
- "mirror-anvil",
  "mirror-config",
  "mirror-hyperliquid",
- "tokio",
- "tracing",
 ]
 
 [[package]]

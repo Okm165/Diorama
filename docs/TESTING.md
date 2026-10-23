@@ -607,9 +607,11 @@ T-side shadow round-trip on the extracted path (`register` → `clear` →
 `clear all`) was re-verified after the extraction (resynced 1, then 2 keys).
 
 Entry shape follows the need, not symmetry for its own sake: the ethereum's
-lib owns a `main_entry` with subcommands (`run` / `selftest` / `rewind`), while
-the venue has no subcommands and its bin is the composition root (plan §11.3
-rule 10) — with the same shutdown path, shared by all four binaries:
+lib owns a `main_entry` with subcommands (`run` / `selftest` / `rewind`); the
+venue crate exposes `main_entry` (the engine) and `sim_entry` (the simulator);
+the cctp crate exposes `main_entry` — and every bin is the same thin shell
+over its entry (the composition roots live in the crates, plan §11.3 rule 10),
+with the same shutdown path shared by all four binaries:
 `boot::shutdown_signal` waits for **SIGINT *and* SIGTERM** (Kubernetes sends
 SIGTERM; measured 2026-10-23: before the fix, no service log had ever shown
 its shutdown line — a `ctrl_c`-only wait was dead code under a rollout), then

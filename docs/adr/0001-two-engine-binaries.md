@@ -29,9 +29,13 @@ is a fitness function, not a convention.
 - A venue change cannot break the ethereum build and vice versa; the closure
   matrix proves it on every run.
 - The bins are thin shells over their project crates: the entrypoint (CLI,
-  boot order, wiring) lives in the crate's `main_entry`; the bin is the shared
-  runtime shell's call site. The service CLIs share one shape (`run --config
-  <path>`, `mirror_config::boot::service_config`).
+  boot order, wiring) lives in the crate's `main_entry` (a crate hosting a
+  second service exposes `<service>_entry` — the venue crate's `sim_entry`);
+  the bin is the shared runtime shell's call site. All four bins
+  (`mainnet-engine`, `venue-engine`, `venue-sim`, `cctp-bridge`) are the same
+  shell and declare the same two dependencies (`mirror-config` + their crate).
+  The service CLIs share one shape (`run --config <path>`,
+  `mirror_config::boot::service_config`).
 - Two entrypoints and two manifests to keep aligned - the shared `Instance`
   loader and the per-instance TOML are the single home of the config.
 - The plan's single-bin sketch is superseded; the two projects stay siblings

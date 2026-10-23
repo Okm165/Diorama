@@ -33,11 +33,13 @@ pub mod hook;
 pub mod iris;
 pub mod metrics;
 pub mod relayer;
+pub mod service;
 pub mod store;
 pub mod transfer;
 pub mod watcher;
 
 pub use error::{Error, Result};
+pub use service::main_entry;
 /// The alloy primitives the bridge's public surface exposes (addresses,
 /// amounts, hashes): the bin reads them from here, never from a second alloy
 /// dependency.
