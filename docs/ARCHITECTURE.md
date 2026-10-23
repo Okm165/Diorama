@@ -8,14 +8,14 @@
 | `lighthouse` | `docker.io/sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator), serves payloads + blob sidecars to the engine | ~160 GB disk and growing to ~200 GB (18-day column custody), ~5-7.5 GB RAM while backfilling (16Gi limit) |
 | `anvil-m` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Mirror chain (M): replays every parent tx, then re-converges from the BAL | ~15-25 MB per replayed block; OOMs into a fresh pin every ~2.5-4 h by design (24Gi limit) |
 | `anvil-t` | same | Devnet chain (T): watch-list state + your writes, never replays parent txs | ~2.5 GB after thousands of applied blocks (16Gi limit) |
-| `engine` | `localhost/mirror-engine:v1` (this repo) | Replay loop, verifier, BAL diff applier, convergence repair, journal, admin API | ~100 MB RAM |
+| `engine` | `localhost/mainnet-engine:v1` (this repo) | Replay loop, verifier, BAL diff applier, convergence repair, journal, admin API | ~100 MB RAM |
 
 The repo is one cargo workspace (`crates/*` + `bins/*`): `crates/anvil` (the
 JSON-RPC client and the measured cheatcode conventions), `crates/config` (the
 layered instance loader), `crates/devnet` (the substrate both mirrors share:
 shadow registry, journal, cursor state with `epoch_pin`, admin surface,
 chain-generic scanner, probes, metrics), the two projects `crates/ethereum`
-and `crates/hyperliquid`, and the binaries `bins/{mirror-engine,venue-mirror,
+and `crates/hyperliquid`, and the binaries `bins/{mainnet-engine,venue-engine,
 venue-sim,cctp-bridge}` — the fourth is element 3 (`crates/cctp` on the common
 client + config only; it does not depend on the devnet substrate or either
 project). The projects are siblings - they share the common crates and
@@ -399,8 +399,8 @@ the fork pin (`pin + 1`), because its state *is* the pin's state.
 
 **The layout is symmetric by construction.** Every layer names the two mirrors
 the same way: `crates/ethereum` + `crates/hyperliquid` (the mirror projects —
-siblings that never depend on each other), `bins/mirror-engine` +
-`bins/venue-mirror` (thin shells, each over its own crate's `main_entry`; the
+siblings that never depend on each other), `bins/mainnet-engine` +
+`bins/venue-engine` (thin shells, each over its own crate's `main_entry`; the
 simulator and the bridge are the venue stack's own services), and
 `k8s/base/mainnet-mirror` + `k8s/base/venue-mirror` (service templates, with
 the shared cluster-scoped `k8s/base/shared` and one overlay per instance
@@ -408,9 +408,9 @@ owning the namespace, the instance ConfigMap and the NodePorts). The instance
 files `config/instances/{mainnet-mirror,venue-mirror}.toml` are the single
 home of each mirror's wiring, and the Makefile reads one uniform path per
 instance (`k8s/base/$(INSTANCE)/engine.yaml`, `$(OVERLAY)/namespace.yaml`) —
-no per-mirror conditionals. The one deliberate name difference: the mainnet
-engine binary keeps the project's own name (`mirror-engine`); every other
-layer uses the instance name.
+no per-mirror conditionals, and no deliberate name difference anywhere: the
+binaries are `mainnet-engine` + `venue-engine`, the images match, and the
+deployments are both `engine` in their own namespace.
 
 **Measured rules baked into the code** (each cost a real run to discover):
 padding all hex to 32 bytes / even length (anvil rejects odd-length hex with
@@ -553,7 +553,7 @@ registry access** (measured: `Container image ... already present on machine`).
 | Lighthouse | `docker.io/sigp/lighthouse:v8.3.0@sha256:ca59d3a3…` | latest release; **v8.3.1 is the standing maintenance item** (the eMudhra CA certificate mitigation — High for stakers, Medium for a non-staking mirror; plan §16.4). Bump via `make images` + the manifest pin when the rollout window allows |
 | Foundry (anvil) | `ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f…` | latest release |
 | init containers / wipe job | `docker.io/library/alpine:3.24.2@sha256:294b683c…` | 3.24.3 exists but the registry was unreachable from this node (DNS/IPv6: `dial tcp [2600:…]: connect: network is unreachable`). Bump with `make images` once it is; the running set is complete without it |
-| engine | `localhost/mirror-engine:v1` | built from this repo; the tag lives in `k8s/base/mainnet-mirror/engine.yaml` and the Makefile reads it from there |
+| engine | `localhost/mainnet-engine:v1` | built from this repo; the tag lives in `k8s/base/mainnet-mirror/engine.yaml` and the Makefile reads it from there |
 
 **Single source of truth.** The Makefile derives the image list for `make images`
 from the manifests (`grep 'image:' k8s/`), so a version bump is a one-line
@@ -730,11 +730,11 @@ loop.
 
 **Two engine binaries, not one profile flag.** The plan sketched one engine
 binary with `profile: ethereum | hyperliquid`; the implementation ships
-per-profile binaries - `bins/mirror-engine` (ethereum) and `bins/venue-mirror`
+per-profile binaries - `bins/mainnet-engine` (ethereum) and `bins/venue-engine`
 (venue) - over sibling project crates, plus `bins/venue-sim`. The reason is
 build isolation, and it is a fitness function, not a convention:
 `scripts/closure-matrix.sh` declares the allowed internal edges
-(`venue-mirror -> mirror-hyperliquid + devnet + anvil + config`, no ethereum
+(`venue-engine -> mirror-hyperliquid + devnet + anvil + config`, no ethereum
 edge; `venue-sim` likewise) and fails any undeclared dependency. With one
 package every build compiled the whole graph (measured, plan §11.3); a
 profile-routing binary would link both projects into every venue build.

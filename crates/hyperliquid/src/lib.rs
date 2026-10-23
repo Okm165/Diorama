@@ -41,7 +41,7 @@ pub use error::{Error, Result};
 pub use mirror_config::boot::now_ms;
 
 /// The Venue Mirror engine's entrypoint (the bin is the shell over this; the
-/// same shell as `mirror-engine`, R3).
+/// same shell as `mainnet-engine`, R3).
 ///
 /// Boot order (plan §7.2): wait for anvil V, assert the chain, reconcile the
 /// registry (reset detection + the epoch rule; the reconcile also anchors the

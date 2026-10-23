@@ -1,4 +1,4 @@
-//! mirror-engine: replay mainnet blocks onto M, keep T's watch-list state fresh
+//! mainnet-engine: replay mainnet blocks onto M, keep T's watch-list state fresh
 //! from EIP-7928 BALs, verify every block, and expose a small admin surface.
 //! Clocks: `block` = the **L1 parent height** (the replayed/applied mainnet
 //! block); `head` = the compared chain's head (M in the replay, T in the
@@ -38,7 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Parser)]
-#[command(name = "mirror-engine", version, about)]
+#[command(name = "mainnet-engine", version, about)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -82,7 +82,7 @@ enum Cmd {
 
 pub async fn main_entry(args: Vec<String>) -> Result<()> {
     mirror_config::boot::init_logging();
-    let cli = Cli::parse_from(std::iter::once("mirror-engine".to_string()).chain(args));
+    let cli = Cli::parse_from(std::iter::once("mainnet-engine".to_string()).chain(args));
     match cli.cmd {
         Cmd::Run { config } => run(config).await,
         Cmd::Selftest {

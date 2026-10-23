@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/venue-mirror:v1
+          image: localhost/venue-engine:v1
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (HL_RPC_URL,

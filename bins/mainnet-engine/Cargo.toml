@@ -1,5 +1,5 @@
 [package]
-name = "mirror-engine"
+name = "mainnet-engine"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

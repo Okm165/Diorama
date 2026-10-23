@@ -620,7 +620,7 @@ mod tests {
     fn blob_path_validates_repairs_and_encodes_on_a_bounded_stack() {
         // One fixture through every call the replay path makes on a blob tx,
         // on a deliberately small stack budget: 4 MiB, a quarter of the
-        // engine's worker budget (bins/mirror-engine). Debug builds give every
+        // engine's worker budget (bins/mainnet-engine). Debug builds give every
         // by-value 128 KiB `Blob` its own slot, so the chain measures ~2 MiB
         // (repair 1.28 + validate 0.64; encode 1.29). If a future frame
         // outgrows the budget, this test aborts loudly instead of the engine

@@ -15,9 +15,12 @@ compile the ethereum stack.
 
 ## Decision
 
-One binary per profile: `bins/mirror-engine` (depends only on
-`mirror-ethereum`) and `bins/venue-mirror` (only on `mirror-hyperliquid`), plus
-`bins/venue-sim` for the simulator. `scripts/closure-matrix.sh` declares every
+One binary per profile: `bins/mainnet-engine` (depends only on
+`mirror-ethereum`) and `bins/venue-engine` (only on `mirror-hyperliquid`), plus
+`bins/venue-sim` for the simulator. The names are mirror-qualified (`mainnet-`
+/ `venue-`, matching the `mainnet-mirror` / `venue-mirror` instances) so
+neither mirror is the unqualified default; the deployments are both `engine`
+in their own namespace. `scripts/closure-matrix.sh` declares every
 allowed internal edge and fails on an undeclared one - the structural contract
 is a fitness function, not a convention.
 

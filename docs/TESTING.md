@@ -303,7 +303,7 @@ export STATE_DIR=/tmp/venue-engine-state SIM_STATE_DIR=/tmp/venue-sim-state
 export ANVIL_V_URL=http://127.0.0.1:8545 ENGINE_ADMIN_URL=http://127.0.0.1:8080
 export CCTP_STATE_DIR=/tmp/venue-cctp-state T_RPC_URL=http://127.0.0.1:8545
 export CCTP_RELAY_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
-cargo run -p venue-mirror -- config/instances/venue-mirror.toml
+cargo run -p venue-engine -- run --config config/instances/venue-mirror.toml
 cargo run -p venue-sim    -- config/instances/venue-mirror.toml
 ```
 

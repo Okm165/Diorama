@@ -2,7 +2,7 @@
 //! one env read besides the loader's), the measured worker stack budget, and
 //! the fatal-error report.
 //!
-//! One home so the four binaries (`mirror-engine`, `venue-mirror`,
+//! One home so the four binaries (`mainnet-engine`, `venue-engine`,
 //! `venue-sim`, `cctp-bridge`) cannot drift: the measured facts below are the
 //! engine's, and the others inherit them deliberately — one budget for every
 //! binary is one thing to know.

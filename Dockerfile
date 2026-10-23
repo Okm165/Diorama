@@ -1,13 +1,13 @@
 # Mirror images: multi-stage build, slim runtime with curl for smoke tests.
 #
 # One Dockerfile, one binary per image: `--build-arg BIN=<package>` selects
-# which workspace binary to build (mirror-engine, venue-mirror, venue-sim and
+# which workspace binary to build (mainnet-engine, venue-engine, venue-sim and
 # cctp-bridge). The runtime entrypoint is a symlink to it.
 #
 # Base images are pinned to the latest stable releases by tag *and* digest, so a
 # rebuilt image is reproducible and no tag can silently move under us.
 FROM docker.io/library/rust:1.99.1-slim-trixie@sha256:e6cd1d294a300601eaaa4a294b337e5f0826f427fb2d481e9f76e69e7981e244 AS builder
-ARG BIN=mirror-engine
+ARG BIN=mainnet-engine
 # Hosts without an IPv6 route (this one): crates.io resolves AAAA first and
 # cargo's libcurl fails instantly on the unreachable v6 address. Prefer IPv4.
 RUN echo 'precedence ::ffff:0:0/96 100' >> /etc/gai.conf
@@ -26,13 +26,13 @@ COPY crates/devnet/Cargo.toml crates/devnet/
 COPY crates/ethereum/Cargo.toml crates/ethereum/
 COPY crates/hyperliquid/Cargo.toml crates/hyperliquid/
 COPY bins/cctp-bridge/Cargo.toml bins/cctp-bridge/
-COPY bins/mirror-engine/Cargo.toml bins/mirror-engine/
-COPY bins/venue-mirror/Cargo.toml bins/venue-mirror/
+COPY bins/mainnet-engine/Cargo.toml bins/mainnet-engine/
+COPY bins/venue-engine/Cargo.toml bins/venue-engine/
 COPY bins/venue-sim/Cargo.toml bins/venue-sim/
 RUN for d in crates/anvil crates/cctp crates/config crates/devnet crates/ethereum crates/hyperliquid; do \
       mkdir -p "$d/src" && : > "$d/src/lib.rs"; \
     done \
-    && for d in bins/cctp-bridge bins/mirror-engine bins/venue-mirror bins/venue-sim; do \
+    && for d in bins/cctp-bridge bins/mainnet-engine bins/venue-engine bins/venue-sim; do \
       mkdir -p "$d/src" && echo 'fn main() {}' > "$d/src/main.rs"; \
     done \
     && cargo build --release --locked -p ${BIN} \
@@ -46,7 +46,7 @@ RUN find crates bins -name '*.rs' -exec touch {} + \
     && cargo build --release --locked -p ${BIN}
 
 FROM docker.io/library/debian:13.7-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
-ARG BIN=mirror-engine
+ARG BIN=mainnet-engine
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl jq \
     && rm -rf /var/lib/apt/lists/*

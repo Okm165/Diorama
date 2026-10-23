@@ -2502,6 +2502,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mainnet-engine"
+version = "0.1.0"
+dependencies = [
+ "mirror-config",
+ "mirror-ethereum",
+ "tokio",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2611,15 +2620,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "mirror-engine"
-version = "0.1.0"
-dependencies = [
- "mirror-config",
- "mirror-ethereum",
- "tokio",
 ]
 
 [[package]]
@@ -4483,7 +4483,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
-name = "venue-mirror"
+name = "venue-engine"
 version = "0.1.0"
 dependencies = [
  "mirror-config",

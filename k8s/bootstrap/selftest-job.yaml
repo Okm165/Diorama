@@ -94,7 +94,7 @@ spec:
             requests: { cpu: "250m", memory: 256Mi }
             limits: { memory: 2Gi }
         - name: engine
-          image: localhost/mirror-engine:v1
+          image: localhost/mainnet-engine:v1
           imagePullPolicy: IfNotPresent
           args:
             - selftest

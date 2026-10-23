@@ -28,7 +28,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/mirror-engine:v1
+          image: localhost/mainnet-engine:v1
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (RETH_URL,

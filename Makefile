@@ -132,16 +132,16 @@ build: ## Build the selected instance's engine image with podman (Dockerfile at 
 	podman build -f Dockerfile --build-arg BIN=$(ENGINE_BIN) -t $(ENGINE_IMAGE):$(ENGINE_TAG) .
 
 import: build ## Import the engine image into the k3s containerd store
-	podman save -o /tmp/mirror-engine.tar $(ENGINE_IMAGE):$(ENGINE_TAG)
-	sudo k3s ctr images import /tmp/mirror-engine.tar
-	rm -f /tmp/mirror-engine.tar
+	podman save -o /tmp/engine-image.tar $(ENGINE_IMAGE):$(ENGINE_TAG)
+	sudo k3s ctr images import /tmp/engine-image.tar
+	rm -f /tmp/engine-image.tar
 
 deploy-engine: import ## Rebuild + redeploy the selected instance's engine
 	$(KUBECTL) rollout restart deploy/engine
 	$(KUBECTL) rollout status deploy/engine --timeout=120s
 
-build-venue: ## Build the venue binaries on the host (cargo: venue-mirror + venue-sim)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p venue-mirror -p venue-sim
+build-venue: ## Build the venue binaries on the host (cargo: venue-engine + venue-sim)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p venue-engine -p venue-sim
 
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace

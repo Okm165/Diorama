@@ -1,6 +1,6 @@
 //! The Venue Mirror engine binary — the `venue` profile's entrypoint.
 //!
-//! Thin shell by design, the same shell as `mirror-engine`: the runtime and
+//! Thin shell by design, the same shell as `mainnet-engine`: the runtime and
 //! the boot order live in `mirror_hyperliquid::main_entry`. The two engine
 //! binaries share the common crates and never each other (R3); the simulator
 //! and the CCTP bridge are the venue stack's own services.
