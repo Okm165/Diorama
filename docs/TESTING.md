@@ -735,6 +735,10 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   every ~12 s) and **0 `logs`** — the earlier live-T silence was a no-mining window, not the WS,
   and 0 logs is by design (the applied blocks carry no txs; §A18). Their scanner's logs-filter +
   HTTP backup is unaffected either way.
+  **§17.4's logs acceptance, closed on scratch T (2026-10-23)**: a `cast logs --subscribe`
+  subscriber on the WETH address (their filter) stayed connected while a devnet tx emitted a
+  `Transfer` — the log was delivered (block 26253639, `logIndex 0`), so the anomaly does not
+  persist after an anvil restart; the HTTP backup stays the fallback for empty blocks.
 - **`eth_getLogs` ranges on T**: a 2000-block range answers locally (their chain-1 setting);
   a range reaching below the fork pin is forwarded to reth, which refuses above its 20 000-result
   cap with `query exceeds max results …, retry with the range …` — a wording their detector's
