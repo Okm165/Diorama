@@ -215,6 +215,27 @@ for gauge in mirror_shadowed_slots mirror_halted mirror_frozen; do
   has_v=$(grep -c "^$gauge" "/tmp/sym-v.out" || true)
   if [ "$has_t" -ge 1 ] && [ "$has_v" -ge 1 ]; then ok "$gauge on both"; else bad "$gauge: T=$has_t V=$has_v"; fi
 done
+# Valid exposition: no duplicate (name + labels) series on either side — the
+# shared admin gauges were once defined twice, with drifted HELP text (fixed
+# 2026-10-23); this keeps a re-introduction visible.
+dupes_of() {
+  python3 -c '
+import re, sys
+from collections import Counter
+series = []
+for l in open(sys.argv[1]):
+    l = l.strip()
+    if not l or l.startswith("#"):
+        continue
+    m = re.match(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?", l)
+    series.append(m.group(1) + (m.group(2) or ""))
+print(",".join(s for s, c in Counter(series).items() if c > 1))
+' "/tmp/sym-$1.out"
+}
+for side in t v; do
+  dupes=$(dupes_of "$side")
+  if [ -z "$dupes" ]; then ok "/metrics ($side): no duplicate (name+labels) series"; else bad "/metrics ($side): duplicates [$dupes]"; fi
+done
 
 echo "-- the deliberate absences (documented asymmetries)"
 LAST_PATH=/admin/time
