@@ -185,7 +185,11 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
 }
 
 async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
+    // The same composition as the venue engine: this profile's own set, then
+    // the shared admin gauges (one definition — `render_admin`), then the
+    // feed bridge's counters.
     let mut out = ctx.metrics.render();
+    out.push_str(&ctx.metrics.render_admin());
     out.push_str(&ctx.feed_bridge_metrics.render());
     out
 }

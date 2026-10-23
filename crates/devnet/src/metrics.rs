@@ -116,9 +116,6 @@ impl Metrics {
             self.t_fork_age_blocks.load(Ordering::Relaxed),
         );
         gauge(&mut out, "mirror_pin_age_blocks", "blocks since the first processed block in this epoch", self.pin_age_blocks.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_frozen", "1 while the replay loop is frozen on divergence", self.frozen.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_halted", "1 while both loops are halted", self.halted.load(Ordering::Relaxed));
-        gauge(&mut out, "mirror_shadowed_slots", "storage slots shadowed by the devnet", self.shadowed_slots.load(Ordering::Relaxed));
         counter(&mut out, "mirror_shadow_scanned_blocks_total", "T blocks the shadow scan walked (empty blocks cost one header read, no traces)", self.shadow_scanned_blocks.load(Ordering::Relaxed));
         gauge(&mut out, "mirror_last_replay_seconds", "duration of the last block replay", self.last_replay_ms.load(Ordering::Relaxed) / 1000);
         gauge(&mut out, "mirror_last_apply_seconds", "duration of the last block diff application", self.last_apply_ms.load(Ordering::Relaxed) / 1000);
@@ -142,5 +139,36 @@ impl Metrics {
         counter(&mut out, "mirror_blob_failures_total", "blocks with blob sidecar/replay failures", self.blob_failures.load(Ordering::Relaxed));
         counter(&mut out, "mirror_receipts_unverified_total", "blocks replayed without receipts verification", self.receipts_unverified.load(Ordering::Relaxed));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// The series names a rendered exposition defines (help/type lines and
+    /// label sets stripped).
+    fn series(rendered: &str) -> BTreeSet<String> {
+        rendered
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| l.split([' ', '{']).next().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// One definition per metric: the profile's own set and the shared admin
+    /// gauges must not overlap — a duplicate series is invalid exposition, and
+    /// the two copies' HELP text had already drifted (measured 2026-10-23:
+    /// `render()` carried its own mirror_halted/mirror_frozen/
+    /// mirror_shadowed_slots beside `render_admin()`'s).
+    #[test]
+    fn render_and_render_admin_share_no_series() {
+        let m = Metrics::default();
+        let dupes: Vec<String> = series(&m.render())
+            .intersection(&series(&m.render_admin()))
+            .cloned()
+            .collect();
+        assert!(dupes.is_empty(), "duplicate series: {dupes:?}");
     }
 }

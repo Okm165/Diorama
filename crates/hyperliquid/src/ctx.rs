@@ -204,3 +204,32 @@ impl Ctx {
         self.halted.load(Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    /// The series names a rendered exposition defines (help/type lines and
+    /// label sets stripped).
+    fn series(rendered: &str) -> BTreeSet<String> {
+        rendered
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(|l| l.split([' ', '{']).next().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The venue's own set and the shared admin gauges must not overlap: the
+    /// engine renders both (venue first, admin second), and a duplicate series
+    /// would be invalid exposition (the mirror of the devnet-side test).
+    #[test]
+    fn venue_and_admin_series_do_not_overlap() {
+        let venue = super::VenueMetrics::default();
+        let admin = mirror_devnet::metrics::Metrics::default();
+        let dupes: Vec<String> = series(&venue.render())
+            .intersection(&series(&admin.render_admin()))
+            .cloned()
+            .collect();
+        assert!(dupes.is_empty(), "duplicate series: {dupes:?}");
+    }
+}
