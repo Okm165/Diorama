@@ -859,7 +859,7 @@ clock.
 | `POST /control/crash` | `{coin, pct?}` | own the coin's mark + oracle (absent = hand back to live) |
 | `POST /control/set_book` | `{coin, levels?}` | scripted book, ≤20 levels per side (absent = hand back) |
 | `POST /control/set_funding` | `{coin, rate?}` | own the hourly rate (absent = hand back) |
-| `POST /control/set_account` | `{address, state}` | hl_mock-compatible seeding (`totalRawUsd` + positions) |
+| `POST /control/set_account` | `{address, state}` | hl_mock-compatible seeding (`totalRawUsd` + positions); a **patch** in their shape's field names (`userAbstraction`, `spotBalances`; unnamed fields keep their value) |
 | `GET /control/state/{address}` | - | the account's served state, or 404 for an untouched one |
 | `POST /control/reset` | `{}` | blank the scenario (accounts + overrides), bump the epoch |
 | `POST /control/epoch_new` | `{}` | reset + re-pin V through the engine's `/admin/epoch` |
@@ -882,8 +882,11 @@ the edges. Two measured quirks are pinned by unit tests: `spotMeta`'s
 camelCase, and requests must omit null optionals (the venue rejects
 `{"type":"metaAndAssetCtxs","dex":null}` with a 422).
 
-The served info surface: `clearinghouseState`, `spotClearinghouseState`,
-`userAbstraction`, `openOrders` (empty for a touched account - the matching lane
+The served info surface: `clearinghouseState`, `spotClearinghouseState`
+(`balances`; unified accounts also carry `tokenToAvailableAfterMaintenance` —
+the figure daloc's client reconciles: `available + maintenance == the
+collateral token's balance`), `userAbstraction`, `openOrders` (empty for a
+touched account - the matching lane
 is Phase 2), `activeAssetData` (touched accounts) / `meta`, `metaAndAssetCtxs`,
 `spotMeta`, `allMids`, `l2Book`, `marginTable`, `exchangeStatus`, `perpDexs`
 (`[null]` - the first dex only until multi-dex lands; an account read scoped to

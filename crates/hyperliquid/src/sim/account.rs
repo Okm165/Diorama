@@ -125,72 +125,104 @@ pub struct SpotEntry {
 /// The seeding shape: hl_mock serves the venue's own state, so the seed is a
 /// (possibly partial) `clearinghouseState` — the sim reads `totalRawUsd` and
 /// the positions and derives the rest at serve time.
+///
+/// **Patch semantics** (their `venue_mock::set_venue_account` contract, and
+/// their mock's own `AccountState::apply`): a field the caller does not name
+/// keeps its previous value — `None` = not named, `Some([])` = named-and-
+/// empty. The field names are the **patch shape's** (`userAbstraction`,
+/// `spotBalances` — not the info endpoints' `userAbstraction`/`balances`).
+/// Measured divergences fixed 2026-10-23: a perp-only seed used to *replace*
+/// the account and silently wipe its spot balances (the
+/// deal-spot-then-seed sequence lost the deal), and the mode/spot fields
+/// carried the served names, so a `userAbstraction`/`spotBalances` patch was
+/// silently ignored.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSeed {
     #[serde(default)]
     pub margin_summary: Option<MarginSummary>,
     #[serde(default)]
-    pub asset_positions: Vec<AssetPosition>,
-    /// The spot side (`spotClearinghouseState`'s `balances`).
+    pub asset_positions: Option<Vec<AssetPosition>>,
+    /// The spot side, in the patch shape (`spotBalances`).
     #[serde(default)]
-    pub balances: Vec<SpotBalance>,
+    pub spot_balances: Option<Vec<SpotBalance>>,
     #[serde(default)]
-    pub abstraction: Option<UserAbstraction>,
+    pub user_abstraction: Option<UserAbstraction>,
 }
 
 impl AccountSeed {
-    /// Nothing to seed: no summary, positions, balances or abstraction.
+    /// Nothing named at all: an all-empty seed would silently register a zero
+    /// account (a named-but-empty field, `Some([])`, is a legitimate clear).
     pub fn is_empty(&self) -> bool {
         self.margin_summary.is_none()
-            && self.asset_positions.is_empty()
-            && self.balances.is_empty()
-            && self.abstraction.is_none()
+            && self.asset_positions.is_none()
+            && self.spot_balances.is_none()
+            && self.user_abstraction.is_none()
     }
 
-    /// Fold the seed into internal inputs. `totalRawUsd` is preserved exactly:
-    /// `balance = totalRawUsd + Σ szi·entryPx`, so the served totalRawUsd
-    /// round-trips byte-for-byte (the operator's recall amount). Fallible:
-    /// absurd seeds must refuse, not panic (the overflow-poison lesson).
-    pub fn into_account(self) -> Result<Account> {
-        let mut account = Account {
-            mode: self.abstraction.unwrap_or_default(),
-            ..Account::default()
+    /// Fold the seed into the account as a **patch**: named fields replace,
+    /// unnamed fields keep their previous value. `totalRawUsd` is preserved
+    /// exactly: `perp_balance = totalRawUsd + Σ szi·entryPx`, so the served
+    /// totalRawUsd round-trips byte-for-byte (the operator's recall amount).
+    /// Fallible: absurd seeds must refuse, not panic (the overflow-poison
+    /// lesson).
+    pub fn apply_to(self, account: &mut Account, clock: u64) -> Result<()> {
+        let perp_changed = self.margin_summary.is_some() || self.asset_positions.is_some();
+        // The raw USDC base: the named summary's totalRawUsd, else the
+        // existing one (reverse the current cost-basis fold).
+        let raw = if let Some(summary) = &self.margin_summary {
+            summary.total_raw_usd
+        } else {
+            let existing = account
+                .positions
+                .values()
+                .try_fold(Decimal::ZERO, |acc, p| add(acc, p.cost_basis()?, "cost basis"))?;
+            sub(account.perp_balance, existing, "raw usdc")?
         };
-        let mut cost_basis = Decimal::ZERO;
-        for asset in self.asset_positions {
-            let p = asset.position;
-            let entry = p.entry_px.unwrap_or_default();
-            let position = Position {
-                szi: p.szi,
-                entry_px: entry,
-                leverage: p.leverage.kind,
-                leverage_value: p.leverage.value,
-                margin_used: p.margin_used,
-                funding_all_time: p.cum_funding.all_time,
-                funding_since_open: p.cum_funding.since_open,
-                funding_since_change: p.cum_funding.since_change,
-            };
-            cost_basis = add(cost_basis, position.cost_basis()?, "seed cost basis")?;
-            account.positions.insert(p.coin, position);
+        if let Some(positions) = &self.asset_positions {
+            account.positions.clear();
+            for asset in positions {
+                let p = &asset.position;
+                let entry = p.entry_px.unwrap_or_default();
+                let position = Position {
+                    szi: p.szi,
+                    entry_px: entry,
+                    leverage: p.leverage.kind,
+                    leverage_value: p.leverage.value,
+                    margin_used: p.margin_used,
+                    funding_all_time: p.cum_funding.all_time,
+                    funding_since_open: p.cum_funding.since_open,
+                    funding_since_change: p.cum_funding.since_change,
+                };
+                account.positions.insert(p.coin.clone(), position);
+            }
         }
-        let raw = self
-            .margin_summary
-            .map(|m| m.total_raw_usd)
-            .unwrap_or_default();
-        account.perp_balance = add(raw, cost_basis, "seed balance")?;
-        for b in self.balances {
-            account.spot.insert(
-                b.token,
-                SpotEntry {
-                    coin: b.coin,
-                    total: b.total,
-                    hold: b.hold,
-                    entry_ntl: b.entry_ntl,
-                },
-            );
+        if perp_changed {
+            let cost_basis = account
+                .positions
+                .values()
+                .try_fold(Decimal::ZERO, |acc, p| add(acc, p.cost_basis()?, "seed cost basis"))?;
+            account.perp_balance = add(raw, cost_basis, "seed balance")?;
+            account.funded_at_ms = clock;
         }
-        Ok(account)
+        if let Some(balances) = &self.spot_balances {
+            account.spot.clear();
+            for b in balances {
+                account.spot.insert(
+                    b.token,
+                    SpotEntry {
+                        coin: b.coin.clone(),
+                        total: b.total,
+                        hold: b.hold,
+                        entry_ntl: b.entry_ntl,
+                    },
+                );
+            }
+        }
+        if let Some(mode) = self.user_abstraction {
+            account.mode = mode;
+        }
+        Ok(())
     }
 }
 
@@ -367,6 +399,41 @@ pub fn spot_balances(account: &Account) -> Vec<SpotBalance> {
         .collect();
     rows.sort_by_key(|b| b.token);
     rows
+}
+
+/// USDC: the venue's collateral token for the default dex (daloc's client
+/// default, `collateral_token = 0`).
+pub const COLLATERAL_TOKEN: u32 = 0;
+
+/// The unified account's `tokenToAvailableAfterMaintenance`: the collateral
+/// token's balance minus the perp maintenance — the identity daloc's client
+/// reconciles (`available + maintenance == the token's balance`, its hard
+/// gate, measured live against the venue). Standard accounts serve none: their
+/// spot side is not read for equity.
+pub fn available_after_maintenance(
+    account: &Account,
+    feed: &MarketFeed,
+    meta: Option<&crate::wire::Meta>,
+) -> Result<Vec<(u32, Decimal)>> {
+    if account.mode != UserAbstraction::UnifiedAccount {
+        return Ok(Vec::new());
+    }
+    let Some(entry) = account.spot.get(&COLLATERAL_TOKEN) else {
+        return Ok(Vec::new());
+    };
+    let v = view(account, feed, meta)?;
+    let isolated = v
+        .asset_positions
+        .iter()
+        .filter(|row| row.position.leverage.kind == LeverageType::Isolated)
+        .try_fold(Decimal::ZERO, |acc, row| {
+            add(acc, row.position.margin_used, "isolated margin")
+        })?;
+    let maintenance = add(v.cross_maintenance_margin_used, isolated, "maintenance")?;
+    Ok(vec![(
+        COLLATERAL_TOKEN,
+        sub(entry.total, maintenance, "available after maintenance")?,
+    )])
 }
 
 /// The maintenance-margin rate for a notional: the margin tier's
@@ -662,11 +729,95 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let account = seed.into_account().unwrap();
+        let mut account = Account::default();
+        seed.apply_to(&mut account, 0).unwrap();
         assert_eq!(account.perp_balance, Decimal::from(100) + Decimal::new(105, 2) * Decimal::from(10));
         let feed = feed_with(&[("BTC", "10.0", "10.0")]);
         let s = clearinghouse(&account, &feed, None, 1).unwrap();
         assert_eq!(s.margin_summary.total_raw_usd, Decimal::from(100));
+    }
+
+    /// The seed is a patch: an unnamed field keeps its previous value — the
+    /// deal-spot-then-seed sequence must not lose the spot balance. A named
+    /// but empty field clears.
+    #[test]
+    fn seed_patches_named_fields_only() {
+        let mut account = Account {
+            perp_balance: Decimal::from(500),
+            ..Account::default()
+        };
+        account.spot.insert(
+            0,
+            SpotEntry {
+                coin: "USDC".into(),
+                total: Decimal::from(250),
+                hold: Decimal::ZERO,
+                entry_ntl: Decimal::ZERO,
+            },
+        );
+        let seed: AccountSeed =
+            serde_json::from_str(r#"{"marginSummary": {"accountValue": "100", "totalNtlPos": "0", "totalRawUsd": "100", "totalMarginUsed": "0"}}"#)
+                .unwrap();
+        seed.apply_to(&mut account, 7).unwrap();
+        assert_eq!(account.perp_balance, Decimal::from(100), "the named summary replaces the raw base");
+        assert_eq!(account.spot[&0].total, Decimal::from(250), "unnamed balances keep their value");
+        assert_eq!(account.funded_at_ms, 7);
+
+        let clear: AccountSeed = serde_json::from_str(r#"{"spotBalances": []}"#).unwrap();
+        clear.apply_to(&mut account, 8).unwrap();
+        assert!(account.spot.is_empty(), "a named empty spotBalances list clears");
+        assert_eq!(account.perp_balance, Decimal::from(100), "a spotBalances-only patch keeps the perp side");
+        assert_eq!(account.funded_at_ms, 7, "a spotBalances-only patch does not re-stamp the funding baseline");
+
+        // The patch shape's own field names land (measured: the served names
+        // were silently ignored).
+        let mode: AccountSeed = serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap();
+        mode.apply_to(&mut account, 9).unwrap();
+        assert_eq!(account.mode, UserAbstraction::UnifiedAccount);
+    }
+
+    /// The unified account's `tokenToAvailableAfterMaintenance` closes daloc's
+    /// reconciliation identity: `available + maintenance == the collateral
+    /// balance` (their hard gate). A standard account serves none.
+    #[test]
+    fn unified_available_closes_the_reconciliation() {
+        let feed = feed_with(&[("BTC", "100.0", "100.0")]);
+        let meta = meta_for("BTC", 10);
+        let mut account = Account {
+            perp_balance: Decimal::ZERO,
+            mode: UserAbstraction::UnifiedAccount,
+            ..Account::default()
+        };
+        account.positions.insert(
+            "BTC".into(),
+            Position {
+                szi: Decimal::ONE,
+                entry_px: Decimal::from(100),
+                leverage: LeverageType::Cross,
+                leverage_value: 10,
+                margin_used: Decimal::ZERO,
+                funding_all_time: Decimal::ZERO,
+                funding_since_open: Decimal::ZERO,
+                funding_since_change: Decimal::ZERO,
+            },
+        );
+        account.spot.insert(
+            0,
+            SpotEntry {
+                coin: "USDC".into(),
+                total: Decimal::from(50),
+                hold: Decimal::ZERO,
+                entry_ntl: Decimal::ZERO,
+            },
+        );
+        let rows = available_after_maintenance(&account, &feed, Some(&meta)).unwrap();
+        let available = rows.iter().find(|(t, _)| *t == 0).unwrap().1;
+        let v = view(&account, &feed, Some(&meta)).unwrap();
+        assert!(v.cross_maintenance_margin_used > Decimal::ZERO);
+        assert_eq!(available + v.cross_maintenance_margin_used, Decimal::from(50));
+
+        account.mode = UserAbstraction::Default;
+        assert!(available_after_maintenance(&account, &feed, Some(&meta)).unwrap().is_empty());
     }
 
     /// Funding accrues hourly at the oracle price, and moves the balance.

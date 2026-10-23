@@ -198,8 +198,16 @@ pub struct ClearinghouseState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct SpotClearinghouseState {
     pub balances: Vec<SpotBalance>,
+    /// The venue's "available after maintenance", per token, as `[token, value]`
+    /// pairs. Served for **unified** accounts — it is the input daloc's client
+    /// reconciles (`available + maintenance == the collateral token's balance`);
+    /// empty (and omitted) for standard ones, whose spot side is not read for
+    /// equity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_to_available_after_maintenance: Vec<(u32, Decimal)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

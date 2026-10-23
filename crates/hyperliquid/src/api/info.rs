@@ -68,13 +68,24 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
                 None => pass_through(&state, &body).await,
             }
         }
-        InfoRequest::SpotClearinghouseState { user } => match state.sim.account(user)? {
-            Some(account) => Ok(Json(crate::wire::SpotClearinghouseState {
-                balances: account::spot_balances(&account),
-            })
-            .into_response()),
-            None => pass_through(&state, &body).await,
-        },
+        InfoRequest::SpotClearinghouseState { user } => {
+            state.sim.accrue_all(&state.feed, crate::now_ms())?;
+            match state.sim.account(user)? {
+                Some(account) => {
+                    let meta = state.feed.meta();
+                    Ok(Json(crate::wire::SpotClearinghouseState {
+                        balances: account::spot_balances(&account),
+                        token_to_available_after_maintenance: account::available_after_maintenance(
+                            &account,
+                            &state.feed,
+                            meta.as_ref(),
+                        )?,
+                    })
+                    .into_response())
+                }
+                None => pass_through(&state, &body).await,
+            }
+        }
         InfoRequest::UserAbstraction { user } => match state.sim.account(user)? {
             Some(account) => Ok(Json(account::mode_of(&account)).into_response()),
             None => pass_through(&state, &body).await,

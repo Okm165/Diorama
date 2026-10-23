@@ -219,21 +219,25 @@ impl Sim {
         Ok(after)
     }
 
-    /// `set_account`: seed an account from the hl_mock-compatible shape. An
-    /// all-empty seed is refused: it would silently register a zero account.
+    /// `set_account`: seed an account from the hl_mock-compatible shape. The
+    /// seed is a **patch** (their `venue_mock::set_venue_account` contract and
+    /// their mock's own apply): a field the caller does not name keeps its
+    /// previous value — a perp-only seed must not wipe the account's spot
+    /// balances. The field names are the patch shape's (`userAbstraction`,
+    /// `spotBalances`). An all-empty seed is refused: it would silently
+    /// register a zero account.
     pub fn set_account(&self, address: Address, seed: AccountSeed) -> Result<()> {
         if seed.is_empty() {
             return Err(Error::BadRequest {
-                reason: "the seed is empty (no marginSummary, positions, balances or abstraction)"
+                reason: "the seed is empty (no marginSummary, assetPositions, spotBalances or userAbstraction)"
                     .into(),
             });
         }
         let now = crate::now_ms();
         let clock = self.clock(now)?;
-        let mut account = seed.into_account()?;
-        account.funded_at_ms = clock;
         let mut state = self.state.lock()?;
-        state.accounts.insert(address, account);
+        let account = state.accounts.entry(address).or_default();
+        seed.apply_to(account, clock)?;
         drop(state);
         self.mark_dirty()
     }
@@ -643,6 +647,55 @@ mod tests {
         let err = sim.set_account(a, seed).unwrap_err();
         assert!(matches!(err, Error::BadRequest { .. }), "{err}");
         assert!(sim.account(a).unwrap().is_none());
+    }
+
+    /// `set_account` is a patch, not a replace: a perp-only seed keeps the
+    /// account's spot balances (their `venue_mock` contract; measured
+    /// divergence fixed 2026-10-23 — the deal-spot-then-seed sequence used to
+    /// lose the deal).
+    #[test]
+    fn set_account_is_a_patch_not_a_replace() {
+        let feed = feed_with("USDC", "1", "1");
+        feed.put_spot_meta(crate::wire::SpotMeta {
+            tokens: vec![crate::wire::SpotToken {
+                name: "USDC".into(),
+                sz_decimals: 8,
+                wei_decimals: 8,
+                index: 0,
+                is_canonical: true,
+                evm_contract: None,
+            }],
+            universe: vec![],
+        });
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        sim.deal(&feed, a, DealClass::Spot, Some("USDC"), Decimal::from(250))
+            .unwrap();
+        sim.set_account(
+            a,
+            serde_json::from_str(
+                r#"{
+                    "marginSummary": {"accountValue": "100", "totalNtlPos": "0", "totalRawUsd": "100", "totalMarginUsed": "0"}
+                }"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let account = sim.account(a).unwrap().unwrap();
+        assert_eq!(account.perp_balance, Decimal::from(100), "the named summary landed");
+        assert_eq!(
+            account.spot.get(&0).map(|s| s.total),
+            Some(Decimal::from(250)),
+            "the unnamed spot balance survived the perp-only seed"
+        );
+
+        // A named balances list replaces the spot side (and a named empty one clears).
+        sim.set_account(
+            a,
+            serde_json::from_str(r#"{"spotBalances": []}"#).unwrap(),
+        )
+        .unwrap();
+        assert!(sim.account(a).unwrap().unwrap().spot.is_empty());
     }
 
     #[test]

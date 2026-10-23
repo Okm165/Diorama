@@ -213,14 +213,30 @@ devnet Ethereum fork), V (a devnet HyperEVM fork), the venue engine, and the
 venue simulator. Each **role** is what one daloc-side actor does; each assertion
 is a gate the plan names (the client gates of §2.1/§18.3, the time policy of
 §17.2, the epoch model of §6.5, the venue mechanics of §5). The roles run in
-order, a failure prints the evidence, and the run exits non-zero. **42 checks**
+order, a failure prints the evidence, and the run exits non-zero. **46 checks**
 in a green run.
+
+The suite re-implements the client gates in Python; the strongest check runs
+the **real client**: `crates/daloc-client`'s gated `HyperLiquidClient` (their
+`margin_venue.rs` — the code the operator's recall path and the indexer's
+poller use) was compiled from their branch and pointed at the sim (measured
+2026-10-23). Both account models pass every gate end to end: the model read,
+the ≤6 s staleness bound, the dex gate (`perpDexs = [null]`), the unified spot
+read, the **hard reconciliation** (`available + maintenance == the collateral
+balance`, closing exactly — 230.7312 + 19.2688 = 250.0), the `account_state`
+projection (side/size/entry/mark/notional/uPnL), and the book/context parses.
+Two sim divergences this run surfaced are fixed and asserted here:
+`set_account` used to *replace* the account (a perp-only seed wiped the spot
+balance their patch contract keeps) and read the *served* field names
+(`balances`/`abstraction`) instead of the patch's
+(`spotBalances`/`userAbstraction`), so a mode or spot patch was silently
+ignored.
 
 | Role | Drives | Gates |
 |---|---|---|
 | `boot` | pins both chains' clocks and mines the carrying block; waits for the sim's readiness | T and V clocks start at wall time (±300 s, their gate); `venue-sim /readyz` 200 |
-| `provision` | `ensure_gas` on T; sim `reset`; `deal` perp + spot; a seeded position | T gas funded; scenario reset; perp deal returns `balance_after == 1000`; spot deal `== 250`; the hl_mock-shaped seed accepted |
-| `operator` | the gated venue reads (`hl_client.rs`) and the info shapes | identity `accountValue == totalRawUsd + Σ signed(positionValue)` at 1e-6; `positionValue` unsigned; `szi` signed; `cumFunding.sinceOpen`; `leverage.type`; flat rows dropped; `liquidationPx` isolated-only; `time` ≤6 s; `totalRawUsd` > 0; `meta.universe` carries `szDecimals`; `openOrders` = `[]`; a non-default dex → empty shape 200; `perpDexs` = `[null]`; `l2Book` exactly 2 sides, ≤20 levels; `userAbstraction` in the enum; an unconfigured account → empty shape 200 (passthrough) |
+| `provision` | `ensure_gas` on T; sim `reset`; `deal` perp + spot; a seeded position | T gas funded; scenario reset; perp deal returns `balance_after == 1000`; spot deal `== 250`; the hl_mock-shaped seed accepted; the perp-only seed keeps the spot balance (patch, not replace) |
+| `operator` | the gated venue reads (`hl_client.rs`) and the info shapes | identity `accountValue == totalRawUsd + Σ signed(positionValue)` at 1e-6; `positionValue` unsigned; `szi` signed; `cumFunding.sinceOpen`; `leverage.type`; flat rows dropped; `liquidationPx` isolated-only; `time` ≤6 s; `totalRawUsd` > 0; `meta.universe` carries `szDecimals`; `openOrders` = `[]`; a non-default dex → empty shape 200; `perpDexs` = `[null]`; `l2Book` exactly 2 sides, ≤20 levels; `userAbstraction` in the enum; a unified account's `available + maintenance == collateral balance` (their reconciliation); an unconfigured account → empty shape 200 (passthrough) |
 | `indexer` | the 5 s poller cadence, then the crash arc | three ticks ≤6 s old; the series is live; `crash` accepted and owned; the crash draws the equity down; hand-back recovers the live mark |
 | `time` | `advance_time_then_refresh`'s shape and the venue-side drawdown | T accepts a forward `anvil_setTime` jump; V accepts a direct jump; `advance` runs the automaton; an underwater position is liquidated (closed at the mark) |
 | `epoch` | the revert-to-blank on both halves | `epoch_new` accepted + `engine_repinned`; the venue engine's `fork_pin` present; the sim's account is gone; T's `/admin/epoch` accepted; T's engine is live after the re-pin |

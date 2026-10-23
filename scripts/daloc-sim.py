@@ -33,6 +33,7 @@ SIM_CTRL = os.environ.get("SIM_CTRL", "http://127.0.0.1:18791")    # venue-sim c
 CAST = os.environ.get("CAST", "/tmp/opencode/foundry-bin/cast")
 
 AGENT = "0x00000000000000000000000000000000000000aa"       # the margin agent
+UNIFIED = "0x00000000000000000000000000000000000000ac"     # a unified-mode account
 UNCONFIGURED = "0x7a3f8d2c9e1b4f6a0d5c8e2f9b3a7d4c1e6f0b5a"
 ANVIL_KEY_0 = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 ANVIL_1 = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
@@ -143,6 +144,13 @@ def role_provision():
     }
     status, body = post(f"{SIM_CTRL}/control/set_account", {"address": AGENT, "state": seed})
     check("venue account seeded (hl_mock shape)", status == 200, str(body)[:160])
+    # The seed is a *patch* (their venue_mock contract): the perp-only seed
+    # must not wipe the spot balance the deal above just wrote. Measured
+    # divergence fixed 2026-10-23 (the seed used to replace the account).
+    _, spot = info("spotClearinghouseState", user=AGENT)
+    usdc = next((b for b in spot["balances"] if b["token"] == 0), None)
+    check("perp-only seed keeps the spot balance (patch, not replace)",
+          usdc is not None and Decimal(usdc["total"]) == 250, str(spot))
 
 
 def role_operator():
@@ -199,6 +207,38 @@ def role_operator():
     status, abstraction = info("userAbstraction", user=AGENT)
     check("userAbstraction served", abstraction in ("default", "disabled", "unifiedAccount",
                                                     "portfolioMargin", "dexAbstraction"), str(abstraction))
+
+    # unified mode: the sim serves `tokenToAvailableAfterMaintenance`, and the
+    # identity daloc's client reconciles (`available + maintenance == the
+    # collateral balance`, its hard gate) closes exactly. Verified live against
+    # the real client (their `margin_venue.rs`) 2026-10-23.
+    status, body = post(f"{SIM_CTRL}/control/set_account", {"address": UNIFIED, "state": {
+        "userAbstraction": "unifiedAccount",
+        "marginSummary": {"accountValue": "1000", "totalNtlPos": "0", "totalRawUsd": "1000",
+                          "totalMarginUsed": "50"},
+        "assetPositions": [{
+            "type": "oneWay",
+            "position": {"coin": "ETH", "entryPx": "2500", "leverage": {"type": "cross", "value": 20},
+                         "marginUsed": "50", "maxLeverage": 25, "positionValue": "0",
+                         "returnOnEquity": "0", "szi": "0.4", "unrealizedPnl": "0",
+                         "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}}
+        }],
+        "spotBalances": [{"coin": "USDC", "token": 0, "hold": "0", "total": "250", "entryNtl": "0"}],
+    }})
+    check("unified account seeded (userAbstraction + spotBalances)", status == 200, str(body)[:160])
+    status, abstraction = info("userAbstraction", user=UNIFIED)
+    check("unified abstraction served", abstraction == "unifiedAccount", str(abstraction))
+    _, spot = info("spotClearinghouseState", user=UNIFIED)
+    _, perp = info("clearinghouseState", user=UNIFIED)
+    available = {int(t): Decimal(v) for t, v in spot.get("tokenToAvailableAfterMaintenance", [])}
+    maintenance = Decimal(perp["crossMaintenanceMarginUsed"]) + sum(
+        (Decimal(a["position"]["marginUsed"]) for a in perp["assetPositions"]
+         if a["position"]["leverage"]["type"] == "isolated"), Decimal(0))
+    balance = next((Decimal(b["total"]) for b in spot["balances"] if b["token"] == 0), None)
+    closes = (balance is not None and 0 in available
+              and abs(available[0] + maintenance - balance) <= Decimal("0.000001"))
+    check("unified: available + maintenance == collateral balance (their reconciliation)",
+          closes, f"available={available} maintenance={maintenance} balance={balance}")
 
     # unconfigured account: empty shape 200 (passthrough to the live venue)
     state = sim_account(UNCONFIGURED)
