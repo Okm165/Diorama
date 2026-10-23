@@ -72,3 +72,14 @@ Devnet reality then bites where the real lane never sees it:
   false-parks. The parity flags set keeper 1000000 on both chains (plan
   §17.6), which holds for any realistic test window; a false park is safe
   (never minted) and the transfer is simply re-run.
+- **Fees stay zero; the lane is finalized.** Every transfer burns with
+  `minFinalityThreshold = 2000` and `maxFee = 0`, and the devnet attester fills
+  `finalityThresholdExecuted = 2000` — so the destination always takes
+  `handleReceiveFinalizedMessage`. The fee knob the plan sketched would be dead
+  config: both chains' on-chain surfaces measure zero (the Ethereum messenger
+  has no min-fee surface at all; HyperEVM's `minFee() = 0`), so the contract
+  charges nothing. The Iris still serves Circle's real fee *table* (0→19 fast =
+  1 unit) for shape fidelity. The confirmed/fast lane (1000 — the
+  unfinalized dispatch) is a documented deferral: the devnet attester would
+  attest it identically, the real HyperEVM source has no fast lane, and no
+  acceptance needs it.

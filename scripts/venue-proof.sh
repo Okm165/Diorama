@@ -9,6 +9,8 @@
 #   D. bridge round-trip - EVM→Core credits the sender's Core spot balance; a
 #                        `sendAsset` completes Core→EVM through the system
 #                        address (the counters move, the balances round-trip)
+#   E. block production - a tx left in the pool (no manual mine) is mined by
+#                        the engine on its next pass (`venue_mined_blocks_total`)
 #
 # Run from the repo root:
 #   make venue-proof                    # against the deployed venue-mirror
@@ -187,16 +189,46 @@ PY
 )
 tx=$(send_tx "$ACCT" "$CORE_WRITER" "$sendraw")
 [ -n "$tx" ] && [ "$tx" != "None" ] && ok "sendAsset (CoreWriter 0x3333) mined ($tx)" || bad "CoreWriter action failed"
-sleep 4   # the bridge pass + the completion tx submission
-mine      # the completion tx lands on the next mined block (like the real chain)
-sleep 2
-completions1=$(metric venue_bridge_completions_total)
+# The sim's watcher decodes the action on its own cadence (seconds), then
+# submits the completion tx; the engine mines it on its next pass. Poll rather
+# than sleep a fixed window (measured: the decode latency varies ~4-9 s).
+completions1="$completions0"
+for _ in $(seq 1 20); do
+  completions1=$(metric venue_bridge_completions_total)
+  [ "$completions1" -gt "$completions0" ] 2>/dev/null && break
+  sleep 1
+done
 [ "$completions1" -gt "$completions0" ] 2>/dev/null && ok "Core→EVM completed ($completions0 -> $completions1)" \
   || bad "no completion recorded ($completions0 -> $completions1)"
-b1=$(balance "$PURR" "$ACCT")
+# The completion tx must land for the balance to move: the engine mines it
+# (within one poll); this explicit mine is the harness-style fallback driver.
+mine
+b1=""
+for _ in $(seq 1 20); do
+  b1=$(balance "$PURR" "$ACCT")
+  [ "$b1" = "98000000000000000000" ] && break
+  sleep 1
+done
 # 100 - 5 sent + 3 completed = 98 PURR
 [ "$b1" = "98000000000000000000" ] && ok "the round trip is exact (100 - 5 + 3 = 98 PURR on V)" \
   || bad "round-trip balance $b1 != 98000000000000000000"
+
+echo "-- E. the engine is V's block producer (a pooled tx, no manual mine)"
+m0=$(eget /metrics | awk '$1 == "venue_mined_blocks_total" {print $2}')
+tx=$(rpcv "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_sendTransaction\",\"params\":[{\"from\":\"$ACCT\",\"to\":\"$ACCT\",\"value\":\"0x1\"}]}" | json 'd["result"]')
+# Deliberately no `mine`: the driver mines a non-empty pool on its next pass
+# (T's counterpart is the applier, one block per applied parent block).
+receipt=""
+for _ in $(seq 1 20); do
+  receipt=$(rpcv "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getTransactionReceipt\",\"params\":[\"$tx\"]}" | json 'd["result"]')
+  [ "$receipt" != "None" ] && break
+  sleep 1
+done
+m1=$(eget /metrics | awk '$1 == "venue_mined_blocks_total" {print $2}')
+[ "$receipt" != "None" ] && ok "the pooled tx mined without a manual mine ($tx)" \
+  || bad "tx $tx stayed in the pool: no block producer"
+[ "${m1:-0}" -gt "${m0:-0}" ] 2>/dev/null && ok "venue_mined_blocks_total moved ($m0 -> $m1)" \
+  || bad "venue_mined_blocks_total did not move ($m0 -> $m1)"
 
 echo "== venue capability proof: $pass passed, $fail failed"
 [ "$fail" = "0" ]

@@ -147,7 +147,7 @@ test-engine: ## Run workspace unit tests on the host (cargo)
 config-check: ## Validate the selected instance's config through the layered loader
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check $(INSTANCE_FILE)
 
-fitness: lint design-assertions closure-matrix no-orphans docs-metrics ## Run every structural fitness function (plan §11.3)
+fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit ## Run every structural fitness function (plan §11.3)
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
@@ -163,6 +163,9 @@ no-orphans: ## No utils/common/helpers crate or module (Lesson 101)
 
 docs-metrics: ## docs<->metrics: every metric the docs name exists in the code
 	./scripts/docs-metrics.sh
+
+trust-audit: ## Every `// TRUST:` marker names its guard (doctrine rule 6)
+	./scripts/trust-audit.sh
 
 ##@ Ops
 
@@ -192,7 +195,7 @@ venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/
 venue-drill: ## The venue epoch drill (same-pin restore, new-pin epoch, driver liveness)
 	NS=venue-mirror ./scripts/venue-drill.sh
 
-venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation, bridge round-trip)
+venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation, bridge round-trip, block production)
 	NS=venue-mirror ./scripts/venue-proof.sh
 
 venue-product-sim: ## The daloc use-case simulation against the venue stack (endpoints via env)

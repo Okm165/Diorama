@@ -26,7 +26,7 @@ are errors at every level.
 | `[services.engine.*]` | the ethereum engine | reth / anvil / source_sync / verifier / journal / blobs / http |
 | `[services.venue.*]` | the venue engine (the fork driver) | state_dir, anvil_url, journal ring, probes, http |
 | `[services.sim.*]` | the simulator | info/control ports, markets, rate budget, persistence |
-| `[services.cctp.*]` | the CCTP bridge | T/V RPCs, relay key, attester seed, iris/control ports |
+| `[services.cctp.*]` | the CCTP bridge | T/V RPCs, relay key, attester seed, iris/control ports, the relayer mode (`auto`/`manual`) |
 | `[watchlist]` | the ethereum engine | the closure scope; one watchlist, two readers (`check` + `closure-check`) |
 
 The engines' sections are named per mirror — `engine` is the ethereum
@@ -46,6 +46,14 @@ mirror-config export-env config/instances/mainnet-mirror.toml --section anvil   
 `make config-check` runs the check in CI. The anvil init containers read
 `FORK_OFFSET` via `export-env` — the instance file is the offset's single
 home.
+
+**How a service finds its instance file.** The path is the binary's first
+argument (`--config <path>` for the engine, positional for `venue-mirror` /
+`venue-sim` / `cctp-bridge`), defaulting to `/etc/mirror/instance.toml` — the
+path every pod mounts via `configMapGenerator`. The plan's
+`MIRROR_INSTANCE`/`MIRROR_CONFIG` envs are therefore unnecessary: one file per
+instance, many readers, and the mount already selects it; the argument exists
+for local runs (the scratch stacks pass their own file).
 
 ## Where a fact lives (§19.2)
 
