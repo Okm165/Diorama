@@ -160,11 +160,26 @@ pub struct EngineSection {
 pub struct FeedBridgeSection {
     /// Poll cadence for the source aggregators.
     pub poll_interval_ms: u64,
+    /// How long a published answer may stay unconfirmed before the bridge
+    /// re-publishes it (the outcome-unknown reconciliation: an anvil pool is
+    /// not durable and a same-nonce sender can displace ours — measured: a
+    /// deploy sharing the writer account wedged a feed in `pending` forever).
+    /// Defaults to 60 s: comfortably beyond a parent block (~12 s) and a pool
+    /// wait, and the re-send is idempotent (a new round with the same answer).
+    #[serde(default = "default_confirm_window_ms")]
+    pub confirm_window_ms: u64,
     /// The account that submits `updateAnswer` on T (auto-impersonate makes
     /// any address usable; the mock's own access control decides who may).
+    /// Give it a *dedicated* account: sharing one with a concurrent sender
+    /// (e.g. daloc's deployer, which is anvil account 0) races nonces.
     pub writer: Address,
     /// The feeds to bridge (one row per mock aggregator).
     pub feeds: Vec<FeedSection>,
+}
+
+/// 60 s: the confirmation window's default (see [`FeedBridgeSection`]).
+const fn default_confirm_window_ms() -> u64 {
+    60_000
 }
 
 /// One bridged feed: the parent chain's aggregator is the source, the

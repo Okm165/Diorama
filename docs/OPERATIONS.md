@@ -305,6 +305,11 @@ at roughly one parent block per second (the poll interval, not the 12 s head
 cadence), and the gap guard allows up to `max_gap_blocks` (300) - so a pause is
 cheap for minutes, not hours.
 
+The k8s probes deliberately use `/livez` (always 200), not `/healthz`: a pause
+must not take the engine - its NodePort included - out of the Service, and a
+liveness probe on `/healthz` (503 while halted) would restart the pod in the
+middle of this drill.
+
 ### Register devnet writes made outside the block pipeline
 
 Cheatcodes applied directly to T (`anvil_setBalance`, `anvil_setStorageAt`, …)

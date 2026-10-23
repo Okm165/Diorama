@@ -33,13 +33,9 @@ pub use ctx::Ctx;
 pub use error::{Error, Result};
 
 /// Wall-clock milliseconds (the wire's `time` fields and the sim clock's
-/// base). One helper so every lane reads the same clock.
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+/// base) — the shared definition lives in `mirror-config`'s boot module; this
+/// re-export keeps `crate::now_ms()` the one spelling at the call sites.
+pub use mirror_config::boot::now_ms;
 
 #[cfg(test)]
 mod design_assertions {

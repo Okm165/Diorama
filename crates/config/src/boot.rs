@@ -83,6 +83,17 @@ pub async fn shutdown_signal() {
     }
 }
 
+/// Wall-clock milliseconds since the Unix epoch — the shared clock. One
+/// definition for the sim's served time, the feed bridge's publish deadlines
+/// and the CCTP store's timestamps; its callers compare deltas and ordering,
+/// never the absolute value.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

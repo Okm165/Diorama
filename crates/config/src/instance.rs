@@ -233,6 +233,12 @@ impl Instance {
                 if fb.poll_interval_ms == 0 {
                     issues.push("services.engine.feed_bridge.poll_interval_ms must be > 0".into());
                 }
+                if fb.confirm_window_ms < fb.poll_interval_ms {
+                    issues.push(
+                        "services.engine.feed_bridge.confirm_window_ms must be >= poll_interval_ms"
+                            .into(),
+                    );
+                }
                 if fb.feeds.is_empty() {
                     issues.push("services.engine.feed_bridge.feeds must not be empty".into());
                 }

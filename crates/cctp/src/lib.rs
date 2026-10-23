@@ -42,13 +42,9 @@ pub use error::{Error, Result};
 pub use alloy_primitives::{Address, Bytes, B256, U256};
 
 /// Wall-clock milliseconds: the PENDING window (`attest_after_ms`), receipt
-/// timestamps, and the Iris `lastUpdated` field all read one clock.
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+/// timestamps, and the Iris `lastUpdated` field all read one clock — the
+/// shared definition lives in `mirror-config`'s boot module.
+pub use mirror_config::boot::now_ms;
 
 #[cfg(test)]
 mod design_assertions {

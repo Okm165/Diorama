@@ -443,8 +443,21 @@ aggregator deployed for the test):
 - a re-pin (epoch) wipes a devnet-deployed target: the bridge forgets the
   feed's decimals **and** value state and returns to *waiting* — not an error
   loop — and the reappeared target is first contact again (the epoch rule:
-  the devnet's values are gone with the old base). Measured: after a T re-pin
-  the bridge recovered cleanly when the target was reinstalled;
+  the devnet's values are gone with the old base). Measured 2026-10-23
+  (daloc-sim's epoch re-pin, then a fixture re-deploy at the same addresses):
+  all five feeds went to waiting with **one warn each and zero pass errors**,
+  then republished and confirmed on first contact;
+- a publish that does not land within `confirm_window_ms` (default 60 s) is
+  **re-sent** — the outcome-unknown reconciliation. An anvil pool is not
+  durable and a same-nonce sender can displace ours: measured, daloc's deploy
+  shares anvil account 0 with the writer, a publish racing the deploy's last
+  txs was displaced, and the feed waited on `pending` forever. Measured live
+  after the fix (applier paused so nothing could mine): an override + hand-back
+  left a pending publish; past the 20 s scratch window the bridge logged
+  `did not land within the confirmation window; re-publishing age_ms=23224`
+  and the feed confirmed when mining resumed. `/admin/feed` carries
+  `pending_since_ms` so the wait is visible. **Give the writer a dedicated
+  account** — never the deployer's — so concurrent senders cannot race it;
 - first contact publishes the source's answer; the next pass confirms it
   (`confirmed_answer`, `feed_bridge_updates_total{feed}`);
 - a scenario write to the target pauses the feed on the next pass
