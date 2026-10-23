@@ -38,13 +38,7 @@ struct Bridge {
 
 async fn run(args: Vec<String>) -> mirror_cctp::Result<()> {
     boot::init_logging();
-    let config = match boot::service_config(&args) {
-        Ok(config) => config,
-        Err(usage) => {
-            eprintln!("{usage}");
-            std::process::exit(2);
-        }
-    };
+    let config = boot::service_config_or_exit(&args);
     let section = load_wiring(&config)?;
     let (bridge, min_fees) = boot_bridge(section).await?;
 

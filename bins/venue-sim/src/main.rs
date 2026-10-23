@@ -19,13 +19,7 @@ fn main() -> ExitCode {
 
 async fn run(args: Vec<String>) -> mirror_hyperliquid::Result<()> {
     boot::init_logging();
-    let config = match boot::service_config(&args) {
-        Ok(config) => config,
-        Err(usage) => {
-            eprintln!("{usage}");
-            std::process::exit(2);
-        }
-    };
+    let config = boot::service_config_or_exit(&args);
     let mut cfg = load_wiring(&config)?;
     let (chain, sim_section) = cfg.take_sim()?;
 

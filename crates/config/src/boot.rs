@@ -79,6 +79,19 @@ pub fn service_config(args: &[String]) -> Result<std::path::PathBuf, String> {
     Ok(config)
 }
 
+/// The plain services' entry: [`service_config`], with a malformed invocation
+/// printing the usage on stderr and exiting 2 — the one place the exit code
+/// and the stream are decided, so the bins cannot drift apart on it.
+pub fn service_config_or_exit(args: &[String]) -> std::path::PathBuf {
+    match service_config(args) {
+        Ok(config) => config,
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    }
+}
+
 /// The shared `main()` shell: build the runtime with the measured worker-stack
 /// budget, run the service future, report a fatal error with its cause chain.
 /// The bins keep their own `run()` — the planes, boot orders and final saves

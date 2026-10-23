@@ -55,13 +55,7 @@ pub use mirror_config::boot::now_ms;
 /// there is nothing to drain.
 pub async fn main_entry(args: Vec<String>) -> Result<()> {
     mirror_config::boot::init_logging();
-    let config = match mirror_config::boot::service_config(&args) {
-        Ok(config) => config,
-        Err(usage) => {
-            eprintln!("{usage}");
-            std::process::exit(2);
-        }
-    };
+    let config = mirror_config::boot::service_config_or_exit(&args);
     run(config).await
 }
 
