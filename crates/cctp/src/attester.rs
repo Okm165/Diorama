@@ -15,6 +15,10 @@
 //! The key is deterministic from the configured seed (a 32-byte hex secret is
 //! used verbatim; any other string is hashed) so restarts re-derive the same
 //! attester and the boot installation stays idempotent.
+//!
+//! §15.3's storage-write fallback (if impersonation were ever blocked) is
+//! deliberately not implemented: `--auto-impersonate` is a boot flag both
+//! chains carry, and the real setters are the measured, working path.
 use crate::chains::MESSAGE_TRANSMITTER_V2;
 use crate::error::{Error, Result};
 use crate::transfer::{
