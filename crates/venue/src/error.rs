@@ -57,8 +57,12 @@ pub enum Error {
     #[error("no live market context for `{coin}`")]
     NoMarket { coin: String },
 
-    // ---- control-plane refusals (the sim maps them to 4xx) ----------------
-    #[error("invalid control request: {reason}")]
+    // ---- request refusals (the sim maps them to 4xx) ----------------------
+    /// A refusal of the caller's request. The reason carries its own surface
+    /// context ("invalid info request: …" from the info boundary; the venue's
+    /// own string from the order lane), so no prefix is added here — the
+    /// control plane and `/info` both serve exactly what their reason says.
+    #[error("{reason}")]
     BadRequest { reason: String },
 
     /// A control route that needs wiring the deployment did not provide.

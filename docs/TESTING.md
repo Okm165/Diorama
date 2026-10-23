@@ -367,6 +367,34 @@ chain facts:
   credit), then a `sendAsset` naming that address (the completion — the system
   address sends the ERC-20 back), exact balances end to end.
 
+### The wire audit against the live venue (measured live, 2026-10-23)
+
+Every served `/info` type was diffed field-by-field against the real venue's
+live answers (a recursive path comparison of the same requests, public reads):
+
+- **`SpotPair` served `is_canonical`** — the venue's key is `isCanonical`, and
+  the missing rename silently *dropped* the live value on deserialize (the
+  existing parse test could not catch it: `#[serde(default)]` masks the missing
+  field). Fixed, and pinned by a name test (`served_field_names_are_the_venues`)
+  that asserts the serialized keys themselves.
+- **`l2Book` for an unknown coin**: the venue answers HTTP 200 `null`; the sim
+  answered 404. Fixed (a typed `Option<L2Book>`); a *configured* market with no
+  book yet stays a 503 (warming) — a different fault, kept distinct.
+- Everything else matched exactly: `meta`, `metaAndAssetCtxs`, `l2Book`,
+  `allMids` (1388 leaf paths — every coin the venue lists), `clearinghouseState`,
+  `spotMeta` (after the fix), `spotClearinghouseState`, `exchangeStatus`,
+  `perpDexs` (the dex objects' fields, pairs-of-pairs included),
+  `userAbstraction`, `marginTable`, `activeAssetData`, `openOrders`.
+- Measured venue quirks kept as named divergences (no client path reaches
+  them): an unknown `marginTable` id answers 500 `null` on the venue (the sim
+  answers 404); a malformed body is 422 on the venue (the sim answers 400 — the
+  documented "a malformed body is the caller's fault" rule); an unknown info
+  *type* answers `"unrouted"` (hl_mock's contract, the plan's choice).
+- The refusal display lost its surface-specific `invalid control request:`
+  prefix: the reason carries its own context (`invalid info request: …`, the
+  venue's own order strings), so `/info` and the control plane each serve
+  exactly what their reason says.
+
 ### The freshness gate and the local feed bridge (measured live, 2026-10-23)
 
 - **The staleness drill** (`venue-order-proof` H, live): `POST

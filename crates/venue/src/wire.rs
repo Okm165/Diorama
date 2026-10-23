@@ -493,6 +493,7 @@ pub(crate) struct SpotEvmContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SpotPair {
     /// `[base, quote]` token indices.
     pub tokens: [u32; 2],
@@ -573,6 +574,44 @@ mod tests {
 
         let spot: SpotClearinghouseState = serde_json::from_str(r#"{"balances":[]}"#).unwrap();
         assert!(spot.balances.is_empty());
+    }
+
+    /// The served *names* are the venue's own: a snake_case key is silently
+    /// nothing to a client, and a missing rename silently drops the live value
+    /// on deserialize (measured: `SpotPair` served `is_canonical` and lost the
+    /// live `isCanonical: true`). The parse test above cannot catch it —
+    /// `#[serde(default)]` masks the missing field — so this asserts the names.
+    #[test]
+    fn served_field_names_are_the_venues() {
+        let pair = SpotPair {
+            tokens: [1, 0],
+            name: "PURR/USDC".into(),
+            index: 0,
+            is_canonical: true,
+        };
+        let v = serde_json::to_value(&pair).unwrap();
+        assert_eq!(v["isCanonical"], serde_json::json!(true));
+        assert!(v.get("is_canonical").is_none(), "the venue's key is camelCase");
+        let back: SpotPair = serde_json::from_value(serde_json::json!({
+            "tokens": [1, 0], "name": "PURR/USDC", "index": 0, "isCanonical": true
+        }))
+        .unwrap();
+        assert!(back.is_canonical, "the live key lands in the field");
+        let token = SpotToken {
+            name: "USDC".into(),
+            sz_decimals: 8,
+            wei_decimals: 8,
+            index: 0,
+            is_canonical: true,
+            evm_contract: None,
+            token_id: None,
+            full_name: None,
+            deployer_trading_fee_share: Decimal::ZERO,
+        };
+        let tv = serde_json::to_value(&token).unwrap();
+        assert_eq!(tv["szDecimals"], serde_json::json!(8));
+        assert_eq!(tv["isCanonical"], serde_json::json!(true));
+        assert!(tv.get("deployerTradingFeeShare").is_some());
     }
 
     #[test]

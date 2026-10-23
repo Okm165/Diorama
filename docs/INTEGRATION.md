@@ -30,7 +30,9 @@ inside the engine's loop.
 **Served `/info` types (13):** `clearinghouseState`, `spotClearinghouseState`,
 `userAbstraction`, `openOrders`, `meta`, `metaAndAssetCtxs`, `perpDexs`,
 `l2Book`, `marginTable`, `activeAssetData`, `exchangeStatus`, `spotMeta`,
-`allMids`. Anything else answers `"unrouted"` (hl_mock's contract — a *named*
+`allMids`. An unknown coin's `l2Book` answers the venue's own absence shape
+(HTTP 200 `null`; a *configured* market still warming is a 503). Anything else
+answers `"unrouted"` (hl_mock's contract — a *named*
 non-answer, never a 500). Un-simulated types are **not proxied** to the live
 venue: the overlay's discipline is that a read either comes from the sim's own
 state or is named absent — a proxy would leak live data past the COW boundary

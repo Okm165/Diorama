@@ -533,9 +533,16 @@ fn l2_book(
 ) -> Result<Response> {
     book_params_ok(n_sig_figs, mantissa)?;
     let now = crate::now_ms();
-    let book = state.feed.book(coin, now).ok_or_else(|| Error::NotFound {
-        what: format!("no book for `{coin}` (not a configured market and no scripted book)"),
-    })?;
+    let Some(book) = state.feed.book(coin, now) else {
+        // The venue's own absence shape (measured live: `l2Book` for an
+        // unknown coin answers HTTP 200 `null`). A *configured* market with
+        // no book yet is a different fault — the plane is warming (503).
+        return if state.feed.markets.iter().any(|m| m == coin) {
+            Err(Error::Warming)
+        } else {
+            Ok(Json(None::<crate::wire::L2Book>).into_response())
+        };
+    };
     Ok(Json(aggregate_book(book, n_sig_figs, mantissa.unwrap_or(1))).into_response())
 }
 
