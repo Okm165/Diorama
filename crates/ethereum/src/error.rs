@@ -62,16 +62,6 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// An endpoint that never answered within its boot window; the last
-    /// failure is kept so the boot error shows why it stayed down.
-    #[error("{name} did not answer RPC within {timeout_secs}s")]
-    NotReady {
-        name: &'static str,
-        timeout_secs: u64,
-        #[source]
-        source: Option<mirror_anvil::Error>,
-    },
-
     /// The selftest's scratch anvil was not started with a fork pin.
     #[error("{chain} has no fork pin - start it with --fork-url and --fork-block-number")]
     NoForkPin { chain: &'static str },

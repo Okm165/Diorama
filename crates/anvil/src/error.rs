@@ -88,6 +88,18 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    /// The server never answered within the caller's boot deadline — a
+    /// coordinated restart (the anvil re-forking, the node unwinding) is the
+    /// normal cause. The last fault is kept so the boot error shows why it
+    /// stayed down.
+    #[error("{what}: no answer within {timeout_secs}s of waiting")]
+    NotReady {
+        what: &'static str,
+        timeout_secs: u64,
+        #[source]
+        source: Box<Error>,
+    },
+
     /// An HTTP refusal whose body was not a JSON-RPC answer (gateway page,
     /// auth wall, empty body): the transport answered, but not with the
     /// protocol. A JSON-RPC error on a non-2xx status is [`Error::Rpc`].
@@ -173,6 +185,9 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::Transport { .. } => true,
+            // The boot wait exhausted its deadline: the server may still come
+            // up, so a later retry is not hopeless.
+            Error::NotReady { .. } => true,
             Error::Status { status, .. } => matches!(status, 429 | 502 | 503 | 504),
             Error::Rpc { payload, .. } => payload.is_retryable(),
             Error::ClientBuild { .. }
@@ -196,7 +211,13 @@ impl Error {
     /// write may have landed. Surface for reconciliation (the journal / the
     /// chain's own dedup), never a silent resend.
     pub fn is_submission_outcome_unknown(&self) -> bool {
-        matches!(self, Error::Transport { source, .. } if !source.is_connect())
+        match self {
+            Error::Transport { source, .. } => !source.is_connect(),
+            // A readiness exhaustion wraps the last fault of a *read* poll;
+            // nothing proves a write's fate, so it sits on the ambiguous wall.
+            Error::NotReady { .. } => true,
+            _ => false,
+        }
     }
 
     /// The node does not know the method (measured: a reth without
@@ -210,6 +231,7 @@ impl Error {
     pub fn endpoint(&self) -> &str {
         match self {
             Error::ClientBuild { .. } | Error::Corrupt { .. } | Error::Encode { .. } => "<local>",
+            Error::NotReady { what, .. } => what,
             Error::Transport { endpoint, .. }
             | Error::Status { endpoint, .. }
             | Error::Rpc { endpoint, .. }

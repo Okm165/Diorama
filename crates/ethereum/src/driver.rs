@@ -10,7 +10,7 @@
 //! `mirror-devnet`, shared.
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::replay::replay_block;
 use crate::source_sync;
 use mirror_devnet::state::{self, ChainCursor};
@@ -508,35 +508,6 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
     }
 }
 
-/// Wait for an anvil to answer RPC, so a coordinated restart (reth unwinding,
-/// anvil re-pinning) does not turn the engine into CrashLoopBackOff. Bounded:
-/// if the anvil is still down after the deadline, start-up fails loudly.
-pub(crate) async fn wait_for_anvil(anvil: &crate::rpc::Rpc, name: &'static str) -> Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(900);
-    let mut last_log = std::time::Instant::now();
-    loop {
-        match anvil.block_number().await {
-            Ok(head) => {
-                tracing::info!(anvil = name, head, "anvil is up");
-                return Ok(());
-            }
-            Err(e) => {
-                if std::time::Instant::now() >= deadline {
-                    return Err(Error::NotReady {
-                        name,
-                        timeout_secs: 900,
-                        source: Some(e),
-                    });
-                }
-                if last_log.elapsed() > std::time::Duration::from_secs(30) {
-                    tracing::warn!(anvil = name, error = %e, "waiting for anvil to come up");
-                    last_log = std::time::Instant::now();
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-        }
-    }
-}
 
 /// Supervises the top-up loop. A panicking top-up task is invisible from the
 /// outside (reth simply stops advancing), so restart it and say so loudly.

@@ -359,6 +359,41 @@ impl Rpc {
         Ok(quantity.to::<u64>())
     }
 
+    /// Wait (bounded) until the server answers `eth_blockNumber`, so a
+    /// coordinated restart — the anvil re-forking, the node unwinding — does
+    /// not turn the caller into CrashLoopBackOff. Warns every 30 s while
+    /// waiting; on the deadline the last fault is returned, named by `what`.
+    ///
+    /// The one boot-wait every service uses (the ethereum's two anvils, the
+    /// venue's V, the CCTP bridge's two chains): one implementation, one
+    /// failure shape.
+    pub async fn wait_until_up(&self, what: &'static str, timeout: Duration) -> Result<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut last_log = std::time::Instant::now();
+        loop {
+            match self.block_number().await {
+                Ok(head) => {
+                    tracing::info!(server = what, head, "rpc server is up");
+                    return Ok(());
+                }
+                Err(e) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(Error::NotReady {
+                            what,
+                            timeout_secs: timeout.as_secs(),
+                            source: Box::new(e),
+                        });
+                    }
+                    if last_log.elapsed() > Duration::from_secs(30) {
+                        tracing::warn!(server = what, error = %e, "waiting for the rpc server to come up");
+                        last_log = std::time::Instant::now();
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
     /// The chain's id (`eth_chainId`): the venue's boot assert reads it.
     pub async fn chain_id(&self) -> Result<u64> {
         let quantity: U64 = self.call("eth_chainId", NO_PARAMS).await?;

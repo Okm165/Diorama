@@ -11,9 +11,18 @@
 //! re-pin interval). A read is therefore only exact while the source's head is
 //! still the pin; once the source has advanced, the read is *refused* with the
 //! numbers rather than silently returning a newer value (the "never hand back
-//! a poisoned value" rule). The robust path — recording each write's trace
-//! `pre` value at first touch, so the base truth lives in the registry — lands
-//! with the venue's journaling slice.
+//! a poisoned value" rule).
+//!
+//! The registry is **not** a substitute: its `values` are the *devnet's*
+//! latest writes (what a re-fork must restore), not the source's before-state.
+//! The before-state lives in the **journal** (each engine write records it) —
+//! so a selective hand-back could serve a key's *oldest* journal entry, gated
+//! on the ring still covering the epoch (`first_block + keep > head`). That
+//! slice is planned, not built: today the refusal above is fail-closed, and
+//! the wholesale hand-back is the epoch itself (the re-pin's re-fork restores
+//! the source's whole state — measured: the pin is seconds stale on a
+//! 1s-block source, so the selective window is only reliable against a
+//! scratch/slow source).
 use alloy_primitives::{Address, B256, U256};
 use mirror_anvil::{Error, Rpc};
 use mirror_devnet::source::{Fut, Source};
@@ -47,9 +56,12 @@ impl VenueSource {
             return Err(Error::Corrupt {
                 what: "venue source",
                 detail: format!(
-                    "the source advanced past the pin (pin {pin}, head {head}); \
-                     re-pin before handing keys back — the source serves its \
-                     latest state for eth_call (measured)"
+                    "the source advanced past the pin (pin {pin}, head {head}): it \
+                     serves only its latest state for eth_call (measured), so the \
+                     pin's truth cannot be read back. A re-pin restores the whole \
+                     source state (the re-fork is the wholesale hand-back); a \
+                     *selective* hand-back is possible only while the source's head \
+                     is still the pin — seconds on a 1s-block source"
                 ),
             });
         }

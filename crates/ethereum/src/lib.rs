@@ -115,6 +115,10 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
     }
 }
 
+/// 15 minutes: reth unwinding and the anvils re-forking both take minutes on
+/// a bad source day, and a crash-loop is worse than a slow boot.
+const ANVIL_BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+
 async fn run(config: PathBuf) -> Result<()> {
     let cfg = Instance::load(&config)?;
     let (reth_url, m_url, t_url) = cfg.ethereum_urls()?;
@@ -125,9 +129,9 @@ async fn run(config: PathBuf) -> Result<()> {
     // A coordinated restart (anvil, reth or lighthouse rolling) must not turn
     // into CrashLoopBackOff: wait for both anvils to answer before proceeding,
     // then fail fast only if they stay down.
-    driver::wait_for_anvil(&ctx.anvil_m, "anvil-m").await?;
+    ctx.anvil_m.wait_until_up("anvil-m", ANVIL_BOOT_TIMEOUT).await?;
     ctx.anvil_m.anvil_set_automine(false).await?;
-    driver::wait_for_anvil(&ctx.anvil_t, "anvil-t").await?;
+    ctx.anvil_t.wait_until_up("anvil-t", ANVIL_BOOT_TIMEOUT).await?;
     ctx.anvil_t.anvil_set_automine(false).await?;
 
     tracing::info!(

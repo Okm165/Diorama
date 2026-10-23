@@ -21,16 +21,6 @@ pub enum Error {
     #[error("anvil-v is not the venue chain: chain id {got}, expected {want}")]
     WrongChain { got: u64, want: u64 },
 
-    /// An endpoint that never answered within its boot window; the last
-    /// failure is kept so the boot error shows why it stayed down.
-    #[error("{name} did not answer RPC within {timeout_secs}s")]
-    NotReady {
-        name: &'static str,
-        timeout_secs: u64,
-        #[source]
-        source: Option<mirror_anvil::Error>,
-    },
-
     /// The HTTP listener could not bind.
     #[error("binding the http api at {addr}")]
     Bind {

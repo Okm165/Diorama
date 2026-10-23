@@ -391,6 +391,15 @@ Iris. Proven live on scratch forks:
   signing. Refusals are 400s naming the state (`no watched message with nonce
   …`, `… is Relayed; only SIGNED messages relay`); `{}` relays every signed
   record (a nudge that skips the poll interval in auto mode);
+- a coordinated restart can fail the bridge's *first* boot: a receipt read times
+  out while the engines restore their registries (measured:
+  `eth_getTransactionReceipt: transport … operation timed out` right after both
+  engines' boots). The deployment's restart backoff is the retry — the boot
+  steps are idempotent (`enableAttester`/`setSignatureThreshold` re-run
+  cleanly; a hook redeploy lands a fresh wrapper and the store records it) —
+  and every service now waits (bounded) for its chains before the first read
+  (`mirror_anvil::Rpc::wait_until_up`: the engines 900 s/120 s, the bridge
+  300 s), so only a *slow-but-up* chain can still fail a boot;
 - the vanished-burn guard reads `eth_getTransactionByHash` on the source and
   is **keeper-sensitive**: with `--transaction-block-keeper 2` anvil prunes tx
   bodies, receipts *and* logs beyond 2 blocks (measured), so any burn older
@@ -481,10 +490,15 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   budget (plan §18.3).
 - **The venue's hand-back needs a fresh pin**: `/admin/shadow {clear}` re-syncs the source's truth
   at the pin, and the public RPC serves its *latest* state for `eth_call` (measured — the block
-  parameter is ignored), so the re-sync is refused while the pin lags the source head ("re-pin
-  before handing keys back"). The mainnet's reth can serve the cursor's state, so its hand-back
-  works at any time — the one deliberate asymmetry, and it is fail-closed: the refusal names the
-  remedy (an epoch re-pin), it never writes a wrong value.
+  parameter is ignored), so the re-sync is refused while the pin lags the source head. The refusal
+  names the truth: a re-pin restores the *whole* source state (the re-fork is the wholesale
+  hand-back), while a *selective* hand-back is only possible while the source's head is still the
+  pin — seconds on a 1s-block source, so reliably only against a scratch/slow source. The
+  registry is no substitute (its values are the *devnet's* writes, for the restore); the
+  before-state lives in the journal, and a journal-based selective fallback (oldest entry, gated
+  on the ring covering the epoch) is the planned slice. The mainnet's reth can serve the cursor's
+  state, so its hand-back works at any time — the one deliberate asymmetry, and it is fail-closed:
+  the refusal names the remedy, it never writes a wrong value.
 
 ## Known limitations (accepted)
 

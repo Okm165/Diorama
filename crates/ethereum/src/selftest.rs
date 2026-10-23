@@ -28,21 +28,9 @@ pub async fn run(
     ctx.restore_blob_form()?;
 
     // Wait for the scratch anvils (same pod, they start in parallel).
-    let mut last: Option<mirror_anvil::Error>;
-    for attempt in 0..120 {
-        match (ctx.anvil_m.block_number().await, ctx.anvil_t.block_number().await) {
-            (Ok(_), Ok(_)) => break,
-            (m, t) => last = m.err().or(t.err()),
-        }
-        if attempt == 119 {
-            return Err(Error::NotReady {
-                name: "scratch anvils",
-                timeout_secs: 120,
-                source: last,
-            });
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
+    let boot = std::time::Duration::from_secs(120);
+    ctx.anvil_m.wait_until_up("anvil-m", boot).await?;
+    ctx.anvil_t.wait_until_up("anvil-t", boot).await?;
     ctx.anvil_m.anvil_set_automine(false).await?;
 
     // The pin comes from the scratch anvil itself (forkConfig.forkBlockNumber).

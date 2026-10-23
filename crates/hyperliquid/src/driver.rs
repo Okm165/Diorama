@@ -45,7 +45,12 @@ const CANARY_SLOT: alloy_primitives::U256 = alloy_primitives::U256::ZERO;
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
 pub async fn boot(ctx: &Ctx) -> Result<()> {
-    wait_for_v(ctx).await?;
+    // 2 minutes: a fork-mode anvil comes up in seconds; a coordinated restart
+    // (the init container re-resolving the pin, the fork source slow) is the
+    // only normal delay — and a crash-loop is worse than a bounded wait.
+    ctx.v
+        .wait_until_up("anvil-v", Duration::from_secs(120))
+        .await?;
     assert_venue_chain(ctx).await?;
     let pin = reconcile(ctx).await?;
     probes_at_pin(ctx, pin).await?;
@@ -209,25 +214,6 @@ async fn write_canary(ctx: &Ctx, pin: u64) -> Result<()> {
 
 /// Wait for V to answer (a coordinated restart must not become
 /// CrashLoopBackOff).
-async fn wait_for_v(ctx: &Ctx) -> Result<()> {
-    let mut last: Option<mirror_anvil::Error> = None;
-    for _ in 0..120 {
-        match ctx.v.block_number().await {
-            Ok(head) => {
-                tracing::info!(anvil = "anvil-v", head, "anvil is up");
-                return Ok(());
-            }
-            Err(e) => last = Some(e),
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-    Err(Error::NotReady {
-        name: "anvil-v",
-        timeout_secs: 120,
-        source: last,
-    })
-}
-
 /// V must be the venue chain with automine off. An anvil restart resets
 /// automine to its default (on) — measured — so the discipline is re-asserted
 /// on every boot and after every reset.

@@ -73,6 +73,16 @@ async fn run() -> mirror_cctp::Result<()> {
     let receipt_timeout = Duration::from_secs(section.receipt_timeout_secs);
 
     let chains = build_chains(&section, Duration::from_secs(30))?;
+    // The same boot convention as both engines: wait (bounded) for each chain
+    // before the first read, so a coordinated restart — the anvil re-forking,
+    // the node unwinding — does not turn the bridge into CrashLoopBackOff.
+    // Five minutes: a devnet chain forks in seconds; this covers a restart.
+    for chain in &chains {
+        chain
+            .rpc
+            .wait_until_up(chain.name, Duration::from_secs(300))
+            .await?;
+    }
     let min_fees = verify_wiring(&chains).await?;
     let attester = Arc::new(mirror_cctp::attester::Attester::from_seed(
         &section.attester_seed,
