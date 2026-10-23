@@ -278,6 +278,59 @@ impl Sim {
         Ok(Placed { fill, resting })
     }
 
+    /// A liquidation's market close: the same walk as an order, but with no
+    /// fee (docs: "there is no clearance fee on liquidations") and no opening
+    /// probe (the venue closes regardless of the resulting margin).
+    pub(crate) fn liquidate_position(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        coin: &str,
+        size: Decimal,
+    ) -> Result<Fill> {
+        let meta = feed.meta();
+        let long = self
+            .account(address)?
+            .and_then(|a| a.positions.get(coin).map(super::account::Position::is_long))
+            .unwrap_or(true);
+        let req = Order {
+            coin: coin.to_string(),
+            is_buy: !long, // close the position
+            size,
+            limit_px: None, // market: whatever the book gives (partial fills ok)
+            tif: Tif::Ioc,
+            reduce_only: true,
+            cloid: None,
+            trigger: None,
+        };
+        let resting = self.resting_orders(None)?;
+        let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), &req, &resting)?;
+        let leverage = self.leverage_for(address, coin, meta.as_ref())?;
+        let facts = super::account::FillFacts {
+            coin: coin.to_string(),
+            is_buy: req.is_buy,
+            size: filled,
+            px: avg_px,
+            leverage,
+            reduce_only: true,
+            fee: Decimal::ZERO,
+        };
+        let clock = self.clock(crate::now_ms())?;
+        self.with_account(address, |account| {
+            super::account::accrue_funding(account, feed, clock)?;
+            super::account::apply_fill(account, &facts)
+        })?;
+        self.settle_legs(feed, &req, &legs, meta.as_ref())?;
+        let oid = self.next_oid()?;
+        self.mark_dirty()?;
+        Ok(Fill {
+            total_sz: filled,
+            avg_px,
+            consumed: Vec::new(),
+            oid,
+        })
+    }
+
     /// A post-only placement: refuses with the venue's own string (and the
     /// bbo) when it would cross, else rests.
     fn place_alo(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<u64> {

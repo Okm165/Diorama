@@ -873,6 +873,9 @@ pub(crate) fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u6
 /// waterfall — partial closes, the backstop, ADL — is Phase 2). An account
 /// with no positions is never "below maintenance": negative equity alone is a
 /// state the venue reports, not a liquidation to re-run every tick.
+/// The v1 full-close (kept for the account-plane tests): the sim's tick runs
+/// the venue's waterfall instead (`Sim::check_all`).
+#[cfg(test)]
 pub(crate) fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<Option<Liquidation>> {
     if account.positions.is_empty() {
         return Ok(None);
@@ -907,7 +910,7 @@ pub(crate) fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta
 /// The isolated positions' maintenance total, from the view's own facts (the
 /// cross side is already in `cross_maintenance_margin_used`). A flat isolated
 /// row has no facts and contributes zero.
-fn isolated_maintenance(account: &Account, v: &AccountView) -> Result<Decimal> {
+pub(crate) fn isolated_maintenance(account: &Account, v: &AccountView) -> Result<Decimal> {
     let mut total = Decimal::ZERO;
     for (coin, p) in &account.positions {
         if p.leverage != LeverageType::Isolated {

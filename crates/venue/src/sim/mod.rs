@@ -60,6 +60,13 @@ pub(crate) struct SimState {
     /// `scheduleCancel` deadlines per account (the dead-man's switch).
     #[serde(default)]
     pub scheduled_cancels: std::collections::BTreeMap<Address, u64>,
+    /// The 30 s cooldown after a partial liquidation (docs: during it, market
+    /// liquidation orders are for the entire position).
+    #[serde(default)]
+    pub liq_cooldown_until: std::collections::BTreeMap<Address, u64>,
+    /// The previous tick's mark per coin (ADL closes at the previous mark).
+    #[serde(default)]
+    pub prev_marks: std::collections::BTreeMap<String, Decimal>,
 }
 
 /// The sim's metrics (rendered beside the feed's).
@@ -86,6 +93,11 @@ pub(crate) struct SimMetrics {
     pub triggers_fired_total: AtomicU64,
     /// Fills that charged a fee (the fee lane's liveness).
     pub fees_charged_total: AtomicU64,
+    /// The waterfall's steps: partial book closes, full book closes, backstop
+    /// takeovers and ADL closes.
+    pub partial_liquidations_total: AtomicU64,
+    pub backstop_liquidations_total: AtomicU64,
+    pub adl_closes_total: AtomicU64,
 }
 
 impl SimMetrics {
@@ -136,6 +148,24 @@ pub(crate) enum DealClass {
     /// The spot wallet (by token; USDC is token 0).
     Spot,
 }
+
+/// The liquidation attempt's size (docs): above the $100k partial threshold
+/// only 20 % goes per attempt; during the 30 s cooldown after a partial, the
+/// full size. Returns (size, was_partial).
+fn attempt_size(full: Decimal, notional: Decimal, in_cooldown: bool) -> Result<(Decimal, bool)> {
+    const PARTIAL_THRESHOLD: Decimal = Decimal::from_parts(100_000, 0, 0, false, 0);
+    if notional > PARTIAL_THRESHOLD && !in_cooldown {
+        return Ok((account::mul(full, Decimal::new(2, 1), "partial size")?, true));
+    }
+    Ok((full, false))
+}
+
+/// The liquidator vault (docs' HLP address): the backstop that takes
+/// positions over below ⅔ of the maintenance requirement.
+pub const BACKSTOP: Address = Address::new([
+    0xdf, 0xc2, 0x4b, 0x07, 0x7b, 0xc1, 0x42, 0x5a, 0xd1, 0xde, 0xa7, 0x5b, 0xcb, 0x6f, 0x81, 0x58, 0xe1, 0x0d,
+    0xf3, 0x03,
+]);
 
 pub struct Sim {
     state: Shared<SimState>,
@@ -481,6 +511,7 @@ impl Sim {
         self.accrue_all(feed, now)?;
         self.run_resting(feed, now)?;
         let liquidated = self.check_all(feed, now)?;
+        self.record_marks(feed)?;
         self.save_if_dirty()?;
         Ok(liquidated)
     }
@@ -668,34 +699,274 @@ impl Sim {
         Ok(())
     }
 
-    /// Check every account against its maintenance requirement and close the
-    /// ones below it (v1: full close at the mark).
+    /// The venue's liquidation waterfall (docs): an account below its
+    /// maintenance requirement is first closed by market orders to the book
+    /// (20 % per attempt above $100k, the full size during the 30 s cooldown
+    /// that follows a partial); below ⅔ of the maintenance requirement the
+    /// backstop (the liquidator vault) takes the positions and margin over
+    /// (the maintenance is not returned); a negative account value goes to
+    /// ADL — the opposite side, ranked by `(mark/entry)·(notional/account_value)`
+    /// at the previous mark, is closed against the underwater account.
     pub fn check_all(&self, feed: &MarketFeed, now_ms: u64) -> Result<Vec<Liquidation>> {
-        let clock = self.clock(now_ms)?;
         let meta = feed.meta();
-        let mut state = self.state.lock()?;
-        let mut liquidated = Vec::new();
-        for (address, account) in state.accounts.iter_mut() {
-            account::accrue_funding(account, feed, clock)?;
-            if let Some(liq) = account::liquidate_if_needed(account, feed, meta.as_ref())? {
-                self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
-                self.dirty.store(true, Ordering::Relaxed);
-                tracing::warn!(
-                    account = %address,
-                    positions = ?liq.positions_closed,
-                    account_value = %liq.account_value,
-                    maintenance = %liq.maintenance,
-                    "sim liquidation: the account fell below maintenance; positions closed at the mark"
-                );
-                liquidated.push(liq);
+        let accounts: Vec<(Address, Account)> = {
+            let st = self.state.lock()?;
+            st.accounts
+                .iter()
+                .map(|(a, acc)| (*a, acc.clone()))
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (address, account) in accounts {
+            if account.positions.is_empty() {
+                continue;
+            }
+            let v = account::view(&account, feed, meta.as_ref())?;
+            let maintenance = account::add(
+                v.cross_maintenance_margin_used,
+                account::isolated_maintenance(&account, &v)?,
+                "maintenance total",
+            )?;
+            let equity = v.margin_summary.account_value;
+            if equity >= maintenance {
+                continue;
+            }
+            let record = if equity < Decimal::ZERO {
+                self.adl(feed, address, &account, meta.as_ref())?
+            } else if account::mul(equity, Decimal::from(3), "backstop check")?
+                < account::mul(maintenance, Decimal::from(2), "backstop check")?
+            {
+                self.backstop(feed, address, &account, meta.as_ref())?
+            } else {
+                self.liquidate_via_book(feed, address, &account, now_ms)?
+            };
+            if let Some(record) = record {
+                out.push(record);
             }
         }
-        Ok(liquidated)
+        Ok(out)
     }
 
-    // ---- persistence ------------------------------------------------------
+    /// Step 1: market orders to the book. Above the $100k partial threshold
+    /// only 20 % goes per attempt; after any partial, a 30 s cooldown makes
+    /// every attempt the full size (docs). Partial fills by liquidity are
+    /// expected — the remainder stays with the account.
+    fn liquidate_via_book(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        account: &Account,
+        now_ms: u64,
+    ) -> Result<Option<Liquidation>> {
+        const COOLDOWN_MS: u64 = 30_000;
+        let cooldown = self
+            .state
+            .lock()?
+            .liq_cooldown_until
+            .get(&address)
+            .copied()
+            .unwrap_or(0);
+        let in_cooldown = now_ms < cooldown;
+        let mut closed = Vec::new();
+        let mut partial = false;
+        for (coin, p) in &account.positions {
+            let Some(mark) = feed.mark(coin) else { continue };
+            let notional = account::mul(p.szi.abs(), mark, "liquidation notional")?;
+            let (size, was_partial) = attempt_size(p.szi.abs(), notional, in_cooldown)?;
+            partial |= was_partial;
+            if size.is_zero() {
+                continue;
+            }
+            match self.liquidate_position(feed, address, coin, size) {
+                Ok(fill) => {
+                    tracing::warn!(account = %address, coin = %coin, sz = %fill.total_sz, avg_px = %fill.avg_px, partial = was_partial, "liquidation: market close");
+                    closed.push(coin.clone());
+                }
+                Err(e) => {
+                    tracing::warn!(account = %address, coin = %coin, error = %e, "liquidation close refused (no liquidity?)");
+                }
+            }
+        }
+        if partial {
+            let until = now_ms.saturating_add(COOLDOWN_MS);
+            self.state.lock()?.liq_cooldown_until.insert(address, until);
+            self.metrics.partial_liquidations_total.fetch_add(1, Ordering::Relaxed);
+        }
+        if closed.is_empty() {
+            return Ok(None);
+        }
+        self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
+        self.mark_dirty()?;
+        Ok(Some(Liquidation {
+            positions_closed: closed,
+            account_value: Decimal::ZERO,
+            maintenance: Decimal::ZERO,
+        }))
+    }
 
-    /// Persist if anything moved since the last save.
+    /// Step 2: the backstop (the liquidator vault) takes the positions and
+    /// margin over — the maintenance is not returned, so the trader ends at
+    /// zero equity (docs). The vault's entry is the mark.
+    fn backstop(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        account: &Account,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<Option<Liquidation>> {
+        let v = account::view(account, feed, meta)?;
+        let mut closed = Vec::new();
+        {
+            let mut st = self.state.lock()?;
+            let mut me = st.accounts.remove(&address).unwrap_or_default();
+            let mut vault = st.accounts.remove(&BACKSTOP).unwrap_or_default();
+            let coins: Vec<String> = me.positions.keys().cloned().collect();
+            for coin in coins {
+                let Some(p) = me.positions.remove(&coin) else {
+                    continue;
+                };
+                let mark = feed.mark(&coin).unwrap_or(p.entry_px);
+                let facts = account::FillFacts {
+                    coin: coin.clone(),
+                    is_buy: !p.is_long(),
+                    size: p.szi.abs(),
+                    px: mark,
+                    leverage: p.leverage_value,
+                    reduce_only: false,
+                    fee: Decimal::ZERO,
+                };
+                if let Err(e) = account::apply_fill(&mut vault, &facts) {
+                    tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
+                    continue;
+                }
+                closed.push(coin);
+            }
+            vault.perp_balance = account::add(vault.perp_balance, me.perp_balance, "backstop balance")?;
+            me.perp_balance = Decimal::ZERO;
+            st.accounts.insert(address, me);
+            st.accounts.insert(BACKSTOP, vault);
+        }
+        self.metrics.backstop_liquidations_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(account = %address, closed = closed.len(), "backstop liquidation: the vault took the positions");
+        self.mark_dirty()?;
+        Ok(Some(Liquidation {
+            positions_closed: closed,
+            account_value: v.margin_summary.account_value,
+            maintenance: Decimal::ZERO,
+        }))
+    }
+
+    /// Step 3: ADL — the platform must stay solvent. The opposite side is
+    /// ranked by `(mark/entry)·(notional/account_value)` and closed at the
+    /// *previous* mark against the underwater account (docs).
+    fn adl(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        account: &Account,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<Option<Liquidation>> {
+        let mut closed = Vec::new();
+        for (coin, p) in &account.positions {
+            let Some(prev_mark) = self.state.lock()?.prev_marks.get(coin).copied() else {
+                tracing::warn!(account = %address, coin = %coin, "ADL skipped: no previous mark recorded yet");
+                continue;
+            };
+            let remaining = p.szi.abs();
+            let my_side_long = p.is_long();
+            let mut ranked = self.adl_ranking(feed, address, (coin, prev_mark, my_side_long), meta)?;
+            ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
+            let mut left = remaining;
+            for (_, other, size, _entry) in ranked {
+                if left <= Decimal::ZERO {
+                    break;
+                }
+                let take = left.min(size);
+                // The counterparty closes at the previous mark; the underwater
+                // account's side closes against it at the same price.
+                let facts_me = account::FillFacts {
+                    coin: coin.clone(),
+                    is_buy: !my_side_long,
+                    size: take,
+                    px: prev_mark,
+                    leverage: p.leverage_value,
+                    reduce_only: true,
+                    fee: Decimal::ZERO,
+                };
+                let facts_other = account::FillFacts {
+                    coin: coin.clone(),
+                    is_buy: my_side_long,
+                    size: take,
+                    px: prev_mark,
+                    leverage: 1,
+                    reduce_only: true,
+                    fee: Decimal::ZERO,
+                };
+                self.with_account(address, |a| account::apply_fill(a, &facts_me))?;
+                self.with_account(other, |a| account::apply_fill(a, &facts_other))?;
+                self.metrics.adl_closes_total.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(account = %address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
+                left = left.saturating_sub(take);
+            }
+            closed.push(coin.clone());
+        }
+        self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
+        self.mark_dirty()?;
+        Ok(Some(Liquidation {
+            positions_closed: closed,
+            account_value: Decimal::ZERO,
+            maintenance: Decimal::ZERO,
+        }))
+    }
+
+    /// The ADL ranking: the opposite side, `(mark/entry)·(notional/account_value)`
+    /// at the previous mark, descending (docs).
+    fn adl_ranking(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        target: (&str, Decimal, bool), // (coin, previous mark, the underwater side)
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<Vec<(Decimal, Address, Decimal, Decimal)>> {
+        let (coin, prev_mark, my_side_long) = target;
+        let mut ranked: Vec<(Decimal, Address, Decimal, Decimal)> = Vec::new();
+        let st = self.state.lock()?;
+        for (other, oa) in st.accounts.iter() {
+            if *other == address {
+                continue;
+            }
+            let Some(op) = oa.positions.get(coin) else { continue };
+            if op.is_long() == my_side_long || op.szi.is_zero() {
+                continue;
+            }
+            let ov = account::view(oa, feed, meta)?;
+            if ov.margin_summary.account_value <= Decimal::ZERO {
+                continue;
+            }
+            let entry = if op.entry_px.is_zero() { Decimal::ONE } else { op.entry_px };
+            let ratio = account::mul(
+                prev_mark / entry,
+                account::mul(op.szi.abs(), prev_mark, "adl notional")?
+                    / ov.margin_summary.account_value,
+                "adl rank",
+            )?;
+            ranked.push((ratio, *other, op.szi.abs(), op.entry_px));
+        }
+        Ok(ranked)
+    }
+
+    /// Record the marks the ADL step reads as "the previous mark".
+    fn record_marks(&self, feed: &MarketFeed) -> Result<()> {
+        let mut st = self.state.lock()?;
+        for coin in feed.markets.clone() {
+            if let Some(mark) = feed.mark(&coin) {
+                st.prev_marks.insert(coin, mark);
+            }
+        }
+        Ok(())
+    }
+
     pub fn save_if_dirty(&self) -> Result<bool> {
         if !self.dirty.swap(false, Ordering::Relaxed) {
             return Ok(false);
@@ -733,8 +1004,7 @@ impl Sim {
             self.metrics.accounts.store(state.accounts.len() as u64, Ordering::Relaxed);
             self.metrics.epoch.store(state.epoch, Ordering::Relaxed);
         }
-    }
-}
+    }}
 
 /// What `advance` moved.
 #[derive(Debug, Clone, Serialize)]
