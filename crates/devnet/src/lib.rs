@@ -7,6 +7,7 @@
 pub mod admin;
 pub mod deal;
 pub mod epoch;
+pub mod handlers;
 pub mod error;
 pub mod journal;
 pub mod metrics;

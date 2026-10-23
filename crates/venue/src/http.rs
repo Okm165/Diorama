@@ -26,10 +26,9 @@ use axum::{
     Json, Router,
 };
 use mirror_devnet::admin::{
-    EpochResponse, PauseResponse, ResumeResponse, RewindRequest, RewindResponse,
+    EpochResponse, RewindRequest, RewindResponse,
     ShadowRequest,
 };
-use mirror_devnet::deal::DealRequest;
 use mirror_devnet::metrics::Registry as _;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -119,23 +118,9 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
     Ok(())
 }
 
-async fn healthz(State(ctx): State<Arc<Ctx>>) -> impl IntoResponse {
-    if ctx.plane.is_halted() {
-        (StatusCode::SERVICE_UNAVAILABLE, "halted")
-    } else {
-        (StatusCode::OK, "ok")
-    }
-}
-
-/// `/livez` — the orchestrator's liveness signal: the process and its HTTP
-/// runtime are answering. Deliberately *not* `/healthz`: that reports the
-/// engine's own state (503 while paused), and probing it would take the engine
-/// out of the Service (its NodePort included) and eventually restart the pod
-/// in the middle of the documented pause drill — while the contract says a
-/// paused engine keeps serving reads and writes.
-async fn livez() -> &'static str {
-    "ok"
-}
+// The health and admin handlers both mirrors must keep byte-identical: one
+// macro, two invocations (crates/devnet/src/handlers.rs).
+mirror_devnet::mirror_handlers!(Ctx, crate::error::Error);
 
 async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     // Head gauges: an endpoint that cannot answer degrades the report to 0,
@@ -168,15 +153,7 @@ async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
     out
 }
 
-async fn admin_resume(State(ctx): State<Arc<Ctx>>) -> Json<ResumeResponse> {
-    ctx.admin().resume();
-    Json(ResumeResponse { resumed: true })
-}
 
-async fn admin_pause(State(ctx): State<Arc<Ctx>>) -> Json<PauseResponse> {
-    ctx.admin().pause();
-    Json(PauseResponse { paused: true })
-}
 
 /// `/admin/rewind`: undo the engine's journaled writes (the deal faucet's
 /// silent storage writes) over the last `blocks` scanned blocks, newest first.
@@ -201,12 +178,7 @@ async fn admin_shadow(
     Ok(Json(out))
 }
 
-async fn admin_deal(
-    State(ctx): State<Arc<Ctx>>,
-    Json(req): Json<DealRequest>,
-) -> Result<Json<mirror_devnet::deal::DealOutcome>> {
-    Ok(Json(ctx.admin().deal(&req).await?))
-}
+
 
 /// `/admin/epoch`: re-pin V to the fork source's latest block. One anvil
 /// call — the driver's canary notices the reset on its next pass and runs the
