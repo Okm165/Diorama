@@ -1,12 +1,14 @@
 //! `mirror-anvil` — the anvil control plane: the typed RPC client (cheatcodes,
 //! batching, measured error recognition), the measured padding rules, and the
 //! prestateTracer fallback. No chain semantics live here.
+mod backoff;
 mod client;
 mod error;
 mod pad;
 mod trace;
 mod writes;
 
+pub use backoff::Backoff;
 pub use client::*;
 pub use error::*;
 pub use pad::*;
@@ -20,6 +22,7 @@ mod design_assertions {
 
     #[test]
     fn public_types_are_normal() {
+        is_normal::<crate::Backoff>();
         is_normal::<crate::Rpc>();
         is_normal::<crate::Call>();
         is_normal::<crate::Error>();

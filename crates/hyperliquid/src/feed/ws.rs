@@ -17,6 +17,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
+/// The websocket handshake's budget (measured: normally well under a second,
+/// once 26 s — a slow venue-side accept). An unbounded hang would leave the
+/// lane down forever: the backoff never runs because the session never
+/// returns. 30 s keeps a slow-but-valid accept and retries a hung one.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// One server push (or ack). `channel` tags the payload.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "channel")]
@@ -76,28 +82,36 @@ impl WsClient {
         Self { feed, ws_url }
     }
 
-    /// Run forever with exponential backoff between sessions.
+    /// Run forever with exponential backoff between sessions (the shared
+    /// `mirror_anvil::Backoff`: 1 s for the first failure, doubling to 30 s,
+    /// reset by a session that served).
     pub async fn run(self) {
-        let mut backoff = Duration::from_secs(1);
+        let mut backoff = mirror_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
         loop {
-            match self.session().await {
-                Ok(()) => backoff = Duration::from_secs(1),
+            let progressed = match self.session().await {
+                Ok(()) => true,
                 Err(e) => {
                     tracing::warn!(error = %e, "market websocket session failed; reconnecting");
+                    false
                 }
-            }
+            };
             self.feed.metrics.set_ws_connected(false);
             self.feed.metrics.inc_ws_reconnects();
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(Duration::from_secs(30));
+            let delay = backoff.delay();
+            backoff.record(progressed);
+            tokio::time::sleep(delay).await;
         }
     }
 
     /// One connection: subscribe, then read until the socket drops.
     async fn session(&self) -> Result<(), WsError> {
-        let (stream, _) = tokio_tungstenite::connect_async(&self.ws_url)
-            .await
-            .map_err(WsError::Connect)?;
+        let (stream, _) = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio_tungstenite::connect_async(&self.ws_url),
+        )
+        .await
+        .map_err(|_| WsError::ConnectTimeout)?
+        .map_err(WsError::Connect)?;
         let (mut sink, mut source) = stream.split();
         for sub in self.subscriptions()? {
             sink.send(Message::Text(sub.into())).await.map_err(WsError::Send)?;
@@ -162,6 +176,10 @@ impl WsClient {
 /// The WS lane's faults (logged by the reconnect loop, never propagated).
 #[derive(Debug, thiserror::Error)]
 pub enum WsError {
+    /// The handshake did not answer inside [`CONNECT_TIMEOUT`] (a hung
+    /// accept): a retryable failure, never an unbounded wait.
+    #[error("connecting the market websocket: no answer in {CONNECT_TIMEOUT:?}")]
+    ConnectTimeout,
     #[error("connecting the market websocket")]
     Connect(#[source] tokio_tungstenite::tungstenite::Error),
     #[error("reading the market websocket")]

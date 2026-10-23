@@ -946,7 +946,13 @@ the config sections, and the CCTP message codec (a packed custom format).
 The measured lesson behind the shape tests: `PerpDex` had never parsed the
 live `perpDexs` (the sim serves `[null]`), so a missing camelCase rename sat
 undetected - a wire type that only ever *serializes* is unverified until a
-sample parses through it.
+sample parses through it. Two edges of the rule, measured: there is **no
+official Rust SDK** for either protocol (a registry search finds third-party
+Hyperliquid crates and nothing from Circle; their SDKs are TS/Python/Java), so
+the wire types stay ours - complete and pinned; and the composition roots
+(`Ctx`) stay wide *by nature*: every seam takes the slice it needs
+(`scan_to(&plane, &rpc, …)`, `record_scan(&walk, &a, &b)`), so the width never
+reaches a contract.
 
 The served info surface: `clearinghouseState`, `spotClearinghouseState`
 (`balances`; unified accounts also carry `tokenToAvailableAfterMaintenance` —
