@@ -367,6 +367,32 @@ chain facts:
   credit), then a `sendAsset` naming that address (the completion — the system
   address sends the ERC-20 back), exact balances end to end.
 
+### The unified-margin and CoreWriter doors (measured live, 2026-10-23)
+
+`make cctp-margin-cycle` now runs 34 checks and carries the axiom's two
+hardest doors end to end:
+
+- **The CoreWriter order door** (action 1, the HyperEVM path): a real
+  `sendRawAction` tx on V is decoded by the bridge (10⁸ units, tif 3 = Ioc)
+  and fills through the **same lane** as `/exchange` and `/control/order`
+  (measured: the position went 0 → 0.02, then the size closed through the
+  control door — both doors, one lane).
+- **Unified collateral**: the abstraction is set through the **real path**
+  (CoreWriter action 16, not the control fixture), a spot-only deal funds the
+  account, and a perp order fills against the collateral — the docs' "USDC
+  unifies perps + spot". The account view's unified branch folds the
+  collateral token's spot balance into `totalRawUsd`, so daloc's identity
+  gate stays exact with it included (measured: `accountValue 250.003 =
+  totalRawUsd 225.985 + positionValue 24.018`); a `usdClassTransfer` moves
+  between the two sides and never both. Before this fix a unified account
+  funded only on the spot side could not open a perp position at all.
+
+The order refusals now speak the venue's **own vocabulary** (plan §16.3's
+measured strings), and `l2Book`'s `nSigFigs`/`mantissa` are applied and
+validated rather than silently ignored (measured live: `nSigFigs=2` merged
+the top asks to one level at `2400`; `nSigFigs=9` and `mantissa` without
+`nSigFigs` both answered 400).
+
 ### The bringup parity their harness needs (measured live, 2026-10-23)
 
 The daloc harness's own chains run with `--code-size-limit 99999` +

@@ -480,7 +480,20 @@ fn assemble(
     rows: Vec<AssetPosition>,
     facts: BTreeMap<String, PositionFacts>,
 ) -> AccountView {
-    let total_raw = account.perp_balance - totals.cost_basis;
+    // The unified account's single balance per asset (docs: "USDC unifies
+    // perps + spot"): the collateral token's spot side is part of the raw
+    // balance, so the identity holds with it included — `totalRawUsd` is the
+    // same one USDC figure the spot state serves. A `usdClassTransfer` moves
+    // between the two sides (never both), so nothing double-counts.
+    let collateral = match account.mode {
+        UserAbstraction::UnifiedAccount => account
+            .spot
+            .get(&COLLATERAL_TOKEN)
+            .map(|e| e.total)
+            .unwrap_or(Decimal::ZERO),
+        _ => Decimal::ZERO,
+    };
+    let total_raw = account.perp_balance + collateral - totals.cost_basis;
     let account_value = total_raw + totals.signed_value;
     let margin_summary = MarginSummary {
         account_value,
@@ -714,7 +727,10 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
         .map(|p| p.szi)
         .unwrap_or(Decimal::ZERO);
     if fill.reduce_only && (old.is_zero() || sign(old) == sign(signed) || fill.size > old.abs()) {
-        return Err(Error::bad_request(format!("reduce-only order would not reduce the {} position", fill.coin),));
+        // The venue's own string (plan §16.3).
+        return Err(Error::bad_request(
+            "Reduce only order would increase position.",
+        ));
     }
     let position = account
         .positions
@@ -740,6 +756,10 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
         return Ok(());
     }
     if let Some(position) = account.positions.get_mut(&fill.coin) {
+        // The venue's `cumFunding.sinceChange` restarts at every size change
+        // (the fill *is* the change; the funding up to it is settled first —
+        // the lane accrues before applying, see `land_fill`).
+        position.funding_since_change = Decimal::ZERO;
         // `.max(1)` guards the decimal division (rust_decimal panics on a
         // zero divisor; a leverage of 0 is not a state this plane creates).
         position.margin_used = mul(position.szi.abs(), position.entry_px, "margin notional")?
@@ -1124,6 +1144,37 @@ mod tests {
     /// The unified account's `tokenToAvailableAfterMaintenance` closes daloc's
     /// reconciliation identity: `available + maintenance == the collateral
     /// balance` (their hard gate). A standard account serves none.
+    /// The unified account's spot collateral is part of the raw balance (the
+    /// single USDC figure the docs describe), so it backs perp margin and the
+    /// identity stays exact.
+    #[test]
+    fn unified_spot_collateral_backs_the_perp_side() {
+        let feed = feed_with(&[("BTC", "100.0", "100.0")]);
+        let meta = meta_for("BTC", 10);
+        let mut account = Account {
+            perp_balance: Decimal::ZERO,
+            mode: UserAbstraction::UnifiedAccount,
+            ..Account::default()
+        };
+        spot_entry(&mut account, crate::sim::TokenRef { index: COLLATERAL_TOKEN, coin: "USDC" }).total =
+            "250".parse().unwrap();
+        let v = view(&account, &feed, Some(&meta)).unwrap();
+        assert_eq!(
+            v.margin_summary.total_raw_usd,
+            "250".parse().unwrap(),
+            "the spot collateral is the raw balance"
+        );
+        assert_eq!(
+            v.margin_summary.account_value,
+            "250".parse().unwrap(),
+            "and the account value"
+        );
+        // The same account in standard mode: the spot side is not read.
+        account.mode = UserAbstraction::Default;
+        let v = view(&account, &feed, Some(&meta)).unwrap();
+        assert_eq!(v.margin_summary.account_value, Decimal::ZERO);
+    }
+
     #[test]
     fn unified_available_closes_the_reconciliation() {
         let feed = feed_with(&[("BTC", "100.0", "100.0")]);

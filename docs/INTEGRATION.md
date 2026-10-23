@@ -44,6 +44,8 @@ flat; `positionValue` is unsigned with the sign in `szi`.
 
 **WS `/ws`:** subscribe/unsubscribe acks; frames for `allMids`,
 `activeAssetCtx` and `l2Book` (per coin; an unknown coin answers an error).
+`l2Book`'s `nSigFigs`/`mantissa` are applied (the docs' aggregation) and
+validated (a value outside `{2,3,4,5}` / `{1,2,5}` is a named 400).
 
 **Control API (§7.3):** `deal` (`{address, class: spot|perp, coin?, amount}`),
 `order` (`{address, coin, is_buy, size, limit_px?, tif?, reduce_only?}` — the
@@ -112,7 +114,7 @@ vanished-burn/keeper caveats.
 
 | Lane | Plan | What it would add |
 |---|---|---|
-| Remaining venue mechanics | §5, §7.1, §18.4 | resting orders (`Gtc`/`Alo`) + cancels (both refused by name today), the venue's exact order-error strings (the tick/lot rules and the $10 minimum are enforced with named refusals), nonces/API wallets, multi-dex, spot ledger, OI caps, fees (a research lane per §16.3 — daloc's paths don't read venue fees). Landed: the `order` action end to end — IOC fills against the real book with per-level consumption, the §4.5 impact invariants (I1–I6), three doors (see ARCHITECTURE) |
+| Remaining venue mechanics | §5, §7.1, §18.4 | resting orders (`Gtc`/`Alo`) + cancels (both refused by name today), the remaining order-error strings (the measured vocabulary — tick size, minimum value, insufficient margin, reduce-only, no-match, no-liquidity — is served verbatim; the OI-cap/tier/TP-SL strings await those mechanics), nonces/API wallets, multi-dex, spot ledger, OI caps, fees (a research lane per §16.3 — daloc's paths don't read venue fees). Landed: the `order` action end to end — IOC fills against the real book with per-level consumption, the §4.5 impact invariants (I1–I6), three doors (see ARCHITECTURE) |
 | Phase 4 lanes | §7.1 | the HIP-3 star venue on testnet; the real-data replay lane |
 | Phase 5 facade | §7.1 | one deal/crash/reset surface across both mirrors (each mirror's own admin works today) |
 | `venue-closure` | §7.8 | the V-side closure audit (no BALs on HyperEVM; `make engine-symmetry` covers the shared verbs) |

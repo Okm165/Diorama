@@ -1037,10 +1037,13 @@ reaches a contract.
 The served info surface: `clearinghouseState`, `spotClearinghouseState`
 (`balances`; unified accounts also carry `tokenToAvailableAfterMaintenance` —
 the figure daloc's client reconciles: `available + maintenance == the
-collateral token's balance`), `userAbstraction`, `openOrders` (empty for a
-touched account — the order lane fills IOC orders against the real book
-immediately and nothing ever rests, so the empty shape is exact),
-`activeAssetData` (touched accounts) /
+collateral token's balance`; in unified mode the view folds that collateral
+into `totalRawUsd`, the docs' single USDC balance — a spot-funded account
+opens perp positions, and the identity stays exact), `userAbstraction`,
+`openOrders` (empty for a touched account — the order lane fills IOC orders
+against the real book immediately and nothing ever rests, so the empty shape
+is exact; `l2Book`'s `nSigFigs`/`mantissa` are applied and validated, never
+ignored), `activeAssetData` (touched accounts) /
 `meta`, `metaAndAssetCtxs`, `spotMeta`, `allMids`, `l2Book`, `marginTable`,
 `exchangeStatus`, `perpDexs`
 (`[null]` - the first dex only until multi-dex lands; an account read scoped to
@@ -1067,11 +1070,16 @@ positionValue` stays exact), and the initial margin follows
 `|szi|·entry/leverage`. The opening check runs on a clone — a refused order
 leaves no trace — and refusals are by name (resting tif, reduce-only that
 would not reduce, no depth within the limit, insufficient margin with the
-numbers). The venue's tick/lot rules are enforced with named refusals: a size
-carries at most the asset's `szDecimals` decimals, a price at most 5
-significant figures and at most `6 − szDecimals` decimals (an integer price
-is always valid), and a perp order's notional is at least $10 — the venue's
-exact error strings are a Phase-2 pin (they need a live probe). Metrics: `venue_sim_owned_levels`, `venue_sim_owned_skips_total`,
+numbers). The venue's tick/lot rules are enforced with its **own vocabulary** (plan
+§16.3's measured strings): a size carries at most the asset's `szDecimals`
+decimals, a price at most 5 significant figures and at most `6 − szDecimals`
+decimals (an integer price is always valid), and a perp order's notional is
+at least $10 — the refusals are `Price must be divisible by tick size.`,
+`Order must have minimum value of $10.`, `Insufficient margin to place
+order.`, `Reduce only order would increase position.`, `Order could not
+immediately match against any resting orders.` and `No liquidity available
+for market order.`, so a client matching on strings sees the venue's (the
+numbers ride the log). Metrics: `venue_sim_owned_levels`, `venue_sim_owned_skips_total`,
 `venue_sim_owned_pruned_total`, `venue_sim_orders_filled_total`. The
 signature is accepted, never verified (the devnet has no keys — the
 anvil-impersonation analogue; the acting account rides the body's `user`).

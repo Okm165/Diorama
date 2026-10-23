@@ -123,16 +123,27 @@ impl Sim {
         meta: Option<&crate::wire::Meta>,
     ) -> Result<()> {
         let coin = facts.coin.clone();
+        // The venue settles funding at the trade: accrue to now on the
+        // *pre-fill* size, then the size change restarts since-change. The
+        // all-or-nothing accrual leaves the stamp where it is when a position
+        // lacks a live context (the shared rule).
+        let clock = self.clock(crate::now_ms())?;
         self.with_account(address, |account| {
+            super::account::accrue_funding(account, feed, clock)?;
             let mut probe = account.clone();
             super::account::apply_fill(&mut probe, facts)?;
             let view = super::account::view(&probe, feed, meta)?;
             if view.margin_summary.account_value < view.margin_summary.total_margin_used {
-                return Err(Error::bad_request(format!(
-                    "insufficient margin: the {coin} position would need {} initial margin, \
-                     the account is worth {}",
-                    view.margin_summary.total_margin_used, view.margin_summary.account_value
-                )));
+                // The venue's own string; the numbers ride the log (a client
+                // matching on the vocabulary sees exactly the venue's).
+                tracing::warn!(
+                    account = %address,
+                    coin,
+                    needs = %view.margin_summary.total_margin_used,
+                    worth = %view.margin_summary.account_value,
+                    "order refused: insufficient margin"
+                );
+                return Err(Error::bad_request("Insufficient margin to place order."));
             }
             super::account::apply_fill(account, facts)
         })
@@ -195,10 +206,12 @@ fn walk_served_book(
     let book = feed.book(&req.coin, now).ok_or(Error::Warming)?;
     let (filled, avg_px, consumed) = walk(&book, req)?;
     if filled <= Decimal::ZERO {
-        return Err(Error::bad_request(format!(
-            "the book has no {} depth within the limit",
-            if req.is_buy { "ask" } else { "bid" }
-        )));
+        // The venue's two depth refusals, by order type: a limit that cannot
+        // match, and a market order with no liquidity.
+        return Err(Error::bad_request(match req.limit_px {
+            Some(_) => "Order could not immediately match against any resting orders.",
+            None => "No liquidity available for market order.",
+        }));
     }
     Ok((filled, avg_px, consumed))
 }
@@ -225,14 +238,15 @@ fn validate_tick_lot(meta: Option<&crate::wire::Meta>, req: &Order) -> Result<()
     }
     let max_dec = 6u32.saturating_sub(sz_dec);
     if px.scale() > max_dec {
-        return Err(Error::bad_request(format!(
-            "limit price {px} has more than {max_dec} decimals (6 − {sz_dec})"
-        )));
+        // The venue's tick-size refusal (its tick is 10^(6 − szDecimals)).
+        tracing::warn!(coin = %req.coin, price = %px, max_dec, "order refused: tick size");
+        return Err(Error::bad_request("Price must be divisible by tick size."));
     }
     if significant_digits(px) > 5 {
-        return Err(Error::bad_request(format!(
-            "limit price {px} has more than 5 significant figures"
-        )));
+        tracing::warn!(coin = %req.coin, price = %px, "order refused: significant figures");
+        return Err(Error::bad_request(
+            "Order price has more than 5 significant figures.",
+        ));
     }
     Ok(())
 }
@@ -524,11 +538,33 @@ mod tests {
         let mut o = ioc(true, "1");
         o.limit_px = Some("100.5".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
-        assert!(format!("{err}").contains("no ask depth"), "{err}");
+        assert!(format!("{err}").contains("could not immediately match"), "{err}");
         let mut o = ioc(false, "1");
         o.limit_px = Some("100.5".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
-        assert!(format!("{err}").contains("no bid depth"), "{err}");
+        assert!(format!("{err}").contains("could not immediately match"), "{err}");
+    }
+
+    /// The venue settles funding at the trade: a fill accrues to now on the
+    /// *pre-fill* size and restarts `cumFunding.sinceChange`.
+    #[test]
+    fn a_fill_settles_funding_and_restarts_since_change() {
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let (sim, a) = funded_sim(&feed, "1000");
+        sim.order(&feed, a, &ioc(true, "0.1")).unwrap();
+        // An hour passes (the fixture's ctx carries a nonzero funding rate),
+        // then a second fill: the pre-fill size pays the hour, and the change
+        // restarts since-change.
+        sim.advance(&feed, 3600, 1).unwrap();
+        sim.order(&feed, a, &ioc(true, "0.1")).unwrap();
+        let p = sim.account(a).unwrap().unwrap().positions.remove("ETH").unwrap();
+        assert_ne!(p.funding_all_time, Decimal::ZERO, "the hour was paid");
+        assert_eq!(
+            p.funding_since_change,
+            Decimal::ZERO,
+            "the size change restarts since-change"
+        );
+        assert_ne!(p.funding_since_open, Decimal::ZERO, "since-open keeps accruing");
     }
 
     /// The venue's tick/lot rules and the $10 minimum refuse by name; an
@@ -540,11 +576,14 @@ mod tests {
         // 5 decimals > szDecimals 4.
         let err = sim.order(&feed, a, &ioc(true, "0.00001")).unwrap_err();
         assert!(format!("{err}").contains("szDecimals"), "{err}");
-        // 3 decimals > 6 − 4.
+        // 3 decimals > 6 − 4: the venue's tick-size refusal.
         let mut o = ioc(true, "1");
         o.limit_px = Some("100.123".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
-        assert!(format!("{err}").contains("decimals"), "{err}");
+        assert!(
+            format!("{err}").contains("divisible by tick size"),
+            "{err}"
+        );
         // 6 significant figures.
         let mut o = ioc(true, "1");
         o.limit_px = Some("12345.6".parse().unwrap());
@@ -574,10 +613,16 @@ mod tests {
         assert!(format!("{err}").contains("resting orders are not modeled"), "{err}");
         // A reduce-only order with nothing to reduce.
         let err = sim.order(&feed, a, &reduce(false, "1")).unwrap_err();
-        assert!(format!("{err}").contains("would not reduce"), "{err}");
+        assert!(
+            format!("{err}").contains("Reduce only order would increase position"),
+            "{err}"
+        );
         // An unfunded opening: the numbers ride in the refusal.
         let b = Address::repeat_byte(0xbb);
         let err = sim.order(&feed, b, &ioc(true, "5")).unwrap_err();
-        assert!(format!("{err}").contains("insufficient margin"), "{err}");
+        assert!(
+            format!("{err}").contains("Insufficient margin to place order."),
+            "{err}"
+        );
     }
 }

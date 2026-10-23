@@ -389,7 +389,11 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         InfoRequest::Meta { dex } => meta(&dex, &state),
         InfoRequest::MetaAndAssetCtxs { dex } => meta_and_ctxs(&dex, &state),
         InfoRequest::PerpDexs => Ok(Json(vec![None::<crate::wire::PerpDex>]).into_response()),
-        InfoRequest::L2Book { coin, .. } => l2_book(&coin, &state),
+        InfoRequest::L2Book {
+            coin,
+            n_sig_figs,
+            mantissa,
+        } => l2_book(&coin, n_sig_figs, mantissa, &state),
         InfoRequest::MarginTable { id } => margin_table(id, &state),
         InfoRequest::ExchangeStatus => exchange_status(&state),
         InfoRequest::SpotMeta => Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response()),
@@ -479,13 +483,102 @@ fn meta_and_ctxs(dex: &Option<String>, state: &ApiState) -> Result<Response> {
     Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response())
 }
 
-/// `l2Book`: the cached or scripted book for one coin.
-fn l2_book(coin: &str, state: &ApiState) -> Result<Response> {
+/// `l2Book`: the cached or scripted book for one coin, aggregated per the
+/// request's parameters (docs: `nSigFigs ∈ {2,3,4,5}`, `mantissa ∈ {1,2,5}`
+/// only with `nSigFigs = 5`). A parameter outside the documented set is a
+/// named 400 — never silently ignored.
+fn l2_book(
+    coin: &str,
+    n_sig_figs: Option<u8>,
+    mantissa: Option<u8>,
+    state: &ApiState,
+) -> Result<Response> {
+    book_params_ok(n_sig_figs, mantissa)?;
     let now = crate::now_ms();
     let book = state.feed.book(coin, now).ok_or_else(|| Error::NotFound {
         what: format!("no book for `{coin}` (not a configured market and no scripted book)"),
     })?;
-    Ok(Json(book).into_response())
+    Ok(Json(aggregate_book(book, n_sig_figs, mantissa.unwrap_or(1))).into_response())
+}
+
+/// The documented parameter set, refused by name otherwise.
+fn book_params_ok(n_sig_figs: Option<u8>, mantissa: Option<u8>) -> Result<()> {
+    if let Some(n) = n_sig_figs {
+        if !(2..=5).contains(&n) {
+            return Err(Error::bad_request(format!(
+                "nSigFigs {n} is not in {{2,3,4,5}}"
+            )));
+        }
+    }
+    match (n_sig_figs, mantissa) {
+        (None, Some(_)) => Err(Error::bad_request(
+            "mantissa requires nSigFigs = 5 (docs)",
+        )),
+        (Some(5), Some(m)) if !matches!(m, 1 | 2 | 5) => Err(Error::bad_request(format!(
+            "mantissa {m} is not in {{1,2,5}}"
+        ))),
+        (Some(n), Some(_)) if n != 5 => Err(Error::bad_request(
+            "mantissa requires nSigFigs = 5 (docs)",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The venue's aggregation: prices round to `n` significant figures (the tick
+/// is `mantissa × 10^(integer digits − n)`), levels at the same rounded price
+/// merge (sizes and counts sum, saturating — a merge never panics), and each
+/// side keeps its order (bids descending, asks ascending).
+fn aggregate_book(book: crate::wire::L2Book, n_sig_figs: Option<u8>, mantissa: u8) -> crate::wire::L2Book {
+    let Some(n) = n_sig_figs else {
+        return book;
+    };
+    let mut out = book;
+    for side in 0..2usize {
+        let mut merged: std::collections::BTreeMap<Decimal, (Decimal, u64)> =
+            std::collections::BTreeMap::new();
+        for level in &out.levels[side] {
+            let px = round_to_sig_figs(level.px, n, mantissa);
+            let entry = merged.entry(px).or_insert((Decimal::ZERO, 0));
+            entry.0 = entry.0.saturating_add(level.sz);
+            entry.1 = entry.1.saturating_add(level.n);
+        }
+        let mut levels: Vec<crate::wire::Level> = merged
+            .into_iter()
+            .map(|(px, (sz, n))| crate::wire::Level { px, sz, n })
+            .collect();
+        if side == 0 {
+            levels.reverse();
+        }
+        out.levels[side] = levels;
+    }
+    out
+}
+
+/// Round a price to `n` significant figures on a `mantissa`-scaled tick.
+fn round_to_sig_figs(px: Decimal, n: u8, mantissa: u8) -> Decimal {
+    if px <= Decimal::ZERO {
+        return px;
+    }
+    let norm = px.normalize();
+    let int_digits = norm.mantissa().unsigned_abs().ilog10() as i32 + 1 - norm.scale() as i32;
+    let step_exp = int_digits - i32::from(n);
+    // 10^step_exp by repeated multiply: exact for the magnitudes a book
+    // carries; beyond them the price is served unrounded (a bounded,
+    // documented degradation rather than a panic).
+    let ten = Decimal::from(10u64);
+    let mut step = Decimal::ONE;
+    for _ in 0..step_exp.abs().min(28) {
+        step = if step_exp >= 0 {
+            step.saturating_mul(ten)
+        } else {
+            step.saturating_mul(Decimal::new(1, 1))
+        };
+    }
+    let step = step.saturating_mul(Decimal::from(mantissa));
+    if step.is_zero() {
+        return px;
+    }
+    (px / step).round().saturating_mul(step)
 }
 
 /// `marginTable`: one table out of the cached metadata by id.
@@ -670,6 +763,46 @@ mod tests {
         // An index past the meta is a named refusal.
         let oob: OrderAction = serde_json::from_str(r#"{"a":7,"b":false,"s":"1"}"#).unwrap();
         assert!(format!("{}", oob.to_order(Some(&meta)).unwrap_err()).contains("unknown asset index"));
+    }
+
+    /// The book aggregation follows the docs: prices round to `n` significant
+    /// figures, levels at the same rounded price merge, and out-of-set
+    /// parameters refuse by name.
+    #[test]
+    fn l2_book_aggregation_follows_the_docs() {
+        let level = |px: &str, sz: &str, n: u64| crate::wire::Level {
+            px: px.parse().unwrap(),
+            sz: sz.parse().unwrap(),
+            n,
+        };
+        let book = crate::wire::L2Book {
+            coin: "ETH".into(),
+            time: 0,
+            levels: [
+                vec![level("100.4", "1", 2), level("100.9", "2", 1)],
+                vec![level("106.0", "1", 1)],
+            ],
+            spread: None,
+        };
+        // n=2: 100.4 and 100.9 both round to 100 (merged: sz 3, n 3);
+        // 106 rounds to 110 (half away from zero on the step of 10).
+        let a = aggregate_book(book.clone(), Some(2), 1);
+        assert_eq!(a.levels[0].len(), 1, "same rounded price merges");
+        assert_eq!(a.levels[0][0].px, "100".parse().unwrap());
+        assert_eq!(a.levels[0][0].sz, "3".parse().unwrap());
+        assert_eq!(a.levels[0][0].n, 3);
+        assert_eq!(a.levels[1][0].px, "110".parse().unwrap());
+        // No params: verbatim, both sides in their own order.
+        let c = aggregate_book(book, None, 1);
+        assert_eq!(c.levels[0].len(), 2);
+        assert_eq!(c.levels[0][0].px, "100.4".parse().unwrap());
+        // The documented parameter set, refused by name otherwise.
+        assert!(book_params_ok(Some(2), None).is_ok());
+        assert!(book_params_ok(Some(5), Some(5)).is_ok());
+        assert!(book_params_ok(Some(6), None).is_err());
+        assert!(book_params_ok(None, Some(5)).is_err());
+        assert!(book_params_ok(Some(4), Some(5)).is_err());
+        assert!(book_params_ok(Some(5), Some(3)).is_err());
     }
 
     /// The complete wire shapes parse (cloid as alloy's `B128`, the trigger

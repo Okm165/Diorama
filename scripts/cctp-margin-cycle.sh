@@ -33,6 +33,7 @@ set -euo pipefail
 NS="${NS:-venue-mirror}"
 RELAY="${RELAY:-0x70997970C51812dc3A010C7d01b50e0d17dc79C8}"   # the bridge's wallet
 TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}" # the V-side trader
+UNIFIED="${UNIFIED:-0x00000000000000000000000000000000000000ea}" # a unified-mode account
 AMOUNT="${AMOUNT:-5000000}"                                    # 5 USDC (6-dec)
 COIN="${COIN:-ETH}"
 SIZE="${SIZE:-0.01}"
@@ -44,6 +45,19 @@ CORE_WRITER=0x3333333333333333333333333333333333333333
 
 source "$(dirname "$0")/lib-cctp.sh"
 require_chain_urls
+
+# The CoreWriter calldata for a raw action stream (docs: the `sendRawAction`
+# selector + offset + length + padded stream) — one home for every action the
+# cycle sends.
+core_writer_calldata() { # core_writer_calldata <stream_hex>
+  python3 - "$1" <<'PY'
+import sys
+stream = bytes.fromhex(sys.argv[1])
+arg = len(stream).to_bytes(32, "big") + stream
+arg += b"\x00" * ((32 - len(stream) % 32) % 32)
+print("0x17938e13" + (32).to_bytes(32, "big").hex() + arg.hex())
+PY
+}
 
 echo "== crosschain unified-margin cycle (T -> CCTP -> venue -> trade -> CCTP -> T) =="
 
@@ -104,13 +118,10 @@ spot1=$(sim_spot "$TRADER")
 sendraw=$(python3 - "$AMOUNT" <<'PY'
 import sys
 ntl = int(sys.argv[1]) * 100            # 6-dec USDC -> 8-dec core wei
-stream = bytes.fromhex("01000007" + f"{ntl:064x}" + f"{1:064x}")
-arg = len(stream).to_bytes(32, "big") + stream
-arg += b"\x00" * ((32 - len(stream) % 32) % 32)
-print("0x17938e13" + (32).to_bytes(32, "big").hex() + arg.hex())
+print("01000007" + f"{ntl:064x}" + f"{1:064x}")
 PY
 )
-tx=$(send_tx "$TRADER" "$CORE_WRITER" "$sendraw")
+tx=$(send_tx "$TRADER" "$CORE_WRITER" "$(core_writer_calldata "$sendraw")")
 [ -n "$tx" ] && [ "$tx" != "None" ] && ok "CoreWriter USD-class transfer mined ($tx)" || bad "CoreWriter tx failed"
 perp1=""
 for _ in $(seq 1 20); do
@@ -138,6 +149,64 @@ state=$(sim_account "$TRADER")
 [ "$(echo "$state" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')" = "0" ] \
   && ok "the position is flat" || bad "not flat: $state"
 [ "$(echo "$state" | identity_ok)" = "ok" ] && ok "the identity holds flat" || bad "identity: $(echo "$state" | identity_ok)"
+
+echo "-- D2. the CoreWriter order door (action 1: the HyperEVM path into the lane)"
+# (asset 1 = ETH, isBuy, limitPx 10^8 x 2500, sz 10^8 x 0.02, not reduce-only,
+# tif 3 = Ioc, cloid 0) — the bridge decodes the action and fills through the
+# same lane as /exchange and /control/order.
+stream=$(python3 - <<'PY'
+word = lambda v: f"{v:064x}"
+print("01000001" + word(1) + word(1) + word(2500 * 10**8) + word(int(0.02 * 10**8)) + word(0) + word(3) + word(0))
+PY
+)
+before=$(sim_account "$TRADER" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')
+tx=$(send_tx "$TRADER" "$CORE_WRITER" "$(core_writer_calldata "$stream")")
+[ -n "$tx" ] && [ "$tx" != "None" ] && ok "the CoreWriter limit order mined ($tx)" || bad "CoreWriter order tx failed"
+after="$before"
+for _ in $(seq 1 20); do
+  after=$(sim_account "$TRADER" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')
+  [ "$after" != "$before" ] && break
+  sleep 1
+done
+[ "$after" != "$before" ] \
+  && ok "the CoreWriter order filled through the lane ($before -> $after)" \
+  || bad "the CoreWriter order did not fill ($before -> $after)"
+# Close the extra size through the control door (both doors, one lane).
+extra=$(python3 -c "from decimal import Decimal; print(Decimal('$after') - Decimal('$before'))")
+spost /control/order "{\"address\":\"$TRADER\",\"coin\":\"$COIN\",\"is_buy\":false,\"size\":\"$extra\",\"reduce_only\":true}" > /dev/null
+state=$(sim_account "$TRADER")
+[ "$(echo "$state" | json 'd["assetPositions"][0]["position"]["szi"] if d.get("assetPositions") else "0"')" = "0" ] \
+  && ok "the CoreWriter size closed through /control/order (flat)" || bad "not flat: $state"
+
+echo "-- D3. unified collateral (spot USDC backs the perp side; the docs' single balance)"
+# The real abstraction path: CoreWriter action 16 (16 = 0x10), abstraction 2.
+stream=$(python3 - "$UNIFIED" <<'PY'
+import sys
+user = int(sys.argv[1], 16)
+print("01000010" + f"{user:064x}" + f"{2:064x}")
+PY
+)
+rpcv "$DST_URL" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setBalance\",\"params\":[\"$UNIFIED\",\"0x8ac7230489e80000\"]}" > /dev/null
+tx=$(send_tx "$UNIFIED" "$CORE_WRITER" "$(core_writer_calldata "$stream")")
+[ -n "$tx" ] && [ "$tx" != "None" ] && ok "the unified abstraction set through CoreWriter 16" || bad "action 16 tx failed"
+abs=""
+for _ in $(seq 1 20); do
+  # The venue serves the abstraction as a bare JSON string (not an object).
+  abs=$(sipost /info "{\"type\":\"userAbstraction\",\"user\":\"$UNIFIED\"}" | json 'd if isinstance(d, str) else d.get("abstraction")')
+  [ "$abs" = "unifiedAccount" ] && break
+  sleep 1
+done
+[ "$abs" = "unifiedAccount" ] && ok "the sim serves unifiedAccount (the real path, not a fixture)" \
+  || bad "abstraction=$abs"
+spost /control/deal "{\"address\":\"$UNIFIED\",\"class\":\"spot\",\"amount\":\"250\"}" > /dev/null
+ufill=$(spost /control/order "{\"address\":\"$UNIFIED\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"0.01\"}")
+usz=$(echo "$ufill" | json 'd.get("totalSz")')
+[ "$usz" = "0.01" ] && ok "a spot-only unified account fills a perp order (collateral backs margin)" \
+  || bad "unified fill: $ufill"
+ustate=$(sim_account "$UNIFIED")
+[ "$(echo "$ustate" | identity_ok)" = "ok" ] && ok "the unified identity holds (collateral inside totalRawUsd)" \
+  || bad "unified identity: $(echo "$ustate" | identity_ok)"
+spost /control/order "{\"address\":\"$UNIFIED\",\"coin\":\"$COIN\",\"is_buy\":false,\"size\":\"0.01\",\"reduce_only\":true}" > /dev/null
 
 echo "-- E. CCTP V -> T (the cycle closes)"
 # The trader returns the V-side USDC to the bridge's wallet, then it burns.
