@@ -553,6 +553,25 @@ chain stays static, and the harness's own `anvil_mine` calls are just extra
 | `probes` | the configured at-pin probe count |
 | `source` | the fork source the pin derives from (the unshadow truth's home) |
 
+### The sim reset runbook
+
+`POST {sim_control}/control/reset` blanks **every simulated account** and bumps
+the scenario epoch (the sim's own `venue_sim_epoch`). The chains keep their
+history, so a reset silently desyncs the pairing: a CCTP deposit already
+relayed into the sim is missing here while the bridge's cursor sits past it,
+and accounts the engine's shadow plane mirrors are gone. Nothing downstream can
+detect the divergence by itself — the reset logs the remedy, and the remedy is
+the one the T re-pin carries:
+
+1. restart the bridge (its scan re-mirrors the chains' state into the sim),
+2. re-pin V through the engine (`/admin/epoch`), so the shadow plane and the
+   devnet's own writes re-base together,
+3. re-run the scenario's setup (deals, orders) — the minted funds are gone with
+   the accounts, by design.
+
+Use it freely on a scratch sim (the drills do); on a shared one, treat it as a
+chain re-pin and schedule it.
+
 ### Venue metrics
 
 The venue engine's `/metrics` renders the `venue_*` set plus the shared admin

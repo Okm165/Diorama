@@ -455,6 +455,18 @@ pub(crate) struct ResetResponse {
 pub(crate) async fn reset(State(state): State<Arc<ApiState>>) -> Result<Json<ResetResponse>> {
     let epoch = state.sim.reset()?;
     state.feed.clear_overrides()?;
+    // The reset blanks every simulated account while the chains keep their
+    // history: a CCTP deposit already relayed into the sim is now missing
+    // here (the bridge's cursor sits past it), and any account the engine's
+    // shadow plane mirrors is gone. The pairing is restored by restarting the
+    // bridge and re-pinning V (the same remedy the T re-pin carries) - say so
+    // loudly, because nothing downstream can detect the divergence by itself.
+    tracing::warn!(
+        epoch,
+        "sim reset: every simulated account is blank; the chains keep their history. \
+         Restart the bridge and re-pin V to restore the pairing (docs/OPERATIONS.md, \
+         the reset runbook)"
+    );
     Ok(Json(ResetResponse { epoch, accounts: 0 }))
 }
 
