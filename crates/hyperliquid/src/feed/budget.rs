@@ -41,10 +41,6 @@ impl Budget {
         self.used_at(Instant::now())
     }
 
-    pub fn capacity(&self) -> u64 {
-        CAPACITY
-    }
-
     fn try_spend_at(&self, now: Instant, weight: u64) -> bool {
         let mut spends = self.spends.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::evict(&mut spends, now);

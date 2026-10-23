@@ -144,17 +144,17 @@ impl EngineClient {
             },
             Ok(ResponsePacket::Batch(_)) => Err(EngineApiError::Decode {
                 method,
-                body: truncate(&text, 200).to_string(),
+                body: mirror_anvil::truncate(&text, 200).to_string(),
                 source: serde_json::Error::custom("a batch answer to a single call"),
             }),
             Err(_) if !status.is_success() => Err(EngineApiError::Status {
                 method,
                 status: status.as_u16(),
-                body: truncate(&text, 300).to_string(),
+                body: mirror_anvil::truncate(&text, 300).to_string(),
             }),
             Err(source) => Err(EngineApiError::Decode {
                 method,
-                body: truncate(&text, 200).to_string(),
+                body: mirror_anvil::truncate(&text, 200).to_string(),
                 source,
             }),
         }
@@ -168,7 +168,7 @@ impl EngineClient {
     ) -> Result<T, EngineApiError> {
         serde_json::from_str(result.get()).map_err(|source| EngineApiError::Decode {
             method,
-            body: truncate(result.get(), 200).to_string(),
+            body: mirror_anvil::truncate(result.get(), 200).to_string(),
             source,
         })
     }
@@ -224,8 +224,4 @@ impl EngineClient {
         let updated: ForkchoiceUpdated = Self::parse("engine_forkchoiceUpdatedV3", &result)?;
         Ok(updated.payload_status)
     }
-}
-
-fn truncate(s: &str, n: usize) -> &str {
-    mirror_anvil::truncate(s, n)
 }

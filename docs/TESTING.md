@@ -732,6 +732,12 @@ Iris. Proven live on scratch forks:
 - the pin clamp: a start block below the fork pin is clamped to the pin with
   one warning (anvil forwards pre-pin `eth_getLogs` ranges upstream, which
   rejects them — measured);
+- the boot wiring asserts cover §15.1's five contracts: chain id,
+  `MT.localDomain()`, `MT.version()`, `TM.messageBodyVersion()`,
+  `TM.localMessageTransmitter()`, `TM.localMinter()` (measured 2026-10-23: the
+  getter is `localMinter()` — a `localTokenMinter()` probe reverts), and
+  `TM.remoteTokenMessengers(peer)`; a mismatch is a boot error naming the
+  field, never a silent wrong address;
 - the real reverts, string for string: source-side `Max fee must be less than
   amount`, `Mint recipient must be nonzero`, `Hook data is empty`; a message
   pinned to another `destinationCaller` → `Invalid caller for message` (the

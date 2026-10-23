@@ -112,7 +112,7 @@ fn log_key(l: &Log) -> String {
     for t in l.topics() {
         s.push_str(&format!("{t:x}|"));
     }
-    s.push_str(&hex::encode(&l.data().data));
+    s.push_str(&alloy_primitives::hex::encode(&l.data().data));
     s
 }
 

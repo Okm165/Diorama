@@ -53,7 +53,6 @@ axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 # Stream/Sink adapters for the venue websocket client.
 futures-util = "0.3"
-hex = "0.4"
 # alloy-rpc-types-engine's `jwt` feature pulls jsonwebtoken but selects no
 # crypto provider, so signing panics at runtime ("Could not automatically
 # determine the process-level CryptoProvider"). alloy has no rust-crypto

@@ -65,6 +65,10 @@ sol! {
         function minFee() external view returns (uint256);
         function getMinFeeAmount(uint256 amount) external view returns (uint256);
         function localMessageTransmitter() external view returns (address);
+        /// The local minter this messenger burns/mints through. Measured
+        /// 2026-10-23: the getter is `localMinter()`; `localTokenMinter()`
+        /// reverts (the const's comment had guessed the wrong name).
+        function localMinter() external view returns (address);
         function messageBodyVersion() external view returns (uint32);
         function remoteTokenMessengers(uint32 domain) external view returns (bytes32);
     }

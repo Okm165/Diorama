@@ -21,7 +21,6 @@ alloy-rpc-types-beacon = { workspace = true }
 alloy-json-rpc = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
-hex = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

@@ -55,10 +55,6 @@ pub const MIN_FEE_MULTIPLIER: u64 = 10_000_000;
 /// The message format version both transmitters report (`MT.version()`,
 /// `TM.messageBodyVersion()`, both measured = 1).
 pub const MESSAGE_VERSION: u32 = 1;
-/// Circle's USDC is 6-decimal on both chains (`TokenMinterV2.getLocalToken`
-/// cross-checked, §15.1).
-pub const USDC_DECIMALS: u8 = 6;
-
 // The five contracts, identical on both chains (verified live, §15.1/§15.2).
 /// TokenMessengerV2 — `depositForBurn` / `handleReceive*`.
 pub const TOKEN_MESSENGER_V2: Address = address!("28b5a0e9C621a5BadaA536219b3a228C8168cf5d");
@@ -180,9 +176,9 @@ impl Chain {
         Ok((Domain(local_domain), version, body_version))
     }
 
-    /// The messenger assertions: the local transmitter must be the pinned one,
-    /// and the peer's TokenMessenger must be registered before the bridge will
-    /// move value.
+    /// The messenger assertions: the local transmitter and minter must be the
+    /// pinned ones, and the peer's TokenMessenger must be registered before the
+    /// bridge will move value.
     async fn verify_messengers(&self, peer: &Chain) -> Result<(Address, B256)> {
         let local_transmitter = self
             .assert_getter(
@@ -202,6 +198,15 @@ impl Chain {
                 "TM.remoteTokenMessengers(peer)",
             )
             .await?;
+        // §15.1's fifth address: the messenger's minter (the value is the
+        // check; a mismatch is the assert's error).
+        self.assert_getter(
+            TOKEN_MESSENGER_V2,
+            &ITokenMessengerV2::localMinterCall {},
+            TOKEN_MINTER_V2,
+            "TM.localMinter()",
+        )
+        .await?;
         Ok((local_transmitter, peer_messenger))
     }
 
