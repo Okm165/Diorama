@@ -15,3 +15,5 @@ truth, and a decision that cost a real run gets a record here.
 | [0007](0007-cctp-devnet-lanes.md) | The CCTP lanes: real contracts, a substituted attester, rewind parking |
 | [0008](0008-base-anchored-validation.md) | The base is the anchor: scans, cursors and applies clamp at the fork pin |
 | [0009](0009-venue-unshadow-truth.md) | The venue's unshadow truth: the pin's window, the journal's before-values |
+| [0010](0010-fixture-ownership.md) | Fixture ownership: the mirror-side `fixture_addresses` list, whole-account |
+| [0011](0011-self-advancing-sim-clock.md) | The simulator's clock self-advances: lazy evaluation on read + a 1 Hz tick |

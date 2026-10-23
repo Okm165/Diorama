@@ -22,6 +22,8 @@
 //! The measured facts the modules cite (message layout, contract addresses,
 //! the fee table, the receive-path proof) live in `chains.rs` and the module
 //! docs; nothing here guesses a number the forks did not answer.
+//! Clocks: `block` = the scanned chain's height (per lane: T or V);
+//! `cursor` = that lane's scan cursor; `pin` = the chain's fork base.
 
 pub mod attester;
 pub mod chains;

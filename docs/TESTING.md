@@ -363,6 +363,29 @@ chain facts:
   credit), then a `sendAsset` naming that address (the completion — the system
   address sends the ERC-20 back), exact balances end to end.
 
+### The served clock after a harness time jump (measured 2026-10-23)
+
+Their harness jumps every chain forward (`anvil_setTime` + mine) and then reads
+the venue; a `time` that lags the chain afterwards fails their freshness gate.
+The bridge observes V's head timestamp once per new head (one header read at the
+top of each scan pass, before the block loop) and the sim serves
+`max(wall, sim clock, chain time)`. Measured live: after a +3600 s jump of V, a
+**touched** account served `time == V's head timestamp` (1792747268 vs wall
+1792740301), and the served clock never moved backwards. An **untouched**
+account kept serving the *real venue's* own time — the COW overlay's split:
+untouched accounts pass through to the live venue verbatim (which is also why
+an unknown address's `clearinghouseState` carries the real venue's `time`,
+never the sim's). `make venue-proof`'s leg G encodes exactly this: touched
+follows the jump, untouched stays pass-through, neither goes backwards.
+
+The trace lane is real on local blocks: `debug_traceBlockByNumber` (callTracer)
+answers for V's own blocks (measured on three). It answers `Method not found`
+for **pre-pin source blocks** — anvil cannot re-execute a forked block's state
+(measured: a hand-typed pre-pin height) — and the bridge never traces those
+(its cursor anchors at `head.max(pin)` and only advances above it), so a
+`venue_bridge_trace_faults_total` increment means a real degradation, not the
+fork boundary.
+
 ## Engine symmetry (the two services read the same way)
 
 The two engines are one design over two sources. The shared crates carry the
@@ -502,6 +525,13 @@ saves its state, and the CCTP bridge saves its store. `make venue-closure` has
 no script: the venue has no incoming parent diffs to close a scope over — its
 standing scope check is the at-pin probe set (`/admin/probes`,
 `venue_probe_*`), which the venue-drill and smoke exercise.
+
+There is also no unified "facade" service (plan §7 Phase 5): each mirror's
+scenario surface is its own — `/admin/*` on the two engines, `/control/*` on
+the simulator — and the Make targets parameterize by `INSTANCE`. A proxy would
+add a hop without adding a fact: the harness speaks each surface directly
+(§7.7), and the shared crates already make the two surfaces one vocabulary
+(`mirror_devnet::admin`, the same control shapes).
 
 ## The feed bridge — measured behavior (Phase 0)
 

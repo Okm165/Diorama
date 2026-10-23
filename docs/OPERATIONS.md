@@ -134,6 +134,19 @@ change (the old image needs the old ConfigMap). `make smoke` + `make scenario`
 are the gate; the anvil pods pick the offset up from the mounted instance file
 (`fork_offset` in `[chains.l1]`), so no env var carries it any more.
 
+### Standing maintenance item: the Lighthouse pin
+
+The running pin is **Lighthouse v8.3.0**. v8.3.1 is the current patch — the
+**eMudhra CA certificate mitigation** (rated High for stakers, Medium for a
+non-staking mirror) — and v8.3.x also satisfies the Hoodi-Oct-26 requirement.
+The bump is a two-step rollout (pull + import the new tag+digest, then
+`make apply` with the manifest edit) and therefore rides the **next rollout
+window**, together with the venue overlay: bump `k8s/base/lighthouse.yaml`'s
+tag+digest, `make images` (the pull), `make check-pins`, then `make apply`.
+Until then the running mirror is unaffected (the mitigation is a CA trust
+change, not a consensus change). reth v2.8.0 and foundry v1.8.6 are the
+current releases and stay as pinned.
+
 Read the flight recorder:
 
 ```bash

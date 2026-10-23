@@ -12,3 +12,17 @@ pub use error::*;
 pub use pad::*;
 pub use trace::*;
 pub use writes::*;
+
+#[cfg(test)]
+mod design_assertions {
+    /// The Rust-for-Rustaceans pin (plan §11.3 rule 11).
+    fn is_normal<T: Send + Sync + Sized + Unpin>() {}
+
+    #[test]
+    fn public_types_are_normal() {
+        is_normal::<crate::Rpc>();
+        is_normal::<crate::Call>();
+        is_normal::<crate::Error>();
+        is_normal::<crate::Write>();
+    }
+}

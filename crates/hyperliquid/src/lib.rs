@@ -17,6 +17,9 @@
 //! The simulator (market/account planes), the daloc-facing API and the
 //! bridges are the venue's own half and land on top of this driver; the
 //! ethereum stack is never compiled here (the closure matrix enforces it).
+//! Clocks: `block` = the **V height** (HyperEVM blocks; the venue profile has
+//! no second chain); the simulator's clock is its served `time` (ms,
+//! self-advancing), never a block label.
 pub mod api;
 pub mod bridge;
 pub mod ctx;

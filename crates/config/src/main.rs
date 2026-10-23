@@ -1,4 +1,5 @@
-//! `mirror-config`: check | get | export-env (plan §19.5).
+//! `mirror-config`: check | get | export-env (plan §19.5; `--section daloc`
+//! renders the daloc-facing endpoint block, §19.7).
 //!
 //! The single owner of config semantics: the layered loader lives in this
 //! package's library; this binary is the scripting surface for it.
@@ -30,8 +31,8 @@ enum Cmd {
     ExportEnv {
         /// Path to config/instances/<name>.toml.
         instance: PathBuf,
-        /// Section name (known: anvil).
-        #[arg(long, default_value = "anvil")]
+        /// Section name (known: anvil, daloc).
+        #[arg(long, alias = "for", default_value = "anvil")]
         section: String,
     },
 }

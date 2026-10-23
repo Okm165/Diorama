@@ -13,6 +13,10 @@
 #                        the engine on its next pass (`venue_mined_blocks_total`)
 #   F. scenario controls - the scripted book and the funding override are served
 #                        exactly, and their hand-backs restore live data
+#   G. chain-time follow - after a forward jump of V's clock (their harness's
+#                        shape), a touched account's served `time` follows V's
+#                        head while an untouched account keeps the venue's own
+#                        time (the COW overlay's split, measured)
 #
 # Run from the repo root:
 #   make venue-proof                    # against the deployed venue-mirror
@@ -237,6 +241,37 @@ i=[k for k,u in enumerate(d[0]['universe']) if u['name']=='BTC'][0]
 print(d[1][i]['funding'])")
 [ "$live" != "0.0001" ] && ok "the hand-back returned funding to live ($live)" \
   || bad "funding still overridden: $live"
+
+echo "-- G. the chain-time invariant on V after a jump"
+# Their harness jumps every chain forward and then reads the venue; a served
+# `time` that lags V afterwards fails their freshness gate. The bridge reads
+# V's head timestamp once per new head and the sim serves
+# `max(wall, sim clock, chain time)`. Measured 2026-10-23: a touched account
+# followed a +3600 s jump exactly (served == head ts) while an untouched
+# account kept the real venue's own time (pass-through, by design). The jump
+# below is permanent until the next re-pin (anvil_reset re-forks at a source
+# block, whose timestamp is wall) — keep it small and run it last.
+UNTOUCHED=0x00000000000000000000000000000000000000f9
+head_ts=$(rpcv '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}' | json 'int(d["result"]["timestamp"],16)')
+served0=$(sim_account "$SIM_ACCT" | json 'd["time"]//1000')
+jump=$((head_ts + 120))
+rpcv "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setTime\",\"params\":[$jump]}" > /dev/null && mine
+served1=$served0
+for _ in $(seq 1 10); do
+  served1=$(sim_account "$SIM_ACCT" | json 'd["time"]//1000')
+  [ "$served1" -ge "$jump" ] && break
+  sleep 1
+done
+[ "$served1" -ge "$jump" ] \
+  && ok "a touched account's served time follows V (served=$served1 >= jumped head=$jump)" \
+  || bad "served time lagged V after the jump: served=$served1 head=$jump"
+[ "$served1" -ge "$served0" ] \
+  && ok "the served clock never moved backwards ($served0 -> $served1)" \
+  || bad "served clock regressed: $served0 -> $served1"
+raw_time=$(sim_account "$UNTOUCHED" | json 'd["time"]//1000')
+[ "$raw_time" -lt "$jump" ] \
+  && ok "an untouched account still serves the venue's own time (pass-through)" \
+  || bad "untouched account followed the jump: time=$raw_time jump=$jump"
 
 echo "== venue capability proof: $pass passed, $fail failed"
 [ "$fail" = "0" ]

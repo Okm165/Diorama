@@ -1,5 +1,10 @@
 //! mirror-engine: replay mainnet blocks onto M, keep T's watch-list state fresh
 //! from EIP-7928 BALs, verify every block, and expose a small admin surface.
+//! Clocks: `block` = the **L1 parent height** (the replayed/applied mainnet
+//! block); `head` = the compared chain's head (M in the replay, T in the
+//! applier); `block_txs` = a count, not a clock; `age_ms` = the feed bridge's
+//! confirmation-window age, not a clock. M/T heights are named (`m_head`,
+//! `t_head`, `cursor_t` = T-height) and never logged bare.
 mod bal;
 mod blob;
 mod ctx;

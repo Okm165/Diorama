@@ -342,10 +342,94 @@ impl Instance {
                     .ok_or_else(|| mismatch("export-env anvil requires [chains.l1]"))?;
                 Ok(vec![format!("FORK_OFFSET={}", l1.fork_offset)])
             }
+            "daloc" => self.daloc_env(),
             other => Err(ConfigError::Invalid {
-                issues: vec![format!("unknown section `{other}` (known: anvil)")],
+                issues: vec![format!("unknown section `{other}` (known: anvil, daloc)")],
             }),
         }
+    }
+
+    /// The daloc-facing endpoint block (plan §7.7/§19.7): our values under
+    /// their names — we provide values, never rename their interface. The
+    /// chain URL is the deployment wiring (the same env the pods read); the
+    /// service URLs are in-cluster DNS built from the instance's own ports.
+    /// The Service names (`mirror-engine`, `venue-sim`, `cctp-bridge`) are
+    /// this repo's k8s topology, defined in `k8s/base/`.
+    fn daloc_env(&self) -> Result<Vec<String>, ConfigError> {
+        let mut out = Vec::new();
+        match self.instance.profile {
+            Profile::Ethereum => {
+                let t = env_url("ANVIL_T_URL")?;
+                out.push(format!("CHAIN_RPC_URL={t}"));
+                out.push(format!("CHAIN_WS_URL={}", ws_of(&t)));
+                let engine = self.services.engine.as_ref().ok_or_else(|| {
+                    mismatch("export-env daloc (ethereum profile) requires [services.engine]")
+                })?;
+                out.push(format!(
+                    "CHAIN_ENGINE_URL=http://mirror-engine:{}",
+                    engine.http.port
+                ));
+            }
+            Profile::Venue => {
+                let venue = self.services.venue.as_ref().ok_or_else(|| {
+                    mismatch("export-env daloc (venue profile) requires [services.venue]")
+                })?;
+                let v = resolved("ANVIL_V_URL", &venue.anvil_url)?;
+                out.push(format!("CHAIN_999_RPC_URL={v}"));
+                out.push(format!("CHAIN_999_WS_URL={}", ws_of(&v)));
+                let sim = self.services.sim.as_ref().ok_or_else(|| {
+                    mismatch("export-env daloc (venue profile) requires [services.sim]")
+                })?;
+                out.push(format!("HL_INFO_API_URL=http://venue-sim:{}", sim.info.port));
+                out.push(format!(
+                    "HL_CONTROL_API_URL=http://venue-sim:{}",
+                    sim.control.port
+                ));
+                out.push(format!(
+                    "VENUE_ACCOUNT_FEEDS=http://venue-sim:{}",
+                    sim.info.port
+                ));
+            }
+        }
+        // The bridge spans both mirrors: its Iris base is part of the block
+        // whichever profile the instance carries (plan §15.4 — the base, their
+        // client appends /v2/messages/... itself).
+        if let Some(cctp) = &self.services.cctp {
+            out.push(format!("IRIS_API_URL=http://cctp-bridge:{}", cctp.iris.port));
+        }
+        Ok(out)
+    }
+}
+
+/// The env wiring a deployment always sets (`ANVIL_T_URL`); a missing one is a
+/// load error naming it (the config crate is the only env reader).
+fn env_url(name: &str) -> Result<String, ConfigError> {
+    std::env::var(name).map_err(|_| ConfigError::Invalid {
+        issues: vec![format!(
+            "export-env daloc: {name} is not set (deployment wiring)"
+        )],
+    })
+}
+
+/// A value that must be concrete for the export: a lingering `${VAR}`
+/// reference means the deployment wiring was not set, and the export's whole
+/// purpose is values, never references.
+fn resolved(name: &str, value: &str) -> Result<String, ConfigError> {
+    if value.contains("${") {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!(
+                "export-env daloc: {name} is not set (deployment wiring)"
+            )],
+        });
+    }
+    Ok(value.to_string())
+}
+
+/// The websocket form of an http URL — anvil serves WS on its HTTP port.
+fn ws_of(url: &str) -> String {
+    match url.strip_prefix("http") {
+        Some(rest) => format!("ws{rest}"),
+        None => url.to_string(),
     }
 }
 
