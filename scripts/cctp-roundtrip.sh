@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# The CCTP round trip, scripted (plan §15.5): fund the relay on the source if
+# short, burn, wait for the record to reach `relayed`, and verify the
+# destination balance delta is exactly the amount. A parked record fails with
+# its own named reason.
+#
+# Direction and amount are env-driven; the default is the T→V leg:
+#   make cctp-roundtrip
+# Direct mode (a scratch stack):
+#   BRIDGE_CTRL_URL=http://127.0.0.1:8096 \
+#   ENGINE_T_URL=http://127.0.0.1:18680 ENGINE_V_URL=http://127.0.0.1:18681 \
+#   T_URL=http://127.0.0.1:18602 V_URL=http://127.0.0.1:18610 \
+#   ./scripts/cctp-roundtrip.sh
+#
+# On the cluster both engines mine, so the wait needs no miner; on a scratch
+# stack mine the *destination* chain if the record stalls (the timeout names
+# the miss).
+set -euo pipefail
+
+NS="${NS:-venue-mirror}"
+SOURCE="${SOURCE:-0}"                 # 0 = Ethereum/T, 19 = HyperEVM/V
+DESTINATION="${DESTINATION:-19}"
+AMOUNT="${AMOUNT:-1000000}"           # raw units (1 USDC, 6-dec)
+RELAY="${RELAY:-0x70997970C51812dc3A010C7d01b50e0d17dc79C8}"
+USDC_T="${USDC_T:-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48}"
+USDC_V="${USDC_V:-0xb88339CB7199b77E23DB6E890353E22632Ba630f}"
+BUDGET="${BUDGET:-180}"              # seconds to wait for `relayed`
+CAST="${CAST:-cast}"
+
+pass=0; fail=0
+ok()   { echo "  ✔ $*"; pass=$((pass+1)); }
+bad()  { echo "  ✘ $*"; fail=$((fail+1)); }
+info() { echo "  · $*"; }
+
+if [ -n "${BRIDGE_CTRL_URL:-}" ]; then
+  bget()  { curl -s --fail-with-body -m 30 "$BRIDGE_CTRL_URL$1"; }
+  bpost() { curl -s --fail-with-body -m 120 -X POST "$BRIDGE_CTRL_URL$1" -H 'Content-Type: application/json' -d "$2"; }
+  cget()  { curl -s --fail-with-body -m 60 "$2$1"; }
+  cpost() { curl -s --fail-with-body -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
+  balance() { # balance <token> <address> <url>
+    "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$3" 2>/dev/null | awk '{print $1}'
+  }
+  SRC_URL="${T_URL:?set T_URL in direct mode}"; DST_URL="${V_URL:?set V_URL in direct mode}"
+  SRC_ENGINE="${ENGINE_T_URL:?set ENGINE_T_URL in direct mode}"; DST_ENGINE="${ENGINE_V_URL:?set ENGINE_V_URL in direct mode}"
+else
+  exec_pod() { kubectl -n "$NS" exec -i deploy/cctp-bridge -- "$@"; }
+  bget()  { exec_pod curl -sf -m 30 "localhost:8096$1"; }
+  bpost() { exec_pod curl -sf -m 120 -X POST "localhost:8096$1" -H 'Content-Type: application/json' -d "$2"; }
+  cget()  { exec_pod curl -sf -m 60 "$2$1"; }
+  cpost() { exec_pod curl -sf -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
+  balance() { exec_pod "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$3" 2>/dev/null | awk '{print $1}'; }
+  SRC_URL="http://anvil-t:8545"; DST_URL="http://anvil-v:8545"
+  SRC_ENGINE="http://mainnet-engine.mainnet-mirror.svc:8080"; DST_ENGINE="localhost:8080"
+fi
+
+if [ "$SOURCE" = "0" ]; then
+  SRC_USDC="$USDC_T"; DST_USDC="$USDC_V"
+else
+  SRC_USDC="$USDC_V"; DST_USDC="$USDC_T"
+fi
+
+echo "== CCTP round trip: $SOURCE -> $DESTINATION, amount=$AMOUNT =="
+src_before=$(balance "$SRC_USDC" "$RELAY" "$SRC_URL")
+[ -n "$src_before" ] && ok "relay balance on the source read ($src_before)" || bad "source balance read failed"
+if [ -n "$src_before" ] && [ "$src_before" -lt "$AMOUNT" ]; then
+  info "relay short on the source; dealing $AMOUNT"
+  cpost /admin/deal "$SRC_ENGINE" "{\"token\":\"$SRC_USDC\",\"to\":\"$RELAY\",\"amount\":\"$AMOUNT\"}" >/dev/null
+  src_before=$(balance "$SRC_USDC" "$RELAY" "$SRC_URL")
+  info "relay funded ($src_before)"
+fi
+dst_before=$(balance "$DST_USDC" "$RELAY" "$DST_URL")
+ok "destination balance before: $dst_before"
+
+burn=$(bpost /control/transfer "{\"source\":$SOURCE,\"destination\":$DESTINATION,\"amount\":\"$AMOUNT\"}")
+burn_tx=$(echo "$burn" | python3 -c "import json,sys; print(json.load(sys.stdin).get('burn_tx',''))")
+mined=$(echo "$burn" | python3 -c "import json,sys; print(json.load(sys.stdin).get('mined'))")
+[ -n "$burn_tx" ] && ok "burn submitted ($burn_tx, mined=$mined)" || bad "no burn_tx in the response: $burn"
+
+state=""
+i=0
+while [ "$i" -lt "$BUDGET" ]; do
+  rec=$(bget /control/state | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for m in d.get('messages', []):
+    if m.get('burn_tx', '').lower() == '$burn_tx'.lower():
+        print(m.get('state', ''), '|', m.get('park_reason') or '')
+        break
+")
+  state=${rec%% *}
+  case "$state" in
+    relayed) ok "the record relayed"; break ;;
+    parked)  bad "the record parked: ${rec#*| }"; break ;;
+    "")      bad "no record for the burn in the store"; break ;;
+  esac
+  i=$((i + 1))
+  sleep 1
+done
+[ "$state" = "relayed" ] || bad "not relayed within ${BUDGET}s (state=$state; a scratch destination needs a miner)"
+
+dst_after=$(balance "$DST_USDC" "$RELAY" "$DST_URL")
+[ -n "$dst_before" ] && [ "$dst_after" = "$((dst_before + AMOUNT))" ] \
+  && ok "destination minted exactly the amount ($dst_before -> $dst_after)" \
+  || bad "destination delta is not the amount ($dst_before -> $dst_after, wanted +$AMOUNT)"
+
+echo "== cctp roundtrip: $pass passed, $fail failed"
+[ "$fail" = "0" ]

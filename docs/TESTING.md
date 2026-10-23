@@ -797,7 +797,9 @@ Iris. Proven live on scratch forks:
 
 Operator surface: `GET /health` (parked counts), `GET /control/state`,
 `POST /control/transfer` (`hook: {target, calldata}` for the credit lane),
-`POST /control/relay` (`{nonce?}` — relay now).
+`POST /control/relay` (`{nonce?}` — relay now), `make cctp-smoke` (health +
+store coherence + metric set) and `make cctp-roundtrip` (the scripted burn →
+mint with the exact delta; `SOURCE`/`DESTINATION`/`AMOUNT` env-driven).
 
 ## Plan axioms → how they are covered
 

@@ -211,6 +211,12 @@ venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation,
 venue-product-sim: ## The daloc use-case simulation against the venue stack (endpoints via env)
 	python3 scripts/daloc-sim.py
 
+cctp-smoke: ## The CCTP bridge smoke (health, store coherence, metric set)
+	NS=venue-mirror ./scripts/cctp-smoke.sh
+
+cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTINATION/AMOUNT env)
+	NS=venue-mirror ./scripts/cctp-roundtrip.sh
+
 engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fitness function)
 	./scripts/engine-symmetry.sh
 
@@ -296,4 +302,5 @@ help: ## Show this help
 
 .PHONY: ns secrets apply diff delete snapshot snapshot-status bootstrap images build build-venue \
 	import deploy-engine test-engine config-check status logs smoke smoke-venue venue-repin feed-bridge \
+	cctp-smoke cctp-roundtrip \
 	selftest pin-show repin help
