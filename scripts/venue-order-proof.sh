@@ -152,7 +152,10 @@ pruned1=$(metric venue_sim_owned_pruned_total)
   || bad "owned_pruned moved $pruned0 -> $pruned1"
 
 echo "-- D. the /exchange door (the venue's own envelope)"
-x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":false,\"p\":\"3000\",\"s\":\"0.2\",\"t\":{\"limit\":{\"tif\":\"Ioc\"}}}]},\"user\":\"$ORDER_ACCT\",\"nonce\":1,\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")
+# The venue's nonce rule (plan §5): the 100 highest per signer, window
+# (T − 2 d, T + 1 d) — so a fixture nonce must be a fresh millisecond stamp.
+nonce=$(date +%s%3N)
+x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":false,\"p\":\"3000\",\"s\":\"0.2\",\"t\":{\"limit\":{\"tif\":\"Ioc\"}}}]},\"user\":\"$ORDER_ACCT\",\"nonce\":$nonce,\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")
 st=$(echo "$x" | json 'd["response"]["data"]["statuses"][0].get("filled",{}).get("totalSz")')
 [ "$st" = "0.2" ] && ok "the compact order filled through /exchange (totalSz 0.2)" || bad "exchange: $x"
 x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":true,\"s\":\"0.1\",\"t\":{\"limit\":{\"tif\":\"Gtc\"}}}]},\"user\":\"$ORDER_ACCT\"}")
@@ -202,7 +205,7 @@ filled1=$(metric venue_sim_orders_filled_total)
 [ "$filled1" -gt "$filled0" ] && ok "the fill counter moved ($filled0 -> $filled1)" || bad "orders_filled=$filled1"
 
 echo "-- G. the noop action (the venue's no-data success)"
-x=$(sipost /exchange "{\"action\":{\"type\":\"noop\"},\"nonce\":1705234567890,\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")
+x=$(sipost /exchange "{\"action\":{\"type\":\"noop\"},\"nonce\":$(date +%s%3N),\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")
 [ "$(echo "$x" | json 'd.get("status")')" = "ok" ] && [ "$(echo "$x" | json 'd["response"]["type"]')" = "default" ] \
   && ok "noop answers the venue's default envelope (no user field needed)" || bad "noop: $x"
 x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":true,\"s\":\"0.01\"}]},\"nonce\":1705234567891}")
