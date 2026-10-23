@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::plane::Plane;
 use crate::shadow::Shadow;
 use crate::shared::Shared;
-use alloy_primitives::U256;
+use alloy_primitives::{B256, U256};
 use alloy_rpc_types_eth::{Block, Transaction};
 use mirror_anvil::Rpc;
 use std::sync::atomic::Ordering;
@@ -128,9 +128,9 @@ pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result
 }
 
 /// Read a block's hash (for cursor validation).
-pub async fn block_hash(rpc: &Rpc, n: u64) -> Result<Option<String>> {
+pub async fn block_hash(rpc: &Rpc, n: u64) -> Result<Option<B256>> {
     let b = rpc.block_by_number_opt(n, false).await?;
-    Ok(b.map(|b| format!("0x{:x}", b.header.hash)))
+    Ok(b.map(|b| b.header.hash))
 }
 
 #[cfg(test)]

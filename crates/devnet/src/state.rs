@@ -8,13 +8,16 @@
 //!   - `reth_last_hash` detects upstream reorgs between consecutive blocks.
 use crate::error::Result;
 use crate::store;
+use alloy_primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChainCursor {
     pub block: u64,
-    pub hash: String,
+    /// The block's hash: the chain-instance check (a cursor whose block no
+    /// longer carries this hash belongs to a chain that was reset).
+    pub hash: B256,
     /// First block this chain ever processed in the current epoch (pin+1 in
     /// practice); used for the pin-age metric.
     pub first_block: u64,
@@ -28,7 +31,7 @@ pub struct Persisted {
     pub t: Option<ChainCursor>,
     /// Hash of the last processed reth block (reorg continuity check).
     #[serde(default)]
-    pub reth_last_hash: Option<String>,
+    pub reth_last_hash: Option<B256>,
     /// Height of the last processed reth block (continuity check guard).
     #[serde(default)]
     pub reth_last_block: Option<u64>,
@@ -74,7 +77,7 @@ impl StateFile {
 pub fn cursor_from(block: &alloy_rpc_types_eth::Block, first_block: u64) -> ChainCursor {
     ChainCursor {
         block: block.header.number,
-        hash: format!("0x{:x}", block.header.hash),
+        hash: block.header.hash,
         first_block,
     }
 }
@@ -103,7 +106,7 @@ mod tests {
     fn resume_is_contiguous() {
         let c = ChainCursor {
             block: 100,
-            hash: "0x1".into(),
+            hash: B256::with_last_byte(1),
             first_block: 1,
         };
         assert_eq!(next_block(Some(&c), 100), (101, false));

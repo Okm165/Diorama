@@ -163,7 +163,7 @@ impl Ctx {
         Ok(())
     }
 
-    pub fn set_reth_last_hash(&self, hash: String) -> Result<()> {
+    pub fn set_reth_last_hash(&self, hash: alloy_primitives::B256) -> Result<()> {
         self.plane.state.lock()?.data.reth_last_hash = Some(hash);
         Ok(())
     }
@@ -177,8 +177,8 @@ impl Ctx {
         Ok(self.plane.state.lock()?.data.reth_last_block)
     }
 
-    pub fn reth_last_hash(&self) -> Result<Option<String>> {
-        Ok(self.plane.state.lock()?.data.reth_last_hash.clone())
+    pub fn reth_last_hash(&self) -> Result<Option<alloy_primitives::B256>> {
+        Ok(self.plane.state.lock()?.data.reth_last_hash)
     }
 
     /// The devnet admin surface, wired to this engine's chain and re-sync

@@ -126,7 +126,7 @@ async fn validate_cursor(
     let valid = if below_base {
         false
     } else {
-        mirror_devnet::scan::block_hash(rpc, c.block).await?.as_deref() == Some(c.hash.as_str())
+        mirror_devnet::scan::block_hash(rpc, c.block).await? == Some(c.hash)
     };
     if valid {
         return Ok(Some(c));

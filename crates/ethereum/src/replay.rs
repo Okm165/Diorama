@@ -224,7 +224,7 @@ async fn finish_replay(
         .unwrap_or(n);
     ctx.set_cursor_m(cursor_from(&m_block, first_block))?;
     ctx.eth_metrics.set(&ctx.eth_metrics.cursor_m, n);
-    ctx.set_reth_last_hash(format!("0x{:x}", block.header.hash))?;
+    ctx.set_reth_last_hash(block.header.hash)?;
     ctx.set_reth_last_block(n)?;
     ctx.plane.save_state()?;
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_replayed);
