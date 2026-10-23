@@ -9,7 +9,8 @@ use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
 use crate::drift::Drift;
 use crate::error::Result;
 use crate::journal::Journal;
-use crate::metrics::Metrics;
+use crate::metrics::EthereumMetrics;
+use mirror_devnet::metrics::Metrics;
 use crate::rpc::Rpc;
 use crate::shadow::Shadow;
 use crate::state::{ChainCursor, StateFile};
@@ -53,6 +54,9 @@ pub struct Ctx {
     pub journal: Journal,
     pub state: Shared<StateFile>,
     pub metrics: Metrics,
+    /// The profile's own set (reth/M/T heads, the applier's counters, the
+    /// probes); rendered beside the shared admin gauges.
+    pub eth_metrics: EthereumMetrics,
     /// The feed bridge's counters (shared with the bridge task; /metrics
     /// renders them whether or not the bridge is configured).
     pub feed_bridge_metrics: Arc<crate::feed_bridge::FeedBridgeMetrics>,
@@ -164,6 +168,7 @@ impl Ctx {
             time_offset: AtomicU64::new(offset),
             state: Shared::new("cursor state", state),
             metrics: Metrics::default(),
+            eth_metrics: EthereumMetrics::default(),
             feed_bridge_metrics: Arc::new(crate::feed_bridge::FeedBridgeMetrics::default()),
             drift,
             frozen: AtomicBool::new(false),
@@ -265,7 +270,7 @@ impl Ctx {
     }
 
     pub fn on_divergence(&self, reason: &str) {
-        self.metrics.inc(&self.metrics.divergences);
+        self.eth_metrics.inc(&self.eth_metrics.divergences);
         tracing::error!(reason, "DIVERGENCE");
         match self.engine.loops.on_divergence {
             mirror_config::OnDivergence::FreezeM => {

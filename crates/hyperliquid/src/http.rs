@@ -151,10 +151,10 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
 }
 
 async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
-    // The venue's own set beside the admin surface's shared gauges (the
-    // ethereum engine's head/replay gauges are not this profile's facts).
+    // The same composition as the ethereum engine: this profile's own set,
+    // then the shared admin gauges (one definition — `Metrics::render`).
     let mut out = ctx.venue_metrics.render();
-    out.push_str(&ctx.metrics.render_admin());
+    out.push_str(&ctx.metrics.render());
     out
 }
 
@@ -178,8 +178,12 @@ async fn admin_shadow(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<ShadowRequest>,
 ) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
-    // The hand-back carries its own race guard (AdminSurface::shadow_hand_back).
-    Ok(Json(ctx.admin().shadow_hand_back(&req).await?))
+    // The hand-back carries its own race guard (AdminSurface::shadow_hand_back);
+    // the scan cost its pre-step paid lands in this profile's counter.
+    let (out, walked) = ctx.admin().shadow_hand_back(&req).await?;
+    ctx.venue_metrics
+        .add(&ctx.venue_metrics.scanned_blocks_total, walked);
+    Ok(Json(out))
 }
 
 async fn admin_deal(

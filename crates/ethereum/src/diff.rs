@@ -161,17 +161,17 @@ async fn finalize(
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;
     let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
     ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
-    ctx.metrics.set(&ctx.metrics.cursor_t, n);
+    ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);
     ctx.save_state()?;
-    ctx.metrics.inc(&ctx.metrics.blocks_applied);
-    ctx.metrics.set(&ctx.metrics.bal_writes, facts.applied as u64);
+    ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
+    ctx.eth_metrics.set(&ctx.eth_metrics.bal_writes, facts.applied as u64);
     ctx.metrics
-        .set(&ctx.metrics.bal_filtered_out, facts.stats.not_watched as u64);
+        .set(&ctx.eth_metrics.bal_filtered_out, facts.stats.not_watched as u64);
     ctx.metrics
-        .set(&ctx.metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
+        .set(&ctx.eth_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
     let duration_ms = started.elapsed().as_millis() as u64;
-    ctx.metrics.set(&ctx.metrics.last_apply_ms, duration_ms);
-    ctx.metrics.set(&ctx.metrics.t_head, t_latest);
+    ctx.eth_metrics.set(&ctx.eth_metrics.last_apply_ms, duration_ms);
+    ctx.eth_metrics.set(&ctx.eth_metrics.t_head, t_latest);
 
     // The rewound range is fully re-applied: resume normal late-completion skips.
     if let Some((_, until)) = facts.reapply {
@@ -231,9 +231,9 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
     let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
     ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
     ctx.save_state()?;
-    ctx.metrics.inc(&ctx.metrics.blocks_applied);
-    ctx.metrics.set(&ctx.metrics.t_head, t_head);
-    ctx.metrics.set(&ctx.metrics.cursor_t, n);
+    ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
+    ctx.eth_metrics.set(&ctx.eth_metrics.t_head, t_head);
+    ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);
     Ok(ApplyOutcome {
         source: "late",
         writes: 0,
@@ -398,7 +398,7 @@ async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
     let from = mirror_devnet::scan::scan_anchor(from, pin);
     let walked = mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, from, now)
         .await?;
-    ctx.metrics.add(&ctx.metrics.shadow_scanned_blocks, walked);
+    ctx.eth_metrics.add(&ctx.eth_metrics.shadow_scanned_blocks, walked);
     Ok(())
 }
 
@@ -444,12 +444,12 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     )
     .parity(&ctx.reth, n, &ctx.anvil_t)
     .await?;
-    ctx.metrics.add(&ctx.metrics.t_convergence_ok, probes.ok as u64);
+    ctx.eth_metrics.add(&ctx.eth_metrics.t_convergence_ok, probes.ok as u64);
     ctx.metrics
-        .add(&ctx.metrics.t_convergence_failed, probes.failed as u64);
+        .add(&ctx.eth_metrics.t_convergence_failed, probes.failed as u64);
     ctx.metrics
-        .set(&ctx.metrics.t_convergence_last_failed, probes.failed as u64);
+        .set(&ctx.eth_metrics.t_convergence_last_failed, probes.failed as u64);
     ctx.metrics
-        .add(&ctx.metrics.t_probe_skipped, probes.skipped as u64);
+        .add(&ctx.eth_metrics.t_probe_skipped, probes.skipped as u64);
     Ok(())
 }

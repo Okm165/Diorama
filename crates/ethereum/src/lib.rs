@@ -11,16 +11,18 @@ mod error;
 mod eth_source;
 pub mod feed_bridge;
 mod http;
+mod metrics;
 mod replay;
 mod selftest;
 mod source_sync;
 mod verify;
 
 // R1/R2 extraction shims: the frozen `crate::rpc::*`, `crate::bal::*` and
-// `crate::shadow|journal|state|metrics` paths keep resolving; the code lives
-// in `mirror-anvil` / `mirror-devnet` (zero call-site churn).
+// `crate::shadow|journal|state` paths keep resolving; the code lives in
+// `mirror-anvil` / `mirror-devnet` (zero call-site churn). `metrics` is the
+// profile's own module here (`mirror_devnet::metrics` is imported by name).
 pub use mirror_anvil as rpc;
-pub use mirror_devnet::{journal, metrics, shadow, state};
+pub use mirror_devnet::{journal, shadow, state};
 
 pub use error::{Error, Result};
 

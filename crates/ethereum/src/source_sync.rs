@@ -50,14 +50,14 @@ pub async fn source_sync_loop(ctx: Arc<Ctx>) {
             Ok(0) => tokio::time::sleep(interval).await,
             Ok(n) => {
                 ctx.metrics
-                    .add(&ctx.metrics.source_sync_delivered, n as u64);
+                    .add(&ctx.eth_metrics.source_sync_delivered, n as u64);
                 if last_report.elapsed() > Duration::from_secs(5) {
                     if let (Some(cl_head), Ok(reth_head)) = (
                         cl_head_el_block(&ctx, &mut head_cache).await,
                         ctx.reth.block_number().await,
                     ) {
                         ctx.metrics.set(
-                            &ctx.metrics.source_sync_gap_blocks,
+                            &ctx.eth_metrics.source_sync_gap_blocks,
                             cl_head.saturating_sub(reth_head),
                         );
                     }

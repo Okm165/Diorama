@@ -78,24 +78,14 @@ impl AdminSurface<'_> {
     /// with the crashed source, and the borrow that followed reverted on the
     /// crashed price). A scan that cannot complete fails the request: a
     /// partial registry would let the race through (marks intact, so the
-    /// caller can retry).
-    pub async fn scan_to_head(&self) -> Result<()> {
+    /// caller can retry). Returns the blocks walked — the profile records
+    /// them in its own scan-cost counter.
+    pub async fn scan_to_head(&self) -> Result<u64> {
         let head = self.target.block_number().await?;
-        let from = self.scanned_upto.load(Ordering::Relaxed);
-        if from == 0 {
-            self.scanned_upto.store(head, Ordering::Relaxed);
-            return Ok(());
-        }
-        // Anchored at the pin: after a re-pin the watermark can sit below the
-        // base, and walking there would read the source's own blocks (anvil
-        // forwards pre-pin ranges upstream) and mark mainnet's writes as the
-        // devnet's.
         let pin = self.target.fork_block().await?.unwrap_or(0);
-        let from = crate::scan::scan_anchor(from, pin);
-        let walked =
-            crate::scan::scan_range(self.target, self.shadow, self.scanned_upto, from, head).await?;
-        self.metrics.add(&self.metrics.shadow_scanned_blocks, walked);
-        Ok(())
+        // A fresh mark starts at the head: the hand-back's job is the recent
+        // devnet writes, not history (the registry was persisted).
+        crate::scan::scan_to(self.target, self.shadow, self.scanned_upto, pin, head, head).await
     }
 
     /// `POST /admin/epoch` — re-pin the devnet chain to its fork source's
@@ -182,11 +172,11 @@ impl AdminSurface<'_> {
     /// is the applier's devnet-block scan, on V the fork driver's), then hands
     /// the keys back. Without the flush the hand-back can read a source value
     /// that predates the devnet's own writes and re-mark the stale value.
-    pub async fn shadow_hand_back(&self, req: &ShadowRequest) -> Result<ShadowOutcome> {
-        if req.clear {
-            self.scan_to_head().await?;
-        }
-        self.shadow(req).await
+    /// Returns the outcome and the blocks the pre-step scan walked (0 when
+    /// there was nothing to flush); the profile records the count.
+    pub async fn shadow_hand_back(&self, req: &ShadowRequest) -> Result<(ShadowOutcome, u64)> {
+        let walked = if req.clear { self.scan_to_head().await? } else { 0 };
+        Ok((self.shadow(req).await?, walked))
     }
 
     /// Register the devnet-owned keys (`clear: false`).

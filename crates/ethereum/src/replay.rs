@@ -80,7 +80,7 @@ pub async fn replay_block(ctx: &Ctx, n: u64) -> Result<ReplayOutcome> {
     if skipped_blobs > 0 {
         // The alarm the operator watches for CL sidecar trouble (the replay
         // holds M and retries; the block is never mined partial or empty).
-        ctx.metrics.inc(&ctx.metrics.blob_failures);
+        ctx.eth_metrics.inc(&ctx.eth_metrics.blob_failures);
         return Err(Error::BlobsUnavailable {
             block: n,
             skipped: skipped_blobs,
@@ -116,7 +116,7 @@ async fn repair_m_state(ctx: &Ctx, n: u64) -> Result<()> {
             ctx.engine.loops.chunk_size,
         )
         .await?;
-        ctx.metrics.add(&ctx.metrics.m_repair_writes, applied as u64);
+        ctx.eth_metrics.add(&ctx.eth_metrics.m_repair_writes, applied as u64);
         tracing::debug!(
             block = n,
             writes = writes.len(),
@@ -139,11 +139,11 @@ async fn convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
         mirror_devnet::probes::ProbeRunner::replay(&ctx.engine.verifier.probes)
             .parity(&ctx.reth, n - 1, &ctx.anvil_m)
             .await?;
-    ctx.metrics.add(&ctx.metrics.m_convergence_ok, probes.ok as u64);
+    ctx.eth_metrics.add(&ctx.eth_metrics.m_convergence_ok, probes.ok as u64);
     ctx.metrics
-        .add(&ctx.metrics.m_convergence_failed, probes.failed as u64);
+        .add(&ctx.eth_metrics.m_convergence_failed, probes.failed as u64);
     ctx.metrics
-        .set(&ctx.metrics.m_convergence_last_failed, probes.failed as u64);
+        .set(&ctx.eth_metrics.m_convergence_last_failed, probes.failed as u64);
     Ok(())
 }
 
@@ -206,7 +206,7 @@ async fn finish_replay(
     let verification = if ctx.engine.verifier.enabled {
         let v = verify_block(ctx, n, &block, &m_block).await?;
         if v.receipts_unverified {
-            ctx.metrics.inc(&ctx.metrics.receipts_unverified);
+            ctx.eth_metrics.inc(&ctx.eth_metrics.receipts_unverified);
         }
         ctx.last_m_diverged
             .store(!v.ok, std::sync::atomic::Ordering::Relaxed);
@@ -221,16 +221,16 @@ async fn finish_replay(
         .map(|c| c.first_block)
         .unwrap_or(n);
     ctx.set_cursor_m(cursor_from(&m_block, first_block))?;
-    ctx.metrics.set(&ctx.metrics.cursor_m, n);
+    ctx.eth_metrics.set(&ctx.eth_metrics.cursor_m, n);
     ctx.set_reth_last_hash(format!("0x{:x}", block.header.hash))?;
     ctx.set_reth_last_block(n)?;
     ctx.save_state()?;
-    ctx.metrics.inc(&ctx.metrics.blocks_replayed);
+    ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_replayed);
     let duration_ms = started.elapsed().as_millis() as u64;
-    ctx.metrics.set(&ctx.metrics.last_replay_ms, duration_ms);
-    ctx.metrics.set(&ctx.metrics.m_head, n);
+    ctx.eth_metrics.set(&ctx.eth_metrics.last_replay_ms, duration_ms);
+    ctx.eth_metrics.set(&ctx.eth_metrics.m_head, n);
     ctx.metrics
-        .set(&ctx.metrics.pin_age_blocks, n.saturating_sub(first_block) + 1);
+        .set(&ctx.eth_metrics.pin_age_blocks, n.saturating_sub(first_block) + 1);
 
     let outcome = ReplayOutcome {
         txs: crate::ctx::block_txs(&block).len(),
@@ -782,9 +782,9 @@ fn log_and_drift(
         Some(v) => {
             let structural = matches!(v.class(), crate::verify::DivergenceClass::Fatal);
             if structural {
-                ctx.metrics.inc(&ctx.metrics.divergences);
+                ctx.eth_metrics.inc(&ctx.eth_metrics.divergences);
             } else {
-                ctx.metrics.add(&ctx.metrics.value_divergences, 1);
+                ctx.eth_metrics.add(&ctx.eth_metrics.value_divergences, 1);
             }
             if ctx.engine.loops.on_divergence == mirror_config::OnDivergence::Continue {
                 tracing::warn!(

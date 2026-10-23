@@ -53,6 +53,37 @@ pub async fn scan_range(
     Ok(walked)
 }
 
+/// The one shadow-scan walk (both profiles, both call shapes): from the
+/// high-water mark — or `first` when the mark is unset (a fresh chain) —
+/// anchored at the pin, up to `head`. Returns the blocks walked; the caller
+/// records them in its own metrics.
+///
+/// `first` carries each profile's fresh-chain policy: the ethereum engine
+/// starts at the head (its registry was persisted; T does not advance while
+/// the engine is down), the venue starts at its cursor (V advances when
+/// anyone mines, so blocks mined while the driver was down must be scanned).
+/// A fresh mark is *set*, never left at 0: the policy is the watermark's
+/// starting value, and leaving it unset would let the next scan re-run the
+/// policy against a moved head and skip blocks written in between.
+pub async fn scan_to(
+    target: &Rpc,
+    shadow: &Shared<Shadow>,
+    scanned_upto: &AtomicU64,
+    pin: u64,
+    head: u64,
+    first: u64,
+) -> Result<u64> {
+    let mark = scanned_upto.load(Ordering::Relaxed);
+    let from = if mark == 0 {
+        let from = scan_anchor(first, pin);
+        scanned_upto.store(from, Ordering::Relaxed);
+        from
+    } else {
+        scan_anchor(mark, pin)
+    };
+    scan_range(target, shadow, scanned_upto, from, head).await
+}
+
 /// Mark one block's writes devnet-owned: every sender's account fields, the
 /// recipients of value transfers, and the storage writes from the tx traces
 /// (prestateTracer diffMode — measured on anvil 1.8.6).

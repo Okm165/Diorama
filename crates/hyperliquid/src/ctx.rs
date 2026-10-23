@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The venue's own metric set (plan §7.8): the substrate gauges the shared
-/// `Metrics` owns are rendered beside these (`render_admin`).
+/// The venue's own metric set (plan §7.8): rendered beside the shared admin
+/// gauges (`mirror_devnet::metrics::Metrics::render`).
 #[derive(Default)]
 pub struct VenueMetrics {
     /// V's head.
@@ -227,7 +227,7 @@ mod tests {
         let venue = super::VenueMetrics::default();
         let admin = mirror_devnet::metrics::Metrics::default();
         let dupes: Vec<String> = series(&venue.render())
-            .intersection(&series(&admin.render_admin()))
+            .intersection(&series(&admin.render()))
             .cloned()
             .collect();
         assert!(dupes.is_empty(), "duplicate series: {dupes:?}");

@@ -41,7 +41,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
         tracing::debug!("follow head unavailable");
         return Ok(None);
     };
-    ctx.metrics.set(&ctx.metrics.reth_follow_head, follow);
+    ctx.eth_metrics.set(&ctx.eth_metrics.reth_follow_head, follow);
     // Schedule a small margin behind the head: the beacon cannot serve blob
     // sidecars for the newest block yet (measured: >15 s of retries on ~every
     // blob block with `follow: latest`, holding M each time). ~2 blocks of
@@ -51,7 +51,7 @@ async fn next_block_for(ctx: &Ctx, chain: Chain) -> Result<Option<u64>> {
     // Metrics-only read: a reth blip must not fail the poll (the gauge reads 0
     // until reth answers again; the next pass overwrites it).
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
-    ctx.metrics.set(&ctx.metrics.reth_head, reth_head);
+    ctx.eth_metrics.set(&ctx.eth_metrics.reth_head, reth_head);
 
     let (head, cursor, rpc) = chain_state(ctx, chain).await?;
     let cursor = validate_cursor(ctx, chain, rpc, head, cursor).await?;
@@ -97,13 +97,13 @@ async fn chain_state(
         ),
     };
     match chain {
-        Chain::M => ctx.metrics.set(&ctx.metrics.m_head, head),
+        Chain::M => ctx.eth_metrics.set(&ctx.eth_metrics.m_head, head),
         Chain::T => {
-            ctx.metrics.set(&ctx.metrics.t_head, head);
+            ctx.eth_metrics.set(&ctx.eth_metrics.t_head, head);
             if let Ok(info) = rpc.anvil_node_info().await {
                 if let Some(fork) = info.fork_config.fork_block_number {
                     ctx.metrics
-                        .set(&ctx.metrics.t_fork_age_blocks, head.saturating_sub(fork));
+                        .set(&ctx.eth_metrics.t_fork_age_blocks, head.saturating_sub(fork));
                 }
             }
         }
@@ -196,7 +196,7 @@ async fn handle_t_reset(ctx: &Ctx, rpc: &mirror_anvil::Rpc) -> Result<()> {
     let pin = rpc.anvil_node_info().await?.fork_config.fork_block_number;
     let known = ctx.state.lock()?.data.epoch_pin;
     let new_epoch = matches!((known, pin), (Some(k), Some(p)) if k != p);
-    ctx.metrics.inc(&ctx.metrics.t_resets_total);
+    ctx.eth_metrics.inc(&ctx.eth_metrics.t_resets_total);
     if new_epoch {
         let (slots, accounts) = ctx.shadow.lock()?.clear_all();
         ctx.save_shadow()?;
@@ -252,7 +252,7 @@ async fn restore_shadow(ctx: &Ctx) -> Result<()> {
 fn account_m_rebase_skip(ctx: &Ctx, from: u64, head: u64) {
     let skipped = head.saturating_sub(from);
     if skipped > 0 {
-        ctx.metrics.add(&ctx.metrics.m_rebase_skipped, skipped);
+        ctx.eth_metrics.add(&ctx.eth_metrics.m_rebase_skipped, skipped);
         tracing::warn!(
             from,
             to = head,
@@ -410,7 +410,7 @@ async fn reorg_continuity(ctx: &Ctx, chain: Chain, start: u64) -> Result<bool> {
     if start > 1 && start - 1 == last_block {
         if let Some(prev) = mirror_devnet::scan::block_hash(&ctx.reth, start - 1).await? {
             if prev != last_hash {
-                ctx.metrics.inc(&ctx.metrics.reorgs_detected);
+                ctx.eth_metrics.inc(&ctx.eth_metrics.reorgs_detected);
                 ctx.on_divergence(&format!("reth reorg at {}", start - 1));
                 return Ok(false);
             }
@@ -531,14 +531,6 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
             Ok(h) => h,
             Err(_) => continue,
         };
-        let last = ctx.shadow_scanned_upto.load(Ordering::Relaxed);
-        if last == 0 {
-            // First pass: do not scan pre-existing history (the registry was
-            // persisted); start from the current head. The applier's inline
-            // scan shares this high-water mark, so its blocks are not re-traced.
-            ctx.shadow_scanned_upto.store(t_head, Ordering::Relaxed);
-            continue;
-        }
         // Never scan at or below T's fork base: after a re-pin those blocks
         // are the source's own (anvil forwards pre-pin ranges upstream), and
         // marking their writes devnet-owned would shadow mainnet's real state
@@ -548,11 +540,23 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
             Ok(pin) => pin.unwrap_or(0),
             Err(_) => continue,
         };
-        let last = mirror_devnet::scan::scan_anchor(last, pin);
-        match mirror_devnet::scan::scan_range(&ctx.anvil_t, &ctx.shadow, &ctx.shadow_scanned_upto, last, t_head)
-            .await
+        // A fresh mark starts at the head: do not scan pre-existing history
+        // (the registry was persisted; T does not advance while the engine is
+        // down). The applier's inline scan shares this high-water mark, so its
+        // blocks are not re-traced.
+        match mirror_devnet::scan::scan_to(
+            &ctx.anvil_t,
+            &ctx.shadow,
+            &ctx.shadow_scanned_upto,
+            pin,
+            t_head,
+            t_head,
+        )
+        .await
         {
-            Ok(walked) => ctx.metrics.add(&ctx.metrics.shadow_scanned_blocks, walked),
+            Ok(walked) => ctx
+                .eth_metrics
+                .add(&ctx.eth_metrics.shadow_scanned_blocks, walked),
             Err(e) => tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block"),
         }
         // A save fault is logged, not swallowed: the marks are in memory and

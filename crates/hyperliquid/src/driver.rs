@@ -125,20 +125,23 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // The watermark starts from the persisted cursor, so blocks the devnet
     // mined while the driver was down are scanned too (V's head advances when
     // someone mines: this loop mines a non-empty pool, the tests mine
-    // explicitly — the chain runs with automine off).
-    let mut last = ctx.shadow_scanned_upto.load(Ordering::Relaxed);
-    if last == 0 {
-        last = cursor.as_ref().map(|c| c.block).unwrap_or(head);
-    }
-    // Never scan at or below the fork pin (the bridge anchors the same way):
-    // those blocks are the source's, their txs are not in this chain, and
-    // tracing one fails — anvil answers an unknown tx with `-32601 Method not
-    // found` (measured), which would stall the watermark below the pin and
-    // livelock the driver after a rewind or a re-pin.
-    last = scan::scan_anchor(last, ctx.pin.load(Ordering::Relaxed));
-    ctx.shadow_scanned_upto.store(last, Ordering::Relaxed);
-    if head > last {
-        let walked = scan::scan_range(&ctx.v, &ctx.shadow, &ctx.shadow_scanned_upto, last, head).await?;
+    // explicitly — the chain runs with automine off). Never at or below the
+    // fork pin (the bridge anchors the same way): those blocks are the
+    // source's, their txs are not in this chain, and tracing one fails —
+    // anvil answers an unknown tx with `-32601 Method not found` (measured),
+    // which would stall the watermark below the pin and livelock the driver
+    // after a rewind or a re-pin.
+    let first = cursor.as_ref().map(|c| c.block).unwrap_or(head);
+    let walked = scan::scan_to(
+        &ctx.v,
+        &ctx.shadow,
+        &ctx.shadow_scanned_upto,
+        ctx.pin.load(Ordering::Relaxed),
+        head,
+        first,
+    )
+    .await?;
+    if walked > 0 {
         ctx.venue_metrics
             .add(&ctx.venue_metrics.scanned_blocks_total, walked);
         ctx.save_shadow()?;

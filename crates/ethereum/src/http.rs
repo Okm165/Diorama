@@ -186,10 +186,10 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
 
 async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
     // The same composition as the venue engine: this profile's own set, then
-    // the shared admin gauges (one definition — `render_admin`), then the
+    // the shared admin gauges (one definition — `Metrics::render`), then the
     // feed bridge's counters.
-    let mut out = ctx.metrics.render();
-    out.push_str(&ctx.metrics.render_admin());
+    let mut out = ctx.eth_metrics.render();
+    out.push_str(&ctx.metrics.render());
     out.push_str(&ctx.feed_bridge_metrics.render());
     out
 }
@@ -227,8 +227,12 @@ async fn admin_shadow(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<ShadowRequest>,
 ) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
-    // The hand-back carries its own race guard (AdminSurface::shadow_hand_back).
-    Ok(Json(ctx.admin().shadow_hand_back(&req).await?))
+    // The hand-back carries its own race guard (AdminSurface::shadow_hand_back);
+    // the scan cost its pre-step paid lands in this profile's counter.
+    let (out, walked) = ctx.admin().shadow_hand_back(&req).await?;
+    ctx.eth_metrics
+        .add(&ctx.eth_metrics.shadow_scanned_blocks, walked);
+    Ok(Json(out))
 }
 
 async fn admin_deal(

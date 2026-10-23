@@ -377,7 +377,7 @@ taxonomy is shared too: `mirror_devnet::Error::{is_request_refusal,
 is_unavailable}` classify 4xx vs 503 once, and both engines map an upstream
 transport fault (anvil, the venue API) to 502.
 
-`make engine-symmetry` (`scripts/engine-symmetry.sh`, 22 checks) is the
+`make engine-symmetry` (`scripts/engine-symmetry.sh`, 23 checks) is the
 fitness function: it drives both engines' shared verbs live and requires
 identical statuses, shapes and refusal wording (digits normalized — a message
 may embed each chain's own cursor or ring size), the shared `/status` fields,
@@ -395,7 +395,9 @@ The behavioral checks, not just shapes:
 - **valid exposition**: each engine's `/metrics` carries no duplicate
   (name + labels) series — the shared admin gauges were once defined twice,
   with drifted HELP text (fixed 2026-10-23); the check keeps a re-introduction
-  visible.
+  visible. The sets themselves are layered: the shared crate renders exactly
+  the three admin gauges, and each profile renders its own set beside them
+  (`EthereumMetrics` / `VenueMetrics`) — pinned by a unit test on each side.
 - **rewind**: a beyond-ring request is one named refusal byte-for-byte; a
   1-block rewind returns the same wire shape on both (direct mode only — on
   the cluster it is a live mutation; the counts legitimately differ: T's
