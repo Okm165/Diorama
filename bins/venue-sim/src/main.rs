@@ -8,22 +8,20 @@
 //!
 //! Thin shell by design: the runtime is built here, the story lives in
 //! `mirror_hyperliquid`.
+use mirror_config::boot;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Worker stack budget: the same measured convention as the other binaries.
-const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
-
 fn main() -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .thread_stack_size(WORKER_STACK_SIZE)
+        .thread_stack_size(boot::WORKER_STACK_SIZE)
         .build()
     {
         Ok(runtime) => runtime,
         Err(e) => {
-            report(&e);
+            boot::report_error(&e);
             return ExitCode::FAILURE;
         }
     };
@@ -31,7 +29,7 @@ fn main() -> ExitCode {
         match run().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                report(&e);
+                boot::report_error(&e);
                 ExitCode::FAILURE
             }
         }
@@ -39,7 +37,7 @@ fn main() -> ExitCode {
 }
 
 async fn run() -> mirror_hyperliquid::Result<()> {
-    init_tracing();
+    boot::init_logging();
     let config = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/etc/mirror/instance.toml".to_string());
@@ -129,23 +127,4 @@ async fn run() -> mirror_hyperliquid::Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("MIRROR_LOG_JSON").map(|v| v != "0").unwrap_or(false);
-    if json {
-        fmt().with_env_filter(filter).json().init();
-    } else {
-        fmt().with_env_filter(filter).init();
-    }
-}
 
-/// Print the error and its full cause chain: the typed sources are the point.
-fn report(e: &dyn std::error::Error) {
-    eprintln!("Error: {e}");
-    let mut source = e.source();
-    while let Some(s) = source {
-        eprintln!("  caused by: {s}");
-        source = s.source();
-    }
-}

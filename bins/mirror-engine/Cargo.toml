@@ -7,6 +7,7 @@ license.workspace = true
 description = "The Mainnet Mirror engine binary (the ethereum profile's entrypoint)"
 
 [dependencies]
+mirror-config = { path = "../../crates/config" }
 mirror-ethereum = { path = "../../crates/ethereum" }
 tokio = { workspace = true }
 

@@ -56,19 +56,17 @@ struct StatusResponse {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
-            Error::Devnet(
-                mirror_devnet::Error::NoCursor
-                | mirror_devnet::Error::InvalidRewind { .. }
-                | mirror_devnet::Error::RewindBeyondRing { .. }
-                | mirror_devnet::Error::InvalidShadow { .. },
-            ) => StatusCode::BAD_REQUEST,
+            // The shared devnet taxonomy (mirror-devnet's typed predicates):
+            // both engines classify the same refusals identically.
+            Error::Devnet(e) if e.is_request_refusal() => StatusCode::BAD_REQUEST,
             Error::BadRequest { .. } => StatusCode::BAD_REQUEST,
             Error::NotFound { .. } | Error::NoMarket { .. } => StatusCode::NOT_FOUND,
             Error::NotConfigured { .. } => StatusCode::CONFLICT,
-            Error::ApiStatus { .. } | Error::Http(_) => StatusCode::BAD_GATEWAY,
-            Error::Warming | Error::Devnet(mirror_devnet::Error::Poisoned { .. }) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            // The upstream boundaries (anvil, the venue API): a transport
+            // fault is a bad gateway, not this service's fault.
+            Error::Rpc(_) | Error::ApiStatus { .. } | Error::Http(_) => StatusCode::BAD_GATEWAY,
+            Error::Warming => StatusCode::SERVICE_UNAVAILABLE,
+            Error::Devnet(e) if e.is_unavailable() => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -233,23 +231,23 @@ struct EpochResponse {
     source: String,
 }
 
-/// `/admin/probes`: run the at-pin parity probes now and report the counters
-/// (boot and re-pin run them automatically; the on-demand trigger matters
-/// after a hand-back, when the probes should go green again).
+/// `/admin/probes`: run the at-pin parity probes now and report the run (boot
+/// and re-pin run them automatically; the on-demand trigger matters after a
+/// hand-back, when the probes should go green again). The ethereum engine's
+/// route is the same verb over its M-vs-reth probe set; the cumulative
+/// counters live in `/metrics` on both.
 async fn admin_probes(State(ctx): State<Arc<Ctx>>) -> Result<Json<ProbeReport>> {
-    crate::driver::probes_now(&ctx).await?;
+    let outcome = crate::driver::probes_now(&ctx).await?;
     Ok(Json(ProbeReport {
-        ok: ctx.venue_metrics.probe_ok.load(Ordering::Relaxed),
-        failed: ctx.venue_metrics.probe_failed.load(Ordering::Relaxed),
-        skipped: ctx.venue_metrics.probe_skipped.load(Ordering::Relaxed),
-        last_failed: ctx.venue_metrics.probe_last_failed.load(Ordering::Relaxed),
+        ok: outcome.ok,
+        failed: outcome.failed,
+        skipped: outcome.skipped,
     }))
 }
 
 #[derive(Debug, Serialize)]
 struct ProbeReport {
-    ok: u64,
-    failed: u64,
-    skipped: u64,
-    last_failed: u64,
+    ok: usize,
+    failed: usize,
+    skipped: usize,
 }

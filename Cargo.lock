@@ -1054,7 +1054,6 @@ dependencies = [
  "mirror-config",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2577,6 +2576,7 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2599,6 +2599,7 @@ dependencies = [
 name = "mirror-engine"
 version = "0.1.0"
 dependencies = [
+ "mirror-config",
  "mirror-ethereum",
  "tokio",
 ]
@@ -4386,8 +4387,6 @@ dependencies = [
  "mirror-config",
  "mirror-hyperliquid",
  "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4399,7 +4398,6 @@ dependencies = [
  "mirror-hyperliquid",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -195,6 +195,9 @@ venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation,
 venue-product-sim: ## The daloc use-case simulation against the venue stack (endpoints via env)
 	python3 scripts/daloc-sim.py
 
+engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fitness function)
+	./scripts/engine-symmetry.sh
+
 feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
 	./scripts/feed-bridge.sh $(ARGS)
 

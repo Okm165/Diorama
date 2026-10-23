@@ -13,8 +13,10 @@
 //! unresolved wiring instead of failing on it.
 //!
 //! The loader is the only environment reader: services never call
-//! `std::env::var` themselves.
+//! `std::env::var` themselves ([`boot::init_logging`] is the one exception,
+//! and it lives here for exactly that reason).
 
+pub mod boot;
 mod env;
 mod instance;
 mod sections;

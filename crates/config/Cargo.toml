@@ -12,6 +12,8 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
+# boot::init_logging (the binaries' shared logging convention).
+tracing-subscriber = { workspace = true }
 # The mirror-config CLI.
 clap = { workspace = true }
 

@@ -83,15 +83,18 @@ struct TimeResponse {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
-            Error::Devnet(
-                mirror_devnet::Error::NoCursor
-                | mirror_devnet::Error::InvalidRewind { .. }
-                | mirror_devnet::Error::RewindBeyondRing { .. }
-                | mirror_devnet::Error::InvalidShadow { .. },
-            ) => StatusCode::BAD_REQUEST,
-            Error::Devnet(mirror_devnet::Error::Poisoned { .. }) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            // The shared devnet taxonomy (mirror-devnet's typed predicates):
+            // both engines classify the same refusals identically.
+            Error::Devnet(e) if e.is_request_refusal() => StatusCode::BAD_REQUEST,
+            Error::Devnet(e) if e.is_unavailable() => StatusCode::SERVICE_UNAVAILABLE,
+            // The upstream anvil boundary: a transport fault is a bad
+            // gateway, not this service's fault.
+            Error::Rpc(_) => StatusCode::BAD_GATEWAY,
+            // The feed bridge's named refusals (the venue maps its own
+            // NotConfigured / NotFound the same way).
+            Error::FeedBridgeUnconfigured => StatusCode::CONFLICT,
+            Error::FeedBridgeUnknown { .. } => StatusCode::NOT_FOUND,
+            Error::FeedBridgeWaiting { .. } => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {
@@ -131,6 +134,7 @@ pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()>
         .route("/admin/shadow", post(admin_shadow))
         .route("/admin/deal", post(admin_deal))
         .route("/admin/epoch", post(admin_epoch))
+        .route("/admin/probes", post(admin_probes))
         .with_state(ctx)
         .merge(feed_routes);
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -270,6 +274,25 @@ async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>>
 struct EpochResponse {
     reset: bool,
     source: String,
+}
+
+/// `/admin/probes`: run the configured probes now (M at the cursor vs reth)
+/// and report the run. The venue's route is the same verb over its at-pin
+/// probe set; the per-block convergence counters stay the loop's.
+async fn admin_probes(State(ctx): State<Arc<Ctx>>) -> Result<Json<ProbeReport>> {
+    let outcome = crate::driver::probes_now(&ctx).await?;
+    Ok(Json(ProbeReport {
+        ok: outcome.ok,
+        failed: outcome.failed,
+        skipped: outcome.skipped,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct ProbeReport {
+    ok: usize,
+    failed: usize,
+    skipped: usize,
 }
 
 /// `/admin/feed` — the bridged feeds and their state.

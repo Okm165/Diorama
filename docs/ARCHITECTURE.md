@@ -741,13 +741,18 @@ the base truth lives in the registry) lands with the venue's journaling slice.
 | `GET /status` | `head`, `cursor`, `fork_pin`, `epoch_pin`, `halted`, `shadowed_slots`, `shadowed_accounts`, `shadowed` (the list), `probes`, `source` |
 | `GET /metrics` | the `venue_*` set (below) + the shared admin gauges (`mirror_shadowed_slots`, `mirror_halted`, `mirror_frozen`) |
 | `POST /admin/deal`, `POST /admin/shadow` | the shared devnet surface, verbatim |
+| `POST /admin/rewind` | the engine's own-write journal (the deal faucet's silent storage writes, recorded under the scan cursor); the shared rewind undoes the last N scanned blocks newest-first |
 | `POST /admin/pause` / `POST /admin/resume` | hold / release the driver |
 | `POST /admin/epoch` | re-pin V to the source's latest block (`anvil_reset` with an explicit forking config - measured: no-params drops the fork); the driver's canary notices on its next pass and runs the epoch rule, so the route never replicates that logic |
+| `POST /admin/probes` | run the at-pin probe set now and report the run (the ethereum engine's route is the same verb over its M-vs-reth set) |
 
-`/admin/rewind` is **deliberately absent**: the venue's journal is empty until
-the devnet's own writes are journaled (or snapshots are wired), and a rewind
-that silently restores nothing while reporting success is the exact no-op the
-doctrine forbids. The route lands with that journaling.
+**The deliberate asymmetries** (the rest of the surface is shared, verb for
+verb — `make engine-symmetry` is the fitness function): `/admin/time` is the
+ethereum's (V's clock is native anvil; a route nobody re-aligns would be a
+no-op), the `/admin/feed*` routes belong to the L1 feed bridge (the venue's
+counterpart is the simulator's control plane), and `/status` reports each
+engine's own facts around the shared fields (`cursor`, `halted`,
+`shadowed*`).
 
 | Metric | Meaning |
 |---|---|

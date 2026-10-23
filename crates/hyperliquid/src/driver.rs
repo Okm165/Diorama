@@ -17,7 +17,7 @@
 //!   what the devnet owns.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use mirror_devnet::probes::ProbeRunner;
+use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
 use mirror_devnet::scan;
 use mirror_devnet::state::cursor_from;
 use std::sync::atomic::Ordering;
@@ -321,15 +321,22 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
 /// alarmed: the source cannot serve it, and a mismatch would be a lie.
 /// Run the at-pin probes now (the admin route's entry: boot and re-pin run
 /// them automatically; this is the on-demand trigger, e.g. after a hand-back).
-pub async fn probes_now(ctx: &Ctx) -> Result<()> {
+pub async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
     let pin = ctx.v.anvil_node_info().await?.fork_config.fork_block_number;
     probes_at_pin(ctx, pin).await
 }
 
-async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
+/// Run the at-pin probe set and return the run's outcome (the cumulative
+/// counters are updated here — an at-pin run is the only probe source on the
+/// venue side). The route reports the run; `/metrics` carries the totals.
+pub async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> {
+    let skipped_all = ProbeOutcome {
+        skipped: ctx.venue.probes.len(),
+        ..Default::default()
+    };
     let Some(pin) = pin else {
         tracing::warn!("at-pin probes skipped: V has no fork pin");
-        return Ok(());
+        return Ok(skipped_all);
     };
     let source_head = ctx.source_rpc.block_number().await?;
     if pin != source_head {
@@ -341,7 +348,7 @@ async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
             skipped = ctx.venue.probes.len(),
             "at-pin probes skipped: the source serves its latest state (measured); the pin is not the source head"
         );
-        return Ok(());
+        return Ok(skipped_all);
     }
     let probes = ProbeRunner::devnet(&ctx.venue.probes, &ctx.shadow, false)
         .parity(&ctx.source_rpc, pin, &ctx.v)
@@ -362,7 +369,11 @@ async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
                 head_now,
                 "at-pin probes raced a source advance; the run is counted skipped"
             );
-            return Ok(());
+            return Ok(ProbeOutcome {
+                ok: probes.ok,
+                skipped: probes.failed + probes.skipped,
+                ..Default::default()
+            });
         }
     }
     ctx.venue_metrics
@@ -380,7 +391,7 @@ async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
         skipped = probes.skipped,
         "at-pin probes complete"
     );
-    Ok(())
+    Ok(probes)
 }
 
 #[cfg(test)]

@@ -1,0 +1,77 @@
+//! The binaries' shared boot conventions: the logging init (the workspace's
+//! one env read besides the loader's), the measured worker stack budget, and
+//! the fatal-error report.
+//!
+//! One home so the four binaries (`mirror-engine`, `venue-mirror`,
+//! `venue-sim`, `cctp-bridge`) cannot drift: the measured facts below are the
+//! engine's, and the others inherit them deliberately — one budget for every
+//! binary is one thing to know.
+use std::error::Error as StdError;
+
+/// Worker stack budget for every binary's tokio runtime.
+///
+/// Debug builds give every by-value 128 KiB `Blob` temporary its own stack
+/// slot: the blob/KZG chain alone needs ~2.1 MiB (measured: `repair_proofs`
+/// 1.28 MiB + `validate_sidecars` 0.64 MiB, `encode_blob_tx` 1.29 MiB), which
+/// is exactly tokio's 2 MiB worker default — the first blob block overflowed
+/// it. The binaries own an explicit budget with headroom; release builds use
+/// a fraction of it, and the cost is address space, not resident memory.
+pub const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// The budget must keep headroom over the measured ~2.1 MiB blob/KZG chain
+/// (debug builds) — a compile-time fact, not a runtime test.
+const _: () = assert!(WORKER_STACK_SIZE >= 8 * 1024 * 1024);
+
+/// Install the tracing subscriber. `MIRROR_LOG_JSON` selects the JSON form
+/// (any value but `0`); `RUST_LOG` filters (default `info`).
+///
+/// This is the one env read outside the config loader — a *logging* concern,
+/// not configuration — and it lives here because every binary must read it
+/// the same way (the loader's rule, applied to the boot step).
+pub fn init_logging() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let json = std::env::var("MIRROR_LOG_JSON").map(|v| v != "0").unwrap_or(false);
+    if json {
+        fmt().with_env_filter(filter).json().init();
+    } else {
+        fmt().with_env_filter(filter).init();
+    }
+}
+
+/// Print a fatal error and its full cause chain: the typed sources are the
+/// point (the operator sees the boundary that failed, not a flattened
+/// string).
+pub fn report_error(error: &dyn StdError) {
+    eprintln!("Error: {error}");
+    let mut source = error.source();
+    while let Some(s) = source {
+        eprintln!("  caused by: {s}");
+        source = s.source();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_error_walks_the_whole_chain() {
+        #[derive(Debug)]
+        struct Layer(Option<Box<dyn StdError + Send + Sync>>);
+        impl std::fmt::Display for Layer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "layer")
+            }
+        }
+        impl StdError for Layer {
+            fn source(&self) -> Option<&(dyn StdError + 'static)> {
+                self.0.as_ref().map(|b| b.as_ref() as &(dyn StdError + 'static))
+            }
+        }
+        // The chain walks without panicking; the print goes to stderr.
+        let root = Layer(None);
+        let outer = Layer(Some(Box::new(root)));
+        report_error(&outer);
+    }
+}

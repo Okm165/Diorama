@@ -11,7 +11,6 @@ mirror-cctp = { path = "../../crates/cctp" }
 mirror-config = { path = "../../crates/config" }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

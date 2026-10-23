@@ -78,6 +78,28 @@ pub enum Error {
     ShadowScan { block: u64, failed: usize },
 }
 
+impl Error {
+    /// A refusal the caller can fix: the HTTP surfaces answer 4xx. The
+    /// taxonomy is shared here so both engines classify identically (the
+    /// grouping comment above the variants is the fact; this is the
+    /// predicate).
+    pub fn is_request_refusal(&self) -> bool {
+        matches!(
+            self,
+            Error::NoCursor
+                | Error::InvalidRewind { .. }
+                | Error::RewindBeyondRing { .. }
+                | Error::InvalidShadow { .. }
+        )
+    }
+
+    /// A server-side state that blocks correct answers until a restart: the
+    /// HTTP surfaces answer 503.
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Error::Poisoned { .. })
+    }
+}
+
 /// The crate's result: `Result<T>` everywhere (the error is fixed).
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

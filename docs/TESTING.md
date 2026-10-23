@@ -315,6 +315,42 @@ chain facts:
   credit), then a `sendAsset` naming that address (the completion — the system
   address sends the ERC-20 back), exact balances end to end.
 
+## Engine symmetry (the two services read the same way)
+
+The two engines are one design over two sources. The shared crates carry the
+substrate — `mirror-devnet` (shadow, journal, cursor, admin, probes, metrics),
+`mirror-anvil` (the RPC boundary), `mirror-config` (the layered config plus the
+binaries' shared boot conventions: the worker stack budget, the logging init,
+the fatal-error report) — and each project owns its driver
+(`crates/ethereum/src/driver.rs`, `crates/hyperliquid/src/driver.rs`), its
+HTTP surface, and its source-specific loops. The refusal taxonomy is shared
+too: `mirror_devnet::Error::{is_request_refusal, is_unavailable}` classify 4xx
+vs 503 once, and both engines map an upstream transport fault (anvil, the
+venue API) to 502.
+
+`make engine-symmetry` (`scripts/engine-symmetry.sh`) is the fitness function:
+it drives both engines' shared verbs live and requires identical statuses,
+shapes and refusal wording (digits normalized — a message may embed each
+chain's own cursor or ring size), the shared `/status` fields, the shared
+admin gauges in `/metrics`, and exactly the documented absences:
+
+- `/admin/time` — the ethereum's persistent clock offset; V's clock is native
+  anvil (`setNextBlockTimestamp`/`evm_mine`), so a route nobody re-aligns
+  would be a no-op.
+- `/admin/feed*` — the L1 feed bridge's routes; the venue's counterpart is the
+  simulator's control plane (`/control/crash`, `/control/deal`, …).
+- `/status` — each engine reports its own facts (reth/M/T vs fork pin/probes/
+  source); the shared fields (`cursor`, `halted`, `shadowed*`) are present on
+  both, and `/admin/deal` discovers the *same* storage slot on both USDCs
+  (Circle's FiatTokenV2 layout) — a symmetry the script asserts.
+
+Entry shape follows the need, not symmetry for its own sake: the ethereum's
+lib owns a `main_entry` with subcommands (`run` / `selftest` / `rewind`), while
+the venue has no subcommands and its bin is the composition root (plan §11.3
+rule 10). `make venue-closure` has no script: the venue has no incoming parent
+diffs to close a scope over — its standing scope check is the at-pin probe set
+(`/admin/probes`, `venue_probe_*`), which the venue-drill and smoke exercise.
+
 ## The CCTP bridge — measured facts and acceptance
 
 The real lane (`cctp-bridge`, Iris 8095 / control 8096) moves native USDC
