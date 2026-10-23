@@ -950,7 +950,11 @@ the raw `u32` survives only at the ABI boundary (`.0` in the `sol!` call) and in
 test fixtures that speak wire bytes. Chain ids use alloy's official type
 (`alloy_chains::Chain`, aliased `ChainId` because cctp already has a `Chain`);
 the measured numeric pins stay `u64` consts and are wrapped at the struct
-boundary. Both changes made the compiler walk every site: the control API's
+boundary. The same boundary decides `#[non_exhaustive]`: it marks the *remote*
+vocabulary (the venue's info and WS enums, the CoreWriter actions) so a
+consumer outside the defining crate must carry a default arm, while our own
+taxonomies — errors, config, persisted state — stay exhaustive, because a new
+variant there *should* break every match at compile time. Both changes made the compiler walk every site: the control API's
 request fields and min-fee map, the persisted record, the watcher's lane check,
 and the two `depositForBurn` builders — the silent-mixing class, enumerated.
 

@@ -13,6 +13,11 @@
 //! 1e-6 by the venue client — f64 arithmetic would fail it at the edges.
 //! Fields the venue may null (`midPx` in thin books, `liquidationPx` on cross
 //! positions) are `Option`.
+//!
+//! Every enum here is `#[non_exhaustive]`: this is the venue's vocabulary and
+//! it may grow, so a consumer outside this crate must carry a default arm. Our
+//! own taxonomies (errors, config, persisted state) stay exhaustive — a new
+//! variant there *should* break every match at compile time.
 use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -22,6 +27,7 @@ use std::collections::BTreeMap;
 /// (hl_mock answered them as unrouted; the handler keeps that contract).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum InfoRequest {
     #[serde(rename = "clearinghouseState")]
     ClearinghouseState {
@@ -164,6 +170,7 @@ pub struct Leverage {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum LeverageType {
     Cross,
     Isolated,
@@ -186,6 +193,7 @@ pub struct AssetPosition {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PositionKind {
     #[serde(rename = "oneWay")]
     OneWay,
@@ -260,6 +268,7 @@ pub struct Order {
 
 /// `A` = ask/sell, `B` = bid/buy.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Side {
     #[serde(rename = "A")]
     Ask,
@@ -494,6 +503,7 @@ pub struct SpotPair {
 /// `portfolioMargin`/`dexAbstraction`; unknown users serve `default`).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub enum UserAbstraction {
     #[default]
     #[serde(rename = "default")]

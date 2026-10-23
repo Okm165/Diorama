@@ -77,6 +77,7 @@ pub const SPOT_DEX: u32 = u32::MAX;
 /// One decoded action. The payloads are decoded from their ABI words; a short
 /// or malformed payload is [`CoreAction::Malformed`] (counted, never applied).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum CoreAction {
     /// 1: `(uint32 asset, bool isBuy, uint64 limitPx, uint64 sz, bool reduceOnly, uint8 tif, uint128 cloid)`.
     LimitOrder {
