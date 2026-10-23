@@ -204,7 +204,11 @@ workflow a margin product actually executes, in one pass and on live state
 
 All three scripts share `scripts/lib.sh` - the measured conventions live there
 (explicit gas on devnet sends, offline `cast` without `--rpc-url`, polled
-receipts) instead of being copied three times.
+receipts) instead of being copied three times. The venue-side dual-mode
+scripts (the epoch drill, the capability proof) share `scripts/lib-venue.sh`
+the same way: one transport per mode (direct URLs for a scratch stack, or
+`kubectl exec` from the venue engine pod in the cluster), plus the assertion
+helpers and the balance read - so a fix to the transport lands in one place.
 
 ## The daloc use-case simulation (`scripts/daloc-sim.py`)
 
