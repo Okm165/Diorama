@@ -171,13 +171,19 @@ fn fill_status(
     }
     match action
         .to_order(meta)
-        .and_then(|o| state.sim.order(&state.feed, user, &o))
+        .and_then(|o| state.sim.place(&state.feed, user, &o))
     {
-        Ok(fill) => OrderStatus::Filled(FilledInfo {
-            total_sz: fill.total_sz.to_string(),
-            avg_px: fill.avg_px.to_string(),
-            oid: fill.oid,
-        }),
+        Ok(placed) => match (placed.fill, placed.resting) {
+            (Some(fill), _) => OrderStatus::Filled(FilledInfo {
+                total_sz: fill.total_sz.to_string(),
+                avg_px: fill.avg_px.to_string(),
+                oid: fill.oid,
+            }),
+            (None, Some(oid)) => OrderStatus::Resting(RestingInfo { oid }),
+            (None, None) => OrderStatus::Error(
+                "order produced neither a fill nor a rest (an internal state)".into(),
+            ),
+        },
         Err(e) => OrderStatus::Error(e.to_string()),
     }
 }
@@ -332,6 +338,7 @@ impl OrderAction {
             Some(p) => Some(p.parse().map_err(|_| Error::bad_request(format!("limit price `{p}` is not a decimal"),))?),
             None => None,
         };
+        let mut trigger = None;
         let tif = match &self.t {
             None => crate::sim::order::Tif::Ioc,
             Some(OrderType::Trigger {
@@ -339,11 +346,26 @@ impl OrderAction {
                 trigger_px,
                 tpsl,
             }) => {
-                return Err(Error::bad_request(format!(
-                        "trigger orders are not modeled (`{tpsl}` at {trigger_px}, \
-                         market={is_market}: there is no trigger engine in the devnet; \
-                         plan §5, Phase 2)"
-                    ),))
+                let px: Decimal = trigger_px.parse().map_err(|_| {
+                    Error::bad_request(format!("trigger price `{trigger_px}` is not a decimal"))
+                })?;
+                let tpsl = match tpsl.as_str() {
+                    "tp" => crate::sim::order::Tpsl::Tp,
+                    "sl" => crate::sim::order::Tpsl::Sl,
+                    other => {
+                        return Err(Error::bad_request(format!(
+                            "unknown tpsl `{other}` (docs: \"tp\" | \"sl\")"
+                        )))
+                    }
+                };
+                trigger = Some(crate::sim::order::Trigger {
+                    is_market: *is_market,
+                    trigger_px: px,
+                    tpsl,
+                });
+                // A trigger does not walk now; its tif is irrelevant (the
+                // execution uses the order's limit price, or a market IOC).
+                crate::sim::order::Tif::Ioc
             }
             Some(OrderType::Limit { tif }) => {
                 crate::sim::order::Tif::from_wire(tif).ok_or_else(|| Error::bad_request(format!("unknown tif `{tif}`"),))?
@@ -356,6 +378,8 @@ impl OrderAction {
             limit_px,
             tif,
             reduce_only: self.r,
+            cloid: self.c,
+            trigger,
         })
     }
 }
@@ -390,7 +414,15 @@ pub(crate) struct OrderData {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OrderStatus {
     Filled(FilledInfo),
+    /// The venue's third status: the order rests on the book.
+    Resting(RestingInfo),
     Error(String),
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RestingInfo {
+    pub oid: u64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -869,13 +901,16 @@ mod tests {
         let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
         let err = order_parts(&body, &req.action).unwrap_err();
         assert!(err.contains("builder fees"), "{err}");
-        // A trigger order is refused by name at the order mapping.
+        // A trigger order maps into its typed shape (armed, not walked).
         let action: OrderAction = serde_json::from_str(
             r#"{"a":0,"b":true,"s":"1","t":{"trigger":{"isMarket":true,"triggerPx":"100","tpsl":"sl"}}}"#,
         )
         .unwrap();
-        let err = action.to_order(Some(&eth_meta())).unwrap_err();
-        assert!(format!("{err}").contains("trigger orders"), "{err}");
+        let order = action.to_order(Some(&eth_meta())).unwrap();
+        let trigger = order.trigger.expect("a trigger order carries its trigger");
+        assert!(trigger.is_market);
+        assert_eq!(trigger.trigger_px, "100".parse().unwrap());
+        assert_eq!(trigger.tpsl, crate::sim::order::Tpsl::Sl);
         // The cloid parses as its own type; expiresAfter rides the body.
         let action: OrderAction = serde_json::from_str(
             r#"{"a":0,"b":true,"s":"1","c":"0x1234567890abcdef1234567890abcdef"}"#,

@@ -245,17 +245,49 @@ impl Bridge {
                 self.set_abstraction(user, abstraction)?;
             }
             order @ CoreAction::LimitOrder { .. } => self.limit_order(caller, &order),
-            // Cancels have nothing to act on: the lane is IOC-only, so no
-            // order ever rests — refused by name and counted, never a silent
-            // no-op (a cancel of a resting order cannot exist here).
-            CoreAction::CancelByOid { .. } | CoreAction::CancelByCloid { .. } => {
-                self.metrics.inc_refusals();
-                tracing::warn!(account = %caller, "bridge: cancel refused (no resting orders)");
+            CoreAction::CancelByOid { asset, oid } => {
+                match self.coin_of(asset) {
+                    Some(coin) => match self.sim.cancel(caller, &coin, oid) {
+                        Ok(()) => tracing::info!(account = %caller, coin = %coin, oid, "bridge: CoreWriter cancel executed"),
+                        Err(e) => {
+                            self.metrics.inc_refusals();
+                            tracing::warn!(account = %caller, coin = %coin, oid, error = %e, "bridge: CoreWriter cancel refused");
+                        }
+                    },
+                    None => {
+                        self.metrics.inc_refusals();
+                        tracing::warn!(account = %caller, asset, "bridge: cancel for an unknown asset refused");
+                    }
+                }
+            }
+            CoreAction::CancelByCloid { asset, cloid } => {
+                match self.coin_of(asset) {
+                    Some(coin) => {
+                        let cloid = alloy_primitives::B128::from(cloid);
+                        match self.sim.cancel_by_cloid(caller, &coin, cloid) {
+                            Ok(()) => tracing::info!(account = %caller, coin = %coin, "bridge: CoreWriter cancelByCloid executed"),
+                            Err(e) => {
+                                self.metrics.inc_refusals();
+                                tracing::warn!(account = %caller, coin = %coin, error = %e, "bridge: CoreWriter cancelByCloid refused");
+                            }
+                        }
+                    }
+                    None => {
+                        self.metrics.inc_refusals();
+                        tracing::warn!(account = %caller, asset, "bridge: cancelByCloid for an unknown asset refused");
+                    }
+                }
             }
             CoreAction::Unmodeled { .. } => {}
             CoreAction::Malformed => self.metrics.inc_malformed(),
         }
         Ok(())
+    }
+
+    /// The asset index -> coin map the CoreWriter actions address (`None` =
+    /// an index the live meta does not carry: a named refusal upstream).
+    fn coin_of(&self, asset: u32) -> Option<String> {
+        self.feed.meta()?.universe.get(asset as usize).map(|a| a.name.clone())
     }
 
     /// The CoreWriter limit order (id 1): prices and sizes arrive as 10^8 ×
@@ -279,8 +311,15 @@ impl Bridge {
             tracing::warn!(account = %caller, asset, "bridge: CoreWriter order for an unknown asset refused");
             return;
         };
-        match self.sim.order(&self.feed, caller, &order) {
-            Ok(fill) => tracing::info!(account = %caller, coin = %order.coin, sz = %fill.total_sz, avg_px = %fill.avg_px, "bridge: CoreWriter order filled"),
+        match self.sim.place(&self.feed, caller, &order) {
+            Ok(placed) => {
+                if let Some(fill) = &placed.fill {
+                    tracing::info!(account = %caller, coin = %order.coin, sz = %fill.total_sz, avg_px = %fill.avg_px, "bridge: CoreWriter order filled");
+                }
+                if let Some(oid) = placed.resting {
+                    tracing::info!(account = %caller, coin = %order.coin, oid, "bridge: CoreWriter order resting");
+                }
+            }
             Err(e) => {
                 self.metrics.inc_refusals();
                 tracing::warn!(account = %caller, coin = %order.coin, error = %e, "bridge: CoreWriter order refused");
@@ -490,6 +529,7 @@ fn core_order(
         limit_px,
         sz,
         reduce_only,
+        cloid,
         ..
     } = action
     else {
@@ -504,6 +544,11 @@ fn core_order(
         limit_px: Some(Decimal::from(*limit_px) / scale),
         tif,
         reduce_only: *reduce_only,
+        // The CoreWriter payload carries the cloid as a uint128 (docs,
+        // action 1); zero means "none" (the wire's absent value).
+        cloid: (*cloid != 0).then(|| alloy_primitives::B128::from(*cloid as u128)),
+        // The CoreWriter has no trigger variant: limit orders only.
+        trigger: None,
     })
 }
 

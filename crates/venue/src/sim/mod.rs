@@ -47,6 +47,19 @@ pub(crate) struct SimState {
     pub next_oid: u64,
     #[serde(default)]
     pub accounts: Accounts,
+    /// The devnet's resting book (the venue's open orders): keyed by oid.
+    #[serde(default)]
+    pub resting: std::collections::BTreeMap<u64, crate::sim::order::RestingOrder>,
+    /// The bounded terminal history (`orderStatus` answers for filled and
+    /// canceled orders, as the venue does).
+    #[serde(default)]
+    pub terminal: std::collections::BTreeMap<u64, crate::sim::order::TerminalOrder>,
+    /// The nonce sets (the venue's rule: the 100 highest per signer).
+    #[serde(default)]
+    pub nonces: std::collections::BTreeMap<Address, std::collections::BTreeSet<u64>>,
+    /// `scheduleCancel` deadlines per account (the dead-man's switch).
+    #[serde(default)]
+    pub scheduled_cancels: std::collections::BTreeMap<Address, u64>,
 }
 
 /// The sim's metrics (rendered beside the feed's).
@@ -68,6 +81,11 @@ pub(crate) struct SimMetrics {
     pub advances_total: AtomicU64,
     /// Orders the matching lane filled (the impact lane's liveness).
     pub orders_filled_total: AtomicU64,
+    /// Trigger orders armed / fired by the tick.
+    pub triggers_armed_total: AtomicU64,
+    pub triggers_fired_total: AtomicU64,
+    /// Fills that charged a fee (the fee lane's liveness).
+    pub fees_charged_total: AtomicU64,
 }
 
 impl SimMetrics {
@@ -461,9 +479,153 @@ impl Sim {
         }
         let now = crate::now_ms();
         self.accrue_all(feed, now)?;
+        self.run_resting(feed, now)?;
         let liquidated = self.check_all(feed, now)?;
         self.save_if_dirty()?;
         Ok(liquidated)
+    }
+
+    /// The resting-book pass (the 1 Hz automaton): scheduled cancels fire,
+    /// armed triggers whose mark crossed execute, and resting orders the live
+    /// book has crossed fill at their own price (they are the maker; the live
+    /// levels they take are consumed — the impact lane).
+    fn run_resting(&self, feed: &MarketFeed, now_ms: u64) -> Result<()> {
+        // (a) scheduleCancel: the dead-man's switch cancels everything due.
+        let due: Vec<Address> = {
+            let st = self.state.lock()?;
+            st.scheduled_cancels
+                .iter()
+                .filter(|(_, t)| **t <= now_ms)
+                .map(|(a, _)| *a)
+                .collect()
+        };
+        for account in due {
+            let mine = self.resting_orders(Some(account))?;
+            let n = mine.len();
+            for r in mine {
+                let _ = self.cancel(account, &r.coin, r.oid);
+            }
+            {
+                let mut st = self.state.lock()?;
+                st.scheduled_cancels.remove(&account);
+            }
+            tracing::info!(account = %account, canceled = n, "scheduled cancel fired (dead-man's switch)");
+        }
+        // (b) triggers: fire when the mark crosses the trigger price.
+        for r in self.resting_orders(None)? {
+            let Some(t) = r.trigger else { continue };
+            let Some((mark, _)) = feed.required_prices(&r.coin) else {
+                continue;
+            };
+            let fires = match (r.is_buy, t.tpsl) {
+                (false, crate::sim::order::Tpsl::Tp) => mark >= t.trigger_px,
+                (false, crate::sim::order::Tpsl::Sl) => mark <= t.trigger_px,
+                (true, crate::sim::order::Tpsl::Tp) => mark <= t.trigger_px,
+                (true, crate::sim::order::Tpsl::Sl) => mark >= t.trigger_px,
+            };
+            if !fires {
+                continue;
+            }
+            // The trigger leaves the book first: a failed execution cancels
+            // it, as the venue's does (never a silent re-arm).
+            let _ = self.cancel(r.account, &r.coin, r.oid);
+            let order = crate::sim::order::Order {
+                coin: r.coin.clone(),
+                is_buy: r.is_buy,
+                size: r.sz,
+                limit_px: if t.is_market { None } else { Some(r.px) },
+                tif: crate::sim::order::Tif::Ioc,
+                reduce_only: r.reduce_only,
+                cloid: r.cloid,
+                trigger: None,
+            };
+            match self.place(feed, r.account, &order) {
+                Ok(placed) => {
+                    self.metrics.triggers_fired_total.fetch_add(1, Ordering::Relaxed);
+                    tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid,
+                        filled = placed.fill.as_ref().map(|f| f.total_sz.to_string()).unwrap_or_default(),
+                        "trigger fired");
+                }
+                Err(e) => {
+                    tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "trigger execution refused; the trigger is canceled")
+                }
+            }
+        }
+        // (c) passive fills: a resting order the live book has crossed.
+        for r in self.resting_orders(None)? {
+            if r.trigger.is_some() {
+                continue;
+            }
+            let Some(book) = feed.book(&r.coin, now_ms) else {
+                continue;
+            };
+            let opposite = usize::from(r.is_buy);
+            let Some(best) = book.levels[opposite].first() else {
+                continue;
+            };
+            let crossed = if r.is_buy { best.px <= r.px } else { best.px >= r.px };
+            if !crossed {
+                continue;
+            }
+            let take = r.sz.min(best.sz);
+            if take <= Decimal::ZERO {
+                continue;
+            }
+            let leverage = self.leverage_for(r.account, &r.coin, feed.meta().as_ref())?;
+            let notional = crate::sim::account::mul(take, r.px, "maker notional")?;
+            let facts = crate::sim::account::FillFacts {
+                coin: r.coin.clone(),
+                is_buy: r.is_buy,
+                size: take,
+                px: r.px,
+                leverage,
+                reduce_only: r.reduce_only,
+                fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
+            };
+            let clock = self.clock(now_ms)?;
+            if let Err(e) = self.with_account(r.account, |account| {
+                crate::sim::account::accrue_funding(account, feed, clock)?;
+                crate::sim::account::apply_fill(account, &facts)
+            }) {
+                tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "passive fill refused");
+                continue;
+            }
+            feed.consume(crate::feed::Consumption {
+                coin: r.coin.clone(),
+                side: opposite as u8,
+                price: best.px,
+                size: take,
+            })?;
+            self.fill_resting_pub(r.oid, take, r.px)?;
+            tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid, sz = %take, px = %r.px, "resting order filled passively");
+        }
+        Ok(())
+    }
+
+    /// The venue's nonce rule (plan §5): the 100 highest nonces per signer,
+    /// accepted in the window (T − 2 d, T + 1 d); a duplicate is refused by
+    /// name. Called only when the body carries a nonce (their harness's
+    /// nonce-less shape stays accepted — the devnet's impersonation analogue).
+    pub(crate) fn use_nonce(&self, signer: Address, nonce: u64, now_ms: u64) -> Result<()> {
+        const TWO_DAYS_MS: u64 = 2 * 24 * 60 * 60 * 1_000;
+        const ONE_DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+        let mut st = self.state.lock()?;
+        let set = st.nonces.entry(signer).or_default();
+        if set.contains(&nonce) {
+            return Err(crate::error::Error::bad_request("Nonce already used."));
+        }
+        if nonce.saturating_add(TWO_DAYS_MS) < now_ms || nonce > now_ms.saturating_add(ONE_DAY_MS) {
+            return Err(crate::error::Error::bad_request(
+                "Nonce is outside the accepted window.",
+            ));
+        }
+        set.insert(nonce);
+        while set.len() > 100 {
+            set.pop_first();
+        }
+        drop(st);
+        self.mark_dirty()?;
+        Ok(())
     }
 
     /// Accrue funding for every account (the caller holds no lock).

@@ -717,6 +717,9 @@ pub(crate) struct FillFacts {
     pub px: Decimal,
     pub leverage: u32,
     pub reduce_only: bool,
+    /// The trading fee (venue base tier; charged on top of the fill — the
+    /// plan's `closedPnl = fee + side·(mark−entry)·size`).
+    pub fee: Decimal,
 }
 
 pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> {
@@ -750,6 +753,11 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
     } else {
         let realized = apply_reduction(position, old, fill)?;
         account.perp_balance = add(account.perp_balance, realized, "realized PnL")?;
+    }
+    // The trading fee (the venue's base tier): charged on the fill's notional,
+    // on both sides of a trade, in USDC — so a closing fill pays it too.
+    if !fill.fee.is_zero() {
+        account.perp_balance = sub(account.perp_balance, fill.fee, "trading fee")?;
     }
     if position.szi.is_zero() {
         account.positions.remove(&fill.coin);
