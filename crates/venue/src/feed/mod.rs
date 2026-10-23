@@ -653,7 +653,13 @@ mod tests {
             "an aged live book is stale"
         );
         // The stall: live writes drop, scripted writes land.
-        assert_eq!(feed.stall(30), now + 30_000);
+        // The deadline is computed from the stall's own clock read: compare in
+        // a window, not to the millisecond (the two reads may straddle one).
+        let until = feed.stall(30);
+        assert!(
+            until >= now + 30_000 && until <= now + 31_000,
+            "the stall's deadline is ~30 s out: {until} vs {now}"
+        );
         assert!(feed.stalled());
         feed.put_ctx("BTC".into(), test_ctx("999", "999"), now);
         feed.put_book(book("999"), now);

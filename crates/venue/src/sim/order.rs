@@ -133,6 +133,15 @@ fn terminalize(
     }
 }
 
+/// One order's initial margin requirement: notional over the account's
+/// leverage (reduce-only orders free margin instead of using it).
+pub(crate) fn order_requirement(sz: Decimal, px: Decimal, leverage: u32, reduce_only: bool) -> Result<Decimal> {
+    if reduce_only {
+        return Ok(Decimal::ZERO);
+    }
+    Ok(super::account::mul(sz, px, "order notional")? / Decimal::from(leverage.max(1)))
+}
+
 /// The venue's base fee tier (docs, fees page: 4.5 bps taker, 1.5 bps maker).
 /// Volume-based tier discounts are not modeled — the sim serves the base tier,
 /// as a flat account would see.
@@ -181,6 +190,10 @@ pub(crate) struct RestingOrder {
 pub(crate) enum TerminalStatus {
     Filled,
     Canceled,
+    /// The venue's `marginCanceled`: the resting order died at match time
+    /// because its account could not carry the fill.
+    #[serde(rename = "marginCanceled")]
+    MarginCanceled,
 }
 
 /// One terminal order (a bounded history so `orderStatus` can answer for a
@@ -231,12 +244,17 @@ impl Sim {
             tracing::warn!(coin = %req.coin, "order refused: open interest cap");
             return Err(Error::bad_request(reason));
         }
+        if let Some(reason) = self.tier_limit_refusal(feed, meta.as_ref(), address, req)? {
+            tracing::warn!(coin = %req.coin, "order refused: margin tier limit");
+            return Err(Error::bad_request(reason));
+        }
         // A trigger arms instead of walking.
         if let Some(trigger) = req.trigger {
             if trigger.trigger_px <= Decimal::ZERO {
                 return Err(Error::bad_request("Invalid TP/SL price."));
             }
             let px = req.limit_px.unwrap_or(trigger.trigger_px);
+            self.require_order_margin(feed, address, req, (px, req.size))?;
             let oid = self.rest_order(address, req, px, req.size)?;
             self.metrics
                 .triggers_armed_total
@@ -267,15 +285,113 @@ impl Sim {
             None
         };
         let remainder = req.size - fill.as_ref().map(|f| f.total_sz).unwrap_or(Decimal::ZERO);
-        let resting = if req.tif == Tif::Gtc && remainder > Decimal::ZERO {
-            match req.limit_px {
-                Some(px) => Some(self.rest_order(address, req, px, remainder)?),
-                None => None, // a market order cannot rest
-            }
-        } else {
-            None
-        };
+        let resting = self.rest_remainder(feed, address, req, remainder)?;
         Ok(Placed { fill, resting })
+    }
+
+    /// The match-time re-margin (plan §5): the maker's *current* available
+    /// margin (value minus the positions' margin minus the account's other
+    /// open orders' reservations) must cover the order's own requirement.
+    pub(crate) fn remargin_ok(&self, feed: &MarketFeed, r: &RestingOrder) -> Result<bool> {
+        let Some(maker) = self.account(r.account)? else {
+            return Ok(true); // no account state: nothing to re-margin against
+        };
+        let meta = feed.meta();
+        let leverage = self.leverage_for(r.account, &r.coin, meta.as_ref())?;
+        let requirement = order_requirement(r.sz, r.px, leverage, r.reduce_only)?;
+        let v = super::account::view(&maker, feed, meta.as_ref())?;
+        let reserved = self.reserved_margin(r.account, Some(r.oid), meta.as_ref())?;
+        let available = super::account::sub(
+            super::account::sub(
+                v.margin_summary.account_value,
+                v.margin_summary.total_margin_used,
+                "available margin",
+            )?,
+            reserved,
+            "available margin",
+        )?;
+        Ok(available >= requirement)
+    }
+
+    /// A Gtc remainder rests (after the venue's order-margin check); anything
+    /// else, or a filled order, rests nothing.
+    fn rest_remainder(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        req: &Order,
+        remainder: Decimal,
+    ) -> Result<Option<u64>> {
+        if req.tif != Tif::Gtc || remainder <= Decimal::ZERO {
+            return Ok(None);
+        }
+        let Some(px) = req.limit_px else {
+            return Ok(None); // a market order cannot rest
+        };
+        self.require_order_margin(feed, address, req, (px, remainder))?;
+        Ok(Some(self.rest_order(address, req, px, remainder)?))
+    }
+
+    /// The venue's order margin (docs: `availableToTrade` accounts for open
+    /// orders): a resting order reserves its own initial margin at its price,
+    /// and the placement is refused with the venue's own string when the
+    /// account cannot carry it.
+    pub(crate) fn require_order_margin(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        req: &Order,
+        resting_at: (Decimal, Decimal),
+    ) -> Result<()> {
+        if req.reduce_only {
+            return Ok(());
+        }
+        let (px, sz) = resting_at;
+        let Some(account) = self.account(address)? else {
+            return Ok(());
+        };
+        let meta = feed.meta();
+        let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
+        let requirement = order_requirement(sz, px, leverage, false)?;
+        let v = super::account::view(&account, feed, meta.as_ref())?;
+        let reserved = self.reserved_margin(address, None, meta.as_ref())?;
+        let available = super::account::sub(
+            super::account::sub(
+                v.margin_summary.account_value,
+                v.margin_summary.total_margin_used,
+                "available margin",
+            )?,
+            reserved,
+            "available margin",
+        )?;
+        if available < requirement {
+            return Err(Error::bad_request("Insufficient margin to place order."));
+        }
+        Ok(())
+    }
+
+    /// The account's open orders' reserved margin (their own notional over the
+    /// account's leverage at their prices; reduce-only orders reserve
+    /// nothing). `exclude_oid` skips the order under check.
+    pub(crate) fn reserved_margin(
+        &self,
+        account: Address,
+        exclude_oid: Option<u64>,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<Decimal> {
+        let mut total = Decimal::ZERO;
+        for r in self.resting_orders(Some(account))? {
+            if Some(r.oid) == exclude_oid || r.reduce_only {
+                continue;
+            }
+            let leverage = self.leverage_for(account, &r.coin, meta)?;
+            total = super::account::add(
+                total,
+                order_requirement(r.sz, r.px, leverage, false)?,
+                "reserved margin",
+            )?;
+        }
+        Ok(total)
     }
 
     /// A liquidation's market close: the same walk as an order, but with no
@@ -331,6 +447,43 @@ impl Sim {
         })
     }
 
+    /// Drop the resting orders whose makers cannot carry their fill right
+    /// now, canceling them (the venue's `marginCanceled` status).
+    fn remargin_makers(
+        &self,
+        feed: &MarketFeed,
+        req: &Order,
+        resting: Vec<RestingOrder>,
+    ) -> Result<Vec<RestingOrder>> {
+        let mut kept = Vec::with_capacity(resting.len());
+        for r in resting {
+            let crosses = r.coin == req.coin
+                && r.is_buy != req.is_buy
+                && r.trigger.is_none()
+                && match req.limit_px {
+                    None => true,
+                    Some(limit) => {
+                        if req.is_buy {
+                            r.px <= limit
+                        } else {
+                            r.px >= limit
+                        }
+                    }
+                };
+            if !crosses {
+                kept.push(r);
+                continue;
+            }
+            if self.remargin_ok(feed, &r)? {
+                kept.push(r);
+            } else {
+                tracing::warn!(account = %r.account, oid = r.oid, coin = %r.coin, "resting order canceled at match time (marginCanceled)");
+                self.margin_cancel(r.account, &r.coin, r.oid)?;
+            }
+        }
+        Ok(kept)
+    }
+
     /// A post-only placement: refuses with the venue's own string (and the
     /// bbo) when it would cross, else rests.
     fn place_alo(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<u64> {
@@ -359,6 +512,10 @@ impl Sim {
     pub(crate) fn order(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<Fill> {
         let meta = feed.meta();
         let resting = self.resting_orders(None)?;
+        // The plan's rule: resting orders are re-margined at match time (the
+        // oracle moves after placement). A maker whose account cannot carry
+        // the fill is canceled (the venue's `marginCanceled`), never filled.
+        let resting = self.remargin_makers(feed, req, resting)?;
         let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), req, &resting)?;
         let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
         let notional = super::account::mul(filled, avg_px, "fill notional")?;
@@ -533,6 +690,52 @@ impl Sim {
         })
     }
 
+    /// The venue's margin-tier cap (docs' string): at the position's current
+    /// leverage the resulting notional must stay below the next tier down's
+    /// lower bound.
+    fn tier_limit_refusal(
+        &self,
+        feed: &MarketFeed,
+        meta: Option<&crate::wire::Meta>,
+        address: Address,
+        req: &Order,
+    ) -> Result<Option<&'static str>> {
+        let Some(asset) = meta.and_then(|m| m.universe.iter().find(|a| a.name == req.coin)) else {
+            return Ok(None);
+        };
+        let Some(table_id) = asset.margin_table_id else {
+            return Ok(None);
+        };
+        let Some((_, table)) = meta.and_then(|m| {
+            m.margin_tables
+                .iter()
+                .find(|(id, _)| *id == table_id)
+        }) else {
+            return Ok(None);
+        };
+        let leverage = self.leverage_for(address, &req.coin, meta)?;
+        let bound = table
+            .margin_tiers
+            .iter()
+            .filter(|t| t.max_leverage < leverage)
+            .map(|t| t.lower_bound)
+            .min();
+        let Some(bound) = bound else {
+            return Ok(None);
+        };
+        let old = self
+            .account(address)?
+            .and_then(|a| a.positions.get(&req.coin).map(|p| p.szi.abs()))
+            .unwrap_or(Decimal::ZERO);
+        let Some(mark) = feed.mark(&req.coin) else {
+            return Ok(None);
+        };
+        let resulting = super::account::mul(old.saturating_add(req.size), mark, "tier notional")?;
+        Ok((resulting > bound).then_some(
+            "Order would cause position to exceed margin tier limit at current leverage",
+        ))
+    }
+
     /// The venue's OI-cap refusal: a coin at its cap accepts only orders that
     /// reduce the position (plan §5's own string).
     fn oi_cap_refusal(
@@ -551,9 +754,25 @@ impl Sim {
         let signed = if req.is_buy { req.size } else { -req.size };
         let increases =
             old.is_zero() || super::account::sign(old) == super::account::sign(signed);
-        Ok(increases.then_some(
-            "Order would increase open interest while open interest is capped",
-        ))
+        if !increases {
+            return Ok(None);
+        }
+        // A price more aggressive than the oracle gets the docs' own string.
+        let aggressive = req
+            .limit_px
+            .zip(feed.oracle(&req.coin))
+            .is_some_and(|(px, oracle)| {
+                if req.is_buy {
+                    px > oracle
+                } else {
+                    px < oracle
+                }
+            });
+        Ok(Some(if aggressive {
+            "Order rejected due to price more aggressive than oracle while at open interest cap"
+        } else {
+            "Order would increase open interest while open interest is capped"
+        }))
     }
 
     /// The tick's passive fill (`fill_resting`, one implementation).
@@ -603,6 +822,23 @@ impl Sim {
     /// `cancel`: the venue's own refusal when the order is unknown to the
     /// caller (`Order was never placed, already canceled, or filled.`).
     pub(crate) fn cancel(&self, account: Address, coin: &str, oid: u64) -> Result<()> {
+        self.cancel_with(account, coin, oid, TerminalStatus::Canceled)
+    }
+
+    /// The match-time margin cancel (the venue's `marginCanceled` status).
+    pub(crate) fn margin_cancel(&self, account: Address, coin: &str, oid: u64) -> Result<()> {
+        self.cancel_with(account, coin, oid, TerminalStatus::MarginCanceled)
+    }
+
+    /// The cancel's one home: move the resting order to the terminal history
+    /// under the given status.
+    fn cancel_with(
+        &self,
+        account: Address,
+        coin: &str,
+        oid: u64,
+        status: TerminalStatus,
+    ) -> Result<()> {
         let mut st = self.state.lock()?;
         match st.resting.get(&oid) {
             Some(r) if r.account == account && r.coin == coin => {
@@ -613,7 +849,7 @@ impl Sim {
                     oid,
                     TerminalOrder {
                         order: done,
-                        status: TerminalStatus::Canceled,
+                        status,
                         filled_sz: Decimal::ZERO,
                         avg_px: Decimal::ZERO,
                         status_ms: crate::now_ms(),
@@ -869,6 +1105,8 @@ pub(crate) fn validate_order(
     }
     validate_tick_lot(meta, req)?;
     validate_min_notional(feed, req)?;
+    validate_price_band(feed, req)?;
+    validate_order_value(feed, meta, req)?;
     // The freshness discipline (stale ≠ absent): a live-sourced book older
     // than the shared window is not tradable — the fill would price off a
     // snapshot the venue has already left. A scripted book is the scenario's
@@ -902,6 +1140,67 @@ fn walk_served_book(
         }));
     }
     Ok((legs, filled, avg_px))
+}
+
+/// The venue's price band (docs: a limit more than 80 % away from the oracle
+/// is rejected — a pre-validation class error upstream; here it rides the
+/// order's own status with the same string).
+fn validate_price_band(feed: &MarketFeed, req: &Order) -> Result<()> {
+    let Some(px) = req.limit_px else {
+        return Ok(());
+    };
+    let Some(oracle) = feed.oracle(&req.coin) else {
+        return Ok(());
+    };
+    if oracle <= Decimal::ZERO {
+        return Ok(());
+    }
+    let distance = (px - oracle).abs();
+    let band = super::account::mul(oracle, Decimal::new(8, 1), "oracle band")?;
+    if distance > band {
+        return Err(Error::bad_request("Order price too far from oracle"));
+    }
+    Ok(())
+}
+
+/// The venue's max order value by the asset's max leverage (docs, §16.3:
+/// $30M ≥25× / $5M / $2M / $500k; a limit order may be 10× the market cap).
+/// The venue's exact string is not pinned — this names our rule until a live
+/// probe pins theirs (docs/INTEGRATION.md).
+fn validate_order_value(
+    feed: &MarketFeed,
+    meta: Option<&crate::wire::Meta>,
+    req: &Order,
+) -> Result<()> {
+    let Some(asset) = meta.and_then(|m| m.universe.iter().find(|a| a.name == req.coin)) else {
+        return Ok(());
+    };
+    let market_cap = match asset.max_leverage {
+        l if l >= 25 => Decimal::from(30_000_000u64),
+        l if l >= 20 => Decimal::from(5_000_000u64),
+        l if l >= 10 => Decimal::from(2_000_000u64),
+        _ => Decimal::from(500_000u64),
+    };
+    let cap = if req.limit_px.is_some() {
+        super::account::mul(market_cap, Decimal::from(10), "limit value cap")?
+    } else {
+        market_cap
+    };
+    let Some(px) = req
+        .limit_px
+        .or_else(|| req.trigger.map(|t| t.trigger_px))
+        .or_else(|| feed.mark(&req.coin))
+    else {
+        return Ok(()); // no reference price yet: the feed is warming
+    };
+    let value = super::account::mul(req.size, px, "order value")?;
+    if value > cap {
+        return Err(Error::bad_request(format!(
+            "Order value {value} exceeds the maximum for this asset's leverage (docs: $30M \
+             ≥25x / $5M / $2M / $500k; a limit order may be 10x the market cap)"
+        )));
+    }
+    Ok(())
 }
 
 /// The venue's tick/lot rules (plan §5, docs §16.3): a size carries at most
@@ -1374,5 +1673,177 @@ mod tests {
             format!("{err}").contains("Insufficient margin to place order."),
             "{err}"
         );
+    }
+
+    /// The venue's order margin: a resting order reserves its own initial
+    /// margin at its price, and a placement the account cannot carry is
+    /// refused with the venue's own string.
+    #[test]
+    fn a_resting_order_reserves_its_margin() {
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let (sim, a) = funded_sim(&feed, "5");
+        // $500 notional at 10× needs $50: the thin account cannot rest it.
+        let mut rest = ioc(true, "5");
+        rest.tif = Tif::Gtc;
+        rest.limit_px = Some("100".parse().unwrap());
+        let err = sim.place(&feed, a, &rest).unwrap_err();
+        assert!(
+            format!("{err}").contains("Insufficient margin to place order."),
+            "{err}"
+        );
+        // A reduce-only order reserves nothing.
+        let mut close = reduce(false, "0.2");
+        close.tif = Tif::Gtc;
+        close.limit_px = Some("105".parse().unwrap());
+        assert!(sim.place(&feed, a, &close).is_ok(), "reduce-only rests free");
+    }
+
+    /// The plan's rule: a resting order is re-margined at match time — a maker
+    /// that cannot carry its fill is canceled (the venue's `marginCanceled`),
+    /// never filled.
+    #[test]
+    fn a_breaching_maker_is_canceled_at_match_time() {
+        // No bids in the served book: the maker's resting bid is the only
+        // crossing liquidity, so its cancellation shows up as no fill.
+        let feed = feed_with_book(book("ETH", &[], &[("101", "2")]), meta_with("ETH", 10));
+        let (sim, maker) = funded_sim(&feed, "1000");
+        let taker = Address::repeat_byte(0xbb);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: taker,
+                class: DealClass::Perp,
+                coin: None,
+                amount: "1000".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        // $500 notional at 10× needs $50: affordable at placement.
+        let mut rest = ioc(true, "5");
+        rest.tif = Tif::Gtc;
+        rest.limit_px = Some("100".parse().unwrap());
+        let oid = sim
+            .place(&feed, maker, &rest)
+            .unwrap()
+            .resting
+            .expect("a Gtc order rests");
+        // The account drains (a loss, a withdrawal — the oracle moved): the
+        // match-time re-margin must refuse the fill.
+        sim.deal(
+            &feed,
+            &Deal {
+                address: maker,
+                class: DealClass::Perp,
+                coin: None,
+                amount: "-990".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        // The taker crosses at the maker's price.
+        let mut cross = ioc(false, "1");
+        cross.limit_px = Some("100".parse().unwrap());
+        let err = sim.place(&feed, taker, &cross).unwrap_err();
+        assert!(format!("{err}").contains("could not immediately match"), "{err}");
+        assert!(
+            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            "the breaching maker is off the book"
+        );
+        let st = sim.state.lock().unwrap();
+        assert_eq!(
+            st.terminal.get(&oid).map(|t| t.status),
+            Some(TerminalStatus::MarginCanceled)
+        );
+    }
+
+    /// The docs' band: a limit more than 80 % from the oracle is refused by
+    /// their own string.
+    #[test]
+    fn the_oracle_band_refuses_by_the_docs_string() {
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let (sim, a) = funded_sim(&feed, "1000");
+        // 300 is ~197 % above the oracle (101): outside the band.
+        let mut far = ioc(true, "0.2");
+        far.limit_px = Some("300".parse().unwrap());
+        let err = sim.order(&feed, a, &far).unwrap_err();
+        assert!(
+            format!("{err}").contains("Order price too far from oracle"),
+            "{err}"
+        );
+        // 101 is inside the band.
+        let mut ok = ioc(true, "0.2");
+        ok.limit_px = Some("101".parse().unwrap());
+        assert!(sim.order(&feed, a, &ok).is_ok(), "inside the band fills");
+    }
+
+    /// The docs' max order value: $30M at ≥25× (a limit may be 10× that).
+    #[test]
+    fn the_order_value_cap_refuses() {
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 25));
+        let (sim, a) = funded_sim(&feed, "1000");
+        // 4M ETH at $100 = $400M > 10 × $30M.
+        let mut huge = ioc(true, "4000000");
+        huge.tif = Tif::Gtc;
+        huge.limit_px = Some("100".parse().unwrap());
+        let err = sim.place(&feed, a, &huge).unwrap_err();
+        assert!(format!("{err}").contains("exceeds the maximum"), "{err}");
+    }
+
+    /// The docs' tier-limit string: the resulting notional may not exceed the
+    /// next tier down's lower bound at the position's leverage.
+    #[test]
+    fn the_margin_tier_limit_refuses() {
+        let mut meta = meta_with("ETH", 40);
+        meta.margin_tables.push((
+            7,
+            crate::wire::MarginTable {
+                description: "test".into(),
+                margin_tiers: vec![
+                    crate::wire::MarginTier {
+                        lower_bound: Decimal::ZERO,
+                        max_leverage: 40,
+                    },
+                    crate::wire::MarginTier {
+                        lower_bound: Decimal::from(150_000_000),
+                        max_leverage: 20,
+                    },
+                ],
+            },
+        ));
+        meta.universe[0].margin_table_id = Some(7);
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta);
+        let (sim, a) = funded_sim(&feed, "1000");
+        // 2M ETH at $100 = $200M > the 40× tier's $150M bound (and inside the
+        // 10× limit cap, so the tier rule is the one that fires).
+        let mut huge = ioc(true, "2000000");
+        huge.tif = Tif::Gtc;
+        huge.limit_px = Some("100".parse().unwrap());
+        let err = sim.place(&feed, a, &huge).unwrap_err();
+        assert!(
+            format!("{err}").contains("exceed margin tier limit"),
+            "{err}"
+        );
+    }
+
+    /// `updateIsolatedMargin` moves USDC between the balance and the
+    /// position's margin; the isolated margin is the position's margin.
+    #[test]
+    fn isolated_margin_moves_onto_the_position() {
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let (sim, a) = funded_sim(&feed, "1000");
+        sim.order(&feed, a, &ioc(true, "1")).unwrap();
+        let before = sim.account(a).unwrap().unwrap().perp_balance;
+        // $100 = 100_000_000 at the docs' 6 decimals.
+        sim.update_isolated_margin(a, "ETH", 100_000_000).unwrap();
+        let account = sim.account(a).unwrap().unwrap();
+        let p = account.positions.get("ETH").unwrap();
+        assert_eq!(p.isolated_margin, Decimal::from(100));
+        assert_eq!(p.margin_used, Decimal::from(100));
+        assert_eq!(p.leverage, crate::wire::LeverageType::Isolated);
+        assert_eq!(account.perp_balance, before - Decimal::from(100));
+        // And back off the position.
+        sim.update_isolated_margin(a, "ETH", -40_000_000).unwrap();
+        let account = sim.account(a).unwrap().unwrap();
+        assert_eq!(account.positions.get("ETH").unwrap().isolated_margin, Decimal::from(60));
+        assert_eq!(account.perp_balance, before - Decimal::from(60));
     }
 }

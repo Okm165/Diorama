@@ -106,10 +106,15 @@ impl SimMetrics {
         mirror_devnet::metrics::push_metric(&mut out, "gauge", "venue_sim_accounts", "simulated (touched) accounts", self.accounts.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "gauge", "venue_sim_epoch", "scenario epoch (reset bumps it)", self.epoch.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_liquidations_total", "liquidations executed by the sim", self.liquidations_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_partial_liquidations_total", "waterfall step 1: partial (20%) book liquidations", self.partial_liquidations_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_backstop_liquidations_total", "waterfall step 2: backstop (the vault took the position)", self.backstop_liquidations_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_adl_closes_total", "waterfall step 3: ADL closes at the previous mark", self.adl_closes_total.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_funding_payments_total", "funding payments applied", self.funding_payments_total.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_identity_violations_total", "served states that failed the identity re-check (must stay 0)", self.identity_violations.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_advances_total", "scenario advance() steps", self.advances_total.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_orders_filled_total", "orders filled against the real book (the impact lane)", self.orders_filled_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_fees_charged_total", "fills that charged a fee (taker and maker sides)", self.fees_charged_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_triggers_armed_total", "trigger orders armed (tp/sl)", self.triggers_armed_total.load(Ordering::Relaxed));
         out
     }
 }
@@ -615,11 +620,28 @@ impl Sim {
             if take <= Decimal::ZERO {
                 continue;
             }
+            // The same re-margin rule as the taker path: a maker that cannot
+            // carry the fill is canceled, not filled.
+            if let Err(e) = self.remargin_one(feed, &r) {
+                tracing::warn!(account = %r.account, oid = r.oid, error = %e, "passive re-margin check failed");
+                continue;
+            }
             if let Err(e) = self.passive_fill(&r, take, best.px, feed) {
                 tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "passive fill refused");
             }
         }
         Ok(())
+    }
+
+    /// The passive path's re-margin check: probe the maker's post-fill
+    /// account; on breach, cancel the resting order (the venue's
+    /// `marginCanceled`) and report it so the caller skips the fill.
+    fn remargin_one(&self, feed: &MarketFeed, r: &crate::sim::order::RestingOrder) -> Result<()> {
+        if self.remargin_ok(feed, r)? {
+            return Ok(());
+        }
+        tracing::warn!(account = %r.account, oid = r.oid, "resting order canceled at match time (marginCanceled)");
+        self.margin_cancel(r.account, &r.coin, r.oid)
     }
 
     /// One passive fill: the maker's account update (their price, the maker
@@ -656,6 +678,32 @@ impl Sim {
         self.fill_resting_pub(r.oid, take, r.px)?;
         tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid, sz = %take, px = %r.px, "resting order filled passively");
         Ok(())
+    }
+
+    /// `updateIsolatedMargin` (docs): move USDC between the perp balance and
+    /// the position's isolated margin (`ntli` is 6-decimal, signed).
+    pub(crate) fn update_isolated_margin(&self, address: Address, coin: &str, ntli: i64) -> Result<()> {
+        let delta = Decimal::from(ntli) / Decimal::from(1_000_000);
+        self.with_account(address, |account| {
+            let Some(p) = account.positions.get_mut(coin) else {
+                return Err(crate::error::Error::bad_request(format!(
+                    "no {coin} position to margin (the docs' `updateIsolatedMargin` targets a position)"
+                )));
+            };
+            let next = account::add(p.isolated_margin, delta, "isolated margin")?;
+            if next < Decimal::ZERO {
+                return Err(crate::error::Error::bad_request(
+                    "isolated margin cannot go below zero",
+                ));
+            }
+            account.perp_balance = account::sub(account.perp_balance, delta, "isolated margin move")?;
+            p.isolated_margin = next;
+            p.leverage = crate::wire::LeverageType::Isolated;
+            if !next.is_zero() {
+                p.margin_used = next;
+            }
+            Ok(())
+        })
     }
 
     /// The venue's nonce rule (plan §5): the 100 highest nonces per signer,
@@ -708,6 +756,9 @@ impl Sim {
     /// ADL — the opposite side, ranked by `(mark/entry)·(notional/account_value)`
     /// at the previous mark, is closed against the underwater account.
     pub fn check_all(&self, feed: &MarketFeed, now_ms: u64) -> Result<Vec<Liquidation>> {
+        // The maintenance is tiered from the live meta; with none (the feed
+        // still warming) the requirement reads zero and no liquidation fires —
+        // the pass fails open, never liquidating on an unknown requirement.
         let meta = feed.meta();
         let accounts: Vec<(Address, Account)> = {
             let st = self.state.lock()?;
@@ -828,7 +879,9 @@ impl Sim {
                 let mark = feed.mark(&coin).unwrap_or(p.entry_px);
                 let facts = account::FillFacts {
                     coin: coin.clone(),
-                    is_buy: !p.is_long(),
+                    // The vault *takes the position over*: same side, entered
+                    // at the mark (its own book starts flat there).
+                    is_buy: p.is_long(),
                     size: p.szi.abs(),
                     px: mark,
                     leverage: p.leverage_value,
@@ -1243,5 +1296,135 @@ mod tests {
         let after = sim.account(a).unwrap().unwrap().perp_balance;
         // One hour of funding at rate 1.25e-5 on oracle 100, long 1.0: paid.
         assert_eq!(before - after, Decimal::new(125, 5));
+    }
+
+    /// The waterfall's attempt sizes (docs): 20 % above the $100k partial
+    /// threshold, the full size below it and during the 30 s cooldown.
+    #[test]
+    fn liquidation_attempts_follow_the_partial_rules() {
+        let full = Decimal::from(10);
+        let (sz, partial) = attempt_size(full, Decimal::from(120_000), false).unwrap();
+        assert!(partial, "above the threshold the attempt is partial");
+        assert_eq!(sz, Decimal::from(2));
+        let (sz, partial) = attempt_size(full, Decimal::from(120_000), true).unwrap();
+        assert!(!partial, "the cooldown switches to the full size");
+        assert_eq!(sz, full);
+        let (sz, partial) = attempt_size(full, Decimal::from(50_000), false).unwrap();
+        assert!(!partial, "below the threshold the attempt is full");
+        assert_eq!(sz, full);
+    }
+
+    /// A meta with one asset (the waterfall's maintenance tiers read it).
+    fn meta_with(coin: &str, max_leverage: u32) -> crate::wire::Meta {
+        let mut m: crate::wire::Meta = serde_json::from_str(r#"{"universe": []}"#).unwrap();
+        m.universe.push(crate::wire::AssetInfo {
+            name: coin.into(),
+            sz_decimals: 4,
+            max_leverage,
+            margin_table_id: None,
+            only_isolated: None,
+            is_delisted: None,
+        });
+        m
+    }
+
+    /// The waterfall's fixture: one account holding a single ETH position.
+    fn put_account(sim: &Sim, address: Address, facts: (Decimal, Decimal, Decimal, u32)) {
+        let (balance, entry, szi, leverage) = facts;
+        sim.with_account(address, |acc| {
+            acc.perp_balance = balance;
+            acc.positions.insert(
+                "ETH".into(),
+                crate::sim::account::Position {
+                    szi,
+                    entry_px: entry,
+                    leverage: crate::wire::LeverageType::Cross,
+                    leverage_value: leverage,
+                    margin_used: Decimal::ZERO,
+                    isolated_margin: Decimal::ZERO,
+                    funding_all_time: Decimal::ZERO,
+                    funding_since_open: Decimal::ZERO,
+                    funding_since_change: Decimal::ZERO,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// Below ⅔ of the maintenance requirement the backstop takes the position
+    /// and the margin over: the vault holds the same side, the trader ends at
+    /// zero equity (docs).
+    #[test]
+    fn the_backstop_takes_the_position_below_two_thirds() {
+        let feed = feed_with(&[("ETH", "40", "40")]);
+        feed.put_meta(meta_with("ETH", 10), crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        // Equity 0 (10 + (40 − 50)), maintenance 40/10/2 = 2, ⅔ of it 1.33.
+        put_account(&sim, a, (Decimal::from(10), Decimal::from(50), Decimal::ONE, 10));
+        let out = sim.check_all(&feed, crate::now_ms()).unwrap();
+        assert_eq!(out.len(), 1, "one liquidation record");
+        let a_acc = sim.account(a).unwrap().unwrap();
+        assert!(a_acc
+            .positions
+            .get("ETH")
+            .map(|p| p.szi.is_zero())
+            .unwrap_or(true));
+        assert_eq!(a_acc.perp_balance, Decimal::ZERO, "the maintenance is not returned");
+        let vault = sim.account(BACKSTOP).unwrap().expect("the vault is touched");
+        assert_eq!(
+            vault.positions.get("ETH").map(|p| p.szi),
+            Some(Decimal::ONE),
+            "the vault takes the same side over"
+        );
+        assert_eq!(
+            sim.metrics
+                .backstop_liquidations_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    /// A negative account value goes to ADL: the opposite side (ranked by
+    /// (mark/entry)·(notional/account_value)) is closed at the previous mark,
+    /// and the platform stays solvent (docs).
+    #[test]
+    fn adl_closes_the_opposite_side_at_the_previous_mark() {
+        let feed = feed_with(&[("ETH", "100", "100")]);
+        feed.put_meta(meta_with("ETH", 10), crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa); // long 1 @ 100, thin
+        let b = Address::repeat_byte(0xbb); // short 1 @ 100, in profit
+        put_account(&sim, a, (Decimal::from(10), Decimal::from(100), Decimal::ONE, 10));
+        put_account(&sim, b, (Decimal::from(10), Decimal::from(100), -Decimal::ONE, 10));
+        // The previous mark is 90; the mark then falls to 80: A's equity = −10.
+        feed.put_ctx("ETH".into(), crate::wire::test_ctx("90", "90"), crate::now_ms());
+        sim.record_marks(&feed).unwrap();
+        feed.put_ctx("ETH".into(), crate::wire::test_ctx("80", "80"), crate::now_ms());
+        let out = sim.check_all(&feed, crate::now_ms()).unwrap();
+        assert_eq!(out.len(), 1, "one liquidation record");
+        let a_acc = sim.account(a).unwrap().unwrap();
+        assert!(a_acc
+            .positions
+            .get("ETH")
+            .map(|p| p.szi.is_zero())
+            .unwrap_or(true));
+        // A closed at 90: (90 − 100)·1 = −10 → balance 0 (solvent, no bad debt).
+        assert_eq!(a_acc.perp_balance, Decimal::ZERO);
+        let b_acc = sim.account(b).unwrap().unwrap();
+        assert!(b_acc
+            .positions
+            .get("ETH")
+            .map(|p| p.szi.is_zero())
+            .unwrap_or(true));
+        // B bought back at the previous mark 90: (100 − 90)·1 = +10.
+        assert_eq!(b_acc.perp_balance, Decimal::from(20));
+        assert_eq!(
+            sim.metrics
+                .adl_closes_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 }

@@ -87,6 +87,11 @@ pub(crate) struct Position {
     pub leverage_value: u32,
     /// The initial margin held (seeded; the matching lane maintains it).
     pub margin_used: Decimal,
+    /// The isolated margin the account moved onto this position
+    /// (`updateIsolatedMargin`; the docs' `leverage.rawUsd`). When set, it is
+    /// the position's margin — the derived cross figure does not apply.
+    #[serde(default)]
+    pub isolated_margin: Decimal,
     /// Cumulative funding, sign = balance delta (negative = paid).
     #[serde(default)]
     pub funding_all_time: Decimal,
@@ -353,6 +358,11 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
                 leverage: p.leverage.kind,
                 leverage_value: p.leverage.value,
                 margin_used: p.margin_used,
+                isolated_margin: if p.leverage.kind == LeverageType::Isolated {
+                    p.margin_used
+                } else {
+                    Decimal::ZERO
+                },
                 funding_all_time: p.cum_funding.all_time,
                 funding_since_open: p.cum_funding.since_open,
                 funding_since_change: p.cum_funding.since_change,
@@ -758,6 +768,7 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
             leverage: LeverageType::Cross,
             leverage_value: fill.leverage.max(1),
             margin_used: Decimal::ZERO,
+            isolated_margin: Decimal::ZERO,
             funding_all_time: Decimal::ZERO,
             funding_since_open: Decimal::ZERO,
             funding_since_change: Decimal::ZERO,
@@ -784,8 +795,16 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
         position.funding_since_change = Decimal::ZERO;
         // `.max(1)` guards the decimal division (rust_decimal panics on a
         // zero divisor; a leverage of 0 is not a state this plane creates).
-        position.margin_used = mul(position.szi.abs(), position.entry_px, "margin notional")?
-            / Decimal::from(position.leverage_value.max(1));
+        // An isolated margin the account moved on (`updateIsolatedMargin`) is
+        // the position's margin, exactly as the venue serves `leverage.rawUsd`.
+        position.margin_used = if position.leverage == LeverageType::Isolated
+            && !position.isolated_margin.is_zero()
+        {
+            position.isolated_margin
+        } else {
+            mul(position.szi.abs(), position.entry_px, "margin notional")?
+                / Decimal::from(position.leverage_value.max(1))
+        };
     }
     Ok(())
 }
@@ -1013,6 +1032,7 @@ mod tests {
                 leverage: LeverageType::Cross,
                 leverage_value: 20,
                 margin_used: "4.967826".parse().unwrap(),
+                isolated_margin: Decimal::ZERO,
                 funding_all_time: Decimal::ZERO,
                 funding_since_open: Decimal::ZERO,
                 funding_since_change: Decimal::ZERO,
@@ -1217,6 +1237,7 @@ mod tests {
                 leverage: LeverageType::Cross,
                 leverage_value: 10,
                 margin_used: Decimal::ZERO,
+                isolated_margin: Decimal::ZERO,
                 funding_all_time: Decimal::ZERO,
                 funding_since_open: Decimal::ZERO,
                 funding_since_change: Decimal::ZERO,
@@ -1258,6 +1279,7 @@ mod tests {
                 leverage: LeverageType::Cross,
                 leverage_value: 10,
                 margin_used: Decimal::from(10),
+                isolated_margin: Decimal::ZERO,
                 funding_all_time: Decimal::ZERO,
                 funding_since_open: Decimal::ZERO,
                 funding_since_change: Decimal::ZERO,
@@ -1282,6 +1304,7 @@ mod tests {
             leverage: LeverageType::Cross,
             leverage_value: 10,
             margin_used: Decimal::from(10),
+            isolated_margin: Decimal::ZERO,
             funding_all_time: Decimal::ZERO,
             funding_since_open: Decimal::ZERO,
             funding_since_change: Decimal::ZERO,
@@ -1332,6 +1355,7 @@ mod tests {
                 leverage: LeverageType::Cross,
                 leverage_value: 10,
                 margin_used: Decimal::ZERO,
+                isolated_margin: Decimal::ZERO,
                 funding_all_time: Decimal::ZERO,
                 funding_since_open: Decimal::ZERO,
                 funding_since_change: Decimal::ZERO,
@@ -1372,6 +1396,7 @@ mod tests {
                 leverage: LeverageType::Cross,
                 leverage_value: 10,
                 margin_used: Decimal::from(10),
+                isolated_margin: Decimal::ZERO,
                 funding_all_time: Decimal::ZERO,
                 funding_since_open: Decimal::ZERO,
                 funding_since_change: Decimal::ZERO,
@@ -1393,6 +1418,7 @@ mod tests {
             leverage: LeverageType::Isolated,
             leverage_value: 20,
             margin_used: Decimal::new(4_967_826, 6),
+            isolated_margin: Decimal::ZERO,
             funding_all_time: Decimal::ZERO,
             funding_since_open: Decimal::ZERO,
             funding_since_change: Decimal::ZERO,

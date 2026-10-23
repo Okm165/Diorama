@@ -572,6 +572,8 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `mirror_shadowed_slots` / `mirror_shadowed_accounts` / `mirror_halted` / `mirror_frozen` | the shared admin gauges, rendered beside the venue's own (the registry pushes them on change) |
 | `venue_sim_accounts` / `venue_sim_epoch` | simulated (touched) accounts / scenario epoch |
 | `venue_sim_liquidations_total` / `venue_sim_funding_payments_total` | liquidations executed / funding payments applied |
+| `venue_sim_partial_liquidations_total` / `venue_sim_backstop_liquidations_total` / `venue_sim_adl_closes_total` | the waterfall's steps: partial (20 %) book closes above $100k / backstop takeovers (the vault) below ⅔ maintenance / ADL closes at the previous mark |
+| `venue_sim_fees_charged_total` / `venue_sim_triggers_armed_total` | fills that charged a fee (taker and maker sides) / trigger orders armed |
 | `venue_sim_ws_connected` / `venue_sim_ws_reconnects_total` | the market WS lane's health |
 | `venue_sim_rest_errors_total` / `venue_sim_budget_skips_total` / `venue_sim_budget_weight_used` | REST faults / calls skipped at the rate budget / weight spent in the rolling minute |
 | `venue_sim_stale_ms{coin}` | milliseconds since the coin's last live context update |

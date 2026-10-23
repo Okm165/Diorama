@@ -73,6 +73,47 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
     Ok(dispatch(&state, user, &body, &req))
 }
 
+/// The docs' pre-validation pass: `Some(reason)` refuses the whole payload
+/// with one error (the venue duplicates it n times for their clients).
+fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Option<String> {
+    if orders.is_empty() {
+        return Some("venue-sim: an empty order batch is rejected (docs: pre-validation)".into());
+    }
+    let meta = state.feed.meta();
+    for action in orders {
+        let Ok(order) = action.to_order(meta.as_ref()) else {
+            continue; // a per-order mapping error keeps its own status
+        };
+        if order.trigger.is_some() && !order.reduce_only {
+            return Some(
+                "venue-sim: TP/SL orders must be reduce-only (docs: pre-validation)".into(),
+            );
+        }
+        if let Err(e) = crate::sim::order::validate_order(&state.feed, meta.as_ref(), &order) {
+            let reason = e.to_string();
+            if reason.contains("too far from oracle") {
+                return Some(reason);
+            }
+        }
+    }
+    None
+}
+
+/// The asset-index actions (`updateLeverage`, `updateIsolatedMargin`): resolve
+/// the coin, run the sim call, answer in the venue's envelope.
+fn asset_action<F>(state: &Arc<ApiState>, asset: u32, run: F) -> Response
+where
+    F: FnOnce(&str) -> std::result::Result<(), crate::error::Error>,
+{
+    match coin_of(state.feed.meta().as_ref(), asset) {
+        Some(coin) => match run(&coin) {
+            Ok(()) => default_ok(),
+            Err(e) => err_envelope(e.to_string()).into_response(),
+        },
+        None => err_envelope(format!("unknown asset index {asset}")).into_response(),
+    }
+}
+
 /// The action dispatch (its own fn: the handler is the parse + the preamble).
 fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBody) -> Response {
     match &req.action {
@@ -102,17 +143,18 @@ fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBo
             }
             default_ok()
         }
+        ExchangeAction::UpdateIsolatedMargin { asset, ntli, .. } => {
+            asset_action(state, *asset, |coin| {
+                state.sim.update_isolated_margin(user, coin, *ntli)
+            })
+        }
         ExchangeAction::UpdateLeverage {
             asset,
             is_cross,
             leverage,
-        } => match coin_of(state.feed.meta().as_ref(), *asset) {
-            Some(coin) => match state.sim.set_leverage(user, &coin, *is_cross, *leverage) {
-                Ok(()) => default_ok(),
-                Err(e) => err_envelope(e.to_string()).into_response(),
-            },
-            None => err_envelope(format!("unknown asset index {asset}")).into_response(),
-        },
+        } => asset_action(state, *asset, |coin| {
+            state.sim.set_leverage(user, coin, *is_cross, *leverage)
+        }),
         ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(user, *time) {
             Ok(_) => default_ok(),
             Err(e) => err_envelope(e.to_string()).into_response(),
@@ -191,10 +233,26 @@ fn order_action(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &Exchan
         "exchange order action accepted (the signature is accepted, never verified)"
     );
     let meta = state.feed.meta();
+    // The docs' pre-validation class: one error for the whole payload
+    // (empty batches, non-reduce-only TP/SL, an order too far from the
+    // reference price) — every status carries it, as their clients expect.
+    if let Some(reason) = prevalidate(state, orders) {
+        let statuses = orders
+            .iter()
+            .map(|_| OrderStatus::Error(reason.clone()))
+            .collect();
+        return order_response(statuses);
+    }
     let statuses = orders
         .iter()
         .map(|action| fill_status(state, user, meta.as_ref(), action))
         .collect();
+    order_response(statuses)
+}
+
+/// The order action's `{"status":"ok","response":{"type":"order","data":…}}`
+/// envelope (the shape their client parses).
+fn order_response(statuses: Vec<OrderStatus>) -> Response {
     Json(ExchangeOk {
         status: "ok",
         response: OrderResponseBody {
@@ -529,6 +587,16 @@ pub(crate) enum ExchangeAction {
     ScheduleCancel {
         #[serde(default)]
         time: Option<u64>,
+    },
+    /// `{"type":"updateIsolatedMargin","asset":N,"isBuy":bool,"ntli":int}`
+    /// (docs: 6-decimals USDC, signed).
+    UpdateIsolatedMargin {
+        asset: u32,
+        /// The docs' payload carries the position side; the sim resolves the
+        /// position by coin (one per coin), so it is informational.
+        #[serde(default, rename = "isBuy")]
+        _is_buy: bool,
+        ntli: i64,
     },
     /// `{"type":"updateLeverage","asset":N,"isCross":bool,"leverage":N}`.
     UpdateLeverage {
@@ -1069,6 +1137,15 @@ fn status_inner(r: &crate::sim::order::RestingOrder, sz: String) -> StatusOrderI
     }
 }
 
+/// The terminal status label (the docs' orderStatus strings).
+fn terminal_status_label(status: crate::sim::order::TerminalStatus) -> &'static str {
+    match status {
+        crate::sim::order::TerminalStatus::Filled => "filled",
+        crate::sim::order::TerminalStatus::Canceled => "canceled",
+        crate::sim::order::TerminalStatus::MarginCanceled => "marginCanceled",
+    }
+}
+
 /// `orderStatus`: open from the book, terminal from the history, else the
 /// docs' `unknownOid`.
 async fn order_status(state: &ApiState, body: Bytes, user: Address, oid: crate::wire::OidOrCloid) -> Result<Response> {
@@ -1083,21 +1160,21 @@ async fn order_status(state: &ApiState, body: Bytes, user: Address, oid: crate::
                 r.placed_ms,
             )),
             None => state.sim.terminal_by_oid(user, o)?.map(|t| {
-                let status = match t.status {
-                    crate::sim::order::TerminalStatus::Filled => "filled",
-                    crate::sim::order::TerminalStatus::Canceled => "canceled",
-                };
-                (status_inner(&t.order, t.order.sz.to_string()), status, t.status_ms)
+                (
+                    status_inner(&t.order, t.order.sz.to_string()),
+                    terminal_status_label(t.status),
+                    t.status_ms,
+                )
             }),
         },
         crate::wire::OidOrCloid::Cloid(c) => match state.sim.resting_by_cloid(user, c)? {
             Some(r) => Some((status_inner(&r, r.sz.to_string()), "open", r.placed_ms)),
             None => state.sim.terminal_by_cloid(user, c)?.map(|t| {
-                let status = match t.status {
-                    crate::sim::order::TerminalStatus::Filled => "filled",
-                    crate::sim::order::TerminalStatus::Canceled => "canceled",
-                };
-                (status_inner(&t.order, t.order.sz.to_string()), status, t.status_ms)
+                (
+                    status_inner(&t.order, t.order.sz.to_string()),
+                    terminal_status_label(t.status),
+                    t.status_ms,
+                )
             }),
         },
     };
