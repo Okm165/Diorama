@@ -61,7 +61,7 @@ pub enum Error {
     #[error("no cursor yet: nothing has been applied to the devnet chain")]
     NoCursor,
 
-    #[error("rewind {blocks} exceeds the applied range (cursor {cursor})")]
+    #[error("rewind {blocks} outside the applied range 1..={cursor}")]
     InvalidRewind { blocks: u64, cursor: u64 },
 
     #[error("rewind {blocks} exceeds the journal ring ({keep} blocks): older before-values are pruned")]

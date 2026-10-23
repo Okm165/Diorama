@@ -148,6 +148,10 @@ fi
 # chain's applied range — the range refusal would embed the chain's own
 # cursor, which is a legitimate difference).
 same_error /admin/rewind -X POST -H 'Content-Type: application/json' -d '{"blocks":2000}'
+# A zero-block rewind is refused on both (400). Which refusal is
+# state-dependent by design (no cursor / outside 1..=cursor — the wording
+# embeds each chain's own cursor), so only status + shape are asserted.
+same /admin/rewind -X POST -H 'Content-Type: application/json' -d '{"blocks":0}'
 # A malformed shadow request is the extractor's 422 on both (axum's own body).
 same /admin/shadow -X POST -H 'Content-Type: application/json' -d '{"clear":"not-a-bool"}'
 # A no-op hand-back (clear, no keys named) is the success-path shape: both 200
