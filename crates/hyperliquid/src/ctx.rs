@@ -171,6 +171,7 @@ impl Ctx {
             frozen: &self.frozen,
             reapply_from: &self.reapply_from,
             chunk_size: self.venue.chunk_size,
+            journal_writes: true,
         }
     }
 

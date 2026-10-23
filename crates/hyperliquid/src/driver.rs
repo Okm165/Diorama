@@ -117,13 +117,23 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     let mut last = ctx.shadow_scanned_upto.load(Ordering::Relaxed);
     if last == 0 {
         last = cursor.as_ref().map(|c| c.block).unwrap_or(head);
-        ctx.shadow_scanned_upto.store(last, Ordering::Relaxed);
     }
+    // Never scan at or below the fork pin (the bridge anchors the same way):
+    // those blocks are the source's, their txs are not in this chain, and
+    // tracing one fails — anvil answers an unknown tx with `-32601 Method not
+    // found` (measured), which would stall the watermark below the pin and
+    // livelock the driver after a rewind or a re-pin.
+    last = scan_anchor(last, ctx.pin.load(Ordering::Relaxed));
+    ctx.shadow_scanned_upto.store(last, Ordering::Relaxed);
     if head > last {
         scan::scan_range(&ctx.v, &ctx.shadow, &ctx.shadow_scanned_upto, last, head).await?;
         ctx.venue_metrics
             .add(&ctx.venue_metrics.scanned_blocks_total, head - last);
         ctx.save_shadow()?;
+        // Ring the journal like the applier does on T: the rewind window is
+        // the same 1024 blocks on both mirrors (files older than head - keep
+        // are pruned; the venue's journal holds its own writes — the deal).
+        ctx.journal.prune(head);
         let block = ctx.v.block_by_number(head, false).await?;
         let first_block = cursor.as_ref().map(|c| c.first_block).unwrap_or(head);
         ctx.set_cursor_v(cursor_from(&block, first_block))?;
@@ -133,14 +143,24 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
 
     // A journal rewind on the venue restores before-values without moving the
     // head; the range marker clears once the head is past it (there is no
-    // parent diff to re-apply - the devnet re-creates its writes).
-    if let Some((_, until)) = *ctx.reapply_from.lock()? {
+    // parent diff to re-apply - the devnet re-creates its writes). The value
+    // is copied out first: a guard held by the `if let` scrutinee across the
+    // body's second `lock()` would self-deadlock (std mutexes are not
+    // reentrant) - the mainnet's applier copies the same way.
+    let reapply = *ctx.reapply_from.lock()?;
+    if let Some((_, until)) = reapply {
         if head >= until {
             *ctx.reapply_from.lock()? = None;
             tracing::info!(block = head, until, "rewound range passed");
         }
     }
     Ok(Pass::Steady)
+}
+
+/// The shadow scan's anchor: the watermark, never below the fork pin (the
+/// pin's own block is the source's state; the devnet's blocks start at pin+1).
+fn scan_anchor(watermark: u64, pin: u64) -> u64 {
+    watermark.max(pin)
 }
 
 /// The canary word: `Some(pin)` when the recorded chain instance wrote it,
@@ -361,4 +381,20 @@ async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
         "at-pin probes complete"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_anchor;
+
+    /// The scan anchor never dips below the pin: a rewound or stale cursor
+    /// must not walk the source's blocks (their txs are untraceable — anvil
+    /// answers an unknown tx with -32601 — the livelock this clamp fixes).
+    #[test]
+    fn scan_anchor_clamps_at_the_pin() {
+        assert_eq!(scan_anchor(0, 100), 100, "a fresh watermark starts at the pin");
+        assert_eq!(scan_anchor(90, 100), 100, "a cursor below the pin is lifted");
+        assert_eq!(scan_anchor(120, 100), 120, "a cursor above the pin is kept");
+        assert_eq!(scan_anchor(7, 0), 7, "no pin: the watermark is the anchor");
+    }
 }

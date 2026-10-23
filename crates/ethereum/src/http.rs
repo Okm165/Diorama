@@ -86,6 +86,7 @@ impl IntoResponse for Error {
             Error::Devnet(
                 mirror_devnet::Error::NoCursor
                 | mirror_devnet::Error::InvalidRewind { .. }
+                | mirror_devnet::Error::RewindBeyondRing { .. }
                 | mirror_devnet::Error::InvalidShadow { .. },
             ) => StatusCode::BAD_REQUEST,
             Error::Devnet(mirror_devnet::Error::Poisoned { .. }) => {

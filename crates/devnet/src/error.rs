@@ -64,6 +64,9 @@ pub enum Error {
     #[error("rewind {blocks} exceeds the applied range (cursor {cursor})")]
     InvalidRewind { blocks: u64, cursor: u64 },
 
+    #[error("rewind {blocks} exceeds the journal ring ({keep} blocks): older before-values are pruned")]
+    RewindBeyondRing { blocks: u64, keep: u64 },
+
     #[error("invalid shadow request: {reason}")]
     InvalidShadow { reason: &'static str },
 

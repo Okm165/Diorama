@@ -173,6 +173,9 @@ pub enum Error {
 
     #[error("feed bridge: no feed named `{feed}`")]
     FeedBridgeUnknown { feed: String },
+
+    #[error("feed `{feed}`: the target aggregator is not installed yet (the devnet's fixture deploy installs it)")]
+    FeedBridgeWaiting { feed: String },
 }
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).

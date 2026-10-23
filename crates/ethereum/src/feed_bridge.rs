@@ -60,8 +60,50 @@ struct FeedRuntime {
     /// target error-looping invisibly: /admin/feed showed a stale confirmed
     /// value and the counter never moved).
     last_error: Mutex<Option<String>>,
-    /// Source/target decimals, read once at boot (a mismatch is a boot fault).
-    decimals: u8,
+    /// The source's decimals (read at boot; the target must match).
+    source_decimals: u8,
+    /// The target's decimals, resolved once the target is readable. `None`
+    /// while the target is not installed yet — a fact the bridge *waits* on
+    /// (the devnet's fixture deploy installs the mock aggregators, so refusing
+    /// to boot would couple the mirror's start to that deploy's order).
+    decimals: Mutex<Option<u8>>,
+}
+
+impl FeedRuntime {
+    /// The target's decimals, resolved the first time the target is readable
+    /// and cached. `None` = not installed yet (the decode of an empty return
+    /// is the *fact*; a transport fault still surfaces).
+    async fn decimals(&self, ctx: &Ctx) -> Result<Option<u8>> {
+        if let Some(d) = *self
+            .decimals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            return Ok(Some(d));
+        }
+        let data = Bytes::from(AggregatorV3Interface::decimalsCall {}.abi_encode());
+        let out = ctx.anvil_t.call_latest(self.section.target, &data).await?;
+        let Ok(decoded) = AggregatorV3Interface::decimalsCall::abi_decode_returns(&out) else {
+            return Ok(None);
+        };
+        if decoded != self.source_decimals {
+            return Err(Error::FeedBridgeDecimals {
+                feed: self.section.name.clone(),
+                have: self.source_decimals,
+                want: decoded,
+            });
+        }
+        *self
+            .decimals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(decoded);
+        tracing::info!(
+            feed = %self.section.name,
+            decimals = decoded,
+            "feed target appeared; the bridge starts publishing"
+        );
+        Ok(Some(decoded))
+    }
 }
 
 /// The bridge's metrics.
@@ -142,26 +184,42 @@ impl FeedBridge {
                     source: Box::new(e),
                 }
             })?;
-            let target = read_decimals(&ctx.anvil_t, feed.target).await.map_err(|e| {
-                Error::FeedBridgeFeed {
-                    feed: feed.name.clone(),
-                    what: "target decimals",
-                    source: Box::new(e),
+            // The target may not be installed yet (their fixture deploy
+            // installs the mocks): *absence* is a fact the bridge waits on, a
+            // transport fault is a fault, and a present-but-mismatched target
+            // is still a boot fault (a mis-scaled answer poisons consumers).
+            let decimals = match read_decimals(&ctx.anvil_t, feed.target).await {
+                Ok(d) if d == source => Some(d),
+                Ok(d) => {
+                    return Err(Error::FeedBridgeDecimals {
+                        feed: feed.name.clone(),
+                        have: source,
+                        want: d,
+                    })
                 }
-            })?;
-            if source != target {
-                return Err(Error::FeedBridgeDecimals {
-                    feed: feed.name.clone(),
-                    have: source,
-                    want: target,
-                });
-            }
+                Err(Error::FeedBridgeAbi { .. }) => {
+                    tracing::warn!(
+                        feed = %feed.name,
+                        target = %feed.target,
+                        "feed target has no code yet; the bridge waits for the devnet's fixture deploy"
+                    );
+                    None
+                }
+                Err(e) => {
+                    return Err(Error::FeedBridgeFeed {
+                        feed: feed.name.clone(),
+                        what: "target decimals",
+                        source: Box::new(e),
+                    })
+                }
+            };
             feeds.push(FeedRuntime {
                 section: feed.clone(),
                 values: Mutex::new(ValueState::default()),
                 paused: AtomicBool::new(false),
                 last_error: Mutex::new(None),
-                decimals: source,
+                source_decimals: source,
+                decimals: Mutex::new(decimals),
             });
         }
         Ok(Self {
@@ -194,6 +252,11 @@ impl FeedBridge {
         if feed.paused.load(Ordering::Relaxed) {
             return Ok(());
         }
+        let Some(decimals) = feed.decimals(ctx).await? else {
+            // The target is not installed yet; wait (the read retries each
+            // pass and the feed starts publishing the moment it appears).
+            return Ok(());
+        };
         let source_now = read_answer(&ctx.reth, feed.section.source).await?;
         let target_now = read_answer(&ctx.anvil_t, feed.section.target).await?;
         let state = *feed.values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -212,7 +275,7 @@ impl FeedBridge {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pending = Some(answer);
                 FeedBridgeMetrics::count(&self.metrics.updates, &feed.section.name);
-                tracing::info!(feed = %feed.section.name, answer, decimals = feed.decimals, "feed bridge published");
+                tracing::info!(feed = %feed.section.name, answer, decimals, "feed bridge published");
                 Ok(())
             }
             Step::Pause { found } => {
@@ -248,7 +311,10 @@ impl FeedBridge {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone(),
-                    decimals: f.decimals,
+                    decimals: *f
+                        .decimals
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
                 }
             })
             .collect()
@@ -275,8 +341,15 @@ impl FeedBridge {
     }
 
     /// Own a feed's value now: publish `answer` and pause (a scripted crash).
+    /// Refused while the target is not installed: a "crash" written to an
+    /// empty address would report success and change nothing.
     pub async fn override_answer(&self, ctx: &Ctx, name: &str, answer: i128) -> Result<()> {
         let feed = self.find(name)?;
+        if feed.decimals(ctx).await?.is_none() {
+            return Err(Error::FeedBridgeWaiting {
+                feed: name.to_string(),
+            });
+        }
         publish(&ctx.anvil_t, feed.section.target, self.writer, answer).await?;
         feed.values
             .lock()
@@ -389,7 +462,8 @@ pub struct FeedStatus {
     /// The last pass fault (a wiped target, a source outage), when one is
     /// active: /admin/feed must show a stuck feed, not a stale success.
     pub last_error: Option<String>,
-    pub decimals: u8,
+    /// The target's decimals; `None` while the target is not installed yet.
+    pub decimals: Option<u8>,
 }
 
 #[cfg(test)]

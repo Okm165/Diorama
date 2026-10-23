@@ -42,20 +42,47 @@ pub struct AdminSurface<'a> {
     /// new before-values). Cleared once the whole range is re-applied.
     pub reapply_from: &'a Shared<Option<(u64, u64)>>,
     pub chunk_size: usize,
+    /// Whether this deployment journals the engine's *own* writes (deal), so
+    /// `/admin/rewind` can undo them. The venue sets this: it has no parent
+    /// stream, so its journal is exactly these writes (keyed by the devnet's
+    /// coordinate — the scan cursor, or the head before the first scan). The
+    /// mainnet keeps it false: its journal is the applier's parent
+    /// before-values, and mixing engine writes in would change what a rewind
+    /// means (frozen behavior).
+    pub journal_writes: bool,
 }
 
 impl AdminSurface<'_> {
     /// `POST /admin/deal` — the unlimited ERC20 faucet.
     pub async fn deal(&self, req: &deal::DealRequest) -> Result<deal::DealOutcome> {
+        let journal = self.journal_sink().await?;
         deal::deal(
             self.target,
             self.shadow,
             self.shadow_path,
             self.metrics,
             self.chunk_size,
+            journal,
             req,
         )
         .await
+    }
+
+    /// The journaling sink for the engine's own writes, when this deployment
+    /// journals them. The block is the devnet's current coordinate — the scan
+    /// cursor, or the head before the first scan — so the write always falls
+    /// inside the range `/admin/rewind` walks (a head-anchored key could land
+    /// *above* the cursor and be missed by the range).
+    async fn journal_sink(&self) -> Result<Option<(&Journal, u64)>> {
+        if !self.journal_writes {
+            return Ok(None);
+        }
+        let cursor = self.state.lock()?.data.t.as_ref().map(|c| c.block);
+        let block = match cursor {
+            Some(block) => block,
+            None => self.target.block_number().await?,
+        };
+        Ok(Some((self.journal, block)))
     }
 
     /// `POST /admin/shadow` — register devnet-owned keys, or hand them back
@@ -191,6 +218,14 @@ impl AdminSurface<'_> {
                 cursor: cursor.block,
             });
         }
+        if blocks > self.journal.keep() {
+            // The ring bounds the rewindable window; beyond it the older
+            // before-values are pruned, so a partial restore would be a lie.
+            return Err(Error::RewindBeyondRing {
+                blocks,
+                keep: self.journal.keep(),
+            });
+        }
         let from = cursor.block - blocks + 1;
         // Mark the range for re-apply *before* rolling anything back: the
         // applier's late-completion skip must be disabled for these blocks from
@@ -203,8 +238,12 @@ impl AdminSurface<'_> {
                 None => (from, cursor.block),
             });
         }
+        // Walk the blocks that actually have before-values (newest first): a
+        // quiet block has no file — skipping it is "nothing to restore", not a
+        // fault, and a large range costs one directory read, not one probe per
+        // block.
         let mut restored = 0usize;
-        for b in (from..=cursor.block).rev() {
+        for b in self.journal.blocks_in(from, cursor.block)? {
             restored += self
                 .journal
                 .undo_block(b, self.target, self.chunk_size)

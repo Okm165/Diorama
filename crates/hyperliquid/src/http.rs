@@ -7,10 +7,15 @@
 //! `InvalidRewind` / `InvalidShadow`) are 4xx; a poisoned registry is 503;
 //! everything else is a server-side fault, logged with its typed cause.
 //!
-//! `/admin/rewind` is deliberately absent: the venue's journal is empty until
-//! the devnet's own writes are journaled (or snapshots are wired), and a
-//! rewind that silently restores nothing while reporting success is the exact
-//! no-op the doctrine forbids. The route lands with that journaling.
+//! `/admin/rewind` is the venue's own-write journal: the engine records the
+//! before-values of the writes it performs on V (the deal faucet's silent
+//! storage writes) under the devnet's coordinate — the scan cursor — and the
+//! shared rewind undoes the last N scanned blocks newest-first. There is no
+//! parent stream to re-apply, so the devnet re-creates its own state; the
+//! driver's range marker clears once the head passes the rewound range.
+//! `/admin/time` stays absent by design: V's clock is native anvil
+//! (`setNextBlockTimestamp`/`evm_mine`, measured), which the harness calls
+//! directly — an engine offset nobody re-aligns would be a no-op route.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use axum::{
@@ -20,7 +25,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mirror_devnet::admin::ShadowRequest;
+use mirror_devnet::admin::{RewindRequest, ShadowRequest};
 use mirror_devnet::deal::DealRequest;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
@@ -54,6 +59,7 @@ impl IntoResponse for Error {
             Error::Devnet(
                 mirror_devnet::Error::NoCursor
                 | mirror_devnet::Error::InvalidRewind { .. }
+                | mirror_devnet::Error::RewindBeyondRing { .. }
                 | mirror_devnet::Error::InvalidShadow { .. },
             ) => StatusCode::BAD_REQUEST,
             Error::BadRequest { .. } => StatusCode::BAD_REQUEST,
@@ -80,6 +86,7 @@ pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
         .route("/metrics", get(metrics))
         .route("/admin/resume", post(admin_resume))
         .route("/admin/pause", post(admin_pause))
+        .route("/admin/rewind", post(admin_rewind))
         .route("/admin/shadow", post(admin_shadow))
         .route("/admin/deal", post(admin_deal))
         .route("/admin/epoch", post(admin_epoch))
@@ -165,6 +172,28 @@ struct ResumeResponse {
 #[derive(Debug, Serialize)]
 struct PauseResponse {
     paused: bool,
+}
+
+/// `/admin/rewind`: undo the engine's journaled writes (the deal faucet's
+/// silent storage writes) over the last `blocks` scanned blocks, newest first.
+async fn admin_rewind(
+    State(ctx): State<Arc<Ctx>>,
+    Json(req): Json<RewindRequest>,
+) -> Result<Json<RewindResponse>> {
+    let out = ctx.admin().rewind(req.blocks).await?;
+    Ok(Json(RewindResponse {
+        rewound_blocks: req.blocks,
+        restored_values: out.restored,
+        cursor_v: out.cursor,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct RewindResponse {
+    rewound_blocks: u64,
+    restored_values: usize,
+    /// V's scan cursor after the rewind (the rewound range's first block − 1).
+    cursor_v: u64,
 }
 
 async fn admin_shadow(

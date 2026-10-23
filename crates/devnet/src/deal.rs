@@ -6,6 +6,7 @@
 //! override — no mining involved — then writes it silently and marks it
 //! devnet-owned so parent diffs can never overwrite it.
 use crate::error::Result;
+use crate::journal::{Journal, JournalEntry};
 use crate::metrics::Metrics;
 use crate::shadow::{save_registry, Shadow};
 use crate::shared::Shared;
@@ -54,12 +55,19 @@ pub struct ProbeRecord {
 /// write devnet-owned. A probe that could not run is a fault, not "this slot is
 /// not the balance slot" (boundary-discipline): if no slot matches, the fault
 /// is reported instead of a layout verdict.
+///
+/// `journal` records the write's before-value so `/admin/rewind` can undo it:
+/// `Some((journal, block))` on a deployment whose journal is its *own* writes
+/// (the venue — it has no parent stream to journal), `None` on the mainnet
+/// (its journal is the applier's parent before-values; mixing engine writes in
+/// would change what a rewind means).
 pub async fn deal(
     target: &Rpc,
     shadow: &Shared<Shadow>,
     shadow_path: &Path,
     metrics: &Metrics,
     chunk_size: usize,
+    journal: Option<(&Journal, u64)>,
     req: &DealRequest,
 ) -> Result<DealOutcome> {
     let data = balance_of_calldata(req.to);
@@ -85,6 +93,14 @@ pub async fn deal(
         slot,
         value: req.amount,
     };
+    // The undo entry's before-value must be read *before* the write; a fault
+    // here refuses the deal with nothing written (fail-closed: an unjournaled
+    // write on a journaling deployment is an undo that later writes a wrong
+    // value). The mainnet does not journal its deals (`None`) — frozen.
+    let before = match journal {
+        Some(_) => Some(target.storage_at_latest(req.token, slot).await?),
+        None => None,
+    };
     match mirror_anvil::apply_writes(target, std::slice::from_ref(&write), chunk_size).await {
         Ok(1) => {}
         // A refused write (e.g. `-32602`) must not be marked: a mark on a
@@ -105,6 +121,16 @@ pub async fn deal(
     let ok = after.as_ref() == Some(&req.amount.to_be_bytes::<32>().into());
     if ok {
         mark_owned(shadow, shadow_path, metrics, &write)?;
+        if let (Some((journal, block)), Some(before)) = (journal, before) {
+            journal.record(
+                block,
+                &[JournalEntry::Storage {
+                    address: req.token,
+                    slot,
+                    before: U256::from_be_bytes(before.0),
+                }],
+            )?;
+        }
     }
     tracing::info!(
         token = %req.token,

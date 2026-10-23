@@ -108,6 +108,42 @@ impl Journal {
     /// before-values belong to a chain that no longer exists, so a rewind
     /// against the new one would write values that were never there. A file
     /// that cannot be removed is logged loudly: a survivor is a rewind hazard.
+    /// The ring size: the rewindable window. `/admin/rewind` refuses beyond
+    /// it — the older before-values are pruned, and restoring only part of the
+    /// requested range while reporting success would be a lie.
+    pub fn keep(&self) -> u64 {
+        self.keep
+    }
+
+    /// The journaled blocks within `[from, to]`, newest first. The rewind
+    /// walks only what exists: a block with no recorded writes has no file
+    /// (empty batches are not recorded), so a per-block probe would fail on a
+    /// quiet block — and a huge range would cost one lookup per block.
+    pub fn blocks_in(&self, from: u64, to: u64) -> Result<Vec<u64>> {
+        let entries = std::fs::read_dir(&self.dir).map_err(|source| Error::Io {
+            what: "journal directory",
+            path: self.dir.clone(),
+            source,
+        })?;
+        let mut out: Vec<u64> = Vec::new();
+        for e in entries.flatten() {
+            let Some(stem) = e
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_suffix(".jsonl").map(str::to_string))
+            else {
+                continue;
+            };
+            if let Ok(block) = stem.parse::<u64>() {
+                if block >= from && block <= to {
+                    out.push(block);
+                }
+            }
+        }
+        out.sort_unstable_by(|a, b| b.cmp(a));
+        Ok(out)
+    }
+
     pub fn clear(&self) -> Result<()> {
         let entries = std::fs::read_dir(&self.dir).map_err(|source| Error::Io {
             what: "journal directory",
@@ -336,6 +372,30 @@ mod tests {
         j.prune(205);
         assert!(j.load(100).is_err(), "block 100 pruned at head 205 keep 10");
         assert!(j.load(200).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rewind walks only the blocks that have before-values: sparse files
+    /// (a quiet block is never recorded) are skipped, the order is newest
+    /// first, and a temp file is not a block.
+    #[test]
+    fn blocks_in_is_sparse_and_newest_first() {
+        let dir = std::env::temp_dir().join(format!("mirror-journal-range-{}", std::process::id()));
+        let j = Journal::new(dir.clone(), 1024).unwrap();
+        let e = JournalEntry::Storage {
+            address: Address::repeat_byte(2),
+            slot: U256::from(1u64),
+            before: U256::from(7u64),
+        };
+        for block in [100u64, 103, 105] {
+            j.record(block, std::slice::from_ref(&e)).unwrap();
+        }
+        // A crash-mid-write temp file must not read as a journaled block.
+        std::fs::write(dir.join("104.jsonl.tmp"), "partial").unwrap();
+        assert_eq!(j.keep(), 1024);
+        assert_eq!(j.blocks_in(99, 106).unwrap(), vec![105, 103, 100]);
+        assert_eq!(j.blocks_in(101, 104).unwrap(), vec![103], "the range clips");
+        assert_eq!(j.blocks_in(200, 300).unwrap(), Vec::<u64>::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

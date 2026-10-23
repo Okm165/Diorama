@@ -244,6 +244,7 @@ impl Ctx {
             frozen: &self.frozen,
             reapply_from: &self.reapply_from,
             chunk_size: self.engine.loops.chunk_size,
+            journal_writes: false,
         }
     }
 
