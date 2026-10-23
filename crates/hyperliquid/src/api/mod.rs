@@ -79,6 +79,9 @@ pub fn info_router(state: Arc<ApiState>) -> Router {
         .route("/healthz", axum::routing::get(info::healthz))
         .route("/readyz", axum::routing::get(info::readyz))
         .route("/info", axum::routing::post(info::info))
+        // The matching lane's named refusal (plan §18.4): their client posts
+        // actions here; the envelope is HL's own err shape, never a 404.
+        .route("/exchange", axum::routing::post(info::exchange))
         // The venue's websocket lane (plan §7.5: "info + WS" on this port).
         .route("/ws", axum::routing::get(ws::ws))
         .with_state(state)

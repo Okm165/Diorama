@@ -47,6 +47,30 @@ pub async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     }
 }
 
+/// `POST /exchange` — the matching lane. Plan §18.4's verdict: no service
+/// submits HL actions (the borrower signs client-side), so the lane is not
+/// required for the suite and stays a research lane; positions come from the
+/// control API instead. The refusal is *named* and uses HL's own envelope
+/// (`{"status":"err","response":"…"}`, HTTP 200 — the shape their client
+/// already parses), so a redesign probing the lane learns why it is absent,
+/// not just that it is.
+pub async fn exchange() -> Json<ExchangeResponse> {
+    Json(ExchangeResponse {
+        status: "err",
+        response: "venue-sim: the matching lane is not implemented (plan §18.4: no service \
+                   submits HL actions; positions come from the control API). \
+                   See docs/INTEGRATION.md.",
+    })
+}
+
+/// The `/exchange` envelope (the refusal above; complete for the err shape
+/// their client reads).
+#[derive(Debug, serde::Serialize)]
+pub struct ExchangeResponse {
+    pub status: &'static str,
+    pub response: &'static str,
+}
+
 /// `POST /info`: parse the typed request, dispatch, or pass through.
 pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
     // A malformed body is the caller's fault (400), not a server fault: the
@@ -303,4 +327,20 @@ fn active_asset_data(
 /// `userAbstraction` for a sim account (the control read shares it).
 pub(crate) fn abstraction_of(account: &account::Account) -> UserAbstraction {
     account::mode_of(account)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The matching lane's refusal is HL's own envelope, never a 404 (plan
+    /// §18.4): a client probing `/exchange` parses `status`/`response`.
+    #[tokio::test]
+    async fn exchange_refuses_in_hls_envelope() {
+        let body = serde_json::to_value(exchange().await.0).expect("serialize");
+        assert_eq!(body["status"], "err");
+        let response = body["response"].as_str().expect("a response string");
+        assert!(response.contains("matching lane"), "{response}");
+        assert!(response.contains("18.4"), "{response}");
+    }
 }
