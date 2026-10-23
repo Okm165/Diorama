@@ -916,6 +916,25 @@ the edges. Two measured quirks are pinned by unit tests: `spotMeta`'s
 camelCase, and requests must omit null optionals (the venue rejects
 `{"type":"metaAndAssetCtxs","dex":null}` with a 422).
 
+**The type discipline** (the import-vs-own rule, applied): every wire seam
+speaks the official crates' types - `alloy_json_rpc`'s envelope (`Request`,
+`ResponsePacket`, `ErrorPayload`, `Id`), `alloy_rpc_types_eth`/`-anvil`/
+`-trace`/`-txpool` for the JSON-RPC namespaces, `alloy_rpc_types_beacon` +
+`alloy_eips` for the CL (`BlockResponse<T>` with a narrow body, `BlobData`),
+`alloy_rpc_types_engine` for the engine API, `alloy_consensus`' `TxEip1559` +
+`encoded_2718` for the CCTP submitter, and `alloy_sol_types`' `sol!` for the
+ERC-20 `Transfer`/`transfer` and the eight CoreWriter action payloads (the
+selector, the validating log decoder and the ABI decoders are the macro's).
+An upstream wire change lands as a compile error at the seam, never as a
+silent mismatch. What stays ours is what no crate defines: the HL info/WS
+shapes (complete, unused fields included, each pinned by a test that parses a
+trimmed **live sample**), the sim's mechanics, the admin/control HTTP bodies,
+the config sections, and the CCTP message codec (a packed custom format).
+The measured lesson behind the shape tests: `PerpDex` had never parsed the
+live `perpDexs` (the sim serves `[null]`), so a missing camelCase rename sat
+undetected - a wire type that only ever *serializes* is unverified until a
+sample parses through it.
+
 The served info surface: `clearinghouseState`, `spotClearinghouseState`
 (`balances`; unified accounts also carry `tokenToAvailableAfterMaintenance` —
 the figure daloc's client reconciles: `available + maintenance == the
