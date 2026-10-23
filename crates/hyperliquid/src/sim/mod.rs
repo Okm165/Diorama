@@ -211,28 +211,45 @@ impl Sim {
     /// Absolute-additive: it raises the balance by `amount` (the harness's
     /// `add_erc20` semantics; draining is `amount` negative or a `set_account`
     /// seed).
+    /// The account plane's one write door: lock the state and run `f` on the
+    /// account, creating it on first touch. Two disciplines ride here — read
+    /// the clock *before* calling (`clock()` locks the same mutex, and a std
+    /// mutex is not reentrant), and mark the state dirty *after* (the guard
+    /// drops when this returns: `touch` for a batched writer, `mark_dirty` to
+    /// persist now). A debit never creates: it reads through `get_mut`.
+    fn with_account<T>(
+        &self,
+        address: Address,
+        f: impl FnOnce(&mut Account) -> Result<T>,
+    ) -> Result<T> {
+        let mut state = self.state.lock()?;
+        f(state.accounts.entry(address).or_default())
+    }
+
     pub fn deal(&self, feed: &MarketFeed, deal: &Deal) -> Result<Decimal> {
         let now = crate::now_ms();
         let clock = self.clock(now)?;
-        let mut state = self.state.lock()?;
-        let account = state.accounts.entry(deal.address).or_default();
-        stamp_funding_baseline(account, clock);
-        let after = match deal.class {
-            DealClass::Perp => {
-                account.perp_balance = account::add(account.perp_balance, deal.amount, "perp deal")?;
-                account.perp_balance
+        let after = self.with_account(deal.address, |account| {
+            stamp_funding_baseline(account, clock);
+            match deal.class {
+                DealClass::Perp => {
+                    account.perp_balance =
+                        account::add(account.perp_balance, deal.amount, "perp deal")?;
+                    Ok(account.perp_balance)
+                }
+                DealClass::Spot => {
+                    let coin = deal.coin.as_deref().unwrap_or("USDC");
+                    let index = feed.token_of(coin).ok_or_else(|| Error::BadRequest {
+                        reason: format!(
+                            "spot coin `{coin}` is not in the venue's token registry yet"
+                        ),
+                    })?;
+                    let entry = account::spot_entry(account, TokenRef { index, coin });
+                    entry.total = account::add(entry.total, deal.amount, "spot deal")?;
+                    Ok(entry.total)
+                }
             }
-            DealClass::Spot => {
-                let coin = deal.coin.as_deref().unwrap_or("USDC");
-                let index = feed.token_of(coin).ok_or_else(|| Error::BadRequest {
-                    reason: format!("spot coin `{coin}` is not in the venue's token registry yet"),
-                })?;
-                let entry = account::spot_entry(account, TokenRef { index, coin });
-                entry.total = account::add(entry.total, deal.amount, "spot deal")?;
-                entry.total
-            }
-        };
-        drop(state);
+        })?;
         self.mark_dirty()?;
         Ok(after)
     }
@@ -252,14 +269,15 @@ impl Sim {
         }
         let now = crate::now_ms();
         let clock = self.clock(now)?;
-        let mut state = self.state.lock()?;
-        let account = state.accounts.entry(address).or_default();
-        seed.apply_to(account, clock)?;
-        // Remember the patch as the control fixture, merged over the previous
-        // one (hl_mock's rule: a named field replaces, an unnamed one keeps).
-        let merged = seed.merged_with(account.control.take());
-        account.control = Some(merged);
-        drop(state);
+        self.with_account(address, |account| {
+            seed.apply_to(account, clock)?;
+            // Remember the patch as the control fixture, merged over the
+            // previous one (hl_mock's rule: a named field replaces, an
+            // unnamed one keeps).
+            let merged = seed.merged_with(account.control.take());
+            account.control = Some(merged);
+            Ok(())
+        })?;
         self.mark_dirty()
     }
 
@@ -280,12 +298,12 @@ impl Sim {
         // Read the clock *before* taking the state lock: `clock()` locks the
         // same mutex, and a std Mutex is not reentrant.
         let clock = self.clock(crate::now_ms())?;
-        let mut state = self.state.lock()?;
-        let account = state.accounts.entry(address).or_default();
-        stamp_funding_baseline(account, clock);
-        let entry = account::spot_entry(account, token);
-        entry.total = account::add(entry.total, amount, "spot credit")?;
-        drop(state);
+        self.with_account(address, |account| {
+            stamp_funding_baseline(account, clock);
+            let entry = account::spot_entry(account, token);
+            entry.total = account::add(entry.total, amount, "spot credit")?;
+            Ok(())
+        })?;
         self.touch();
         Ok(())
     }
@@ -315,27 +333,31 @@ impl Sim {
     /// `false` when the source side is short.
     pub fn usd_class_transfer(&self, address: Address, token: TokenRef<'_>, amount: Decimal, to_perp: bool) -> Result<bool> {
         let clock = self.clock(crate::now_ms())?;
-        let mut state = self.state.lock()?;
-        let account = state.accounts.entry(address).or_default();
-        stamp_funding_baseline(account, clock);
-        if to_perp {
-            let entry = account::spot_entry(account, token);
-            if entry.total < amount {
-                return Ok(false);
+        let applied = self.with_account(address, |account| {
+            stamp_funding_baseline(account, clock);
+            if to_perp {
+                let entry = account::spot_entry(account, token);
+                if entry.total < amount {
+                    return Ok(false);
+                }
+                entry.total = account::sub(entry.total, amount, "usd class transfer")?;
+                account.perp_balance =
+                    account::add(account.perp_balance, amount, "usd class transfer")?;
+            } else {
+                if account.perp_balance < amount {
+                    return Ok(false);
+                }
+                account.perp_balance =
+                    account::sub(account.perp_balance, amount, "usd class transfer")?;
+                let entry = account::spot_entry(account, token);
+                entry.total = account::add(entry.total, amount, "usd class transfer")?;
             }
-            entry.total = account::sub(entry.total, amount, "usd class transfer")?;
-            account.perp_balance = account::add(account.perp_balance, amount, "usd class transfer")?;
-        } else {
-            if account.perp_balance < amount {
-                return Ok(false);
-            }
-            account.perp_balance = account::sub(account.perp_balance, amount, "usd class transfer")?;
-            let entry = account::spot_entry(account, token);
-            entry.total = account::add(entry.total, amount, "usd class transfer")?;
+            Ok(true)
+        })?;
+        if applied {
+            self.touch();
         }
-        drop(state);
-        self.touch();
-        Ok(true)
+        Ok(applied)
     }
 
     /// Core spot send: debit the sender, credit the recipient. `false` when
@@ -360,25 +382,25 @@ impl Sim {
 
     /// Record an API wallet (CoreWriter action 9).
     pub fn note_agent(&self, address: Address, wallet: Address, name: &str) -> Result<()> {
-        let mut state = self.state.lock()?;
-        let account = state.accounts.entry(address).or_default();
-        if account.agents.iter().all(|a| a.wallet != wallet) {
-            account.agents.push(account::AgentWallet {
-                wallet,
-                name: name.to_string(),
-            });
-        }
-        drop(state);
+        self.with_account(address, |account| {
+            if account.agents.iter().all(|a| a.wallet != wallet) {
+                account.agents.push(account::AgentWallet {
+                    wallet,
+                    name: name.to_string(),
+                });
+            }
+            Ok(())
+        })?;
         self.touch();
         Ok(())
     }
 
     /// Set the account's abstraction mode (CoreWriter action 16).
     pub fn set_mode(&self, address: Address, mode: crate::wire::UserAbstraction) -> Result<()> {
-        let mut state = self.state.lock()?;
-        let account = state.accounts.entry(address).or_default();
-        account.mode = mode;
-        drop(state);
+        self.with_account(address, |account| {
+            account.mode = mode;
+            Ok(())
+        })?;
         self.touch();
         Ok(())
     }

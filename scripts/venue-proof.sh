@@ -50,6 +50,20 @@ source "$(dirname "$0")/lib-venue.sh"
 
 sim_account() { sipost /info "{\"type\":\"clearinghouseState\",\"user\":\"$1\"}"; }
 metric() { smetrics | awk -v k="$1" '$1 == k || $1 ~ "^"k"\\{" {s+=$2; found=1} END {print (found ? s : 0)}'; }
+# Poll a metric to a threshold (bounded): the bridge's and the sim's passes are
+# 1 Hz, but a cold market feed defers a bridge pass (the block is re-scanned),
+# so a fixed sleep flakes — a poll outlasts it, and a real breakage still
+# fails at the budget's end. Prints the last value seen.
+wait_metric() { # wait_metric <name> <min> [budget_secs=20]
+  local name=$1 min=$2 budget=${3:-20} i=0 v=0
+  while [ "$i" -lt "$budget" ]; do
+    v=$(metric "$name")
+    [ "$v" -ge "$min" ] 2>/dev/null && break
+    sleep 1
+    i=$((i + 1))
+  done
+  printf '%s' "$v"
+}
 mine()   { rpcv '{"jsonrpc":"2.0","id":1,"method":"evm_mine","params":[]}' > /dev/null; }
 # eth_sendTransaction works because V runs auto-impersonate (the parity flag):
 # no key material is needed for the proof's actor. V is no-mining, so the
@@ -109,8 +123,7 @@ liq0=$(metric venue_sim_liquidations_total)
 spost /control/set_account "{\"address\":\"$UNDER\",\"state\":$seed}" > /dev/null \
   && ok "underwater account seeded" || bad "set_account refused"
 spost /control/advance '{"seconds":2}' > /dev/null
-sleep 3
-liq1=$(metric venue_sim_liquidations_total)
+liq1=$(wait_metric venue_sim_liquidations_total $((liq0 + 1)))
 after=$(sim_account "$UNDER")
 flat=$(echo "$after" | json 'len(d["assetPositions"])')
 [ "$liq1" -gt "$liq0" ] && [ "$flat" = "0" ] \
@@ -143,8 +156,7 @@ t0=$(balance "$PURR" "$ACCT")
 data=$("$CAST" calldata "transfer(address,uint256)" "$PURR_SYSTEM" "$PURR_SEND")
 tx=$(send_tx "$ACCT" "$PURR" "$data")
 [ -n "$tx" ] && [ "$tx" != "None" ] && ok "transfer to the system address mined ($tx)" || bad "system-address transfer failed"
-sleep 3   # the bridge pass (1 s) + the sim's atomic save
-credits1=$(metric venue_bridge_credits_total)
+credits1=$(wait_metric venue_bridge_credits_total $((credits0 + 1)))
 [ "$credits1" -gt "$credits0" ] 2>/dev/null && ok "EVM→Core credited ($credits0 -> $credits1)" \
   || bad "no credit recorded ($credits0 -> $credits1)"
 # Core→EVM: a sendAsset naming the system address completes through it. The

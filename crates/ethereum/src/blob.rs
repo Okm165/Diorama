@@ -191,6 +191,16 @@ pub struct TopUpBody {
     pub execution_requests: Option<ExecutionRequestsV4>,
 }
 
+/// Decode one beacon response, naming the source in the error — the three
+/// readers (head slot, block by slot, sidecars) share the mapping, and a
+/// decode fault must never read as a missing object.
+fn decode_json<T: serde::de::DeserializeOwned>(url: &str, text: &str) -> Result<T, BeaconError> {
+    serde_json::from_str(text).map_err(|source| BeaconError::Decode {
+        url: url.to_string(),
+        source,
+    })
+}
+
 /// `beacon_payload_v3::deserialize` produces a `ExecutionPayloadV3`; the
 /// field is optional because pre-Bellatrix bodies carry no payload at all.
 fn deserialize_opt_payload<'de, D>(deserializer: D) -> Result<Option<ExecutionPayloadV3>, D::Error>
@@ -276,11 +286,7 @@ impl BeaconClient {
         // The official response type: `data.header.message.slot` is a u64 with
         // the API's decimal-string serde. Parsing it as hex silently yielded a
         // bogus slot, which made the top-up loop walk far past the CL head.
-        let parsed: HeaderResponse =
-            serde_json::from_str(&text).map_err(|source| BeaconError::Decode {
-                url: url.clone(),
-                source,
-            })?;
+        let parsed: HeaderResponse = decode_json(&url, &text)?;
         Ok(parsed.data.header.message.slot)
     }
 
@@ -325,11 +331,7 @@ impl BeaconClient {
             return Ok(None);
         }
         let text = self.body_text(&url, resp).await?;
-        let parsed: BeaconBlock =
-            serde_json::from_str(&text).map_err(|source| BeaconError::Decode {
-                url: url.clone(),
-                source,
-            })?;
+        let parsed: BeaconBlock = decode_json(&url, &text)?;
         Ok(Some(parsed))
     }
 
@@ -381,11 +383,7 @@ impl BeaconClient {
                 source,
             })?;
         let text = self.body_text(&url, resp).await?;
-        let parsed: SidecarResponse =
-            serde_json::from_str(&text).map_err(|source| BeaconError::Decode {
-                url: url.clone(),
-                source,
-            })?;
+        let parsed: SidecarResponse = decode_json(&url, &text)?;
         if parsed.data.is_empty() {
             Ok(None)
         } else {
