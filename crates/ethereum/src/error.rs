@@ -62,6 +62,15 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// An anvil answered with a different chain id: the profile would fork the
+    /// wrong chain (state, addresses and every measured fact follow from it).
+    #[error("{anvil} is not the mainnet chain: chain id {got}, expected {want}")]
+    WrongChain {
+        anvil: &'static str,
+        got: u64,
+        want: u64,
+    },
+
     /// The selftest's scratch anvil was not started with a fork pin.
     #[error("{chain} has no fork pin - start it with --fork-url and --fork-block-number")]
     NoForkPin { chain: &'static str },

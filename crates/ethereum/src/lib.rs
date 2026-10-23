@@ -119,6 +119,9 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
 /// a bad source day, and a crash-loop is worse than a slow boot.
 const ANVIL_BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 
+/// Ethereum mainnet: what both anvils must fork (a code fact, plan §19.6).
+const MAINNET_CHAIN_ID: u64 = 1;
+
 async fn run(config: PathBuf) -> Result<()> {
     let cfg = Instance::load(&config)?;
     let (reth_url, m_url, t_url) = cfg.ethereum_urls()?;
@@ -133,6 +136,20 @@ async fn run(config: PathBuf) -> Result<()> {
     ctx.anvil_m.anvil_set_automine(false).await?;
     ctx.anvil_t.wait_until_up("anvil-t", ANVIL_BOOT_TIMEOUT).await?;
     ctx.anvil_t.anvil_set_automine(false).await?;
+    // Both anvils fork Ethereum mainnet: a wrong source (a testnet reth, a
+    // misdirected URL) would mirror the wrong chain silently - state,
+    // addresses and every measured fact follow from the id. The venue asserts
+    // V's identity the same way at boot.
+    for (anvil, rpc) in [("anvil-m", &ctx.anvil_m), ("anvil-t", &ctx.anvil_t)] {
+        let got = rpc.chain_id().await?;
+        if got != MAINNET_CHAIN_ID {
+            return Err(Error::WrongChain {
+                anvil,
+                got,
+                want: MAINNET_CHAIN_ID,
+            });
+        }
+    }
 
     tracing::info!(
         reth = %ctx.reth.url(),
