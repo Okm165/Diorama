@@ -104,6 +104,17 @@ impl Plane {
         shadow::save_registry(&self.shadow, &self.shadow_path, &self.metrics)
     }
 
+    /// Open the plane from the engine section's layout (state dir, journal
+    /// dir/blocks, fixture addresses): the one convention both profiles use.
+    pub fn from_engine(engine: &mirror_config::EngineSection) -> Result<Self> {
+        Self::open(
+            &engine.state_dir,
+            engine.journal.dir.clone(),
+            engine.journal.blocks,
+            &engine.fixture_addresses,
+        )
+    }
+
     pub fn is_halted(&self) -> bool {
         self.halted.load(Ordering::Relaxed)
     }

@@ -168,8 +168,12 @@ impl Shadow {
     /// they would hold pin-era mainnet values while mainnet's diffs keep
     /// skipping them - the worst of both worlds. Hand them back instead.
     pub fn unrecorded(&mut self) -> (usize, usize) {
-        let mut slots = 0usize;
-        let mut accounts = 0usize;
+        (self.drop_unvalued_slots(), self.drop_unvalued_accounts())
+    }
+
+    /// Drop marked slots with no recorded value: they would hold pin-era
+    /// source values under a devnet mark. Returns the count dropped.
+    fn drop_unvalued_slots(&mut self) -> usize {
         // Collect first (the borrow checker will not let us mutate while
         // iterating the same maps).
         let mut drop_slots: Vec<(Address, U256)> = Vec::new();
@@ -181,13 +185,18 @@ impl Shadow {
                 }
             }
         }
-        slots += drop_slots.len();
-        for (address, slot) in drop_slots {
-            if let Some(set) = self.slots.get_mut(&address) {
-                set.remove(&slot);
+        for (address, slot) in &drop_slots {
+            if let Some(set) = self.slots.get_mut(address) {
+                set.remove(slot);
             }
         }
         self.slots.retain(|_, set| !set.is_empty());
+        drop_slots.len()
+    }
+
+    /// Drop whole-account marks with no recorded value (the same rule as the
+    /// slots). Returns the count dropped.
+    fn drop_unvalued_accounts(&mut self) -> usize {
         let mut drop_accounts: Vec<Address> = Vec::new();
         for address in self.accounts.iter() {
             let recorded = self
@@ -199,11 +208,10 @@ impl Shadow {
                 drop_accounts.push(*address);
             }
         }
-        accounts += drop_accounts.len();
-        for address in drop_accounts {
-            self.accounts.remove(&address);
+        for address in &drop_accounts {
+            self.accounts.remove(address);
         }
-        (slots, accounts)
+        drop_accounts.len()
     }
 
     /// Re-apply the devnet's own writes to a chain that was re-forked under us

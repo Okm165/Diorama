@@ -69,6 +69,22 @@ pub struct ScanWalk {
     pub shadowed: u64,
 }
 
+/// Publish the `shadow_scanned` fact when the walk moved blocks (an empty
+/// walk says nothing new). The one fact construction both drivers report; the
+/// applier's inline scan and the hand-backs' pre-scans record the counters
+/// alone (`Registry::record_scan`), because their own fact or response
+/// carries the walk.
+pub fn publish(plane: &Plane, chain: &'static str, walk: &ScanWalk) {
+    if walk.walked > 0 {
+        plane.facts.publish(crate::facts::Fact::ShadowScanned {
+            chain,
+            blocks: walk.walked,
+            empty: walk.empty,
+            shadowed: walk.shadowed,
+        });
+    }
+}
+
 /// The one shadow-scan walk (both profiles, both call shapes): from the
 /// high-water mark — or `first` when the mark is unset (a fresh chain) —
 /// anchored at the pin, up to `head`. Returns the blocks walked; the caller

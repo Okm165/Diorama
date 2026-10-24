@@ -158,25 +158,35 @@ pub fn plan_reads(
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for closure in closures {
-        for key in closure.keys_for(touched) {
-            if seen.insert(key) {
-                out.push(key);
-            }
-        }
+        push_new(&mut out, &mut seen, closure.keys_for(touched));
     }
     let mut accounts: Vec<Address> = touched.addresses.iter().copied().collect();
     accounts.sort_unstable();
     for address in accounts {
-        if !watch.accounts.contains(&address) {
-            continue;
-        }
-        for key in [Key::Balance(address), Key::Nonce(address), Key::Code(address)] {
-            if seen.insert(key) {
-                out.push(key);
-            }
+        if watch.accounts.contains(&address) {
+            push_new(&mut out, &mut seen, account_field_keys(address));
         }
     }
     out
+}
+
+/// The three account-field keys as one unit (they shadow together).
+fn account_field_keys(address: Address) -> [Key; 3] {
+    [
+        Key::Balance(address),
+        Key::Nonce(address),
+        Key::Code(address),
+    ]
+}
+
+/// Append `keys` in order, skipping ones already seen: the plan is deduped,
+/// declaration order first.
+fn push_new(out: &mut Vec<Key>, seen: &mut HashSet<Key>, keys: impl IntoIterator<Item = Key>) {
+    for key in keys {
+        if seen.insert(key) {
+            out.push(key);
+        }
+    }
 }
 
 #[cfg(test)]

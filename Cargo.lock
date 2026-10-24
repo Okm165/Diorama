@@ -785,6 +785,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "ast-scope"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2610,6 +2618,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "alloy-serde",
+ "futures-util",
  "mirror-anvil",
  "mirror-config",
  "serde",

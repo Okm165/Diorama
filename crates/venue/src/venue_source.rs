@@ -25,7 +25,8 @@
 //! scratch/slow source).
 use alloy_primitives::{Address, B256, U256};
 use mirror_anvil::{Error, Rpc};
-use mirror_devnet::source::{Capabilities, Fut, Source};
+use futures_util::future::BoxFuture;
+use mirror_devnet::source::{Capabilities, Source};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -112,7 +113,7 @@ impl Source for VenueSource {
     /// The source's anchor: the pin. Before the pin is resolved (a boot race
     /// the bin's ordering rules out) the source's head is the only truthful
     /// answer left; it is never the steady-state path.
-    fn head(&self) -> Fut<'_, mirror_anvil::Result<u64>> {
+    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
         Box::pin(async move {
             let pin = self.pin.load(Ordering::Relaxed);
             if pin != 0 {
@@ -125,21 +126,21 @@ impl Source for VenueSource {
     /// Block headers are historical-safe on the public source (unlike state
     /// reads): `eth_getBlockByNumber` serves old blocks, which is what makes
     /// forking and cursor hashes possible at all. No pin guard here.
-    fn header(&self, n: u64) -> Fut<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
+    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
         Box::pin(async move {
             let block = self.rpc.block_by_number(n, false).await?;
             Ok(block.header)
         })
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<U256>> {
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {
         Box::pin(async move {
             self.guard().await?;
             self.rpc.balance_at(address, block).await
         })
     }
 
-    fn nonce_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<u64>> {
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
         Box::pin(async move {
             self.guard().await?;
             self.rpc.nonce_at(address, block).await
@@ -151,7 +152,7 @@ impl Source for VenueSource {
         address: Address,
         slot: U256,
         block: u64,
-    ) -> Fut<'_, mirror_anvil::Result<B256>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<B256>> {
         Box::pin(async move {
             self.guard().await?;
             self.rpc.storage_at(address, slot, block).await
@@ -162,7 +163,7 @@ impl Source for VenueSource {
         &self,
         address: Address,
         block: u64,
-    ) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
         Box::pin(async move {
             self.guard().await?;
             self.rpc.code_at(address, block).await
@@ -176,7 +177,7 @@ impl Source for VenueSource {
         &self,
         from: u64,
         to: u64,
-    ) -> Fut<'_, mirror_anvil::Result<mirror_devnet::closure::TouchedSet>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<mirror_devnet::closure::TouchedSet>> {
         let system_txs = self.capabilities().system_txs;
         Box::pin(mirror_devnet::bal::envelope_touches(
             &self.rpc,

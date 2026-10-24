@@ -17,7 +17,8 @@
 use crate::cow::Scope;
 use crate::error::Result;
 use crate::shared::Shared;
-use crate::source::{Fut, Source};
+use crate::source::Source;
+use futures_util::future::BoxFuture;
 use crate::state::StateFile;
 use mirror_anvil::Rpc;
 use std::sync::Arc;
@@ -78,7 +79,7 @@ pub enum ResetSignal {
 /// source). `PinCanary` (the venue mirror, in its folder): the recorded
 /// instance's storage word must read back its pin.
 pub trait ResetDetector: Send + Sync {
-    fn detect<'a>(&'a self, target: &'a Rpc) -> Fut<'a, Result<ResetSignal>>;
+    fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, Result<ResetSignal>>;
 }
 
 /// The cursor-hash detector: the cursor's block must carry its recorded hash,
@@ -103,10 +104,10 @@ pub fn below_fork_base(cursor_block: u64, base: Option<u64>) -> bool {
 }
 
 impl ResetDetector for CursorHash {
-    fn detect<'a>(&'a self, target: &'a Rpc) -> Fut<'a, Result<ResetSignal>> {
+    fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, Result<ResetSignal>> {
         Box::pin(async move {
             // No cursor: nothing to invalidate (the fresh-chain path).
-            let Some(cursor) = self.state.lock()?.data.devnet.clone() else {
+            let Some(cursor) = self.state.cursor()? else {
                 return Ok(ResetSignal::Steady);
             };
             let base = target.fork_block().await?;

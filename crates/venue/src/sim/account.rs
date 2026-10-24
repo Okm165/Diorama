@@ -746,6 +746,22 @@ pub(crate) struct FillFacts {
     pub fee: Decimal,
 }
 
+impl FillFacts {
+    /// A reduce-only close at `px` with no fee: the waterfall's shape (the ADL
+    /// pairs and the book's reduce closes).
+    pub(crate) fn close(coin: &str, is_buy: bool, size: Decimal, px: Decimal, leverage: u32) -> Self {
+        Self {
+            coin: coin.to_string(),
+            is_buy,
+            size,
+            px,
+            leverage,
+            reduce_only: true,
+            fee: Decimal::ZERO,
+        }
+    }
+}
+
 pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> {
     let signed = if fill.is_buy { fill.size } else { -fill.size };
     let old = account

@@ -212,35 +212,7 @@ impl FeedBridge {
                 source: Box::new(e),
             }
         })?;
-        // The target may not be installed yet (their fixture deploy installs
-        // the mocks): *absence* is a fact the bridge waits on, a transport
-        // fault is a fault, and a present-but-mismatched target is still a
-        // boot fault (a mis-scaled answer poisons consumers).
-        let decimals = match read_decimals(&ctx.anvil_t, feed.target).await {
-            Ok(d) if d == source => Some(d),
-            Ok(d) => {
-                return Err(Error::FeedBridgeDecimals {
-                    feed: feed.name.clone(),
-                    have: source,
-                    want: d,
-                })
-            }
-            Err(Error::FeedBridgeAbi { .. }) => {
-                tracing::warn!(
-                    feed = %feed.name,
-                    target = %feed.target,
-                    "feed target has no code yet; the bridge waits for the devnet's fixture deploy"
-                );
-                None
-            }
-            Err(e) => {
-                return Err(Error::FeedBridgeFeed {
-                    feed: feed.name.clone(),
-                    what: "target decimals",
-                    source: Box::new(e),
-                })
-            }
-        };
+        let decimals = target_decimals(ctx, feed, source).await?;
         Ok(FeedRuntime {
             section: feed.clone(),
             values: Mutex::new(ValueState::default()),
@@ -517,6 +489,34 @@ async fn read_decimals(rpc: &mirror_anvil::Rpc, aggregator: Address) -> Result<u
             detail: e.to_string(),
         })?;
     Ok(decoded)
+}
+
+/// The target's decimals, when it exists and matches the source. `None` while
+/// the fixture deploy has not run yet — *absence* is a fact the bridge waits
+/// on; a present-but-mismatched target or an unexpected fault is a boot error
+/// naming itself (a mis-scaled answer poisons consumers).
+async fn target_decimals(ctx: &Ctx, feed: &FeedSection, source: u8) -> Result<Option<u8>> {
+    match read_decimals(&ctx.anvil_t, feed.target).await {
+        Ok(d) if d == source => Ok(Some(d)),
+        Ok(d) => Err(Error::FeedBridgeDecimals {
+            feed: feed.name.clone(),
+            have: source,
+            want: d,
+        }),
+        Err(Error::FeedBridgeAbi { .. }) => {
+            tracing::warn!(
+                feed = %feed.name,
+                target = %feed.target,
+                "feed target has no code yet; the bridge waits for the devnet's fixture deploy"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(Error::FeedBridgeFeed {
+            feed: feed.name.clone(),
+            what: "target decimals",
+            source: Box::new(e),
+        }),
+    }
 }
 
 async fn read_answer(rpc: &mirror_anvil::Rpc, aggregator: Address) -> Result<i128> {

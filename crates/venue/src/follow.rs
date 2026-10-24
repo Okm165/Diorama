@@ -41,7 +41,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<()> {
     let source_head = ctx.source_rpc.block_number().await?;
     ctx.venue_metrics
         .set(&ctx.venue_metrics.source_head, source_head);
-    let Some(followed) = ctx.source_last_block()? else {
+    let Some(followed) = ctx.plane.state.source_last_block()? else {
         // Not anchored yet (reconcile anchors at the pin); nothing to do.
         return Ok(());
     };
@@ -125,7 +125,7 @@ fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> bool {
 /// count it, say so, and let the operator re-pin (HL finality is BFT; a
 /// visible alarm is the honest guard).
 async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
-    let Some(last_hash) = ctx.source_last_hash()? else {
+    let Some(last_hash) = ctx.plane.state.source_last_hash()? else {
         return Ok(());
     };
     let next = ctx.source_rpc.block_by_number(followed + 1, false).await?;
@@ -201,8 +201,7 @@ fn record_poll_stats(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) {
 /// block hash — the continuity check's anchor) and persist the state.
 async fn advance_follow(ctx: &Ctx, source_head: u64) -> Result<()> {
     let head_block = ctx.source_rpc.block_by_number(source_head, false).await?;
-    ctx.set_source_last_block(source_head)?;
-    ctx.set_source_last_hash(head_block.header.hash)?;
+    ctx.plane.state.set_source_last(source_head, head_block.header.hash)?;
     ctx.plane.save_state()?;
     Ok(())
 }

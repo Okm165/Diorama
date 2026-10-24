@@ -26,6 +26,7 @@ allowed() {
     venue-engine)       echo "mirror-venue mirror-devnet mirror-anvil mirror-config" ;;
     venue-sim)          echo "mirror-venue mirror-devnet mirror-anvil mirror-config" ;;
     cctp-bridge)        echo "mirror-cctp mirror-anvil mirror-config" ;;
+    ast-scope)          echo "" ;;
     *)                  echo "UNKNOWN-PACKAGE" ;;
   esac
 }

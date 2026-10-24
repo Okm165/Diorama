@@ -11,7 +11,7 @@ use crate::drift::Drift;
 use crate::error::{Error, Result};
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
-use mirror_anvil::{Rpc, Write};
+use mirror_anvil::{Key, Rpc, Write};
 use mirror_devnet::cow::FilterStats;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
@@ -157,12 +157,9 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let header = ctx.mirror.source().header(n).await?;
 
     let t_head = ctx.anvil_t.block_number().await?;
-    // The base this apply started under: a re-pin racing the (slow) fetch
-    // below would land parent n's writes on the *new* base — watched state
-    // regressed to an old height and a block mined at the wrong height
-    // (measured: the applier then sat silent on the resetting anvil).
-    // `plan_and_check_base` aborts on the move; the next pass reconciles (the
-    // cursor sits below the base → the epoch rule).
+    // The base this apply started under: `plan_and_check_base` aborts if a
+    // re-pin races the (slow) compose, before any write; the next pass
+    // reconciles (the cursor sits below the base → the epoch rule).
     let base = ctx.anvil_t.fork_block().await?;
     let (needs_reapply, reapply) = match apply_entry(ctx, n, t_head, started).await? {
         ApplyEntry::Late(outcome) => return Ok(outcome),
@@ -172,8 +169,7 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         } => (needs_reapply, reapply),
     };
 
-    prepend_devnet_txs(&ctx.anvil_t, n, ctx.mirror.policies().prepend_rounds).await?;
-    mark_own_writes(ctx).await?;
+    prepend_and_mark(ctx, n).await?;
 
     let plan = plan_and_check_base(ctx, n, base).await?;
     let entries = read_before_values(&ctx.anvil_t, &plan.writes, t_head).await?;
@@ -181,8 +177,7 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let applied = write_and_mine(ctx, &header, &plan.writes).await?;
     journal_and_scan(ctx, n, &entries, t_head).await?;
     // The parent-stream continuity marker (reorg detection reads it).
-    ctx.set_source_last_hash(header.hash)?;
-    ctx.set_source_last_block(n)?;
+    ctx.plane.state.set_source_last(n, header.hash)?;
 
     let t_latest = ctx.anvil_t.block_number().await?;
     let (sampled, sampled_ok) = sample_parity(ctx, n, &plan.writes, t_latest).await;
@@ -306,8 +301,8 @@ async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> 
 /// state persisted.
 async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
     let t_block = ctx.anvil_t.block_by_number(n, false).await?;
-    let first_block = ctx.cursor_t()?.map(|c| c.first_block).unwrap_or(n);
-    ctx.set_cursor_t(cursor_from(&t_block, first_block))?;
+    let first_block = ctx.plane.state.cursor()?.map(|c| c.first_block).unwrap_or(n);
+    ctx.plane.state.set_cursor(cursor_from(&t_block, first_block))?;
     ctx.plane.save_state()?;
     Ok(())
 }
@@ -387,6 +382,14 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
         sampled_ok: 0,
         duration_ms: started.elapsed().as_millis() as u64,
     })
+}
+
+/// Step 0 of one apply: the prepend rule's mine(s), then mark the devnet's
+/// own writes — the COW filter reads the marks, and the parent's diff must
+/// not overwrite the devnet's state.
+async fn prepend_and_mark(ctx: &Ctx, n: u64) -> Result<()> {
+    prepend_devnet_txs(&ctx.anvil_t, n, ctx.mirror.policies().prepend_rounds).await?;
+    mark_own_writes(ctx).await
 }
 
 /// Prepend rule (plan, "Prepend rules"): mine the devnet's pending txs in
@@ -520,36 +523,57 @@ async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
 /// sample. Returns `(sampled, sampled_ok)`.
 async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> (usize, usize) {
     let full = ctx.engine.verifier.full_sweep;
-    let mut sample: Vec<&Write> = filtered
-        .iter()
-        .filter(|w| matches!(w, Write::Storage { .. }))
-        .collect();
+    let mut sample: Vec<Key> = filtered.iter().filter_map(storage_key).collect();
     if !full {
         sample.truncate(ctx.engine.verifier.drift_sample_keys);
     }
     let mut sampled_ok = 0usize;
-    for w in &sample {
-        if let Write::Storage { address, slot, .. } = w {
-            match (
-                ctx.anvil_t.storage_at(*address, *slot, t_latest).await,
-                ctx.reth.storage_at(*address, *slot, n).await,
-            ) {
-                (Ok(a), Ok(b)) if a == b => sampled_ok += 1,
-                (a, b) => {
-                    if full {
-                        ctx.eth_metrics.inc(&ctx.eth_metrics.full_sweep_mismatches);
-                    }
-                    tracing::warn!(
-                        block = n,
-                        address = %address,
-                        slot = %slot,
-                        "drift sample mismatch: t={a:?} reth={b:?}"
-                    );
-                }
-            }
+    for key in &sample {
+        if sample_key(ctx, n, t_latest, key, full).await {
+            sampled_ok += 1;
         }
     }
     (sample.len(), sampled_ok)
+}
+
+/// The key of a storage write (`None` for account-field writes: only storage
+/// is sampled).
+fn storage_key(w: &Write) -> Option<Key> {
+    match w {
+        Write::Storage { address, slot, .. } => Some(Key::Storage {
+            address: *address,
+            slot: *slot,
+        }),
+        _ => None,
+    }
+}
+
+/// Compare one storage key at the two chains' own anchors: T's latest block
+/// against reth at n. Equal reads are the reading; a mismatch (or a fault on
+/// either side) is the drift lens's warn — and, under `full_sweep`, a
+/// counted mismatch.
+async fn sample_key(ctx: &Ctx, n: u64, t_latest: u64, key: &Key, full: bool) -> bool {
+    let Key::Storage { address, slot } = key else {
+        return true;
+    };
+    match (
+        ctx.anvil_t.storage_at(*address, *slot, t_latest).await,
+        ctx.reth.storage_at(*address, *slot, n).await,
+    ) {
+        (Ok(a), Ok(b)) if a == b => true,
+        (a, b) => {
+            if full {
+                ctx.eth_metrics.inc(&ctx.eth_metrics.full_sweep_mismatches);
+            }
+            tracing::warn!(
+                block = n,
+                address = %address,
+                slot = %slot,
+                "drift sample mismatch: t={a:?} reth={b:?}"
+            );
+            false
+        }
+    }
 }
 
 /// Probe parity for T (the plan's invariant: "probe parity on T after context

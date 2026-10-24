@@ -10,7 +10,8 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::Header;
 use mirror_devnet::bal::DiffKind;
 use mirror_devnet::closure::TouchedSet;
-use mirror_devnet::source::{Capabilities, Fut, Source};
+use futures_util::future::BoxFuture;
+use mirror_devnet::source::{Capabilities, Source};
 use std::sync::Arc;
 
 /// The reth handle is shared (`Arc`): one client per endpoint, referenced by
@@ -39,22 +40,22 @@ impl Source for RethSource {
         }
     }
 
-    fn head(&self) -> Fut<'_, mirror_anvil::Result<u64>> {
+    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
         Box::pin(self.reth.block_number())
     }
 
-    fn header(&self, n: u64) -> Fut<'_, mirror_anvil::Result<Header>> {
+    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<Header>> {
         Box::pin(async move {
             let block = self.reth.block_by_number(n, false).await?;
             Ok(block.header)
         })
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<U256>> {
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {
         Box::pin(self.reth.balance_at(address, block))
     }
 
-    fn nonce_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<u64>> {
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
         Box::pin(self.reth.nonce_at(address, block))
     }
 
@@ -63,7 +64,7 @@ impl Source for RethSource {
         address: Address,
         slot: U256,
         block: u64,
-    ) -> Fut<'_, mirror_anvil::Result<B256>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<B256>> {
         Box::pin(self.reth.storage_at(address, slot, block))
     }
 
@@ -71,7 +72,7 @@ impl Source for RethSource {
         &self,
         address: Address,
         block: u64,
-    ) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
         Box::pin(self.reth.code_at(address, block))
     }
 
@@ -81,7 +82,7 @@ impl Source for RethSource {
     fn bal(
         &self,
         n: u64,
-    ) -> Fut<'_, mirror_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
         Box::pin(self.reth.block_access_list(n))
     }
 
@@ -93,7 +94,7 @@ impl Source for RethSource {
     /// block with transactions and an empty trace falls back to the tx-level
     /// tracer — the scanner's own path — instead of silently composing
     /// nothing.
-    fn touched(&self, from: u64, to: u64) -> Fut<'_, mirror_anvil::Result<TouchedSet>> {
+    fn touched(&self, from: u64, to: u64) -> BoxFuture<'_, mirror_anvil::Result<TouchedSet>> {
         Box::pin(async move {
             let mut touched = TouchedSet::default();
             for n in (from + 1)..=to {

@@ -8,13 +8,11 @@
 //! pipeline and a hand-back ask for: capabilities, the head, a block header,
 //! and the three account reads an unshadow restores.
 use alloy_primitives::{Address, B256, U256};
-use std::future::Future;
-use std::pin::Pin;
+// The seam's reads are dynamic (`&dyn Source`): one box per call, the
+// standard `futures_util` form. These are per-block and admin-path reads,
+// never a hot loop.
+use futures_util::future::BoxFuture;
 use std::sync::Arc;
-
-/// A boxed future: the boundary is dynamic, so each call boxes once. These
-/// are per-block and admin-path reads, never a hot loop.
-pub type Fut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// What a source can serve. Probed once at boot and logged; every read path
 /// gates on it — never assumed.
@@ -45,16 +43,16 @@ pub trait Source: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     /// The source's own head: the anchor before the first apply, when the
     /// devnet has no cursor yet (nothing applied to reflect).
-    fn head(&self) -> Fut<'_, mirror_anvil::Result<u64>>;
+    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>>;
 
     /// The block's header: identity (number/hash/parent) plus the context the
     /// applier aligns to (timestamp, coinbase, prevRandao, gas limit, base
     /// fee). The official type — no mirror-owned block shape.
-    fn header(&self, n: u64) -> Fut<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>>;
+    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>>;
 
-    fn balance_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<U256>>;
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>>;
 
-    fn nonce_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<u64>>;
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>>;
 
     /// A storage word: the wire form (32 bytes), converted at the write site.
     fn storage_at(
@@ -62,14 +60,14 @@ pub trait Source: Send + Sync {
         address: Address,
         slot: U256,
         block: u64,
-    ) -> Fut<'_, mirror_anvil::Result<B256>>;
+    ) -> BoxFuture<'_, mirror_anvil::Result<B256>>;
 
-    fn code_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>>;
+    fn code_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>>;
 
     /// Read one key. The default composes the four typed reads, so a source
     /// implements only the primitives it can serve; the composer reads its
     /// plan through this seam (one call shape for every key kind).
-    fn read_key(&self, key: mirror_anvil::Key, block: u64) -> Fut<'_, mirror_anvil::Result<mirror_anvil::Value>> {
+    fn read_key(&self, key: mirror_anvil::Key, block: u64) -> BoxFuture<'_, mirror_anvil::Result<mirror_anvil::Value>> {
         Box::pin(async move {
             Ok(match key {
                 mirror_anvil::Key::Storage { address, slot } => {
@@ -93,7 +91,7 @@ pub trait Source: Send + Sync {
     /// Default: none — the composer falls to the synthesized rung (the
     /// capability flag selects the rung; this answers per block, because a
     /// node can serve some blocks and not others).
-    fn bal(&self, n: u64) -> Fut<'_, mirror_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
+    fn bal(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
         let _ = n;
         Box::pin(async move { Ok(None) })
     }
@@ -102,7 +100,7 @@ pub trait Source: Send + Sync {
     /// plan from, plus any changed keys the source already carries values for
     /// (the trace rung). Every source implements this — it is the synthesized
     /// rung's data side.
-    fn touched(&self, from: u64, to: u64) -> Fut<'_, mirror_anvil::Result<crate::closure::TouchedSet>>;
+    fn touched(&self, from: u64, to: u64) -> BoxFuture<'_, mirror_anvil::Result<crate::closure::TouchedSet>>;
 
     /// What this source's touched rung is (`Trace` for a trace-based source,
     /// `Poll` for the envelope rung): the window BAL's `kind` label.
@@ -239,19 +237,19 @@ impl Source for RawSource {
         self.capabilities
     }
 
-    fn head(&self) -> Fut<'_, mirror_anvil::Result<u64>> {
+    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
         Box::pin(self.rpc.block_number())
     }
 
-    fn header(&self, n: u64) -> Fut<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
+    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
         Box::pin(async move { Ok(self.rpc.block_by_number(n, false).await?.header) })
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<U256>> {
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {
         Box::pin(self.rpc.balance_at(address, block))
     }
 
-    fn nonce_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<u64>> {
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
         Box::pin(self.rpc.nonce_at(address, block))
     }
 
@@ -260,7 +258,7 @@ impl Source for RawSource {
         address: Address,
         slot: U256,
         block: u64,
-    ) -> Fut<'_, mirror_anvil::Result<B256>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<B256>> {
         Box::pin(self.rpc.storage_at(address, slot, block))
     }
 
@@ -268,7 +266,7 @@ impl Source for RawSource {
         &self,
         address: Address,
         block: u64,
-    ) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
         Box::pin(self.rpc.code_at(address, block))
     }
 
@@ -279,7 +277,7 @@ impl Source for RawSource {
         &self,
         from: u64,
         to: u64,
-    ) -> Fut<'_, mirror_anvil::Result<crate::closure::TouchedSet>> {
+    ) -> BoxFuture<'_, mirror_anvil::Result<crate::closure::TouchedSet>> {
         let system_txs = self.capabilities.system_txs;
         Box::pin(crate::bal::envelope_touches(&self.rpc, from, to, system_txs))
     }

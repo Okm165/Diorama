@@ -103,7 +103,7 @@ impl AdminSurface<'_> {
         if !self.journal_writes {
             return Ok(None);
         }
-        let cursor = self.plane.state.lock()?.data.devnet.as_ref().map(|c| c.block);
+        let cursor = self.plane.state.cursor()?.as_ref().map(|c| c.block);
         let block = match cursor {
             Some(block) => block,
             None => self.target.block_number().await?,
@@ -212,11 +212,12 @@ impl AdminSurface<'_> {
         if req.all {
             let s = self.plane.shadow.lock()?;
             if let Some(set) = s.slots.get(&req.address) {
-                for slot in set {
-                    if !slots.contains(slot) {
-                        slots.push(*slot);
-                    }
-                }
+                let missing: Vec<U256> = set
+                    .iter()
+                    .filter(|slot| !slots.contains(slot))
+                    .copied()
+                    .collect();
+                slots.extend(missing);
             }
         }
         Ok((slots, req.account_fields || req.all))
@@ -322,7 +323,7 @@ impl AdminSurface<'_> {
                 keep: self.plane.journal.keep(),
             });
         }
-        let Some(cursor) = self.plane.state.lock()?.data.devnet.clone() else {
+        let Some(cursor) = self.plane.state.cursor()? else {
             return Err(Error::NoCursor);
         };
         if blocks == 0 || blocks > cursor.block {
@@ -379,10 +380,10 @@ impl AdminSurface<'_> {
                     .as_ref()
                     .map(|c| c.first_block)
                     .unwrap_or(target);
-                self.plane.state.lock()?.data.devnet = Some(crate::state::cursor_from(&b, first));
+                self.plane.state.set_cursor(crate::state::cursor_from(&b, first))?;
             }
             None => {
-                self.plane.state.lock()?.data.devnet = None;
+                self.plane.state.clear_cursor()?;
             }
         }
         self.plane.state.lock()?.save()
@@ -411,7 +412,7 @@ impl AdminSurface<'_> {
         self.plane.time_offset.store(seconds, Ordering::Relaxed);
         // Persist it: the offset is part of the devnet's state contract (its
         // blocks carry it), so a restart must keep it.
-        self.plane.state.lock()?.data.time_offset_seconds = Some(seconds);
+        self.plane.state.set_time_offset_seconds(seconds)?;
         self.plane.state.lock()?.save()?;
         // Informational: the offset is already set and persisted; a head gauge
         // that cannot be read degrades the report, it must not fail the write.

@@ -22,6 +22,27 @@ pub struct ProbeOutcome {
     pub skipped: usize,
 }
 
+/// Report one run: the fact on the bus and the log line, one place for both
+/// engines' on-demand paths (`at` names the compared block — the mainnet's
+/// cursor, the venue's pin). The applier's per-block probe path counts its
+/// own convergence counters and does not report here.
+pub fn report(plane: &crate::plane::Plane, chain: &'static str, at: u64, out: &ProbeOutcome) {
+    tracing::info!(
+        block = at,
+        ok = out.ok,
+        failed = out.failed,
+        skipped = out.skipped,
+        "probes complete"
+    );
+    plane.facts.publish(crate::facts::Fact::ProbesRun {
+        chain,
+        at,
+        ok: out.ok,
+        failed: out.failed,
+        skipped: out.skipped,
+    });
+}
+
 pub struct ProbeRunner<'a> {
     probes: &'a [Probe],
     /// Targets the devnet owns (COW): their probes are skipped, never alarmed.

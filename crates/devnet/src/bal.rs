@@ -70,6 +70,18 @@ pub struct WindowBal {
     pub bal: BlockAccessList,
 }
 
+impl WindowBal {
+    /// The empty window (`to <= from`): the pipeline's no-op input.
+    fn empty(from: u64, to: u64) -> Self {
+        Self {
+            from,
+            to,
+            kind: DiffKind::None,
+            bal: Vec::new(),
+        }
+    }
+}
+
 /// What the composer saw (the venue's poll gauges; the mainnet does not
 /// record them). `changed` counts the changes the BAL carries *before* the
 /// COW filter.
@@ -100,54 +112,61 @@ pub async fn compose(
     to: u64,
 ) -> Result<(WindowBal, ComposeStats)> {
     if to <= from {
-        return Ok((
-            WindowBal {
-                from,
-                to,
-                kind: DiffKind::None,
-                bal: Vec::new(),
-            },
-            ComposeStats::default(),
-        ));
+        return Ok((WindowBal::empty(from, to), ComposeStats::default()));
     }
     if source.capabilities().native_bal {
-        let mut acc: BTreeMap<Address, AccountChanges> = BTreeMap::new();
-        let mut stats = ComposeStats::default();
-        let mut kind = DiffKind::Bal;
-        for n in (from + 1)..=to {
-            if let Some(bal) = source.bal(n).await? {
-                merge_into(&mut acc, bal);
-            } else {
-                // A block the source cannot serve a BAL for: its own touched
-                // rung, one block wide.
-                let (bal, s) = synthesize(source, target, scope, n - 1, n).await?;
-                merge_into(&mut acc, bal);
-                stats.absorb(s);
-                kind = source.touched_kind();
-            }
-        }
-        let bal: BlockAccessList = acc.into_values().collect();
-        Ok((
-            WindowBal {
-                from,
-                to,
-                kind,
-                bal,
-            },
-            stats,
-        ))
+        native_window(source, target, scope, from, to).await
     } else {
-        let (bal, stats) = synthesize(source, target, scope, from, to).await?;
-        Ok((
-            WindowBal {
-                from,
-                to,
-                kind: source.touched_kind(),
-                bal,
-            },
-            stats,
-        ))
+        synth_window(source, target, scope, from, to).await
     }
+}
+
+/// Rung 1: the source records BALs — fetch each block of the window and merge
+/// them. A block without one falls back to rung 2 for that block alone; the
+/// window's kind then names the rung that answered.
+async fn native_window(
+    source: &dyn Source,
+    target: &dyn Source,
+    scope: &Scope,
+    from: u64,
+    to: u64,
+) -> Result<(WindowBal, ComposeStats)> {
+    let mut acc: BTreeMap<Address, AccountChanges> = BTreeMap::new();
+    let mut stats = ComposeStats::default();
+    let mut kind = DiffKind::Bal;
+    for n in (from + 1)..=to {
+        if let Some(bal) = source.bal(n).await? {
+            merge_into(&mut acc, bal);
+        } else {
+            let (bal, s) = synthesize(source, target, scope, n - 1, n).await?;
+            merge_into(&mut acc, bal);
+            stats.absorb(s);
+            kind = source.touched_kind();
+        }
+    }
+    let bal: BlockAccessList = acc.into_values().collect();
+    Ok((WindowBal { from, to, kind, bal }, stats))
+}
+
+/// Rung 2: the source reports the window's touches; the declared scope plans
+/// the keys and the differing reads become the BAL.
+async fn synth_window(
+    source: &dyn Source,
+    target: &dyn Source,
+    scope: &Scope,
+    from: u64,
+    to: u64,
+) -> Result<(WindowBal, ComposeStats)> {
+    let (bal, stats) = synthesize(source, target, scope, from, to).await?;
+    Ok((
+        WindowBal {
+            from,
+            to,
+            kind: source.touched_kind(),
+            bal,
+        },
+        stats,
+    ))
 }
 
 /// A composed window: `(from, to]`. The mainnet composes one parent block at
@@ -240,12 +259,8 @@ async fn synthesize(
         if valued.contains(key) {
             continue;
         }
-        let source_value = source.read_key(*key, to).await?;
-        let target_value = target.read_key(*key, target_at).await?;
-        if source_value != target_value {
-            if let Some(w) = Write::new(*key, source_value) {
-                writes.push(w);
-            }
+        if let Some(w) = diff_key(source, target, *key, (to, target_at)).await? {
+            writes.push(w);
         }
     }
     let stats = ComposeStats {
@@ -255,6 +270,25 @@ async fn synthesize(
         uncovered: uncovered_emitters(scope, &plan, &touched),
     };
     Ok((mirror_anvil::bal_from_writes(&writes), stats))
+}
+
+/// One planned key's read-diff: the source's value at the window's end against
+/// the target's at its own head; a difference becomes a write (the value the
+/// source serves). Equal reads emit nothing.
+async fn diff_key(
+    source: &dyn Source,
+    target: &dyn Source,
+    key: Key,
+    at: (u64, u64),
+) -> Result<Option<Write>> {
+    let (source_at, target_at) = at;
+    let source_value = source.read_key(key, source_at).await?;
+    let target_value = target.read_key(key, target_at).await?;
+    Ok(if source_value != target_value {
+        Write::new(key, source_value)
+    } else {
+        None
+    })
 }
 
 /// Log emitters no closure covers and that are not watched accounts: a state
@@ -591,27 +625,27 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             self.caps
         }
-        fn head(&self) -> crate::source::Fut<'_, mirror_anvil::Result<u64>> {
+        fn head(&self) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<u64>> {
             Box::pin(async { Ok(10) })
         }
         fn header(
             &self,
             _n: u64,
-        ) -> crate::source::Fut<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
+        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
             Box::pin(async { Err(mirror_anvil::Error::Corrupt { what: "fake", detail: "header not used".into() }) })
         }
         fn balance_at(
             &self,
             _address: Address,
             _block: u64,
-        ) -> crate::source::Fut<'_, mirror_anvil::Result<U256>> {
+        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<U256>> {
             Box::pin(async { Ok(U256::ZERO) })
         }
         fn nonce_at(
             &self,
             _address: Address,
             _block: u64,
-        ) -> crate::source::Fut<'_, mirror_anvil::Result<u64>> {
+        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<u64>> {
             Box::pin(async { Ok(0) })
         }
         fn storage_at(
@@ -619,21 +653,21 @@ mod tests {
             _address: Address,
             _slot: U256,
             _block: u64,
-        ) -> crate::source::Fut<'_, mirror_anvil::Result<B256>> {
+        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<B256>> {
             Box::pin(async { Ok(B256::ZERO) })
         }
         fn code_at(
             &self,
             _address: Address,
             _block: u64,
-        ) -> crate::source::Fut<'_, mirror_anvil::Result<Bytes>> {
+        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<Bytes>> {
             Box::pin(async { Ok(Bytes::new()) })
         }
         fn read_key(
             &self,
             key: Key,
             _block: u64,
-        ) -> crate::source::Fut<'_, mirror_anvil::Result<Value>> {
+        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<Value>> {
             self.read_keys.lock().unwrap().push(key);
             let value = self.reads.get(&key).cloned();
             Box::pin(async move { Ok(value.unwrap_or(Value::Balance(U256::ZERO))) })
@@ -641,7 +675,7 @@ mod tests {
         fn bal(
             &self,
             _n: u64,
-        ) -> crate::source::Fut<'_, mirror_anvil::Result<Option<BlockAccessList>>> {
+        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<Option<BlockAccessList>>> {
             let bal = self.bal.clone();
             Box::pin(async move { Ok(bal) })
         }
@@ -649,7 +683,7 @@ mod tests {
             &self,
             _from: u64,
             _to: u64,
-        ) -> crate::source::Fut<'_, mirror_anvil::Result<TouchedSet>> {
+        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<TouchedSet>> {
             let touched = self.touched.clone();
             Box::pin(async move { Ok(touched) })
         }

@@ -72,6 +72,83 @@ impl StateFile {
     }
 }
 
+/// The state file's named accessors — one definition per field, on the shared
+/// handle itself: every read and write of the cursor, the follow markers, the
+/// epoch pin and the clock offset goes through them (the engines' contexts,
+/// the reset detectors and the admin surface alike). The field names are
+/// serde's (`devnet` is the chain's cursor on both profiles); the accessors
+/// carry the meaning.
+impl crate::shared::Shared<StateFile> {
+    /// The devnet chain's cursor (T-height on the mainnet — one block per
+    /// applied parent — V's on the venue).
+    pub fn cursor(&self) -> Result<Option<ChainCursor>> {
+        Ok(self.lock()?.data.devnet.clone())
+    }
+
+    pub fn set_cursor(&self, cursor: ChainCursor) -> Result<()> {
+        self.lock()?.data.devnet = Some(cursor);
+        Ok(())
+    }
+
+    /// Forget the cursor (a re-pin/rebase: the chain instance moved, the old
+    /// height means nothing on the new base).
+    pub fn clear_cursor(&self) -> Result<()> {
+        self.lock()?.data.devnet = None;
+        Ok(())
+    }
+
+    /// The highest source block composed onto the devnet (absent until the
+    /// first anchor).
+    pub fn source_last_block(&self) -> Result<Option<u64>> {
+        Ok(self.lock()?.data.source_last_block)
+    }
+
+    /// That block's hash (the reorg-continuity anchor).
+    pub fn source_last_hash(&self) -> Result<Option<B256>> {
+        Ok(self.lock()?.data.source_last_hash)
+    }
+
+    /// Record the source block the devnet now mirrors. Height and hash are one
+    /// anchor (the reorg-continuity check reads the pair; a reorg clears it
+    /// whole), so they are written together — never one without the other.
+    pub fn set_source_last(&self, n: u64, hash: B256) -> Result<()> {
+        let mut state = self.lock()?;
+        state.data.source_last_block = Some(n);
+        state.data.source_last_hash = Some(hash);
+        Ok(())
+    }
+
+    /// Forget the follow-marker pair (a detected reorg: the recorded source
+    /// block no longer belongs to this chain's branch).
+    pub fn clear_source_last(&self) -> Result<()> {
+        let mut state = self.lock()?;
+        state.data.source_last_hash = None;
+        state.data.source_last_block = None;
+        Ok(())
+    }
+
+    /// The base the registry was built against (anvil's `forkBlockNumber`): a
+    /// change is a new epoch.
+    pub fn epoch_pin(&self) -> Result<Option<u64>> {
+        Ok(self.lock()?.data.epoch_pin)
+    }
+
+    pub fn set_epoch_pin(&self, pin: Option<u64>) -> Result<()> {
+        self.lock()?.data.epoch_pin = pin;
+        Ok(())
+    }
+
+    /// The devnet's clock offset (seconds ahead of the parent, persisted).
+    pub fn time_offset_seconds(&self) -> Result<Option<u64>> {
+        Ok(self.lock()?.data.time_offset_seconds)
+    }
+
+    pub fn set_time_offset_seconds(&self, seconds: u64) -> Result<()> {
+        self.lock()?.data.time_offset_seconds = Some(seconds);
+        Ok(())
+    }
+}
+
 /// Convenience: build a `ChainCursor` from a block (the block's own number and
 /// hash, plus the epoch's first processed block).
 pub fn cursor_from(block: &alloy_rpc_types_eth::Block, first_block: u64) -> ChainCursor {

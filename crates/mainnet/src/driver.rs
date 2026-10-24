@@ -62,7 +62,7 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
 /// state): the epoch rule reconciles and the cursor rebases. Returns the
 /// cursor when it is still valid, `None` after a rebase.
 async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
-    let Some(c) = ctx.cursor_t()? else {
+    let Some(c) = ctx.plane.state.cursor()? else {
         return Ok(None);
     };
     match ctx.mirror.reset().detect(&ctx.anvil_t).await? {
@@ -74,14 +74,28 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
 /// A witnessed reset: say what was seen, publish the witness, and rebase.
 /// All three witnesses converge here (the detector's answer decides the fact).
 async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<ChainCursor>> {
-    let witness = match signal {
+    let Some(witness) = witness_for(signal) else {
+        return Ok(None);
+    };
+    ctx.plane.facts.publish(Fact::ResetDetected {
+        chain: ctx.mirror.label(),
+        witness,
+    });
+    rebase(ctx, head).await?;
+    Ok(None)
+}
+
+/// The detector's signal as a witness, each with the log line that names what
+/// was seen (`Steady` = no reset at all: `None`).
+fn witness_for(signal: ResetSignal) -> Option<ResetWitness> {
+    match signal {
         ResetSignal::BaseMoved { base, cursor } => {
             tracing::warn!(
                 ?base,
                 cursor,
                 "cursor below the fork base (re-pin) - reconciling"
             );
-            ResetWitness::Position { base, cursor }
+            Some(ResetWitness::Position { base, cursor })
         }
         ResetSignal::HashMismatch {
             block,
@@ -94,11 +108,11 @@ async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<Ch
                 ?found,
                 "cursor hash not found on chain (reset or re-pin) - reconciling"
             );
-            ResetWitness::Hash {
+            Some(ResetWitness::Hash {
                 block,
                 expected,
                 found,
-            }
+            })
         }
         ResetSignal::PinMismatch { expected, found } => {
             // Not this detector's witness (the venue's canary); fail closed if
@@ -109,16 +123,10 @@ async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<Ch
                 ?found,
                 "pin mismatch from the cursor-hash detector - reconciling"
             );
-            ResetWitness::Pin { expected, found }
+            Some(ResetWitness::Pin { expected, found })
         }
-        ResetSignal::Steady => return Ok(None),
-    };
-    ctx.plane.facts.publish(Fact::ResetDetected {
-        chain: ctx.mirror.label(),
-        witness,
-    });
-    rebase(ctx, head).await?;
-    Ok(None)
+        ResetSignal::Steady => None,
+    }
 }
 
 /// The invalid cursor's consequences, one step per effect: T's epoch rule (a
@@ -136,7 +144,7 @@ async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
     ctx.eth_metrics.inc(&ctx.eth_metrics.t_resets_total);
     mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.anvil_t, ctx.engine.loops.chunk_size, pin)
         .await?;
-    ctx.plane.state.lock()?.data.devnet = None;
+    ctx.plane.state.clear_cursor()?;
     ctx.plane.save_state()?;
     ctx.plane
         .facts
@@ -215,7 +223,7 @@ fn gap_within_limit(gap: u64, limit: Option<u64>, rebased: bool) -> bool {
 /// (the tradeoff a single-Anvil mirror accepts, and the reason
 /// `mirror_reorgs_detected_total` is an alarm).
 async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
-    let (Some(last_hash), Some(last_block)) = (ctx.source_last_hash()?, ctx.source_last_block()?) else {
+    let (Some(last_hash), Some(last_block)) = (ctx.plane.state.source_last_hash()?, ctx.plane.state.source_last_block()?) else {
         return Ok(());
     };
     if start > 1 && start - 1 == last_block {
@@ -226,10 +234,7 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
                     block = start - 1,
                     "reth reorg detected; applied diffs self-heal on the new branch"
                 );
-                let mut state = ctx.plane.state.lock()?;
-                state.data.source_last_hash = None;
-                state.data.source_last_block = None;
-                drop(state);
+                ctx.plane.state.clear_source_last()?;
                 ctx.plane.save_state()?;
             }
         }
@@ -318,14 +323,7 @@ async fn scan_once(ctx: &Ctx) -> Result<()> {
         &ctx.eth_metrics.shadow_scanned_blocks,
         &ctx.eth_metrics.shadow_skipped_empty_blocks,
     );
-    if walk.walked > 0 {
-        ctx.plane.facts.publish(Fact::ShadowScanned {
-            chain: ctx.mirror.label(),
-            blocks: walk.walked,
-            empty: walk.empty,
-            shadowed: walk.shadowed,
-        });
-    }
+    mirror_devnet::scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
     Ok(())
 }
 
@@ -335,7 +333,7 @@ async fn scan_once(ctx: &Ctx) -> Result<()> {
 /// its own outcome and leaves them alone. The venue's `/admin/probes` is the
 /// same verb over its at-pin probe set.
 pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::ProbeOutcome> {
-    let Some(cursor) = ctx.cursor_t()? else {
+    let Some(cursor) = ctx.plane.state.cursor()? else {
         tracing::warn!("on-demand probes skipped: no cursor yet");
         return Ok(mirror_devnet::probes::ProbeOutcome {
             skipped: ctx.engine.verifier.probes.len(),
@@ -349,19 +347,6 @@ pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::Probe
     )
     .parity(&ctx.reth, cursor.block, &ctx.anvil_t)
     .await?;
-    tracing::info!(
-        block = cursor.block,
-        ok = probes.ok,
-        failed = probes.failed,
-        skipped = probes.skipped,
-        "on-demand probes complete"
-    );
-    ctx.plane.facts.publish(Fact::ProbesRun {
-        chain: ctx.mirror.label(),
-        at: cursor.block,
-        ok: probes.ok,
-        failed: probes.failed,
-        skipped: probes.skipped,
-    });
+    mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), cursor.block, &probes);
     Ok(probes)
 }

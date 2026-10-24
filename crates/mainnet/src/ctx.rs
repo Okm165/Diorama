@@ -16,7 +16,6 @@ use mirror_devnet::admin::AdminSurface;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::source::Source;
 use mirror_devnet::spine::Mirror;
-use mirror_devnet::state::ChainCursor;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -57,42 +56,22 @@ impl Ctx {
     /// correct is fallible here (clients, state files, the drift log): a
     /// missing boundary is a boot error naming it, never a degraded start.
     pub fn new(mut cfg: Instance, reth_url: &str, anvil_t_url: &str) -> Result<Self> {
-        let (l1, engine_section) = cfg.take_mainnet()?;
-        let timeout = Duration::from_secs(engine_section.reth.request_timeout_secs);
-        let plane = Plane::open(
-            &engine_section.state_dir,
-            engine_section.journal.dir.clone(),
-            engine_section.journal.blocks,
-            &engine_section.fixture_addresses,
-        )?;
-        let drift = Drift::new(engine_section.state_dir.join("drift.jsonl"))?;
-        let beacon = BeaconClient::new(engine_section.beacon.urls.clone())?;
-        // One client per endpoint, shared (`Arc`): the context, the source
-        // objects and the composer's target all reference the same handle.
-        let reth = Arc::new(Rpc::new(reth_url, timeout)?);
-        let anvil_t = Arc::new(Rpc::new(anvil_t_url, timeout)?);
+        let (l1, engine) = cfg.take_mainnet()?;
+        let plane = Plane::from_engine(&engine)?;
+        let drift = Drift::new(engine.state_dir.join("drift.jsonl"))?;
+        let beacon = BeaconClient::new(engine.beacon.urls.clone())?;
+        let (reth, anvil_t) = build_clients(&engine, reth_url, anvil_t_url)?;
         let wiring = crate::profile::build(
-            &engine_section,
+            &engine,
             plane.state.clone(),
             reth.clone(),
             anvil_t.clone(),
             cfg.watch_set(),
         )?;
-        let engine_api = match (
-            &engine_section.source_sync.engine_url,
-            &engine_section.source_sync.jwt_path,
-        ) {
-            (Some(url), Some(jwt)) if engine_section.source_sync.enabled => {
-                // A configured boundary that cannot be built is a boot error
-                // naming itself: silently disabling it would stop the top-up
-                // loop while every dashboard still says "enabled".
-                Some(crate::engine_api::EngineClient::new(url, jwt)?)
-            }
-            _ => None,
-        };
+        let engine_api = build_engine_api(&engine)?;
         Ok(Self {
             l1,
-            engine: engine_section,
+            engine,
             reth,
             anvil_t,
             mirror: wiring.mirror,
@@ -104,35 +83,6 @@ impl Ctx {
             feed_bridge_metrics: Arc::new(crate::feed_bridge::FeedBridgeMetrics::default()),
             drift,
         })
-    }
-
-    /// The devnet chain's cursor (T-height: T mines one block per applied
-    /// parent block, so its height is not a parent height).
-    pub fn cursor_t(&self) -> Result<Option<ChainCursor>> {
-        Ok(self.plane.state.lock()?.data.devnet.clone())
-    }
-
-    pub fn set_cursor_t(&self, c: ChainCursor) -> Result<()> {
-        self.plane.state.lock()?.data.devnet = Some(c);
-        Ok(())
-    }
-
-    pub fn set_source_last_hash(&self, hash: alloy_primitives::B256) -> Result<()> {
-        self.plane.state.lock()?.data.source_last_hash = Some(hash);
-        Ok(())
-    }
-
-    pub fn set_source_last_block(&self, n: u64) -> Result<()> {
-        self.plane.state.lock()?.data.source_last_block = Some(n);
-        Ok(())
-    }
-
-    pub fn source_last_block(&self) -> Result<Option<u64>> {
-        Ok(self.plane.state.lock()?.data.source_last_block)
-    }
-
-    pub fn source_last_hash(&self) -> Result<Option<alloy_primitives::B256>> {
-        Ok(self.plane.state.lock()?.data.source_last_hash)
     }
 
     /// The devnet admin surface, wired to this engine's chain and re-sync
@@ -162,5 +112,31 @@ impl Ctx {
             FollowHead::Latest => "latest",
             FollowHead::Finalized => "finalized",
         }
+    }
+}
+
+/// One client per endpoint, shared (`Arc`): the context, the source objects
+/// and the composer's target all reference the same handle.
+fn build_clients(
+    engine: &EngineSection,
+    reth_url: &str,
+    anvil_t_url: &str,
+) -> Result<(Arc<Rpc>, Arc<Rpc>)> {
+    let timeout = Duration::from_secs(engine.reth.request_timeout_secs);
+    Ok((
+        Arc::new(Rpc::new(reth_url, timeout)?),
+        Arc::new(Rpc::new(anvil_t_url, timeout)?),
+    ))
+}
+
+/// The top-up loop's authrpc client. A configured boundary that cannot be
+/// built is a boot error naming itself: silently disabling it would stop the
+/// top-up loop while every dashboard still says "enabled".
+fn build_engine_api(engine: &EngineSection) -> Result<Option<crate::engine_api::EngineClient>> {
+    match (&engine.source_sync.engine_url, &engine.source_sync.jwt_path) {
+        (Some(url), Some(jwt)) if engine.source_sync.enabled => {
+            Ok(Some(crate::engine_api::EngineClient::new(url, jwt)?))
+        }
+        _ => Ok(None),
     }
 }

@@ -51,14 +51,13 @@ pub enum Epoch {
 pub fn anchor(plane: &Plane, pin: Option<u64>) -> Result<()> {
     let Some(pin) = pin else { return Ok(()) };
     {
-        let known = plane.state.lock()?.data.epoch_pin;
+        let known = plane.state.epoch_pin()?;
         if known.is_some() || plane.shadow.lock()?.has_recorded() {
             return Ok(());
         }
     }
-    let mut state = plane.state.lock()?;
-    state.data.epoch_pin = Some(pin);
-    state.save()?;
+    plane.state.set_epoch_pin(Some(pin))?;
+    plane.save_state()?;
     tracing::info!(pin, "epoch pin anchored (fresh registry)");
     Ok(())
 }
@@ -75,7 +74,7 @@ pub async fn reconcile(
     chunk_size: usize,
     pin: Option<u64>,
 ) -> Result<Epoch> {
-    let known = plane.state.lock()?.data.epoch_pin;
+    let known = plane.state.epoch_pin()?;
     let epoch = if known != pin {
         clear_for_new_pin(plane, known, pin)?
     } else if pin.is_some() && plane.shadow.lock()?.has_recorded() {
@@ -84,9 +83,8 @@ pub async fn reconcile(
         Epoch::Steady
     };
     if pin.is_some() && known != pin {
-        let mut state = plane.state.lock()?;
-        state.data.epoch_pin = pin;
-        state.save()?;
+        plane.state.set_epoch_pin(pin)?;
+        plane.save_state()?;
     }
     // The journal holds before-values of the *old* chain: a rewind against the
     // re-forked chain would restore values that never existed there.
@@ -212,14 +210,14 @@ mod tests {
         //    non-empty one is left unknown (nothing is asserted unprovably).
         let empty = test_plane("anchor-empty");
         anchor(&empty, Some(100)).unwrap();
-        assert_eq!(empty.state.lock().unwrap().data.epoch_pin, Some(100));
+        assert_eq!(empty.state.epoch_pin().unwrap(), Some(100));
         let held = test_plane("anchor-held");
         held.shadow
             .lock()
             .unwrap()
             .mark(&storage_write(addr, slot, U256::from(7)));
         anchor(&held, Some(100)).unwrap();
-        assert_eq!(held.state.lock().unwrap().data.epoch_pin, None);
+        assert_eq!(held.state.epoch_pin().unwrap(), None);
 
         // 2. A fresh state dir (unknown pin, empty registry) is not a
         //    transition: the pin is merely anchored.
@@ -228,7 +226,7 @@ mod tests {
             reconcile(&fresh, &rpc, 8, Some(100)).await.unwrap(),
             Epoch::Steady
         ));
-        assert_eq!(fresh.state.lock().unwrap().data.epoch_pin, Some(100));
+        assert_eq!(fresh.state.epoch_pin().unwrap(), Some(100));
 
         // 3. Unknown pin beside a *values-only* registry: cleared, never
         //    reported as "nothing to clear" (the values are stale derivations
@@ -247,7 +245,7 @@ mod tests {
         // 4. A changed pin clears and re-anchors; the same pin with an empty
         //    registry is steady.
         let moved = test_plane("moved");
-        moved.state.lock().unwrap().data.epoch_pin = Some(1);
+        moved.state.set_epoch_pin(Some(1)).unwrap();
         moved
             .shadow
             .lock()
@@ -257,7 +255,7 @@ mod tests {
             reconcile(&moved, &rpc, 8, Some(100)).await.unwrap(),
             Epoch::Cleared
         ));
-        assert_eq!(moved.state.lock().unwrap().data.epoch_pin, Some(100));
+        assert_eq!(moved.state.epoch_pin().unwrap(), Some(100));
         assert!(matches!(
             reconcile(&moved, &rpc, 8, Some(100)).await.unwrap(),
             Epoch::Steady

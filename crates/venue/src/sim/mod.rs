@@ -759,43 +759,55 @@ impl Sim {
         // The maintenance is tiered from the live meta; with none (the feed
         // still warming) the requirement reads zero and no liquidation fires —
         // the pass fails open, never liquidating on an unknown requirement.
-        let meta = feed.meta();
-        let accounts: Vec<(Address, Account)> = {
-            let st = self.state.lock()?;
-            st.accounts
-                .iter()
-                .map(|(a, acc)| (*a, acc.clone()))
-                .collect()
-        };
+        let accounts = self.account_snapshot()?;
         let mut out = Vec::new();
         for (address, account) in accounts {
-            if account.positions.is_empty() {
-                continue;
-            }
-            let v = account::view(&account, feed, meta.as_ref())?;
-            let maintenance = account::add(
-                v.cross_maintenance_margin_used,
-                account::isolated_maintenance(&account, &v)?,
-                "maintenance total",
-            )?;
-            let equity = v.margin_summary.account_value;
-            if equity >= maintenance {
-                continue;
-            }
-            let record = if equity < Decimal::ZERO {
-                self.adl(feed, address, &account, meta.as_ref())?
-            } else if account::mul(equity, Decimal::from(3), "backstop check")?
-                < account::mul(maintenance, Decimal::from(2), "backstop check")?
-            {
-                self.backstop(feed, address, &account, meta.as_ref())?
-            } else {
-                self.liquidate_via_book(feed, address, &account, now_ms)?
-            };
-            if let Some(record) = record {
+            if let Some(record) = self.check_account(feed, address, &account, now_ms)? {
                 out.push(record);
             }
         }
         Ok(out)
+    }
+
+    /// The accounts snapshot (the decision loop mutates state, so it iterates
+    /// a copy).
+    fn account_snapshot(&self) -> Result<Vec<(Address, Account)>> {
+        let st = self.state.lock()?;
+        Ok(st
+            .accounts
+            .iter()
+            .map(|(a, acc)| (*a, acc.clone()))
+            .collect())
+    }
+
+    /// One account's waterfall decision: solvent → nothing; underwater → ADL;
+    /// below the backstop ratio → the vault; otherwise the book.
+    fn check_account(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        account: &Account,
+        now_ms: u64,
+    ) -> Result<Option<Liquidation>> {
+        if account.positions.is_empty() {
+            return Ok(None);
+        }
+        let meta = feed.meta();
+        let v = account::view(account, feed, meta.as_ref())?;
+        let maintenance = account::add(
+            v.cross_maintenance_margin_used,
+            account::isolated_maintenance(account, &v)?,
+            "maintenance total",
+        )?;
+        let equity = v.margin_summary.account_value;
+        if equity >= maintenance {
+            return Ok(None);
+        }
+        match rescue_step(equity, maintenance)? {
+            Rescue::Adl => self.adl(feed, address, account, meta.as_ref()),
+            Rescue::Backstop => self.backstop(feed, address, account, meta.as_ref()),
+            Rescue::Book => self.liquidate_via_book(feed, address, account, now_ms),
+        }
     }
 
     /// Step 1: market orders to the book. Above the $100k partial threshold
@@ -938,26 +950,18 @@ impl Sim {
                 let take = left.min(size);
                 // The counterparty closes at the previous mark; the underwater
                 // account's side closes against it at the same price.
-                let facts_me = account::FillFacts {
-                    coin: coin.clone(),
-                    is_buy: !my_side_long,
-                    size: take,
-                    px: prev_mark,
-                    leverage: p.leverage_value,
-                    reduce_only: true,
-                    fee: Decimal::ZERO,
-                };
-                let facts_other = account::FillFacts {
-                    coin: coin.clone(),
-                    is_buy: my_side_long,
-                    size: take,
-                    px: prev_mark,
-                    leverage: 1,
-                    reduce_only: true,
-                    fee: Decimal::ZERO,
-                };
-                self.with_account(address, |a| account::apply_fill(a, &facts_me))?;
-                self.with_account(other, |a| account::apply_fill(a, &facts_other))?;
+                self.with_account(address, |a| {
+                    account::apply_fill(
+                        a,
+                        &account::FillFacts::close(coin, !my_side_long, take, prev_mark, p.leverage_value),
+                    )
+                })?;
+                self.with_account(other, |a| {
+                    account::apply_fill(
+                        a,
+                        &account::FillFacts::close(coin, my_side_long, take, prev_mark, 1),
+                    )
+                })?;
                 self.metrics.adl_closes_total.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(account = %address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
                 left = left.saturating_sub(take);
@@ -1074,6 +1078,32 @@ fn stamp_funding_baseline(account: &mut Account, clock: u64) {
     if account.funded_at_ms == 0 {
         account.funded_at_ms = clock;
     }
+}
+
+/// The waterfall's step for one underwater account.
+enum Rescue {
+    /// Negative equity: ADL against the opposite side.
+    Adl,
+    /// Below the backstop ratio (`3·equity < 2·maintenance`): the vault takes
+    /// the positions over.
+    Backstop,
+    /// Otherwise: market orders to the book.
+    Book,
+}
+
+/// The waterfall's step from the two readings (docs: ADL when underwater, the
+/// vault below the backstop ratio, the book otherwise).
+fn rescue_step(equity: Decimal, maintenance: Decimal) -> Result<Rescue> {
+    if equity < Decimal::ZERO {
+        return Ok(Rescue::Adl);
+    }
+    let backstop = account::mul(equity, Decimal::from(3), "backstop check")?
+        < account::mul(maintenance, Decimal::from(2), "backstop check")?;
+    Ok(if backstop {
+        Rescue::Backstop
+    } else {
+        Rescue::Book
+    })
 }
 
 /// The sim tests' feed fixture: one market per triple with a funding ctx

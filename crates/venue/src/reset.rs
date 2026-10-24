@@ -15,7 +15,7 @@
 use alloy_primitives::{Address, B256, U256};
 use mirror_anvil::Rpc;
 use mirror_devnet::shared::Shared;
-use mirror_devnet::source::Fut;
+use futures_util::future::BoxFuture;
 use mirror_devnet::spine::{ResetDetector, ResetSignal};
 use mirror_devnet::state::StateFile;
 
@@ -38,9 +38,9 @@ impl PinCanary {
 }
 
 impl ResetDetector for PinCanary {
-    fn detect<'a>(&'a self, target: &'a Rpc) -> Fut<'a, mirror_devnet::Result<ResetSignal>> {
+    fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, mirror_devnet::Result<ResetSignal>> {
         Box::pin(async move {
-            let expected = self.state.lock()?.data.epoch_pin;
+            let expected = self.state.epoch_pin()?;
             let found = read_canary(target).await?;
             Ok(if found == expected {
                 ResetSignal::Steady

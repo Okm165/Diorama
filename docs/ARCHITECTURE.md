@@ -744,9 +744,14 @@ exists in the code), `trust-audit` (every `// TRUST:` names its guard),
 `clock-labels` (every logged block label appears in its crate's `//! Clocks:`
 ledger), `no-panics` (the production code carries exactly two panic-family
 sites, both named invariants in the script's allow-list — a service that panics
-on an upstream answer is a crash loop, not a degradation) and `config-check`
-(every instance file through the layered loader). Each fails on drift; adding a
-gate is adding a script and one Makefile line.
+on an upstream answer is a crash loop, not a degradation), `config-check`
+(every instance file through the layered loader) and `ast-scope`
+(`bins/ast-scope`, the compiler's own parser over the sources: function bodies
+≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
+visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;
+test modules are out of scope, and the tool prints the largest offenders as its
+report). Each fails on drift; adding a gate is adding a script (or a bin) and
+one Makefile line.
 
 **Boot asserts.** The engine waits for V (a coordinated restart must not become
 CrashLoopBackOff), asserts the chain id is 999 (a profile over the wrong chain

@@ -118,14 +118,12 @@ where
 fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBody) -> Response {
     match &req.action {
         ExchangeAction::Order { .. } => order_action(state, user, body, req),
-        ExchangeAction::Cancel { cancels, fast } => match flag_omitted("f", *fast) {
-            Ok(()) => cancel_action(state, user, cancels),
-            Err(reason) => err_envelope(reason).into_response(),
-        },
-        ExchangeAction::CancelByCloid { cancels, fast } => match flag_omitted("f", *fast) {
-            Ok(()) => cancel_by_cloid_action(state, user, cancels),
-            Err(reason) => err_envelope(reason).into_response(),
-        },
+        ExchangeAction::Cancel { cancels, fast } => {
+            flagged("f", *fast, || cancel_action(state, user, cancels))
+        }
+        ExchangeAction::CancelByCloid { cancels, fast } => {
+            flagged("f", *fast, || cancel_by_cloid_action(state, user, cancels))
+        }
         ExchangeAction::Modify {
             oid,
             order,
@@ -134,15 +132,7 @@ fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBo
         ExchangeAction::BatchModify {
             modifies,
             always_place,
-        } => {
-            let always = always_place.unwrap_or(false);
-            for m in modifies {
-                if let Err(e) = modify_one(state, user, &m.oid, &m.order, always) {
-                    return err_envelope(e.to_string()).into_response();
-                }
-            }
-            default_ok()
-        }
+        } => batch_modify(state, user, modifies, always_place.unwrap_or(false)),
         ExchangeAction::UpdateIsolatedMargin { asset, ntli, .. } => {
             asset_action(state, *asset, |coin| {
                 state.sim.update_isolated_margin(user, coin, *ntli)
@@ -204,6 +194,32 @@ fn flag_omitted(name: &str, flag: Option<bool>) -> Result<(), String> {
         )),
         _ => Ok(()),
     }
+}
+
+/// Run `action` only when the flag is omitted (`flag_omitted`); a present
+/// flag's refusal is the ready err-envelope response. The one shape both
+/// cancel arms share.
+fn flagged(name: &str, flag: Option<bool>, action: impl FnOnce() -> Response) -> Response {
+    match flag_omitted(name, flag) {
+        Ok(()) => action(),
+        Err(reason) => err_envelope(reason).into_response(),
+    }
+}
+
+/// Modify every leg; the first refusal is the response (the venue answers a
+/// batch all-or-nothing).
+fn batch_modify(
+    state: &Arc<ApiState>,
+    user: Address,
+    modifies: &[ModifyItem],
+    always: bool,
+) -> Response {
+    for m in modifies {
+        if let Err(e) = modify_one(state, user, &m.oid, &m.order, always) {
+            return err_envelope(e.to_string()).into_response();
+        }
+    }
+    default_ok()
 }
 
 /// The venue's no-data success, built once.

@@ -188,20 +188,42 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
     // references instead of failing on them; the engine's own sections are
     // then required here, by name (the cctp bridge's pattern).
     let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
-    if let (Some(chain), Some(engine)) = (cfg.chains.venue.as_ref(), cfg.services.engine.as_ref())
-    {
-        let state_dir = engine.state_dir.to_string_lossy().to_string();
-        let v_url = engine.anvil.target_url.as_deref().unwrap_or_default();
-        mirror_config::require_resolved_logged(
-            "venue engine wiring",
-            &[&chain.source_url, v_url, &state_dir],
-            &unresolved,
-        )?;
-    }
+    require_wiring(&cfg, &unresolved)?;
     let (source_url, v_url) = cfg.venue_urls()?;
     let ctx = std::sync::Arc::new(Ctx::new(cfg, &source_url, &v_url)?);
 
     driver::boot(&ctx).await?;
+    let tasks = spawn_loops(&ctx);
+    mirror_config::boot::shutdown_signal().await;
+    tracing::info!("shutdown signal received");
+    for t in tasks {
+        t.abort();
+    }
+    Ok(())
+}
+
+/// This pod's wiring, by name (the venue chain's source URL, V's URL, the
+/// state dir): unresolved here is a boot error naming the section.
+fn require_wiring(
+    cfg: &mirror_config::Instance,
+    unresolved: &[String],
+) -> std::result::Result<(), mirror_config::ConfigError> {
+    let (Some(chain), Some(engine)) = (cfg.chains.venue.as_ref(), cfg.services.engine.as_ref())
+    else {
+        return Ok(());
+    };
+    let state_dir = engine.state_dir.to_string_lossy().to_string();
+    let v_url = engine.anvil.target_url.as_deref().unwrap_or_default();
+    mirror_config::require_resolved_logged(
+        "venue engine wiring",
+        &[&chain.source_url, v_url, &state_dir],
+        unresolved,
+    )
+}
+
+/// The engine's two loops (HTTP and the driver), each exiting with a named
+/// error and neither taking the process down (the shutdown signal does).
+fn spawn_loops(ctx: &std::sync::Arc<Ctx>) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
     {
         let ctx = ctx.clone();
@@ -219,11 +241,5 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
             }
         }));
     }
-
-    mirror_config::boot::shutdown_signal().await;
-    tracing::info!("shutdown signal received");
-    for t in tasks {
-        t.abort();
-    }
-    Ok(())
+    tasks
 }

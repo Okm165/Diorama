@@ -73,6 +73,11 @@ pub struct Watcher {
     pub metrics: Arc<CctpMetrics>,
 }
 
+/// Why a stale record is parked (invariant I6): its burn transaction no
+/// longer exists on this chain.
+const PARK_REASON: &str =
+    "source chain re-pinned or rewound: the burn transaction no longer exists";
+
 impl Watcher {
     /// The steady loop: one pass per interval; failures are logged and
     /// counted, never fatal (a chain that is down must not stop the other).
@@ -207,17 +212,7 @@ impl Watcher {
     /// re-pin or a rewind leaves their burn transactions absent, so they are
     /// stale derivations (I6) — kept visible, never relayed.
     async fn park_vanished(&self) -> Result<usize> {
-        let candidates: Vec<B256> = self.store.with(|state| {
-            Ok(state
-                .messages
-                .iter()
-                .filter(|m| {
-                    m.source_domain == self.chain.domain
-                        && matches!(m.state, RelayState::Pending | RelayState::Signed)
-                })
-                .map(|m| m.burn_tx)
-                .collect::<Vec<_>>())
-        })?;
+        let candidates = self.stale_candidates()?;
         let mut parked = 0usize;
         for burn_tx in candidates {
             let exists: Option<alloy_rpc_types_eth::Transaction> = self
@@ -228,30 +223,58 @@ impl Watcher {
             if exists.is_some() {
                 continue;
             }
-            self.store.with(|state| {
-                if let Some(record) = state.messages.iter_mut().find(|m| m.burn_tx == burn_tx) {
-                    record.state = RelayState::Parked;
-                    record.park_reason = Some(
-                        "source chain re-pinned or rewound: the burn transaction no longer exists"
-                            .into(),
-                    );
-                }
-                Ok(())
-            })?;
-            parked += 1;
+            if self.park(burn_tx)? {
+                parked += 1;
+            }
         }
-        if parked > 0 {
-            self.metrics
-                .relays_parked
-                .fetch_add(parked as u64, std::sync::atomic::Ordering::Relaxed);
-            self.store.save()?;
-            tracing::warn!(
-                chain = self.chain.name,
-                parked,
-                "stale cctp records parked (their burn transactions vanished)"
-            );
-        }
+        self.report_parked(parked)?;
         Ok(parked)
+    }
+
+    /// The records this chain's history could back: its own domain's
+    /// non-relayed ones (pending or signed).
+    fn stale_candidates(&self) -> Result<Vec<B256>> {
+        self.store.with(|state| {
+            Ok(state
+                .messages
+                .iter()
+                .filter(|m| {
+                    m.source_domain == self.chain.domain
+                        && matches!(m.state, RelayState::Pending | RelayState::Signed)
+                })
+                .map(|m| m.burn_tx)
+                .collect())
+        })
+    }
+
+    /// Park one record (mark it with the reason); `false` when it is gone.
+    fn park(&self, burn_tx: B256) -> Result<bool> {
+        self.store.with(|state| {
+            let Some(record) = state.messages.iter_mut().find(|m| m.burn_tx == burn_tx) else {
+                return Ok(false);
+            };
+            record.state = RelayState::Parked;
+            record.park_reason = Some(PARK_REASON.into());
+            Ok(true)
+        })
+    }
+
+    /// The parked count's report: the counter, the saved store, and the warn
+    /// (nothing when nothing was parked).
+    fn report_parked(&self, parked: usize) -> Result<()> {
+        if parked == 0 {
+            return Ok(());
+        }
+        self.metrics
+            .relays_parked
+            .fetch_add(parked as u64, std::sync::atomic::Ordering::Relaxed);
+        self.store.save()?;
+        tracing::warn!(
+            chain = self.chain.name,
+            parked,
+            "stale cctp records parked (their burn transactions vanished)"
+        );
+        Ok(())
     }
 
     /// The served `expirationBlock`: 0 = no expiry; otherwise the

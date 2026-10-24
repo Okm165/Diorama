@@ -422,15 +422,7 @@ impl Sim {
         let resting = self.resting_orders(None)?;
         let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), &req, &resting)?;
         let leverage = self.leverage_for(address, coin, meta.as_ref())?;
-        let facts = super::account::FillFacts {
-            coin: coin.to_string(),
-            is_buy: req.is_buy,
-            size: filled,
-            px: avg_px,
-            leverage,
-            reduce_only: true,
-            fee: Decimal::ZERO,
-        };
+        let facts = super::account::FillFacts::close(coin, req.is_buy, filled, avg_px, leverage);
         let clock = self.clock(crate::now_ms())?;
         self.with_account(address, |account| {
             super::account::accrue_funding(account, feed, clock)?;

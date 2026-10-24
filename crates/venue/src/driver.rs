@@ -103,12 +103,7 @@ enum Pass {
 }
 
 async fn pass(ctx: &Ctx) -> Result<Pass> {
-    // V's block production (T's is the applier's): the pool is mined once per
-    // pass, so the bridge's boot txs and relay mints land without waiting for
-    // a harness mine; an idle chain stays static.
-    if let Err(e) = mine_pending(ctx).await {
-        tracing::warn!(error = %e, "pending-tx mine failed; the next pass retries");
-    }
+    mine_pending_best_effort(ctx).await;
     let head = ctx.v.block_number().await?;
     ctx.venue_metrics.set(&ctx.venue_metrics.head, head);
 
@@ -121,13 +116,8 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
         return Ok(Pass::Reset);
     }
 
-    let cursor = ctx.cursor_v()?;
-    if let Some(c) = &cursor {
-        ctx.venue_metrics.set(&ctx.venue_metrics.cursor, c.block);
-        ctx.venue_metrics
-            .set(&ctx.venue_metrics.pin_age_blocks, head.saturating_sub(c.first_block) + 1);
-    }
-
+    let cursor = ctx.plane.state.cursor()?;
+    record_cursor_metrics(ctx, cursor.as_ref(), head);
     scan_and_advance(ctx, cursor.as_ref(), head).await?;
 
     // Follow the source: compose the window since the last composed source
@@ -135,12 +125,37 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // devnet's own writes are marked before the filter reads them.
     crate::follow::step(ctx).await?;
 
-    // A journal rewind on the venue restores before-values without moving the
-    // head; the range marker clears once the head is past it (there is no
-    // parent diff to re-apply - the devnet re-creates its writes). The value
-    // is copied out first: a guard held by the `if let` scrutinee across the
-    // body's second `lock()` would self-deadlock (std mutexes are not
-    // reentrant) - the mainnet's applier copies the same way.
+    clear_rewound_range(ctx, head)?;
+    Ok(Pass::Steady)
+}
+
+/// V's block production (T's is the applier's), best-effort: the pool is
+/// mined once per pass, so the bridge's boot txs and relay mints land without
+/// waiting for a harness mine; an idle chain stays static. A fault is a warn —
+/// the next pass retries.
+async fn mine_pending_best_effort(ctx: &Ctx) {
+    if let Err(e) = mine_pending(ctx).await {
+        tracing::warn!(error = %e, "pending-tx mine failed; the next pass retries");
+    }
+}
+
+/// The cursor's gauges: the cursor height and the pin-age reading (blocks
+/// since the epoch's first).
+fn record_cursor_metrics(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) {
+    let Some(c) = cursor else { return };
+    ctx.venue_metrics.set(&ctx.venue_metrics.cursor, c.block);
+    ctx.venue_metrics.set(
+        &ctx.venue_metrics.pin_age_blocks,
+        head.saturating_sub(c.first_block) + 1,
+    );
+}
+
+/// Clear the journal-rewind marker once the head is past the rolled-back
+/// range (there is no parent diff to re-apply — the devnet re-creates its own
+/// writes). The value is copied out first: a guard held by the `if let`
+/// scrutinee across the body's second `lock()` would self-deadlock (std
+/// mutexes are not reentrant) — the mainnet's applier copies the same way.
+fn clear_rewound_range(ctx: &Ctx, head: u64) -> Result<()> {
     let reapply = *ctx.plane.reapply_from.lock()?;
     if let Some((_, until)) = reapply {
         if head >= until {
@@ -148,7 +163,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
             tracing::info!(block = head, until, "rewound range passed");
         }
     }
-    Ok(Pass::Steady)
+    Ok(())
 }
 
 /// Scan V's own blocks since `cursor` and persist the walk: the shadow
@@ -179,12 +194,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
         &ctx.venue_metrics.scanned_blocks_total,
         &ctx.venue_metrics.skipped_empty_blocks_total,
     );
-    ctx.plane.facts.publish(Fact::ShadowScanned {
-        chain: ctx.mirror.label(),
-        blocks: walk.walked,
-        empty: walk.empty,
-        shadowed: walk.shadowed,
-    });
+    scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
     ctx.plane.save_shadow()?;
     // Ring the journal like the applier does on T: the rewind window is the
     // same 1024 blocks on both mirrors (files older than head - keep are
@@ -192,7 +202,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     ctx.plane.journal.prune(head);
     let block = ctx.v.block_by_number(head, false).await?;
     let first_block = cursor.map(|c| c.first_block).unwrap_or(head);
-    ctx.set_cursor_v(cursor_from(&block, first_block))?;
+    ctx.plane.state.set_cursor(cursor_from(&block, first_block))?;
     ctx.plane.save_state()?;
     ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
     ctx.plane.facts.publish(Fact::CursorAdvanced {
@@ -256,7 +266,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     ctx.plane.facts.publish(Fact::ResetDetected {
         chain: ctx.mirror.label(),
         witness: ResetWitness::Pin {
-            expected: ctx.plane.state.lock()?.data.epoch_pin,
+            expected: ctx.plane.state.epoch_pin()?,
             found: pin,
         },
     });
@@ -314,14 +324,13 @@ async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     let watermark = if let Some(p) = pin {
         let block = ctx.v.block_by_number(p, false).await?;
-        ctx.set_cursor_v(cursor_from(&block, p))?;
+        ctx.plane.state.set_cursor(cursor_from(&block, p))?;
         // The follow cursor starts at the pin: V's state *is* the source's
         // state at the pin, so the next window composes pin+1 onward. The
         // hash is the source's own block hash (the continuity check compares
         // it to the next block's parent).
         let source_block = ctx.source_rpc.block_by_number(p, false).await?;
-        ctx.set_source_last_block(p)?;
-        ctx.set_source_last_hash(source_block.header.hash)?;
+        ctx.plane.state.set_source_last(p, source_block.header.hash)?;
         p
     } else {
         tracing::warn!("anvil-v has no fork pin: epoch decisions are pin-based and cannot run");
@@ -384,13 +393,7 @@ pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOu
         .parity(&ctx.source_rpc, pin, &ctx.v)
         .await?;
     let out = count_probes(ctx, probes, pin, source_head).await?;
-    ctx.plane.facts.publish(Fact::ProbesRun {
-        chain: ctx.mirror.label(),
-        at: pin,
-        ok: out.ok,
-        failed: out.failed,
-        skipped: out.skipped,
-    });
+    mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), pin, &out);
     Ok(out)
 }
 

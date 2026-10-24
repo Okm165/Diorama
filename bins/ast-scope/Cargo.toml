@@ -1,0 +1,17 @@
+[package]
+name = "ast-scope"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "AST scope analysis: the shapes the doctrine keeps small (fitness gate)"
+
+[dependencies]
+# The compiler's own parser: `syn` is the AST layer rustc's proc-macro
+# interface uses, and `proc-macro2`'s span-locations feature gives real
+# line/column positions for the metrics.
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[lints]
+workspace = true

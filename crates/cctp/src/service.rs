@@ -8,7 +8,7 @@
 //! (8095 Iris-compatible, 8096 control).
 use crate::chains::{Chain, Domain, DOMAIN_ETHEREUM, DOMAIN_HYPER_EVM};
 use crate::transfer::{TxSender, Wallet};
-use crate::{Address, U256};
+use crate::{Address, B256, U256};
 use mirror_config::boot;
 use mirror_config::CctpSection;
 use std::collections::BTreeMap;
@@ -332,6 +332,18 @@ async fn deploy_wrapper(
             return;
         }
     };
+    handle_deploy_receipt(chain, store, sender, hash, receipt_timeout).await;
+}
+
+/// The deploy's receipt: a mined success with a contract address is verified
+/// and recorded; every other outcome is a named warn (the next boot retries).
+async fn handle_deploy_receipt(
+    chain: &Chain,
+    store: &Arc<crate::store::Store>,
+    sender: &TxSender,
+    hash: B256,
+    receipt_timeout: Duration,
+) {
     match crate::transfer::wait_for_receipt(&chain.rpc, hash, receipt_timeout).await {
         Ok(Some(receipt)) if receipt.status() => {
             if let Some(wrapper) = receipt.contract_address {
@@ -344,9 +356,7 @@ async fn deploy_wrapper(
                 );
             }
         }
-        Ok(Some(_)) => {
-            tracing::warn!(chain = chain.name, tx = %hash, "hook wrapper deploy reverted");
-        }
+        Ok(Some(_)) => tracing::warn!(chain = chain.name, tx = %hash, "hook wrapper deploy reverted"),
         Ok(None) => tracing::warn!(
             chain = chain.name,
             tx = %hash,

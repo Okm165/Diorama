@@ -56,19 +56,7 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
                 ctx.plane
                     .facts
                     .publish(mirror_devnet::facts::Fact::TopUpDelivered { delivered: n });
-                if last_report.elapsed() > Duration::from_secs(5) {
-                    if let (Some(cl_head), Ok(reth_head)) = (
-                        cl_head_el_block(&ctx.beacon, &mut head_cache).await,
-                        ctx.reth.block_number().await,
-                    ) {
-                        ctx.eth_metrics.set(
-                            &ctx.eth_metrics.source_sync_gap_blocks,
-                            cl_head.saturating_sub(reth_head),
-                        );
-                    }
-                    tracing::info!(payloads = n, "top-up: delivered payloads to reth");
-                    last_report = Instant::now();
-                }
+                report_top_up(&ctx, n, &mut last_report, &mut head_cache).await;
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             Err(e) => {
@@ -77,6 +65,31 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
             }
         }
     }
+}
+
+/// The top-up's periodic report (at most one per 5 s): the CL-vs-reth gap
+/// gauge and the log line. A beacon fault degrades the gauge only — the
+/// delivery itself already succeeded.
+async fn report_top_up(
+    ctx: &Ctx,
+    payloads: usize,
+    last_report: &mut Instant,
+    head_cache: &mut Option<(Instant, u64)>,
+) {
+    if last_report.elapsed() <= Duration::from_secs(5) {
+        return;
+    }
+    if let (Some(cl_head), Ok(reth_head)) = (
+        cl_head_el_block(&ctx.beacon, head_cache).await,
+        ctx.reth.block_number().await,
+    ) {
+        ctx.eth_metrics.set(
+            &ctx.eth_metrics.source_sync_gap_blocks,
+            cl_head.saturating_sub(reth_head),
+        );
+    }
+    tracing::info!(payloads, "top-up: delivered payloads to reth");
+    *last_report = Instant::now();
 }
 
 /// The CL head's execution block number, cached for a minute. Metrics-only:

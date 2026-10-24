@@ -159,7 +159,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
     let follow = ctx.follow_head().await.ok().flatten().unwrap_or(0);
     let head = ctx.anvil_t.block_number().await.unwrap_or(0);
-    let ct = ctx.cursor_t()?;
+    let ct = ctx.plane.state.cursor()?;
     let shadow = ctx.plane.shadow.lock()?;
     Ok(Json(StatusResponse {
         reth_head,

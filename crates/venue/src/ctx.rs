@@ -15,7 +15,6 @@ use mirror_devnet::admin::AdminSurface;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::source::Source;
 use mirror_devnet::spine::Mirror;
-use mirror_devnet::state::ChainCursor;
 use mirror_anvil::Rpc;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -62,12 +61,7 @@ impl Ctx {
         // configurable because its reth queries race the sync; no measured need
         // justifies a second knob here.
         let timeout = Duration::from_secs(30);
-        let plane = Plane::open(
-            &engine.state_dir,
-            engine.journal.dir.clone(),
-            engine.journal.blocks,
-            &engine.fixture_addresses,
-        )?;
+        let plane = Plane::from_engine(&engine)?;
         let venue_metrics = Arc::new(VenueMetrics::default());
         let source_rpc = Arc::new(Rpc::new(source_url, timeout)?);
         let v = Arc::new(Rpc::new(v_url, timeout)?);
@@ -106,32 +100,4 @@ impl Ctx {
         )
     }
 
-    pub fn cursor_v(&self) -> Result<Option<ChainCursor>> {
-        Ok(self.plane.state.lock()?.data.devnet.clone())
-    }
-
-    pub fn set_cursor_v(&self, cursor: ChainCursor) -> Result<()> {
-        self.plane.state.lock()?.data.devnet = Some(cursor);
-        Ok(())
-    }
-
-    /// The follow cursor: the highest source block composed onto V (absent
-    /// until `reconcile` anchors it at the pin).
-    pub fn source_last_block(&self) -> Result<Option<u64>> {
-        Ok(self.plane.state.lock()?.data.source_last_block)
-    }
-
-    pub fn source_last_hash(&self) -> Result<Option<alloy_primitives::B256>> {
-        Ok(self.plane.state.lock()?.data.source_last_hash)
-    }
-
-    pub fn set_source_last_block(&self, n: u64) -> Result<()> {
-        self.plane.state.lock()?.data.source_last_block = Some(n);
-        Ok(())
-    }
-
-    pub fn set_source_last_hash(&self, hash: alloy_primitives::B256) -> Result<()> {
-        self.plane.state.lock()?.data.source_last_hash = Some(hash);
-        Ok(())
-    }
 }

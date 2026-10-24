@@ -267,18 +267,7 @@ impl Rpc {
         let mut out = Vec::with_capacity(calls.len());
         let mut start = 0usize;
         while start < calls.len() {
-            let mut end = start;
-            let mut bytes = 2usize; // brackets
-            while end < calls.len() && (end - start) < max_items {
-                // The params are already serialized JSON, so the size estimate
-                // is exact enough for the chunk decision.
-                let estimate = calls[end].meta.method.len() + calls[end].params.get().len() + 64;
-                if end > start && bytes + estimate > max_bytes {
-                    break;
-                }
-                bytes += estimate + 1;
-                end += 1;
-            }
+            let end = chunk_end(calls, start, max_items, max_bytes);
             out.extend(self.batch_once(&calls[start..end]).await?);
             start = end;
         }
@@ -733,6 +722,23 @@ pub fn truncate(s: &str, n: usize) -> &str {
     } else {
         &s[..s.floor_char_boundary(n)]
     }
+}
+
+/// One chunk's end, from `start`: walk while the item count and the estimated
+/// body size allow. The params are already serialized JSON, so the size
+/// estimate is exact enough for the chunk decision.
+fn chunk_end(calls: &[Call], start: usize, max_items: usize, max_bytes: usize) -> usize {
+    let mut end = start;
+    let mut bytes = 2usize; // brackets
+    while end < calls.len() && (end - start) < max_items {
+        let estimate = calls[end].meta.method.len() + calls[end].params.get().len() + 64;
+        if end > start && bytes + estimate > max_bytes {
+            break;
+        }
+        bytes += estimate + 1;
+        end += 1;
+    }
+    end
 }
 
 #[cfg(test)]

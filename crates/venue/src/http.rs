@@ -131,7 +131,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     // Head gauges: an endpoint that cannot answer degrades the report to 0,
     // never fails it - /status is a diagnostic, not a fact source.
     let head = ctx.v.block_number().await.unwrap_or(0);
-    let cursor = ctx.cursor_v()?;
+    let cursor = ctx.plane.state.cursor()?;
     let shadow = ctx.plane.shadow.lock()?;
     Ok(Json(StatusResponse {
         head,
@@ -140,7 +140,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
             0 => None,
             p => Some(p),
         },
-        epoch_pin: ctx.plane.state.lock()?.data.epoch_pin,
+        epoch_pin: ctx.plane.state.epoch_pin()?,
         halted: ctx.plane.is_halted(),
         shadowed_slots: shadow.slot_count(),
         shadowed_accounts: shadow.accounts.len(),
