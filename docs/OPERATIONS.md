@@ -465,12 +465,10 @@ the same name to re-attach it, or delete the PV explicitly to free the space.
 | reth `eth_syncing` true for a long time | unwind/replay after a restart, or a stale engine buffer | wait; check `logs-reth` for stage progress |
 | Lighthouse "no checkpoint" / sync stuck | checkpoint provider down | switch `CHECKPOINT_SYNC_URL` in `mirror-config` to a working provider (beaconcha.in's sync endpoint is the known-good alternative) |
 | Lighthouse `system resources may be overloaded` (WARN) | a state advance at an epoch boundary took longer than usual | during the one-time backfill it recurs every ~32 slots (the backfill's I/O competes with the advance) and clears when the backfill completes - measured: 6 events in one 30-min window, none after. Not an alarm while reth tracks the CL head |
-| Engine: "cursor not found on chain" | anvil restarted with a stale dump | expected; engine rebases and re-converges |
+| Engine: "cursor not found on chain" | anvil restarted with a stale dump | expected; the engine re-bases T and re-applies its recorded writes |
 | Engine: "gap too large" | engine was down > `max_gap_blocks` | re-pin (fast) or raise `max_gap_blocks` and restart the engine |
 | The applier is silent after a re-pin | the re-pin raced an in-flight apply (a slow source read) | the engine aborts that apply (`ResetDuringApply`) and reconciles on the next pass — the cursor sits below the base, so the epoch rule fires; a restart re-resolves the pins if it persists |
 | T mines empty blocks (`tx_count: reth=N t=0`) | automine is on (anvil restart reset it) | check `anvil_getAutomine` on T; the deployment runs `--no-mining` (the engine also re-asserts it on rebases) |
-| `recomputed blob KZG proof` in engine logs | normal on Fulu: the beacon API's blob-level proof is a placeholder, the engine recomputes it | none (one line per blob) |
-| `no valid blob sidecar from any source` | the CL cannot serve the sidecars yet (they arrive seconds after the block; the replay margin hides it) | T holds at n-1 and retries - it never mines an empty or partial block. If it persists, the CL is lagging the head: check `mirror_lag_blocks` |
 | Senders' nonces hundreds behind | automine incident (chain height ran away) | re-pin for a clean chain |
 
 | `mirror_t_convergence_failures_total` climbing | T drifted from mainnet on a devnet-unowned probe (missing BAL entry, watchlist gap) | check `/status.shadowed`; extend the watchlist if the account should be tracked; clear any `/admin/time` offset |
