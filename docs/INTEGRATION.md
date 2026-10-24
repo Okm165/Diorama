@@ -54,8 +54,9 @@ validated (a value outside `{2,3,4,5}` / `{1,2,5}` is a named 400).
 same lane `/exchange` drives; the response carries `totalSz`/`avgPx`/`oid`
 and the consumed levels), `advance`, `crash` (`{coin, pct}`; no `pct` hands
 the mark back), `set_book`, `set_funding`, `set_account` (the hl_mock patch
-shape), `reset`, `epoch_new`, `GET/POST /control/state/{address}`, plus
-`/health` and `/metrics`.
+shape), `reset`, `epoch_new`, `stall` (`{seconds}`; the market plane holds —
+`/readyz` and the order lane see a real outage; `0` clears),
+`GET/POST /control/state/{address}`, plus `/health` and `/metrics`.
 
 **`POST /exchange`** models the `order` action end to end: a compact order
 (`{"type":"order","orders":[{"a","b","p","s","r","t":{"limit":{"tif"}}}]}`)
@@ -80,7 +81,8 @@ success (`{"status":"ok","response":{"type":"default"}}`).
 Iris-compatible: `GET /v2/messages/{source_domain}?transactionHash=…` (the
 authoritative tx-keyed lookup; `attestation: null` while the PENDING window
 runs), `POST /v2/reattest/{nonce}`, `GET /v2/publicKeys`,
-`GET /v2/burn/USDC/fees/{source}/{destination}`, `GET /healthz`. Control:
+`GET /v2/burn/USDC/fees/{source}/{destination}`,
+`GET /v2/fastBurn/USDC/allowance?sourceDomain=…`, `GET /healthz`. Control:
 `GET /health` (the queue counts), `/metrics`, `POST /control/transfer`
 (`hook: {target, calldata}` for the credit lane), `POST /control/relay`,
 `GET /control/state`. `make cctp-smoke` and `make cctp-roundtrip` are the
