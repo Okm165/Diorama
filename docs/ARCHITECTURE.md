@@ -764,6 +764,10 @@ own vocabulary, quoted from the EIPs, is allow-listed with its source), and
 `facts-published` (every `Fact` variant the event vocabulary declares is
 constructed by a real `publish(...)` — a variant nobody publishes is an event
 that never happens; found `DealApplied`, declared and never published),
+`metrics-written` (the same class on the metric side: a declared series whose
+every use is a render `.load(` would read as "nothing happened" instead of
+"nobody measures it"; 62 series checked, whitespace-normalized so multi-line
+accesses count),
 `spine-purity` (the spine's *code* — `crates/devnet` with line comments
 stripped — names no mirror: the doc comments cite them as examples, but a
 name in code would mean a new mirror kind needs edits inside the spine,

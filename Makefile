@@ -154,7 +154,7 @@ config-check: ## Validate every instance file through the layered loader (struct
 	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check "$$f" || exit 1; \
 	done
 
-fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels no-panics config-check docker-members k8s-wiring spec-citations spine-purity facts-published ast-scope ## Run every structural fitness function (plan §11.3)
+fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels no-panics config-check docker-members k8s-wiring spec-citations spine-purity facts-published metrics-written ast-scope ## Run every structural fitness function (plan §11.3)
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
@@ -194,6 +194,9 @@ spine-purity: ## the spine's code names no mirror (seams are data, not names)
 
 facts-published: ## every Fact variant the event vocabulary declares is published
 	./scripts/facts-published.sh
+
+metrics-written: ## every metric series a registry declares is written by real code
+	./scripts/metrics-written.sh
 
 ast-scope: ## AST scope analysis: fn/struct size and nesting depth (syn, the compiler's parser)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p ast-scope -- crates bins
