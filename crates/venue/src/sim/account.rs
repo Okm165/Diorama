@@ -281,36 +281,17 @@ impl AccountSeed {
         let raw = if let Some(summary) = &self.margin_summary {
             summary.total_raw_usd
         } else {
-            let existing = account
-                .positions
-                .values()
-                .try_fold(Decimal::ZERO, |acc, p| add(acc, p.cost_basis()?, "cost basis"))?;
-            sub(account.perp_balance, existing, "raw usdc")?
+            sub(account.perp_balance, cost_basis_total(account)?, "raw usdc")?
         };
         if let Some(positions) = &self.asset_positions {
             apply_positions(account, positions)?;
         }
         if perp_changed {
-            let cost_basis = account
-                .positions
-                .values()
-                .try_fold(Decimal::ZERO, |acc, p| add(acc, p.cost_basis()?, "seed cost basis"))?;
-            account.perp_balance = add(raw, cost_basis, "seed balance")?;
+            account.perp_balance = add(raw, cost_basis_total(account)?, "seed balance")?;
             account.funded_at_ms = clock;
         }
         if let Some(balances) = &self.spot_balances {
-            account.spot.clear();
-            for b in balances {
-                account.spot.insert(
-                    b.token,
-                    SpotEntry {
-                        coin: b.coin.clone(),
-                        total: b.total,
-                        hold: b.hold,
-                        entry_ntl: b.entry_ntl,
-                    },
-                );
-            }
+            apply_spot_balances(account, balances);
         }
         if let Some(mode) = self.user_abstraction {
             account.mode = mode;
@@ -357,6 +338,33 @@ pub(crate) fn control_view(
 /// without an entry price cannot reconstruct the raw base
 /// (`perp_balance = totalRawUsd + Σ szi·entryPx`): refused loudly, never a
 /// zero-cost basis; a flat row's entry price is irrelevant.
+/// The account's positions' cost basis, summed — the seed's fold (the raw
+/// USDC is the balance minus it; the patch's balance is the raw plus it).
+fn cost_basis_total(account: &Account) -> Result<Decimal> {
+    account
+        .positions
+        .values()
+        .try_fold(Decimal::ZERO, |acc, p| add(acc, p.cost_basis()?, "cost basis"))
+}
+
+/// Replace the spot balances (the patch's `spotBalances`: a replace, never a
+/// merge — the measured hl_mock semantics), the spot twin of
+/// [`apply_positions`].
+fn apply_spot_balances(account: &mut Account, balances: &[SpotBalance]) {
+    account.spot.clear();
+    for b in balances {
+        account.spot.insert(
+            b.token,
+            SpotEntry {
+                coin: b.coin.clone(),
+                total: b.total,
+                hold: b.hold,
+                entry_ntl: b.entry_ntl,
+            },
+        );
+    }
+}
+
 fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result<()> {
     account.positions.clear();
     for asset in positions {
