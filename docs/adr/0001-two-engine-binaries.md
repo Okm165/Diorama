@@ -13,7 +13,7 @@ the common crates (`anvil`, `config`, `devnet`) and never each other, plus a
 simulator service whose closure must stay narrow. Measured: with one package,
 every build compiled the whole graph (plan §11.3); a profile-routing binary
 would link both projects into every venue build, and `venue-sim` must never
-compile the ethereum stack.
+compile the mainnet stack.
 
 ## Decision
 
