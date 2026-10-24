@@ -43,10 +43,10 @@ pub async fn boot(ctx: &Ctx) -> Result<()> {
     // 2 minutes: a fork-mode anvil comes up in seconds; a coordinated restart
     // (the init container re-resolving the pin, the fork source slow) is the
     // only normal delay — and a crash-loop is worse than a bounded wait.
-    ctx.v
+    ctx.anvil_v
         .wait_until_up("anvil-v", Duration::from_secs(120))
         .await?;
-    assert_venue_chain(&ctx.v).await?;
+    assert_venue_chain(&ctx.anvil_v).await?;
     // The declared capabilities are audited once, against the live endpoint
     // (a declaration that disagrees is named here, never discovered mid-window).
     mirror_devnet::source::audit_capabilities(
@@ -83,7 +83,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
 /// succeeds).
 async fn recover_from_reset(ctx: &Ctx) {
     tracing::warn!("V was reset under the driver - reconciling (epoch rule)");
-    if let Err(e) = assert_venue_chain(&ctx.v).await {
+    if let Err(e) = assert_venue_chain(&ctx.anvil_v).await {
         tracing::warn!(error = %e, "venue chain assert failed after a reset");
     }
     match reconcile(ctx).await {
@@ -105,13 +105,13 @@ enum Pass {
 
 async fn pass(ctx: &Ctx) -> Result<Pass> {
     mine_pending_best_effort(ctx).await;
-    let head = ctx.v.block_number().await?;
+    let head = ctx.anvil_v.block_number().await?;
     ctx.venue_metrics.set(&ctx.venue_metrics.head, head);
 
     // Reset detection: the bundle's detector (the pin canary — see
     // `crate::reset`): anything but Steady runs the epoch rule.
     if !matches!(
-        ctx.mirror.reset().detect(&ctx.v).await?,
+        ctx.mirror.reset().detect(&ctx.anvil_v).await?,
         ResetSignal::Steady
     ) {
         return Ok(Pass::Reset);
@@ -181,7 +181,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     let first = cursor.map(|c| c.block).unwrap_or(head);
     let walk = scan::scan_to(
         &ctx.plane,
-        &ctx.v,
+        &ctx.anvil_v,
         ctx.pin.load(Ordering::Relaxed),
         head,
         first,
@@ -197,7 +197,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     // same 1024 blocks on both mirrors (files older than head - keep are
     // pruned; the venue's journal holds its own writes — the deal).
     ctx.plane.journal.prune(head);
-    let block = ctx.v.block_by_number(head, false).await?;
+    let block = ctx.anvil_v.block_by_number(head, false).await?;
     let first_block = cursor.map(|c| c.first_block).unwrap_or(head);
     ctx.plane.state.set_cursor(cursor_from(&block, first_block))?;
     ctx.plane.save_state()?;
@@ -221,11 +221,11 @@ async fn mine_pending(ctx: &Ctx) -> Result<()> {
     if ctx.mirror.policies().mine != MinePolicy::PoolDrain {
         return Ok(());
     }
-    let status = ctx.v.txpool_status().await?;
+    let status = ctx.anvil_v.txpool_status().await?;
     if status.pending == 0 {
         return Ok(());
     }
-    ctx.v.anvil_mine(1).await?;
+    ctx.anvil_v.anvil_mine(1).await?;
     ctx.venue_metrics.inc(&ctx.venue_metrics.mined_blocks_total);
     tracing::debug!(pending = %status.pending, "mined V's pending transactions");
     Ok(())
@@ -257,7 +257,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     // The canary tells whether this is still the chain instance the registry
     // was built against (see CANARY_ADDRESS): present and equal to the pin
     // means steady, nothing to reconcile.
-    if read_canary(&ctx.v).await? == pin {
+    if read_canary(&ctx.anvil_v).await? == pin {
         return Ok(pin);
     }
     ctx.plane.facts.publish(Fact::ResetDetected {
@@ -276,7 +276,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
 /// without it the epoch decision would default to "same pin" and re-apply
 /// writes across a pin change.
 async fn pin_read(ctx: &Ctx) -> Result<Option<u64>> {
-    let pin = ctx.v.anvil_node_info().await?.fork_config.fork_block_number;
+    let pin = ctx.anvil_v.anvil_node_info().await?.fork_config.fork_block_number;
     ctx.venue_metrics
         .set(&ctx.venue_metrics.fork_pin, pin.unwrap_or(0));
     if let Some(p) = pin {
@@ -292,7 +292,7 @@ async fn pin_read(ctx: &Ctx) -> Result<Option<u64>> {
 /// writes; the journal goes either way. The transition's logs are the shared
 /// module's; the counters are V's (epoch transitions, not resets found).
 async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
-    match mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.v, ctx.engine.loops.chunk_size, pin)
+    match mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.anvil_v, ctx.engine.loops.chunk_size, pin)
         .await?
     {
         mirror_devnet::epoch::Epoch::Steady => {}
@@ -320,7 +320,7 @@ async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// the base the registry was just rebuilt against.
 async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     let watermark = if let Some(p) = pin {
-        let block = ctx.v.block_by_number(p, false).await?;
+        let block = ctx.anvil_v.block_by_number(p, false).await?;
         ctx.plane.state.set_cursor(cursor_from(&block, p))?;
         // The follow cursor starts at the pin: V's state *is* the source's
         // state at the pin, so the next window composes pin+1 onward. The
@@ -331,14 +331,14 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
         p
     } else {
         tracing::warn!("anvil-v has no fork pin: epoch decisions are pin-based and cannot run");
-        ctx.v.block_number().await?
+        ctx.anvil_v.block_number().await?
     };
     ctx.plane
         .shadow_scanned_upto
         .store(watermark, Ordering::Relaxed);
     ctx.plane.save_state()?;
     if let Some(p) = pin {
-        write_canary(&ctx.v, p).await?;
+        write_canary(&ctx.anvil_v, p).await?;
     }
     Ok(())
 }
@@ -356,7 +356,7 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// Run the at-pin probes now (the admin route's entry: boot and re-pin run
 /// them automatically; this is the on-demand trigger, e.g. after a hand-back).
 pub async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
-    let pin = ctx.v.anvil_node_info().await?.fork_config.fork_block_number;
+    let pin = ctx.anvil_v.anvil_node_info().await?.fork_config.fork_block_number;
     probes_at_pin(ctx, pin).await
 }
 
@@ -387,7 +387,7 @@ pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOu
     // The venue has no clock offset (the plane's field is shape-only: nothing
     // re-aligns V's clock), so the probes never take the offset path.
     let probes = ProbeRunner::devnet(&ctx.engine.verifier.probes, &ctx.plane.shadow, false)
-        .parity(&ctx.source_rpc, pin, &ctx.v)
+        .parity(&ctx.source_rpc, pin, &ctx.anvil_v)
         .await?;
     let out = count_probes(ctx, probes, pin, source_head).await?;
     mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), pin, &out);

@@ -29,7 +29,7 @@ pub struct Ctx {
     /// profile's fields.
     pub(crate) engine: EngineSection,
     /// Anvil V (the devnet chain; chain id 999).
-    pub(crate) v: Arc<Rpc>,
+    pub(crate) anvil_v: Arc<Rpc>,
     /// The fork source V derives from (the unshadow re-sync truth at the pin).
     pub(crate) source_rpc: Arc<Rpc>,
     /// V's fork pin (0 = not yet resolved): the anchor `VenueSource` reads at
@@ -65,20 +65,20 @@ impl Ctx {
         let plane = Plane::from_engine(&engine)?;
         let venue_metrics = Arc::new(VenueMetrics::default());
         let source_rpc = Arc::new(Rpc::new(source_url, timeout)?);
-        let v = Arc::new(Rpc::new(v_url, timeout)?);
+        let anvil_v = Arc::new(Rpc::new(v_url, timeout)?);
         let wiring = crate::profile::build(
             &engine,
             crate::profile::Deps {
                 state: plane.state.clone(),
                 source_rpc: source_rpc.clone(),
-                v: v.clone(),
+                anvil_v: anvil_v.clone(),
                 watch: cfg.watch_set(),
             },
         );
         Ok(Self {
             chain,
             engine,
-            v,
+            anvil_v,
             source_rpc,
             pin: wiring.pin,
             mirror: wiring.mirror,
@@ -94,7 +94,7 @@ impl Ctx {
     /// journal that is exactly the engine's own writes).
     pub fn admin(&self) -> AdminSurface<'_> {
         self.plane.admin(
-            &self.v,
+            &self.anvil_v,
             self.mirror.source().as_ref(),
             self.engine.loops.chunk_size,
             true,
@@ -114,7 +114,7 @@ impl Ctx {
     /// Re-pin V to the fork source's latest block (the `/admin/epoch` route's
     /// one profile-specific fact: which chain, which source URL).
     pub(crate) async fn epoch_repin(&self) -> Result<mirror_devnet::admin::EpochResponse> {
-        Ok(mirror_devnet::admin::AdminSurface::epoch_repin(&self.v, &self.chain.source_url).await?)
+        Ok(mirror_devnet::admin::AdminSurface::epoch_repin(&self.anvil_v, &self.chain.source_url).await?)
     }
 
     /// Run the at-pin probes now and report the run (the shared

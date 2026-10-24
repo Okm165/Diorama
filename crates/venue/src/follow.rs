@@ -160,7 +160,7 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
     let applied = if plan.writes.is_empty() {
         0
     } else {
-        mirror_anvil::apply_writes(&ctx.v, &plan.writes, ctx.engine.loops.chunk_size).await?
+        mirror_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size).await?
     };
     let (sampled, sampled_ok) =
         if matches!(ctx.mirror.policies().probes, ProbeSchedule::LiveParity) {

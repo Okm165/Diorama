@@ -45,7 +45,7 @@ pub struct Ctx {
     pub(crate) plane: Plane,
     /// The profile's own set (reth/T heads, the applier's counters, the
     /// probes); rendered beside the shared admin gauges.
-    pub(crate) eth_metrics: MainnetMetrics,
+    pub(crate) mainnet_metrics: MainnetMetrics,
     /// The feed bridge's counters (shared with the bridge task; /metrics
     /// renders them whether or not the bridge is configured).
     pub(crate) feed_bridge_metrics: Arc<crate::feed_bridge::FeedBridgeMetrics>,
@@ -80,7 +80,7 @@ impl Ctx {
             beacon,
             engine_api,
             plane,
-            eth_metrics: MainnetMetrics::default(),
+            mainnet_metrics: MainnetMetrics::default(),
             feed_bridge_metrics: Arc::new(crate::feed_bridge::FeedBridgeMetrics::default()),
             drift,
         })
@@ -103,10 +103,10 @@ impl Ctx {
     /// Record one shadow-scan walk in this profile's counters: the drivers'
     /// inline scans and the shared admin hand-back all report through here.
     pub(crate) fn record_scan(&self, walk: &mirror_devnet::scan::ScanWalk) {
-        self.eth_metrics.record_scan(
+        self.mainnet_metrics.record_scan(
             walk,
-            &self.eth_metrics.shadow_scanned_blocks,
-            &self.eth_metrics.shadow_skipped_empty_blocks,
+            &self.mainnet_metrics.shadow_scanned_blocks,
+            &self.mainnet_metrics.shadow_skipped_empty_blocks,
         );
     }
 

@@ -179,7 +179,7 @@ async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
     // The same composition as the venue engine: this profile's own set, then
     // the shared admin gauges (one definition — `Metrics::render`), then the
     // feed bridge's counters.
-    let mut out = ctx.eth_metrics.render();
+    let mut out = ctx.mainnet_metrics.render();
     out.push_str(&ctx.plane.metrics.render());
     out.push_str(&ctx.feed_bridge_metrics.render());
     out

@@ -43,7 +43,7 @@ use system::{TokenInfo, Transfer};
 /// The bridge's own cursor and the persisted state it needs. The cursor lives
 /// in the sim's state file (one state root per service).
 pub struct Bridge {
-    v: Rpc,
+    anvil_v: Rpc,
     sim: Arc<Sim>,
     feed: Arc<MarketFeed>,
     /// The last head whose timestamp was observed (one header read per new
@@ -57,10 +57,10 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn new(v: Rpc, sim: Arc<Sim>, feed: Arc<MarketFeed>, metrics: Arc<BridgeMetrics>) -> Self {
+    pub fn new(anvil_v: Rpc, sim: Arc<Sim>, feed: Arc<MarketFeed>, metrics: Arc<BridgeMetrics>) -> Self {
         let cursor = sim.bridge_cursor().unwrap_or(0);
         Self {
-            v,
+            anvil_v,
             sim,
             feed,
             observed_head: std::sync::atomic::AtomicU64::new(0),
@@ -81,9 +81,9 @@ impl Bridge {
 
     /// One pass: anchor (pin-aware), then scan every new block.
     pub async fn pass(&self) -> Result<()> {
-        let head = self.v.block_number().await?;
+        let head = self.anvil_v.block_number().await?;
         self.observe_head_time(head).await?;
-        let pin = self.v.fork_config().await?.map(|(_, block)| block).unwrap_or(0);
+        let pin = self.anvil_v.fork_config().await?.map(|(_, block)| block).unwrap_or(0);
         let mut from = self.cursor.load(Ordering::Relaxed);
         if from == 0 || from < pin || from > head {
             // First pass, a re-pin, or a chain reset under us: anchor at the
@@ -115,7 +115,7 @@ impl Bridge {
         if self.observed_head.load(Ordering::Relaxed) == head {
             return Ok(());
         }
-        let block = self.v.block_by_number(head, false).await?;
+        let block = self.anvil_v.block_by_number(head, false).await?;
         self.sim.observe_chain_time(block.header.timestamp.saturating_mul(1_000));
         self.observed_head.store(head, Ordering::Relaxed);
         Ok(())
@@ -123,7 +123,7 @@ impl Bridge {
 
     /// Decode one block's boundary activity and apply it.
     async fn scan_block(&self, n: u64) -> Result<()> {
-        let block = self.v.block_by_number(n, true).await?;
+        let block = self.anvil_v.block_by_number(n, true).await?;
         if block.transactions.is_empty() {
             return Ok(());
         }
@@ -134,7 +134,7 @@ impl Bridge {
         let tokens = system::token_registry(&spot);
 
         // EVM→Core: transfers to system addresses, from the receipts' logs.
-        let receipts = self.v.receipts(n).await?;
+        let receipts = self.anvil_v.receipts(n).await?;
         for receipt in &receipts {
             for log in receipt.logs() {
                 let Some(transfer) = system::transfer_of(log.data()) else {
@@ -161,7 +161,7 @@ impl Bridge {
         n: u64,
         block: &alloy_rpc_types_eth::Block,
     ) -> Result<Vec<(Address, CoreAction)>> {
-        match self.v.trace_block_calls(n).await {
+        match self.anvil_v.trace_block_calls(n).await {
             Ok(traces) => {
                 let mut out = Vec::new();
                 for trace in traces {
@@ -493,8 +493,8 @@ impl Bridge {
         let from = system::system_address(u64::from(info.index));
         // The system address pays gas on V (the real chain's system txs do
         // not); fund it once so the pool's balance check passes.
-        if self.v.balance_at(from, 0).await.unwrap_or(U256::ZERO).is_zero() {
-            self.v
+        if self.anvil_v.balance_at(from, 0).await.unwrap_or(U256::ZERO).is_zero() {
+            self.anvil_v
                 .anvil_set_balance(from, U256::from(1_000_000_000_000_000_000u64))
                 .await?;
         }
@@ -502,7 +502,7 @@ impl Bridge {
             .from(from)
             .to(erc20)
             .input(system::transfer_calldata(*recipient, value).into());
-        let hash = self.v.send_transaction(tx).await?;
+        let hash = self.anvil_v.send_transaction(tx).await?;
         self.metrics.inc_completions();
         tracing::info!(
             to = %recipient,

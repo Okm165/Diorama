@@ -311,17 +311,17 @@ async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
 /// The applier's per-block gauges (one place; the late-completion path sets
 /// its own subset).
 fn record_apply_metrics(ctx: &Ctx, n: u64, facts: &ApplyFacts, duration_ms: u64) {
-    ctx.eth_metrics.set(&ctx.eth_metrics.cursor, n);
-    ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
-    ctx.eth_metrics.set(&ctx.eth_metrics.bal_writes, facts.applied as u64);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.cursor, n);
+    ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.blocks_applied);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.bal_writes, facts.applied as u64);
     ctx.plane
         .metrics
-        .set(&ctx.eth_metrics.bal_filtered_out, facts.stats.not_watched as u64);
+        .set(&ctx.mainnet_metrics.bal_filtered_out, facts.stats.not_watched as u64);
     ctx.plane
         .metrics
-        .set(&ctx.eth_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
-    ctx.eth_metrics.set(&ctx.eth_metrics.last_apply_ms, duration_ms);
-    ctx.eth_metrics.set(&ctx.eth_metrics.head, facts.t_latest);
+        .set(&ctx.mainnet_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.last_apply_ms, duration_ms);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, facts.t_latest);
 }
 
 /// The rewound range is fully re-applied: resume normal late-completion skips.
@@ -367,9 +367,9 @@ fn log_drift_if_anomalous(
 async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result<ApplyOutcome> {
     tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
     advance_cursor(ctx, n).await?;
-    ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
-    ctx.eth_metrics.set(&ctx.eth_metrics.head, t_head);
-    ctx.eth_metrics.set(&ctx.eth_metrics.cursor, n);
+    ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.blocks_applied);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, t_head);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.cursor, n);
     ctx.plane.facts.publish(Fact::CursorAdvanced {
         chain: ctx.mirror.label(),
         block: n,
@@ -572,7 +572,7 @@ async fn sample_key(ctx: &Ctx, n: u64, t_latest: u64, key: &Key, full: bool) -> 
         (Ok(a), Ok(b)) if a == b => true,
         (a, b) => {
             if full {
-                ctx.eth_metrics.inc(&ctx.eth_metrics.full_sweep_mismatches);
+                ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.full_sweep_mismatches);
             }
             tracing::warn!(
                 block = n,
@@ -596,12 +596,12 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     )
     .parity(&ctx.reth, n, &ctx.anvil_t)
     .await?;
-    ctx.eth_metrics.add(&ctx.eth_metrics.t_convergence_ok, probes.ok as u64);
-    ctx.eth_metrics
-        .add(&ctx.eth_metrics.t_convergence_failed, probes.failed as u64);
-    ctx.eth_metrics
-        .set(&ctx.eth_metrics.t_convergence_last_failed, probes.failed as u64);
-    ctx.eth_metrics
-        .add(&ctx.eth_metrics.t_probe_skipped, probes.skipped as u64);
+    ctx.mainnet_metrics.add(&ctx.mainnet_metrics.t_convergence_ok, probes.ok as u64);
+    ctx.mainnet_metrics
+        .add(&ctx.mainnet_metrics.t_convergence_failed, probes.failed as u64);
+    ctx.mainnet_metrics
+        .set(&ctx.mainnet_metrics.t_convergence_last_failed, probes.failed as u64);
+    ctx.mainnet_metrics
+        .add(&ctx.mainnet_metrics.t_probe_skipped, probes.skipped as u64);
     Ok(())
 }

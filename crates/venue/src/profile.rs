@@ -145,7 +145,7 @@ pub struct Wiring {
 pub struct Deps {
     pub state: Shared<StateFile>,
     pub source_rpc: Arc<Rpc>,
-    pub v: Arc<Rpc>,
+    pub anvil_v: Arc<Rpc>,
     pub watch: std::collections::HashSet<alloy_primitives::Address>,
 }
 
@@ -153,13 +153,13 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let Deps {
         state,
         source_rpc,
-        v,
+        anvil_v,
         watch,
     } = deps;
     let pin = Arc::new(AtomicU64::new(0));
     let source: Arc<dyn Source> = Arc::new(VenueSource::new(source_rpc.clone(), pin.clone()));
     let follow: Arc<dyn Source> = Arc::new(RawSource::new(source_rpc, public_capabilities()));
-    let target: Arc<dyn Source> = Arc::new(RawSource::target(v));
+    let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_v));
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
     let scope = Scope::new(watch_set(watch, &engine.closures), closures(&engine.closures));
     let mirror: Arc<dyn Mirror> = Arc::new(VenueMirror {

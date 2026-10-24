@@ -24,22 +24,22 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
         tracing::debug!("follow head unavailable");
         return Ok(None);
     };
-    ctx.eth_metrics.set(&ctx.eth_metrics.reth_follow_head, follow);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.reth_follow_head, follow);
     // Schedule a small margin behind the head: the applier mines one T block
     // per applied parent block, so the follow head *is* the devnet's cadence.
     let follow = follow.saturating_sub(ctx.l1.follow_margin_blocks);
     // Metrics-only read: a reth blip must not fail the poll (the gauge reads 0
     // until reth answers again; the next pass overwrites it).
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
-    ctx.eth_metrics.set(&ctx.eth_metrics.reth_head, reth_head);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.reth_head, reth_head);
 
     let head = ctx.anvil_t.block_number().await?;
-    ctx.eth_metrics.set(&ctx.eth_metrics.head, head);
+    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, head);
     if let Ok(info) = ctx.anvil_t.anvil_node_info().await {
         if let Some(fork) = info.fork_config.fork_block_number {
             ctx.plane
                 .metrics
-                .set(&ctx.eth_metrics.t_fork_age_blocks, head.saturating_sub(fork));
+                .set(&ctx.mainnet_metrics.t_fork_age_blocks, head.saturating_sub(fork));
         }
     }
 
@@ -142,7 +142,7 @@ async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
         .await?
         .fork_config
         .fork_block_number;
-    ctx.eth_metrics.inc(&ctx.eth_metrics.t_resets_total);
+    ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.t_resets_total);
     mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.anvil_t, ctx.engine.loops.chunk_size, pin)
         .await?;
     ctx.plane.state.clear_cursor()?;
@@ -226,7 +226,7 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
     if start > 1 && start - 1 == last_block {
         if let Some(prev) = mirror_devnet::scan::block_hash(&ctx.reth, start - 1).await? {
             if prev != last_hash {
-                ctx.eth_metrics.inc(&ctx.eth_metrics.reorgs_detected);
+                ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.reorgs_detected);
                 tracing::warn!(
                     block = start - 1,
                     "reth reorg detected; applied diffs self-heal on the new branch"

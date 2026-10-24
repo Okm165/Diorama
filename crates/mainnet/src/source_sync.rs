@@ -51,8 +51,8 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
         match top_up(&ctx, &engine).await {
             Ok(0) => tokio::time::sleep(interval).await,
             Ok(n) => {
-                ctx.eth_metrics
-                    .add(&ctx.eth_metrics.source_sync_delivered, n as u64);
+                ctx.mainnet_metrics
+                    .add(&ctx.mainnet_metrics.source_sync_delivered, n as u64);
                 ctx.plane
                     .facts
                     .publish(mirror_devnet::facts::Fact::TopUpDelivered { delivered: n });
@@ -83,8 +83,8 @@ async fn report_top_up(
         cl_head_el_block(&ctx.beacon, head_cache).await,
         ctx.reth.block_number().await,
     ) {
-        ctx.eth_metrics.set(
-            &ctx.eth_metrics.source_sync_gap_blocks,
+        ctx.mainnet_metrics.set(
+            &ctx.mainnet_metrics.source_sync_gap_blocks,
             cl_head.saturating_sub(reth_head),
         );
     }

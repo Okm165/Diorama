@@ -125,7 +125,7 @@ mirror_devnet::mirror_handlers!(Ctx, crate::error::Error);
 async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     // Head gauges: an endpoint that cannot answer degrades the report to 0,
     // never fails it - /status is a diagnostic, not a fact source.
-    let head = ctx.v.block_number().await.unwrap_or(0);
+    let head = ctx.anvil_v.block_number().await.unwrap_or(0);
     let cursor = ctx.plane.state.cursor()?;
     let shadow = ctx.plane.shadow.lock()?;
     Ok(Json(StatusResponse {
