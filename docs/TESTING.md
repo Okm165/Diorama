@@ -474,7 +474,7 @@ to 0). The trader's state: 3 long at the weighted entry, the identity exact
 (`accountValue == totalRawUsd + Σ signed positionValue`, within the served
 `positionValue`'s 2dp rounding), a reduce-only sell realizing at the bid,
 then flat. The `/exchange` door served the venue's own envelopes: a filled
-status, a `Gtc` refusal per-order by name ("resting orders are not modeled"),
+status, a priced `Gtc` resting (`openOrders` serves it, `cancel` closes it),
 a non-order action answering the `err` envelope. A live order filled at the
 touch (`2400.0`-class prints) — the real depth, not a simulation of it.
 

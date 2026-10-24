@@ -11,8 +11,8 @@
 #      consumed levels while the scripted base owns the coin, and nothing is
 #      pruned spuriously (the served base is what the consumption scopes to)
 #   D. the /exchange door            - the compact order action fills in the
-#      venue's own envelope; a resting tif refuses per-order by name; a
-#      non-order action answers the err envelope
+#      venue's own envelope; a priced Gtc rests (openOrders serves it, cancel
+#      closes it); a non-order action answers the err envelope
 #   E. the live book                 - an order against the live depth fills
 #      at the touch (the scripted base handed back first)
 #   F. the owned mark is never moved - with the mark owned by a crash, a fill

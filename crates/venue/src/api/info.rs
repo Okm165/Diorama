@@ -498,7 +498,7 @@ fn fill_status(
         tracing::info!(
             cloid = %cloid,
             asset = action.a,
-            "order carries a client id (echoed; nothing rests, so there is no id to key)"
+            "order carries a client id (echoed; the resting lane keys cancels by it)"
         );
     }
     match action
@@ -686,9 +686,10 @@ pub(crate) struct OrderAction {
     pub c: Option<alloy_primitives::B128>,
 }
 
-/// The order type: the venue's own shapes (docs). Only IOC limit fills — a
-/// Gtc/Alo remainder cannot rest and a trigger order has no trigger engine in
-/// the devnet (both refused by name).
+/// The order type: the venue's own shapes (docs). A `Gtc`/`Alo` order rests
+/// in the sim's book (`openOrders` serves it, the live book fills it, cancels
+/// and the dead-man's switch close it) and a trigger arms until the mark
+/// crosses (the 1 Hz tick fires it).
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OrderType {
@@ -725,7 +726,8 @@ pub(crate) struct Builder {
 impl OrderAction {
     /// The compact action → the lane's order: the asset index resolves
     /// through the live meta (unknown = a named refusal), size and limit are
-    /// decimal strings, and only IOC fills.
+    /// decimal strings; the tif decides what rests (the sim's `place` owns
+    /// the semantics).
     fn to_order(&self, meta: Option<&crate::wire::Meta>) -> Result<crate::sim::order::Order> {
         let coin = meta
             .and_then(|m| m.universe.get(self.a as usize))

@@ -65,9 +65,10 @@ per-level consumption (plan §4.5's impact lane: the order moves the *book*,
 never the *mark*), answered in HL's own ok envelope
 (`{"status":"ok","response":{"type":"order","data":{"statuses":
 [{"filled":{"totalSz","avgPx","oid"}}]}}}`; a per-order refusal rides as
-`{"error":"…"}` inside the statuses). Only IOC fills: a `Gtc`/`Alo` order is
-refused by name (the devnet has no resting book — nothing ever rests, so
-`openOrders` is exact at empty), and every other action tag answers HL's err
+`{"error":"…"}` inside the statuses). `Gtc`/`Alo` orders rest in the sim's
+book — `openOrders`/`frontendOpenOrders` serve them, the live book fills them,
+`cancel`/`cancelByCloid`/`scheduleCancel` close them, an armed trigger fires
+when the mark crosses — and every other action tag answers HL's err
 envelope (`{"status":"err","response":"…"}`, HTTP 200 — the shape their
 client already parses), never a 404. The signature is accepted, never
 verified (the devnet has no keys — the anvil-impersonation analogue); the
@@ -121,7 +122,7 @@ vanished-burn/keeper caveats.
 
 | Lane | Plan | What it would add |
 |---|---|---|
-| Remaining venue mechanics | §5, §7.1, §18.4 | resting orders (`Gtc`/`Alo`) + cancels (both refused by name today), the remaining order-error strings (the measured vocabulary — tick size, minimum value, insufficient margin, reduce-only, no-match, no-liquidity — is served verbatim; the OI-cap/tier/TP-SL strings await those mechanics), nonces/API wallets, multi-dex, spot ledger, OI caps, fees (a research lane per §16.3 — daloc's paths don't read venue fees). Landed: the `order` action end to end — IOC fills against the real book with per-level consumption, the §4.5 impact invariants (I1–I6), three doors (see ARCHITECTURE) |
+| Remaining venue mechanics | §5, §7.1, §18.4 | the remaining order-error strings (the measured vocabulary — tick size, minimum value, insufficient margin, reduce-only, no-match, no-liquidity, the mis-sided trigger — is served verbatim), multi-dex, spot ledger, fees (a research lane per §16.3 — daloc's paths don't read venue fees). Landed: the `order` action end to end (IOC fills against the real book with per-level consumption, the resting lane — `Gtc`/`Alo`, cancels, triggers, the dead-man's switch — the §4.5 impact invariants I1–I6, three doors), nonces/API wallets (the 100-highest set with the floor, agent wallets), the margin modes (cross and isolated legs, strict isolated), the OI cap and margin-tier refusals |
 | Phase 4 lanes | §7.1 | the HIP-3 star venue on testnet; the real-data replay lane |
 | Phase 5 facade | §7.1 | one deal/crash/reset surface across both mirrors (each mirror's own admin works today) |
 | `venue-closure` | §7.8 | the V-side closure audit (no BALs on HyperEVM; `make engine-symmetry` covers the shared verbs) |

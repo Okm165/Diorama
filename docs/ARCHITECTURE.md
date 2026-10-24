@@ -757,7 +757,11 @@ build's dependency layer sees every workspace member: cargo resolves the whole
 workspace before building one package, so a member added or renamed without the
 Dockerfile fails `make build` at COPY — measured: the pre-rename
 `ethereum`/`hyperliquid` names outlived the crates and the new `ast-scope` bin
-was missing), `k8s-wiring` (the instances and the manifests are two halves of
+was missing), `spec-citations` (every code symbol `docs/SPINE.md` names in
+backticks exists in the workspace — the doc's cross-reference tables claim
+behavior by symbol, so a rename that leaves the doc behind fails; the specs'
+own vocabulary, quoted from the EIPs, is allow-listed with its source), and
+`k8s-wiring` (the instances and the manifests are two halves of
 one contract: every `${VAR}` an instance names is provided by the tree's pod
 env, and every `mirror-config` key is consumed — a key left behind after a
 feature moves is dead wiring that still shows in `kubectl describe`, measured:
@@ -1084,10 +1088,10 @@ the figure daloc's client reconciles: `available + maintenance == the
 collateral token's balance`; in unified mode the view folds that collateral
 into `totalRawUsd`, the docs' single USDC balance — a spot-funded account
 opens perp positions, and the identity stays exact), `userAbstraction`,
-`openOrders` (empty for a touched account — the order lane fills IOC orders
-against the real book immediately and nothing ever rests, so the empty shape
-is exact; `l2Book`'s `nSigFigs`/`mantissa` are applied and validated, never
-ignored), `activeAssetData` (touched accounts) /
+`openOrders` (the resting lane's rows — a `Gtc`/`Alo` order rests, the live
+book fills it, cancels and the dead-man's switch close it, so an account with
+no resting orders serves the exact empty shape; `l2Book`'s
+`nSigFigs`/`mantissa` are applied and validated, never ignored), `activeAssetData` (touched accounts) /
 `meta`, `metaAndAssetCtxs`, `spotMeta`, `allMids`, `l2Book`, `marginTable`,
 `exchangeStatus`, `perpDexs`
 (`[null]` - the first dex only until multi-dex lands; an account read scoped to
@@ -1115,9 +1119,9 @@ entry update, a reducing fill realizes its closed part's PnL into the perp
 balance (so the measured identity `accountValue == totalRawUsd + Σ signed
 positionValue` stays exact), and the initial margin follows
 `|szi|·entry/leverage`. The opening check runs on a clone — a refused order
-leaves no trace — and refusals are by name (resting tif, reduce-only that
-would not reduce, no depth within the limit, insufficient margin with the
-numbers). The venue's tick/lot rules are enforced with its **own vocabulary** (plan
+leaves no trace — and refusals are by name (reduce-only that would not
+reduce, no depth within the limit, insufficient margin with the numbers, the
+$10 minimum, a mis-sided trigger). The venue's tick/lot rules are enforced with its **own vocabulary** (plan
 §16.3's measured strings): a size carries at most the asset's `szDecimals`
 decimals, a price at most 5 significant figures and at most `6 − szDecimals`
 decimals (an integer price is always valid), and a perp order's notional is
@@ -1164,11 +1168,11 @@ name, Phase 2), API-wallet registration, abstraction mode;
 insufficient-balance refusals are counted, not retried. The CoreWriter limit
 order (id 1) fills through the **same lane** as `/exchange` and
 `/control/order`: prices and sizes arrive as 10^8 × the human value and the
-tif byte is the docs' own (1 `Alo`, 2 `Gtc`, 3 `Ioc`) — a resting tif is
-refused by name, a fill that cannot land (no depth, no margin, unknown asset)
-is counted as a refusal, never retried. Cancels (10/11) have nothing to act
-on (no order ever rests) and are refused by name and counted; the remaining
-unmodeled ids are counted by id (`venue_bridge_actions_total{id}`).
+tif byte is the docs' own (1 `Alo`, 2 `Gtc`, 3 `Ioc`) — an `Alo`/`Gtc`
+order rests in the sim's book, a fill that cannot land (no depth, no margin,
+unknown asset) is counted as a refusal, never retried. Cancels (10/11) act on
+the resting book (by oid, by cloid) and their refusals are counted; the
+remaining unmodeled ids are counted by id (`venue_bridge_actions_total{id}`).
 
 **Core→EVM.** A `sendAsset` naming the token's system address debits the sim and
 is completed the way the chain does it: a `transfer(recipient, amount)` call on

@@ -1,5 +1,5 @@
-//! `MainnetMirror` — the mainnet mirror's divergence bundle, in its own
-//! folder.
+//! The mainnet mirror's [`Bundle`] — its divergence choices, filled and
+//! documented in its own folder.
 //!
 //! The spine ([`mirror_devnet::spine`]) declares the [`Mirror`] interface and
 //! never names a mirror; this file is where the mainnet profile's choices are

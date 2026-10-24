@@ -1,4 +1,5 @@
-//! `VenueMirror` — the venue mirror's divergence bundle, in its own folder.
+//! The venue mirror's [`Bundle`] — its divergence choices, filled and
+//! documented in its own folder.
 //!
 //! The spine ([`mirror_devnet::spine`]) declares the [`Mirror`] interface and
 //! never names a mirror; this file is where the venue profile's choices are

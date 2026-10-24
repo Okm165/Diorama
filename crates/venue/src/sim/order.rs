@@ -1109,8 +1109,8 @@ impl Sim {
 }
 
 /// Walk the served book (the live depth minus what the devnet already
-/// consumed) and validate the request: only IOC fills, positive size, real
-/// depth within the limit.
+/// consumed) and validate the request: positive size, real depth within the
+/// limit (an `Ioc`; a resting tif takes the rest path instead).
 /// One candidate the taker's walk can take: a live level (external liquidity,
 /// recorded as a consumption) or a devnet resting order (an internal trade
 /// that updates its maker's account).

@@ -174,7 +174,7 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             cctp-roundtrip, cctp-margin-cycle, engine-symmetry), daloc-sim.py,
                             and the structural fitness scripts (closure-matrix, no-orphans,
                             docs-metrics, trust-audit, clock-labels, no-panics, config-check,
-                            docker-members, k8s-wiring, render-diagrams)
+                            docker-members, k8s-wiring, spec-citations, render-diagrams)
 docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, OPERATIONS.md, TESTING.md, adr/
 ```
 

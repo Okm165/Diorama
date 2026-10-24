@@ -75,7 +75,7 @@ never names a mirror.
 | Interface | Where | Consumed by | Mainnet impl | Venue impl |
 |---|---|---|---|---|
 | `Source` | `devnet/src/source.rs` | the composer (reads), the applier (target reads), re-sync/hand-back | reth (historical, BALs, traces, WS heads) | the HL public API (latest-only) + the EVM RPC; `Mirror::follow_source` splits truth reads from follow reads (the pin guard would refuse the follow's reads — reth serves both roles) |
-| `Mirror` | `devnet/src/spine.rs` | both engines' assembly | `MainnetMirror` (label `t`) | `VenueMirror` (label `v`) |
+| `Mirror` | `devnet/src/spine.rs` | both engines' assembly | the profile's `Bundle` (label `t`) | the profile's `Bundle` (label `v`) |
 | `ResetDetector` | `devnet/src/spine.rs` | the engine's reset pass | `CursorHash` (the cursor's block must carry its recorded hash; below the fork base = stale by position) | `PinCanary` (ADR-0002: heights below a fork's pin resolve to the source, so cursor hashes are unsound there) |
 | `KeyClosure` | `devnet/src/closure.rs` | the COW filter | the declared closures (watch-set keys the devnet owns) | same, plus the sim's own writes |
 | `Registry` | `devnet/src/metrics.rs` | `/metrics` | one registry per engine, declared series + computed ones | same |
@@ -163,6 +163,47 @@ Profile components, each in its own folder and never importing the other
 | `venue::sim` | the closed-source semantics: accounts, orders, the waterfall, funding, the served wire | exist behind a shared trait (only one mirror has this) |
 | `cctp` | the fourth element: the CCTP lanes + the Iris-compatible attestation API, on the common client + config only | depend on the devnet substrate or either project |
 
+## Where the next divergence happens
+
+The seams above are ranked by blast radius: a new parent kind (or a new
+capability on an existing one) lands in this order, and only the first two are
+code the pipeline never sees.
+
+| # | Step | What it decides | The failure it prevents |
+|---|---|---|---|
+| 1 | `Capabilities` | what the parent can answer (`native_bal`, `traces`, `historical`, `heads_ws`, `system_txs`, `system_tx_receipts`) | a declared capability the endpoint does not serve: `verify_methods` audits each at boot (the behavioral two — `historical`, `heads_ws` — cannot be probed; their reads enforce them) |
+| 2 | `Source` | the primitives it serves; the trait's defaults compose the rest (`read_key`, `bal`) | a source that has to implement what it cannot serve |
+| 3 | `ResetDetector` | the witness the parent admits (a cursor hash if its blocks are stable; a canary if not) | a reset detected by the wrong signal — the venue's heights below a pin resolve to the fork source, so its hashes are unsound (ADR-0002) |
+| 4 | `Policies` | clock, mining, probes, prepend, gap | mirroring a cadence or a clock the parent does not have |
+| 5 | `Scope` + `KeyClosure` | what stays fresh and what the devnet owns | overwriting the devnet's own writes |
+| 6 | `Bundle` | the six fields, filled | — (data, not code) |
+| 7 | The composer rung | nothing if the parent serves BALs; otherwise `touched` (envelopes) + the declared closures + the reads | an uncovered emitter (the audit counts them) |
+| 8 | A simulator, only if the parent's state cannot be read at all | the closed-source semantics + their spec table (the venue's discipline) | simulating what could be executed |
+
+The classes of divergence this predicts, and where each lands:
+
+- **Latest-only reads** (the HL API's model): the follow/truth split
+  (`follow_source`), `ProbeSchedule::LiveParity`, and windows instead of
+  per-block work.
+- **Reorgs deeper than the fork base**: the reset detector + the epoch rule
+  (marks *and* values reconciled) — never a silent re-apply.
+- **A parent clock that must not be mirrored**: `ClockPolicy::Native`.
+- **A cadence that must not be mirrored**: `MinePolicy::PoolDrain`; one that
+  must: `PerAppliedBlock`.
+- **A new effect shape** (system txs, blobs, envelope-only events): the
+  envelope decoder + the uncovered-emitter audit; the BAL stays the one
+  vocabulary (`block_access_index` 0/n/n+1).
+- **A rate/operational budget** (the HL EVM RPC's 100 requests/min): the
+  follow window and poll cadence are sized to it — an operational constraint,
+  never a semantic one.
+- **Private, non-deterministic state** (a matching engine): a simulator with
+  its own spec cross-reference table — and only then.
+
+What holds for *any* mirror, by construction (the pipeline's contracts): the
+devnet's own writes win (COW); one transaction per window (the journal's
+before-values and the cursor move together); the epoch rule on a pin change;
+parity as the measurement; every step published as one fact.
+
 ## The venue sim, cross-referenced
 
 Every behavior against the sentence it implements (sources: Hyperliquid docs,
@@ -181,12 +222,20 @@ fetched 2026-10-24; the probe rows are live API measurements).
 | Negative account/isolated value → ADL; ranking `(mark/entry)·(notional/account_value)`; closed at the previous mark | "If a user's account value or isolated position value becomes negative … The specific sorting index … is `(mark_price / entry_price) * (notional_position / account_value)`. Those traders' positions are closed at the previous mark price" | implemented (`adl`, `adl_ranking`) — the index and the price match the sentence exactly |
 | Liquidation uses the mark price | "Liquidations use the mark price, which combines external CEX prices with Hyperliquid's book state" | implemented (the served mark; the mark's own formula is the venue's) |
 | Isolated liq price formula | "`liq_price = price − side · margin_available / position_size / (1 − l · side)`", `margin_available (isolated) = isolated_margin − maintenance_margin_required` | implemented (`liquidation_px`) |
+| Tick/lot: prices ≤ 5 significant figures and ≤ `6 − szDecimals` decimals (integers always valid); sizes rounded to `szDecimals` | "Prices can have up to 5 significant figures, but no more than `MAX_DECIMALS - szDecimals` decimal places where `MAX_DECIMALS` is 6 for perps"; "Sizes are rounded to the `szDecimals`" | implemented (`validate_tick_lot`; the perp rule — the sim trades perps) |
+| Minimum order value $10 | the exchange page's own error sample: "Order must have minimum value of $10." | implemented verbatim (`validate_min_notional`) |
+| Nonces: the 100 highest per signer, larger than the smallest retained, never reused, window (T−2d, T+1d) | "the 100 highest nonces are stored per address. Every new transaction must have nonce larger than the smallest nonce in this set and also never have been used before. Nonces must be within `(T - 2 days, T + 1 day)`" | **fixed this wave** (the floor; the window and reuse were already there) |
+| Fast cancels: `f: true` refused for trigger orders; `f: false` must be omitted | "Orders with `f: true` are rejected if they refer to trigger orders"; "`f` must be skipped if false" | **fixed this wave** (the flag rides `cancel`/`cancel_by_cloid`; the omitted-when-false rule was there) |
+| Trigger direction: for a buy, a stop's trigger above the mid and a take's below (sell: reverse) | "Stop Market … For long orders, the trigger price needs to be higher than the mid price. For short orders … lower"; "Take Market … lower … higher" | **fixed this wave** (`validate_trigger_side`, the served book's mid) |
+| scheduleCancel: ≥ 5 s ahead; max 10 triggers per day, reset 00:00 UTC | "The time must be at least 5 seconds after the current time … The max number of triggers per day is 10. This trigger count is reset at 00:00 UTC." | **fixed this wave** (the cap; the 5 s floor was there) |
+| `always_place=false`: the new order must be non-trigger, ALO or a non-executable Gtc (overridden to ALO) | "When `always_place = false` the new order must be a non-trigger order, and must have TIF = ALO or a non-executable order with TIF = GTC. In the latter case, TIF of the new order is overridden to ALO." | implemented (`modify_one`) |
 | Funding: hourly, `position_size · oracle_price · funding_rate`, all-or-nothing per account | "Funding is paid every hour"; "the spot oracle price is used to convert the position size to notional value, not the mark price" | implemented (`accrue_funding`) — oracle, hourly, all-or-nothing |
 | Funding rate: interest 0.01 %/8 h, premium clamp, 4 %/h cap | the funding page's formula | **not computed**: the sim consumes the venue's own served `activeAssetCtx.funding` (a reimplementation would drift; the venue's figure is the truth) |
 | Cross default; isolated per position | "Positions by default are also opened in cross margin mode. Isolated margin is also supported" | implemented (the account model) |
 | CoreWriter action IDs/encodings: 1/2/3/4/5/6/7/8/9/10/11/12/13/15/16/17, tif 1/2/3, 10⁸ scaling, `uint32::MAX` = spot | the CoreWriter table | implemented (`bridge::corewriter`, `SPOT_DEX = u32::MAX`) |
 | CoreWriter does not revert on Core failures | "CoreWriter does not revert on HyperCore failures" | implemented (the tx succeeds; the refusal is named in the logs) |
 | Actions are delayed a few seconds onchain | "order actions and vault transfers sent from CoreWriter are delayed onchain for a few seconds" | **simplification**: the bridge applies at the log (the delay is an anti-latency-advantage measure; our product is not racing) |
+| Rate limits: 1200 weight/min per IP; address limits (1 request per 1 USDC traded, 10 000 initial buffer, one request per 10 s when limited); open-order limits (1000 + 1 per 5M USDC volume, cap 5000; ≥1000 open refuses reduce-only and trigger orders); 100 EVM RPC requests/min | the rate-limits page | **deliberately not simulated**: a devnet that throttles its own product is hostile, and the limits are the public venue's operational property, not state semantics. The 100 req/min EVM budget *is* an operational constraint on our source reads (the follow window is sized to it) |
 | Boundary errors carry code 10055 | the HyperEVM page's error table | **not applicable**: V is a real EVM (anvil) and the bridge completes Core→EVM transfers itself; named here for the record |
 | Cancun without blobs; priority fees burned; HYPE is gas | the HyperEVM page | V pins `--hardfork cancun` (the manifest's comment names the intent); **gap**: anvil has no knob to refuse blob txs the real chain rejects (its `--help` has no blob flag). Fees are anvil's own — the product does not depend on fee semantics |
 | The served totals with an isolated leg: `accountValue = totalRawUsd + Σ sign·value`; `cross.accountValue = total.accountValue − Σ iso margin`; `cross.totalRawUsd = total.totalRawUsd − Σ iso margin + Σ iso signed value` | — (live probe) | **fixed this wave** (`assemble`; two live accounts, 1e-4) |
@@ -211,6 +260,9 @@ fetched 2026-10-24; the probe rows are live API measurements).
 | A closed isolated position's margin vanished; strict-isolated rules absent | the docs' margin sentences | fixed (release + proportional + refusal by name) |
 | The served cross/total figures omitted the isolated margin | live probe, two accounts | fixed (`assemble`) |
 | A leverage switch to isolated left no margin on the position | implied by the model (an isolated position always carries its margin) | fixed (`set_leverage` parks it; back returns it) — **named as an inference**, no doc sentence states the allocation |
+| The nonce floor, fast-cancel trigger rule, trigger direction, scheduleCancel cap | the exchange/nonce/rate-limit pages | fixed this wave (+ four tests citing the sentences) |
+| The `Mirror` impls duplicated four accessor bodies | AST duplicates reading | fixed: `spine::Bundle` is the one implementation; the profiles fill data |
+| The product-facing docs described the Phase-1 IOC-only order lane while the sim had grown the resting lane (resting orders, triggers, cancels) — twelve sites | the venue-order-proof script's own assertions ("a priced Gtc rests, openOrders serves it, cancel closes it") against the prose | fixed: the sweep (`INTEGRATION.md`, `ARCHITECTURE.md`, `TESTING.md`, the three code comments, the script's header) |
 | `Meta::asset` — the universe lookup repeated at six sites | AST reuse reading | extracted |
 | CoreWriter's onchain delay | the CoreWriter page | documented simplification (above) |
 | Cancun-without-blobs on V | the HyperEVM page + anvil's `--help` | documented gap (no anvil knob; the manifest's comment records the intent) |

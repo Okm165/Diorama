@@ -298,10 +298,9 @@ impl Bridge {
     /// The CoreWriter limit order (id 1): prices and sizes arrive as 10^8 ×
     /// the human value and the tif byte is the docs' own (1 `Alo`, 2 `Gtc`,
     /// 3 `Ioc`). The order fills against the real book through the same lane
-    /// as `/exchange` and `/control/order` — one lane, three doors. A
-    /// resting tif is refused by name (the devnet has no resting book), and a
-    /// refused fill (no depth, no margin, unknown asset) is counted, never
-    /// retried.
+    /// as `/exchange` and `/control/order` — one lane, three doors. An
+    /// `Alo`/`Gtc` order rests in the sim's book; a refused fill (no depth,
+    /// no margin, unknown asset) is counted, never retried.
     fn limit_order(&self, caller: Address, action: &CoreAction) {
         let CoreAction::LimitOrder { asset, tif, .. } = action else {
             return;
