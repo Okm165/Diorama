@@ -100,20 +100,30 @@ impl From<RawAccountValues> for AccountValues {
 
 impl Shadow {
     pub fn is_shadowed(&self, w: &Write) -> bool {
-        if self.fixtures.contains(&w.address()) {
+        self.is_shadowed_key(&w.key())
+    }
+
+    /// The key-level form (the BAL-typed COW filter asks keys, not writes).
+    pub fn is_shadowed_key(&self, key: &mirror_anvil::Key) -> bool {
+        if self.is_fixture(&key.address()) {
             // Whole-account ownership: every write to a fixture address is
             // devnet-owned, marked or not (the fixture deploy is invisible to
             // the scanner).
             return true;
         }
-        match w {
-            Write::Storage { address, slot, .. } => self
+        match key {
+            mirror_anvil::Key::Storage { address, slot } => self
                 .slots
                 .get(address)
                 .map(|s| s.contains(slot))
                 .unwrap_or(false),
-            _ => self.accounts.contains(&w.address()),
+            _ => self.accounts.contains(&key.address()),
         }
+    }
+
+    /// Is this a fixture address (whole-account devnet ownership)?
+    pub fn is_fixture(&self, address: &Address) -> bool {
+        self.fixtures.contains(address)
     }
 
     /// Install the fixture list (boot: from the instance's

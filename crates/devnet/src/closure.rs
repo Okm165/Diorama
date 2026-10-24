@@ -17,19 +17,21 @@
 //!   WETH (slot 3): holder `0x28C6…1d60` ⇒ slot `0xdca77c…a94e`, and the
 //!   storage word equals `balanceOf` exactly.
 use alloy_primitives::{keccak256, Address, B256, Bytes, Log, U256};
-use mirror_anvil::Key;
+use mirror_anvil::{Key, Write};
 use std::collections::{HashMap, HashSet};
 
-/// The addresses a source block touched, and the logs it emitted. Built by
-/// the venue composer from block envelopes + receipts + system transactions.
-/// Logs are the shared alloy type — the same shape the receipts carry, so the
-/// receipt path adopts them verbatim and the reconstructed system-transfer
-/// logs (no receipt is served for system txs) are the only ones built here.
+/// The window's touches as a source can report them: the addresses and logs
+/// the declared closures plan from, plus any changed keys the source already
+/// carries values for (the trace rung; empty on the envelope rung). Built by
+/// [`crate::bal::envelope_touches`] and by the trace-based sources.
 #[derive(Debug, Clone, Default)]
 pub struct TouchedSet {
     pub addresses: HashSet<Address>,
     /// The window's logs, in block order.
     pub logs: Vec<Log>,
+    /// Changed keys the source already knows the post-values of (the trace
+    /// rung): the synthesis does not re-read them.
+    pub values: Vec<Write>,
 }
 
 impl TouchedSet {
@@ -50,8 +52,15 @@ impl TouchedSet {
         self.logs.push(log);
     }
 
+    /// Record a changed key the source already carries the value of (the
+    /// trace rung). Deliberately not an address touch: the value is complete
+    /// for the key, so the read plan must not re-read it.
+    pub fn value(&mut self, write: Write) {
+        self.values.push(write);
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.addresses.is_empty() && self.logs.is_empty()
+        self.addresses.is_empty() && self.logs.is_empty() && self.values.is_empty()
     }
 }
 
@@ -147,7 +156,7 @@ impl KeyClosure for TopicMappedSlots {
 ///   deterministic plans make logs and tests stable.
 pub fn plan_reads(
     closures: &[Box<dyn KeyClosure>],
-    watch: &crate::diff::WatchSet,
+    watch: &crate::cow::WatchSet,
     touched: &TouchedSet,
 ) -> Vec<Key> {
     let mut out = Vec::new();
@@ -257,7 +266,7 @@ mod tests {
 
     #[test]
     fn plan_reads_scopes_account_fields_and_dedups_slots() {
-        use crate::diff::WatchSet;
+        use crate::cow::WatchSet;
         let weth = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
         let oracle = address!("00000000000000000000000000000000000000aa");
         let holder = address!("28C6c06298d514Db089934071355E5743bf21d60");
@@ -313,7 +322,7 @@ mod tests {
 
     #[test]
     fn plan_reads_reads_no_fields_for_untouched_watched_accounts() {
-        use crate::diff::WatchSet;
+        use crate::cow::WatchSet;
         let watched = address!("00000000000000000000000000000000000000bb");
         let other = address!("00000000000000000000000000000000000000cc");
         let mut watch = WatchSet::default();

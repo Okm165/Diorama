@@ -167,7 +167,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
         cursor_t: ct.as_ref().map(|c| c.block),
         lag: follow.saturating_sub(ct.as_ref().map(|c| c.block).unwrap_or(follow)),
         halted: ctx.plane.is_halted(),
-        watchlist: ctx.watch.accounts.len(),
+        watchlist: ctx.mirror.scope().watch().accounts.len(),
         shadowed_slots: shadow.slot_count(),
         shadowed_accounts: shadow.accounts.len(),
         shadowed: shadow.shadowed_addresses(),

@@ -6,13 +6,14 @@
 //! profile reads (the run path moves them out of the instance), so a venue
 //! build never sees the ethereum sections and vice versa. The divergence set
 //! itself lives in the mirror bundle (`profile.rs`): the context only assembles
-//! it.
+//! it. One client handle per endpoint (`Arc`): the context, the source views,
+//! the composer's target and the driver all reference the same objects.
 use crate::error::Result;
 use crate::metrics::VenueMetrics;
 use mirror_config::{ChainVenue, EngineSection};
 use mirror_devnet::admin::AdminSurface;
-use mirror_devnet::diff::WatchSet;
 use mirror_devnet::plane::Plane;
+use mirror_devnet::source::Source;
 use mirror_devnet::spine::Mirror;
 use mirror_devnet::state::ChainCursor;
 use mirror_anvil::Rpc;
@@ -28,27 +29,25 @@ pub struct Ctx {
     /// profile's fields.
     pub(crate) engine: EngineSection,
     /// Anvil V (the devnet chain; chain id 999).
-    pub(crate) v: Rpc,
+    pub(crate) v: Arc<Rpc>,
     /// The fork source V derives from (the unshadow re-sync truth at the pin).
-    pub(crate) source_rpc: Rpc,
+    pub(crate) source_rpc: Arc<Rpc>,
     /// V's fork pin (0 = not yet resolved): the anchor `VenueSource` reads at
     /// (V's base state *is* the source's state at the pin) and the driver's
     /// epoch key. Shared with the source, set by the driver's reconcile.
     pub(crate) pin: Arc<AtomicU64>,
-    /// The mirror bundle: the HL public API as the truth, the poll composer,
-    /// the pin canary, and the policies (see `profile.rs` — the divergence
-    /// set, in the profile's own folder).
+    /// The mirror bundle: the HL public API as the truth (hand-back and follow
+    /// views), the pin canary, the declared scope, and the policies (see
+    /// `profile.rs` — the divergence set, in the profile's own folder).
     pub(crate) mirror: Arc<dyn Mirror>,
-    /// What the mirror keeps fresh: the watchlist accounts plus the declared
-    /// closures (the COW filter's key space — the same set the composer plans
-    /// from).
-    pub(crate) watch: WatchSet,
+    /// The composer's target side: V itself (shared with the anvil handle).
+    pub(crate) target: Arc<dyn Source>,
     /// The devnet plane: the shadow registry, the journal, the cursor state,
     /// the shared admin gauges and flags — the same bundle the ethereum engine
     /// embeds. The venue never freezes and has no clock offset; those fields
     /// keep the shared surface's shape (documented on the plane).
     pub(crate) plane: Plane,
-    /// The venue's own gauges/counters (shared with the poll composer).
+    /// The venue's own gauges/counters.
     pub(crate) venue_metrics: Arc<VenueMetrics>,
 }
 
@@ -69,18 +68,16 @@ impl Ctx {
             engine.journal.blocks,
             &engine.fixture_addresses,
         )?;
-        let watch = crate::profile::watch_set(cfg.watch_set(), &engine.closures);
         let venue_metrics = Arc::new(VenueMetrics::default());
-        let source_rpc = Rpc::new(source_url, timeout)?;
-        let v = Rpc::new(v_url, timeout)?;
+        let source_rpc = Arc::new(Rpc::new(source_url, timeout)?);
+        let v = Arc::new(Rpc::new(v_url, timeout)?);
         let wiring = crate::profile::build(
             &engine,
             crate::profile::Deps {
                 state: plane.state.clone(),
                 source_rpc: source_rpc.clone(),
                 v: v.clone(),
-                watch: watch.clone(),
-                metrics: venue_metrics.clone(),
+                watch: cfg.watch_set(),
             },
         );
         Ok(Self {
@@ -90,7 +87,7 @@ impl Ctx {
             source_rpc,
             pin: wiring.pin,
             mirror: wiring.mirror,
-            watch,
+            target: wiring.target,
             plane,
             venue_metrics,
         })

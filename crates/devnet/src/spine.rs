@@ -2,8 +2,9 @@
 //! each an interface the shared pipeline consumes — so the pipeline itself has
 //! none.
 //!
-//! 1. the truth followed ([`crate::source::Source`]);
-//! 2. the diff source ([`crate::diff::DiffComposer`]);
+//! 1. the truth followed ([`crate::source::Source`]: reth | the HL public API);
+//! 2. the BAL rung ([`crate::bal::compose`]: native | synthesized — the
+//!    generic composer selects it from the source's declared capabilities);
 //! 3. the reset signal ([`ResetDetector`]);
 //! 4. the clock rule ([`ClockPolicy`]);
 //! 5. block production ([`MinePolicy`]);
@@ -11,10 +12,9 @@
 //!
 //! [`Mirror`] bundles them: one object per mirror, implemented in that
 //! mirror's own folder (`crates/mainnet`, `crates/venue`), holding the
-//! profile's wiring and reading its label, source, composer, reset detector
-//! and [`Policies`]. The policies are data (config maps to them); the
-//! detector is a trait because it performs reads.
-use crate::diff::DiffComposer;
+//! profile's wiring and reading its label, sources, reset detector, policies
+//! and scope. COW ([`crate::cow`]) and everything after are shared.
+use crate::cow::Scope;
 use crate::error::Result;
 use crate::shared::Shared;
 use crate::source::{Fut, Source};
@@ -28,14 +28,20 @@ use std::sync::Arc;
 pub trait Mirror: Send + Sync {
     /// The chain tag facts and drift entries carry ("t" | "v").
     fn label(&self) -> &'static str;
-    /// The truth the mirror follows.
+    /// The truth for state reads (re-sync/hand-back): reth at a block | the
+    /// fork source at the pin.
     fn source(&self) -> &Arc<dyn Source>;
-    /// The diff seam: what the applier composes from.
-    fn composer(&self) -> &Arc<dyn DiffComposer>;
+    /// The composer's read side: the same object as [`Self::source`] on the
+    /// mainnet (reth serves both roles), the venue's latest-reading source
+    /// (its pin guard would refuse the follow's reads).
+    fn follow_source(&self) -> &Arc<dyn Source>;
     /// The reset seam: how a chain reset is witnessed.
     fn reset(&self) -> &Arc<dyn ResetDetector>;
     /// The profile's decisions, as data.
     fn policies(&self) -> Policies;
+    /// What the mirror keeps fresh: the watch set and declared closures the
+    /// composer plans from and the COW filter keeps.
+    fn scope(&self) -> &Scope;
 }
 
 /// What a reset check saw — the witness, not just a boolean: the evidence

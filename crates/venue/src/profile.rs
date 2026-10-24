@@ -7,25 +7,24 @@
 //! | decision | venue (here) | mainnet (`crates/mainnet/src/profile.rs`) |
 //! |---|---|---|
 //! | label | `"v"` | `"t"` |
-//! | source | HL public API (poll) | reth (local full node) |
-//! | composer | poll window over envelopes | per-block BAL (trace fallback) |
+//! | source | HL public API (latest reads) | reth (local full node) |
+//! | BAL rung | synthesized (envelopes → closures → reads) | native (`eth_getBlockAccessList`), trace fallback |
 //! | reset | chain-instance canary | cursor hash / below base |
 //! | clock | native | align to the parent block + live offset |
 //! | mining | pool drain | one T block per applied parent block |
-//! | probes | live parity against the polled values | per applied block |
+//! | probes | live parity against the composed BAL | per applied block |
 //! | prepend | 1 | 3 (a steady stream must not starve the parent) |
 //!
 //! Both mirrors therefore do the same things — follow their parent chain,
-//! mirror its state onto their devnet, and let the devnet modify that state
-//! with minted liquidity (the COW registry keeps the two apart) — while the
-//! five decisions above are the only places the implementations diverge.
-use crate::compose::PollComposer;
-use crate::metrics::VenueMetrics;
+//! compose its changes as a BAL, COW it against the devnet's own writes, and
+//! measure the result — while the decisions above are the only places the
+//! implementations diverge. The composer itself is generic
+//! (`mirror_devnet::bal::compose`).
 use crate::reset::PinCanary;
 use crate::venue_source::{public_capabilities, VenueSource};
 use mirror_config::{ClosuresSection, EngineSection};
 use mirror_devnet::closure::{FixedSlots, KeyClosure, TopicMappedSlots};
-use mirror_devnet::diff::{DiffComposer, WatchSet};
+use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{Capabilities, RawSource, Source};
 use mirror_devnet::spine::{
@@ -33,34 +32,23 @@ use mirror_devnet::spine::{
 };
 use mirror_devnet::state::StateFile;
 use mirror_anvil::Rpc;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-/// The venue mirror's bundle: the HL public API as the truth, the poll
-/// composer, the pin canary, and the policies the driver reads.
+/// The venue mirror's bundle: the HL public API as the truth (two views — the
+/// pin-exact hand-back source and the latest-reading follow source), the pin
+/// canary, the declared scope, and the policies the driver reads.
 pub struct VenueMirror {
     source: Arc<dyn Source>,
-    composer: Arc<dyn DiffComposer>,
+    follow: Arc<dyn Source>,
     reset: Arc<dyn ResetDetector>,
     policies: Policies,
+    scope: Scope,
 }
 
 impl VenueMirror {
-    pub fn new(
-        source: Arc<dyn Source>,
-        composer: Arc<dyn DiffComposer>,
-        reset: Arc<dyn ResetDetector>,
-        policies: Policies,
-    ) -> Self {
-        Self {
-            source,
-            composer,
-            reset,
-            policies,
-        }
-    }
-
     /// The profile's decisions: the clock is V's own, mining drains the pool
-    /// (an idle chain stays static), probes compare against the polled values,
+    /// (an idle chain stays static), probes compare against the composed BAL,
     /// and the gap guard pauses the poll when the source head runs too far
     /// ahead (a wide window is a re-pin decision, never a silent partial poll).
     pub fn policies(engine: &EngineSection) -> Policies {
@@ -83,8 +71,11 @@ impl Mirror for VenueMirror {
         &self.source
     }
 
-    fn composer(&self) -> &Arc<dyn DiffComposer> {
-        &self.composer
+    /// The follow reads the source at *latest* (the composer's values), while
+    /// [`Self::source`] is pin-exact for hand-back: the pin guard would refuse
+    /// the follow's reads, so the two roles are two objects over one handle.
+    fn follow_source(&self) -> &Arc<dyn Source> {
+        &self.follow
     }
 
     fn reset(&self) -> &Arc<dyn ResetDetector> {
@@ -94,10 +85,14 @@ impl Mirror for VenueMirror {
     fn policies(&self) -> Policies {
         self.policies
     }
+
+    fn scope(&self) -> &Scope {
+        &self.scope
+    }
 }
 
 /// What V (anvil) serves as the composer's target: traces yes, BAL not
-/// exercised, historical yes, no system txs.
+/// exercised (the target is only read for the synthesis rung's diff).
 pub fn target_capabilities() -> Capabilities {
     Capabilities {
         native_bal: false,
@@ -154,16 +149,17 @@ pub fn watch_set(
 pub struct Wiring {
     pub mirror: Arc<dyn Mirror>,
     /// V's fork pin, shared with [`VenueSource`].
-    pub pin: Arc<std::sync::atomic::AtomicU64>,
+    pub pin: Arc<AtomicU64>,
+    /// The composer's target side: V itself (shared with the anvil handle).
+    pub target: Arc<dyn Source>,
 }
 
 /// What the wiring needs (the context assembles it; `build` consumes it).
 pub struct Deps {
     pub state: Shared<StateFile>,
-    pub source_rpc: Rpc,
-    pub v: Rpc,
-    pub watch: WatchSet,
-    pub metrics: Arc<VenueMetrics>,
+    pub source_rpc: Arc<Rpc>,
+    pub v: Arc<Rpc>,
+    pub watch: std::collections::HashSet<alloy_primitives::Address>,
 }
 
 pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
@@ -172,23 +168,19 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
         source_rpc,
         v,
         watch,
-        metrics,
     } = deps;
-    let pin = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let pin = Arc::new(AtomicU64::new(0));
     let source: Arc<dyn Source> = Arc::new(VenueSource::new(source_rpc.clone(), pin.clone()));
-    let composer: Arc<dyn DiffComposer> = Arc::new(PollComposer::new(
-        Arc::new(RawSource::new(source_rpc, public_capabilities())),
-        Arc::new(RawSource::new(v, target_capabilities())),
-        watch,
-        closures(&engine.closures),
-        metrics,
-    ));
+    let follow: Arc<dyn Source> = Arc::new(RawSource::new(source_rpc, public_capabilities()));
+    let target: Arc<dyn Source> = Arc::new(RawSource::new(v, target_capabilities()));
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
-    let mirror: Arc<dyn Mirror> = Arc::new(VenueMirror::new(
+    let scope = Scope::new(watch_set(watch, &engine.closures), closures(&engine.closures));
+    let mirror: Arc<dyn Mirror> = Arc::new(VenueMirror {
         source,
-        composer,
+        follow,
         reset,
-        VenueMirror::policies(engine),
-    ));
-    Wiring { mirror, pin }
+        policies: VenueMirror::policies(engine),
+        scope,
+    });
+    Wiring { mirror, pin, target }
 }

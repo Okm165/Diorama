@@ -50,12 +50,14 @@ list below then walks it step by step):
 ```
 ![per-block data flow](img/arch-data-flow.png)
 
-The venue profile follows its parent chain too, with a poll composer instead of
-BALs: each pass composes the window's touched set from the HL public API's
-envelopes (txs, receipts, system txs), derives concrete keys from the declared
-closures, and lands the changed keys on V under the same COW filter ("The
-Venue Mirror" below), with the simulator's market and account planes beside it
-("The venue simulator").
+The venue profile follows its parent chain too, through the same pipeline: the
+spine's generic composer (`mirror_devnet::bal::compose`) has no native BAL to
+take from the HL public API, so it synthesizes one — each pass composes the
+window's touched set from the envelopes (txs, receipts, system txs), derives
+concrete keys from the declared closures, reads source and target, and frames
+the changes as a BAL. The shared COW filter then drops devnet-owned keys and
+the applier lands the rest on V ("The Venue Mirror" below), with the
+simulator's market and account planes beside it ("The venue simulator").
 
 ### One product, two chains: the capability symmetry
 
@@ -64,16 +66,20 @@ a live fork of its parent fresh, each lets the devnet modify the mirrored
 market state with minted liquidity, and each measures the result against the
 parent 1:1. Only the mechanisms differ, and each mechanism lives in its own
 mirror's folder behind a spine interface — `mirror_devnet::spine::Mirror`
-bundles the divergence set (`label`, `source`, `composer`, `reset`,
-`policies`), implemented by `crates/mainnet/src/profile.rs` and
-`crates/venue/src/profile.rs`.
+bundles the divergence set (`label`, `source`, `follow_source`, `reset`,
+`policies`, `scope`), implemented by `crates/mainnet/src/profile.rs` and
+`crates/venue/src/profile.rs`. The composer itself is **one generic algorithm**
+(`mirror_devnet::bal::compose`): it takes the native BAL rung when the source
+records BALs and synthesizes one otherwise, so the mirrors differ in data
+(source, scope), not in pipeline. COW (`mirror_devnet::cow`) and everything
+after are shared code.
 
 | capability | Mainnet Mirror (T) | Venue Mirror (V) | shared spine |
 |---|---|---|---|
-| **mirror the parent chain** | reth local full node; per-block BAL diff (prestateTracer fallback); one T block per applied parent block | HL public API; poll window (envelopes → touched set → declared closures → keys) applied to V's latest state | `Source`, `DiffComposer`, the applier/follow sequences, the COW filter, the journal, the cursor state |
+| **mirror the parent chain** | reth local full node; the native BAL rung (`eth_getBlockAccessList`, prestateTracer fallback); one T block per applied parent block | HL public API; the synthesized BAL rung (envelopes → touches → declared closures → reads) applied to V's latest state | `Source` (both rungs), `bal::compose`, the applier/follow sequences, `cow::filter_bal`, the journal, the cursor state |
 | **modify market state** | `/admin/deal` (mint balances), the feed bridge (live prices → mock aggregators), fixture deploys (`anvil_setCode`) | `/admin/deal` on V's tokens, the venue simulator's control API (orders, positions, accounts, prices) | `deal`, the shadow registry (COW), `anvil_setStorageAt`/`setCode` |
 | **minted liquidity** | `deal` mints ERC20 balances at the discovered slot; the CCTP bridge mints USDC via relay | `deal` mints on V; the sim mints perp/spot balances through its account plane | the same deal path — the mint is the devnet's own write, never the parent's |
-| **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `full_sweep`), configured probes per block, the drift log | live parity (applied keys re-read vs expected), at-pin probes, the uncovered-emitter audit | `ProbeRunner`, `DiffComposer::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`) |
+| **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `full_sweep`), configured probes per block, the drift log | live parity (applied keys re-read vs the composed BAL), at-pin probes, the uncovered-emitter audit | `ProbeRunner`, `bal::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`) |
 | **reset / epoch** | cursor hash + below-base witness | chain-instance canary (pin witness) | `ResetDetector`, `mirror_devnet::epoch` |
 | **time travel** | `/admin/time` clock offset (persists across parent blocks) + `evm_increaseTime` | none on V's chain by design (V's clock is native; the harness drives `evm_increaseTime`/`anvil_mine` directly and an engine offset nobody re-aligns would be a no-op route) — the *product's* clock is the sim's served time | the plane's `time_offset` (mainnet only) |
 
@@ -85,11 +91,17 @@ Per applied block on T the engine does, in order:
 
 0. **Prepend** (bounded, ≤3 rounds): mine the devnet's pending txs in their own
    block first (see below).
-1. **Compose**: `eth_getBlockAccessList(N)` from reth, flattened to the write
-   set (the prestateTracer diff is the fallback when a block has no BAL).
-2. **Filter**: the watch list, minus devnet-owned keys (copy-on-write); whole
-   account fields count as one unit.
-3. **Before-values**: read at T's head and journaled (`/admin/rewind`).
+1. **Compose a BAL**: the spine's generic composer (`mirror_devnet::bal`)
+   produces the window's block-level access list — the native rung
+   (`eth_getBlockAccessList(N)` from reth, with the prestateTracer rung when a
+   block has none) or the synthesized rung (the source's touches → the
+   declared scope's read plan → source/target reads → `bal_from_writes`). Both
+   mirrors end in the same document.
+2. **COW the BAL**: `cow::filter_bal` keeps the watch set's changes and drops
+   devnet-owned keys (copy-on-write); whole account fields count as one unit,
+   fixture addresses are whole-account owned.
+3. **Before-values**: flatten the filtered BAL (`flatten_bal`), read the
+   before-values at T's head and journal them (`/admin/rewind`).
 4. **Apply**: batched cheatcode writes (≤500 per batch), the context aligned to
    the parent (timestamp + offset, clamped monotonic), then `anvil_mine(1)`.
 5. **Scan**: T's own blocks into the shadow registry, so the next filter sees
@@ -676,15 +688,18 @@ is a fork-mode Anvil of the public chain (`https://rpc.hyperliquid.xyz/evm`,
 chain id 999), and a **simulator** serves the venue's own API beside it (next
 section). The Mainnet Mirror's machinery does not transfer wholesale, and
 deliberately so: HyperEVM cannot be replayed (node-level precompiles, system
-txs, dual 1 s/60 s blocks) and the public API exposes no traces, BALs or
-proofs — so replay-by-BAL, the prepend rule, and the clock offset are
-**dropped permanently** (plan §4.4). What replaces them is the poll follow:
-the composer derives each window's touched set from the envelopes the API
-does serve (txs, receipts, and `eth_getSystemTxsByBlockNumber`), the declared
-closures turn it into concrete keys, and the changed keys land on V under the
-same COW filter — one window per pass, gap-guarded. What remains shared is
-exactly the half both chains share, delivered by the common crates: the
-shadow registry (COW), the journal, the cursor state with `epoch_pin`, the
+txs, dual 1 s/60 s blocks) and the public API exposes no traces, native BALs or
+proofs — so the *native* BAL rung, the prepend rule, and the clock offset are
+**dropped permanently** (plan §4.4). What replaces them is the **synthesized
+BAL rung**: the generic composer (`mirror_devnet::bal::compose`) derives each
+window's touched set from the envelopes the API does serve (txs, receipts, and
+`eth_getSystemTxsByBlockNumber`), the declared closures turn it into concrete
+keys, the source and target are read, and the changes are framed as a BAL —
+the same document the mainnet takes natively. The shared COW filter then drops
+devnet-owned keys and the applier lands the rest on V: one window per pass,
+gap-guarded. What remains shared is exactly the half both chains share,
+delivered by the common crates: the composer, the COW filter, the shadow
+registry, the journal, the cursor state with `epoch_pin`, the
 admin surface, the chain-generic scanner, the probe runner, the epoch rule,
 the declared closures, and the devnet plane (the registries and flags as one
 bundle). The driver in `crates/venue` is the venue's own loop.

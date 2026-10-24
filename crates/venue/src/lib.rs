@@ -31,7 +31,6 @@
 //! gate's figure, not a clock).
 pub mod api;
 pub mod bridge;
-pub mod compose;
 pub mod ctx;
 pub mod driver;
 pub mod error;

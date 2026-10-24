@@ -10,6 +10,7 @@ Three layers, each runnable on demand:
 | Scenario | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 12 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
 | Product sim | `make mainnet-product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
 | Follow (local) | `make venue-follow-local` | anvil + the venue engine binary (no cluster/Docker) | the venue's source follow natively: a local anvil stands in for the HL public API, V forks it, the watched account is mirrored 1:1, and a devnet write on V survives the next source window (COW) |
+| Selftest (local) | `make mainnet-selftest-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet applier natively: a local source anvil with a storage-writing contract, T forks it, the engine applies the blocks above the pin through the trace rung (anvil's block trace is empty, so the per-tx fallback runs) and the sampled storage parity passes |
 
 ## Unit tests (`cargo test --workspace`)
 

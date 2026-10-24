@@ -121,7 +121,7 @@ async fn run(config: PathBuf) -> Result<()> {
         reth = %ctx.reth.url(),
         anvil_t = %ctx.anvil_t.url(),
         follow = ctx.follow_tag(),
-        watchlist = ctx.watch.accounts.len(),
+        watchlist = ctx.mirror.scope().watch().accounts.len(),
         "mirror engine starting"
     );
 

@@ -3,8 +3,9 @@
 //! [`Plane`] — the same bundle the venue engine embeds.
 //!
 //! One Anvil (T) and one source (reth). The spine's seams are wired here,
-//! chosen at boot: the source ([`RethSource`]), the composer
-//! ([`RethComposer`]: BAL → trace), and the reset detector (cursor hash).
+//! chosen at boot: the source ([`RethSource`] — native BALs with the trace
+//! rung), the reset detector (cursor hash), and the scope (whole accounts).
+//! The composer itself is the spine's generic one (`mirror_devnet::bal`).
 use crate::beacon::BeaconClient;
 use crate::drift::Drift;
 use crate::error::Result;
@@ -12,8 +13,8 @@ use crate::metrics::MainnetMetrics;
 use crate::rpc::Rpc;
 use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
 use mirror_devnet::admin::AdminSurface;
-use mirror_devnet::diff::WatchSet;
 use mirror_devnet::plane::Plane;
+use mirror_devnet::source::Source;
 use mirror_devnet::spine::Mirror;
 use mirror_devnet::state::ChainCursor;
 use std::sync::Arc;
@@ -29,20 +30,19 @@ pub struct Ctx {
     /// The engine's section (the run path moved it out of the instance: the
     /// context carries exactly the sections it reads).
     pub(crate) engine: EngineSection,
-    pub(crate) reth: Rpc,
-    pub(crate) anvil_t: Rpc,
-    /// The mirror bundle: reth-as-source, the BAL composer, the cursor-hash
-    /// reset detector, and the policies (see `profile.rs` — the divergence
-    /// set, in the profile's own folder).
+    pub(crate) reth: Arc<Rpc>,
+    pub(crate) anvil_t: Arc<Rpc>,
+    /// The mirror bundle: reth-as-source, the cursor-hash reset detector, the
+    /// whole-account scope, and the policies (see `profile.rs` — the
+    /// divergence set, in the profile's own folder).
     pub(crate) mirror: Arc<dyn Mirror>,
+    /// The composer's target side: T itself (shared with the anvil handle).
+    pub(crate) target: Arc<dyn Source>,
     /// The beacon-API client for the top-up loop (EIP-8379): the local CL.
     pub(crate) beacon: BeaconClient,
     /// Engine API client (reth authrpc) for the top-up loop; None when disabled
     /// or unconfigured.
     pub(crate) engine_api: Option<crate::engine_api::EngineClient>,
-    /// What the mirror keeps fresh: whole accounts (every slot of a watched
-    /// account arrives through the BAL).
-    pub(crate) watch: WatchSet,
     /// The devnet plane: the shadow registry, the journal, the cursor state,
     /// the shared admin gauges and flags — the same bundle the venue engine
     /// embeds (one home for the wiring that must not drift).
@@ -63,7 +63,6 @@ impl Ctx {
     pub fn new(mut cfg: Instance, reth_url: &str, anvil_t_url: &str) -> Result<Self> {
         let (l1, engine_section) = cfg.take_mainnet()?;
         let timeout = Duration::from_secs(engine_section.reth.request_timeout_secs);
-        let watch = WatchSet::new(cfg.watch_set());
         let plane = Plane::open(
             &engine_section.state_dir,
             engine_section.journal.dir.clone(),
@@ -72,8 +71,17 @@ impl Ctx {
         )?;
         let drift = Drift::new(engine_section.state_dir.join("drift.jsonl"))?;
         let beacon = BeaconClient::new(engine_section.beacon.urls.clone())?;
-        let reth = Rpc::new(reth_url, timeout)?;
-        let mirror = crate::profile::build(&engine_section, plane.state.clone(), &reth)?;
+        // One client per endpoint, shared (`Arc`): the context, the source
+        // objects and the composer's target all reference the same handle.
+        let reth = Arc::new(Rpc::new(reth_url, timeout)?);
+        let anvil_t = Arc::new(Rpc::new(anvil_t_url, timeout)?);
+        let wiring = crate::profile::build(
+            &engine_section,
+            plane.state.clone(),
+            reth.clone(),
+            anvil_t.clone(),
+            cfg.watch_set(),
+        )?;
         let engine_api = match (
             &engine_section.source_sync.engine_url,
             &engine_section.source_sync.jwt_path,
@@ -90,11 +98,11 @@ impl Ctx {
             l1,
             engine: engine_section,
             reth,
-            anvil_t: Rpc::new(anvil_t_url, timeout)?,
-            mirror,
+            anvil_t,
+            mirror: wiring.mirror,
+            target: wiring.target,
             beacon,
             engine_api,
-            watch,
             plane,
             eth_metrics: MainnetMetrics::default(),
             feed_bridge_metrics: Arc::new(crate::feed_bridge::FeedBridgeMetrics::default()),

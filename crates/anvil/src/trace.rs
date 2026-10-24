@@ -10,8 +10,9 @@
 //! a JSON number, and storage keys/values as **full-width** 32-byte hex —
 //! exactly what alloy's `AccountState` models, so the parse is the official
 //! type's, not ours.
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rpc_types_trace::geth::{AccountState, GethTrace, PreStateFrame, TraceResult};
+use std::collections::BTreeMap;
 
 /// One state write a trace diff reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,15 +142,22 @@ pub(crate) fn flatten_trace_diff(frame: &PreStateFrame) -> Vec<Write> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for (address, pre) in &diff.pre {
-        let post = diff.post.get(address);
-        push_storage(&mut out, *address, pre, post);
-    }
-    for (address, post) in &diff.post {
-        let pre = diff.pre.get(address);
-        push_balance(&mut out, *address, pre, post);
-        push_nonce(&mut out, *address, pre, post);
-        push_code(&mut out, *address, pre, post);
+    // The union of both sides: an account can appear in `post` only (anvil
+    // omits an unchanged-zero pre-state's storage, so a 0→v write lives in
+    // `post.storage` alone) and in `pre` only (a v→0 write, which `post`
+    // omits — both measured).
+    let mut addresses: std::collections::BTreeSet<Address> =
+        diff.pre.keys().copied().collect();
+    addresses.extend(diff.post.keys().copied());
+    for address in addresses {
+        let pre = diff.pre.get(&address);
+        let post = diff.post.get(&address);
+        push_storage(&mut out, address, pre, post);
+        if let Some(post) = post {
+            push_balance(&mut out, address, pre, post);
+            push_nonce(&mut out, address, pre, post);
+            push_code(&mut out, address, pre, post);
+        }
     }
     out
 }
@@ -181,28 +189,38 @@ fn push_code(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>,
     }
 }
 
-/// Storage writes, driven by `pre` (measured: `pre.storage` lists exactly the
-/// changed slots — read-only and no-op touches appear nowhere — while `post`
-/// omits slots that changed to zero; a drained slot is therefore
-/// `pre`-present and `post`-absent, and must be recorded as a write to ZERO).
-fn push_storage(out: &mut Vec<Write>, address: Address, pre: &AccountState, post: Option<&AccountState>) {
-    for (slot, pre_value) in &pre.storage {
-        let value = if let Some(post_value) = post.and_then(|p| p.storage.get(slot)) {
-            if post_value == pre_value {
-                continue;
-            }
-            U256::from_be_bytes(post_value.0)
-        } else {
-            if pre_value.is_zero() {
-                continue;
-            }
-            U256::ZERO
-        };
-        out.push(Write::Storage {
-            address,
-            slot: U256::from_be_bytes(slot.0),
-            value,
-        });
+/// Storage writes: the union of the `pre` and `post` storage maps. Measured:
+/// reth's `pre.storage` lists the changed slots and `post` omits slots that
+/// changed to zero; anvil's `post.storage` lists them and `pre` omits slots
+/// whose pre-value was zero. Either side alone misses a 0→v or v→0 write, so
+/// a slot present on one side only reads the missing side as zero.
+fn push_storage(
+    out: &mut Vec<Write>,
+    address: Address,
+    pre: Option<&AccountState>,
+    post: Option<&AccountState>,
+) {
+    let empty = BTreeMap::new();
+    let pre_storage = pre.map(|p| &p.storage).unwrap_or(&empty);
+    let post_storage = post.map(|p| &p.storage).unwrap_or(&empty);
+    let mut slots: std::collections::BTreeSet<B256> = pre_storage.keys().copied().collect();
+    slots.extend(post_storage.keys().copied());
+    for slot in slots {
+        let pre_value = pre_storage
+            .get(&slot)
+            .map(|v| U256::from_be_bytes(v.0))
+            .unwrap_or(U256::ZERO);
+        let post_value = post_storage
+            .get(&slot)
+            .map(|v| U256::from_be_bytes(v.0))
+            .unwrap_or(U256::ZERO);
+        if pre_value != post_value {
+            out.push(Write::Storage {
+                address,
+                slot: U256::from_be_bytes(slot.0),
+                value: post_value,
+            });
+        }
     }
 }
 
@@ -306,6 +324,26 @@ mod tests {
         )
         .expect("frame");
         assert!(flatten_trace_diff(&frame).is_empty());
+    }
+
+    /// A 0→v storage write whose pre-state side omits the slot (measured
+    /// 2026-10-24 on anvil: `pre` carries only balance/code for an account
+    /// whose slot was zero; the change lives in `post.storage` alone). The
+    /// union rule must record it — the pre-driven rule silently missed it.
+    #[test]
+    fn a_post_only_storage_change_is_a_write() {
+        let frame: PreStateFrame = serde_json::from_str(
+            r#"{"post":{"0x000000000000000000000000000000000000c0de":{
+                    "storage":{"0x0000000000000000000000000000000000000000000000000000000000000000":"0x0000000000000000000000000000000000000000000000000000000000000001"}}},
+                "pre":{"0x000000000000000000000000000000000000c0de":{"balance":"0x0","code":"0x60016000556000"}}}"#,
+        )
+        .expect("frame");
+        let writes = flatten_trace_diff(&frame);
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert!(matches!(
+            &writes[0],
+            Write::Storage { slot, value, .. } if *slot == U256::ZERO && *value == U256::from(1)
+        ));
     }
 
     /// A genuine excerpt of a zeroing transfer (measured 2026-10-22 on the

@@ -1,11 +1,11 @@
 //! Diff applier: keeps T's watch-list state fresh by applying parent BALs.
 //!
-//! Per parent block (plan §4.2): prepend devnet txs -> compose the source's
-//! diffs -> watch list -> skip shadowed (COW) -> read before-values ->
-//! batched cheatcode writes -> align block context -> mine -> journal ->
+//! Per parent block (plan §4.2): prepend devnet txs -> compose the parent's
+//! BAL (the spine's generic composer: native on reth, the trace rung as
+//! fallback) -> COW it against the devnet's own writes -> read before-values
+//! -> batched cheatcode writes -> align block context -> mine -> journal ->
 //! sampled parity + probe parity. Each phase is one function; `apply_block` is
-//! the sequence. The diff source is the spine's seam (`ctx.composer`): the
-//! native BAL with the prestateTracer fallback.
+//! the sequence.
 use crate::ctx::{cursor_from, Ctx};
 use crate::drift::Drift;
 use crate::error::{Error, Result};
@@ -14,7 +14,8 @@ use crate::rpc::Rpc;
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
 use mirror_anvil::Write;
-use mirror_devnet::diff::{filter_watched, DiffKind, FilterStats};
+use mirror_devnet::bal::DiffKind;
+use mirror_devnet::cow::FilterStats;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
@@ -200,22 +201,29 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
 
 /// Compose the window's diffs and apply the watch/COW filter. The pre-write
 /// base check lives here: a re-pin racing the (slow) compose must abort
-/// before any write. Returns `(filtered, total, stats, kind)`.
+/// before any write. Returns `(filtered writes, total changes, stats, kind)`.
 async fn compose_and_filter(
     ctx: &Ctx,
     n: u64,
     base: Option<u64>,
 ) -> Result<(Vec<mirror_anvil::Write>, usize, FilterStats, DiffKind)> {
-    let diff = ctx.mirror.composer().compose(n.saturating_sub(1), n).await?;
+    let (window, _stats) = mirror_devnet::bal::compose(
+        ctx.mirror.follow_source().as_ref(),
+        ctx.target.as_ref(),
+        ctx.mirror.scope(),
+        n.saturating_sub(1),
+        n,
+    )
+    .await?;
     if ctx.anvil_t.fork_block().await? != base {
         return Err(Error::ResetDuringApply { n });
     }
-    let total = diff.writes.len();
+    let total = mirror_devnet::bal::change_count(&window.bal);
     let (filtered, stats) = {
         let shadow = ctx.plane.shadow.lock()?;
-        filter_watched(&ctx.watch, &shadow, diff.writes)
+        mirror_devnet::cow::filter_bal(ctx.mirror.scope().watch(), &shadow, window.bal)
     };
-    Ok((filtered, total, stats, diff.kind))
+    Ok((mirror_anvil::flatten_bal(&filtered), total, stats, window.kind))
 }
 
 /// The per-block facts the finalize step records (cursor, metrics, drift,

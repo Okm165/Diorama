@@ -22,12 +22,11 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::reset::{read_canary, write_canary};
 use mirror_anvil::Rpc;
-use mirror_devnet::diff::filter_watched;
 use mirror_devnet::facts::{Fact, ResetWitness};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
 use mirror_devnet::scan;
-use mirror_devnet::spine::ResetSignal;
+use mirror_devnet::spine::{ProbeSchedule, ResetSignal};
 use mirror_devnet::state::{cursor_from, ChainCursor};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -320,31 +319,61 @@ async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
 }
 
 /// Compose the window and land its writes on V under the COW filter, then
-/// record the live parity of what was applied.
+/// record the live parity of what was applied. The composer is the spine's
+/// generic one: the venue's source has no native BAL, so it synthesizes.
 async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<Window> {
-    let diff = ctx.mirror.composer().compose(from, to).await?;
-    let total = diff.writes.len();
-    let (writes, stats) = {
+    let (window, stats) = mirror_devnet::bal::compose(
+        ctx.mirror.follow_source().as_ref(),
+        ctx.target.as_ref(),
+        ctx.mirror.scope(),
+        from,
+        to,
+    )
+    .await?;
+    record_poll_stats(ctx, &stats);
+    let total = mirror_devnet::bal::change_count(&window.bal);
+    let (filtered, cow) = {
         let shadow = ctx.plane.shadow.lock()?;
-        filter_watched(&ctx.watch, &shadow, diff.writes)
+        mirror_devnet::cow::filter_bal(ctx.mirror.scope().watch(), &shadow, window.bal)
     };
+    let writes = mirror_anvil::flatten_bal(&filtered);
     let applied = if writes.is_empty() {
         0
     } else {
         mirror_anvil::apply_writes(&ctx.v, &writes, ctx.engine.loops.chunk_size).await?
     };
-    let (sampled, sampled_ok) = match ctx.mirror.composer().verify(&writes).await? {
-        Some((ok, failed)) => (ok + failed, ok),
-        None => (0, 0),
-    };
+    let (sampled, sampled_ok) =
+        if matches!(ctx.mirror.policies().probes, ProbeSchedule::LiveParity) {
+            mirror_devnet::bal::verify(ctx.target.as_ref(), &filtered).await?
+        } else {
+            (0, 0)
+        };
     Ok(Window {
         total,
         applied,
         filtered: writes.len(),
-        skipped_shadowed: stats.skipped_shadowed,
+        skipped_shadowed: cow.skipped_shadowed,
         sampled,
         sampled_ok,
     })
+}
+
+/// The poll's gauges and the audit warning, one place.
+fn record_poll_stats(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) {
+    ctx.venue_metrics
+        .set(&ctx.venue_metrics.poll_touched, stats.touched as u64);
+    ctx.venue_metrics
+        .set(&ctx.venue_metrics.poll_planned_keys, stats.planned as u64);
+    ctx.venue_metrics
+        .set(&ctx.venue_metrics.poll_changed_keys, stats.changed as u64);
+    if !stats.uncovered.is_empty() {
+        ctx.venue_metrics
+            .add(&ctx.venue_metrics.poll_uncovered_logs, stats.uncovered.len() as u64);
+        tracing::warn!(
+            emitters = ?stats.uncovered,
+            "follow: logs from contracts no closure covers (declare a closure to follow them)"
+        );
+    }
 }
 
 /// Advance the follow cursor to `source_head` (recording the source's own

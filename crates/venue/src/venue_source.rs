@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 pub struct VenueSource {
-    rpc: Rpc,
+    rpc: Arc<Rpc>,
     /// V's fork pin (0 = not yet resolved: the driver sets it during boot's
     /// reconcile, before the HTTP surface serves).
     pin: Arc<AtomicU64>,
@@ -56,7 +56,9 @@ pub fn public_capabilities() -> Capabilities {
 }
 
 impl VenueSource {
-    pub fn new(rpc: Rpc, pin: Arc<AtomicU64>) -> Self {
+    /// The handle is shared (`Arc`): one client per endpoint, referenced by
+    /// every object that reads through it.
+    pub fn new(rpc: Arc<Rpc>, pin: Arc<AtomicU64>) -> Self {
         Self { rpc, pin }
     }
 
@@ -160,5 +162,26 @@ impl Source for VenueSource {
             self.guard().await?;
             self.rpc.code_at(address, block).await
         })
+    }
+
+    /// The envelope rung: the same generic EVM touches the public API serves
+    /// (txs, receipts, and the HyperEVM system txs — `Capabilities` says so).
+    /// Envelope reads are historical-safe, so the pin guard does not apply.
+    fn touched(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> Fut<'_, mirror_anvil::Result<mirror_devnet::closure::TouchedSet>> {
+        let system_txs = self.capabilities().system_txs;
+        Box::pin(mirror_devnet::bal::envelope_touches(
+            &self.rpc,
+            from,
+            to,
+            system_txs,
+        ))
+    }
+
+    fn touched_kind(&self) -> mirror_devnet::bal::DiffKind {
+        mirror_devnet::bal::DiffKind::Poll
     }
 }

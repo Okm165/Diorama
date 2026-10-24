@@ -5,7 +5,6 @@
 //! `head` = the compared chain's head (T); `block_txs` = a count, not a clock;
 //! `age_ms` = the feed bridge's confirmation-window age, not a clock.
 mod beacon;
-mod compose;
 mod ctx;
 mod diff;
 mod driver;

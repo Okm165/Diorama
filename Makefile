@@ -143,6 +143,9 @@ deploy-engine: import ## Rebuild + redeploy the selected instance's engine
 venue-build: ## Build the venue binaries on the host (cargo: venue-engine + venue-sim)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p venue-engine -p venue-sim
 
+mainnet-build: ## Build the mainnet engine on the host (cargo: mainnet-engine)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p mainnet-engine
+
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
@@ -261,6 +264,9 @@ mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no
 	kubectl apply -f $(BOOTSTRAP)/selftest-job.yaml
 	kubectl -n mainnet-mirror wait --for=condition=complete job/engine-selftest --timeout=900s || true
 	$(KUBECTL) logs job/engine-selftest
+
+mainnet-selftest-local: mainnet-build ## Native local selftest (two anvils; no reth/public RPC/cluster)
+	./scripts/mainnet-selftest-local.sh
 
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
 	@for c in reth lighthouse anvil-t engine; do \

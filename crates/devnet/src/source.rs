@@ -10,6 +10,7 @@
 use alloy_primitives::{Address, B256, U256};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 /// A boxed future: the boundary is dynamic, so each call boxes once. These
 /// are per-block and admin-path reads, never a hot loop.
@@ -66,9 +67,8 @@ pub trait Source: Send + Sync {
     fn code_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>>;
 
     /// Read one key. The default composes the four typed reads, so a source
-    /// implements only the primitives it can serve; the venue's poll
-    /// composer reads its plan through this seam (one call shape for every
-    /// key kind).
+    /// implements only the primitives it can serve; the composer reads its
+    /// plan through this seam (one call shape for every key kind).
     fn read_key(&self, key: mirror_anvil::Key, block: u64) -> Fut<'_, mirror_anvil::Result<mirror_anvil::Value>> {
         Box::pin(async move {
             Ok(match key {
@@ -88,6 +88,25 @@ pub trait Source: Send + Sync {
             })
         })
     }
+
+    /// The native BAL for block `n`, when the source records one (EIP-7928).
+    /// Default: none — the composer falls to the synthesized rung (the
+    /// capability flag selects the rung; this answers per block, because a
+    /// node can serve some blocks and not others).
+    fn bal(&self, n: u64) -> Fut<'_, mirror_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
+        let _ = n;
+        Box::pin(async move { Ok(None) })
+    }
+
+    /// The window's touches: the addresses and logs the declared closures
+    /// plan from, plus any changed keys the source already carries values for
+    /// (the trace rung). Every source implements this — it is the synthesized
+    /// rung's data side.
+    fn touched(&self, from: u64, to: u64) -> Fut<'_, mirror_anvil::Result<crate::closure::TouchedSet>>;
+
+    /// What this source's touched rung is (`Trace` for a trace-based source,
+    /// `Poll` for the envelope rung): the window BAL's `kind` label.
+    fn touched_kind(&self) -> crate::bal::DiffKind;
 }
 
 impl Capabilities {
@@ -163,12 +182,14 @@ fn method_present<T>(r: mirror_anvil::Result<T>) -> bool {
 /// [`crate::source::Source`] for unshadow restores) keeps its own
 /// implementation.
 pub struct RawSource {
-    rpc: mirror_anvil::Rpc,
+    rpc: Arc<mirror_anvil::Rpc>,
     capabilities: Capabilities,
 }
 
 impl RawSource {
-    pub fn new(rpc: mirror_anvil::Rpc, capabilities: Capabilities) -> Self {
+    /// The handle is shared (`Arc`): one client per endpoint, referenced by
+    /// every object that reads through it.
+    pub fn new(rpc: Arc<mirror_anvil::Rpc>, capabilities: Capabilities) -> Self {
         Self { rpc, capabilities }
     }
 
@@ -215,5 +236,21 @@ impl Source for RawSource {
         block: u64,
     ) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
         Box::pin(self.rpc.code_at(address, block))
+    }
+
+    /// The envelope rung: the generic EVM touches (txs, receipts, and — when
+    /// declared — HyperEVM's system txs), no values (the state reads fill
+    /// them).
+    fn touched(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> Fut<'_, mirror_anvil::Result<crate::closure::TouchedSet>> {
+        let system_txs = self.capabilities.system_txs;
+        Box::pin(crate::bal::envelope_touches(&self.rpc, from, to, system_txs))
+    }
+
+    fn touched_kind(&self) -> crate::bal::DiffKind {
+        crate::bal::DiffKind::Poll
     }
 }
