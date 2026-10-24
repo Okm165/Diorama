@@ -727,7 +727,9 @@ venue's own loop.
 binary with `profile: ethereum | hyperliquid`; the implementation ships
 per-profile binaries - `bins/mainnet-engine` (ethereum) and `bins/venue-engine`
 (venue) - over sibling project crates, plus `bins/venue-sim` and
-`bins/cctp-bridge` (the same shell over their crates' entries). The reason is
+`bins/cctp-bridge` (the same shell over their crates' entries) and
+`bins/ast-scope` (the structural fitness gate's parser, no internal deps). The
+reason is
 build isolation, and it is a fitness function, not a convention:
 `scripts/closure-matrix.sh` declares the allowed internal edges
 (`venue-engine -> mirror-venue + devnet + anvil + config`, no ethereum

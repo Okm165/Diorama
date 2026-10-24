@@ -207,14 +207,13 @@ impl Relayer {
         let decoded = record.decoded()?;
         let (target, consumer) = self.consumer(record, &decoded)?;
         if caller_mismatch(decoded.header.destination_caller, consumer) {
-            self.park(
+            return self.refuse(
                 record.nonce,
                 format!(
                     "destinationCaller {} is not this bridge's consumer ({consumer})",
                     decoded.header.destination_caller
                 ),
-            )?;
-            return Ok(false);
+            );
         }
         // A re-pin removes the wrapper's code (it was deployed on the old
         // base): a call to it would succeed vacuously and the mint would be
@@ -223,24 +222,22 @@ impl Relayer {
         if !decoded.body.hook_data.is_empty()
             && !crate::transfer::has_code(&chain.rpc, target).await?
         {
-            self.park(
+            return self.refuse(
                 record.nonce,
                 format!(
                     "the hook wrapper {target} has no code on {} (a re-pin?); restart the bridge to redeploy it",
                     chain.name
                 ),
-            )?;
-            return Ok(false);
+            );
         }
         // The burn must still exist on the source: a reattest of a record
         // whose burn a re-pin or rewind removed must never mint (I6 — stale
         // derivations are parked, never re-owned).
         if !self.burn_exists(record).await? {
-            self.park(
+            return self.refuse(
                 record.nonce,
                 "the source burn no longer exists (a re-pin or rewind); re-run the transfer".into(),
-            )?;
-            return Ok(false);
+            );
         }
         if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
             self.mark_relayed(record.nonce, None)?;
@@ -401,6 +398,13 @@ impl Relayer {
             &IMessageTransmitterV2::usedNoncesCall { nonce },
         )
         .await
+    }
+
+    /// Park a record and report the refusal (`false` = not relayed): the one
+    /// shape every gate in `relay` uses — the reason names what was seen.
+    fn refuse(&self, nonce: B256, reason: String) -> Result<bool> {
+        self.park(nonce, reason)?;
+        Ok(false)
     }
 
     fn mark_relayed(&self, nonce: B256, tx: Option<B256>) -> Result<()> {

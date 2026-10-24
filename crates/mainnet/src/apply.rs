@@ -180,10 +180,7 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     ctx.plane.state.set_source_last(n, header.hash)?;
 
     let t_latest = ctx.anvil_t.block_number().await?;
-    let (sampled, sampled_ok) = sample_parity(ctx, n, &plan.writes, t_latest).await;
-    if ctx.mirror.policies().probes == ProbeSchedule::PerBlock {
-        t_convergence_probes(ctx, n).await?;
-    }
+    let (sampled, sampled_ok) = parity_step(ctx, n, &plan.writes, t_latest).await?;
 
     finalize(
         ctx,
@@ -252,10 +249,6 @@ struct ApplyFacts {
 /// Cursor + metrics + drift + log for one applied block.
 async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> {
     advance_cursor(ctx, n).await?;
-    let duration_ms = facts.started.elapsed().as_millis() as u64;
-    record_apply_metrics(ctx, n, &facts, duration_ms);
-    clear_reapply(&ctx.plane, n, facts.reapply)?;
-
     let outcome = ApplyOutcome {
         source: facts.source,
         writes: facts.total,
@@ -263,9 +256,18 @@ async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> 
         skipped_shadowed: facts.stats.skipped_shadowed,
         sampled: facts.sampled,
         sampled_ok: facts.sampled_ok,
-        duration_ms,
+        duration_ms: facts.started.elapsed().as_millis() as u64,
     };
+    record_apply_metrics(ctx, n, &facts, outcome.duration_ms);
+    clear_reapply(&ctx.plane, n, facts.reapply)?;
     log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome)?;
+    report_applied(ctx, n, &facts, &outcome);
+    Ok(outcome)
+}
+
+/// The applied block's announcements: the `block_applied` fact, the cursor
+/// fact, and the log line — one place, both engines' vocabulary.
+fn report_applied(ctx: &Ctx, n: u64, facts: &ApplyFacts, outcome: &ApplyOutcome) {
     ctx.plane.facts.publish(Fact::BlockApplied {
         chain: facts.chain,
         block: n,
@@ -275,7 +277,7 @@ async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> 
         skipped_shadowed: facts.stats.skipped_shadowed,
         sampled: facts.sampled,
         sampled_ok: facts.sampled_ok,
-        ms: duration_ms,
+        ms: outcome.duration_ms,
     });
     ctx.plane.facts.publish(Fact::CursorAdvanced {
         chain: facts.chain,
@@ -290,10 +292,9 @@ async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> 
         skipped_shadowed = outcome.skipped_shadowed,
         sampled_ok = outcome.sampled_ok,
         sampled = outcome.sampled,
-        ms = duration_ms,
+        ms = outcome.duration_ms,
         "parent diffs applied to T"
     );
-    Ok(outcome)
 }
 
 /// Advance the devnet cursor to `n` — the applier's and the late-completion
@@ -513,6 +514,16 @@ async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
         &ctx.eth_metrics.shadow_skipped_empty_blocks,
     );
     Ok(())
+}
+
+/// The apply's parity step: the drift lens (sampled storage keys vs reth at
+/// n) and — when the profile probes per block — the convergence probe set.
+async fn parity_step(ctx: &Ctx, n: u64, writes: &[Write], t_latest: u64) -> Result<(usize, usize)> {
+    let (sampled, sampled_ok) = sample_parity(ctx, n, writes, t_latest).await;
+    if ctx.mirror.policies().probes == ProbeSchedule::PerBlock {
+        t_convergence_probes(ctx, n).await?;
+    }
+    Ok((sampled, sampled_ok))
 }
 
 /// One sampled storage-parity reading vs reth at n (drift lens). T's *height*

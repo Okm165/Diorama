@@ -878,39 +878,7 @@ impl Sim {
         meta: Option<&crate::wire::Meta>,
     ) -> Result<Option<Liquidation>> {
         let v = account::view(account, feed, meta)?;
-        let mut closed = Vec::new();
-        {
-            let mut st = self.state.lock()?;
-            let mut me = st.accounts.remove(&address).unwrap_or_default();
-            let mut vault = st.accounts.remove(&BACKSTOP).unwrap_or_default();
-            let coins: Vec<String> = me.positions.keys().cloned().collect();
-            for coin in coins {
-                let Some(p) = me.positions.remove(&coin) else {
-                    continue;
-                };
-                let mark = feed.mark(&coin).unwrap_or(p.entry_px);
-                let facts = account::FillFacts {
-                    coin: coin.clone(),
-                    // The vault *takes the position over*: same side, entered
-                    // at the mark (its own book starts flat there).
-                    is_buy: p.is_long(),
-                    size: p.szi.abs(),
-                    px: mark,
-                    leverage: p.leverage_value,
-                    reduce_only: false,
-                    fee: Decimal::ZERO,
-                };
-                if let Err(e) = account::apply_fill(&mut vault, &facts) {
-                    tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
-                    continue;
-                }
-                closed.push(coin);
-            }
-            vault.perp_balance = account::add(vault.perp_balance, me.perp_balance, "backstop balance")?;
-            me.perp_balance = Decimal::ZERO;
-            st.accounts.insert(address, me);
-            st.accounts.insert(BACKSTOP, vault);
-        }
+        let closed = self.vault_take(feed, address)?;
         self.metrics.backstop_liquidations_total.fetch_add(1, Ordering::Relaxed);
         self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(account = %address, closed = closed.len(), "backstop liquidation: the vault took the positions");
@@ -920,6 +888,43 @@ impl Sim {
             account_value: v.margin_summary.account_value,
             maintenance: Decimal::ZERO,
         }))
+    }
+
+    /// The vault takes every position over at the mark (same side, entered
+    /// there — its own book starts flat) and the account's margin with it; the
+    /// trader ends flat. Returns the coins taken; a refused transfer stays
+    /// with the account and is named.
+    fn vault_take(&self, feed: &MarketFeed, address: Address) -> Result<Vec<String>> {
+        let mut closed = Vec::new();
+        let mut st = self.state.lock()?;
+        let mut me = st.accounts.remove(&address).unwrap_or_default();
+        let mut vault = st.accounts.remove(&BACKSTOP).unwrap_or_default();
+        let coins: Vec<String> = me.positions.keys().cloned().collect();
+        for coin in coins {
+            let Some(p) = me.positions.remove(&coin) else {
+                continue;
+            };
+            let mark = feed.mark(&coin).unwrap_or(p.entry_px);
+            let facts = account::FillFacts {
+                coin: coin.clone(),
+                is_buy: p.is_long(),
+                size: p.szi.abs(),
+                px: mark,
+                leverage: p.leverage_value,
+                reduce_only: false,
+                fee: Decimal::ZERO,
+            };
+            if let Err(e) = account::apply_fill(&mut vault, &facts) {
+                tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
+                continue;
+            }
+            closed.push(coin);
+        }
+        vault.perp_balance = account::add(vault.perp_balance, me.perp_balance, "backstop balance")?;
+        me.perp_balance = Decimal::ZERO;
+        st.accounts.insert(address, me);
+        st.accounts.insert(BACKSTOP, vault);
+        Ok(closed)
     }
 
     /// Step 3: ADL — the platform must stay solvent. The opposite side is

@@ -232,6 +232,14 @@ pub(crate) struct Placed {
     pub resting: Option<u64>,
 }
 
+/// The resting-only outcome (a trigger armed, an ALO posted): no fill.
+fn resting_only(oid: u64) -> Placed {
+    Placed {
+        fill: None,
+        resting: Some(oid),
+    }
+}
+
 impl Sim {
     /// `place`: the venue's order entry, end to end — validations, the
     /// immediate take against the served book *and* the devnet's own resting
@@ -240,14 +248,7 @@ impl Sim {
     pub(crate) fn place(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<Placed> {
         let meta = feed.meta();
         validate_order(feed, meta.as_ref(), req)?;
-        if let Some(reason) = self.oi_cap_refusal(feed, address, req)? {
-            tracing::warn!(coin = %req.coin, "order refused: open interest cap");
-            return Err(Error::bad_request(reason));
-        }
-        if let Some(reason) = self.tier_limit_refusal(feed, meta.as_ref(), address, req)? {
-            tracing::warn!(coin = %req.coin, "order refused: margin tier limit");
-            return Err(Error::bad_request(reason));
-        }
+        self.pre_place_refusals(feed, address, req, meta.as_ref())?;
         // A trigger arms instead of walking.
         if let Some(trigger) = req.trigger {
             if trigger.trigger_px <= Decimal::ZERO {
@@ -260,18 +261,12 @@ impl Sim {
                 .triggers_armed_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::info!(account = %address, coin = %req.coin, oid, "trigger order armed");
-            return Ok(Placed {
-                fill: None,
-                resting: Some(oid),
-            });
+            return Ok(resting_only(oid));
         }
         // Post-only: a crossing order is canceled instead of matching (docs).
         if req.tif == Tif::Alo {
             let oid = self.place_alo(feed, address, req)?;
-            return Ok(Placed {
-                fill: None,
-                resting: Some(oid),
-            });
+            return Ok(resting_only(oid));
         }
         // The venue's self-trade rule: the taker's own crossing resting orders
         // are expired, not matched.
@@ -287,6 +282,26 @@ impl Sim {
         let remainder = req.size - fill.as_ref().map(|f| f.total_sz).unwrap_or(Decimal::ZERO);
         let resting = self.rest_remainder(feed, address, req, remainder)?;
         Ok(Placed { fill, resting })
+    }
+
+    /// The pre-place refusals (the open-interest cap and the margin-tier
+    /// limit): each gate's reason is the venue's refusal envelope.
+    fn pre_place_refusals(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        req: &Order,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<()> {
+        if let Some(reason) = self.oi_cap_refusal(feed, address, req)? {
+            tracing::warn!(coin = %req.coin, "order refused: open interest cap");
+            return Err(Error::bad_request(reason));
+        }
+        if let Some(reason) = self.tier_limit_refusal(feed, meta, address, req)? {
+            tracing::warn!(coin = %req.coin, "order refused: margin tier limit");
+            return Err(Error::bad_request(reason));
+        }
+        Ok(())
     }
 
     /// The match-time re-margin (plan §5): the maker's *current* available
