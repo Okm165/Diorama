@@ -487,8 +487,10 @@ impl Sim {
         Ok(())
     }
 
-    /// Set the account's abstraction mode (CoreWriter action 16).
+    /// Set the account's abstraction mode (CoreWriter action 16). Portfolio
+    /// margin is refused by name (see `account::refuse_unmodeled_mode`).
     pub(crate) fn set_mode(&self, address: Address, mode: crate::wire::UserAbstraction) -> Result<()> {
+        account::refuse_unmodeled_mode(mode)?;
         self.with_account(address, |account| {
             account.mode = mode;
             Ok(())
@@ -1839,6 +1841,24 @@ mod tests {
             Some(Decimal::ZERO)
         );
         assert_eq!(acc.perp_balance, Decimal::from(50), "the margin came back");
+    }
+
+    /// Portfolio margin is refused by name (CoreWriter action 16's value 3
+    /// and the control patch alike): its cross-asset portfolio is the venue's
+    /// own accounting; `unifiedAccount` is the modeled single balance.
+    #[test]
+    fn portfolio_margin_is_refused_by_name() {
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        let refused = sim.set_mode(a, crate::wire::UserAbstraction::PortfolioMargin);
+        assert!(refused.is_err(), "portfolio margin is not modeled");
+        assert!(refused.unwrap_err().to_string().contains("portfolio margin"));
+        assert_eq!(sim.account(a).unwrap().map(|acc| acc.mode), None, "nothing entered the state");
+        sim.set_mode(a, crate::wire::UserAbstraction::UnifiedAccount).unwrap();
+        assert_eq!(
+            sim.account(a).unwrap().unwrap().mode,
+            crate::wire::UserAbstraction::UnifiedAccount
+        );
     }
 
     /// The measured served identities with an isolated leg (probe: two live

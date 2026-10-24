@@ -301,6 +301,7 @@ impl AccountSeed {
             apply_spot_balances(account, balances);
         }
         if let Some(mode) = self.user_abstraction {
+            refuse_unmodeled_mode(mode)?;
             account.mode = mode;
         }
         Ok(())
@@ -667,6 +668,27 @@ pub(crate) fn spot_balances(account: &Account) -> Vec<SpotBalance> {
         .collect();
     rows.sort_by_key(|b| b.token);
     rows
+}
+
+/// Refuse the abstraction modes the sim cannot serve. Portfolio margin's
+/// cross-asset portfolio (docs: "single portfolio unifying all eligible
+/// assets, which are currently HYPE, BTC, USDC, USDT"; the portfolio-wide
+/// available figure, measured live on two accounts) is the venue's own
+/// accounting — the single-collateral model cannot reproduce it, and a mode
+/// whose correctness would depend on the account's future spot holdings must
+/// not be accepted silently. Everything else is served: `unifiedAccount` is
+/// the modeled single balance (the live identity `available + maintenance ==
+/// the collateral token's balance` holds to the digit), `default` is the
+/// standard split, and the discontinued `dexAbstraction` is the standard
+/// fold by its own definition ("USDC balances default to perps balance, all
+/// other collateral defaults to spot balance").
+pub(crate) fn refuse_unmodeled_mode(mode: UserAbstraction) -> Result<()> {
+    if mode == UserAbstraction::PortfolioMargin {
+        return Err(Error::bad_request(
+            "portfolio margin is not modeled (its cross-asset portfolio is the venue's own accounting); use unifiedAccount",
+        ));
+    }
+    Ok(())
 }
 
 /// USDC: the venue's collateral token for the default dex (daloc's client
@@ -1349,6 +1371,26 @@ mod tests {
         account.mode = UserAbstraction::Default;
         let v = view(&account, &feed, Some(&meta)).unwrap();
         assert_eq!(v.margin_summary.account_value, Decimal::ZERO);
+    }
+
+    /// Portfolio margin is refused by name at the seed patch too: its
+    /// cross-asset portfolio (the eligible set, the portfolio-wide available —
+    /// measured live on two accounts) is the venue's own accounting, and a
+    /// mode whose correctness would depend on the account's future spot
+    /// holdings must not enter the state silently. The same patch with
+    /// `unifiedAccount` applies.
+    #[test]
+    fn the_seed_patch_refuses_portfolio_margin() {
+        let seed: AccountSeed =
+            serde_json::from_str(r#"{"userAbstraction": "portfolioMargin"}"#).unwrap();
+        let mut account = Account::default();
+        let refused = seed.apply_to(&mut account, 0);
+        assert!(refused.is_err(), "portfolio margin is not modeled");
+        assert_eq!(account.mode, UserAbstraction::Default, "the mode is untouched");
+        let seed: AccountSeed =
+            serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap();
+        seed.apply_to(&mut account, 0).unwrap();
+        assert_eq!(account.mode, UserAbstraction::UnifiedAccount);
     }
 
     #[test]

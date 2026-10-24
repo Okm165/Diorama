@@ -761,7 +761,11 @@ was missing), `spec-citations` (every code symbol `docs/SPINE.md` names in
 backticks exists in the workspace — the doc's cross-reference tables claim
 behavior by symbol, so a rename that leaves the doc behind fails; the specs'
 own vocabulary, quoted from the EIPs, is allow-listed with its source), and
-`k8s-wiring` (the instances and the manifests are two halves of
+`spine-purity` (the spine's *code* — `crates/devnet` with line comments
+stripped — names no mirror: the doc comments cite them as examples, but a
+name in code would mean a new mirror kind needs edits inside the spine,
+which the seam design exists to prevent), `k8s-wiring` (the instances and the
+manifests are two halves of
 one contract: every `${VAR}` an instance names is provided by the tree's pod
 env, and every `mirror-config` key is consumed — a key left behind after a
 feature moves is dead wiring that still shows in `kubectl describe`, measured:

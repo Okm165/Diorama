@@ -242,7 +242,7 @@ impl Bridge {
                 self.add_api_wallet(caller, wallet, &name)?;
             }
             CoreAction::SetAbstraction { user, abstraction } => {
-                self.set_abstraction(user, abstraction)?;
+                self.set_abstraction(user, abstraction);
             }
             order @ CoreAction::LimitOrder { .. } => self.limit_order(caller, &order),
             action @ (CoreAction::CancelByOid { .. } | CoreAction::CancelByCloid { .. }) => {
@@ -422,21 +422,27 @@ impl Bridge {
         Ok(())
     }
 
-    /// `setAbstraction`: 1 = disabled, 2 = unified account, 3 = portfolio
-    /// margin; any other code is counted and never applied.
-    fn set_abstraction(&self, user: Address, abstraction: u8) -> Result<()> {
+    /// `setAbstraction`: 1 = disabled, 2 = unified account; any other code is
+    /// counted and never applied. 3 (portfolio margin) reaches the sim, which
+    /// refuses it by name — its cross-asset portfolio is the venue's own
+    /// accounting — and the refusal is counted here, never a block failure.
+    fn set_abstraction(&self, user: Address, abstraction: u8) {
         let mode = match abstraction {
             1 => UserAbstraction::Disabled,
             2 => UserAbstraction::UnifiedAccount,
             3 => UserAbstraction::PortfolioMargin,
             _ => {
                 self.metrics.inc_refusals();
-                return Ok(());
+                return;
             }
         };
-        self.sim.set_mode(user, mode)?;
-        tracing::info!(account = %user, ?mode, "bridge: abstraction set");
-        Ok(())
+        match self.sim.set_mode(user, mode) {
+            Ok(()) => tracing::info!(account = %user, ?mode, "bridge: abstraction set"),
+            Err(e) => {
+                self.metrics.inc_refusals();
+                tracing::warn!(account = %user, error = %e, "bridge: abstraction refused");
+            }
+        }
     }
 
     /// `sendAsset`: spot→spot inside Core, or Core→EVM when the destination
