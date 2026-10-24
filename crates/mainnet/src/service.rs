@@ -82,7 +82,7 @@ async fn selftest_cmd(
         .as_mut()
         .ok_or_else(|| {
             Error::Config(mirror_config::ConfigError::Invalid {
-                issues: vec!["profile \"ethereum\" requires [services.engine]".into()],
+                issues: vec!["profile \"mainnet\" requires [services.engine]".into()],
             })
         })?
         .reth

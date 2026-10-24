@@ -9,7 +9,7 @@
 //! other trace. One storage read per pass; one write per reconcile.
 //!
 //! The detector is the venue's implementation of the spine's
-//! [`ResetDetector`]: the ethereum mirror's is `CursorHash` (in the spine),
+//! [`ResetDetector`]: the mainnet mirror's is `CursorHash` (in the spine),
 //! this one is the pin canary — the divergence is declared in
 //! `crates/venue/src/profile.rs` and this module holds its mechanics.
 use alloy_primitives::{Address, B256, U256};

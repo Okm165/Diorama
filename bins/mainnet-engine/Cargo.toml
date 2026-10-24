@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The Mainnet Mirror engine binary (the ethereum profile's entrypoint)"
+description = "The Mainnet Mirror engine binary (the mainnet profile's entrypoint)"
 
 [dependencies]
 mirror-config = { path = "../../crates/config" }

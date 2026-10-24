@@ -2,7 +2,7 @@
 //! cost, the engine-mined blocks, the at-pin probes. Rendered beside the
 //! shared admin gauges (`mirror_devnet::metrics::Metrics::render`) — the split
 //! keeps the shared crate's exposition to exactly what both profiles own (the
-//! ethereum engine's mirror of this file is `MainnetMetrics`).
+//! mainnet engine's mirror of this file is `MainnetMetrics`).
 
 mirror_devnet::registry! {
     pub struct VenueMetrics {
@@ -92,7 +92,7 @@ mod tests {
 
     /// The venue's own set and the shared admin gauges must not overlap: the
     /// engine renders both (venue first, admin second), and a duplicate series
-    /// would be invalid exposition (the mirror of the ethereum-side test).
+    /// would be invalid exposition (the mirror of the mainnet-side test).
     #[test]
     fn venue_and_admin_series_do_not_overlap() {
         let venue = VenueMetrics::default();

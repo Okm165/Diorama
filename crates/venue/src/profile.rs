@@ -2,7 +2,7 @@
 //!
 //! The spine ([`mirror_devnet::spine`]) declares the [`Mirror`] interface and
 //! never names a mirror; this file is where the venue profile's choices are
-//! made and documented, next to the ethereum profile's `crates/mainnet/src/profile.rs`:
+//! made and documented, next to the mainnet profile's `crates/mainnet/src/profile.rs`:
 //!
 //! | decision | venue (here) | mainnet (`crates/mainnet/src/profile.rs`) |
 //! |---|---|---|

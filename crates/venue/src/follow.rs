@@ -1,4 +1,4 @@
-//! The follow step: the venue's counterpart of the ethereum applier.
+//! The follow step: the venue's counterpart of the mainnet applier.
 //!
 //! One window per pass: compose the source's window BAL (the spine's generic
 //! composer — the HL public API has no native BAL, so it synthesizes one from
@@ -97,7 +97,7 @@ fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats, ms: u64) {
 }
 
 /// The gap guard: a window wider than the profile's limit pauses the follow
-/// (the same regime as the ethereum applier's `max_gap_blocks`).
+/// (the same regime as the mainnet applier's `max_gap_blocks`).
 fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> bool {
     let gap = source_head - followed;
     let Some(limit) = ctx.mirror.policies().gap else {

@@ -1,7 +1,8 @@
 //! The typed write path: [`Write`]s to cheatcode calls, batched.
 //!
 //! Every write the mirror makes to an anvil chain goes through here (parent
-//! diffs, unshadow re-sync, deal, M repair, journal undo, shadow re-apply), so
+//! diffs, unshadow re-sync, deal, re-base repair, journal undo, shadow
+//! re-apply), so
 //! the measured wire rules are stated once, as types: storage keys/values are
 //! full 32-byte words (`B256` serializes with leading zeros; anvil rejects
 //! odd-length or quantized hex with `-32602`), balances/nonces are quantities

@@ -17,7 +17,7 @@
 //!   what the devnet owns;
 //! - **the source follow** ([`crate::follow`]): compose the window since the
 //!   last composed source block and land the changed keys on V under the COW
-//!   filter — the venue's counterpart of the ethereum applier's parent stream.
+//!   filter — the venue's counterpart of the mainnet applier's parent stream.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::reset::{read_canary, write_canary};
@@ -287,7 +287,7 @@ async fn pin_read(ctx: &Ctx) -> Result<Option<u64>> {
     Ok(pin)
 }
 
-/// The epoch rule (shared with the ethereum engine, `mirror-devnet::epoch`):
+/// The epoch rule (shared with the mainnet engine, `mirror-devnet::epoch`):
 /// a fresh pin drops marks and values, the same pin re-applies the recorded
 /// writes; the journal goes either way. The transition's logs are the shared
 /// module's; the counters are V's (epoch transitions, not resets found).

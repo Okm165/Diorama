@@ -3,9 +3,10 @@
 //! One JSON line per *divergence* (or apply anomaly) - not per block. Per-block
 //! telemetry lives in the Prometheus metrics; this file is the forensic trail
 //! you read when an alarm fires, so it must stay small and readable. Writes are
-//! serialized and flushed as a single write per line: the M replay and the T
-//! applier run as separate tasks, and concurrent appends of long lines
-//! interleaved and corrupted the file (measured: 10 broken lines in 48k).
+//! serialized and flushed as a single write per line: the mirror's write paths
+//! run as separate tasks (the removed M replay was one), and concurrent
+//! appends of long lines interleaved and corrupted the file (measured: 10
+//! broken lines in 48k).
 //!
 //! A drift write that fails is a typed fault the caller surfaces: a divergence
 //! record that could not be written must not look like a clean run.

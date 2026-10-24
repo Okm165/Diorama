@@ -58,7 +58,7 @@ pub const DEFAULT_INSTANCE_PATH: &str = "/etc/mirror/instance.toml";
 /// The shared service CLI: `run [--config <path>]`. Every service binary has
 /// exactly one mode today and the instance file is its one flag, so the shape
 /// is parsed here — one definition, and the four bins cannot drift apart in
-/// usage. (The ethereum engine's richer CLI — `selftest`, `rewind` — keeps
+/// usage. (The mainnet engine's richer CLI — `selftest`, `rewind` — keeps
 /// its own clap subcommands on top of the same `run --config` shape.)
 pub(crate) fn service_config(args: &[String]) -> Result<std::path::PathBuf, String> {
     let mut rest = args.iter().map(String::as_str);

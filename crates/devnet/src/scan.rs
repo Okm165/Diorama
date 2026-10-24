@@ -90,7 +90,7 @@ pub fn publish(plane: &Plane, chain: &'static str, walk: &ScanWalk) {
 /// anchored at the pin, up to `head`. Returns the blocks walked; the caller
 /// records them in its own metrics.
 ///
-/// `first` carries each profile's fresh-chain policy: the ethereum engine
+/// `first` carries each profile's fresh-chain policy: the mainnet engine
 /// starts at the head (its registry was persisted; T does not advance while
 /// the engine is down), the venue starts at its cursor (V advances when
 /// anyone mines, so blocks mined while the driver was down must be scanned).

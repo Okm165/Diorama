@@ -860,7 +860,7 @@ the base truth lives in the registry) lands with the venue's journaling slice.
 | `POST /admin/rewind` | the engine's own-write journal (the deal faucet's silent storage writes, recorded under the scan cursor); the shared rewind undoes the last N scanned blocks newest-first |
 | `POST /admin/pause` / `POST /admin/resume` | hold / release the driver |
 | `POST /admin/epoch` | re-pin V to the source's latest block (`anvil_reset` with an explicit forking config - measured: no-params drops the fork); the driver's canary notices on its next pass and runs the epoch rule, so the route never replicates that logic |
-| `POST /admin/probes` | run the at-pin probe set now and report the run (the ethereum engine's route is the same verb over its T-vs-reth set) |
+| `POST /admin/probes` | run the at-pin probe set now and report the run (the mainnet engine's route is the same verb over its T-vs-reth set) |
 
 **The deliberate asymmetries** (the rest of the surface is shared, verb for
 verb — `make engine-symmetry` is the fitness function): `/admin/time` is the

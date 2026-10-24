@@ -10,8 +10,9 @@ use std::path::PathBuf;
 
 /// `[services]`: one section per service; each service reads its own (§19.3).
 /// The engine's key is the same for both profiles — what differs is the
-/// profile's shape (`[services.engine.anvil]` carries M + T or V, and the
-/// coherence check requires exactly the profile's fields). The venue's
+/// profile's shape (`[services.engine.anvil]` carries the devnet chain's
+/// URL, T's or V's, and the coherence check requires exactly the profile's
+/// fields). The venue's
 /// simulator is `[services.venue_sim]`; `[services.cctp_bridge]` is element 3,
 /// optional under either profile (the bridge spans both mirrors, §15).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -217,7 +218,7 @@ pub struct VerifierSection {
     /// our application of it. Expensive; off by default.
     #[serde(default)]
     pub full_sweep: bool,
-    /// State probes: re-run against T after every apply (ethereum), and at
+    /// State probes: re-run against T after every apply (the mainnet profile), and at
     /// the pin against the fork source (venue) — devnet-owned targets are
     /// skipped and counted (COW means that state is the devnet's, not the
     /// fork base's).

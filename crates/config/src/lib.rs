@@ -111,7 +111,7 @@ fn load_merged(
     // The defaults carry every profile's section tree (the workspace
     // conventions of each service). A load sees only the sections its own
     // profile owns: without this, a venue instance would inherit the
-    // ethereum engine's stub and fail deserialization on the missing fields
+    // mainnet engine's stub and fail deserialization on the missing fields
     // (and vice versa).
     prune_other_profile(&mut merged, profile_of(&over));
     // Optional services: the defaults hold their shared numbers, but a
@@ -275,7 +275,7 @@ port = 8080
         Ok((instance, unresolved))
     }
 
-    /// The ethereum sections, for the tests' direct field reads.
+    /// The mainnet sections, for the tests' direct field reads.
     fn l1(inst: &Instance) -> &ChainL1 {
         inst.chains.l1.as_ref().expect("[chains.l1]")
     }
@@ -518,7 +518,7 @@ port = 8096
 
     #[test]
     fn profile_coherence_is_enforced() {
-        // A venue instance carrying ethereum sections:
+        // A venue instance carrying mainnet sections:
         let src = format!(
             "{}\n[chains.l1]\nkind = \"ethereum\"\nsource_url = \"http://reth:8545\"\nfollow = \"latest\"\nfollow_margin_blocks = 2\nfork_offset = 128\n",
             minimal_venue_instance()
@@ -527,7 +527,7 @@ port = 8096
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("must not carry [chains.l1]"), "{err}");
 
-        // An ethereum instance carrying venue sections:
+        // A mainnet instance carrying venue sections:
         let src = format!(
             "{}\n[chains.venue]\nkind = \"hyperliquid\"\nsource_url = \"http://hl-rpc:8545\"\napi_url = \"https://api.hyperliquid.xyz\"\nws_url = \"wss://api.hyperliquid.xyz/ws\"\n",
             minimal_instance()
@@ -539,7 +539,7 @@ port = 8096
             "{err}"
         );
 
-        // An ethereum instance carrying the simulator's section:
+        // A mainnet instance carrying the simulator's section:
         let src = format!(
             "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\npoll_interval_ms = 5000\n[services.venue_sim.info]\naddr = \"0.0.0.0\"\nport = 8090\n[services.venue_sim.control]\naddr = \"0.0.0.0\"\nport = 8091\n",
             minimal_instance()
@@ -599,7 +599,7 @@ port = 8096
     }
 
     /// `[services.cctp_bridge]` is optional under both profiles and cross-cutting:
-    /// a venue instance may carry it (and take it), and an ethereum instance
+    /// a venue instance may carry it (and take it), and a mainnet instance
     /// may too — unlike the simulator, which the mainnet profile forbids.
     #[test]
     fn the_cctp_section_is_optional_and_cross_cutting() {

@@ -472,7 +472,7 @@ pub struct EpochResponse {
 }
 
 /// `/admin/rewind`'s wire shape (both engines): `cursor` is the profile's
-/// devnet-chain cursor after the rewind — T's on the ethereum, V's on the
+/// devnet-chain cursor after the rewind — T's on the mainnet, V's on the
 /// venue — named as `/status` names it (one fact, one name).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RewindResponse {

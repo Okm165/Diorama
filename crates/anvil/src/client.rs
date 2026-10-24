@@ -362,7 +362,7 @@ impl Rpc {
     /// not turn the caller into CrashLoopBackOff. Warns every 30 s while
     /// waiting; on the deadline the last fault is returned, named by `what`.
     ///
-    /// The one boot-wait every service uses (the ethereum's two anvils, the
+    /// The one boot-wait every service uses (the mainnet engine's anvil, the
     /// venue's V, the CCTP bridge's two chains): one implementation, one
     /// failure shape.
     pub async fn wait_until_up(&self, what: &'static str, timeout: Duration) -> Result<()> {
@@ -472,7 +472,8 @@ impl Rpc {
     }
 
     /// eth_call against the current state, including unmined cheatcode writes
-    /// (used to read M right after the BAL convergence repair).
+    /// (the latest-state read: the probes and the composed-BAL parity compare
+    /// the devnet chain against the parent).
     pub async fn call_latest(&self, to: Address, data: &Bytes) -> Result<Bytes> {
         self.call("eth_call", (Self::call_tx(to, data), BlockNumberOrTag::Latest))
             .await
@@ -634,13 +635,10 @@ impl Rpc {
         }
     }
 
-    /// `anvil_reset` with a fresh fork: re-bases the chain at `block` from `url`.
-    /// Used to recover M when the follow head moves backward past its
-    /// irreversible replay (the cursor hash check rebases the replay after).
-    /// Always explicit: the measured no-params form drops the fork entirely.
     /// `anvil_reset` to a fresh fork at the source's *latest* block (the
     /// venue's `/admin/epoch`: the driver's canary detects the reset and runs
-    /// the epoch rule — new base = new epoch, same base = restore).
+    /// the epoch rule — new base = new epoch, same base = restore). Always
+    /// explicit: the measured no-params form drops the fork entirely.
     pub async fn anvil_reset_fork_latest(&self, url: &str) -> Result<()> {
         let forking = Forking {
             json_rpc_url: Some(url.to_string()),

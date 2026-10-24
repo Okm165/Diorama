@@ -1,8 +1,8 @@
-//! `MainnetMirror` — the ethereum mirror's divergence bundle, in its own
+//! `MainnetMirror` — the mainnet mirror's divergence bundle, in its own
 //! folder.
 //!
 //! The spine ([`mirror_devnet::spine`]) declares the [`Mirror`] interface and
-//! never names a mirror; this file is where the ethereum profile's choices are
+//! never names a mirror; this file is where the mainnet profile's choices are
 //! made and documented, next to the venue's `profile.rs`:
 //!
 //! | decision | mainnet (here) | venue (`crates/venue/src/profile.rs`) |
@@ -30,7 +30,7 @@ use mirror_devnet::state::StateFile;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// The ethereum mirror's bundle: reth as the truth, the cursor-hash detector,
+/// The mainnet mirror's bundle: reth as the truth, the cursor-hash detector,
 /// the whole-account scope, and the policies the applier reads.
 pub struct MainnetMirror {
     source: Arc<dyn Source>,

@@ -5,7 +5,7 @@
 //! state at the pin, and the driver **follows** the HL public API from there —
 //! the generic composer synthesizes a BAL from the window's envelopes (txs,
 //! receipts, system txs), the declared closures turn it into concrete keys, and
-//! the changed keys land on V under the same COW filter the ethereum mirror
+//! the changed keys land on V under the same COW filter the mainnet mirror
 //! uses (devnet-owned keys are never clobbered). What the mainnet profile
 //! supplies as a parent stream (one block per applied parent block, aligned
 //! clocks), the venue supplies as poll windows; the spine's seams make the two

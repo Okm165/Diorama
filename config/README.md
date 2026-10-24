@@ -30,12 +30,12 @@ are errors at every level.
 | Section | Read by | Carries |
 |---|---|---|
 | `[instance]` | every service | identity: name, namespace, profile |
-| `[chains.l1]` | the ethereum engine, the anvil-t init container | the mainnet source; `fork_offset` (its single home) |
+| `[chains.l1]` | the mainnet engine, the anvil-t init container | the mainnet source; `fork_offset` (its single home) |
 | `[chains.venue]` | the venue engine, the simulator, the CCTP bridge | the venue source: HL API/WS, the fork RPC |
 | `[services.engine.*]` | the engine (both profiles — the same key, the profile's shape) | reth / anvil (`target_url`; each instance points it at `ANVIL_T_URL` or `ANVIL_V_URL`) / source_sync / verifier / journal / beacon / http / feed_bridge (optional: absent = the devnet's own price writers own the mock aggregators; keys: `poll_interval_ms`, `confirm_window_ms` (default 60 s — a publish that does not land is re-sent), `writer` (give it a dedicated account), `feeds`) |
 | `[services.venue_sim.*]` | the simulator | info/control ports, markets, rate budget, persistence |
 | `[services.cctp_bridge.*]` | the CCTP bridge | T/V RPCs, relay key, attester seed, iris/control ports, the relayer mode (`auto`/`manual`) |
-| `[watchlist]` | the ethereum engine | the closure scope; one watchlist, two readers (`check` + `closure-check`) |
+| `[watchlist]` | the mainnet engine | the closure scope; one watchlist, two readers (`check` + `closure-check`) |
 
 The engines' sections are named per mirror — `engine` is the ethereum
 profile's, `venue` is the venue profile's (the plan's per-service grouping,

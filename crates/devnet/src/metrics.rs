@@ -17,7 +17,7 @@ pub fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, v: u64)
 /// A pair may carry a unit divisor (`field = "series", "help" / 1000`), for a
 /// series the field stores in a finer unit. The generated `render_declared`
 /// writes the declared lines in declaration order; a registry with a computed
-/// series (the ethereum engine's `mirror_lag_blocks`, a difference of two
+/// series (the mainnet engine's `mirror_lag_blocks`, a difference of two
 /// fields) writes its own `render` beside it.
 #[macro_export]
 macro_rules! registry {
@@ -58,9 +58,9 @@ macro_rules! registry {
 
 registry! {
     /// The shared admin surface's gauges (plan §11.3): what the devnet plane
-    /// itself owns. Each profile renders its own set beside these (the ethereum
+    /// itself owns. Each profile renders its own set beside these (the mainnet
     /// engine's `MainnetMetrics`, the venue's `VenueMetrics`), so this crate
-    /// knows nothing about reth, M/T or the venue's chain.
+    /// knows nothing about reth, T or the venue's chain.
     pub struct Metrics {
         gauge shadowed_slots = "mirror_shadowed_slots", "storage slots shadowed by the devnet";
         gauge shadowed_accounts = "mirror_shadowed_accounts", "accounts with devnet-owned keys (whole-account marks or per-slot marks)";
@@ -98,7 +98,7 @@ impl Registry for Metrics {}
 
 impl Metrics {
     /// The shared admin gauges: the whole of this crate's exposition. Each
-    /// profile renders these beside its own set (the ethereum engine's
+    /// profile renders these beside its own set (the mainnet engine's
     /// `MainnetMetrics`, the venue's `VenueMetrics`).
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(256);
@@ -124,7 +124,7 @@ mod tests {
 
     /// The shared crate's whole exposition: the three admin gauges. A fourth
     /// series means a profile field crept back in — the layering rule is that
-    /// profile sets live with their profile (the ethereum engine's
+    /// profile sets live with their profile (the mainnet engine's
     /// `MainnetMetrics`, the venue's `VenueMetrics`), which also keeps the
     /// compositions duplicate-free (measured 2026-10-23: the shared set once
     /// carried profile gauges beside its admin gauges, and the two copies'

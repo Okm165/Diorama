@@ -286,7 +286,7 @@ pub struct Wiring {
     pub body_version: u32,
     pub local_transmitter: Address,
     pub peer_messenger: B256,
-    /// `None` = the revision has no min-fee surface (Ethereum's instance,
+    /// `None` = the revision has no min-fee surface (the mainnet instance,
     /// measured); `Some(0)` = present and zero (HyperEVM's, measured).
     pub min_fee: Option<U256>,
 }

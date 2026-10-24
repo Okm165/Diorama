@@ -35,7 +35,7 @@ use std::time::Duration;
 
 sol! {
     /// The TokenMessengerV2 surface (§15.1). `minFee`/`getMinFeeAmount` are
-    /// the revision-dependent fee surface: absent on Ethereum's instance,
+    /// the revision-dependent fee surface: absent on the mainnet instance,
     /// present (`0`) on HyperEVM's — both measured, §15.2 — so the builder
     /// capability-probes them instead of assuming either.
     #[derive(Debug)]
@@ -311,7 +311,7 @@ pub async fn eth_call<C: SolCall>(rpc: &Rpc, to: Address, call: &C) -> Result<C:
 
 /// Probe the revision-dependent min-fee surface, capability-probed at boot
 /// (§15.2): `Some(minFee)` when the node serves `minFee()`, `None` when it
-/// does not (the Ethereum instance's older revision reverts). A JSON-RPC
+/// does not (the mainnet instance's older revision reverts). A JSON-RPC
 /// error means "no such method"; a transport or decode fault is **not**
 /// absence (boundary-discipline): it propagates, because a probe that could
 /// not run must not be read as "the surface is absent".

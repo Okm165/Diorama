@@ -147,7 +147,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
 }
 
 async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
-    // The same composition as the ethereum engine: this profile's own set,
+    // The same composition as the mainnet engine: this profile's own set,
     // then the shared admin gauges (one definition — `Metrics::render`).
     let mut out = ctx.venue_metrics.render();
     out.push_str(&ctx.plane.metrics.render());
@@ -161,7 +161,7 @@ mod tests {
     use super::*;
 
     /// The shared taxonomy, pinned per service (the same test name lives in
-    /// the ethereum engine and the CCTP bridge): a request refusal is 400, a
+    /// the mainnet engine and the CCTP bridge): a request refusal is 400, a
     /// transport fault at a boundary (anvil, the venue API) is 502, an
     /// unavailable/warming state is 503, a named absence/conflict keeps its
     /// 4xx. The sim serves the same mapping (this crate's `Error`).

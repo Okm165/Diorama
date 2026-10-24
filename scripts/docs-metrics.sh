@@ -12,7 +12,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-crate_names="mirror_devnet mirror_anvil mirror_config mirror_ethereum mirror_hyperliquid mirror_cctp venue_sim cctp_bridge"
+crate_names="mirror_devnet mirror_anvil mirror_config mirror_mainnet mirror_venue mirror_cctp venue_sim cctp_bridge"
 tokens=$(grep -rhoE '(mirror|venue|feed_bridge|cctp)_[a-z0-9_]+' docs/*.md | sort -u)
 fail=0
 checked=0

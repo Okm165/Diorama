@@ -1,10 +1,10 @@
 //! The venue engine's context: V's client, the devnet plane (registry,
 //! journal, cursor state, admin gauges and flags) as one [`Plane`] — the same
-//! bundle the ethereum engine embeds — and the venue's own metrics.
+//! bundle the mainnet engine embeds — and the venue's own metrics.
 //!
 //! Narrow by construction: the context carries exactly the sections the venue
 //! profile reads (the run path moves them out of the instance), so a venue
-//! build never sees the ethereum sections and vice versa. The divergence set
+//! build never sees the mainnet sections and vice versa. The divergence set
 //! itself lives in the mirror bundle (`profile.rs`): the context only assembles
 //! it. One client handle per endpoint (`Arc`): the context, the source views,
 //! the composer's target and the driver all reference the same objects.
@@ -25,7 +25,7 @@ pub struct Ctx {
     /// The venue chain's section (the fork source).
     pub(crate) chain: ChainVenue,
     /// The engine's section (cadence, chunk size, probes, http) — the same
-    /// `[services.engine]` section the ethereum engine carries, read for this
+    /// `[services.engine]` section the mainnet engine carries, read for this
     /// profile's fields.
     pub(crate) engine: EngineSection,
     /// Anvil V (the devnet chain; chain id 999).
@@ -43,7 +43,7 @@ pub struct Ctx {
     /// The composer's target side: V itself (shared with the anvil handle).
     pub(crate) target: Arc<dyn Source>,
     /// The devnet plane: the shadow registry, the journal, the cursor state,
-    /// the shared admin gauges and flags — the same bundle the ethereum engine
+    /// the shared admin gauges and flags — the same bundle the mainnet engine
     /// embeds. The venue never freezes and has no clock offset; those fields
     /// keep the shared surface's shape (documented on the plane).
     pub(crate) plane: Plane,

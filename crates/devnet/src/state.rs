@@ -31,7 +31,7 @@ pub struct Persisted {
     #[serde(default, alias = "t")]
     pub devnet: Option<ChainCursor>,
     /// Hash of the last processed source block (the reorg continuity check on
-    /// both mirrors: the ethereum applier's parent hash, the venue's follow
+    /// both mirrors: the mainnet applier's parent hash, the venue's follow
     /// window). `alias`: pre-rename state files spelled this `reth_last_hash`.
     #[serde(default, alias = "reth_last_hash")]
     pub source_last_hash: Option<B256>,

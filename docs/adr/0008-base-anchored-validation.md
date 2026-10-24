@@ -11,7 +11,7 @@ call sites read or wrote across that boundary, each with a measured failure:
   it read the **source's** pre-pin blocks (anvil forwards those ranges
   upstream) and marked mainnet's real writes devnet-owned — measured: 311 real
   txs / 2586 writes scanned as devnet writes right after a re-pin;
-- the ethereum engine validated its cursor by hashing the cursor block *on the
+- the mainnet engine validated its cursor by hashing the cursor block *on the
   chain*; after a re-pin that is a pre-pin block forwarded to the source, and
   the public RPCs rate-limit or time out on those — measured: a re-pin while
   the engine ran left the rebase unfired for minutes (the documented

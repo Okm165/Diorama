@@ -76,7 +76,7 @@ pub enum ResetSignal {
 /// the state whose expectation it validates (the cursor or the recorded
 /// instance), reads the chain, and answers with the witness.
 ///
-/// `CursorHash` (the ethereum mirror): the cursor's block must carry its
+/// `CursorHash` (the mainnet mirror): the cursor's block must carry its
 /// recorded hash, and a cursor below the fork base is stale by position (the
 /// base proves it — the hash read would forward a pre-pin request to the fork
 /// source). `PinCanary` (the venue mirror, in its folder): the recorded

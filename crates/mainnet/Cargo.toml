@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Mainnet mirror engine: replay (M) + verifier + EIP-7928 diff applier (T)"
+description = "The Mainnet Mirror: the BAL applier (T), the verifier, the top-up loop, the feed bridge"
 
 [dependencies]
 mirror-config = { path = "../config" }
