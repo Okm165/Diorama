@@ -195,6 +195,27 @@ impl Store {
         self.with(|state| Ok(state.messages.iter().find(|m| pred(m)).cloned()))
     }
 
+    /// Insert the record unless a burn with the same nonce is already known:
+    /// `None` = inserted, `Some(true)` = the same message re-scanned (the
+    /// restart backfill, normal), `Some(false)` = a different burn with the
+    /// same nonce (two burns in one tx — the caller refuses loudly). The
+    /// record is pushed under the lock, so two scanners cannot both insert.
+    pub(crate) fn insert_message(&self, record: MessageRecord) -> Result<Option<bool>> {
+        let nonce = record.burn_tx;
+        let source_domain = record.source_domain;
+        self.with(move |state| {
+            if let Some(existing) = state
+                .messages
+                .iter()
+                .find(|m| m.nonce == nonce && m.source_domain == source_domain)
+            {
+                return Ok(Some(existing.raw_message == record.raw_message));
+            }
+            state.messages.push(record);
+            Ok(None)
+        })
+    }
+
     /// Mutate the first message matching `pred` and persist, one atomic step.
     /// Absent is `None`, not an error: the watcher is the only creator, and
     /// every caller here refines a record that already exists.

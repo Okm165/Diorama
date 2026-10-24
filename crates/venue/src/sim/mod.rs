@@ -847,21 +847,11 @@ impl Sim {
         let mut closed = Vec::new();
         let mut partial = false;
         for (coin, p) in &account.positions {
-            let Some(mark) = feed.mark(coin) else { continue };
-            let notional = account::mul(p.szi.abs(), mark, "liquidation notional")?;
-            let (size, was_partial) = attempt_size(p.szi.abs(), notional, in_cooldown)?;
+            let (did_close, was_partial) =
+                self.liquidate_one(feed, address, (coin, p), in_cooldown)?;
             partial |= was_partial;
-            if size.is_zero() {
-                continue;
-            }
-            match self.liquidate_position(feed, address, coin, size) {
-                Ok(fill) => {
-                    tracing::warn!(account = %address, coin = %coin, sz = %fill.total_sz, avg_px = %fill.avg_px, partial = was_partial, "liquidation: market close");
-                    closed.push(coin.clone());
-                }
-                Err(e) => {
-                    tracing::warn!(account = %address, coin = %coin, error = %e, "liquidation close refused (no liquidity?)");
-                }
+            if did_close {
+                closed.push(coin.clone());
             }
         }
         if partial {
@@ -879,6 +869,38 @@ impl Sim {
             account_value: Decimal::ZERO,
             maintenance: Decimal::ZERO,
         }))
+    }
+
+    /// One position's attempt inside the waterfall: `(closed, partial)`. The
+    /// close may be refused (no liquidity), and a partial attempt sets the
+    /// cooldown either way — the caller ORs the flag before it looks at the
+    /// outcome.
+    fn liquidate_one(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        position: (&str, &account::Position),
+        in_cooldown: bool,
+    ) -> Result<(bool, bool)> {
+        let (coin, p) = position;
+        let Some(mark) = feed.mark(coin) else {
+            return Ok((false, false));
+        };
+        let notional = account::mul(p.szi.abs(), mark, "liquidation notional")?;
+        let (size, was_partial) = attempt_size(p.szi.abs(), notional, in_cooldown)?;
+        if size.is_zero() {
+            return Ok((false, was_partial));
+        }
+        match self.liquidate_position(feed, address, coin, size) {
+            Ok(fill) => {
+                tracing::warn!(account = %address, coin = %coin, sz = %fill.total_sz, avg_px = %fill.avg_px, partial = was_partial, "liquidation: market close");
+                Ok((true, was_partial))
+            }
+            Err(e) => {
+                tracing::warn!(account = %address, coin = %coin, error = %e, "liquidation close refused (no liquidity?)");
+                Ok((false, was_partial))
+            }
+        }
     }
 
     /// Step 2: the backstop (the liquidator vault) takes the positions and
@@ -969,19 +991,10 @@ impl Sim {
                 let take = left.min(size);
                 // The counterparty closes at the previous mark; the underwater
                 // account's side closes against it at the same price.
-                self.with_account(address, |a| {
-                    account::apply_fill(
-                        a,
-                        &account::FillFacts::close(coin, !my_side_long, take, prev_mark, p.leverage_value),
-                    )
-                })?;
-                self.with_account(other, |a| {
-                    account::apply_fill(
-                        a,
-                        &account::FillFacts::close(coin, my_side_long, take, prev_mark, 1),
-                    )
-                })?;
-                self.metrics.adl_closes_total.fetch_add(1, Ordering::Relaxed);
+                let own =
+                    account::FillFacts::close(coin, !my_side_long, take, prev_mark, p.leverage_value);
+                let theirs = account::FillFacts::close(coin, my_side_long, take, prev_mark, 1);
+                self.adl_close_pair(address, other, &own, &theirs)?;
                 tracing::warn!(account = %address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
                 left = left.saturating_sub(take);
             }
@@ -998,6 +1011,22 @@ impl Sim {
 
     /// The ADL ranking: the opposite side, `(mark/entry)·(notional/account_value)`
     /// at the previous mark, descending (docs).
+    /// Close both sides of one ADL fill — the underwater account's own side
+    /// and the ranked counterparty's against it, at the same price — counted
+    /// as one close.
+    fn adl_close_pair(
+        &self,
+        address: Address,
+        other: Address,
+        own: &account::FillFacts,
+        theirs: &account::FillFacts,
+    ) -> Result<()> {
+        self.with_account(address, |a| account::apply_fill(a, own))?;
+        self.with_account(other, |a| account::apply_fill(a, theirs))?;
+        self.metrics.adl_closes_total.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn adl_ranking(
         &self,
         feed: &MarketFeed,

@@ -345,25 +345,13 @@ impl Watcher {
 
     /// Insert one record (or reconcile a re-scan of it) and report it.
     fn insert(&self, record: MessageRecord) -> Result<usize> {
-        let burn_tx = record.burn_tx;
-        let burn_block = record.burn_block;
-        let source_domain = record.source_domain;
-        let destination_domain = record.destination_domain;
-        // `Some(true)` = the same event re-scanned (the restart backfill,
-        // normal); `Some(false)` = a different burn with the same nonce (two
-        // burns in one tx — refused loudly).
-        let duplicate = self.store.with(move |state| {
-            if let Some(existing) = state
-                .messages
-                .iter()
-                .find(|m| m.nonce == burn_tx && m.source_domain == source_domain)
-            {
-                return Ok(Some(existing.raw_message == record.raw_message));
-            }
-            state.messages.push(record);
-            Ok(None)
-        })?;
-        match duplicate {
+        let (burn_tx, burn_block, source_domain, destination_domain) = (
+            record.burn_tx,
+            record.burn_block,
+            record.source_domain,
+            record.destination_domain,
+        );
+        match self.store.insert_message(record)? {
             None => {
                 self.metrics
                     .messages_seen
