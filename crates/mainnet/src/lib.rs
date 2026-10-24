@@ -15,6 +15,7 @@ mod error;
 pub mod feed_bridge;
 mod http;
 mod metrics;
+pub mod profile;
 mod selftest;
 mod service;
 mod source;

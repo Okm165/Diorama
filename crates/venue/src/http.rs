@@ -10,8 +10,9 @@
 //! `/admin/rewind` is the venue's own-write journal: the engine records the
 //! before-values of the writes it performs on V (the deal faucet's silent
 //! storage writes) under the devnet's coordinate — the scan cursor — and the
-//! shared rewind undoes the last N scanned blocks newest-first. There is no
-//! parent stream to re-apply, so the devnet re-creates its own state; the
+//! shared rewind undoes the last N scanned blocks newest-first. The follow's
+//! source windows are not journaled (a rewind restores devnet writes, never
+//! source history), so the devnet re-creates its own state; the
 //! driver's range marker clears once the head passes the rewound range.
 //! `/admin/time` stays absent by design: V's clock is native anvil
 //! (`setNextBlockTimestamp`/`evm_mine`, measured), which the harness calls

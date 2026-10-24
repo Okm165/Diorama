@@ -24,8 +24,8 @@ use alloy_json_rpc::{
 use alloy_primitives::{Address, Bytes, B256, TxKind, U256, U64};
 use alloy_rpc_types_anvil::{Forking, NodeInfo};
 use alloy_rpc_types_eth::{
-    state::StateOverride, Block, BlockNumberOrTag, Filter, Header, Log, TransactionReceipt,
-    TransactionRequest,
+    state::StateOverride, Block, BlockNumberOrTag, Filter, Header, Log, Transaction,
+    TransactionReceipt, TransactionRequest,
 };
 use alloy_rpc_types_trace::geth::{
     GethDebugTracingOptions, GethTrace, PreStateConfig, TraceResult,
@@ -444,6 +444,23 @@ impl Rpc {
 
     pub async fn receipts(&self, n: u64) -> Result<Vec<TransactionReceipt>> {
         self.call("eth_getBlockReceipts", (U64::from(n),)).await
+    }
+
+    /// `eth_getSystemTxsByBlockNumber` (HyperEVM): the protocol's Core→EVM
+    /// pseudo-transactions (they carry a fabricated signature, `gasPrice 0x0`
+    /// and a real `from`; measured 2026-10-24). The public RPC strips them
+    /// from block-shaped responses but serves them here; a chain without the
+    /// method answers an empty list, so callers need no capability check to
+    /// be safe.
+    pub async fn system_txs(&self, n: u64) -> Result<Vec<Transaction>> {
+        match self
+            .call_opt::<Vec<Transaction>>("eth_getSystemTxsByBlockNumber", (U64::from(n),))
+            .await
+        {
+            Ok(v) => Ok(v.unwrap_or_default()),
+            Err(e) if e.is_method_not_found() => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     pub async fn logs(&self, n: u64) -> Result<Vec<Log>> {

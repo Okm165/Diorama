@@ -547,6 +547,11 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_epochs_total` | times V was found re-forked under the driver (the epoch rule ran) |
 | `venue_restore_writes_total` | writes re-applied by same-pin restores |
 | `venue_scanned_blocks_total` / `venue_skipped_empty_blocks_total` / `venue_mined_blocks_total` | V blocks the shadow scan walked / the empty share of the walk (one call, no traces) / V blocks the engine mined (the pool was non-empty — the engine is V's block producer; T's is the applier) |
+| `venue_source_head` / `venue_source_followed` | the HL source's head / the highest source block composed onto V (the follow cursor) |
+| `venue_follow_windows_total` / `venue_follow_applied_total` / `venue_follow_skipped_shadowed_total` | follow windows composed / keys applied / keys skipped because the devnet owns them (COW) |
+| `venue_follow_gap_pauses_total` / `venue_source_reorg_total` | windows paused by the gap guard / source continuity mismatches (a parent hash changed under the follow) |
+| `venue_poll_touched` / `venue_poll_planned_keys` / `venue_poll_changed_keys` | the last window: addresses touched / keys the closures planned / keys found changed |
+| `venue_poll_uncovered_logs_total` | logs from contracts no closure covers (declare a closure to follow them) |
 | `venue_probe_ok_total` / `venue_probe_failures_total` | at-pin probes matching / diverging from the fork source |
 | `venue_probe_skipped_total` / `venue_probe_last_failed` | probes skipped (devnet-owned target, or a pin the source cannot serve) / diverged in the last run |
 | `venue_bridge_lag_blocks` | V head minus the bridge's processed cursor (growing = stuck) |

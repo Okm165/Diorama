@@ -8,11 +8,22 @@
 //! decides — the engine's loops propagate it (the mirror halts loudly);
 //! read-only admin handlers answer 503.
 use crate::error::{Error, Result};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub struct Shared<T> {
     what: &'static str,
-    value: Mutex<T>,
+    value: Arc<Mutex<T>>,
+}
+
+impl<T> Clone for Shared<T> {
+    /// A clone shares the protected value (the `Arc`), not a copy of it: the
+    /// reset detectors hold the same state file the plane writes.
+    fn clone(&self) -> Self {
+        Self {
+            what: self.what,
+            value: Arc::clone(&self.value),
+        }
+    }
 }
 
 impl<T> Shared<T> {
@@ -20,7 +31,7 @@ impl<T> Shared<T> {
     pub fn new(what: &'static str, value: T) -> Self {
         Self {
             what,
-            value: Mutex::new(value),
+            value: Arc::new(Mutex::new(value)),
         }
     }
 

@@ -59,7 +59,7 @@ layered config) and never each other. Detail:
 
 | | Mainnet Mirror | Venue Mirror |
 |---|---|---|
-| chain | T (`anvil-t`, an Ethereum fork kept fresh by BAL diffs) | V (`anvil-v`, a HyperEVM fork, static between re-pins) |
+| chain | T (`anvil-t`, an Ethereum fork kept fresh by BAL diffs) | V (`anvil-v`, a HyperEVM fork kept fresh by the poll follow) |
 | engine | `mainnet-engine` | `venue-engine` |
 | venue plane | — | `venue-sim` (market + account planes, an `hl_mock` superset) |
 | admin | deal / shadow / epoch / time / rewind | deal / shadow / epoch / pause / resume |

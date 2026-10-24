@@ -16,19 +16,20 @@
 //!   `slot = keccak256(pad32(key) ‖ pad32(base))`. Live-verified against
 //!   WETH (slot 3): holder `0x28C6…1d60` ⇒ slot `0xdca77c…a94e`, and the
 //!   storage word equals `balanceOf` exactly.
-use alloy_primitives::{keccak256, Address, B256, U256};
+use alloy_primitives::{keccak256, Address, B256, Bytes, Log, U256};
 use mirror_anvil::Key;
 use std::collections::{HashMap, HashSet};
 
-/// The addresses a source block touched, and the indexed log topics that
-/// carry mapping keys. Built by the venue composer from block envelopes +
-/// receipts + system transactions; `log_topics` is what lets a mapping
-/// closure derive per-holder slots the account list alone cannot.
+/// The addresses a source block touched, and the logs it emitted. Built by
+/// the venue composer from block envelopes + receipts + system transactions.
+/// Logs are the shared alloy type — the same shape the receipts carry, so the
+/// receipt path adopts them verbatim and the reconstructed system-transfer
+/// logs (no receipt is served for system txs) are the only ones built here.
 #[derive(Debug, Clone, Default)]
 pub struct TouchedSet {
     pub addresses: HashSet<Address>,
-    /// `(emitter, indexed topics)` per log, in block order.
-    pub log_topics: Vec<(Address, Vec<B256>)>,
+    /// The window's logs, in block order.
+    pub logs: Vec<Log>,
 }
 
 impl TouchedSet {
@@ -36,13 +37,21 @@ impl TouchedSet {
         self.addresses.insert(address);
     }
 
+    /// Record a log by its parts (the reconstructed system-transfer path).
     pub fn log(&mut self, emitter: Address, topics: Vec<B256>) {
         self.addresses.insert(emitter);
-        self.log_topics.push((emitter, topics));
+        self.logs
+            .push(Log::new_unchecked(emitter, topics, Bytes::new()));
+    }
+
+    /// Adopt a log a receipt already carries (no re-shaping).
+    pub fn push_log(&mut self, log: Log) {
+        self.addresses.insert(log.address);
+        self.logs.push(log);
     }
 
     pub fn is_empty(&self) -> bool {
-        self.addresses.is_empty() && self.log_topics.is_empty()
+        self.addresses.is_empty() && self.logs.is_empty()
     }
 }
 
@@ -109,14 +118,12 @@ pub struct TopicMappedSlots {
 impl KeyClosure for TopicMappedSlots {
     fn keys_for(&self, touched: &TouchedSet) -> Vec<Key> {
         touched
-            .log_topics
+            .logs
             .iter()
-            .filter(|(emitter, topics)| {
-                *emitter == self.contract && topics.len() > self.topic_index
-            })
-            .map(|(_, topics)| Key::Storage {
+            .filter(|log| log.address == self.contract && log.topics().len() > self.topic_index)
+            .map(|log| Key::Storage {
                 address: self.contract,
-                slot: mapping_slot(topics[self.topic_index], self.base_slot),
+                slot: mapping_slot(log.topics()[self.topic_index], self.base_slot),
             })
             .collect()
     }

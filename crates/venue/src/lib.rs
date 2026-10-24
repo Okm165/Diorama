@@ -1,18 +1,25 @@
 //! `mirror-hyperliquid` — the Venue Mirror's engine: the fork driver over
 //! anvil V.
 //!
-//! V is a fork-mode anvil of HyperEVM (chain id 999): static between re-pins,
-//! so the mainnet profile's parent stream machinery (replay, BAL diffs, the
-//! prepend rule, the clock offset) has no counterpart here. What remains is
-//! the substrate's half, delivered by the shared crates:
+//! V is a fork-mode anvil of HyperEVM (chain id 999): it starts as the source's
+//! state at the pin, and the driver **follows** the HL public API from there —
+//! the poll composer derives the touched set from the window's envelopes (txs,
+//! receipts, system txs), the declared closures turn it into concrete keys, and
+//! the changed keys land on V under the same COW filter the ethereum mirror
+//! uses (devnet-owned keys are never clobbered). What the mainnet profile
+//! supplies as a parent stream (one block per applied parent block, aligned
+//! clocks), the venue supplies as poll windows; the spine's seams make the two
+//! the same pipeline.
+//!
+//! The substrate's half is delivered by the shared crates:
 //!
 //! - the devnet plane (`mirror-devnet`): the shadow registry (COW), the
 //!   journal, the cursor state with `epoch_pin`, the admin surface, the
-//!   chain-generic scanner, the probe runner;
+//!   chain-generic scanner, the probe runner, the declared closures;
 //! - the anvil boundary (`mirror-anvil`): the typed client, the measured
 //!   padding/batching rules, the trace flattening;
 //! - the driver (this crate): boot asserts, reset detection, the epoch rule,
-//!   probes-at-pin, and the steady-state scan.
+//!   probes-at-pin, the steady-state scan, and the source follow.
 //!
 //! The simulator (market/account planes), the daloc-facing API and the
 //! bridges are the venue's own half and land on top of this driver; the
@@ -24,12 +31,15 @@
 //! gate's figure, not a clock).
 pub mod api;
 pub mod bridge;
+pub mod compose;
 pub mod ctx;
 pub mod driver;
 pub mod error;
 pub mod feed;
 pub mod http;
 pub mod metrics;
+pub mod profile;
+pub mod reset;
 pub mod service;
 pub mod sim;
 pub mod venue_source;

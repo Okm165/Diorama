@@ -14,7 +14,7 @@ use crate::rpc::Rpc;
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
 use mirror_anvil::Write;
-use mirror_devnet::diff::{filter_watched, FilterStats};
+use mirror_devnet::diff::{filter_watched, DiffKind, FilterStats};
 use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
@@ -143,14 +143,14 @@ async fn mark_own_writes(ctx: &Ctx) -> Result<()> {
 
 pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let started = Instant::now();
-    let header = ctx.source.header(n).await?;
+    let header = ctx.mirror.source().header(n).await?;
 
     let t_head = ctx.anvil_t.block_number().await?;
     // The base this apply started under: a re-pin racing the (slow) fetch
     // below would land parent n's writes on the *new* base — watched state
     // regressed to an old height and a block mined at the wrong height
-    // (measured: the applier then sat silent on the resetting anvil). The
-    // pre-write check below aborts instead; the next pass reconciles (the
+    // (measured: the applier then sat silent on the resetting anvil).
+    // `compose_and_filter` aborts on the move; the next pass reconciles (the
     // cursor sits below the base → the epoch rule).
     let base = ctx.anvil_t.fork_block().await?;
     let (needs_reapply, reapply) = match apply_entry(ctx, n, t_head, started).await? {
@@ -161,25 +161,17 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         } => (needs_reapply, reapply),
     };
 
-    prepend_devnet_txs(&ctx.anvil_t, n).await?;
+    prepend_devnet_txs(&ctx.anvil_t, n, ctx.mirror.policies().prepend_rounds).await?;
     mark_own_writes(ctx).await?;
 
-    let diff = ctx.composer.compose(n).await?;
-    if ctx.anvil_t.fork_block().await? != base {
-        return Err(Error::ResetDuringApply { n });
-    }
-    let total = diff.writes.len();
-    let (filtered, stats) = {
-        let shadow = ctx.plane.shadow.lock()?;
-        filter_watched(&ctx.watch, &shadow, diff.writes)
-    };
+    let (filtered, total, stats, kind) = compose_and_filter(ctx, n, base).await?;
     let entries = read_before_values(&ctx.anvil_t, &filtered, t_head).await?;
 
     let applied = write_and_mine(ctx, &header, &filtered).await?;
     journal_and_scan(ctx, n, &entries, t_head).await?;
     // The parent-stream continuity marker (reorg detection reads it).
-    ctx.set_reth_last_hash(header.hash)?;
-    ctx.set_reth_last_block(n)?;
+    ctx.set_source_last_hash(header.hash)?;
+    ctx.set_source_last_block(n)?;
 
     let t_latest = ctx.anvil_t.block_number().await?;
     let (sampled, sampled_ok) = sample_parity(ctx, n, &filtered, t_latest).await;
@@ -188,10 +180,9 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     finalize(
         ctx,
         n,
-        started,
-        t_latest,
         ApplyFacts {
-            source: if needs_reapply { "reapply" } else { diff.kind.as_str() },
+            chain: ctx.mirror.label(),
+            source: if needs_reapply { "reapply" } else { kind.as_str() },
             total,
             applied,
             filtered: filtered.len(),
@@ -200,14 +191,38 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
             sampled_ok,
             needs_reapply,
             reapply,
+            t_latest,
+            started,
         },
     )
     .await
 }
 
+/// Compose the window's diffs and apply the watch/COW filter. The pre-write
+/// base check lives here: a re-pin racing the (slow) compose must abort
+/// before any write. Returns `(filtered, total, stats, kind)`.
+async fn compose_and_filter(
+    ctx: &Ctx,
+    n: u64,
+    base: Option<u64>,
+) -> Result<(Vec<mirror_anvil::Write>, usize, FilterStats, DiffKind)> {
+    let diff = ctx.mirror.composer().compose(n.saturating_sub(1), n).await?;
+    if ctx.anvil_t.fork_block().await? != base {
+        return Err(Error::ResetDuringApply { n });
+    }
+    let total = diff.writes.len();
+    let (filtered, stats) = {
+        let shadow = ctx.plane.shadow.lock()?;
+        filter_watched(&ctx.watch, &shadow, diff.writes)
+    };
+    Ok((filtered, total, stats, diff.kind))
+}
+
 /// The per-block facts the finalize step records (cursor, metrics, drift,
 /// outcome).
 struct ApplyFacts {
+    /// The mirror's chain tag (the bundle's label).
+    chain: &'static str,
     source: &'static str,
     total: usize,
     applied: usize,
@@ -217,19 +232,15 @@ struct ApplyFacts {
     sampled_ok: usize,
     needs_reapply: bool,
     reapply: Option<(u64, u64)>,
+    t_latest: u64,
+    started: Instant,
 }
 
 /// Cursor + metrics + drift + log for one applied block.
-async fn finalize(
-    ctx: &Ctx,
-    n: u64,
-    started: Instant,
-    t_latest: u64,
-    facts: ApplyFacts,
-) -> Result<ApplyOutcome> {
+async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> {
     advance_cursor(ctx, n).await?;
-    let duration_ms = started.elapsed().as_millis() as u64;
-    record_apply_metrics(ctx, n, t_latest, &facts, duration_ms);
+    let duration_ms = facts.started.elapsed().as_millis() as u64;
+    record_apply_metrics(ctx, n, &facts, duration_ms);
     clear_reapply(&ctx.plane, n, facts.reapply)?;
 
     let outcome = ApplyOutcome {
@@ -241,9 +252,9 @@ async fn finalize(
         sampled_ok: facts.sampled_ok,
         duration_ms,
     };
-    log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome, duration_ms)?;
+    log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome)?;
     ctx.plane.facts.publish(Fact::BlockApplied {
-        chain: "t",
+        chain: facts.chain,
         block: n,
         source: facts.source,
         writes: facts.total,
@@ -254,7 +265,7 @@ async fn finalize(
         ms: duration_ms,
     });
     ctx.plane.facts.publish(Fact::CursorAdvanced {
-        chain: "t",
+        chain: facts.chain,
         block: n,
     });
     tracing::info!(
@@ -285,7 +296,7 @@ async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
 
 /// The applier's per-block gauges (one place; the late-completion path sets
 /// its own subset).
-fn record_apply_metrics(ctx: &Ctx, n: u64, t_latest: u64, facts: &ApplyFacts, duration_ms: u64) {
+fn record_apply_metrics(ctx: &Ctx, n: u64, facts: &ApplyFacts, duration_ms: u64) {
     ctx.eth_metrics.set(&ctx.eth_metrics.cursor, n);
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
     ctx.eth_metrics.set(&ctx.eth_metrics.bal_writes, facts.applied as u64);
@@ -296,7 +307,7 @@ fn record_apply_metrics(ctx: &Ctx, n: u64, t_latest: u64, facts: &ApplyFacts, du
         .metrics
         .set(&ctx.eth_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
     ctx.eth_metrics.set(&ctx.eth_metrics.last_apply_ms, duration_ms);
-    ctx.eth_metrics.set(&ctx.eth_metrics.head, t_latest);
+    ctx.eth_metrics.set(&ctx.eth_metrics.head, facts.t_latest);
 }
 
 /// The rewound range is fully re-applied: resume normal late-completion skips.
@@ -318,13 +329,12 @@ fn log_drift_if_anomalous(
     n: u64,
     facts: &ApplyFacts,
     outcome: &ApplyOutcome,
-    duration_ms: u64,
 ) -> Result<()> {
     if !(facts.needs_reapply || outcome.sampled_ok < outcome.sampled) {
         return Ok(());
     }
     drift.append(&TDriftEntry {
-        chain: "t",
+        chain: facts.chain,
         block: n,
         source: facts.source,
         bal_writes: facts.total,
@@ -334,7 +344,7 @@ fn log_drift_if_anomalous(
         skipped_shadowed: facts.stats.skipped_shadowed,
         sampled: outcome.sampled,
         sampled_ok: outcome.sampled_ok,
-        duration_ms,
+        duration_ms: outcome.duration_ms,
     })
 }
 
@@ -347,7 +357,7 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
     ctx.eth_metrics.set(&ctx.eth_metrics.head, t_head);
     ctx.eth_metrics.set(&ctx.eth_metrics.cursor, n);
     ctx.plane.facts.publish(Fact::CursorAdvanced {
-        chain: "t",
+        chain: ctx.mirror.label(),
         block: n,
     });
     Ok(ApplyOutcome {
@@ -372,9 +382,9 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
 /// on (measured: an Aave borrow estimated pre-diff came out ~5% short and
 /// reverted). Mine until the pool drains, at most 3 rounds so a steady stream
 /// cannot starve the parent block.
-async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64) -> Result<()> {
+async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()> {
     let mut rounds = 0;
-    while rounds < 3 {
+    while rounds < rounds_max {
         let status = match anvil_t.txpool_status().await {
             Ok(status) => status,
             Err(e) => {

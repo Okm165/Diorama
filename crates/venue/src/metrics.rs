@@ -34,6 +34,32 @@ mirror_devnet::registry! {
         counter probe_skipped = "venue_probe_skipped_total", "probes skipped because their target is devnet-owned";
         /// Probes that diverged in the last at-pin run.
         gauge probe_last_failed = "venue_probe_last_failed", "probes that diverged in the last at-pin run";
+        /// The poll composer's last window: addresses touched by the source's
+        /// envelopes (txs, receipts, system txs).
+        gauge poll_touched = "venue_poll_touched", "addresses touched in the last polled window";
+        /// Keys the declared closures planned for that window.
+        gauge poll_planned_keys = "venue_poll_planned_keys", "keys the declared closures planned in the last polled window";
+        /// Keys whose source value differed from V (the writes applied).
+        gauge poll_changed_keys = "venue_poll_changed_keys", "keys the poll found changed (writes emitted)";
+        /// Log emitters no closure covers: a state change the declared watch
+        /// model cannot follow (the audit signal; should stay 0 in a
+        /// complete declaration).
+        counter poll_uncovered_logs = "venue_poll_uncovered_logs_total", "logs from contracts no closure covers (declare a closure to follow them)";
+        /// The source's head (the HL public API): the follow's target.
+        gauge source_head = "venue_source_head", "the HL source's head (the follow's target)";
+        /// The highest source block composed onto V (the follow cursor).
+        gauge source_followed = "venue_source_followed", "highest source block composed onto V";
+        /// Follow windows composed (one per pass with a non-empty window).
+        counter follow_windows_total = "venue_follow_windows_total", "follow windows composed";
+        /// Keys the follow applied to V (after the COW filter).
+        counter follow_applied_total = "venue_follow_applied_total", "keys the follow applied to V";
+        /// Keys the follow skipped because the devnet owns them (COW).
+        counter follow_skipped_shadowed_total = "venue_follow_skipped_shadowed_total", "keys the follow skipped (devnet-owned, COW)";
+        /// Follow windows paused by the gap guard.
+        counter follow_gap_pauses_total = "venue_follow_gap_pauses_total", "follow windows paused (gap guard)";
+        /// Source-continuity mismatches (a block's parent hash changed under
+        /// the follow): a source reorg; the window is recomposed from latest.
+        counter source_reorg_total = "venue_source_reorg_total", "source continuity mismatches (a parent hash changed under the follow)";
     }
 }
 

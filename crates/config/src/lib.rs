@@ -27,9 +27,9 @@ pub use instance::{
     ChainKind, ChainL1, ChainVenue, Chains, FollowHead, Instance, InstanceMeta, Profile, WatchEntry,
 };
 pub use sections::{
-    BeaconSection, CctpSection, EngineAnvil, EngineReth, EngineSection, FeedBridgeSection,
-    FeedSection, HttpSection, JournalSection, LoopsSection, Probe, RelayerMode,
-    Services, SourceSyncSection, VenueSimSection, VerifierSection,
+    BeaconSection, CctpSection, ClosuresSection, EngineAnvil, EngineReth, EngineSection,
+    FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection, LoopsSection,
+    MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, VenueSimSection, VerifierSection,
 };
 
 use std::path::Path;

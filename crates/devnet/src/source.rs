@@ -154,3 +154,66 @@ fn method_present<T>(r: mirror_anvil::Result<T>) -> bool {
         Err(e) => !e.is_method_not_found(),
     }
 }
+
+/// A source over a raw RPC: the reads are forwarded verbatim and the
+/// capabilities are the caller's declaration. For reads that are
+/// latest-by-design (the venue's poll composer reads the public RPC at
+/// latest, where the pin guard would refuse every read) and for tools; a
+/// profile whose reads carry invariants (the venue's pin-exact
+/// [`crate::source::Source`] for unshadow restores) keeps its own
+/// implementation.
+pub struct RawSource {
+    rpc: mirror_anvil::Rpc,
+    capabilities: Capabilities,
+}
+
+impl RawSource {
+    pub fn new(rpc: mirror_anvil::Rpc, capabilities: Capabilities) -> Self {
+        Self { rpc, capabilities }
+    }
+
+    /// The raw client, for the calls the state seam does not model
+    /// (envelopes, receipts, system txs).
+    pub fn rpc(&self) -> &mirror_anvil::Rpc {
+        &self.rpc
+    }
+}
+
+impl Source for RawSource {
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
+    fn head(&self) -> Fut<'_, mirror_anvil::Result<u64>> {
+        Box::pin(self.rpc.block_number())
+    }
+
+    fn header(&self, n: u64) -> Fut<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
+        Box::pin(async move { Ok(self.rpc.block_by_number(n, false).await?.header) })
+    }
+
+    fn balance_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<U256>> {
+        Box::pin(self.rpc.balance_at(address, block))
+    }
+
+    fn nonce_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<u64>> {
+        Box::pin(self.rpc.nonce_at(address, block))
+    }
+
+    fn storage_at(
+        &self,
+        address: Address,
+        slot: U256,
+        block: u64,
+    ) -> Fut<'_, mirror_anvil::Result<B256>> {
+        Box::pin(self.rpc.storage_at(address, slot, block))
+    }
+
+    fn code_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+        Box::pin(self.rpc.code_at(address, block))
+    }
+}

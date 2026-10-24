@@ -229,36 +229,7 @@ impl Journal {
             }
         };
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(stem) = name.to_str() else {
-                continue;
-            };
-            // A crashed `record` left a partial temp file: the real entry is
-            // the renamed one, so the temp is always garbage.
-            if stem.ends_with(".jsonl.tmp") {
-                if let Err(source) = std::fs::remove_file(entry.path()) {
-                    tracing::warn!(
-                        path = %entry.path().display(),
-                        error = %source,
-                        "journal prune: temp file could not be removed"
-                    );
-                }
-                continue;
-            }
-            let Some(stem) = stem.strip_suffix(".jsonl") else {
-                continue;
-            };
-            if let Ok(n) = stem.parse::<u64>() {
-                if n < floor {
-                    if let Err(source) = std::fs::remove_file(entry.path()) {
-                        tracing::warn!(
-                            path = %entry.path().display(),
-                            error = %source,
-                            "journal prune: entry could not be removed"
-                        );
-                    }
-                }
-            }
+            prune_entry(&entry, floor);
         }
     }
 
@@ -270,6 +241,33 @@ impl Journal {
         mirror_anvil::apply_writes(t, &writes, chunk)
             .await
             .map_err(Error::from)
+    }
+}
+
+/// One directory entry: a crashed `record` left a partial temp file — the
+/// real entry is the renamed one, so the temp is always garbage. A `.jsonl`
+/// entry below the floor is removed; anything else is left alone.
+fn prune_entry(entry: &std::fs::DirEntry, floor: u64) {
+    let name = entry.file_name();
+    let Some(stem) = name.to_str() else {
+        return;
+    };
+    if stem.ends_with(".jsonl.tmp") {
+        remove_logged(&entry.path(), "journal prune: temp file could not be removed");
+        return;
+    }
+    let Some(stem) = stem.strip_suffix(".jsonl") else {
+        return;
+    };
+    if stem.parse::<u64>().is_ok_and(|n| n < floor) {
+        remove_logged(&entry.path(), "journal prune: entry could not be removed");
+    }
+}
+
+/// A housekeeping removal: a fault is logged, never silent.
+fn remove_logged(path: &std::path::Path, what: &'static str) {
+    if let Err(source) = std::fs::remove_file(path) {
+        tracing::warn!(path = %path.display(), error = %source, "{what}");
     }
 }
 

@@ -76,26 +76,37 @@ impl<'a> ProbeRunner<'a> {
                     "probe skipped: target is devnet-owned");
                 continue;
             }
-            let r = source.call_at(probe.to, &probe.data, at).await;
-            let t = target.call_latest(probe.to, &probe.data).await;
-            match (r, t) {
-                (Ok(a), Ok(b)) if a == b => out.ok += 1,
-                (Ok(a), Ok(b)) => {
-                    out.failed += 1;
-                    tracing::warn!(
-                        block = at,
-                        probe = %probe.name,
-                        source = %mirror_anvil::truncate(&alloy_primitives::hex::encode(&a), 80),
-                        target = %mirror_anvil::truncate(&alloy_primitives::hex::encode(&b), 80),
-                        "probe mismatch"
-                    );
-                }
-                (Err(e), _) | (_, Err(e)) => {
-                    out.failed += 1;
-                    tracing::debug!(block = at, probe = %probe.name, error = %e, "probe read failed");
-                }
+            if compare_probe(source, target, probe, at).await {
+                out.ok += 1;
+            } else {
+                out.failed += 1;
             }
         }
         Ok(out)
+    }
+}
+
+/// Compare one probe: the source at `at` vs the target's latest. A read fault
+/// counts as a mismatch (the fault is logged here with its cause). One
+/// function per probe — the loop above is the tally.
+async fn compare_probe(source: &Rpc, target: &Rpc, probe: &Probe, at: u64) -> bool {
+    let r = source.call_at(probe.to, &probe.data, at).await;
+    let t = target.call_latest(probe.to, &probe.data).await;
+    match (r, t) {
+        (Ok(a), Ok(b)) if a == b => true,
+        (Ok(a), Ok(b)) => {
+            tracing::warn!(
+                block = at,
+                probe = %probe.name,
+                source = %mirror_anvil::truncate(&alloy_primitives::hex::encode(&a), 80),
+                target = %mirror_anvil::truncate(&alloy_primitives::hex::encode(&b), 80),
+                "probe mismatch"
+            );
+            false
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::debug!(block = at, probe = %probe.name, error = %e, "probe read failed");
+            false
+        }
     }
 }

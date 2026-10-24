@@ -30,12 +30,14 @@ pub struct Persisted {
     /// cursor's meaning is the same. (`alias = "t"`: pre-rename state files.)
     #[serde(default, alias = "t")]
     pub devnet: Option<ChainCursor>,
-    /// Hash of the last processed reth block (reorg continuity check).
-    #[serde(default)]
-    pub reth_last_hash: Option<B256>,
-    /// Height of the last processed reth block (continuity check guard).
-    #[serde(default)]
-    pub reth_last_block: Option<u64>,
+    /// Hash of the last processed source block (the reorg continuity check on
+    /// both mirrors: the ethereum applier's parent hash, the venue's follow
+    /// window). `alias`: pre-rename state files spelled this `reth_last_hash`.
+    #[serde(default, alias = "reth_last_hash")]
+    pub source_last_hash: Option<B256>,
+    /// Height of the last processed source block (continuity check guard).
+    #[serde(default, alias = "reth_last_block")]
+    pub source_last_block: Option<u64>,
     /// Fork pin of the current epoch (anvil forkBlockNumber). A change starts
     /// a new epoch: the shadow registry is cleared (marks *and* values - the
     /// old base's derivations must not be replayed onto the moved base) and

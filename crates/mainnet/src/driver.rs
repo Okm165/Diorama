@@ -8,7 +8,6 @@ use crate::ctx::Ctx;
 use crate::diff::apply_block;
 use crate::error::Result;
 use crate::source_sync;
-use mirror_config::EngineSection;
 use mirror_devnet::facts::{Fact, ResetWitness};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::spine::ResetSignal;
@@ -52,7 +51,7 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
         tracing::debug!(head, follow, start, "chain is at the follow head");
         return Ok(None);
     }
-    if !gap_within_limit(&ctx.engine, follow.saturating_sub(start), rebased) {
+    if !gap_within_limit(follow.saturating_sub(start), ctx.mirror.policies().gap, rebased) {
         return Ok(None);
     }
     reorg_continuity(ctx, start).await?;
@@ -66,21 +65,23 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
     let Some(c) = ctx.cursor_t()? else {
         return Ok(None);
     };
-    match ctx.reset.detect(&ctx.anvil_t, &c).await? {
+    match ctx.mirror.reset().detect(&ctx.anvil_t).await? {
         ResetSignal::Steady => Ok(Some(c)),
+        signal => on_reset(ctx, head, signal).await,
+    }
+}
+
+/// A witnessed reset: say what was seen, publish the witness, and rebase.
+/// All three witnesses converge here (the detector's answer decides the fact).
+async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<ChainCursor>> {
+    let witness = match signal {
         ResetSignal::BaseMoved { base, cursor } => {
             tracing::warn!(
-                block = c.block,
                 ?base,
                 cursor,
                 "cursor below the fork base (re-pin) - reconciling"
             );
-            ctx.plane.facts.publish(Fact::ResetDetected {
-                chain: "t",
-                witness: ResetWitness::Position { base, cursor },
-            });
-            rebase(ctx, head).await?;
-            Ok(None)
+            ResetWitness::Position { base, cursor }
         }
         ResetSignal::HashMismatch {
             block,
@@ -93,18 +94,31 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
                 ?found,
                 "cursor hash not found on chain (reset or re-pin) - reconciling"
             );
-            ctx.plane.facts.publish(Fact::ResetDetected {
-                chain: "t",
-                witness: ResetWitness::Hash {
-                    block,
-                    expected,
-                    found,
-                },
-            });
-            rebase(ctx, head).await?;
-            Ok(None)
+            ResetWitness::Hash {
+                block,
+                expected,
+                found,
+            }
         }
-    }
+        ResetSignal::PinMismatch { expected, found } => {
+            // Not this detector's witness (the venue's canary); fail closed if
+            // it ever appears: an instance the registry does not know is a
+            // reset by definition.
+            tracing::error!(
+                ?expected,
+                ?found,
+                "pin mismatch from the cursor-hash detector - reconciling"
+            );
+            ResetWitness::Pin { expected, found }
+        }
+        ResetSignal::Steady => return Ok(None),
+    };
+    ctx.plane.facts.publish(Fact::ResetDetected {
+        chain: ctx.mirror.label(),
+        witness,
+    });
+    rebase(ctx, head).await?;
+    Ok(None)
 }
 
 /// The invalid cursor's consequences, one step per effect: T's epoch rule (a
@@ -124,7 +138,9 @@ async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
         .await?;
     ctx.plane.state.lock()?.data.devnet = None;
     ctx.plane.save_state()?;
-    ctx.plane.facts.publish(Fact::EpochChanged { chain: "t", pin });
+    ctx.plane
+        .facts
+        .publish(Fact::EpochChanged { chain: ctx.mirror.label(), pin });
     tracing::info!(head, ?pin, "chain rebased; the epoch rule ran");
     Ok(())
 }
@@ -165,15 +181,19 @@ async fn on_rebase(rpc: &mirror_anvil::Rpc, head: u64, follow: u64, start: u64) 
     Ok(())
 }
 
-/// Two regimes (plan §3 ops): normal operation pauses at `max_gap_blocks`
-/// (300 = the plan's "> 300 -> pause and re-sync"), while a *rebased* cursor
-/// (a fresh pin after a restart/re-fork) is allowed to replay its whole pin
-/// window - bounded by reth's state window (10,064), the plan's own limit.
-fn gap_within_limit(engine: &EngineSection, gap: u64, rebased: bool) -> bool {
+/// Two regimes (plan §3 ops): normal operation pauses at the profile's gap
+/// (`max_gap_blocks`; 300 = the plan's "> 300 -> pause and re-sync"), while a
+/// *rebased* cursor (a fresh pin after a restart/re-fork) is allowed to replay
+/// its whole pin window - bounded by reth's state window (10,064), the plan's
+/// own limit.
+fn gap_within_limit(gap: u64, limit: Option<u64>, rebased: bool) -> bool {
     let limit = if rebased {
         10_064
     } else {
-        engine.loops.max_gap_blocks
+        match limit {
+            Some(limit) => limit,
+            None => return true,
+        }
     };
     if gap > limit {
         tracing::error!(
@@ -195,7 +215,7 @@ fn gap_within_limit(engine: &EngineSection, gap: u64, rebased: bool) -> bool {
 /// (the tradeoff a single-Anvil mirror accepts, and the reason
 /// `mirror_reorgs_detected_total` is an alarm).
 async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
-    let (Some(last_hash), Some(last_block)) = (ctx.reth_last_hash()?, ctx.reth_last_block()?) else {
+    let (Some(last_hash), Some(last_block)) = (ctx.source_last_hash()?, ctx.source_last_block()?) else {
         return Ok(());
     };
     if start > 1 && start - 1 == last_block {
@@ -207,8 +227,8 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
                     "reth reorg detected; applied diffs self-heal on the new branch"
                 );
                 let mut state = ctx.plane.state.lock()?;
-                state.data.reth_last_hash = None;
-                state.data.reth_last_block = None;
+                state.data.source_last_hash = None;
+                state.data.source_last_block = None;
                 drop(state);
                 ctx.plane.save_state()?;
             }
@@ -266,40 +286,8 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
     let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
     loop {
         tokio::time::sleep(poll * 2).await;
-        let t_head = match ctx.anvil_t.block_number().await {
-            Ok(h) => h,
-            Err(_) => continue,
-        };
-        // Never scan at or below T's fork base: after a re-pin those blocks
-        // are the source's own (anvil forwards pre-pin ranges upstream), and
-        // marking their writes devnet-owned would shadow mainnet's real state
-        // (measured: 311 real txs scanned as devnet writes right after a
-        // re-pin). The venue driver clamps its scan the same way.
-        let pin = match ctx.anvil_t.fork_block().await {
-            Ok(pin) => pin.unwrap_or(0),
-            Err(_) => continue,
-        };
-        // A fresh mark starts at the head: do not scan pre-existing history
-        // (the registry was persisted; T does not advance while the engine is
-        // down). The applier's inline scan shares this high-water mark, so its
-        // blocks are not re-traced.
-        match mirror_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await {
-            Ok(walk) => {
-                ctx.eth_metrics.record_scan(
-                    &walk,
-                    &ctx.eth_metrics.shadow_scanned_blocks,
-                    &ctx.eth_metrics.shadow_skipped_empty_blocks,
-                );
-                if walk.walked > 0 {
-                    ctx.plane.facts.publish(Fact::ShadowScanned {
-                        chain: "t",
-                        blocks: walk.walked,
-                        empty: walk.empty,
-                        shadowed: walk.shadowed,
-                    });
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block"),
+        if let Err(e) = scan_once(&ctx).await {
+            tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block");
         }
         // A save fault is logged, not swallowed: the marks are in memory and
         // the next pass retries the write (bounded: one warn per poll).
@@ -307,6 +295,38 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
             tracing::warn!(error = %e, "shadow registry save failed");
         }
     }
+}
+
+/// One shadow-scan pass: read the head and pin, walk the unscanned blocks,
+/// record the walk's metrics, and publish the fact. The loop above is a sleep
+/// plus this call.
+async fn scan_once(ctx: &Ctx) -> Result<()> {
+    let t_head = ctx.anvil_t.block_number().await?;
+    // Never scan at or below T's fork base: after a re-pin those blocks
+    // are the source's own (anvil forwards pre-pin ranges upstream), and
+    // marking their writes devnet-owned would shadow mainnet's real state
+    // (measured: 311 real txs scanned as devnet writes right after a
+    // re-pin). The venue driver clamps its scan the same way.
+    let pin = ctx.anvil_t.fork_block().await?.unwrap_or(0);
+    // A fresh mark starts at the head: do not scan pre-existing history
+    // (the registry was persisted; T does not advance while the engine is
+    // down). The applier's inline scan shares this high-water mark, so its
+    // blocks are not re-traced.
+    let walk = mirror_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await?;
+    ctx.eth_metrics.record_scan(
+        &walk,
+        &ctx.eth_metrics.shadow_scanned_blocks,
+        &ctx.eth_metrics.shadow_skipped_empty_blocks,
+    );
+    if walk.walked > 0 {
+        ctx.plane.facts.publish(Fact::ShadowScanned {
+            chain: ctx.mirror.label(),
+            blocks: walk.walked,
+            empty: walk.empty,
+            shadowed: walk.shadowed,
+        });
+    }
+    Ok(())
 }
 
 /// Run the configured probes now: T at the applied cursor vs reth at the
@@ -337,7 +357,7 @@ pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::Probe
         "on-demand probes complete"
     );
     ctx.plane.facts.publish(Fact::ProbesRun {
-        chain: "t",
+        chain: ctx.mirror.label(),
         at: cursor.block,
         ok: probes.ok,
         failed: probes.failed,

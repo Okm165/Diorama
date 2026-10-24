@@ -23,10 +23,14 @@ impl DiffComposer for RethComposer {
         DiffKind::Bal
     }
 
-    fn compose(&self, n: u64) -> Fut<'_, mirror_anvil::Result<BlockDiff>> {
+    /// The window is a single block on the mainnet: the applier advances one
+    /// parent block at a time, and the BAL is per block. `from` is the
+    /// applier's previous block (part of the shared seam's contract); the
+    /// composition itself only needs `to`.
+    fn compose(&self, _from: u64, to: u64) -> Fut<'_, mirror_anvil::Result<BlockDiff>> {
         Box::pin(async move {
-            let (writes, kind) = fetch_diffs(&self.reth, n).await?;
-            Ok(BlockDiff { n, kind, writes })
+            let (writes, kind) = fetch_diffs(&self.reth, to).await?;
+            Ok(BlockDiff { n: to, kind, writes })
         })
     }
 }

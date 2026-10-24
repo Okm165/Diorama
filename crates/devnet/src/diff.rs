@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 /// Where a block's writes came from: one metric label, one log field.
 ///
 /// `Bal` = `eth_getBlockAccessList`; `Trace` = prestateTracer fallback;
-/// `Poll` = the venue's cached diff over touched accounts + declared closure;
-/// `None` = the chain is static between re-pins.
+/// `Poll` = the venue's window diff over touched accounts + declared closures;
+/// `None` = nothing was composed (an empty window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum DiffKind {
     Bal,
@@ -46,14 +46,34 @@ pub struct BlockDiff {
     pub writes: Vec<Write>,
 }
 
-/// The pluggable part: how one source block becomes writes. One implementation
+/// The pluggable part: how a source's blocks become writes. One implementation
 /// per profile (reth: BAL → trace; the venue: the polled cache diff); the
 /// spine never knows which.
+///
+/// The window is `(from, to]`: a per-block composer (reth's BAL) composes the
+/// single block `to` — the applier advances one block at a time, so the
+/// window is exactly one block — while a window composer (the venue's poll)
+/// composes everything since the last composed block, because its source
+/// cannot enumerate a single block's writes and the touched set must cover
+/// the whole gap after downtime.
 pub trait DiffComposer: Send + Sync {
     /// The composer's preferred kind (the per-block `BlockDiff::kind` is the
     /// truth for what a given block used).
     fn kind(&self) -> DiffKind;
-    fn compose(&self, n: u64) -> Fut<'_, mirror_anvil::Result<BlockDiff>>;
+    fn compose(&self, from: u64, to: u64) -> Fut<'_, mirror_anvil::Result<BlockDiff>>;
+
+    /// Post-write live parity: re-read the just-written keys and compare them
+    /// against the values the composition expected. `None` when this composer
+    /// has no live parity (the per-block BAL composer: the applier's sampled
+    /// parity is its check); the poll composer answers `Some((ok, failed))` —
+    /// the venue's [`crate::spine::ProbeSchedule::LiveParity`].
+    fn verify<'a>(
+        &'a self,
+        writes: &'a [Write],
+    ) -> Fut<'a, mirror_anvil::Result<Option<(usize, usize)>>> {
+        let _ = writes;
+        Box::pin(async move { Ok(None) })
+    }
 }
 
 /// What the mirror keeps fresh.
@@ -76,6 +96,13 @@ impl WatchSet {
             accounts,
             slots: HashMap::new(),
         }
+    }
+
+    /// Declare slots for a contract (the venue closure): whenever the account
+    /// is touched, its declared slots are watched. The plan is the narrower
+    /// set; the watch set's job is the COW filter and the audit.
+    pub fn declare_slots(&mut self, contract: Address, slots: impl IntoIterator<Item = U256>) {
+        self.slots.entry(contract).or_default().extend(slots);
     }
 
     /// Is this write's key watched? Account fields follow the account; a

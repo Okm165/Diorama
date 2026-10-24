@@ -14,8 +14,10 @@ use crate::ConfigError;
 pub struct Instance {
     pub instance: InstanceMeta,
     pub chains: Chains,
-    /// The watched addresses (the mainnet profile's parent-diff scope; the
-    /// venue has no parent stream, so it is empty there).
+    /// The watched addresses: the parent-diff scope on the mainnet profile,
+    /// and the account-field scope of the venue's poll follow (both mirrors
+    /// follow their parent; the mechanisms differ — see
+    /// `docs/ARCHITECTURE.md`, "One product, two chains").
     #[serde(default)]
     pub watchlist: Vec<WatchEntry>,
     pub services: Services,

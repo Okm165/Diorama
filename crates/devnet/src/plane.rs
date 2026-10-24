@@ -44,8 +44,9 @@ pub struct Plane {
     /// Seconds the devnet's clock runs ahead of the parent block
     /// (`/admin/time`). The mainnet profile's applier aligns to
     /// `parent + offset` and clamps for monotonicity, so a jump sticks while
-    /// mainnet's data keeps flowing; the venue has no parent stream and never
-    /// sets it — the field keeps the shared surface's shape. Seeded from the
+    /// mainnet's data keeps flowing; the venue's follow never re-aligns V's
+    /// clock, so the venue never sets it — the field keeps the shared
+    /// surface's shape. Seeded from the
     /// state file: the offset is part of the devnet's state contract (T's
     /// blocks carry it), so a restart must not drop it back to 0 (measured:
     /// Aave's `lastUpdateTimestamp` lands in the future and every supply

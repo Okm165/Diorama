@@ -135,6 +135,10 @@ pub struct EngineSection {
     /// clobbered, and these are the watched ones it replaces.
     #[serde(default)]
     pub fixture_addresses: Vec<Address>,
+    /// The venue profile's declared watch closures (the poll composer's key
+    /// derivation). Empty = watchlist account fields only.
+    #[serde(default)]
+    pub closures: ClosuresSection,
 }
 
 /// `[services.engine.feed_bridge]`: live parent-chain feed answers →
@@ -243,6 +247,42 @@ pub struct SourceSyncSection {
     pub engine_url: Option<String>,
     /// JWT secret shared with the consensus client (a path, never the value).
     pub jwt_path: Option<PathBuf>,
+}
+
+/// `[services.engine.closures]`: the venue profile's declared watch closures —
+/// what turns a poll window's touched set into concrete keys. Absent/empty
+/// means the watchlist's account fields only: the poll still follows, and the
+/// composer's audit counts the emitters no closure covers (never silent).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ClosuresSection {
+    /// Whole-contract slot sets: `[[services.engine.closures.fixed]]` with
+    /// `contract` and `slots`.
+    #[serde(default)]
+    pub fixed: Vec<FixedSlotsSpec>,
+    /// Mapping slots derived from one indexed log topic
+    /// (`[[services.engine.closures.mappings]]`).
+    #[serde(default)]
+    pub mappings: Vec<MappingSpec>,
+}
+
+/// A fixed slot set: whenever `contract` is touched, these slots are read.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FixedSlotsSpec {
+    pub contract: Address,
+    pub slots: Vec<U256>,
+}
+
+/// A mapping closure: for every log emitted by `contract`, the topic at
+/// `topic_index` is the mapping key and `base_slot` its slot (ERC20 balances:
+/// `topic_index = 2` on `Transfer`, `base_slot` the token's balance mapping).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MappingSpec {
+    pub contract: Address,
+    pub base_slot: U256,
+    pub topic_index: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

@@ -36,6 +36,25 @@ pub struct VenueSource {
     pin: Arc<AtomicU64>,
 }
 
+/// What the public venue source can serve (measured 2026-10-24): no BAL, no
+/// traces, no proofs, no websocket JSON-RPC; state reads are latest-only (the
+/// block parameter is ignored), and system transactions (Core→EVM completions)
+/// are exposed through their own RPC method. The poll composer declares the
+/// same capabilities on its raw source.
+pub fn public_capabilities() -> Capabilities {
+    Capabilities {
+        native_bal: false,
+        traces: false,
+        historical: false,
+        heads_ws: false,
+        system_txs: true,
+        // Measured 2026-10-24: the public RPC serves the system txs but their
+        // receipts are null (and absent from eth_getBlockReceipts); a nanoreth
+        // archive serves them.
+        system_tx_receipts: false,
+    }
+}
+
 impl VenueSource {
     pub fn new(rpc: Rpc, pin: Arc<AtomicU64>) -> Self {
         Self { rpc, pin }
@@ -80,17 +99,7 @@ impl Source for VenueSource {
     /// latest-only (the block parameter is ignored), and system transactions
     /// (Core→EVM completions) are exposed through their own RPC method.
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            native_bal: false,
-            traces: false,
-            historical: false,
-            heads_ws: false,
-            system_txs: true,
-            // Measured 2026-10-24: the public RPC serves the system txs but
-            // their receipts are null (and absent from eth_getBlockReceipts);
-            // a nanoreth archive serves them.
-            system_tx_receipts: false,
-        }
+        public_capabilities()
     }
 
     /// The source's anchor: the pin. Before the pin is resolved (a boot race

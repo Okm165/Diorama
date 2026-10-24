@@ -1,0 +1,194 @@
+//! `VenueMirror` — the venue mirror's divergence bundle, in its own folder.
+//!
+//! The spine ([`mirror_devnet::spine`]) declares the [`Mirror`] interface and
+//! never names a mirror; this file is where the venue profile's choices are
+//! made and documented, next to the ethereum profile's `crates/mainnet/src/profile.rs`:
+//!
+//! | decision | venue (here) | mainnet (`crates/mainnet/src/profile.rs`) |
+//! |---|---|---|
+//! | label | `"v"` | `"t"` |
+//! | source | HL public API (poll) | reth (local full node) |
+//! | composer | poll window over envelopes | per-block BAL (trace fallback) |
+//! | reset | chain-instance canary | cursor hash / below base |
+//! | clock | native | align to the parent block + live offset |
+//! | mining | pool drain | one T block per applied parent block |
+//! | probes | live parity against the polled values | per applied block |
+//! | prepend | 1 | 3 (a steady stream must not starve the parent) |
+//!
+//! Both mirrors therefore do the same things — follow their parent chain,
+//! mirror its state onto their devnet, and let the devnet modify that state
+//! with minted liquidity (the COW registry keeps the two apart) — while the
+//! five decisions above are the only places the implementations diverge.
+use crate::compose::PollComposer;
+use crate::metrics::VenueMetrics;
+use crate::reset::PinCanary;
+use crate::venue_source::{public_capabilities, VenueSource};
+use mirror_config::{ClosuresSection, EngineSection};
+use mirror_devnet::closure::{FixedSlots, KeyClosure, TopicMappedSlots};
+use mirror_devnet::diff::{DiffComposer, WatchSet};
+use mirror_devnet::shared::Shared;
+use mirror_devnet::source::{Capabilities, RawSource, Source};
+use mirror_devnet::spine::{
+    ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
+};
+use mirror_devnet::state::StateFile;
+use mirror_anvil::Rpc;
+use std::sync::Arc;
+
+/// The venue mirror's bundle: the HL public API as the truth, the poll
+/// composer, the pin canary, and the policies the driver reads.
+pub struct VenueMirror {
+    source: Arc<dyn Source>,
+    composer: Arc<dyn DiffComposer>,
+    reset: Arc<dyn ResetDetector>,
+    policies: Policies,
+}
+
+impl VenueMirror {
+    pub fn new(
+        source: Arc<dyn Source>,
+        composer: Arc<dyn DiffComposer>,
+        reset: Arc<dyn ResetDetector>,
+        policies: Policies,
+    ) -> Self {
+        Self {
+            source,
+            composer,
+            reset,
+            policies,
+        }
+    }
+
+    /// The profile's decisions: the clock is V's own, mining drains the pool
+    /// (an idle chain stays static), probes compare against the polled values,
+    /// and the gap guard pauses the poll when the source head runs too far
+    /// ahead (a wide window is a re-pin decision, never a silent partial poll).
+    pub fn policies(engine: &EngineSection) -> Policies {
+        Policies {
+            clock: ClockPolicy::Native,
+            mine: MinePolicy::PoolDrain,
+            probes: ProbeSchedule::LiveParity,
+            prepend_rounds: 1,
+            gap: Some(engine.loops.max_gap_blocks),
+        }
+    }
+}
+
+impl Mirror for VenueMirror {
+    fn label(&self) -> &'static str {
+        "v"
+    }
+
+    fn source(&self) -> &Arc<dyn Source> {
+        &self.source
+    }
+
+    fn composer(&self) -> &Arc<dyn DiffComposer> {
+        &self.composer
+    }
+
+    fn reset(&self) -> &Arc<dyn ResetDetector> {
+        &self.reset
+    }
+
+    fn policies(&self) -> Policies {
+        self.policies
+    }
+}
+
+/// What V (anvil) serves as the composer's target: traces yes, BAL not
+/// exercised, historical yes, no system txs.
+pub fn target_capabilities() -> Capabilities {
+    Capabilities {
+        native_bal: false,
+        traces: true,
+        historical: true,
+        heads_ws: false,
+        system_txs: false,
+        system_tx_receipts: false,
+    }
+}
+
+/// The declared closures, from config: fixed slot sets and topic-mapped
+/// mapping slots. Empty config = watch-only follow (the watchlist's account
+/// fields; the composer's audit counts every uncovered emitter).
+pub fn closures(section: &ClosuresSection) -> Vec<Box<dyn KeyClosure>> {
+    let mut out: Vec<Box<dyn KeyClosure>> = Vec::new();
+    let mut fixed = FixedSlots::new();
+    for spec in &section.fixed {
+        fixed.declare(spec.contract, spec.slots.iter().copied());
+    }
+    if !section.fixed.is_empty() {
+        out.push(Box::new(fixed));
+    }
+    for spec in &section.mappings {
+        out.push(Box::new(TopicMappedSlots {
+            contract: spec.contract,
+            base_slot: spec.base_slot,
+            topic_index: spec.topic_index,
+        }));
+    }
+    out
+}
+
+/// The venue's watch set: the watchlist accounts plus the declared closures —
+/// fixed slots as slot declarations, mapping contracts as watched accounts
+/// (the *plan* is the narrower set the closures derive; the watch set feeds
+/// the COW filter and the audit).
+pub fn watch_set(
+    accounts: std::collections::HashSet<alloy_primitives::Address>,
+    section: &ClosuresSection,
+) -> WatchSet {
+    let mut watch = WatchSet::new(accounts);
+    for spec in &section.fixed {
+        watch.declare_slots(spec.contract, spec.slots.iter().copied());
+    }
+    for spec in &section.mappings {
+        watch.accounts.insert(spec.contract);
+    }
+    watch
+}
+
+/// The engine's build step (the profile's wiring, kept beside the bundle so
+/// `ctx.rs` reads as assembly).
+pub struct Wiring {
+    pub mirror: Arc<dyn Mirror>,
+    /// V's fork pin, shared with [`VenueSource`].
+    pub pin: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// What the wiring needs (the context assembles it; `build` consumes it).
+pub struct Deps {
+    pub state: Shared<StateFile>,
+    pub source_rpc: Rpc,
+    pub v: Rpc,
+    pub watch: WatchSet,
+    pub metrics: Arc<VenueMetrics>,
+}
+
+pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
+    let Deps {
+        state,
+        source_rpc,
+        v,
+        watch,
+        metrics,
+    } = deps;
+    let pin = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let source: Arc<dyn Source> = Arc::new(VenueSource::new(source_rpc.clone(), pin.clone()));
+    let composer: Arc<dyn DiffComposer> = Arc::new(PollComposer::new(
+        Arc::new(RawSource::new(source_rpc, public_capabilities())),
+        Arc::new(RawSource::new(v, target_capabilities())),
+        watch,
+        closures(&engine.closures),
+        metrics,
+    ));
+    let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
+    let mirror: Arc<dyn Mirror> = Arc::new(VenueMirror::new(
+        source,
+        composer,
+        reset,
+        VenueMirror::policies(engine),
+    ));
+    Wiring { mirror, pin }
+}

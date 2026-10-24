@@ -8,6 +8,8 @@ use crate::error::{Error, Result};
 use crate::plane::Plane;
 use crate::shadow::Shadow;
 use crate::shared::Shared;
+use alloy_consensus::Transaction as _;
+use alloy_network_primitives::TransactionResponse as _;
 use alloy_primitives::{B256, U256};
 use alloy_rpc_types_eth::{Block, Transaction};
 use mirror_anvil::Rpc;
@@ -90,10 +92,35 @@ pub async fn scan_to(plane: &Plane, target: &Rpc, pin: u64, head: u64, first: u6
     scan_range(plane, target, from, head).await
 }
 
+/// Mark one transaction's writes: the sender's account fields (its nonce
+/// moves), value recipients, and the storage writes from its trace
+/// (prestateTracer diffMode — measured on anvil 1.8.6). Returns the marks
+/// added; a trace fault is returned so the caller can keep the block
+/// unscanned (the watermark must not advance past it).
+async fn mark_tx(target: &Rpc, shadow: &Shared<Shadow>, tx: &Transaction) -> Result<usize> {
+    let mut marked = 0;
+    // A tx from an account stops its account-field sync (nonce -> balance too).
+    shadow.lock()?.mark_account_fields(tx.from());
+    marked += 1;
+    // Value transfers shadow the recipient's balance.
+    if tx.inner.value() > U256::ZERO {
+        if let Some(to) = tx.inner.to() {
+            shadow.lock()?.mark_account_fields(to);
+        }
+    }
+    // Storage writes come from the tx trace.
+    let trace = target.trace_tx_prestate(tx.tx_hash()).await?;
+    for w in mirror_anvil::flatten_trace(&trace) {
+        shadow.lock()?.mark(&w);
+        marked += 1;
+    }
+    Ok(marked)
+}
+
 /// Mark one block's writes devnet-owned: every sender's account fields, the
-/// recipients of value transfers, and the storage writes from the tx traces
-/// (prestateTracer diffMode — measured on anvil 1.8.6). Returns how many
-/// writes were marked; `0` is the empty-block skip the caller counts.
+/// recipients of value transfers, and the storage writes from the tx traces.
+/// Returns how many writes were marked; `0` is the empty-block skip the
+/// caller counts.
 pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<usize> {
     let block = target.block_by_number(n, true).await?;
     let txs = block_txs(&block);
@@ -103,26 +130,8 @@ pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result
     let mut shadowed = 0usize;
     let mut trace_failures = 0usize;
     for tx in txs {
-        use alloy_consensus::Transaction as _;
-        use alloy_network_primitives::TransactionResponse as _;
-        // A tx from an account stops its account-field sync (nonce -> balance too).
-        let from = tx.from();
-        shadow.lock()?.mark_account_fields(from);
-        shadowed += 1;
-        // Value transfers shadow the recipient's balance.
-        if tx.inner.value() > U256::ZERO {
-            if let Some(to) = tx.inner.to() {
-                shadow.lock()?.mark_account_fields(to);
-            }
-        }
-        // Storage writes come from the tx trace.
-        match target.trace_tx_prestate(tx.tx_hash()).await {
-            Ok(trace) => {
-                for w in mirror_anvil::flatten_trace(&trace) {
-                    shadow.lock()?.mark(&w);
-                    shadowed += 1;
-                }
-            }
+        match mark_tx(target, shadow, tx).await {
+            Ok(marked) => shadowed += marked,
             Err(e) => {
                 // A tx whose trace failed hides its writes: the block is *not*
                 // cleanly scanned and the watermark must not advance past it.

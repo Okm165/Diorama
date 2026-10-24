@@ -4,13 +4,16 @@
 //!
 //! Narrow by construction: the context carries exactly the sections the venue
 //! profile reads (the run path moves them out of the instance), so a venue
-//! build never sees the ethereum sections and vice versa.
+//! build never sees the ethereum sections and vice versa. The divergence set
+//! itself lives in the mirror bundle (`profile.rs`): the context only assembles
+//! it.
 use crate::error::Result;
 use crate::metrics::VenueMetrics;
 use mirror_config::{ChainVenue, EngineSection};
 use mirror_devnet::admin::AdminSurface;
+use mirror_devnet::diff::WatchSet;
 use mirror_devnet::plane::Plane;
-use mirror_devnet::source::Source;
+use mirror_devnet::spine::Mirror;
 use mirror_devnet::state::ChainCursor;
 use mirror_anvil::Rpc;
 use std::sync::atomic::AtomicU64;
@@ -32,16 +35,21 @@ pub struct Ctx {
     /// (V's base state *is* the source's state at the pin) and the driver's
     /// epoch key. Shared with the source, set by the driver's reconcile.
     pub(crate) pin: Arc<AtomicU64>,
-    /// The unshadow re-sync source: `VenueSource` reads the fork source at the
-    /// pin (one implementation per profile, chosen at boot — rule 15).
-    pub(crate) source: Arc<dyn Source>,
+    /// The mirror bundle: the HL public API as the truth, the poll composer,
+    /// the pin canary, and the policies (see `profile.rs` — the divergence
+    /// set, in the profile's own folder).
+    pub(crate) mirror: Arc<dyn Mirror>,
+    /// What the mirror keeps fresh: the watchlist accounts plus the declared
+    /// closures (the COW filter's key space — the same set the composer plans
+    /// from).
+    pub(crate) watch: WatchSet,
     /// The devnet plane: the shadow registry, the journal, the cursor state,
     /// the shared admin gauges and flags — the same bundle the ethereum engine
     /// embeds. The venue never freezes and has no clock offset; those fields
     /// keep the shared surface's shape (documented on the plane).
     pub(crate) plane: Plane,
-    /// The venue's own gauges/counters.
-    pub(crate) venue_metrics: VenueMetrics,
+    /// The venue's own gauges/counters (shared with the poll composer).
+    pub(crate) venue_metrics: Arc<VenueMetrics>,
 }
 
 impl Ctx {
@@ -61,20 +69,30 @@ impl Ctx {
             engine.journal.blocks,
             &engine.fixture_addresses,
         )?;
+        let watch = crate::profile::watch_set(cfg.watch_set(), &engine.closures);
+        let venue_metrics = Arc::new(VenueMetrics::default());
         let source_rpc = Rpc::new(source_url, timeout)?;
-        let pin = Arc::new(AtomicU64::new(0));
+        let v = Rpc::new(v_url, timeout)?;
+        let wiring = crate::profile::build(
+            &engine,
+            crate::profile::Deps {
+                state: plane.state.clone(),
+                source_rpc: source_rpc.clone(),
+                v: v.clone(),
+                watch: watch.clone(),
+                metrics: venue_metrics.clone(),
+            },
+        );
         Ok(Self {
             chain,
             engine,
-            v: Rpc::new(v_url, timeout)?,
-            source: Arc::new(crate::venue_source::VenueSource::new(
-                source_rpc.clone(),
-                pin.clone(),
-            )),
+            v,
             source_rpc,
-            pin,
+            pin: wiring.pin,
+            mirror: wiring.mirror,
+            watch,
             plane,
-            venue_metrics: VenueMetrics::default(),
+            venue_metrics,
         })
     }
 
@@ -83,8 +101,12 @@ impl Ctx {
     /// profile's: V's chain, the fork source, the configured chunk size, and a
     /// journal that is exactly the engine's own writes).
     pub fn admin(&self) -> AdminSurface<'_> {
-        self.plane
-            .admin(&self.v, self.source.as_ref(), self.engine.loops.chunk_size, true)
+        self.plane.admin(
+            &self.v,
+            self.mirror.source().as_ref(),
+            self.engine.loops.chunk_size,
+            true,
+        )
     }
 
     pub fn cursor_v(&self) -> Result<Option<ChainCursor>> {
@@ -93,6 +115,26 @@ impl Ctx {
 
     pub fn set_cursor_v(&self, cursor: ChainCursor) -> Result<()> {
         self.plane.state.lock()?.data.devnet = Some(cursor);
+        Ok(())
+    }
+
+    /// The follow cursor: the highest source block composed onto V (absent
+    /// until `reconcile` anchors it at the pin).
+    pub fn source_last_block(&self) -> Result<Option<u64>> {
+        Ok(self.plane.state.lock()?.data.source_last_block)
+    }
+
+    pub fn source_last_hash(&self) -> Result<Option<alloy_primitives::B256>> {
+        Ok(self.plane.state.lock()?.data.source_last_hash)
+    }
+
+    pub fn set_source_last_block(&self, n: u64) -> Result<()> {
+        self.plane.state.lock()?.data.source_last_block = Some(n);
+        Ok(())
+    }
+
+    pub fn set_source_last_hash(&self, hash: alloy_primitives::B256) -> Result<()> {
+        self.plane.state.lock()?.data.source_last_hash = Some(hash);
         Ok(())
     }
 }

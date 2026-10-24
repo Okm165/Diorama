@@ -1,19 +1,42 @@
-//! The spine's divergence seams: the five decisions that may differ per
-//! profile, hidden so the pipeline itself has none.
+//! The spine's divergence seams: the decisions that may differ per mirror,
+//! each an interface the shared pipeline consumes — so the pipeline itself has
+//! none.
 //!
-//! 1. the diff source ([`crate::diff::DiffComposer`]);
-//! 2. the reset signal ([`ResetDetector`]: cursor hash on both anvils, the
-//!    venue's fork-instance canary lands here too);
-//! 3. the clock rule ([`ClockPolicy`]);
-//! 4. block production ([`MinePolicy`]);
-//! 5. probe cadence ([`ProbeSchedule`]).
+//! 1. the truth followed ([`crate::source::Source`]);
+//! 2. the diff source ([`crate::diff::DiffComposer`]);
+//! 3. the reset signal ([`ResetDetector`]);
+//! 4. the clock rule ([`ClockPolicy`]);
+//! 5. block production ([`MinePolicy`]);
+//! 6. probe cadence ([`ProbeSchedule`]).
 //!
-//! The policies are data (the profile's config maps to them); the detector is
-//! a trait because it performs reads.
+//! [`Mirror`] bundles them: one object per mirror, implemented in that
+//! mirror's own folder (`crates/mainnet`, `crates/venue`), holding the
+//! profile's wiring and reading its label, source, composer, reset detector
+//! and [`Policies`]. The policies are data (config maps to them); the
+//! detector is a trait because it performs reads.
+use crate::diff::DiffComposer;
 use crate::error::Result;
-use crate::source::Fut;
-use crate::state::ChainCursor;
+use crate::shared::Shared;
+use crate::source::{Fut, Source};
+use crate::state::StateFile;
 use mirror_anvil::Rpc;
+use std::sync::Arc;
+
+/// One mirror's divergence bundle — the single object the engines read
+/// everything profile-specific through. The implementations live in the
+/// mirror folders; this crate never names one.
+pub trait Mirror: Send + Sync {
+    /// The chain tag facts and drift entries carry ("t" | "v").
+    fn label(&self) -> &'static str;
+    /// The truth the mirror follows.
+    fn source(&self) -> &Arc<dyn Source>;
+    /// The diff seam: what the applier composes from.
+    fn composer(&self) -> &Arc<dyn DiffComposer>;
+    /// The reset seam: how a chain reset is witnessed.
+    fn reset(&self) -> &Arc<dyn ResetDetector>;
+    /// The profile's decisions, as data.
+    fn policies(&self) -> Policies;
+}
 
 /// What a reset check saw — the witness, not just a boolean: the evidence
 /// decides what an operator reads and what the fact stream reports.
@@ -30,25 +53,40 @@ pub enum ResetSignal {
         expected: alloy_primitives::B256,
         found: Option<alloy_primitives::B256>,
     },
+    /// The recorded chain instance's canary word is gone or foreign (the
+    /// venue's witness: heights below a fork's pin resolve to the source, so
+    /// cursor hashes are unsound there — ADR 0002).
+    PinMismatch {
+        expected: Option<u64>,
+        found: Option<u64>,
+    },
 }
 
-/// How a chain reset is detected.
+/// How a chain reset is detected. The detector is self-sufficient: it holds
+/// the state whose expectation it validates (the cursor or the recorded
+/// instance), reads the chain, and answers with the witness.
 ///
-/// `CursorHash`: the cursor's block must carry its recorded hash, and a cursor
-/// below the fork base is stale by position (the base proves it — the hash
-/// read would forward a pre-pin request to the fork source). `Canary`: the
-/// venue's one storage word must read back the recorded pin (heights below a
-/// fork's pin resolve to the source, so hashes are unsound there — ADR 0002).
+/// `CursorHash` (the ethereum mirror): the cursor's block must carry its
+/// recorded hash, and a cursor below the fork base is stale by position (the
+/// base proves it — the hash read would forward a pre-pin request to the fork
+/// source). `PinCanary` (the venue mirror, in its folder): the recorded
+/// instance's storage word must read back its pin.
 pub trait ResetDetector: Send + Sync {
-    fn detect<'a>(
-        &'a self,
-        target: &'a Rpc,
-        cursor: &'a ChainCursor,
-    ) -> Fut<'a, Result<ResetSignal>>;
+    fn detect<'a>(&'a self, target: &'a Rpc) -> Fut<'a, Result<ResetSignal>>;
 }
 
-/// The cursor-hash detector (both anvils; the venue adds its canary beside it).
-pub struct CursorHash;
+/// The cursor-hash detector: the cursor's block must carry its recorded hash,
+/// and a cursor below the chain's fork base is stale by position.
+pub struct CursorHash {
+    /// The cursor state (the plane's state file) the check reads.
+    pub state: Shared<StateFile>,
+}
+
+impl CursorHash {
+    pub fn new(state: Shared<StateFile>) -> Self {
+        Self { state }
+    }
+}
 
 /// Is the cursor below the chain's fork base? A re-pin moves the base past the
 /// cursor, so the cursor points at blocks the current chain never carried —
@@ -59,12 +97,12 @@ pub fn below_fork_base(cursor_block: u64, base: Option<u64>) -> bool {
 }
 
 impl ResetDetector for CursorHash {
-    fn detect<'a>(
-        &'a self,
-        target: &'a Rpc,
-        cursor: &'a ChainCursor,
-    ) -> Fut<'a, Result<ResetSignal>> {
+    fn detect<'a>(&'a self, target: &'a Rpc) -> Fut<'a, Result<ResetSignal>> {
         Box::pin(async move {
+            // No cursor: nothing to invalidate (the fresh-chain path).
+            let Some(cursor) = self.state.lock()?.data.devnet.clone() else {
+                return Ok(ResetSignal::Steady);
+            };
             let base = target.fork_block().await?;
             if below_fork_base(cursor.block, base) {
                 return Ok(ResetSignal::BaseMoved {
@@ -89,9 +127,11 @@ impl ResetDetector for CursorHash {
 /// The clock rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockPolicy {
-    /// The applied block's context is the source's: timestamp + offset,
-    /// clamped to last+1 so a deliberate jump can never go non-monotonic.
-    AlignToSource { offset_seconds: u64 },
+    /// The applied block's context is the source's: timestamp + the plane's
+    /// live offset, clamped to last+1 so a deliberate jump can never go
+    /// non-monotonic. (The offset is runtime state — `/admin/time` — so it is
+    /// read from the plane, not declared here.)
+    AlignToSource,
     /// The target's own clock (the venue; nothing re-aligns it).
     Native,
 }

@@ -12,9 +12,11 @@ profile = "venue"
 [chains.venue]
 # The chain id (999) and the canonical HyperEVM addresses are code facts;
 # only the deployment's fork source is data. V (the fork-mode anvil) pins at
-# this source's `latest` - the source is archive-deep (measured: ≥5M blocks),
-# so there is no fork-offset policy and no follow machinery. The API URLs are
-# the simulator's market plane (REST snapshots + WS pushes).
+# this source's `latest`, then **follows** it: each pass composes the window
+# since the last composed source block (the poll composer over the window's
+# envelopes + the declared closures, `[services.engine.closures]` below) and
+# lands the changed keys on V under the COW filter. The API URLs are the
+# simulator's market plane (REST snapshots + WS pushes).
 kind = "hyperliquid"
 source_url = "${HL_RPC_URL}"
 api_url = "https://api.hyperliquid.xyz"

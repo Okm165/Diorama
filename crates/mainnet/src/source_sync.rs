@@ -156,41 +156,74 @@ enum SlotOutcome {
 
 /// Deliver one slot's payload: skip empty/missed/executed slots, report a gap,
 /// submit `newPayload` and advance the forkchoice.
-async fn deliver_slot(
+/// A slot's next payload to deliver, with everything the engine call needs —
+/// gathered in one place so `deliver_slot` is just the three-way dispatch.
+struct NextSlot {
+    number: u64,
+    payload: alloy_rpc_types_engine::ExecutionPayloadV3,
+    versioned_hashes: Vec<B256>,
+    parent_root: B256,
+    requests: Option<alloy_eips::eip7685::Requests>,
+    payload_hash: B256,
+}
+
+/// What one slot amounts to: nothing to do, a gap, or the next payload.
+enum SlotStep {
+    Skip,
+    Gap { number: u64 },
+    Deliver(Box<NextSlot>),
+}
+
+/// Classify the slot: a missed slot, an empty slot, and an already-executed
+/// payload all mean "skip"; a number ahead of the next expected one is a gap.
+async fn next_payload(
     beacon: &BeaconClient,
-    engine: &crate::engine_api::EngineClient,
     slot: u64,
     el_head: u64,
     delivered: usize,
-) -> Result<SlotOutcome> {
+) -> Result<SlotStep> {
     let Some(block) = beacon.block_by_slot(slot).await? else {
-        return Ok(SlotOutcome::Skipped); // missed slot
+        return Ok(SlotStep::Skip); // missed slot
     };
     let body = &block.data.message.body;
     let Some(payload) = body.payload() else {
-        return Ok(SlotOutcome::Skipped); // no payload in this slot
+        return Ok(SlotStep::Skip); // no payload in this slot
     };
     let number = payload.payload_inner.payload_inner.block_number;
     if number <= el_head {
-        return Ok(SlotOutcome::Skipped); // already executed
+        return Ok(SlotStep::Skip); // already executed
     }
     if number != el_head + delivered as u64 + 1 {
-        return Ok(SlotOutcome::Gap { number });
+        return Ok(SlotStep::Gap { number });
     }
-    let payload_hash = payload.payload_inner.payload_inner.block_hash;
+    Ok(SlotStep::Deliver(Box::new(NextSlot {
+        number,
+        payload: payload.clone(),
+        versioned_hashes: body.versioned_hashes(),
+        parent_root: block.data.message.parent_root,
+        requests: body.requests(),
+        payload_hash: payload.payload_inner.payload_inner.block_hash,
+    })))
+}
+
+/// Hand the payload to the engine: `newPayload` then `forkchoiceUpdated`.
+async fn submit_payload(
+    engine: &crate::engine_api::EngineClient,
+    next: &NextSlot,
+) -> Result<()> {
     let status = engine
         .new_payload(
-            payload,
-            &body.versioned_hashes(),
-            block.data.message.parent_root,
-            body.requests().as_ref(),
+            &next.payload,
+            &next.versioned_hashes,
+            next.parent_root,
+            next.requests.as_ref(),
         )
         .await?;
     match &status.status {
         PayloadStatusEnum::Valid | PayloadStatusEnum::Accepted => {}
         other => {
             return Err(Error::PayloadRejected {
-                number,
+                number: next.number,
                 status: other.as_str().to_string(),
                 message: other.validation_error().unwrap_or_default().to_string(),
             })
@@ -198,11 +231,27 @@ async fn deliver_slot(
     }
     engine
         .forkchoice_updated(&ForkchoiceState {
-            head_block_hash: payload_hash,
+            head_block_hash: next.payload_hash,
             safe_block_hash: B256::ZERO,
             finalized_block_hash: B256::ZERO,
         })
         .await?;
-    tracing::debug!(block = number, slot, "top-up delivered");
+    Ok(())
+}
+
+async fn deliver_slot(
+    beacon: &BeaconClient,
+    engine: &crate::engine_api::EngineClient,
+    slot: u64,
+    el_head: u64,
+    delivered: usize,
+) -> Result<SlotOutcome> {
+    let next = match next_payload(beacon, slot, el_head, delivered).await? {
+        SlotStep::Skip => return Ok(SlotOutcome::Skipped),
+        SlotStep::Gap { number } => return Ok(SlotOutcome::Gap { number }),
+        SlotStep::Deliver(next) => next,
+    };
+    submit_payload(engine, &next).await?;
+    tracing::debug!(block = next.number, slot, "top-up delivered");
     Ok(SlotOutcome::Delivered)
 }

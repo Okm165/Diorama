@@ -12,10 +12,9 @@ use crate::metrics::MainnetMetrics;
 use crate::rpc::Rpc;
 use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
 use mirror_devnet::admin::AdminSurface;
-use mirror_devnet::diff::{DiffComposer, WatchSet};
+use mirror_devnet::diff::WatchSet;
 use mirror_devnet::plane::Plane;
-use mirror_devnet::source::Source;
-use mirror_devnet::spine::ResetDetector;
+use mirror_devnet::spine::Mirror;
 use mirror_devnet::state::ChainCursor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,12 +31,10 @@ pub struct Ctx {
     pub(crate) engine: EngineSection,
     pub(crate) reth: Rpc,
     pub(crate) anvil_t: Rpc,
-    /// The source seam: reth reads (BALs, traces, the state window).
-    pub(crate) source: Arc<dyn Source>,
-    /// The diff seam: the native BAL first, the trace fallback per block.
-    pub(crate) composer: Arc<dyn DiffComposer>,
-    /// The reset seam: the cursor-hash detector (both anvils).
-    pub(crate) reset: Arc<dyn ResetDetector>,
+    /// The mirror bundle: reth-as-source, the BAL composer, the cursor-hash
+    /// reset detector, and the policies (see `profile.rs` — the divergence
+    /// set, in the profile's own folder).
+    pub(crate) mirror: Arc<dyn Mirror>,
     /// The beacon-API client for the top-up loop (EIP-8379): the local CL.
     pub(crate) beacon: BeaconClient,
     /// Engine API client (reth authrpc) for the top-up loop; None when disabled
@@ -76,10 +73,7 @@ impl Ctx {
         let drift = Drift::new(engine_section.state_dir.join("drift.jsonl"))?;
         let beacon = BeaconClient::new(engine_section.beacon.urls.clone())?;
         let reth = Rpc::new(reth_url, timeout)?;
-        let source: Arc<dyn Source> = Arc::new(crate::source::RethSource::new(reth.clone()));
-        let composer: Arc<dyn DiffComposer> =
-            Arc::new(crate::compose::RethComposer::new(reth.clone()));
-        let reset: Arc<dyn ResetDetector> = Arc::new(mirror_devnet::spine::CursorHash);
+        let mirror = crate::profile::build(&engine_section, plane.state.clone(), &reth)?;
         let engine_api = match (
             &engine_section.source_sync.engine_url,
             &engine_section.source_sync.jwt_path,
@@ -97,9 +91,7 @@ impl Ctx {
             engine: engine_section,
             reth,
             anvil_t: Rpc::new(anvil_t_url, timeout)?,
-            source,
-            composer,
-            reset,
+            mirror,
             beacon,
             engine_api,
             watch,
@@ -121,22 +113,22 @@ impl Ctx {
         Ok(())
     }
 
-    pub fn set_reth_last_hash(&self, hash: alloy_primitives::B256) -> Result<()> {
-        self.plane.state.lock()?.data.reth_last_hash = Some(hash);
+    pub fn set_source_last_hash(&self, hash: alloy_primitives::B256) -> Result<()> {
+        self.plane.state.lock()?.data.source_last_hash = Some(hash);
         Ok(())
     }
 
-    pub fn set_reth_last_block(&self, n: u64) -> Result<()> {
-        self.plane.state.lock()?.data.reth_last_block = Some(n);
+    pub fn set_source_last_block(&self, n: u64) -> Result<()> {
+        self.plane.state.lock()?.data.source_last_block = Some(n);
         Ok(())
     }
 
-    pub fn reth_last_block(&self) -> Result<Option<u64>> {
-        Ok(self.plane.state.lock()?.data.reth_last_block)
+    pub fn source_last_block(&self) -> Result<Option<u64>> {
+        Ok(self.plane.state.lock()?.data.source_last_block)
     }
 
-    pub fn reth_last_hash(&self) -> Result<Option<alloy_primitives::B256>> {
-        Ok(self.plane.state.lock()?.data.reth_last_hash)
+    pub fn source_last_hash(&self) -> Result<Option<alloy_primitives::B256>> {
+        Ok(self.plane.state.lock()?.data.source_last_hash)
     }
 
     /// The devnet admin surface, wired to this engine's chain and re-sync
@@ -147,7 +139,7 @@ impl Ctx {
     pub fn admin(&self) -> AdminSurface<'_> {
         self.plane.admin(
             &self.anvil_t,
-            self.source.as_ref(),
+            self.mirror.source().as_ref(),
             self.engine.loops.chunk_size,
             false,
         )

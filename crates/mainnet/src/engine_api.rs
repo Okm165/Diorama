@@ -114,6 +114,30 @@ impl EngineClient {
         method: &'static str,
         params: &impl Serialize,
     ) -> Result<Box<RawValue>, EngineApiError> {
+        let request = self.request_body(method, params)?;
+        let resp = self
+            .http
+            .post(&self.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", request.token))
+            .body(request.json)
+            .send()
+            .await
+            .map_err(|source| EngineApiError::Transport { method, source })?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|source| EngineApiError::Transport { method, source })?;
+        parse_response(method, status, &text)
+    }
+
+    /// The envelope's pieces: the signed JWT and the serialized request.
+    fn request_body(
+        &self,
+        method: &'static str,
+        params: &impl Serialize,
+    ) -> Result<EngineRequest, EngineApiError> {
         let token = self
             .secret
             .encode(&Claims::with_current_timestamp())
@@ -123,41 +147,10 @@ impl EngineClient {
         let body = Request::new(method.to_string(), Id::Number(1), params)
             .serialize()
             .map_err(|source| EngineApiError::Encode { method, source })?;
-        let resp = self
-            .http
-            .post(&self.url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
-            .body(body.take_request().get().to_string())
-            .send()
-            .await
-            .map_err(|source| EngineApiError::Transport { method, source })?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|source| EngineApiError::Transport { method, source })?;
-        match serde_json::from_str::<ResponsePacket>(&text) {
-            Ok(ResponsePacket::Single(response)) => match response.payload {
-                ResponsePayload::Success(result) => Ok(result),
-                ResponsePayload::Failure(payload) => Err(EngineApiError::Rpc { method, payload }),
-            },
-            Ok(ResponsePacket::Batch(_)) => Err(EngineApiError::Decode {
-                method,
-                body: mirror_anvil::truncate(&text, 200).to_string(),
-                source: serde_json::Error::custom("a batch answer to a single call"),
-            }),
-            Err(_) if !status.is_success() => Err(EngineApiError::Status {
-                method,
-                status: status.as_u16(),
-                body: mirror_anvil::truncate(&text, 300).to_string(),
-            }),
-            Err(source) => Err(EngineApiError::Decode {
-                method,
-                body: mirror_anvil::truncate(&text, 200).to_string(),
-                source,
-            }),
-        }
+        Ok(EngineRequest {
+            token,
+            json: body.take_request().get().to_string(),
+        })
     }
 
     /// Parse a raw `result` into its typed shape, naming the method on a
@@ -223,5 +216,42 @@ impl EngineClient {
             .await?;
         let updated: ForkchoiceUpdated = Self::parse("engine_forkchoiceUpdatedV3", &result)?;
         Ok(updated.payload_status)
+    }
+}
+
+/// The envelope's pieces: the signed JWT and the serialized request body.
+struct EngineRequest {
+    token: String,
+    json: String,
+}
+
+/// Parse one answer. The boundary rule: a body that parses as a JSON-RPC
+/// answer *is* reth's answer whatever the HTTP status; a non-body error names
+/// the status and the truncated body.
+fn parse_response(
+    method: &'static str,
+    status: reqwest::StatusCode,
+    text: &str,
+) -> Result<Box<RawValue>, EngineApiError> {
+    match serde_json::from_str::<ResponsePacket>(text) {
+        Ok(ResponsePacket::Single(response)) => match response.payload {
+            ResponsePayload::Success(result) => Ok(result),
+            ResponsePayload::Failure(payload) => Err(EngineApiError::Rpc { method, payload }),
+        },
+        Ok(ResponsePacket::Batch(_)) => Err(EngineApiError::Decode {
+            method,
+            body: mirror_anvil::truncate(text, 200).to_string(),
+            source: serde_json::Error::custom("a batch answer to a single call"),
+        }),
+        Err(_) if !status.is_success() => Err(EngineApiError::Status {
+            method,
+            status: status.as_u16(),
+            body: mirror_anvil::truncate(text, 300).to_string(),
+        }),
+        Err(source) => Err(EngineApiError::Decode {
+            method,
+            body: mirror_anvil::truncate(text, 200).to_string(),
+            source,
+        }),
     }
 }

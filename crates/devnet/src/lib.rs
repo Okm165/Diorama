@@ -74,6 +74,7 @@ mod design_assertions {
         is_normal::<crate::spine::ProbeSchedule>();
         is_normal::<crate::spine::Policies>();
         is_normal::<crate::source::Capabilities>();
+        is_normal::<crate::source::RawSource>();
         is_normal::<crate::facts::Fact>();
         is_normal::<crate::facts::Notice>();
         is_normal::<crate::facts::FactBus>();

@@ -56,7 +56,8 @@ pub(crate) struct ProbeRecord {
 ///
 /// `journal` records the write's before-value so `/admin/rewind` can undo it:
 /// `Some((journal, block))` on a deployment whose journal is its *own* writes
-/// (the venue — it has no parent stream to journal), `None` on the mainnet
+/// (the venue — its follow windows are source state, not journaled devnet
+/// writes), `None` on the mainnet
 /// (its journal is the applier's parent before-values; mixing engine writes in
 /// would change what a rewind means).
 pub async fn deal(
@@ -234,6 +235,30 @@ fn deal_sentinel() -> U256 {
 /// Returns the found slot (with its hex index), the first four probe records
 /// (the error shape carries them) and the first probe *fault*: a probe that
 /// could not run is not "this is not the balance slot" (boundary-discipline).
+/// One candidate slot: override `token`'s slot `idx` with the full-width
+/// sentinel word and re-run `balanceOf`. The override is alloy's own
+/// state-override model — anvil rejects quantized (short) hex here (measured).
+/// Returns the raw answer, or the read fault.
+async fn probe_candidate(
+    target: &Rpc,
+    token: Address,
+    data: &Bytes,
+    idx: B256,
+    sentinel: U256,
+) -> (Option<Bytes>, Option<mirror_anvil::Error>) {
+    let over = StateOverride::from_iter([(
+        token,
+        AccountOverride {
+            state_diff: Some([(idx, B256::from(sentinel))].into_iter().collect()),
+            ..Default::default()
+        },
+    )]);
+    match target.call_with_override(token, data, &over).await {
+        Ok(probe) => (Some(probe), None),
+        Err(e) => (None, Some(e)),
+    }
+}
+
 async fn discover_balance_slot(
     target: &Rpc,
     req: &DealRequest,
@@ -252,24 +277,11 @@ async fn discover_balance_slot(
     for slot in 0u64..16 {
         let idx = mirror_anvil::mapping_slot(to, U256::from(slot));
         let idx_hex = format!("0x{idx:064x}");
-        // The override is alloy's own state-override model: a `stateDiff`
-        // entry keyed by the full-width 32-byte slot, valued by the full-width
-        // sentinel word — anvil rejects quantized (short) hex here (measured).
-        let over = StateOverride::from_iter([(
-            token,
-            AccountOverride {
-                state_diff: Some([(B256::from(idx), B256::from(sentinel))].into_iter().collect()),
-                ..Default::default()
-            },
-        )]);
-        let probe = match target.call_with_override(token, data, &over).await {
-            Ok(probe) => Some(probe),
-            Err(e) => {
-                tracing::warn!(slot = %idx_hex, error = %e, "deal probe failed");
-                fault = Some(e);
-                None
-            }
-        };
+        let (probe, err) = probe_candidate(target, token, data, B256::from(idx), sentinel).await;
+        if let Some(e) = err {
+            tracing::warn!(slot = %idx_hex, error = %e, "deal probe failed");
+            fault = Some(e);
+        }
         if probes.len() < 4 {
             probes.push(ProbeRecord {
                 slot: idx_hex.clone(),

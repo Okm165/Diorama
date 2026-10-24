@@ -309,7 +309,8 @@ curl -s -X POST localhost:8091/control/deal \
   deal marks the slot it writes, so `shadowed_slots` grows with it.
 - **The engine is V's block producer**: the driver mines a non-empty pool once
   per pass (`venue_mined_blocks_total`). T's producer is the applier (one block
-  per applied parent block), but V has no parent stream — without the mine the
+  per applied parent block), while V's source windows land as cheatcode writes
+  (no block per window) — without the mine the
   bridge's boot txs sit in the pool forever (measured: the attester install
   failed `… was not mined within 120s` on a chain nobody mined). An idle chain
   stays static; the harness's own `anvil_mine` calls are just extra (empty)
@@ -676,9 +677,11 @@ The behavioral checks, not just shapes:
 - **rewind semantics** (deliberate): T's journal holds the applier's
   parent-diff before-values, so `/admin/rewind` on T undoes *applied parent
   blocks*; a T-side engine write (the deal faucet) is undone by the hand-back
-  (`/admin/shadow {clear}`), which re-syncs the source's value. On V there is
-  no parent stream, so the journal holds the engine's own writes and one
-  rewind covers both (measured: a V rewind restores a deal's before-value,
+  (`/admin/shadow {clear}`), which re-syncs the source's value. On V the
+  journal holds the engine's own writes (the follow's source windows are not
+  journaled: a rewind restores devnet writes, never source history), so one
+  rewind covers the deal's before-value
+  (measured: a V rewind restores a deal's before-value,
   `restored_values: 1`). Divergences are recorded, never fatal — no run
   freezes itself.
 
