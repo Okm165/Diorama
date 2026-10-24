@@ -76,7 +76,7 @@ after are shared code.
 
 | capability | Mainnet Mirror (T) | Venue Mirror (V) | shared spine |
 |---|---|---|---|
-| **mirror the parent chain** | reth local full node; the native BAL rung (`eth_getBlockAccessList`, prestateTracer fallback); one T block per applied parent block | HL public API; the synthesized BAL rung (envelopes → touches → declared closures → reads) applied to V's latest state | `Source` (both rungs), `bal::compose`, the applier/follow sequences, `cow::filter_bal`, the journal, the cursor state |
+| **mirror the parent chain** | reth local full node; the native BAL rung (`eth_getBlockAccessList`, prestateTracer fallback); one T block per applied parent block | HL public API; the synthesized BAL rung (envelopes → touches → declared closures → reads) applied to V's latest state | `Source` (both rungs), `bal::plan` (compose → COW → flatten), the applier/follow sequences, the journal, the cursor state |
 | **modify market state** | `/admin/deal` (mint balances), the feed bridge (live prices → mock aggregators), fixture deploys (`anvil_setCode`) | `/admin/deal` on V's tokens, the venue simulator's control API (orders, positions, accounts, prices) | `deal`, the shadow registry (COW), `anvil_setStorageAt`/`setCode` |
 | **minted liquidity** | `deal` mints ERC20 balances at the discovered slot; the CCTP bridge mints USDC via relay | `deal` mints on V; the sim mints perp/spot balances through its account plane | the same deal path — the mint is the devnet's own write, never the parent's |
 | **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `full_sweep`), configured probes per block, the drift log | live parity (applied keys re-read vs the composed BAL), at-pin probes, the uncovered-emitter audit | `ProbeRunner`, `bal::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`) |
@@ -85,7 +85,8 @@ after are shared code.
 
 The remaining divergences are exactly the policy data
 (`mirror_devnet::spine::Policies`: clock, mining, probe cadence, prepend
-rounds, gap guard) — declared per mirror, read by the shared sequences.
+rounds — `None` on V, which never prepends — and the gap guard) — declared per
+mirror, read by the shared sequences.
 
 Per applied block on T the engine does, in order:
 

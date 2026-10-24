@@ -4,8 +4,8 @@ Three layers, each runnable on demand:
 
 | Layer | Command | Needs | Covers |
 |---|---|---|---|
-| Unit | `make test-engine` (cargo test) | nothing | pure logic: BAL flattening, padding, COW granularity, journal, cursor/rebase rules, KZG proof repair, Engine API request encoding |
-| Self test | `make mainnet-selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (replay + verify + diff apply + sampled parity) |
+| Unit | `make test-engine` (cargo test) | nothing | pure logic: BAL composition (`bal_from_writes` through the spec validator) and flattening, padding, COW granularity, journal, cursor/rebase rules, the shared wire/HTTP conventions |
+| Self test | `make mainnet-selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (compose the parent's BAL → COW filter → apply → sampled storage parity) |
 | Smoke | `make mainnet-smoke` | the deployed stack | service health + parity spot check on T's head vs reth |
 | Scenario | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **T** (the 11 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
 | Product sim | `make mainnet-product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
@@ -23,7 +23,9 @@ each module documents:
   `-32602`), the batch body shapes, the wire-error predicates (content
   refusals are never retryable; unknown upstream codes stay verbatim), the
   trace flattening (`prestateTracer{diffMode}` — the fallback shape measured
-  on anvil 1.8.5; a slot changed to zero is still a write).
+  on anvil 1.8.5; a slot changed to zero is still a write; unchanged fields
+  are not), the BAL composer (`bal_from_writes` round-trips through the
+  spec's own validator; `flatten_bal` takes the post-states), the backoff cap.
 - `mirror-devnet` — COW granularity (storage per slot, account fields as one
   unit, other slots keep syncing; fixture addresses are owned whole), the
   journal round-trip + ring + typed faults on malformed entries, the cursor
@@ -39,13 +41,15 @@ each module documents:
   sections — one instance file, many readers, each pod carrying only its own
   wiring), `MIRROR__*` overrides, profile coherence, fork-offset bounds; the
   real instance files load and check.
-- `mirror-mainnet` — BAL flattening (post-states, last-change-wins), the
-  KZG sidecar path (build → validate → corrupt → reject; the proof repair is
-  correct, so "invalid KZG proof" from a source means the source's data is
-  bad), the Engine API execution-request encoding (type-prefixed SSZ
-  elements, empty types excluded), the versioned-hash mapping, the feed
-  bridge's pause rule (`step` never overwrites a scenario; a publish in
-  flight is not a scenario write).
+- `mirror-mainnet` — the feed bridge's pause rule (`step` never overwrites a
+  scenario; a publish in flight is not a scenario write; a stale pending
+  publish is re-sent), the step wrapper's error chain (the chain walk stays
+  readable), the bounded error size, the shared HTTP status mapping (one row
+  per error variant, all in one place), the metric set's disjointness
+  (profile, admin and bridge series do not overlap). The applier's own path —
+  BAL flattening, the blob-sidecar and Engine-API encodings — is exercised
+  end-to-end by the self test and the deployed stack, not by unit tests
+  here.
 - `mirror-venue` — the served identity, funding hourly on the oracle,
   liquidation at the mark + the isolated `liq_price` formula, the wire shapes
   (requests omit null optionals; the mixed-case spotMeta parses), the
