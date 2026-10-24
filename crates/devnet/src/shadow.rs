@@ -178,9 +178,8 @@ impl Shadow {
         // iterating the same maps).
         let mut drop_slots: Vec<(Address, U256)> = Vec::new();
         for (address, set) in self.slots.iter() {
-            let known = self.values.get(address);
             for slot in set.iter() {
-                if known.map(|m| !m.contains_key(slot)).unwrap_or(true) {
+                if self.unvalued_slot(address, slot) {
                     drop_slots.push((*address, *slot));
                 }
             }
@@ -192,6 +191,14 @@ impl Shadow {
         }
         self.slots.retain(|_, set| !set.is_empty());
         drop_slots.len()
+    }
+
+    /// A slot mark with no recorded value: it cannot restore anything, so it
+    /// is dropped (the same rule the accounts get below).
+    fn unvalued_slot(&self, address: &Address, slot: &U256) -> bool {
+        self.values
+            .get(address)
+            .is_none_or(|m| !m.contains_key(slot))
     }
 
     /// Drop whole-account marks with no recorded value (the same rule as the

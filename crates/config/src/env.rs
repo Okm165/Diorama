@@ -44,12 +44,8 @@ fn expand_str(s: &str, vars: &[(String, String)], unresolved: &mut Vec<String>) 
         match after.find('}') {
             Some(end) if !after[..end].is_empty() => {
                 let name = &after[..end];
-                if let Some((_, value)) = vars.iter().find(|(key, _)| key == name) {
-                    out.push_str(value);
-                } else {
-                    out.push_str(&rest[start..start + 2 + end + 1]);
-                    unresolved.push(name.to_string());
-                }
+                let reference = &rest[start..start + 2 + end + 1];
+                out.push_str(&resolve(name, reference, vars, unresolved));
                 rest = &after[end + 1..];
             }
             Some(end) => {
@@ -65,6 +61,22 @@ fn expand_str(s: &str, vars: &[(String, String)], unresolved: &mut Vec<String>) 
     }
     out.push_str(rest);
     out
+}
+
+/// One `${NAME}` reference: the value when `vars` carries it, else the
+/// reference verbatim with the name reported unresolved (the loader keeps it
+/// for the per-pod `require_resolved` pass to refuse by name).
+fn resolve(
+    name: &str,
+    reference: &str,
+    vars: &[(String, String)],
+    unresolved: &mut Vec<String>,
+) -> String {
+    if let Some((_, value)) = vars.iter().find(|(key, _)| key == name) {
+        return value.clone();
+    }
+    unresolved.push(name.to_string());
+    reference.to_string()
 }
 
 /// The per-pod wiring contract (plan §19.4): one instance file, many readers
