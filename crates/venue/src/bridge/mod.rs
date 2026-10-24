@@ -144,8 +144,14 @@ impl Bridge {
             }
         }
 
-        // CoreWriter: top-level txs plus contract-internal calls.
-        let calls = self.corewriter_calls(n, &block).await?;
+        // CoreWriter: top-level txs plus contract-internal calls. The Core
+        // sorts a block's actions by category before applying them (docs:
+        // non-order actions, then cancels, then actions that send Gtc or Ioc
+        // orders; within a category, the proposed order) — the bridge
+        // reproduces that order. The consensus batches inside a block are not
+        // visible from the EVM side; one batch per block is the usual case.
+        let mut calls = self.corewriter_calls(n, &block).await?;
+        calls.sort_by_key(|(_, action)| action_rank(action));
         for (caller, action) in calls {
             self.apply_action(caller, action, &tokens).await?;
         }
@@ -520,6 +526,22 @@ impl Bridge {
     }
 }
 
+/// The Core's intra-block action order (docs: "Within a block, actions are
+/// sorted within each consensus batch as 1. Actions that do not send GTC or
+/// IOC orders to any book 2. Cancels 3. Actions that send at least one GTC or
+/// IOC … Within each category, actions are sorted in the order they were
+/// proposed"). An `Alo` (post-only, tif byte 1) cannot match, so it sorts
+/// with the non-order actions; `Gtc`/`Ioc` (bytes 2/3) are the book-sending
+/// category. `sort_by_key` is stable, so each category keeps the proposed
+/// order.
+fn action_rank(action: &CoreAction) -> u8 {
+    match action {
+        CoreAction::CancelByOid { .. } | CoreAction::CancelByCloid { .. } => 1,
+        CoreAction::LimitOrder { tif, .. } if *tif == 2 || *tif == 3 => 2,
+        _ => 0,
+    }
+}
+
 /// Collect CoreWriter calls from a trace tree (frame order = execution order).
 fn collect_internal(trace: &TraceResult, out: &mut Vec<(Address, CoreAction)>) {
     if let Some(GethTrace::CallTracer(frame)) = trace.success() {
@@ -658,5 +680,45 @@ mod tests {
         assert_eq!(out[0].0, Address::repeat_byte(0x02), "attributed to the caller");
         assert_eq!(out[0].1.id(), 7);
         assert_eq!(out[1].1.id(), 7);
+    }
+    /// The Core's intra-block action order (docs): non-order actions, then
+    /// cancels, then Gtc/Ioc orders — a stable sort, so each category keeps
+    /// the proposed order. An Alo is post-only and sorts with the non-orders.
+    #[test]
+    fn intra_block_actions_sort_by_category() {
+        let cancel = |oid: u64| CoreAction::CancelByOid { asset: 0, oid };
+        let order = |tif: u8, cloid: u128| CoreAction::LimitOrder {
+            asset: 0,
+            is_buy: true,
+            limit_px: 100,
+            sz: 1,
+            reduce_only: false,
+            tif,
+            cloid,
+        };
+        let mut calls = [
+            order(2, 1),
+            cancel(1),
+            CoreAction::UsdClassTransfer { ntl: 1, to_perp: true },
+            order(1, 2),
+            order(3, 3),
+            cancel(2),
+        ];
+        calls.sort_by_key(action_rank);
+        assert!(
+            matches!(calls[0], CoreAction::UsdClassTransfer { .. }),
+            "a non-order action leads"
+        );
+        assert!(
+            matches!(calls[1], CoreAction::LimitOrder { tif: 1, .. }),
+            "the Alo is post-only: it sorts with the non-orders"
+        );
+        assert!(matches!(calls[2], CoreAction::CancelByOid { oid: 1, .. }));
+        assert!(matches!(calls[3], CoreAction::CancelByOid { oid: 2, .. }), "cancels keep the proposed order");
+        assert!(matches!(calls[4], CoreAction::LimitOrder { tif: 2, .. }));
+        assert!(
+            matches!(calls[5], CoreAction::LimitOrder { tif: 3, .. }),
+            "the book-sending orders close the block, in the proposed order"
+        );
     }
 }
