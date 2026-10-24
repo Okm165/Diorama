@@ -137,6 +137,12 @@ impl Bridge {
         let receipts = self.anvil_v.receipts(n).await?;
         for receipt in &receipts {
             for log in receipt.logs() {
+                // HYPE's boundary is the system contract's `Received` event
+                // (docs): a tx value sent to `0x2222…2` credits Core HYPE.
+                if log.address() == system::HYPE_SYSTEM {
+                    self.apply_hype_credit(log.data(), &tokens)?;
+                    continue;
+                }
                 let Some(transfer) = system::transfer_of(log.data()) else {
                     continue;
                 };
@@ -210,6 +216,29 @@ impl Bridge {
             amount = %amount,
             "bridge: EVM→Core credit"
         );
+        Ok(())
+    }
+
+    /// The EVM→Core HYPE credit (the system contract's `Received` event).
+    /// The emitter check is the address itself: only the real system contract
+    /// can emit a credit, never a look-alike.
+    fn apply_hype_credit(&self, data: &alloy_primitives::LogData, tokens: &[TokenInfo]) -> Result<()> {
+        let Some(token) = tokens.iter().find(|t| t.name == "HYPE") else {
+            return Ok(());
+        };
+        let Some((user, amount)) = system::hype_received_of(data, token) else {
+            return Ok(());
+        };
+        self.sim.credit_spot(
+            user,
+            TokenRef {
+                index: token.index,
+                coin: &token.name,
+            },
+            amount,
+        )?;
+        self.metrics.inc_credits();
+        tracing::info!(from = %user, amount = %amount, "bridge: EVM→Core HYPE credit");
         Ok(())
     }
 

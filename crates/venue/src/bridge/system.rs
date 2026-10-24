@@ -30,10 +30,19 @@ sol! {
     /// decoder and the selector — the wire format is never hand-rolled.
     event Transfer(address indexed from, address indexed to, uint256 value);
     function transfer(address to, uint256 amount) returns (bool);
+    /// HYPE's boundary (docs): the system contract's payable `receive()`
+    /// emits `Received(user, amount)` with `user = msg.sender`, so a tx value
+    /// sent to `0x2222…2` is the EVM→Core HYPE transfer.
+    event Received(address indexed user, uint256 amount);
 }
 
 /// The native HYPE system address (transfers as tx value; `Received` event).
 pub(crate) const HYPE_SYSTEM: Address = address!("2222222222222222222222222222222222222222");
+
+/// HYPE's EVM-side decimals: native, 18 (the docs' special case — HYPE is
+/// received as the gas token, not an ERC20, so the token registry's
+/// `evm_decimals` cannot answer for it).
+pub(crate) const HYPE_EVM_DECIMALS: i32 = 18;
 
 /// The system address for a token index.
 pub(crate) fn system_address(token_index: u64) -> Address {
@@ -142,6 +151,18 @@ pub(crate) fn transfer_calldata(to: Address, amount: U256) -> Bytes {
 /// look-alike or malformed event decodes to `None` instead of a credit.
 pub(crate) fn transfer_of(log: &LogData) -> Option<Transfer> {
     Transfer::decode_log_data_validate(log).ok()
+}
+
+/// The EVM→Core HYPE credit a system-contract `Received` log represents:
+/// the sender and the Core amount (18 EVM decimals floored to the token's
+/// Core wei — the docs' burn caveat applies to HYPE too).
+pub(crate) fn hype_received_of(log: &LogData, token: &TokenInfo) -> Option<(Address, Decimal)> {
+    let event = Received::decode_log_data_validate(log).ok()?;
+    let credited = floor_to_core_wei(
+        evm_to_human(event.amount, HYPE_EVM_DECIMALS)?,
+        token.wei_decimals,
+    )?;
+    Some((event.user, credited))
 }
 
 /// The EVM→Core credit an observed transfer represents: the sender, the
@@ -267,6 +288,35 @@ mod tests {
             vec![Transfer::SIGNATURE_HASH, from.into_word(), to.into_word()],
             value.to_be_bytes::<32>().to_vec().into(),
         )
+    }
+
+    /// One `Received` log as the system contract emits it: topic0 + the
+    /// indexed user + one data word.
+    fn received_log(user: Address, amount: U256) -> LogData {
+        LogData::new_unchecked(
+            vec![Received::SIGNATURE_HASH, user.into_word()],
+            amount.to_be_bytes::<32>().to_vec().into(),
+        )
+    }
+
+    /// The docs' HYPE path: a tx value to `0x2222…2` emits `Received(user,
+    /// amount)`; the credit floors 18 EVM decimals to the Core's 8.
+    #[test]
+    fn a_received_event_credits_hype() {
+        let hype = TokenInfo {
+            index: 150,
+            name: "HYPE".into(),
+            wei_decimals: 8,
+            evm: None,
+        };
+        let user = Address::repeat_byte(0xaa);
+        let log = received_log(user, U256::from(1_500_000_000_000_000_001u128));
+        let (credited_user, amount) = hype_received_of(&log, &hype).expect("decodes");
+        assert_eq!(credited_user, user);
+        assert_eq!(amount, Decimal::from_str("1.50000000").unwrap(), "18 decimals floored to Core wei");
+        // A malformed look-alike is not a credit.
+        let malformed = LogData::new_unchecked(vec![Received::SIGNATURE_HASH], Bytes::new());
+        assert!(hype_received_of(&malformed, &hype).is_none());
     }
 
     #[test]
