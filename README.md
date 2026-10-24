@@ -16,7 +16,7 @@ Consumers connect to **T** (or to reth for the pristine reference within its
 10,064-block state window). The engine composes each parent block's writes
 from the BAL (with a trace fallback), filters them through the copy-on-write
 registry, applies them, verifies with probes and sampled parity, records
-everything in `drift.jsonl`, and exposes Prometheus metrics plus an admin API
+every anomaly in `drift.jsonl`, and exposes Prometheus metrics plus an admin API
 (fork controls: rewind, pause/resume, clock offset, faucet, shadow marking).
 The one accepted limitation is storage proofs (fork blocks report
 `stateRoot = 0x0`).
@@ -62,23 +62,23 @@ layered config) and never each other. Detail:
 | chain | T (`anvil-t`, an Ethereum fork kept fresh by BAL diffs) | V (`anvil-v`, a HyperEVM fork kept fresh by the poll follow) |
 | engine | `mainnet-engine` | `venue-engine` |
 | venue plane | — | `venue-sim` (market + account planes, an `hl_mock` superset) |
-| admin | deal / shadow / epoch / time / rewind | deal / shadow / epoch / pause / resume |
+| admin | deal / shadow / epoch / rewind / probes / pause / resume / time / feed* | deal / shadow / epoch / rewind / probes / pause / resume |
 | namespace | `mainnet-mirror` | `venue-mirror` |
 ## Quickstart
 
 ```bash
-make ns secrets images   # namespace, StorageClass, JWT, pinned images into k3s
-make bootstrap           # + snapshot download (~50 min, 154 GB) + full stack
-make status              # pods, PVCs, engine status
-make smoke               # end-to-end checks (parity spot check included)
+make ns mainnet-secrets images  # namespace, StorageClass, JWT, pinned images into k3s
+make mainnet-bootstrap          # + snapshot download (~50 min, 154 GB) + full stack
+make status                     # pods, PVCs, engine status
+make mainnet-smoke              # end-to-end checks (parity spot check included)
 ```
 
 Venue Mirror (a second namespace in the same cluster; no snapshot needed):
 
 ```bash
 kubectl apply -k k8s/overlays/venue-mirror   # V + venue engine + venue-sim (namespace venue-mirror)
-make smoke-venue                             # V, engine, sim and bridge checks
-python3 scripts/daloc-sim.py --lane all      # the daloc use-case arc (42 gates; point the
+make venue-smoke                             # V, engine, sim and bridge checks
+python3 scripts/daloc-sim.py --lane all      # the daloc use-case arc (44 checks; point the
                                              # script's constants at your endpoints first)
 ```
 
@@ -101,24 +101,24 @@ snapshot download and Lighthouse's checkpoint sync (both documented in
 
 **Freshness check:** `mirror_reth_head` must advance with the chain. While the
 top-up catches up, `mirror_source_sync_gap_blocks` counts down; once it is 0,
-run `make repin` so T starts from a live, exact base. See
+run `make mainnet-repin` so T starts from a live, exact base. See
 [OPERATIONS → Source liveness](docs/OPERATIONS.md#source-liveness-self-contained).
 
 ## Common operations
 
 ```bash
-make logs-reth           # or logs-lighthouse / logs-engine / logs-anvil-t
-make selftest            # apply 3 real blocks' BALs against a public RPC (no reth needed)
-make product-sim         # the margin-product workflow end to end on T (leverage, live data, liquidation)
-make closure-check       # every market-data view's storage deps must be in the watchlist
-make pin-show            # resolved fork pin of T
-make repin               # re-pin drill: a fresh pin; engine rebases, a new epoch starts
+make logs-reth              # or logs-lighthouse / logs-engine / logs-anvil-t
+make mainnet-selftest       # apply 3 real blocks' BALs against a public RPC (no reth needed)
+make mainnet-product-sim    # the margin-product workflow end to end on T (leverage, live data, liquidation)
+make mainnet-closure-check  # every market-data view's storage deps must be in the watchlist
+make pin-show               # resolved fork pin of T
+make mainnet-repin          # re-pin drill: a fresh pin; engine rebases, a new epoch starts
 ```
 
 Venue Mirror counterparts:
 
 ```bash
-make smoke-venue         # the venue stack end to end (V, engine, sim, bridge)
+make venue-smoke         # the venue stack end to end (V, engine, sim, bridge)
 make venue-drill         # epoch drill: a write survives a same-pin reset, dies with a new pin
 make venue-proof         # capability proof: mint, sim deal, crash⇒liquidation, bridge round-trip
 make venue-order-proof   # order-lane proof: fills vs the real book, the §4.5 impact invariants
@@ -163,17 +163,18 @@ k8s/base/cctp-bridge/       the cross-mirror bridge (deploys beside the venue st
 k8s/base/shared/            the mirror-retain StorageClass
 k8s/overlays/mainnet-mirror/  single-node k3s overlay (mainnet mirror)
 k8s/overlays/venue-mirror/    the venue stack overlay (V, engine, sim, bridge, NodePorts)
-k8s/bootstrap/              one-shot Jobs: reth snapshot, engine selftest, re-pin wipe
+k8s/bootstrap/              one-shot Jobs: reth snapshot, CL blob prune, engine selftest, re-pin wipe
 scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the shared plumbing), the
                             mainnet suites (mainnet-smoke, mainnet-scenario, mainnet-proof,
                             mainnet-product-sim, mainnet-closure-check, mainnet-feed-bridge,
-                            mainnet-feed-local), the venue suites (venue-smoke, venue-drill,
-                            venue-proof, venue-order-proof, venue-product-sim), the
-                            cross-mirror suites (cctp-smoke,
+                            mainnet-feed-local, mainnet-selftest-local, mainnet-secrets), the
+                            venue suites (venue-smoke, venue-drill, venue-proof,
+                            venue-order-proof, venue-product-sim, venue-follow-local,
+                            venue-secrets), the cross-mirror suites (cctp-smoke,
                             cctp-roundtrip, cctp-margin-cycle, engine-symmetry), daloc-sim.py,
                             and the structural fitness scripts (closure-matrix, no-orphans,
-                            docs-metrics, trust-audit, clock-labels, no-panics,
-                            gen-secret, render-diagrams)
+                            docs-metrics, trust-audit, clock-labels, no-panics, config-check,
+                            docker-members, k8s-wiring, render-diagrams)
 docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md, TESTING.md, adr/
 ```
 

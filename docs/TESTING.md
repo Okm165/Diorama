@@ -207,8 +207,8 @@ devnet Ethereum fork), V (a devnet HyperEVM fork), the venue engine, and the
 venue simulator. Each **role** is what one daloc-side actor does; each assertion
 is a gate the plan names (the client gates of §2.1/§18.3, the time policy of
 §17.2, the epoch model of §6.5, the venue mechanics of §5). The roles run in
-order, a failure prints the evidence, and the run exits non-zero. **46 checks**
-in a green run.
+order, a failure prints the evidence, and the run exits non-zero. **44 checks**
+in a green run (six roles: boot, provision, operator, indexer, time, epoch).
 
 The suite re-implements the client gates in Python; the strongest check runs
 the **real client**: `crates/daloc-client`'s gated `HyperLiquidClient` (their
@@ -247,8 +247,8 @@ deployment's NodePorts to run the same arc there):
 | venue-sim info | `SIM_INFO` | `http://127.0.0.1:18790` | 31090 |
 | venue-sim control | `SIM_CTRL` | `http://127.0.0.1:18791` | 31091 |
 
-`CAST` points at `/tmp/opencode/foundry-bin/cast` (a constant in the script -
-edit it for your environment). Run:
+`CAST` defaults to `/tmp/opencode/foundry-bin/cast`; every constant is an env
+override (`CAST=... python3 scripts/daloc-sim.py`), so no edit is needed. Run:
 
 ```bash
 python3 scripts/daloc-sim.py --lane all        # every role, in order
@@ -710,10 +710,10 @@ with the same shutdown path shared by all four binaries:
 SIGTERM; measured 2026-10-23: before the fix, no service log had ever shown
 its shutdown line — a `ctrl_c`-only wait was dead code under a rollout), then
 the engine aborts its tasks (every mutation persists as it happens), the sim
-saves its state, and the CCTP bridge saves its store. `make venue-closure` has
-no script: the venue has no incoming parent diffs to close a scope over — its
-standing scope check is the at-pin probe set (`/admin/probes`,
-`venue_probe_*`), which the venue-drill and smoke exercise.
+saves its state, and the CCTP bridge saves its store. There is no venue
+counterpart of `mainnet-closure-check`: the venue has no incoming parent diffs
+to close a scope over — its standing scope check is the at-pin probe set
+(`/admin/probes`, `venue_probe_*`), which the venue-drill and smoke exercise.
 
 There is also no unified "facade" service (plan §7 Phase 5): each mirror's
 scenario surface is its own — `/admin/*` on the two engines, `/control/*` on
