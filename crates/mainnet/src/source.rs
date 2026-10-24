@@ -24,6 +24,8 @@ impl Source for RethSource {
             historical: true,
             heads_ws: true,
             system_txs: false,
+            // Ethereum has no system transactions; nothing to serve receipts for.
+            system_tx_receipts: false,
         }
     }
 
@@ -53,5 +55,13 @@ impl Source for RethSource {
         block: u64,
     ) -> Fut<'_, mirror_anvil::Result<B256>> {
         Box::pin(self.reth.storage_at(address, slot, block))
+    }
+
+    fn code_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+        Box::pin(self.reth.code_at(address, block))
     }
 }

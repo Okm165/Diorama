@@ -83,6 +83,40 @@ impl Key {
     }
 }
 
+/// A state key's value, as a read returns it. `Write` is key + value; `Value`
+/// is what the read seam answers, so the venue's poll composer can read a
+/// plan of keys without matching on four separate methods.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    Storage(U256),
+    Balance(U256),
+    Nonce(u64),
+    Code(Bytes),
+}
+
+impl Write {
+    /// Pair a key with its value. `None` when they do not match (a read plan
+    /// bug): the caller keeps the key and treats the value as unusable, never
+    /// writes a mistyped word.
+    pub fn new(key: Key, value: Value) -> Option<Write> {
+        match (key, value) {
+            (Key::Storage { address, slot }, Value::Storage(value)) => {
+                Some(Write::Storage {
+                    address,
+                    slot,
+                    value,
+                })
+            }
+            (Key::Balance(address), Value::Balance(value)) => {
+                Some(Write::Balance { address, value })
+            }
+            (Key::Nonce(address), Value::Nonce(value)) => Some(Write::Nonce { address, value }),
+            (Key::Code(address), Value::Code(value)) => Some(Write::Code { address, value }),
+            _ => None,
+        }
+    }
+}
+
 /// Flatten one transaction's `prestateTracer{diffMode}` frame into writes:
 /// the `pre` side lists the *changed* fields (measured: a read-only or no-op
 /// touch appears nowhere), the `post` side omits fields that changed to zero

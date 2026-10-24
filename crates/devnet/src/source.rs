@@ -30,6 +30,13 @@ pub struct Capabilities {
     pub heads_ws: bool,
     /// `eth_getSystemTxsByBlockNumber` (HyperEVM's Core→EVM completions).
     pub system_txs: bool,
+    /// Receipts (and therefore logs) for the system txs. The HL public RPC
+    /// serves the txs but **not** their receipts (measured 2026-10-24: a
+    /// system tx's receipt is `null` and `eth_getBlockReceipts` returns only
+    /// the block's normal txs), so a composer on this source must decode the
+    /// system txs' calldata for their touched accounts; a nanoreth archive
+    /// serves the receipts.
+    pub system_tx_receipts: bool,
 }
 
 /// The truth an unshadow restores from, and the pipeline's read side.
@@ -55,6 +62,32 @@ pub trait Source: Send + Sync {
         slot: U256,
         block: u64,
     ) -> Fut<'_, mirror_anvil::Result<B256>>;
+
+    fn code_at(&self, address: Address, block: u64) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>>;
+
+    /// Read one key. The default composes the four typed reads, so a source
+    /// implements only the primitives it can serve; the venue's poll
+    /// composer reads its plan through this seam (one call shape for every
+    /// key kind).
+    fn read_key(&self, key: mirror_anvil::Key, block: u64) -> Fut<'_, mirror_anvil::Result<mirror_anvil::Value>> {
+        Box::pin(async move {
+            Ok(match key {
+                mirror_anvil::Key::Storage { address, slot } => {
+                    let word = self.storage_at(address, slot, block).await?;
+                    mirror_anvil::Value::Storage(U256::from_be_bytes(word.0))
+                }
+                mirror_anvil::Key::Balance(address) => {
+                    mirror_anvil::Value::Balance(self.balance_at(address, block).await?)
+                }
+                mirror_anvil::Key::Nonce(address) => {
+                    mirror_anvil::Value::Nonce(self.nonce_at(address, block).await?)
+                }
+                mirror_anvil::Key::Code(address) => {
+                    mirror_anvil::Value::Code(self.code_at(address, block).await?)
+                }
+            })
+        })
+    }
 }
 
 impl Capabilities {

@@ -86,6 +86,10 @@ impl Source for VenueSource {
             historical: false,
             heads_ws: false,
             system_txs: true,
+            // Measured 2026-10-24: the public RPC serves the system txs but
+            // their receipts are null (and absent from eth_getBlockReceipts);
+            // a nanoreth archive serves them.
+            system_tx_receipts: false,
         }
     }
 
@@ -135,6 +139,17 @@ impl Source for VenueSource {
         Box::pin(async move {
             self.guard().await?;
             self.rpc.storage_at(address, slot, block).await
+        })
+    }
+
+    fn code_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> Fut<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+        Box::pin(async move {
+            self.guard().await?;
+            self.rpc.code_at(address, block).await
         })
     }
 }

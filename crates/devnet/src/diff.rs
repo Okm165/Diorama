@@ -82,15 +82,20 @@ impl WatchSet {
     /// storage write is watched when its account is (mainnet: all slots) or
     /// its slot is declared (venue closure).
     pub fn contains(&self, w: &Write) -> bool {
-        match w {
-            Write::Storage { address, slot, .. } => {
+        self.contains_key(&w.key())
+    }
+
+    /// The key-level form (the read plan asks keys, not writes).
+    pub fn contains_key(&self, key: &mirror_anvil::Key) -> bool {
+        match key {
+            mirror_anvil::Key::Storage { address, slot } => {
                 self.accounts.contains(address)
                     || self
                         .slots
                         .get(address)
                         .is_some_and(|slots| slots.contains(slot))
             }
-            _ => self.accounts.contains(&w.address()),
+            other => self.accounts.contains(&other.address()),
         }
     }
 }

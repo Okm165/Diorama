@@ -122,6 +122,51 @@ impl KeyClosure for TopicMappedSlots {
     }
 }
 
+/// The read plan: every key the poll must read, deduped, deterministic.
+///
+/// This is the composer's *decision* half — pure, no IO, no clock — so it is
+/// unit-testable without a chain (functional core; the reads and the writes
+/// are the imperative shell). Scope rules, evidence-backed:
+///
+/// - **Closures are authoritative for slots.** They only emit keys for
+///   touched addresses (fixed) or configured contracts (mapped), so they are
+///   the venue's slot declaration; filtering them through the watch set
+///   again would drop exactly the derived keys the closure exists to produce.
+/// - **Account fields follow the account**: balance/nonce/code are read only
+///   for touched addresses the watch set names (the source cannot say which
+///   field changed, so all three are read; unchanged values produce no
+///   write).
+/// - **Order**: closure order (config order), then touched addresses sorted —
+///   deterministic plans make logs and tests stable.
+pub fn plan_reads(
+    closures: &[Box<dyn KeyClosure>],
+    watch: &crate::diff::WatchSet,
+    touched: &TouchedSet,
+) -> Vec<Key> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for closure in closures {
+        for key in closure.keys_for(touched) {
+            if seen.insert(key) {
+                out.push(key);
+            }
+        }
+    }
+    let mut accounts: Vec<Address> = touched.addresses.iter().copied().collect();
+    accounts.sort_unstable();
+    for address in accounts {
+        if !watch.accounts.contains(&address) {
+            continue;
+        }
+        for key in [Key::Balance(address), Key::Nonce(address), Key::Code(address)] {
+            if seen.insert(key) {
+                out.push(key);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +246,78 @@ mod tests {
         let mut touched = TouchedSet::default();
         touched.log(other, vec![B256::ZERO, B256::ZERO]);
         assert!(closure.keys_for(&touched).is_empty());
+    }
+
+    #[test]
+    fn plan_reads_scopes_account_fields_and_dedups_slots() {
+        use crate::diff::WatchSet;
+        let weth = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
+        let oracle = address!("00000000000000000000000000000000000000aa");
+        let holder = address!("28C6c06298d514Db089934071355E5743bf21d60");
+        let watched = address!("00000000000000000000000000000000000000bb");
+
+        let mut watch = WatchSet::default();
+        watch.accounts.insert(watched);
+        let mut fixed = FixedSlots::new();
+        fixed.declare(oracle, [U256::from(1)]);
+        let closures: Vec<Box<dyn KeyClosure>> = vec![
+            Box::new(fixed),
+            Box::new(TopicMappedSlots {
+                contract: weth,
+                base_slot: U256::from(3),
+                topic_index: 1,
+            }),
+        ];
+
+        let mut touched = TouchedSet::default();
+        touched.touch(oracle);
+        touched.touch(watched);
+        touched.log(
+            weth,
+            vec![
+                B256::ZERO,
+                B256::left_padding_from(holder.as_slice()),
+                B256::ZERO,
+            ],
+        );
+
+        let plan = plan_reads(&closures, &watch, &touched);
+        // oracle fixed slot + weth mapping slot + 3 account fields.
+        assert_eq!(plan.len(), 5);
+        assert!(plan.contains(&Key::Storage {
+            address: oracle,
+            slot: U256::from(1)
+        }));
+        assert!(plan.contains(&Key::Balance(watched)));
+        assert!(plan.contains(&Key::Nonce(watched)));
+        assert!(plan.contains(&Key::Code(watched)));
+
+        // A second log for the same holder adds no key.
+        touched.log(
+            weth,
+            vec![
+                B256::ZERO,
+                B256::left_padding_from(holder.as_slice()),
+                B256::ZERO,
+            ],
+        );
+        assert_eq!(plan_reads(&closures, &watch, &touched).len(), 5);
+    }
+
+    #[test]
+    fn plan_reads_reads_no_fields_for_untouched_watched_accounts() {
+        use crate::diff::WatchSet;
+        let watched = address!("00000000000000000000000000000000000000bb");
+        let other = address!("00000000000000000000000000000000000000cc");
+        let mut watch = WatchSet::default();
+        watch.accounts.insert(watched);
+        let closures: Vec<Box<dyn KeyClosure>> = Vec::new();
+
+        let mut touched = TouchedSet::default();
+        touched.touch(other);
+        assert!(plan_reads(&closures, &watch, &touched).is_empty());
+
+        touched.touch(watched);
+        assert_eq!(plan_reads(&closures, &watch, &touched).len(), 3);
     }
 }
