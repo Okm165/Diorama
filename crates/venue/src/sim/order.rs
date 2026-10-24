@@ -590,25 +590,26 @@ impl Sim {
     /// Reduce a resting order by a fill; a fully filled order moves to the
     /// terminal history (`orderStatus` reports it, as the venue does).
     fn fill_resting(&self, oid: u64, sz: Decimal, px: Decimal) -> Result<()> {
-        let mut st = self.state.lock()?;
-        let Some(order) = st.resting.get_mut(&oid) else {
-            return Ok(());
-        };
-        order.sz = order.sz.saturating_sub(sz);
-        order.filled_sz = super::account::add(order.filled_sz, sz, "filled size")?;
-        order.filled_ntl = super::account::add(
-            order.filled_ntl,
-            super::account::mul(sz, px, "filled notional")?,
-            "filled notional",
-        )?;
-        if order.sz > Decimal::ZERO {
-            return Ok(());
-        }
-        let Some(done) = st.resting.remove(&oid) else {
-            return Ok(());
-        };
-        terminalize(&mut st.terminal, done, TerminalStatus::Filled, sz);
-        Ok(())
+        self.with_state(|st| {
+            let Some(order) = st.resting.get_mut(&oid) else {
+                return Ok(());
+            };
+            order.sz = order.sz.saturating_sub(sz);
+            order.filled_sz = super::account::add(order.filled_sz, sz, "filled size")?;
+            order.filled_ntl = super::account::add(
+                order.filled_ntl,
+                super::account::mul(sz, px, "filled notional")?,
+                "filled notional",
+            )?;
+            if order.sz > Decimal::ZERO {
+                return Ok(());
+            }
+            let Some(done) = st.resting.remove(&oid) else {
+                return Ok(());
+            };
+            terminalize(&mut st.terminal, done, TerminalStatus::Filled, sz);
+            Ok(())
+        })
     }
 
     /// The taker's own crossing resting orders are expired (the venue's
@@ -776,13 +777,14 @@ impl Sim {
 
     /// Every resting order, or one account's (`openOrders`).
     pub(crate) fn resting_orders(&self, account: Option<Address>) -> Result<Vec<RestingOrder>> {
-        let st = self.state.lock()?;
-        Ok(st
-            .resting
-            .values()
-            .filter(|r| account.is_none_or(|a| r.account == a))
-            .cloned()
-            .collect())
+        self.with_state(|st| {
+            Ok(st
+                .resting
+                .values()
+                .filter(|r| account.is_none_or(|a| r.account == a))
+                .cloned()
+                .collect())
+        })
     }
 
     /// Insert a resting order under a fresh oid.
@@ -804,10 +806,10 @@ impl Sim {
             filled_sz: Decimal::ZERO,
             filled_ntl: Decimal::ZERO,
         };
-        {
-            let mut st = self.state.lock()?;
+        self.with_state(|st| {
             st.resting.insert(oid, order);
-        }
+            Ok(())
+        })?;
         self.mark_dirty()?;
         tracing::info!(account = %account, coin = %req.coin, oid, px = %px, sz = %sz, "order resting");
         Ok(oid)
@@ -833,30 +835,31 @@ impl Sim {
         oid: u64,
         status: TerminalStatus,
     ) -> Result<()> {
-        let mut st = self.state.lock()?;
-        match st.resting.get(&oid) {
-            Some(r) if r.account == account && r.coin == coin => {
-                let Some(done) = st.resting.remove(&oid) else {
-                    return Ok(());
-                };
-                st.terminal.insert(
-                    oid,
-                    TerminalOrder {
-                        order: done,
-                        status,
-                        filled_sz: Decimal::ZERO,
-                        avg_px: Decimal::ZERO,
-                        status_ms: crate::now_ms(),
-                },
-                );
-                drop(st);
-                self.mark_dirty()?;
-                Ok(())
+        self.with_state(|st| {
+            match st.resting.get(&oid) {
+                Some(r) if r.account == account && r.coin == coin => {
+                    let Some(done) = st.resting.remove(&oid) else {
+                        return Ok(());
+                    };
+                    st.terminal.insert(
+                        oid,
+                        TerminalOrder {
+                            order: done,
+                            status,
+                            filled_sz: Decimal::ZERO,
+                            avg_px: Decimal::ZERO,
+                            status_ms: crate::now_ms(),
+                        },
+                    );
+                    Ok(())
+                }
+                _ => Err(Error::bad_request(
+                    "Order was never placed, already canceled, or filled.",
+                )),
             }
-            _ => Err(Error::bad_request(
-                "Order was never placed, already canceled, or filled.",
-            )),
-        }
+        })?;
+        self.mark_dirty()?;
+        Ok(())
     }
 
     /// `cancelByCloid`: the same, addressed by the client id.
@@ -866,13 +869,13 @@ impl Sim {
         coin: &str,
         cloid: alloy_primitives::B128,
     ) -> Result<()> {
-        let oid = {
-            let st = self.state.lock()?;
-            st.resting
+        let oid = self.with_state(|st| {
+            Ok(st
+                .resting
                 .values()
                 .find(|r| r.account == account && r.coin == coin && r.cloid == Some(cloid))
-                .map(|r| r.oid)
-        };
+                .map(|r| r.oid))
+        })?;
         match oid {
             Some(oid) => self.cancel(account, coin, oid),
             None => Err(Error::bad_request(
@@ -935,12 +938,9 @@ impl Sim {
     /// order of the account is canceled (the tick enforces it).
     pub(crate) fn schedule_cancel(&self, account: Address, time_ms: Option<u64>) -> Result<u64> {
         let now = crate::now_ms();
-        let mut st = self.state.lock()?;
-        match time_ms {
+        let t = self.with_state(|st| match time_ms {
             None => {
                 st.scheduled_cancels.remove(&account);
-                drop(st);
-                self.mark_dirty()?;
                 Ok(0)
             }
             Some(t) => {
@@ -950,11 +950,11 @@ impl Sim {
                     ));
                 }
                 st.scheduled_cancels.insert(account, t);
-                drop(st);
-                self.mark_dirty()?;
                 Ok(t)
             }
-        }
+        })?;
+        self.mark_dirty()?;
+        Ok(t)
     }
 
     /// The fill's landing: the opening check runs on a clone, so a refused
@@ -1029,9 +1029,10 @@ impl Sim {
     /// The next order id (the venue's own numbering; monotonic across the
     /// scenario, persisted with the state).
     fn next_oid(&self) -> Result<u64> {
-        let mut state = self.state.lock()?;
-        state.next_oid = state.next_oid.saturating_add(1);
-        Ok(state.next_oid)
+        self.with_state(|state| {
+            state.next_oid = state.next_oid.saturating_add(1);
+            Ok(state.next_oid)
+        })
     }
 }
 

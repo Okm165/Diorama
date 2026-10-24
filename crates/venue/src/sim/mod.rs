@@ -214,12 +214,12 @@ impl Sim {
     /// The account, or `None` when it was never touched (the caller passes
     /// the read through to the real venue).
     pub(crate) fn account(&self, address: Address) -> Result<Option<Account>> {
-        Ok(self.state.lock()?.accounts.get(&address).cloned())
+        self.with_state(|state| Ok(state.accounts.get(&address).cloned()))
     }
 
     /// The sim clock (ms) at wall time `now_ms`.
     pub fn clock(&self, now_ms: u64) -> Result<u64> {
-        let offset = self.state.lock()?.clock_offset_ms;
+        let offset = self.with_state(|state| Ok(state.clock_offset_ms))?;
         Ok((now_ms as i64 + offset).max(0) as u64)
     }
 
@@ -242,7 +242,7 @@ impl Sim {
     /// The scenario epoch counter (tests: `reset` returns it to callers).
     #[cfg(test)]
     pub fn epoch(&self) -> Result<u64> {
-        Ok(self.state.lock()?.epoch)
+        self.with_state(|state| Ok(state.epoch))
     }
 
     /// The state lock is poisoned (a panic happened mid-update): every
@@ -253,12 +253,15 @@ impl Sim {
 
     /// The bridge's scan cursor (0 = not anchored).
     pub fn bridge_cursor(&self) -> Result<u64> {
-        Ok(self.state.lock()?.bridge_cursor)
+        self.with_state(|state| Ok(state.bridge_cursor))
     }
 
     /// Move the bridge's cursor (persisted with the next save).
     pub fn set_bridge_cursor(&self, block: u64) -> Result<()> {
-        self.state.lock()?.bridge_cursor = block;
+        self.with_state(|state| {
+            state.bridge_cursor = block;
+            Ok(())
+        })?;
         self.dirty.store(true, Ordering::Relaxed);
         Ok(())
     }
@@ -282,6 +285,17 @@ impl Sim {
     ) -> Result<T> {
         let mut state = self.state.lock()?;
         f(state.accounts.entry(address).or_default())
+    }
+
+    /// Run one critical section against the sim's state — the raw door, for
+    /// the state that is not one account (orders, cooldowns, marks, nonces).
+    /// The guard lives for the closure only; the account verbs
+    /// (`with_account`, `with_account_now`) are the account-plane doors, and
+    /// `mark_dirty`/`touch` stay at the call sites (the bridge saves per
+    /// block, not per write).
+    fn with_state<T>(&self, f: impl FnOnce(&mut SimState) -> Result<T>) -> Result<T> {
+        let mut state = self.state.lock()?;
+        f(&mut state)
     }
 
     /// Mutate one account at the venue's clock, funding accrued to it first:
@@ -384,19 +398,22 @@ impl Sim {
     /// or the balance is short (the bridge counts the refusal — a system
     /// transfer never goes negative).
     pub fn try_debit_spot(&self, address: Address, token: u32, amount: Decimal) -> Result<Option<Decimal>> {
-        let mut state = self.state.lock()?;
-        let Some(account) = state.accounts.get_mut(&address) else {
+        let debited = self.with_state(|state| {
+            let Some(account) = state.accounts.get_mut(&address) else {
+                return Ok(None);
+            };
+            let Some(entry) = account.spot.get_mut(&token) else {
+                return Ok(None);
+            };
+            if entry.total < amount {
+                return Ok(None);
+            }
+            entry.total = account::sub(entry.total, amount, "spot debit")?;
+            Ok(Some(entry.total))
+        })?;
+        let Some(after) = debited else {
             return Ok(None);
         };
-        let Some(entry) = account.spot.get_mut(&token) else {
-            return Ok(None);
-        };
-        if entry.total < amount {
-            return Ok(None);
-        }
-        entry.total = account::sub(entry.total, amount, "spot debit")?;
-        let after = entry.total;
-        drop(state);
         self.touch();
         Ok(Some(after))
     }
@@ -435,8 +452,7 @@ impl Sim {
     /// Core spot send: debit the sender, credit the recipient. `false` when
     /// the sender is short.
     pub(crate) fn spot_send(&self, from: Address, to: Address, token: TokenRef<'_>, amount: Decimal) -> Result<bool> {
-        {
-            let mut state = self.state.lock()?;
+        let debited = self.with_state(|state| {
             let Some(sender) = state.accounts.get_mut(&from) else {
                 return Ok(false);
             };
@@ -447,6 +463,10 @@ impl Sim {
                 return Ok(false);
             }
             entry.total = account::sub(entry.total, amount, "spot send")?;
+            Ok(true)
+        })?;
+        if !debited {
+            return Ok(false);
         }
         self.credit_spot(to, token, amount)?;
         Ok(true)
@@ -479,13 +499,12 @@ impl Sim {
 
     /// `reset`: blank the scenario (accounts + clock offset), bump the epoch.
     pub fn reset(&self) -> Result<u64> {
-        let epoch = {
-            let mut state = self.state.lock()?;
+        let epoch = self.with_state(|state| {
             state.accounts.clear();
             state.clock_offset_ms = 0;
             state.epoch += 1;
-            state.epoch
-        };
+            Ok(state.epoch)
+        })?;
         self.save()?;
         Ok(epoch)
     }
@@ -494,10 +513,10 @@ impl Sim {
     /// checks inside it — the deterministic complement to self-advance.
     pub(crate) fn advance(&self, feed: &MarketFeed, seconds: u64, blocks: u64) -> Result<AdvanceOutcome> {
         let jump_ms = seconds.saturating_mul(1_000);
-        {
-            let mut state = self.state.lock()?;
+        self.with_state(|state| {
             state.clock_offset_ms = state.clock_offset_ms.saturating_add(jump_ms as i64);
-        }
+            Ok(())
+        })?;
         let now = crate::now_ms();
         let mut liquidations = Vec::new();
         let blocks = blocks.max(1);
@@ -549,24 +568,24 @@ impl Sim {
 
     /// (a) `scheduleCancel`: the dead-man's switch cancels everything due.
     fn fire_scheduled_cancels(&self, now_ms: u64) -> Result<()> {
-        let due: Vec<Address> = {
-            let st = self.state.lock()?;
-            st.scheduled_cancels
+        let due: Vec<Address> = self.with_state(|st| {
+            Ok(st
+                .scheduled_cancels
                 .iter()
                 .filter(|(_, t)| **t <= now_ms)
                 .map(|(a, _)| *a)
-                .collect()
-        };
+                .collect())
+        })?;
         for account in due {
             let mine = self.resting_orders(Some(account))?;
             let n = mine.len();
             for r in mine {
                 let _ = self.cancel(account, &r.coin, r.oid);
             }
-            {
-                let mut st = self.state.lock()?;
+            self.with_state(|st| {
                 st.scheduled_cancels.remove(&account);
-            }
+                Ok(())
+            })?;
             tracing::info!(account = %account, canceled = n, "scheduled cancel fired (dead-man's switch)");
         }
         Ok(())
@@ -727,21 +746,24 @@ impl Sim {
     pub(crate) fn use_nonce(&self, signer: Address, nonce: u64, now_ms: u64) -> Result<()> {
         const TWO_DAYS_MS: u64 = 2 * 24 * 60 * 60 * 1_000;
         const ONE_DAY_MS: u64 = 24 * 60 * 60 * 1_000;
-        let mut st = self.state.lock()?;
-        let set = st.nonces.entry(signer).or_default();
-        if set.contains(&nonce) {
-            return Err(crate::error::Error::bad_request("Nonce already used."));
-        }
-        if nonce.saturating_add(TWO_DAYS_MS) < now_ms || nonce > now_ms.saturating_add(ONE_DAY_MS) {
-            return Err(crate::error::Error::bad_request(
-                "Nonce is outside the accepted window.",
-            ));
-        }
-        set.insert(nonce);
-        while set.len() > 100 {
-            set.pop_first();
-        }
-        drop(st);
+        self.with_state(|st| {
+            let set = st.nonces.entry(signer).or_default();
+            if set.contains(&nonce) {
+                return Err(crate::error::Error::bad_request("Nonce already used."));
+            }
+            if nonce.saturating_add(TWO_DAYS_MS) < now_ms
+                || nonce > now_ms.saturating_add(ONE_DAY_MS)
+            {
+                return Err(crate::error::Error::bad_request(
+                    "Nonce is outside the accepted window.",
+                ));
+            }
+            set.insert(nonce);
+            while set.len() > 100 {
+                set.pop_first();
+            }
+            Ok(())
+        })?;
         self.mark_dirty()?;
         Ok(())
     }
@@ -749,11 +771,13 @@ impl Sim {
     /// Accrue funding for every account (the caller holds no lock).
     pub fn accrue_all(&self, feed: &MarketFeed, now_ms: u64) -> Result<()> {
         let clock = self.clock(now_ms)?;
-        let mut state = self.state.lock()?;
         let mut payments = 0u64;
-        for account in state.accounts.values_mut() {
-            payments += account::accrue_funding(account, feed, clock)? as u64;
-        }
+        self.with_state(|state| {
+            for account in state.accounts.values_mut() {
+                payments += account::accrue_funding(account, feed, clock)? as u64;
+            }
+            Ok(())
+        })?;
         if payments > 0 {
             self.metrics.funding_payments_total.fetch_add(payments, Ordering::Relaxed);
             self.dirty.store(true, Ordering::Relaxed);
@@ -786,12 +810,13 @@ impl Sim {
     /// The accounts snapshot (the decision loop mutates state, so it iterates
     /// a copy).
     fn account_snapshot(&self) -> Result<Vec<(Address, Account)>> {
-        let st = self.state.lock()?;
-        Ok(st
-            .accounts
-            .iter()
-            .map(|(a, acc)| (*a, acc.clone()))
-            .collect())
+        self.with_state(|st| {
+            Ok(st
+                .accounts
+                .iter()
+                .map(|(a, acc)| (*a, acc.clone()))
+                .collect())
+        })
     }
 
     /// One account's waterfall decision: solvent → nothing; underwater → ADL;
@@ -856,7 +881,10 @@ impl Sim {
         }
         if partial {
             let until = now_ms.saturating_add(COOLDOWN_MS);
-            self.state.lock()?.liq_cooldown_until.insert(address, until);
+            self.with_state(|state| {
+                state.liq_cooldown_until.insert(address, until);
+                Ok(())
+            })?;
             self.metrics.partial_liquidations_total.fetch_add(1, Ordering::Relaxed);
         }
         if closed.is_empty() {
@@ -920,35 +948,37 @@ impl Sim {
     /// with the account and is named.
     fn vault_take(&self, feed: &MarketFeed, address: Address) -> Result<Vec<String>> {
         let mut closed = Vec::new();
-        let mut st = self.state.lock()?;
-        let mut me = st.accounts.remove(&address).unwrap_or_default();
-        let mut vault = st.accounts.remove(&BACKSTOP).unwrap_or_default();
-        let coins: Vec<String> = me.positions.keys().cloned().collect();
-        for coin in coins {
-            let Some(p) = me.positions.remove(&coin) else {
-                continue;
-            };
-            let mark = feed.mark(&coin).unwrap_or(p.entry_px);
-            let facts = account::FillFacts {
-                coin: coin.clone(),
-                is_buy: p.is_long(),
-                size: p.szi.abs(),
-                px: mark,
-                leverage: p.leverage_value,
-                reduce_only: false,
-                fee: Decimal::ZERO,
-            };
-            if let Err(e) = account::apply_fill(&mut vault, &facts) {
-                tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
-                continue;
+        self.with_state(|st| {
+            let mut me = st.accounts.remove(&address).unwrap_or_default();
+            let mut vault = st.accounts.remove(&BACKSTOP).unwrap_or_default();
+            let coins: Vec<String> = me.positions.keys().cloned().collect();
+            for coin in coins {
+                let Some(p) = me.positions.remove(&coin) else {
+                    continue;
+                };
+                let mark = feed.mark(&coin).unwrap_or(p.entry_px);
+                let facts = account::FillFacts {
+                    coin: coin.clone(),
+                    is_buy: p.is_long(),
+                    size: p.szi.abs(),
+                    px: mark,
+                    leverage: p.leverage_value,
+                    reduce_only: false,
+                    fee: Decimal::ZERO,
+                };
+                if let Err(e) = account::apply_fill(&mut vault, &facts) {
+                    tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
+                    continue;
+                }
+                closed.push(coin);
             }
-            closed.push(coin);
-        }
-        vault.perp_balance = account::add(vault.perp_balance, me.perp_balance, "backstop balance")?;
-        me.perp_balance = Decimal::ZERO;
-        st.accounts.insert(address, me);
-        st.accounts.insert(BACKSTOP, vault);
-        Ok(closed)
+            vault.perp_balance =
+                account::add(vault.perp_balance, me.perp_balance, "backstop balance")?;
+            me.perp_balance = Decimal::ZERO;
+            st.accounts.insert(address, me);
+            st.accounts.insert(BACKSTOP, vault);
+            Ok(closed)
+        })
     }
 
     /// Step 3: ADL — the platform must stay solvent. The opposite side is
@@ -963,7 +993,9 @@ impl Sim {
     ) -> Result<Option<Liquidation>> {
         let mut closed = Vec::new();
         for (coin, p) in &account.positions {
-            let Some(prev_mark) = self.state.lock()?.prev_marks.get(coin).copied() else {
+            let Some(prev_mark) =
+                self.with_state(|state| Ok(state.prev_marks.get(coin).copied()))?
+            else {
                 tracing::warn!(account = %address, coin = %coin, "ADL skipped: no previous mark recorded yet");
                 continue;
             };
@@ -1018,39 +1050,42 @@ impl Sim {
     ) -> Result<Vec<(Decimal, Address, Decimal, Decimal)>> {
         let (coin, prev_mark, my_side_long) = target;
         let mut ranked: Vec<(Decimal, Address, Decimal, Decimal)> = Vec::new();
-        let st = self.state.lock()?;
-        for (other, oa) in st.accounts.iter() {
-            if *other == address {
-                continue;
+        self.with_state(|st| {
+            for (other, oa) in st.accounts.iter() {
+                if *other == address {
+                    continue;
+                }
+                let Some(op) = oa.positions.get(coin) else { continue };
+                if op.is_long() == my_side_long || op.szi.is_zero() {
+                    continue;
+                }
+                let ov = account::view(oa, feed, meta)?;
+                if ov.margin_summary.account_value <= Decimal::ZERO {
+                    continue;
+                }
+                let ratio = account::mul(
+                    account::ratio_or(prev_mark, op.entry_px, prev_mark),
+                    account::mul(op.szi.abs(), prev_mark, "adl notional")?
+                        / ov.margin_summary.account_value,
+                    "adl rank",
+                )?;
+                ranked.push((ratio, *other, op.szi.abs(), op.entry_px));
             }
-            let Some(op) = oa.positions.get(coin) else { continue };
-            if op.is_long() == my_side_long || op.szi.is_zero() {
-                continue;
-            }
-            let ov = account::view(oa, feed, meta)?;
-            if ov.margin_summary.account_value <= Decimal::ZERO {
-                continue;
-            }
-            let ratio = account::mul(
-                account::ratio_or(prev_mark, op.entry_px, prev_mark),
-                account::mul(op.szi.abs(), prev_mark, "adl notional")?
-                    / ov.margin_summary.account_value,
-                "adl rank",
-            )?;
-            ranked.push((ratio, *other, op.szi.abs(), op.entry_px));
-        }
+            Ok(())
+        })?;
         Ok(ranked)
     }
 
     /// Record the marks the ADL step reads as "the previous mark".
     fn record_marks(&self, feed: &MarketFeed) -> Result<()> {
-        let mut st = self.state.lock()?;
-        for coin in feed.markets.clone() {
-            if let Some(mark) = feed.mark(&coin) {
-                st.prev_marks.insert(coin, mark);
+        self.with_state(|st| {
+            for coin in feed.markets.clone() {
+                if let Some(mark) = feed.mark(&coin) {
+                    st.prev_marks.insert(coin, mark);
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn save_if_dirty(&self) -> Result<bool> {
@@ -1066,7 +1101,7 @@ impl Sim {
             self.dirty.store(false, Ordering::Relaxed);
             return Ok(());
         };
-        let snapshot = self.state.lock()?.clone();
+        let snapshot = self.with_state(|state| Ok(state.clone()))?;
         store::save(path, &snapshot, "sim state")?;
         self.dirty.store(false, Ordering::Relaxed);
         self.publish_gauges();
@@ -1103,9 +1138,11 @@ impl Sim {
     }
 
     fn publish_gauges(&self) {
-        if let Ok(state) = self.state.lock() {
-            self.metrics.accounts.store(state.accounts.len() as u64, Ordering::Relaxed);
-            self.metrics.epoch.store(state.epoch, Ordering::Relaxed);
+        if let Ok((accounts, epoch)) =
+            self.with_state(|state| Ok((state.accounts.len() as u64, state.epoch)))
+        {
+            self.metrics.accounts.store(accounts, Ordering::Relaxed);
+            self.metrics.epoch.store(epoch, Ordering::Relaxed);
         }
     }}
 

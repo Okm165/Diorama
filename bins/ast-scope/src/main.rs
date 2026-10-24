@@ -713,6 +713,27 @@ fn fan_in(prod: &[&Item]) {
     for (name, n) in rows.iter().take(REPORT_TOP) {
         println!("  {n:>3} callers  {name}");
     }
+
+    // Method fan-in: the most-called method names. A raw accessor at the top
+    // (`with`, `lock`, `get`) says the callers hand-roll a sequence the type
+    // could carry as one verb — the lens that found `Store::insert_message`.
+    let mut methods: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for item in prod {
+        if item.kind != "fn" {
+            continue;
+        }
+        for op in &item.ops {
+            if let Some(method) = op.strip_prefix('.') {
+                methods.entry(method).or_default().insert(item.name.as_str());
+            }
+        }
+    }
+    let mut mrows: Vec<(&str, usize)> = methods.iter().map(|(k, v)| (*k, v.len())).collect();
+    mrows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    println!("\nmethod fan-in: the most-called method names (a raw accessor here is a verb not yet named):");
+    for (name, n) in mrows.iter().take(REPORT_TOP) {
+        println!("  {n:>3} callers  .{name}");
+    }
 }
 
 /// The dispersion reading: types whose `self.<field>` accesses span several
