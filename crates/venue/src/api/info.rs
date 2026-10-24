@@ -119,10 +119,14 @@ fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBo
     match &req.action {
         ExchangeAction::Order { .. } => order_action(state, user, body, req),
         ExchangeAction::Cancel { cancels, fast } => {
-            flagged("f", *fast, || cancel_action(state, user, cancels))
+            let fast = *fast;
+            flagged("f", fast, || cancel_action(state, user, cancels, fast.unwrap_or(false)))
         }
         ExchangeAction::CancelByCloid { cancels, fast } => {
-            flagged("f", *fast, || cancel_by_cloid_action(state, user, cancels))
+            let fast = *fast;
+            flagged("f", fast, || {
+                cancel_by_cloid_action(state, user, cancels, fast.unwrap_or(false))
+            })
         }
         ExchangeAction::Modify {
             oid,
@@ -297,7 +301,12 @@ fn coin_of(meta: Option<&crate::wire::Meta>, asset: u32) -> Option<String> {
 }
 
 /// `cancel`: per-entry statuses in the venue's own shape.
-fn cancel_action(state: &ApiState, user: Address, cancels: &[CancelAction]) -> Response {
+fn cancel_action(
+    state: &ApiState,
+    user: Address,
+    cancels: &[CancelAction],
+    fast: bool,
+) -> Response {
     if cancels.is_empty() {
         // The venue's batched actions answer an error for an empty payload
         // (the order action's pre-validation carries the same rule).
@@ -308,7 +317,7 @@ fn cancel_action(state: &ApiState, user: Address, cancels: &[CancelAction]) -> R
     let statuses = cancels
         .iter()
         .map(|c| match coin_of(meta.as_ref(), c.a) {
-            Some(coin) => match state.sim.cancel(user, &coin, c.o) {
+            Some(coin) => match state.sim.cancel(user, &coin, c.o, fast) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
                 Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
             },
@@ -332,6 +341,7 @@ fn cancel_by_cloid_action(
     state: &ApiState,
     user: Address,
     cancels: &[CancelByCloidAction],
+    fast: bool,
 ) -> Response {
     if cancels.is_empty() {
         return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string())
@@ -341,7 +351,7 @@ fn cancel_by_cloid_action(
     let statuses = cancels
         .iter()
         .map(|c| match coin_of(meta.as_ref(), c.asset) {
-            Some(coin) => match state.sim.cancel_by_cloid(user, &coin, c.cloid) {
+            Some(coin) => match state.sim.cancel_by_cloid(user, &coin, c.cloid, fast) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
                 Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
             },
@@ -392,13 +402,13 @@ fn modify_one(
             let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
                 Error::bad_request(format!("unknown asset index {}", order.a))
             })?;
-            state.sim.cancel(user, &coin, *o)
+            state.sim.cancel(user, &coin, *o, false)
         }
         crate::wire::OidOrCloid::Cloid(c) => {
             let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
                 Error::bad_request(format!("unknown asset index {}", order.a))
             })?;
-            state.sim.cancel_by_cloid(user, &coin, *c)
+            state.sim.cancel_by_cloid(user, &coin, *c, false)
         }
     };
     if !always_place {

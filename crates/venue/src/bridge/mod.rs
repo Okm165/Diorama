@@ -265,7 +265,7 @@ impl Bridge {
                     tracing::warn!(account = %caller, asset, "bridge: cancel for an unknown asset refused");
                     return;
                 };
-                (coin, self.sim.cancel(caller, &self.coin_of(*asset).unwrap_or_default(), *oid))
+                (coin, self.sim.cancel(caller, &self.coin_of(*asset).unwrap_or_default(), *oid, false))
             }
             CoreAction::CancelByCloid { asset, cloid } => {
                 let Some(coin) = self.coin_of(*asset) else {
@@ -275,7 +275,7 @@ impl Bridge {
                 };
                 (
                     coin,
-                    self.sim.cancel_by_cloid(caller, &self.coin_of(*asset).unwrap_or_default(), alloy_primitives::B128::from(*cloid)),
+                    self.sim.cancel_by_cloid(caller, &self.coin_of(*asset).unwrap_or_default(), alloy_primitives::B128::from(*cloid), false),
                 )
             }
             _ => return,

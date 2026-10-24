@@ -51,6 +51,13 @@ pub(crate) struct Account {
     /// API wallets the CoreWriter registered for this account.
     #[serde(default)]
     pub agents: Vec<AgentWallet>,
+    /// The UTC day (epoch days) of the last scheduled-cancel fire, and the
+    /// day's count — the venue caps triggers at 10 per day, reset at 00:00
+    /// UTC (docs).
+    #[serde(default)]
+    pub schedule_fire_day: u64,
+    #[serde(default)]
+    pub schedule_fires: u32,
     /// The per-coin leverage setting (`updateLeverage`): applied to a
     /// position when it opens, and to an open position immediately — the
     /// venue's own behavior (the setting outlives the position).

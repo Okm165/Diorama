@@ -48,6 +48,49 @@ pub trait Mirror: Send + Sync {
     fn scope(&self) -> &Scope;
 }
 
+/// The divergence bundle — the spine's own struct, one per mirror. The
+/// profiles *fill* it (their choices are data, which is the whole point of
+/// the seam list above), so [`Mirror`] has exactly one implementation and the
+/// profiles carry no accessor bodies.
+pub struct Bundle {
+    pub label: &'static str,
+    pub source: Arc<dyn Source>,
+    /// The composer's read side: the same object as [`Self::source`] unless
+    /// the mirror's follow reads differ (the venue's latest-reading source,
+    /// whose pin guard would refuse the follow's reads). The profiles pass a
+    /// clone when one object serves both roles.
+    pub follow_source: Arc<dyn Source>,
+    pub reset: Arc<dyn ResetDetector>,
+    pub policies: Policies,
+    pub scope: Scope,
+}
+
+impl Mirror for Bundle {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+
+    fn source(&self) -> &Arc<dyn Source> {
+        &self.source
+    }
+
+    fn follow_source(&self) -> &Arc<dyn Source> {
+        &self.follow_source
+    }
+
+    fn reset(&self) -> &Arc<dyn ResetDetector> {
+        &self.reset
+    }
+
+    fn policies(&self) -> Policies {
+        self.policies
+    }
+
+    fn scope(&self) -> &Scope {
+        &self.scope
+    }
+}
+
 /// What a reset check saw — the witness, not just a boolean: the evidence
 /// decides what an operator reads and what the fact stream reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

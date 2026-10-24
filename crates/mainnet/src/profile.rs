@@ -24,59 +24,46 @@ use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
 use mirror_devnet::spine::{
-    ClockPolicy, CursorHash, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
+    Bundle, ClockPolicy, CursorHash, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
 use mirror_devnet::state::StateFile;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// The mainnet mirror's bundle: reth as the truth, the cursor-hash detector,
-/// the whole-account scope, and the policies the applier reads.
-pub struct MainnetMirror {
+/// The mainnet mirror's bundle: reth as the truth (one object serves both
+/// the truth and the follow reads — reth answers at any block), the
+/// cursor-hash detector, the whole-account scope, and the policies the
+/// applier reads.
+pub fn bundle(
+    engine: &EngineSection,
     source: Arc<dyn Source>,
     reset: Arc<dyn ResetDetector>,
-    policies: Policies,
     scope: Scope,
+) -> Arc<dyn Mirror> {
+    Arc::new(Bundle {
+        label: "t",
+        follow_source: Arc::clone(&source),
+        source,
+        reset,
+        policies: policies(engine),
+        scope,
+    })
 }
 
-impl MainnetMirror {
-    /// The profile's decisions, assembled from the engine section: the gap
-    /// guard is the config's `max_gap_blocks` (a rebased cursor gets the
-    /// plan's 10,064 replay bound instead — the caller's branch).
-    pub fn policies(engine: &EngineSection) -> Policies {
-        Policies {
-            clock: ClockPolicy::AlignToSource,
-            mine: MinePolicy::PerAppliedBlock,
-            probes: ProbeSchedule::PerBlock,
-            // A tx arriving mid-apply would be mined against a state its gas
-            // was never estimated on (measured: ~5% short, reverted), so the
-            // pool is drained first — bounded so a steady stream cannot starve
-            // the parent block.
-            prepend_rounds: Some(3),
-            gap: Some(engine.loops.max_gap_blocks),
-        }
-    }
-}
-
-impl Mirror for MainnetMirror {
-    fn label(&self) -> &'static str {
-        "t"
-    }
-
-    fn source(&self) -> &Arc<dyn Source> {
-        &self.source
-    }
-
-    fn reset(&self) -> &Arc<dyn ResetDetector> {
-        &self.reset
-    }
-
-    fn policies(&self) -> Policies {
-        self.policies
-    }
-
-    fn scope(&self) -> &Scope {
-        &self.scope
+/// The profile's decisions, assembled from the engine section: the gap guard
+/// is the config's `max_gap_blocks` (a rebased cursor gets the plan's 10,064
+/// replay bound instead — the caller's branch).
+pub fn policies(engine: &EngineSection) -> Policies {
+    Policies {
+        clock: ClockPolicy::AlignToSource,
+        mine: MinePolicy::PerAppliedBlock,
+        probes: ProbeSchedule::PerBlock,
+        // A tx arriving mid-apply would be mined against a state its gas was
+        // never estimated on (measured: ~5% short, reverted), so the pool is
+        // drained first — bounded so a steady stream cannot starve the parent
+        // block.
+        prepend_rounds: Some(3),
+        gap: Some(engine.loops.max_gap_blocks),
     }
 }
 
@@ -103,12 +90,7 @@ pub fn build(
     let scope = Scope::new(WatchSet::new(watch), Vec::new());
     let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_t));
     Wiring {
-        mirror: Arc::new(MainnetMirror {
-            source,
-            reset,
-            policies: MainnetMirror::policies(engine),
-            scope,
-        }),
+        mirror: bundle(engine, source, reset, scope),
         target,
     }
 }

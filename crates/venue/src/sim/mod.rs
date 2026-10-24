@@ -580,10 +580,18 @@ impl Sim {
             let mine = self.resting_orders(Some(account))?;
             let n = mine.len();
             for r in mine {
-                let _ = self.cancel(account, &r.coin, r.oid);
+                let _ = self.cancel(account, &r.coin, r.oid, false);
             }
             self.with_state(|st| {
                 st.scheduled_cancels.remove(&account);
+                if let Some(acc) = st.accounts.get_mut(&account) {
+                    let day = now_ms / 86_400_000;
+                    if acc.schedule_fire_day != day {
+                        acc.schedule_fire_day = day;
+                        acc.schedule_fires = 0;
+                    }
+                    acc.schedule_fires = acc.schedule_fires.saturating_add(1);
+                }
                 Ok(())
             })?;
             tracing::info!(account = %account, canceled = n, "scheduled cancel fired (dead-man's switch)");
@@ -609,7 +617,7 @@ impl Sim {
             if !fires {
                 continue;
             }
-            let _ = self.cancel(r.account, &r.coin, r.oid);
+            let _ = self.cancel(r.account, &r.coin, r.oid, false);
             let order = crate::sim::order::Order {
                 coin: r.coin.clone(),
                 is_buy: r.is_buy,
@@ -764,6 +772,17 @@ impl Sim {
             let set = st.nonces.entry(signer).or_default();
             if set.contains(&nonce) {
                 return Err(crate::error::Error::bad_request("Nonce already used."));
+            }
+            // The venue keeps the 100 highest nonces per signer and a nonce
+            // must be *larger* than the smallest retained (docs) — otherwise
+            // an action pushed out of the set could be replayed. The venue's
+            // own string is not published; named here.
+            if let Some(floor) = set.first().copied() {
+                if nonce <= floor {
+                    return Err(crate::error::Error::bad_request(
+                        "Nonce is too low (the venue keeps the 100 highest per signer).",
+                    ));
+                }
             }
             if nonce.saturating_add(TWO_DAYS_MS) < now_ms
                 || nonce > now_ms.saturating_add(ONE_DAY_MS)

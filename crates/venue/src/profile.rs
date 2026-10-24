@@ -28,66 +28,46 @@ use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
 use mirror_devnet::spine::{
-    ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
+    Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
 use mirror_devnet::state::StateFile;
 use mirror_anvil::Rpc;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-/// The venue mirror's bundle: the HL public API as the truth (two views — the
-/// pin-exact hand-back source and the latest-reading follow source), the pin
-/// canary, the declared scope, and the policies the driver reads.
-pub struct VenueMirror {
+/// The venue mirror's bundle: the HL public API as the truth (two views —
+/// the pin-exact hand-back source and the latest-reading follow source; the
+/// pin guard would refuse the follow's reads, so the roles are two objects
+/// over one handle), the pin canary, the declared scope, and the policies the
+/// driver reads.
+pub fn bundle(
+    engine: &EngineSection,
     source: Arc<dyn Source>,
     follow: Arc<dyn Source>,
     reset: Arc<dyn ResetDetector>,
-    policies: Policies,
     scope: Scope,
+) -> Arc<dyn Mirror> {
+    Arc::new(Bundle {
+        label: "v",
+        source,
+        follow_source: follow,
+        reset,
+        policies: policies(engine),
+        scope,
+    })
 }
 
-impl VenueMirror {
-    /// The profile's decisions: the clock is V's own, mining drains the pool
-    /// (an idle chain stays static), probes compare against the composed BAL,
-    /// and the gap guard pauses the poll when the source head runs too far
-    /// ahead (a wide window is a re-pin decision, never a silent partial poll).
-    pub fn policies(engine: &EngineSection) -> Policies {
-        Policies {
-            clock: ClockPolicy::Native,
-            mine: MinePolicy::PoolDrain,
-            probes: ProbeSchedule::LiveParity,
-            prepend_rounds: None,
-            gap: Some(engine.loops.max_gap_blocks),
-        }
-    }
-}
-
-impl Mirror for VenueMirror {
-    fn label(&self) -> &'static str {
-        "v"
-    }
-
-    fn source(&self) -> &Arc<dyn Source> {
-        &self.source
-    }
-
-    /// The follow reads the source at *latest* (the composer's values), while
-    /// [`Self::source`] is pin-exact for hand-back: the pin guard would refuse
-    /// the follow's reads, so the two roles are two objects over one handle.
-    fn follow_source(&self) -> &Arc<dyn Source> {
-        &self.follow
-    }
-
-    fn reset(&self) -> &Arc<dyn ResetDetector> {
-        &self.reset
-    }
-
-    fn policies(&self) -> Policies {
-        self.policies
-    }
-
-    fn scope(&self) -> &Scope {
-        &self.scope
+/// The profile's decisions: the clock is V's own, mining drains the pool (an
+/// idle chain stays static), probes compare against the composed BAL, and the
+/// gap guard pauses the poll when the source head runs too far ahead (a wide
+/// window is a re-pin decision, never a silent partial poll).
+pub fn policies(engine: &EngineSection) -> Policies {
+    Policies {
+        clock: ClockPolicy::Native,
+        mine: MinePolicy::PoolDrain,
+        probes: ProbeSchedule::LiveParity,
+        prepend_rounds: None,
+        gap: Some(engine.loops.max_gap_blocks),
     }
 }
 
@@ -162,12 +142,6 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_v));
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
     let scope = Scope::new(watch_set(watch, &engine.closures), closures(&engine.closures));
-    let mirror: Arc<dyn Mirror> = Arc::new(VenueMirror {
-        source,
-        follow,
-        reset,
-        policies: VenueMirror::policies(engine),
-        scope,
-    });
+    let mirror = bundle(engine, source, follow, reset, scope);
     Wiring { mirror, pin, target }
 }

@@ -101,6 +101,15 @@ pub(crate) enum Tpsl {
     Sl,
 }
 
+/// How a cancel is requested: the terminal status to record, and whether the
+/// wire's `fast` flag rode it — the venue rejects a fast cancel that refers
+/// to a trigger order (docs), checked where the order is known.
+#[derive(Clone, Copy)]
+struct CancelMode {
+    status: TerminalStatus,
+    fast: bool,
+}
+
 /// Move a finished order into the bounded terminal history (`orderStatus`
 /// answers for filled and canceled orders, as the venue's does).
 fn terminalize(
@@ -250,6 +259,7 @@ impl Sim {
             if trigger.trigger_px <= Decimal::ZERO {
                 return Err(Error::bad_request("Invalid TP/SL price."));
             }
+            validate_trigger_side(feed, req, &trigger)?;
             let px = req.limit_px.unwrap_or(trigger.trigger_px);
             self.require_order_margin(feed, address, req, (px, req.size))?;
             let oid = self.rest_order(address, req, px, req.size)?;
@@ -633,7 +643,7 @@ impl Sim {
             if crosses {
                 let _ = feed; // (the feed is the caller's context; no read needed)
                 tracing::info!(account = %account, oid = r.oid, "self-crossing resting order expired (expire-maker)");
-                self.cancel(account, &r.coin, r.oid)?;
+                self.cancel(account, &r.coin, r.oid, false)?;
             }
         }
         Ok(())
@@ -838,13 +848,32 @@ impl Sim {
 
     /// `cancel`: the venue's own refusal when the order is unknown to the
     /// caller (`Order was never placed, already canceled, or filled.`).
-    pub(crate) fn cancel(&self, account: Address, coin: &str, oid: u64) -> Result<()> {
-        self.cancel_with(account, coin, oid, TerminalStatus::Canceled)
+    /// A cancel; `fast` is the wire flag — the venue rejects a fast cancel
+    /// that refers to a trigger order (docs), so the flag is checked where
+    /// the order is known.
+    pub(crate) fn cancel(&self, account: Address, coin: &str, oid: u64, fast: bool) -> Result<()> {
+        self.cancel_with(
+            account,
+            coin,
+            oid,
+            CancelMode {
+                status: TerminalStatus::Canceled,
+                fast,
+            },
+        )
     }
 
     /// The match-time margin cancel (the venue's `marginCanceled` status).
     pub(crate) fn margin_cancel(&self, account: Address, coin: &str, oid: u64) -> Result<()> {
-        self.cancel_with(account, coin, oid, TerminalStatus::MarginCanceled)
+        self.cancel_with(
+            account,
+            coin,
+            oid,
+            CancelMode {
+                status: TerminalStatus::MarginCanceled,
+                fast: false,
+            },
+        )
     }
 
     /// The cancel's one home: move the resting order to the terminal history
@@ -854,11 +883,17 @@ impl Sim {
         account: Address,
         coin: &str,
         oid: u64,
-        status: TerminalStatus,
+        mode: CancelMode,
     ) -> Result<()> {
+        let CancelMode { status, fast } = mode;
         self.with_state(|st| {
             match st.resting.get(&oid) {
                 Some(r) if r.account == account && r.coin == coin => {
+                    if fast && r.trigger.is_some() {
+                        return Err(Error::bad_request(
+                            "Fast cancel cannot cancel a trigger order.",
+                        ));
+                    }
                     let Some(done) = st.resting.remove(&oid) else {
                         return Ok(());
                     };
@@ -889,6 +924,7 @@ impl Sim {
         account: Address,
         coin: &str,
         cloid: alloy_primitives::B128,
+        fast: bool,
     ) -> Result<()> {
         let oid = self.with_state(|st| {
             Ok(st
@@ -898,7 +934,7 @@ impl Sim {
                 .map(|r| r.oid))
         })?;
         match oid {
-            Some(oid) => self.cancel(account, coin, oid),
+            Some(oid) => self.cancel(account, coin, oid, fast),
             None => Err(Error::bad_request(
                 "Order was never placed, already canceled, or filled.",
             )),
@@ -908,23 +944,23 @@ impl Sim {
     /// The resting order a status read may find (open), or its terminal
     /// record (filled/canceled).
     pub(crate) fn resting_by_oid(&self, account: Address, oid: u64) -> Result<Option<RestingOrder>> {
-        Ok(self
-            .state
-            .lock()?
-            .resting
-            .get(&oid)
-            .filter(|r| r.account == account)
-            .cloned())
+        self.with_state(|st| {
+            Ok(st
+                .resting
+                .get(&oid)
+                .filter(|r| r.account == account)
+                .cloned())
+        })
     }
 
     pub(crate) fn terminal_by_oid(&self, account: Address, oid: u64) -> Result<Option<TerminalOrder>> {
-        Ok(self
-            .state
-            .lock()?
-            .terminal
-            .get(&oid)
-            .filter(|t| t.order.account == account)
-            .cloned())
+        self.with_state(|st| {
+            Ok(st
+                .terminal
+                .get(&oid)
+                .filter(|t| t.order.account == account)
+                .cloned())
+        })
     }
 
     pub(crate) fn resting_by_cloid(
@@ -932,13 +968,13 @@ impl Sim {
         account: Address,
         cloid: alloy_primitives::B128,
     ) -> Result<Option<RestingOrder>> {
-        Ok(self
-            .state
-            .lock()?
-            .resting
-            .values()
-            .find(|r| r.account == account && r.cloid == Some(cloid))
-            .cloned())
+        self.with_state(|st| {
+            Ok(st
+                .resting
+                .values()
+                .find(|r| r.account == account && r.cloid == Some(cloid))
+                .cloned())
+        })
     }
 
     pub(crate) fn terminal_by_cloid(
@@ -946,13 +982,13 @@ impl Sim {
         account: Address,
         cloid: alloy_primitives::B128,
     ) -> Result<Option<TerminalOrder>> {
-        Ok(self
-            .state
-            .lock()?
-            .terminal
-            .values()
-            .find(|t| t.order.account == account && t.order.cloid == Some(cloid))
-            .cloned())
+        self.with_state(|st| {
+            Ok(st
+                .terminal
+                .values()
+                .find(|t| t.order.account == account && t.order.cloid == Some(cloid))
+                .cloned())
+        })
     }
 
     /// `scheduleCancel`: a dead-man's switch — at `time` (ms) every resting
@@ -968,6 +1004,21 @@ impl Sim {
                 if t < now + 5_000 {
                     return Err(Error::bad_request(
                         "Scheduled cancel time must be at least 5 seconds in the future.",
+                    ));
+                }
+                // The venue caps scheduled-cancel triggers at 10 per UTC day
+                // (docs; the count increments when one fires, reset at 00:00
+                // UTC — the day of the *fire* is what counts, so the cap is
+                // checked against today's).
+                let day = now / 86_400_000;
+                let fires = st
+                    .accounts
+                    .get(&account)
+                    .map(|a| if a.schedule_fire_day == day { a.schedule_fires } else { 0 })
+                    .unwrap_or(0);
+                if fires >= 10 {
+                    return Err(Error::bad_request(
+                        "The maximum number of scheduled cancel triggers per day is 10.",
                     ));
                 }
                 st.scheduled_cancels.insert(account, t);
@@ -1252,6 +1303,32 @@ fn validate_tick_lot(meta: Option<&crate::wire::Meta>, req: &Order) -> Result<()
         tracing::warn!(coin = %req.coin, price = %px, "order refused: significant figures");
         return Err(Error::bad_request(
             "Order price has more than 5 significant figures.",
+        ));
+    }
+    Ok(())
+}
+
+/// The venue's trigger direction rule (docs, stated for the stop/take
+/// market orders): for a buy, a *stop*'s trigger sits above the mid and a
+/// *take*'s below; for a sell, the reverse — a mis-sided trigger would fire
+/// immediately. The mid is the served book's `(best bid + best ask) / 2`; a
+/// missing or one-sided book skips the check (the feed is warming).
+fn validate_trigger_side(feed: &MarketFeed, req: &Order, trigger: &Trigger) -> Result<()> {
+    let (Some(bid), Some(ask)) = (bbo(feed, &req.coin, true), bbo(feed, &req.coin, false)) else {
+        return Ok(());
+    };
+    let mid = super::account::div(
+        super::account::add(bid, ask, "mid price")?,
+        Decimal::from(2),
+        "mid price",
+    )?;
+    let ok = match (req.is_buy, trigger.tpsl) {
+        (true, Tpsl::Sl) | (false, Tpsl::Tp) => trigger.trigger_px > mid,
+        (true, Tpsl::Tp) | (false, Tpsl::Sl) => trigger.trigger_px < mid,
+    };
+    if !ok {
+        return Err(Error::bad_request(
+            "Trigger price is on the wrong side of the mid price.",
         ));
     }
     Ok(())
@@ -1860,5 +1937,107 @@ mod tests {
         let account = sim.account(a).unwrap().unwrap();
         assert_eq!(account.positions.get("ETH").unwrap().isolated_margin, Decimal::from(60));
         assert_eq!(account.perp_balance, before - Decimal::from(60));
+    }
+    /// The nonce floor (docs): "the 100 highest nonces are stored per address.
+    /// Every new transaction must have nonce larger than the smallest nonce in
+    /// this set and also never have been used before." A nonce pushed out of
+    /// the retained set must not be replayable.
+    #[test]
+    fn a_pruned_nonce_cannot_be_replayed() {
+        let sim = Sim::memory();
+        let signer = Address::repeat_byte(0xbb);
+        let now = crate::now_ms();
+        for i in 0..101u64 {
+            sim.use_nonce(signer, now + i, now).unwrap();
+        }
+        // Only the 100 highest are kept: the first is below the floor now.
+        let refused = sim.use_nonce(signer, now, now);
+        assert!(refused.is_err(), "a nonce below the retained set is refused");
+        assert!(refused.unwrap_err().to_string().contains("too low"));
+        // The most recent is still "already used", not "too low".
+        let used = sim.use_nonce(signer, now + 100, now);
+        assert!(used.is_err());
+        assert!(used.unwrap_err().to_string().contains("already used"));
+        // A fresh nonce above the floor passes.
+        sim.use_nonce(signer, now + 101, now).unwrap();
+    }
+
+    /// The venue rejects a fast cancel that refers to a trigger order (docs);
+    /// a plain cancel of the same trigger succeeds.
+    #[test]
+    fn fast_cancel_refuses_trigger_orders() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "10")], &[("101", "10")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let mut t = ioc(true, "1");
+        t.tif = Tif::Gtc;
+        t.limit_px = Some("101".parse().unwrap());
+        t.trigger = Some(Trigger {
+            is_market: false,
+            trigger_px: "110".parse().unwrap(),
+            tpsl: Tpsl::Sl,
+        });
+        let oid = sim.place(&feed, a, &t).unwrap().resting.expect("the trigger armed");
+        let refused = sim.cancel(a, "ETH", oid, true);
+        assert!(refused.is_err(), "a fast cancel refuses the trigger");
+        assert!(refused.unwrap_err().to_string().contains("trigger"));
+        sim.cancel(a, "ETH", oid, false).unwrap();
+    }
+
+    /// The trigger direction rule (docs, stated for the stop/take market
+    /// orders): for a buy, a stop's trigger sits above the mid and a take's
+    /// below; for a sell, the reverse. A mis-sided trigger would fire
+    /// immediately, so the venue refuses it at placement.
+    #[test]
+    fn a_mis_sided_trigger_is_refused() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "10")], &[("101", "10")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let trigger = |is_buy: bool, tpsl: Tpsl, px: &str| {
+            let mut o = ioc(is_buy, "1");
+            o.tif = Tif::Gtc;
+            o.limit_px = Some("100".parse().unwrap());
+            o.trigger = Some(Trigger {
+                is_market: true,
+                trigger_px: px.parse().unwrap(),
+                tpsl,
+            });
+            o
+        };
+        // The mid is (100 + 101) / 2 = 100.5.
+        let refused = sim.place(&feed, a, &trigger(true, Tpsl::Sl, "99"));
+        assert!(refused.is_err(), "a stop buy below the mid is refused");
+        assert!(refused.unwrap_err().to_string().contains("wrong side"));
+        sim.place(&feed, a, &trigger(true, Tpsl::Sl, "110")).unwrap();
+        let refused = sim.place(&feed, a, &trigger(false, Tpsl::Tp, "99"));
+        assert!(refused.is_err(), "a take sell below the mid is refused");
+        sim.place(&feed, a, &trigger(false, Tpsl::Tp, "110")).unwrap();
+    }
+
+    /// The scheduled-cancel cap (docs): "The max number of triggers per day is
+    /// 10. This trigger count is reset at 00:00 UTC." The count increments
+    /// when one fires; the 11th schedule of the day is refused.
+    #[test]
+    fn scheduled_cancels_are_capped_per_day() {
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        sim.with_account(a, |acc| {
+            acc.perp_balance = Decimal::from(100);
+            Ok(())
+        })
+        .unwrap();
+        let now = crate::now_ms();
+        for i in 0..10u64 {
+            let t = now + 6_000 + i * 1_000;
+            sim.schedule_cancel(a, Some(t)).unwrap();
+            sim.fire_scheduled_cancels(t).unwrap();
+        }
+        let refused = sim.schedule_cancel(a, Some(now + 60_000));
+        assert!(refused.is_err(), "the 11th trigger of the day is refused");
+        assert!(refused.unwrap_err().to_string().contains("per day"));
     }
 }
