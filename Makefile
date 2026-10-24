@@ -328,6 +328,8 @@ help: ## Show this help
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
+.PHONY: fitness lint design-assertions closure-matrix no-orphans docs-metrics \
+	trust-audit clock-labels no-panics config-check docker-members ast-scope
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build import deploy-engine test-engine config-check \
