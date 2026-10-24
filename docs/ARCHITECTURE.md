@@ -764,13 +764,21 @@ harness's `test-endpoints` env names only NodePorts the overlay declares) and
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;
 test modules are out of scope). The tool's report is the analysis half and
-carries four readings the gates cannot: **fan-in** (the workspace's own free
+carries readings the gates cannot: **fan-in** (the workspace's own free
 functions by caller count — the atomic blocks actually in use), **reuse**
-(3-operation sequences shared by ≥ 3 functions, and bodies that are literally
-the same code — the extraction candidates), **dispersion** (types whose field
-logic spans ≥ 3 files: behavior living away from its type) and **divisions**
-(production divisions whose divisor is not a literal — arithmetic panics are
-invisible to the `no-panics` regex, so each site is a named audit entry).
+(3–6-operation sequences shared by ≥ 3 functions, longest first: a long shared
+sequence is the stronger extraction candidate, and a shorter one already
+contained in a reported longer one is skipped), **duplicates** (bodies that
+are literally the same code) and **near-duplicates** (bodies equal once every
+literal is replaced — the same code with different data; tiny one-expression
+wrappers are floored out), **similar records** (structs sharing ≥ 80 % of
+their fields: one type, or an import), **dispersion** (types whose field logic
+spans ≥ 3 files: behavior living away from its type), **narrow context**
+(functions taking the whole `Ctx` but touching one field), **uncalled/dead**
+(the AST verdict confirmed textually, since macro arguments are invisible to
+the expression visitor) and **divisions** (production divisions whose divisor
+is not a literal — arithmetic panics are invisible to the `no-panics` regex,
+so each site is a named audit entry).
 Each gate fails on drift; adding one is adding a script (or a bin) and one
 Makefile line.
 

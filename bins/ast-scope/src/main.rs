@@ -32,6 +32,10 @@ const REPORT_TOP: usize = 12;
 const GRAM_MIN: usize = 3;
 const GRAM_MAX: usize = 6;
 const SHARED_BY: usize = 3;
+/// The near-duplicates reading's shape floor: below this a "shared shape" is a
+/// one-expression wrapper whose literal *is* the content (a call with a
+/// different method name, a constant's return).
+const SHAPE_MIN: usize = 120;
 /// A type whose fields are touched from this many files has behavior living
 /// away from it (the dispersion reading).
 const DISPERSED_BY: usize = 3;
@@ -72,6 +76,13 @@ struct Item {
     /// uncalled reading's input (a handler passed as a value is referenced,
     /// not called).
     refs: Vec<String>,
+    /// The body's token stream with every literal replaced: two functions
+    /// with the same shape differ only in their data (the near-duplicates
+    /// reading's input).
+    shape: String,
+    /// A struct's declared field names: the similar-records reading's input
+    /// (two types carrying the same fields are one type, or an external one).
+    declared: Vec<String>,
 }
 
 impl Item {
@@ -213,22 +224,7 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
     for item in items {
         match item {
             syn::Item::Fn(f) => out.push(fn_item(file, &f.sig, &f.block, &f.attrs, test)),
-            syn::Item::Struct(s) => out.push(Item {
-                file: file.into(),
-                kind: "struct",
-                name: s.ident.to_string(),
-                lines: span_lines(s.span()),
-                depth: 0,
-                size: s.fields.len(),
-                test,
-                ops: Vec::new(),
-                body: String::new(),
-                divisions: Vec::new(),
-                ctx_fields: Vec::new(),
-                ctx_params: 0,
-                ctx_passed_on: false,
-                refs: Vec::new(),
-            }),
+            syn::Item::Struct(s) => out.push(struct_item(file, s, test)),
             syn::Item::Enum(e) => out.push(Item {
                 file: file.into(),
                 kind: "enum",
@@ -244,6 +240,8 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
                 ctx_params: 0,
                 ctx_passed_on: false,
                 refs: Vec::new(),
+                shape: String::new(),
+                declared: Vec::new(),
             }),
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
@@ -279,6 +277,33 @@ fn walk_impl(file: &str, i: &syn::ItemImpl, test: bool, out: &mut Vec<Item>) {
 
 /// One function's shape: span lines (docs included), nesting depth, and
 /// whether it is a test.
+/// One struct's shape: the field count (the gate) and the declared names
+/// (the similar-records reading).
+fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
+    Item {
+        file: file.into(),
+        kind: "struct",
+        name: s.ident.to_string(),
+        lines: span_lines(s.span()),
+        depth: 0,
+        size: s.fields.len(),
+        test,
+        ops: Vec::new(),
+        body: String::new(),
+        divisions: Vec::new(),
+        ctx_fields: Vec::new(),
+        ctx_params: 0,
+        ctx_passed_on: false,
+        refs: Vec::new(),
+        shape: String::new(),
+        declared: s
+            .fields
+            .iter()
+            .filter_map(|f| f.ident.as_ref().map(ToString::to_string))
+            .collect(),
+    }
+}
+
 fn fn_item(
     file: &str,
     sig: &syn::Signature,
@@ -302,6 +327,8 @@ fn fn_item(
         test: test || has_test_attr(attrs),
         ops: body.ops,
         body: normalize(block),
+        shape: normalize_literals(block),
+        declared: Vec::new(),
         divisions: body.divisions,
         ctx_fields: body.ctx_fields.into_iter().collect(),
         ctx_params: params.len(),
@@ -345,6 +372,40 @@ fn normalize(block: &syn::Block) -> String {
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect()
+}
+
+/// [`normalize`] with every literal replaced (strings -> `""`, numbers -> `0`):
+/// two bodies with the same shape are the same code with different data — the
+/// near-duplicates reading's signal, and the exact reading cannot see them.
+fn normalize_literals(block: &syn::Block) -> String {
+    fn walk(ts: proc_macro2::TokenStream, out: &mut String) {
+        for tt in ts {
+            match tt {
+                proc_macro2::TokenTree::Literal(lit) => {
+                    if lit.to_string().starts_with('"') {
+                        out.push_str("\"\"");
+                    } else {
+                        out.push('0');
+                    }
+                }
+                proc_macro2::TokenTree::Group(group) => {
+                    let (open, close) = match group.delimiter() {
+                        proc_macro2::Delimiter::Parenthesis => ('(', ')'),
+                        proc_macro2::Delimiter::Brace => ('{', '}'),
+                        proc_macro2::Delimiter::Bracket => ('[', ']'),
+                        proc_macro2::Delimiter::None => (' ', ' '),
+                    };
+                    out.push(open);
+                    walk(group.stream(), out);
+                    out.push(close);
+                }
+                other => out.push_str(&other.to_string()),
+            }
+        }
+    }
+    let mut out = String::new();
+    walk(block.to_token_stream(), &mut out);
+    out
 }
 
 /// The visitor behind `lines`/`depth`/`ops`: every block-like expression is
@@ -471,6 +532,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String]) {
     fan_in(&prod);
     reuse(&prod);
     dispersion(fields);
+    similar_records(&prod);
     narrow_context(&prod);
     uncalled(&prod, corpus);
     divisions(&prod);
@@ -545,6 +607,45 @@ fn count_word(corpus: &[String], word: &str) -> usize {
 
 fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
+}
+
+/// Structs carrying nearly the same field set: two types with the same fields
+/// are one type — or one of them is an external type the other should import.
+/// Small records are skipped (a two-field shape matches everything).
+fn similar_records(prod: &[&Item]) {
+    const MIN_FIELDS: usize = 5;
+    const SIMILAR: f64 = 0.8;
+    let structs: Vec<&&Item> = prod
+        .iter()
+        .filter(|i| i.kind == "struct" && i.declared.len() >= MIN_FIELDS)
+        .collect();
+    let mut pairs: Vec<(f64, &Item, &Item)> = Vec::new();
+    for (i, a) in structs.iter().enumerate() {
+        for b in structs.iter().skip(i + 1) {
+            let shared = a.declared.iter().filter(|f| b.declared.contains(f)).count();
+            let union = a.declared.len() + b.declared.len() - shared;
+            let jaccard = shared as f64 / union as f64;
+            if jaccard >= SIMILAR {
+                pairs.push((jaccard, a, b));
+            }
+        }
+    }
+    pairs.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
+    if pairs.is_empty() {
+        println!("\nsimilar records: none (no two structs share >= 80% of their fields)");
+        return;
+    }
+    println!("\nsimilar records: structs sharing >= 80% of their fields (one type, or an import):");
+    for (jaccard, a, b) in pairs.iter().take(REPORT_TOP) {
+        println!(
+            "  {:>3.0}%  {} ({}) <-> {} ({})",
+            jaccard * 100.0,
+            a.name,
+            a.file,
+            b.name,
+            b.file
+        );
+    }
 }
 
 /// The narrow-scope reading: functions that take the whole `Ctx` but touch at
@@ -661,6 +762,7 @@ fn reuse(prod: &[&Item]) {
         }
     }
     duplicates(prod);
+    near_duplicates(prod);
 }
 
 /// The `gram`-op sequences that >= [`SHARED_BY`] functions contain, widest
@@ -705,6 +807,37 @@ fn duplicates(prod: &[&Item]) {
     }
     println!("\nduplicates: bodies that are literally the same code:");
     for group in dupes.iter().take(REPORT_TOP) {
+        let names: Vec<&str> = group.iter().map(|i| i.name.as_str()).collect();
+        println!("  {}x  {}", group.len(), list(&names));
+    }
+}
+
+/// Functions whose bodies are the same code with different literals (a
+/// message, a number, a path): the exact-duplicates reading's near miss. A
+/// group whose bodies are all identical is skipped — that is the exact
+/// reading's finding.
+fn near_duplicates(prod: &[&Item]) {
+    let mut by_shape: HashMap<&str, Vec<&Item>> = HashMap::new();
+    for item in prod {
+        if item.kind == "fn" && item.shape.len() >= SHAPE_MIN {
+            by_shape.entry(item.shape.as_str()).or_default().push(item);
+        }
+    }
+    let mut groups: Vec<&Vec<&Item>> = by_shape
+        .values()
+        .filter(|v| v.len() > 1)
+        .filter(|v| {
+            let bodies: HashSet<&str> = v.iter().map(|i| i.body.as_str()).collect();
+            bodies.len() > 1
+        })
+        .collect();
+    groups.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    if groups.is_empty() {
+        println!("\nnear-duplicates: none (no two functions differ only in their literals)");
+        return;
+    }
+    println!("\nnear-duplicates: same code, different literals (extraction candidates):");
+    for group in groups.iter().take(REPORT_TOP) {
         let names: Vec<&str> = group.iter().map(|i| i.name.as_str()).collect();
         println!("  {}x  {}", group.len(), list(&names));
     }

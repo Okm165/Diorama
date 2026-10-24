@@ -460,30 +460,30 @@ fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
 }
 
 fn check_http_url(key: &str, value: &str, issues: &mut Vec<String>) {
-    if value.contains("${") {
-        // Deploy-time wiring: the reference is validated after expansion
-        // (services); `inspect` reports the unresolved names separately.
-        return;
-    }
-    let host = value
-        .strip_prefix("http://")
-        .or_else(|| value.strip_prefix("https://"));
-    let ok = matches!(host, Some(h) if !h.is_empty() && !h.starts_with('/'));
-    if !ok {
-        issues.push(format!("{key} \"{value}\" is not an http(s) URL with a host"));
-    }
+    check_url(key, value, ["http://", "https://"], "http(s)", issues);
 }
 
 fn check_ws_url(key: &str, value: &str, issues: &mut Vec<String>) {
+    check_url(key, value, ["ws://", "wss://"], "ws(s)", issues);
+}
+
+/// One URL check: the value carries one of `schemes` and a host — or it is a
+/// deploy-time `${VAR}` reference, validated after expansion (`inspect`
+/// reports the unresolved names separately).
+fn check_url(
+    key: &str,
+    value: &str,
+    schemes: [&str; 2],
+    what: &str,
+    issues: &mut Vec<String>,
+) {
     if value.contains("${") {
         return;
     }
-    let host = value
-        .strip_prefix("ws://")
-        .or_else(|| value.strip_prefix("wss://"));
+    let host = schemes.iter().find_map(|s| value.strip_prefix(s));
     let ok = matches!(host, Some(h) if !h.is_empty() && !h.starts_with('/'));
     if !ok {
-        issues.push(format!("{key} \"{value}\" is not a ws(s) URL with a host"));
+        issues.push(format!("{key} \"{value}\" is not a {what} URL with a host"));
     }
 }
 
