@@ -2634,6 +2634,7 @@ dependencies = [
  "alloy-sol-types",
  "axum",
  "clap",
+ "futures-util",
  "jsonwebtoken",
  "mirror-anvil",
  "mirror-config",

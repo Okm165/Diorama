@@ -15,6 +15,7 @@ use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
 use mirror_anvil::Write;
 use mirror_devnet::diff::{filter_watched, FilterStats};
+use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::probes::ProbeRunner;
@@ -241,6 +242,21 @@ async fn finalize(
         duration_ms,
     };
     log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome, duration_ms)?;
+    ctx.plane.facts.publish(Fact::BlockApplied {
+        chain: "t",
+        block: n,
+        source: facts.source,
+        writes: facts.total,
+        filtered: facts.filtered,
+        skipped_shadowed: facts.stats.skipped_shadowed,
+        sampled: facts.sampled,
+        sampled_ok: facts.sampled_ok,
+        ms: duration_ms,
+    });
+    ctx.plane.facts.publish(Fact::CursorAdvanced {
+        chain: "t",
+        block: n,
+    });
     tracing::info!(
         block = n,
         source = facts.source,
@@ -330,6 +346,10 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
     ctx.eth_metrics.set(&ctx.eth_metrics.head, t_head);
     ctx.eth_metrics.set(&ctx.eth_metrics.cursor, n);
+    ctx.plane.facts.publish(Fact::CursorAdvanced {
+        chain: "t",
+        block: n,
+    });
     Ok(ApplyOutcome {
         source: "late",
         writes: 0,

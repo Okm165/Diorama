@@ -160,7 +160,11 @@ impl AdminSurface<'_> {
         let walk = if req.clear {
             self.scan_to_head().await?
         } else {
-            crate::scan::ScanWalk { walked: 0, empty: 0 }
+            crate::scan::ScanWalk {
+                walked: 0,
+                empty: 0,
+                shadowed: 0,
+            }
         };
         Ok((self.shadow(req).await?, walk))
     }

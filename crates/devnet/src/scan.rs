@@ -39,11 +39,17 @@ pub fn scan_anchor(watermark: u64, pin: u64) -> u64 {
 /// empty block is one call and no traces, and the harness mines one block per
 /// poll, so the empty share is what the counters are for (plan §17.4).
 pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Result<ScanWalk> {
-    let mut walk = ScanWalk { walked: 0, empty: 0 };
+    let mut walk = ScanWalk {
+        walked: 0,
+        empty: 0,
+        shadowed: 0,
+    };
     for n in (from + 1)..=to {
-        if !scan_block(target, &plane.shadow, n).await? {
+        let marked = scan_block(target, &plane.shadow, n).await?;
+        if marked == 0 {
             walk.empty += 1;
         }
+        walk.shadowed += marked as u64;
         plane.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
         walk.walked += 1;
     }
@@ -56,6 +62,8 @@ pub struct ScanWalk {
     pub walked: u64,
     /// Blocks with no txs: one call, no traces.
     pub empty: u64,
+    /// Devnet writes marked across the walk (the COW progress reading).
+    pub shadowed: u64,
 }
 
 /// The one shadow-scan walk (both profiles, both call shapes): from the
@@ -84,13 +92,13 @@ pub async fn scan_to(plane: &Plane, target: &Rpc, pin: u64, head: u64, first: u6
 
 /// Mark one block's writes devnet-owned: every sender's account fields, the
 /// recipients of value transfers, and the storage writes from the tx traces
-/// (prestateTracer diffMode — measured on anvil 1.8.6). Returns whether the
-/// block had any txs — `false` is the empty-block skip the caller counts.
-pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<bool> {
+/// (prestateTracer diffMode — measured on anvil 1.8.6). Returns how many
+/// writes were marked; `0` is the empty-block skip the caller counts.
+pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<usize> {
     let block = target.block_by_number(n, true).await?;
     let txs = block_txs(&block);
     if txs.is_empty() {
-        return Ok(false);
+        return Ok(0);
     }
     let mut shadowed = 0usize;
     let mut trace_failures = 0usize;
@@ -135,7 +143,7 @@ pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result
         shadowed_writes = shadowed,
         "scanned devnet block for shadow writes"
     );
-    Ok(true)
+    Ok(shadowed)
 }
 
 /// Read a block's hash (for cursor validation).

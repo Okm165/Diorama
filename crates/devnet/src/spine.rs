@@ -15,15 +15,20 @@ use crate::source::Fut;
 use crate::state::ChainCursor;
 use mirror_anvil::Rpc;
 
-/// What a reset check saw.
+/// What a reset check saw — the witness, not just a boolean: the evidence
+/// decides what an operator reads and what the fact stream reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetSignal {
     /// The cursor still belongs to this chain instance.
     Steady,
-    /// Reconcile before any write (the epoch rule owns what happens next).
-    Moved {
-        expected: Option<u64>,
-        found: Option<u64>,
+    /// The cursor's position is stale: it sits below the chain's fork base
+    /// (a re-pin moved the base past it).
+    BaseMoved { base: Option<u64>, cursor: u64 },
+    /// The cursor's block no longer carries its recorded hash.
+    HashMismatch {
+        block: u64,
+        expected: alloy_primitives::B256,
+        found: Option<alloy_primitives::B256>,
     },
 }
 
@@ -62,18 +67,19 @@ impl ResetDetector for CursorHash {
         Box::pin(async move {
             let base = target.fork_block().await?;
             if below_fork_base(cursor.block, base) {
-                return Ok(ResetSignal::Moved {
-                    expected: base,
-                    found: Some(cursor.block),
+                return Ok(ResetSignal::BaseMoved {
+                    base,
+                    cursor: cursor.block,
                 });
             }
             let found = crate::scan::block_hash(target, cursor.block).await?;
             Ok(if found == Some(cursor.hash) {
                 ResetSignal::Steady
             } else {
-                ResetSignal::Moved {
-                    expected: base,
-                    found: cursor.block.into(),
+                ResetSignal::HashMismatch {
+                    block: cursor.block,
+                    expected: cursor.hash,
+                    found,
                 }
             })
         })

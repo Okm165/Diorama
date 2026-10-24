@@ -35,7 +35,6 @@ pub struct Capabilities {
 /// The truth an unshadow restores from, and the pipeline's read side.
 pub trait Source: Send + Sync {
     fn capabilities(&self) -> Capabilities;
-
     /// The source's own head: the anchor before the first apply, when the
     /// devnet has no cursor yet (nothing applied to reflect).
     fn head(&self) -> Fut<'_, mirror_anvil::Result<u64>>;
@@ -56,4 +55,69 @@ pub trait Source: Send + Sync {
         slot: U256,
         block: u64,
     ) -> Fut<'_, mirror_anvil::Result<B256>>;
+}
+
+impl Capabilities {
+    /// Verify the method-presence flags against the live endpoint and return
+    /// the flags that disagree with the declaration (empty = all agree). The
+    /// engines call this once at boot and log any disagreement: a declared
+    /// capability that the endpoint does not serve is a misconfiguration,
+    /// named at the only moment it is cheap to see.
+    ///
+    /// Each probe targets a block that does not exist yet: a method that
+    /// exists answers an error that is *not* `-32601` (or a null result), a
+    /// method that does not answers exactly that. No traces or BALs are
+    /// actually fetched — the probe never pays a full trace's cost.
+    ///
+    /// Behavioral capabilities (`historical`, `heads_ws`) are not probed:
+    /// "the block parameter is ignored" cannot be distinguished from "the
+    /// value did not change" by a read. They stay declarations with their
+    /// measurements, enforced at the read path (the venue source refuses a
+    /// non-latest read rather than silently answering a newer value).
+    pub async fn verify_methods(
+        &self,
+        rpc: &mirror_anvil::Rpc,
+        future: u64,
+    ) -> Vec<&'static str> {
+        use alloy_primitives::U64;
+        let mut disagree = Vec::new();
+
+        let bal = rpc
+            .call::<serde_json::Value>("eth_getBlockAccessList", (U64::from(future),))
+            .await;
+        if self.native_bal != method_present(bal) {
+            disagree.push("native_bal");
+        }
+
+        let trace = rpc
+            .call::<serde_json::Value>(
+                "debug_traceBlockByNumber",
+                (
+                    U64::from(future),
+                    serde_json::json!({"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}),
+                ),
+            )
+            .await;
+        if self.traces != method_present(trace) {
+            disagree.push("traces");
+        }
+
+        let system = rpc
+            .call::<serde_json::Value>("eth_getSystemTxsByBlockNumber", (U64::from(future),))
+            .await;
+        if self.system_txs != method_present(system) {
+            disagree.push("system_txs");
+        }
+
+        disagree
+    }
+}
+
+/// Did the method exist? Anything but `-32601` means yes (a missing block is
+/// an answer from a method that exists).
+fn method_present<T>(r: mirror_anvil::Result<T>) -> bool {
+    match r {
+        Ok(_) => true,
+        Err(e) => !e.is_method_not_found(),
+    }
 }

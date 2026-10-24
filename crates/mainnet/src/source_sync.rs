@@ -53,6 +53,9 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
             Ok(n) => {
                 ctx.eth_metrics
                     .add(&ctx.eth_metrics.source_sync_delivered, n as u64);
+                ctx.plane
+                    .facts
+                    .publish(mirror_devnet::facts::Fact::TopUpDelivered { delivered: n });
                 if last_report.elapsed() > Duration::from_secs(5) {
                     if let (Some(cl_head), Ok(reth_head)) = (
                         cl_head_el_block(&ctx.beacon, &mut head_cache).await,

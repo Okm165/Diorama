@@ -173,6 +173,7 @@ mod tests {
                 StateFile::open(dir.join("cursor.json")).unwrap(),
             ),
             metrics: Metrics::default(),
+            facts: crate::facts::FactBus::default(),
             halted: AtomicBool::new(false),
             time_offset: AtomicU64::new(0),
             shadow_scanned_upto: AtomicU64::new(0),

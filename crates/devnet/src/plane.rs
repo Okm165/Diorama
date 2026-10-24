@@ -36,6 +36,9 @@ pub struct Plane {
     pub state: Shared<StateFile>,
     /// The shared admin gauges (shadowed slots, halted).
     pub metrics: Metrics,
+    /// The fact bus: what happened, as events (in-process broadcast; the
+    /// engines' `/events` SSE endpoint serves the same notices).
+    pub facts: crate::facts::FactBus,
     /// Set by `/admin/pause`: the profile's loops hold where they are.
     pub halted: AtomicBool,
     /// Seconds the devnet's clock runs ahead of the parent block
@@ -83,6 +86,7 @@ impl Plane {
             journal,
             state: Shared::new("cursor state", state),
             metrics: Metrics::default(),
+            facts: crate::facts::FactBus::default(),
             halted: AtomicBool::new(false),
             time_offset: AtomicU64::new(offset),
             shadow_scanned_upto: AtomicU64::new(0),

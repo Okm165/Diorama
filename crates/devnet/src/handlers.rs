@@ -57,5 +57,37 @@ macro_rules! mirror_handlers {
         ) -> ::std::result::Result<::axum::Json<$crate::deal::DealOutcome>, $error> {
             Ok(::axum::Json(ctx.admin().deal(&req).await?))
         }
+
+        /// `/events` — the fact stream, SSE. One JSON notice per event
+        /// (`id:` = the bus sequence number; `event: fact`). Notifications,
+        /// not state: the server replays nothing on reconnect — a consumer
+        /// that missed events re-reads `/status` and the state files. A
+        /// lagged subscriber resumes from the oldest retained fact (tokio
+        /// broadcast semantics), which is the notification contract.
+        async fn admin_events(
+            ::axum::extract::State(ctx): ::axum::extract::State<::std::sync::Arc<$ctx>>,
+        ) -> impl ::axum::response::IntoResponse {
+            let rx = ctx.plane.facts.subscribe();
+            let stream = ::futures_util::stream::unfold(rx, |mut rx| async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(notice) => {
+                            let event = ::axum::response::sse::Event::default()
+                                .id(notice.seq.to_string())
+                                .event("fact")
+                                .json_data(notice)
+                                .unwrap_or_else(|_| {
+                                    ::axum::response::sse::Event::default().event("encode_error")
+                                });
+                            return Some((Ok::<_, ::std::convert::Infallible>(event), rx));
+                        }
+                        Err(::tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(::tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            });
+            ::axum::response::sse::Sse::new(stream)
+                .keep_alive(::axum::response::sse::KeepAlive::default())
+        }
     };
 }

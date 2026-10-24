@@ -44,6 +44,43 @@ impl Write {
             | Write::Code { address, .. } => *address,
         }
     }
+
+    /// The write's key half: what it writes, without the value. This is the
+    /// vocabulary of the watch set, the shadow registry, the journal and the
+    /// venue's declared closures — one key space for both mirrors.
+    pub fn key(&self) -> Key {
+        match self {
+            Write::Storage { address, slot, .. } => Key::Storage {
+                address: *address,
+                slot: *slot,
+            },
+            Write::Balance { address, .. } => Key::Balance(*address),
+            Write::Nonce { address, .. } => Key::Nonce(*address),
+            Write::Code { address, .. } => Key::Code(*address),
+        }
+    }
+}
+
+/// A state key: `Write` without its value. `Key` is what a read asks for
+/// (the venue's poll composer reads keys) and what a mark names (the shadow
+/// registry's marks are keyed by it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Key {
+    Storage { address: Address, slot: U256 },
+    Balance(Address),
+    Nonce(Address),
+    Code(Address),
+}
+
+impl Key {
+    pub fn address(&self) -> Address {
+        match self {
+            Key::Storage { address, .. }
+            | Key::Balance(address)
+            | Key::Nonce(address)
+            | Key::Code(address) => *address,
+        }
+    }
 }
 
 /// Flatten one transaction's `prestateTracer{diffMode}` frame into writes:

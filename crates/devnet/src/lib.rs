@@ -5,9 +5,11 @@
 //! V on the venue profile — the shared crates drive whichever chain the
 //! profile owns); `pin` = that chain's fork base.
 pub mod admin;
+pub mod closure;
 pub mod deal;
 pub mod diff;
 pub mod epoch;
+pub mod facts;
 pub mod handlers;
 pub mod error;
 pub mod journal;
@@ -72,6 +74,13 @@ mod design_assertions {
         is_normal::<crate::spine::ProbeSchedule>();
         is_normal::<crate::spine::Policies>();
         is_normal::<crate::source::Capabilities>();
+        is_normal::<crate::facts::Fact>();
+        is_normal::<crate::facts::Notice>();
+        is_normal::<crate::facts::FactBus>();
+        is_normal::<crate::facts::ResetWitness>();
+        is_normal::<crate::closure::TouchedSet>();
+        is_normal::<crate::closure::FixedSlots>();
+        is_normal::<crate::closure::TopicMappedSlots>();
         is_normal::<crate::Error>();
     }
 }

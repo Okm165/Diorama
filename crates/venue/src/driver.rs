@@ -20,6 +20,7 @@
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use mirror_anvil::Rpc;
+use mirror_devnet::facts::{Fact, ResetWitness};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
 use mirror_devnet::scan;
@@ -176,6 +177,12 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
         &ctx.venue_metrics.scanned_blocks_total,
         &ctx.venue_metrics.skipped_empty_blocks_total,
     );
+    ctx.plane.facts.publish(Fact::ShadowScanned {
+        chain: "v",
+        blocks: walk.walked,
+        empty: walk.empty,
+        shadowed: walk.shadowed,
+    });
     ctx.plane.save_shadow()?;
     // Ring the journal like the applier does on T: the rewind window is the
     // same 1024 blocks on both mirrors (files older than head - keep are
@@ -186,6 +193,10 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     ctx.set_cursor_v(cursor_from(&block, first_block))?;
     ctx.plane.save_state()?;
     ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
+    ctx.plane.facts.publish(Fact::CursorAdvanced {
+        chain: "v",
+        block: head,
+    });
     Ok(())
 }
 
@@ -270,6 +281,13 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     if read_canary(&ctx.v).await? == pin {
         return Ok(pin);
     }
+    ctx.plane.facts.publish(Fact::ResetDetected {
+        chain: "v",
+        witness: ResetWitness::Pin {
+            expected: ctx.plane.state.lock()?.data.epoch_pin,
+            found: pin,
+        },
+    });
 
     // The epoch rule (shared with the ethereum engine, `mirror-devnet::epoch`):
     // a fresh pin drops marks and values, the same pin re-applies the recorded
@@ -279,11 +297,13 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
         mirror_devnet::epoch::Epoch::Steady => {}
         mirror_devnet::epoch::Epoch::Cleared => {
             ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
+            ctx.plane.facts.publish(Fact::EpochChanged { chain: "v", pin });
         }
         mirror_devnet::epoch::Epoch::Restored { restored } => {
             ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
             ctx.venue_metrics
                 .add(&ctx.venue_metrics.restore_writes_total, restored as u64);
+            ctx.plane.facts.publish(Fact::EpochChanged { chain: "v", pin });
         }
     }
 
@@ -352,7 +372,15 @@ pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOu
     let probes = ProbeRunner::devnet(&ctx.engine.verifier.probes, &ctx.plane.shadow, false)
         .parity(&ctx.source_rpc, pin, &ctx.v)
         .await?;
-    count_probes(ctx, probes, pin, source_head).await
+    let out = count_probes(ctx, probes, pin, source_head).await?;
+    ctx.plane.facts.publish(Fact::ProbesRun {
+        chain: "v",
+        at: pin,
+        ok: out.ok,
+        failed: out.failed,
+        skipped: out.skipped,
+    });
+    Ok(out)
 }
 
 /// Fold one run's outcome into the counters and report it. A run that raced a

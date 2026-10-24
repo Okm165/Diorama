@@ -87,6 +87,7 @@ fn app(ctx: Arc<Ctx>) -> Router {
         .route("/livez", get(livez))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
+        .route("/events", get(admin_events))
         .route("/admin/resume", post(admin_resume))
         .route("/admin/pause", post(admin_pause))
         .route("/admin/rewind", post(admin_rewind))

@@ -631,6 +631,7 @@ the engine's equivalent today is the HTTP surface above plus the cheatcodes.
 | `GET /livez` | always 200 — the orchestrator's liveness signal; the k8s probes use this, not `/healthz` (a paused engine must not leave the Service or restart) |
 | `GET /status` | heads, cursors, lag, halted, shadow counts |
 | `GET /metrics` | Prometheus text: heads, lag, durations, convergence probes, writes, pin age, the feed bridge's counters |
+| `GET /events` | the fact stream (SSE): `block_applied`, `cursor_advanced`, `reset_detected`, `epoch_changed`, `probes_run`, `shadow_scanned`, `top_up_delivered` — notifications, not state (reconnect and re-read) |
 | `POST /admin/rewind` | `{"blocks": N}` – journal-based rewind of T |
 | `POST /admin/resume` | clear a divergence freeze (and a `/admin/pause` halt) |
 | `POST /admin/pause` | hold both loops (reads, writes and cheatcodes keep working) |
@@ -785,6 +786,7 @@ the base truth lives in the registry) lands with the venue's journaling slice.
 | `GET /livez` | always 200 — the orchestrator's liveness signal (the k8s probes use it, not `/healthz`) |
 | `GET /status` | `head`, `cursor`, `fork_pin`, `epoch_pin`, `halted`, `shadowed_slots`, `shadowed_accounts`, `shadowed` (the list), `probes`, `source` |
 | `GET /metrics` | the `venue_*` set (below) + the shared admin gauges (`mirror_shadowed_slots`, `mirror_halted`) |
+| `GET /events` | the fact stream (SSE), the same vocabulary (`block_applied` arrives with the poll composer; `reset_detected`/`epoch_changed`/`shadow_scanned`/`probes_run` today) |
 | `POST /admin/deal`, `POST /admin/shadow` | the shared devnet surface, verbatim |
 | `POST /admin/rewind` | the engine's own-write journal (the deal faucet's silent storage writes, recorded under the scan cursor); the shared rewind undoes the last N scanned blocks newest-first |
 | `POST /admin/pause` / `POST /admin/resume` | hold / release the driver |

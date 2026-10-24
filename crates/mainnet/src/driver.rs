@@ -9,6 +9,7 @@ use crate::diff::apply_block;
 use crate::error::Result;
 use crate::source_sync;
 use mirror_config::EngineSection;
+use mirror_devnet::facts::{Fact, ResetWitness};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::spine::ResetSignal;
 use mirror_devnet::state::{self, ChainCursor};
@@ -67,13 +68,39 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
     };
     match ctx.reset.detect(&ctx.anvil_t, &c).await? {
         ResetSignal::Steady => Ok(Some(c)),
-        ResetSignal::Moved { expected, found } => {
+        ResetSignal::BaseMoved { base, cursor } => {
             tracing::warn!(
                 block = c.block,
+                ?base,
+                cursor,
+                "cursor below the fork base (re-pin) - reconciling"
+            );
+            ctx.plane.facts.publish(Fact::ResetDetected {
+                chain: "t",
+                witness: ResetWitness::Position { base, cursor },
+            });
+            rebase(ctx, head).await?;
+            Ok(None)
+        }
+        ResetSignal::HashMismatch {
+            block,
+            expected,
+            found,
+        } => {
+            tracing::warn!(
+                block,
                 ?expected,
                 ?found,
-                "cursor not found on chain (reset or re-pin) - reconciling"
+                "cursor hash not found on chain (reset or re-pin) - reconciling"
             );
+            ctx.plane.facts.publish(Fact::ResetDetected {
+                chain: "t",
+                witness: ResetWitness::Hash {
+                    block,
+                    expected,
+                    found,
+                },
+            });
             rebase(ctx, head).await?;
             Ok(None)
         }
@@ -97,6 +124,7 @@ async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
         .await?;
     ctx.plane.state.lock()?.data.devnet = None;
     ctx.plane.save_state()?;
+    ctx.plane.facts.publish(Fact::EpochChanged { chain: "t", pin });
     tracing::info!(head, ?pin, "chain rebased; the epoch rule ran");
     Ok(())
 }
@@ -262,6 +290,14 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
                     &ctx.eth_metrics.shadow_scanned_blocks,
                     &ctx.eth_metrics.shadow_skipped_empty_blocks,
                 );
+                if walk.walked > 0 {
+                    ctx.plane.facts.publish(Fact::ShadowScanned {
+                        chain: "t",
+                        blocks: walk.walked,
+                        empty: walk.empty,
+                        shadowed: walk.shadowed,
+                    });
+                }
             }
             Err(e) => tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block"),
         }
@@ -300,5 +336,12 @@ pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::Probe
         skipped = probes.skipped,
         "on-demand probes complete"
     );
+    ctx.plane.facts.publish(Fact::ProbesRun {
+        chain: "t",
+        at: cursor.block,
+        ok: probes.ok,
+        failed: probes.failed,
+        skipped: probes.skipped,
+    });
     Ok(probes)
 }
