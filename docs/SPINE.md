@@ -4,6 +4,34 @@ One machine, two parents: the information both mirrors carry, the interfaces
 they share, the places they diverge, and the evidence for every claim below
 (specs, live probes, measured behavior).
 
+## The shape
+
+```
+   parent A: reth (Ethereum)             parent B: the HL API (HyperEVM)
+   +--------------------------+          +--------------------------------+
+   | BAL(n) native            |          | latest state only; envelopes:  |
+   | traces, historical,      |          | CoreWriter logs, system txs    |
+   | WS heads                 |          | (null receipts), no WS         |
+   +------------+-------------+          +---------------+----------------+
+                |                                        |
+                v                                        v
+   +--------------------------------------------------------------------+
+   | the spine (crates/devnet): one pipeline, no profile names          |
+   |   window (from, to] -> effects: a BAL (EIP-7928's envelope)        |
+   |   -> COW filter (your writes win) -> journal -> writes -> align    |
+   |   -> mine -> scan -> parity -> cursor                              |
+   |   facts -> /events (SSE)        policies + capabilities (data)     |
+   +----------------+----------------------------------+----------------+
+                    |                                  |
+                    v                                  v
+             devnet T (anvil/revm)              devnet V (anvil/revm)
+             your writes live here              + the Core simulated
+                                                (matching, funding,
+                                                 liquidation, ADL)
+```
+
+![the spine](img/spine-overview.png)
+
 ## The thesis
 
 A mirror is: **a parent's state changes, replayed onto a devnet chain under
