@@ -862,13 +862,7 @@ impl Sim {
         if closed.is_empty() {
             return Ok(None);
         }
-        self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
-        self.mark_dirty()?;
-        Ok(Some(Liquidation {
-            positions_closed: closed,
-            account_value: Decimal::ZERO,
-            maintenance: Decimal::ZERO,
-        }))
+        self.liquidated(closed, Decimal::ZERO)
     }
 
     /// One position's attempt inside the waterfall: `(closed, partial)`. The
@@ -916,14 +910,8 @@ impl Sim {
         let v = account::view(account, feed, meta)?;
         let closed = self.vault_take(feed, address)?;
         self.metrics.backstop_liquidations_total.fetch_add(1, Ordering::Relaxed);
-        self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(account = %address, closed = closed.len(), "backstop liquidation: the vault took the positions");
-        self.mark_dirty()?;
-        Ok(Some(Liquidation {
-            positions_closed: closed,
-            account_value: v.margin_summary.account_value,
-            maintenance: Decimal::ZERO,
-        }))
+        self.liquidated(closed, v.margin_summary.account_value)
     }
 
     /// The vault takes every position over at the mark (same side, entered
@@ -1000,17 +988,9 @@ impl Sim {
             }
             closed.push(coin.clone());
         }
-        self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
-        self.mark_dirty()?;
-        Ok(Some(Liquidation {
-            positions_closed: closed,
-            account_value: Decimal::ZERO,
-            maintenance: Decimal::ZERO,
-        }))
+        self.liquidated(closed, Decimal::ZERO)
     }
 
-    /// The ADL ranking: the opposite side, `(mark/entry)·(notional/account_value)`
-    /// at the previous mark, descending (docs).
     /// Close both sides of one ADL fill — the underwater account's own side
     /// and the ranked counterparty's against it, at the same price — counted
     /// as one close.
@@ -1027,6 +1007,8 @@ impl Sim {
         Ok(())
     }
 
+    /// The ADL ranking: the opposite side, `(mark/entry)·(notional/account_value)`
+    /// at the previous mark, descending (docs).
     fn adl_ranking(
         &self,
         feed: &MarketFeed,
@@ -1094,6 +1076,23 @@ impl Sim {
     fn mark_dirty(&self) -> Result<()> {
         self.dirty.store(true, Ordering::Relaxed);
         self.save()
+    }
+
+    /// One liquidation's tail: counted and marked dirty (saved), with the
+    /// `Liquidation` the caller returns. `account_value` is the figure at the
+    /// close — zero for the book/ADL paths, the view's number for the backstop.
+    fn liquidated(
+        &self,
+        positions_closed: Vec<String>,
+        account_value: Decimal,
+    ) -> Result<Option<Liquidation>> {
+        self.metrics.liquidations_total.fetch_add(1, Ordering::Relaxed);
+        self.mark_dirty()?;
+        Ok(Some(Liquidation {
+            positions_closed,
+            account_value,
+            maintenance: Decimal::ZERO,
+        }))
     }
 
     /// Mark the state dirty without saving: the bridge applies a block's
