@@ -5,7 +5,7 @@
 //! One Anvil, one parent stream. The cursor/rebase/gap/reorg rules live here;
 //! the epoch rule itself is shared (`mirror_devnet::epoch`).
 use crate::ctx::Ctx;
-use crate::diff::apply_block;
+use crate::apply::apply_block;
 use crate::error::Result;
 use crate::source_sync;
 use mirror_devnet::facts::{Fact, ResetWitness};

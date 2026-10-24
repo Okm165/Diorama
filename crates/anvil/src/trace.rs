@@ -63,7 +63,7 @@ impl Write {
 }
 
 /// A state key: `Write` without its value. `Key` is what a read asks for
-/// (the venue's poll composer reads keys) and what a mark names (the shadow
+/// (the read plan asks keys) and what a mark names (the shadow
 /// registry's marks are keyed by it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
@@ -85,7 +85,7 @@ impl Key {
 }
 
 /// A state key's value, as a read returns it. `Write` is key + value; `Value`
-/// is what the read seam answers, so the venue's poll composer can read a
+/// is what the read seam answers, so the composer can read a
 /// plan of keys without matching on four separate methods.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
@@ -96,17 +96,6 @@ pub enum Value {
 }
 
 impl Write {
-    /// The write's value half, in the read seam's shape: the live-parity check
-    /// compares what a key reads back to what the composition expected.
-    pub fn value(&self) -> Value {
-        match self {
-            Write::Storage { value, .. } => Value::Storage(*value),
-            Write::Balance { value, .. } => Value::Balance(*value),
-            Write::Nonce { value, .. } => Value::Nonce(*value),
-            Write::Code { value, .. } => Value::Code(value.clone()),
-        }
-    }
-
     /// Pair a key with its value. `None` when they do not match (a read plan
     /// bug): the caller keeps the key and treats the value as unusable, never
     /// writes a mistyped word.

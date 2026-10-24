@@ -34,7 +34,7 @@ mirror_devnet::registry! {
         counter probe_skipped = "venue_probe_skipped_total", "probes skipped because their target is devnet-owned";
         /// Probes that diverged in the last at-pin run.
         gauge probe_last_failed = "venue_probe_last_failed", "probes that diverged in the last at-pin run";
-        /// The poll composer's last window: addresses touched by the source's
+        /// The composer's last window: addresses touched by the source's
         /// envelopes (txs, receipts, system txs).
         gauge poll_touched = "venue_poll_touched", "addresses touched in the last polled window";
         /// Keys the declared closures planned for that window.

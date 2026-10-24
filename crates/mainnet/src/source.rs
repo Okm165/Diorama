@@ -17,11 +17,11 @@ use std::sync::Arc;
 /// the context and the source objects (the source is chosen at boot and never
 /// re-created — rule 15).
 pub struct RethSource {
-    reth: Arc<crate::rpc::Rpc>,
+    reth: Arc<mirror_anvil::Rpc>,
 }
 
 impl RethSource {
-    pub fn new(reth: Arc<crate::rpc::Rpc>) -> Self {
+    pub fn new(reth: Arc<mirror_anvil::Rpc>) -> Self {
         Self { reth }
     }
 }

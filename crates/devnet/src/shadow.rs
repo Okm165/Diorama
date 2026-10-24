@@ -99,11 +99,8 @@ impl From<RawAccountValues> for AccountValues {
 }
 
 impl Shadow {
-    pub fn is_shadowed(&self, w: &Write) -> bool {
-        self.is_shadowed_key(&w.key())
-    }
-
-    /// The key-level form (the BAL-typed COW filter asks keys, not writes).
+    /// The key-level shadow check (the BAL-typed COW filter asks keys, not
+    /// writes).
     pub fn is_shadowed_key(&self, key: &mirror_anvil::Key) -> bool {
         if self.is_fixture(&key.address()) {
             // Whole-account ownership: every write to a fixture address is
@@ -454,7 +451,6 @@ pub(crate) async fn restore_recorded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mirror_anvil::Write;
 
     /// The `/status` presentation is the registry's: lowercase, sorted,
     /// deduped, slot-marked and whole-account-owned addresses together.
@@ -478,26 +474,18 @@ mod tests {
         let a = Address::repeat_byte(0xaa);
         s.mark_slot(a, U256::from(1u64));
         s.mark_account_fields(a);
-        assert!(s.is_shadowed(&Write::Storage {
+        assert!(s.is_shadowed_key(&mirror_anvil::Key::Storage {
             address: a,
             slot: U256::from(1u64),
-            value: U256::ZERO
         }));
         // other slots of the same account still sync
-        assert!(!s.is_shadowed(&Write::Storage {
+        assert!(!s.is_shadowed_key(&mirror_anvil::Key::Storage {
             address: a,
             slot: U256::from(2u64),
-            value: U256::ZERO
         }));
         // account fields shadow as one unit
-        assert!(s.is_shadowed(&Write::Balance {
-            address: a,
-            value: U256::ZERO
-        }));
-        assert!(s.is_shadowed(&Write::Nonce {
-            address: a,
-            value: 0
-        }));
+        assert!(s.is_shadowed_key(&mirror_anvil::Key::Balance(a)));
+        assert!(s.is_shadowed_key(&mirror_anvil::Key::Nonce(a)));
     }
 
     #[test]
@@ -629,20 +617,24 @@ mod tests {
         let other = Address::repeat_byte(0xf2);
         let mut s = Shadow::default();
         s.set_fixtures([fixture].into_iter().collect());
-        let write = |address: Address, slot: u64| Write::Storage {
-            address,
-            slot: U256::from(slot),
-            value: U256::from(1u64),
-        };
-        assert!(s.is_shadowed(&write(fixture, 7)), "any fixture slot is owned");
         assert!(
-            s.is_shadowed(&Write::Balance {
+            s.is_shadowed_key(&mirror_anvil::Key::Storage {
                 address: fixture,
-                value: U256::from(9u64),
+                slot: U256::from(7u64),
             }),
+            "any fixture slot is owned"
+        );
+        assert!(
+            s.is_shadowed_key(&mirror_anvil::Key::Balance(fixture)),
             "fixture account fields are owned"
         );
-        assert!(!s.is_shadowed(&write(other, 7)), "non-fixtures need a mark");
+        assert!(
+            !s.is_shadowed_key(&mirror_anvil::Key::Storage {
+                address: other,
+                slot: U256::from(7u64),
+            }),
+            "non-fixtures need a mark"
+        );
         assert!(s.owned_addresses().contains(&fixture));
         // Runtime-only: the persisted form never carries the fixture list.
         let text = serde_json::to_string(&s).unwrap();

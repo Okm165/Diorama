@@ -26,7 +26,7 @@ use mirror_config::{ClosuresSection, EngineSection};
 use mirror_devnet::closure::{FixedSlots, KeyClosure, TopicMappedSlots};
 use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
-use mirror_devnet::source::{Capabilities, RawSource, Source};
+use mirror_devnet::source::{RawSource, Source};
 use mirror_devnet::spine::{
     ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
@@ -88,19 +88,6 @@ impl Mirror for VenueMirror {
 
     fn scope(&self) -> &Scope {
         &self.scope
-    }
-}
-
-/// What V (anvil) serves as the composer's target: traces yes, BAL not
-/// exercised (the target is only read for the synthesis rung's diff).
-pub fn target_capabilities() -> Capabilities {
-    Capabilities {
-        native_bal: false,
-        traces: true,
-        historical: true,
-        heads_ws: false,
-        system_txs: false,
-        system_tx_receipts: false,
     }
 }
 
@@ -172,7 +159,7 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let pin = Arc::new(AtomicU64::new(0));
     let source: Arc<dyn Source> = Arc::new(VenueSource::new(source_rpc.clone(), pin.clone()));
     let follow: Arc<dyn Source> = Arc::new(RawSource::new(source_rpc, public_capabilities()));
-    let target: Arc<dyn Source> = Arc::new(RawSource::new(v, target_capabilities()));
+    let target: Arc<dyn Source> = Arc::new(RawSource::target(v));
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
     let scope = Scope::new(watch_set(watch, &engine.closures), closures(&engine.closures));
     let mirror: Arc<dyn Mirror> = Arc::new(VenueMirror {

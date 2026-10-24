@@ -52,6 +52,9 @@ struct StatusResponse {
     probes: usize,
     /// The source URL the pin derives from (the unshadow truth's home).
     source: String,
+    /// What the source declares it can serve (the follow source's audited
+    /// capability matrix: native BALs, traces, historical state, system txs).
+    capabilities: mirror_devnet::source::Capabilities,
 }
 
 /// The HTTP mapping of the error taxonomy (the engine and the simulator
@@ -144,6 +147,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
         shadowed: shadow.shadowed_addresses(),
         probes: ctx.engine.verifier.probes.len(),
         source: ctx.chain.source_url.clone(),
+        capabilities: ctx.mirror.follow_source().capabilities(),
     }))
 }
 

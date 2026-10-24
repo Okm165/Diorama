@@ -110,9 +110,9 @@ kubectl -n mainnet-mirror get cm mainnet-instance -o jsonpath='{.data.instance\.
 
 | Invariant | Class | Where |
 |---|---|---|
-| sampled storage parity on written keys vs reth at N (all keys with `full_sweep`) | diff | `diff.rs` |
+| sampled storage parity on written keys vs reth at N (all keys with `full_sweep`) | apply | `apply.rs` |
 | state probes: `eth_call` parity vs reth at N, devnet-owned targets skipped | convergence | `probes.rs` |
-| watch-list filter counts (applied / not-watched / shadowed) | COW | `diff.rs` |
+| watch-list filter counts (applied / not-watched / shadowed) | COW | `cow.rs` |
 | reth parent-hash continuity between consecutive blocks (reorg detection) | structural | `driver.rs` |
 | cursor hash matches the chain (reset detection) | lifecycle | `driver.rs` |
 

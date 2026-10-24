@@ -10,7 +10,7 @@ use crate::beacon::BeaconClient;
 use crate::drift::Drift;
 use crate::error::Result;
 use crate::metrics::MainnetMetrics;
-use crate::rpc::Rpc;
+use mirror_anvil::Rpc;
 use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
 use mirror_devnet::admin::AdminSurface;
 use mirror_devnet::plane::Plane;
@@ -19,10 +19,6 @@ use mirror_devnet::spine::Mirror;
 use mirror_devnet::state::ChainCursor;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// Block → cursor conversion (the shim keeps the frozen `crate::ctx::cursor_from`
-/// path resolving; the code lives in `mirror-devnet`).
-pub use mirror_devnet::state::cursor_from;
 
 pub struct Ctx {
     /// The ethereum chain's section (the source, follow policy, fork offset).

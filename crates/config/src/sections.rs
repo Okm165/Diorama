@@ -135,7 +135,7 @@ pub struct EngineSection {
     /// clobbered, and these are the watched ones it replaces.
     #[serde(default)]
     pub fixture_addresses: Vec<Address>,
-    /// The venue profile's declared watch closures (the poll composer's key
+    /// The venue profile's declared watch closures (the composer's key
     /// derivation). Empty = watchlist account fields only.
     #[serde(default)]
     pub closures: ClosuresSection,

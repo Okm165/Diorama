@@ -174,9 +174,32 @@ fn method_present<T>(r: mirror_anvil::Result<T>) -> bool {
     }
 }
 
+/// Probe a source's declared method-presence capabilities against the live
+/// endpoint, once at boot (both engines call this for their follow source):
+/// a declared capability the endpoint does not serve — or one it serves that
+/// the declaration denies — is named at the only moment it is cheap to see,
+/// never discovered mid-window. A probe fault is the caller's (a boot read
+/// that cannot happen is a boot fault).
+pub async fn audit_capabilities(
+    what: &str,
+    caps: Capabilities,
+    rpc: &mirror_anvil::Rpc,
+) -> mirror_anvil::Result<()> {
+    let head = rpc.block_number().await?;
+    let disagree = caps.verify_methods(rpc, head.saturating_add(1_000)).await;
+    if !disagree.is_empty() {
+        tracing::warn!(
+            source = what,
+            disagree = ?disagree,
+            "declared source capabilities disagree with the endpoint"
+        );
+    }
+    Ok(())
+}
+
 /// A source over a raw RPC: the reads are forwarded verbatim and the
 /// capabilities are the caller's declaration. For reads that are
-/// latest-by-design (the venue's poll composer reads the public RPC at
+/// latest-by-design (the venue's follow reads the public RPC at
 /// latest, where the pin guard would refuse every read) and for tools; a
 /// profile whose reads carry invariants (the venue's pin-exact
 /// [`crate::source::Source`] for unshadow restores) keeps its own
@@ -193,10 +216,21 @@ impl RawSource {
         Self { rpc, capabilities }
     }
 
-    /// The raw client, for the calls the state seam does not model
-    /// (envelopes, receipts, system txs).
-    pub fn rpc(&self) -> &mirror_anvil::Rpc {
-        &self.rpc
+    /// The devnet chain as the composer's target: the synthesis rung reads it
+    /// for the diff (traces yes; no BAL — the target is only read, never
+    /// composed from).
+    pub fn target(rpc: Arc<mirror_anvil::Rpc>) -> Self {
+        Self::new(
+            rpc,
+            Capabilities {
+                native_bal: false,
+                traces: true,
+                historical: true,
+                heads_ws: false,
+                system_txs: false,
+                system_tx_receipts: false,
+            },
+        )
     }
 }
 

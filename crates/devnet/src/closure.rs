@@ -58,10 +58,6 @@ impl TouchedSet {
     pub fn value(&mut self, write: Write) {
         self.values.push(write);
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.addresses.is_empty() && self.logs.is_empty() && self.values.is_empty()
-    }
 }
 
 /// Touched set → concrete keys to read. One closure list per venue mirror

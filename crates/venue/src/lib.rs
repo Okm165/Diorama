@@ -3,7 +3,7 @@
 //!
 //! V is a fork-mode anvil of HyperEVM (chain id 999): it starts as the source's
 //! state at the pin, and the driver **follows** the HL public API from there —
-//! the poll composer derives the touched set from the window's envelopes (txs,
+//! the generic composer synthesizes a BAL from the window's envelopes (txs,
 //! receipts, system txs), the declared closures turn it into concrete keys, and
 //! the changed keys land on V under the same COW filter the ethereum mirror
 //! uses (devnet-owned keys are never clobbered). What the mainnet profile
@@ -35,6 +35,7 @@ pub mod ctx;
 pub mod driver;
 pub mod error;
 pub mod feed;
+pub mod follow;
 pub mod http;
 pub mod metrics;
 pub mod profile;

@@ -53,6 +53,9 @@ struct StatusResponse {
     /// alarming.
     shadowed: Vec<String>,
     time_offset_seconds: u64,
+    /// What the source declares it can serve (the follow source's audited
+    /// capability matrix: native BALs, traces, historical state, system txs).
+    capabilities: mirror_devnet::source::Capabilities,
 }
 
 /// `/admin/time` — the devnet clock offset is set (and persisted).
@@ -172,6 +175,7 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
         shadowed_accounts: shadow.accounts.len(),
         shadowed: shadow.shadowed_addresses(),
         time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
+        capabilities: ctx.mirror.follow_source().capabilities(),
     }))
 }
 

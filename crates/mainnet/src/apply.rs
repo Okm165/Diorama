@@ -6,11 +6,12 @@
 //! -> batched cheatcode writes -> align block context -> mine -> journal ->
 //! sampled parity + probe parity. Each phase is one function; `apply_block` is
 //! the sequence.
-use crate::ctx::{cursor_from, Ctx};
+use crate::ctx::Ctx;
+use mirror_devnet::state::cursor_from;
 use crate::drift::Drift;
 use crate::error::{Error, Result};
-use crate::journal::{entry_for_write, BeforeValue, JournalEntry};
-use crate::rpc::Rpc;
+use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
+use mirror_anvil::Rpc;
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
 use mirror_anvil::Write;
@@ -20,6 +21,7 @@ use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::probes::ProbeRunner;
+use mirror_devnet::spine::{ClockPolicy, MinePolicy, ProbeSchedule};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -56,7 +58,17 @@ struct TDriftEntry<'a> {
 async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[mirror_anvil::Write]) -> Result<usize> {
     let applied =
         mirror_anvil::apply_writes(&ctx.anvil_t, filtered, ctx.engine.loops.chunk_size).await?;
-    align_context_and_mine(ctx, header).await?;
+    let policies = ctx.mirror.policies();
+    // The profile's clock rule: the applied block's context is the parent's
+    // (aligned to timestamp + the plane's live offset) or the devnet's own.
+    if policies.clock == ClockPolicy::AlignToSource {
+        align_context(ctx, header).await?;
+    }
+    // The profile's production rule: one T block per applied parent block
+    // (T's cadence is the devnet's); a pool-drain profile mines elsewhere.
+    if policies.mine == MinePolicy::PerAppliedBlock {
+        ctx.anvil_t.anvil_mine(1).await?;
+    }
     Ok(applied)
 }
 
@@ -176,7 +188,9 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
 
     let t_latest = ctx.anvil_t.block_number().await?;
     let (sampled, sampled_ok) = sample_parity(ctx, n, &filtered, t_latest).await;
-    t_convergence_probes(ctx, n).await?;
+    if ctx.mirror.policies().probes == ProbeSchedule::PerBlock {
+        t_convergence_probes(ctx, n).await?;
+    }
 
     finalize(
         ctx,
@@ -467,7 +481,11 @@ async fn read_before_values(
 /// deliberate `evm_increaseTime` (or a lowered offset) can never make the
 /// timestamp non-monotonic and fail the alignment - anvil would then mine with
 /// its own default and the context would silently drift (measured).
-async fn align_context_and_mine(ctx: &Ctx, header: &Header) -> Result<()> {
+/// The applied block's context: the parent's timestamp + the plane's live
+/// offset, clamped to last+1 so a deliberate jump can never go non-monotonic
+/// (`ClockPolicy::AlignToSource`; the venue's clock is native and nothing
+/// re-aligns it).
+async fn align_context(ctx: &Ctx, header: &Header) -> Result<()> {
     let offset = ctx.plane.time_offset.load(Ordering::Relaxed);
     let last_ts = ctx
         .anvil_t
@@ -479,7 +497,6 @@ async fn align_context_and_mine(ctx: &Ctx, header: &Header) -> Result<()> {
     if let Err(e) = ctx.anvil_t.set_next_block_context(ts, header).await {
         tracing::warn!(error = %e, "context alignment failed");
     }
-    ctx.anvil_t.anvil_mine(1).await?;
     Ok(())
 }
 

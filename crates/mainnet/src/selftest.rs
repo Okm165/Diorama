@@ -2,7 +2,7 @@
 //! Anvil forked from a public RPC. Needs no reth, so it can validate the
 //! whole apply pipeline before the local fork source is synced.
 use crate::ctx::Ctx;
-use crate::diff::apply_block;
+use crate::apply::apply_block;
 use crate::error::{Error, Result};
 use mirror_config::Instance;
 use std::sync::Arc;

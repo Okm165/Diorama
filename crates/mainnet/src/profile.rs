@@ -23,7 +23,7 @@ use crate::error::Result;
 use mirror_config::EngineSection;
 use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
-use mirror_devnet::source::{Capabilities, RawSource, Source};
+use mirror_devnet::source::{RawSource, Source};
 use mirror_devnet::spine::{
     ClockPolicy, CursorHash, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
@@ -99,8 +99,8 @@ pub struct Wiring {
 pub fn build(
     engine: &EngineSection,
     state: Shared<StateFile>,
-    reth: Arc<crate::rpc::Rpc>,
-    anvil_t: Arc<crate::rpc::Rpc>,
+    reth: Arc<mirror_anvil::Rpc>,
+    anvil_t: Arc<mirror_anvil::Rpc>,
     watch: HashSet<alloy_primitives::Address>,
 ) -> Result<Wiring> {
     let source: Arc<dyn Source> = Arc::new(crate::source::RethSource::new(reth));
@@ -108,7 +108,7 @@ pub fn build(
     // The mainnet watches whole accounts: the BAL enumerates every changed
     // slot, so no closures are needed (the scope's slot set stays empty).
     let scope = Scope::new(WatchSet::new(watch), Vec::new());
-    let target: Arc<dyn Source> = Arc::new(RawSource::new(anvil_t, target_capabilities()));
+    let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_t));
     Ok(Wiring {
         mirror: Arc::new(MainnetMirror {
             source,
@@ -118,17 +118,4 @@ pub fn build(
         }),
         target,
     })
-}
-
-/// What T (anvil) serves as the composer's target: traces yes, BAL not
-/// exercised (the target is only read for the synthesis rung's diff).
-fn target_capabilities() -> Capabilities {
-    Capabilities {
-        native_bal: false,
-        traces: true,
-        historical: true,
-        heads_ws: false,
-        system_txs: false,
-        system_tx_receipts: false,
-    }
 }

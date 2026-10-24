@@ -158,11 +158,8 @@ pub enum MinePolicy {
 pub enum ProbeSchedule {
     /// After every apply (T: reth can serve the applied block).
     PerBlock,
-    /// Only while the pin is the source's head (V after a re-pin; the public
-    /// source serves its latest state, so an older pin cannot be compared).
-    AtPin,
-    /// After every apply, against the composer's own cached source values
-    /// (V live: the poll cache is the expected side).
+    /// After every composed window, against the composed BAL (V live: the
+    /// values the composition expected are the expected side).
     LiveParity,
 }
 

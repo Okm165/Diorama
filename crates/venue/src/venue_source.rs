@@ -39,7 +39,7 @@ pub struct VenueSource {
 /// What the public venue source can serve (measured 2026-10-24): no BAL, no
 /// traces, no proofs, no websocket JSON-RPC; state reads are latest-only (the
 /// block parameter is ignored), and system transactions (Core→EVM completions)
-/// are exposed through their own RPC method. The poll composer declares the
+/// are exposed through their own RPC method. The follow source declares the
 /// same capabilities on its raw source.
 pub fn public_capabilities() -> Capabilities {
     Capabilities {
@@ -63,8 +63,13 @@ impl VenueSource {
     }
 
     /// The pin guard: every read is only exact while the source's head is
-    /// still the pin.
-    async fn guard(&self) -> Result<u64, Error> {
+    /// still the pin. The declaration drives it — a source that can serve
+    /// historical state (an archive) needs no check; this one cannot
+    /// (measured: the block parameter is ignored, latest is all there is).
+    async fn guard(&self) -> Result<(), Error> {
+        if self.capabilities().historical {
+            return Ok(());
+        }
         let pin = self.pin.load(Ordering::Relaxed);
         if pin == 0 {
             return Err(Error::Corrupt {
@@ -86,7 +91,7 @@ impl VenueSource {
                 ),
             });
         }
-        Ok(pin)
+        Ok(())
     }
 }
 

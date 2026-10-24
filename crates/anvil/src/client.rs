@@ -16,7 +16,7 @@
 //! is `alloy_json_rpc`'s; the results and params are alloy's per-namespace
 //! types (`alloy_rpc_types_eth`, `…-anvil`, `…-trace`, `…-txpool`). A wire
 //! change upstream lands as a compile error here, never as a silent mismatch.
-use crate::error::{bad_result, missing_from_batch, Error, Result, RpcError};
+use crate::error::{missing_from_batch, Error, Result, RpcError};
 use alloy_eips::eip7928::BlockAccessList;
 use alloy_json_rpc::{
     Id, Request, RequestPacket, Response, ResponsePacket, ResponsePayload, SerializedRequest,
@@ -30,7 +30,7 @@ use alloy_rpc_types_eth::{
 use alloy_rpc_types_trace::geth::{
     GethDebugTracingOptions, GethTrace, PreStateConfig, TraceResult,
 };
-use alloy_rpc_types_txpool::{TxpoolContent, TxpoolStatus};
+use alloy_rpc_types_txpool::TxpoolStatus;
 use serde::{de::DeserializeOwned, de::Error as _, Serialize};
 use serde_json::value::RawValue;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -534,25 +534,6 @@ impl Rpc {
         Ok(quantity.to::<u64>())
     }
 
-    /// Batch raw-tx submission. Per-item errors are returned, not thrown.
-    /// Chunked by item count and body size (mainnet blocks can exceed anvil's
-    /// 2 MB request limit at 500 txs).
-    pub async fn send_raw_batch(&self, raws: &[Bytes]) -> Result<Vec<std::result::Result<B256, RpcError>>> {
-        let calls: Vec<Call> = raws
-            .iter()
-            .map(|raw| call("eth_sendRawTransaction", (raw,)))
-            .collect::<Result<_>>()?;
-        let results = self.batch_limited(&calls, 500, 1 << 20).await?;
-        Ok(results
-            .into_iter()
-            .map(|result| match result {
-                Ok(value) => serde_json::from_str::<B256>(value.get())
-                    .map_err(|e| bad_result("eth_sendRawTransaction", &e.to_string())),
-                Err(error) => Err(error),
-            })
-            .collect())
-    }
-
     /// `debug_traceBlockByNumber` with prestateTracer diffMode (BAL fallback
     /// and write-tracking): one alloy `TraceResult` per transaction.
     pub async fn trace_block_prestate(&self, n: u64) -> Result<Vec<TraceResult>> {
@@ -598,20 +579,6 @@ impl Rpc {
         self.call_raw("anvil_setNextBlockTimestamp", (U64::from(timestamp),))
             .await?;
         Ok(())
-    }
-
-    /// Align the next block's **execution context** to a parent header:
-    /// timestamp (the caller adjusts it for the devnet offset), coinbase,
-    /// prevRandao, and — when the parent has one — base fee. M's replay uses
-    /// this; T's applier uses [`Self::set_next_block_context`] because T keeps
-    /// its own gas limit.
-    pub async fn set_next_block_env(&self, timestamp: u64, header: &Header) -> Result<()> {
-        let mut calls = Self::context_calls(timestamp, header)?;
-        calls.push(call(
-            "anvil_setBlockGasLimit",
-            (U64::from(header.gas_limit),),
-        )?);
-        self.apply_env_calls(calls).await
     }
 
     /// Align the next block's context fields T owns (timestamp/coinbase/
@@ -682,15 +649,6 @@ impl Rpc {
     /// Used to recover M when the follow head moves backward past its
     /// irreversible replay (the cursor hash check rebases the replay after).
     /// Always explicit: the measured no-params form drops the fork entirely.
-    pub async fn anvil_reset_fork(&self, url: &str, block: u64) -> Result<()> {
-        let forking = Forking {
-            json_rpc_url: Some(url.to_string()),
-            block_number: Some(block),
-        };
-        self.call_raw("anvil_reset", (ResetParams { forking },)).await?;
-        Ok(())
-    }
-
     /// `anvil_reset` to a fresh fork at the source's *latest* block (the
     /// venue's `/admin/epoch`: the driver's canary detects the reset and runs
     /// the epoch rule — new base = new epoch, same base = restore).
@@ -710,15 +668,6 @@ impl Rpc {
 
     /// The full pool content (per sender, per nonce) — used to find what is
     /// still pending before mining.
-    pub async fn txpool_content(&self) -> Result<TxpoolContent> {
-        self.call("txpool_content", NO_PARAMS).await
-    }
-
-    pub async fn anvil_set_nonce(&self, addr: Address, nonce: u64) -> Result<()> {
-        self.call_raw("anvil_setNonce", (addr, U64::from(nonce))).await?;
-        Ok(())
-    }
-
     /// `anvil_impersonateAccount` — the devnet's substitution path (the
     /// attester manager, the bridge's system-address senders).
     pub async fn anvil_impersonate_account(&self, addr: Address) -> Result<()> {
@@ -753,11 +702,6 @@ impl Rpc {
             (addr, B256::from(slot.to_be_bytes::<32>()), value),
         )
         .await?;
-        Ok(())
-    }
-
-    pub async fn anvil_drop_transaction(&self, hash: B256) -> Result<()> {
-        self.call_raw("anvil_dropTransaction", (hash,)).await?;
         Ok(())
     }
 }
@@ -830,7 +774,6 @@ mod tests {
             )
             .expect_err("a page is not an answer");
         assert!(matches!(err, Error::Status { status: 502, .. }), "{err}");
-        assert!(err.is_retryable());
     }
 
     /// A 2xx body with neither `result` nor `error` is not a JSON-RPC answer.
@@ -840,7 +783,6 @@ mod tests {
             .answer("eth_call", reqwest::StatusCode::OK, r#"{"message":"hello"}"#)
             .expect_err("not an answer");
         assert!(matches!(err, Error::Decode { .. }), "{err}");
-        assert!(!err.is_retryable());
     }
 
     /// `result: null` is a legitimate empty answer (anvil cheatcodes return

@@ -6,7 +6,7 @@
 //! `age_ms` = the feed bridge's confirmation-window age, not a clock.
 mod beacon;
 mod ctx;
-mod diff;
+mod apply;
 mod driver;
 mod drift;
 mod engine_api;
@@ -19,11 +19,6 @@ mod selftest;
 mod service;
 mod source;
 mod source_sync;
-
-// The frozen `crate::rpc::*` and `crate::shadow|journal|state` paths keep
-// resolving; the code lives in `mirror-anvil` / `mirror-devnet`.
-pub use mirror_anvil as rpc;
-pub use mirror_devnet::{journal, shadow, state};
 
 pub use error::{Error, Result};
 pub use service::main_entry;

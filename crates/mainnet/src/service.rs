@@ -158,6 +158,15 @@ async fn boot_asserts(ctx: &Ctx) -> Result<()> {
     }
     let t_pin = ctx.anvil_t.anvil_node_info().await?.fork_config.fork_block_number;
     mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
+    // The declared capabilities are audited once, against the live endpoint
+    // (a declaration that disagrees is named here, never discovered
+    // mid-window).
+    mirror_devnet::source::audit_capabilities(
+        "reth",
+        ctx.mirror.follow_source().capabilities(),
+        &ctx.reth,
+    )
+    .await?;
     Ok(())
 }
 
