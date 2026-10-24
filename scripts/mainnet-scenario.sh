@@ -4,7 +4,7 @@
 #
 # Phases
 #   1. self-containment   reth has no peers, the top-up gap is 0, blobs are local
-#   2. live parity        heads agree; the 12 state probes match reth on T
+#   2. live parity        heads agree; the 11 state probes match reth on T
 #   3. devnet workflow    fund, send, shadow, rewind, snapshot/revert on T
 #   4. integrity counters no divergences / convergence failures / blob failures
 #
@@ -61,7 +61,7 @@ aave_wbtc_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f0700000000000
 aave_usdt_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f07000000000000000000000000dAC17F958D2ee523a2206206994597C13D831ec7
 aave_wsteth_price 0x54586bE62E3c3580375aE3723C145253060Ca0C2 0xb3596f070000000000000000000000007f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0
 PROBES
-  [ "$mismatches" -eq 0 ] && ok "$label matches reth on all 12 probes (${skipped} devnet-owned skipped)"
+  [ "$mismatches" -eq 0 ] && ok "$label matches reth on all 11 probes (${skipped} devnet-owned skipped)"
 }
 
 echo "== mirror scenario test (namespace $NS)"

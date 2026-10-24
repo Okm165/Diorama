@@ -747,7 +747,12 @@ exists in the code), `trust-audit` (every `// TRUST:` names its guard),
 ledger), `no-panics` (the production code carries exactly two panic-family
 sites, both named invariants in the script's allow-list — a service that panics
 on an upstream answer is a crash loop, not a degradation), `config-check`
-(every instance file through the layered loader) and `ast-scope`
+(every instance file through the layered loader), `docker-members` (the image
+build's dependency layer sees every workspace member: cargo resolves the whole
+workspace before building one package, so a member added or renamed without the
+Dockerfile fails `make build` at COPY — measured: the pre-rename
+`ethereum`/`hyperliquid` names outlived the crates and the new `ast-scope` bin
+was missing) and `ast-scope`
 (`bins/ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;

@@ -7,16 +7,16 @@ Three layers, each runnable on demand:
 | Unit | `make test-engine` (cargo test) | nothing | pure logic: BAL flattening, padding, COW granularity, journal, cursor/rebase rules, KZG proof repair, Engine API request encoding |
 | Self test | `make mainnet-selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (replay + verify + diff apply + sampled parity) |
 | Smoke | `make mainnet-smoke` | the deployed stack | service health + parity spot check on T's head vs reth |
-| Scenario | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **T** (the 12 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
+| Scenario | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **T** (the 11 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
 | Product sim | `make mainnet-product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
 | Follow (local) | `make venue-follow-local` | anvil + the venue engine binary (no cluster/Docker) | the venue's source follow natively: a local anvil stands in for the HL public API, V forks it, the watched account is mirrored 1:1, and a devnet write on V survives the next source window (COW) |
 | Selftest (local) | `make mainnet-selftest-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet applier natively: a local source anvil with a storage-writing contract, T forks it, the engine applies the blocks above the pin through the trace rung (anvil's block trace is empty, so the per-tx fallback runs) and the sampled storage parity passes |
 
 ## Unit tests (`cargo test --workspace`)
 
-140 tests, all offline, one suite per crate: `mirror-anvil` 15,
-`mirror-devnet` 21, `mirror-config` 16, `mirror-mainnet` 14,
-`mirror-venue` 43, `mirror-cctp` 31. The suites carry the measured rules
+196 tests, all offline, one suite per crate: `mirror-anvil` 16,
+`mirror-devnet` 42, `mirror-config` 17, `mirror-mainnet` 8,
+`mirror-venue` 82, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
 - `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with

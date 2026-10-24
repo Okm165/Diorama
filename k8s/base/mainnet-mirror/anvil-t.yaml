@@ -30,8 +30,8 @@ spec:
       # Give anvil time to shut down cleanly on SIGTERM.
       terminationGracePeriodSeconds: 90
       initContainers:
-        # Resolve a *fresh* fork pin on every start, like M. That bounds the
-        # post-restart re-replay to FORK_OFFSET (~128 blocks, minutes) instead
+        # Resolve a *fresh* fork pin on every start. That bounds the
+        # post-restart re-fork to FORK_OFFSET (~128 blocks, minutes) instead
         # of the whole pin age - and a fresh pin is a *new epoch*: the base
         # moved, so the engine clears the shadow registry (marks *and* values)
         # and the devnet starts clean. Re-create positions from your journal;
@@ -146,10 +146,10 @@ spec:
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
-          # A restarted anvil forks (and, for M, re-replays) before it can
-          # serve: gate readiness/liveness behind a startup probe so k8s does
-          # not flap them during the catch-up (measured: "Readiness probe
-          # failed: connection refused" events on every M restart).
+          # A restarted anvil re-forks before it can serve: gate
+          # readiness/liveness behind a startup probe so k8s does not flap them
+          # during the catch-up (measured: "Readiness probe failed: connection
+          # refused" events on every restart).
           startupProbe:
             tcpSocket: { port: 8545 }
             periodSeconds: 5

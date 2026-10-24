@@ -144,19 +144,7 @@ pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result
     if txs.is_empty() {
         return Ok(0);
     }
-    let mut shadowed = 0usize;
-    let mut trace_failures = 0usize;
-    for tx in txs {
-        match mark_tx(target, shadow, tx).await {
-            Ok(marked) => shadowed += marked,
-            Err(e) => {
-                // A tx whose trace failed hides its writes: the block is *not*
-                // cleanly scanned and the watermark must not advance past it.
-                trace_failures += 1;
-                tracing::warn!(tx = %tx.tx_hash(), error = %e, "shadow trace failed");
-            }
-        }
-    }
+    let (shadowed, trace_failures) = mark_block(target, shadow, txs).await;
     if trace_failures > 0 {
         return Err(Error::ShadowScan {
             block: n,
@@ -170,6 +158,24 @@ pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result
         "scanned devnet block for shadow writes"
     );
     Ok(shadowed)
+}
+
+/// Mark every tx's writes, returning (marks added, traces that failed). A
+/// failed trace hides its tx's writes: the block is *not* cleanly scanned and
+/// the watermark must not advance past it.
+async fn mark_block(target: &Rpc, shadow: &Shared<Shadow>, txs: &[Transaction]) -> (usize, usize) {
+    let mut shadowed = 0usize;
+    let mut trace_failures = 0usize;
+    for tx in txs {
+        match mark_tx(target, shadow, tx).await {
+            Ok(marked) => shadowed += marked,
+            Err(e) => {
+                trace_failures += 1;
+                tracing::warn!(tx = %tx.tx_hash(), error = %e, "shadow trace failed");
+            }
+        }
+    }
+    (shadowed, trace_failures)
 }
 
 /// Read a block's hash (for cursor validation).

@@ -71,18 +71,9 @@ impl AdminSurface<'_> {
     /// is a success, not a failure (the retry-discipline rule: never report a
     /// fault for a completed effect).
     pub async fn epoch_repin(target: &Rpc, source_url: &str) -> Result<EpochResponse> {
-        let before = target.fork_config().await?.map(|(_, block)| block);
+        let before = fork_base(target).await?;
         if let Err(e) = target.anvil_reset_fork_latest(source_url).await {
-            let after = target.fork_config().await?.map(|(_, block)| block);
-            if after == before {
-                return Err(e.into());
-            }
-            tracing::warn!(
-                error = %e,
-                before = ?before,
-                after = ?after,
-                "anvil_reset answered with a transport fault but the fork base moved; treating it as applied"
-            );
+            confirm_reset(target, before, e).await?;
         }
         tracing::warn!(
             source = %source_url,
@@ -445,6 +436,28 @@ impl AdminSurface<'_> {
         self.plane.halted.store(false, Ordering::SeqCst);
         self.plane.metrics.set(&self.plane.metrics.halted, 0);
     }
+}
+
+/// The chain's fork base, when it is a fork (the re-pin's before/after probe).
+async fn fork_base(target: &Rpc) -> Result<Option<u64>> {
+    Ok(target.fork_config().await?.map(|(_, block)| block))
+}
+
+/// An applied-but-unanswered reset is a success, not a failure (the
+/// retry-discipline rule: never report a fault for a completed effect). A
+/// fork base that did not move means the reset never landed: the fault stands.
+async fn confirm_reset(target: &Rpc, before: Option<u64>, e: mirror_anvil::Error) -> Result<()> {
+    let after = fork_base(target).await?;
+    if after == before {
+        return Err(e.into());
+    }
+    tracing::warn!(
+        error = %e,
+        before = ?before,
+        after = ?after,
+        "anvil_reset answered with a transport fault but the fork base moved; treating it as applied"
+    );
+    Ok(())
 }
 
 /// `/admin/epoch`'s wire shape (both engines): the re-pin applied, and the

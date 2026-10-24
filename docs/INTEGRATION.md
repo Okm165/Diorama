@@ -27,10 +27,10 @@ Anvil, one source".
 
 ## 2. The venue side — venue-sim (info :8090, control :8091)
 
-**Served `/info` types (13):** `clearinghouseState`, `spotClearinghouseState`,
-`userAbstraction`, `openOrders`, `meta`, `metaAndAssetCtxs`, `perpDexs`,
-`l2Book`, `marginTable`, `activeAssetData`, `exchangeStatus`, `spotMeta`,
-`allMids`. An unknown coin's `l2Book` answers the venue's own absence shape
+**Served `/info` types (16):** `clearinghouseState`, `spotClearinghouseState`,
+`userAbstraction`, `openOrders`, `frontendOpenOrders`, `orderStatus`,
+`perpsAtOpenInterestCap`, `meta`, `metaAndAssetCtxs`, `perpDexs`, `l2Book`,
+`marginTable`, `activeAssetData`, `exchangeStatus`, `spotMeta`, `allMids`. An unknown coin's `l2Book` answers the venue's own absence shape
 (HTTP 200 `null`; a *configured* market still warming is a 503). Anything else
 answers `"unrouted"` (hl_mock's contract — a *named*
 non-answer, never a 500). Un-simulated types are **not proxied** to the live

@@ -1,7 +1,7 @@
 # anvil-v - the Venue Mirror's devnet chain (V, chain-id 999).
 #
 # A fork-mode anvil over the public HyperEVM RPC. There is no follow machinery
-# and no fork offset (unlike M/T): the source is archive-deep (measured: >=5M
+# and no fork offset (unlike T): the source is archive-deep (measured: >=5M
 # blocks), so the pin is simply the source's latest block. The engine's epoch
 # rule keys on this pin (persisted in /state/pin): a re-pin to a *different*
 # base is a new epoch (the shadow registry is cleared, the simulator re-pins
@@ -30,7 +30,7 @@ spec:
       # Give anvil time to shut down cleanly on SIGTERM.
       terminationGracePeriodSeconds: 90
       initContainers:
-        # Resolve a *fresh* pin on every start, like M/T: the source serves
+        # Resolve a *fresh* pin on every start, like T: the source serves
         # `latest` at archive depth, so a restart re-forks at a current block
         # and the driver reconciles it as an epoch on its next pass.
         - name: resolve-pin

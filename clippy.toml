@@ -1,5 +1,11 @@
 too-many-lines-threshold = 50
-cognitive-complexity-threshold = 18
+# No `cognitive-complexity-threshold`: clippy's `cognitive_complexity` lint is
+# allow-by-default (restriction) and counts macro-*expanded* `if`s, so every
+# `tracing::warn!` scores several branches — measured here: a four-log bridge
+# handler read 30/18 while the same code without the logs read under 18. It is
+# a logging tax, not a scope measure (clippy's own docs say it "should not be
+# used as a measurement tool"). Scope is gated where it is measurable:
+# `too_many_lines` below, and ast-scope's span/depth readings.
 # Methods count `self`; 5 keeps four-argument handlers legal while flagging the
 # genuinely wide signatures.
 too-many-arguments-threshold = 5

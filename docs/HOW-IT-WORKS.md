@@ -107,7 +107,7 @@ re-forks.
 8. **Scan** T's own blocks into the shadow registry (the prepend's txs
    included), so the next filter sees your writes.
 9. **Parity.** 8 sampled storage keys vs reth at `n` (every applied key with
-   `verifier.full_sweep`), then the 12 probes: T@latest vs reth at `n`.
+   `verifier.full_sweep`), then the 11 probes: T@latest vs reth at `n`.
    Devnet-owned targets are skipped (counted in `mirror_t_probe_skipped_total`
    - a devnet write to a shared contract hides all of that contract's probes
    until it is handed back), and the applier scans its own prepend blocks

@@ -1,6 +1,7 @@
-# engine - the Mainnet Mirror engine: the L1 replay loop (M), the verifier, the
-# BAL diff applier (T), and the admin surface (/admin/epoch, /admin/shadow,
-# /admin/feed, /admin/time, /admin/rewind).
+# engine - the Mainnet Mirror engine: the BAL applier (T), the shadow scan,
+# the state probes, the top-up loop (the local CL -> reth), the feed bridge,
+# and the admin surface (/admin/epoch, /admin/shadow, /admin/feed, /admin/time,
+# /admin/rewind).
 #
 # Same shape as the venue engine deployment: the image carries the mainnet
 # binary, the mounted instance file selects the profile (plan §19.5), and the

@@ -80,12 +80,7 @@ impl<'a> ProbeRunner<'a> {
             );
             return Ok(out);
         }
-        let shadowed: HashSet<Address> = self
-            .shadow
-            .lock()?
-            .owned_addresses()
-            .into_iter()
-            .collect();
+        let shadowed = self.owned_addresses()?;
         for probe in self.probes {
             if shadowed.contains(&probe.to) {
                 // A devnet write anywhere in this target hides *all* of its
@@ -105,6 +100,11 @@ impl<'a> ProbeRunner<'a> {
         }
         Ok(out)
     }
+
+    /// The devnet-owned targets, as a set (the probe loop's skip test).
+    fn owned_addresses(&self) -> Result<HashSet<Address>> {
+        Ok(self.shadow.lock()?.owned_addresses().into_iter().collect())
+    }
 }
 
 /// Compare one probe: the source at `at` vs the target's latest. A read fault
@@ -116,13 +116,7 @@ async fn compare_probe(source: &Rpc, target: &Rpc, probe: &Probe, at: u64) -> bo
     match (r, t) {
         (Ok(a), Ok(b)) if a == b => true,
         (Ok(a), Ok(b)) => {
-            tracing::warn!(
-                block = at,
-                probe = %probe.name,
-                source = %mirror_anvil::truncate(&alloy_primitives::hex::encode(&a), 80),
-                target = %mirror_anvil::truncate(&alloy_primitives::hex::encode(&b), 80),
-                "probe mismatch"
-            );
+            log_mismatch(probe, at, &a, &b);
             false
         }
         (Err(e), _) | (_, Err(e)) => {
@@ -130,4 +124,15 @@ async fn compare_probe(source: &Rpc, target: &Rpc, probe: &Probe, at: u64) -> bo
             false
         }
     }
+}
+
+/// A probe mismatch: both sides hex-encoded and truncated (the log's shape).
+fn log_mismatch(probe: &Probe, at: u64, source: &[u8], target: &[u8]) {
+    tracing::warn!(
+        block = at,
+        probe = %probe.name,
+        source = %mirror_anvil::truncate(&alloy_primitives::hex::encode(source), 80),
+        target = %mirror_anvil::truncate(&alloy_primitives::hex::encode(target), 80),
+        "probe mismatch"
+    );
 }

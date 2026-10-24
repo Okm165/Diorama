@@ -2,7 +2,9 @@
 #
 # One Dockerfile, one binary per image: `--build-arg BIN=<package>` selects
 # which workspace binary to build (mainnet-engine, venue-engine, venue-sim and
-# cctp-bridge). The runtime entrypoint is a symlink to it.
+# cctp-bridge). The runtime entrypoint is a symlink to it. `ast-scope` (the AST
+# fitness gate) ships no image, but its manifest is still copied: cargo resolves
+# the whole workspace before building one package.
 #
 # Base images are pinned to the latest stable releases by tag *and* digest, so a
 # rebuilt image is reproducible and no tag can silently move under us.
@@ -23,16 +25,17 @@ COPY crates/anvil/Cargo.toml crates/anvil/
 COPY crates/cctp/Cargo.toml crates/cctp/
 COPY crates/config/Cargo.toml crates/config/
 COPY crates/devnet/Cargo.toml crates/devnet/
-COPY crates/ethereum/Cargo.toml crates/ethereum/
-COPY crates/hyperliquid/Cargo.toml crates/hyperliquid/
+COPY crates/mainnet/Cargo.toml crates/mainnet/
+COPY crates/venue/Cargo.toml crates/venue/
+COPY bins/ast-scope/Cargo.toml bins/ast-scope/
 COPY bins/cctp-bridge/Cargo.toml bins/cctp-bridge/
 COPY bins/mainnet-engine/Cargo.toml bins/mainnet-engine/
 COPY bins/venue-engine/Cargo.toml bins/venue-engine/
 COPY bins/venue-sim/Cargo.toml bins/venue-sim/
-RUN for d in crates/anvil crates/cctp crates/config crates/devnet crates/ethereum crates/hyperliquid; do \
+RUN for d in crates/anvil crates/cctp crates/config crates/devnet crates/mainnet crates/venue; do \
       mkdir -p "$d/src" && : > "$d/src/lib.rs"; \
     done \
-    && for d in bins/cctp-bridge bins/mainnet-engine bins/venue-engine bins/venue-sim; do \
+    && for d in bins/ast-scope bins/cctp-bridge bins/mainnet-engine bins/venue-engine bins/venue-sim; do \
       mkdir -p "$d/src" && echo 'fn main() {}' > "$d/src/main.rs"; \
     done \
     && cargo build --release --locked -p ${BIN} \
