@@ -200,6 +200,9 @@ mainnet-smoke: ## End-to-end smoke test (mainnet)
 venue-smoke: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
 	NS=venue-mirror ./scripts/venue-smoke.sh
 
+venue-follow-local: venue-build ## Native local proof of the source follow (two anvils; no cluster/Docker)
+	./scripts/venue-follow-local.sh
+
 venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
 	kubectl apply -f k8s/base/venue-mirror/pvcs.yaml
 	$(MAKE) INSTANCE=venue-mirror apply
