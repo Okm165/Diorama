@@ -463,7 +463,7 @@ the same name to re-attach it, or delete the PV explicitly to free the space.
 | Lighthouse in CrashLoopBackOff | OOM during checkpoint sync (needs >6 GiB) | keep the 16Gi limit; `logs-lighthouse` shows `State cache missed` before OOM |
 | Anvil OOMKilled | state snapshots + fork cache (`--prune-history`) | restart; lower `--prune-history`; see the memory table above |
 | reth `eth_syncing` true for a long time | unwind/replay after a restart, or a stale engine buffer | wait; check `logs-reth` for stage progress |
-| Lighthouse "no checkpoint" / sync stuck | checkpoint provider down | switch `CHECKPOINT_SYNC_URL` in `mirror-config` (fallback is beaconcha.in) |
+| Lighthouse "no checkpoint" / sync stuck | checkpoint provider down | switch `CHECKPOINT_SYNC_URL` in `mirror-config` to a working provider (beaconcha.in's sync endpoint is the known-good alternative) |
 | Lighthouse `system resources may be overloaded` (WARN) | a state advance at an epoch boundary took longer than usual | during the one-time backfill it recurs every ~32 slots (the backfill's I/O competes with the advance) and clears when the backfill completes - measured: 6 events in one 30-min window, none after. Not an alarm while reth tracks the CL head |
 | Engine: "cursor not found on chain" | anvil restarted with a stale dump | expected; engine rebases and re-converges |
 | Engine: "gap too large" | engine was down > `max_gap_blocks` | re-pin (fast) or raise `max_gap_blocks` and restart the engine |

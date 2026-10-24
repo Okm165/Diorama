@@ -154,7 +154,7 @@ config-check: ## Validate every instance file through the layered loader (struct
 	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check "$$f" || exit 1; \
 	done
 
-fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels no-panics config-check docker-members ast-scope ## Run every structural fitness function (plan §11.3)
+fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels no-panics config-check docker-members k8s-wiring ast-scope ## Run every structural fitness function (plan §11.3)
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
@@ -182,6 +182,9 @@ no-panics: ## No panic-family site in production code outside the named allow-li
 
 docker-members: ## Dockerfile<->workspace: every member is copied and stubbed
 	./scripts/docker-members.sh
+
+k8s-wiring: ## instances<->manifests: every placeholder provided, every key consumed
+	./scripts/k8s-wiring.sh
 
 ast-scope: ## AST scope analysis: fn/struct size and nesting depth (syn, the compiler's parser)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p ast-scope -- crates bins
@@ -329,7 +332,7 @@ help: ## Show this help
 	@echo
 
 .PHONY: fitness lint design-assertions closure-matrix no-orphans docs-metrics \
-	trust-audit clock-labels no-panics config-check docker-members ast-scope
+	trust-audit clock-labels no-panics config-check docker-members k8s-wiring ast-scope
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build import deploy-engine test-engine config-check \

@@ -752,7 +752,11 @@ build's dependency layer sees every workspace member: cargo resolves the whole
 workspace before building one package, so a member added or renamed without the
 Dockerfile fails `make build` at COPY — measured: the pre-rename
 `ethereum`/`hyperliquid` names outlived the crates and the new `ast-scope` bin
-was missing) and `ast-scope`
+was missing), `k8s-wiring` (the instances and the manifests are two halves of
+one contract: every `${VAR}` an instance names is provided by the tree's pod
+env, and every `mirror-config` key is consumed — a key left behind after a
+feature moves is dead wiring that still shows in `kubectl describe`, measured:
+`CHECKPOINT_SYNC_FALLBACK` and `MAINNET_RPC`) and `ast-scope`
 (`bins/ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;

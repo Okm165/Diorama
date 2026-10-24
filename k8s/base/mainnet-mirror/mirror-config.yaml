@@ -23,12 +23,8 @@ data:
   JWT_PATH: "/secrets/jwt.hex"
   STATE_DIR: "/state"
 
-  # Lighthouse checkpoint sync (fresh CL head without genesis sync).
+  # Lighthouse checkpoint sync (fresh CL head without genesis sync). One URL:
+  # lighthouse takes no fallback argument, so a dead provider is an operator
+  # switch of this value (beaconcha.in's sync endpoint is the known-good
+  # alternative - OPERATIONS, "sync stuck").
   CHECKPOINT_SYNC_URL: "https://mainnet-checkpoint-sync.stakely.io"
-  CHECKPOINT_SYNC_FALLBACK: "https://sync-mainnet.beaconcha.in"
-
-  # Public mainnet RPC, used only by the self-test Job (a test-only external
-  # dependency: it forks scratch Anvils from a public RPC and needs no reth).
-  # Nothing in the runtime stack uses it - the engine always talks to the local
-  # reth, and smoke.sh checks source liveness against the local CL.
-  MAINNET_RPC: "https://ethereum-rpc.publicnode.com"
