@@ -20,7 +20,7 @@
 //! the devnet chain's own domain, never in wall time.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use alloy_primitives::{Address, Bytes, I256};
+use alloy_primitives::{Address, I256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::{sol, SolCall};
 use mirror_config::FeedSection;
@@ -87,10 +87,15 @@ impl FeedRuntime {
         {
             return Ok(Some(d));
         }
-        let data = Bytes::from(AggregatorV3Interface::decimalsCall {}.abi_encode());
-        let out = anvil_t.call_latest(self.section.target, &data).await?;
-        let Ok(decoded) = AggregatorV3Interface::decimalsCall::abi_decode_returns(&out) else {
-            return Ok(None);
+        let decoded = match anvil_t
+            .call_decode(self.section.target, &AggregatorV3Interface::decimalsCall {})
+            .await
+        {
+            Ok(decoded) => decoded,
+            // An empty return does not decode: the *fact* is "no code yet".
+            // A transport fault still surfaces.
+            Err(mirror_anvil::Error::Abi { .. }) => return Ok(None),
+            Err(e) => return Err(e.into()),
         };
         if decoded != self.source_decimals {
             return Err(Error::FeedBridgeDecimals {
@@ -486,14 +491,9 @@ fn step(state: ValueState, target_now: i128, source_now: i128, now_ms: u64, wind
 }
 
 async fn read_decimals(rpc: &mirror_anvil::Rpc, aggregator: Address) -> Result<u8> {
-    let data = Bytes::from(AggregatorV3Interface::decimalsCall {}.abi_encode());
-    let out = rpc.call_latest(aggregator, &data).await?;
-    let decoded = AggregatorV3Interface::decimalsCall::abi_decode_returns(&out)
-        .map_err(|e| Error::FeedBridgeAbi {
-            what: "decimals()",
-            detail: e.to_string(),
-        })?;
-    Ok(decoded)
+    Ok(rpc
+        .call_decode(aggregator, &AggregatorV3Interface::decimalsCall {})
+        .await?)
 }
 
 /// The target's decimals, when it exists and matches the source. `None` while
@@ -525,13 +525,9 @@ async fn target_decimals(anvil_t: &mirror_anvil::Rpc, feed: &FeedSection, source
 }
 
 async fn read_answer(rpc: &mirror_anvil::Rpc, aggregator: Address) -> Result<i128> {
-    let data = Bytes::from(AggregatorV3Interface::latestRoundDataCall {}.abi_encode());
-    let out = rpc.call_latest(aggregator, &data).await?;
-    let decoded = AggregatorV3Interface::latestRoundDataCall::abi_decode_returns(&out)
-        .map_err(|e| Error::FeedBridgeAbi {
-            what: "latestRoundData()",
-            detail: e.to_string(),
-        })?;
+    let decoded = rpc
+        .call_decode(aggregator, &AggregatorV3Interface::latestRoundDataCall {})
+        .await?;
     decoded
         .answer
         .try_into()

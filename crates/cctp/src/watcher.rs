@@ -249,14 +249,16 @@ impl Watcher {
 
     /// Park one record (mark it with the reason); `false` when it is gone.
     fn park(&self, burn_tx: B256) -> Result<bool> {
-        self.store.with(|state| {
-            let Some(record) = state.messages.iter_mut().find(|m| m.burn_tx == burn_tx) else {
-                return Ok(false);
-            };
-            record.state = RelayState::Parked;
-            record.park_reason = Some(PARK_REASON.into());
-            Ok(true)
-        })
+        Ok(self
+            .store
+            .update_message(
+                |m| m.burn_tx == burn_tx,
+                |record| {
+                    record.state = RelayState::Parked;
+                    record.park_reason = Some(PARK_REASON.into());
+                },
+            )?
+            .is_some())
     }
 
     /// The parked count's report: the counter, the saved store, and the warn

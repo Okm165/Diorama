@@ -34,10 +34,22 @@ pub fn load<T: DeserializeOwned>(path: &Path, what: &'static str) -> Result<Opti
     Ok(Some(value))
 }
 
-/// Save a JSON state file atomically (temp + rename), creating missing parent
-/// directories. `what` names the state in the errors (the path names the file
-/// or, for a directory fault, the parent).
+/// Save a JSON state file atomically: [`save_bytes`] over the pretty-printed
+/// value. `what` names the state in the errors.
 pub fn save<T: Serialize>(path: &Path, value: &T, what: &'static str) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|source| Error::Encode { what, source })?;
+    save_bytes(path, &bytes, what)
+}
+
+/// Write bytes atomically (temp + rename), creating missing parent
+/// directories. The temp sibling is `<name>.tmp`; a crash between the write
+/// and the rename leaves it behind, and the reader of the *target* name never
+/// sees it. The raw half of [`save`], for bodies that are not one serialized
+/// value (the journal's JSONL block files).
+///
+/// `what` names the state in the errors (the path names the file or, for a
+/// directory fault, the parent).
+pub fn save_bytes(path: &Path, bytes: &[u8], what: &'static str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|source| Error::Io {
             what,
@@ -46,7 +58,6 @@ pub fn save<T: Serialize>(path: &Path, value: &T, what: &'static str) -> Result<
         })?;
     }
     let tmp = path.with_extension("tmp");
-    let bytes = serde_json::to_vec_pretty(value).map_err(|source| Error::Encode { what, source })?;
     std::fs::write(&tmp, bytes).map_err(|source| Error::Io {
         what,
         path: tmp.clone(),

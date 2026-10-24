@@ -284,6 +284,24 @@ impl Sim {
         f(state.accounts.entry(address).or_default())
     }
 
+    /// Mutate one account at the venue's clock, funding accrued to it first:
+    /// the venue settles funding at the trade (on the *pre-fill* size), so
+    /// every value-changing path uses this. `with_account` is the raw form for
+    /// paths that must not touch funding (baseline stamps, control-plane
+    /// patches).
+    fn with_account_now<T>(
+        &self,
+        address: Address,
+        feed: &MarketFeed,
+        f: impl FnOnce(&mut Account) -> Result<T>,
+    ) -> Result<T> {
+        let clock = self.clock(crate::now_ms())?;
+        self.with_account(address, |account| {
+            account::accrue_funding(account, feed, clock)?;
+            f(account)
+        })
+    }
+
     pub(crate) fn deal(&self, feed: &MarketFeed, deal: &Deal) -> Result<Decimal> {
         let now = crate::now_ms();
         let clock = self.clock(now)?;
@@ -662,9 +680,7 @@ impl Sim {
             reduce_only: r.reduce_only,
             fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
         };
-        let clock = self.clock(crate::now_ms())?;
-        self.with_account(r.account, |account| {
-            crate::sim::account::accrue_funding(account, feed, clock)?;
+        self.with_account_now(r.account, feed, |account| {
             crate::sim::account::apply_fill(account, &facts)
         })?;
         feed.consume(crate::feed::Consumption {

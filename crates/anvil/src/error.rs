@@ -99,6 +99,17 @@ pub enum Error {
         source: serde_json::Error,
     },
 
+    /// A typed call's return did not decode: the interface's own generated
+    /// decoder named it (a wrong contract revision, a target with no code).
+    /// Distinct from [`Error::Rpc`] so a boundary that reads *absence* from a
+    /// node's refusal never reads a decode fault as absence too.
+    #[error("abi {what}: {source}")]
+    Abi {
+        what: &'static str,
+        #[source]
+        source: alloy_sol_types::Error,
+    },
+
     /// A request that could not be encoded (a bug in our own types; named so
     /// it can never masquerade as a node fault).
     #[error("{method}: encoding the request")]
@@ -138,7 +149,10 @@ impl Error {
     /// The endpoint the failure belongs to (for logs and error aggregation).
     pub fn endpoint(&self) -> &str {
         match self {
-            Error::ClientBuild { .. } | Error::Corrupt { .. } | Error::Encode { .. } => "<local>",
+            Error::ClientBuild { .. }
+            | Error::Abi { .. }
+            | Error::Corrupt { .. }
+            | Error::Encode { .. } => "<local>",
             Error::NotReady { what, .. } => what,
             Error::Transport { endpoint, .. }
             | Error::Status { endpoint, .. }

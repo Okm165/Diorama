@@ -186,19 +186,28 @@ impl Store {
         self.with(|state| Ok(Counts::of(state)))
     }
 
-    /// Mutate the message record for `nonce` and persist, one atomic step.
+    /// The first message matching `pred`, cloned out of the lock: the read
+    /// side of the record lookups (`update_message` is the write side).
+    pub(crate) fn find_message(
+        &self,
+        pred: impl Fn(&MessageRecord) -> bool,
+    ) -> Result<Option<MessageRecord>> {
+        self.with(|state| Ok(state.messages.iter().find(|m| pred(m)).cloned()))
+    }
+
+    /// Mutate the first message matching `pred` and persist, one atomic step.
     /// Absent is `None`, not an error: the watcher is the only creator, and
     /// every caller here refines a record that already exists.
     pub(crate) fn update_message<T>(
         &self,
-        nonce: B256,
+        pred: impl Fn(&MessageRecord) -> bool,
         f: impl FnOnce(&mut MessageRecord) -> T,
     ) -> Result<Option<T>> {
         let out = self.with(|state| {
             Ok(state
                 .messages
                 .iter_mut()
-                .find(|m| m.nonce == nonce)
+                .find(|m| pred(m))
                 .map(f))
         })?;
         self.save()?;

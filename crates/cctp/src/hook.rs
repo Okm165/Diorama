@@ -111,18 +111,10 @@ pub async fn verify(
     expected_owner: Address,
     expected_transmitter: Address,
 ) -> Result<()> {
-    let owner = crate::transfer::eth_call(
-        rpc,
-        wrapper,
-        &ICCTPHookWrapper::ownerCall {},
-    )
-    .await?;
-    let transmitter = crate::transfer::eth_call(
-        rpc,
-        wrapper,
-        &ICCTPHookWrapper::messageTransmitterCall {},
-    )
-    .await?;
+    let owner = rpc.call_decode(wrapper, &ICCTPHookWrapper::ownerCall {}).await?;
+    let transmitter = rpc
+        .call_decode(wrapper, &ICCTPHookWrapper::messageTransmitterCall {})
+        .await?;
     if owner != expected_owner || transmitter != expected_transmitter {
         return Err(Error::bad_request(format!(
                 "hook wrapper {wrapper} wiring mismatch: owner {owner} (want {expected_owner}), transmitter {transmitter} (want {expected_transmitter})"

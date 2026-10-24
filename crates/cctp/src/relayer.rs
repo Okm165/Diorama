@@ -322,10 +322,13 @@ impl Relayer {
             .await
         {
             Ok(hash) => {
-                self.store.update_message(record.nonce, |m| {
-                    m.relay_tx = Some(hash);
-                    m.attempts += 1;
-                })?;
+                self.store.update_message(
+                    |m| m.nonce == record.nonce,
+                    |m| {
+                        m.relay_tx = Some(hash);
+                        m.attempts += 1;
+                    },
+                )?;
                 tracing::info!(
                     nonce = %record.nonce,
                     chain = chain.name,
@@ -392,12 +395,14 @@ impl Relayer {
     }
 
     async fn used_nonce(&self, chain: &Chain, nonce: B256) -> Result<U256> {
-        crate::transfer::eth_call(
-            &chain.rpc,
-            MESSAGE_TRANSMITTER_V2,
-            &IMessageTransmitterV2::usedNoncesCall { nonce },
-        )
-        .await
+        chain
+            .rpc
+            .call_decode(
+                MESSAGE_TRANSMITTER_V2,
+                &IMessageTransmitterV2::usedNoncesCall { nonce },
+            )
+            .await
+            .map_err(Error::from)
     }
 
     /// Park a record and report the refusal (`false` = not relayed): the one
@@ -408,13 +413,16 @@ impl Relayer {
     }
 
     fn mark_relayed(&self, nonce: B256, tx: Option<B256>) -> Result<()> {
-        self.store.update_message(nonce, |m| {
-            m.state = RelayState::Relayed;
-            m.relayed_ms = Some(crate::now_ms());
-            if tx.is_some() {
-                m.relay_tx = tx;
-            }
-        })?;
+        self.store.update_message(
+            |m| m.nonce == nonce,
+            |m| {
+                m.state = RelayState::Relayed;
+                m.relayed_ms = Some(crate::now_ms());
+                if tx.is_some() {
+                    m.relay_tx = tx;
+                }
+            },
+        )?;
         // Counted only after the state is persisted: a confirm that failed to
         // persist must not be counted.
         self.metrics.relays_confirmed.fetch_add(1, Ordering::Relaxed);
@@ -423,10 +431,13 @@ impl Relayer {
 
     fn park(&self, nonce: B256, reason: String) -> Result<()> {
         tracing::error!(%nonce, reason, "cctp message PARKED (never dropped; /health shows it)");
-        self.store.update_message(nonce, |m| {
-            m.state = RelayState::Parked;
-            m.park_reason = Some(reason);
-        })?;
+        self.store.update_message(
+            |m| m.nonce == nonce,
+            |m| {
+                m.state = RelayState::Parked;
+                m.park_reason = Some(reason);
+            },
+        )?;
         self.metrics.relays_parked.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -436,10 +447,13 @@ impl Relayer {
     fn bump_attempts(&self, nonce: B256) -> Result<u32> {
         Ok(self
             .store
-            .update_message(nonce, |m| {
-                m.attempts += 1;
-                m.attempts
-            })?
+            .update_message(
+                |m| m.nonce == nonce,
+                |m| {
+                    m.attempts += 1;
+                    m.attempts
+                },
+            )?
             .unwrap_or(0))
     }
 }

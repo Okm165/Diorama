@@ -22,7 +22,7 @@ pub enum Error {
     Config(#[from] mirror_config::ConfigError),
 
     #[error(transparent)]
-    Rpc(#[from] mirror_anvil::Error),
+    Rpc(mirror_anvil::Error),
 
     #[error("{what}: {path}")]
     Io {
@@ -117,6 +117,19 @@ pub enum Error {
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// The anvil boundary's conversion: a typed call's decode fault keeps its own
+/// name here ([`Error::Abi`]), so the boundaries that read *absence* from a
+/// node refusal (`probe_min_fee`) never read a decode fault as absence too.
+/// Every other anvil fault is the transparent [`Error::Rpc`].
+impl From<mirror_anvil::Error> for Error {
+    fn from(e: mirror_anvil::Error) -> Self {
+        match e {
+            mirror_anvil::Error::Abi { what, source } => Error::Abi { what, source },
+            other => Error::Rpc(other),
+        }
+    }
+}
 
 impl Error {
     /// A refused request with its reason — one constructor for the most

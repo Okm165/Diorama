@@ -301,14 +301,6 @@ pub(crate) async fn has_code(rpc: &Rpc, address: Address) -> Result<bool> {
     Ok(!code.is_empty())
 }
 
-pub async fn eth_call<C: SolCall>(rpc: &Rpc, to: Address, call: &C) -> Result<C::Return> {
-    let ret = rpc.call_latest(to, &Bytes::from(call.abi_encode())).await?;
-    C::abi_decode_returns(&ret).map_err(|source| Error::Abi {
-        what: C::SIGNATURE,
-        source,
-    })
-}
-
 /// Probe the revision-dependent min-fee surface, capability-probed at boot
 /// (§15.2): `Some(minFee)` when the node serves `minFee()`, `None` when it
 /// does not (the mainnet instance's older revision reverts). A JSON-RPC
@@ -316,10 +308,16 @@ pub async fn eth_call<C: SolCall>(rpc: &Rpc, to: Address, call: &C) -> Result<C:
 /// absence (boundary-discipline): it propagates, because a probe that could
 /// not run must not be read as "the surface is absent".
 pub(crate) async fn probe_min_fee(rpc: &Rpc, token_messenger: Address) -> Result<Option<U256>> {
-    match eth_call(rpc, token_messenger, &ITokenMessengerV2::minFeeCall {}).await {
+    match rpc
+        .call_decode(token_messenger, &ITokenMessengerV2::minFeeCall {})
+        .await
+    {
         Ok(min_fee) => Ok(Some(min_fee)),
-        Err(Error::Rpc(_)) => Ok(None),
-        Err(e) => Err(e),
+        // The node's own "no such method" refusal is the surface being absent
+        // (measured: the mainnet instance's older revision). A transport or
+        // decode fault is **not** absence (boundary-discipline) and propagates.
+        Err(e) if e.is_method_not_found() => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 

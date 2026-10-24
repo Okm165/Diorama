@@ -22,7 +22,7 @@
 use crate::chains::MESSAGE_TRANSMITTER_V2;
 use crate::error::{Error, Result};
 use crate::transfer::{
-    eth_call, wait_for_receipt, Wallet, IMessageTransmitterV2,
+    wait_for_receipt, Wallet, IMessageTransmitterV2,
 };
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_eth::TransactionRequest;
@@ -149,24 +149,21 @@ pub async fn install(
 /// The transmitter's attester state: the manager, whether `attester` is
 /// enabled, and the signature threshold (read before and after the install).
 async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, bool, U256)> {
-    let manager = eth_call(
-        rpc,
-        MESSAGE_TRANSMITTER_V2,
-        &IMessageTransmitterV2::attesterManagerCall {},
-    )
-    .await?;
-    let enabled = eth_call(
-        rpc,
-        MESSAGE_TRANSMITTER_V2,
-        &IMessageTransmitterV2::isEnabledAttesterCall { attester },
-    )
-    .await?;
-    let threshold = eth_call(
-        rpc,
-        MESSAGE_TRANSMITTER_V2,
-        &IMessageTransmitterV2::signatureThresholdCall {},
-    )
-    .await?;
+    let manager = rpc
+        .call_decode(MESSAGE_TRANSMITTER_V2, &IMessageTransmitterV2::attesterManagerCall {})
+        .await?;
+    let enabled = rpc
+        .call_decode(
+            MESSAGE_TRANSMITTER_V2,
+            &IMessageTransmitterV2::isEnabledAttesterCall { attester },
+        )
+        .await?;
+    let threshold = rpc
+        .call_decode(
+            MESSAGE_TRANSMITTER_V2,
+            &IMessageTransmitterV2::signatureThresholdCall {},
+        )
+        .await?;
     Ok((manager, enabled, threshold))
 }
 

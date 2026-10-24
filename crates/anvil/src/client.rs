@@ -479,6 +479,23 @@ impl Rpc {
             .await
     }
 
+    /// Encode a typed call, run it against the current state, and decode the
+    /// return with the interface's own generated decoder — the one shape
+    /// every typed read shares (the `SolCall` comes from the contract
+    /// bindings; a decode fault is [`Error::Abi`], never a node fault).
+    pub async fn call_decode<C: alloy_sol_types::SolCall>(
+        &self,
+        to: Address,
+        call: &C,
+    ) -> Result<C::Return> {
+        let data = Bytes::from(call.abi_encode());
+        let out = self.call_latest(to, &data).await?;
+        C::abi_decode_returns(&out).map_err(|source| Error::Abi {
+            what: C::SIGNATURE,
+            source,
+        })
+    }
+
     /// eth_call with a state override, returned as raw bytes. Used to discover
     /// ERC20 balance slots without mining anything (anvil's own dealERC20 probe
     /// needs mined writes and fails on a no-mining fork).

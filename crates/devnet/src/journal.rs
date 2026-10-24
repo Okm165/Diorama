@@ -157,19 +157,9 @@ impl Journal {
             buf.push_str(&line);
             buf.push('\n');
         }
-        // tmp+rename, like the other state files: a crash mid-write must not
-        // leave a truncated file that parses as a shorter, valid journal.
-        let tmp = self.dir.join(format!("{block}.jsonl.tmp"));
-        std::fs::write(&tmp, buf).map_err(|source| Error::Io {
-            what: "journal entry",
-            path: tmp.clone(),
-            source,
-        })?;
-        std::fs::rename(&tmp, &path).map_err(|source| Error::Io {
-            what: "journal entry",
-            path,
-            source,
-        })
+        // The shared atomic writer: a crash mid-write must not leave a
+        // truncated file that parses as a shorter, valid journal.
+        crate::store::save_bytes(&path, buf.as_bytes(), "journal entry")
     }
 
     /// Does a journal file exist for this block?
@@ -252,7 +242,7 @@ fn prune_entry(entry: &std::fs::DirEntry, floor: u64) {
     let Some(stem) = name.to_str() else {
         return;
     };
-    if stem.ends_with(".jsonl.tmp") {
+    if stem.ends_with(".tmp") {
         remove_logged(&entry.path(), "journal prune: temp file could not be removed");
         return;
     }
@@ -370,7 +360,7 @@ mod tests {
             j.record(block, std::slice::from_ref(&e)).unwrap();
         }
         // A crash-mid-write temp file must not read as a journaled block.
-        std::fs::write(dir.join("104.jsonl.tmp"), "partial").unwrap();
+        std::fs::write(dir.join("104.tmp"), "partial").unwrap();
         assert_eq!(j.keep(), 1024);
         assert_eq!(j.blocks_in(99, 106).unwrap(), vec![105, 103, 100]);
         assert_eq!(j.blocks_in(101, 104).unwrap(), vec![103], "the range clips");

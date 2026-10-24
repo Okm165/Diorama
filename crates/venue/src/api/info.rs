@@ -935,29 +935,27 @@ async fn clearinghouse(
 /// (`available + maintenance == balance`), or the venue's verbatim.
 async fn spot_state(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
     state.sim.evaluate(&state.feed)?;
-    match state.sim.account(user)? {
-        Some(account) => {
-            let meta = state.feed.meta();
-            Ok(Json(crate::wire::SpotClearinghouseState {
-                balances: account::spot_balances(&account),
-                token_to_available_after_maintenance: account::available_after_maintenance(
-                    &account,
-                    &state.feed,
-                    meta.as_ref(),
-                )?,
-            })
-            .into_response())
-        }
-        None => pass_through(state, &body).await,
-    }
+    simulated(state, &body, user, |account| {
+        let meta = state.feed.meta();
+        Ok(Json(crate::wire::SpotClearinghouseState {
+            balances: account::spot_balances(account),
+            token_to_available_after_maintenance: account::available_after_maintenance(
+                account,
+                &state.feed,
+                meta.as_ref(),
+            )?,
+        })
+        .into_response())
+    })
+    .await
 }
 
 /// `userAbstraction`: the account's parseable mode, or the venue's verbatim.
 async fn abstraction(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
-    match state.sim.account(user)? {
-        Some(account) => Ok(Json(account::mode_of(&account)).into_response()),
-        None => pass_through(state, &body).await,
-    }
+    simulated(state, &body, user, |account| {
+        Ok(Json(account::mode_of(account)).into_response())
+    })
+    .await
 }
 
 /// One `openOrders` row (the docs' shape: coin, limitPx, oid, side, sz,
@@ -1020,62 +1018,58 @@ fn trigger_condition(order: &crate::sim::order::RestingOrder) -> String {
 /// `openOrders`: the devnet's resting book for a touched account (the venue's
 /// own row shape); untouched accounts pass through.
 async fn open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
-    match state.sim.account(user)? {
-        Some(_) => {
-            let rows: Vec<OpenOrder> = state
-                .sim
-                .resting_orders(Some(user))?
-                .into_iter()
-                .map(|r| OpenOrder {
-                    coin: r.coin.clone(),
-                    limit_px: r.px.to_string(),
-                    oid: r.oid,
-                    side: side_letter(r.is_buy),
-                    sz: r.sz.to_string(),
-                    timestamp: r.placed_ms,
-                })
-                .collect();
-            Ok(Json(rows).into_response())
-        }
-        None => pass_through(state, &body).await,
-    }
+    simulated(state, &body, user, |_| {
+        let rows: Vec<OpenOrder> = state
+            .sim
+            .resting_orders(Some(user))?
+            .into_iter()
+            .map(|r| OpenOrder {
+                coin: r.coin.clone(),
+                limit_px: r.px.to_string(),
+                oid: r.oid,
+                side: side_letter(r.is_buy),
+                sz: r.sz.to_string(),
+                timestamp: r.placed_ms,
+            })
+            .collect();
+        Ok(Json(rows).into_response())
+    })
+    .await
 }
 
 /// `frontendOpenOrders`: the same rows with the frontend's extra fields.
 async fn frontend_open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
-    match state.sim.account(user)? {
-        Some(_) => {
-            let rows: Vec<FrontendOpenOrder> = state
-                .sim
-                .resting_orders(Some(user))?
-                .into_iter()
-                .map(|r| FrontendOpenOrder {
-                    coin: r.coin.clone(),
-                    is_position_tpsl: false,
-                    is_trigger: r.trigger.is_some(),
-                    limit_px: r.px.to_string(),
-                    oid: r.oid,
-                    order_type: if r.trigger.is_some() {
-                        "Trigger"
-                    } else {
-                        "Limit"
-                    },
-                    orig_sz: r.orig_sz.to_string(),
-                    reduce_only: r.reduce_only,
-                    side: side_letter(r.is_buy),
-                    sz: r.sz.to_string(),
-                    timestamp: r.placed_ms,
-                    trigger_condition: trigger_condition(&r),
-                    trigger_px: r
-                        .trigger
-                        .map(|t| t.trigger_px.to_string())
-                        .unwrap_or_else(|| "0.0".into()),
-                })
-                .collect();
-            Ok(Json(rows).into_response())
-        }
-        None => pass_through(state, &body).await,
-    }
+    simulated(state, &body, user, |_| {
+        let rows: Vec<FrontendOpenOrder> = state
+            .sim
+            .resting_orders(Some(user))?
+            .into_iter()
+            .map(|r| FrontendOpenOrder {
+                coin: r.coin.clone(),
+                is_position_tpsl: false,
+                is_trigger: r.trigger.is_some(),
+                limit_px: r.px.to_string(),
+                oid: r.oid,
+                order_type: if r.trigger.is_some() {
+                    "Trigger"
+                } else {
+                    "Limit"
+                },
+                orig_sz: r.orig_sz.to_string(),
+                reduce_only: r.reduce_only,
+                side: side_letter(r.is_buy),
+                sz: r.sz.to_string(),
+                timestamp: r.placed_ms,
+                trigger_condition: trigger_condition(&r),
+                trigger_px: r
+                    .trigger
+                    .map(|t| t.trigger_px.to_string())
+                    .unwrap_or_else(|| "0.0".into()),
+            })
+            .collect();
+        Ok(Json(rows).into_response())
+    })
+    .await
 }
 
 /// One order's status row inside `orderStatus` (the docs' `order` object).
@@ -1224,10 +1218,10 @@ async fn active_asset(
     user: Address,
     coin: String,
 ) -> Result<Response> {
-    match state.sim.account(user)? {
-        Some(account) => Ok(Json(active_asset_data(state, user, &account, &coin)?).into_response()),
-        None => pass_through(state, &body).await,
-    }
+    simulated(state, &body, user, |account| {
+        Ok(Json(active_asset_data(state, user, account, &coin)?).into_response())
+    })
+    .await
 }
 
 /// `meta`: the cached metadata for the default dex.
@@ -1398,6 +1392,22 @@ pub(crate) fn clearinghouse_of(state: &ApiState, address: Address) -> Result<Opt
 }
 
 /// The venue's own answer for an untouched account (verbatim passthrough).
+/// The per-user read's guard: a simulated account computes the answer; an
+/// unconfigured one is passed through to the live venue verbatim (the
+/// overlay's discipline — the sim's own state, or the venue's answer, never a
+/// guess). One shape for every per-user read.
+async fn simulated(
+    state: &ApiState,
+    body: &Bytes,
+    user: Address,
+    compute: impl FnOnce(&crate::sim::account::Account) -> Result<Response>,
+) -> Result<Response> {
+    match state.sim.account(user)? {
+        Some(account) => compute(&account),
+        None => pass_through(state, body).await,
+    }
+}
+
 async fn pass_through(state: &ApiState, body: &Bytes) -> Result<Response> {
     // Budget accounting (plan §18.3): a pass-through is an outbound venue
     // read, so it spends the conservative heavy weight (most info types weigh

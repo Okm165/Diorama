@@ -8,6 +8,7 @@ description = "The anvil control plane: JSON-RPC client, batching, cheatcode con
 
 [dependencies]
 alloy-primitives = { workspace = true }
+alloy-sol-types = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 alloy-json-rpc = { workspace = true }

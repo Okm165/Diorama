@@ -20,7 +20,7 @@ pub enum Error {
     Config(#[from] mirror_config::ConfigError),
 
     #[error(transparent)]
-    Rpc(#[from] mirror_anvil::Error),
+    Rpc(mirror_anvil::Error),
 
     #[error(transparent)]
     Devnet(#[from] mirror_devnet::Error),
@@ -136,6 +136,22 @@ pub enum Error {
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// The anvil boundary's conversion: a contract answer that does not decode is
+/// the feed bridge's own boundary fact ("the target has no code yet", named
+/// by [`Error::FeedBridgeAbi`]); every other anvil fault is the transparent
+/// [`Error::Rpc`].
+impl From<mirror_anvil::Error> for Error {
+    fn from(e: mirror_anvil::Error) -> Self {
+        match e {
+            mirror_anvil::Error::Abi { what, source } => Error::FeedBridgeAbi {
+                what,
+                detail: source.to_string(),
+            },
+            other => Error::Rpc(other),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

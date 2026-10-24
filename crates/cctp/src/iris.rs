@@ -259,12 +259,7 @@ async fn messages(
         .map_err(|_| IrisError::bad_request(format!("transactionHash `{raw_hash}` is not a 32-byte hex hash")))?;
     let record = state
         .store
-        .with(|s| {
-            Ok(s.messages
-                .iter()
-                .find(|m| m.source_domain == source_domain && m.burn_tx == hash)
-                .cloned())
-        })
+        .find_message(|m| m.source_domain == source_domain && m.burn_tx == hash)
         .map_err(|e| IrisError::internal(&e))?;
     let Some(record) = record else {
         return Err(IrisError::not_found());
@@ -296,7 +291,6 @@ async fn reattest(
         .sign(&message.encode())
         .map_err(|e| IrisError::internal(&e))?;
     let refreshed = refresh_record(&state, nonce, &message, attestation)?;
-    state.store.save().map_err(|e| IrisError::internal(&e))?;
     tracing::warn!(%nonce, expiration = %expiration, "cctp message re-attested with a fresh expiration");
     Ok(Json(MessagesResponse {
         messages: vec![entry(&refreshed)],
@@ -313,7 +307,7 @@ fn parse_nonce(raw: &str) -> Result<B256, IrisError> {
 fn find_record(state: &IrisState, nonce: B256) -> Result<MessageRecord, IrisError> {
     state
         .store
-        .with(|s| Ok(s.messages.iter().find(|m| m.nonce == nonce).cloned()))
+        .find_message(|m| m.nonce == nonce)
         .map_err(|e| IrisError::internal(&e))?
         .ok_or_else(IrisError::not_found)
 }
@@ -352,19 +346,19 @@ fn refresh_record(
 ) -> Result<MessageRecord, IrisError> {
     state
         .store
-        .with(move |s| {
-            let Some(rec) = s.messages.iter_mut().find(|m| m.nonce == nonce) else {
-                return Ok(None);
-            };
-            rec.message_hash = message.keccak();
-            rec.message = message.encode();
-            rec.attestation = Some(attestation);
-            rec.state = RelayState::Signed;
-            rec.park_reason = None;
-            rec.relay_tx = None;
-            rec.attempts = 0;
-            Ok(Some(rec.clone()))
-        })
+        .update_message(
+            |m| m.nonce == nonce,
+            move |rec| {
+                rec.message_hash = message.keccak();
+                rec.message = message.encode();
+                rec.attestation = Some(attestation);
+                rec.state = RelayState::Signed;
+                rec.park_reason = None;
+                rec.relay_tx = None;
+                rec.attempts = 0;
+                rec.clone()
+            },
+        )
         .map_err(|e| IrisError::internal(&e))?
         .ok_or_else(IrisError::not_found)
 }

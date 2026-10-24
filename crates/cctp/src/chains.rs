@@ -7,7 +7,7 @@
 //! themselves. Configuration carries only deployment facts (URLs, keys,
 //! state dir) — never an address a typo could move value on.
 use crate::error::{Error, Result};
-use crate::transfer::{eth_call, probe_min_fee, IMessageTransmitterV2, ITokenMessengerV2, IERC20};
+use crate::transfer::{probe_min_fee, IMessageTransmitterV2, ITokenMessengerV2, IERC20};
 // alloy's official chain-id type: a known chain by name, or a raw EIP-155 id
 // (`Chain::from_id`). Aliased to `ChainId` because this crate already has a
 // `Chain` (the served chain) — same type, unambiguous name.
@@ -226,7 +226,7 @@ impl Chain {
     where
         C::Return: PartialEq + std::fmt::Display,
     {
-        let got = eth_call(&self.rpc, to, call).await?;
+        let got = self.rpc.call_decode(to, call).await?;
         if got != want {
             return Err(self.wiring(what, &got, &want));
         }
@@ -244,22 +244,18 @@ impl Chain {
 
     /// The owner's USDC balance on this chain.
     pub async fn usdc_balance(&self, owner: Address) -> Result<U256> {
-        eth_call(
-            &self.rpc,
-            self.usdc,
-            &IERC20::balanceOfCall { account: owner },
-        )
-        .await
+        self.rpc
+            .call_decode(self.usdc, &IERC20::balanceOfCall { account: owner })
+            .await
+            .map_err(Error::from)
     }
 
     /// The owner's USDC allowance for `spender` on this chain.
     pub async fn usdc_allowance(&self, owner: Address, spender: Address) -> Result<U256> {
-        eth_call(
-            &self.rpc,
-            self.usdc,
-            &IERC20::allowanceCall { owner, spender },
-        )
-        .await
+        self.rpc
+            .call_decode(self.usdc, &IERC20::allowanceCall { owner, spender })
+            .await
+            .map_err(Error::from)
     }
 
     /// The native balance of `who` (gas alerts; the relay key pays its own).

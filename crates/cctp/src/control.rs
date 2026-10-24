@@ -193,7 +193,7 @@ pub(crate) async fn relay(
     if let Some(nonce) = request.nonce {
         let record = state
             .store
-            .with(|s| Ok(s.messages.iter().find(|m| m.nonce == nonce).cloned()))?
+            .find_message(|m| m.nonce == nonce)?
             .ok_or_else(|| Error::bad_request(format!("no watched message with nonce {nonce}"),))?;
         if record.state != RelayState::Signed {
             return Err(Error::bad_request(format!(

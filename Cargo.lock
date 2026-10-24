@@ -2565,6 +2565,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
  "alloy-rpc-types-txpool",
+ "alloy-sol-types",
  "reqwest",
  "serde",
  "serde_json",

@@ -27,8 +27,10 @@ const MAX_FIELDS: usize = 20;
 const MAX_VARIANTS: usize = 25;
 /// How many offenders each report section lists.
 const REPORT_TOP: usize = 12;
-/// The reuse analysis's window (consecutive operations) and sharing floor.
-const GRAM: usize = 3;
+/// The reuse analysis's window (consecutive operations), longest first — a
+/// long shared sequence is the stronger extraction candidate — and its floor.
+const GRAM_MIN: usize = 3;
+const GRAM_MAX: usize = 6;
 const SHARED_BY: usize = 3;
 /// A type whose fields are touched from this many files has behavior living
 /// away from it (the dispersion reading).
@@ -637,31 +639,58 @@ fn dispersion(fields: &FieldAccesses) {
 /// The reuse analysis: op sequences shared by several functions (the atomic
 /// blocks worth extracting) and bodies that are literally the same code.
 fn reuse(prod: &[&Item]) {
+    // Longest window first; a shorter sequence already contained in a reported
+    // longer one is skipped, so one shared block reads as one finding.
+    let mut reported: Vec<String> = Vec::new();
+    for gram in (GRAM_MIN..=GRAM_MAX).rev() {
+        let fresh: Vec<(String, Vec<&str>)> = shared_grams(prod, gram)
+            .into_iter()
+            .filter(|(key, _)| !reported.iter().any(|r| r.contains(key.as_str())))
+            .take(REPORT_TOP)
+            .collect();
+        if fresh.is_empty() {
+            continue;
+        }
+        println!(
+            "\nreuse: {gram}-op sequences shared by >= {SHARED_BY} functions (extraction candidates):"
+        );
+        for (key, fns) in fresh {
+            println!("  {:>2}x  {key}", fns.len());
+            println!("       in {}", list(&fns));
+            reported.push(key);
+        }
+    }
+    duplicates(prod);
+}
+
+/// The `gram`-op sequences that >= [`SHARED_BY`] functions contain, widest
+/// sharing first (each function counts once per sequence).
+fn shared_grams<'a>(prod: &[&'a Item], gram: usize) -> Vec<(String, Vec<&'a str>)> {
     let mut grams: HashMap<String, Vec<&str>> = HashMap::new();
     for item in prod {
         if item.kind != "fn" {
             continue;
         }
         let mut seen = HashSet::new();
-        for window in item.ops.windows(GRAM) {
+        for window in item.ops.windows(gram) {
             let key = window.join(" -> ");
             if seen.insert(key.clone()) {
                 grams.entry(key).or_default().push(item.name.as_str());
             }
         }
     }
-    let mut shared: Vec<(&String, &Vec<&str>)> = grams
-        .iter()
+    let mut shared: Vec<(String, Vec<&str>)> = grams
+        .into_iter()
         .filter(|(_, fns)| fns.len() >= SHARED_BY)
         .collect();
     shared.sort_by_key(|(_, fns)| std::cmp::Reverse(fns.len()));
-    println!(
-        "\nreuse: {GRAM}-op sequences shared by >= {SHARED_BY} functions (extraction candidates):"
-    );
-    for (key, fns) in shared.iter().take(REPORT_TOP) {
-        println!("  {:>2}x  {key}", fns.len());
-        println!("       in {}", list(fns));
-    }
+    shared
+}
+
+/// Production functions whose bodies are literally the same code (the trait
+/// accessors and one-line delegations land here by design; a group that is
+/// neither is a duplication to fold).
+fn duplicates(prod: &[&Item]) {
     let mut by_body: HashMap<&str, Vec<&Item>> = HashMap::new();
     for item in prod {
         if item.kind == "fn" && !item.body.is_empty() {
@@ -676,7 +705,8 @@ fn reuse(prod: &[&Item]) {
     }
     println!("\nduplicates: bodies that are literally the same code:");
     for group in dupes.iter().take(REPORT_TOP) {
-        println!("  {}x  {}", group.len(), list(&group.iter().map(|i| i.name.as_str()).collect::<Vec<_>>()));
+        let names: Vec<&str> = group.iter().map(|i| i.name.as_str()).collect();
+        println!("  {}x  {}", group.len(), list(&names));
     }
 }
 

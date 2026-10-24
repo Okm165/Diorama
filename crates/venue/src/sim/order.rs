@@ -434,9 +434,7 @@ impl Sim {
         let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), &req, &resting)?;
         let leverage = self.leverage_for(address, coin, meta.as_ref())?;
         let facts = super::account::FillFacts::close(coin, req.is_buy, filled, avg_px, leverage);
-        let clock = self.clock(crate::now_ms())?;
-        self.with_account(address, |account| {
-            super::account::accrue_funding(account, feed, clock)?;
+        self.with_account_now(address, feed, |account| {
             super::account::apply_fill(account, &facts)
         })?;
         self.settle_legs(feed, &req, &legs, meta.as_ref())?;
@@ -578,9 +576,7 @@ impl Sim {
                         reduce_only: self.resting_flag(*oid)?,
                         fee: super::account::mul(notional, maker_fee(), "maker fee")?,
                     };
-                    let clock = self.clock(crate::now_ms())?;
-                    self.with_account(*maker, |account| {
-                        super::account::accrue_funding(account, feed, clock)?;
+                    self.with_account_now(*maker, feed, |account| {
                         super::account::apply_fill(account, &facts)
                     })?;
                     self.fill_resting(*oid, *sz, *px)?;
@@ -975,9 +971,7 @@ impl Sim {
         // *pre-fill* size, then the size change restarts since-change. The
         // all-or-nothing accrual leaves the stamp where it is when a position
         // lacks a live context (the shared rule).
-        let clock = self.clock(crate::now_ms())?;
-        self.with_account(address, |account| {
-            super::account::accrue_funding(account, feed, clock)?;
+        self.with_account_now(address, feed, |account| {
             let mut probe = account.clone();
             super::account::apply_fill(&mut probe, facts)?;
             let view = super::account::view(&probe, feed, meta)?;
