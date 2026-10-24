@@ -435,7 +435,7 @@ impl Sim {
         let leverage = self.leverage_for(address, coin, meta.as_ref())?;
         let facts = super::account::FillFacts::close(coin, req.is_buy, filled, avg_px, leverage);
         self.with_account_now(address, feed, |account| {
-            super::account::apply_fill(account, &facts)
+            super::account::apply_fill(account, &facts, meta.as_ref())
         })?;
         self.settle_legs(feed, &req, &legs, meta.as_ref())?;
         let oid = self.next_oid()?;
@@ -577,7 +577,7 @@ impl Sim {
                         fee: super::account::mul(notional, maker_fee(), "maker fee")?,
                     };
                     self.with_account_now(*maker, feed, |account| {
-                        super::account::apply_fill(account, &facts)
+                        super::account::apply_fill(account, &facts, meta)
                     })?;
                     self.fill_resting(*oid, *sz, *px)?;
                     tracing::info!(maker = %maker, oid, "resting order filled");
@@ -669,17 +669,38 @@ impl Sim {
                 super::account::LeverageSetting { is_cross, leverage },
             );
             if let Some(p) = account.positions.get_mut(coin) {
+                let was_isolated = p.leverage == crate::wire::LeverageType::Isolated;
+                let initial = super::account::div(
+                    super::account::mul(p.szi.abs(), p.entry_px, "margin notional")?,
+                    Decimal::from(leverage),
+                    "margin notional",
+                )?;
                 p.leverage = if is_cross {
                     crate::wire::LeverageType::Cross
                 } else {
                     crate::wire::LeverageType::Isolated
                 };
                 p.leverage_value = leverage;
-                p.margin_used = super::account::div(
-                    super::account::mul(p.szi.abs(), p.entry_px, "margin notional")?,
-                    Decimal::from(leverage),
-                    "margin notional",
-                )?;
+                p.margin_used = initial;
+                // The mode switch moves the initial margin across the
+                // boundary: converting to isolated parks it on the position
+                // (an isolated position always carries its margin — the
+                // waterfall's per-leg check reads it); converting back
+                // returns it to the cross balance.
+                if is_cross {
+                    account.perp_balance = super::account::add(
+                        account.perp_balance,
+                        std::mem::take(&mut p.isolated_margin),
+                        "isolated margin return",
+                    )?;
+                } else if !was_isolated {
+                    account.perp_balance = super::account::sub(
+                        account.perp_balance,
+                        initial,
+                        "isolated margin allocation",
+                    )?;
+                    p.isolated_margin = initial;
+                }
             }
             Ok(())
         })
@@ -695,7 +716,7 @@ impl Sim {
         address: Address,
         req: &Order,
     ) -> Result<Option<&'static str>> {
-        let Some(asset) = meta.and_then(|m| m.universe.iter().find(|a| a.name == req.coin)) else {
+        let Some(asset) = meta.and_then(|m| m.asset(&req.coin)) else {
             return Ok(None);
         };
         let Some(table_id) = asset.margin_table_id else {
@@ -973,7 +994,7 @@ impl Sim {
         // lacks a live context (the shared rule).
         self.with_account_now(address, feed, |account| {
             let mut probe = account.clone();
-            super::account::apply_fill(&mut probe, facts)?;
+            super::account::apply_fill(&mut probe, facts, meta)?;
             let view = super::account::view(&probe, feed, meta)?;
             if view.margin_summary.account_value < view.margin_summary.total_margin_used {
                 // The venue's own string; the numbers ride the log (a client
@@ -987,7 +1008,7 @@ impl Sim {
                 );
                 return Err(Error::bad_request("Insufficient margin to place order."));
             }
-            super::account::apply_fill(account, facts)
+            super::account::apply_fill(account, facts, meta)
         })
     }
 
@@ -1020,7 +1041,7 @@ impl Sim {
             return Ok(s.leverage.max(1));
         }
         Ok(meta
-            .and_then(|m| m.universe.iter().find(|a| a.name == coin))
+            .and_then(|m| m.asset(coin))
             .map(|a| a.max_leverage)
             .filter(|l| *l > 0)
             .unwrap_or(20))
@@ -1170,7 +1191,7 @@ fn validate_order_value(
     meta: Option<&crate::wire::Meta>,
     req: &Order,
 ) -> Result<()> {
-    let Some(asset) = meta.and_then(|m| m.universe.iter().find(|a| a.name == req.coin)) else {
+    let Some(asset) = meta.and_then(|m| m.asset(&req.coin)) else {
         return Ok(());
     };
     let market_cap = match asset.max_leverage {
@@ -1205,7 +1226,7 @@ fn validate_order_value(
 /// the asset's `szDecimals` decimals; a price at most 5 significant figures
 /// and at most `6 − szDecimals` decimals (an integer price is always valid).
 fn validate_tick_lot(meta: Option<&crate::wire::Meta>, req: &Order) -> Result<()> {
-    let Some(asset) = meta.and_then(|m| m.universe.iter().find(|a| a.name == req.coin)) else {
+    let Some(asset) = meta.and_then(|m| m.asset(&req.coin)) else {
         return Ok(());
     };
     let sz_dec = u32::from(asset.sz_decimals);
@@ -1827,7 +1848,7 @@ mod tests {
         sim.order(&feed, a, &ioc(true, "1")).unwrap();
         let before = sim.account(a).unwrap().unwrap().perp_balance;
         // $100 = 100_000_000 at the docs' 6 decimals.
-        sim.update_isolated_margin(a, "ETH", 100_000_000).unwrap();
+        sim.update_isolated_margin(a, "ETH", 100_000_000, None).unwrap();
         let account = sim.account(a).unwrap().unwrap();
         let p = account.positions.get("ETH").unwrap();
         assert_eq!(p.isolated_margin, Decimal::from(100));
@@ -1835,7 +1856,7 @@ mod tests {
         assert_eq!(p.leverage, crate::wire::LeverageType::Isolated);
         assert_eq!(account.perp_balance, before - Decimal::from(100));
         // And back off the position.
-        sim.update_isolated_margin(a, "ETH", -40_000_000).unwrap();
+        sim.update_isolated_margin(a, "ETH", -40_000_000, None).unwrap();
         let account = sim.account(a).unwrap().unwrap();
         assert_eq!(account.positions.get("ETH").unwrap().isolated_margin, Decimal::from(60));
         assert_eq!(account.perp_balance, before - Decimal::from(60));

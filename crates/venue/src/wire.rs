@@ -281,6 +281,15 @@ pub(crate) struct Meta {
     pub collateral_token: u32,
 }
 
+impl Meta {
+    /// The live asset entry for a coin — the one lookup (the maintenance
+    /// tier, the max-leverage fallback, the order validators): `None` while
+    /// the meta is warming or for a coin outside the tracked universe.
+    pub(crate) fn asset(&self, coin: &str) -> Option<&AssetInfo> {
+        self.universe.iter().find(|a| a.name == coin)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssetInfo {

@@ -412,17 +412,18 @@ pub(crate) struct AccountView {
     /// pass that builds the served rows, so the check reuses their marks and
     /// maintenance instead of recomputing them. A missing entry means exactly
     /// "flat row" — the view skips flat rows, and a missing *price* fails the
-    /// view outright ([`PositionFacts::of`]).
-    facts: BTreeMap<String, PositionFacts>,
+    /// view outright ([`PositionFacts::of`]). The waterfall reads one entry
+    /// per isolated leg (`Sim::check_account`).
+    pub(crate) facts: BTreeMap<String, PositionFacts>,
 }
 
 /// One position's derived facts: the feed's mark, the unsigned notional
 /// (`position_value`) and the maintenance requirement at that mark. Computed
 /// once, consumed by both the totals and the served row.
-struct PositionFacts {
-    mark: Decimal,
-    value: Decimal,
-    maintenance: Decimal,
+pub(crate) struct PositionFacts {
+    pub(crate) mark: Decimal,
+    pub(crate) value: Decimal,
+    pub(crate) maintenance: Decimal,
 }
 
 impl PositionFacts {
@@ -452,6 +453,10 @@ struct PositionTotals {
     cross_margin: Decimal,
     cross_maintenance: Decimal,
     isolated_margin: Decimal,
+    /// The isolated positions' signed value (`Σ sign(szi)·positionValue`):
+    /// the cross summary's raw balance subtracts the margins and adds this
+    /// back (measured live).
+    isolated_signed: Decimal,
 }
 
 impl PositionTotals {
@@ -468,6 +473,7 @@ impl PositionTotals {
                 add(self.cross_maintenance, facts.maintenance, "cross maintenance")?;
         } else {
             self.isolated_margin = add(self.isolated_margin, p.margin_used, "isolated margin")?;
+            self.isolated_signed = add(self.isolated_signed, signed, "isolated signed value")?;
         }
         Ok(())
     }
@@ -544,7 +550,15 @@ fn assemble(
             .unwrap_or(Decimal::ZERO),
         _ => Decimal::ZERO,
     };
-    let total_raw = account.perp_balance + collateral - totals.cost_basis;
+    // The venue's totals, measured live (probe, two isolated accounts): the
+    // *total* carries the isolated margins as cash — they are the trader's
+    // equity, parked on their positions — so
+    // `accountValue = totalRawUsd + Σ sign·positionValue` holds with them
+    // included; and the cross summary is the total minus the isolated legs'
+    // contribution: value minus their margins, raw minus (margin − signed
+    // value).
+    let cash = account.perp_balance + collateral + totals.isolated_margin;
+    let total_raw = cash - totals.cost_basis;
     let account_value = total_raw + totals.signed_value;
     let margin_summary = MarginSummary {
         account_value,
@@ -553,10 +567,11 @@ fn assemble(
         total_margin_used: totals.margin,
     };
     let cross_account_value = account_value - totals.isolated_margin;
+    let cross_raw = total_raw - totals.isolated_margin + totals.isolated_signed;
     let cross_margin_summary = MarginSummary {
         account_value: cross_account_value,
         total_ntl_pos: totals.cross_notional,
-        total_raw_usd: total_raw,
+        total_raw_usd: cross_raw,
         total_margin_used: totals.cross_margin,
     };
     AccountView {
@@ -688,7 +703,7 @@ pub(crate) fn maintenance_rate(coin: &str, notional: Decimal, meta: Option<&crat
     let Some(meta) = meta else {
         return Decimal::ZERO;
     };
-    let Some(asset) = meta.universe.iter().find(|a| a.name == coin) else {
+    let Some(asset) = meta.asset(coin) else {
         return Decimal::ZERO;
     };
     let table = asset
@@ -714,12 +729,22 @@ pub(crate) fn maintenance_margin(coin: &str, notional: Decimal, meta: Option<&cr
     mul(notional, maintenance_rate(coin, notional, meta), "maintenance margin")
 }
 
+/// Whether the asset is *strict isolated* (docs): its margin cannot be
+/// removed by hand, and it is released proportionally as the position is
+/// closed. The flag is the live meta's (`onlyIsolated`); a warming meta or an
+/// unknown coin reads false.
+pub(crate) fn strict_isolated(coin: &str, meta: Option<&crate::wire::Meta>) -> bool {
+    meta.and_then(|m| m.asset(coin))
+        .and_then(|a| a.only_isolated)
+        .unwrap_or(false)
+}
+
 /// The coin's live max leverage — `None` when the live meta does not carry
 /// the coin (a seeded position outside the tracked markets: the feed is
 /// warming). Callers pick their own bounded fallback; a fabricated default
 /// here would be a silent lie about a margin bound.
 fn max_leverage(coin: &str, meta: Option<&crate::wire::Meta>) -> Option<u32> {
-    meta.and_then(|m| m.universe.iter().find(|a| a.name == coin))
+    meta.and_then(|m| m.asset(coin))
         .map(|a| a.max_leverage)
 }
 
@@ -789,7 +814,11 @@ impl FillFacts {
     }
 }
 
-pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> {
+pub(crate) fn apply_fill(
+    account: &mut Account,
+    fill: &FillFacts,
+    meta: Option<&crate::wire::Meta>,
+) -> Result<()> {
     let signed = if fill.is_buy { fill.size } else { -fill.size };
     let old = account
         .positions
@@ -804,8 +833,34 @@ pub(crate) fn apply_fill(account: &mut Account, fill: &FillFacts) -> Result<()> 
     if old.is_zero() || sign(old) == sign(signed) {
         apply_increase(position, old, fill)?;
     } else {
+        let closed = old.abs().min(fill.size);
         let realized = apply_reduction(position, old, fill)?;
         account.perp_balance = add(account.perp_balance, realized, "realized PnL")?;
+        // The margin a close releases (docs): a fully closed isolated position
+        // returns its whole isolated margin to the cross balance — the margin
+        // is the trader's collateral, only the position is gone. A *strict
+        // isolated* asset releases it proportionally as the position closes
+        // (there the margin cannot be moved out by hand); a normal isolated
+        // position's margin is the trader's to move (`updateIsolatedMargin`),
+        // so a partial close keeps it.
+        if position.leverage == LeverageType::Isolated && !position.isolated_margin.is_zero() {
+            let released = if position.szi.is_zero() {
+                position.isolated_margin
+            } else if strict_isolated(&fill.coin, meta) {
+                mul(
+                    position.isolated_margin,
+                    div(closed, old.abs(), "isolated release fraction")?,
+                    "isolated margin release",
+                )?
+            } else {
+                Decimal::ZERO
+            };
+            if !released.is_zero() {
+                position.isolated_margin =
+                    sub(position.isolated_margin, released, "isolated margin release")?;
+                account.perp_balance = add(account.perp_balance, released, "isolated margin release")?;
+            }
+        }
     }
     // The trading fee (the venue's base tier): charged on the fill's notional,
     // on both sides of a trade, in USDC — so a closing fill pays it too.
@@ -994,7 +1049,10 @@ pub(crate) fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta
 
 /// The isolated positions' maintenance total, from the view's own facts (the
 /// cross side is already in `cross_maintenance_margin_used`). A flat isolated
-/// row has no facts and contributes zero.
+/// row has no facts and contributes zero. Production's waterfall reads the
+/// per-leg `facts.maintenance` directly; the account-plane test helper
+/// (`liquidate_if_needed`) sums here.
+#[cfg(test)]
 pub(crate) fn isolated_maintenance(account: &Account, v: &AccountView) -> Result<Decimal> {
     let mut total = Decimal::ZERO;
     for (coin, p) in &account.positions {

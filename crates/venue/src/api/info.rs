@@ -134,8 +134,9 @@ fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBo
             always_place,
         } => batch_modify(state, user, modifies, always_place.unwrap_or(false)),
         ExchangeAction::UpdateIsolatedMargin { asset, ntli, .. } => {
+            let meta = state.feed.meta();
             asset_action(state, *asset, |coin| {
-                state.sim.update_isolated_margin(user, coin, *ntli)
+                state.sim.update_isolated_margin(user, coin, *ntli, meta.as_ref())
             })
         }
         ExchangeAction::UpdateLeverage {
