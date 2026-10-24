@@ -109,11 +109,7 @@ fn terminalize(
     status: TerminalStatus,
     filled_sz: Decimal,
 ) {
-    let avg = if order.filled_sz.is_zero() {
-        Decimal::ZERO
-    } else {
-        order.filled_ntl / order.filled_sz
-    };
+    let avg = super::account::ratio_or(order.filled_ntl, order.filled_sz, Decimal::ZERO);
     let oid = order.oid;
     terminal.insert(
         oid,
@@ -670,14 +666,6 @@ impl Sim {
         if leverage == 0 {
             return Err(Error::bad_request("leverage must be at least 1"));
         }
-        let max = self
-            .state
-            .lock()?
-            .accounts
-            .get(&address)
-            .and_then(|a| a.leverage_settings.get(coin).map(|s| s.leverage))
-            .unwrap_or(0);
-        let _ = max;
         self.with_account(address, |account| {
             account.leverage_settings.insert(
                 coin.to_string(),
@@ -690,8 +678,11 @@ impl Sim {
                     crate::wire::LeverageType::Isolated
                 };
                 p.leverage_value = leverage;
-                p.margin_used = super::account::mul(p.szi.abs(), p.entry_px, "margin notional")?
-                    / Decimal::from(leverage);
+                p.margin_used = super::account::div(
+                    super::account::mul(p.szi.abs(), p.entry_px, "margin notional")?,
+                    Decimal::from(leverage),
+                    "margin notional",
+                )?;
             }
             Ok(())
         })
@@ -1346,11 +1337,7 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Leg
         }
     }
     let filled = req.size - remaining;
-    let avg_px = if filled.is_zero() {
-        Decimal::ZERO
-    } else {
-        notional / filled
-    };
+    let avg_px = super::account::ratio_or(notional, filled, Decimal::ZERO);
     Ok((legs, filled, avg_px))
 }
 

@@ -261,14 +261,14 @@ async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> 
     record_apply_metrics(ctx, n, &facts, outcome.duration_ms);
     clear_reapply(&ctx.plane, n, facts.reapply)?;
     log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome)?;
-    report_applied(ctx, n, &facts, &outcome);
+    report_applied(&ctx.plane, n, &facts, &outcome);
     Ok(outcome)
 }
 
 /// The applied block's announcements: the `block_applied` fact, the cursor
 /// fact, and the log line — one place, both engines' vocabulary.
-fn report_applied(ctx: &Ctx, n: u64, facts: &ApplyFacts, outcome: &ApplyOutcome) {
-    ctx.plane.facts.publish(Fact::BlockApplied {
+fn report_applied(plane: &Plane, n: u64, facts: &ApplyFacts, outcome: &ApplyOutcome) {
+    plane.facts.publish(Fact::BlockApplied {
         chain: facts.chain,
         block: n,
         source: facts.source,
@@ -279,7 +279,7 @@ fn report_applied(ctx: &Ctx, n: u64, facts: &ApplyFacts, outcome: &ApplyOutcome)
         sampled_ok: facts.sampled_ok,
         ms: outcome.duration_ms,
     });
-    ctx.plane.facts.publish(Fact::CursorAdvanced {
+    plane.facts.publish(Fact::CursorAdvanced {
         chain: facts.chain,
         block: n,
     });

@@ -77,6 +77,12 @@ pub enum Error {
     #[error("amount overflow: {what}")]
     Overflow { what: &'static str },
 
+    /// A division by zero: refused cleanly (rust_decimal's `/` panics on it,
+    /// the same measured hazard as the overflow above — a panic under the
+    /// state lock poisons every account path).
+    #[error("division by zero: {what}")]
+    DivideByZero { what: &'static str },
+
     /// A market read before the first venue poll landed (or an untouched
     /// account the venue cannot answer for): warming up, 503.
     #[error("the market plane is warming up (no venue data yet)")]

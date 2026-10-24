@@ -1006,9 +1006,8 @@ impl Sim {
             if ov.margin_summary.account_value <= Decimal::ZERO {
                 continue;
             }
-            let entry = if op.entry_px.is_zero() { Decimal::ONE } else { op.entry_px };
             let ratio = account::mul(
-                prev_mark / entry,
+                account::ratio_or(prev_mark, op.entry_px, prev_mark),
                 account::mul(op.szi.abs(), prev_mark, "adl notional")?
                     / ov.margin_summary.account_value,
                 "adl rank",
@@ -1203,6 +1202,23 @@ mod tests {
             .deal(&feed, &Deal { address: a, class: DealClass::Spot, coin: Some("USDC".into()), amount: Decimal::ONE })
             .unwrap_err();
         assert!(matches!(err, Error::Overflow { .. }), "{err}");
+    }
+
+    /// The arithmetic family's division half: a zero divisor is a named fault
+    /// (`Decimal`'s `/` panics on it, the same measured hazard as the
+    /// overflow above), and `ratio_or` is the domain's fallback reading.
+    #[test]
+    fn division_by_zero_is_named_and_ratios_fall_back() {
+        let err = super::account::div(Decimal::ONE, Decimal::ZERO, "test ratio").unwrap_err();
+        assert!(matches!(err, Error::DivideByZero { .. }), "{err}");
+        assert_eq!(
+            super::account::ratio_or(Decimal::ONE, Decimal::ZERO, Decimal::ZERO),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            super::account::ratio_or(Decimal::from(6), Decimal::from(3), Decimal::ZERO),
+            Decimal::from(2)
+        );
     }
 
     /// The served `time` never lags wall, the sim clock (`advance`), or the

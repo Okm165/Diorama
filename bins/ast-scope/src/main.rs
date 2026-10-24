@@ -30,6 +30,9 @@ const REPORT_TOP: usize = 12;
 /// The reuse analysis's window (consecutive operations) and sharing floor.
 const GRAM: usize = 3;
 const SHARED_BY: usize = 3;
+/// A type whose fields are touched from this many files has behavior living
+/// away from it (the dispersion reading).
+const DISPERSED_BY: usize = 3;
 
 /// One production item's shape.
 struct Item {
@@ -48,6 +51,19 @@ struct Item {
     /// The body's token stream, whitespace-stripped (the duplicate detector's
     /// key).
     body: String,
+    /// The body's divisions whose divisor is not a literal, as
+    /// `line: divisor` sketches: the arithmetic-panic audit's input (a zero
+    /// divisor panics; `no-panics` has no regex for arithmetic).
+    divisions: Vec<String>,
+    /// The distinct `ctx.<field>` accesses of a function whose parameters
+    /// include a `Ctx`: the narrow-scope reading (a function that needs one
+    /// field should take the field, not the whole context).
+    ctx_fields: Vec<String>,
+    /// How many `Ctx` parameters the signature has (0 = not a context taker).
+    ctx_params: usize,
+    /// Whether a `Ctx` parameter is used bare (passed to another call): then
+    /// the function genuinely needs the whole context, not a field of it.
+    ctx_passed_on: bool,
 }
 
 impl Item {
@@ -92,15 +108,17 @@ fn main() {
     }
     files.sort();
     let mut items = Vec::new();
+    let mut fields: FieldAccesses = HashMap::new();
     for file in &files {
-        parse_into(file, &mut items);
+        parse_into(file, &mut items, &mut fields);
     }
-    report(&items);
+    report(&items, &fields);
     std::process::exit(gate(&items));
 }
 
-/// Parse one file and push its production items (test modules skipped).
-fn parse_into(path: &Path, items: &mut Vec<Item>) {
+/// The file's production items and the `self.field` accesses its impl blocks
+/// make (the dispersion reading's input).
+fn parse_into(path: &Path, items: &mut Vec<Item>, fields: &mut FieldAccesses) {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) => {
@@ -117,6 +135,63 @@ fn parse_into(path: &Path, items: &mut Vec<Item>) {
     };
     let file = path.to_string_lossy().to_string();
     walk(&file, &parsed.items, false, items);
+    walk_fields(&file, &parsed.items, false, fields);
+}
+
+/// The `self.<field>` accesses per type per file: where a type's behavior
+/// lives, against where the type is defined.
+fn walk_fields(file: &str, items: &[syn::Item], test: bool, out: &mut FieldAccesses) {
+    for item in items {
+        match item {
+            syn::Item::Impl(i) if !test => {
+                let Some(name) = self_type(i) else { continue };
+                let mut access = FieldVisit::default();
+                access.visit_item_impl(i);
+                for field in access.fields {
+                    out.entry((name.clone(), field))
+                        .or_default()
+                        .insert(file.to_string());
+                }
+            }
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    walk_fields(file, inner, test || has_test_attr(&m.attrs), out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The `impl` block's own type, when it is a plain path (`Ctx`, `Sim`, …).
+fn self_type(i: &syn::ItemImpl) -> Option<String> {
+    match &*i.self_ty {
+        syn::Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// `(type, field)` → the files that touch it.
+type FieldAccesses = HashMap<(String, String), HashSet<String>>;
+
+/// The visitor behind the dispersion reading: `self.<field>` reads and writes
+/// inside one impl block.
+#[derive(Default)]
+struct FieldVisit {
+    fields: HashSet<String>,
+}
+
+impl<'ast> Visit<'ast> for FieldVisit {
+    fn visit_expr_field(&mut self, n: &'ast syn::ExprField) {
+        if let syn::Expr::Path(p) = &*n.base {
+            if p.path.is_ident("self") {
+                if let syn::Member::Named(field) = &n.member {
+                    self.fields.insert(field.to_string());
+                }
+            }
+        }
+        visit::visit_expr_field(self, n);
+    }
 }
 
 /// Walk items, descending into modules and impl blocks. `test` marks the
@@ -136,6 +211,10 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
                 test,
                 ops: Vec::new(),
                 body: String::new(),
+                divisions: Vec::new(),
+                ctx_fields: Vec::new(),
+                ctx_params: 0,
+                ctx_passed_on: false,
             }),
             syn::Item::Enum(e) => out.push(Item {
                 file: file.into(),
@@ -147,6 +226,10 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
                 test,
                 ops: Vec::new(),
                 body: String::new(),
+                divisions: Vec::new(),
+                ctx_fields: Vec::new(),
+                ctx_params: 0,
+                ctx_passed_on: false,
             }),
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
@@ -189,7 +272,11 @@ fn fn_item(
     attrs: &[syn::Attribute],
     test: bool,
 ) -> Item {
-    let mut body = Body::default();
+    let params = ctx_params(sig);
+    let mut body = Body {
+        ctx_params: params.clone(),
+        ..Body::default()
+    };
     body.visit_block(block);
     Item {
         file: file.into(),
@@ -201,6 +288,36 @@ fn fn_item(
         test: test || has_test_attr(attrs),
         ops: body.ops,
         body: normalize(block),
+        divisions: body.divisions,
+        ctx_fields: body.ctx_fields.into_iter().collect(),
+        ctx_params: params.len(),
+        ctx_passed_on: body.ctx_passed_on,
+    }
+}
+
+/// The parameters that hold an engine context: the type's last path segment
+/// is `Ctx` (`ctx: &Ctx`, `context: &Arc<Ctx>`).
+fn ctx_params(sig: &syn::Signature) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for arg in &sig.inputs {
+        let syn::FnArg::Typed(pat) = arg else { continue };
+        let syn::Pat::Ident(name) = &*pat.pat else { continue };
+        if type_is_ctx(&pat.ty) {
+            out.insert(name.ident.to_string());
+        }
+    }
+    out
+}
+
+fn type_is_ctx(ty: &syn::Type) -> bool {
+    match ty {
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "Ctx"),
+        syn::Type::Reference(r) => type_is_ctx(&r.elem),
+        _ => false,
     }
 }
 
@@ -222,6 +339,13 @@ struct Body {
     depth: usize,
     max_depth: usize,
     ops: Vec<String>,
+    divisions: Vec<String>,
+    /// The parameter names that hold the engine context (`ctx`, `context`).
+    ctx_params: HashSet<String>,
+    ctx_fields: HashSet<String>,
+    /// A ctx param appeared as a bare path: it is passed on (or used as a
+    /// value), so the function needs the context itself.
+    ctx_passed_on: bool,
 }
 
 impl Body {
@@ -267,11 +391,52 @@ impl<'ast> Visit<'ast> for Body {
         visit::visit_expr_method_call(self, n);
         self.ops.push(format!(".{}", n.method));
     }
+    fn visit_expr_field(&mut self, n: &'ast syn::ExprField) {
+        // `ctx.<field>` on a context parameter: the narrow-scope reading.
+        // The base is *not* a bare use — return without recursing into it.
+        if let syn::Expr::Path(p) = &*n.base {
+            if let Some(name) = p.path.get_ident() {
+                if self.ctx_params.contains(&name.to_string()) {
+                    if let syn::Member::Named(field) = &n.member {
+                        self.ctx_fields.insert(field.to_string());
+                    }
+                    return;
+                }
+            }
+        }
+        visit::visit_expr_field(self, n);
+    }
+    fn visit_expr_path(&mut self, n: &'ast syn::ExprPath) {
+        // A bare `ctx` (an argument, a binding): the function passes the
+        // context on, so it needs the whole thing, not a field.
+        if let Some(name) = n.path.get_ident() {
+            if self.ctx_params.contains(&name.to_string()) {
+                self.ctx_passed_on = true;
+            }
+        }
+        visit::visit_expr_path(self, n);
+    }
+    fn visit_expr_binary(&mut self, n: &'ast syn::ExprBinary) {
+        if matches!(n.op, syn::BinOp::Div(_)) && !is_literal(&n.right) {
+            let sketch = n.right.to_token_stream().to_string().replace(' ', "");
+            let sketch: String = sketch.chars().take(40).collect();
+            self.divisions.push(format!("{}: {}", n.span().start().line, sketch));
+        }
+        visit::visit_expr_binary(self, n);
+    }
 }
 
-/// The report: the largest production items per kind, then the reuse
-/// analysis (the analysis half).
-fn report(items: &[Item]) {
+/// A literal divisor (`2`, `3_600_000`) cannot be zero — nothing to audit.
+fn is_literal(e: &syn::Expr) -> bool {
+    matches!(
+        e,
+        syn::Expr::Lit(_) | syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), .. })
+    )
+}
+
+/// The report: the largest production items per kind, then the reuse and
+/// dispersion analyses (the analysis half).
+fn report(items: &[Item], fields: &FieldAccesses) {
     let prod: Vec<&Item> = items.iter().filter(|i| !i.is_test()).collect();
     println!(
         "ast-scope: {} production items ({} functions, {} structs, {} enums)",
@@ -283,7 +448,100 @@ fn report(items: &[Item]) {
     section("largest functions (lines, docs included)", &prod, "fn");
     section("deepest functions (nesting)", &prod, "fn-depth");
     section("largest records (fields/variants)", &prod, "record");
+    fan_in(&prod);
     reuse(&prod);
+    dispersion(fields);
+    narrow_context(&prod);
+    divisions(&prod);
+}
+
+/// The narrow-scope reading: functions that take the whole `Ctx` but touch at
+/// most one of its fields — the parameter should be the field itself (the
+/// caller passes it; the callee's scope shrinks to what it reads).
+fn narrow_context(prod: &[&Item]) {
+    let mut rows: Vec<&&Item> = prod
+        .iter()
+        .filter(|i| i.kind == "fn" && i.ctx_params > 0 && !i.ctx_passed_on && i.ctx_fields.len() <= 1)
+        .collect();
+    rows.sort_by_key(|i| i.ctx_fields.len());
+    println!("\nnarrow context: functions taking `Ctx` that touch <= 1 field:");
+    for item in rows.iter().take(REPORT_TOP * 2) {
+        let fields = if item.ctx_fields.is_empty() {
+            "none".to_string()
+        } else {
+            item.ctx_fields.join(", ")
+        };
+        println!("  {}:{}  ({fields})", item.file, item.name);
+    }
+}
+
+/// The arithmetic-panic audit: production divisions whose divisor is not a
+/// literal (a zero divisor panics — and under the state lock that is a
+/// poisoned plane). Each site needs a guard or a checked helper; the report
+/// names them so the audit is a list, not a search.
+fn divisions(prod: &[&Item]) {
+    let mut rows: Vec<(&Item, &String)> = Vec::new();
+    for item in prod {
+        for site in &item.divisions {
+            rows.push((item, site));
+        }
+    }
+    println!("\ndivisions: non-literal divisors ({} sites; each needs a zero guard):", rows.len());
+    for (item, site) in rows.iter().take(REPORT_TOP * 2) {
+        println!("  {}:{}  {site}", item.file, item.name);
+    }
+}
+
+/// The call graph's fan-in over the workspace's own free functions: the
+/// atomic blocks actually in use, measured rather than assumed. Method calls
+/// are excluded (their names collide with std's), and so are names the
+/// workspace does not define.
+fn fan_in(prod: &[&Item]) {
+    let mut defined: HashSet<&str> = HashSet::new();
+    for item in prod {
+        if item.kind == "fn" && !item.name.contains('.') {
+            defined.insert(item.name.as_str());
+        }
+    }
+    let mut callers: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for item in prod {
+        if item.kind != "fn" {
+            continue;
+        }
+        for op in &item.ops {
+            if !op.starts_with('.') && defined.contains(op.as_str()) {
+                callers.entry(op.as_str()).or_default().insert(item.name.as_str());
+            }
+        }
+    }
+    let mut rows: Vec<(&str, usize)> = callers.iter().map(|(k, v)| (*k, v.len())).collect();
+    rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    println!("\nfan-in: the workspace's own free functions by caller count (the atomic blocks in use):");
+    for (name, n) in rows.iter().take(REPORT_TOP) {
+        println!("  {n:>3} callers  {name}");
+    }
+}
+
+/// The dispersion reading: types whose `self.<field>` accesses span several
+/// files — the behavior lives away from the type.
+fn dispersion(fields: &FieldAccesses) {
+    let mut by_type: HashMap<&str, HashSet<&str>> = HashMap::new();
+    for ((ty, _), files) in fields {
+        by_type
+            .entry(ty.as_str())
+            .or_default()
+            .extend(files.iter().map(String::as_str));
+    }
+    let mut rows: Vec<(&str, HashSet<&str>)> = by_type
+        .into_iter()
+        .filter(|(_, files)| files.len() >= DISPERSED_BY)
+        .collect();
+    rows.sort_by_key(|(_, files)| std::cmp::Reverse(files.len()));
+    println!("\ndispersion: types whose field logic spans >= {DISPERSED_BY} files:");
+    for (ty, files) in rows.iter().take(REPORT_TOP) {
+        let list = list(&files.iter().copied().collect::<Vec<_>>());
+        println!("  {:>2} files  {ty}: {list}", files.len());
+    }
 }
 
 /// The reuse analysis: op sequences shared by several functions (the atomic

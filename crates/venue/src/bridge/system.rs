@@ -97,32 +97,39 @@ pub(crate) fn by_name<'a>(tokens: &'a [TokenInfo], name: &str) -> Option<&'a Tok
 }
 
 /// An EVM-unit amount as the human decimal the sim keeps (`value / 10^d`).
-pub(crate) fn evm_to_human(value: U256, evm_decimals: i32) -> Decimal {
-    let amount = decimal_of(value);
-    amount / pow10(evm_decimals)
+/// `None` when the value or the token's decimals cannot be represented — the
+/// caller refuses the amount rather than panicking on a corrupt answer.
+pub(crate) fn evm_to_human(value: U256, evm_decimals: i32) -> Option<Decimal> {
+    Some(decimal_of(value)? / pow10(evm_decimals)?)
 }
 
 /// A Core wei amount as the human decimal (`wei / 10^d`).
-pub(crate) fn core_to_human(wei: u64, wei_decimals: u32) -> Decimal {
-    Decimal::from(wei) / pow10(wei_decimals as i32)
+pub(crate) fn core_to_human(wei: u64, wei_decimals: u32) -> Option<Decimal> {
+    Some(Decimal::from(wei) / pow10(wei_decimals as i32)?)
 }
 
 /// A human decimal as an EVM-unit amount, floored at the EVM wei: the real
 /// chain burns the sub-wei remainder of a non-round amount (plan §16.3), so
 /// the bridge does the same rather than refusing a transfer the chain would
-/// complete. `None` only for a negative amount or an unrepresentable one.
+/// complete. `None` for a negative amount or one the decimal range cannot
+/// carry (the multiply is checked: `Decimal`'s `*` panics on overflow).
 pub(crate) fn human_to_evm(amount: Decimal, evm_decimals: i32) -> Option<U256> {
     if amount.is_sign_negative() {
         return None;
     }
-    (amount * pow10(evm_decimals)).trunc().to_string().parse().ok()
+    (amount.checked_mul(pow10(evm_decimals)?)?)
+        .trunc()
+        .to_string()
+        .parse()
+        .ok()
 }
 
 /// Floor a human amount at the Core wei (`wei_decimals`): EVM→Core credits
 /// are floored the same way (the sub-wei remainder is burned on the real
 /// chain).
-pub(crate) fn floor_to_core_wei(amount: Decimal, wei_decimals: u32) -> Decimal {
-    (amount * pow10(wei_decimals as i32)).trunc() / pow10(wei_decimals as i32)
+pub(crate) fn floor_to_core_wei(amount: Decimal, wei_decimals: u32) -> Option<Decimal> {
+    let p = pow10(wei_decimals as i32)?;
+    Some(amount.checked_mul(p)?.trunc() / p)
 }
 
 /// `transfer(address,uint256)` calldata — alloy's own encoder.
@@ -160,25 +167,30 @@ pub(crate) fn credit_of<'a>(
         return None;
     }
     let evm_decimals = token.evm_decimals()?;
-    let credited = floor_to_core_wei(evm_to_human(transfer.value, evm_decimals), token.wei_decimals);
+    let credited =
+        floor_to_core_wei(evm_to_human(transfer.value, evm_decimals)?, token.wei_decimals)?;
     Some((transfer.from, token, credited))
 }
 
-fn decimal_of(value: U256) -> Decimal {
-    value.to_string().parse().unwrap_or(Decimal::ZERO)
+/// A U256 as a decimal: `None` when the value has more digits than the
+/// decimal range carries (a `U256::MAX` credit is unrepresentable, and
+/// silently reading it as zero would be a lie about money).
+fn decimal_of(value: U256) -> Option<Decimal> {
+    value.to_string().parse().ok()
 }
 
-fn pow10(decimals: i32) -> Decimal {
+/// `10^decimals`, checked: the exponent comes from the venue's public
+/// metadata (input-reachable), and `Decimal`'s `*` panics past ~28 digits.
+fn pow10(decimals: i32) -> Option<Decimal> {
     let mut out = Decimal::ONE;
-    let n = decimals.unsigned_abs();
-    for _ in 0..n {
-        out *= Decimal::TEN;
+    for _ in 0..decimals.unsigned_abs() {
+        out = out.checked_mul(Decimal::TEN)?;
     }
-    if decimals < 0 {
-        Decimal::ONE / out
+    Some(if decimals < 0 {
+        Decimal::ONE.checked_div(out)?
     } else {
         out
-    }
+    })
 }
 
 /// The system address's completion send cannot be built: a typed fault the
@@ -222,9 +234,9 @@ mod tests {
         };
         assert_eq!(usdc.evm_decimals(), Some(6));
         // 1.0 USDC EVM (1e6) → 1 human.
-        assert_eq!(evm_to_human(U256::from(1_000_000u64), 6), Decimal::ONE);
+        assert_eq!(evm_to_human(U256::from(1_000_000u64), 6), Some(Decimal::ONE));
         // 1.0 USDC Core wei (1e8) → 1 human.
-        assert_eq!(core_to_human(100_000_000, 8), Decimal::ONE);
+        assert_eq!(core_to_human(100_000_000, 8), Some(Decimal::ONE));
         // 1 human → 1e6 EVM units.
         assert_eq!(human_to_evm(Decimal::ONE, 6), Some(U256::from(1_000_000u64)));
         assert_eq!(human_to_evm(Decimal::new(15, 1), 6), Some(U256::from(1_500_000u64)));
@@ -238,7 +250,7 @@ mod tests {
         // floored value (the rest burns, like the real chain).
         let one_and_dust = Decimal::from_str("1.000000000000000001").unwrap();
         let floored = floor_to_core_wei(one_and_dust, 8);
-        assert_eq!(floored, Decimal::from_str("1.00000000").unwrap());
+        assert_eq!(floored, Some(Decimal::from_str("1.00000000").unwrap()));
         // Core→EVM floors at the EVM wei instead of refusing.
         let value = human_to_evm(one_and_dust, 18).unwrap();
         assert_eq!(value, U256::from(1_000_000_000_000_000_001u128));

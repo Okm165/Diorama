@@ -156,7 +156,7 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
         mirror_devnet::bal::Window::new(from, to),
     )
     .await?;
-    record_poll_stats(ctx, &plan.compose);
+    record_poll_stats(&ctx.venue_metrics, &plan.compose);
     let applied = if plan.writes.is_empty() {
         0
     } else {
@@ -180,16 +180,12 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
 }
 
 /// The poll's gauges and the audit warning, one place.
-fn record_poll_stats(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) {
-    ctx.venue_metrics
-        .set(&ctx.venue_metrics.poll_touched, stats.touched as u64);
-    ctx.venue_metrics
-        .set(&ctx.venue_metrics.poll_planned_keys, stats.planned as u64);
-    ctx.venue_metrics
-        .set(&ctx.venue_metrics.poll_changed_keys, stats.changed as u64);
+fn record_poll_stats(metrics: &crate::metrics::VenueMetrics, stats: &mirror_devnet::bal::ComposeStats) {
+    metrics.set(&metrics.poll_touched, stats.touched as u64);
+    metrics.set(&metrics.poll_planned_keys, stats.planned as u64);
+    metrics.set(&metrics.poll_changed_keys, stats.changed as u64);
     if !stats.uncovered.is_empty() {
-        ctx.venue_metrics
-            .add(&ctx.venue_metrics.poll_uncovered_logs, stats.uncovered.len() as u64);
+        metrics.add(&metrics.poll_uncovered_logs, stats.uncovered.len() as u64);
         tracing::warn!(
             emitters = ?stats.uncovered,
             "follow: logs from contracts no closure covers (declare a closure to follow them)"

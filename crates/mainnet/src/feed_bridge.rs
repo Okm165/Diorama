@@ -79,7 +79,7 @@ impl FeedRuntime {
     /// The target's decimals, resolved the first time the target is readable
     /// and cached. `None` = not installed yet (the decode of an empty return
     /// is the *fact*; a transport fault still surfaces).
-    async fn decimals(&self, ctx: &Ctx) -> Result<Option<u8>> {
+    async fn decimals(&self, anvil_t: &mirror_anvil::Rpc) -> Result<Option<u8>> {
         if let Some(d) = *self
             .decimals
             .lock()
@@ -88,7 +88,7 @@ impl FeedRuntime {
             return Ok(Some(d));
         }
         let data = Bytes::from(AggregatorV3Interface::decimalsCall {}.abi_encode());
-        let out = ctx.anvil_t.call_latest(self.section.target, &data).await?;
+        let out = anvil_t.call_latest(self.section.target, &data).await?;
         let Ok(decoded) = AggregatorV3Interface::decimalsCall::abi_decode_returns(&out) else {
             return Ok(None);
         };
@@ -212,7 +212,7 @@ impl FeedBridge {
                 source: Box::new(e),
             }
         })?;
-        let decimals = target_decimals(ctx, feed, source).await?;
+        let decimals = target_decimals(&ctx.anvil_t, feed, source).await?;
         Ok(FeedRuntime {
             section: feed.clone(),
             values: Mutex::new(ValueState::default()),
@@ -245,7 +245,7 @@ impl FeedBridge {
         if feed.paused.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let Some(decimals) = feed.decimals(ctx).await? else {
+        let Some(decimals) = feed.decimals(&ctx.anvil_t).await? else {
             // The target is not installed yet; wait (the read retries each
             // pass and the feed starts publishing the moment it appears).
             return Ok(());
@@ -331,14 +331,19 @@ impl FeedBridge {
     /// Own a feed's value now: publish `answer` and pause (a scripted crash).
     /// Refused while the target is not installed: a "crash" written to an
     /// empty address would report success and change nothing.
-    pub async fn override_answer(&self, ctx: &Ctx, name: &str, answer: i128) -> Result<()> {
+    pub async fn override_answer(
+        &self,
+        anvil_t: &mirror_anvil::Rpc,
+        name: &str,
+        answer: i128,
+    ) -> Result<()> {
         let feed = self.find(name)?;
-        if feed.decimals(ctx).await?.is_none() {
+        if feed.decimals(anvil_t).await?.is_none() {
             return Err(Error::FeedBridgeWaiting {
                 feed: name.to_string(),
             });
         }
-        publish(&ctx.anvil_t, feed.section.target, self.writer, answer).await?;
+        publish(anvil_t, feed.section.target, self.writer, answer).await?;
         let mut state = feed
             .values
             .lock()
@@ -495,8 +500,8 @@ async fn read_decimals(rpc: &mirror_anvil::Rpc, aggregator: Address) -> Result<u
 /// the fixture deploy has not run yet — *absence* is a fact the bridge waits
 /// on; a present-but-mismatched target or an unexpected fault is a boot error
 /// naming itself (a mis-scaled answer poisons consumers).
-async fn target_decimals(ctx: &Ctx, feed: &FeedSection, source: u8) -> Result<Option<u8>> {
-    match read_decimals(&ctx.anvil_t, feed.target).await {
+async fn target_decimals(anvil_t: &mirror_anvil::Rpc, feed: &FeedSection, source: u8) -> Result<Option<u8>> {
+    match read_decimals(anvil_t, feed.target).await {
         Ok(d) if d == source => Ok(Some(d)),
         Ok(d) => Err(Error::FeedBridgeDecimals {
             feed: feed.name.clone(),

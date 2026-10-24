@@ -122,9 +122,10 @@ impl Position {
     }
 }
 
-/// Checked money arithmetic: rust_decimal panics on overflow, and a panic
-/// under the state lock poisons the account plane for the process's life.
-/// Every step an input can reach goes through these.
+/// Checked money arithmetic: rust_decimal panics on overflow (and on
+/// division by zero), and a panic under the state lock poisons the account
+/// plane for the process's life. Every step an input can reach goes through
+/// these.
 pub fn add(a: Decimal, b: Decimal, what: &'static str) -> Result<Decimal> {
     a.checked_add(b).ok_or(crate::error::Error::Overflow { what })
 }
@@ -135,6 +136,26 @@ pub fn sub(a: Decimal, b: Decimal, what: &'static str) -> Result<Decimal> {
 
 pub(crate) fn mul(a: Decimal, b: Decimal, what: &'static str) -> Result<Decimal> {
     a.checked_mul(b).ok_or(crate::error::Error::Overflow { what })
+}
+
+/// Checked division: `Decimal`'s `/` panics on a zero divisor, so the
+/// divisor is named when it refuses.
+pub(crate) fn div(a: Decimal, b: Decimal, what: &'static str) -> Result<Decimal> {
+    a.checked_div(b)
+        .ok_or(crate::error::Error::DivideByZero { what })
+}
+
+/// `a / b`, or `fallback` when the divisor is zero: the sim's shape for a
+/// ratio whose denominator may legitimately be absent (a position with no
+/// margin, a notional with no fill, a mark not yet polled). The fallback is
+/// the domain's reading of "absent" — the one place a raw `/` is allowed,
+/// because the guard is right here.
+pub(crate) fn ratio_or(a: Decimal, b: Decimal, fallback: Decimal) -> Decimal {
+    if b.is_zero() {
+        fallback
+    } else {
+        a / b
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -452,11 +473,9 @@ fn position_row(
     meta: Option<&crate::wire::Meta>,
 ) -> Result<AssetPosition> {
     let u_pnl = p.unrealized_pnl(facts.mark)?;
-    let roe = if p.margin_used.is_zero() {
-        Decimal::ZERO
-    } else {
-        u_pnl / p.margin_used
-    };
+    // A position with no margin reads ROE 0 (the ratio's absent-denominator
+    // fallback; `ratio_or` is where a raw `/` is allowed).
+    let roe = ratio_or(u_pnl, p.margin_used, Decimal::ZERO);
     let liquidation_px = match p.leverage {
         LeverageType::Isolated => Some(liquidation_px(
             p,
@@ -827,8 +846,7 @@ fn fresh_position(fill: &FillFacts) -> Position {
 /// first — the lane accrues before applying, see `land_fill`), and the margin
 /// follows — the isolated margin when the account moved one on
 /// (`updateIsolatedMargin`, the docs' `leverage.rawUsd`), else notional over
-/// leverage (`.max(1)` guards the decimal division; a leverage of 0 is not a
-/// state this plane creates).
+/// leverage (checked: a zero leverage is a named fault, never a panic).
 fn settle_margin(position: &mut Position) -> Result<()> {
     position.funding_since_change = Decimal::ZERO;
     position.margin_used = if position.leverage == LeverageType::Isolated
@@ -836,8 +854,11 @@ fn settle_margin(position: &mut Position) -> Result<()> {
     {
         position.isolated_margin
     } else {
-        mul(position.szi.abs(), position.entry_px, "margin notional")?
-            / Decimal::from(position.leverage_value.max(1))
+        div(
+            mul(position.szi.abs(), position.entry_px, "margin notional")?,
+            Decimal::from(position.leverage_value),
+            "margin notional",
+        )?
     };
     Ok(())
 }
@@ -849,7 +870,11 @@ fn apply_increase(position: &mut Position, old: Decimal, fill: &FillFacts) -> Re
     let old_notional = mul(old.abs(), position.entry_px, "entry notional")?;
     let fill_notional = mul(fill.size, fill.px, "fill notional")?;
     let new_szi = add(old, signed, "position size")?;
-    position.entry_px = add(old_notional, fill_notional, "entry notional total")? / new_szi.abs();
+    position.entry_px = div(
+        add(old_notional, fill_notional, "entry notional total")?,
+        new_szi.abs(),
+        "entry price",
+    )?;
     position.szi = new_szi;
     Ok(())
 }

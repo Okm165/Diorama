@@ -1465,11 +1465,11 @@ fn active_asset_data(
             raw_usd: None,
         });
     let available = view.withdrawable.max(Decimal::ZERO);
-    let max_sz = if mark.is_zero() {
-        Decimal::ZERO
-    } else {
-        available * Decimal::from(leverage.value) / mark
-    };
+    let max_sz = account::ratio_or(
+        account::mul(available, Decimal::from(leverage.value), "max size")?,
+        mark,
+        Decimal::ZERO,
+    );
     Ok(ActiveAssetData {
         user,
         coin: coin.to_string(),

@@ -23,6 +23,7 @@ use crate::error::{Error, Result};
 use crate::reset::{read_canary, write_canary};
 use mirror_anvil::Rpc;
 use mirror_devnet::facts::{Fact, ResetWitness};
+use mirror_devnet::plane::Plane;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
 use mirror_devnet::scan;
@@ -117,7 +118,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     }
 
     let cursor = ctx.plane.state.cursor()?;
-    record_cursor_metrics(ctx, cursor.as_ref(), head);
+    record_cursor_metrics(&ctx.venue_metrics, cursor.as_ref(), head);
     scan_and_advance(ctx, cursor.as_ref(), head).await?;
 
     // Follow the source: compose the window since the last composed source
@@ -125,7 +126,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // devnet's own writes are marked before the filter reads them.
     crate::follow::step(ctx).await?;
 
-    clear_rewound_range(ctx, head)?;
+    clear_rewound_range(&ctx.plane, head)?;
     Ok(Pass::Steady)
 }
 
@@ -141,11 +142,11 @@ async fn mine_pending_best_effort(ctx: &Ctx) {
 
 /// The cursor's gauges: the cursor height and the pin-age reading (blocks
 /// since the epoch's first).
-fn record_cursor_metrics(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) {
+fn record_cursor_metrics(metrics: &crate::metrics::VenueMetrics, cursor: Option<&ChainCursor>, head: u64) {
     let Some(c) = cursor else { return };
-    ctx.venue_metrics.set(&ctx.venue_metrics.cursor, c.block);
-    ctx.venue_metrics.set(
-        &ctx.venue_metrics.pin_age_blocks,
+    metrics.set(&metrics.cursor, c.block);
+    metrics.set(
+        &metrics.pin_age_blocks,
         head.saturating_sub(c.first_block) + 1,
     );
 }
@@ -155,11 +156,11 @@ fn record_cursor_metrics(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) {
 /// writes). The value is copied out first: a guard held by the `if let`
 /// scrutinee across the body's second `lock()` would self-deadlock (std
 /// mutexes are not reentrant) — the mainnet's applier copies the same way.
-fn clear_rewound_range(ctx: &Ctx, head: u64) -> Result<()> {
-    let reapply = *ctx.plane.reapply_from.lock()?;
+fn clear_rewound_range(plane: &Plane, head: u64) -> Result<()> {
+    let reapply = *plane.reapply_from.lock()?;
     if let Some((_, until)) = reapply {
         if head >= until {
-            *ctx.plane.reapply_from.lock()? = None;
+            *plane.reapply_from.lock()? = None;
             tracing::info!(block = head, until, "rewound range passed");
         }
     }

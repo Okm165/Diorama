@@ -343,7 +343,11 @@ impl Bridge {
         let Some(usdc) = system::by_name(tokens, "USDC") else {
             return Err(Error::Warming);
         };
-        let amount = system::core_to_human(ntl, usdc.wei_decimals);
+        let Some(amount) = system::core_to_human(ntl, usdc.wei_decimals) else {
+            self.metrics.inc_refusals();
+            tracing::warn!(wei = ntl, "bridge: usdClassTransfer amount is not representable; refused");
+            return Ok(());
+        };
         let applied = self.sim.usd_class_transfer(
             caller,
             TokenRef { index: usdc.index, coin: &usdc.name },
@@ -394,7 +398,11 @@ impl Bridge {
         info: &TokenInfo,
         wei: u64,
     ) -> Result<()> {
-        let amount = system::core_to_human(wei, info.wei_decimals);
+        let Some(amount) = system::core_to_human(wei, info.wei_decimals) else {
+            self.metrics.inc_refusals();
+            tracing::warn!(wei, "bridge: spotSend amount is not representable; refused");
+            return Ok(());
+        };
         let applied = self.sim.spot_send(
             caller,
             destination,
@@ -441,7 +449,11 @@ impl Bridge {
         info: &TokenInfo,
         wei: u64,
     ) -> Result<()> {
-        let amount = system::core_to_human(wei, info.wei_decimals);
+        let Some(amount) = system::core_to_human(wei, info.wei_decimals) else {
+            self.metrics.inc_refusals();
+            tracing::warn!(wei, "bridge: sendAsset amount is not representable; refused");
+            return Ok(());
+        };
         if destination == system::system_address(u64::from(info.index)) {
             // Core→EVM: debit the caller, then complete on the EVM side.
             let Some(_after) = self.sim.try_debit_spot(caller, info.index, amount)? else {

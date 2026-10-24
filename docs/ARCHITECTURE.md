@@ -751,9 +751,16 @@ on an upstream answer is a crash loop, not a degradation), `config-check`
 (`bins/ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;
-test modules are out of scope, and the tool prints the largest offenders as its
-report). Each fails on drift; adding a gate is adding a script (or a bin) and
-one Makefile line.
+test modules are out of scope). The tool's report is the analysis half and
+carries four readings the gates cannot: **fan-in** (the workspace's own free
+functions by caller count — the atomic blocks actually in use), **reuse**
+(3-operation sequences shared by ≥ 3 functions, and bodies that are literally
+the same code — the extraction candidates), **dispersion** (types whose field
+logic spans ≥ 3 files: behavior living away from its type) and **divisions**
+(production divisions whose divisor is not a literal — arithmetic panics are
+invisible to the `no-panics` regex, so each site is a named audit entry).
+Each gate fails on drift; adding one is adding a script (or a bin) and one
+Makefile line.
 
 **Boot asserts.** The engine waits for V (a coordinated restart must not become
 CrashLoopBackOff), asserts the chain id is 999 (a profile over the wrong chain

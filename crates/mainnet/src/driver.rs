@@ -8,6 +8,7 @@ use crate::ctx::Ctx;
 use crate::apply::apply_block;
 use crate::error::Result;
 use crate::source_sync;
+use mirror_anvil::Rpc;
 use mirror_devnet::facts::{Fact, ResetWitness};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::spine::ResetSignal;
@@ -43,7 +44,7 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
     }
 
     let cursor = validate_cursor(ctx, head).await?;
-    let (start, rebased) = resume_point(ctx, cursor.as_ref(), head).await?;
+    let (start, rebased) = resume_point(&ctx.anvil_t, cursor.as_ref(), head).await?;
     if rebased {
         on_rebase(&ctx.anvil_t, head, follow, start).await?;
     }
@@ -160,13 +161,9 @@ async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
 /// its height is not a parent height and `head + 1` can land past the follow
 /// head, stalling T forever (measured). Fail-closed on the pin read: a fault
 /// here must not silently pick that stalled path.
-async fn resume_point(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) -> Result<(u64, bool)> {
+async fn resume_point(anvil_t: &Rpc, cursor: Option<&ChainCursor>, head: u64) -> Result<(u64, bool)> {
     let reset_pin = if cursor.is_none() {
-        ctx.anvil_t
-            .anvil_node_info()
-            .await?
-            .fork_config
-            .fork_block_number
+        anvil_t.anvil_node_info().await?.fork_config.fork_block_number
     } else {
         None
     };
