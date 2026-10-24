@@ -193,6 +193,13 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
     let ctx = std::sync::Arc::new(Ctx::new(cfg, &source_url, &v_url)?);
 
     driver::boot(&ctx).await?;
+    tracing::info!(
+        source = %ctx.source_rpc.url(),
+        anvil_v = %ctx.anvil_v.url(),
+        pin = ctx.pin.load(std::sync::atomic::Ordering::Relaxed),
+        watchlist = ctx.mirror.scope().watch().accounts.len(),
+        "mirror engine starting"
+    );
     let tasks = spawn_loops(&ctx);
     mirror_config::boot::shutdown_signal().await;
     tracing::info!("shutdown signal received");
