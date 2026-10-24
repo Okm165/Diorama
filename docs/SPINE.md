@@ -253,6 +253,7 @@ fetched 2026-10-24; the probe rows are live API measurements).
 | Size budget: ~90 KiB average per BAL at 60 M gas | EIP-7928's analysis | measured against our window sizes; the window framing on the venue exists for the same reason |
 | CL-driven EL sync: deliver payloads ascending; the EL may close the gap by "acquiring state directly (e.g., … EIP-7928 block access list fast-forward) and skipping execution" | **EIP-8379 "Top-up Sync"** (Draft, 2026-08-06) | implemented in substance: the top-up loop (`engine_newPayload` + `forkchoiceUpdated`) + BAL-based state application. Forward note: when reth implements `engine_getSyncStatus`/`MISSING_STATE`, the loop can read the standardized status instead of its own probes |
 | No simulation: the parent's own effects land on a real EVM | — | by construction: anvil/revm computes; the mirror only transports and measures |
+| Hash-dependent code diverges (the A17 class): a fork cannot reproduce the parent's block hashes | — (the fork's own semantics) | documented limitation (measured: a hash-gated MEV entry flips, cascading into WETH supply and Uniswap logs — ARCHITECTURE's "Divergences are recorded, not fatal"); recorded in `drift.jsonl` and metrics, re-converged by the next block's absolute writes; the alarm that matters is `mirror_t_convergence_failures_total` |
 
 ## Gaps found in this review, and dispositions
 
