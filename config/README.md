@@ -37,7 +37,7 @@ are errors at every level.
 | `[services.cctp_bridge.*]` | the CCTP bridge | T/V RPCs, relay key, attester seed, iris/control ports, the relayer mode (`auto`/`manual`) |
 | `[watchlist]` | the mainnet engine | the closure scope; one watchlist, two readers (`check` + `closure-check`) |
 
-The engines' sections are named per mirror — `engine` is the ethereum
+The engines' sections are named per mirror — `engine` is the mainnet
 profile's, `venue` is the venue profile's (the plan's per-service grouping,
 §19.3; the venue's engine section doubles as the mirror's own section for
 chain-level knobs). Each service reads only its own section; one file per
@@ -52,14 +52,18 @@ mirror-config export-env config/instances/mainnet-mirror/instance.toml --section
 ```
 
 `make config-check` checks **every** instance unit under `config/instances/` and is part
-of `make fitness`. The anvil init containers read
-`FORK_OFFSET` via `export-env` — the instance file is the offset's single
-home.
+of `make fitness`. The anvil-t init container reads `FORK_OFFSET` straight from
+the mounted TOML (a `sed` read — the alpine init container carries no Rust
+binary; the instance file is the offset's single home), and
+`mirror-config export-env --section anvil` renders the same fact for anything
+with the CLI available. The venue's anvil forks at the source's latest block,
+so it reads no offset.
 
-**How a service finds its instance file.** The path is the binary's first
-argument (`--config <path>` for the engine, positional for `venue-mirror` /
-`venue-sim` / `cctp-bridge`), defaulting to `/etc/mirror/instance.toml` — the
-path every pod mounts via `configMapGenerator`. The plan's
+**How a service finds its instance file.** Every service is invoked
+`run --config <path>` (the manifests' `args:`), defaulting to
+`/etc/mirror/instance.toml` — the path every pod mounts via
+`configMapGenerator`. The mainnet engine's CLI adds the `selftest` and
+`rewind` subcommands; the plain services accept exactly `run`. The plan's
 `MIRROR_INSTANCE`/`MIRROR_CONFIG` envs are therefore unnecessary: one file per
 instance, many readers, and the mount already selects it; the argument exists
 for local runs (the scratch stacks pass their own file).
