@@ -12,7 +12,10 @@
 # `MAINNET_RPC`, overridden inline by the self-test Job).
 #
 # The overlay's resource list is the tree's manifest set: the venue overlay
-# includes the cross-mirror bridge's base, the mainnet overlay does not.
+# includes the cross-mirror bridge's base, the mainnet overlay does not. The
+# same file also carries the harness's `test-endpoints` env: every
+# `localhost:PORT` there must be a NodePort the overlay declares, or the
+# harness dials a port nothing serves.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 python3 - <<'PY'
@@ -56,7 +59,18 @@ for tree in ("mainnet-mirror", "venue-mirror"):
         print(f"VIOLATION: {tree}: ConfigMap key {k} is consumed by nothing (dead wiring)")
         bad = 1
 
+# The harness env's ports must be NodePorts the same overlay declares.
+for tree in ("mainnet-mirror", "venue-mirror"):
+    path = f"k8s/overlays/{tree}/nodeports.yaml"
+    text = open(path).read()
+    declared = set(re.findall(r"nodePort:\s*(\d+)", text))
+    env_block = text.split("test-endpoints.env: |", 1)[-1]
+    for port in sorted(set(re.findall(r"localhost:(\d+)", env_block))):
+        if port not in declared:
+            print(f"VIOLATION: {tree}: test-endpoints names localhost:{port}, which no Service in the overlay declares")
+            bad = 1
+
 if not bad:
-    print("k8s-wiring: OK (every instance placeholder is provided; every ConfigMap key is consumed)")
+    print("k8s-wiring: OK (placeholders provided, ConfigMap keys consumed, harness ports declared)")
 sys.exit(bad)
 PY

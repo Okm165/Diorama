@@ -226,7 +226,7 @@ pub fn flatten_trace(trace: &GethTrace) -> Vec<Write> {
 /// Flatten a `debug_traceBlockByNumber` answer (`[{txHash, result}]`):
 /// the prestate frames of every successfully traced transaction, in order.
 /// A transaction the tracer could not process contributes no writes — the
-/// caller's convergence repair is the backstop for a partial flattening.
+/// caller's next parent BAL is the backstop for a partial flattening.
 pub fn flatten_trace_block(traces: &[TraceResult]) -> Vec<Write> {
     traces
         .iter()

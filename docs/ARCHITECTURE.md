@@ -757,7 +757,9 @@ was missing), `k8s-wiring` (the instances and the manifests are two halves of
 one contract: every `${VAR}` an instance names is provided by the tree's pod
 env, and every `mirror-config` key is consumed — a key left behind after a
 feature moves is dead wiring that still shows in `kubectl describe`, measured:
-`CHECKPOINT_SYNC_FALLBACK` and `MAINNET_RPC`) and `ast-scope`
+`CHECKPOINT_SYNC_FALLBACK` and `MAINNET_RPC`; the same gate checks the
+harness's `test-endpoints` env names only NodePorts the overlay declares) and
+`ast-scope`
 (`bins/ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;

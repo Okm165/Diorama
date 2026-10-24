@@ -1002,7 +1002,7 @@ verify against). Verdicts:
 | Verdict | Axioms | Where |
 |---|---|---|
 | **SAME** (same modules) | A1, A2, A5, A8, A11, A13, A14, A15, A18, A19, A20 + the pins/epochs/journal/COW/automine decisions | `crates/anvil` + `crates/devnet`, exercised by `make venue-smoke` and the epoch drill (same-pin restore / new-pin epoch) |
-| **IMPOSSIBLE (permanent)** | A3, A4, A6, A7, A9, A12, A16, A17 + the mainnet guarantee (per-block verification, probe parity, convergence repair) | no replay exists to verify; the fork keeps the source's exact state and hashes at the pin |
+| **IMPOSSIBLE (permanent)** | A3, A4, A6, A7, A9, A12, A16, A17 + the mainnet guarantee (per-block BAL apply, sampled parity, the probes) | no replay exists to verify; the fork keeps the source's exact state and hashes at the pin |
 | **REFRAMED** | L9 freshness → the pin (chain) + the live public API (venue data); the T guarantee → at-pin parity | `venue_fork_pin`, probes-at-pin (skip+count when the pin ≠ source head — measured: the source ignores the block parameter) |
 | **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (Phase 2), bridge round-trip exactness | `crates/venue`; the identity is re-checked at the serve boundary |
 
@@ -1094,8 +1094,8 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
    are served). Placeholder blob proofs are recomputed locally and verified
    against the tx's versioned hash. If a slot is outside the CL's coverage, the
    block is mined without its blob txs and recorded; **T's state still
-   converges** through the parent-BAL repair (the BAL carries every state
-   change).
+   converges** through the next parent BAL (every state change is carried
+   there).
 6. **No replay means no memory ceiling**: the removed M cached every replayed
    tx (~15-25 MB/block) and long replays ended in a k8s restart; T applies the
    parent's BAL and never replays, so it is ~10× leaner.

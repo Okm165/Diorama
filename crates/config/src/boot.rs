@@ -10,16 +10,18 @@ use std::error::Error as StdError;
 
 /// Worker stack budget for every binary's tokio runtime.
 ///
-/// Debug builds give every by-value 128 KiB `Blob` temporary its own stack
-/// slot: the blob/KZG chain alone needs ~2.1 MiB (measured: `repair_proofs`
-/// 1.28 MiB + `validate_sidecars` 0.64 MiB, `encode_blob_tx` 1.29 MiB), which
-/// is exactly tokio's 2 MiB worker default — the first blob block overflowed
-/// it. The binaries own an explicit budget with headroom; release builds use
-/// a fraction of it, and the cost is address space, not resident memory.
+/// Debug builds give every by-value temporary its own stack slot: the removed
+/// blob/KZG pipeline (M's replay) needed ~2.1 MiB there (measured:
+/// `repair_proofs` 1.28 MiB + `validate_sidecars` 0.64 MiB, `encode_blob_tx`
+/// 1.29 MiB) — exactly tokio's 2 MiB worker default, so the first blob block
+/// overflowed it. The pipeline is gone (the BAL carries every effect), but
+/// the budget stays: it costs address space, not resident memory, and one
+/// by-value block type in a future path would overflow the default again in
+/// debug builds.
 pub(crate) const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
-/// The budget must keep headroom over the measured ~2.1 MiB blob/KZG chain
-/// (debug builds) — a compile-time fact, not a runtime test.
+/// The budget must keep headroom over the measured ~2.1 MiB debug-build chain
+/// (a compile-time fact, not a runtime test).
 const _: () = assert!(WORKER_STACK_SIZE >= 8 * 1024 * 1024);
 
 /// Install the tracing subscriber. `MIRROR_LOG_JSON` selects the JSON form
