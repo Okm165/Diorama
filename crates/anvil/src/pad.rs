@@ -5,14 +5,22 @@
 //! full 32-byte words (`B256`) and minimal even-length quantities
 //! (`U256`/`U64`), so the official types' serde is that rule's single home
 //! (`crates/anvil/src/writes.rs`).
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
+
+/// `keccak256(key32 ‖ slot32)` — the layout every Solidity mapping has (the
+/// compiler hashes the concatenation of the key and the slot, both left-padded
+/// to 32 bytes). The one definition both forms below and the venue's declared
+/// closures share.
+pub fn mapping_slot_word(key: B256, slot: U256) -> U256 {
+    let mut preimage = [0u8; 64];
+    preimage[..32].copy_from_slice(key.as_slice());
+    preimage[32..].copy_from_slice(&slot.to_be_bytes::<32>());
+    U256::from_be_bytes(alloy_primitives::keccak256(preimage).0)
+}
 
 /// `keccak256(abi.encode(key, slot))` - the storage slot of a Solidity mapping.
 pub fn mapping_slot(key: Address, slot: U256) -> U256 {
-    let mut buf = [0u8; 64];
-    buf[12..32].copy_from_slice(key.as_slice());
-    buf[32..64].copy_from_slice(&slot.to_be_bytes::<32>());
-    U256::from_be_bytes(alloy_primitives::keccak256(buf).0)
+    mapping_slot_word(B256::left_padding_from(key.as_slice()), slot)
 }
 
 #[cfg(test)]

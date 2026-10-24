@@ -16,7 +16,7 @@
 //!   `slot = keccak256(pad32(key) ‖ pad32(base))`. Live-verified against
 //!   WETH (slot 3): holder `0x28C6…1d60` ⇒ slot `0xdca77c…a94e`, and the
 //!   storage word equals `balanceOf` exactly.
-use alloy_primitives::{keccak256, Address, B256, Bytes, Log, U256};
+use alloy_primitives::{Address, B256, Bytes, Log, U256};
 use mirror_anvil::{Key, Write};
 use std::collections::{HashMap, HashSet};
 
@@ -102,12 +102,10 @@ impl KeyClosure for FixedSlots {
 ///
 /// This is the layout every Solidity mapping has (the compiler hashes the
 /// concatenation of the key and the slot, both left-padded to 32 bytes);
-/// verified live against WETH's `balanceOf` (see the module docs).
+/// verified live against WETH's `balanceOf` (see the module docs). The
+/// preimage rule lives once, in `mirror_anvil::mapping_slot_word`.
 pub fn mapping_slot(key: B256, base_slot: U256) -> U256 {
-    let mut preimage = [0u8; 64];
-    preimage[..32].copy_from_slice(key.as_slice());
-    preimage[32..].copy_from_slice(&base_slot.to_be_bytes::<32>());
-    U256::from_be_bytes(keccak256(preimage).0)
+    mirror_anvil::mapping_slot_word(key, base_slot)
 }
 
 /// Mapping slots derived from one indexed log topic (ERC20/ERC721 balances,
