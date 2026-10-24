@@ -19,7 +19,6 @@
 //! The composer itself is generic (`mirror_devnet::bal::compose`): it picks the
 //! native rung from `Capabilities::native_bal` and synthesizes otherwise, so
 //! the two mirrors differ in *data* (source, scope), not in algorithm.
-use crate::error::Result;
 use mirror_config::EngineSection;
 use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
@@ -53,7 +52,7 @@ impl MainnetMirror {
             // was never estimated on (measured: ~5% short, reverted), so the
             // pool is drained first — bounded so a steady stream cannot starve
             // the parent block.
-            prepend_rounds: 3,
+            prepend_rounds: Some(3),
             gap: Some(engine.loops.max_gap_blocks),
         }
     }
@@ -96,14 +95,14 @@ pub fn build(
     reth: Arc<mirror_anvil::Rpc>,
     anvil_t: Arc<mirror_anvil::Rpc>,
     watch: HashSet<alloy_primitives::Address>,
-) -> Result<Wiring> {
+) -> Wiring {
     let source: Arc<dyn Source> = Arc::new(crate::source::RethSource::new(reth));
     let reset: Arc<dyn ResetDetector> = Arc::new(CursorHash::new(state));
     // The mainnet watches whole accounts: the BAL enumerates every changed
     // slot, so no closures are needed (the scope's slot set stays empty).
     let scope = Scope::new(WatchSet::new(watch), Vec::new());
     let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_t));
-    Ok(Wiring {
+    Wiring {
         mirror: Arc::new(MainnetMirror {
             source,
             reset,
@@ -111,5 +110,5 @@ pub fn build(
             scope,
         }),
         target,
-    })
+    }
 }

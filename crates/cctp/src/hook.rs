@@ -36,11 +36,12 @@ sol! {
 #[derive(Deserialize)]
 struct Artifact {
     creation_bytecode: String,
-    /// Read by the provenance test below (deploy time only needs the creation
-    /// code; the runtime is the artifact's identity).
-    #[allow(dead_code)]
+    /// The provenance test's data (deploy time only needs the creation code;
+    /// the runtime is the artifact's identity). Test-only: the artifact JSON's
+    /// extra keys are ignored in production builds.
+    #[cfg(test)]
     runtime_bytecode: String,
-    #[allow(dead_code)]
+    #[cfg(test)]
     runtime_sha256: String,
 }
 

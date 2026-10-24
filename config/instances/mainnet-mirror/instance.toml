@@ -19,16 +19,16 @@ source_url = "${RETH_URL}"
 # in ~12 s (measured with `safe`: the safe tag jumps 32 blocks per epoch, so
 # the applier burst-mines every ~6.4 min and a devnet tx waits minutes - a
 # fork that does not confirm is not a fork). The rare shallow reorg is
-# handled by the continuity check + the M re-base path
+# handled by the continuity check + the re-base path
 # (metrics: mirror_reorgs_detected_total).
 follow = "latest"
-# Blocks between the follow head and M's fork base when the engine has to
-# re-base M: the safe head can move backward (CL forkchoice), and M's replay
-# is irreversible, so the mirror re-forks behind it instead of stalling.
+# Blocks between the follow head and T's fork base when the engine has to
+# re-base T: the safe head can move backward (CL forkchoice), and a replay is
+# irreversible, so the mirror re-forks behind it instead of stalling.
 # Constraints: well inside reth's 10,064-block state window; inside the
 # range of slots whose blobs the local Lighthouse supernode can reconstruct;
 # and *behind* the follow head (with the offset at 64 the pin sat exactly at
-# the follow head and a safe-head recede of a few blocks left M ahead of it,
+# the follow head and a safe-head recede of a few blocks left T ahead of it,
 # stalling the replay until the safe head caught up - measured). 128 keeps
 # ~64 blocks of margin. This is the single home of the offset: the anvil
 # pods read it from this file (an anchored sed over the mounted TOML — the
@@ -68,8 +68,9 @@ engine_url = "${ENGINE_API_URL}"
 jwt_path = "${JWT_PATH}"
 
 [services.engine.verifier]
-# State probes re-run against M after every repair: convergence_failures
-# staying at 0 is the "M is an exact mirror" health signal.
+# State probes re-run against T after every repair:
+# mirror_t_convergence_failures_total staying at 0 is the "T is an exact
+# mirror" health signal.
 probes = [
   { name = "usdc_total_supply", to = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", data = "0x18160ddd" },
   { name = "weth_total_supply", to = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", data = "0x18160ddd" },

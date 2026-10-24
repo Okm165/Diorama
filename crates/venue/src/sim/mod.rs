@@ -191,7 +191,8 @@ impl Sim {
         Ok(Self::from_state(state, Some(path)))
     }
 
-    /// An in-memory registry (tests).
+    /// An in-memory registry (tests only: no production path builds one).
+    #[cfg(test)]
     pub fn memory() -> Self {
         Self::from_state(SimState::default(), None)
     }
@@ -216,11 +217,6 @@ impl Sim {
         Ok(self.state.lock()?.accounts.get(&address).cloned())
     }
 
-    /// Every touched address (control-side diagnostics).
-    pub fn addresses(&self) -> Result<Vec<Address>> {
-        Ok(self.state.lock()?.accounts.keys().copied().collect())
-    }
-
     /// The sim clock (ms) at wall time `now_ms`.
     pub fn clock(&self, now_ms: u64) -> Result<u64> {
         let offset = self.state.lock()?.clock_offset_ms;
@@ -243,6 +239,8 @@ impl Sim {
             .max(self.chain_time_ms.load(Ordering::Relaxed)))
     }
 
+    /// The scenario epoch counter (tests: `reset` returns it to callers).
+    #[cfg(test)]
     pub fn epoch(&self) -> Result<u64> {
         Ok(self.state.lock()?.epoch)
     }

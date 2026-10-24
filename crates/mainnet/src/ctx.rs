@@ -68,7 +68,7 @@ impl Ctx {
             reth.clone(),
             anvil_t.clone(),
             cfg.watch_set(),
-        )?;
+        );
         let engine_api = build_engine_api(&engine)?;
         Ok(Self {
             l1,

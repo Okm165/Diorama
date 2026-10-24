@@ -6,8 +6,8 @@ Three layers, each runnable on demand:
 |---|---|---|---|
 | Unit | `make test-engine` (cargo test) | nothing | pure logic: BAL flattening, padding, COW granularity, journal, cursor/rebase rules, KZG proof repair, Engine API request encoding |
 | Self test | `make mainnet-selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (replay + verify + diff apply + sampled parity) |
-| Smoke | `make mainnet-smoke` | the deployed stack | service health + parity spot check on M's head vs reth |
-| Scenario | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **M and T** (the 12 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
+| Smoke | `make mainnet-smoke` | the deployed stack | service health + parity spot check on T's head vs reth |
+| Scenario | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **T** (the 12 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
 | Product sim | `make mainnet-product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
 | Follow (local) | `make venue-follow-local` | anvil + the venue engine binary (no cluster/Docker) | the venue's source follow natively: a local anvil stands in for the HL public API, V forks it, the watched account is mirrored 1:1, and a devnet write on V survives the next source window (COW) |
 | Selftest (local) | `make mainnet-selftest-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet applier natively: a local source anvil with a storage-writing contract, T forks it, the engine applies the blocks above the pin through the trace rung (anvil's block trace is empty, so the per-tx fallback runs) and the sampled storage parity passes |
@@ -129,7 +129,7 @@ re-converge with the next block's absolute writes; the probes are the alarm.
 | A17's observed blast radius | block 26,244,417 tx 124: a MEV bot's `BLOCKHASH`-gated entry (`revert("ph-")`, selector `0x4e00c7fc`) succeeds on mainnet (215,606 gas) and reverts on a fork (38,530); the flipped status cascades into WETH `totalSupply` and Uniswap V2/V3/V4 `Swap`/`Sync` log diffs — all re-converged by the next block's writes |
 | Anvil `--prune-history N` keeps N full state snapshots in memory | anvil-t 9.8 GB at 1000; ~2.5 GB at 32 |
 | Lighthouse needs >6 GiB during checkpoint sync | CrashLoopBackOff (OOMKilled ×5) at 6Gi |
-| Anvil restarts reset automine to *on* | with automine on, every raw tx mines its own block: engine blocks were empty (`m=0`), the height ran away (~14 blocks per parent block) and nonces fell hundreds behind. Fixed with `--no-mining` + re-asserting automine=false on rebases |
+| Anvil restarts reset automine to *on* | with automine on, every raw tx mines its own block: engine blocks were empty, the height ran away (~14 blocks per parent block) and nonces fell hundreds behind. Fixed with `--no-mining` + re-asserting automine=false on rebases |
 | A re-pin moves the chain's base past the shadow watermark | the scan walked the *source's* pre-pin blocks (anvil forwards those ranges upstream) and marked mainnet's real writes devnet-owned (measured: 311 real txs scanned as devnet writes right after a re-pin); every scan is anchored at the pin now (`mirror_devnet::scan::scan_anchor` — the ethereum loop, the applier's inline scan, the admin's hand-back pre-step and the venue driver all use it), and a cursor *at* the base is the legitimate rest state (`cursor_off_base` / `below_fork_base` are strict `<`) |
 | A regular beacon node cannot serve blobs after PeerDAS | bpo2 Lighthouse answers HTTP 400 `Insufficient data columns to reconstruct blobs: required 64, but only 4 were found` unless run with `--supernode`/`--semi-supernode`; the deployment runs `--semi-supernode` locally, so the CL can serve blob custody |
 | reth rejects non-spec `executionRequests` | `-32602 Invalid params: EmptyExecutionRequest` until elements were type-prefixed with empty types excluded (`engine/prague.md`) |
@@ -998,7 +998,7 @@ verify against). Verdicts:
 | Verdict | Axioms | Where |
 |---|---|---|
 | **SAME** (same modules) | A1, A2, A5, A8, A11, A13, A14, A15, A18, A19, A20 + the pins/epochs/journal/COW/automine decisions | `crates/anvil` + `crates/devnet`, exercised by `make venue-smoke` and the epoch drill (same-pin restore / new-pin epoch) |
-| **IMPOSSIBLE (permanent)** | A3, A4, A6, A7, A9, A12, A16, A17 + the M guarantee (per-block verification, probe parity, convergence repair) | no replay exists to verify; the fork keeps the source's exact state and hashes at the pin |
+| **IMPOSSIBLE (permanent)** | A3, A4, A6, A7, A9, A12, A16, A17 + the mainnet guarantee (per-block verification, probe parity, convergence repair) | no replay exists to verify; the fork keeps the source's exact state and hashes at the pin |
 | **REFRAMED** | L9 freshness → the pin (chain) + the live public API (venue data); the T guarantee → at-pin parity | `venue_fork_pin`, probes-at-pin (skip+count when the pin ≠ source head — measured: the source ignores the block parameter) |
 | **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (Phase 2), bridge round-trip exactness | `crates/venue`; the identity is re-checked at the serve boundary |
 
@@ -1089,13 +1089,13 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
    18-day data-availability window (verified: sidecars for slots ~1.2 days old
    are served). Placeholder blob proofs are recomputed locally and verified
    against the tx's versioned hash. If a slot is outside the CL's coverage, the
-   block is mined without its blob txs and recorded; **M's state still
-   converges** through the parent-BAL repair, and T is unaffected (the BAL
-   carries every state change).
-6. **M is memory-hungry**: every replayed tx is cached by anvil
-   (~15-25 MB/block). Long replays end in a k8s restart; the engine rebases and
-   re-converges. T (the devnet) is ~10× leaner because it never replays txs.
-7. **Only the last `--prune-history` blocks of M are traceable**
+   block is mined without its blob txs and recorded; **T's state still
+   converges** through the parent-BAL repair (the BAL carries every state
+   change).
+6. **No replay means no memory ceiling**: the removed M cached every replayed
+   tx (~15-25 MB/block) and long replays ended in a k8s restart; T applies the
+   parent's BAL and never replays, so it is ~10× leaner.
+7. **Only the last `--prune-history` blocks of a devnet chain are traceable**
    (`debug_traceTransaction`), because anvil keeps state snapshots in memory.
    reth serves `debug_traceBlockByNumber` inside its 10,064-block window for
    anything older.

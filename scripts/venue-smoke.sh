@@ -6,7 +6,7 @@
 # cluster-internal service names (the same way the engine does). The mainnet
 # counterpart is scripts/mainnet-smoke.sh; the checks differ because the venue's facts
 # differ: a fork pin instead of a follow head, the simulator's market-plane
-# freshness instead of reth/CL liveness, the bridge's counters instead of M/T
+# freshness instead of reth/CL liveness, the bridge's counters instead of reth/T
 # parity.
 set -euo pipefail
 

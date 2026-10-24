@@ -19,11 +19,11 @@ acceptance).
 | Watchlist + probes | the instance TOML | 88 watched accounts on the mainnet instance; the closure audit is `make mainnet-closure-check` |
 | Epochs | `POST /admin/epoch` (T) / the sim's `POST /control/epoch_new` (V) | a fresh pin clears the devnet's marks *and* values; a same-pin reset restores them |
 
-**M — the strict replay reference — is deliberately not exposed.** M is the
-mirror's internal "is the replay still true?" chain (never written, its parity
-asserted by the engine's probes); giving it a NodePort would put a writable
-RPC for it on the test host. T is the devnet the harness consumes; M stays
-inside the engine's loop.
+**The engine exposes one chain: T, the devnet.** There is no internal replay
+chain to expose: the applier reconstructs state from the parent's BAL and the
+engine checks it in place (sampled parity, the convergence probes,
+`verifier.full_sweep`). The removal's rationale is in ARCHITECTURE, "One
+Anvil, one source".
 
 ## 2. The venue side — venue-sim (info :8090, control :8091)
 

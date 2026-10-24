@@ -118,7 +118,8 @@ impl MarketFeed {
         })
     }
 
-    /// An in-memory feed (tests).
+    /// An in-memory feed (tests only: no production path builds one).
+    #[cfg(test)]
     pub fn memory(markets: Vec<String>) -> Self {
         Self {
             cache: RwLock::new(Cache::default()),

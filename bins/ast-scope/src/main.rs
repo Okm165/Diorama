@@ -33,6 +33,8 @@ const SHARED_BY: usize = 3;
 /// A type whose fields are touched from this many files has behavior living
 /// away from it (the dispersion reading).
 const DISPERSED_BY: usize = 3;
+/// Entry points: uncalled by construction (the runtime calls them).
+const ENTRY_POINTS: [&str; 1] = ["main"];
 
 /// One production item's shape.
 struct Item {
@@ -64,6 +66,10 @@ struct Item {
     /// Whether a `Ctx` parameter is used bare (passed to another call): then
     /// the function genuinely needs the whole context, not a field of it.
     ctx_passed_on: bool,
+    /// Every bare identifier the body references (path last segments): the
+    /// uncalled reading's input (a handler passed as a value is referenced,
+    /// not called).
+    refs: Vec<String>,
 }
 
 impl Item {
@@ -109,10 +115,14 @@ fn main() {
     files.sort();
     let mut items = Vec::new();
     let mut fields: FieldAccesses = HashMap::new();
+    let mut corpus = Vec::new();
     for file in &files {
         parse_into(file, &mut items, &mut fields);
+        if let Ok(text) = std::fs::read_to_string(file) {
+            corpus.push(text);
+        }
     }
-    report(&items, &fields);
+    report(&items, &fields, &corpus);
     std::process::exit(gate(&items));
 }
 
@@ -215,6 +225,7 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
                 ctx_fields: Vec::new(),
                 ctx_params: 0,
                 ctx_passed_on: false,
+                refs: Vec::new(),
             }),
             syn::Item::Enum(e) => out.push(Item {
                 file: file.into(),
@@ -230,6 +241,7 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
                 ctx_fields: Vec::new(),
                 ctx_params: 0,
                 ctx_passed_on: false,
+                refs: Vec::new(),
             }),
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
@@ -292,6 +304,7 @@ fn fn_item(
         ctx_fields: body.ctx_fields.into_iter().collect(),
         ctx_params: params.len(),
         ctx_passed_on: body.ctx_passed_on,
+        refs: body.refs,
     }
 }
 
@@ -346,6 +359,8 @@ struct Body {
     /// A ctx param appeared as a bare path: it is passed on (or used as a
     /// value), so the function needs the context itself.
     ctx_passed_on: bool,
+    /// Every bare identifier the body references.
+    refs: Vec<String>,
 }
 
 impl Body {
@@ -414,6 +429,9 @@ impl<'ast> Visit<'ast> for Body {
                 self.ctx_passed_on = true;
             }
         }
+        if let Some(seg) = n.path.segments.last() {
+            self.refs.push(seg.ident.to_string());
+        }
         visit::visit_expr_path(self, n);
     }
     fn visit_expr_binary(&mut self, n: &'ast syn::ExprBinary) {
@@ -436,7 +454,7 @@ fn is_literal(e: &syn::Expr) -> bool {
 
 /// The report: the largest production items per kind, then the reuse and
 /// dispersion analyses (the analysis half).
-fn report(items: &[Item], fields: &FieldAccesses) {
+fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String]) {
     let prod: Vec<&Item> = items.iter().filter(|i| !i.is_test()).collect();
     println!(
         "ast-scope: {} production items ({} functions, {} structs, {} enums)",
@@ -452,7 +470,79 @@ fn report(items: &[Item], fields: &FieldAccesses) {
     reuse(&prod);
     dispersion(fields);
     narrow_context(&prod);
+    uncalled(&prod, corpus);
     divisions(&prod);
+}
+
+/// The uncalled reading: production functions no other production function
+/// calls or references by name. Macro arguments (`vec![f(..)]`, `json!`,
+/// `format!`) are invisible to the expression visitor, so the AST verdict is
+/// confirmed textually: a name that occurs exactly once in the whole corpus
+/// (its own definition) is dead; one that occurs elsewhere is referenced
+/// through a macro or a value position. Entry points are named and skipped.
+fn uncalled(prod: &[&Item], corpus: &[String]) {
+    let mut referenced: HashSet<&str> = HashSet::new();
+    for item in prod {
+        for name in &item.refs {
+            referenced.insert(name.as_str());
+        }
+        for op in &item.ops {
+            match op.strip_prefix('.') {
+                Some(method) => {
+                    referenced.insert(method);
+                }
+                None => {
+                    referenced.insert(op.as_str());
+                }
+            }
+        }
+    }
+    let mut dead: Vec<&&Item> = Vec::new();
+    let mut macro_only: Vec<&&Item> = Vec::new();
+    for item in prod.iter().filter(|i| i.kind == "fn") {
+        let last = item.name.rsplit('.').next().unwrap_or(&item.name);
+        if ENTRY_POINTS.contains(&last) || referenced.contains(last) {
+            continue;
+        }
+        match count_word(corpus, last) {
+            0 | 1 => dead.push(item),
+            _ => macro_only.push(item),
+        }
+    }
+    println!("\ndead: production functions nothing references (AST and text agree):");
+    for item in dead.iter().take(REPORT_TOP * 2) {
+        println!("  {}:{}", item.file, item.name);
+    }
+    println!("\nmacro/value-only: referenced outside the AST (check each):");
+    for item in macro_only.iter().take(REPORT_TOP * 2) {
+        println!("  {}:{}", item.file, item.name);
+    }
+}
+
+/// How many times `word` occurs (identifier boundaries) in the corpus.
+fn count_word(corpus: &[String], word: &str) -> usize {
+    let mut count = 0;
+    for text in corpus {
+        for (at, _) in text.match_indices(word) {
+            let before_ok = text[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_ident_char(c));
+            let after = at + word.len();
+            let after_ok = text[after..]
+                .chars()
+                .next()
+                .is_none_or(|c| !is_ident_char(c));
+            if before_ok && after_ok {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// The narrow-scope reading: functions that take the whole `Ctx` but touch at

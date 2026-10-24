@@ -139,10 +139,6 @@ impl crate::shared::Shared<StateFile> {
     }
 
     /// The devnet's clock offset (seconds ahead of the parent, persisted).
-    pub fn time_offset_seconds(&self) -> Result<Option<u64>> {
-        Ok(self.lock()?.data.time_offset_seconds)
-    }
-
     pub fn set_time_offset_seconds(&self, seconds: u64) -> Result<()> {
         self.lock()?.data.time_offset_seconds = Some(seconds);
         Ok(())

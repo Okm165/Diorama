@@ -1,4 +1,5 @@
-//! The mirrors' configuration: one grammar, three layers (plan §19).
+//! `mirror-config` — the mirrors' configuration: one grammar, three layers
+//! (plan §19).
 //!
 //! `config/defaults.toml` (global, embedded at build time) <-
 //! `config/instances/<name>/instance.toml` (one deployment, mounted) <-

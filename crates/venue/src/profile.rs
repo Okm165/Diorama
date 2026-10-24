@@ -13,7 +13,7 @@
 //! | clock | native | align to the parent block + live offset |
 //! | mining | pool drain | one T block per applied parent block |
 //! | probes | live parity against the composed BAL | per applied block |
-//! | prepend | 1 | 3 (a steady stream must not starve the parent) |
+//! | prepend | none — mining drains the pool every pass | 3 rounds (a steady stream must not starve the parent) |
 //!
 //! Both mirrors therefore do the same things — follow their parent chain,
 //! compose its changes as a BAL, COW it against the devnet's own writes, and
@@ -21,7 +21,7 @@
 //! implementations diverge. The composer itself is generic
 //! (`mirror_devnet::bal::compose`).
 use crate::reset::PinCanary;
-use crate::venue_source::{public_capabilities, VenueSource};
+use crate::source::{public_capabilities, VenueSource};
 use mirror_config::{ClosuresSection, EngineSection};
 use mirror_devnet::closure::{FixedSlots, KeyClosure, TopicMappedSlots};
 use mirror_devnet::cow::{Scope, WatchSet};
@@ -56,7 +56,7 @@ impl VenueMirror {
             clock: ClockPolicy::Native,
             mine: MinePolicy::PoolDrain,
             probes: ProbeSchedule::LiveParity,
-            prepend_rounds: 1,
+            prepend_rounds: None,
             gap: Some(engine.loops.max_gap_blocks),
         }
     }

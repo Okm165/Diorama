@@ -30,7 +30,6 @@ pub struct ApiState {
     /// The bridge's counters (rendered with the sim's metrics), when the
     /// bridge is configured.
     pub bridge: Option<Arc<crate::bridge::metrics::BridgeMetrics>>,
-    pub started_ms: u64,
 }
 
 impl ApiState {
@@ -53,7 +52,6 @@ impl ApiState {
                 .timeout(std::time::Duration::from_secs(45))
                 .build()?,
             bridge,
-            started_ms: crate::now_ms(),
         })
     }
 

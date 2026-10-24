@@ -389,7 +389,9 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
 /// own writes — the COW filter reads the marks, and the parent's diff must
 /// not overwrite the devnet's state.
 async fn prepend_and_mark(ctx: &Ctx, n: u64) -> Result<()> {
-    prepend_devnet_txs(&ctx.anvil_t, n, ctx.mirror.policies().prepend_rounds).await?;
+    if let Some(rounds) = ctx.mirror.policies().prepend_rounds {
+        prepend_devnet_txs(&ctx.anvil_t, n, rounds).await?;
+    }
     mark_own_writes(ctx).await
 }
 

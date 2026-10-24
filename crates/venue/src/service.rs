@@ -8,7 +8,7 @@
 //! something moved).
 use crate::Result;
 use crate::{driver, http};
-use crate::Ctx;
+use crate::ctx::Ctx;
 use mirror_config::boot;
 use std::sync::Arc;
 use std::time::Duration;

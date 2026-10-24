@@ -1,4 +1,4 @@
-//! `mirror-hyperliquid` — the Venue Mirror's engine: the fork driver over
+//! `mirror-venue` — the Venue Mirror's engine: the fork driver over
 //! anvil V.
 //!
 //! V is a fork-mode anvil of HyperEVM (chain id 999): it starts as the source's
@@ -29,30 +29,30 @@
 //! self-advancing), never a block label; `age_ms` = the served book's
 //! staleness age (wall ms since the last live context update — the freshness
 //! gate's figure, not a clock).
-pub mod api;
-pub mod bridge;
-pub mod ctx;
-pub mod driver;
-pub mod error;
-pub mod feed;
-pub mod follow;
-pub mod http;
-pub mod metrics;
-pub mod profile;
-pub mod reset;
-pub mod service;
-pub mod sim;
-pub mod venue_source;
-pub mod wire;
+mod api;
+mod bridge;
+mod ctx;
+mod driver;
+mod error;
+mod feed;
+mod follow;
+mod http;
+mod metrics;
+mod profile;
+mod reset;
+mod service;
+mod sim;
+mod source;
+mod wire;
 
-pub use ctx::Ctx;
 pub use error::{Error, Result};
 pub use service::{main_entry, sim_entry};
 
 /// Wall-clock milliseconds (the wire's `time` fields and the sim clock's
 /// base) — the shared definition lives in `mirror-config`'s boot module; this
-/// re-export keeps `crate::now_ms()` the one spelling at the call sites.
-pub use mirror_config::boot::now_ms;
+/// crate-root binding keeps `crate::now_ms()` the one spelling at the call
+/// sites. Not re-exported: the entry points are this crate's public surface.
+use mirror_config::boot::now_ms;
 
 #[cfg(test)]
 mod design_assertions {

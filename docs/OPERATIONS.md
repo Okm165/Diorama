@@ -93,8 +93,8 @@ make images            # re-import the pinned images into k3s (after a bump)
 make mainnet-backfill          # CL backfill progress + lighthouse datadir sizes
 make logs              # tail everything
 make logs-engine       # one component (also: logs-reth, logs-lighthouse, logs-anvil-t)
-make mainnet-smoke             # endpoint checks + parity spot check on M's head
-make mainnet-scenario          # self-containment + M/T parity + devnet workflow
+make mainnet-smoke             # endpoint checks + parity spot check on T's head vs reth
+make mainnet-scenario          # self-containment + T-vs-reth parity + devnet workflow
 make pin-show          # current fork pins
 ```
 
@@ -468,9 +468,9 @@ the same name to re-attach it, or delete the PV explicitly to free the space.
 | Engine: "cursor not found on chain" | anvil restarted with a stale dump | expected; engine rebases and re-converges |
 | Engine: "gap too large" | engine was down > `max_gap_blocks` | re-pin (fast) or raise `max_gap_blocks` and restart the engine |
 | The applier is silent after a re-pin | the re-pin raced an in-flight apply (a slow source read) | the engine aborts that apply (`ResetDuringApply`) and reconciles on the next pass — the cursor sits below the base, so the epoch rule fires; a restart re-resolves the pins if it persists |
-| M mines empty blocks (`tx_count: reth=N m=0`) | automine is on (anvil restart reset it) | check `anvil_getAutomine` on both anvils; both deployments must run `--no-mining` (the engine also re-asserts it on rebases) |
+| T mines empty blocks (`tx_count: reth=N t=0`) | automine is on (anvil restart reset it) | check `anvil_getAutomine` on T; the deployment runs `--no-mining` (the engine also re-asserts it on rebases) |
 | `recomputed blob KZG proof` in engine logs | normal on Fulu: the beacon API's blob-level proof is a placeholder, the engine recomputes it | none (one line per blob) |
-| `no valid blob sidecar from any source` | the CL cannot serve the sidecars yet (they arrive seconds after the block; the replay margin hides it) | M holds at n-1 and retries - it never mines an empty or partial block. If it persists, the CL is lagging the head: check `mirror_lag_blocks` |
+| `no valid blob sidecar from any source` | the CL cannot serve the sidecars yet (they arrive seconds after the block; the replay margin hides it) | T holds at n-1 and retries - it never mines an empty or partial block. If it persists, the CL is lagging the head: check `mirror_lag_blocks` |
 | Senders' nonces hundreds behind | automine incident (chain height ran away) | re-pin for a clean chain |
 
 | `mirror_t_convergence_failures_total` climbing | T drifted from mainnet on a devnet-unowned probe (missing BAL entry, watchlist gap) | check `/status.shadowed`; extend the watchlist if the account should be tracked; clear any `/admin/time` offset |

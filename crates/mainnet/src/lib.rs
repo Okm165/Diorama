@@ -1,5 +1,6 @@
-//! mainnet-engine: keep T's watch-list state fresh from EIP-7928 BALs and
-//! expose a small admin surface. One Anvil (T), one source (reth).
+//! `mirror-mainnet` — the Mainnet Mirror's engine: keep T's watch-list
+//! state fresh from EIP-7928 BALs and expose a small admin surface. One
+//! Anvil (T), one source (reth).
 //!
 //! Clocks: `block` = the **L1 parent height** (the applied mainnet block);
 //! `head` = the compared chain's head (T); `block_txs` = a count, not a clock;
@@ -11,10 +12,10 @@ mod driver;
 mod drift;
 mod engine_api;
 mod error;
-pub mod feed_bridge;
+mod feed_bridge;
 mod http;
 mod metrics;
-pub mod profile;
+mod profile;
 mod selftest;
 mod service;
 mod source;

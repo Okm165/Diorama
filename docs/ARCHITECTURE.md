@@ -270,8 +270,8 @@ BAL diffs, your writes live there and are never overwritten. The BAL is the
 authoritative post-state of every changed entry (reth rejects a block whose
 BAL mismatches execution), so applying it *is* state reconstruction — the
 spec's own "executionless state updates" use case (EIP-7928). A separate
-replay chain (M) bought execution evidence at the cost of a second chain, a
-blob pipeline and a convergence repair; reth itself serves traces and state
+replay chain (the removed M) bought execution evidence at the cost of a second
+chain, a blob pipeline and a convergence repair; reth itself serves traces and state
 within its 10,064-block window, and the apply path is checked by sampled
 parity, the probes, and `verifier.full_sweep`.
 
@@ -322,7 +322,7 @@ Two constraints bound the pin depth:
 
 Depth is a trade-off, not a requirement: 128 keeps the mirror live with a fast,
 exact bootstrap (~26 min of replayed mainnet history); raising it replays more
-history but costs replay time and M memory. When the pin ages out of reth's
+history but costs replay time and disk. When the pin ages out of reth's
 state window, run `make mainnet-repin`: fresh pins, the engine rebases automatically and
 restores the devnet's writes.
 
@@ -512,7 +512,7 @@ Pruning removes everything older than the DA boundary - the mirror only ever
 needs the replay window (10,064 blocks ≈ 1.4 days, bounded by reth's state
 window; the pin itself is only 128 blocks), so this is safe. It leaves ~50 GB of
 columns plus the blocks. The alternative trade-off is dropping `--semi-supernode`:
-~650 GB less disk, but the mirror loses blob-tx fidelity on M (blob blocks are
+~650 GB less disk, but the mirror loses blob-tx fidelity (blob blocks are
 mined without their blob txs and recorded; state stays exact via the BAL).
 
 **Follow head during a catch-up.** The engine follows reth's `safe`/`latest` block, which
@@ -523,7 +523,7 @@ pointers stay at the snapshot's values - the mirror's follow head is frozen
 until the catch-up completes, then jumps to live. The top-up's own
 `forkchoiceUpdated` passes zero hashes for safe/finalized (spec: zero = no
 update), so it never clobbers them. After a fresh bootstrap, re-pin once the
-catch-up has finished: M/T then start from a live, exact pin instead of
+catch-up has finished: T then starts from a live, exact pin instead of
 replaying the (partially degraded) catch-up window.
 
 ## Pinned versions (tag + digest, no floating references)

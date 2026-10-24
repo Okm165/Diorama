@@ -4,7 +4,7 @@
 #
 # Phases
 #   1. self-containment   reth has no peers, the top-up gap is 0, blobs are local
-#   2. live parity        heads agree; the 12 state probes match reth on M *and* T
+#   2. live parity        heads agree; the 12 state probes match reth on T
 #   3. devnet workflow    fund, send, shadow, rewind, snapshot/revert on T
 #   4. integrity counters no divergences / convergence failures / blob failures
 #
@@ -14,8 +14,8 @@ set -uo pipefail
 source "$(dirname "$0")/lib-mainnet.sh"
 
 # The probes mirror config/instances/mainnet-mirror/instance.toml:probes (all watched
-# accounts, so T must match reth exactly; none is blockhash-dependent, so M must
-# too - the engine's convergence repair is what makes that true).
+# accounts, so T must match reth exactly; none is blockhash-dependent either
+# (the engine's convergence repair is what makes that true).
 probe() { # probe <rpc-url> <block-hex> <to> <data>
   rpc "$1" eth_call "[{\"to\":\"$3\",\"data\":\"$4\"},\"$2\"]" | jq -r '.result // "ERR"'
 }

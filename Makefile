@@ -244,7 +244,7 @@ engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fit
 mainnet-feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
 	./scripts/mainnet-feed-bridge.sh $(ARGS)
 
-mainnet-scenario: ## Scenario test: self-containment, live parity (M+T), devnet workflow
+mainnet-scenario: ## Scenario test: self-containment, live parity (T vs reth), devnet workflow
 	NS=mainnet-mirror ./scripts/mainnet-scenario.sh
 
 mainnet-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction

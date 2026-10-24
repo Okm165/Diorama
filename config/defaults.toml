@@ -12,7 +12,7 @@
 [chains.l1]
 # Replay this many blocks behind the follow head. Blob sidecars for the
 # newest block are not in the beacon yet (measured: >15 s of retries on
-# ~every blob block), so the applier would hold M and retry on every blob
+# ~every blob block), so the applier would hold T and retry on every blob
 # block. A 2-block margin costs ~24 s of lag and removes the stall.
 follow_margin_blocks = 2
 
