@@ -57,7 +57,16 @@ macro_rules! mirror_handlers {
             ::axum::extract::State(ctx): ::axum::extract::State<::std::sync::Arc<$ctx>>,
             ::axum::Json(req): ::axum::Json<$crate::deal::DealRequest>,
         ) -> ::std::result::Result<::axum::Json<$crate::deal::DealOutcome>, $error> {
-            Ok(::axum::Json(ctx.admin().deal(&req).await?))
+            let outcome = ctx.admin().deal(&req).await?;
+            // The event model's one fact per state change: the faucet's write
+            // is visible to `/events` consumers. The sim service has no bus
+            // (it is plane-less by design), so the engine's door is the
+            // fact's home.
+            ctx.plane.facts.publish($crate::facts::Fact::DealApplied {
+                chain: ctx.mirror.label(),
+                address: req.to,
+            });
+            Ok(::axum::Json(outcome))
         }
 
         /// `/admin/rewind` — undo the engine's journaled writes over the last

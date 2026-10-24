@@ -761,6 +761,9 @@ was missing), `spec-citations` (every code symbol `docs/SPINE.md` names in
 backticks exists in the workspace — the doc's cross-reference tables claim
 behavior by symbol, so a rename that leaves the doc behind fails; the specs'
 own vocabulary, quoted from the EIPs, is allow-listed with its source), and
+`facts-published` (every `Fact` variant the event vocabulary declares is
+constructed by a real `publish(...)` — a variant nobody publishes is an event
+that never happens; found `DealApplied`, declared and never published),
 `spine-purity` (the spine's *code* — `crates/devnet` with line comments
 stripped — names no mirror: the doc comments cite them as examples, but a
 name in code would mean a new mirror kind needs edits inside the spine,

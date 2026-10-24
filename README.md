@@ -175,7 +175,7 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             and the structural fitness scripts (closure-matrix, no-orphans,
                             docs-metrics, trust-audit, clock-labels, no-panics, config-check,
                             docker-members, k8s-wiring, spec-citations, spine-purity,
-                            render-diagrams)
+                            facts-published, render-diagrams)
 docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, OPERATIONS.md, TESTING.md, adr/
 ```
 

@@ -126,7 +126,7 @@ the notification contract, not a log).
 | `ProbesRun` | an on-demand probe run finished | ok/failed/skipped (per-block counters are metrics, not facts) |
 | `ShadowScanned` | the COW scan walked blocks | blocks/empty/shadowed |
 | `TopUpDelivered` | the top-up loop fed reth payloads (mainnet-only) | count |
-| `DealApplied` | the faucet wrote a key | chain, address |
+| `DealApplied` | an engine's `/admin/deal` wrote a key (the sim service is plane-less by design, so the engine's door is the fact's home) | chain, address |
 
 The sim's own events are the served state (orders, fills, liquidations,
 funding) — the venue's *external* contract, because that is what its parent
