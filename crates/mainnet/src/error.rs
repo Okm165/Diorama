@@ -3,17 +3,15 @@
 //! Variants classify by **failure class**, never by call site; each carries the
 //! structured fields an operator needs (endpoint, block, path). The
 //! sub-boundaries keep their own vocabularies with their modules —
-//! [`EngineApiError`] (reth authrpc), [`BeaconError`] / [`BlobError`] (beacon
-//! API + KZG), `mirror_devnet::Error` (the devnet plane, incl. the admin
-//! refusals) — and compose here.
+//! [`EngineApiError`] (reth authrpc), [`BeaconError`] (the beacon API) — and
+//! compose here.
 //!
 //! Policy carriers: the devnet's `NoCursor` / `InvalidRewind` are admin
 //! *request refusals* — `http.rs` maps them to 4xx while every other variant is
 //! a server-side fault (5xx, or 503 for a poisoned registry).
-use alloy_primitives::B256;
 use std::path::PathBuf;
 
-pub use crate::blob::{BeaconError, BlobError};
+pub use crate::beacon::BeaconError;
 pub use crate::engine_api::EngineApiError;
 
 #[derive(Debug, thiserror::Error)]
@@ -32,9 +30,6 @@ pub enum Error {
 
     #[error(transparent)]
     Beacon(#[from] BeaconError),
-
-    #[error(transparent)]
-    Blob(#[from] BlobError),
 
     /// Engine-local file IO (drift log, pin file).
     #[error("{what}: {path}")]
@@ -75,7 +70,7 @@ pub enum Error {
     #[error("{chain} has no fork pin - start it with --fork-url and --fork-block-number")]
     NoForkPin { chain: &'static str },
 
-    /// A phase of the selftest (replay/apply of one block) failed; wraps the
+    /// A phase of the selftest (apply of one block) failed; wraps the
     /// inner fault so the phase and the block are both named.
     #[error("{step} block {block}: {source}")]
     Step {
@@ -83,51 +78,6 @@ pub enum Error {
         block: u64,
         #[source]
         source: Box<Error>,
-    },
-
-    // ---- replay (M) ------------------------------------------------------
-    #[error("M head {m_head} does not precede block {n}")]
-    ReplayOrder { m_head: u64, n: u64 },
-
-    #[error("block {block}: block env failed: {source}")]
-    BlockEnv {
-        block: u64,
-        #[source]
-        source: Box<mirror_anvil::Error>,
-    },
-
-    /// A reth pre-balance read for the withdrawal credits failed. The field
-    /// is named `payload`: alloy's `ErrorPayload` implements `Display`, not
-    /// `Error`, so thiserror's automatic source detection must not see it.
-    #[error("block {block}: reth pre-balance: {payload}")]
-    PreBalance {
-        block: u64,
-        payload: mirror_anvil::RpcError,
-    },
-
-    #[error("block {block}: raw tx {index} send failed")]
-    TxSend {
-        block: u64,
-        index: usize,
-        #[source]
-        source: mirror_anvil::Error,
-    },
-
-    #[error("block {block}: {skipped} blob tx(s) have no sidecar; not mining a partial block")]
-    BlobsUnavailable { block: u64, skipped: usize },
-
-    #[error("block {block}: replay aborted: {rejected} raw tx(s) rejected")]
-    ReplayAborted { block: u64, rejected: usize },
-
-    #[error("block {block}: replay aborted after retry")]
-    ReplayRetryExhausted { block: u64 },
-
-    #[error("block {block}: blob tx {hash} could not be re-encoded")]
-    BlobReencode {
-        block: u64,
-        hash: B256,
-        #[source]
-        source: BlobError,
     },
 
     // ---- applier (T) -----------------------------------------------------
@@ -193,15 +143,15 @@ mod tests {
 
     #[test]
     fn the_step_wrapper_keeps_the_chain_walkable() {
-        let inner = Error::ReplayOrder { m_head: 7, n: 7 };
+        let inner = Error::NoForkPin { chain: "anvil-t" };
         let wrapped = Error::Step {
-            step: "replay",
+            step: "apply",
             block: 7,
             source: Box::new(inner),
         };
-        assert!(wrapped.to_string().contains("replay block 7"), "{wrapped}");
+        assert!(wrapped.to_string().contains("apply block 7"), "{wrapped}");
         let source = std::error::Error::source(&wrapped).expect("source is preserved");
-        assert!(source.to_string().contains("M head 7"), "{source}");
+        assert!(source.to_string().contains("fork pin"), "{source}");
     }
 }
 

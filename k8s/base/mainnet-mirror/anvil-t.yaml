@@ -1,6 +1,7 @@
 # anvil-t - the devnet chain (T).
 #
-# Same fork source and pin mechanics as anvil-m, but this is where your dapp
+# The devnet chain: forks the same source and resolves its pin with the same
+# mechanics, but this is where your dapp
 # writes. The engine keeps watch-list state fresh here by applying EIP-7928
 # block access lists (never by replaying mainnet txs), and tracks your writes
 # so parent diffs never overwrite them (copy-on-write, per slot; account

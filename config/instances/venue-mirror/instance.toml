@@ -39,7 +39,7 @@ fixture_addresses = [
 ]
 
 [services.engine.anvil]
-v_url = "${ANVIL_V_URL}"
+target_url = "${ANVIL_V_URL}"
 
 # The journal's before-value ring (the rewind window) lives beside the
 # engine's state; the cadence and write chunk are the shared `loops` defaults.

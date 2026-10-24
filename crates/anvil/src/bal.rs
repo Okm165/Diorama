@@ -1,18 +1,14 @@
-//! The EIP-7928 BAL flattening. The measured padding rules and the prestateTracer
-//! fallback live in `mirror-anvil` (anvil-facing formats); the symbols the
-//! frozen engine still reaches through `crate::bal::*` are re-exported here
-//! (R1 extraction — zero call-site churn; the write encoder now lives in
-//! `mirror_anvil::apply_writes`).
+//! EIP-7928 BAL flattening: the spec's `AccountChanges` into the write set.
 //!
 //! Measured rule (do not rediscover): "last change per key = final value" is
 //! guaranteed by the spec ordering; `AccountChanges::storage_post_states()`
-//! implements exactly that.
+//! implements exactly that. The trace fallback's flattener lives beside this
+//! one in [`crate::trace`] — both speak [`crate::Write`], the one currency.
 use alloy_eips::eip7928::BlockAccessList;
-
-pub use mirror_anvil::{flatten_trace_block, Write};
+use crate::Write;
 
 /// Flatten a BAL into post-state writes (last change per key).
-pub(crate) fn flatten_bal(bal: &BlockAccessList) -> Vec<Write> {
+pub fn flatten_bal(bal: &BlockAccessList) -> Vec<Write> {
     let mut out = Vec::new();
     for acct in bal.iter() {
         if !acct.has_changes() {

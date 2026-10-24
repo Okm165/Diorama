@@ -30,33 +30,19 @@ max_gap_blocks = 300
 # Max JSON-RPC batch size: source reads (a public endpoint may refuse more;
 # measured: drpc's free plan allows 3) and cheatcode writes to the local anvils.
 chunk_size = 500
-replay_into_m = true
-apply_into_t = true
-# Converge M from the parent BAL before each replay: a fork cannot
-# reproduce blockhash-dependent values (A17; e.g. Seaport 1.6 counters use
-# blockhash(n-1)), and without convergence one divergence cascades into
-# invalid txs and permanently wrong state. With it, M stays a faithful
-# mirror while still executing every tx (traces + verification).
-repair_m = true
-# continue (default): record every divergence in drift.jsonl + metrics and
-#   keep replaying. M's state is converged from the parent BAL before each
-#   block, so divergences never cascade. Measured: a fork cannot reproduce
-#   blockhash-dependent values (A17), so freezing would stall the mirror.
-# freeze_m: stop replaying into M on divergence (T keeps syncing).
-# halt_all: stop both loops. Use these for conformance runs.
-on_divergence = "continue"
 
 [services.engine.verifier]
 enabled = true
-# Each block is verified against reth: tx count/order, blob gas, receipts
-# (count/status/gas), logs (bloom + full set), withdrawals, and state
-# probes. Divergences are classified structural (tx count/order, blob gas,
-# withdrawals) vs behavioral (receipt statuses/gas, logs, values - the
-# blockhash-gated class; real execution problems surface via the
-# convergence probes) in drift.jsonl and metrics; both are recorded.
-# After the repair the probes are re-run against M: convergence_failures
-# staying at 0 is the "M is an exact mirror" health signal.
+# Each applied block is verified against the source: the BAL carries the
+# source's authoritative post-state (reth rejects a block whose BAL mismatches
+# execution), and the applier re-checks its own application — sampled keys
+# every block, every key when `full_sweep` is set (conformance runs).
+# `drift_sample_keys` is the steady-state sample size; full_sweep = true
+# re-reads every applied key from the source after the apply.
 drift_sample_keys = 8
+# Conformance-grade: re-read every applied key, not just the sample. Off by
+# default (expensive); on for audits and re-pin validation.
+full_sweep = false
 
 [services.engine.source_sync]
 enabled = true
@@ -67,8 +53,10 @@ max_per_pass = 256
 [services.engine.journal]
 blocks = 1024
 
-[services.engine.blobs]
-enabled = true
+[services.engine.beacon]
+# Beacon-API base URLs, tried in order (local Lighthouse first). The top-up
+# loop is the only reader (EIP-8379); the instance supplies the URL.
+urls = []
 
 [services.engine.http]
 addr = "0.0.0.0"

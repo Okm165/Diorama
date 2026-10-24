@@ -34,7 +34,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (RETH_URL,
-          # ANVIL_*_URL, BEACON_URL, ENGINE_API_URL, JWT_PATH, STATE_DIR).
+          # ANVIL_T_URL, BEACON_URL, ENGINE_API_URL, JWT_PATH, STATE_DIR).
           envFrom:
             - configMapRef: { name: mirror-config }
           ports:

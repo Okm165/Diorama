@@ -103,7 +103,7 @@ impl AdminSurface<'_> {
         if !self.journal_writes {
             return Ok(None);
         }
-        let cursor = self.plane.state.lock()?.data.t.as_ref().map(|c| c.block);
+        let cursor = self.plane.state.lock()?.data.devnet.as_ref().map(|c| c.block);
         let block = match cursor {
             Some(block) => block,
             None => self.target.block_number().await?,
@@ -227,7 +227,7 @@ impl AdminSurface<'_> {
             .state
             .lock()?
             .data
-            .t
+            .devnet
             .as_ref()
             .map(|c| c.block)
             .unwrap_or(0);
@@ -318,7 +318,7 @@ impl AdminSurface<'_> {
                 keep: self.plane.journal.keep(),
             });
         }
-        let Some(cursor) = self.plane.state.lock()?.data.t.clone() else {
+        let Some(cursor) = self.plane.state.lock()?.data.devnet.clone() else {
             return Err(Error::NoCursor);
         };
         if blocks == 0 || blocks > cursor.block {
@@ -371,14 +371,14 @@ impl AdminSurface<'_> {
                     .state
                     .lock()?
                     .data
-                    .t
+                    .devnet
                     .as_ref()
                     .map(|c| c.first_block)
                     .unwrap_or(target);
-                self.plane.state.lock()?.data.t = Some(crate::state::cursor_from(&b, first));
+                self.plane.state.lock()?.data.devnet = Some(crate::state::cursor_from(&b, first));
             }
             None => {
-                self.plane.state.lock()?.data.t = None;
+                self.plane.state.lock()?.data.devnet = None;
             }
         }
         self.plane.state.lock()?.save()
@@ -433,14 +433,11 @@ impl AdminSurface<'_> {
         self.plane.metrics.set(&self.plane.metrics.halted, 1);
     }
 
-    /// `POST /admin/resume` — clear the halt *and* the divergence freeze.
-    /// The freeze is the operator's decision point (`on_divergence`), so
-    /// resuming is the operator's acknowledgement that it was investigated:
-    /// the two flags are cleared together, as they always have been.
+    /// `POST /admin/resume` — clear the `/admin/pause` halt. The halt is the
+    /// operator's gate (both engines share it), so resuming is the operator's
+    /// acknowledgement that it was investigated.
     pub fn resume(&self) {
-        self.plane.frozen.store(false, Ordering::SeqCst);
         self.plane.halted.store(false, Ordering::SeqCst);
-        self.plane.metrics.set(&self.plane.metrics.frozen, 0);
         self.plane.metrics.set(&self.plane.metrics.halted, 0);
     }
 }

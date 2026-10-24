@@ -27,8 +27,8 @@ pub use instance::{
     ChainKind, ChainL1, ChainVenue, Chains, FollowHead, Instance, InstanceMeta, Profile, WatchEntry,
 };
 pub use sections::{
-    BlobsSection, CctpSection, EngineAnvil, EngineReth, EngineSection, FeedBridgeSection,
-    FeedSection, HttpSection, JournalSection, LoopsSection, OnDivergence, Probe, RelayerMode,
+    BeaconSection, CctpSection, EngineAnvil, EngineReth, EngineSection, FeedBridgeSection,
+    FeedSection, HttpSection, JournalSection, LoopsSection, Probe, RelayerMode,
     Services, SourceSyncSection, VenueSimSection, VerifierSection,
 };
 
@@ -211,7 +211,6 @@ mod tests {
     fn wiring() -> Vec<(String, String)> {
         vars(&[
             ("RETH_URL", "http://reth:8545"),
-            ("ANVIL_M_URL", "http://anvil-m:8545"),
             ("ANVIL_T_URL", "http://anvil-t:8545"),
             ("BEACON_URL", "http://lighthouse:5052"),
             ("ENGINE_API_URL", "http://reth:8551"),
@@ -239,8 +238,7 @@ fork_offset = 128
 state_dir = "/state"
 
 [services.engine.anvil]
-m_url = "http://anvil-m:8545"
-t_url = "http://anvil-t:8545"
+target_url = "http://anvil-t:8545"
 
 [services.engine.source_sync]
 engine_url = "http://reth:8551"
@@ -249,8 +247,8 @@ jwt_path = "/secrets/jwt.hex"
 [services.engine.journal]
 dir = "/state/journal"
 
-[services.engine.blobs]
-beacon_urls = ["http://lighthouse:5052"]
+[services.engine.beacon]
+urls = ["http://lighthouse:5052"]
 
 [services.engine.verifier]
 probes = []
@@ -304,7 +302,7 @@ ws_url = "wss://api.hyperliquid.xyz/ws"
 state_dir = "/state"
 
 [services.engine.anvil]
-v_url = "http://anvil-v:8545"
+target_url = "http://anvil-v:8545"
 
 [services.engine.journal]
 dir = "/state/journal"
@@ -369,11 +367,11 @@ port = 8080
     #[test]
     fn arrays_replace_never_concatenate() {
         let src = minimal_instance().replace(
-            r#"beacon_urls = ["http://lighthouse:5052"]"#,
-            r#"beacon_urls = ["http://a:1", "http://b:2"]"#,
+            r#"urls = ["http://lighthouse:5052"]"#,
+            r#"urls = ["http://a:1", "http://b:2"]"#,
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
-        assert_eq!(engine(&inst).blobs.beacon_urls.len(), 2);
+        assert_eq!(engine(&inst).beacon.urls.len(), 2);
     }
 
     #[test]
@@ -464,9 +462,9 @@ port = 8096
         assert!(format!("{err}").contains("jwt_path"), "{err}");
         let engine = inst.services.engine.as_mut().unwrap();
         engine.source_sync.jwt_path = Some("/secrets/jwt.hex".into());
-        engine.anvil.m_url = Some("anvil-m:8545".into());
+        engine.anvil.target_url = Some("not-a-url".into());
         let err = inst.check().unwrap_err();
-        assert!(format!("{err}").contains("m_url"), "{err}");
+        assert!(format!("{err}").contains("target_url"), "{err}");
     }
 
     #[test]
@@ -487,8 +485,8 @@ port = 8096
         assert_eq!(
             names,
             vec![
-                "ANVIL_M_URL", "ANVIL_T_URL", "BEACON_URL", "ENGINE_API_URL", "JWT_PATH",
-                "RETH_URL", "STATE_DIR"
+                "ANVIL_T_URL", "BEACON_URL", "ENGINE_API_URL", "JWT_PATH", "RETH_URL",
+                "STATE_DIR"
             ],
             "the wiring the instance references"
         );
@@ -512,7 +510,7 @@ port = 8096
         inst.check().unwrap();
         let (chain, engine) = inst.take_venue().unwrap();
         assert_eq!(chain.source_url, "http://hl-rpc:8545");
-        assert_eq!(engine.anvil.v_url.as_deref(), Some("http://anvil-v:8545"));
+        assert_eq!(engine.anvil.target_url.as_deref(), Some("http://anvil-v:8545"));
         // And the sections are gone after the take (moved, not copied).
         assert!(inst.take_venue().is_err());
     }
@@ -568,7 +566,7 @@ port = 8096
         // The engine's take still works on an instance that also carries the sim.
         let (mut inst2, _) = load_str(&src, &[]).unwrap();
         let (_, engine2) = inst2.take_venue().unwrap();
-        assert_eq!(engine2.anvil.v_url.as_deref(), Some("http://anvil-v:8545"));
+        assert_eq!(engine2.anvil.target_url.as_deref(), Some("http://anvil-v:8545"));
     }
 
     #[test]
@@ -671,7 +669,7 @@ port = 8096
         is_normal::<VerifierSection>();
         is_normal::<SourceSyncSection>();
         is_normal::<JournalSection>();
-        is_normal::<BlobsSection>();
+        is_normal::<BeaconSection>();
         is_normal::<HttpSection>();
         is_normal::<ConfigError>();
     }

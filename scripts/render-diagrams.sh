@@ -36,6 +36,6 @@ PY
 render README.md             "reth + Lighthouse"     docs/img/readme-overview.png
 render docs/HOW-IT-WORKS.md  "Lighthouse"            docs/img/how-topology.png
 render docs/HOW-IT-WORKS.md  "parent diff for key K" docs/img/how-cow.png
-render docs/ARCHITECTURE.md  "anvil M / T"           docs/img/arch-data-flow.png
+render docs/ARCHITECTURE.md  "anvil T"               docs/img/arch-data-flow.png
 render docs/ARCHITECTURE.md  "no prepend"            docs/img/arch-prepend.png
 echo "5 diagrams regenerated from the docs"

@@ -2,6 +2,7 @@
 //! batching, measured error recognition), the measured padding rules, and the
 //! prestateTracer fallback. No chain semantics live here.
 mod backoff;
+mod bal;
 mod client;
 mod error;
 mod pad;
@@ -9,6 +10,7 @@ mod trace;
 mod writes;
 
 pub use backoff::Backoff;
+pub use bal::*;
 pub use client::*;
 pub use error::*;
 pub use pad::*;

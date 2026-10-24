@@ -5,10 +5,9 @@
 | Component | Image / build | Role | Measured footprint |
 |---|---|---|---|
 | `reth` | `ghcr.io/paradigmxyz/reth:v2.8.0` | Source of truth: head state, blocks, receipts, EIP-7928 BALs, `debug` traces | ~300 GB disk, ~2.6 GB RAM idle / ~5.5 GB while following and serving |
-| `lighthouse` | `docker.io/sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator), serves payloads + blob sidecars to the engine | ~160 GB disk and growing to ~200 GB (18-day column custody), ~5-7.5 GB RAM while backfilling (16Gi limit) |
-| `anvil-m` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Mirror chain (M): replays every parent tx, then re-converges from the BAL | ~15-25 MB per replayed block; OOMs into a fresh pin every ~2.5-4 h by design (24Gi limit) |
-| `anvil-t` | same | Devnet chain (T): watch-list state + your writes, never replays parent txs | ~2.5 GB after thousands of applied blocks (16Gi limit) |
-| `engine` | `localhost/mainnet-engine:v1` (this repo) | Replay loop, verifier, BAL diff applier, convergence repair, journal, admin API | ~100 MB RAM |
+| `lighthouse` | `docker.io/sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator); the engine's top-up loop reads its beacon REST surface | ~160 GB disk and growing to ~200 GB (18-day column custody), ~5-7.5 GB RAM while backfilling (16Gi limit) |
+| `anvil-t` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Devnet chain (T): watch-list state kept fresh by applying EIP-7928 BALs; your writes live here | ~2.5 GB after thousands of applied blocks (16Gi limit) |
+| `engine` | `localhost/mainnet-engine:v1` (this repo) | The applier: BAL → trace composition, COW filter, journal, epoch rule, probes, admin API | ~100 MB RAM |
 
 The repo is one cargo workspace (`crates/*` + `bins/*`): `crates/anvil` (the
 JSON-RPC client and the measured cheatcode conventions), `crates/config` (the
@@ -25,57 +24,53 @@ Mirror's components and data flow are in "The Venue Mirror" below.
 
 ## Data flow
 
-The per-block exchange between the three processes, top to bottom (the
-numbered list below then walks M's side of it step by step):
+The per-block exchange between the processes, top to bottom (the numbered
+list below then walks it step by step):
 
 ```
-   reth            ENGINE              anvil M / T
+   reth            ENGINE              anvil T
    |               |                   |
    | block(N):     |                   |
-   | txs, env,     |                   |
-   | withdrawals   |                   |
-   +-------------->| replay loop       |
-   | receipts,     |                   |
-   | logs, traces  |                   |
-   +-------------->| verify: counts,   |
-   |               | gas, bloom, logs  |
-   |               | send raws -> mine |
-   |               +------------------>| M
-   | BAL(N) for    |                   |
-   | the watchlist |                   |
-   +-------------->| diff applier      |
-   |               | pad, write <=500, |
-   |               | mine(1)           |
+   | header,       |                   |
+   | BAL(N),       |                   |
+   | receipts      |                   |
+   +-------------->| compose: BAL(N)   |
+   |               | (trace fallback)  |
+   |               | filter: watch +   |
+   |               | COW (skip owned)  |
+   |               | journal before-   |
+   |               | values            |
+   |               | pad, write <=500  |
+   |               | align, mine(1)    |
    |               +------------------>| T
+   |               | scan own blocks,  |
    |               | sampled parity,   |
-   |               | T probes          |
-   +-------------->|<------------------+
-   |               | journal + drift   |
+   |               | probes            |
+   |               | cursor + drift    |
 ```
 ![per-block data flow](img/arch-data-flow.png)
 
-The exchange above is the mainnet profile's. The venue profile has no parent
-stream: V is static between re-pins, and the engine's job is the devnet's own
-blocks plus the fork lifecycle ("The Venue Mirror" below), with the
-simulator's market and account planes beside it ("The venue simulator").
+The venue profile has no parent stream: V is static between re-pins, and the
+engine's job is the devnet's own blocks plus the fork lifecycle ("The Venue
+Mirror" below), with the simulator's market and account planes beside it
+("The venue simulator").
 
-Per replayed block on M the engine does, in order:
+Per applied block on T the engine does, in order:
 
-0. **Convergence repair** – apply the parent BAL (`N-1`) to M as cheatcode writes,
-   then prove it with the configured probes: `eth_call` on M's repaired (unmined)
-   state vs reth at `N-1`. A mismatch here is a real repair failure - not the
-   expected blockhash-level noise - so it is the counter to alarm on
-   (`mirror_m_convergence_failures_total`, must stay 0).
-1. Block env: timestamp, coinbase, prevRandao, gas limit, base fee (all five fields).
-2. Withdrawals credited idempotently (`setBalance(pre + amount)`).
-3. Raw txs built from the parent block (blob sidecars from the beacon API).
-4. Txs sent one request at a time (pool order is load-bearing), then `anvil_mine(1)`.
-5. Verification: tx count/order, blob gas, receipts (count/status/gas), logsBloom,
-   full log set, withdrawals. (State probes deliberately do *not* re-run here:
-   post-execution they only re-detect the blockhash-level divergence the log and
-   receipt checks already record - measured on a `BLOCKHASH`-gated MEV bot.)
-6. Divergence entry (`drift.jsonl`, only when something diverged) + cursor +
-   metrics. Clean blocks are counted in the metrics, never written to disk.
+0. **Prepend** (bounded, ≤3 rounds): mine the devnet's pending txs in their own
+   block first (see below).
+1. **Compose**: `eth_getBlockAccessList(N)` from reth, flattened to the write
+   set (the prestateTracer diff is the fallback when a block has no BAL).
+2. **Filter**: the watch list, minus devnet-owned keys (copy-on-write); whole
+   account fields count as one unit.
+3. **Before-values**: read at T's head and journaled (`/admin/rewind`).
+4. **Apply**: batched cheatcode writes (≤500 per batch), the context aligned to
+   the parent (timestamp + offset, clamped monotonic), then `anvil_mine(1)`.
+5. **Scan**: T's own blocks into the shadow registry, so the next filter sees
+   the devnet's writes.
+6. **Parity + cursor**: sampled storage keys vs reth at N (every applied key
+   with `verifier.full_sweep`), the state probes, `drift.jsonl` on anomalies,
+   and the cursor (keyed to the parent height).
 
 ### Devnet transactions: the prepend rule
 
@@ -179,24 +174,18 @@ immediately, hand the stale slots back to mainnet sync with
 at the cursor (used for the WETH/USD aggregator: hot-vars slot + the
 transmission mapping slots, `keccak(roundId, 17)`).
 
-### Fork pins (M refreshes, T persists)
+### Fork pins (T persists, refreshed on every start)
 
-M's fork pin is **re-resolved on every start** (`reth head - FORK_OFFSET`,
-64 by default): a full-replay fork is recycled by k8s when it reaches its
-memory limit (~2.5-4 h at the measured ~20 MB/replayed block), and a fresh pin
-keeps the post-restart re-replay at 128 blocks (~1-2 min) instead of the whole
-epoch - a stale pin makes the replay OOM before it can catch up (measured).
-T's pin is **re-resolved on every container start** as well (init container +
-container wrapper, like M), which bounds the post-restart re-replay to
-`FORK_OFFSET` (~128 blocks, minutes) instead of the pin age (~1.5 h measured).
-A fresh pin is a **new epoch**: the base moved, and the devnet's recorded
-writes are derivations of the old base (plan 2.2/6.3) - restoring them would
-mix eras (measured: a +30d time-travel write came back as a future
+T's fork pin is **re-resolved on every container start** (init container +
+container wrapper), which bounds the post-restart re-replay to `FORK_OFFSET`
+(~128 blocks, minutes) instead of the pin age (~1.5 h measured). A fresh pin
+is a **new epoch**: the base moved, and the devnet's recorded writes are
+derivations of the old base (plan 2.2/6.3) - restoring them would mix eras
+(measured: a +30d time-travel write came back as a future
 `lastUpdateTimestamp` and every Aave supply panicked with an underflow). So
 the engine clears the shadow registry (marks *and* values) and the product
 re-creates its positions from its own journal (plan 3.6); a reset at the
-*same* pin restores the recorded writes instead. M's own re-base never touches
-T: T's epoch is its own.
+*same* pin restores the recorded writes instead.
 Watch `mirror_t_fork_age_blocks` (reth serves reads below T's fork block, and
 its state window is 10,064 blocks) and `mirror_t_resets_total`.
 
@@ -226,67 +215,42 @@ need >6 GiB (it OOM-looped at 6Gi) - the deployment requests 2Gi and limits 16Gi
 
 **Anvil `--prune-history`** is a memory knob, not a disk knob: it keeps up to N
 full *state snapshots* in memory for rollback/tracing. Measured with 1000:
-anvil-t reached 9.8 GB in minutes and anvil-m OOM'd at 12Gi. Now: T keeps 32
-(its state is small and the devnet uses `evm_snapshot`/`evm_revert`), M keeps 2
-(it replays every parent tx, so snapshots are huge and M is recycled by design).
-Tracing a historical block on M is therefore limited to the last ~2 replayed
-blocks; T's own journal (`/admin/rewind`) is engine-side and unaffected.
+anvil-t reached 9.8 GB in minutes. Now: T keeps 32 (its state is small and the
+devnet uses `evm_snapshot`/`evm_revert`). T's own journal (`/admin/rewind`) is
+engine-side and unaffected.
 
-**State dumps are disabled** on both chains: `--state`/`--state-interval` wrote
-per-block historical state (a T dump grew to 13 GB and never completed; leaked
-tmp dirs filled a PVC). Restarts are handled by design instead: a fresh pin
-bounds M's re-replay to `FORK_OFFSET` (~1-2 min) and T's devnet writes are
-re-applied from the shadow registry.
+**State dumps are disabled**: `--state`/`--state-interval` wrote per-block
+historical state (a T dump grew to 13 GB and never completed; leaked tmp dirs
+filled a PVC). Restarts are handled by design instead: a fresh pin bounds the
+re-replay to `FORK_OFFSET` (~1-2 min) and T's devnet writes are re-applied from
+the shadow registry.
 
 ## Design decisions
 
-**Why two chains.** M replays every parent tx, so its receipts/logs/traces exist
-and its execution can be *verified*. T is the devnet: watch-list state is kept
-fresh by BAL diffs, your writes live there and are never overwritten. Without M
-a divergence would be ambiguous ("engine bug or my scenario?").
+**One Anvil, one source.** T is the devnet: watch-list state is kept fresh by
+BAL diffs, your writes live there and are never overwritten. The BAL is the
+authoritative post-state of every changed entry (reth rejects a block whose
+BAL mismatches execution), so applying it *is* state reconstruction — the
+spec's own "executionless state updates" use case (EIP-7928). A separate
+replay chain (M) bought execution evidence at the cost of a second chain, a
+blob pipeline and a convergence repair; reth itself serves traces and state
+within its 10,064-block window, and the apply path is checked by sampled
+parity, the probes, and `verifier.full_sweep`.
 
-**M is executed *and* converged.** A fork cannot reproduce `blockhash(...)`
-(A17): Seaport 1.6's `incrementCounter` uses `blockhash(number-1)` as its
-quasi-random interval, so its counter (and everything derived from it, e.g.
-order validity) diverges on any fork. Because the BAL is the authoritative
-post-state of every changed entry, the engine applies the parent BAL to M
-*before* each replay. Execution still runs (traces + verification stay real),
-but state stays exact: `mirror_m_convergence_failures_total` stays 0 in steady
-state. Without this, one Seaport counter divergence cascaded into invalid txs
-(queued senders), missing txs, and permanently wrong state within ~10 blocks.
+**Blob sidecars leave the engine's path.** Blob data is not executed — blob
+txs execute by versioned hash — so the applier never needs sidecars; the CL
+(Lighthouse) keeps custody and serves them. The engine's beacon reads are the
+top-up loop's head/block reads only.
 
-**Blob-tx replay works without any public API.** The local Lighthouse runs
-`--semi-supernode`: it custodies half the data columns (enough to reconstruct
-any blob) for the 18-day data-availability window, so the engine's only blob
-source is `http://lighthouse:5052`. Two measured quirks are handled:
-
-- For Fulu blocks the beacon API's `kzg_proof` field is a *placeholder*
-  (`0xc0…`, the point at infinity): the stored container only has cell proofs.
-  The engine recomputes the blob proof locally with c-KZG and re-verifies the
-  triple. This is a real check, not a bypass - a recomputed proof verifies if
-  and only if the blob is the one the commitment commits to, and the tx's
-  versioned hash anchors the commitment. Covered by a KZG round-trip unit test.
-- A block whose blob txs still cannot be built (source gap) is mined with
-  whatever the pool holds after three attempts and recorded; the parent-BAL
-  repair keeps M's state exact and T is unaffected.
-
-**Divergence policy: record, don't freeze** (`loops.on_divergence`, default
-`continue`). Every divergence is classified and written to `drift.jsonl` +
-metrics; `freeze_m`/`halt_all` are for conformance runs. Measured reasons
-divergences are inherent:
-- blockhash-dependent values (Seaport counters, any `blockhash(n-1)` reader);
-- near-full blocks: mainnet block 26,233,028 used 59,975,282 / 60,000,000 gas;
-  a small gas delta (type-4 refund accounting is the only *known* systematic
-  delta) pushes the last txs out of M's block;
-- cascades of the above *within* a block (statuses, log values). Root cause
-  measured on block 26,244,417 tx 124: a MEV bot's `BLOCKHASH`-gated entry
-  (`revert("ph-")`) succeeds on mainnet and reverts on M; the flipped status
-  cascades into WETH supply and Uniswap pool logs, all repaired from the parent
-  BAL before the next block.
-
-Structural checks (tx count/order, blob gas, receipt count, withdrawals) are
-what an engine bug would break; they are reported separately
-(`mirror_divergences_total`) so `continue` stays honest.
+**Divergences are recorded, not fatal.** A fork cannot reproduce
+`blockhash(...)` values (A17: Seaport 1.6's `incrementCounter` uses
+`blockhash(number-1)`), so the applier's sampled parity can legitimately
+mismatch on such blocks; every anomaly is written to `drift.jsonl` +
+metrics, and the next parent block's absolute writes re-converge the state.
+The alarm that matters is `mirror_t_convergence_failures_total`: probes
+compare T against reth at the applied parent block, devnet-owned targets
+skipped. With `verifier.full_sweep` enabled, every applied key is re-read
+from the source after the apply (`mirror_full_sweep_mismatches_total`).
 
 **Follow `latest`** (`reth.follow: latest|safe|finalized`). This is a devnet
 requirement, not a preference: the applier mines one T block per applied parent
@@ -295,23 +259,21 @@ updates the safe block once per epoch, the applier burst-mines 32 blocks every
 ~6.4 min, and a devnet tx sent between bursts waits minutes for a receipt
 (measured: 180 s+ timeouts, then "transaction not found" after a pool reset).
 With `latest` the parent stream advances every ~12 s and a devnet tx confirms in
-~12 s (measured). A small replay margin (`reth.follow_margin_blocks`, default 2)
-sits between the head and the applier: the beacon cannot serve blob sidecars for
-the newest block yet, and without the margin M held and retried on ~every blob
-block (measured: 20 retry errors / 20 min, ~4 blocks/min instead of 5). The cost
-is exposure to shallow reorgs; those are detected
-(`mirror_reorgs_detected_total`) and M is re-based behind the new head by the
-same self-heal path that handles a receding follow head. The mirror follows
-*reth's* head: see "Source liveness" below.
+~12 s (measured). A small margin (`reth.follow_margin_blocks`, default 2) sits
+between the head and the applier, so a shallow reorg invalidates at most the
+blocks still behind the head. Reorgs are detected
+(`mirror_reorgs_detected_total`) and the applier continues on the new branch
+(absolute writes self-heal). The mirror follows *reth's* head: see "Source
+liveness" below.
 
 **Pins and epochs.** Anvil forks at an absolute pin (`reth head - FORK_OFFSET`,
 128 blocks). The pin is re-resolved on every *container* start (the init
 container for a fresh pod, the wrapper on a container restart) and persisted in
-`/state/pin` as the fallback for when reth is unreachable, so an OOM restart
-re-forks at the live head instead of replaying an aging fork until the next
-OOM. Reads above the pin come from the replayed chain (M) or from applied diffs
-(T); reads below it come from reth's state window (which serves deep history:
-10,064 blocks of state, 20,000 blocks of receipts/bodies).
+`/state/pin` as the fallback for when reth is unreachable, so a restart
+re-forks at the live head instead of replaying an aging fork. Reads above the
+pin come from applied diffs (T); reads below it come from reth's state window
+(which serves deep history: 10,064 blocks of state, 20,000 blocks of
+receipts/bodies).
 
 Two constraints bound the pin depth:
 1. reth's state window (10,064 blocks ≈ 1.4 days) - reth must be able to serve
@@ -357,19 +319,12 @@ before-value (`/state/journal/<block>.jsonl`, ring 1024 blocks).
 `POST /admin/rewind` restores those values newest-first and moves the cursor
 back, so the applier re-applies from there.
 
-**Automine is disabled on both anvils** (`--no-mining`) and the engine
+**Automine is disabled on the anvil** (`--no-mining`) and the engine
 re-asserts `anvil_setAutomine(false)` on every rebase. This is load-bearing:
-anvil restarts (re-pin, OOM) reset automine to its default (on), and with
+an anvil restart (re-pin, OOM) resets automine to its default (on), and with
 automine on every raw tx mines its own block, so the engine's `mine(1)` produces
 empty blocks and the chain height runs away (measured: ~14 blocks mined per
-parent block, every block `m=0`, senders' nonces hundreds behind).
-
-**A block that cannot be replayed is skipped, not fatal.** After three failed
-attempts the engine mines whatever the pool holds and records the divergence;
-the parent-BAL repair still converges M's state, so one block's missing txs
-never stalls the mirror. Blob sidecars are fetched from the local Lighthouse
-only, validated with the bundled mainnet trusted setup, and placeholder proofs
-are recomputed (see above).
+parent block, senders' nonces hundreds behind).
 
 **A fresh pin starts a new epoch.** A re-fork at a *changed* fork pin (an OOM
 restart or `make mainnet-repin`) moves T's base, so the devnet's recorded writes -
@@ -390,12 +345,12 @@ leave a half-parsed file for the next boot to die on.
 
 **T's heights are its own.** T mines one block per applied parent block, plus
 one per journal rewind, so its height is not a mainnet block number - the
-engine tracks progress by `cursor_t` (last applied parent block) and only M,
-which replays 1:1, is compared against the follow head by height. Two rules
-follow from this and both were bugs once: a hash-validated cursor always wins
-(resuming at `cursor + 1`, even behind the chain head - jumping to `head + 1`
-silently skipped parent blocks and stalled T), and after a reset T resumes from
-the fork pin (`pin + 1`), because its state *is* the pin's state.
+engine tracks progress by `cursor_t` (last applied parent block) and compares
+it against the follow head (with a small margin). Two rules follow from this
+and both were bugs once: a hash-validated cursor always wins (resuming at
+`cursor + 1`, even behind the chain head - jumping to `head + 1` silently
+skipped parent blocks and stalled T), and after a reset T resumes from the
+fork pin (`pin + 1`), because its state *is* the pin's state.
 
 **The layout is symmetric by construction.** Every layer names the two mirrors
 the same way: `crates/mainnet` + `crates/venue` (the mirror projects —
@@ -417,44 +372,35 @@ deployments are both `engine` in their own namespace.
 **Measured rules baked into the code** (each cost a real run to discover):
 padding all hex to 32 bytes / even length (anvil rejects odd-length hex with
 `-32602`); JSON-RPC batches chunked by bytes as well as items (bodies ≥2 MB are
-rejected with `-32600`); raw txs sent sequentially (batch items execute
-concurrently and scramble pool order); withdrawals credited via `setBalance`
-(idempotent - `addBalance` double-credits on retries); type-4 gas delta bound
-`[-12,500 × #auths, 0]`; blob sidecars from the beacon API using
-`parentBeaconBlockRoot` of EL block N+1; beacon-API quantities are **decimal
-strings** while the Engine API wants hex (parsing a decimal slot as hex silently
-un-bounds the top-up walk); withdrawal credits read their pre-balance from reth
-so a retried block can never double-credit (reading M at N-1 does exactly that,
-because anvil's "N-1" is the live state when the block is not mined yet).
+rejected with `-32600`); beacon-API quantities are **decimal strings** while
+the Engine API wants hex (parsing a decimal slot as hex silently un-bounds the
+top-up walk); the applier mines exactly one block per applied parent block and
+the prepend mines the devnet's pending txs in their own block first (the
+gas-estimate rule above).
 
 **Contracts are as narrow as the body uses.** Every internal seam takes the
 narrowest type that carries the fact it needs: leaf helpers take the section
 they read (`&Rpc` for a chain client, `&Drift`, `&Plane`, `&MainnetMetrics`,
 `&EngineSection`, `&BeaconClient`, `&AtomicBool`/`&AtomicU64` for one flag),
 never the whole `Ctx`. A compiler-assisted audit (per-function field-use
-analysis over both engines' crates, 2026-10-23) found and narrowed eighteen
-leaves: `prepend_devnet_txs` / `fetch_diffs` / `read_before_values` /
-`send_once` + `NonceTracker::{prepare, before_send, restore}` / `read_canary` /
-`write_canary` / `assert_venue_chain` (`&Rpc`), `log_drift_if_anomalous`
-(`&Drift`), `deliver_slot` / `cl_head_el_block` (`&BeaconClient`),
-`gap_within_limit` (`&EngineSection`), `account_m_rebase_skip`
-(`&MainnetMetrics`), `clear_reapply` (`&Plane`), `hold_replay_failure`
-(`&AtomicBool`), `warn_skipped_blob` (`&AtomicU64`). What stays `&Ctx` is a
-*composition point*, and the audit names why: `apply_block` / `apply_entry` /
-`advance_cursor` / `late_completion` / `finalize` / `journal_and_scan` /
-`log_and_drift` thread several sections plus the cursor accessors,
-`probes_now` drives `probes_at_pin`, and the blob-form accessors bridge the
-preference cell and the persisted state. The payoff is mechanical: a leaf
-whose body grows a second dependency cannot compile until its signature says
-so, so contracts cannot silently widen. The audit's false positives are the
-framework's: axum handlers must take `State<Arc<ApiState>>` (the extractor
-dictates the type), and router builders pass the context through to the app.
-The same audit's struct pass narrowed fields rather than signatures: both
-engines' `Ctx` fields, `Plane.shadow_path` and `Chain.usdc` are `pub(crate)`
-(the composition points stay public as types; their fields are crate-internal),
-while `Watcher`/`Relayer` keep `pub` fields because the bridge binary
-constructs them — the compiler named exactly those two when the pass first
-tried them.
+analysis over both engines' crates, 2026-10-23) found and narrowed the leaves:
+`prepend_devnet_txs` / `read_before_values` / `read_canary` / `write_canary` /
+`assert_venue_chain` (`&Rpc`), `log_drift_if_anomalous` (`&Drift`),
+`deliver_slot` / `cl_head_el_block` (`&BeaconClient`), `gap_within_limit`
+(`&EngineSection`), `clear_reapply` (`&Plane`). What stays `&Ctx` is a
+*composition point*: `apply_block` / `apply_entry` / `advance_cursor` /
+`late_completion` / `finalize` / `journal_and_scan` thread several sections
+plus the cursor accessors, and `probes_now` drives the probe runner. The
+payoff is mechanical: a leaf whose body grows a second dependency cannot
+compile until its signature says so, so contracts cannot silently widen. The
+audit's false positives are the framework's: axum handlers must take
+`State<Arc<ApiState>>` (the extractor dictates the type), and router builders
+pass the context through to the app. The same audit's struct pass narrowed
+fields rather than signatures: both engines' `Ctx` fields, `Plane.shadow_path`
+and `Chain.usdc` are `pub(crate)` (the composition points stay public as types;
+their fields are crate-internal), while `Watcher`/`Relayer` keep `pub` fields
+because the bridge binary constructs them — the compiler named exactly those
+two when the pass first tried them.
 
 ## Source liveness: self-contained by construction
 
@@ -607,17 +553,15 @@ instance file (CI + boot gate).
 [chains.venue] { kind = "hyperliquid", source_url = "${HL_RPC_URL}",
               api_url, ws_url }                    # the venue profile's chain
 [services.engine] { state_dir = "${STATE_DIR}", fixture_addresses[] }
-[services.engine.anvil] { m_url = "${ANVIL_M_URL}", t_url = "${ANVIL_T_URL}" }
-              # ... or v_url = "${ANVIL_V_URL}" (the venue profile)
+[services.engine.anvil] { target_url = "${ANVIL_T_URL}" }
+              # (the venue profile's instance points it at "${ANVIL_V_URL}")
 [services.engine.reth] { request_timeout_secs }
 [services.engine.source_sync] { enabled, interval_ms, max_per_pass,
               engine_url = "${ENGINE_API_URL}", jwt_path = "${JWT_PATH}" }
-[services.engine.loops] { poll_interval_ms, max_gap_blocks, chunk_size,
-              replay_into_m, apply_into_t, repair_m,
-              on_divergence = "continue"|"freeze_m"|"halt_all" }
-[services.engine.verifier] { enabled, drift_sample_keys, probes[] }
+[services.engine.loops] { poll_interval_ms, max_gap_blocks, chunk_size }
+[services.engine.verifier] { enabled, drift_sample_keys, full_sweep, probes[] }
 [services.engine.journal] { dir = "${STATE_DIR}/journal", blocks }
-[services.engine.blobs] { enabled, beacon_urls = ["${BEACON_URL}"] }
+[services.engine.beacon] { urls = ["${BEACON_URL}"] }
 [services.engine.http] { addr, port }
 [services.venue_sim] { state_dir, markets, poll_interval_ms, engine_admin_url,
               anvil_url }                # + .info/.control listener sections
@@ -642,10 +586,11 @@ price one round stale on T. Resolve the aggregator with `aggregator()`
 (selector `0x245a7bfc`) and watch it too; re-check after a feed upgrade, when
 the address changes.
 
-**Probes** (per-block `eth_call` parity reth vs M, and reth vs M *after* the
-repair): USDC/WETH totalSupply, Chainlink WETH/USD `latestRoundData`, UniV3
-`slot0`, aEthUSDC totalSupply, Aave `getReserveNormalizedIncome(USDC)` (the
-time-dependence proof – it only matches when the block context is aligned).
+**Probes** (per-block `eth_call` parity reth vs T; devnet-owned targets are
+skipped and counted): USDC/WETH totalSupply, Chainlink WETH/USD
+`latestRoundData`, UniV3 `slot0`, aEthUSDC totalSupply, Aave
+`getReserveNormalizedIncome(USDC)` (the time-dependence proof – it only
+matches when the block context is aligned).
 
 ## The admin surface (plan §4.4, mapped)
 
@@ -660,11 +605,12 @@ Anvil cannot do. This is the mapping, so nothing is ambiguous:
 | Storage / code | anvil: `anvil_setStorageAt`, `anvil_setCode`; engine: `POST /admin/shadow` hands keys back to mainnet sync (immediate: reth's values at the cursor are pushed to T; the engine scans T up to its head first so a just-mined devnet write cannot re-mark the key) | |
 | Snapshots | anvil: `evm_snapshot`/`evm_revert`; engine: `POST /admin/rewind` = the plan's §4.4 sync-revert control (rolls T back per parent block through the journal) | |
 | Time travel | engine: `POST /admin/time` (persistent clock offset, survives parent blocks) *and* anvil's `evm_increaseTime` (which the next alignment would overwrite - use the offset) | the capability a margin product needs; a static fork's `evm_increaseTime` alone is not enough on a live mirror |
-| Mirror sync control | engine: `POST /admin/pause` = the plan's §4.4 stop-sync, `POST /admin/resume` = start-sync, `GET /status` = sync status (`frozen`/`halted` = active, `lag`, `cursor`/`cursor_t` = latest synced block, `follow_head` = parent latest block, `time_offset_seconds` = the `/admin/time` offset) | the plan's sync-next has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
+| Mirror sync control | engine: `POST /admin/pause` = the plan's §4.4 stop-sync, `POST /admin/resume` = start-sync, `GET /status` = sync status (`halted` = active, `lag`, `cursor`/`cursor_t` = latest synced block, `follow_head` = parent latest block, `time_offset_seconds` = the `/admin/time` offset) | the plan's sync-next has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
 
 **Scope vs the plan's fork engine (M1-M5).** This repo implements the plan's
-*minimal viable mirror* path - stock Anvil + replay + verifier + BAL diff
-applier + journal + the admin surface above - which the plan explicitly allows
+*minimal viable mirror* path - stock Anvil + BAL diff
+applier + verifier + journal + the admin surface above - which the plan
+explicitly allows
 to ship first ("the diff applier alone already works on stock Anvil", §4.3).
 The custom revm engine (`MirrorDb`, Executor, chain/journal, RPC, native modes)
 is **not** built: its purpose is to drop Anvil's per-write cost and get the
@@ -681,10 +627,10 @@ the engine's equivalent today is the HTTP surface above plus the cheatcodes.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /healthz` | 200 unless halted on divergence (an operator *state* signal) |
+| `GET /healthz` | 200 unless `/admin/pause` halted the loops (an operator *state* signal) |
 | `GET /livez` | always 200 — the orchestrator's liveness signal; the k8s probes use this, not `/healthz` (a paused engine must not leave the Service or restart) |
-| `GET /status` | heads, cursors, lag, frozen, shadow counts, blob form |
-| `GET /metrics` | Prometheus text: heads, lag, durations, divergences (structural + behavioral), repair writes, convergence probes, writes, pin age, the feed bridge's counters |
+| `GET /status` | heads, cursors, lag, halted, shadow counts |
+| `GET /metrics` | Prometheus text: heads, lag, durations, convergence probes, writes, pin age, the feed bridge's counters |
 | `POST /admin/rewind` | `{"blocks": N}` – journal-based rewind of T |
 | `POST /admin/resume` | clear a divergence freeze (and a `/admin/pause` halt) |
 | `POST /admin/pause` | hold both loops (reads, writes and cheatcodes keep working) |
@@ -692,7 +638,7 @@ the engine's equivalent today is the HTTP surface above plus the cheatcodes.
 | `POST /admin/shadow` | register devnet writes that bypassed the block pipeline; with `"clear": true` hand the given slots/account fields *back* to mainnet sync and re-sync their values from reth at T's cursor (a key with a stale value and no shadow is the most confusing state there is) |
 | `POST /admin/deal` | the unlimited ERC-20 faucet: slot discovery via `eth_call` + a `stateDiff` override, silent write, marked devnet-owned |
 | `POST /admin/epoch` | one-call revert-to-blank: re-pin T to the source's latest block; the engine detects the reset on its next pass and runs the epoch rule (new base = clear, same base = restore) |
-| `POST /admin/probes` | run the configured probes now (M at the cursor vs reth) and report the run `{ok, failed, skipped}`; the per-block convergence counters stay the loop's. The venue engine's route is the same verb over its at-pin probe set (`make engine-symmetry` checks both) |
+| `POST /admin/probes` | run the configured probes now (T at the cursor vs reth) and report the run `{ok, failed, skipped}`; the per-block convergence counters stay the loop's. The venue engine's route is the same verb over its at-pin probe set (`make engine-symmetry` checks both) |
 | `GET /admin/feed` | the feed bridge's feeds: paused, confirmed/pending answers, decimals |
 | `POST /admin/feed/pause\|resume\|override` | pause a feed (the scenario owns its value), hand it back (the next pass re-establishes the source's value), or publish a scripted answer and pause |
 
@@ -838,12 +784,12 @@ the base truth lives in the registry) lands with the venue's journaling slice.
 | `GET /healthz` | 200 unless halted |
 | `GET /livez` | always 200 — the orchestrator's liveness signal (the k8s probes use it, not `/healthz`) |
 | `GET /status` | `head`, `cursor`, `fork_pin`, `epoch_pin`, `halted`, `shadowed_slots`, `shadowed_accounts`, `shadowed` (the list), `probes`, `source` |
-| `GET /metrics` | the `venue_*` set (below) + the shared admin gauges (`mirror_shadowed_slots`, `mirror_halted`, `mirror_frozen`) |
+| `GET /metrics` | the `venue_*` set (below) + the shared admin gauges (`mirror_shadowed_slots`, `mirror_halted`) |
 | `POST /admin/deal`, `POST /admin/shadow` | the shared devnet surface, verbatim |
 | `POST /admin/rewind` | the engine's own-write journal (the deal faucet's silent storage writes, recorded under the scan cursor); the shared rewind undoes the last N scanned blocks newest-first |
 | `POST /admin/pause` / `POST /admin/resume` | hold / release the driver |
 | `POST /admin/epoch` | re-pin V to the source's latest block (`anvil_reset` with an explicit forking config - measured: no-params drops the fork); the driver's canary notices on its next pass and runs the epoch rule, so the route never replicates that logic |
-| `POST /admin/probes` | run the at-pin probe set now and report the run (the ethereum engine's route is the same verb over its M-vs-reth set) |
+| `POST /admin/probes` | run the at-pin probe set now and report the run (the ethereum engine's route is the same verb over its T-vs-reth set) |
 
 **The deliberate asymmetries** (the rest of the surface is shared, verb for
 verb — `make engine-symmetry` is the fitness function): `/admin/time` is the
@@ -868,7 +814,7 @@ one block per applied parent block, V's driver mines a non-empty pool
 (`config/instances/{mainnet-mirror,venue-mirror}/instance.toml`, layered over
 `config/defaults.toml`). `[services.engine]` is the same key for both profiles -
 what differs is the profile's shape: `[services.engine.anvil]` carries
-`m_url` + `t_url` for ethereum or `v_url` for the venue (the check requires
+`target_url` for both profiles (the check requires
 exactly the profile's set), and the venue's driver reads the shared
 `loops`/`journal`/`verifier` sub-sections, so the cadence, write chunk and
 journal ring live there once for both profiles. `profile = "mainnet"` requires

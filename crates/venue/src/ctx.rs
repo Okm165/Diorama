@@ -88,11 +88,11 @@ impl Ctx {
     }
 
     pub fn cursor_v(&self) -> Result<Option<ChainCursor>> {
-        Ok(self.plane.state.lock()?.data.t.clone())
+        Ok(self.plane.state.lock()?.data.devnet.clone())
     }
 
     pub fn set_cursor_v(&self, cursor: ChainCursor) -> Result<()> {
-        self.plane.state.lock()?.data.t = Some(cursor);
+        self.plane.state.lock()?.data.devnet = Some(cursor);
         Ok(())
     }
 }

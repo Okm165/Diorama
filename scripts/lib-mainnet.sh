@@ -20,7 +20,6 @@ NS=${NS:-mainnet-mirror}
 K="kubectl -n $NS"
 ENGINE="$K exec deploy/engine --"
 ANVIL_T="$K exec deploy/anvil-t --"
-ANVIL_M="$K exec deploy/anvil-m --"
 pass=0; fail=0
 ok()  { echo "  ✔ $*"; pass=$((pass+1)); }
 bad() { echo "  ✘ $*"; fail=$((fail+1)); }

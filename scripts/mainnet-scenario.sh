@@ -101,41 +101,38 @@ for _ in $(seq 1 30); do
 done
 reth_head=$(num "$(rpc http://reth:8545 eth_blockNumber | jq -r '.result')")
 follow=$(num "$(engine_api /status | jq -r '.follow_head')")
-m_head=$(num "$(engine_api /status | jq -r '.m_head')")
+cursor_t=$(num "$(engine_api /status | jq -r '.cursor_t')")
 t_head=$(num "$(engine_api /status | jq -r '.t_head')")
-info "reth=$reth_head follow=$follow M=$m_head T=$t_head"
+info "reth=$reth_head follow=$follow cursor_t=$cursor_t T=$t_head"
 [ "$reth_head" -ge "$follow" ] && ok "reth is at/above the follow head" || bad "reth behind follow head"
-if [ "$m_head" -lt "$((follow - 2))" ]; then
-  lag0=$((follow - m_head))
-  info "M is $lag0 blocks behind; waiting to see it advance…"
+if [ "$cursor_t" -lt "$((follow - 2))" ]; then
+  lag0=$((follow - cursor_t))
+  info "the applier is $lag0 blocks behind; waiting to see it advance…"
   for _ in $(seq 1 45); do
-    m2=$(num "$(engine_api /status | jq -r '.m_head')")
-    [ "$m2" -gt "$m_head" ] && { m_head=$m2; break; }
+    c2=$(num "$(engine_api /status | jq -r '.cursor_t')")
+    [ "$c2" -gt "$cursor_t" ] && { cursor_t=$c2; break; }
     sleep 2
   done
-  if [ "$m_head" -gt "$((follow - lag0))" ]; then
-    ok "M is catching up ($((follow - m_head)) blocks behind, replaying)"
+  if [ "$cursor_t" -gt "$((follow - lag0))" ]; then
+    ok "the applier is catching up ($((follow - cursor_t)) blocks behind)"
   else
-    bad "M is stalled at $m_head (follow $follow)"
+    bad "the applier is stalled at $cursor_t (follow $follow)"
   fi
 else
-  ok "M is replaying at the follow head"
+  ok "the applier is at the follow head"
 fi
-cursor_t=$(num "$(engine_api /status | jq -r '.cursor_t')")
-[ "$cursor_t" -ge "$((follow - 2))" ] && ok "T has applied parent blocks up to the follow head (cursor_t=$cursor_t, height=$t_head)" \
-  || bad "T applier lagging: cursor_t=$cursor_t, follow=$follow"
-probes_match http://reth:8545 http://anvil-m:8545 "M" "$(printf '0x%x' "$((m_head - 1))")" # repaired point
+probes_match http://reth:8545 http://anvil-t:8545 "T" "$(printf '0x%x' "$cursor_t")"
 
 # A1/A2: fork blocks carry no trie (stateRoot = 0x0 - proofs are impossible by
 # design) while the pin block itself is byte-identical to mainnet's.
-root=$(rpc http://anvil-m:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$m_head")\",false]" | jq -r '.result.stateRoot')
+root=$(rpc http://anvil-t:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$t_head")\",false]" | jq -r '.result.stateRoot')
 [ "$root" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] \
-  && ok "A1: M blocks carry no trie (stateRoot = 0x0)" || bad "A1: stateRoot = $root"
-pin=$($ANVIL_M cast rpc anvil_nodeInfo --rpc-url http://localhost:8545 2>/dev/null | jq -r '.forkConfig.forkBlockNumber' | tr -d '\r')
-mhash=$(rpc http://anvil-m:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$pin")\",false]" | jq -r '.result.hash')
+  && ok "A1: T blocks carry no trie (stateRoot = 0x0)" || bad "A1: stateRoot = $root"
+pin=$($ANVIL_T cast rpc anvil_nodeInfo --rpc-url http://localhost:8545 2>/dev/null | jq -r '.forkConfig.forkBlockNumber' | tr -d '\r')
+thash=$(rpc http://anvil-t:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$pin")\",false]" | jq -r '.result.hash')
 rhash=$(rpc http://reth:8545 eth_getBlockByNumber "[\"$(printf '0x%x' "$pin")\",false]" | jq -r '.result.hash')
-[ -n "$mhash" ] && [ "$mhash" = "$rhash" ] && ok "A2: pin block $pin byte-identical to mainnet" \
-  || bad "A2: pin block mismatch (m=$mhash reth=$rhash)"
+[ -n "$thash" ] && [ "$thash" = "$rhash" ] && ok "A2: pin block $pin byte-identical to mainnet" \
+  || bad "A2: pin block mismatch (t=$thash reth=$rhash)"
 at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
 probes_match http://reth:8545 http://anvil-t:8545 "T" "$at"
 
@@ -404,11 +401,12 @@ fi
 
 echo "-- 4. integrity counters"
 m=$(engine_api /metrics)
-for counter in mirror_divergences_total mirror_value_divergences_total \
-               mirror_m_convergence_failures_total mirror_blob_failures_total; do
+for counter in mirror_t_convergence_failures_total \
+               mirror_full_sweep_mismatches_total \
+               mirror_reorgs_detected_total; do
   v=$(echo "$m" | awk -v c="$counter" '$1==c {print $2}')
   case "$counter" in
-    mirror_value_divergences_total) info "$counter = ${v:-0} (blockhash-dependent, allowed)";;
+    mirror_reorgs_detected_total) info "$counter = ${v:-0} (upstream reorgs; informational, the applier self-heals)";;
     *) [ "$(num "$v")" -eq 0 ] && ok "$counter = 0" || info "$counter = ${v:-?} (cumulative; see the latest drift entry)";;
   esac
 done

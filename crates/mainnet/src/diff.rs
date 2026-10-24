@@ -1,18 +1,20 @@
 //! Diff applier: keeps T's watch-list state fresh by applying parent BALs.
 //!
-//! Per parent block (plan §4.2): prepend devnet txs -> fetch BAL (trace
-//! fallback) -> watch list -> skip shadowed (COW) -> read before-values ->
+//! Per parent block (plan §4.2): prepend devnet txs -> compose the source's
+//! diffs -> watch list -> skip shadowed (COW) -> read before-values ->
 //! batched cheatcode writes -> align block context -> mine -> journal ->
 //! sampled parity + probe parity. Each phase is one function; `apply_block` is
-//! the sequence.
-use crate::bal::{self, Write};
+//! the sequence. The diff source is the spine's seam (`ctx.composer`): the
+//! native BAL with the prestateTracer fallback.
 use crate::ctx::{cursor_from, Ctx};
 use crate::drift::Drift;
 use crate::error::{Error, Result};
 use crate::journal::{entry_for_write, BeforeValue, JournalEntry};
 use crate::rpc::Rpc;
 use alloy_primitives::U256;
-use alloy_rpc_types_eth::Block;
+use alloy_rpc_types_eth::Header;
+use mirror_anvil::Write;
+use mirror_devnet::diff::{filter_watched, FilterStats};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::probes::ProbeRunner;
@@ -49,14 +51,10 @@ struct TDriftEntry<'a> {
 
 /// Write the filtered diffs to T (batched; padding is mandatory — measured)
 /// and mine the aligned parent block. Returns the writes applied.
-async fn write_and_mine(
-    ctx: &Ctx,
-    block: &alloy_rpc_types_eth::Block,
-    filtered: &[mirror_anvil::Write],
-) -> Result<usize> {
+async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[mirror_anvil::Write]) -> Result<usize> {
     let applied =
         mirror_anvil::apply_writes(&ctx.anvil_t, filtered, ctx.engine.loops.chunk_size).await?;
-    align_context_and_mine(ctx, block).await?;
+    align_context_and_mine(ctx, header).await?;
     Ok(applied)
 }
 
@@ -144,7 +142,7 @@ async fn mark_own_writes(ctx: &Ctx) -> Result<()> {
 
 pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let started = Instant::now();
-    let block = ctx.reth.block_by_number(n, false).await?;
+    let header = ctx.source.header(n).await?;
 
     let t_head = ctx.anvil_t.block_number().await?;
     // The base this apply started under: a re-pin racing the (slow) fetch
@@ -165,16 +163,22 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     prepend_devnet_txs(&ctx.anvil_t, n).await?;
     mark_own_writes(ctx).await?;
 
-    let (writes, source) = fetch_diffs(&ctx.reth, n).await?;
+    let diff = ctx.composer.compose(n).await?;
     if ctx.anvil_t.fork_block().await? != base {
         return Err(Error::ResetDuringApply { n });
     }
-    let total = writes.len();
-    let (filtered, stats) = filter_watched(ctx, writes)?;
+    let total = diff.writes.len();
+    let (filtered, stats) = {
+        let shadow = ctx.plane.shadow.lock()?;
+        filter_watched(&ctx.watch, &shadow, diff.writes)
+    };
     let entries = read_before_values(&ctx.anvil_t, &filtered, t_head).await?;
 
-    let applied = write_and_mine(ctx, &block, &filtered).await?;
+    let applied = write_and_mine(ctx, &header, &filtered).await?;
     journal_and_scan(ctx, n, &entries, t_head).await?;
+    // The parent-stream continuity marker (reorg detection reads it).
+    ctx.set_reth_last_hash(header.hash)?;
+    ctx.set_reth_last_block(n)?;
 
     let t_latest = ctx.anvil_t.block_number().await?;
     let (sampled, sampled_ok) = sample_parity(ctx, n, &filtered, t_latest).await;
@@ -186,7 +190,7 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         started,
         t_latest,
         ApplyFacts {
-            source: if needs_reapply { "reapply" } else { source },
+            source: if needs_reapply { "reapply" } else { diff.kind.as_str() },
             total,
             applied,
             filtered: filtered.len(),
@@ -266,7 +270,7 @@ async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
 /// The applier's per-block gauges (one place; the late-completion path sets
 /// its own subset).
 fn record_apply_metrics(ctx: &Ctx, n: u64, t_latest: u64, facts: &ApplyFacts, duration_ms: u64) {
-    ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);
+    ctx.eth_metrics.set(&ctx.eth_metrics.cursor, n);
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
     ctx.eth_metrics.set(&ctx.eth_metrics.bal_writes, facts.applied as u64);
     ctx.plane
@@ -276,7 +280,7 @@ fn record_apply_metrics(ctx: &Ctx, n: u64, t_latest: u64, facts: &ApplyFacts, du
         .metrics
         .set(&ctx.eth_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
     ctx.eth_metrics.set(&ctx.eth_metrics.last_apply_ms, duration_ms);
-    ctx.eth_metrics.set(&ctx.eth_metrics.t_head, t_latest);
+    ctx.eth_metrics.set(&ctx.eth_metrics.head, t_latest);
 }
 
 /// The rewound range is fully re-applied: resume normal late-completion skips.
@@ -324,8 +328,8 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
     tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
     advance_cursor(ctx, n).await?;
     ctx.eth_metrics.inc(&ctx.eth_metrics.blocks_applied);
-    ctx.eth_metrics.set(&ctx.eth_metrics.t_head, t_head);
-    ctx.eth_metrics.set(&ctx.eth_metrics.cursor_t, n);
+    ctx.eth_metrics.set(&ctx.eth_metrics.head, t_head);
+    ctx.eth_metrics.set(&ctx.eth_metrics.cursor, n);
     Ok(ApplyOutcome {
         source: "late",
         writes: 0,
@@ -341,7 +345,7 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
 /// their own block *before* this parent's diffs land. Then the parent's block
 /// on T carries only the parent's effects, and a devnet tx executes against
 /// the same state its gas was estimated on (measured: anvil's auto-gas for
-/// eth_sendTransaction came out ~5% short when the diffs landed between
+/// `eth_sendTransaction` came out ~5% short when the diffs landed between
 /// estimate and execution, so the tx ran out of gas). Bounded loop: a tx that
 /// arrives *while* this apply is writing diffs would otherwise be mined
 /// together with them, executing against a state its gas was never estimated
@@ -387,43 +391,6 @@ async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64) -> Result<()> {
     Ok(())
 }
 
-/// The parent's diffs: native BAL first, prestateTracer diff fallback.
-async fn fetch_diffs(reth: &Rpc, n: u64) -> Result<(Vec<Write>, &'static str)> {
-    if let Some(bal) = reth.block_access_list(n).await? {
-        return Ok((bal::flatten_bal(&bal), "bal"));
-    }
-    let traces = reth.trace_block_prestate(n).await?;
-    Ok((bal::flatten_trace_block(&traces), "trace"))
-}
-
-/// Watch list + COW counts for one apply.
-struct FilterStats {
-    not_watched: usize,
-    skipped_shadowed: usize,
-}
-
-/// Keep only the watch list's writes, skipping devnet-owned keys (COW:
-/// account fields count as one unit).
-fn filter_watched(ctx: &Ctx, writes: Vec<Write>) -> Result<(Vec<Write>, FilterStats)> {
-    let mut filtered = Vec::new();
-    let mut stats = FilterStats {
-        not_watched: 0,
-        skipped_shadowed: 0,
-    };
-    for w in writes {
-        if !ctx.watchlist.contains(&w.address()) {
-            stats.not_watched += 1;
-            continue;
-        }
-        if ctx.is_shadowed(&w)? {
-            stats.skipped_shadowed += 1;
-            continue;
-        }
-        filtered.push(w);
-    }
-    Ok((filtered, stats))
-}
-
 /// Before-values for the journal, read at T's current head. A read that fails
 /// fails the apply: a journal with a missing before-value would let a later
 /// rewind report success while leaving that key un-restored.
@@ -462,8 +429,7 @@ async fn read_before_values(
 /// deliberate `evm_increaseTime` (or a lowered offset) can never make the
 /// timestamp non-monotonic and fail the alignment - anvil would then mine with
 /// its own default and the context would silently drift (measured).
-async fn align_context_and_mine(ctx: &Ctx, block: &Block) -> Result<()> {
-    let h = &block.header;
+async fn align_context_and_mine(ctx: &Ctx, header: &Header) -> Result<()> {
     let offset = ctx.plane.time_offset.load(Ordering::Relaxed);
     let last_ts = ctx
         .anvil_t
@@ -471,8 +437,8 @@ async fn align_context_and_mine(ctx: &Ctx, block: &Block) -> Result<()> {
         .await?
         .header
         .timestamp;
-    let ts = (h.timestamp + offset).max(last_ts.saturating_add(1));
-    if let Err(e) = ctx.anvil_t.set_next_block_context(ts, h).await {
+    let ts = (header.timestamp + offset).max(last_ts.saturating_add(1));
+    if let Err(e) = ctx.anvil_t.set_next_block_context(ts, header).await {
         tracing::warn!(error = %e, "context alignment failed");
     }
     ctx.anvil_t.anvil_mine(1).await?;
@@ -498,14 +464,18 @@ async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
 /// One sampled storage-parity reading vs reth at n (drift lens). T's *height*
 /// drifts ahead of the parent height (devnet prepend blocks), so compare T's
 /// latest block against reth at n - reading T by height compared unrelated
-/// blocks and produced ~200 false mismatches per 30 min. Returns
-/// `(sampled, sampled_ok)`.
+/// blocks and produced ~200 false mismatches per 30 min. With
+/// `verifier.full_sweep` every applied storage key is checked, not just the
+/// sample. Returns `(sampled, sampled_ok)`.
 async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> (usize, usize) {
-    let sample: Vec<&Write> = filtered
+    let full = ctx.engine.verifier.full_sweep;
+    let mut sample: Vec<&Write> = filtered
         .iter()
         .filter(|w| matches!(w, Write::Storage { .. }))
-        .take(ctx.engine.verifier.drift_sample_keys)
         .collect();
+    if !full {
+        sample.truncate(ctx.engine.verifier.drift_sample_keys);
+    }
     let mut sampled_ok = 0usize;
     for w in &sample {
         if let Write::Storage { address, slot, .. } = w {
@@ -514,12 +484,17 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
                 ctx.reth.storage_at(*address, *slot, n).await,
             ) {
                 (Ok(a), Ok(b)) if a == b => sampled_ok += 1,
-                (a, b) => tracing::warn!(
-                    block = n,
-                    address = %address,
-                    slot = %slot,
-                    "drift sample mismatch: t={a:?} reth={b:?}"
-                ),
+                (a, b) => {
+                    if full {
+                        ctx.eth_metrics.inc(&ctx.eth_metrics.full_sweep_mismatches);
+                    }
+                    tracing::warn!(
+                        block = n,
+                        address = %address,
+                        slot = %slot,
+                        "drift sample mismatch: t={a:?} reth={b:?}"
+                    );
+                }
             }
         }
     }

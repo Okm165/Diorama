@@ -59,8 +59,7 @@ fixture_addresses = [
 ]
 
 [services.engine.anvil]
-m_url = "${ANVIL_M_URL}"
-t_url = "${ANVIL_T_URL}"
+target_url = "${ANVIL_T_URL}"
 
 [services.engine.source_sync]
 # reth's authenticated Engine API endpoint + the JWT secret shared with the
@@ -104,17 +103,11 @@ probes = [
 [services.engine.journal]
 dir = "${STATE_DIR}/journal"
 
-[services.engine.blobs]
-# Sidecar sources, tried in order. Self-contained: the only source is our
-# own Lighthouse, which runs as a PeerDAS semi-supernode (half the data
-# columns = enough to reconstruct every blob) for the 18-day availability
-# window. A regular (non-supernode) node CANNOT reconstruct blobs after
-# EIP-7594 - it answers HTTP 400 "Insufficient data columns to reconstruct
-# blobs" (measured). Every candidate is KZG-validated (c-kzg + bundled
-# mainnet trusted setup) per blob tx before it is sent; Fulu placeholder
-# proofs (0xc0..) are recomputed locally, so a source that cannot
-# reconstruct blobs can never poison the pool.
-beacon_urls = ["${BEACON_URL}"]
+[services.engine.beacon]
+# The beacon-API source of the top-up loop (EIP-8379): the local Lighthouse,
+# which also drives reth. Blob sidecars are fetched by reth's CL over the
+# Engine API; the engine reads only head/block here.
+urls = ["${BEACON_URL}"]
 
 [services.engine.http]
 port = 8080

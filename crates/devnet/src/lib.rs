@@ -6,6 +6,7 @@
 //! profile owns); `pin` = that chain's fork base.
 pub mod admin;
 pub mod deal;
+pub mod diff;
 pub mod epoch;
 pub mod handlers;
 pub mod error;
@@ -17,6 +18,7 @@ pub mod scan;
 pub mod shadow;
 pub mod shared;
 pub mod source;
+pub mod spine;
 pub mod state;
 pub mod store;
 
@@ -59,6 +61,17 @@ mod design_assertions {
         is_normal::<crate::probes::ProbeRunner<'static>>();
         is_normal::<crate::scan::ScanWalk>();
         is_normal::<crate::epoch::Epoch>();
+        is_normal::<crate::diff::DiffKind>();
+        is_normal::<crate::diff::BlockDiff>();
+        is_normal::<crate::diff::WatchSet>();
+        is_normal::<crate::diff::FilterStats>();
+        is_normal::<crate::spine::ResetSignal>();
+        is_normal::<crate::spine::CursorHash>();
+        is_normal::<crate::spine::ClockPolicy>();
+        is_normal::<crate::spine::MinePolicy>();
+        is_normal::<crate::spine::ProbeSchedule>();
+        is_normal::<crate::spine::Policies>();
+        is_normal::<crate::source::Capabilities>();
         is_normal::<crate::Error>();
     }
 }

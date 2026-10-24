@@ -1,10 +1,9 @@
 //! `ProbeRunner` — configured state probes, compared source-vs-target.
 //!
-//! Two users with the same shape: the M convergence check (source = reth at
-//! `n`, target = anvil-m; no devnet writes on M, nothing to skip) and the
-//! devnet probe parity (source = reth at the applied parent block, target =
-//! anvil-t/v; targets the devnet owns are skipped, counted, never alarmed on -
-//! copy-on-write means that state is the devnet's, not the parent's).
+//! One shape, both mirrors: the devnet probe parity (source = the parent
+//! source at the applied block / at the pin, target = anvil T or V). Targets
+//! the devnet owns are skipped, counted, never alarmed on — copy-on-write
+//! means that state is the devnet's, not the source's.
 use crate::error::Result;
 use crate::shadow::Shadow;
 use crate::shared::Shared;
@@ -25,8 +24,8 @@ pub struct ProbeOutcome {
 
 pub struct ProbeRunner<'a> {
     probes: &'a [Probe],
-    /// Targets the devnet owns (COW). `None` on a chain with no devnet writes.
-    shadow: Option<&'a Shared<Shadow>>,
+    /// Targets the devnet owns (COW): their probes are skipped, never alarmed.
+    shadow: &'a Shared<Shadow>,
     /// The devnet clock is offset: every time-dependent view diverges from the
     /// parent by design (that is what the offset is for), so skip instead of
     /// alarming.
@@ -34,21 +33,12 @@ pub struct ProbeRunner<'a> {
 }
 
 impl<'a> ProbeRunner<'a> {
-    /// A replay chain (M): no devnet writes, no clock offset - nothing to skip.
-    pub fn replay(probes: &'a [Probe]) -> Self {
-        Self {
-            probes,
-            shadow: None,
-            clock_offset: false,
-        }
-    }
-
     /// A devnet chain (T/V): skip devnet-owned targets, and everything when the
     /// clock is offset.
     pub fn devnet(probes: &'a [Probe], shadow: &'a Shared<Shadow>, clock_offset: bool) -> Self {
         Self {
             probes,
-            shadow: Some(shadow),
+            shadow,
             clock_offset,
         }
     }
@@ -69,13 +59,12 @@ impl<'a> ProbeRunner<'a> {
             );
             return Ok(out);
         }
-        let shadowed: HashSet<Address> = match self.shadow {
-            Some(s) => {
-                let s = s.lock()?;
-                s.owned_addresses().into_iter().collect()
-            }
-            None => HashSet::new(),
-        };
+        let shadowed: HashSet<Address> = self
+            .shadow
+            .lock()?
+            .owned_addresses()
+            .into_iter()
+            .collect();
         for probe in self.probes {
             if shadowed.contains(&probe.to) {
                 // A devnet write anywhere in this target hides *all* of its

@@ -7,47 +7,23 @@
 | `mirror_reth_head` | not moving | top-up stalled: check `logs-engine` for "top-up failed" (reth unreachable, beacon API down, or a gap the CL cannot serve) |
 | `mirror_source_sync_gap_blocks` | > 0 for long | reth is catching up to the CL head via the Engine API (~10-11 blocks/s measured); a stuck gap means the CL's backfill has not reached the gap window yet |
 | `mirror_source_sync_delivered_total` | rate 0 while `gap_blocks` > 0 | the top-up loop is dead or erroring - it is supervised, so check `logs-engine` |
-| `mirror_lag_blocks` | > 60 | `follow_head - cursor_m`. A steady 2-3 is the replay margin (`reth.follow_margin_blocks`); a *growing* value means M is holding - check for "holding M" in the log (missing blob sidecars) or a reth/CL problem |
-| `mirror_cursor_block` / `mirror_cursor_block_t` | not advancing | the chain's parent cursor; `_t` is the devnet's. T's cursor must track the head even when M holds (they are independent loops) |
-| `mirror_lag_blocks` | > `max_gap_blocks` (300) | engine pauses itself (the plan's "> 300 → pause and re-sync"); re-pin drill or restore reth. A cursor that was just rebased to a fresh pin is exempt and may replay its whole pin window (bounded by reth's 10,064-block state window) |
-| `mirror_last_replay_seconds` | > 10 s warm | investigate; check reth health first (state-fetch bound) |
-| `mirror_divergences_total` | increase | structural divergence (tx count/order, blob gas, withdrawals) – inspect `drift.jsonl`; the repair re-converges state on the next block. Statuses/gas/logs are classified *behavioral* (the A17 blockhash class) and counted in `mirror_value_divergences_total`; real execution problems surface via the convergence probes |
-| `mirror_value_divergences_total` | increase | expected for blocks with blockhash-dependent txs (A17) – no action |
-| `mirror_m_convergence_failures_total` | increase | M's state ≠ mainnet at n-1 (the 12 probes, run for every block). A stale pin or a missing BAL entry; re-pin if it keeps climbing |
+| `mirror_lag_blocks` | > 60 | `follow_head - cursor_t`. A steady 2-3 is the scheduling margin (`reth.follow_margin_blocks`); a *growing* value means the applier is behind - check reth/CL health and the engine log |
+| `mirror_lag_blocks` | > `max_gap_blocks` (300) | engine pauses itself (the plan's "> 300 → pause and re-sync"); re-pin drill or restore reth. A cursor that was just rebased to a fresh pin is exempt and may re-apply its whole pin window (bounded by reth's 10,064-block state window) |
 | `mirror_t_convergence_failures_total` | increase | T's state ≠ mainnet at the parent block just applied, on a probe whose target the devnet does *not* own (shadowed targets are skipped by design). A missing BAL entry, a watchlist gap, or a clock offset left set (`/admin/time`). A deliberate manipulation whose target is shadowed does *not* fire it; one that is read *through* an unowned contract (e.g. crashing a Chainlink aggregator behind its proxy) does, until restored - the counter is cumulative, `mirror_t_convergence_last_failed` shows the current state |
-| `mirror_m_repair_writes_total` | flat | normal when no block diverged: the parent-BAL repair is gated on the *previous* block's verification, so a clean block's state stays the replay's own product (and a diverged one is repaired before the next block executes). Non-zero growth = A17-class divergences being repaired |
-| `mirror_reorgs_detected_total` | any increase | upstream reorg: the engine re-bases M behind the follow head (self-healing, ~1-2 min) and keeps applying T; with `on_divergence: freeze_m` it freezes instead - re-pin only if it keeps recurring |
+| `mirror_full_sweep_mismatches_total` | increase | a full-sweep apply mismatch (`verifier.full_sweep`): T's value ≠ reth's at the applied block for a key that was applied. Inspect `drift.jsonl` and re-run with the sweep for a conformance window |
+| `mirror_reorgs_detected_total` | any increase | upstream reorg: the applier continues on the new branch (absolute writes self-heal); re-pin only if it keeps recurring |
 | `mirror_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make mainnet-repin`) - the fresh pin starts a new epoch: the devnet's writes are gone with the old base (re-create positions from your journal) |
 | `mirror_pin_age_blocks` | informational | blocks since this epoch's first parent block (the journal/cursor marker) |
-| `mirror_blob_failures_total` | increase | a blob block could not be built (source gap). Placeholder proofs are repaired automatically; a rising counter means the CL cannot serve the sidecars |
-| engine log `holding M (never mining an empty or partial block)` | any | the block's raws could not be built (blob sidecars not in the beacon yet). M waits at n-1 and retries; T keeps applying. With `follow_margin_blocks: 2` this should not appear - if it does, the CL is lagging the head by more than ~24 s |
-| engine log `block unservable for ~90 s; asking for an M re-base` | any | the same block kept failing. Lighthouse prunes blob sidecars after ~1 epoch, so older blobs can never be served: the engine re-bases M at a fresh pin (`follow - fork_offset`), which skips the unservable block and records it. The gap guard (300 blocks) pauses instead if the cause is an engine-side outage |
-| `mirror_receipts_unverified_total` | increase | engine lagged past the 20k receipts window; blocks replayed unverified |
-| Anvil RSS (kubectl top) | see table below | restart the pod; the engine rebases and re-converges |
-
-Log-level signals for nonces: `nonce ahead of state: EIP-7702 authorization
-bump within the block` (INFO) is expected - the sender is an authority of a
-type-4 tx in the same block, so its nonce only becomes valid mid-execution. The
-WARN `nonce gap in block: adjusted state nonce for pool acceptance` means the
-gap is *not* explained by any authorization in the block and deserves a look (a
-skipped tx would look like this).
+| Anvil RSS (kubectl top) | see table below | restart the pod; the engine rebases and re-applies |
 
 Anvil memory is a *state* cost, not a leak:
 
 | Chain | Growth | Steady state | Notes |
 |---|---|---|---|
 | `anvil-t` | ~0.7 MB per applied block in steady state; a full drill run (scenario + proof) adds ~300 MB | ~6.5 GB after a session of drills, recycles at the 16Gi limit | watch-list writes only (~90-500 per block) plus the drills' own writes and the `--prune-history 32` state snapshots. A restart re-forks T: the devnet's writes are gone and the engine clears their shadow marks |
-| `anvil-m` | ~20 MB per replayed block (measured steady state) | recycles at the 24Gi limit | full tx replay: the fork read cache + 2 state snapshots |
 
-**M's recycle cycle is normal, and now cheap.** A full-replay fork materializes
-mainnet's working set in RAM (~20 MB/block steady state, more during a cold
-catch-up), so `anvil-m` reaches its 24Gi limit every ~2.5-4 h and k8s restarts
-it. Because **M re-resolves its fork pin on every start** (`anvil-m.yaml`), the
-post-restart re-replay is bounded by `FORK_OFFSET` (128 blocks, ~1-2 min)
-instead of the whole epoch - with a stale pin the replay OOMs before it can
-catch up (measured death spiral: lag grew 458 -> 546 and never closed).
-**T's pin is re-resolved on every container start**, like M's: that bounds the
-post-restart re-replay to `FORK_OFFSET` (~128 blocks) instead of the pin age.
+**T's pin is re-resolved on every container start**: that bounds the
+post-restart re-apply to `FORK_OFFSET` (~128 blocks) instead of the pin age.
 
 **A T restart starts a new epoch.** The engine detects the reset (the cursor's
 block hash no longer matches) and, when the pin changed, clears the shadow
@@ -59,14 +35,12 @@ eras: measured, a +30d time-travel write came back as a future
 reset at the *same* pin restores the recorded writes, and orphan values (keys
 handed back earlier) are always pruned, never re-owned.
 
-**The anvil state dump is disabled on both chains.** `--state`/`--state-interval`
+**The anvil state dump is disabled.** `--state`/`--state-interval`
 writes per-block historical state: a T dump grew to 13 GB and never completed,
 leaving orphaned `~/.foundry/anvil/tmp/anvil-state-*` dirs that filled the 40Gi
-PVC (measured: 3 dirs, 41 GB). State is rebuilt instead - M re-replays FORK_OFFSET
-(128) blocks, T re-applies its parent diffs from its own pin. If tmp dirs ever
-reappear: `kubectl -n mainnet-mirror exec deploy/anvil-t -- rm -rf /state/.foundry/anvil/tmp/*`.
-repair re-converges state. `mirror_m_convergence_failures_total` may tick up
-right after such a restart until stale slots are touched again.
+PVC (measured: 3 dirs, 41 GB). State is rebuilt instead - a fresh pin re-applies
+the pin window, and T re-applies its parent diffs from its own pin. If tmp dirs
+ever reappear: `kubectl -n mainnet-mirror exec deploy/anvil-t -- rm -rf /state/.foundry/anvil/tmp/*`.
 
 ## Metrics reference (complete)
 
@@ -77,14 +51,14 @@ covers the ones that page someone; these are the rest.
 |---|---|
 | `mirror_reth_head` / `mirror_reth_follow_head` | reth's head / the follow head the engine schedules against (raw, before the replay margin) |
 | `mirror_source_sync_gap_blocks` / `mirror_source_sync_delivered_total` | the CL-head gap reth's top-up still owes / blocks it has delivered |
-| `mirror_m_head` / `mirror_t_head` | the anvil chains' heights (T drifts ahead: one block per parent block plus one per devnet batch) |
-| `mirror_cursor_block` / `mirror_cursor_block_t` | the last *parent* block applied on each chain (the honest progress signal) |
+| `mirror_head` | the devnet chain's height (T drifts ahead: one block per parent block plus one per devnet batch) |
+| `mirror_cursor_block` | the last *parent* block applied (the honest progress signal) |
 | `mirror_t_fork_age_blocks` | how far T's fork base is behind its head (reth serves reads below it) |
 | `mirror_t_resets_total` | times T was found re-forked (its OOM restart / a re-pin): a new epoch starts (the devnet's writes are gone with the old base) - re-create positions from your journal |
-| `mirror_lag_blocks` | `follow_head - cursor_m` (2-3 in steady state = the replay margin) |
-| `mirror_frozen` / `mirror_halted` | 1 when a divergence policy froze M / when `/admin/pause` holds both loops |
-| `mirror_blocks_replayed_total` / `mirror_blocks_applied_total` | parent blocks replayed on M / applied to T |
-| `mirror_last_replay_seconds` / `mirror_last_apply_seconds` | duration of the last M replay / T apply |
+| `mirror_lag_blocks` | `follow_head - cursor_t` (2-3 in steady state = the scheduling margin) |
+| `mirror_halted` | 1 while `/admin/pause` holds both loops |
+| `mirror_blocks_applied_total` | parent blocks applied to T |
+| `mirror_last_apply_seconds` | duration of the last T apply |
 | `mirror_pin_age_blocks` | blocks since the epoch's first block (re-pin before reth's 10,064-block window) |
 | `mirror_bal_writes_last_block` | watch-list writes applied to T in the last applied parent block (a gauge: this is a per-block value, not a cumulative total) |
 | `mirror_bal_filtered_out_last_block` | BAL entries for accounts outside the watchlist in the last block (skipped by design) |
@@ -105,17 +79,11 @@ the source head, the registry clears, and the scan re-anchors at the new pin
 (measured live: after the re-pin the same hand-back answered 400, the same as
 V's). Keep the scan's cursor within the prune window by letting it run — a
 long engine stop with the harness still mining T is the way to fall behind.
-| `mirror_m_repair_writes_total` | parent-BAL writes applied to M by the convergence repair (gated on the previous block's verification) |
-| `mirror_m_rebase_skipped_blocks_total` | parent blocks an M re-base skipped. Their state is exact (the fresh fork's base *is* mainnet's state), but the engine did not re-execute them, so their tx-level verification is skipped. Bounded by `fork_offset` per re-base; a rise simply means M re-based (OOM recovery, reorg) |
-| `mirror_m_convergence_ok_total` / `mirror_m_convergence_failures_total` | the 12 state probes against reth at n-1, run every block |
-| `mirror_m_convergence_last_failed` | how many probes failed in the last check (0 in steady state) |
 | `mirror_t_convergence_ok_total` / `mirror_t_convergence_failures_total` | the same probes against T at the applied parent block (the plan's "probe parity on T after context alignment"); devnet-owned targets are skipped, and the check is suspended while a `/admin/time` offset is set |
 | `mirror_t_probe_skipped_total` | informational | probes skipped because their target is devnet-owned - a devnet write to a shared contract (e.g. the Aave oracle) hides *all* of that contract's probes until it is handed back. If it grows while you are not writing, inspect `/status` `shadowed` and unshadow the venue |
 | `mirror_t_convergence_last_failed` | how many T probes diverged in the last applied block (0 in steady state) |
-| `mirror_receipts_unverified_total` | blocks replayed after lagging past the receipts window |
-| `mirror_reorgs_detected_total` | parent-hash discontinuities seen by the M loop |
-| `mirror_divergences_total` / `mirror_value_divergences_total` | structural / value-level divergences (see `drift.jsonl`) |
-| `mirror_blob_failures_total` | blob sidecars that were not available yet (M holds and retries; should stay 0 with the replay margin) |
+| `mirror_full_sweep_mismatches_total` | full-sweep parity mismatches (`verifier.full_sweep`); should stay 0 |
+| `mirror_reorgs_detected_total` | parent-hash discontinuities seen by the applier |
 
 ## Day-to-day
 
@@ -252,26 +220,24 @@ kubectl -n mainnet-mirror exec deploy/engine -- curl -s http://reth:8545 -X POST
 
 ## Drills
 
-### Restart a chain (fresh fork + restore)
+### Restart the chain (fresh fork + restore)
 
-Both anvils re-resolve their fork pin on every container start, so a restart
-re-forks at `reth head - FORK_OFFSET` and the engine replays from there. There
+The anvil re-resolves its fork pin on every container start, so a restart
+re-forks at `reth head - FORK_OFFSET` and the engine applies from there. There
 is no state dump any more (see "The anvil state dump is disabled").
 
 ```bash
-kubectl -n mainnet-mirror rollout restart deploy/anvil-t   # or anvil-m
+kubectl -n mainnet-mirror rollout restart deploy/anvil-t
 kubectl -n mainnet-mirror rollout status  deploy/anvil-t
 ```
 
-- **M**: the cursor's block hash no longer matches, so the engine rebases and
-  replays `FORK_OFFSET` (~128) blocks (~1-2 min). Nothing is lost - M is never
-  written.
-- **T**: same rebase, plus the engine re-applies the devnet's own writes from
-  the shadow registry's value map (`mirror_t_resets_total` increments, one WARN
-  per reset, keys without a recorded value are handed back to mainnet sync).
-  The devnet's *transaction history* does not survive a re-fork; its *state*
-  does. The journal is cleared with the old chain, so rewind drills start from
-  the new one.
+- **T**: the cursor's block hash no longer matches, so the engine reconciles
+  and re-applies from the pin. The engine re-applies the devnet's own writes
+  from the shadow registry's value map (`mirror_t_resets_total` increments, one
+  WARN per reset, keys without a recorded value are handed back to mainnet
+  sync). The devnet's *transaction history* does not survive a re-fork; its
+  *state* does. The journal is cleared with the old chain, so rewind drills
+  start from the new one.
 
 ### Re-pin — `make mainnet-repin`
 
@@ -280,21 +246,20 @@ Three occasions:
 1. **After a fresh bootstrap**, once the top-up catch-up has finished
    (`mirror_source_sync_gap_blocks` = 0). The first pin is resolved while reth
    is still behind, so the mirror starts near the snapshot's head; re-pinning
-   moves M/T to a live, exact base instead of replaying the catch-up window
-   (whose blob sidecars may not all be reconstructable).
+   moves T to a live, exact base instead of applying the catch-up window.
 2. When the pin ages out of reth's state window (~10k blocks ≈ 1.4 days).
-3. After an upstream reorg, or when M's convergence failures keep climbing.
+3. After an upstream reorg.
 
 The drill:
 
-1. scales `anvil-m`/`anvil-t` down,
+1. scales `anvil-t` down,
 2. wipes `/state/pin` and `/state/state.json` (fork cache is keyed by block and
    is kept),
-3. scales back up: init containers resolve a fresh pin (`reth head - FORK_OFFSET`,
+3. scales back up: the init container resolves a fresh pin (`reth head - FORK_OFFSET`,
    default 128),
 4. the engine detects the chain reset on its next poll, starts a new epoch
    (the devnet's writes are gone with the old base) and rebases its cursor
-   (start = chain head + 1). Re-create positions from your journal.
+   (start = pin + 1). Re-create positions from your journal.
 
 ### Rewind applied parent blocks
 
@@ -403,15 +368,14 @@ The engine drops the shadow and immediately writes mainnet's current value
 (read at T's cursor, so T stays consistent with the parent blocks it has
 applied).
 
-### Resume after a freeze
-
-Only relevant with `on_divergence: freeze_m|halt_all` (conformance runs):
+### Resume after a pause
 
 ```bash
 kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/resume
 ```
 
-With the default `continue` policy nothing freezes; divergences are recorded.
+`/admin/resume` clears a `/admin/pause` halt; divergences are recorded, never
+fatal, so no other state needs clearing.
 
 ## Devnet transactions
 
@@ -470,8 +434,7 @@ curl -s -X POST -H 'content-type: application/json' http://reth:8545 \
 |---|---|---|
 | `reth-data` | 400 Gi | reth DB + static files (snapshot + growth, ~300 GB expected) |
 | `lighthouse-data` | 1500 Gi | beacon DB + 18-day column custody. Measured during the one-time backfill: ~377 KB/slot inside the DA window, blocks only beyond it; ~200 GB expected when it completes |
-| `anvil-m-state` | 20 Gi | pin (the fork cache is RAM; no state dump - see above) |
-| `anvil-t-state` | 40 Gi | same for the devnet chain (dump ~27 MB) |
+| `anvil-t-state` | 40 Gi | pin (the fork cache is RAM; no state dump - see above) |
 | `engine-state` | 10 Gi | cursor.json, shadow.json, drift.jsonl (divergence-only; a legacy `drift.jsonl.1` may hold older per-block records from before that rewrite), journal/ |
 
 All PVCs use the `mirror-retain` StorageClass (`reclaimPolicy: Retain`):
@@ -510,9 +473,8 @@ the same name to re-attach it, or delete the PV explicitly to free the space.
 | `no valid blob sidecar from any source` | the CL cannot serve the sidecars yet (they arrive seconds after the block; the replay margin hides it) | M holds at n-1 and retries - it never mines an empty or partial block. If it persists, the CL is lagging the head: check `mirror_lag_blocks` |
 | Senders' nonces hundreds behind | automine incident (chain height ran away) | re-pin for a clean chain |
 
-| `mirror_m_convergence_failures_total` climbing | M's state stale (old pin, missing BAL entry) | re-pin for a clean M; verify `eth_getBlockAccessList` on reth |
 | `mirror_t_convergence_failures_total` climbing | T drifted from mainnet on a devnet-unowned probe (missing BAL entry, watchlist gap) | check `/status.shadowed`; extend the watchlist if the account should be tracked; clear any `/admin/time` offset |
-| T state looks stale | diff applier behind, or the account is not watched | check `mirror_cursor_block_t` vs `mirror_cursor_block`; extend `watchlist` |
+| T state looks stale | the applier is behind, or the account is not watched | check `mirror_lag_blocks` and `mirror_cursor_block`; extend `watchlist` |
 
 ## Venue operations
 
@@ -520,8 +482,8 @@ The Venue Mirror is its own namespace (`venue-mirror`) with its own components:
 V (`anvil-v`, 8545), the venue engine (`venue-mirror`, 8080), the simulator
 (`venue-sim`, info 8090 / control 8091), and the CCTP bridge (8095/8096) when
 deployed. The NodePorts keep the 31xxx range (31545 / 31880 / 31090 / 31091),
-so both mirrors fit on one node. There is no `reth`/`lighthouse`/`anvil-m` here
-and no M/T split: V is a single fork-mode chain, and the engine's job is the
+so both mirrors fit on one node. There is no `reth`/`lighthouse` here and no
+mainnet-side fork: V is a single fork-mode chain, and the engine's job is the
 fork lifecycle plus the devnet's own blocks.
 
 **First rollout**: `make ns INSTANCE=venue-mirror` creates the namespace, and
@@ -588,7 +550,7 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_probe_ok_total` / `venue_probe_failures_total` | at-pin probes matching / diverging from the fork source |
 | `venue_probe_skipped_total` / `venue_probe_last_failed` | probes skipped (devnet-owned target, or a pin the source cannot serve) / diverged in the last run |
 | `venue_bridge_lag_blocks` | V head minus the bridge's processed cursor (growing = stuck) |
-| `mirror_shadowed_slots` / `mirror_shadowed_accounts` / `mirror_halted` / `mirror_frozen` | the shared admin gauges, rendered beside the venue's own (the registry pushes them on change) |
+| `mirror_shadowed_slots` / `mirror_shadowed_accounts` / `mirror_halted` | the shared admin gauges, rendered beside the venue's own (the registry pushes them on change) |
 | `venue_sim_accounts` / `venue_sim_epoch` | simulated (touched) accounts / scenario epoch |
 | `venue_sim_liquidations_total` / `venue_sim_funding_payments_total` | liquidations executed / funding payments applied |
 | `venue_sim_partial_liquidations_total` / `venue_sim_backstop_liquidations_total` / `venue_sim_adl_closes_total` | the waterfall's steps: partial (20 %) book closes above $100k / backstop takeovers (the vault) below ⅔ maintenance / ADL closes at the previous mark |

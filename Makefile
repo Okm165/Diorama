@@ -19,7 +19,7 @@ ENGINE_TAG      := $(lastword $(subst :, ,$(ENGINE_REF)))
 ENGINE_BIN      := $(notdir $(ENGINE_IMAGE))
 
 # The anvil components of the selected instance (pin-show).
-ANVILS := $(if $(filter mainnet-mirror,$(INSTANCE)),anvil-m anvil-t,anvil-v)
+ANVILS := $(if $(filter mainnet-mirror,$(INSTANCE)),anvil-t,anvil-v)
 
 # The selected instance's Namespace manifest: the overlay owns it (instance
 # identity, not a service template) - one rule for both mirrors.
@@ -188,7 +188,7 @@ status: ## Pods, PVCs, engine status
 logs: ## Tail logs of all pods of the selected instance (follow)
 	$(KUBECTL) logs -f -l app.kubernetes.io/part-of=$(NS) --max-log-requests=10 --prefix
 
-logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-anvil-m
+logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-anvil-t
 	$(KUBECTL) logs -f deploy/$* --tail=100
 
 # The mirror-specific targets pin their own namespace (the shared targets
@@ -260,7 +260,7 @@ mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no
 	$(KUBECTL) logs job/engine-selftest
 
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
-	@for c in reth lighthouse anvil-m anvil-t engine; do \
+	@for c in reth lighthouse anvil-t engine; do \
 	  printf "== %s\n" "$$c"; \
 	  kubectl -n $(NS) logs deploy/$$c --since=30m 2>/dev/null \
 	    | grep -aE "WARN|ERROR|\"level\":\"(WARN|ERROR)\"" \
@@ -291,19 +291,17 @@ pin-show: ## Show the resolved fork pins of the instance's anvils
 		printf "%s pin: " $$c; $(KUBECTL) exec deploy/$$c -- cat /state/pin 2>/dev/null || echo "(not resolved yet)"; \
 	done
 
-mainnet-repin: ## Re-pin drill: wipe the pins, restart the anvils (engine auto-rebases; a new epoch starts)
-	kubectl -n mainnet-mirror scale deploy/anvil-m deploy/anvil-t --replicas=0
-	# Wait until the pods are really gone before wiping: the wipe must not
+mainnet-repin: ## Re-pin drill: wipe the pin, restart the anvil (engine auto-rebases; a new epoch starts)
+	kubectl -n mainnet-mirror scale deploy/anvil-t --replicas=0
+	# Wait until the pod is really gone before wiping: the wipe must not
 	# race a container that is still shutting down (its init container
 	# re-resolves the pin on the next start).
-	kubectl -n mainnet-mirror wait --for=delete pod -l app.kubernetes.io/name=anvil-m --timeout=180s || true
 	kubectl -n mainnet-mirror wait --for=delete pod -l app.kubernetes.io/name=anvil-t --timeout=180s || true
 	kubectl -n mainnet-mirror delete job repin-wipe --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/repin-job.yaml
 	kubectl -n mainnet-mirror wait --for=condition=complete job/repin-wipe --timeout=300s
 	kubectl -n mainnet-mirror delete job repin-wipe --ignore-not-found
-	kubectl -n mainnet-mirror scale deploy/anvil-m deploy/anvil-t --replicas=1
-	kubectl -n $(NS) rollout status deploy/anvil-m --timeout=600s
+	kubectl -n mainnet-mirror scale deploy/anvil-t --replicas=1
 	kubectl -n $(NS) rollout status deploy/anvil-t --timeout=600s
 	@echo "re-pinned. engine will rebase automatically on its next poll."
 

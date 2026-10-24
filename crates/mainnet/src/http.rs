@@ -36,17 +36,13 @@ struct StatusResponse {
     reth_head: u64,
     follow_head: u64,
     follow: &'static str,
-    m_head: u64,
-    t_head: u64,
-    /// The devnet chain's cursor (T-height, the shared field's meaning on both
+    head: u64,
+    /// The devnet chain's cursor (T-height; the shared field's meaning on both
     /// engines; the plan's clock-labels rule).
     cursor: Option<u64>,
     /// T's cursor by its profile name (the scripts' established spelling).
     cursor_t: Option<u64>,
-    /// M's replay cursor (M-height — the parent stream's own clock).
-    cursor_m: Option<u64>,
     lag: u64,
-    frozen: bool,
     halted: bool,
     watchlist: usize,
     shadowed_slots: usize,
@@ -56,7 +52,6 @@ struct StatusResponse {
     /// mainnet — parity checks (scenario probes) must skip them instead of
     /// alarming.
     shadowed: Vec<String>,
-    blob_form: Option<&'static str>,
     time_offset_seconds: u64,
 }
 
@@ -159,28 +154,22 @@ async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
     // never fails it - /status is a diagnostic, not a fact source.
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
     let follow = ctx.follow_head().await.ok().flatten().unwrap_or(0);
-    let m_head = ctx.anvil_m.block_number().await.unwrap_or(0);
-    let t_head = ctx.anvil_t.block_number().await.unwrap_or(0);
-    let cm = ctx.cursor_m()?;
+    let head = ctx.anvil_t.block_number().await.unwrap_or(0);
     let ct = ctx.cursor_t()?;
     let shadow = ctx.plane.shadow.lock()?;
     Ok(Json(StatusResponse {
         reth_head,
         follow_head: follow,
         follow: ctx.follow_tag(),
-        m_head,
-        t_head,
+        head,
         cursor: ct.as_ref().map(|c| c.block),
         cursor_t: ct.as_ref().map(|c| c.block),
-        cursor_m: cm.as_ref().map(|c| c.block),
-        lag: follow.saturating_sub(cm.as_ref().map(|c| c.block).unwrap_or(follow)),
-        frozen: ctx.plane.frozen.load(Ordering::Relaxed),
+        lag: follow.saturating_sub(ct.as_ref().map(|c| c.block).unwrap_or(follow)),
         halted: ctx.plane.is_halted(),
-        watchlist: ctx.watchlist.len(),
+        watchlist: ctx.watch.accounts.len(),
         shadowed_slots: shadow.slot_count(),
         shadowed_accounts: shadow.accounts.len(),
         shadowed: shadow.shadowed_addresses(),
-        blob_form: ctx.blob_form()?.map(crate::blob::BlobForm::as_str),
         time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
     }))
 }

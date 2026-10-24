@@ -67,59 +67,32 @@ echo "-- lighthouse"
 syncing=$(run curl -sf -m 20 http://lighthouse:5052/eth/v1/node/syncing | jq -c '.data | {head_slot, sync_distance, is_syncing}' || echo FAIL)
 if [ "$syncing" != "FAIL" ]; then ok "beacon node: $syncing"; else bad "lighthouse unreachable"; fi
 
-echo "-- anvil M / T"
-for chain in anvil-m anvil-t; do
-  h=$(rpc "http://$chain:8545" eth_blockNumber | jq -r .result)
-  info=$(rpc "http://$chain:8545" anvil_nodeInfo | jq -c '{head: .result.currentBlockNumber, pin: .result.forkConfig.forkBlockNumber}')
-  if [ "$h" != "null" ]; then ok "$chain: $info"; else bad "$chain unreachable"; fi
-done
+echo "-- anvil T"
+h=$(rpc "http://anvil-t:8545" eth_blockNumber | jq -r .result)
+info=$(rpc "http://anvil-t:8545" anvil_nodeInfo | jq -c '{head: .result.currentBlockNumber, pin: .result.forkConfig.forkBlockNumber}')
+if [ "$h" != "null" ]; then ok "anvil-t: $info"; else bad "anvil-t unreachable"; fi
 
 echo "-- engine"
 st=$(run curl -sf -m 10 http://engine:8080/status || echo FAIL)
 if [ "$st" != "FAIL" ]; then
-  ok "engine status: $(echo "$st" | jq -c '{reth_head, m_head, t_head, cursor, frozen, lag}')"
+  ok "engine status: $(echo "$st" | jq -c '{reth_head, head, cursor_t, lag}')"
 else
   bad "engine /status unreachable"
 fi
 
-echo "-- parity sample (last 10 replayed blocks, M vs reth)"
-last=$(run curl -sf -m 10 http://engine:8080/status 2>/dev/null | jq -r '.m_head // empty' || true)
-if [ -n "$last" ] && [ "$last" != "null" ] && [ "$last" != "0" ]; then
-  # Sample a window: blocks whose blob sidecars could not be reconstructed are
-  # deliberately skipped by the engine (recorded in drift.jsonl), so the health
-  # signal is the parity *rate*, not a single block.
-  total=0; match=0; blob_blocks=0
-  for i in $(seq 0 9); do
-    n=$((last - i))
-    [ "$n" -le 0 ] && continue
-    q="[\"$(printf '0x%x' "$n")\",false]"
-    rb=$(rpc http://reth:8545 eth_getBlockByNumber "$q")
-    # Blocks with blob txs are excluded: after PeerDAS a non-supernode beacon
-    # source cannot serve their sidecars, so the engine skips those txs by
-    # design (recorded in drift.jsonl, state still converged by the repair).
-    bg=$(echo "$rb" | jq -r '.result.blobGasUsed // "0x0"')
-    if [ "$bg" != "0x0" ] && [ "$bg" != "null" ] && [ -n "$bg" ]; then
-      blob_blocks=$((blob_blocks + 1)); continue
-    fi
-    rtx=$(echo "$rb" | jq -r '.result.transactions | length' 2>/dev/null)
-    mtx=$(rpc http://anvil-m:8545 eth_getBlockByNumber "$q" | jq -r '.result.transactions | length' 2>/dev/null)
-    [ -z "$rtx" ] || [ -z "$mtx" ] && continue
-    total=$((total + 1))
-    [ "$rtx" = "$mtx" ] && match=$((match + 1))
-  done
-  if [ "$total" -gt 0 ]; then
-    pct=$((match * 100 / total))
-    echo "   tx-count parity: $match/$total non-blob blocks ($blob_blocks blob blocks excluded)"
-    if [ "$pct" -ge 80 ]; then
-      ok "parity rate ${pct}% (>= 80%; blob-tx blocks are excluded by design)"
-    else
-      bad "parity rate ${pct}% (< 80%): inspect drift.jsonl and logs-engine"
-    fi
+echo "-- state parity (the engine's own convergence counters)"
+m=$(run curl -sf -m 10 http://engine:8080/metrics 2>/dev/null || true)
+if [ -n "$m" ]; then
+  t_fail=$(echo "$m" | awk '/^mirror_t_convergence_failures_total /{print $2}' || true)
+  sweep=$(echo "$m" | awk '/^mirror_full_sweep_mismatches_total /{print $2}' || true)
+  lag=$(echo "$m" | awk '/^mirror_lag_blocks /{print $2}' || true)
+  if [ "${t_fail:-1}" = "0" ] && [ "${sweep:-1}" = "0" ]; then
+    ok "probe parity: t_convergence_failures=0, full_sweep_mismatches=0 (lag ${lag:-?} blocks)"
   else
-    echo "  … no comparable blocks yet ($blob_blocks blob blocks excluded)"
+    bad "parity counters non-zero: t_convergence_failures=${t_fail:-?}, full_sweep_mismatches=${sweep:-?} - inspect drift.jsonl and logs-engine"
   fi
 else
-  echo "  … engine has not replayed a block yet (skipping parity check)"
+  bad "engine /metrics unreachable"
 fi
 
 echo

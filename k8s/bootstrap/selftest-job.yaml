@@ -1,9 +1,9 @@
-# Engine self test: replays + diff-applies real mainnet blocks against two
-# scratch Anvil forks of a public RPC. Validates the whole pipeline before the
-# local reth fork source is synced (and on demand afterwards).
+# Engine self test: diff-applies real mainnet blocks onto one scratch Anvil
+# fork of a public RPC. Validates the apply pipeline before the local reth
+# fork source is synced (and on demand afterwards).
 #
-# Test-only external dependencies: a public RPC and a public beacon API. The
-# deployed stack is self-contained (see docs/ARCHITECTURE.md, "Source liveness").
+# Test-only external dependency: a public RPC. The deployed stack is
+# self-contained (see docs/ARCHITECTURE.md, "Source liveness").
 #
 #   make mainnet-selftest
 apiVersion: batch/v1
@@ -53,26 +53,6 @@ spec:
           volumeMounts:
             - { name: shared, mountPath: /shared }
       containers:
-        - name: anvil-m
-          image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              PIN=$(cat /shared/pin)
-              echo "anvil-m: fork=$MAINNET_RPC pin=$PIN"
-              exec anvil --host 0.0.0.0 --port 8545 \
-                --fork-url "$MAINNET_RPC" --fork-block-number "$PIN" \
-                --chain-id 1 --hardfork bpo2 --gas-limit 60000000 \
-                --enable-tx-gas-limit --code-size-limit 24576 \
-                --disable-pool-balance-checks --order fifo --auto-impersonate \
-                --prune-history 1000 --no-rate-limit --no-request-size-limit --no-fork-node-info
-          env:
-            - { name: MAINNET_RPC, value: "https://eth.drpc.org" }
-          volumeMounts:
-            - { name: shared, mountPath: /shared }
-          resources:
-            requests: { cpu: "250m", memory: 256Mi }
-            limits: { memory: 2Gi }
         - name: anvil-t
           image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
           command: ["/bin/sh", "-c"]
@@ -80,7 +60,7 @@ spec:
             - |
               PIN=$(cat /shared/pin)
               echo "anvil-t: fork=$MAINNET_RPC pin=$PIN"
-              exec anvil --host 0.0.0.0 --port 8546 \
+              exec anvil --host 0.0.0.0 --port 8545 \
                 --fork-url "$MAINNET_RPC" --fork-block-number "$PIN" \
                 --chain-id 1 --hardfork bpo2 --gas-limit 60000000 \
                 --enable-tx-gas-limit --code-size-limit 24576 \
@@ -99,16 +79,12 @@ spec:
           args:
             - selftest
             - --rpc=$(MAINNET_RPC)
-            - --anvil-m=http://127.0.0.1:8545
-            - --anvil-t=http://127.0.0.1:8546
+            - --anvil-t=http://127.0.0.1:8545
             - --config=/etc/mirror/instance.toml
-            - --beacon=$(BEACON_API)
             - --blocks=2
             - --timeout-secs=300
           env:
             - { name: MAINNET_RPC, value: "https://eth.drpc.org" }
-            - name: BEACON_API
-              value: "https://ethereum-beacon-api.publicnode.com"
           volumeMounts:
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
           resources:

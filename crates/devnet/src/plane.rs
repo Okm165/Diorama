@@ -34,15 +34,10 @@ pub struct Plane {
     /// the devnet's clock offset, the learned blob form. One file, shared
     /// fields — each profile reads its own chain's cursor.
     pub state: Shared<StateFile>,
-    /// The shared admin gauges (shadowed slots, halted, frozen).
+    /// The shared admin gauges (shadowed slots, halted).
     pub metrics: Metrics,
     /// Set by `/admin/pause`: the profile's loops hold where they are.
     pub halted: AtomicBool,
-    /// The divergence policy's switch (the mainnet profile's M chain). The
-    /// venue never freezes — there is no parent stream to diverge from — so
-    /// the field stays false there and `mirror_frozen` renders 0; it keeps the
-    /// shared surface's exact shape.
-    pub frozen: AtomicBool,
     /// Seconds the devnet's clock runs ahead of the parent block
     /// (`/admin/time`). The mainnet profile's applier aligns to
     /// `parent + offset` and clamps for monotonicity, so a jump sticks while
@@ -89,7 +84,6 @@ impl Plane {
             state: Shared::new("cursor state", state),
             metrics: Metrics::default(),
             halted: AtomicBool::new(false),
-            frozen: AtomicBool::new(false),
             time_offset: AtomicU64::new(offset),
             shadow_scanned_upto: AtomicU64::new(0),
             reapply_from: Shared::new("reapply range", None),

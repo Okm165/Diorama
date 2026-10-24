@@ -65,7 +65,6 @@ registry! {
         gauge shadowed_slots = "mirror_shadowed_slots", "storage slots shadowed by the devnet";
         gauge shadowed_accounts = "mirror_shadowed_accounts", "accounts with devnet-owned keys (whole-account marks or per-slot marks)";
         gauge halted = "mirror_halted", "1 while the driver is halted";
-        gauge frozen = "mirror_frozen", "1 while the driver is frozen";
     }
 }
 
@@ -135,7 +134,7 @@ mod tests {
         let m = Metrics::default();
         let names = series(&m.render());
         let want: BTreeSet<String> =
-            ["mirror_frozen", "mirror_halted", "mirror_shadowed_slots", "mirror_shadowed_accounts"]
+            ["mirror_halted", "mirror_shadowed_slots", "mirror_shadowed_accounts"]
             .into_iter()
             .map(String::from)
             .collect();

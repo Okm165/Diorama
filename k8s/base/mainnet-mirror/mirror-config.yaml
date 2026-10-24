@@ -13,11 +13,10 @@ data:
   # production mode: remote mining is 55-256 s/block (measured).
   RETH_URL: "http://reth:8545"
 
-  # The two chain endpoints the engine drives, plus the beacon/engine-api/JWT
-  # wiring for blobs and the top-up loop (EIP-8379). The fork offset's single
-  # home is [chains.l1].fork_offset in the instance file - the anvil pods read
-  # it from the mounted TOML, so it is not repeated here.
-  ANVIL_M_URL: "http://anvil-m:8545"
+  # The chain endpoint the engine drives, plus the beacon/engine-api/JWT
+  # wiring for the top-up loop (EIP-8379). The fork offset's single home is
+  # [chains.l1].fork_offset in the instance file - the anvil pod reads it from
+  # the mounted TOML, so it is not repeated here.
   ANVIL_T_URL: "http://anvil-t:8545"
   BEACON_URL: "http://lighthouse:5052"
   ENGINE_API_URL: "http://reth:8551"

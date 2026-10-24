@@ -35,18 +35,6 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: anvil-m-state
-  labels: { app.kubernetes.io/part-of: mainnet-mirror, app: anvil-m }
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: mirror-retain
-  resources:
-    requests:
-      storage: 20Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
   name: anvil-t-state
   labels: { app.kubernetes.io/part-of: mainnet-mirror, app: anvil-t }
 spec:

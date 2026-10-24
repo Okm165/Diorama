@@ -108,8 +108,7 @@ pub struct VenueSimSection {
 }
 
 /// `[services.engine]`: the mirror engine — one section for both profiles
-/// (plan §19.3's grammar). What differs by profile is the anvil endpoints
-/// (`[services.engine.anvil]`: M + T or V) and which sub-sections the
+/// (plan §19.3's grammar). What differs by profile is which sub-sections the
 /// profile's code reads; `loops`/`journal`/`verifier` are the shared homes —
 /// the venue's cadence, write chunk and journal ring are the same knobs under
 /// the same keys.
@@ -124,7 +123,7 @@ pub struct EngineSection {
     pub verifier: VerifierSection,
     pub source_sync: SourceSyncSection,
     pub journal: JournalSection,
-    pub blobs: BlobsSection,
+    pub beacon: BeaconSection,
     pub http: HttpSection,
     /// Optional: the feed bridge (absent = the devnet's own price writers own
     /// the mocks, the pre-mirror arrangement).
@@ -177,16 +176,15 @@ pub struct FeedSection {
     pub source: Address,
 }
 
-/// `[services.engine.anvil]`: the profile's anvil endpoints — M (the verified
-/// replay chain) and T (the devnet chain) for the mainnet profile, V (the
-/// fork) for the venue's. The coherence check requires exactly the profile's
-/// set; the names mirror the deployment wiring (`ANVIL_{M,T,V}_URL`).
+/// `[services.engine.anvil]`: the profile's target Anvil — T (the devnet
+/// chain) for the mainnet profile, V (the fork) for the venue's. One field for
+/// both profiles: with a single Anvil per mirror, the endpoint is a fact of
+/// the deployment, not of the profile. The deployment wiring names it
+/// `ANVIL_{T,V}_URL`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EngineAnvil {
-    pub m_url: Option<String>,
-    pub t_url: Option<String>,
-    pub v_url: Option<String>,
+    pub target_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -202,33 +200,6 @@ pub struct LoopsSection {
     pub max_gap_blocks: u64,
     /// Max JSON-RPC batch size for raw-tx submissions and cheatcode writes.
     pub chunk_size: usize,
-    pub replay_into_m: bool,
-    pub apply_into_t: bool,
-    /// Converge M's state from the parent BAL before each replay: M's
-    /// execution cannot reproduce blockhash-dependent values (A17), so a
-    /// single divergence would otherwise cascade forever. Applying mainnet's
-    /// authoritative post-state keeps M a faithful mirror; execution still
-    /// runs (traces + verification). Set false for pure-replay conformance
-    /// runs.
-    pub repair_m: bool,
-    pub on_divergence: OnDivergence,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OnDivergence {
-    /// Record every divergence (drift.jsonl + metrics) and keep replaying.
-    /// M's state is converged from the parent BAL before the next block, so
-    /// divergences (inherent: a fork cannot reproduce blockhash-dependent
-    /// values, A17) never cascade. This is the default: the mirror stays
-    /// live and the operator watches mirror_divergences_total.
-    Continue,
-    /// Stop the replay loop (M) on any divergence; the diff applier (T)
-    /// keeps running. Use for conformance runs where any divergence must be
-    /// inspected before proceeding.
-    FreezeM,
-    /// Stop both loops on divergence.
-    HaltAll,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -236,7 +207,13 @@ pub enum OnDivergence {
 pub struct VerifierSection {
     pub enabled: bool,
     pub drift_sample_keys: usize,
-    /// State probes: re-run against M after every repair (ethereum), and at
+    /// Re-read every applied key from the source after the apply (not just
+    /// `drift_sample_keys`): the conformance-grade check. The BAL's
+    /// correctness is upstream (reth rejects a mismatched BAL); this checks
+    /// our application of it. Expensive; off by default.
+    #[serde(default)]
+    pub full_sweep: bool,
+    /// State probes: re-run against T after every apply (ethereum), and at
     /// the pin against the fork source (venue) — devnet-owned targets are
     /// skipped and counted (COW means that state is the devnet's, not the
     /// fork base's).
@@ -275,14 +252,14 @@ pub struct JournalSection {
     pub blocks: u64,
 }
 
+/// `[services.engine.beacon]`: the consensus client's REST base URLs, tried
+/// in order (local Lighthouse first). The top-up loop is the only reader
+/// (EIP-8379 choreography); empty = no beacon sources.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct BlobsSection {
-    pub enabled: bool,
-    /// Beacon-API base URLs, tried in order (local Lighthouse first); empty
-    /// for a profile with no beacon sources (the venue's chain has none).
+pub struct BeaconSection {
     #[serde(default)]
-    pub beacon_urls: Vec<String>,
+    pub urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

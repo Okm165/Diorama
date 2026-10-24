@@ -25,19 +25,14 @@ enum Cmd {
         #[arg(long, default_value = mirror_config::boot::DEFAULT_INSTANCE_PATH)]
         config: PathBuf,
     },
-    /// End-to-end self test against a public RPC + two scratch Anvil forks.
+    /// End-to-end self test against a public RPC + one scratch Anvil fork.
     Selftest {
         #[arg(long)]
         rpc: String,
         #[arg(long)]
-        anvil_m: String,
-        #[arg(long)]
         anvil_t: String,
         #[arg(long, default_value = mirror_config::boot::DEFAULT_INSTANCE_PATH)]
         config: PathBuf,
-        /// Optional beacon-API base URL override (sidecar source).
-        #[arg(long)]
-        beacon: Option<String>,
         /// Number of consecutive blocks to test starting at the anvil pin + 1.
         #[arg(long, default_value_t = 3)]
         blocks: u64,
@@ -61,19 +56,12 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
         Cmd::Run { config } => run(config).await,
         Cmd::Selftest {
             rpc,
-            anvil_m,
             anvil_t,
             config,
-            beacon,
             blocks,
             timeout_secs,
         } => {
-            let targets = selftest::Targets {
-                rpc,
-                anvil_m,
-                anvil_t,
-                beacon,
-            };
+            let targets = selftest::Targets { rpc, anvil_t };
             selftest_cmd(config, targets, blocks, timeout_secs).await
         }
         Cmd::Rewind { config, blocks } => rewind_cmd(config, blocks).await,
@@ -106,8 +94,8 @@ async fn selftest_cmd(
 /// The `rewind` subcommand: undo the last N applied parent blocks on T.
 async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
     let cfg = Instance::load(&config)?;
-    let (reth, m, t) = cfg.mainnet_urls()?;
-    let ctx = Ctx::new(cfg, &reth, &m, &t)?;
+    let (reth, t) = cfg.mainnet_urls()?;
+    let ctx = Ctx::new(cfg, &reth, &t)?;
     let out = ctx.admin().rewind(blocks).await?;
     println!(
         "rewound {blocks} block(s): {} values restored, cursor_t now {}",
@@ -125,19 +113,15 @@ const MAINNET_CHAIN_ID: u64 = 1;
 
 async fn run(config: PathBuf) -> Result<()> {
     let cfg = Instance::load(&config)?;
-    let (reth_url, m_url, t_url) = cfg.mainnet_urls()?;
-    let ctx = Arc::new(Ctx::new(cfg, &reth_url, &m_url, &t_url)?);
-    ctx.restore_blob_form()?;
+    let (reth_url, t_url) = cfg.mainnet_urls()?;
+    let ctx = Arc::new(Ctx::new(cfg, &reth_url, &t_url)?);
     boot_asserts(&ctx).await?;
 
     tracing::info!(
         reth = %ctx.reth.url(),
-        anvil_m = %ctx.anvil_m.url(),
         anvil_t = %ctx.anvil_t.url(),
         follow = ctx.follow_tag(),
-        watchlist = ctx.watchlist.len(),
-        replay_into_m = ctx.engine.loops.replay_into_m,
-        apply_into_t = ctx.engine.loops.apply_into_t,
+        watchlist = ctx.watch.accounts.len(),
         "mirror engine starting"
     );
 
@@ -150,10 +134,10 @@ async fn run(config: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// The boot asserts, in order: both anvils answer (a coordinated restart —
+/// The boot asserts, in order: the anvil answers (a coordinated restart —
 /// anvil, reth or lighthouse rolling — must not turn into CrashLoopBackOff),
-/// automine is off (M is engine-owned: transactions are batched and mined
-/// explicitly), both fork Ethereum mainnet (a wrong source — a testnet reth, a
+/// automine is off (T is engine-owned: transactions are batched and mined
+/// explicitly), it forks Ethereum mainnet (a wrong source — a testnet reth, a
 /// misdirected URL — would mirror the wrong chain silently: state, addresses
 /// and every measured fact follow from the id; the venue asserts V's identity
 /// the same way at boot), and the epoch pin is anchored before any writes
@@ -162,42 +146,32 @@ async fn run(config: PathBuf) -> Result<()> {
 /// would have to fail closed, dropping the devnet's writes — the venue's
 /// boot-time reconcile anchors the same way).
 async fn boot_asserts(ctx: &Ctx) -> Result<()> {
-    ctx.anvil_m.wait_until_up("anvil-m", ANVIL_BOOT_TIMEOUT).await?;
-    ctx.anvil_m.anvil_set_automine(false).await?;
     ctx.anvil_t.wait_until_up("anvil-t", ANVIL_BOOT_TIMEOUT).await?;
     ctx.anvil_t.anvil_set_automine(false).await?;
-    for (anvil, rpc) in [("anvil-m", &ctx.anvil_m), ("anvil-t", &ctx.anvil_t)] {
-        let got = rpc.chain_id().await?;
-        if got != MAINNET_CHAIN_ID {
-            return Err(Error::WrongChain {
-                anvil,
-                got,
-                want: MAINNET_CHAIN_ID,
-            });
-        }
+    let got = ctx.anvil_t.chain_id().await?;
+    if got != MAINNET_CHAIN_ID {
+        return Err(Error::WrongChain {
+            anvil: "anvil-t",
+            got,
+            want: MAINNET_CHAIN_ID,
+        });
     }
     let t_pin = ctx.anvil_t.anvil_node_info().await?.fork_config.fork_block_number;
     mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
     Ok(())
 }
 
-/// Spawn the profile's loops (replay/apply per config, the top-up supervisor,
-/// the shadow scan, the feed bridge, the HTTP surface) and return their
-/// handles for the shutdown tail. The feed bridge is built only when
-/// configured; a boot fault there is fatal (a mis-scaled price would poison
-/// every scenario).
+/// Spawn the profile's loops (the applier, the top-up supervisor, the shadow
+/// scan, the feed bridge, the HTTP surface) and return their handles for the
+/// shutdown tail. The feed bridge is built only when configured; a boot fault
+/// there is fatal (a mis-scaled price would poison every scenario).
 async fn spawn_loops(ctx: &Arc<Ctx>) -> Result<Vec<tokio::task::JoinHandle<()>>> {
     let mut tasks = Vec::new();
-    if ctx.engine.loops.replay_into_m {
-        tasks.push(tokio::spawn(driver::replay_loop(ctx.clone())));
-    }
     if ctx.engine_api.is_some() {
         tasks.push(tokio::spawn(driver::source_sync_supervisor(ctx.clone())));
     }
-    if ctx.engine.loops.apply_into_t {
-        tasks.push(tokio::spawn(driver::apply_loop(ctx.clone())));
-        tasks.push(tokio::spawn(driver::shadow_loop(ctx.clone())));
-    }
+    tasks.push(tokio::spawn(driver::apply_loop(ctx.clone())));
+    tasks.push(tokio::spawn(driver::shadow_loop(ctx.clone())));
     let bridge = match ctx.engine.feed_bridge.is_some() {
         true => {
             let bridge = Arc::new(feed_bridge::FeedBridge::new(ctx).await?);

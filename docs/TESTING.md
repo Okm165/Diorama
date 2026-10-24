@@ -56,40 +56,30 @@ each module documents:
 
 ## Self test (`k8s/bootstrap/selftest-job.yaml`)
 
-One Job, three containers in one pod:
+One Job, two containers in one pod:
 
 1. `resolve-pin` (alpine) resolves `pin = rpc head - 16`,
-2. `anvil-m` / `anvil-t` fork a public RPC at that pin,
-3. `engine selftest` replays and applies blocks `pin+1 .. pin+3`, printing a
-   check-by-check report (tx-count, blobGasUsed, logsBloom, log set, receipts
-   with the type-4 gas rule, withdrawals; T: writes/filtered/shadowed,
-   sampled storage parity) and exiting non-zero on any failure.
+2. `anvil-t` forks a public RPC at that pin,
+3. `engine selftest` applies blocks `pin+1 .. pin+3`, printing a
+   check-by-check report (source, writes/filtered/shadowed, sampled storage
+   parity) and exiting non-zero on any failure.
 
 This is the fastest full-pipeline check and it exercises the **trace fallback**
-(public RPCs do not serve `eth_getBlockAccessList`) and the **blob path**
-(sidecars fetched from the beacon API, network-form encoding).
+(public RPCs do not serve `eth_getBlockAccessList`).
 
 Expected output shape:
 
 ```
 -- block 26242174
-   M ✔ tx_count                 reth=251 m=251
-   M ✔ blob_gas_used            reth=786432 m=786432
-   M ✔ logs_bloom
-   M ✔ log_set                  1103 logs
-   M ✔ receipts                 251 receipts
-   M ✔ withdrawals              16 withdrawals
-   ...
-   M replay: txs=251 replayed=251 skipped_blobs=0 ms=...
-   T apply:  source=trace writes=... filtered=... skipped_shadowed=... sampled=8/8 ms=...
+   apply: source=trace writes=... filtered=... skipped_shadowed=... sampled=8/8 ms=...
 ```
 
 ## Smoke (`scripts/mainnet-smoke.sh`)
 
 Checks pods, reth head + `eth_syncing` + `eth_getBlockAccessList` availability,
-Lighthouse sync status, both anvil pins, the engine `/status`, and a parity
-spot check: `logsBloom` and tx count of M's head block vs reth at the same
-height.
+Lighthouse sync status, the anvil pin, the engine `/status`, and the engine's
+convergence counters (`mirror_t_convergence_failures_total`,
+`mirror_full_sweep_mismatches_total`).
 
 ## Self-containment checks
 
@@ -114,50 +104,35 @@ kubectl -n mainnet-mirror get cm mainnet-instance -o jsonpath='{.data.instance\.
   | grep -A2 "beacon_urls"   # ["${BEACON_URL}"] -> mirror-config: http://lighthouse:5052
 ```
 
-## Invariants asserted per replayed block (on M)
+## Invariants asserted per applied block (on T)
 
 | Invariant | Class | Where |
 |---|---|---|
-| tx-count parity | structural | `verify.rs` |
-| tx order (hashes in position) | structural | `verify.rs` |
-| `blobGasUsed` parity | structural | `verify.rs` |
-| receipt count | structural | `verify.rs` |
-| withdrawal recipient balances equal reth at N | structural | `verify.rs` |
-| `logsBloom` parity | behavioral | `verify.rs` |
-| log-set equality (address, topics, data) | behavioral | `verify.rs` |
-| receipt statuses identical; gas Δ only on type-4, in `[-12,500 × #auths, 0]` | behavioral | `verify.rs` |
-| post-repair convergence (probes: `eth_call` on M's unmined repaired state vs reth at N-1) | convergence invariant | `verify.rs::convergence_check` |
-| M chain continuity (head == N-1 before replay) | structural | `replay.rs` |
-| reth parent-hash continuity between consecutive blocks (reorg detection) | structural | `main.rs` |
-| T sampled storage parity on written keys | diff | `diff.rs` |
+| sampled storage parity on written keys vs reth at N (all keys with `full_sweep`) | diff | `diff.rs` |
+| state probes: `eth_call` parity vs reth at N, devnet-owned targets skipped | convergence | `probes.rs` |
+| watch-list filter counts (applied / not-watched / shadowed) | COW | `diff.rs` |
+| reth parent-hash continuity between consecutive blocks (reorg detection) | structural | `driver.rs` |
+| cursor hash matches the chain (reset detection) | lifecycle | `driver.rs` |
 
-Divergence classes are recorded in `drift.jsonl` (divergences only)
-(`divergence_class: none|value_level|fatal`) and counted separately in metrics
-(`mirror_divergences_total` structural, `mirror_value_divergences_total`
-behavioral). The default policy (`on_divergence: continue`) records all of them;
-`freeze_m`/`halt_all` turn them into stops for conformance runs.
+Anomalies are recorded in `drift.jsonl` and counted in metrics
+(`mirror_t_convergence_failures_total`, `mirror_full_sweep_mismatches_total`).
+Sampled-parity mismatches are the A17 class (blockhash-dependent values) and
+re-converge with the next block's absolute writes; the probes are the alarm.
 
-## Measured facts that shaped the verifier
+## Measured facts that shaped the applier
 
 | Fact | Evidence |
 |---|---|
-| Type-4 txs are the only *systematic* gas delta (refund accounting ≤12,500/auth) | first replay runs, plan §1.1 |
-| Self-sponsored EIP-7702 txs advance the sender nonce by 2, so blocks contain nonce gaps (`0x1e6, 0x1e8, 0x1ea`) | block 26,232,893; anvil's pool parked the gap txs as *queued* until the engine adjusted the pool's nonce view |
-| Near-full blocks amplify any gas delta | block 26,233,028: mainnet 59,975,282 / 60,000,000 gas; a ~36k delta pushed the last 2 txs out of M's block |
-| Seaport 1.6 `incrementCounter` reads `blockhash(number-1)` | `seaport-core/src/lib/CounterManager.sol`; a fork cannot reproduce it (A17), so the counter (and order validity) diverges without the BAL repair |
-| One unhandled divergence cascades | the same block then produced status mismatches, wrong probes, and 60+ structurally short blocks |
-| A17's observed blast radius | block 26,244,417 tx 124: a MEV bot's `BLOCKHASH`-gated entry (`revert("ph-")`, selector `0x4e00c7fc`) succeeds on mainnet (215,606 gas) and reverts on M (38,530); the flipped status cascades into WETH `totalSupply` and Uniswap V2/V3/V4 `Swap`/`Sync` log diffs - all repaired from the parent BAL before the next block |
-| EIP-7702 nonce gaps are expected, not anomalies | every warned gap traced to a type-4 authorization bumping its authority mid-block (block 26,244,442: auth nonce 513 for sender `0xf28225…`, then that sender's tx at nonce 514; all warned senders were `0xef0100…` delegated accounts). The tracker recovers authorities (`recover_authority`) and logs these at INFO; WARN is reserved for unexplained gaps |
+| Seaport 1.6 `incrementCounter` reads `blockhash(number-1)` | `seaport-core/src/lib/CounterManager.sol`; a fork cannot reproduce it (A17), so the counter (and order validity) diverges — sampled parity records it and the next block's absolute writes re-converge the state |
+| A17's observed blast radius | block 26,244,417 tx 124: a MEV bot's `BLOCKHASH`-gated entry (`revert("ph-")`, selector `0x4e00c7fc`) succeeds on mainnet (215,606 gas) and reverts on a fork (38,530); the flipped status cascades into WETH `totalSupply` and Uniswap V2/V3/V4 `Swap`/`Sync` log diffs — all re-converged by the next block's writes |
 | Anvil `--prune-history N` keeps N full state snapshots in memory | anvil-t 9.8 GB at 1000; ~2.5 GB at 32 |
 | Lighthouse needs >6 GiB during checkpoint sync | CrashLoopBackOff (OOMKilled ×5) at 6Gi |
 | Anvil restarts reset automine to *on* | with automine on, every raw tx mines its own block: engine blocks were empty (`m=0`), the height ran away (~14 blocks per parent block) and nonces fell hundreds behind. Fixed with `--no-mining` + re-asserting automine=false on rebases |
 | A re-pin moves the chain's base past the shadow watermark | the scan walked the *source's* pre-pin blocks (anvil forwards those ranges upstream) and marked mainnet's real writes devnet-owned (measured: 311 real txs scanned as devnet writes right after a re-pin); every scan is anchored at the pin now (`mirror_devnet::scan::scan_anchor` — the ethereum loop, the applier's inline scan, the admin's hand-back pre-step and the venue driver all use it), and a cursor *at* the base is the legitimate rest state (`cursor_off_base` / `below_fork_base` are strict `<`) |
-| A regular beacon node cannot serve blobs after PeerDAS | bpo2 Lighthouse answers HTTP 400 `Insufficient data columns to reconstruct blobs: required 64, but only 4 were found` unless run with `--supernode`/`--semi-supernode`; the mirror runs `--semi-supernode` locally (64 of 128 columns = enough to reconstruct) |
-| The beacon API's blob-level `kzg_proof` is a placeholder on Fulu | our semi-supernode served `kzg_proof = 0xc0…` (point at infinity) with a correct blob and commitment; a KZG round-trip unit test proved the validator correct, so the engine recomputes the proof locally |
+| A regular beacon node cannot serve blobs after PeerDAS | bpo2 Lighthouse answers HTTP 400 `Insufficient data columns to reconstruct blobs: required 64, but only 4 were found` unless run with `--supernode`/`--semi-supernode`; the deployment runs `--semi-supernode` locally, so the CL can serve blob custody |
 | reth rejects non-spec `executionRequests` | `-32602 Invalid params: EmptyExecutionRequest` until elements were type-prefixed with empty types excluded (`engine/prague.md`) |
 | jsonwebtoken panics without a crypto provider | alloy's `jwt` feature selects none; the top-up task died silently at the first JWT sign until `rust_crypto` was enabled |
 | Beacon API quantities are **decimal strings**, Engine API wants hex | `head_slot()` parsed the slot as hex, silently un-bounding the top-up walk (`parse_quantity` now accepts both; unit-tested) |
-| A withdrawal credit must read its pre-balance from **reth**, not from M at N-1 | when a block is retried before mining, anvil's "N-1" *is* the live state, which already contains the first attempt's credit - measured once as `withdrawals` divergence (M = reth_post + amount) |
 | T's heights advance independently of mainnet's | one T block per applied parent block plus one per journal rewind; the engine bounds T by `cursor_t` (not by its height), so a rewind drill cannot stall it. A hash-validated cursor always wins (`cursor + 1`) - jumping to `chain_head + 1` skipped parent blocks and stalled T until the cursor semantics were fixed |
 | Watching a proxy is not enough: delegate targets own the state | Chainlink `AggregatorProxy.latestRoundData()` delegatecalls the aggregator; the scenario's T probe caught a one-round-stale price until the aggregators were added to the watchlist |
 | The follow head sets the devnet's block cadence | with `reth.follow: safe` the CL updates the safe block once per epoch: the applier burst-mines 32 blocks every ~6.4 min and a devnet tx sent between bursts waited 180 s+ (cast's own receipt timeout, then "transaction not found" after a pool reset). With `latest` the parent stream advances every ~12 s and a tx confirms in ~12 s |
@@ -170,13 +145,13 @@ behavioral). The default policy (`on_divergence: continue`) records all of them;
 | A devnet reset can make your next tx a no-op that reports success | re-syncing an account's fields puts its nonce back to mainnet's; a byte-identical tx (same nonce, data, gas price) has the same hash, so the node answers with the *old* receipt while the reset state no longer holds its effects (measured: a "successful" approve that changed nothing, then a supply reverting with a bare `revert()`). Vary something - the gas price is enough - or never reset the sender's nonce |
 | `cast send --unlocked` needs an explicit `anvil_impersonateAccount` | anvil's `--auto-impersonate` accepts `eth_sendTransaction` from any sender, but cast's own signer check refuses first ("No Signer available"). The suite sends raw `eth_sendTransaction` through the engine pod instead - no signer involved, and the receipt poll is ours |
 | `cast index` is offline | it ignores/silently mishandles `--rpc-url`; a slot computed with one comes back empty and the storage read looks like "no value" instead of a wrong slot |
-| The tx pool keeps a devnet tx that the engine cannot mine | when the applier bails (T's head behind the cursor after an out-of-band `anvil_reset`), pending txs starve while the probes stay green - watch `mirror_t_head` vs `cursor_t`, not just the probes |
+| The tx pool keeps a devnet tx that the engine cannot mine | when the applier bails (T's head behind the cursor after an out-of-band `anvil_reset`), pending txs starve while the probes stay green - watch `mirror_head` vs `cursor_t`, not just the probes |
 | Handing a key back kept its recorded value, so a re-fork resurrected it | `unmark` cleared the mark only; the value stayed in the registry, and a later re-fork restored (and re-owned) it. Measured: the scenario's crashed oracle source (USDC source = the WETH/USD feed, price 240,233,000,110 vs mainnet's 99,983,478) came back this way - and because *any* devnet mark on a probe's target skips that probe, the five oracle probes stayed green while the price was poisoned. Fixed three ways: `unmark` now drops the recorded value, orphan values are pruned (never re-owned), and `mirror_t_probe_skipped_total` counts skipped probes so the blind spot is visible. One unshadow call healed the price (`resynced_keys: 4`). The same audit fixed the epoch semantics (a fresh pin clears marks *and* values) - restoring across a moved base is what resurrected the value in the first place |
 | Restoring devnet writes onto a *moved* base mixes eras | a +30d time-travel run recorded Aave's `lastUpdateTimestamp` ~13 days in the future; a later re-fork re-applied it and every `supply` panicked with `arithmetic underflow` (product sim 2/13, scenario 31/33). The plan's rule decides it - derived values go stale when the base advances (2.2/6.3): a pin change is a new epoch (clear marks and values), the product re-creates positions from its own journal (3.6). After the epoch reset the suites are green again |
 
 ## Capability proof: `scripts/mainnet-proof.sh`
 
-`scripts/mainnet-scenario.sh` proves the *substrate* (replay fidelity, COW, drills).
+`scripts/mainnet-scenario.sh` proves the *substrate* (apply fidelity, COW, drills).
 `scripts/mainnet-proof.sh` proves the *product*: the three things a fork must
 do, measured end-to-end against the live stack and left clean afterwards.
 
@@ -677,11 +652,11 @@ The behavioral checks, not just shapes:
   wall). `/admin/feed*` — the L1 feed
   bridge's routes; the venue's counterpart is the simulator's control plane
   (`/control/crash`, `/control/deal`, …).
-- **`/status`** — each engine reports its own facts (reth/M/T vs fork
+- **`/status`** — each engine reports its own facts (reth/T vs fork
   pin/probes/source); the shared fields (`cursor`, `halted`, `shadowed*`) are
   present on both, and `cursor` means the *devnet chain's* cursor on both
   (T-height; the plan's clock-labels rule). The mainnet profile names its
-  clocks explicitly: `cursor_t` is T's, `cursor_m` is M's replay cursor.
+  clocks explicitly: `cursor_t` is T's applied-parent cursor.
 - **the venue plane's alarm set** — the plan §7.8 alarms are served under the
   sim's own spellings: API lag as `venue_sim_stale_ms{coin}` (per coin, ms —
   finer-grained than a per-feed seconds gauge); the rate budget as
@@ -704,8 +679,8 @@ The behavioral checks, not just shapes:
   (`/admin/shadow {clear}`), which re-syncs the source's value. On V there is
   no parent stream, so the journal holds the engine's own writes and one
   rewind covers both (measured: a V rewind restores a deal's before-value,
-  `restored_values: 1`). `mirror_frozen` stays 0 on V: the divergence policy
-  is a replay-tier concept (T's M chain).
+  `restored_values: 1`). Divergences are recorded, never fatal — no run
+  freezes itself.
 
 The behavioral contracts behind the surface are also verified by the drills
 (measured live 2026-10-23): `pause` freezes both engines' cursors (T's head
@@ -953,25 +928,25 @@ mint with the exact delta; `SOURCE`/`DESTINATION`/`AMOUNT` env-driven).
 
 | # | Fact | Coverage |
 |---|---|---|
-| A1 | fork blocks have no trie | scenario: M head `stateRoot = 0x0`; proofs impossible by design (§6) |
-| A2 | pin byte-identical to mainnet | scenario: pin block hash M == reth; `make pin-show` |
-| A3 | block env set exactly | replay sets all five context fields; an env error shows up as receipt/log-set divergence in the same block |
-| A4 | withdrawals are not txs | idempotent `setBalance` credit + withdrawal balance check |
-| A5 | in-block-funded txs need the flag | `--disable-pool-balance-checks` in both anvil deployments |
-| A6 | blob txs need the network wrapper | `blob.rs` (legacy / eip7594 / bare forms, learned at runtime) |
-| A7 | blob data for any age | narrowed by design: the mirror serves blobs only from the local CL's own window (self-containment); older blobs would need an external source, which the runtime never uses |
-| A8 | mining is state-fetch-bound | `mirror_last_replay_seconds`; the local reth keeps it ~2 s/block even cold (remote measured 55-256 s) |
-| A9 | type-4 gas deviation bound | `verify.rs` receipts check |
-| A10 | replayed blocks expose real logs | log-set + logsBloom checks |
+| A1 | fork blocks have no trie | scenario: T head `stateRoot = 0x0`; proofs impossible by design (§6) |
+| A2 | pin byte-identical to mainnet | scenario: pin block hash T == reth; `make pin-show` |
+| A3 | block env aligned exactly | the applier sets all five context fields from the source header; an env error shows up as a probe divergence in the same block |
+| A4 | withdrawals arrive as state | the BAL carries withdrawal recipients' post-balances; the applier writes them like any other balance change |
+| A5 | in-block-funded txs need the flag | `--disable-pool-balance-checks` in the anvil deployment |
+| A6 | devnet txs are never mixed with the source's writes | the prepend rule (own block, `last+1`), asserted by the scenario |
+| A7 | blob data is not executed | the applier never fetches sidecars (blob txs execute by versioned hash); the CL keeps custody |
+| A8 | apply is source-fetch-bound | `mirror_last_apply_seconds`; the local reth keeps it ~1 s/block even cold (remote measured 55-256 s) |
+| A9 | sampled parity catches the A17 class | `drift.jsonl` anomaly entries + `mirror_full_sweep_mismatches_total` with the sweep on |
+| A10 | T exposes the source's logs only through reth | T executes only devnet txs; parent-block logs live in reth (within its 10,064-block window) |
 | A11 | `deal` writes storage silently | scenario: a WETH deal sets the balance with **no** Transfer log; the same probe finds USDC's packed `balanceAndBlacklistStates` slot (the sentinel stays below 2^255 so packed reads return it unmasked) |
-| A12 | exactly one M block per parent block | scenario head parity (`m_head == follow_head`) + `anvil_mine(1)` |
-| A13 | local writes never touch M | the COW/shadow section runs on T; M's probes and the drift gate are asserted after it |
-| A14 | warm restart preserves state | anvil `--state` removed (it dumped per-block history: 13 GB/dump, leaked tmp dirs, filled T's PVC); the engine rebases instead - M re-replays FORK_OFFSET blocks (~1-2 min, measured). T re-forks at a fresh pin = a **new epoch**: the devnet's writes are *not* replayed onto the moved base (values are derivations of the old base - plan 2.2/6.3; measured: a +30d time-travel write came back as a future `lastUpdateTimestamp` and every Aave supply panicked with an underflow). The registry is cleared (marks *and* values) and the product re-creates positions from its own journal (plan 3.6); a reset at the *same* pin restores the recorded writes |
-| A15 | memory bounded by restart | measured ~20 MB per replayed block steady state; M recycles at its 24Gi limit (~2.5-4 h) and recovers in ~1-2 min |
-| A16 | upstream reorgs detected | parent-hash continuity check (M loop only); the engine records it and re-bases M behind the follow head - self-healing in ~1-2 min. With `on_divergence: freeze_m` it freezes for inspection instead |
-| A17 | mirror block hashes differ | inherent (verified: anvil exposes no blockhash/beacon-root setter); recorded as behavioral, state re-converged from the parent BAL. Measured rate: ~45% of blocks carry a value-level divergence (the blockhash-gated MEV/Seaport class), 0 structural in steady state, and `mirror_m_convergence_failures_total` stays 0 - the state is exact even when the execution diverges |
-| A18 | delivery is event-driven | consumers subscribe to anvil M/T WS (`eth_subscribe`) |
-| A19 | scoped manipulation leaves replay intact | scenario: a shadowed slot survives further parent diffs; unshadow re-syncs from reth; M's probes stay green |
+| A12 | exactly one T block per parent block | scenario head parity + `anvil_mine(1)` |
+| A13 | local writes never appear in the source's diffs | COW: the shadow filter skips owned keys; the scenario asserts the skip counters |
+| A14 | warm restart preserves state | anvil `--state` removed (13 GB dumps, leaked tmp dirs, filled T's PVC); a fresh pin re-applies the pin window and the epoch rule restores the recorded writes at the *same* pin (a moved base clears them - plan 2.2/6.3; measured: a +30d time-travel write came back as a future `lastUpdateTimestamp` and every Aave supply panicked with an underflow) |
+| A15 | memory bounded by restart | anvil-t steady state ~6.5 GB after a session of drills; recycles at the 16Gi limit |
+| A16 | upstream reorgs detected | parent-hash continuity check; the applier continues on the new branch (absolute writes self-heal) |
+| A17 | fork block hashes differ | inherent (verified: anvil exposes no blockhash/beacon-root setter); sampled parity records the class and the next block's absolute writes re-converge the state. Measured: ~45% of blocks carry such a mismatch, `mirror_t_convergence_failures_total` stays 0 in steady state |
+| A18 | delivery is event-driven | consumers subscribe to anvil T WS (`eth_subscribe`) |
+| A19 | scoped manipulation leaves parity intact | scenario: a shadowed slot survives further parent diffs; unshadow re-syncs from reth; T's probes skip the shadowed target |
 | A20 | journal round-trip is faithful | scenario: snapshot/revert + `/admin/rewind` restore T's cursor and re-apply cleanly |
 
 ### The market-impact chain, measured live on T (2026-10-23)

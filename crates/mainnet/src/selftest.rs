@@ -1,57 +1,36 @@
-//! End-to-end self test: replays and diff-applies real mainnet blocks against
-//! two scratch Anvil instances forked from a public RPC. Needs no reth, so it
-//! can validate the whole pipeline before the local fork source is synced.
-use mirror_config::Instance;
+//! End-to-end self test: diff-applies real mainnet blocks onto a scratch
+//! Anvil forked from a public RPC. Needs no reth, so it can validate the
+//! whole apply pipeline before the local fork source is synced.
 use crate::ctx::Ctx;
 use crate::diff::apply_block;
 use crate::error::{Error, Result};
-use crate::replay::replay_block;
+use mirror_config::Instance;
 use std::sync::Arc;
 
-/// The selftest's scratch targets: the source RPC and the two anvil endpoints
-/// (plus the optional beacon for blob sidecars) — one argument for what the
-/// CLI passes together.
+/// The selftest's scratch targets: the source RPC and the anvil endpoint.
 pub struct Targets {
     pub rpc: String,
-    pub anvil_m: String,
     pub anvil_t: String,
-    pub beacon: Option<String>,
 }
 
-pub async fn run(mut cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
-    let Targets {
-        rpc,
-        anvil_m,
-        anvil_t,
-        beacon,
-    } = targets;
-    if let Some(b) = beacon {
-        let engine = cfg.services.engine.as_mut().ok_or_else(|| Error::Config(
-            mirror_config::ConfigError::Invalid {
-                issues: vec!["profile \"ethereum\" requires [services.engine]".into()],
-            },
-        ))?;
-        engine.blobs.beacon_urls = vec![b];
-    }
-    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_m, &anvil_t)?);
-    ctx.restore_blob_form()?;
+pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
+    let Targets { rpc, anvil_t } = targets;
+    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_t)?);
 
-    // Wait for the scratch anvils (same pod, they start in parallel).
+    // Wait for the scratch anvil (same pod, it starts in parallel).
     let boot = std::time::Duration::from_secs(120);
-    ctx.anvil_m.wait_until_up("anvil-m", boot).await?;
     ctx.anvil_t.wait_until_up("anvil-t", boot).await?;
-    ctx.anvil_m.anvil_set_automine(false).await?;
+    ctx.anvil_t.anvil_set_automine(false).await?;
 
     // The pin comes from the scratch anvil itself (forkConfig.forkBlockNumber).
-    let info = ctx.anvil_m.anvil_node_info().await?;
+    let info = ctx.anvil_t.anvil_node_info().await?;
     let pin = info
         .fork_config
         .fork_block_number
-        .ok_or(Error::NoForkPin { chain: "anvil-m" })?;
+        .ok_or(Error::NoForkPin { chain: "anvil-t" })?;
 
     println!("== mirror engine selftest ==");
     println!("rpc:      {rpc}");
-    println!("anvil-m:  {anvil_m}");
     println!("anvil-t:  {anvil_t}");
     println!("pin:      {pin}");
     println!("blocks:   {blocks}");
@@ -70,47 +49,21 @@ pub async fn run(mut cfg: Instance, targets: Targets, blocks: u64) -> Result<boo
     Ok(all_ok)
 }
 
-/// Replay + verify + apply one block, printing the per-check lines; returns
-/// whether the block passed every check.
+/// Apply one block, printing the per-check lines; returns whether it passed.
 async fn run_one_block(ctx: &Ctx, n: u64) -> Result<bool> {
-    let r = replay_block(ctx, n).await.map_err(|source| Error::Step {
-        step: "replay",
-        block: n,
-        source: Box::new(source),
-    })?;
-    let mut ok = true;
-    if let Some(v) = &r.verification {
-        for (check, passed, detail) in &v.checks {
-            if !*passed {
-                ok = false;
-            }
-            println!("   M {} {:<24} {}", if *passed { "✔" } else { "✘" }, check, detail);
-        }
-        if !v.ok {
-            ok = false;
-        }
-    }
-    println!(
-        "   M replay: txs={} replayed={} skipped_blobs={} ms={} {}",
-        r.txs,
-        r.replayed,
-        r.skipped_blobs,
-        r.duration_ms,
-        if ok { "" } else { "(DIVERGED)" }
-    );
-
     let a = apply_block(ctx, n).await.map_err(|source| Error::Step {
         step: "apply",
         block: n,
         source: Box::new(source),
     })?;
+    let mut ok = true;
     println!(
-        "   T apply:  source={} writes={} filtered={} skipped_shadowed={} sampled={}/{} ms={}",
+        "   apply: source={} writes={} filtered={} skipped_shadowed={} sampled={}/{} ms={}",
         a.source, a.writes, a.filtered, a.skipped_shadowed, a.sampled_ok, a.sampled, a.duration_ms
     );
     if a.sampled != a.sampled_ok {
         ok = false;
-        println!("   T ✘ sampled storage parity failed");
+        println!("   ✘ sampled storage parity failed");
     }
     Ok(ok)
 }

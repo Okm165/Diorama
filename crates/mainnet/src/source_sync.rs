@@ -21,12 +21,12 @@
 //!   - `GET /eth/v1/beacon/headers/head`   -> CL head slot
 //!   - `GET /eth/v2/beacon/blocks/{slot}`  -> beacon block + execution payload
 //!
-//! Both are parsed into alloy's official beacon types (`crate::blob`), and the
+//! Both are parsed into alloy's official beacon types (`crate::beacon`), and the
 //! payload goes to reth through the official engine types — no hand-rewritten
 //! JSON anywhere on this path.
 //!
 //! No P2P peers, no public RPC.
-use crate::blob::BeaconClient;
+use crate::beacon::BeaconClient;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::B256;

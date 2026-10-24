@@ -203,7 +203,7 @@ impl Instance {
 
     fn check_services(&self, issues: &mut Vec<String>) {
         if let Some(eng) = &self.services.engine {
-            check_engine(self.instance.profile, eng, issues);
+            check_engine(eng, issues);
         }
         if let Some(sim) = &self.services.venue_sim {
             check_venue_sim(sim, issues);
@@ -271,7 +271,7 @@ impl Instance {
 
     /// The mainnet profile's endpoints: the pre-context reads the run path
     /// needs (`Ctx::new` takes the sections itself).
-    pub fn mainnet_urls(&self) -> Result<(String, String, String), ConfigError> {
+    pub fn mainnet_urls(&self) -> Result<(String, String), ConfigError> {
         let l1 = self
             .chains
             .l1
@@ -284,11 +284,8 @@ impl Instance {
             .ok_or_else(|| mismatch("profile \"mainnet\" requires [services.engine]"))?;
         Ok((
             l1.source_url.clone(),
-            engine.anvil.m_url.clone().ok_or_else(|| {
-                mismatch("profile \"mainnet\" requires [services.engine.anvil].m_url")
-            })?,
-            engine.anvil.t_url.clone().ok_or_else(|| {
-                mismatch("profile \"mainnet\" requires [services.engine.anvil].t_url")
+            engine.anvil.target_url.clone().ok_or_else(|| {
+                mismatch("profile \"mainnet\" requires [services.engine.anvil].target_url")
             })?,
         ))
     }
@@ -305,10 +302,10 @@ impl Instance {
             .engine
             .as_ref()
             .ok_or_else(|| mismatch("profile \"venue\" requires [services.engine]"))?;
-        let v_url = engine.anvil.v_url.clone().ok_or_else(|| {
-            mismatch("profile \"venue\" requires [services.engine.anvil].v_url")
+        let target_url = engine.anvil.target_url.clone().ok_or_else(|| {
+            mismatch("profile \"venue\" requires [services.engine.anvil].target_url")
         })?;
-        Ok((chain.source_url.clone(), v_url))
+        Ok((chain.source_url.clone(), target_url))
     }
 
     /// The instance as a TOML value (the shape the loader produced).
@@ -378,9 +375,9 @@ impl Instance {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
             mismatch("export-env daloc (mainnet profile) requires [services.engine]")
         })?;
-        let t_url = engine.anvil.t_url.as_deref().ok_or_else(|| {
+        let t_url = engine.anvil.target_url.as_deref().ok_or_else(|| {
             mismatch(
-                "export-env daloc (mainnet profile) requires [services.engine.anvil].t_url",
+                "export-env daloc (mainnet profile) requires [services.engine.anvil].target_url",
             )
         })?;
         let t = resolved("ANVIL_T_URL", t_url)?;
@@ -397,8 +394,8 @@ impl Instance {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
             mismatch("export-env daloc (venue profile) requires [services.engine]")
         })?;
-        let v_url = engine.anvil.v_url.as_deref().ok_or_else(|| {
-            mismatch("export-env daloc (venue profile) requires [services.engine.anvil].v_url")
+        let v_url = engine.anvil.target_url.as_deref().ok_or_else(|| {
+            mismatch("export-env daloc (venue profile) requires [services.engine.anvil].target_url")
         })?;
         let v = resolved("ANVIL_V_URL", v_url)?;
         let sim = self.services.venue_sim.as_ref().ok_or_else(|| {
@@ -512,53 +509,22 @@ fn looks_like_secret(value: &str) -> bool {
     hex.len() >= 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-/// The profile's anvil shape: exactly the profile's endpoints, each a
-/// parseable http URL.
-fn check_engine_anvil(profile: Profile, anvil: &EngineAnvil, issues: &mut Vec<String>) {
-    match profile {
-        Profile::Mainnet => {
-            for (key, url) in [
-                ("services.engine.anvil.m_url", &anvil.m_url),
-                ("services.engine.anvil.t_url", &anvil.t_url),
-            ] {
-                match url {
-                    Some(url) => check_http_url(key, url, issues),
-                    None => issues.push(format!("profile \"ethereum\" requires [{key}]")),
-                }
-            }
-            if anvil.v_url.is_some() {
-                issues.push(
-                    "profile \"ethereum\" must not carry [services.engine.anvil].v_url".into(),
-                );
-            }
-        }
-        Profile::Venue => {
-            match &anvil.v_url {
-                Some(url) => check_http_url("services.engine.anvil.v_url", url, issues),
-                None => issues
-                    .push("profile \"venue\" requires [services.engine.anvil].v_url".into()),
-            }
-            for (key, present) in [
-                ("m_url", anvil.m_url.is_some()),
-                ("t_url", anvil.t_url.is_some()),
-            ] {
-                if present {
-                    issues.push(format!(
-                        "profile \"venue\" must not carry [services.engine.anvil].{key}"
-                    ));
-                }
-            }
-        }
+/// The anvil shape: the profile's target endpoint, a parseable http URL. One
+/// field for both profiles (the endpoint is a deployment fact).
+fn check_engine_anvil(anvil: &EngineAnvil, issues: &mut Vec<String>) {
+    match &anvil.target_url {
+        Some(url) => check_http_url("services.engine.anvil.target_url", url, issues),
+        None => issues.push("the engine requires [services.engine.anvil].target_url".into()),
     }
 }
 
-/// The engine's section: the profile's anvil shape, the beacon list, the
-/// source-sync boundary, the state dirs, and the feed bridge.
-fn check_engine(profile: Profile, eng: &EngineSection, issues: &mut Vec<String>) {
-    check_engine_anvil(profile, &eng.anvil, issues);
-    for (i, url) in eng.blobs.beacon_urls.iter().enumerate() {
+/// The engine's section: the anvil shape, the beacon list, the source-sync
+/// boundary, the state dirs, and the feed bridge.
+fn check_engine(eng: &EngineSection, issues: &mut Vec<String>) {
+    check_engine_anvil(&eng.anvil, issues);
+    for (i, url) in eng.beacon.urls.iter().enumerate() {
         check_http_url(
-            &format!("services.engine.blobs.beacon_urls[{i}]"),
+            &format!("services.engine.beacon.urls[{i}]"),
             url,
             issues,
         );

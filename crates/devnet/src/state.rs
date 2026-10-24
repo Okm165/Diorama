@@ -25,19 +25,17 @@ pub struct ChainCursor {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Persisted {
-    #[serde(default)]
-    pub m: Option<ChainCursor>,
-    #[serde(default)]
-    pub t: Option<ChainCursor>,
+    /// The devnet chain's cursor: T on the mainnet profile, V on the venue
+    /// profile. One field, both profiles — the chain is the profile's, the
+    /// cursor's meaning is the same. (`alias = "t"`: pre-rename state files.)
+    #[serde(default, alias = "t")]
+    pub devnet: Option<ChainCursor>,
     /// Hash of the last processed reth block (reorg continuity check).
     #[serde(default)]
     pub reth_last_hash: Option<B256>,
     /// Height of the last processed reth block (continuity check guard).
     #[serde(default)]
     pub reth_last_block: Option<u64>,
-    /// Learned blob wrapper form ("legacy" | "eip7594" | "bare").
-    #[serde(default)]
-    pub blob_wrapper: Option<String>,
     /// Fork pin of the current epoch (anvil forkBlockNumber). A change starts
     /// a new epoch: the shadow registry is cleared (marks *and* values - the
     /// old base's derivations must not be replayed onto the moved base) and

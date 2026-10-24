@@ -191,7 +191,7 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
     if let (Some(chain), Some(engine)) = (cfg.chains.venue.as_ref(), cfg.services.engine.as_ref())
     {
         let state_dir = engine.state_dir.to_string_lossy().to_string();
-        let v_url = engine.anvil.v_url.as_deref().unwrap_or_default();
+        let v_url = engine.anvil.target_url.as_deref().unwrap_or_default();
         mirror_config::require_resolved_logged(
             "venue engine wiring",
             &[&chain.source_url, v_url, &state_dir],

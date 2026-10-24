@@ -229,7 +229,7 @@ fi
 echo "-- the shared gauges in /metrics"
 LAST_PATH=/metrics
 fetch t > /dev/null; fetch v > /dev/null
-for gauge in mirror_shadowed_slots mirror_halted mirror_frozen; do
+for gauge in mirror_shadowed_slots mirror_halted; do
   has_t=$(grep -c "^$gauge" "/tmp/sym-t.out" || true)
   has_v=$(grep -c "^$gauge" "/tmp/sym-v.out" || true)
   if [ "$has_t" -ge 1 ] && [ "$has_v" -ge 1 ]; then ok "$gauge on both"; else bad "$gauge: T=$has_t V=$has_v"; fi

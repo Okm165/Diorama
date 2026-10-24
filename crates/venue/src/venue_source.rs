@@ -25,7 +25,7 @@
 //! scratch/slow source).
 use alloy_primitives::{Address, B256, U256};
 use mirror_anvil::{Error, Rpc};
-use mirror_devnet::source::{Fut, Source};
+use mirror_devnet::source::{Capabilities, Fut, Source};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -75,6 +75,20 @@ impl VenueSource {
 // measured), reads are refused instead of served from the wrong state.
 
 impl Source for VenueSource {
+    /// What the public venue source can serve (measured 2026-10-24): no BAL,
+    /// no traces, no proofs, no websocket JSON-RPC; state reads are
+    /// latest-only (the block parameter is ignored), and system transactions
+    /// (Core→EVM completions) are exposed through their own RPC method.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            native_bal: false,
+            traces: false,
+            historical: false,
+            heads_ws: false,
+            system_txs: true,
+        }
+    }
+
     /// The source's anchor: the pin. Before the pin is resolved (a boot race
     /// the bin's ordering rules out) the source's head is the only truthful
     /// answer left; it is never the steady-state path.
@@ -85,6 +99,16 @@ impl Source for VenueSource {
                 return Ok(pin);
             }
             self.rpc.block_number().await
+        })
+    }
+
+    /// Block headers are historical-safe on the public source (unlike state
+    /// reads): `eth_getBlockByNumber` serves old blocks, which is what makes
+    /// forking and cursor hashes possible at all. No pin guard here.
+    fn header(&self, n: u64) -> Fut<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
+        Box::pin(async move {
+            let block = self.rpc.block_by_number(n, false).await?;
+            Ok(block.header)
         })
     }
 
