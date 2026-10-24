@@ -79,7 +79,7 @@ impl FixedSlots {
     }
 
     pub fn declare(&mut self, contract: Address, slots: impl IntoIterator<Item = U256>) {
-        self.slots.entry(contract).or_default().extend(slots);
+        crate::cow::declare_slots(&mut self.slots, contract, slots);
     }
 }
 

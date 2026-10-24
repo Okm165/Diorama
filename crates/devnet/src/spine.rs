@@ -32,10 +32,13 @@ pub trait Mirror: Send + Sync {
     /// The truth for state reads (re-sync/hand-back): reth at a block | the
     /// fork source at the pin.
     fn source(&self) -> &Arc<dyn Source>;
-    /// The composer's read side: the same object as [`Self::source`] on the
-    /// mainnet (reth serves both roles), the venue's latest-reading source
-    /// (its pin guard would refuse the follow's reads).
-    fn follow_source(&self) -> &Arc<dyn Source>;
+    /// The composer's read side: the same object as [`Self::source`] unless a
+    /// mirror's follow reads differ from its truth reads — the venue's
+    /// latest-reading source, whose pin guard would refuse the follow's reads
+    /// (reth serves both roles on the mainnet, so the default is exact there).
+    fn follow_source(&self) -> &Arc<dyn Source> {
+        self.source()
+    }
     /// The reset seam: how a chain reset is witnessed.
     fn reset(&self) -> &Arc<dyn ResetDetector>;
     /// The profile's decisions, as data.

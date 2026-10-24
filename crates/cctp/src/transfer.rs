@@ -309,51 +309,45 @@ pub async fn eth_call<C: SolCall>(rpc: &Rpc, to: Address, call: &C) -> Result<C:
     })
 }
 
-/// The revision-dependent min-fee surface, capability-probed at boot (§15.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FeeSurface {
-    pub min_fee: Option<U256>,
+/// Probe the revision-dependent min-fee surface, capability-probed at boot
+/// (§15.2): `Some(minFee)` when the node serves `minFee()`, `None` when it
+/// does not (the Ethereum instance's older revision reverts). A JSON-RPC
+/// error means "no such method"; a transport or decode fault is **not**
+/// absence (boundary-discipline): it propagates, because a probe that could
+/// not run must not be read as "the surface is absent".
+pub(crate) async fn probe_min_fee(rpc: &Rpc, token_messenger: Address) -> Result<Option<U256>> {
+    match eth_call(rpc, token_messenger, &ITokenMessengerV2::minFeeCall {}).await {
+        Ok(min_fee) => Ok(Some(min_fee)),
+        Err(Error::Rpc(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
-impl FeeSurface {
-    /// Probe `minFee()`. A JSON-RPC error means the node answered "no such
-    /// method" (the Ethereum instance's older revision reverts) — that is the
-    /// `None` arm. A transport or decode fault is **not** absence
-    /// (boundary-discipline): it propagates, because a probe that could not
-    /// run must not be read as "the surface is absent".
-    pub async fn probe(rpc: &Rpc, token_messenger: Address) -> Result<Self> {
-        match eth_call(rpc, token_messenger, &ITokenMessengerV2::minFeeCall {}).await {
-            Ok(min_fee) => Ok(Self {
-                min_fee: Some(min_fee),
-            }),
-            Err(Error::Rpc(_)) => Ok(Self { min_fee: None }),
-            Err(e) => Err(e),
-        }
+/// The source-side validation `_depositForBurn` performs: `0 < maxFee <
+/// amount` always; when `minFee > 0`, `maxFee >= max(1,
+/// amount·minFee/10_000_000)`. Refusing here names the numbers instead of
+/// paying for a revert. `None` (or a zero min fee) is the unconstrained
+/// surface: only the amount bound applies.
+pub(crate) fn validate_max_fee(min_fee: Option<U256>, amount: U256, max_fee: U256) -> Result<()> {
+    if max_fee >= amount {
+        return Err(Error::bad_request(format!(
+            "maxFee {max_fee} must be less than amount {amount}"
+        )));
     }
-
-    /// The source-side validation `_depositForBurn` performs: `0 < maxFee <
-    /// amount` always; when `minFee > 0`, `maxFee >= max(1,
-    /// amount·minFee/10_000_000)`. Refusing here names the numbers instead of
-    /// paying for a revert.
-    pub fn validate_max_fee(&self, amount: U256, max_fee: U256) -> Result<()> {
-        if max_fee >= amount {
-            return Err(Error::bad_request(format!("maxFee {max_fee} must be less than amount {amount}"),));
-        }
-        let Some(min_fee) = self.min_fee else {
-            return Ok(());
-        };
-        if min_fee.is_zero() {
-            return Ok(());
-        }
-        let required = required_min_fee(amount, min_fee)?;
-        if max_fee < required {
-            return Err(Error::bad_request(format!(
-                    "maxFee {max_fee} is below the contract's minimum fee {required} \
-                     (minFee {min_fee}, amount {amount})"
-                ),));
-        }
-        Ok(())
+    let Some(min_fee) = min_fee else {
+        return Ok(());
+    };
+    if min_fee.is_zero() {
+        return Ok(());
     }
+    let required = required_min_fee(amount, min_fee)?;
+    if max_fee < required {
+        return Err(Error::bad_request(format!(
+            "maxFee {max_fee} is below the contract's minimum fee {required} \
+             (minFee {min_fee}, amount {amount})"
+        )));
+    }
+    Ok(())
 }
 
 /// The contract's `_calcMinFeeAmount`: `max(1, amount·minFee/MIN_FEE_MULTIPLIER)`,
@@ -761,19 +755,17 @@ mod tests {
     /// `max(1, amount·minFee/10_000_000)` when the probed surface says so.
     #[test]
     fn max_fee_validation_follows_the_contract_rules() {
-        let absent = FeeSurface { min_fee: None };
-        absent.validate_max_fee(U256::from(1000u64), U256::ZERO).unwrap();
-        let err = absent.validate_max_fee(U256::from(1000u64), U256::from(1000u64)).unwrap_err();
+        validate_max_fee(None, U256::from(1000u64), U256::ZERO).unwrap();
+        let err = validate_max_fee(None, U256::from(1000u64), U256::from(1000u64)).unwrap_err();
         assert!(matches!(err, Error::BadRequest { .. }), "{err}");
 
-        let zero = FeeSurface { min_fee: Some(U256::ZERO) };
-        zero.validate_max_fee(U256::from(1000u64), U256::ZERO).unwrap();
+        validate_max_fee(Some(U256::ZERO), U256::from(1000u64), U256::ZERO).unwrap();
 
-        let some = FeeSurface { min_fee: Some(U256::from(1_000_000u64)) };
+        let some = Some(U256::from(1_000_000u64));
         // amount 10_000_000 → min fee 1_000_000 (10 %).
-        let err = some.validate_max_fee(U256::from(10_000_000u64), U256::ZERO).unwrap_err();
+        let err = validate_max_fee(some, U256::from(10_000_000u64), U256::ZERO).unwrap_err();
         assert!(format!("{err}").contains("1000000"), "{err}");
-        some.validate_max_fee(U256::from(10_000_000u64), U256::from(1_000_000u64)).unwrap();
+        validate_max_fee(some, U256::from(10_000_000u64), U256::from(1_000_000u64)).unwrap();
         // The floor: a tiny fee still requires 1.
         assert_eq!(
             required_min_fee(U256::from(2u64), U256::from(1u64)).unwrap(),

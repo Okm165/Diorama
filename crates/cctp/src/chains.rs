@@ -7,7 +7,7 @@
 //! themselves. Configuration carries only deployment facts (URLs, keys,
 //! state dir) — never an address a typo could move value on.
 use crate::error::{Error, Result};
-use crate::transfer::{eth_call, FeeSurface, IMessageTransmitterV2, ITokenMessengerV2, IERC20};
+use crate::transfer::{eth_call, probe_min_fee, IMessageTransmitterV2, ITokenMessengerV2, IERC20};
 // alloy's official chain-id type: a known chain by name, or a raw EIP-155 id
 // (`Chain::from_id`). Aliased to `ChainId` because this crate already has a
 // `Chain` (the served chain) — same type, unambiguous name.
@@ -137,7 +137,7 @@ impl Chain {
         }
         let (local_domain, version, body_version) = self.verify_versions().await?;
         let (local_transmitter, peer_messenger) = self.verify_messengers(peer).await?;
-        let fees = FeeSurface::probe(&self.rpc, TOKEN_MESSENGER_V2).await?;
+        let min_fee = probe_min_fee(&self.rpc, TOKEN_MESSENGER_V2).await?;
         Ok(Wiring {
             chain_id,
             local_domain,
@@ -145,7 +145,7 @@ impl Chain {
             body_version,
             local_transmitter,
             peer_messenger,
-            min_fee: fees.min_fee,
+            min_fee,
         })
     }
 

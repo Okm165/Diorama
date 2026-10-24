@@ -71,7 +71,6 @@ mod design_assertions {
         is_normal::<crate::transfer::MessageHeader>();
         is_normal::<crate::transfer::BurnMessageBody>();
         is_normal::<crate::transfer::Message>();
-        is_normal::<crate::transfer::FeeSurface>();
         is_normal::<crate::transfer::Wallet>();
         is_normal::<crate::transfer::TxSender>();
         is_normal::<crate::attester::Attester>();

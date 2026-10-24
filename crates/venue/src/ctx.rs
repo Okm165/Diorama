@@ -12,6 +12,7 @@ use crate::error::Result;
 use crate::metrics::VenueMetrics;
 use mirror_config::{ChainVenue, EngineSection};
 use mirror_devnet::admin::AdminSurface;
+use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::source::Source;
 use mirror_devnet::spine::Mirror;
@@ -98,6 +99,28 @@ impl Ctx {
             self.engine.loops.chunk_size,
             true,
         )
+    }
+
+    /// Record one shadow-scan walk in this profile's counters: the driver's
+    /// scans and the shared admin hand-back all report through here.
+    pub(crate) fn record_scan(&self, walk: &mirror_devnet::scan::ScanWalk) {
+        self.venue_metrics.record_scan(
+            walk,
+            &self.venue_metrics.scanned_blocks_total,
+            &self.venue_metrics.skipped_empty_blocks_total,
+        );
+    }
+
+    /// Re-pin V to the fork source's latest block (the `/admin/epoch` route's
+    /// one profile-specific fact: which chain, which source URL).
+    pub(crate) async fn epoch_repin(&self) -> Result<mirror_devnet::admin::EpochResponse> {
+        Ok(mirror_devnet::admin::AdminSurface::epoch_repin(&self.v, &self.chain.source_url).await?)
+    }
+
+    /// Run the at-pin probes now and report the run (the shared
+    /// `/admin/probes` route; the cumulative counters live in `/metrics`).
+    pub(crate) async fn probes_now(&self) -> Result<mirror_devnet::probes::ProbeOutcome> {
+        crate::driver::probes_now(self).await
     }
 
 }

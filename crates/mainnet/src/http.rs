@@ -19,11 +19,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mirror_devnet::admin::{
-    EpochResponse, RewindRequest, RewindResponse,
-    ShadowRequest, TimeRequest,
-};
-use mirror_devnet::metrics::Registry as _;
+use mirror_devnet::admin::TimeRequest;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -189,15 +185,6 @@ async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
     out
 }
 
-async fn admin_rewind(
-    State(ctx): State<Arc<Ctx>>,
-    Json(req): Json<RewindRequest>,
-) -> Result<Json<RewindResponse>> {
-    Ok(Json(ctx.admin().rewind_response(req.blocks).await?))
-}
-
-
-
 async fn admin_time(
     State(ctx): State<Arc<Ctx>>,
     Json(req): Json<TimeRequest>,
@@ -208,43 +195,6 @@ async fn admin_time(
         t_head: out.head,
         note: "T's timestamps are monotonic; lowering the offset lets the clock converge, it cannot jump backwards",
     }))
-}
-
-async fn admin_shadow(
-    State(ctx): State<Arc<Ctx>>,
-    Json(req): Json<ShadowRequest>,
-) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
-    // The hand-back carries its own race guard (AdminSurface::shadow_hand_back);
-    // the scan cost its pre-step paid lands in this profile's counter.
-    let (out, walk) = ctx.admin().shadow_hand_back(&req).await?;
-    ctx.eth_metrics.record_scan(
-        &walk,
-        &ctx.eth_metrics.shadow_scanned_blocks,
-        &ctx.eth_metrics.shadow_skipped_empty_blocks,
-    );
-    Ok(Json(out))
-}
-
-
-
-/// `/admin/epoch` — one-call revert-to-blank (plan §7.1): re-pin T to the
-/// source's latest block. The engine's cursor check detects the reset on its
-/// next pass and runs the epoch rule (new base = clear marks and values;
-/// same base = re-apply the recorded writes), so this route never replicates
-/// that logic.
-async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
-    Ok(Json(
-        mirror_devnet::admin::AdminSurface::epoch_repin(&ctx.anvil_t, &ctx.l1.source_url).await?,
-    ))
-}
-
-/// `/admin/probes`: run the configured probes now (M at the cursor vs reth)
-/// and report the run. The venue's route is the same verb over its at-pin
-/// probe set; the per-block convergence counters stay the loop's.
-async fn admin_probes(
-    State(ctx): State<Arc<Ctx>>,
-) -> Result<Json<mirror_devnet::probes::ProbeOutcome>> {
-    Ok(Json(crate::driver::probes_now(&ctx).await?))
 }
 
 /// `/admin/feed` — the bridged feeds and their state.

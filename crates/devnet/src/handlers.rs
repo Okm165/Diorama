@@ -1,11 +1,13 @@
 //! The two mirrors' identical HTTP handlers — one macro, both crates.
 //!
-//! The profiles differ in their state type and their error type; the shapes
-//! and the shared `mirror_devnet` payload types do not. The five handlers the
-//! orchestrator and the drills depend on (probes hit `/livez` on both, the
-//! pause/resume/deal drills run against both) must stay byte-identical, so
-//! they are generated once and invoked twice — the doctrine's one repeated
-//! small-code macro, never a single-use one.
+//! The profiles differ in their state type, their error type and a few
+//! `Ctx` accessors; the shapes and the shared `mirror_devnet` payload types do
+//! not. The handlers the orchestrator and the drills depend on (probes hit
+//! `/livez` on both, the pause/resume/deal/rewind/shadow/epoch drills run
+//! against both) must stay byte-identical, so they are generated once and
+//! invoked twice — the doctrine's one repeated small-code macro, never a
+//! single-use one. The profile-specific facts the handlers need are `Ctx`
+//! methods (`admin`, `record_scan`, `epoch_repin`).
 
 /// Generate the shared health and admin handlers inside a mirror's `http`
 /// module (its `Ctx` and its error type in scope):
@@ -56,6 +58,49 @@ macro_rules! mirror_handlers {
             ::axum::Json(req): ::axum::Json<$crate::deal::DealRequest>,
         ) -> ::std::result::Result<::axum::Json<$crate::deal::DealOutcome>, $error> {
             Ok(::axum::Json(ctx.admin().deal(&req).await?))
+        }
+
+        /// `/admin/rewind` — undo the engine's journaled writes over the last
+        /// `blocks` scanned blocks, newest first.
+        async fn admin_rewind(
+            ::axum::extract::State(ctx): ::axum::extract::State<::std::sync::Arc<$ctx>>,
+            ::axum::Json(req): ::axum::Json<$crate::admin::RewindRequest>,
+        ) -> ::std::result::Result<::axum::Json<$crate::admin::RewindResponse>, $error> {
+            Ok(::axum::Json(ctx.admin().rewind_response(req.blocks).await?))
+        }
+
+        /// `/admin/shadow` — the COW hand-back: clear the named keys' marks
+        /// (or all of an account's) and re-sync them from the source. The
+        /// hand-back carries its own race guard; the scan its pre-step paid
+        /// for lands in the profile's counters (`Ctx::record_scan`).
+        async fn admin_shadow(
+            ::axum::extract::State(ctx): ::axum::extract::State<::std::sync::Arc<$ctx>>,
+            ::axum::Json(req): ::axum::Json<$crate::admin::ShadowRequest>,
+        ) -> ::std::result::Result<::axum::Json<$crate::admin::ShadowOutcome>, $error> {
+            let (out, walk) = ctx.admin().shadow_hand_back(&req).await?;
+            ctx.record_scan(&walk);
+            Ok(::axum::Json(out))
+        }
+
+        /// `/admin/epoch` — one-call revert-to-blank: re-pin the chain to the
+        /// source's latest block. The engine's reset detection notices on its
+        /// next pass and runs the epoch rule (new base = clear marks and
+        /// values; same base = re-apply the recorded writes), so this route
+        /// never replicates that logic.
+        async fn admin_epoch(
+            ::axum::extract::State(ctx): ::axum::extract::State<::std::sync::Arc<$ctx>>,
+        ) -> ::std::result::Result<::axum::Json<$crate::admin::EpochResponse>, $error> {
+            Ok(::axum::Json(ctx.epoch_repin().await?))
+        }
+
+        /// `/admin/probes` — run the configured probes now and report the
+        /// run (boot and re-pin run them automatically; the on-demand trigger
+        /// matters after a hand-back, when they should go green again). The
+        /// per-block counters stay the loops'.
+        async fn admin_probes(
+            ::axum::extract::State(ctx): ::axum::extract::State<::std::sync::Arc<$ctx>>,
+        ) -> ::std::result::Result<::axum::Json<$crate::probes::ProbeOutcome>, $error> {
+            Ok(::axum::Json(ctx.probes_now().await?))
         }
 
         /// `/events` — the fact stream, SSE. One JSON notice per event

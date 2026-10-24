@@ -68,12 +68,6 @@ impl Mirror for MainnetMirror {
         &self.source
     }
 
-    /// One reth serves both roles here: the state reads at a block and the
-    /// composer's reads (historical reads are exact).
-    fn follow_source(&self) -> &Arc<dyn Source> {
-        &self.source
-    }
-
     fn reset(&self) -> &Arc<dyn ResetDetector> {
         &self.reset
     }

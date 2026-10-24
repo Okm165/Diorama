@@ -26,11 +26,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mirror_devnet::admin::{
-    EpochResponse, RewindRequest, RewindResponse,
-    ShadowRequest,
-};
-use mirror_devnet::metrics::Registry as _;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -160,52 +155,6 @@ async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
 }
 
 
-
-/// `/admin/rewind`: undo the engine's journaled writes (the deal faucet's
-/// silent storage writes) over the last `blocks` scanned blocks, newest first.
-async fn admin_rewind(
-    State(ctx): State<Arc<Ctx>>,
-    Json(req): Json<RewindRequest>,
-) -> Result<Json<RewindResponse>> {
-    Ok(Json(ctx.admin().rewind_response(req.blocks).await?))
-}
-async fn admin_shadow(
-    State(ctx): State<Arc<Ctx>>,
-    Json(req): Json<ShadowRequest>,
-) -> Result<Json<mirror_devnet::admin::ShadowOutcome>> {
-    // The hand-back carries its own race guard (AdminSurface::shadow_hand_back);
-    // the scan cost its pre-step paid lands in this profile's counter.
-    let (out, walk) = ctx.admin().shadow_hand_back(&req).await?;
-    ctx.venue_metrics.record_scan(
-        &walk,
-        &ctx.venue_metrics.scanned_blocks_total,
-        &ctx.venue_metrics.skipped_empty_blocks_total,
-    );
-    Ok(Json(out))
-}
-
-
-
-/// `/admin/epoch`: re-pin V to the fork source's latest block. One anvil
-/// call — the driver's canary notices the reset on its next pass and runs the
-/// epoch rule (new base = new epoch, same base = restore), so this route
-/// never needs to replicate that logic.
-async fn admin_epoch(State(ctx): State<Arc<Ctx>>) -> Result<Json<EpochResponse>> {
-    Ok(Json(
-        mirror_devnet::admin::AdminSurface::epoch_repin(&ctx.v, &ctx.chain.source_url).await?,
-    ))
-}
-
-/// `/admin/probes`: run the at-pin parity probes now and report the run (boot
-/// and re-pin run them automatically; the on-demand trigger matters after a
-/// hand-back, when the probes should go green again). The ethereum engine's
-/// route is the same verb over its M-vs-reth probe set; the cumulative
-/// counters live in `/metrics` on both.
-async fn admin_probes(
-    State(ctx): State<Arc<Ctx>>,
-) -> Result<Json<mirror_devnet::probes::ProbeOutcome>> {
-    Ok(Json(crate::driver::probes_now(&ctx).await?))
-}
 
 #[cfg(test)]
 mod tests {

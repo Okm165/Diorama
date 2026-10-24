@@ -219,94 +219,71 @@ impl Instance {
     /// already validated presence; a missing one is still a named error, never
     /// a silent default).
     pub fn take_mainnet(&mut self) -> Result<(ChainL1, EngineSection), ConfigError> {
-        let l1 = self
-            .chains
-            .l1
-            .take()
-            .ok_or_else(|| mismatch("profile \"mainnet\" requires [chains.l1]"))?;
-        let engine = self
-            .services
-            .engine
-            .take()
-            .ok_or_else(|| mismatch("profile \"mainnet\" requires [services.engine]"))?;
+        let l1 = required(self.chains.l1.take(), "profile \"mainnet\" requires [chains.l1]")?;
+        let engine = required(
+            self.services.engine.take(),
+            "profile \"mainnet\" requires [services.engine]",
+        )?;
         Ok((l1, engine))
     }
 
     /// The venue profile's sections, moved out for the run path.
     pub fn take_venue(&mut self) -> Result<(ChainVenue, EngineSection), ConfigError> {
-        let chain = self
-            .chains
-            .venue
-            .take()
-            .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
-        let engine = self
-            .services
-            .engine
-            .take()
-            .ok_or_else(|| mismatch("profile \"venue\" requires [services.engine]"))?;
+        let chain = required(self.chains.venue.take(), "profile \"venue\" requires [chains.venue]")?;
+        let engine = required(
+            self.services.engine.take(),
+            "profile \"venue\" requires [services.engine]",
+        )?;
         Ok((chain, engine))
     }
 
     /// The simulator's sections, moved out for the run path.
     pub fn take_venue_sim(&mut self) -> Result<(ChainVenue, VenueSimSection), ConfigError> {
-        let chain = self
-            .chains
-            .venue
-            .take()
-            .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
-        let sim = self
-            .services
-            .venue_sim
-            .take()
-            .ok_or_else(|| mismatch("the simulator requires [services.venue_sim]"))?;
+        let chain = required(self.chains.venue.take(), "profile \"venue\" requires [chains.venue]")?;
+        let sim = required(
+            self.services.venue_sim.take(),
+            "the simulator requires [services.venue_sim]",
+        )?;
         Ok((chain, sim))
     }
 
     /// The CCTP bridge's section, moved out for the run path. Cross-cutting:
     /// it needs no chain section (its own `t_url`/`v_url` are the endpoints).
     pub fn take_cctp(&mut self) -> Result<CctpSection, ConfigError> {
-        self.services
-            .cctp_bridge
-            .take()
-            .ok_or_else(|| mismatch("the CCTP bridge requires [services.cctp_bridge]"))
+        required(
+            self.services.cctp_bridge.take(),
+            "the CCTP bridge requires [services.cctp_bridge]",
+        )
     }
 
     /// The mainnet profile's endpoints: the pre-context reads the run path
     /// needs (`Ctx::new` takes the sections itself).
     pub fn mainnet_urls(&self) -> Result<(String, String), ConfigError> {
-        let l1 = self
-            .chains
-            .l1
-            .as_ref()
-            .ok_or_else(|| mismatch("profile \"mainnet\" requires [chains.l1]"))?;
-        let engine = self
-            .services
-            .engine
-            .as_ref()
-            .ok_or_else(|| mismatch("profile \"mainnet\" requires [services.engine]"))?;
+        let l1 = required(self.chains.l1.as_ref(), "profile \"mainnet\" requires [chains.l1]")?;
+        let engine = required(
+            self.services.engine.as_ref(),
+            "profile \"mainnet\" requires [services.engine]",
+        )?;
         Ok((
             l1.source_url.clone(),
-            engine.anvil.target_url.clone().ok_or_else(|| {
-                mismatch("profile \"mainnet\" requires [services.engine.anvil].target_url")
-            })?,
+            required(
+                engine.anvil.target_url.clone(),
+                "profile \"mainnet\" requires [services.engine.anvil].target_url",
+            )?,
         ))
     }
 
     /// The venue profile's endpoints (the fork source and anvil V).
     pub fn venue_urls(&self) -> Result<(String, String), ConfigError> {
-        let chain = self
-            .chains
-            .venue
-            .as_ref()
-            .ok_or_else(|| mismatch("profile \"venue\" requires [chains.venue]"))?;
-        let engine = self
-            .services
-            .engine
-            .as_ref()
-            .ok_or_else(|| mismatch("profile \"venue\" requires [services.engine]"))?;
-        let target_url = engine.anvil.target_url.clone().ok_or_else(|| {
-            mismatch("profile \"venue\" requires [services.engine.anvil].target_url")
-        })?;
+        let chain = required(self.chains.venue.as_ref(), "profile \"venue\" requires [chains.venue]")?;
+        let engine = required(
+            self.services.engine.as_ref(),
+            "profile \"venue\" requires [services.engine]",
+        )?;
+        let target_url = required(
+            engine.anvil.target_url.clone(),
+            "profile \"venue\" requires [services.engine.anvil].target_url",
+        )?;
         Ok((chain.source_url.clone(), target_url))
     }
 
@@ -334,11 +311,10 @@ impl Instance {
     pub fn export_env(&self, section: &str) -> Result<Vec<String>, ConfigError> {
         match section {
             "anvil" => {
-                let l1 = self
-                    .chains
-                    .l1
-                    .as_ref()
-                    .ok_or_else(|| mismatch("export-env anvil requires [chains.l1]"))?;
+                let l1 = required(
+                    self.chains.l1.as_ref(),
+                    "export-env anvil requires [chains.l1]",
+                )?;
                 Ok(vec![format!("FORK_OFFSET={}", l1.fork_offset)])
             }
             "daloc" => self.daloc_env(),
@@ -435,6 +411,12 @@ fn ws_of(url: &str) -> String {
         Some(rest) => format!("ws{rest}"),
         None => url.to_string(),
     }
+}
+
+/// Take a required section, naming the need when it is absent: the one shape
+/// every `take_*`/`*_urls` read uses.
+fn required<T>(section: Option<T>, what: &str) -> Result<T, ConfigError> {
+    section.ok_or_else(|| mismatch(what))
 }
 
 fn mismatch(what: &str) -> ConfigError {

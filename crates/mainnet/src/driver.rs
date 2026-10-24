@@ -318,11 +318,7 @@ async fn scan_once(ctx: &Ctx) -> Result<()> {
     // down). The applier's inline scan shares this high-water mark, so its
     // blocks are not re-traced.
     let walk = mirror_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await?;
-    ctx.eth_metrics.record_scan(
-        &walk,
-        &ctx.eth_metrics.shadow_scanned_blocks,
-        &ctx.eth_metrics.shadow_skipped_empty_blocks,
-    );
+    ctx.record_scan(&walk);
     mirror_devnet::scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
     Ok(())
 }

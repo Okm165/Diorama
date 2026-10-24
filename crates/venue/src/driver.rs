@@ -189,11 +189,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     if walk.walked == 0 {
         return Ok(());
     }
-    ctx.venue_metrics.record_scan(
-        &walk,
-        &ctx.venue_metrics.scanned_blocks_total,
-        &ctx.venue_metrics.skipped_empty_blocks_total,
-    );
+    ctx.record_scan(&walk);
     scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
     ctx.plane.save_shadow()?;
     // Ring the journal like the applier does on T: the rewind window is the

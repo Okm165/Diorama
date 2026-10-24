@@ -12,6 +12,8 @@ description = "AST scope analysis: the shapes the doctrine keeps small (fitness 
 # line/column positions for the metrics.
 syn = { version = "2", features = ["full", "visit"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
+# Token streams for the duplicate-body hash (syn's companion crate).
+quote = "1"
 
 [lints]
 workspace = true

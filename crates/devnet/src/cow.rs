@@ -30,6 +30,18 @@ pub struct WatchSet {
     pub slots: HashMap<Address, HashSet<U256>>,
 }
 
+/// Declare `slots` for `contract` (extend, never replace: a second
+/// declaration adds): the one body the watch set and the venue's fixed
+/// closures share — their maps differ in the value collection, not in the
+/// rule.
+pub fn declare_slots<C: Extend<U256> + Default>(
+    map: &mut HashMap<Address, C>,
+    contract: Address,
+    slots: impl IntoIterator<Item = U256>,
+) {
+    map.entry(contract).or_default().extend(slots);
+}
+
 impl WatchSet {
     pub fn new(accounts: HashSet<Address>) -> Self {
         Self {
@@ -42,7 +54,7 @@ impl WatchSet {
     /// is touched, its declared slots are watched. The plan is the narrower
     /// set; the watch set's job is the COW filter and the audit.
     pub fn declare_slots(&mut self, contract: Address, slots: impl IntoIterator<Item = U256>) {
-        self.slots.entry(contract).or_default().extend(slots);
+        declare_slots(&mut self.slots, contract, slots);
     }
 
     /// Is this write's key watched? Account fields follow the account; a

@@ -14,7 +14,7 @@ use crate::metrics::{render_counts, CctpMetrics};
 use crate::relayer::Relayer;
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{
-    wait_for_receipt, FeeSurface, IERC20, ITokenMessengerV2, TxSender,
+    validate_max_fee, wait_for_receipt, IERC20, ITokenMessengerV2, TxSender,
 };
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
@@ -363,10 +363,11 @@ fn validate_request(state: &ControlState, request: &TransferRequest) -> Result<(
     if request.amount.is_zero() {
         return Err(Error::bad_request("amount must be nonzero",));
     }
-    let surface = FeeSurface {
-        min_fee: state.min_fees.get(&request.source).copied().flatten(),
-    };
-    surface.validate_max_fee(request.amount, U256::ZERO)
+    validate_max_fee(
+        state.min_fees.get(&request.source).copied().flatten(),
+        request.amount,
+        U256::ZERO,
+    )
 }
 
 /// Funding and allowance: the messenger pulls from the sender's balance
