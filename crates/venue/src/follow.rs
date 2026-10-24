@@ -16,7 +16,10 @@ use std::time::Instant;
 
 
 /// One follow window's outcome (what the fact and the gauges report).
-struct Window {
+struct WindowStats {
+    /// The compose rung's name (`plan.kind.as_str()`: `poll` for the public
+    /// API's touches; `bal`/`trace` if a future source serves them).
+    source: &'static str,
     total: usize,
     applied: usize,
     filtered: usize,
@@ -53,14 +56,14 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<()> {
 
     let started = Instant::now();
     continuity_check(ctx, followed).await?;
-    let window = compose_window(ctx, followed, source_head).await?;
+    let stats = compose_window(ctx, followed, source_head).await?;
     advance_follow(ctx, source_head).await?;
-    report_window(ctx, followed, source_head, &window, started.elapsed().as_millis() as u64);
+    report_window(ctx, followed, source_head, &stats, started.elapsed().as_millis() as u64);
     Ok(())
 }
 
 /// One place for the window's gauges, fact, and log.
-fn report_window(ctx: &Ctx, from: u64, to: u64, window: &Window, ms: u64) {
+fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats, ms: u64) {
     ctx.venue_metrics
         .inc(&ctx.venue_metrics.follow_windows_total);
     ctx.venue_metrics
@@ -72,7 +75,7 @@ fn report_window(ctx: &Ctx, from: u64, to: u64, window: &Window, ms: u64) {
     ctx.plane.facts.publish(Fact::BlockApplied {
         chain: ctx.mirror.label(),
         block: to,
-        source: "poll",
+        source: window.source,
         writes: window.total,
         filtered: window.filtered,
         skipped_shadowed: window.skipped_shadowed,
@@ -142,38 +145,35 @@ async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
 /// Compose the window and land its writes on V under the COW filter, then
 /// record the live parity of what was applied. The composer is the spine's
 /// generic one: the venue's source has no native BAL, so it synthesizes.
-async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<Window> {
-    let (window, stats) = mirror_devnet::bal::compose(
+async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
+    // The shared pipeline half (compose → COW → flatten): the same call the
+    // applier makes for one parent block, here for the whole window.
+    let plan = mirror_devnet::bal::plan(
         ctx.mirror.follow_source().as_ref(),
         ctx.target.as_ref(),
         ctx.mirror.scope(),
-        from,
-        to,
+        &ctx.plane.shadow,
+        mirror_devnet::bal::Window::new(from, to),
     )
     .await?;
-    record_poll_stats(ctx, &stats);
-    let total = mirror_devnet::bal::change_count(&window.bal);
-    let (filtered, cow) = {
-        let shadow = ctx.plane.shadow.lock()?;
-        mirror_devnet::cow::filter_bal(ctx.mirror.scope().watch(), &shadow, window.bal)
-    };
-    let writes = mirror_anvil::flatten_bal(&filtered);
-    let applied = if writes.is_empty() {
+    record_poll_stats(ctx, &plan.compose);
+    let applied = if plan.writes.is_empty() {
         0
     } else {
-        mirror_anvil::apply_writes(&ctx.v, &writes, ctx.engine.loops.chunk_size).await?
+        mirror_anvil::apply_writes(&ctx.v, &plan.writes, ctx.engine.loops.chunk_size).await?
     };
     let (sampled, sampled_ok) =
         if matches!(ctx.mirror.policies().probes, ProbeSchedule::LiveParity) {
-            mirror_devnet::bal::verify(ctx.target.as_ref(), &filtered).await?
+            mirror_devnet::bal::verify(ctx.target.as_ref(), &plan.bal).await?
         } else {
             (0, 0)
         };
-    Ok(Window {
-        total,
+    Ok(WindowStats {
+        source: plan.kind.as_str(),
+        total: plan.total,
         applied,
-        filtered: writes.len(),
-        skipped_shadowed: cow.skipped_shadowed,
+        filtered: plan.writes.len(),
+        skipped_shadowed: plan.filter.skipped_shadowed,
         sampled,
         sampled_ok,
     })

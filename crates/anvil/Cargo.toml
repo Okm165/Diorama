@@ -11,7 +11,6 @@ alloy-primitives = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
 alloy-json-rpc = { workspace = true }
-alloy-serde = { workspace = true }
 alloy-rpc-types-trace = { workspace = true }
 alloy-rpc-types-anvil = { workspace = true }
 alloy-rpc-types-txpool = { workspace = true }
@@ -21,11 +20,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-
-[dev-dependencies]
-# The write-policy predicates are pinned against a real connect-phase
-# transport failure (ECONNREFUSED), which needs a runtime to observe; the
-# runtime itself is the regular `tokio` dependency above.
 
 [lints]
 workspace = true

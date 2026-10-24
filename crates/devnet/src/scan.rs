@@ -64,7 +64,8 @@ pub struct ScanWalk {
     pub walked: u64,
     /// Blocks with no txs: one call, no traces.
     pub empty: u64,
-    /// Devnet writes marked across the walk (the COW progress reading).
+    /// Devnet writes marked across the walk (the `shadow_scanned` fact's
+    /// count).
     pub shadowed: u64,
 }
 

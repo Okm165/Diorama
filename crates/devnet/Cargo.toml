@@ -21,10 +21,5 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
-[dev-dependencies]
-# The epoch decision table drives the async rule (its non-network paths); the
-# runtime is test-only here.
-tokio = { workspace = true }
-
 [lints]
 workspace = true

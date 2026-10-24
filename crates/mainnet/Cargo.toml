@@ -12,16 +12,17 @@ mirror-anvil = { path = "../anvil" }
 mirror-devnet = { path = "../devnet" }
 alloy-primitives = { workspace = true }
 alloy-sol-types = { workspace = true }
-alloy-consensus = { workspace = true }
 alloy-network-primitives = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
+# The shared `mirror_handlers!` SSE handler expands `::futures_util` at the
+# call site, so every invoking crate depends on it directly.
+futures-util = { workspace = true }
 alloy-rpc-types-engine = { workspace = true }
 alloy-rpc-types-beacon = { workspace = true }
 alloy-json-rpc = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
-futures-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -30,7 +31,6 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

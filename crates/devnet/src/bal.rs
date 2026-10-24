@@ -14,11 +14,12 @@
 //!   are framed as a BAL (`bal_from_writes`). This is the HyperEVM rung (the
 //!   public API enumerates no writes) and reth's trace fallback.
 //!
-//! Everything after `compose` is shared: [`crate::cow::filter_bal`] drops the
-//! devnet-owned keys, [`mirror_anvil::flatten_bal`] lowers the BAL to the
-//! write set, and the engines' apply/scan/parity sequences run unchanged. The
-//! window is `(from, to]`; the mainnet composes one parent block at a time,
-//! the venue composes everything since its last composed source block.
+//! Everything after `compose` is shared: [`plan`] is the one call for the
+//! whole pipeline half (`compose` → [`crate::cow::filter_bal`] drops the
+//! devnet-owned keys → [`mirror_anvil::flatten_bal`] lowers the BAL to the
+//! write set), and the engines' apply/scan/parity sequences run unchanged.
+//! The window is `(from, to]`; the mainnet composes one parent block at a
+//! time, the venue composes everything since its last composed source block.
 use crate::closure::{plan_reads, TouchedSet};
 use crate::cow::Scope;
 use crate::error::Result;
@@ -147,6 +148,73 @@ pub async fn compose(
             stats,
         ))
     }
+}
+
+/// A composed window: `(from, to]`. The mainnet composes one parent block at
+/// a time ([`Window::single`]); the venue composes everything since its last
+/// composed source block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub from: u64,
+    pub to: u64,
+}
+
+impl Window {
+    pub fn new(from: u64, to: u64) -> Self {
+        Self { from, to }
+    }
+
+    /// The one-block window `(n-1, n]` (the mainnet's per-parent apply).
+    pub fn single(n: u64) -> Self {
+        Self {
+            from: n.saturating_sub(1),
+            to: n,
+        }
+    }
+}
+
+/// A window's plan: the composed BAL after COW, lowered to the write set the
+/// engines apply. One call for the whole shared pipeline half
+/// (`compose → cow::filter_bal → flatten_bal`), so the two engines differ
+/// only in what they do with it (journal/align/mine vs live parity).
+pub struct WindowPlan {
+    pub kind: DiffKind,
+    /// The composed change count, *before* COW (the `BlockApplied` fact's
+    /// `writes`).
+    pub total: usize,
+    /// The kept changes, still in BAL form (the live-parity check reads it).
+    pub bal: BlockAccessList,
+    /// The kept changes, flattened (what the engines apply and journal).
+    pub writes: Vec<Write>,
+    pub filter: crate::cow::FilterStats,
+    pub compose: ComposeStats,
+}
+
+/// The shared pipeline half: compose the window, COW it against the devnet's
+/// own writes, and lower it to the write set. The registry is locked only for
+/// the filter step (the compose awaits with the lock free).
+pub async fn plan(
+    source: &dyn Source,
+    target: &dyn Source,
+    scope: &Scope,
+    shadow: &crate::shared::Shared<crate::shadow::Shadow>,
+    window: Window,
+) -> Result<WindowPlan> {
+    let (composed, compose) = compose(source, target, scope, window.from, window.to).await?;
+    let total = change_count(&composed.bal);
+    let (bal, filter) = {
+        let shadow = shadow.lock()?;
+        crate::cow::filter_bal(scope.watch(), &shadow, composed.bal)
+    };
+    let writes = mirror_anvil::flatten_bal(&bal);
+    Ok(WindowPlan {
+        kind: composed.kind,
+        total,
+        bal,
+        writes,
+        filter,
+        compose,
+    })
 }
 
 /// Rung 2: touches → the declared scope's read plan → source/target reads →
@@ -605,26 +673,8 @@ mod tests {
     #[test]
     fn compose_prefers_the_native_rung() {
         let acct = address!("00000000000000000000000000000000000000ee");
-        let native: BlockAccessList = vec![AccountChanges::new(acct).with_balance_change(
-            alloy_eips::eip7928::BalanceChange::new(
-                alloy_eips::eip7928::BlockAccessIndex::new(1),
-                U256::from(99),
-            ),
-        )];
-        let source = Fake {
-            caps: caps(true),
-            bal: Some(native.clone()),
-            touched: TouchedSet::default(),
-            reads: HashMap::new(),
-            read_keys: std::sync::Mutex::new(Vec::new()),
-        };
-        let target = Fake {
-            caps: caps(false),
-            bal: None,
-            touched: TouchedSet::default(),
-            reads: HashMap::new(),
-            read_keys: std::sync::Mutex::new(Vec::new()),
-        };
+        let native: BlockAccessList = vec![balance_change(acct, 99)];
+        let (source, target) = bal_pair(native.clone());
         let scope = Scope::default();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (window, stats) = rt
@@ -712,5 +762,66 @@ mod tests {
         // nothing.
         let reads = source.read_keys.lock().unwrap();
         assert!(!reads.contains(&Key::Balance(watched)), "valued keys are not re-read");
+    }
+
+    /// One balance change, framed the way the composer frames them.
+    fn balance_change(acct: Address, value: u64) -> AccountChanges {
+        AccountChanges::new(acct).with_balance_change(alloy_eips::eip7928::BalanceChange::new(
+            alloy_eips::eip7928::BlockAccessIndex::new(1),
+            U256::from(value),
+        ))
+    }
+
+    /// A native-BAL source and an empty target (the rung-1 test pair).
+    fn bal_pair(native: BlockAccessList) -> (Fake, Fake) {
+        (
+            Fake {
+                caps: caps(true),
+                bal: Some(native),
+                touched: TouchedSet::default(),
+                reads: HashMap::new(),
+                read_keys: std::sync::Mutex::new(Vec::new()),
+            },
+            Fake {
+                caps: caps(false),
+                bal: None,
+                touched: TouchedSet::default(),
+                reads: HashMap::new(),
+                read_keys: std::sync::Mutex::new(Vec::new()),
+            },
+        )
+    }
+
+    /// The shared pipeline half in one call: compose → COW → flatten. A
+    /// devnet-owned account's change is skipped; the kept ones land in both
+    /// the filtered BAL (the live-parity read) and the write set (the apply).
+    #[test]
+    fn plan_composes_filters_and_flattens() {
+        let owned = address!("00000000000000000000000000000000000000b1");
+        let free = address!("00000000000000000000000000000000000000b2");
+        let (source, target) = bal_pair(vec![balance_change(owned, 1), balance_change(free, 2)]);
+        let scope = Scope::new(WatchSet::new([owned, free].into_iter().collect()), Vec::new());
+        let shadow = crate::shared::Shared::new("test shadow", {
+            let mut s = crate::shadow::Shadow::default();
+            s.mark_account_fields(owned);
+            s
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let plan = rt
+            .block_on(plan(&source, &target, &scope, &shadow, Window::single(1)))
+            .unwrap();
+        assert_eq!(plan.kind, DiffKind::Bal);
+        assert_eq!(plan.total, 2, "the pre-COW change count");
+        assert_eq!(plan.filter.skipped_shadowed, 1, "the owned account's fields");
+        assert_eq!(plan.writes.len(), 1);
+        assert!(
+            matches!(plan.writes[0], Write::Balance { address, .. } if address == free),
+            "the kept write is the free account's"
+        );
+        assert_eq!(
+            mirror_anvil::flatten_bal(&plan.bal),
+            plan.writes,
+            "the filtered BAL and the write set agree"
+        );
     }
 }

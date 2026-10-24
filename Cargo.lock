@@ -2556,7 +2556,6 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",
  "alloy-rpc-types-txpool",
- "alloy-serde",
  "reqwest",
  "serde",
  "serde_json",
@@ -2624,7 +2623,6 @@ dependencies = [
 name = "mirror-mainnet"
 version = "0.1.0"
 dependencies = [
- "alloy-consensus",
  "alloy-eips",
  "alloy-json-rpc",
  "alloy-network-primitives",
@@ -2647,7 +2645,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2655,7 +2652,6 @@ name = "mirror-venue"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
- "alloy-network-primitives",
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "alloy-rpc-types-trace",

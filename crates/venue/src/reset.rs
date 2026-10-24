@@ -20,9 +20,9 @@ use mirror_devnet::spine::{ResetDetector, ResetSignal};
 use mirror_devnet::state::StateFile;
 
 /// The canary word's address (a scratch address with no code) and slot.
-pub const CANARY_ADDRESS: Address =
+pub(crate) const CANARY_ADDRESS: Address =
     alloy_primitives::address!("00000000000000000000000000000000ca11ca11");
-pub const CANARY_SLOT: U256 = U256::ZERO;
+pub(crate) const CANARY_SLOT: U256 = U256::ZERO;
 
 /// The pin-canary detector: the recorded chain instance's storage word must
 /// read back the pin the registry was built against.

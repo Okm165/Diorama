@@ -91,22 +91,22 @@ Per applied block on T the engine does, in order:
 
 0. **Prepend** (bounded, ≤3 rounds): mine the devnet's pending txs in their own
    block first (see below).
-1. **Compose a BAL**: the spine's generic composer (`mirror_devnet::bal`)
-   produces the window's block-level access list — the native rung
-   (`eth_getBlockAccessList(N)` from reth, with the prestateTracer rung when a
-   block has none) or the synthesized rung (the source's touches → the
-   declared scope's read plan → source/target reads → `bal_from_writes`). Both
-   mirrors end in the same document.
-2. **COW the BAL**: `cow::filter_bal` keeps the watch set's changes and drops
-   devnet-owned keys (copy-on-write); whole account fields count as one unit,
-   fixture addresses are whole-account owned.
-3. **Before-values**: flatten the filtered BAL (`flatten_bal`), read the
-   before-values at T's head and journal them (`/admin/rewind`).
-4. **Apply**: batched cheatcode writes (≤500 per batch), the context aligned to
+1. **Plan the window**: `bal::plan` — the one pipeline call both engines make
+   — composes the window's block-level access list (the native rung
+   `eth_getBlockAccessList(N)` from reth, with the prestateTracer rung when a
+   block has none, or the synthesized rung: the source's touches → the
+   declared scope's read plan → source/target reads → `bal_from_writes`), COWs
+   it (`cow::filter_bal` keeps the watch set's changes and drops devnet-owned
+   keys; whole account fields count as one unit, fixture addresses are
+   whole-account owned), and flattens it to the write set (`flatten_bal`).
+   Both mirrors end in the same document and the same write set.
+2. **Before-values**: read the before-values at T's head and journal them
+   (`/admin/rewind`).
+3. **Apply**: batched cheatcode writes (≤500 per batch), the context aligned to
    the parent (timestamp + offset, clamped monotonic), then `anvil_mine(1)`.
-5. **Scan**: T's own blocks into the shadow registry, so the next filter sees
+4. **Scan**: T's own blocks into the shadow registry, so the next filter sees
    the devnet's writes.
-6. **Parity + cursor**: sampled storage keys vs reth at N (every applied key
+5. **Parity + cursor**: sampled storage keys vs reth at N (every applied key
    with `verifier.full_sweep`), the state probes, `drift.jsonl` on anomalies,
    and the cursor (keyed to the parent height).
 
@@ -695,14 +695,15 @@ BAL rung**: the generic composer (`mirror_devnet::bal::compose`) derives each
 window's touched set from the envelopes the API does serve (txs, receipts, and
 `eth_getSystemTxsByBlockNumber`), the declared closures turn it into concrete
 keys, the source and target are read, and the changes are framed as a BAL —
-the same document the mainnet takes natively. The shared COW filter then drops
-devnet-owned keys and the applier lands the rest on V: one window per pass,
-gap-guarded. What remains shared is exactly the half both chains share,
-delivered by the common crates: the composer, the COW filter, the shadow
-registry, the journal, the cursor state with `epoch_pin`, the
-admin surface, the chain-generic scanner, the probe runner, the epoch rule,
-the declared closures, and the devnet plane (the registries and flags as one
-bundle). The driver in `crates/venue` is the venue's own loop.
+the same document the mainnet takes natively. The shared pipeline call
+(`bal::plan`: compose → COW → flatten) then drops devnet-owned keys and the
+follow lands the rest on V: one window per pass, gap-guarded. What remains
+shared is exactly the half both chains share, delivered by the common crates:
+the composer, the COW filter, the shadow registry, the journal, the cursor
+state with `epoch_pin`, the admin surface, the chain-generic scanner, the
+probe runner, the epoch rule, the declared closures, and the devnet plane
+(the registries and flags as one bundle). The driver in `crates/venue` is the
+venue's own loop.
 
 ```
    public HL API (info + WS)         rpc.hyperliquid.xyz/evm

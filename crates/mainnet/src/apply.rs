@@ -1,4 +1,4 @@
-//! Diff applier: keeps T's watch-list state fresh by applying parent BALs.
+//! Applier: keeps T's watch-list state fresh by applying parent BALs.
 //!
 //! Per parent block (plan §4.2): prepend devnet txs -> compose the parent's
 //! BAL (the spine's generic composer: native on reth, the trace rung as
@@ -7,21 +7,19 @@
 //! sampled parity + probe parity. Each phase is one function; `apply_block` is
 //! the sequence.
 use crate::ctx::Ctx;
-use mirror_devnet::state::cursor_from;
 use crate::drift::Drift;
 use crate::error::{Error, Result};
-use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
-use mirror_anvil::Rpc;
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
-use mirror_anvil::Write;
-use mirror_devnet::bal::DiffKind;
+use mirror_anvil::{Rpc, Write};
 use mirror_devnet::cow::FilterStats;
 use mirror_devnet::facts::Fact;
+use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::probes::ProbeRunner;
 use mirror_devnet::spine::{ClockPolicy, MinePolicy, ProbeSchedule};
+use mirror_devnet::state::cursor_from;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -163,7 +161,7 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // below would land parent n's writes on the *new* base — watched state
     // regressed to an old height and a block mined at the wrong height
     // (measured: the applier then sat silent on the resetting anvil).
-    // `compose_and_filter` aborts on the move; the next pass reconciles (the
+    // `plan_and_check_base` aborts on the move; the next pass reconciles (the
     // cursor sits below the base → the epoch rule).
     let base = ctx.anvil_t.fork_block().await?;
     let (needs_reapply, reapply) = match apply_entry(ctx, n, t_head, started).await? {
@@ -177,17 +175,17 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     prepend_devnet_txs(&ctx.anvil_t, n, ctx.mirror.policies().prepend_rounds).await?;
     mark_own_writes(ctx).await?;
 
-    let (filtered, total, stats, kind) = compose_and_filter(ctx, n, base).await?;
-    let entries = read_before_values(&ctx.anvil_t, &filtered, t_head).await?;
+    let plan = plan_and_check_base(ctx, n, base).await?;
+    let entries = read_before_values(&ctx.anvil_t, &plan.writes, t_head).await?;
 
-    let applied = write_and_mine(ctx, &header, &filtered).await?;
+    let applied = write_and_mine(ctx, &header, &plan.writes).await?;
     journal_and_scan(ctx, n, &entries, t_head).await?;
     // The parent-stream continuity marker (reorg detection reads it).
     ctx.set_source_last_hash(header.hash)?;
     ctx.set_source_last_block(n)?;
 
     let t_latest = ctx.anvil_t.block_number().await?;
-    let (sampled, sampled_ok) = sample_parity(ctx, n, &filtered, t_latest).await;
+    let (sampled, sampled_ok) = sample_parity(ctx, n, &plan.writes, t_latest).await;
     if ctx.mirror.policies().probes == ProbeSchedule::PerBlock {
         t_convergence_probes(ctx, n).await?;
     }
@@ -197,11 +195,11 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         n,
         ApplyFacts {
             chain: ctx.mirror.label(),
-            source: if needs_reapply { "reapply" } else { kind.as_str() },
-            total,
+            source: if needs_reapply { "reapply" } else { plan.kind.as_str() },
+            total: plan.total,
             applied,
-            filtered: filtered.len(),
-            stats,
+            filtered: plan.writes.len(),
+            stats: plan.filter,
             sampled,
             sampled_ok,
             needs_reapply,
@@ -216,28 +214,26 @@ pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
 /// Compose the window's diffs and apply the watch/COW filter. The pre-write
 /// base check lives here: a re-pin racing the (slow) compose must abort
 /// before any write. Returns `(filtered writes, total changes, stats, kind)`.
-async fn compose_and_filter(
+async fn plan_and_check_base(
     ctx: &Ctx,
     n: u64,
     base: Option<u64>,
-) -> Result<(Vec<mirror_anvil::Write>, usize, FilterStats, DiffKind)> {
-    let (window, _stats) = mirror_devnet::bal::compose(
+) -> Result<mirror_devnet::bal::WindowPlan> {
+    // The shared pipeline half (compose → COW → flatten), then the check: the
+    // compose awaits for seconds, and a re-pin racing it must abort before any
+    // write (the next pass reconciles).
+    let plan = mirror_devnet::bal::plan(
         ctx.mirror.follow_source().as_ref(),
         ctx.target.as_ref(),
         ctx.mirror.scope(),
-        n.saturating_sub(1),
-        n,
+        &ctx.plane.shadow,
+        mirror_devnet::bal::Window::single(n),
     )
     .await?;
     if ctx.anvil_t.fork_block().await? != base {
         return Err(Error::ResetDuringApply { n });
     }
-    let total = mirror_devnet::bal::change_count(&window.bal);
-    let (filtered, stats) = {
-        let shadow = ctx.plane.shadow.lock()?;
-        mirror_devnet::cow::filter_bal(ctx.mirror.scope().watch(), &shadow, window.bal)
-    };
-    Ok((mirror_anvil::flatten_bal(&filtered), total, stats, window.kind))
+    Ok(plan)
 }
 
 /// The per-block facts the finalize step records (cursor, metrics, drift,
