@@ -1,0 +1,203 @@
+# The spine
+
+One machine, two parents: the information both mirrors carry, the interfaces
+they share, the places they diverge, and the evidence for every claim below
+(specs, live probes, measured behavior).
+
+## The thesis
+
+A mirror is: **a parent's state changes, replayed onto a devnet chain under
+copy-on-write, measured 1:1 against the parent.**
+
+The parent differs — a reth node on Ethereum, the Hyperliquid public API on
+HyperEVM — and that one difference, the parent's *read model*, propagates into
+exactly the seams listed here. Everything else is one shared pipeline
+(`crates/devnet`) and one shared transport (`crates/anvil`).
+
+The EVM is open source, so the mainnet mirror **simulates nothing**: it applies
+the parent's own recorded effects (EIP-7928 BALs) to a real EVM (anvil/revm)
+and lets the real machine compute the resulting state. Hyperliquid's matching
+engine is closed source, so the venue mirror **must** simulate — and it does so
+against the published specifications, sentence by sentence (the tables below)
+— while its EVM side (V) is again a real EVM, and its Core side is the only
+simulated thing in the workspace. That asymmetry is the design: simulate only
+what cannot be executed.
+
+## The information spine
+
+Eight things flow, in both mirrors, in this order. Every one of them is a type
+in `crates/devnet`; none of them is per-mirror code.
+
+| # | What | The type | What it means |
+|---|---|---|---|
+| 1 | The window | `bal::Window { from, to }` | The unit of work: `(from, to]` parent blocks. One block on the mainnet (per-block fidelity); a follow window on the venue (the source has no per-block record). |
+| 2 | The window's effects | `bal::WindowBal { from, to, kind: DiffKind, bal: BlockAccessList }` | **EIP-7928's structure as the universal diff envelope** (`alloy_eips::eip7928::BlockAccessList`): accounts → `storage_changes`/`storage_reads`, balance/nonce/code changes, each with its `block_access_index`. Native on the mainnet (`DiffKind::Bal`), synthesized on the venue (`DiffKind::Poll`, or `Trace` where traces exist). |
+| 3 | The COW filter | `cow::Scope` + `closure::KeyClosure` | The watch set (what the mirror keeps fresh) and the declared closures (what the devnet's own writes own). A key the devnet wrote is skipped, not overwritten: your writes win. |
+| 4 | The applier's step | `bal::WindowPlan { kind, total, bal, writes }` | `flatten_bal` → the journal records before-values → the writes land → the context aligns → the block mines → the scanner re-reads → parity → the cursor advances. One transaction per window (`apply_block`'s pipeline). |
+| 5 | The measurement | `ProbeSchedule` + the drift log | Mainnet: sampled parity against reth at N, configured probes per block. Venue: live parity against the composed BAL, at-pin probes, the uncovered-emitter audit. |
+| 6 | The facts | `facts::Fact` / `Notice` | The event stream (see "The event model"). |
+| 7 | The policies | `spine::Policies { clock, mine, probes, prepend_rounds, gap }` | The divergence **as data**: the pipeline reads decisions, never a profile name. |
+| 8 | The capabilities | `source::Capabilities` | What the parent can answer: `native_bal`, `traces`, `historical`, `heads_ws`, `system_txs`, `system_tx_receipts`. Declared at boot and audited (`resolve` probes each one). The composer's rung selector reads this. |
+
+## The interfaces
+
+Five traits carry every seam. The projects implement them; `crates/devnet`
+never names a mirror.
+
+| Interface | Where | Consumed by | Mainnet impl | Venue impl |
+|---|---|---|---|---|
+| `Source` | `devnet/src/source.rs` | the composer (reads), the applier (target reads), re-sync/hand-back | reth (historical, BALs, traces, WS heads) | the HL public API (latest-only) + the EVM RPC; `Mirror::follow_source` splits truth reads from follow reads (the pin guard would refuse the follow's reads — reth serves both roles) |
+| `Mirror` | `devnet/src/spine.rs` | both engines' assembly | `MainnetMirror` (label `t`) | `VenueMirror` (label `v`) |
+| `ResetDetector` | `devnet/src/spine.rs` | the engine's reset pass | `CursorHash` (the cursor's block must carry its recorded hash; below the fork base = stale by position) | `PinCanary` (ADR-0002: heights below a fork's pin resolve to the source, so cursor hashes are unsound there) |
+| `KeyClosure` | `devnet/src/closure.rs` | the COW filter | the declared closures (watch-set keys the devnet owns) | same, plus the sim's own writes |
+| `Registry` | `devnet/src/metrics.rs` | `/metrics` | one registry per engine, declared series + computed ones | same |
+
+The vocabulary types are the contracts between the traits: `Window`,
+`WindowBal`, `WindowPlan`, `Write`, `DiffKind`, `Capabilities`, `Policies`,
+`ResetSignal`/`ResetWitness`, `Fact`/`Notice`. A change to any of them is a
+change to both mirrors by construction.
+
+**Deliberately not an interface:** the venue simulator. Only one mirror has a
+closed-source parent; wrapping the sim behind a trait would invent a second
+implementation that cannot exist. Its seam is the `Source` it serves and the
+`Fact`s it publishes, nothing else.
+
+## The divergence points
+
+The complete list. Each is a decision, absorbed by an interface (or a policy
+field), never by a branch in shared code.
+
+| # | Divergence | Mainnet | Venue | Absorbed by | Evidence |
+|---|---|---|---|---|---|
+| 1 | Parent read model | reth: historical reads, BALs, traces, WS heads | the HL API: latest-only state ("Ask it for the order book now and you get the book now"), no BAL/traces, **no WS on the EVM RPC** | `Source` + `Capabilities` | Hyperliquid docs (info endpoint; HyperEVM page: "There is currently no websocket JSON-RPC support for the RPC at `rpc.hyperliquid.xyz/evm`"); measured |
+| 2 | Effects acquisition | native BAL per block (`eth_getBlockAccessList`; prestateTracer fallback) | synthesized: envelopes (CoreWriter logs, system txs) → touched set → declared closures → reads → `bal_from_writes` | `bal::compose` (rung select from `native_bal`) | EIP-7928 (the BAL structure); reth's `eth_getBlockAccessList`; measured (HL system txs have **null receipts** — the composer decodes `0xa9059cbb` calldata) |
+| 3 | Reset signal | cursor hash + fork-base position | the pin canary (a recorded instance word) | `ResetDetector` | ADR-0002; measured (pre-pin hash reads forward to the fork source) |
+| 4 | Clock | `AlignToSource` (the applied block's timestamp + the plane's live offset, clamped monotonic) | `Native` (V's own clock; the *product's* clock is the sim's served time policy) | `ClockPolicy` | the venue's own time policy jumps every chain's clock forward; `chain_time = max(wall, head)` |
+| 5 | Mining | `PerAppliedBlock` (the parent stream is the devnet's cadence) | `PoolDrain` (an idle chain stays static) | `MinePolicy` | measured (the 2026-10 automine-reset incident) |
+| 6 | Prepend | `Some(3)` (a tx arriving mid-apply would be mined against a state its gas was never estimated on) | `None` | `Policies::prepend_rounds` | measured (~5 % short, reverted) |
+| 7 | Probes | `PerBlock` (reth can serve the applied block) | `LiveParity` (the source is latest-only; the composed BAL is the expected side) | `ProbeSchedule` | divergence #1 |
+| 8 | Gap guard | `Some(max_gap_blocks)` | `Some(max_gap_blocks)` | `Policies::gap` | shared policy, per-instance value |
+| 9 | Simulation | none — real EVM, real state | the Core (closed-source matching engine) simulated; the EVM side (V) real | `crates/venue/src/sim` (its own crate folder) | see the cross-reference table |
+
+## The event model
+
+The fact stream is the engines' primary interface to the outside. The rule:
+**every state-changing step publishes exactly one fact**; the HTTP surfaces
+(`/status`, the state files) and the metrics are *derived* views, and a
+consumer that missed events re-reads them instead of replaying. `/events` is
+SSE: one JSON notice per event, `id:` = the bus sequence number, the bus keeps
+the newest facts only (a lagged subscriber resumes from the oldest retained —
+the notification contract, not a log).
+
+| Fact | Published when | Carries |
+|---|---|---|
+| `BlockApplied` | one diff was composed and applied | the composer's truth (`bal`/`trace`/`poll`/`late`/`reapply`), writes/filtered/skipped/sampled counts, ms |
+| `CursorAdvanced` | the devnet cursor moved | block |
+| `ResetDetected` | a reset was witnessed | the witness (position / hash / pin) |
+| `EpochChanged` | the epoch rule ran | the new pin |
+| `ProbesRun` | an on-demand probe run finished | ok/failed/skipped (per-block counters are metrics, not facts) |
+| `ShadowScanned` | the COW scan walked blocks | blocks/empty/shadowed |
+| `TopUpDelivered` | the top-up loop fed reth payloads (mainnet-only) | count |
+| `DealApplied` | the faucet wrote a key | chain, address |
+
+The sim's own events are the served state (orders, fills, liquidations,
+funding) — the venue's *external* contract, because that is what its parent
+serves. The two engines share the fact vocabulary; the sim's records are
+per-sim types, deliberately (they are wire shapes, not engine events).
+
+## Component specs
+
+Common components (`crates/devnet`, `crates/anvil`, `crates/config`):
+
+| Component | Owns | Must not |
+|---|---|---|
+| `anvil::Rpc` | the transport: one `Arc<Rpc>` per endpoint, typed reads (`call_decode<C: SolCall>`), measured error recognition (`is_method_not_found`), the cheatcode conventions | know any chain's semantics |
+| `devnet::bal` | the window, the rungs, `flatten_bal`, `bal_from_writes`, the plan | read a source directly (it composes through `Source`) |
+| `devnet::cow` | the watch set, the declared closures, the skip rule | decide *what* is watched (the mirror's `Scope` does) |
+| `devnet::journal` | before-values, one atomic save per window (`store::save_bytes`) | hold business state |
+| `devnet::state` | the cursor, `epoch_pin`, the offset, the halted flag | know which chain it tracks (the `chain` tag is data) |
+| `devnet::scanner` | the re-read of touched keys, parity | interpret a value (that is `probes`) |
+| `devnet::facts` | the bus, sequence numbers, the notification contract | persist anything |
+| `devnet::spine` | the seams (traits), `Policies`, `ResetSignal` | name a mirror |
+| `config` | the layered loader, `${VAR}` resolution, validation | default a chain behavior |
+
+Profile components, each in its own folder and never importing the other
+(`scripts/closure-matrix.sh` enforces the sibling rule):
+
+| Component | Owns | Must not |
+|---|---|---|
+| `mainnet::profile` | the bundle: reth source, `CursorHash`, the policies, the watch scope | grow a second source |
+| `mainnet::feed_bridge` | the beacon/engine wiring (checkpoint sync, the top-up loop) | touch the applier |
+| `mainnet::engine_api` | the JWT-authenticated engine transport, `parse_response` | share a type with the venue |
+| `venue::profile` | the bundle: the HL sources, `PinCanary`, the policies | read the sim directly (the feed does) |
+| `venue::bridge` | the CoreWriter action table, the system-tx completions, the Core↔EVM boundary | interpret an action's economics (the sim does) |
+| `venue::feed` | WS-first market data (ADR-0006), REST backfill, the served book | decide margin |
+| `venue::sim` | the closed-source semantics: accounts, orders, the waterfall, funding, the served wire | exist behind a shared trait (only one mirror has this) |
+| `cctp` | the fourth element: the CCTP lanes + the Iris-compatible attestation API, on the common client + config only | depend on the devnet substrate or either project |
+
+## The venue sim, cross-referenced
+
+Every behavior against the sentence it implements (sources: Hyperliquid docs,
+fetched 2026-10-24; the probe rows are live API measurements).
+
+| Sim behavior | The spec | Disposition |
+|---|---|---|
+| Maintenance margin = ½ the initial margin at max leverage (1.25 %–16.7 %) | "The maintenance margin is half of the initial margin at max leverage" | implemented (`maintenance_rate`, margin tiers from the live meta) |
+| Book first: market orders for the full size | "the positions are first attempted to be entirely closed by sending market orders to the book" | implemented (`liquidate_via_book`) |
+| 20 % per attempt above 100k USDC; 30 s cooldown makes every attempt full-size | "For liquidatable positions larger than 100k USDC, only 20 % … there is a cooldown period of 30 seconds. During this cooldown period, all market liquidation orders for that user will be for the entire position" | implemented (`attempt_size`, per-user cooldown) |
+| Below ⅔ of maintenance → the liquidator vault; maintenance not returned | "below 2/3 of the maintenance margin … a backstop liquidation happens through the liquidator vault"; "During backstop liquidation, the maintenance margin is not returned" | implemented (`rescue_step`, `vault_take`) |
+| Cross backstop: cross positions + cross margin; isolated: that position + its margin | "the trader's cross positions and cross margin are all transferred"; "that isolated position and isolated margin are transferred … The user's cross margin and positions are untouched" | **fixed this wave** (the waterfall's legs) |
+| Isolated positions liquidate on their own inputs | "the only inputs to the computation are the isolated margin and the notional value of the isolated position"; "isolated positions will apply unrealized pnl as additional margin" | **fixed this wave** (`check_account`'s isolated legs) |
+| A closed isolated position returns its margin | implied: the margin is the trader's collateral (only the position is gone) | **fixed this wave** (`apply_fill`) |
+| Strict isolated: margin cannot be removed; released proportionally on close | "strict isolated … the additional constraint that margin cannot be removed. Margin is proportionally removed as the position is closed" | **fixed this wave** (refused by name; proportional release) |
+| Negative account/isolated value → ADL; ranking `(mark/entry)·(notional/account_value)`; closed at the previous mark | "If a user's account value or isolated position value becomes negative … The specific sorting index … is `(mark_price / entry_price) * (notional_position / account_value)`. Those traders' positions are closed at the previous mark price" | implemented (`adl`, `adl_ranking`) — the index and the price match the sentence exactly |
+| Liquidation uses the mark price | "Liquidations use the mark price, which combines external CEX prices with Hyperliquid's book state" | implemented (the served mark; the mark's own formula is the venue's) |
+| Isolated liq price formula | "`liq_price = price − side · margin_available / position_size / (1 − l · side)`", `margin_available (isolated) = isolated_margin − maintenance_margin_required` | implemented (`liquidation_px`) |
+| Funding: hourly, `position_size · oracle_price · funding_rate`, all-or-nothing per account | "Funding is paid every hour"; "the spot oracle price is used to convert the position size to notional value, not the mark price" | implemented (`accrue_funding`) — oracle, hourly, all-or-nothing |
+| Funding rate: interest 0.01 %/8 h, premium clamp, 4 %/h cap | the funding page's formula | **not computed**: the sim consumes the venue's own served `activeAssetCtx.funding` (a reimplementation would drift; the venue's figure is the truth) |
+| Cross default; isolated per position | "Positions by default are also opened in cross margin mode. Isolated margin is also supported" | implemented (the account model) |
+| CoreWriter action IDs/encodings: 1/2/3/4/5/6/7/8/9/10/11/12/13/15/16/17, tif 1/2/3, 10⁸ scaling, `uint32::MAX` = spot | the CoreWriter table | implemented (`bridge::corewriter`, `SPOT_DEX = u32::MAX`) |
+| CoreWriter does not revert on Core failures | "CoreWriter does not revert on HyperCore failures" | implemented (the tx succeeds; the refusal is named in the logs) |
+| Actions are delayed a few seconds onchain | "order actions and vault transfers sent from CoreWriter are delayed onchain for a few seconds" | **simplification**: the bridge applies at the log (the delay is an anti-latency-advantage measure; our product is not racing) |
+| Boundary errors carry code 10055 | the HyperEVM page's error table | **not applicable**: V is a real EVM (anvil) and the bridge completes Core→EVM transfers itself; named here for the record |
+| Cancun without blobs; priority fees burned; HYPE is gas | the HyperEVM page | V pins `--hardfork cancun` (the manifest's comment names the intent); **gap**: anvil has no knob to refuse blob txs the real chain rejects (its `--help` has no blob flag). Fees are anvil's own — the product does not depend on fee semantics |
+| The served totals with an isolated leg: `accountValue = totalRawUsd + Σ sign·value`; `cross.accountValue = total.accountValue − Σ iso margin`; `cross.totalRawUsd = total.totalRawUsd − Σ iso margin + Σ iso signed value` | — (live probe) | **fixed this wave** (`assemble`; two live accounts, 1e-4) |
+
+## The mainnet, cross-referenced
+
+| Behavior | The spec | Disposition |
+|---|---|---|
+| The BAL as the applier's input, with `block_access_index` (0 = pre-execution, 1..n = txs, n+1 = post) | EIP-7928 (Last Call, 2026-11-01 deadline) | implemented (`bal::flatten_bal`, the journal's per-key before-values) |
+| No-op writes land in `storage_reads`, not `storage_changes` | EIP-7928's recording semantics | implemented (the composer reads `storage_reads`; the synthesized rung emits the same shape) |
+| Ordering/uniqueness: accounts lexicographic, slots ascending, changes by index | EIP-7928 | implemented (`bal_from_writes` sorts; the parity check compares post-values) |
+| Retrieval: `eth_getBlockAccessList` + the engine API's payload-bodies V2 | EIP-7928's engine API section; reth's RPC | implemented (native rung; a block without one falls back per block) |
+| Size budget: ~90 KiB average per BAL at 60 M gas | EIP-7928's analysis | measured against our window sizes; the window framing on the venue exists for the same reason |
+| CL-driven EL sync: deliver payloads ascending; the EL may close the gap by "acquiring state directly (e.g., … EIP-7928 block access list fast-forward) and skipping execution" | **EIP-8379 "Top-up Sync"** (Draft, 2026-08-06) | implemented in substance: the top-up loop (`engine_newPayload` + `forkchoiceUpdated`) + BAL-based state application. Forward note: when reth implements `engine_getSyncStatus`/`MISSING_STATE`, the loop can read the standardized status instead of its own probes |
+| No simulation: the parent's own effects land on a real EVM | — | by construction: anvil/revm computes; the mirror only transports and measures |
+
+## Gaps found in this review, and dispositions
+
+| Gap | Evidence | Disposition |
+|---|---|---|
+| The waterfall acted on the whole account | the docs' independence sentences | fixed (the legs) + six tests citing the sentences |
+| A closed isolated position's margin vanished; strict-isolated rules absent | the docs' margin sentences | fixed (release + proportional + refusal by name) |
+| The served cross/total figures omitted the isolated margin | live probe, two accounts | fixed (`assemble`) |
+| A leverage switch to isolated left no margin on the position | implied by the model (an isolated position always carries its margin) | fixed (`set_leverage` parks it; back returns it) — **named as an inference**, no doc sentence states the allocation |
+| `Meta::asset` — the universe lookup repeated at six sites | AST reuse reading | extracted |
+| CoreWriter's onchain delay | the CoreWriter page | documented simplification (above) |
+| Cancun-without-blobs on V | the HyperEVM page + anvil's `--help` | documented gap (no anvil knob; the manifest's comment records the intent) |
+| Funding rate computation | the funding page | deliberate: the served rate is consumed, not recomputed |
+| `engine_getSyncStatus` | EIP-8379 | forward note (the top-up loop's own probes stand) |
+
+## Sources
+
+- EIP-7928 (Block-Level Access Lists): <https://eips.ethereum.org/EIPS/eip-7928>
+- EIP-8379 (Top-up Sync): <https://eips.ethereum.org/EIPS/eip-8379>
+- Hyperliquid docs: liquidations, auto-deleveraging, funding, margining,
+  clearinghouse, HyperEVM, interacting-with-hypercore, info-endpoint
+  (<https://hyperliquid.gitbook.io/hyperliquid-docs>; `.md` variants)
+- Circle CCTP: supported chains and domains (domain 19 = HyperEVM), the
+  technical guide's Iris endpoints (<https://developers.circle.com/cctp>)
+- reth: `eth_getBlockAccessList` (the EIP-7928 RPC surface)
+- Live probes (2026-10-24): the info endpoint's clearinghouseState for two
+  leaderboard accounts with isolated positions (the three identities above)

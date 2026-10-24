@@ -266,6 +266,10 @@ the shadow registry.
 
 ## Design decisions
 
+The seams these decisions create — the information both mirrors carry, the
+interfaces they share, the divergence points and the spec evidence for each —
+are collected in [SPINE.md](SPINE.md).
+
 **One Anvil, one source.** T is the devnet: watch-list state is kept fresh by
 BAL diffs, your writes live there and are never overwritten. The BAL is the
 authoritative post-state of every changed entry (reth rejects a block whose

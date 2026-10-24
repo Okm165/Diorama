@@ -175,7 +175,7 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             and the structural fitness scripts (closure-matrix, no-orphans,
                             docs-metrics, trust-audit, clock-labels, no-panics, config-check,
                             docker-members, k8s-wiring, render-diagrams)
-docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md, TESTING.md, adr/
+docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, OPERATIONS.md, TESTING.md, adr/
 ```
 
 ## Docs
@@ -187,6 +187,10 @@ docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, OPERATIONS.md, TES
   COW, journal), config reference, source
   liveness, and the Venue Mirror (fork driver, simulator, Core↔EVM bridge,
   feed bridge).
+- **[docs/SPINE.md](docs/SPINE.md)** — the spine: the information both mirrors
+  carry, the interfaces they share, the complete divergence list, the event
+  model, and the spec cross-references (EIP-7928/EIP-8379/reth for the
+  mainnet; the Hyperliquid docs and live probes for the venue sim).
 - **[docs/OPERATIONS.md](docs/OPERATIONS.md)** — signals/thresholds, day-to-day,
   source-liveness playbook, drills, storage/PVC handling, failure playbook,
   venue operations.
