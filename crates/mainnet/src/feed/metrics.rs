@@ -70,7 +70,7 @@ mod tests {
     /// The bridge's counters render their labeled series (the venue's
     /// `feed/metrics.rs` pins its own the same way).
     #[test]
-    fn renders_labeled_feed_series() {
+    fn renders_labeled_series() {
         let m = FeedBridgeMetrics::default();
         m.record_update("ETH/USD");
         m.record_update("ETH/USD");

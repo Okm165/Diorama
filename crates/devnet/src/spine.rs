@@ -229,4 +229,52 @@ pub struct Policies {
     pub gap: Option<u64>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cow::{Scope, WatchSet};
+    use crate::source::{RawSource, Source};
+    use std::collections::HashSet;
+    use std::sync::Arc;
 
+    struct NoReset;
+
+    impl ResetDetector for NoReset {
+        fn detect<'a>(&'a self, _target: &'a Rpc) -> BoxFuture<'a, Result<ResetSignal>> {
+            Box::pin(async { Ok(ResetSignal::Steady) })
+        }
+    }
+
+    /// The bundle reports exactly what it was built with — the label, the two
+    /// source roles, the policies, and the journal scope (the newest
+    /// divergence row: it drives `/admin/rewind`).
+    #[test]
+    fn a_bundle_reports_what_it_was_built_with() {
+        let rpc = Arc::new(
+            Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
+        );
+        let source: Arc<dyn Source> = Arc::new(RawSource::target(rpc));
+        let bundle = Bundle {
+            label: "t",
+            source: Arc::clone(&source),
+            follow_source: Arc::clone(&source),
+            reset: Arc::new(NoReset),
+            policies: Policies {
+                clock: ClockPolicy::AlignToSource,
+                mine: MinePolicy::PerAppliedBlock,
+                probes: ProbeSchedule::PerBlock,
+                prepend_rounds: Some(3),
+                gap: Some(32),
+            },
+            journal_scope: crate::engine::JournalScope::ParentBeforeValues,
+            scope: Scope::new(WatchSet::new(HashSet::new()), Vec::new()),
+        };
+        assert_eq!(bundle.label(), "t");
+        assert!(Arc::ptr_eq(bundle.source(), &source));
+        assert_eq!(bundle.policies().gap, Some(32));
+        assert_eq!(
+            bundle.journal_scope(),
+            crate::engine::JournalScope::ParentBeforeValues
+        );
+    }
+}

@@ -467,4 +467,17 @@ mod tests {
         let err = pinned(caps(false), 7).guard().await.unwrap_err();
         assert!(matches!(err, mirror_anvil::Error::Transport { .. }), "{err}");
     }
+
+    /// The pinned head is the pin, not the source's (the guard's premise): a
+    /// resolved pin answers without a read; unresolved falls through to the
+    /// source (the transport fault proves the read was attempted).
+    #[tokio::test]
+    async fn a_pinned_head_is_the_pin_not_the_sources() {
+        assert_eq!(pinned(caps(false), 7).head().await.unwrap(), 7);
+        let err = pinned(caps(false), crate::pin::PIN_UNRESOLVED)
+            .head()
+            .await
+            .unwrap_err();
+        assert!(matches!(err, mirror_anvil::Error::Transport { .. }), "{err}");
+    }
 }

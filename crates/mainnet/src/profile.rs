@@ -20,7 +20,7 @@
 //! native rung from `Capabilities::native_bal` and synthesizes otherwise, so
 //! the two mirrors differ in *data* (source, scope), not in algorithm.
 use mirror_config::{EngineSection, LoopsSection};
-use mirror_devnet::cow::{Scope, WatchSet};
+use mirror_devnet::cow::Scope;
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
 use crate::reset::CursorHash;
@@ -103,7 +103,7 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let reset: Arc<dyn ResetDetector> = Arc::new(CursorHash::new(state));
     // The mainnet watches whole accounts: the BAL enumerates every changed
     // slot, so no closures are needed (the scope's slot set stays empty).
-    let scope = Scope::new(WatchSet::new(watch), Vec::new());
+    let scope = Scope::from_config(watch, &engine.closures);
     let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_t));
     Wiring {
         mirror: bundle(engine, source, reset, scope),

@@ -58,10 +58,6 @@ pub enum Error {
         want: u64,
     },
 
-    /// The selftest's scratch anvil was not started with a fork pin.
-    #[error("{chain} has no fork pin - start it with --fork-url and --fork-block-number")]
-    NoForkPin { chain: &'static str },
-
     /// A phase of the selftest (apply of one block) failed; wraps the
     /// inner fault so the phase and the block are both named.
     #[error("{step} block {block}: {source}")]
@@ -158,9 +154,11 @@ mirror_devnet::shell_fault_conversion!(Error);
 mod tests {
     use super::*;
 
+    /// A wrapped fault keeps its cause chain (the venue's test pins the same
+    /// rule under the same name).
     #[test]
-    fn the_step_wrapper_keeps_the_chain_walkable() {
-        let inner = Error::NoForkPin { chain: "anvil-t" };
+    fn a_wrapped_fault_keeps_its_cause_chain() {
+        let inner = Error::FeedBridgeUnconfigured;
         let wrapped = Error::Step {
             step: "apply",
             block: 7,
@@ -168,7 +166,7 @@ mod tests {
         };
         assert!(wrapped.to_string().contains("apply block 7"), "{wrapped}");
         let source = std::error::Error::source(&wrapped).expect("source is preserved");
-        assert!(source.to_string().contains("fork pin"), "{source}");
+        assert!(source.to_string().contains("feed bridge"), "{source}");
     }
 }
 

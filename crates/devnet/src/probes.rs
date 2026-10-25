@@ -41,17 +41,13 @@ impl ProbeOutcome {
 /// runner tail both engines share. The *schedule* (per block, at pin) and the
 /// skip decisions stay the mirror's; the clock offset is the plane's (the
 /// venue never sets it, so the same read is exact there).
-pub async fn run_at<E: crate::engine::Engine>(
-    ctx: &E,
-    source: &Rpc,
-    at: u64,
-) -> crate::Result<ProbeOutcome> {
+pub async fn run_at<E: crate::engine::Engine>(ctx: &E, at: u64) -> crate::Result<ProbeOutcome> {
     ProbeRunner::devnet(
         &ctx.engine().verifier.probes,
         &ctx.plane().shadow,
         ctx.plane().time_offset.load(std::sync::atomic::Ordering::Relaxed) != 0,
     )
-    .parity(source, at, ctx.target())
+    .parity(ctx.source_rpc(), at, ctx.target())
     .await
 }
 
@@ -164,4 +160,33 @@ fn log_mismatch(probe: &Probe, at: u64, source: &[u8], target: &[u8]) {
         target = %mirror_anvil::truncate(&alloy_primitives::hex::encode(target), 80),
         "probe mismatch"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::Shared;
+    use std::sync::Arc;
+
+    /// The offset clock skips every probe, counted, before any read: the
+    /// blind spot is visible instead of reading as "no probes configured".
+    /// The endpoints are unreachable, so a read would fail loudly.
+    #[tokio::test]
+    async fn an_offset_clock_skips_every_probe() {
+        let rpc = Arc::new(
+            mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
+        );
+        let probes = vec![Probe {
+            name: "p".into(),
+            to: alloy_primitives::Address::ZERO,
+            data: alloy_primitives::Bytes::new(),
+        }];
+        let shadow = Shared::new("shadow", crate::shadow::Shadow::default());
+        let out = ProbeRunner::devnet(&probes, &shadow, true)
+            .parity(&rpc, 1, &rpc)
+            .await
+            .unwrap();
+        assert_eq!((out.ok, out.failed, out.skipped), (0, 0, 1));
+        assert_eq!(ProbeOutcome::skipped(3).skipped, 3);
+    }
 }

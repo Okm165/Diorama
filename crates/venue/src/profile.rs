@@ -23,7 +23,6 @@
 //! (`mirror_devnet::bal::compose`).
 use crate::reset::PinCanary;
 use mirror_config::{EngineSection, LoopsSection};
-use mirror_devnet::closure::{closures, watch_set};
 use mirror_devnet::cow::Scope;
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
@@ -105,7 +104,7 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let follow: Arc<dyn Source> = crate::source::follow(source_rpc);
     let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_v));
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
-    let scope = Scope::new(watch_set(watch, &engine.closures), closures(&engine.closures));
+    let scope = Scope::from_config(watch, &engine.closures);
     let mirror = bundle(engine, source, follow, reset, scope);
     Wiring { mirror, pin, target }
 }

@@ -123,6 +123,7 @@ impl Engine for Ctx {
             plane: &self.plane,
             mirror: &self.mirror,
             target: &self.anvil_v,
+            source: &self.source_rpc,
             source_url: &self.chain.source_url,
             engine: &self.engine,
         }

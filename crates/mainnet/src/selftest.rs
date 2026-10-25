@@ -23,11 +23,7 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
     ctx.anvil_t.anvil_set_automine(false).await?;
 
     // The pin comes from the scratch anvil itself (forkConfig.forkBlockNumber).
-    let info = ctx.anvil_t.anvil_node_info().await?;
-    let pin = info
-        .fork_config
-        .fork_block_number
-        .ok_or(Error::NoForkPin { chain: "anvil-t" })?;
+    let pin = mirror_devnet::pin::fork_pin(&ctx.anvil_t, "anvil-t").await?;
 
     println!("== mirror engine selftest ==");
     println!("rpc:      {rpc}");

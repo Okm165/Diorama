@@ -273,13 +273,7 @@ fn require_wiring(
     what: &'static str,
     endpoints: &[&str],
 ) -> std::result::Result<(), mirror_config::ConfigError> {
-    let Some(engine) = cfg.services.engine.as_ref() else {
-        return Ok(());
-    };
-    let state_dir = engine.state_dir.to_string_lossy().into_owned();
-    let mut values: Vec<&str> = endpoints.to_vec();
-    values.push(&state_dir);
-    mirror_config::require_resolved_logged(what, &values, unresolved)
+    mirror_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &[])
 }
 
 /// The engine's two loops (the shared HTTP surface and the driver), each

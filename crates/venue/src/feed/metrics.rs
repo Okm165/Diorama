@@ -137,7 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renders_labeled_staleness() {
+    fn renders_labeled_series() {
         let m = FeedMetrics::new(&["BTC".into(), "ETH".into()]);
         m.set_stale("BTC", 1500);
         m.set_ws_connected(true);

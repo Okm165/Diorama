@@ -115,6 +115,25 @@ impl Plane {
         )
     }
 
+    /// Publish the reset fact for a witnessable signal (a steady signal
+    /// publishes nothing): the witness mapping is the spine's, the fact shape
+    /// here. Returns whether it published.
+    pub fn witness_reset(&self, chain: &'static str, signal: crate::spine::ResetSignal) -> bool {
+        let Some(witness) = crate::spine::witness_for(signal) else {
+            return false;
+        };
+        self.facts
+            .publish(crate::facts::Fact::ResetDetected { chain, witness });
+        true
+    }
+
+    /// Publish the epoch-change fact: the pin the rule moved to (`None` =
+    /// unpinned).
+    pub fn publish_epoch_changed(&self, chain: &'static str, pin: Option<u64>) {
+        self.facts
+            .publish(crate::facts::Fact::EpochChanged { chain, pin });
+    }
+
     pub fn is_halted(&self) -> bool {
         self.halted.load(Ordering::Relaxed)
     }

@@ -267,7 +267,7 @@ mod tests {
     /// pauses (the mainnet's test pins the same boundary with its rebase
     /// bound).
     #[test]
-    fn the_gap_guard_follows_within_the_limit() {
+    fn the_gap_guard_honors_its_limit() {
         assert!(gap_within_limit(0, 32));
         assert!(gap_within_limit(32, 32));
         assert!(!gap_within_limit(33, 32));

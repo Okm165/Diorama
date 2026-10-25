@@ -137,27 +137,30 @@ fn require_wiring(
     what: &'static str,
     endpoints: &[&str],
 ) -> std::result::Result<(), mirror_config::ConfigError> {
-    let Some(engine) = cfg.services.engine.as_ref() else {
-        return Ok(());
-    };
-    let state_dir = engine.state_dir.to_string_lossy().into_owned();
-    let journal = engine.journal.dir.to_string_lossy().into_owned();
-    let jwt = engine
-        .source_sync
-        .jwt_path
-        .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
-    let mut values: Vec<&str> = endpoints.to_vec();
-    values.push(&state_dir);
-    values.push(&journal);
-    values.extend(engine.beacon.urls.iter().map(String::as_str));
-    if let Some(url) = &engine.source_sync.engine_url {
-        values.push(url);
+    // The boundaries only this profile builds (the venue's are the endpoints
+    // and the state dir, which the shared check covers).
+    let engine = cfg.services.engine.as_ref();
+    let journal = engine.map(|e| e.journal.dir.to_string_lossy().into_owned());
+    let jwt = engine.and_then(|e| {
+        e.source_sync
+            .jwt_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+    });
+    let mut extra: Vec<&str> = Vec::new();
+    if let Some(journal) = &journal {
+        extra.push(journal);
+    }
+    if let Some(e) = engine {
+        extra.extend(e.beacon.urls.iter().map(String::as_str));
+        if let Some(url) = &e.source_sync.engine_url {
+            extra.push(url);
+        }
     }
     if let Some(jwt) = &jwt {
-        values.push(jwt);
+        extra.push(jwt);
     }
-    mirror_config::require_resolved_logged(what, &values, unresolved)
+    mirror_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &extra)
 }
 
 async fn run(config: PathBuf) -> Result<()> {

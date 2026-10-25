@@ -378,4 +378,57 @@ mod tests {
         touched.touch(watched);
         assert_eq!(plan_reads(&closures, &watch, &touched).len(), 3);
     }
+
+    /// The config builders: one fixed closure + one mapping, in order, and an
+    /// empty section = watch-only (the mainnet profile's case).
+    #[test]
+    fn closures_build_fixed_then_mapped_from_config() {
+        let fixed_contract = Address::repeat_byte(0xaa);
+        let mapped = Address::repeat_byte(0xbb);
+        let section = mirror_config::ClosuresSection {
+            fixed: vec![mirror_config::FixedSlotsSpec {
+                contract: fixed_contract,
+                slots: vec![U256::from(1), U256::from(2)],
+            }],
+            mappings: vec![mirror_config::MappingSpec {
+                contract: mapped,
+                base_slot: U256::from(3),
+                topic_index: 2,
+            }],
+        };
+        assert_eq!(closures(&section).len(), 2);
+        assert!(closures(&mirror_config::ClosuresSection::default()).is_empty());
+    }
+
+    /// The watch set folds the same declarations: the mapping contract is
+    /// watched, the fixed contract's slots are declared, and an empty section
+    /// keeps exactly the accounts.
+    #[test]
+    fn watch_set_folds_the_declared_closures() {
+        let fixed_contract = Address::repeat_byte(0xaa);
+        let mapped = Address::repeat_byte(0xbb);
+        let watched = Address::repeat_byte(0xcc);
+        let section = mirror_config::ClosuresSection {
+            fixed: vec![mirror_config::FixedSlotsSpec {
+                contract: fixed_contract,
+                slots: vec![U256::from(1)],
+            }],
+            mappings: vec![mirror_config::MappingSpec {
+                contract: mapped,
+                base_slot: U256::from(3),
+                topic_index: 2,
+            }],
+        };
+        let mut accounts = HashSet::new();
+        accounts.insert(watched);
+        let watch = watch_set(accounts, &section);
+        assert!(watch.accounts.contains(&watched));
+        assert!(watch.accounts.contains(&mapped));
+        assert!(watch
+            .slots
+            .get(&fixed_contract)
+            .is_some_and(|slots| slots.contains(&U256::from(1))));
+        let bare = watch_set(HashSet::new(), &mirror_config::ClosuresSection::default());
+        assert!(bare.accounts.is_empty());
+    }
 }

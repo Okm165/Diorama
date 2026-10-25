@@ -96,6 +96,19 @@ impl Scope {
         Self { watch, closures }
     }
 
+    /// The scope from config: the watch accounts plus the instance's declared
+    /// closures (an empty section degenerates to the watch-only scope — the
+    /// mainnet profile's case).
+    pub fn from_config(
+        accounts: HashSet<Address>,
+        closures: &mirror_config::ClosuresSection,
+    ) -> Self {
+        Self::new(
+            crate::closure::watch_set(accounts, closures),
+            crate::closure::closures(closures),
+        )
+    }
+
     pub fn watch(&self) -> &WatchSet {
         &self.watch
     }

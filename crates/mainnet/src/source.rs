@@ -160,3 +160,35 @@ impl Source for RethSource {
         DiffKind::Trace
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reth declaration, pinned: the boot audit compares the live
+    /// endpoint against exactly these flags, and the trace rung is the touched
+    /// set's kind (the venue's
+    /// `the_public_source_declares_the_measured_capabilities` pins its own
+    /// declaration the same way).
+    #[test]
+    fn the_reth_source_declares_the_measured_capabilities() {
+        let rpc = Arc::new(
+            mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
+        );
+        let source = RethSource::new(rpc);
+        assert_eq!(source.capabilities(), DECLARED);
+        assert_eq!(
+            DECLARED,
+            Capabilities {
+                native_bal: true,
+                traces: true,
+                historical: true,
+                heads_ws: true,
+                system_txs: false,
+                system_tx_receipts: false,
+            },
+            "the declaration the boot audit compares against"
+        );
+        assert_eq!(source.touched_kind(), DiffKind::Trace);
+    }
+}

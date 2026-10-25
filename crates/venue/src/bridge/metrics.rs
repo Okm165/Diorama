@@ -93,3 +93,21 @@ impl BridgeMetrics {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bridge's series render with their action labels (the mainnet's
+    /// bridge counters and the sim's series pin theirs the same way).
+    #[test]
+    fn renders_the_bridge_series_with_action_labels() {
+        let m = BridgeMetrics::default();
+        m.count_action(7);
+        m.count_action(7);
+        m.inc_credits();
+        let out = m.render();
+        assert!(out.contains("venue_bridge_actions_total{id=\"7\"} 2"), "{out}");
+        assert!(out.contains("venue_bridge_credits_total 1"), "{out}");
+    }
+}

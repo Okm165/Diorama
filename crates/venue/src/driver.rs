@@ -49,15 +49,7 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
 pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
-    mirror_devnet::engine::assert_chain(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT).await?;
-    // The declared capabilities are audited once, against the live endpoint
-    // (a declaration that disagrees is named here, never discovered mid-window).
-    mirror_devnet::source::audit_capabilities(
-        "hl public api",
-        ctx.mirror.follow_source().capabilities(),
-        &ctx.source_rpc,
-    )
-    .await?;
+    mirror_devnet::engine::boot_prefix(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT, "hl public api").await?;
     let pin = reconcile(ctx).await?;
     probes_at_pin(ctx, pin).await?;
     Ok(())
@@ -259,12 +251,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
             expected: ctx.plane.state.epoch_pin()?,
             found: pin,
         };
-        if let Some(witness) = mirror_devnet::spine::witness_for(signal) {
-            ctx.plane.facts.publish(Fact::ResetDetected {
-                chain: ctx.mirror.label(),
-                witness,
-            });
-        }
+        ctx.plane.witness_reset(ctx.mirror.label(), signal);
     }
     run_epoch_rule(ctx, pin).await?;
     anchor_cursor(ctx, pin).await?;
@@ -275,7 +262,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
 /// without it the epoch decision would default to "same pin" and re-apply
 /// writes across a pin change.
 async fn pin_read(ctx: &Ctx) -> Result<Option<u64>> {
-    let pin = ctx.anvil_v.anvil_node_info().await?.fork_config.fork_block_number;
+    let pin = ctx.anvil_v.fork_block().await?;
     ctx.venue_metrics
         .set(&ctx.venue_metrics.fork_pin, pin.unwrap_or(0));
     if let Some(p) = pin {
@@ -291,23 +278,17 @@ async fn pin_read(ctx: &Ctx) -> Result<Option<u64>> {
 /// writes; the journal goes either way. The transition's logs are the shared
 /// module's; the counters are V's (epoch transitions, not resets found).
 async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
-    match mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.anvil_v, ctx.engine.loops.chunk_size, pin)
-        .await?
-    {
+    match ctx.epoch_rule(pin).await? {
         mirror_devnet::epoch::Epoch::Steady => {}
         mirror_devnet::epoch::Epoch::Cleared => {
             ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
-            ctx.plane
-                .facts
-                .publish(Fact::EpochChanged { chain: ctx.mirror.label(), pin });
+            ctx.plane.publish_epoch_changed(ctx.mirror.label(), pin);
         }
         mirror_devnet::epoch::Epoch::Restored { restored } => {
             ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
             ctx.venue_metrics
                 .add(&ctx.venue_metrics.restore_writes_total, restored as u64);
-            ctx.plane
-                .facts
-                .publish(Fact::EpochChanged { chain: ctx.mirror.label(), pin });
+            ctx.plane.publish_epoch_changed(ctx.mirror.label(), pin);
         }
     }
     Ok(())
@@ -357,7 +338,7 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// Run the at-pin probes now (the admin route's entry: boot and re-pin run
 /// them automatically; this is the on-demand trigger, e.g. after a hand-back).
 pub(crate) async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
-    let pin = ctx.anvil_v.anvil_node_info().await?.fork_config.fork_block_number;
+    let pin = ctx.anvil_v.fork_block().await?;
     probes_at_pin(ctx, pin).await
 }
 
@@ -382,7 +363,7 @@ pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOu
         );
         return Ok(skipped_all());
     }
-    let probes = mirror_devnet::probes::run_at(ctx, &ctx.source_rpc, pin).await?;
+    let probes = mirror_devnet::probes::run_at(ctx, pin).await?;
     let out = count_probes(ctx, probes, pin, source_head).await?;
     mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), pin, &out);
     Ok(out)

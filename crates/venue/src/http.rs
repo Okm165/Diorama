@@ -21,7 +21,6 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use axum::{
     http::StatusCode,
-    response::{IntoResponse, Response},
     Router,
 };
 use mirror_devnet::engine::SharedStatus;
@@ -56,32 +55,18 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
     })
 }
 
-/// The HTTP mapping of the error taxonomy (the engine and the simulator
-/// share it): request refusals are 4xx, a warming/poisoned state is 503, the
-/// venue's own refusals are 502, everything else is a server-side fault.
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
-        let status = match &self {
-            // The shared devnet taxonomy (mirror-devnet's one
-            // classification): both engines answer the same refusal the same
-            // way by construction.
-            Error::Devnet(e) => mirror_devnet::handlers::devnet_status(e)
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            Error::BadRequest { .. } => StatusCode::BAD_REQUEST,
-            Error::NotFound { .. } | Error::NoMarket { .. } => StatusCode::NOT_FOUND,
-            Error::NotConfigured { .. } => StatusCode::CONFLICT,
-            // The upstream boundaries (anvil, the venue API): a transport
-            // fault is a bad gateway, not this service's fault.
-            Error::Rpc(_) | Error::ApiStatus { .. } | Error::Http(_) => StatusCode::BAD_GATEWAY,
-            Error::Warming => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        if status == StatusCode::INTERNAL_SERVER_ERROR {
-            tracing::error!(error = %self, "request failed");
-        }
-        (status, self.to_string()).into_response()
-    }
-}
+// The HTTP mapping of the error taxonomy (the engine and the simulator
+// share it): request refusals are 4xx, a warming/poisoned state is 503, the
+// venue's own refusals are 502, everything else is a server-side fault.
+mirror_devnet::http_status_map!(Error, "request failed" {
+    Error::BadRequest { .. } => StatusCode::BAD_REQUEST,
+    Error::NotFound { .. } | Error::NoMarket { .. } => StatusCode::NOT_FOUND,
+    Error::NotConfigured { .. } => StatusCode::CONFLICT,
+    // The upstream boundaries (anvil, the venue API): a transport fault is a
+    // bad gateway, not this service's fault.
+    Error::Rpc(_) | Error::ApiStatus { .. } | Error::Http(_) => StatusCode::BAD_GATEWAY,
+    Error::Warming => StatusCode::SERVICE_UNAVAILABLE,
+});
 
 /// The engine's control surface: the shared route table, this profile's own
 /// routes added beside it (the exact routes this process serves — the table
@@ -93,6 +78,7 @@ pub(crate) fn app(ctx: Arc<Ctx>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
 
     /// The shared taxonomy, pinned per service (the same test name lives in
     /// the mainnet engine and the CCTP bridge): a request refusal is 400, a

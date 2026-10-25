@@ -7,7 +7,7 @@
 //! mainnet counterpart is `crates/mainnet/src/selftest.rs` (apply real parent
 //! blocks onto a scratch T).
 use crate::ctx::Ctx;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::follow;
 use mirror_config::Instance;
 use std::sync::Arc;
@@ -32,13 +32,7 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<bool> 
     // reconcile (which anchors the cursor and the follow at V's pin), and the
     // at-pin probes — a boot fault is the selftest's first failure.
     crate::driver::boot(&ctx).await?;
-    let pin = ctx
-        .anvil_v
-        .anvil_node_info()
-        .await?
-        .fork_config
-        .fork_block_number
-        .ok_or(Error::NoForkPin { chain: "anvil-v" })?;
+    let pin = mirror_devnet::pin::fork_pin(&ctx.anvil_v, "anvil-v").await?;
 
     println!("== venue engine selftest ==");
     println!("rpc:      {rpc}");

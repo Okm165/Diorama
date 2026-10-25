@@ -49,6 +49,31 @@ pub fn devnet_status(error: &crate::Error) -> Option<StatusCode> {
     None
 }
 
+/// The `IntoResponse` shell both engines share: the devnet taxonomy maps
+/// through [`devnet_status`] first (one classification for both mirrors), the
+/// profile's own arms follow, everything else is a server-side fault — logged
+/// at 500, where a silent bug would otherwise read as a refusal. The profile
+/// keeps its arms and its log message.
+#[macro_export]
+macro_rules! http_status_map {
+    ($ty:ident, $log:literal { $($pat:pat => $status:expr),+ $(,)? }) => {
+        impl axum::response::IntoResponse for $ty {
+            fn into_response(self) -> axum::response::Response {
+                let status = match &self {
+                    $ty::Devnet(e) => $crate::handlers::devnet_status(e)
+                        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+                    $($pat => $status,)+
+                    _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                if status == axum::http::StatusCode::INTERNAL_SERVER_ERROR {
+                    tracing::error!(error = %self, $log);
+                }
+                (status, self.to_string()).into_response()
+            }
+        }
+    };
+}
+
 pub fn shared_routes<E: Engine>() -> Router<Arc<E>> {
     Router::new()
         .route(HEALTHZ, get(healthz::<E>))

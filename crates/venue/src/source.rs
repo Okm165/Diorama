@@ -56,3 +56,30 @@ pub(crate) fn pinned(rpc: Arc<mirror_anvil::Rpc>, pin: Arc<AtomicU64>) -> Arc<dy
 pub(crate) fn follow(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
     Arc::new(RawSource::new(rpc, DECLARED))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Capabilities, DECLARED};
+
+    /// The public source's declaration, pinned flag for flag: the boot audit
+    /// compares the live endpoint against exactly this, and the composer
+    /// depends on each one (no BAL, no traces, latest-only reads, system txs
+    /// exposed, their receipts absent — measured 2026-10-24). The mainnet's
+    /// `the_reth_source_declares_the_measured_capabilities` pins its own the
+    /// same way.
+    #[test]
+    fn the_public_source_declares_the_measured_capabilities() {
+        assert_eq!(
+            DECLARED,
+            Capabilities {
+                native_bal: false,
+                traces: false,
+                historical: false,
+                heads_ws: false,
+                system_txs: true,
+                system_tx_receipts: false,
+            },
+            "the declaration the boot audit compares against (measured 2026-10-24)"
+        );
+    }
+}

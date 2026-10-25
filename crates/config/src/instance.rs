@@ -604,3 +604,18 @@ fn check_venue_sim(sim: &VenueSimSection, issues: &mut Vec<String>) {
         check_http_url("services.venue_sim.anvil_url", url, issues);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::FollowHead;
+
+    /// The follow-head tags are the config's own spelling: the mainnet
+    /// engine's `follow_tag()` delegates to this mapping (one home; the test
+    /// moved here from the engine's ctx, where it pinned nothing of its own).
+    #[test]
+    fn the_follow_head_tags_are_the_configs_spelling() {
+        assert_eq!(FollowHead::Safe.tag(), "safe");
+        assert_eq!(FollowHead::Latest.tag(), "latest");
+        assert_eq!(FollowHead::Finalized.tag(), "finalized");
+    }
+}

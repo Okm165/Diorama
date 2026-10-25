@@ -15,7 +15,6 @@ use crate::feed::FeedBridge;
 use axum::{
     extract::State,
     http::StatusCode,
-    response::{IntoResponse, Response},
     routing::post,
     Json, Router,
 };
@@ -71,30 +70,16 @@ struct TimeResponse {
     note: &'static str,
 }
 
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
-        let status = match &self {
-            // The shared devnet taxonomy (mirror-devnet's one
-            // classification): both engines answer the same refusal the same
-            // way by construction.
-            Error::Devnet(e) => mirror_devnet::handlers::devnet_status(e)
-                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            // The upstream anvil boundary: a transport fault is a bad
-            // gateway, not this service's fault.
-            Error::Rpc(_) => StatusCode::BAD_GATEWAY,
-            // The feed bridge's named refusals (the venue maps its own
-            // NotConfigured / NotFound the same way).
-            Error::FeedBridgeUnconfigured => StatusCode::CONFLICT,
-            Error::FeedBridgeUnknown { .. } => StatusCode::NOT_FOUND,
-            Error::FeedBridgeWaiting { .. } => StatusCode::SERVICE_UNAVAILABLE,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        if status == StatusCode::INTERNAL_SERVER_ERROR {
-            tracing::error!(error = %self, "admin request failed");
-        }
-        (status, self.to_string()).into_response()
-    }
-}
+mirror_devnet::http_status_map!(Error, "admin request failed" {
+    // The upstream anvil boundary: a transport fault is a bad gateway, not
+    // this service's fault.
+    Error::Rpc(_) => StatusCode::BAD_GATEWAY,
+    // The feed bridge's named refusals (the venue maps its own
+    // NotConfigured / NotFound the same way).
+    Error::FeedBridgeUnconfigured => StatusCode::CONFLICT,
+    Error::FeedBridgeUnknown { .. } => StatusCode::NOT_FOUND,
+    Error::FeedBridgeWaiting { .. } => StatusCode::SERVICE_UNAVAILABLE,
+});
 
 /// The engine's control surface: the shared route table plus this profile's
 /// own routes (the exact routes this process serves — the table the
@@ -121,6 +106,7 @@ async fn admin_time(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
 
     /// The shared taxonomy, pinned per service (the same test name lives in
     /// the venue engine and the CCTP bridge): a request refusal is 400, a

@@ -39,6 +39,11 @@ pub enum Error {
         source: serde_json::Error,
     },
 
+    /// The scratch anvil (or any chain) was read for its fork pin and has
+    /// none — the shared `pin::fork_pin` read, one spelling for both mirrors.
+    #[error("{chain} has no fork pin - start it with --fork-url and --fork-block-number")]
+    NoForkPin { chain: &'static str },
+
     #[error(transparent)]
     Rpc(#[from] mirror_anvil::Error),
 

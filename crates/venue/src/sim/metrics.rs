@@ -52,3 +52,21 @@ impl SimMetrics {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sim's series render (the mainnet's bridge counters test pins its
+    /// own set the same way).
+    #[test]
+    fn renders_the_sim_series() {
+        let m = SimMetrics::default();
+        m.accounts.store(3, std::sync::atomic::Ordering::Relaxed);
+        m.liquidations_total.store(1, std::sync::atomic::Ordering::Relaxed);
+        let out = m.render();
+        assert!(out.contains("venue_sim_accounts 3"), "{out}");
+        assert!(out.contains("venue_sim_liquidations_total 1"), "{out}");
+        assert!(out.contains("venue_sim_identity_violations_total 0"), "{out}");
+    }
+}

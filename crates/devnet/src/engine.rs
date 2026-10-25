@@ -33,6 +33,9 @@ pub struct EngineCore<'a> {
     pub plane: &'a Plane,
     pub mirror: &'a Arc<dyn Mirror>,
     pub target: &'a Arc<Rpc>,
+    /// The source endpoint (the follow source's RPC): the boot audit and the
+    /// probes read it.
+    pub source: &'a Arc<Rpc>,
     pub source_url: &'a str,
     pub engine: &'a EngineSection,
 }
@@ -60,6 +63,27 @@ pub trait Engine: Send + Sync + Sized + 'static {
     /// The devnet chain the shell drives.
     fn target(&self) -> &Arc<Rpc> {
         self.core().target
+    }
+    /// The source endpoint the boot audit and the probes read.
+    fn source_rpc(&self) -> &Arc<Rpc> {
+        self.core().source
+    }
+    /// Run the epoch rule against the target: the shared reconcile with this
+    /// shell's plane, target and chunk size (the counters and the publish
+    /// conditionals stay the mirror's).
+    fn epoch_rule(
+        &self,
+        pin: Option<u64>,
+    ) -> BoxFuture<'_, crate::Result<crate::epoch::Epoch, Self::Error>> {
+        Box::pin(async move {
+            Ok(crate::epoch::reconcile(
+                self.plane(),
+                self.target(),
+                self.engine().loops.chunk_size,
+                pin,
+            )
+            .await?)
+        })
     }
     /// The source URL `/admin/epoch` re-pins from.
     fn source_url(&self) -> &str {
@@ -156,13 +180,13 @@ pub enum ShellFault {
 #[macro_export]
 macro_rules! shell_fault_conversion {
     ($ty:ty) => {
-        impl From<mirror_devnet::engine::ShellFault> for $ty {
-            fn from(fault: mirror_devnet::engine::ShellFault) -> Self {
+        impl From<$crate::engine::ShellFault> for $ty {
+            fn from(fault: $crate::engine::ShellFault) -> Self {
                 match fault {
-                    mirror_devnet::engine::ShellFault::Bind { addr, source } => {
+                    $crate::engine::ShellFault::Bind { addr, source } => {
                         Self::Bind { addr, source }
                     }
-                    mirror_devnet::engine::ShellFault::Io {
+                    $crate::engine::ShellFault::Io {
                         what,
                         path,
                         source,
@@ -171,13 +195,56 @@ macro_rules! shell_fault_conversion {
                         path: path.into(),
                         source,
                     },
-                    mirror_devnet::engine::ShellFault::WrongChain { anvil, got, want } => {
+                    $crate::engine::ShellFault::WrongChain { anvil, got, want } => {
                         Self::WrongChain { anvil, got, want }
                     }
                 }
             }
         }
     };
+}
+
+/// The boot prefix both engines share: wait for the chain, assert its
+/// identity and take block production, then audit the follow source's declared
+/// capabilities against the live endpoint (a declaration that disagrees is
+/// named here, never discovered mid-window). Read-only: the profile's own
+/// first write (the epoch anchor / the pin reconcile) follows.
+pub async fn boot_prefix<E: Engine>(
+    ctx: &E,
+    anvil: &'static str,
+    chain_id: u64,
+    wait: std::time::Duration,
+    source_what: &str,
+) -> crate::Result<(), E::Error> {
+    assert_chain(ctx, anvil, chain_id, wait).await?;
+    crate::source::audit_capabilities(
+        source_what,
+        ctx.mirror().follow_source().capabilities(),
+        ctx.source_rpc(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// The boot wiring check both engines share: every value the instance
+/// references must be resolvable — the profile's `endpoints`, the engine's own
+/// state dir, and `extra` (the boundaries only that profile builds).
+/// `Ok(())` when the instance has no engine section (nothing to check).
+pub fn require_engine_wiring(
+    cfg: &mirror_config::Instance,
+    unresolved: &[String],
+    what: &'static str,
+    endpoints: &[&str],
+    extra: &[&str],
+) -> Result<(), mirror_config::ConfigError> {
+    let Some(engine) = cfg.services.engine.as_ref() else {
+        return Ok(());
+    };
+    let state_dir = engine.state_dir.to_string_lossy().into_owned();
+    let mut values: Vec<&str> = endpoints.to_vec();
+    values.push(&state_dir);
+    values.extend_from_slice(extra);
+    mirror_config::require_resolved_logged(what, &values, unresolved)
 }
 
 /// The shell's error contract: the conversions the shared helpers need (the
@@ -304,5 +371,60 @@ pub async fn shutdown(tasks: Vec<tokio::task::JoinHandle<()>>) {
     tracing::info!("shutdown signal received");
     for t in tasks {
         t.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShellFault;
+
+    #[derive(Debug, thiserror::Error)]
+    enum TestErr {
+        #[error("{what}: {path}")]
+        Io {
+            what: &'static str,
+            path: std::path::PathBuf,
+            #[source]
+            source: std::io::Error,
+        },
+        #[error("binding at {addr}")]
+        Bind {
+            addr: String,
+            #[source]
+            source: std::io::Error,
+        },
+        #[error("{anvil} is not the chain")]
+        WrongChain {
+            anvil: &'static str,
+            got: u64,
+            want: u64,
+        },
+    }
+
+    crate::shell_fault_conversion!(TestErr);
+
+    /// The conversion macro's full contract: every shared fault shape maps
+    /// field-for-field into a taxonomy carrying the three variants (the
+    /// mirrors' own tests pin `WrongChain` through their taxonomies; this pins
+    /// the macro itself, all three arms).
+    #[test]
+    fn the_shell_fault_conversion_covers_every_variant() {
+        let bind = TestErr::from(ShellFault::Bind {
+            addr: "0.0.0.0:8080".into(),
+            source: std::io::Error::other("in use"),
+        });
+        assert!(matches!(bind, TestErr::Bind { ref addr, .. } if addr == "0.0.0.0:8080"));
+        let io = TestErr::from(ShellFault::Io {
+            what: "state",
+            path: "/tmp/x".into(),
+            source: std::io::Error::other("missing"),
+        });
+        assert!(matches!(io, TestErr::Io { what: "state", .. }));
+        let chain = TestErr::from(ShellFault::WrongChain {
+            anvil: "anvil-t",
+            got: 1,
+            want: 2,
+        });
+        assert!(matches!(chain, TestErr::WrongChain { got: 1, want: 2, .. }));
     }
 }

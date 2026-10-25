@@ -79,7 +79,7 @@ mod tests {
     /// The three sets the engine's `/metrics` composes (the profile's, the
     /// shared admin gauges, the feed bridge's) must not overlap: a duplicate
     /// series is invalid exposition (the venue's
-    /// `venue_and_admin_series_do_not_overlap` is the mirror of this test).
+    /// `the_registry_series_do_not_overlap` is the mirror of this test).
     #[test]
     fn the_registry_series_do_not_overlap() {
         let profile = MainnetMetrics::default();

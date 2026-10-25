@@ -12,7 +12,6 @@ use crate::error::Result;
 use crate::source_sync;
 use mirror_anvil::Rpc;
 use mirror_devnet::engine::Engine as _;
-use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::spine::ResetSignal;
 use mirror_devnet::state::{self, ChainCursor};
@@ -34,24 +33,15 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(900);
 /// declared capabilities. A boot fault is fatal (the bin exits): an applier
 /// over the wrong chain or an unanchored epoch must not serve.
 pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
-    // The shared prefix (the same order the venue's boot reads): the chain
-    // assert, then the capability audit — a read-only probe, so the epoch
-    // anchor below is still the first *write*.
-    mirror_devnet::engine::assert_chain(ctx, ANVIL, MAINNET_CHAIN_ID, BOOT_TIMEOUT).await?;
-    // The declared capabilities are audited once, against the live endpoint
-    // (a declaration that disagrees is named here, never discovered
-    // mid-window).
-    mirror_devnet::source::audit_capabilities(
-        "reth",
-        ctx.mirror.follow_source().capabilities(),
-        &ctx.reth,
-    )
-    .await?;
+    // The shared prefix (the same call the venue's boot reads): the chain
+    // assert, then the capability audit — read-only, so the epoch anchor
+    // below is still the first *write*.
+    mirror_devnet::engine::boot_prefix(ctx, ANVIL, MAINNET_CHAIN_ID, BOOT_TIMEOUT, "reth").await?;
     // The epoch pin is anchored before any writes exist (a fresh registry's
     // epoch *is* the current fork base; without the record a later same-pin
     // restart would be an unprovable epoch and the rule would have to fail
     // closed, dropping the devnet's writes).
-    let t_pin = ctx.anvil_t.anvil_node_info().await?.fork_config.fork_block_number;
+    let t_pin = ctx.anvil_t.fork_block().await?;
     mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
     Ok(())
 }
@@ -74,12 +64,10 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
 
     let head = ctx.anvil_t.block_number().await?;
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, head);
-    if let Ok(info) = ctx.anvil_t.anvil_node_info().await {
-        if let Some(fork) = info.fork_config.fork_block_number {
-            ctx.plane
-                .metrics
-                .set(&ctx.mainnet_metrics.t_fork_age_blocks, head.saturating_sub(fork));
-        }
+    if let Ok(Some(fork)) = ctx.anvil_t.fork_block().await {
+        ctx.plane
+            .metrics
+            .set(&ctx.mainnet_metrics.t_fork_age_blocks, head.saturating_sub(fork));
     }
 
     let cursor = validate_cursor(ctx, head).await?;
@@ -114,13 +102,9 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
 /// A witnessed reset: say what was seen, publish the witness, and rebase.
 /// All three witnesses converge here (the detector's answer decides the fact).
 async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<ChainCursor>> {
-    let Some(witness) = mirror_devnet::spine::witness_for(signal) else {
+    if !ctx.plane.witness_reset(ctx.mirror.label(), signal) {
         return Ok(None);
-    };
-    ctx.plane.facts.publish(Fact::ResetDetected {
-        chain: ctx.mirror.label(),
-        witness,
-    });
+    }
     rebase(ctx, head).await?;
     Ok(None)
 }
@@ -131,20 +115,12 @@ async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<Ch
 /// is an epoch marker; the next processed block sets a fresh one, or
 /// `mirror_pin_age_blocks` counts across epochs).
 async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
-    let pin = ctx
-        .anvil_t
-        .anvil_node_info()
-        .await?
-        .fork_config
-        .fork_block_number;
+    let pin = ctx.anvil_t.fork_block().await?;
     ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.t_resets_total);
-    mirror_devnet::epoch::reconcile(&ctx.plane, &ctx.anvil_t, ctx.engine.loops.chunk_size, pin)
-        .await?;
+    ctx.epoch_rule(pin).await?;
     ctx.plane.state.clear_cursor()?;
     ctx.plane.save_state()?;
-    ctx.plane
-        .facts
-        .publish(Fact::EpochChanged { chain: ctx.mirror.label(), pin });
+    ctx.plane.publish_epoch_changed(ctx.mirror.label(), pin);
     tracing::info!(head, ?pin, "chain rebased; the epoch rule ran");
     Ok(())
 }
@@ -158,7 +134,7 @@ async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
 /// here must not silently pick that stalled path.
 async fn resume_point(anvil_t: &Rpc, cursor: Option<&ChainCursor>, head: u64) -> Result<(u64, bool)> {
     let reset_pin = if cursor.is_none() {
-        anvil_t.anvil_node_info().await?.fork_config.fork_block_number
+        anvil_t.fork_block().await?
     } else {
         None
     };
@@ -327,7 +303,7 @@ pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::Probe
             ctx.engine.verifier.probes.len(),
         ));
     };
-    let probes = mirror_devnet::probes::run_at(ctx, &ctx.reth, cursor.block).await?;
+    let probes = mirror_devnet::probes::run_at(ctx, cursor.block).await?;
     mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), cursor.block, &probes);
     Ok(probes)
 }
@@ -340,7 +316,7 @@ mod tests {
     /// plan's 10,064-block replay bound instead, and no limit means no guard
     /// (the venue's `gap_within_limit` test pins its own column).
     #[test]
-    fn the_gap_guard_honors_the_limit_and_the_replay_bound() {
+    fn the_gap_guard_honors_its_limit() {
         assert!(gap_within_limit(0, Some(32), false));
         assert!(gap_within_limit(32, Some(32), false));
         assert!(!gap_within_limit(33, Some(32), false));
