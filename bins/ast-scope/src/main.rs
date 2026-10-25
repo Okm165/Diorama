@@ -71,6 +71,11 @@ struct Item {
     file: String,
     kind: &'static str,
     name: String,
+    /// The trait this fn implements, when it is an impl method (`Source`'s
+    /// `read`, the `Engine` hooks): the pair key for the structure map and
+    /// the trait reading — the shared shape a qualified-name reading cannot
+    /// see.
+    trait_name: Option<String>,
     lines: usize,
     depth: usize,
     size: usize,
@@ -299,6 +304,10 @@ fn walk_impl(file: &str, i: &syn::ItemImpl, test: bool, out: &mut Vec<Item>) {
         if let syn::ImplItem::Fn(f) = item {
             let mut item = fn_item(file, &f.sig, &f.block, &f.attrs, test);
             item.name = format!("{type_name}.{}", f.sig.ident);
+            item.trait_name = i
+                .trait_
+                .as_ref()
+                .and_then(|(_, path, _)| path.segments.last().map(|s| s.ident.to_string()));
             out.push(item);
         }
     }
@@ -429,6 +438,7 @@ fn enum_item(file: &str, e: &syn::ItemEnum, test: bool) -> Item {
         file: file.into(),
         kind: "enum",
         name: e.ident.to_string(),
+        trait_name: None,
         lines: span_lines(e.span()),
         depth: 0,
         size: e.variants.len(),
@@ -455,6 +465,7 @@ fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
         file: file.into(),
         kind: "struct",
         name: s.ident.to_string(),
+        trait_name: None,
         lines: span_lines(s.span()),
         depth: 0,
         size: s.fields.len(),
@@ -495,6 +506,7 @@ fn fn_item(
         file: file.into(),
         kind: "fn",
         name: sig.ident.to_string(),
+        trait_name: None,
         lines: span_lines(block.span()),
         depth: body.max_depth,
         size: sig.inputs.len(),
@@ -775,6 +787,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
     similar_records(&prod);
     compositions(&prod);
     twin_shapes(&prod);
+    trait_impls(&prod);
     wrappers(&prod);
     narrow_context(&prod);
     uncalled(&prod, corpus);
@@ -985,6 +998,18 @@ const PAIRS: &[(&str, &str)] = &[
 /// the items only one side carries — the symmetrization's worklist. The
 /// role pairs (the mainnet's prepend vs the venue's audit) read as one-sided
 /// here by construction: their names differ on purpose.
+/// The pairing key: a trait method pairs by `Trait.method` — the shared
+/// shape across two types — everything else by its own name.
+fn pair_key(item: &Item) -> String {
+    match &item.trait_name {
+        Some(t) => {
+            let method = item.name.rsplit('.').next().unwrap_or(item.name.as_str());
+            format!("{t}.{method}")
+        }
+        None => item.name.clone(),
+    }
+}
+
 fn structure_map(items: &[Item]) {
     println!("\nstructure map: the paired files, their production items, and the one-sided names:");
     for (mn, vn) in PAIRS {
@@ -997,11 +1022,11 @@ fn structure_map(items: &[Item]) {
         };
         let m = side("crates/mainnet/src/", mn);
         let v = side("crates/venue/src/", vn);
-        let m_names: HashSet<&str> = m.iter().map(|i| i.name.as_str()).collect();
-        let v_names: HashSet<&str> = v.iter().map(|i| i.name.as_str()).collect();
-        let mut paired: Vec<&str> = m_names.intersection(&v_names).copied().collect();
-        let mut m_only: Vec<&str> = m_names.difference(&v_names).copied().collect();
-        let mut v_only: Vec<&str> = v_names.difference(&m_names).copied().collect();
+        let m_names: HashSet<String> = m.iter().map(|i| pair_key(i)).collect();
+        let v_names: HashSet<String> = v.iter().map(|i| pair_key(i)).collect();
+        let mut paired: Vec<&str> = m_names.intersection(&v_names).map(String::as_str).collect();
+        let mut m_only: Vec<&str> = m_names.difference(&v_names).map(String::as_str).collect();
+        let mut v_only: Vec<&str> = v_names.difference(&m_names).map(String::as_str).collect();
         paired.sort_unstable();
         m_only.sort_unstable();
         v_only.sort_unstable();
@@ -1173,6 +1198,49 @@ fn gram_overlap(a: &[String], b: &[String]) -> f64 {
 /// external crates already have (the audit's "import it" axis) or a domain
 /// name the workspace keeps deliberately — the reading lists them so the
 /// judgment is made once, not rediscovered.
+/// The trait implementations on both mirrors: the same trait method
+/// implemented in both crates — the shared construction shape.
+fn trait_impls(prod: &[&Item]) {
+    let mut by_key: HashMap<String, Vec<&Item>> = HashMap::new();
+    for i in prod.iter().filter(|i| i.trait_name.is_some()) {
+        by_key.entry(pair_key(i)).or_default().push(i);
+    }
+    let mut rows: Vec<(String, Vec<&Item>)> = by_key
+        .into_iter()
+        // The conversion boilerplate is the language's shape, not the
+        // mirrors' construction (`From.from` lumps four unrelated impls).
+        .filter(|(key, _)| {
+            !["From.", "TryFrom.", "Into.", "Deref."]
+                .iter()
+                .any(|p| key.starts_with(p))
+        })
+        .filter(|(_, v)| {
+            v.iter().any(|i| i.file.starts_with("crates/mainnet/"))
+                && v.iter().any(|i| i.file.starts_with("crates/venue/"))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    println!("\ntrait implementations on both mirrors (the shared construction shape):");
+    if rows.is_empty() {
+        println!("  none");
+        return;
+    }
+    for (key, v) in rows.iter().take(REPORT_TOP) {
+        let mut homes: Vec<String> = v
+            .iter()
+            .map(|i| {
+                let f = i
+                    .file
+                    .replace("crates/mainnet/src/", "m/")
+                    .replace("crates/venue/src/", "v/");
+                format!("{f}:{}", i.name)
+            })
+            .collect();
+        homes.sort_unstable();
+        println!("  {key}  ({})", homes.join(" <-> "));
+    }
+}
+
 fn wrappers(prod: &[&Item]) {
     let mut rows: Vec<&&Item> = prod
         .iter()
