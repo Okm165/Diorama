@@ -241,5 +241,24 @@ grep -q "deal_applied" "$DIR/events2.out" \
   && bad "the no-slot deal published deal_applied (it wrote nothing)" \
   || ok "the no-slot deal publishes no deal_applied (the fact is a state change)"
 
+# ---- the epoch rule (the mainnet script's section, V's own facts) ----------
+# A one-call re-pin moves V's base: the driver detects the reset and the
+# epoch rule runs — the events carry both facts, the counter moves.
+timeout 20 curl -s -N "$HTTP/events" > "$DIR/events3.out" 2>/dev/null &
+for _ in $(seq 1 20); do grep -q ": connected" "$DIR/events3.out" 2>/dev/null && break; sleep 0.1; done
+ep=$(curl -s -X POST "$HTTP/admin/epoch")
+printf '%s' "$ep" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("reset") is True and d.get("source") else 1)' \
+  && ok "/admin/epoch: re-pinned ($ep)" || bad "/admin/epoch: $ep"
+for _ in $(seq 1 30); do
+  grep -q "epoch_changed" "$DIR/events3.out" 2>/dev/null && break
+  sleep 1
+done
+grep -q "reset_detected" "$DIR/events3.out" && ok "/events carries reset_detected after the re-pin" \
+  || bad "/events missing reset_detected (see $DIR/events3.out)"
+grep -q "epoch_changed" "$DIR/events3.out" && ok "/events carries epoch_changed (the epoch rule ran)" \
+  || bad "/events missing epoch_changed"
+e1=$(metric venue_epochs_total)
+[ "${e1:-0}" -ge 1 ] && ok "venue_epochs_total moved ($e1)" || bad "venue_epochs_total did not move ($e1)"
+
 echo "venue-engine-local: $pass ok, $fail bad (logs in $DIR)"
 [ "$fail" -eq 0 ]

@@ -211,12 +211,30 @@ sleep 3
 grep -q "deal_applied" "$DIR/events.out" && ok "/events carries deal_applied" || bad "/events missing deal_applied (see $DIR/events.out)"
 grep -q "block_applied" "$DIR/events.out" && ok "/events carries block_applied" || bad "/events missing block_applied"
 
+# A token without the standard layout writes nothing, so it must publish
+# nothing: the fact is a state change, never a request receipt.
+timeout 4 curl -s -N "$HTTP/events" > "$DIR/events_deal.out" 2>/dev/null &
+for _ in $(seq 1 20); do grep -q ": connected" "$DIR/events_deal.out" 2>/dev/null && break; sleep 0.1; done
+bad_deal=$(curl -s -X POST "$HTTP/admin/deal" -H 'content-type: application/json' \
+  -d '{"token":"0x00000000000000000000000000000000000000e8","to":"'$A2'","amount":"1"}')
+printf '%s' "$bad_deal" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is False else 1)' \
+  && ok "/admin/deal: a token without the layout answers ok:false" || bad "/admin/deal bad token: $bad_deal"
+sleep 3
+grep -q "deal_applied" "$DIR/events_deal.out" \
+  && bad "the no-slot deal published deal_applied (it wrote nothing)" \
+  || ok "the no-slot deal publishes no deal_applied (the fact is a state change)"
+
 # ---- the shared admin surface ----------------------------------------------
 # time: the persistent devnet offset
 curl -s -X POST "$HTTP/admin/time" -H 'content-type: application/json' -d '{"offset_seconds":3600}' >/dev/null
 off=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["time_offset_seconds"])')
 [ "$off" = "3600" ] && ok "/admin/time: the offset is set and reported" || bad "/admin/time: $off"
 curl -s -X POST "$HTTP/admin/time" -H 'content-type: application/json' -d '{"offset_seconds":0}' >/dev/null
+
+# The bare clear is the designed refusal (a clear with nothing to hand back
+# would look like success).
+sc=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HTTP/admin/shadow" -H 'content-type: application/json' -d '{"address":"'$A2'","clear":true}')
+[ "$sc" = "400" ] && ok "/admin/shadow bare clear: 400 (the designed refusal)" || bad "/admin/shadow bare clear: $sc"
 
 # shadow hand-back: A2's account fields return to the source's values
 sleep 3
@@ -243,6 +261,10 @@ printf '%s' "$rw" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exi
 after=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor_t"])')
 curl -s -X POST "$HTTP/admin/resume" -H 'content-type: application/json' -d '{}' >/dev/null
 [ "$after" -lt "$before" ] && ok "rewind: the cursor moved back ($before -> $after)" || bad "rewind: cursor $before -> $after"
+
+# A rewind past the journal ring is the named refusal, never a silent no-op.
+rc=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HTTP/admin/rewind" -H 'content-type: application/json' -d '{"blocks":9999999}')
+[ "$rc" = "400" ] && ok "/admin/rewind beyond ring: 400 (the named refusal)" || bad "/admin/rewind beyond ring: $rc"
 
 # epoch: one-call re-pin; the engine detects the reset and reconciles
 timeout 20 curl -s -N "$HTTP/events" > "$DIR/events2.out" 2>/dev/null &

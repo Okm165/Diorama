@@ -118,5 +118,25 @@ addr = "127.0.0.1"
 port = 18096
 EOF
 
-"$ENGINE" selftest --rpc "$RPC" --anvil-v "$V" --config "$DIR/instance.toml" --windows 5
+if ! "$ENGINE" selftest --rpc "$RPC" --anvil-v "$V" --config "$DIR/instance.toml" \
+    --windows 5 > "$DIR/engine.log" 2>&1; then
+  tail -30 "$DIR/engine.log"
+  echo "venue-selftest-local: FAILED (engine exit)"
+  exit 1
+fi
+# The poll rung must have answered: every window's compose source is the live
+# poll (the venue's rung — HyperEVM has no BAL lane), and at least one window
+# composed a change (the selftest's own contract: the run is bounded until a
+# window moves).
+if ! grep -q "source=poll" "$DIR/engine.log"; then
+  echo "venue-selftest-local: FAILED (the poll rung did not answer; engine log:)"
+  tail -30 "$DIR/engine.log"
+  exit 1
+fi
+if ! grep -qE "applied=[1-9]" "$DIR/engine.log"; then
+  echo "venue-selftest-local: FAILED (no window composed a change; engine log:)"
+  tail -30 "$DIR/engine.log"
+  exit 1
+fi
+tail -3 "$DIR/engine.log"
 echo "venue-selftest-local: PASSED (logs in $DIR)"
