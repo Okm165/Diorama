@@ -778,7 +778,7 @@ fn plumbing(prod: &[&Item]) {
             rows.push((&item.name, item.params.len(), forwarded));
         }
     }
-    rows.sort_by_key(|(_, params, forwarded)| std::cmp::Reverse((*params, *forwarded)));
+    rank(&mut rows, |(_, params, forwarded)| (*params, *forwarded));
     if rows.is_empty() {
         println!("\nplumbing: none (no three-parameter function mostly forwards its parameters)");
         return;
@@ -991,7 +991,7 @@ fn repeated_literals(prod: &[&Item]) {
         .into_iter()
         .filter(|(_, users)| users.len() >= 3)
         .collect();
-    rows.sort_by_key(|(_, users)| std::cmp::Reverse(users.len()));
+    rank(&mut rows, |(_, users)| users.len());
     if rows.is_empty() {
         println!("\nrepeated literals: none (no value appears in three production bodies)");
         return;
@@ -1050,7 +1050,7 @@ fn fan_in(prod: &[&Item]) {
         }
     }
     let mut rows: Vec<(&str, usize)> = callers.iter().map(|(k, v)| (*k, v.len())).collect();
-    rows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    rank(&mut rows, |(_, n)| *n);
     println!("\nfan-in: the workspace's own free functions by caller count (the atomic blocks in use):");
     for (name, n) in rows.iter().take(REPORT_TOP) {
         println!("  {n:>3} callers  {name}");
@@ -1071,7 +1071,7 @@ fn fan_in(prod: &[&Item]) {
         }
     }
     let mut mrows: Vec<(&str, usize)> = methods.iter().map(|(k, v)| (*k, v.len())).collect();
-    mrows.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    rank(&mut mrows, |(_, n)| *n);
     println!("\nmethod fan-in: the most-called method names (a raw accessor here is a verb not yet named):");
     for (name, n) in mrows.iter().take(REPORT_TOP) {
         println!("  {n:>3} callers  .{name}");
@@ -1092,7 +1092,7 @@ fn dispersion(fields: &FieldAccesses) {
         .into_iter()
         .filter(|(_, files)| files.len() >= DISPERSED_BY)
         .collect();
-    rows.sort_by_key(|(_, files)| std::cmp::Reverse(files.len()));
+    rank(&mut rows, |(_, files)| files.len());
     println!("\ndispersion: types whose field logic spans >= {DISPERSED_BY} files:");
     for (ty, files) in rows.iter().take(REPORT_TOP) {
         let list = list(&files.iter().copied().collect::<Vec<_>>());
@@ -1148,7 +1148,7 @@ fn shared_grams<'a>(prod: &[&'a Item], gram: usize) -> Vec<(String, Vec<&'a str>
         .into_iter()
         .filter(|(_, fns)| fns.len() >= SHARED_BY)
         .collect();
-    shared.sort_by_key(|(_, fns)| std::cmp::Reverse(fns.len()));
+    rank(&mut shared, |(_, fns)| fns.len());
     shared
 }
 
@@ -1163,7 +1163,7 @@ fn duplicates(prod: &[&Item]) {
         }
     }
     let mut dupes: Vec<&Vec<&Item>> = by_body.values().filter(|v| v.len() > 1).collect();
-    dupes.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    rank(&mut dupes, |v| v.len());
     if dupes.is_empty() {
         println!("\nduplicates: none (no two production bodies are the same code)");
         return;
@@ -1204,6 +1204,11 @@ fn near_duplicates(prod: &[&Item]) {
         let names: Vec<&str> = group.iter().map(|i| i.name.as_str()).collect();
         println!("  {}x  {}", group.len(), list(&names));
     }
+}
+
+/// Sort a report's rows, most first (the report's one ranking).
+fn rank<T, K: Ord>(rows: &mut [T], key: impl Fn(&T) -> K) {
+    rows.sort_by_key(|r| std::cmp::Reverse(key(r)));
 }
 
 /// Up to four names, then the remainder's count.

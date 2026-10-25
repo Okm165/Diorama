@@ -38,7 +38,7 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
     if matches!(req.action, ExchangeAction::Noop) {
         if let (Some(user), Some(nonce)) = (req.user, req.nonce) {
             if let Err(e) = state.sim.use_nonce(user, nonce, crate::now_ms()) {
-                return Ok(err_envelope(e.to_string()).into_response());
+                return Ok(err_envelope(e.to_string()));
             }
         }
         return Ok(noop_response(&req));
@@ -66,7 +66,7 @@ fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Option<String> 
                 "venue-sim: TP/SL orders must be reduce-only (docs: pre-validation)".into(),
             );
         }
-        if let Err(e) = crate::sim::order::validate_order(&state.feed, meta.as_ref(), &order) {
+        if let Err(e) = crate::sim::validate::validate_order(&state.feed, meta.as_ref(), &order) {
             let reason = e.to_string();
             if reason.contains("too far from oracle") {
                 return Some(reason);
@@ -85,9 +85,9 @@ where
     match coin_of(state.feed.meta().as_ref(), asset) {
         Some(coin) => match run(&coin) {
             Ok(()) => default_ok(),
-            Err(e) => err_envelope(e.to_string()).into_response(),
+            Err(e) => err_envelope(e.to_string()),
         },
-        None => err_envelope(format!("unknown asset index {asset}")).into_response(),
+        None => err_envelope(format!("unknown asset index {asset}")),
     }
 }
 
@@ -132,10 +132,10 @@ fn dispatch(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeB
         } => leverage_action(state, owner, *asset, *is_cross, *leverage),
         ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(owner, *time) {
             Ok(_) => default_ok(),
-            Err(e) => err_envelope(e.to_string()).into_response(),
+            Err(e) => err_envelope(e.to_string()),
         },
         ExchangeAction::Noop => noop_response(req),
-        ExchangeAction::Unmodeled => err_envelope(unmodeled_reason(body)).into_response(),
+        ExchangeAction::Unmodeled => err_envelope(unmodeled_reason(body)),
     }
 }
 
@@ -166,13 +166,12 @@ fn acting_user(
                 "venue-sim: an action must name the acting account in `user` — the devnet has \
                  no keys to derive it from the signature (plan §17). See docs/INTEGRATION.md."
                     .to_string(),
-            )
-            .into_response(),
+            ),
         ));
     };
     if let Some(nonce) = req.nonce {
         if let Err(e) = state.sim.use_nonce(user, nonce, crate::now_ms()) {
-            return Err(Box::new(err_envelope(e.to_string()).into_response()));
+            return Err(Box::new(err_envelope(e.to_string())));
         }
     }
     Ok((user, acting_owner(req).unwrap_or(user)))
@@ -196,7 +195,7 @@ fn flag_omitted(name: &str, flag: Option<bool>) -> Result<(), String> {
 fn flagged(name: &str, flag: Option<bool>, action: impl FnOnce() -> Response) -> Response {
     match flag_omitted(name, flag) {
         Ok(()) => action(),
-        Err(reason) => err_envelope(reason).into_response(),
+        Err(reason) => err_envelope(reason),
     }
 }
 
@@ -210,7 +209,7 @@ fn batch_modify(
 ) -> Response {
     for m in modifies {
         if let Err(e) = modify_one(state, owner, &m.oid, &m.order, always) {
-            return err_envelope(e.to_string()).into_response();
+            return err_envelope(e.to_string());
         }
     }
     default_ok()
@@ -249,7 +248,7 @@ fn leverage_action(
 fn order_action(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeBody) -> Response {
     let (orders, grouping) = match order_parts(body, &req.action) {
         Ok(parts) => parts,
-        Err(reason) => return err_envelope(reason).into_response(),
+        Err(reason) => return err_envelope(reason),
     };
     tracing::info!(
         owner = %owner,
@@ -316,8 +315,7 @@ fn cancel_action(
     if cancels.is_empty() {
         // The venue's batched actions answer an error for an empty payload
         // (the order action's pre-validation carries the same rule).
-        return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string())
-            .into_response();
+        return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string());
     }
     let meta = state.feed.meta();
     let statuses = cancels
@@ -350,8 +348,7 @@ fn cancel_by_cloid_action(
     fast: bool,
 ) -> Response {
     if cancels.is_empty() {
-        return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string())
-            .into_response();
+        return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string());
     }
     let meta = state.feed.meta();
     let statuses = cancels
@@ -386,7 +383,7 @@ fn modify_action(
 ) -> Response {
     match modify_one(state, owner, oid, order, always_place) {
         Ok(()) => default_ok(),
-        Err(e) => err_envelope(e.to_string()).into_response(),
+        Err(e) => err_envelope(e.to_string()),
     }
 }
 
@@ -501,11 +498,12 @@ fn order_parts<'a>(
 }
 
 /// The venue's `err` envelope (HTTP 200 — the shape their client parses).
-fn err_envelope(response: String) -> Json<ExchangeResponse> {
+fn err_envelope(response: String) -> Response {
     Json(ExchangeResponse {
         status: "err",
         response,
     })
+    .into_response()
 }
 
 /// One order's status: the fill, or its refusal, in the venue's own shapes.

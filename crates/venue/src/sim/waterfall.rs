@@ -443,6 +443,7 @@ pub(super) fn attempt_size(full: Decimal, notional: Decimal, in_cooldown: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::feed_with;
 
     /// The waterfall's attempt sizes (docs): 20 % above the $100k partial
     /// threshold, the full size below it and during the 30 s cooldown.
@@ -458,5 +459,325 @@ mod tests {
         let (sz, partial) = attempt_size(full, Decimal::from(50_000), false).unwrap();
         assert!(!partial, "below the threshold the attempt is full");
         assert_eq!(sz, full);
+    }
+
+    /// A meta with the given assets (the waterfall's maintenance tiers read
+    /// it).
+    fn meta_of(assets: &[(&str, u32)]) -> crate::wire::Meta {
+        let mut m: crate::wire::Meta = serde_json::from_str(r#"{"universe": []}"#).unwrap();
+        for (coin, max_leverage) in assets {
+            m.universe.push(crate::wire::AssetInfo {
+                name: (*coin).into(),
+                sz_decimals: 4,
+                max_leverage: *max_leverage,
+                margin_table_id: None,
+                only_isolated: None,
+                is_delisted: None,
+                margin_mode: None,
+            });
+        }
+        m
+    }
+
+    /// A meta with one asset.
+    fn meta_with(coin: &str, max_leverage: u32) -> crate::wire::Meta {
+        meta_of(&[(coin, max_leverage)])
+    }
+
+    /// The waterfall's fixture: one account holding a single ETH position.
+    fn put_account(sim: &Sim, address: Address, facts: (Decimal, Decimal, Decimal, u32)) {
+        let (balance, entry, szi, leverage) = facts;
+        sim.with_account(address, |acc| {
+            acc.perp_balance = balance;
+            acc.positions.insert(
+                "ETH".into(),
+                crate::sim::account::Position {
+                    szi,
+                    entry_px: entry,
+                    leverage: crate::wire::LeverageType::Cross,
+                    leverage_value: leverage,
+                    margin_used: Decimal::ZERO,
+                    isolated_margin: Decimal::ZERO,
+                    funding_all_time: Decimal::ZERO,
+                    funding_since_open: Decimal::ZERO,
+                    funding_since_change: Decimal::ZERO,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// Below ⅔ of the maintenance requirement the backstop takes the position
+    /// and the margin over: the vault holds the same side, the trader ends at
+    /// zero equity (docs).
+    #[test]
+    fn the_backstop_takes_the_position_below_two_thirds() {
+        let feed = feed_with(&[("ETH", "40", "40")]);
+        feed.put_meta(meta_with("ETH", 10), crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        // Equity 0 (10 + (40 − 50)), maintenance 40/10/2 = 2, ⅔ of it 1.33.
+        put_account(&sim, a, (Decimal::from(10), Decimal::from(50), Decimal::ONE, 10));
+        let out = sim.check_all(&feed, crate::now_ms()).unwrap();
+        assert_eq!(out.len(), 1, "one liquidation record");
+        let a_acc = sim.account(a).unwrap().unwrap();
+        assert!(a_acc
+            .positions
+            .get("ETH")
+            .map(|p| p.szi.is_zero())
+            .unwrap_or(true));
+        assert_eq!(a_acc.perp_balance, Decimal::ZERO, "the maintenance is not returned");
+        let vault = sim.account(BACKSTOP).unwrap().expect("the vault is touched");
+        assert_eq!(
+            vault.positions.get("ETH").map(|p| p.szi),
+            Some(Decimal::ONE),
+            "the vault takes the same side over"
+        );
+        assert_eq!(
+            sim.metrics
+                .backstop_liquidations_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    /// A negative account value goes to ADL: the opposite side (ranked by
+    /// (mark/entry)·(notional/account_value)) is closed at the previous mark,
+    /// and the platform stays solvent (docs).
+    #[test]
+    fn adl_closes_the_opposite_side_at_the_previous_mark() {
+        let feed = feed_with(&[("ETH", "100", "100")]);
+        feed.put_meta(meta_with("ETH", 10), crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa); // long 1 @ 100, thin
+        let b = Address::repeat_byte(0xbb); // short 1 @ 100, in profit
+        put_account(&sim, a, (Decimal::from(10), Decimal::from(100), Decimal::ONE, 10));
+        put_account(&sim, b, (Decimal::from(10), Decimal::from(100), -Decimal::ONE, 10));
+        // The previous mark is 90; the mark then falls to 80: A's equity = −10.
+        feed.put_ctx("ETH".into(), crate::wire::test_ctx("90", "90"), crate::now_ms());
+        sim.record_marks(&feed).unwrap();
+        feed.put_ctx("ETH".into(), crate::wire::test_ctx("80", "80"), crate::now_ms());
+        let out = sim.check_all(&feed, crate::now_ms()).unwrap();
+        assert_eq!(out.len(), 1, "one liquidation record");
+        let a_acc = sim.account(a).unwrap().unwrap();
+        assert!(a_acc
+            .positions
+            .get("ETH")
+            .map(|p| p.szi.is_zero())
+            .unwrap_or(true));
+        // A closed at 90: (90 − 100)·1 = −10 → balance 0 (solvent, no bad debt).
+        assert_eq!(a_acc.perp_balance, Decimal::ZERO);
+        let b_acc = sim.account(b).unwrap().unwrap();
+        assert!(b_acc
+            .positions
+            .get("ETH")
+            .map(|p| p.szi.is_zero())
+            .unwrap_or(true));
+        // B bought back at the previous mark 90: (100 − 90)·1 = +10.
+        assert_eq!(b_acc.perp_balance, Decimal::from(20));
+        assert_eq!(
+            sim.metrics
+                .adl_closes_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+    /// The waterfall's fixture for an isolated leg: one isolated position
+    /// carrying its own margin (the mode switch parks it there).
+    fn put_isolated(
+        sim: &Sim,
+        address: Address,
+        coin: &str,
+        facts: (Decimal, Decimal, u32, Decimal),
+    ) {
+        let (entry, szi, leverage, margin) = facts;
+        sim.with_account(address, |acc| {
+            acc.positions.insert(
+                coin.into(),
+                crate::sim::account::Position {
+                    szi,
+                    entry_px: entry,
+                    leverage: crate::wire::LeverageType::Isolated,
+                    leverage_value: leverage,
+                    margin_used: margin,
+                    isolated_margin: margin,
+                    funding_all_time: Decimal::ZERO,
+                    funding_since_open: Decimal::ZERO,
+                    funding_since_change: Decimal::ZERO,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// The legs are independent (docs: "Liquidations in that asset do not
+    /// affect other isolated positions or cross positions"): an isolated
+    /// position below its own maintenance goes to the vault alone — "the
+    /// user's cross margin and positions are untouched".
+    #[test]
+    fn an_isolated_leg_goes_to_the_vault_alone() {
+        let feed = feed_with(&[("ETH", "100", "100"), ("BTC", "100", "100")]);
+        feed.put_meta(meta_of(&[("ETH", 10), ("BTC", 10)]), crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        put_account(&sim, a, (Decimal::from(10), Decimal::from(100), Decimal::ONE, 10));
+        // BTC isolated: margin 1, maintenance 100/10/2 = 5 → 3·1 < 2·5: the vault.
+        put_isolated(&sim, a, "BTC", (Decimal::from(100), Decimal::ONE, 10, Decimal::ONE));
+        let out = sim.check_all(&feed, crate::now_ms()).unwrap();
+        assert_eq!(out.len(), 1, "one liquidation record");
+        assert_eq!(out[0].positions_closed, vec!["BTC".to_string()]);
+        let acc = sim.account(a).unwrap().unwrap();
+        assert_eq!(
+            acc.positions.get("ETH").map(|p| p.szi),
+            Some(Decimal::ONE),
+            "the cross side is untouched"
+        );
+        assert_eq!(acc.perp_balance, Decimal::from(10), "the cross balance is untouched");
+        assert!(!acc.positions.contains_key("BTC"), "the isolated position is gone");
+        let vault = sim.account(BACKSTOP).unwrap().expect("the vault is touched");
+        assert_eq!(vault.positions.get("BTC").map(|p| p.szi), Some(Decimal::ONE));
+        assert_eq!(vault.perp_balance, Decimal::ONE, "the isolated margin moved with it");
+    }
+
+    /// A cross backstop transfers the cross positions and the cross margin
+    /// only (docs: "the trader's cross positions and cross margin are all
+    /// transferred"); the trader keeps the isolated position and its margin —
+    /// "if the trader has no isolated positions, the trader ends up with zero
+    /// account equity" implies the isolated margin stays otherwise.
+    #[test]
+    fn the_cross_backstop_leaves_isolated_positions() {
+        let feed = feed_with(&[("ETH", "100", "100"), ("BTC", "100", "100")]);
+        feed.put_meta(meta_of(&[("ETH", 10), ("BTC", 10)]), crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        // Cross: balance 3, ETH long 1 @ 100 → cross value 3 < 5 and
+        // 3·3 < 2·5 → the vault.
+        put_account(&sim, a, (Decimal::from(3), Decimal::from(100), Decimal::ONE, 10));
+        // BTC isolated, margin 6: 6 >= maintenance 5 → solvent.
+        put_isolated(&sim, a, "BTC", (Decimal::from(100), Decimal::ONE, 10, Decimal::from(6)));
+        let out = sim.check_all(&feed, crate::now_ms()).unwrap();
+        assert_eq!(out.len(), 1, "one liquidation record");
+        assert_eq!(out[0].positions_closed, vec!["ETH".to_string()]);
+        let acc = sim.account(a).unwrap().unwrap();
+        assert!(!acc.positions.contains_key("ETH"), "the vault took the cross position");
+        assert_eq!(acc.perp_balance, Decimal::ZERO, "the cross margin moved with it");
+        let btc = acc.positions.get("BTC").expect("the isolated position stays");
+        assert_eq!(btc.isolated_margin, Decimal::from(6), "its margin stays with it");
+        let vault = sim.account(BACKSTOP).unwrap().expect("the vault is touched");
+        assert_eq!(vault.positions.get("ETH").map(|p| p.szi), Some(Decimal::ONE));
+        assert!(
+            !vault.positions.contains_key("BTC"),
+            "the vault did not touch the isolated leg"
+        );
+    }
+
+    /// Closing an isolated position returns its margin to the cross balance:
+    /// the margin is the trader's collateral, only the position is gone.
+    #[test]
+    fn closing_an_isolated_position_returns_its_margin() {
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        put_isolated(&sim, a, "ETH", (Decimal::from(100), Decimal::ONE, 10, Decimal::from(4)));
+        sim.with_account(a, |acc| {
+            let facts =
+                crate::sim::account::FillFacts::close("ETH", false, Decimal::ONE, Decimal::from(100), 10);
+            crate::sim::account::apply_fill(acc, &facts, None)
+        })
+        .unwrap();
+        let acc = sim.account(a).unwrap().unwrap();
+        assert!(acc.positions.is_empty(), "the position is closed");
+        assert_eq!(acc.perp_balance, Decimal::from(4), "the isolated margin came back");
+    }
+
+    /// A strict isolated asset (docs: "the margin cannot be removed. Margin is
+    /// proportionally removed as the position is closed"): removal is refused
+    /// by name, and a half close releases half the margin.
+    #[test]
+    fn strict_isolated_margin_is_not_removable_and_releases_proportionally() {
+        let feed = feed_with(&[("ETH", "100", "100")]);
+        let mut meta = meta_with("ETH", 10);
+        meta.universe[0].only_isolated = Some(true);
+        feed.put_meta(meta, crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        put_isolated(&sim, a, "ETH", (Decimal::from(100), Decimal::from(2), 10, Decimal::from(8)));
+        let refused = sim.update_isolated_margin(a, "ETH", -1_000_000, &feed);
+        assert!(refused.is_err(), "strict isolated margin cannot be removed");
+        assert_eq!(
+            sim.account(a).unwrap().unwrap().positions["ETH"].isolated_margin,
+            Decimal::from(8),
+            "the refused removal left the margin alone"
+        );
+        // A half close releases half the margin (4), keeping the other 4.
+        sim.with_account(a, |acc| {
+            let facts =
+                crate::sim::account::FillFacts::close("ETH", false, Decimal::ONE, Decimal::from(100), 10);
+            crate::sim::account::apply_fill(acc, &facts, feed.meta().as_ref())
+        })
+        .unwrap();
+        let acc = sim.account(a).unwrap().unwrap();
+        let p = acc.positions.get("ETH").expect("half the position remains");
+        assert_eq!(p.szi, Decimal::ONE);
+        assert_eq!(p.isolated_margin, Decimal::from(4), "released proportionally");
+        assert_eq!(acc.perp_balance, Decimal::from(4), "the released half landed in the cross balance");
+    }
+
+    /// `updateLeverage` moves the initial margin across the boundary: to
+    /// isolated parks it on the position, back to cross returns it.
+    #[test]
+    fn switching_to_isolated_parks_and_back_returns_the_margin() {
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        put_account(&sim, a, (Decimal::from(50), Decimal::from(100), Decimal::ONE, 10));
+        sim.set_leverage(a, "ETH", account::LeverageSetting { is_cross: false, leverage: 10 }, None)
+            .unwrap();
+        let acc = sim.account(a).unwrap().unwrap();
+        assert_eq!(
+            acc.positions.get("ETH").map(|p| p.isolated_margin),
+            Some(Decimal::from(10)),
+            "the initial margin is parked on the position"
+        );
+        assert_eq!(acc.perp_balance, Decimal::from(40));
+        sim.set_leverage(a, "ETH", account::LeverageSetting { is_cross: true, leverage: 10 }, None)
+            .unwrap();
+        let acc = sim.account(a).unwrap().unwrap();
+        assert_eq!(
+            acc.positions.get("ETH").map(|p| p.isolated_margin),
+            Some(Decimal::ZERO)
+        );
+        assert_eq!(acc.perp_balance, Decimal::from(50), "the margin came back");
+    }
+
+    /// The measured served identities with an isolated leg (probe: two live
+    /// accounts): the total carries the isolated margin as cash —
+    /// `accountValue = totalRawUsd + Σ sign·positionValue` holds with it
+    /// included — the cross value is the total minus the margin, and the
+    /// cross raw subtracts the margin and adds the isolated signed value.
+    #[test]
+    fn the_isolated_margin_rides_the_totals() {
+        let feed = feed_with(&[("ETH", "100", "100"), ("BTC", "100", "100")]);
+        feed.put_meta(meta_of(&[("ETH", 10), ("BTC", 10)]), crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        put_account(&sim, a, (Decimal::from(50), Decimal::from(100), Decimal::ONE, 10));
+        put_isolated(&sim, a, "BTC", (Decimal::from(100), Decimal::ONE, 10, Decimal::from(6)));
+        let acc = sim.account(a).unwrap().unwrap();
+        let v = crate::sim::account::view(&acc, &feed, feed.meta().as_ref()).unwrap();
+        // Total: cash 50 + 6, cost basis 200, signed 200 → value 56, raw −144.
+        assert_eq!(v.margin_summary.account_value, Decimal::from(56));
+        assert_eq!(v.margin_summary.total_raw_usd, Decimal::from(-144));
+        assert_eq!(
+            v.margin_summary.total_raw_usd + Decimal::from(200),
+            v.margin_summary.account_value,
+            "the client's identity holds with the isolated margin in the total"
+        );
+        // Cross: 56 − 6 = 50; raw −144 − 6 + 100 = −50.
+        assert_eq!(v.cross_margin_summary.account_value, Decimal::from(50));
+        assert_eq!(v.cross_margin_summary.total_raw_usd, Decimal::from(-50));
+        let state =
+            crate::sim::account::clearinghouse(&acc, &feed, feed.meta().as_ref(), 0).unwrap();
+        assert!(crate::sim::account::identity_holds(&state));
     }
 }

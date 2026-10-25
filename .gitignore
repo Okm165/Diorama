@@ -9,3 +9,6 @@
 k8s/**/secret-*.yaml
 
 .context/
+# Python bytecode
+__pycache__/
+*.pyc
