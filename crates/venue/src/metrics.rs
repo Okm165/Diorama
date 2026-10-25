@@ -57,6 +57,12 @@ mirror_devnet::registry! {
         counter follow_skipped_shadowed_total = "venue_follow_skipped_shadowed_total", "keys the follow skipped (devnet-owned, COW)";
         /// Follow windows paused by the gap guard.
         counter follow_gap_pauses_total = "venue_follow_gap_pauses_total", "follow windows paused (gap guard)";
+        /// The live parity's sample: keys the follow re-read on V after
+        /// applying them (the composed BAL's entries), and how many read
+        /// back the composed value. The pair is the follow's measurement
+        /// (the applier's convergence counters' counterpart).
+        counter follow_sampled_total = "venue_follow_sampled_total", "keys the follow re-read on V after applying them";
+        counter follow_sampled_ok_total = "venue_follow_sampled_ok_total", "applied keys that read back the composed value";
         /// Source-continuity mismatches (a block's parent hash changed under
         /// the follow): a source reorg; the window is recomposed from latest.
         counter source_reorg_total = "venue_source_reorg_total", "source continuity mismatches (a parent hash changed under the follow)";

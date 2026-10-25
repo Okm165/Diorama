@@ -227,6 +227,9 @@ venue-smoke: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridg
 venue-follow-local: venue-build ## Native local proof of the source follow (two anvils; no cluster/Docker)
 	./scripts/venue-follow-local.sh
 
+venue-selftest-local: venue-build ## Native local proof of the follow against the real HyperEVM (one forked anvil)
+	./scripts/venue-selftest-local.sh
+
 venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
 	kubectl apply -f k8s/base/venue-mirror/pvcs.yaml
 	$(MAKE) INSTANCE=venue-mirror apply
@@ -363,4 +366,4 @@ help: ## Show this help
 	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
 	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help \
-	venue-follow-local mainnet-selftest-local mainnet-engine-local daloc-local container-smoke
+	venue-follow-local venue-selftest-local mainnet-selftest-local mainnet-engine-local daloc-local container-smoke

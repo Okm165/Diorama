@@ -2668,6 +2668,7 @@ dependencies = [
  "alloy-rpc-types-trace",
  "alloy-sol-types",
  "axum",
+ "clap",
  "futures-util",
  "mirror-anvil",
  "mirror-config",

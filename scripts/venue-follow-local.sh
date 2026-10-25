@@ -144,6 +144,16 @@ if [ "${applied:-0}" -ge 2 ]; then
 else
   bad "follow applied_total=$applied (expected >= 2)"
 fi
+# The follow's measurement: every applied key must read back the composed
+# value (the live parity). The pair was silently inverted once — a clean
+# window reported as a failure — so the proof asserts it here.
+sampled=$(metric venue_follow_sampled_total || true)
+sampled_ok=$(metric venue_follow_sampled_ok_total || true)
+if [ "${sampled_ok:-0}" = "${sampled:-0}" ] && [ "${sampled:-0}" -ge 1 ]; then
+  ok "live parity: $sampled_ok/$sampled applied keys read back the composed value"
+else
+  bad "live parity: $sampled_ok/$sampled (the follow's measurement)"
+fi
 
 # Stage 3: the forensic trail. A log from a contract no declared closure
 # covers cannot be followed — it must land in the shared drift log

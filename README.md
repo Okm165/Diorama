@@ -196,7 +196,7 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             mainnet-secrets), the
                             venue suites (venue-smoke, venue-drill, venue-proof,
                             venue-order-proof, venue-product-sim, venue-follow-local,
-                            venue-secrets), the cross-mirror suites (cctp-smoke,
+                            venue-selftest-local, venue-secrets), the cross-mirror suites (cctp-smoke,
                             cctp-roundtrip, cctp-margin-cycle, engine-symmetry), daloc-sim.py
                             with daloc-local.sh (the arc against a local scratch stack), the
                             container proof (container-smoke.sh: the engine image run for

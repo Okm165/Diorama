@@ -106,11 +106,60 @@ pub enum ResetSignal {
     },
     /// The recorded chain instance's canary word is gone or foreign (the
     /// venue's witness: heights below a fork's pin resolve to the source, so
-    /// cursor hashes are unsound there — ADR 0002).
+    /// cursor hashes are unsound there — ADR 0002). `expected` is the
+    /// registry's recorded epoch pin; `found` is what the witness saw (the
+    /// detector answers with the canary's decoded pin; a caller that
+    /// re-derives the witness from the chain answers with its current pin).
     PinMismatch {
         expected: Option<u64>,
         found: Option<u64>,
     },
+}
+
+/// The detector's signal as the fact's witness, with the log line that names
+/// what was seen — one home, so the fact and the wording cannot drift between
+/// the mirrors (the mainnet's cursor-hash detector answers three of the
+/// variants, the venue's canary one; each detector is defensive about the
+/// others, and every non-`Steady` signal is a reset by definition).
+/// `Steady` = no reset at all: `None`.
+pub fn witness_for(signal: ResetSignal) -> Option<crate::facts::ResetWitness> {
+    use crate::facts::ResetWitness;
+    match signal {
+        ResetSignal::Steady => None,
+        ResetSignal::BaseMoved { base, cursor } => {
+            tracing::warn!(
+                ?base,
+                cursor,
+                "cursor below the fork base (re-pin) - reconciling"
+            );
+            Some(ResetWitness::Position { base, cursor })
+        }
+        ResetSignal::HashMismatch {
+            block,
+            expected,
+            found,
+        } => {
+            tracing::warn!(
+                block,
+                ?expected,
+                ?found,
+                "cursor hash not found on chain (reset or re-pin) - reconciling"
+            );
+            Some(ResetWitness::Hash {
+                block,
+                expected,
+                found,
+            })
+        }
+        ResetSignal::PinMismatch { expected, found } => {
+            tracing::warn!(
+                ?expected,
+                ?found,
+                "chain instance mismatch (the canary is gone or foreign) - reconciling"
+            );
+            Some(ResetWitness::Pin { expected, found })
+        }
+    }
 }
 
 /// How a chain reset is detected. The detector is self-sufficient: it holds

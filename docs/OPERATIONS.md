@@ -551,6 +551,7 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_source_head` / `venue_source_followed` | the HL source's head / the highest source block composed onto V (the follow cursor) |
 | `venue_follow_windows_total` / `venue_follow_applied_total` / `venue_follow_skipped_shadowed_total` | follow windows composed / keys applied / keys skipped because the devnet owns them (COW) |
 | `venue_follow_gap_pauses_total` / `venue_source_reorg_total` | windows paused by the gap guard / source continuity mismatches (a parent hash changed under the follow) |
+| `venue_follow_sampled_total` / `venue_follow_sampled_ok_total` | the live parity's sample and its passes: the follow re-reads every applied key on V and compares against the composed value |
 | `venue_poll_touched` / `venue_poll_planned_keys` / `venue_poll_changed_keys` | the last window: addresses touched / keys the closures planned / keys found changed |
 | `venue_poll_uncovered_logs_total` | logs from contracts no closure covers (declare a closure to follow them) |
 | `venue_probe_ok_total` / `venue_probe_failures_total` | at-pin probes matching / diverging from the fork source |
@@ -774,6 +775,7 @@ StorageClass as the mainnet mirror; the state layout is the shared one
 |---|---|---|
 | `venue_epochs_total` increased and `shadowed_slots` dropped to 0 | V was re-forked at a *new* pin (an OOM restart, `/admin/epoch`, an out-of-band `anvil_reset`): a new epoch - the devnet's writes are gone with the old base | re-create the scenario from its journal; the sim's `epoch_new` does both halves in one call |
 | `venue_epochs_total` increased and `venue_restore_writes_total` grew | V was reset at the *same* pin: the recorded writes were re-applied, orphans pruned | none; verify `/status.shadowed` matches expectation |
+| `venue_follow_sampled_ok_total` below `venue_follow_sampled_total` | an applied key did not read back the composed value (a write that did not land, or a composition bug): inspect `drift.jsonl` and the window's log line | re-run the window (`/admin/epoch` re-pins) and check the key by hand; a repeat is a bug, never drift |
 | `venue_probe_skipped_total` climbing, `venue_probe_failures_total` flat | the pin is not the source's head (the source serves its latest state for `eth_call` - measured), so probes are skipped, never alarmed | re-pin (`/admin/epoch` or `epoch_new`) to probe against a fresh base |
 | `venue_probe_failures_total` climbing | V diverged from the fork source on a devnet-unowned target (a missing hand-back, a poisoned value) | inspect `/status.shadowed`; hand the keys back (`/admin/shadow {clear: true, all: true}`); re-pin if it persists |
 | `/admin/shadow {clear: true}` refused with "the source advanced past the pin" | the unshadow source can no longer serve the pin (`eth_call` serves its latest state - measured) | re-pin (`POST /admin/epoch`); the refusal is the protection against handing back a poisoned value |

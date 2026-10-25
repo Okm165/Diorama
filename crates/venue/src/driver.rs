@@ -22,7 +22,7 @@ use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::reset::{read_canary, write_canary};
 use mirror_devnet::engine::Engine as _;
-use mirror_devnet::facts::{Fact, ResetWitness};
+use mirror_devnet::facts::Fact;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
@@ -127,8 +127,10 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
 
     // Follow the source: compose the window since the last composed source
     // block and land the changed keys on V (COW). After the scan, so the
-    // devnet's own writes are marked before the filter reads them.
-    crate::follow::step(ctx).await?;
+    // devnet's own writes are marked before the filter reads them. The
+    // window's stats are the fact's and the selftest's to read; the steady
+    // state ignores them.
+    let _ = crate::follow::step(ctx).await?;
 
     clear_rewound_range(&ctx.plane, head)?;
     Ok(Pass::Steady)
@@ -247,13 +249,23 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     if read_canary(&ctx.anvil_v).await? == pin {
         return Ok(pin);
     }
-    ctx.plane.facts.publish(Fact::ResetDetected {
-        chain: ctx.mirror.label(),
-        witness: ResetWitness::Pin {
+    // The witness comes first (the cause, then the effect), through the same
+    // mapping the mainnet's detector path uses. A fresh state dir is not a
+    // transition: there is no instance the registry recorded, so the boot is
+    // an anchor and stays silent — the mainnet's boot anchor behaves the
+    // same way (the epoch rule's fresh case is the negation of `holds_state`).
+    if mirror_devnet::epoch::holds_state(&ctx.plane)? {
+        let signal = ResetSignal::PinMismatch {
             expected: ctx.plane.state.epoch_pin()?,
             found: pin,
-        },
-    });
+        };
+        if let Some(witness) = mirror_devnet::spine::witness_for(signal) {
+            ctx.plane.facts.publish(Fact::ResetDetected {
+                chain: ctx.mirror.label(),
+                witness,
+            });
+        }
+    }
     run_epoch_rule(ctx, pin).await?;
     anchor_cursor(ctx, pin).await?;
     Ok(pin)

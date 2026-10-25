@@ -62,6 +62,15 @@ pub fn anchor(plane: &Plane, pin: Option<u64>) -> Result<()> {
     Ok(())
 }
 
+/// Whether the registry holds anything a reconcile must witness: a recorded
+/// epoch pin or recorded writes. A fresh state dir holds neither — its boot
+/// is an *anchor*, not a transition (the rule's own fresh case below is the
+/// negation of this), so a caller that reports the transition (the venue's
+/// reset fact) stays silent for it, exactly like the mainnet's boot anchor.
+pub fn holds_state(plane: &Plane) -> Result<bool> {
+    Ok(plane.state.epoch_pin()?.is_some() || plane.shadow.lock()?.has_recorded())
+}
+
 /// Run the epoch rule against `pin` (the chain's fork base, a source-chain
 /// block height; `None` = the chain has no fork config). See the module docs
 /// for the contract. A transition is persisted before returning: a crash

@@ -7,6 +7,7 @@ license.workspace = true
 description = "The Venue Mirror: the fork driver over anvil V, the market/account simulator, the daloc-facing API"
 
 [dependencies]
+clap = { workspace = true }
 mirror-config = { path = "../config" }
 mirror-anvil = { path = "../anvil" }
 mirror-devnet = { path = "../devnet" }

@@ -15,17 +15,20 @@ use mirror_devnet::spine::ProbeSchedule;
 use std::time::Instant;
 
 
-/// One follow window's outcome (what the fact and the gauges report).
-struct WindowStats {
+/// One follow window's outcome (what the fact and the gauges report) — the
+/// venue's counterpart of the applier's `ApplyOutcome`, returned by [`step`]
+/// so a caller that reports per-window lines (the selftest) reads the same
+/// numbers the fact carries.
+pub(crate) struct WindowStats {
     /// The compose rung's name (`plan.kind.as_str()`: `poll` for the public
     /// API's touches; `bal`/`trace` if a future source serves them).
-    source: &'static str,
-    total: usize,
-    applied: usize,
-    filtered: usize,
-    skipped_shadowed: usize,
-    sampled: usize,
-    sampled_ok: usize,
+    pub(crate) source: &'static str,
+    pub(crate) total: usize,
+    pub(crate) applied: usize,
+    pub(crate) filtered: usize,
+    pub(crate) skipped_shadowed: usize,
+    pub(crate) sampled: usize,
+    pub(crate) sampled_ok: usize,
 }
 
 /// The gap guard's drift line: the source head ran past the follow cursor by
@@ -72,21 +75,21 @@ struct UncoveredLogsEntry {
 /// The window's writes are the *source's* state, not the devnet's: they are
 /// not journaled (a rewind restores devnet writes, never source history), and
 /// a key the devnet owns is skipped until it is handed back.
-pub(crate) async fn step(ctx: &Ctx) -> Result<()> {
+pub(crate) async fn step(ctx: &Ctx) -> Result<Option<WindowStats>> {
     let source_head = ctx.source_rpc.block_number().await?;
     ctx.venue_metrics
         .set(&ctx.venue_metrics.source_head, source_head);
     let Some(followed) = ctx.plane.state.source_last_block()? else {
         // Not anchored yet (reconcile anchors at the pin); nothing to do.
-        return Ok(());
+        return Ok(None);
     };
     ctx.venue_metrics
         .set(&ctx.venue_metrics.source_followed, followed);
     if source_head <= followed {
-        return Ok(());
+        return Ok(None);
     }
     if !gap_ok(ctx, followed, source_head)? {
-        return Ok(());
+        return Ok(None);
     }
 
     let started = Instant::now();
@@ -94,7 +97,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<()> {
     let stats = compose_window(ctx, followed, source_head).await?;
     advance_follow(ctx, source_head).await?;
     report_window(ctx, followed, source_head, &stats, started.elapsed().as_millis() as u64);
-    Ok(())
+    Ok(Some(stats))
 }
 
 /// One place for the window's gauges, fact, and log.
@@ -103,6 +106,10 @@ fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats, ms: u64) {
         .inc(&ctx.venue_metrics.follow_windows_total);
     ctx.venue_metrics
         .add(&ctx.venue_metrics.follow_applied_total, window.applied as u64);
+    ctx.venue_metrics
+        .add(&ctx.venue_metrics.follow_sampled_total, window.sampled as u64);
+    ctx.venue_metrics
+        .add(&ctx.venue_metrics.follow_sampled_ok_total, window.sampled_ok as u64);
     ctx.venue_metrics.add(
         &ctx.venue_metrics.follow_skipped_shadowed_total,
         window.skipped_shadowed as u64,
@@ -213,7 +220,12 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
     };
     let (sampled, sampled_ok) =
         if matches!(ctx.mirror.policies().probes, ProbeSchedule::LiveParity) {
-            mirror_devnet::bal::verify(ctx.target.as_ref(), &plan.bal).await?
+            // `verify` answers `(ok, failed)`; the fact's contract is
+            // `(sample size, passed)` — the applier's naming, so the two
+            // mirrors' facts read the same way (found by the venue selftest:
+            // the inverted pair reported every clean window as a failure).
+            let (ok, failed) = mirror_devnet::bal::verify(ctx.target.as_ref(), &plan.bal).await?;
+            (ok + failed, ok)
         } else {
             (0, 0)
         };

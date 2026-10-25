@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::source_sync;
 use mirror_anvil::Rpc;
 use mirror_devnet::engine::Engine as _;
-use mirror_devnet::facts::{Fact, ResetWitness};
+use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::spine::ResetSignal;
 use mirror_devnet::state::{self, ChainCursor};
@@ -76,7 +76,7 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
 /// A witnessed reset: say what was seen, publish the witness, and rebase.
 /// All three witnesses converge here (the detector's answer decides the fact).
 async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<ChainCursor>> {
-    let Some(witness) = witness_for(signal) else {
+    let Some(witness) = mirror_devnet::spine::witness_for(signal) else {
         return Ok(None);
     };
     ctx.plane.facts.publish(Fact::ResetDetected {
@@ -85,50 +85,6 @@ async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<Ch
     });
     rebase(ctx, head).await?;
     Ok(None)
-}
-
-/// The detector's signal as a witness, each with the log line that names what
-/// was seen (`Steady` = no reset at all: `None`).
-fn witness_for(signal: ResetSignal) -> Option<ResetWitness> {
-    match signal {
-        ResetSignal::BaseMoved { base, cursor } => {
-            tracing::warn!(
-                ?base,
-                cursor,
-                "cursor below the fork base (re-pin) - reconciling"
-            );
-            Some(ResetWitness::Position { base, cursor })
-        }
-        ResetSignal::HashMismatch {
-            block,
-            expected,
-            found,
-        } => {
-            tracing::warn!(
-                block,
-                ?expected,
-                ?found,
-                "cursor hash not found on chain (reset or re-pin) - reconciling"
-            );
-            Some(ResetWitness::Hash {
-                block,
-                expected,
-                found,
-            })
-        }
-        ResetSignal::PinMismatch { expected, found } => {
-            // Not this detector's witness (the venue's canary); fail closed if
-            // it ever appears: an instance the registry does not know is a
-            // reset by definition.
-            tracing::error!(
-                ?expected,
-                ?found,
-                "pin mismatch from the cursor-hash detector - reconciling"
-            );
-            Some(ResetWitness::Pin { expected, found })
-        }
-        ResetSignal::Steady => None,
-    }
 }
 
 /// The invalid cursor's consequences, one step per effect: T's epoch rule (a

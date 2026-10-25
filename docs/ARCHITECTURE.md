@@ -946,6 +946,7 @@ one block per applied parent block, V's driver mines a non-empty pool
 | `venue_scanned_blocks_total` / `venue_mined_blocks_total` | V blocks the shadow scan walked / V blocks the engine mined (the pool was non-empty — the engine is V's block producer, the counterpart of T's applier) |
 | `venue_source_head` / `venue_source_followed` | the HL source's head / the highest source block composed onto V (the follow cursor) |
 | `venue_follow_windows_total` / `venue_follow_applied_total` / `venue_follow_skipped_shadowed_total` | follow windows composed / keys applied / keys skipped because the devnet owns them (COW) |
+| `venue_follow_sampled_total` / `venue_follow_sampled_ok_total` | the live parity: applied keys re-read on V / how many read back the composed value (the pair is the follow's measurement) |
 | `venue_follow_gap_pauses_total` / `venue_source_reorg_total` | windows paused by the gap guard / source continuity mismatches (a parent hash changed under the follow) |
 | `venue_poll_touched` / `venue_poll_planned_keys` / `venue_poll_changed_keys` | the last window: addresses touched / keys the closures planned / keys found changed |
 | `venue_poll_uncovered_logs_total` | logs from contracts no closure covers (declare a closure to follow them) |
