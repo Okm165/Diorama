@@ -23,6 +23,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The shell's view of a mirror's engine context.
+/// The context facts every shell reads through [`Engine`]: the plane, the
+/// mirror bundle, the devnet chain, the source URL and the engine section —
+/// borrowed from the mirror's own context, so the trait provides the
+/// accessors once and each `impl Engine` supplies only this view plus its
+/// genuinely profile-specific pieces (the scan counters, the exposition, the
+/// probes and the status document).
+pub struct EngineCore<'a> {
+    pub plane: &'a Plane,
+    pub mirror: &'a Arc<dyn Mirror>,
+    pub target: &'a Arc<Rpc>,
+    pub source_url: &'a str,
+    pub engine: &'a EngineSection,
+}
+
 pub trait Engine: Send + Sync + Sized + 'static {
     /// The mirror's error taxonomy (the HTTP mapping classifies it).
     type Error: ShellError;
@@ -31,18 +45,30 @@ pub trait Engine: Send + Sync + Sized + 'static {
     /// knowing the fields — the mirror's struct pins the names.
     type Status: serde::Serialize + Send + 'static;
 
+    /// The shared facts, borrowed from the mirror's own context (see
+    /// [`EngineCore`]) — the one data hook the accessors below read.
+    fn core(&self) -> EngineCore<'_>;
+
     /// The shared plane: registry, journal, cursor state, admin gauges.
-    fn plane(&self) -> &Plane;
+    fn plane(&self) -> &Plane {
+        self.core().plane
+    }
     /// The divergence bundle (source, reset detector, policies, scope).
-    fn mirror(&self) -> &Arc<dyn Mirror>;
+    fn mirror(&self) -> &Arc<dyn Mirror> {
+        self.core().mirror
+    }
     /// The devnet chain the shell drives.
-    fn target(&self) -> &Arc<Rpc>;
+    fn target(&self) -> &Arc<Rpc> {
+        self.core().target
+    }
     /// The source URL `/admin/epoch` re-pins from.
-    fn source_url(&self) -> &str;
-    /// What this deployment's journal holds (the rewind's semantics).
-    fn journal_scope(&self) -> JournalScope;
+    fn source_url(&self) -> &str {
+        self.core().source_url
+    }
     /// The engine's section: loops, HTTP, verifier.
-    fn engine(&self) -> &EngineSection;
+    fn engine(&self) -> &EngineSection {
+        self.core().engine
+    }
     /// Run the mirror's probes now (`/admin/probes`; the bodies differ —
     /// per-block parity vs at-pin).
     fn probes_now(&self) -> BoxFuture<'_, crate::Result<ProbeOutcome, Self::Error>>;
@@ -66,7 +92,7 @@ pub trait Engine: Send + Sync + Sized + 'static {
             self.target(),
             self.mirror().source().as_ref(),
             self.engine().loops.chunk_size,
-            self.journal_scope(),
+            self.mirror().journal_scope(),
         )
     }
 
@@ -120,6 +146,38 @@ pub enum ShellFault {
         got: u64,
         want: u64,
     },
+}
+
+/// The conversion every shell's taxonomy needs from the shared faults: the
+/// three variants (`Bind`, `Io`, `WrongChain`) are the contract, the enum is
+/// the mirror's own (its `#[error]` wording stays at the definition). One
+/// expansion, so a new [`ShellFault`] shape is a compile error in one place,
+/// not two.
+#[macro_export]
+macro_rules! shell_fault_conversion {
+    ($ty:ty) => {
+        impl From<mirror_devnet::engine::ShellFault> for $ty {
+            fn from(fault: mirror_devnet::engine::ShellFault) -> Self {
+                match fault {
+                    mirror_devnet::engine::ShellFault::Bind { addr, source } => {
+                        Self::Bind { addr, source }
+                    }
+                    mirror_devnet::engine::ShellFault::Io {
+                        what,
+                        path,
+                        source,
+                    } => Self::Io {
+                        what,
+                        path: path.into(),
+                        source,
+                    },
+                    mirror_devnet::engine::ShellFault::WrongChain { anvil, got, want } => {
+                        Self::WrongChain { anvil, got, want }
+                    }
+                }
+            }
+        }
+    };
 }
 
 /// The shell's error contract: the conversions the shared helpers need (the

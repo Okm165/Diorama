@@ -25,9 +25,21 @@ homes = {
     pathlib.Path("crates/devnet/src/metrics.rs"): "registry",
     pathlib.Path("crates/mainnet/src/metrics.rs"): "registry",
     pathlib.Path("crates/venue/src/metrics.rs"): "registry",
-    pathlib.Path("crates/venue/src/sim/mod.rs"): "manual",
+    # The hand-rolled homes: `pub <field>: AtomicU64` sets, no registry macro.
+    # The simulator's is the largest (agent-found stale path: this used to
+    # point at `sim/mod.rs`, which carries no such field — the gate silently
+    # checked zero fields).
+    pathlib.Path("crates/venue/src/sim/metrics.rs"): "manual",
+    pathlib.Path("crates/cctp/src/metrics.rs"): "manual",
+    pathlib.Path("crates/cctp/src/watcher.rs"): "manual",
+    pathlib.Path("crates/devnet/src/plane.rs"): "manual",
 }
+# (The push-style homes — `feed/metrics.rs`, `bridge/metrics.rs`,
+# `feed_bridge/metrics.rs` — declare private counters and push their literal
+# series from their own methods; `docs-metrics` checks those names both ways
+# and the AST gate sees the methods' call sites.)
 dead, total = [], 0
+counts = []
 for path, kind in homes.items():
     s = path.read_text()
     if kind == "registry":
@@ -36,7 +48,8 @@ for path, kind in homes.items():
             r"^\s*(?:gauge|counter) ([a-z0-9_]+) = ", body.group(1), re.M)]
     else:
         fields = [m.group(1) for m in re.finditer(
-            r"^\s*pub ([a-z0-9_]+): AtomicU64", s, re.M)]
+            r"^\s*pub ([a-z0-9_]+): (?:std::sync::atomic::)?AtomicU64", s, re.M)]
+    counts.append((path, len(fields)))
     for f in fields:
         total += 1
         pattern = re.compile(rf"\.{re.escape(f)}(?![a-z0-9_])")
@@ -51,6 +64,8 @@ for path, kind in homes.items():
         if uses == loads:
             dead.append((path, f, uses))
 print(f"metrics-written: {total} series checked")
+for path, n in counts:
+    print(f"  {path}: {n} fields")
 for path, f, n in dead:
     print(f"  UNWRITTEN (declared, only ever rendered): {path}: {f} (uses={n})")
 sys.exit(1 if dead else 0)

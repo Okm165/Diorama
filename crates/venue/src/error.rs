@@ -107,31 +107,12 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl mirror_devnet::engine::ShellError for Error {}
 
-/// The shell contract (`mirror_devnet::engine::ShellError`): this taxonomy
-/// accepts the spine's shared errors — the devnet's own, the anvil boundary,
-/// and the shared [`mirror_devnet::engine::ShellFault`]s the boot/serve
-/// helpers construct. The rest of the taxonomy stays the venue's own.
-impl From<mirror_devnet::engine::ShellFault> for Error {
-    fn from(fault: mirror_devnet::engine::ShellFault) -> Self {
-        match fault {
-            mirror_devnet::engine::ShellFault::Bind { addr, source } => {
-                Error::Bind { addr, source }
-            }
-            mirror_devnet::engine::ShellFault::Io {
-                what,
-                path,
-                source,
-            } => Error::Io {
-                what,
-                path: path.into(),
-                source,
-            },
-            mirror_devnet::engine::ShellFault::WrongChain { anvil, got, want } => {
-                Error::WrongChain { anvil, got, want }
-            }
-        }
-    }
-}
+// The shell contract (`mirror_devnet::engine::ShellError`): this taxonomy
+// accepts the spine's shared errors — the devnet's own, the anvil boundary,
+// and the shared `ShellFault`s the boot/serve helpers construct (the
+// conversion is the spine's one expansion). The rest of the taxonomy stays
+// this mirror's own.
+mirror_devnet::shell_fault_conversion!(Error);
 
 impl Error {
     /// A refused request with its reason — one constructor for the most

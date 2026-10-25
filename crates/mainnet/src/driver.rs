@@ -16,7 +16,6 @@ use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::spine::ResetSignal;
 use mirror_devnet::state::{self, ChainCursor};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,13 +34,10 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(900);
 /// declared capabilities. A boot fault is fatal (the bin exits): an applier
 /// over the wrong chain or an unanchored epoch must not serve.
 pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
+    // The shared prefix (the same order the venue's boot reads): the chain
+    // assert, then the capability audit — a read-only probe, so the epoch
+    // anchor below is still the first *write*.
     mirror_devnet::engine::assert_chain(ctx, ANVIL, MAINNET_CHAIN_ID, BOOT_TIMEOUT).await?;
-    // The epoch pin is anchored before any writes exist (a fresh registry's
-    // epoch *is* the current fork base; without the record a later same-pin
-    // restart would be an unprovable epoch and the rule would have to fail
-    // closed, dropping the devnet's writes).
-    let t_pin = ctx.anvil_t.anvil_node_info().await?.fork_config.fork_block_number;
-    mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
     // The declared capabilities are audited once, against the live endpoint
     // (a declaration that disagrees is named here, never discovered
     // mid-window).
@@ -51,6 +47,12 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
         &ctx.reth,
     )
     .await?;
+    // The epoch pin is anchored before any writes exist (a fresh registry's
+    // epoch *is* the current fork base; without the record a later same-pin
+    // restart would be an unprovable epoch and the rule would have to fail
+    // closed, dropping the devnet's writes).
+    let t_pin = ctx.anvil_t.anvil_node_info().await?.fork_config.fork_block_number;
+    mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
     Ok(())
 }
 
@@ -321,18 +323,11 @@ async fn scan_once(ctx: &Ctx) -> Result<()> {
 pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::ProbeOutcome> {
     let Some(cursor) = ctx.plane.state.cursor()? else {
         tracing::warn!("on-demand probes skipped: no cursor yet");
-        return Ok(mirror_devnet::probes::ProbeOutcome {
-            skipped: ctx.engine.verifier.probes.len(),
-            ..Default::default()
-        });
+        return Ok(mirror_devnet::probes::ProbeOutcome::skipped(
+            ctx.engine.verifier.probes.len(),
+        ));
     };
-    let probes = mirror_devnet::probes::ProbeRunner::devnet(
-        &ctx.engine.verifier.probes,
-        &ctx.plane.shadow,
-        ctx.plane.time_offset.load(Ordering::Relaxed) != 0,
-    )
-    .parity(&ctx.reth, cursor.block, &ctx.anvil_t)
-    .await?;
+    let probes = mirror_devnet::probes::run_at(ctx, &ctx.reth, cursor.block).await?;
     mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), cursor.block, &probes);
     Ok(probes)
 }

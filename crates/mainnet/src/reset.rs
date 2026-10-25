@@ -74,7 +74,7 @@ mod tests {
     /// rebase unfired). `cursor == base` is the rest state right after a
     /// rebase and must not fire.
     #[test]
-    fn below_fork_base_is_strict() {
+    fn the_fork_base_rule_is_strict() {
         assert!(below_fork_base(99, Some(100)), "a re-pin moved the base past the cursor");
         assert!(!below_fork_base(100, Some(100)), "cursor at the base: the rest state");
         assert!(!below_fork_base(101, Some(100)), "cursor above the base");

@@ -7,28 +7,39 @@
 //! applied. The gap guard pauses a window that is too wide (a re-pin
 //! decision, never a silent partial poll); the continuity check names a
 //! source reorg.
+//!
+//! The parts mirror the applier's `apply/`: this module is the step and its
+//! guards, [`parity`] is the measurement (the applier's drift-lens
+//! counterpart), [`audit`] is the uncovered-log trail (venue-only: reth's
+//! native BALs carry every write).
+mod audit;
+mod parity;
+
 use crate::ctx::Ctx;
 use crate::error::Result;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
-use mirror_devnet::spine::ProbeSchedule;
 use std::time::Instant;
 
 
 /// One follow window's outcome (what the fact and the gauges report) — the
 /// venue's counterpart of the applier's `ApplyOutcome`, returned by [`step`]
 /// so a caller that reports per-window lines (the selftest) reads the same
-/// numbers the fact carries.
+/// numbers the fact carries. The field names are the applier's fact
+/// vocabulary (`total`/`applied`/`filtered`), so the two mirrors' facts and
+/// logs read the same way.
 pub(crate) struct WindowStats {
     /// The compose rung's name (`plan.kind.as_str()`: `poll` for the public
     /// API's touches; `bal`/`trace` if a future source serves them).
     pub(crate) source: &'static str,
+    /// The composed change count, before COW (the fact's `writes`).
     pub(crate) total: usize,
     pub(crate) applied: usize,
     pub(crate) filtered: usize,
     pub(crate) skipped_shadowed: usize,
     pub(crate) sampled: usize,
     pub(crate) sampled_ok: usize,
+    pub(crate) duration_ms: u64,
 }
 
 /// The gap guard's drift line: the source head ran past the follow cursor by
@@ -54,17 +65,6 @@ struct SourceReorgEntry {
     block: u64,
     expected: String,
     found: String,
-}
-
-/// The uncovered-log audit's drift line: log emitters no declared closure
-/// covers — their state changes cannot be followed until a closure is
-/// declared (the metric counts every window; the line carries the emitters
-/// new to the log — see [`fresh_emitters`]).
-#[derive(serde::Serialize)]
-struct UncoveredLogsEntry {
-    chain: &'static str,
-    kind: &'static str,
-    emitters: Vec<String>,
 }
 
 /// Follow the source: compose the window since the last composed source
@@ -95,14 +95,15 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<WindowStats>> {
 
     let started = Instant::now();
     continuity_check(ctx, followed).await?;
-    let stats = compose_window(ctx, followed, source_head).await?;
+    let mut stats = compose_window(ctx, followed, source_head).await?;
     advance_follow(ctx, source_head).await?;
-    report_window(ctx, followed, source_head, &stats, started.elapsed().as_millis() as u64);
+    stats.duration_ms = started.elapsed().as_millis() as u64;
+    report_window(ctx, followed, source_head, &stats);
     Ok(Some(stats))
 }
 
 /// One place for the window's gauges, fact, and log.
-fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats, ms: u64) {
+fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats) {
     ctx.venue_metrics
         .inc(&ctx.venue_metrics.follow_windows_total);
     ctx.venue_metrics
@@ -124,7 +125,7 @@ fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats, ms: u64) {
         skipped_shadowed: window.skipped_shadowed,
         sampled: window.sampled,
         sampled_ok: window.sampled_ok,
-        ms,
+        ms: window.duration_ms,
     });
     tracing::info!(
         from,
@@ -134,7 +135,7 @@ fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats, ms: u64) {
         skipped_shadowed = window.skipped_shadowed,
         sampled_ok = window.sampled_ok,
         sampled = window.sampled,
-        ms,
+        ms = window.duration_ms,
         "source window composed onto V"
     );
 }
@@ -220,23 +221,14 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
     }
     .plan(&ctx.plane.shadow, mirror_devnet::bal::Window::new(from, to))
     .await?;
-    record_poll_stats(ctx, &plan.compose)?;
+    record_poll_gauges(ctx, &plan.compose);
+    audit::record(ctx, &plan.compose.uncovered)?;
     let applied = if plan.writes.is_empty() {
         0
     } else {
         mirror_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size).await?
     };
-    let (sampled, sampled_ok) =
-        if matches!(ctx.mirror.policies().probes, ProbeSchedule::LiveParity) {
-            // `verify` answers `(ok, failed)`; the fact's contract is
-            // `(sample size, passed)` — the applier's naming, so the two
-            // mirrors' facts read the same way (found by the venue selftest:
-            // the inverted pair reported every clean window as a failure).
-            let (ok, failed) = mirror_devnet::bal::verify(ctx.target.as_ref(), &plan.bal).await?;
-            (ok + failed, ok)
-        } else {
-            (0, 0)
-        };
+    let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
     Ok(WindowStats {
         source: plan.kind.as_str(),
         total: plan.total,
@@ -245,51 +237,17 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
         skipped_shadowed: plan.filter.skipped_shadowed,
         sampled,
         sampled_ok,
+        duration_ms: 0, // set by `step` once the window's work is timed
     })
 }
 
-/// The poll's gauges and the audit trail, one place. The counter counts every
-/// window; the drift line and the warning carry only the emitters *new* to
-/// the log — a busy chain touches dozens of contracts per window and the set
-/// churns, so a per-window line would grow forever while saying nothing new.
-fn record_poll_stats(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) -> Result<()> {
+/// The poll's gauges: what the window's composition touched, planned and
+/// changed (the uncovered-log trail is [`audit`]'s).
+fn record_poll_gauges(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) {
     let metrics = &ctx.venue_metrics;
     metrics.set(&metrics.poll_touched, stats.touched as u64);
     metrics.set(&metrics.poll_planned_keys, stats.planned as u64);
     metrics.set(&metrics.poll_changed_keys, stats.changed as u64);
-    if !stats.uncovered.is_empty() {
-        metrics.add(&metrics.poll_uncovered_logs, stats.uncovered.len() as u64);
-        let fresh = fresh_emitters(&ctx.uncovered_seen, &stats.uncovered);
-        if !fresh.is_empty() {
-            ctx.drift.append(&UncoveredLogsEntry {
-                chain: ctx.mirror.label(),
-                kind: "uncovered_logs",
-                emitters: fresh.clone(),
-            })?;
-            tracing::warn!(
-                emitters = ?fresh,
-                "follow: logs from contracts no closure covers (declare a closure to follow them)"
-            );
-        }
-    }
-    Ok(())
-}
-
-/// The emitters in `current` that the seen set had not carried yet, adding
-/// them as it goes. A poisoned lock is recovered by construction (the set is
-/// a cache of what was logged; there is no invariant a panic could break).
-fn fresh_emitters(
-    seen: &std::sync::Mutex<std::collections::HashSet<String>>,
-    current: &[alloy_primitives::Address],
-) -> Vec<String> {
-    let mut seen = seen
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    current
-        .iter()
-        .map(ToString::to_string)
-        .filter(|emitter| seen.insert(emitter.clone()))
-        .collect()
 }
 
 /// Advance the follow cursor to `source_head` (recording the source's own
@@ -303,10 +261,7 @@ async fn advance_follow(ctx: &Ctx, source_head: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fresh_emitters, gap_within_limit};
-    use alloy_primitives::Address;
-    use std::collections::HashSet;
-    use std::sync::Mutex;
+    use super::gap_within_limit;
 
     /// The gap guard's predicate: at or below the limit follows, beyond it
     /// pauses (the mainnet's test pins the same boundary with its rebase
@@ -316,20 +271,5 @@ mod tests {
         assert!(gap_within_limit(0, 32));
         assert!(gap_within_limit(32, 32));
         assert!(!gap_within_limit(33, 32));
-    }
-
-    /// The audit's bound: the first sighting of an emitter is fresh, its
-    /// repeats are not, and a churning set reports only what is new.
-    #[test]
-    fn fresh_emitters_reports_each_address_once() {
-        let seen = Mutex::new(HashSet::new());
-        let a = Address::repeat_byte(0xaa);
-        let b = Address::repeat_byte(0xbb);
-        assert_eq!(fresh_emitters(&seen, &[a, b]).len(), 2);
-        assert!(fresh_emitters(&seen, &[a, b]).is_empty());
-        assert_eq!(fresh_emitters(&seen, &[b, a]).len(), 0);
-        let c = Address::repeat_byte(0xcc);
-        let fresh = fresh_emitters(&seen, &[a, c]);
-        assert_eq!(fresh, vec![c.to_string()]);
     }
 }

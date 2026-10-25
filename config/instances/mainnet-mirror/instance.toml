@@ -288,9 +288,6 @@ note = "batch executor"
 address = "0xA65911f8D6FD989dEcCf2C2e7815588CEFD8EC59"
 note = "batch executor beacon"
 [[watchlist]]
-address = "0x7b9BfA64860C473Bd197B43B3730F9296c18510C"
-note = "facts registrar"
-[[watchlist]]
 address = "0xa3Ede4d669b95193C892eE670E4E88243e393c6C"
 note = "oracle adapter ETH"
 [[watchlist]]

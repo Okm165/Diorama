@@ -20,9 +20,9 @@
 //! The scan is anchored like the driver's: blocks at or below the fork pin
 //! are the *source's* real blocks and are never scanned (their transfers are
 //! not the devnet's); a re-pin re-anchors the cursor to the new pin.
-pub mod corewriter;
-pub mod metrics;
-pub mod system;
+pub(crate) mod corewriter;
+pub(crate) mod metrics;
+pub(crate) mod system;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;

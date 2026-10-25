@@ -100,7 +100,7 @@ mod tests {
     /// engine renders both (venue first, admin second), and a duplicate series
     /// would be invalid exposition (the mirror of the mainnet-side test).
     #[test]
-    fn venue_and_admin_series_do_not_overlap() {
+    fn the_registry_series_do_not_overlap() {
         let venue = VenueMetrics::default();
         let admin = mirror_devnet::metrics::Metrics::default();
         let dupes: Vec<String> = series(&venue.render())

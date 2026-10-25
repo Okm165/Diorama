@@ -647,7 +647,7 @@ mod tests {
     /// order, `expiresAfter`, the builder) and the boundary refusals name
     /// what they refused.
     #[test]
-    fn complete_shapes_and_named_refusals() {
+    fn the_wire_shapes_parse_and_the_refusals_are_named() {
         // The unmodeled tag is read alone and named in the reason.
         let body = Bytes::from(
             r#"{"action":{"type":"cancel","cancels":[]},"user":"0x00000000000000000000000000000000000000e1"}"#,
@@ -727,7 +727,7 @@ mod tests {
     /// Every other action tag lands in `Unmodeled` (the named refusal path),
     /// and the filled status serializes in the venue's own shape.
     #[test]
-    fn unmodeled_actions_and_the_fill_shape() {
+    fn unmodeled_actions_land_in_the_named_refusal_and_fills_take_the_venue_shape() {
         // A real venue action the devnet does not model (twapOrder) lands in
         // the named refusal; cancel is modeled now (its own tests cover it).
         let body: ExchangeBody = serde_json::from_str(

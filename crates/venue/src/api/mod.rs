@@ -6,10 +6,10 @@
 //! venue for untouched ones), the control router drives scenarios. The error
 //! mapping keeps the taxonomy's meaning on the wire: control refusals are
 //! 4xx, a warming market plane is 503, a venue fault is 502.
-pub mod control;
-pub mod exchange;
-pub mod info;
-pub mod ws;
+pub(crate) mod control;
+pub(crate) mod exchange;
+pub(crate) mod info;
+pub(crate) mod ws;
 
 use crate::error::Result;
 use crate::feed::rest::RestClient;

@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_eviction() {
+    fn the_window_evicts_only_the_oldest_spend() {
         let b = Budget::default();
         let t0 = Instant::now();
         assert!(b.try_spend_at(t0, 600));

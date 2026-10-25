@@ -24,6 +24,7 @@ use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
 use crate::reset::CursorHash;
+use mirror_devnet::engine::JournalScope;
 use mirror_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
@@ -47,6 +48,10 @@ pub fn bundle(
         source,
         reset,
         policies: policies(&engine.loops),
+        // T's journal holds the applier's parent before-values, not the
+        // engine's own writes: a rewind restores them and the applier
+        // re-derives.
+        journal_scope: JournalScope::ParentBeforeValues,
         scope,
     })
 }

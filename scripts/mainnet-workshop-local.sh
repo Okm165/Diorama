@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # mainnet-workshop-local: a financial workshop on live mainnet state, natively
-# (no reth, no cluster). The counterpart of the venue's order lane: the whole
-# arc a margin product runs — minted liquidity, a real levered position, live
-# 1:1 measurement, a crash and a liquidation — against the *real* protocols.
+# (no reth, no cluster). The counterpart of the venue workshop
+# (scripts/venue-workshop-local.sh): the same acts — the market on live data,
+# minted liquidity and a position, the impact measured — run against the
+# *real* protocols there and the real book here. The whole arc a margin
+# product runs: minted liquidity, a real levered position, live 1:1
+# measurement, a crash and a liquidation.
 #
 # A source anvil forks Ethereum mainnet at a public RPC and mines on top of
 # the pin (its blocks carry amsterdam block access lists, so the composer's

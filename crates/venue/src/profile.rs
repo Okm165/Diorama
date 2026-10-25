@@ -23,11 +23,12 @@
 //! (`mirror_devnet::bal::compose`).
 use crate::reset::PinCanary;
 use crate::source::public_capabilities;
-use mirror_config::{ClosuresSection, EngineSection, LoopsSection};
-use mirror_devnet::closure::{FixedSlots, KeyClosure, TopicMappedSlots};
-use mirror_devnet::cow::{Scope, WatchSet};
+use mirror_config::{EngineSection, LoopsSection};
+use mirror_devnet::closure::{closures, watch_set};
+use mirror_devnet::cow::Scope;
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{PinnedSource, RawSource, Source};
+use mirror_devnet::engine::JournalScope;
 use mirror_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
@@ -54,6 +55,9 @@ pub fn bundle(
         follow_source: follow,
         reset,
         policies: policies(&engine.loops),
+        // V's journal holds the engine's *own* writes (the deal faucet's
+        // silent storage writes), keyed by the scan cursor.
+        journal_scope: JournalScope::OwnWrites,
         scope,
     })
 }
@@ -70,46 +74,6 @@ pub fn policies(loops: &LoopsSection) -> Policies {
         prepend_rounds: None,
         gap: Some(loops.max_gap_blocks),
     }
-}
-
-/// The declared closures, from config: fixed slot sets and topic-mapped
-/// mapping slots. Empty config = watch-only follow (the watchlist's account
-/// fields; the composer's audit counts every uncovered emitter).
-pub fn closures(section: &ClosuresSection) -> Vec<Box<dyn KeyClosure>> {
-    let mut out: Vec<Box<dyn KeyClosure>> = Vec::new();
-    let mut fixed = FixedSlots::new();
-    for spec in &section.fixed {
-        fixed.declare(spec.contract, spec.slots.iter().copied());
-    }
-    if !section.fixed.is_empty() {
-        out.push(Box::new(fixed));
-    }
-    for spec in &section.mappings {
-        out.push(Box::new(TopicMappedSlots {
-            contract: spec.contract,
-            base_slot: spec.base_slot,
-            topic_index: spec.topic_index,
-        }));
-    }
-    out
-}
-
-/// The venue's watch set: the watchlist accounts plus the declared closures —
-/// fixed slots as slot declarations, mapping contracts as watched accounts
-/// (the *plan* is the narrower set the closures derive; the watch set feeds
-/// the COW filter and the audit).
-pub fn watch_set(
-    accounts: std::collections::HashSet<alloy_primitives::Address>,
-    section: &ClosuresSection,
-) -> WatchSet {
-    let mut watch = WatchSet::new(accounts);
-    for spec in &section.fixed {
-        watch.declare_slots(spec.contract, spec.slots.iter().copied());
-    }
-    for spec in &section.mappings {
-        watch.accounts.insert(spec.contract);
-    }
-    watch
 }
 
 /// The engine's build step (the profile's wiring, kept beside the bundle so

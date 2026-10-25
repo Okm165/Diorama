@@ -11,19 +11,36 @@ use alloy_rpc_types_eth::Header;
 use mirror_devnet::bal::DiffKind;
 use mirror_devnet::closure::TouchedSet;
 use futures_util::future::BoxFuture;
-use mirror_devnet::source::{Capabilities, Source};
+use mirror_devnet::source::{Capabilities, RawSource, Source};
 use std::sync::Arc;
+
+/// What reth serves (measured): the native BAL rung, traces, a 10,064-block
+/// state window, WS heads; no system transactions (Ethereum has none).
+const DECLARED: Capabilities = Capabilities {
+    native_bal: true,
+    traces: true,
+    historical: true,
+    heads_ws: true,
+    system_txs: false,
+    system_tx_receipts: false,
+};
 
 /// The reth handle is shared (`Arc`): one client per endpoint, referenced by
 /// the context and the source objects (the source is chosen at boot and never
-/// re-created — rule 15).
+/// re-created — rule 15). The raw reads are the spine's [`RawSource`]; this
+/// type adds the mainnet's rungs (the native BAL with its commitment check,
+/// the trace rung) and its declaration.
 pub struct RethSource {
+    inner: RawSource,
     reth: Arc<mirror_anvil::Rpc>,
 }
 
 impl RethSource {
     pub fn new(reth: Arc<mirror_anvil::Rpc>) -> Self {
-        Self { reth }
+        Self {
+            inner: RawSource::new(reth.clone(), DECLARED),
+            reth,
+        }
     }
 
     /// The per-tx prestate traces of a block, merged (the fallback for nodes
@@ -42,34 +59,25 @@ impl RethSource {
 
 impl Source for RethSource {
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            native_bal: true,
-            traces: true,
-            historical: true,
-            heads_ws: true,
-            system_txs: false,
-            // Ethereum has no system transactions; nothing to serve receipts for.
-            system_tx_receipts: false,
-        }
+        DECLARED
     }
 
+    // The raw reads are the spine's (one home for how a source read is
+    // performed); the rungs below are this source's own.
     fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
-        Box::pin(self.reth.block_number())
+        self.inner.head()
     }
 
     fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<Header>> {
-        Box::pin(async move {
-            let block = self.reth.block_by_number(n, false).await?;
-            Ok(block.header)
-        })
+        self.inner.header(n)
     }
 
     fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {
-        Box::pin(self.reth.balance_at(address, block))
+        self.inner.balance_at(address, block)
     }
 
     fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
-        Box::pin(self.reth.nonce_at(address, block))
+        self.inner.nonce_at(address, block)
     }
 
     fn storage_at(
@@ -78,7 +86,7 @@ impl Source for RethSource {
         slot: U256,
         block: u64,
     ) -> BoxFuture<'_, mirror_anvil::Result<B256>> {
-        Box::pin(self.reth.storage_at(address, slot, block))
+        self.inner.storage_at(address, slot, block)
     }
 
     fn code_at(
@@ -86,7 +94,7 @@ impl Source for RethSource {
         address: Address,
         block: u64,
     ) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
-        Box::pin(self.reth.code_at(address, block))
+        self.inner.code_at(address, block)
     }
 
     /// The native rung: reth records EIP-7928 BALs (a block without one — an

@@ -97,8 +97,9 @@ The two *workshops* — a strategy run end to end on live state — also run
 locally: `make mainnet-workshop-local` (a public-RPC fork of mainnet; minted
 liquidity, a real Aave/Uniswap levered position whose pool impact is measured,
 live parity, an oracle crash and a liquidation) and `make venue-workshop-local`
-(the daloc stack kept up, then the order lane: fills against the real book
-and the §4.5 impact).
+(the same acts on the venue's mechanisms: the daloc arc on live market data,
+a devnet deal's minted collateral, a fill against the real book, and the §4.5
+impact measured).
 
 ## Quickstart
 
@@ -209,16 +210,19 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             mainnet-feed-local, mainnet-selftest-local, mainnet-engine-local,
                             mainnet-workshop-local, mainnet-secrets), the
                             venue suites (venue-smoke, venue-drill, venue-proof,
-                            venue-order-proof, venue-product-sim, venue-engine-local,
+                            venue-order-proof, venue-engine-local,
                             venue-selftest-local, venue-sim-parity-local, venue-workshop-local, venue-secrets), the cross-mirror suites (cctp-smoke,
-                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry) with cctp-local.sh (the
-                            same lane against forked real chains, no cluster), daloc-sim.py
-                            with daloc-local.sh (the arc against a local scratch stack), the
-                            container proof (container-smoke.sh: the engine image run for
-                            real), and the structural fitness scripts (closure-matrix, no-orphans,
-                            docs-metrics, trust-audit, clock-labels, no-panics, config-check,
-                            docker-members, k8s-wiring, spec-citations, spine-purity,
-                            facts-published, metrics-written, render-diagrams)
+                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry, ux-symmetry-local)
+                            with cctp-local.sh (the same lane against forked real chains, no
+                            cluster), daloc-sim.py with daloc-local.sh (the arc against a local
+                            scratch stack), the container proof (container-smoke.sh: the engine
+                            image run for real), and the structural fitness scripts
+                            (closure-matrix, no-orphans, docs-metrics, trust-audit, clock-labels,
+                            no-panics, docker-members, k8s-wiring, spec-citations, spine-purity,
+                            facts-published, metrics-written, render-diagrams). The
+                            `venue-product-sim` and `config-check` make targets drive
+                            `daloc-sim.py` and the config loader rather than a script of their
+                            own
 docs/                       HOW-IT-WORKS.md, HOW-IT-WORKS-VENUE.md, ARCHITECTURE.md, SPINE.md, STRUCTURE.md, OPERATIONS.md, TESTING.md, INTEGRATION.md, adr/
 ```
 

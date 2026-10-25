@@ -41,6 +41,9 @@ pub trait Mirror: Send + Sync {
     fn reset(&self) -> &Arc<dyn ResetDetector>;
     /// The profile's decisions, as data.
     fn policies(&self) -> Policies;
+    /// What this deployment's journal holds — the rewind's semantics, data
+    /// (see [`crate::engine::JournalScope`]).
+    fn journal_scope(&self) -> crate::engine::JournalScope;
     /// What the mirror keeps fresh: the watch set and declared closures the
     /// composer plans from and the COW filter keeps.
     fn scope(&self) -> &Scope;
@@ -60,6 +63,7 @@ pub struct Bundle {
     pub follow_source: Arc<dyn Source>,
     pub reset: Arc<dyn ResetDetector>,
     pub policies: Policies,
+    pub journal_scope: crate::engine::JournalScope,
     pub scope: Scope,
 }
 
@@ -82,6 +86,10 @@ impl Mirror for Bundle {
 
     fn policies(&self) -> Policies {
         self.policies
+    }
+
+    fn journal_scope(&self) -> crate::engine::JournalScope {
+        self.journal_scope
     }
 
     fn scope(&self) -> &Scope {

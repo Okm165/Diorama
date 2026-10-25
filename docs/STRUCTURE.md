@@ -14,7 +14,7 @@ symmetry sweeps — regenerate the readings with
 | `service.rs` | `service.rs` | the service entry: CLI (`run`/`selftest`[`/rewind`]), the boot call, the loop spawner (the venue's carries the simulator's entry too) |
 | `ctx.rs` | `ctx.rs` | `Ctx` (the profile's clients + sections + the shared `Plane`) and its `impl Engine` |
 | `driver.rs` | `driver.rs` | `boot` (wait, assert the chain, anchor/reconcile, audit capabilities) and the loops |
-| `apply/` (mod, prepend, parity) | `follow.rs` | the per-unit step: compose → COW → land → measure (the mainnet's step has parts: the devnet prepend, the drift lens + probes) |
+| `apply/` (mod, prepend, parity) | `follow/` (mod, parity, audit) | the per-unit step: compose → COW → land → measure — the same parts on both sides (the step, the measurement, one distinct concern: the mainnet's devnet prepend / the venue's uncovered-log trail) |
 | `error.rs` | `error.rs` | the profile's error vocabulary (the shared devnet/anvil boundaries composed in) |
 | `http.rs` | `http.rs` | the shared route table + the profile's own routes (`/admin/time`; the venue's simulator API is `api/`) |
 | `metrics.rs` | `metrics.rs` | the profile's metric set (rendered beside the shared gauges) |
@@ -44,16 +44,16 @@ reads identically on both sides; everything else is the profile's own rule set:
 
 | file | mainnet | venue |
 |---|---|---|
-| `ctx.rs` | `Ctx::{new, follow_head, follow_tag}` + `impl Engine` | `Ctx::{new}` + `resolved_pin` + `impl Engine` |
+| `ctx.rs` | `Ctx::{new, follow_head, follow_tag}` + `impl Engine` (`core()` + the profile's pieces) | `Ctx::{new}` + `impl Engine` (the same shape; the pin vocabulary is the spine's `pin`) |
 | `driver.rs` | `boot` + `apply_loop`/`shadow_loop`/`source_sync_supervisor` + the cursor/reorg rules (`next_block`, `validate_cursor`, `on_reset`, `rebase`, `resume_point`, `on_rebase`, `gap_within_limit`, `reorg_continuity`) + `scan_once`, `probes_now` | `boot` + `run`/`pass` + `reconcile`/`pin_read`/`anchor_cursor`/`recover_from_reset`/`run_epoch_rule` + `scan_and_advance`, `mine_pending`, `probes_at_pin`, `probes_now` |
 | `service.rs` | `main_entry` + `run` + `require_wiring(what, endpoints)` + `build_bridge` + `spawn_loops` | `main_entry` + `run` + `require_wiring(what, endpoints)` + `spawn_loops` (+ `sim_entry` and the simulator's spawns) |
-| `profile.rs` | `bundle`/`policies`/`build` + `Wiring`/`Deps` | `bundle`/`policies`/`build` + `Wiring`/`Deps` (+ `closures`/`watch_set`) |
+| `profile.rs` | `bundle`/`policies`/`build` + `Wiring`/`Deps` | `bundle`/`policies`/`build` + `Wiring`/`Deps` (the closures/watch-set builders are the spine's `closure::{closures, watch_set}`) |
 | `http.rs` | `app` + `status_doc` (+ `admin_time`) | `app` + `status_doc` |
 | `selftest.rs` | `run` (+ `run_one_block`) | `run` (+ `windows_loop`, `wait_for_move`) |
-| `source.rs` | `RethSource::{new, trace_block_per_tx}` + `impl Source` | `public_capabilities` (the read shape is the spine's `PinnedSource`) |
+| `source.rs` | `RethSource::{new, trace_block_per_tx}` (a `RawSource` wrapper: the raw reads are the spine's) + `impl Source` | `public_capabilities` (the read shape is the spine's `PinnedSource`) |
 | `reset.rs` | `CursorHash` + `below_fork_base` | `PinCanary` + the canary io |
 | `metrics.rs` | `MainnetMetrics` (registry + render + overlap test) | `VenueMetrics` (the same three) |
-| `error.rs` | the profile's variants + `impl ShellError` + `From<ShellFault>` | the same shape |
+| `error.rs` | the profile's variants + `impl ShellError` + `mirror_devnet::shell_fault_conversion!` | the same shape |
 
 Struct level: both `Ctx`es carry the same ordered core (the chain section, the
 engine section, the target anvil, the source, the mirror bundle, the composer
@@ -70,7 +70,7 @@ in `SPINE.md` and the profiles' own tables are the full list):
 
 | asymmetry | why it stands |
 |---|---|
-| `apply/` (3 files) vs `follow.rs` (1) | the mainnet's step has parts (the devnet prepend, the drift lens); the venue's composes one window |
+| `apply/` (3 files) vs `follow/` (3 files) | the parts are symmetric now (step + `parity.rs` + one distinct concern); the third file's name follows its mechanism: the mainnet's devnet prepend, the venue's uncovered-log audit (venue-only — reth's native BALs cannot leave a log uncovered) |
 | `feed_bridge/` vs `feed/` | different domains: a price *bridge* (Chainlink mocks) vs the *market feed* (HL REST/WS) |
 | `source_sync/` (mainnet) | the CL + engine-API transports have no venue counterpart (the HL API is one HTTP client) |
 | `api/`, `sim/`, `wire.rs` (venue) | the simulator's served surface has no mainnet counterpart |
@@ -92,6 +92,13 @@ every reading below was acted on or judged:
 | dispersion | `Sim` spans four files — the domain folder's pattern (one impl block per concern) |
 | narrow context | none: every `Ctx`-taking function touches ≥ 2 fields or passes the context on |
 | plumbing | judged: pure policy/formatting helpers (`step`, `push_metric`, `scan_to`) keep positional parameters — a parameter object would obscure them |
+| the `Engine` accessors + the reset detectors' `new` | judged: the accessor hooks are the trait's required *data* (fields, not behavior — a default cannot read a field), and the detectors' single-field constructors are Rust's newtype idiom, not shared behavior; a shared base type would add indirection without removing a divergence |
+| the test-only `is_normal` helper | judged: one line per crate's test module; a spine helper would ship test scaffolding in the public API |
+| the gap guard's home (`driver.rs` mainnet / `follow/mod.rs` venue) | judged: the mainnet's is a *cursor* rule beside `next_block`; the venue's is the window's own guard. Both are pure and tested on their own side; the mainnet's test adds the rebase bound, the venue has none by design |
+| the venue driver's unit tests | judged: its rules (the epoch decision, the pin anchor) read a chain — the live proofs cover them (`venue-engine-local`, `venue-selftest-local`, `daloc-local`), and a chainless unit test would assert nothing (the placeholder was removed) |
+| the paired test names | pinned: shared files share their test names (`the_http_status_mapping…`, `the_registry_series_do_not_overlap`, `the_shell_fault_converts_into_the_taxonomy`); the step folders' tests name their own contracts (`the_parity_…`) |
+| ~130 `pub` items that are file-local by name | judged: the count is name-based — a struct's *fields* are read cross-file by inference without the type name, so a mass tightening would be unsafe; the AST gate and `-D warnings` cover the real cases |
+| the per-crate `series_names` test helper (and `is_normal`) | judged: a shared helper would ship test scaffolding in the public API (and three of the six crates cannot depend on the spine); one line per test module is the honest cost |
 | divisions (non-literal divisors) | all guarded: `ratio_or` (an explicit zero branch), `maintenance_rate` (`max_leverage == 0`), `liquidation_px` (`szi`/`denominator`), `adl_ranking` (a non-positive account value skips), `floor_to_core_wei`/`round_to_sig_figs` (a checked `pow10`/`step ≥ 1`) |
 | casts (narrow `as`) | judged safe: date fields, decimal scales (≤ 28), decimals (≤ 18), booleans to `u8` |
 | repeated literals | named once: `mirror_anvil::{LATEST, TRACE_BLOCK_METHOD, JSON_CONTENT_TYPE, ETH_GET_BALANCE}`, `mirror_devnet::handlers::{HEALTHZ, METRICS}`, the drivers' `ANVIL`, the config's section requirements, the journal's io context, the sim's money contexts, the venue's order-type names and margin mode, `SIM_POISONED` |

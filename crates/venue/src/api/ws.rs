@@ -195,7 +195,7 @@ mod tests {
     /// The subscription lifecycle: ack, at-most-once, unsubscribe, and the
     /// error frame for what the sim does not serve (never silence).
     #[test]
-    fn subscriptions_ack_error_and_unsubscribe() {
+    fn the_ws_acks_unsubscribes_and_answers_unserved_frames_with_an_error() {
         let feed = MarketFeed::memory(vec!["BTC".into()]);
         let mut subs = Vec::new();
         let ack = request_reply(

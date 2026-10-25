@@ -83,13 +83,14 @@ implement them; `crates/devnet` never names a mirror.
 | `ResetDetector` | `devnet/src/spine.rs` | the engine's reset pass | `CursorHash` (the cursor's block must carry its recorded hash; below the fork base = stale by position) | `PinCanary` (ADR-0002: heights below a fork's pin resolve to the source, so cursor hashes are unsound there) |
 | `KeyClosure` | `devnet/src/closure.rs` | the COW filter | the declared closures (watch-set keys the devnet owns) | same, plus the sim's own writes |
 | `Registry` | `devnet/src/metrics.rs` | `/metrics` | one registry per engine, declared series + computed ones | same |
-| `Engine` | `devnet/src/engine.rs` | the shared shell: the HTTP handlers and route table, the boot assert, the admin surface's wiring, `/admin/epoch`, `serve` (and `serve_router`, the one listener boundary every service shares), the shutdown tail; `JournalScope` names what the journal holds (the rewind's semantics) | `impl Engine for Ctx` (the required facts: T's chain, the source URL, `JournalScope::ParentBeforeValues`, `probes_now`, the scan counters, the status document, the metric exposition) | `impl Engine for Ctx` (V's chain, the source URL, `JournalScope::OwnWrites`, the at-pin probes, its counters, its status document, its exposition) |
+| `Engine` | `devnet/src/engine.rs` | the shared shell: the HTTP handlers and route table, the boot assert, the admin surface's wiring, `/admin/epoch`, `serve` (and `serve_router`, the one listener boundary every service shares), the shutdown tail, the probe runner tail (`probes::run_at`/`ProbeOutcome::skipped`); `JournalScope` names what the journal holds (the rewind's semantics, data in the `Bundle`) | `impl Engine for Ctx`: `core()` (the shared facts as one view — `EngineCore`) + the profile's own pieces (`probes_now`, the scan counters, the status document, the exposition) | the same shape (V's chain and source URL in the view; the at-pin probes, its counters, its status document, its exposition) |
 | `ShellError` | `devnet/src/engine.rs` | the shell's helpers: they construct `ShellFault`s (bind / IO / chain identity), the mirror converts them into its own taxonomy (`From<ShellFault>`) | `impl ShellError for Error` + `From<ShellFault>` | `impl ShellError for Error` + `From<ShellFault>` |
 
 The vocabulary types are the contracts between the traits: `Window`,
 `WindowBal`, `WindowPlan`, `Write`, `DiffKind`, `Capabilities`, `Policies`,
-`ResetSignal`/`ResetWitness`, `Fact`/`Notice`, and `SharedStatus` (the status
-fields both surfaces must report, gathered once). Shared the same way: the
+`ResetSignal`/`ResetWitness`, `Fact`/`Notice`, `SharedStatus` (the status
+fields both surfaces must report, gathered once) and `EngineCore` (the
+facts every shell reads, borrowed from the mirror's context). Shared the same way: the
 shell faults (`engine::ShellFault` — the spine constructs them, the mirror
 words them) and the fork-pin vocabulary (`pin::{PIN_UNRESOLVED, resolved_pin}`
 — the driver resolves it, the pinned source reads it). A change to any of

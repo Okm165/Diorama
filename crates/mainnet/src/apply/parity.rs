@@ -116,7 +116,7 @@ mod tests {
     /// carry no storage key (the venue's live parity re-reads the composed
     /// BAL's storage keys the same way).
     #[test]
-    fn only_storage_writes_carry_a_sampled_key() {
+    fn the_parity_lens_samples_only_storage_writes() {
         let address = Address::repeat_byte(0x11);
         let slot = U256::from(7);
         let storage = Write::Storage {

@@ -13,7 +13,7 @@ use futures_util::future::BoxFuture;
 use mirror_anvil::Rpc;
 use mirror_config::{ChainL1, EngineSection, Instance};
 use mirror_devnet::drift::Drift;
-use mirror_devnet::engine::{Engine, JournalScope};
+use mirror_devnet::engine::{Engine, EngineCore};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::probes::ProbeOutcome;
@@ -115,31 +115,14 @@ impl Engine for Ctx {
     type Error = Error;
     type Status = crate::http::StatusResponse;
 
-    fn plane(&self) -> &Plane {
-        &self.plane
-    }
-
-    fn mirror(&self) -> &Arc<dyn Mirror> {
-        &self.mirror
-    }
-
-    fn target(&self) -> &Arc<Rpc> {
-        &self.anvil_t
-    }
-
-    fn source_url(&self) -> &str {
-        &self.l1.source_url
-    }
-
-    fn journal_scope(&self) -> JournalScope {
-        // T's journal holds the applier's parent before-values, not the
-        // engine's own writes: a rewind restores them and the applier
-        // re-derives.
-        JournalScope::ParentBeforeValues
-    }
-
-    fn engine(&self) -> &EngineSection {
-        &self.engine
+    fn core(&self) -> EngineCore<'_> {
+        EngineCore {
+            plane: &self.plane,
+            mirror: &self.mirror,
+            target: &self.anvil_t,
+            source_url: &self.l1.source_url,
+            engine: &self.engine,
+        }
     }
 
     fn probes_now(&self) -> BoxFuture<'_, Result<ProbeOutcome>> {

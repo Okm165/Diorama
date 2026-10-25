@@ -455,16 +455,19 @@ port = 8096
     }
 
     #[test]
-    fn the_real_mainnet_mirror_instance_loads_and_checks() {        let path = std::path::Path::new(concat!(
+    fn the_real_mainnet_mirror_instance_loads_and_checks() {
+        let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/instances/mainnet-mirror/instance.toml"
         ));
         let (inst, unresolved) = Instance::inspect(path).unwrap();
         assert_eq!(inst.instance.name, "mainnet-mirror");
-        // 47 market/protocol entries + the dapp's 41-address mainnet
+        // 46 market/protocol entries + the dapp's 41-address mainnet
         // deployment (contracts/deployments/ethereum.json; measured complete
-        // 2026-10-23). Update this count deliberately when the audit changes.
-        assert_eq!(inst.watchlist.len(), 88, "the audited watchlist is complete");
+        // 2026-10-23). The codeless "facts registrar" was removed 2026-10-25
+        // after a live re-check (eth_getCode `0x`, nonce 0). Update this
+        // count deliberately when the audit changes.
+        assert_eq!(inst.watchlist.len(), 87, "the audited watchlist is complete");
         assert_eq!(l1(&inst).fork_offset, 128);
         assert_eq!(engine(&inst).verifier.probes.len(), 11);
         let mut names = unresolved.clone();

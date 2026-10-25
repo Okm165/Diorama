@@ -17,10 +17,10 @@
 //! friends): a crash owns both mark and oracle, and `metaAndAssetCtxs` serves
 //! the same owned numbers the account plane computes with — daloc must never
 //! read a different mark than the sim used for margin.
-pub mod budget;
-pub mod metrics;
-pub mod rest;
-pub mod ws;
+pub(crate) mod budget;
+pub(crate) mod metrics;
+pub(crate) mod rest;
+pub(crate) mod ws;
 
 use crate::error::Result;
 use crate::wire::{AllMids, AssetCtx, L2Book, Meta};

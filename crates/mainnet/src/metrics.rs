@@ -81,7 +81,7 @@ mod tests {
     /// series is invalid exposition (the venue's
     /// `venue_and_admin_series_do_not_overlap` is the mirror of this test).
     #[test]
-    fn profile_admin_and_bridge_series_do_not_overlap() {
+    fn the_registry_series_do_not_overlap() {
         let profile = MainnetMetrics::default();
         let admin = mirror_devnet::metrics::Metrics::default();
         let bridge = crate::feed_bridge::FeedBridgeMetrics::default();

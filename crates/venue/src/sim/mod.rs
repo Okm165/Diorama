@@ -24,14 +24,14 @@
 /// The artifact's name in errors and load messages: one home.
 const ARTIFACT: &str = "sim state";
 
-pub mod account;
-pub mod funding;
-pub mod metrics;
-pub mod order;
-pub mod seed;
-pub mod tick;
-pub mod validate;
-pub mod waterfall;
+pub(crate) mod account;
+pub(crate) mod funding;
+pub(crate) mod metrics;
+pub(crate) mod order;
+pub(crate) mod seed;
+pub(crate) mod tick;
+pub(crate) mod validate;
+pub(crate) mod waterfall;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;

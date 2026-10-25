@@ -351,7 +351,7 @@ mainnet-prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; s
 	kubectl -n $(NS) delete job lighthouse-prune-blobs --ignore-not-found
 	kubectl -n $(NS) scale deploy/lighthouse --replicas=1
 	kubectl -n $(NS) rollout status deploy/lighthouse --timeout=300s
-	@$(MAKE) --no-print-directory backfill
+	@$(MAKE) --no-print-directory mainnet-backfill
 
 pin-show: ## Show the resolved fork pins of the instance's anvils
 	@for c in $(ANVILS); do \
@@ -385,9 +385,10 @@ help: ## Show this help
 	spec-citations facts-published metrics-written
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
-	images build venue-build import deploy-engine test-engine config-check \
-	status logs mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-drill \
-	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
+	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \
+	status logs logs-check check-pins mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-drill \
+	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle cctp-local engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
-	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help \
-	venue-engine-local venue-selftest-local mainnet-selftest-local mainnet-engine-local ux-symmetry-local daloc-local container-smoke
+	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help diagrams \
+	venue-engine-local venue-selftest-local venue-sim-parity-local mainnet-selftest-local mainnet-engine-local \
+	mainnet-workshop-local venue-workshop-local ux-symmetry-local daloc-local container-smoke

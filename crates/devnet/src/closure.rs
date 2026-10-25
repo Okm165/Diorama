@@ -187,6 +187,44 @@ fn push_new(out: &mut Vec<Key>, seen: &mut HashSet<Key>, keys: impl IntoIterator
     }
 }
 
+/// The declared closures from config: fixed slot sets and topic-mapped
+/// mapping slots. Empty config = watch-only follow (the watchlist's account
+/// fields; the composer's audit counts every uncovered emitter).
+pub fn closures(section: &mirror_config::ClosuresSection) -> Vec<Box<dyn KeyClosure>> {
+    let mut out: Vec<Box<dyn KeyClosure>> = Vec::new();
+    let mut fixed = FixedSlots::new();
+    for spec in &section.fixed {
+        fixed.declare(spec.contract, spec.slots.iter().copied());
+    }
+    if !section.fixed.is_empty() {
+        out.push(Box::new(fixed));
+    }
+    for spec in &section.mappings {
+        out.push(Box::new(TopicMappedSlots {
+            contract: spec.contract,
+            base_slot: spec.base_slot,
+            topic_index: spec.topic_index,
+        }));
+    }
+    out
+}
+
+/// The COW scope's watch set from config: the accounts plus every declared
+/// closure's keys (fixed slots per contract, the mapping contracts' accounts).
+pub fn watch_set(
+    accounts: HashSet<Address>,
+    section: &mirror_config::ClosuresSection,
+) -> crate::cow::WatchSet {
+    let mut watch = crate::cow::WatchSet::new(accounts);
+    for spec in &section.fixed {
+        watch.declare_slots(spec.contract, spec.slots.iter().copied());
+    }
+    for spec in &section.mappings {
+        watch.accounts.insert(spec.contract);
+    }
+    watch
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

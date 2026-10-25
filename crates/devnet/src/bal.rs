@@ -24,7 +24,11 @@ use crate::closure::{plan_reads, TouchedSet};
 use crate::cow::Scope;
 use crate::error::Result;
 use crate::source::Source;
-use alloy_eips::eip7928::{AccountChanges, BlockAccessList};
+// The BAL is the official alloy type (EIP-7928): re-exported, so a caller
+// that must name it (the venue's parity step) names the official one, never a
+// mirror-owned alias.
+pub use alloy_eips::eip7928::BlockAccessList;
+use alloy_eips::eip7928::AccountChanges;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::{Transaction, TransactionReceipt};
 use mirror_anvil::{Key, Rpc, Value, Write};

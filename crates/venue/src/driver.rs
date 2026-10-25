@@ -25,7 +25,7 @@ use mirror_devnet::engine::Engine as _;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::metrics::Registry as _;
-use mirror_devnet::probes::{ProbeOutcome, ProbeRunner};
+use mirror_devnet::probes::ProbeOutcome;
 use mirror_devnet::scan;
 use mirror_devnet::spine::{MinePolicy, ResetSignal};
 use mirror_devnet::state::{cursor_from, ChainCursor};
@@ -48,7 +48,7 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Boot: wait for V, assert the chain, reconcile the registry, run the at-pin
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
-pub async fn boot(ctx: &Ctx) -> Result<()> {
+pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
     mirror_devnet::engine::assert_chain(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT).await?;
     // The declared capabilities are audited once, against the live endpoint
     // (a declaration that disagrees is named here, never discovered mid-window).
@@ -64,7 +64,7 @@ pub async fn boot(ctx: &Ctx) -> Result<()> {
 }
 
 /// The steady-state loop (boot has already run).
-pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
+pub(crate) async fn run(ctx: Arc<Ctx>) -> Result<()> {
     let poll = ctx.engine.loops.poll();
     loop {
         if ctx.plane.is_halted() {
@@ -355,7 +355,7 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// alarmed: the source cannot serve it, and a mismatch would be a lie.
 /// Run the at-pin probes now (the admin route's entry: boot and re-pin run
 /// them automatically; this is the on-demand trigger, e.g. after a hand-back).
-pub async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
+pub(crate) async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
     let pin = ctx.anvil_v.anvil_node_info().await?.fork_config.fork_block_number;
     probes_at_pin(ctx, pin).await
 }
@@ -364,10 +364,7 @@ pub async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
 /// counters are updated here — an at-pin run is the only probe source on the
 /// venue side). The route reports the run; `/metrics` carries the totals.
 pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> {
-    let skipped_all = || ProbeOutcome {
-        skipped: ctx.engine.verifier.probes.len(),
-        ..Default::default()
-    };
+    let skipped_all = || ProbeOutcome::skipped(ctx.engine.verifier.probes.len());
     let Some(pin) = pin else {
         tracing::warn!("at-pin probes skipped: V has no fork pin");
         return Ok(skipped_all());
@@ -384,11 +381,7 @@ pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOu
         );
         return Ok(skipped_all());
     }
-    // The venue has no clock offset (the plane's field is shape-only: nothing
-    // re-aligns V's clock), so the probes never take the offset path.
-    let probes = ProbeRunner::devnet(&ctx.engine.verifier.probes, &ctx.plane.shadow, false)
-        .parity(&ctx.source_rpc, pin, &ctx.anvil_v)
-        .await?;
+    let probes = mirror_devnet::probes::run_at(ctx, &ctx.source_rpc, pin).await?;
     let out = count_probes(ctx, probes, pin, source_head).await?;
     mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), pin, &out);
     Ok(out)
@@ -440,3 +433,4 @@ async fn count_probes(
     );
     Ok(probes)
 }
+

@@ -63,3 +63,22 @@ impl FeedBridgeMetrics {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bridge's counters render their labeled series (the venue's
+    /// `feed/metrics.rs` pins its own the same way).
+    #[test]
+    fn renders_labeled_feed_series() {
+        let m = FeedBridgeMetrics::default();
+        m.record_update("ETH/USD");
+        m.record_update("ETH/USD");
+        m.record_pause("BTC/USD");
+        m.inc_pass_errors();
+        let out = m.render();
+        assert!(out.contains("feed_bridge_updates_total{feed=\"ETH/USD\"} 2"), "{out}");
+        assert!(out.contains("feed_bridge_pauses_total{feed=\"BTC/USD\"} 1"), "{out}");
+        assert!(out.contains("feed_bridge_pass_errors_total 1"), "{out}");
+    }
+}

@@ -22,10 +22,39 @@ pub struct ProbeOutcome {
     pub skipped: usize,
 }
 
+impl ProbeOutcome {
+    /// Everything skipped, nothing read — the one spelling for "this run had
+    /// nothing to check" (no cursor, no pin, a source that moved off the pin).
+    pub fn skipped(n: usize) -> Self {
+        Self {
+            skipped: n,
+            ..Default::default()
+        }
+    }
+}
+
 /// Report one run: the fact on the bus and the log line, one place for both
 /// engines' on-demand paths (`at` names the compared block — the mainnet's
 /// cursor, the venue's pin). The applier's per-block probe path counts its
 /// own convergence counters and does not report here.
+/// Run the probe set against `source` at `at`, on the mirror's target: the
+/// runner tail both engines share. The *schedule* (per block, at pin) and the
+/// skip decisions stay the mirror's; the clock offset is the plane's (the
+/// venue never sets it, so the same read is exact there).
+pub async fn run_at<E: crate::engine::Engine>(
+    ctx: &E,
+    source: &Rpc,
+    at: u64,
+) -> crate::Result<ProbeOutcome> {
+    ProbeRunner::devnet(
+        &ctx.engine().verifier.probes,
+        &ctx.plane().shadow,
+        ctx.plane().time_offset.load(std::sync::atomic::Ordering::Relaxed) != 0,
+    )
+    .parity(source, at, ctx.target())
+    .await
+}
+
 pub fn report(plane: &crate::plane::Plane, chain: &'static str, at: u64, out: &ProbeOutcome) {
     tracing::info!(
         block = at,

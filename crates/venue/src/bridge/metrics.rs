@@ -2,7 +2,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
-pub struct BridgeMetrics {
+pub(crate) struct BridgeMetrics {
     /// EVM→Core credits applied.
     credits: AtomicU64,
     /// Core→EVM completions submitted.
