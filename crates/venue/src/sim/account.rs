@@ -965,63 +965,9 @@ pub(crate) fn ctx_of(feed: &MarketFeed, coin: &str) -> Option<AssetCtx> {
 pub(crate) type Accounts = BTreeMap<Address, Account>;
 
 #[cfg(test)]
-use crate::wire::{AssetInfo, MarginTable, MarginTier, Meta};
-
-#[cfg(test)]
-pub(crate) fn meta_for(coin: &str, max_leverage: u32) -> Meta {
-        Meta {
-            universe: vec![AssetInfo {
-                name: coin.to_string(),
-                sz_decimals: 5,
-                max_leverage,
-                margin_table_id: Some(50),
-                only_isolated: None,
-                is_delisted: None,
-                margin_mode: None,
-            }],
-            margin_tables: vec![(
-                50,
-                MarginTable {
-                    description: String::new(),
-                    margin_tiers: vec![MarginTier {
-                        lower_bound: Decimal::ZERO,
-                        max_leverage,
-                    }],
-                },
-            )],
-            collateral_token: 0,
-        }
-    }
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::feed_with;
-
-    fn meta_for(coin: &str, max_leverage: u32) -> Meta {
-        Meta {
-            universe: vec![AssetInfo {
-                name: coin.to_string(),
-                sz_decimals: 5,
-                max_leverage,
-                margin_table_id: Some(50),
-                only_isolated: None,
-                is_delisted: None,
-                margin_mode: None,
-            }],
-            margin_tables: vec![(
-                50,
-                MarginTable {
-                    description: String::new(),
-                    margin_tiers: vec![MarginTier {
-                        lower_bound: Decimal::ZERO,
-                        max_leverage,
-                    }],
-                },
-            )],
-            collateral_token: 0,
-        }
-    }
+    use crate::sim::{feed_with, meta_with_table};
 
     /// The unified account's `tokenToAvailableAfterMaintenance` closes daloc's
     /// reconciliation identity: `available + maintenance == the collateral
@@ -1042,7 +988,7 @@ mod tests {
     #[test]
     fn unified_spot_collateral_backs_the_perp_side() {
         let feed = feed_with(&[("BTC", "100.0", "100.0")]);
-        let meta = meta_for("BTC", 10);
+        let meta = meta_with_table("BTC", 10);
         let mut account = Account {
             perp_balance: Decimal::ZERO,
             mode: UserAbstraction::UnifiedAccount,
@@ -1076,7 +1022,7 @@ mod tests {
     #[test]
     fn unified_available_closes_the_reconciliation() {
         let feed = feed_with(&[("BTC", "100.0", "100.0")]);
-        let meta = meta_for("BTC", 10);
+        let meta = meta_with_table("BTC", 10);
         let mut account = Account {
             perp_balance: Decimal::ZERO,
             mode: UserAbstraction::UnifiedAccount,
@@ -1161,7 +1107,7 @@ mod tests {
     #[test]
     fn liquidation_closes_at_the_mark() {
         let feed = feed_with(&[("BTC", "50", "50")]);
-        let meta = meta_for("BTC", 10);
+        let meta = meta_with_table("BTC", 10);
         let mut account = Account {
             perp_balance: Decimal::from(1), // tiny balance
             ..Account::default()

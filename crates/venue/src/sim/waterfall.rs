@@ -538,7 +538,7 @@ pub(super) fn attempt_size(full: Decimal, notional: Decimal, in_cooldown: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::feed_with;
+    use crate::sim::{feed_with, meta_of, meta_with};
 
     /// The waterfall's attempt sizes (docs): 20 % above the $100k partial
     /// threshold, the full size below it and during the 30 s cooldown.
@@ -554,29 +554,6 @@ mod tests {
         let (sz, partial) = attempt_size(full, Decimal::from(50_000), false).unwrap();
         assert!(!partial, "below the threshold the attempt is full");
         assert_eq!(sz, full);
-    }
-
-    /// A meta with the given assets (the waterfall's maintenance tiers read
-    /// it).
-    fn meta_of(assets: &[(&str, u32)]) -> crate::wire::Meta {
-        let mut m: crate::wire::Meta = serde_json::from_str(r#"{"universe": []}"#).unwrap();
-        for (coin, max_leverage) in assets {
-            m.universe.push(crate::wire::AssetInfo {
-                name: (*coin).into(),
-                sz_decimals: 4,
-                max_leverage: *max_leverage,
-                margin_table_id: None,
-                only_isolated: None,
-                is_delisted: None,
-                margin_mode: None,
-            });
-        }
-        m
-    }
-
-    /// A meta with one asset.
-    fn meta_with(coin: &str, max_leverage: u32) -> crate::wire::Meta {
-        meta_of(&[(coin, max_leverage)])
     }
 
     /// The waterfall's fixture: one account holding a single position.

@@ -204,13 +204,11 @@ async fn mine_pending(ctx: &Ctx) -> Result<()> {
     if ctx.mirror.policies().mine != MinePolicy::PoolDrain {
         return Ok(());
     }
-    let status = ctx.anvil_v.txpool_status().await?;
-    if status.pending == 0 {
+    let Some(pending) = ctx.anvil_v.mine_pending().await? else {
         return Ok(());
-    }
-    ctx.anvil_v.anvil_mine(1).await?;
+    };
     ctx.venue_metrics.inc(&ctx.venue_metrics.mined_blocks_total);
-    tracing::debug!(pending = %status.pending, "mined V's pending transactions");
+    tracing::debug!(pending = %pending, "mined V's pending transactions");
     Ok(())
 }
 

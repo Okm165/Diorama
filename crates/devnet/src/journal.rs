@@ -267,6 +267,34 @@ fn remove_logged(path: &std::path::Path, what: &'static str) {
     }
 }
 
+/// The journal's read side: before-values for a batch of writes, read at the
+/// target's block `at` (the applied parent's head). A read that fails fails
+/// the apply — a journal with a missing before-value would let a later rewind
+/// report success while leaving that key un-restored.
+pub async fn read_before_values(
+    target: &Rpc,
+    writes: &[Write],
+    at: u64,
+) -> Result<Vec<JournalEntry>> {
+    let mut entries = Vec::with_capacity(writes.len());
+    for w in writes {
+        let before = match w {
+            Write::Storage { address, slot, .. } => BeforeValue::Storage(U256::from_be_bytes(
+                target.storage_at(*address, *slot, at).await?.0,
+            )),
+            Write::Balance { address, .. } => {
+                BeforeValue::Balance(target.balance_at(*address, at).await?)
+            }
+            Write::Nonce { address, .. } => {
+                BeforeValue::Nonce(target.nonce_at(*address, at).await?)
+            }
+            Write::Code { address, .. } => BeforeValue::Code(target.code_at(*address, at).await?),
+        };
+        entries.push(entry_for_write(w, before)?);
+    }
+    Ok(entries)
+}
+
 /// Journal before-values for a batch of writes (read from T first).
 ///
 /// The pairing of a write with its before-value is a caller contract; a

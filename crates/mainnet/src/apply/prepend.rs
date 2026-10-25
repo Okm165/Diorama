@@ -32,19 +32,10 @@ pub(super) async fn prepend_and_mark(ctx: &Ctx, n: u64) -> Result<()> {
 async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()> {
     let mut rounds = 0;
     while rounds < rounds_max {
-        let status = match anvil_t.txpool_status().await {
-            Ok(status) => status,
-            Err(e) => {
-                // The prepend is a gas-estimate safeguard; a txpool fault skips
-                // it (named here, bounded: the next apply tries again).
-                tracing::debug!(block = n, error = %e, "prepend skipped: txpool unavailable");
-                return Ok(());
-            }
-        };
-        if status.pending == 0 {
-            return Ok(());
-        }
-        rounds += 1;
+        // The prepend block's timestamp: monotonic (last+1) so the applied
+        // block's alignment below can never fail on a lowered offset. Set
+        // before the pool check — a pool that drains first leaves the value
+        // for the applied block, which sets its own.
         let last = anvil_t
             .block_by_number(anvil_t.block_number().await?, false)
             .await?;
@@ -57,10 +48,20 @@ async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()>
             // block's timestamp, so this is a named, bounded degradation.
             tracing::debug!(block = n, error = %e, "prepend timestamp not set");
         }
-        anvil_t.anvil_mine(1).await?;
+        let pending = match anvil_t.mine_pending().await {
+            Ok(Some(pending)) => pending,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                // The prepend is a gas-estimate safeguard; a txpool fault skips
+                // it (named here, bounded: the next apply tries again).
+                tracing::debug!(block = n, error = %e, "prepend skipped: txpool unavailable");
+                return Ok(());
+            }
+        };
+        rounds += 1;
         tracing::info!(
             block = n,
-            pending = status.pending,
+            pending,
             round = rounds,
             "mined devnet txs before the parent diffs"
         );

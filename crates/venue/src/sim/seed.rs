@@ -238,7 +238,8 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
 
 #[cfg(test)]
 mod tests {
-    use crate::sim::account::{clearinghouse, meta_for};
+    use crate::sim::account::clearinghouse;
+    use crate::sim::meta_with_table;
     use super::*;
     use crate::sim::feed_with;
 
@@ -246,7 +247,7 @@ mod tests {
     #[test]
     fn identity_holds_for_seeded_positions() {
         let feed = feed_with(&[("ETH", "2985.9", "2986.0")]);
-        let meta = meta_for("ETH", 50);
+        let meta = meta_with_table("ETH", 50);
         let mut account = Account {
             perp_balance: Decimal::from(1000),
             ..Account::default()

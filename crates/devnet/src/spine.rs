@@ -192,6 +192,17 @@ pub trait ResetDetector: Send + Sync {
     fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, Result<ResetSignal>>;
 }
 
+/// The steady detector: never a reset. The identity element of the
+/// `ResetDetector` algebra — the profiles' tests use it (one home for the
+/// copies that stood in each profile's test module and this one's).
+pub struct NoReset;
+
+impl ResetDetector for NoReset {
+    fn detect<'a>(&'a self, _target: &'a Rpc) -> BoxFuture<'a, Result<ResetSignal>> {
+        Box::pin(async { Ok(ResetSignal::Steady) })
+    }
+}
+
 /// The clock rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClockPolicy {
@@ -247,14 +258,6 @@ mod tests {
     use crate::source::{RawSource, Source};
     use std::collections::HashSet;
     use std::sync::Arc;
-
-    struct NoReset;
-
-    impl ResetDetector for NoReset {
-        fn detect<'a>(&'a self, _target: &'a Rpc) -> BoxFuture<'a, Result<ResetSignal>> {
-            Box::pin(async { Ok(ResetSignal::Steady) })
-        }
-    }
 
     /// The bundle reports exactly what it was built with — the label, the two
     /// source roles, the policies, and the journal scope (the newest

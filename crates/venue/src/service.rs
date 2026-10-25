@@ -274,18 +274,8 @@ fn require_wiring(
 /// The shell's service hooks (`mirror_devnet::engine::EngineService`): the
 /// sequence is the spine's; these are V's own pieces.
 impl mirror_devnet::engine::EngineService for Ctx {
-    fn require_wiring(
-        cfg: &mirror_config::Instance,
-        unresolved: &[String],
-        source_url: &str,
-        target_url: &str,
-    ) -> Result<()> {
-        Ok(self::require_wiring(
-            cfg,
-            unresolved,
-            "venue engine wiring",
-            &[source_url, target_url],
-        )?)
+    fn wiring_label() -> &'static str {
+        "venue engine wiring"
     }
 
     fn urls(cfg: &mirror_config::Instance) -> Result<(String, String)> {

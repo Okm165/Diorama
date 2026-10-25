@@ -70,11 +70,12 @@ in `crates/devnet`; none of them is per-mirror code.
 
 ## The interfaces
 
-Seven traits carry every seam: the five semantic ones below, plus the shared
-shell's two (`Engine` — the shell's view of a mirror's context — and
-`ShellError` — the error contract its helpers construct: the shared
-`ShellFault`s convert into each mirror's taxonomy through `From`). The projects
-implement them; `crates/devnet` never names a mirror.
+Eight traits carry every seam: the five semantic ones below, plus the shared
+shell's three (`Engine` — the shell's view of a mirror's context; `ShellError`
+— the error contract its helpers construct: the shared `ShellFault`s convert
+into each mirror's taxonomy through `From`; and `EngineService` — the service
+hooks the boot sequence drives). The projects implement them;
+`crates/devnet` never names a mirror.
 
 | Interface | Where | Consumed by | Mainnet impl | Venue impl |
 |---|---|---|---|---|
@@ -85,6 +86,7 @@ implement them; `crates/devnet` never names a mirror.
 | `Registry` | `devnet/src/metrics.rs` | `/metrics` | one registry per engine, declared series + computed ones | same |
 | `Engine` | `devnet/src/engine.rs` | the shared shell: the HTTP handlers and route table, the boot assert, the admin surface's wiring, `/admin/epoch`, `serve` (and `serve_router`, the one listener boundary every service shares), the shutdown tail, the probe runner tail (`probes::run_at`/`ProbeOutcome::skipped`); `JournalScope` names what the journal holds (the rewind's semantics, data in the `Bundle`) | `impl Engine for Ctx`: `core()` (the shared facts as one view — `EngineCore`) + the profile's own pieces (`probes_now`, the scan counters, the status document, the exposition) | the same shape (V's chain and source URL in the view; the at-pin probes, its counters, its status document, its exposition) |
 | `ShellError` | `devnet/src/engine.rs` | the shell's helpers: they construct `ShellFault`s (bind / IO / chain identity), the mirror converts them into its own taxonomy (`From<ShellFault>`) | `impl ShellError for Error` + `From<ShellFault>` | `impl ShellError for Error` + `From<ShellFault>` |
+| `EngineService` | `devnet/src/engine.rs` | the shell's boot sequence (`run_engine`: inspect → endpoints → wiring → context → boot → log → spawn → shutdown) | `impl EngineService for Ctx`: the label, the profile-only boundaries (the journal's ring, the CL sources, the engine API's URL and JWT), the URLs, the context, the boot, the start log, the loops | the same shape (no extra boundaries: the label alone — `wiring_extra` defaults empty) |
 
 The vocabulary types are the contracts between the traits: `Window`,
 `WindowBal`, `WindowPlan`, `Write`, `DiffKind`, `Capabilities`, `Policies`,
@@ -157,15 +159,15 @@ Common components (`crates/devnet`, `crates/anvil`, `crates/config`):
 
 | Component | Owns | Must not |
 |---|---|---|
-| `anvil::Rpc` | the transport: one `Arc<Rpc>` per endpoint, typed reads (`call_decode<C: SolCall>`), measured error recognition (`is_method_not_found`), the cheatcode conventions | know any chain's semantics |
+| `anvil::Rpc` | the transport: one `Arc<Rpc>` per endpoint, typed reads (`call_decode<C: SolCall>`), measured error recognition (`is_method_not_found`), the producer rule (`mine_pending`: mine iff the pool is non-empty), the cheatcode conventions | know any chain's semantics |
 | `devnet::bal` | the window, the rungs, `flatten_bal`, `bal_from_writes`, the plan | read a source directly (it composes through `Source`) |
 | `devnet::cow` | the watch set, the declared closures, the skip rule | decide *what* is watched (the mirror's `Scope` does) |
-| `devnet::journal` | before-values, one atomic save per window (`store::save_bytes`) | hold business state |
+| `devnet::journal` | before-values (the read side `read_before_values`), one atomic save per window (`store::save_bytes`) | hold business state |
 | `devnet::state` | the cursor, `epoch_pin`, the offset, the halted flag | know which chain it tracks (the `chain` tag is data) |
 | `devnet::scanner` | the re-read of touched keys, parity | interpret a value (that is `probes`) |
 | `devnet::facts` | the bus, sequence numbers, the notification contract | persist anything |
-| `devnet::spine` | the seams (traits), `Policies`, `ResetSignal` | name a mirror |
-| `devnet::engine` | the shared shell: the `Engine`/`ShellError` contracts, `SharedStatus`, the boot assert, `serve`/`spawn_http`/`shutdown` | know a mirror's fields (the impl does) |
+| `devnet::spine` | the seams (traits), `Policies`, `ResetSignal`, the identity detector (`NoReset`) | name a mirror |
+| `devnet::engine` | the shared shell: the `Engine`/`EngineService`/`ShellError` contracts, `SharedStatus`, the client pair (`build_clients`), the loops' halt gate, the wiring check's default (the profiles supply the label and their boundaries), the boot assert, `serve`/`spawn_http`/`shutdown` | know a mirror's fields (the impl does) |
 | `devnet::handlers` | the shared HTTP surface: one generic handler per route, the route table, and the taxonomy's one status mapping (`devnet_status` — a shared refusal cannot answer two statuses) | own a route's semantics (the admin surface does) |
 | `config` | the layered loader, `${VAR}` resolution, validation | default a chain behavior |
 

@@ -32,7 +32,7 @@ pub(super) async fn parity_step(
 /// sample. Returns `(sampled, sampled_ok)`.
 async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> (usize, usize) {
     let full = ctx.engine.verifier.full_sweep;
-    let mut sample: Vec<Key> = filtered.iter().filter_map(storage_key).collect();
+    let mut sample: Vec<Key> = filtered.iter().filter_map(Write::storage_key).collect();
     if !full {
         sample.truncate(ctx.engine.verifier.drift_sample_keys);
     }
@@ -43,18 +43,6 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
         }
     }
     (sample.len(), sampled_ok)
-}
-
-/// The key of a storage write (`None` for account-field writes: only storage
-/// is sampled).
-fn storage_key(w: &Write) -> Option<Key> {
-    match w {
-        Write::Storage { address, slot, .. } => Some(Key::Storage {
-            address: *address,
-            slot: *slot,
-        }),
-        _ => None,
-    }
 }
 
 /// Compare one storage key at the two chains' own anchors: T's latest block
@@ -108,7 +96,6 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::storage_key;
     use alloy_primitives::{Address, U256};
     use mirror_anvil::{Key, Write};
 
@@ -124,11 +111,11 @@ mod tests {
             slot,
             value: U256::ZERO,
         };
-        assert_eq!(storage_key(&storage), Some(Key::Storage { address, slot }));
+        assert_eq!(storage.storage_key(), Some(Key::Storage { address, slot }));
         let balance = Write::Balance {
             address,
             value: U256::ZERO,
         };
-        assert_eq!(storage_key(&balance), None);
+        assert_eq!(balance.storage_key(), None);
     }
 }

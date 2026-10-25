@@ -125,18 +125,6 @@ mod tests {
         assert_eq!(p.gap, Some(32));
     }
 
-    struct NoReset;
-
-    impl ResetDetector for NoReset {
-        fn detect<'a>(
-            &'a self,
-            _target: &'a mirror_anvil::Rpc,
-        ) -> futures_util::future::BoxFuture<'a, mirror_devnet::Result<mirror_devnet::spine::ResetSignal>>
-        {
-            Box::pin(async { Ok(mirror_devnet::spine::ResetSignal::Steady) })
-        }
-    }
-
     /// The bundle's own divergences, pinned: the label, the journal scope
     /// (V's *own* writes — the rewind's semantics), and the two-source split
     /// (the truth source is the pin-guarded one, the follow reads raw). The
@@ -164,7 +152,7 @@ mod tests {
         let watched = alloy_primitives::Address::repeat_byte(0xaa);
         let scope =
             Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
-        let mirror = bundle(&engine, source, follow, Arc::new(NoReset), scope);
+        let mirror = bundle(&engine, source, follow, Arc::new(mirror_devnet::spine::NoReset), scope);
         assert_eq!(mirror.label(), "v");
         assert_eq!(
             mirror.journal_scope(),

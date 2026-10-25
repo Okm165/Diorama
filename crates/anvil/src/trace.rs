@@ -60,6 +60,18 @@ impl Write {
             Write::Code { address, .. } => Key::Code(*address),
         }
     }
+
+    /// The storage key of a storage write (`None` for account-field writes:
+    /// only storage carries a slot — the parity lens samples exactly these).
+    pub fn storage_key(&self) -> Option<Key> {
+        match self {
+            Write::Storage { address, slot, .. } => Some(Key::Storage {
+                address: *address,
+                slot: *slot,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// A state key: `Write` without its value. `Key` is what a read asks for

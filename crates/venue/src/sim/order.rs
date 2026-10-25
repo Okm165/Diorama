@@ -1321,7 +1321,7 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Can
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::{Deal, DealClass};
+    use crate::sim::{meta_with, Deal, DealClass};
     use crate::wire::{Level, Meta};
 
     /// A book with the given (bids, asks) as (px, sz) pairs.
@@ -1340,21 +1340,6 @@ mod tests {
             ],
             spread: None,
         }
-    }
-
-    /// A one-asset meta.
-    fn meta_with(coin: &str, max_leverage: u32) -> Meta {
-        let mut m: Meta = serde_json::from_str(r#"{"universe": []}"#).unwrap();
-        m.universe.push(crate::wire::AssetInfo {
-            name: coin.into(),
-            sz_decimals: 4,
-            max_leverage,
-            margin_table_id: None,
-            only_isolated: None,
-            is_delisted: None,
-            margin_mode: None,
-        });
-        m
     }
 
     /// A feed serving the book with a live mark (the best ask, else 1) — the

@@ -29,6 +29,7 @@ HTTP="http://127.0.0.1:$HTTP_PORT"
 WATCH=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 # anvil account 0 (watched)
 OTHER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 # anvil account 1 (devnet tx)
 TOKEN=0x00000000000000000000000000000000000000e7    # the mock ERC-20 (see below)
+PROBE_DATA="0x70a08231000000000000000000000000$(echo "$WATCH" | cut -c3-)"
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
@@ -45,9 +46,9 @@ rm -rf "$DIR"; mkdir -p "$DIR/state/journal"
 
 status() { curl -s "$HTTP/status"; }
 metric() { curl -s "$HTTP/metrics" | grep "^$1 " | awk '{print $2}'; }
-bal() { rpc "$1" eth_getBalance "[\"$WATCH\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
-nonce() { rpc "$1" eth_getTransactionCount "[\"$WATCH\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
-send() { rpc "$1" eth_sendTransaction "[{\"from\":\"$2\",\"to\":\"$3\",\"value\":\"$4\"}]" >/dev/null; }
+bal() { rpc "$1" eth_getBalance "[\"$2\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
+nonce() { rpc "$1" eth_getTransactionCount "[\"$2\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
+send() { rpc "$1" eth_sendTransaction "[{\"from\":\"$2\",\"to\":\"$3\",\"value\":\"$4\"}]"; }
 
 "$ANVIL" --port "$SRC_PORT" --chain-id 998 --block-time 1 --silent > "$DIR/source.log" 2>&1 &
 SRC_PID=$!
@@ -82,6 +83,7 @@ note = "anvil account 0: the proof's watched sender"
 
 [services.engine]
 state_dir = "$DIR/state"
+fixture_addresses = []
 
 [services.engine.anvil]
 target_url = "$V"
@@ -90,7 +92,11 @@ target_url = "$V"
 dir = "$DIR/state/journal"
 
 [services.engine.verifier]
-probes = []
+
+[[services.engine.verifier.probes]]
+name = "token.balanceOf(watch)"
+to = "$TOKEN"
+data = "$PROBE_DATA"
 
 [services.engine.http]
 addr = "127.0.0.1"
@@ -99,38 +105,38 @@ EOF
 
 "$ENGINE" run --config "$DIR/instance.toml" > "$DIR/engine.log" 2>&1 &
 ENG_PID=$!
-for _ in $(seq 1 40); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
+for _ in $(seq 1 120); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
 curl -sf "$HTTP/livez" >/dev/null || { bad "engine did not come up (see $DIR/engine.log)"; exit 1; }
 
-# Stage 1: the source moves; the follow must land the watched fields on V 1:1.
-send "$SRC" "$WATCH" 0x000000000000000000000000000000000000dEaD 0xde0b6b3a7640000
+# ---- follow: V follows the source 1:1 --------------------------------------
+send "$SRC" "$WATCH" 0x000000000000000000000000000000000000dEaD 0xde0b6b3a7640000 >/dev/null
 sleep 5
-if [ "$(bal "$SRC")" = "$(bal "$V")" ] && [ "$(nonce "$SRC")" = "$(nonce "$V")" ]; then
+if [ "$(bal "$SRC" "$WATCH")" = "$(bal "$V" "$WATCH")" ] && [ "$(nonce "$SRC" "$WATCH")" = "$(nonce "$V" "$WATCH")" ]; then
   ok "follow 1:1: V's balance and nonce match the source after its tx"
 else
-  bad "follow mismatch: source $(bal "$SRC")/$(nonce "$SRC") vs V $(bal "$V")/$(nonce "$V")"
+  bad "follow mismatch: source $(bal "$SRC" "$WATCH")/$(nonce "$SRC" "$WATCH") vs V $(bal "$V" "$WATCH")/$(nonce "$V" "$WATCH")"
 fi
-base_v=$(bal "$V")
+base_v=$(bal "$V" "$WATCH")
 
-# Stage 2: a devnet write on V, then another source move: COW must skip it.
-send "$V" "$OTHER" "$WATCH" 0x4563918244f40000
+# ---- modify: a devnet write on V is COW-marked and survives the next window --
+send "$V" "$OTHER" "$WATCH" 0x4563918244f40000 >/dev/null
 sleep 4
 expect=$(python3 -c "print($base_v + 5 * 10**18)")
-if [ "$(bal "$V")" = "$expect" ]; then
+if [ "$(bal "$V" "$WATCH")" = "$expect" ]; then
   ok "devnet write on V landed (balance + 5 ETH)"
 else
-  bad "devnet write did not land ($(bal "$V") != $expect)"
+  bad "devnet write did not land ($(bal "$V" "$WATCH") != $expect)"
 fi
 status | python3 -c 'import json,sys; w="'"$WATCH"'".lower(); d=json.load(sys.stdin); sys.exit(0 if any(w in a.lower() for a in d["shadowed"]) else 1)' \
   && ok "/status lists the devnet-owned account (shadowed)" \
   || bad "/status shadowed: $(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["shadowed"])')"
 
-send "$SRC" "$WATCH" 0x000000000000000000000000000000000000dEaD 0xde0b6b3a7640000
+send "$SRC" "$WATCH" 0x000000000000000000000000000000000000dEaD 0xde0b6b3a7640000 >/dev/null
 sleep 5
-if [ "$(bal "$V")" = "$expect" ] && [ "$(bal "$SRC")" != "$expect" ]; then
+if [ "$(bal "$V" "$WATCH")" = "$expect" ] && [ "$(bal "$SRC" "$WATCH")" != "$expect" ]; then
   ok "COW: the devnet-owned balance survived the next source window"
 else
-  bad "COW: V $(bal "$V") vs expected $expect (source $(bal "$SRC"))"
+  bad "COW: V $(bal "$V" "$WATCH") vs expected $expect (source $(bal "$SRC" "$WATCH"))"
 fi
 skipped=$(metric venue_follow_skipped_shadowed_total || true)
 if [ "${skipped:-0}" -ge 2 ]; then
@@ -155,13 +161,13 @@ else
   bad "live parity: $sampled_ok/$sampled (the follow's measurement)"
 fi
 
-# Stage 3: the forensic trail. A log from a contract no declared closure
-# covers cannot be followed — it must land in the shared drift log
-# (`drift.jsonl`, the venue's counterpart of the applier's anomaly lines),
-# beside the counter.
+# ---- drift: the forensic trail (an uncovered emitter) -----------------------
+# A log from a contract no declared closure covers cannot be followed — it
+# must land in the shared drift log (`drift.jsonl`, the venue's counterpart
+# of the applier's anomaly lines), beside the counter.
 EMITTER=0x00000000000000000000000000000000000000e9
 rpc "$SRC" anvil_setCode "[\"$EMITTER\",\"0x60006000a0\"]" >/dev/null # PUSH1 0 PUSH1 0 LOG0
-send "$SRC" "$WATCH" "$EMITTER" 0
+send "$SRC" "$WATCH" "$EMITTER" 0 >/dev/null
 sleep 5
 if grep -q '"uncovered_logs"' "$DIR/state/drift.jsonl" 2>/dev/null; then
   ok "drift.jsonl: the uncovered emitter is on the venue's forensic trail"
@@ -169,13 +175,11 @@ else
   bad "drift.jsonl missing the uncovered_logs line (see $DIR/state/drift.jsonl)"
 fi
 
-# ---- the shared admin surface (the venue side of the engine UX) ------------
+# ---- the shared admin surface ----------------------------------------------
 # The exact verbs `make engine-symmetry` checks cluster-side, driven here
 # against the one engine: /status, pause/resume effects, the shadow
-# hand-back and its designed refusal, probes, deal, events, the rewind
-# refusal.
-TOKEN=0x00000000000000000000000000000000000000e7 # the mock ERC-20 (deployed on the source)
-
+# hand-back and its designed refusal, probes, deal, events (the rewind pair
+# is below, after the stability legs).
 st=$(status)
 for k in head cursor halted shadowed shadowed_slots shadowed_accounts capabilities fork_pin epoch_pin probes source; do
   printf '%s' "$st" | python3 -c "import json,sys; sys.exit(0 if '$k' in json.load(sys.stdin) else 1)"     && ok "/status has $k" || bad "/status missing $k"
@@ -211,6 +215,16 @@ fi
 po=$(curl -s -X POST "$HTTP/admin/probes" -H 'content-type: application/json' -d '{}')
 printf '%s' "$po" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if all(k in d for k in ("ok","failed","skipped")) else 1)' \
   && ok "/admin/probes reports {ok, failed, skipped}" || bad "/admin/probes: $po"
+# The configured probe must be accounted for: the venue's schedule is at-pin,
+# so an older pin (the source moved past it) is skipped and counted — the
+# mainnet's per-block schedule asserts `ok >= 1` at the same call.
+pok=$(metric venue_probe_ok_total || true)
+pskip=$(metric venue_probe_skipped_total || true)
+if [ $(( ${pok:-0} + ${pskip:-0} )) -ge 1 ]; then
+  ok "/admin/probes: the configured probe is accounted for (ok=${pok:-0} skipped=${pskip:-0})"
+else
+  bad "/admin/probes: the probe was not accounted for (ok=${pok:-0} skipped=${pskip:-0})"
+fi
 
 timeout 5 curl -s -N "$HTTP/events" > "$DIR/events.out" 2>/dev/null &
 for _ in $(seq 1 20); do grep -q ": connected" "$DIR/events.out" 2>/dev/null && break; sleep 0.1; done
@@ -224,9 +238,6 @@ db=$(rpc "$V" eth_call "[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231000000000000000
 sleep 3
 grep -q "deal_applied" "$DIR/events.out" && ok "/events carries deal_applied" || bad "/events missing deal_applied"
 grep -q "block_applied" "$DIR/events.out" && ok "/events carries block_applied" || bad "/events missing block_applied"
-
-rc=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HTTP/admin/rewind" -H 'content-type: application/json' -d '{"blocks":9999999}')
-[ "$rc" = "400" ] && ok "/admin/rewind beyond ring: 400 (the named refusal)" || bad "/admin/rewind beyond ring: $rc"
 
 # A token without the standard layout writes nothing, so it must publish
 # nothing: the fact is a state change, never a request receipt.
@@ -250,7 +261,7 @@ kill -9 "$ENG_PID" 2>/dev/null || true
 sleep 1
 "$ENGINE" run --config "$DIR/instance.toml" >> "$DIR/engine.log" 2>&1 &
 ENG_PID=$!
-for _ in $(seq 1 40); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
+for _ in $(seq 1 120); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
 cursor_after=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
 [ "$cursor_after" -ge "$cursor_before" ] \
   && ok "restart: the cursor resumed from the state file ($cursor_before -> $cursor_after)" \
@@ -288,9 +299,12 @@ curl -sf "$HTTP/livez" >/dev/null \
   && ok "corrupt state: the restored file boots again" \
   || bad "corrupt state: the engine did not come back (see $DIR/engine.log)"
 
-# ---- a successful rewind (the mainnet script's twin) ----------------------
+# ---- rewind: the journal's own writes (the mainnet script's legs) ---------
 # The venue's own writes are journaled (OwnWrites), so one block back restores
-# them. Paused for the two reads — the follow races them otherwise.
+# them. Paused for the two reads — the follow races them otherwise. The pair
+# sits after the stability legs on this side: a rewind rolls back the deal's
+# write, which the restart leg above checks (the mainnet's pair sits in its
+# admin section — its journal holds the parent's before-values instead).
 curl -s -X POST "$HTTP/admin/pause" -H 'content-type: application/json' -d '{}' >/dev/null
 sleep 1.5
 before=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
@@ -301,6 +315,9 @@ printf '%s' "$rw" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exi
 after=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
 curl -s -X POST "$HTTP/admin/resume" -H 'content-type: application/json' -d '{}' >/dev/null
 [ "$after" -lt "$before" ] && ok "rewind: the cursor moved back ($before -> $after)" || bad "rewind: cursor $before -> $after"
+# A rewind past the journal ring is the named refusal, never a silent no-op.
+rc=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HTTP/admin/rewind" -H 'content-type: application/json' -d '{"blocks":9999999}')
+[ "$rc" = "400" ] && ok "/admin/rewind beyond ring: 400 (the named refusal)" || bad "/admin/rewind beyond ring: $rc"
 
 # ---- the epoch rule (the mainnet script's section, V's own facts) ----------
 # A one-call re-pin moves V's base: the driver detects the reset and the

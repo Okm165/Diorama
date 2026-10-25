@@ -13,13 +13,12 @@ pub(crate) mod prepend;
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
-use mirror_anvil::{Rpc, Write};
+use mirror_anvil::Write;
 use mirror_devnet::cow::FilterStats;
 use mirror_devnet::drift::Drift;
 use mirror_devnet::facts::Fact;
-use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
+use mirror_devnet::journal::JournalEntry;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::spine::{ClockPolicy, MinePolicy};
@@ -160,7 +159,8 @@ pub(crate) async fn step(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     prepend_and_mark(ctx, n).await?;
 
     let plan = plan_and_check_base(ctx, n, base).await?;
-    let entries = read_before_values(&ctx.anvil_t, &plan.writes, t_head).await?;
+    let entries =
+        mirror_devnet::journal::read_before_values(&ctx.anvil_t, &plan.writes, t_head).await?;
 
     let applied = write_and_mine(ctx, &header, &plan.writes).await?;
     journal_and_scan(ctx, n, &entries, t_head).await?;
@@ -368,35 +368,6 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
         sampled_ok: 0,
         duration_ms: started.elapsed().as_millis() as u64,
     })
-}
-
-/// Before-values for the journal, read at T's current head. A read that fails
-/// fails the apply: a journal with a missing before-value would let a later
-/// rewind report success while leaving that key un-restored.
-async fn read_before_values(
-    anvil_t: &Rpc,
-    filtered: &[Write],
-    t_head: u64,
-) -> Result<Vec<JournalEntry>> {
-    let mut entries = Vec::with_capacity(filtered.len());
-    for w in filtered {
-        let before = match w {
-            Write::Storage { address, slot, .. } => BeforeValue::Storage(U256::from_be_bytes(
-                anvil_t.storage_at(*address, *slot, t_head).await?.0,
-            )),
-            Write::Balance { address, .. } => {
-                BeforeValue::Balance(anvil_t.balance_at(*address, t_head).await?)
-            }
-            Write::Nonce { address, .. } => {
-                BeforeValue::Nonce(anvil_t.nonce_at(*address, t_head).await?)
-            }
-            Write::Code { address, .. } => {
-                BeforeValue::Code(anvil_t.code_at(*address, t_head).await?)
-            }
-        };
-        entries.push(entry_for_write(w, before)?);
-    }
-    Ok(entries)
 }
 
 /// Align block context + mine, so `latest` views (Aave-style time

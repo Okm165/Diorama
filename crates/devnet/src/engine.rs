@@ -281,14 +281,39 @@ pub async fn boot_prefix<E: Engine>(
 /// wiring, assemble the context, boot, log, spawn the loops, shut down — is
 /// one invariant in [`run_engine`]; these are the profile's own pieces.
 pub trait EngineService: Engine {
-    /// The wiring check, labelled with this engine's name (each profile adds
-    /// its own boundaries' values beside the endpoints).
+    /// The wiring check, in the shell: the endpoints plus the profile's own
+    /// boundaries (`wiring_extra`), under the profile's label
+    /// (`wiring_label`). The profiles implement the two hooks, not this
+    /// method.
     fn require_wiring(
         cfg: &mirror_config::Instance,
         unresolved: &[String],
         source_url: &str,
         target_url: &str,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<(), Self::Error> {
+        let extra = Self::wiring_extra(cfg);
+        let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+        require_engine_wiring(
+            cfg,
+            unresolved,
+            Self::wiring_label(),
+            &[source_url, target_url],
+            &refs,
+        )
+        .map_err(Self::Error::from)
+    }
+
+    /// The boot error's label (`"<profile> engine wiring"`).
+    fn wiring_label() -> &'static str;
+
+    /// The profile-only boundary values beside the endpoints and the state
+    /// dir (the journal's ring, the CL sources, the engine API's URL and
+    /// JWT). Empty by default — a profile with no extra boundaries implements
+    /// only the label.
+    fn wiring_extra(cfg: &mirror_config::Instance) -> Vec<String> {
+        let _ = cfg;
+        Vec::new()
+    }
     /// The instance's endpoints for this engine (source, target).
     fn urls(cfg: &mirror_config::Instance) -> Result<(String, String), Self::Error>;
     /// The context assembly.

@@ -283,6 +283,7 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
                 }
             }
             syn::Item::Impl(i) => walk_impl(file, i, test, out),
+            syn::Item::Trait(t) => walk_trait(file, t, test, out),
             _ => {}
         }
     }
@@ -309,6 +310,23 @@ fn walk_impl(file: &str, i: &syn::ItemImpl, test: bool, out: &mut Vec<Item>) {
                 .as_ref()
                 .and_then(|(_, path, _)| path.segments.last().map(|s| s.ident.to_string()));
             out.push(item);
+        }
+    }
+}
+
+/// The provided methods of one trait, named `Trait.method` — a trait
+/// default's body is production shape (the shell's accessors and shared
+/// helpers live there), so the readings must see it.
+fn walk_trait(file: &str, t: &syn::ItemTrait, test: bool, out: &mut Vec<Item>) {
+    let name = t.ident.to_string();
+    for item in &t.items {
+        if let syn::TraitItem::Fn(f) = item {
+            if let Some(block) = &f.default {
+                let mut item = fn_item(file, &f.sig, block, &f.attrs, test);
+                item.name = format!("{name}.{}", f.sig.ident);
+                item.trait_name = Some(name.clone());
+                out.push(item);
+            }
         }
     }
 }
@@ -768,7 +786,13 @@ fn is_literal(e: &syn::Expr) -> bool {
 /// The report: the largest production items per kind, then the reuse and
 /// dispersion analyses (the analysis half).
 fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &MemberUses) {
-    let prod: Vec<&Item> = items.iter().filter(|i| !i.is_test()).collect();
+    // The instrument measures the mirrors, not itself: ast-scope's own
+    // items would otherwise top the shape readings (the gate still covers
+    // them).
+    let prod: Vec<&Item> = items
+        .iter()
+        .filter(|i| !i.is_test() && !i.file.starts_with("bins/ast-scope/"))
+        .collect();
     println!(
         "ast-scope: {} production items ({} functions, {} structs, {} enums)",
         prod.len(),
@@ -1006,7 +1030,13 @@ fn pair_key(item: &Item) -> String {
             let method = item.name.rsplit('.').next().unwrap_or(item.name.as_str());
             format!("{t}.{method}")
         }
-        None => item.name.clone(),
+        // An inherent method pairs by the method's own name: the types
+        // carry the mirrors' vocabulary (`FeedBridgeMetrics.render` and
+        // `FeedMetrics.render` are one role), the method the contract.
+        None => match item.name.rsplit_once('.') {
+            Some((_, method)) => method.to_string(),
+            None => item.name.clone(),
+        },
     }
 }
 
@@ -1025,8 +1055,18 @@ fn structure_map(items: &[Item]) {
         let m_names: HashSet<String> = m.iter().map(|i| pair_key(i)).collect();
         let v_names: HashSet<String> = v.iter().map(|i| pair_key(i)).collect();
         let mut paired: Vec<&str> = m_names.intersection(&v_names).map(String::as_str).collect();
-        let mut m_only: Vec<&str> = m_names.difference(&v_names).map(String::as_str).collect();
-        let mut v_only: Vec<&str> = v_names.difference(&m_names).map(String::as_str).collect();
+        // The one-sided lists print the item's own (qualified) name: the
+        // key is for pairing, the name for reading.
+        let mut m_only: Vec<&str> = m
+            .iter()
+            .filter(|i| !v_names.contains(&pair_key(i)))
+            .map(|i| i.name.as_str())
+            .collect();
+        let mut v_only: Vec<&str> = v
+            .iter()
+            .filter(|i| !m_names.contains(&pair_key(i)))
+            .map(|i| i.name.as_str())
+            .collect();
         paired.sort_unstable();
         m_only.sort_unstable();
         v_only.sort_unstable();
@@ -1130,11 +1170,14 @@ fn compositions(prod: &[&Item]) {
             .map(String::as_str)
             .filter(|op| own.contains(op))
             .collect();
+        // One entry per (gram, function): a run of same calls inside one
+        // function is one caller, not many.
+        let mut seen: HashSet<String> = HashSet::new();
         for window in ops.windows(2) {
-            grams
-                .entry(window.join(" -> "))
-                .or_default()
-                .push(item.name.as_str());
+            let gram = window.join(" -> ");
+            if seen.insert(gram.clone()) {
+                grams.entry(gram).or_default().push(item.name.as_str());
+            }
         }
     }
     let mut shared: Vec<(&String, &Vec<&str>)> =
@@ -1380,7 +1423,7 @@ fn fan_in(prod: &[&Item]) {
     }
     let mut rows: Vec<(&str, usize)> = callers.iter().map(|(k, v)| (*k, v.len())).collect();
     rank(&mut rows, |(_, n)| *n);
-    println!("\nfan-in: the workspace's own free functions by caller count (the atomic blocks in use):");
+    println!("\nfan-in: the workspace's own free functions by caller count, matched by name (same-named fns merge; the atomic blocks in use):");
     for (name, n) in rows.iter().take(REPORT_TOP) {
         println!("  {n:>3} callers  {name}");
     }

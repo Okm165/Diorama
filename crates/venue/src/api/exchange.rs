@@ -231,13 +231,19 @@ fn batch_modify(
     default_ok()
 }
 
-/// The venue's no-data success, built once.
-fn default_ok() -> Response {
+/// The exchange lane's ok envelope: every successful answer carries
+/// `{"status":"ok","response":…}` — built once here.
+fn ok_envelope<T: serde::Serialize>(response: T) -> Response {
     Json(ExchangeOk {
         status: "ok",
-        response: DefaultBody { r#type: "default" },
+        response,
     })
     .into_response()
+}
+
+/// The venue's no-data success, built once.
+fn default_ok() -> Response {
+    ok_envelope(DefaultBody { r#type: "default" })
 }
 
 /// The `updateLeverage` action (its own fn so the dispatcher stays small):
@@ -298,14 +304,10 @@ fn order_action(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &Excha
 /// The order action's `{"status":"ok","response":{"type":"order","data":…}}`
 /// envelope (the shape their client parses).
 fn order_response(statuses: Vec<OrderStatus>) -> Response {
-    Json(ExchangeOk {
-        status: "ok",
-        response: OrderResponseBody {
-            r#type: "order",
-            data: OrderData { statuses },
-        },
+    ok_envelope(OrderResponseBody {
+        r#type: "order",
+        data: OrderData { statuses },
     })
-    .into_response()
 }
 
 /// The unmodeled tag's refusal, naming the tag from the raw body.
@@ -346,14 +348,10 @@ fn cancel_action(
             })),
         })
         .collect();
-    Json(ExchangeOk {
-        status: "ok",
-        response: CancelResponseBody {
-            r#type: "cancel",
-            data: CancelData { statuses },
-        },
+    ok_envelope(CancelResponseBody {
+        r#type: "cancel",
+        data: CancelData { statuses },
     })
-    .into_response()
 }
 
 /// `cancelByCloid`: the same, addressed by client id.
@@ -458,11 +456,7 @@ fn noop_response(req: &ExchangeBody) -> Response {
         signed = req.signature.as_ref().is_some_and(Signature::is_shaped),
         "exchange noop accepted (the signature is accepted, never verified)"
     );
-    Json(ExchangeOk {
-        status: "ok",
-        response: DefaultBody { r#type: "default" },
-    })
-    .into_response()
+    ok_envelope(DefaultBody { r#type: "default" })
 }
 
 /// The action's orders after the boundary checks, or the refusal reason the

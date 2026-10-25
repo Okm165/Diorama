@@ -586,6 +586,20 @@ impl Rpc {
         Ok(())
     }
 
+    /// Mine one block iff the pool is non-empty; `Some(pending)` is the
+    /// pool's depth when a block was mined, `None` when it was empty (V's
+    /// producer rule: an idle chain stays static; T's prepend runs the same
+    /// check with its timestamp step around it).
+    pub async fn mine_pending(&self) -> Result<Option<u64>> {
+        let status = self.txpool_status().await?;
+        let pending = status.pending;
+        if pending == 0 {
+            return Ok(None);
+        }
+        self.anvil_mine(1).await?;
+        Ok(Some(pending))
+    }
+
     /// Set the next block's timestamp alone (the devnet prepend block: the
     /// diffs' own context alignment follows separately).
     pub async fn anvil_set_next_block_timestamp(&self, timestamp: u64) -> Result<()> {

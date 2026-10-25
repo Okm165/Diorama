@@ -690,6 +690,59 @@ pub(crate) fn feed_with_funding(marks: &[(&str, &str, &str)]) -> MarketFeed {
     feed
 }
 
+/// A `Meta` with the given assets (the sim's fixtures: the waterfall's
+/// maintenance tiers and the order tests' book both read it).
+#[cfg(test)]
+pub(crate) fn meta_of(assets: &[(&str, u32)]) -> crate::wire::Meta {
+    let mut m: crate::wire::Meta = serde_json::from_str(r#"{"universe": []}"#).unwrap();
+    for (coin, max_leverage) in assets {
+        m.universe.push(crate::wire::AssetInfo {
+            name: (*coin).into(),
+            sz_decimals: 4,
+            max_leverage: *max_leverage,
+            margin_table_id: None,
+            only_isolated: None,
+            is_delisted: None,
+            margin_mode: None,
+        });
+    }
+    m
+}
+
+/// A `Meta` with one asset.
+#[cfg(test)]
+pub(crate) fn meta_with(coin: &str, max_leverage: u32) -> crate::wire::Meta {
+    meta_of(&[(coin, max_leverage)])
+}
+
+/// A `Meta` whose one asset carries a margin table (the account tests'
+/// leverage tiers).
+#[cfg(test)]
+pub(crate) fn meta_with_table(coin: &str, max_leverage: u32) -> crate::wire::Meta {
+    crate::wire::Meta {
+        universe: vec![crate::wire::AssetInfo {
+            name: coin.to_string(),
+            sz_decimals: 5,
+            max_leverage,
+            margin_table_id: Some(50),
+            only_isolated: None,
+            is_delisted: None,
+            margin_mode: None,
+        }],
+        margin_tables: vec![(
+            50,
+            crate::wire::MarginTable {
+                description: String::new(),
+                margin_tiers: vec![crate::wire::MarginTier {
+                    lower_bound: Decimal::ZERO,
+                    max_leverage,
+                }],
+            },
+        )],
+        collateral_token: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

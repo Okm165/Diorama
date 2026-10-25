@@ -144,18 +144,12 @@ async fn run(config: PathBuf) -> Result<()> {
 /// The shell's service hooks (`mirror_devnet::engine::EngineService`): the
 /// sequence is the spine's; these are T's own pieces.
 impl mirror_devnet::engine::EngineService for Ctx {
-    fn require_wiring(
-        cfg: &Instance,
-        unresolved: &[String],
-        source_url: &str,
-        target_url: &str,
-    ) -> Result<()> {
-        Ok(self::require_wiring(
-            cfg,
-            unresolved,
-            "mainnet engine wiring",
-            &[source_url, target_url],
-        )?)
+    fn wiring_label() -> &'static str {
+        "mainnet engine wiring"
+    }
+
+    fn wiring_extra(cfg: &Instance) -> Vec<String> {
+        self::wiring_extra(cfg)
     }
 
     fn urls(cfg: &Instance) -> Result<(String, String)> {
@@ -204,37 +198,36 @@ impl mirror_devnet::engine::EngineService for Ctx {
 }
 
 /// This command's wiring, by name: the endpoints plus the boundaries only
-/// this profile builds (the journal's ring, the beacon sources, the engine
-/// API's URL and JWT). Unresolved here is a boot error naming the variable,
-/// never a literal used as an endpoint.
+/// this profile builds (`wiring_extra`). Unresolved here is a boot error
+/// naming the variable, never a literal used as an endpoint.
 fn require_wiring(
     cfg: &Instance,
     unresolved: &[String],
     what: &'static str,
     endpoints: &[&str],
 ) -> std::result::Result<(), mirror_config::ConfigError> {
-    let engine = cfg.services.engine.as_ref();
-    let journal = engine.map(|e| e.journal.dir.to_string_lossy().into_owned());
-    let jwt = engine.and_then(|e| {
-        e.source_sync
-            .jwt_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-    });
-    let mut extra: Vec<&str> = Vec::new();
-    if let Some(journal) = &journal {
-        extra.push(journal);
+    let extra = wiring_extra(cfg);
+    let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+    mirror_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &refs)
+}
+
+/// The profile-only boundary values this instance must resolve: the journal's
+/// ring, the beacon sources, the engine API's URL and JWT — the endpoints and
+/// the state dir are the spine's to check.
+fn wiring_extra(cfg: &Instance) -> Vec<String> {
+    let mut extra: Vec<String> = Vec::new();
+    let Some(engine) = cfg.services.engine.as_ref() else {
+        return extra;
+    };
+    extra.push(engine.journal.dir.to_string_lossy().into_owned());
+    extra.extend(engine.beacon.urls.iter().cloned());
+    if let Some(url) = &engine.source_sync.engine_url {
+        extra.push(url.clone());
     }
-    if let Some(e) = engine {
-        extra.extend(e.beacon.urls.iter().map(String::as_str));
-        if let Some(url) = &e.source_sync.engine_url {
-            extra.push(url);
-        }
+    if let Some(jwt) = &engine.source_sync.jwt_path {
+        extra.push(jwt.to_string_lossy().into_owned());
     }
-    if let Some(jwt) = &jwt {
-        extra.push(jwt);
-    }
-    mirror_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &extra)
+    extra
 }
 
 /// The feed bridge, when configured. Built before any loop serves: a fault

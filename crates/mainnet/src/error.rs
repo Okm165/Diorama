@@ -168,6 +168,7 @@ mod tests {
         let source = std::error::Error::source(&wrapped).expect("source is preserved");
         assert!(source.to_string().contains("feed bridge"), "{source}");
     }
+
 }
 
 #[cfg(test)]
