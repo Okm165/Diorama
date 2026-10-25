@@ -266,6 +266,27 @@ kubectl -n mainnet-mirror rollout status  deploy/anvil-t
   *state* does. The journal is cleared with the old chain, so rewind drills
   start from the new one.
 
+### The crosschain unified-margin cycle — `make cctp-margin-cycle`
+
+One actor's funds travel the whole substrate: the T mint (`/admin/deal`), the
+CCTP burn + relay + the V mint, the venue-side spot ledger and the CoreWriter
+spot→perp transfer, a perp fill against the real book, the CoreWriter order
+door, the unified-collateral path (a spot-only unified account backing a perp
+order) and the return leg closing exactly. In cluster mode the script derives
+the bridge's wallet from the venue secret (`cctp-relay-key`), so the actor is
+always the wallet the burn sends from — never the local harness's.
+
+### The portfolio simulation — `make portfolio-sim`
+
+A delta-neutral basis book across both mirrors (long WETH on T, short the ETH
+perp on V), measured end to end: the live context (V's mark/oracle/funding +
+T's Chainlink feed), the fills against V's real book with their impact, the
+coin and dollar deltas, one scripted hour of funding read as collected carry,
+a crash's hedged PnL (the short gains, the T leg under the same shock stated),
+and the capital-efficiency table (effective leverage, annualized carry on
+capital, shock PnL on capital) — the prime-brokerage read the daloc benchmarks
+extend.
+
 ### Re-pin — `make mainnet-repin`
 
 Three occasions:

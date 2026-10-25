@@ -50,11 +50,18 @@ else
   biget() { exec_pod curl -s --fail-with-body -m 30 "localhost:8095$1"; }
   cget()  { exec_pod curl -s --fail-with-body -m 60 "$2$1"; }
   cpost() { exec_pod curl -s --fail-with-body -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
-  balance() { exec_pod "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$3" 2>/dev/null | awk '{print $1}'; }
+  # The pod carries curl, never cast (the engine/bridge images are the slim
+  # runtime; the foundry tooling lives in the anvil pods): the read is an
+  # eth_call through the pod and the parse on the host — the venue lib's shape.
+  balance() { # balance <token> <address> <rpc-url> -> decimal units
+    exec_pod curl -s --fail-with-body -m 30 -X POST "$3" -H 'Content-Type: application/json' \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[{\"to\":\"$1\",\"data\":\"0x70a08231000000000000000000000000${2:2}\"},\"latest\"]}" \
+      | python3 -c "import json,sys; r=json.load(sys.stdin).get('result','0x0'); print(int(r,16))"
+  }
   rpcv()  { exec_pod curl -s --fail-with-body -m 60 -X POST "$1" -H 'Content-Type: application/json' -d "$2"; }
   SRC_URL="http://anvil-t.mainnet-mirror.svc:8545"
   DST_URL="http://anvil-v:8545"
-  SRC_ENGINE="http://mainnet-engine.mainnet-mirror.svc:8080"
+  SRC_ENGINE="http://engine.mainnet-mirror.svc:8080"
   DST_ENGINE="http://engine:8080"
 fi
 

@@ -277,6 +277,9 @@ cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTIN
 cctp-margin-cycle: ## The crosschain unified-margin cycle (T mint -> CCTP -> venue collateral -> trade -> CCTP back)
 	NS=venue-mirror ./scripts/cctp-margin-cycle.sh
 
+portfolio-sim: ## The portfolio simulation: a delta-neutral basis book across both mirrors (carry + shock + capital efficiency)
+	NS=venue-mirror ./scripts/portfolio-sim.sh
+
 cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locally (both chains forked from the real ones: the round trip + the unified-margin cycle)
 	./scripts/cctp-local.sh
 

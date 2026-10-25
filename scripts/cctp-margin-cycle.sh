@@ -31,7 +31,7 @@
 set -euo pipefail
 
 NS="${NS:-venue-mirror}"
-RELAY="${RELAY:-0x70997970C51812dc3A010C7d01b50e0d17dc79C8}"   # the bridge's wallet
+RELAY="${RELAY:-}"                                             # the bridge's wallet (the cycle's actor)
 TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}" # the V-side trader
 UNIFIED="${UNIFIED:-0x00000000000000000000000000000000000000ea}" # a unified-mode account
 AMOUNT="${AMOUNT:-5000000}"                                    # 5 USDC (6-dec)
@@ -45,6 +45,21 @@ CORE_WRITER=0x3333333333333333333333333333333333333333
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-cctp.sh"
 require_chain_urls
+
+# The actor is the bridge's own wallet: section A mints to it and the burn
+# sends from it. Local mode uses the harness's known wallet; cluster mode
+# derives it from the venue secret, so the default can never mispoint (the
+# local address has no funds on the cluster's T).
+if [ -z "$RELAY" ]; then
+  if [ -n "${BRIDGE_CTRL_URL:-}" ]; then
+    RELAY=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+  else
+    key=$(kubectl -n "$NS" get secret cctp-relay-key -o jsonpath='{.data.relay-key}' 2>/dev/null | base64 -d 2>/dev/null | tr -d '\r')
+    RELAY=$("${CAST:-cast}" wallet address --private-key "$key" 2>/dev/null | tr -d '\r')
+    [ -n "$RELAY" ] || { echo "RELAY unset and the cluster secret cctp-relay-key is unreadable" >&2; exit 1; }
+    echo "  · the bridge's wallet derived from the cluster secret: $RELAY"
+  fi
+fi
 
 # The CoreWriter calldata for a raw action stream (docs: the `sendRawAction`
 # selector + offset + length + padded stream) — one home for every action the
