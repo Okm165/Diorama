@@ -5,11 +5,9 @@
 //! Clocks: `block` = the **L1 parent height** (the applied mainnet block);
 //! `head` = the compared chain's head (T); `block_txs` = a count, not a clock;
 //! `age_ms` = the feed bridge's confirmation-window age, not a clock.
-mod beacon;
 mod ctx;
 mod apply;
 mod driver;
-mod engine_api;
 mod error;
 mod feed_bridge;
 mod http;

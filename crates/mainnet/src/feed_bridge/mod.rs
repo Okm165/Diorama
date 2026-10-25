@@ -20,40 +20,21 @@
 //! the devnet chain's own domain, never in wall time.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use alloy_primitives::{Address, I256};
-use alloy_rpc_types_eth::TransactionRequest;
-use alloy_sol_types::{sol, SolCall};
+use alloy_primitives::Address;
 use mirror_config::FeedSection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-sol! {
-    /// The Chainlink aggregator surface the bridge needs (their mocks speak
-    /// the same interface as the real feeds, §7.1).
-    interface AggregatorV3Interface {
-        function latestRoundData() external view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
-        function decimals() external view returns (uint8);
-        function updateAnswer(int256 _answer) external;
-    }
-}
+mod chainlink;
+mod metrics;
+mod policy;
 
-/// One feed's value state: what the chain confirmed the bridge wrote, and
-/// what a publish in flight should land as. Both are needed: between the
-/// `updateAnswer` tx and its mining, the target still holds the *previous*
-/// value — comparing only against "last written" would read that as a
-/// scenario's write and pause the bridge on itself.
-///
-/// `pending_since_ms` is the publish's send time: an anvil pool is not
-/// durable (and a same-nonce sender can displace ours — measured: daloc's
-/// deploy sharing the writer account wedged a feed in `pending` forever), so
-/// a publish that does not land within the confirmation window is re-sent.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct ValueState {
-    confirmed: Option<i128>,
-    pending: Option<i128>,
-    pending_since_ms: Option<u64>,
-}
+use crate::feed_bridge::chainlink::{
+    publish, read_answer, read_decimals, read_target_decimals, target_decimals,
+};
+use crate::feed_bridge::policy::{step, Step, ValueState};
+pub(crate) use crate::feed_bridge::metrics::FeedBridgeMetrics;
 
 /// One feed's runtime state (the section is the config; this is the truth the
 /// pass compares against).
@@ -87,15 +68,9 @@ impl FeedRuntime {
         {
             return Ok(Some(d));
         }
-        let decoded = match anvil_t
-            .call_decode(self.section.target, &AggregatorV3Interface::decimalsCall {})
-            .await
-        {
-            Ok(decoded) => decoded,
+        let Some(decoded) = read_target_decimals(anvil_t, self.section.target).await? else {
             // An empty return does not decode: the *fact* is "no code yet".
-            // A transport fault still surfaces.
-            Err(mirror_anvil::Error::Abi { .. }) => return Ok(None),
-            Err(e) => return Err(e.into()),
+            return Ok(None);
         };
         if decoded != self.source_decimals {
             return Err(Error::FeedBridgeDecimals {
@@ -114,55 +89,6 @@ impl FeedRuntime {
             "feed target appeared; the bridge starts publishing"
         );
         Ok(Some(decoded))
-    }
-}
-
-/// The bridge's metrics.
-#[derive(Default)]
-pub(crate) struct FeedBridgeMetrics {
-    updates: Mutex<Vec<(String, u64)>>,
-    pauses: Mutex<Vec<(String, u64)>>,
-    /// Pass faults, whatever the stage: a source read, a target read, a
-    /// publish, a decimals mismatch. The feed's `last_error` names the cause
-    /// (measured: an uninstalled target is *waiting*, not a fault - the
-    /// counter only moves when a pass actually fails).
-    pass_errors: std::sync::atomic::AtomicU64,
-}
-
-impl FeedBridgeMetrics {
-    pub fn inc_pass_errors(&self) {
-        self.pass_errors.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn count(field: &Mutex<Vec<(String, u64)>>, name: &str) {
-        let mut v = field.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match v.iter_mut().find(|(n, _)| n == name) {
-            Some((_, c)) => *c += 1,
-            None => v.push((name.to_string(), 1)),
-        }
-    }
-
-    pub fn render(&self) -> String {
-        let mut out = String::with_capacity(512);
-        let series = |out: &mut String, name: &str, help: &str, kind: &str, values: &Mutex<Vec<(String, u64)>>| {
-            let values = values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            for (feed, v) in values.iter() {
-                out.push_str(&format!(
-                    "# HELP {name} {help}\n# TYPE {name} {kind}\n{name}{{feed=\"{feed}\"}} {v}\n"
-                ));
-            }
-        };
-        let counter = mirror_devnet::metrics::COUNTER;
-        series(&mut out, "feed_bridge_updates_total", "answers published to mock aggregators", counter, &self.updates);
-        series(&mut out, "feed_bridge_pauses_total", "feeds paused on a scenario's write", counter, &self.pauses);
-        mirror_devnet::metrics::push_metric(
-            &mut out,
-            counter,
-            "feed_bridge_pass_errors_total",
-            "feed bridge passes that failed (the feed's last_error names the cause)",
-            self.pass_errors.load(Ordering::Relaxed),
-        );
-        out
     }
 }
 
@@ -408,7 +334,7 @@ fn record_publish(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, answer: i128,
     }
     state.pending = Some(answer);
     state.pending_since_ms = Some(now);
-    FeedBridgeMetrics::count(&metrics.updates, &feed.section.name);
+    metrics.record_update(&feed.section.name);
 }
 
 /// Forget the resolved decimals *and* the value state: the target's code is
@@ -437,7 +363,7 @@ fn forget_target(feed: &FeedRuntime, error: &Error) {
 /// back).
 fn pause_feed(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, state: ValueState, found: i128) {
     feed.paused.store(true, Ordering::Relaxed);
-    FeedBridgeMetrics::count(&metrics.pauses, &feed.section.name);
+    metrics.record_pause(&feed.section.name);
     tracing::warn!(
         feed = %feed.section.name,
         confirmed = ?state.confirmed,
@@ -445,112 +371,6 @@ fn pause_feed(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, state: ValueState
         found,
         "a scenario owns this feed's value now; the bridge paused it (resume to hand back)"
     );
-}
-
-/// The pass decision, pure so the pause rule is testable without a chain.
-#[derive(Debug, PartialEq, Eq)]
-enum Step {
-    /// The target now holds the pending publish: record it as confirmed.
-    Confirm,
-    /// A publish is in flight (or the value is current): nothing to do.
-    WaitPending,
-    SkipUnchanged,
-    Publish(i128),
-    Pause { found: i128 },
-}
-
-/// The rules, in order:
-/// 1. the target holds the pending publish → confirm it;
-/// 2. the target holds the confirmed value (or nothing was ever confirmed —
-///    first contact): publish the source's value when it moved, wait while a
-///    publish is in flight *within the confirmation window*, re-publish when
-///    it did not land in time, skip when nothing moved;
-/// 3. anything else on the target → a scenario wrote it: pause, never
-///    overwrite a scenario's value.
-fn step(state: ValueState, target_now: i128, source_now: i128, now_ms: u64, window_ms: u64) -> Step {
-    if state.pending == Some(target_now) {
-        return Step::Confirm;
-    }
-    let ours = state.confirmed.is_none() || state.confirmed == Some(target_now);
-    if !ours {
-        return Step::Pause { found: target_now };
-    }
-    if let Some(since) = state.pending_since_ms {
-        if now_ms.saturating_sub(since) < window_ms {
-            return Step::WaitPending;
-        }
-        // The pending publish never landed (dropped, displaced by a
-        // same-nonce sender, or reverted): re-send the *current* source
-        // value. The effect is idempotent — a new round with the same answer
-        // is exactly what a retry should leave behind.
-        return Step::Publish(source_now);
-    }
-    if state.confirmed == Some(source_now) {
-        return Step::SkipUnchanged;
-    }
-    Step::Publish(source_now)
-}
-
-async fn read_decimals(rpc: &mirror_anvil::Rpc, aggregator: Address) -> Result<u8> {
-    Ok(rpc
-        .call_decode(aggregator, &AggregatorV3Interface::decimalsCall {})
-        .await?)
-}
-
-/// The target's decimals, when it exists and matches the source. `None` while
-/// the fixture deploy has not run yet — *absence* is a fact the bridge waits
-/// on; a present-but-mismatched target or an unexpected fault is a boot error
-/// naming itself (a mis-scaled answer poisons consumers).
-async fn target_decimals(anvil_t: &mirror_anvil::Rpc, feed: &FeedSection, source: u8) -> Result<Option<u8>> {
-    match read_decimals(anvil_t, feed.target).await {
-        Ok(d) if d == source => Ok(Some(d)),
-        Ok(d) => Err(Error::FeedBridgeDecimals {
-            feed: feed.name.clone(),
-            have: source,
-            want: d,
-        }),
-        Err(Error::FeedBridgeAbi { .. }) => {
-            tracing::warn!(
-                feed = %feed.name,
-                target = %feed.target,
-                "feed target has no code yet; the bridge waits for the devnet's fixture deploy"
-            );
-            Ok(None)
-        }
-        Err(e) => Err(Error::FeedBridgeFeed {
-            feed: feed.name.clone(),
-            what: "target decimals",
-            source: Box::new(e),
-        }),
-    }
-}
-
-async fn read_answer(rpc: &mirror_anvil::Rpc, aggregator: Address) -> Result<i128> {
-    let decoded = rpc
-        .call_decode(aggregator, &AggregatorV3Interface::latestRoundDataCall {})
-        .await?;
-    decoded
-        .answer
-        .try_into()
-        .map_err(|_| Error::FeedBridgeAbi {
-            what: "latestRoundData() answer",
-            detail: "does not fit i128".into(),
-        })
-}
-
-async fn publish(rpc: &mirror_anvil::Rpc, aggregator: Address, writer: Address, answer: i128) -> Result<()> {
-    let call = AggregatorV3Interface::updateAnswerCall {
-        _answer: I256::try_from(answer).map_err(|_| Error::FeedBridgeAbi {
-            what: "updateAnswer(int256)",
-            detail: format!("answer {answer} does not fit int256"),
-        })?,
-    };
-    let tx = TransactionRequest::default()
-        .from(writer)
-        .to(aggregator)
-        .input(call.abi_encode().into());
-    rpc.send_transaction(tx).await?;
-    Ok(())
 }
 
 /// The `/admin/feed` list row.
@@ -575,62 +395,3 @@ pub(crate) struct FeedStatus {
     pub decimals: Option<u8>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn state(confirmed: Option<i128>, pending: Option<i128>) -> ValueState {
-        // A pending state's send time defaults to 0 (fresh unless the test
-        // says otherwise by advancing `now`).
-        ValueState {
-            confirmed,
-            pending,
-            pending_since_ms: pending.map(|_| 0),
-        }
-    }
-
-    const WINDOW: u64 = 60_000;
-
-    #[test]
-    fn the_pause_rule_never_overwrites_a_scenario() {
-        let now = 1_000;
-        // The bridge confirmed 2000; the target now holds 1500 (a crash): pause.
-        assert_eq!(step(state(Some(2000), None), 1500, 2000, now, WINDOW), Step::Pause { found: 1500 });
-        // The target still holds the bridge's value; the source moved: publish.
-        assert_eq!(step(state(Some(2000), None), 2000, 2100, now, WINDOW), Step::Publish(2100));
-        // Nothing moved: no tx.
-        assert_eq!(step(state(Some(2000), None), 2000, 2000, now, WINDOW), Step::SkipUnchanged);
-        // First pass (never wrote): publish the source value, no pause.
-        assert_eq!(step(ValueState::default(), 999, 2000, now, WINDOW), Step::Publish(2000));
-    }
-
-    /// Between the publish and its mining the target holds the *previous*
-    /// value: that must read as "in flight", never as a scenario's write.
-    #[test]
-    fn a_publish_in_flight_is_not_a_scenario_write() {
-        let now = 1_000;
-        assert_eq!(step(state(Some(2000), Some(2100)), 2000, 2100, now, WINDOW), Step::WaitPending);
-        // Mined: confirmed.
-        assert_eq!(step(state(Some(2000), Some(2100)), 2100, 2100, now, WINDOW), Step::Confirm);
-        // After Confirm the next pass sees the source unchanged: skip.
-        assert_eq!(step(state(Some(2100), None), 2100, 2100, now, WINDOW), Step::SkipUnchanged);
-        // A crash during the flight is still caught (neither value).
-        assert_eq!(step(state(Some(2000), Some(2100)), 1500, 2100, now, WINDOW), Step::Pause { found: 1500 });
-    }
-
-    /// A publish that never lands is re-sent once the confirmation window
-    /// passes — an anvil pool is not durable, and a same-nonce sender can
-    /// displace the tx (measured: daloc's deploy sharing the writer account
-    /// wedged a feed in `pending` forever).
-    #[test]
-    fn a_stale_pending_publish_is_re_sent() {
-        let in_flight = state(Some(2000), Some(2100));
-        // Within the window: wait.
-        assert_eq!(step(in_flight, 2000, 2100, 1_000, WINDOW), Step::WaitPending);
-        // Past the window, target still not holding it: re-publish the
-        // *current* source value.
-        assert_eq!(step(in_flight, 2000, 2200, 1_000 + WINDOW, WINDOW), Step::Publish(2200));
-        // Past the window but the target does hold it: confirm wins.
-        assert_eq!(step(in_flight, 2100, 2200, 1_000 + WINDOW, WINDOW), Step::Confirm);
-    }
-}

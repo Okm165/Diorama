@@ -79,13 +79,15 @@ impact is measured 1:1:
    writes it silently; the venue's simulator adds account-level deals, funding
    and liquidations on the same chain.
 4. **Measure the divergence** — probes (T vs reth at the applied parent; V vs
-   the source at the pin), sampled storage parity, the drift log (T) and the
-   uncovered-emitter audit (V) turn "did my write behave like the real market
+   the source at the pin), the sampled/live parity of every applied key, the
+   shared drift log (T's apply anomalies, V's follow anomalies) and the
+   uncovered-emitter audit turn "did my write behave like the real market
    would?" into counters and facts.
 
 Both proofs run locally against the real engine binaries: `make
-mainnet-engine-local` (two anvils; the mainnet side) and `make
-venue-follow-local` (anvil + the venue engine).
+mainnet-engine-local` (two anvils; the mainnet side), `make venue-follow-local`
+(anvil + the venue engine), `make venue-selftest-local` (against the real
+HyperEVM) and `make daloc-local` (the whole daloc arc on live market data).
 
 ## Quickstart
 

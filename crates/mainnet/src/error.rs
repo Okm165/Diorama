@@ -11,8 +11,8 @@
 //! a server-side fault (5xx, or 503 for a poisoned registry).
 use std::path::PathBuf;
 
-pub use crate::beacon::BeaconError;
-pub use crate::engine_api::EngineApiError;
+pub use crate::source_sync::beacon::BeaconError;
+pub use crate::source_sync::engine_api::EngineApiError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

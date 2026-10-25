@@ -21,12 +21,15 @@
 //!   - `GET /eth/v1/beacon/headers/head`   -> CL head slot
 //!   - `GET /eth/v2/beacon/blocks/{slot}`  -> beacon block + execution payload
 //!
-//! Both are parsed into alloy's official beacon types (`crate::beacon`), and the
+//! Both are parsed into alloy's official beacon types (`source_sync::beacon`), and the
 //! payload goes to reth through the official engine types — no hand-rewritten
 //! JSON anywhere on this path.
 //!
 //! No P2P peers, no public RPC.
-use crate::beacon::BeaconClient;
+pub(crate) mod beacon;
+pub(crate) mod engine_api;
+
+use crate::source_sync::beacon::BeaconClient;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::B256;
@@ -116,7 +119,7 @@ async fn cl_head_el_block(beacon: &BeaconClient, cache: &mut Option<(Instant, u6
 
 /// One pass: deliver as many contiguous payloads as the budget allows.
 /// Returns how many were delivered.
-async fn top_up(ctx: &Ctx, engine: &crate::engine_api::EngineClient) -> Result<usize> {
+async fn top_up(ctx: &Ctx, engine: &crate::source_sync::engine_api::EngineClient) -> Result<usize> {
     if !ctx.beacon.enabled() {
         // No beacon configured: the top-up has no source. A fact, not a fault.
         return Ok(0);
@@ -221,7 +224,7 @@ async fn next_payload(
 
 /// Hand the payload to the engine: `newPayload` then `forkchoiceUpdated`.
 async fn submit_payload(
-    engine: &crate::engine_api::EngineClient,
+    engine: &crate::source_sync::engine_api::EngineClient,
     next: &NextSlot,
 ) -> Result<()> {
     let status = engine
@@ -254,7 +257,7 @@ async fn submit_payload(
 
 async fn deliver_slot(
     beacon: &BeaconClient,
-    engine: &crate::engine_api::EngineClient,
+    engine: &crate::source_sync::engine_api::EngineClient,
     slot: u64,
     el_head: u64,
     delivered: usize,

@@ -268,29 +268,21 @@ impl Sim {
             let mut held = false;
             let coins: Vec<String> = me.positions.keys().cloned().collect();
             for coin in coins {
-                let Some(p) = me.positions.get(&coin) else { continue };
-                if !leg.holds(&coin, p) {
+                let holds = me
+                    .positions
+                    .get(&coin)
+                    .map(|p| leg.holds(&coin, p))
+                    .unwrap_or(false);
+                if !holds {
                     continue;
                 }
                 held = true;
-                let taken = p.isolated_margin;
-                let mark = pass.feed.mark(&coin).unwrap_or(p.entry_px);
-                let facts = account::FillFacts {
-                    coin: coin.clone(),
-                    is_buy: p.is_long(),
-                    size: p.szi.abs(),
-                    px: mark,
-                    leverage: p.leverage_value,
-                    reduce_only: false,
-                    fee: Decimal::ZERO,
-                };
-                if let Err(e) = account::apply_fill(&mut vault, &facts, pass.feed.meta().as_ref()) {
-                    tracing::warn!(account = %pass.address, coin = %coin, error = %e, "backstop transfer refused");
-                    continue;
+                if let Some(taken) =
+                    vault_take_coin(&mut vault, &mut me, pass.address, &coin, pass.feed)
+                {
+                    margin = account::add(margin, taken, "backstop margin")?;
+                    closed.push(coin);
                 }
-                me.positions.remove(&coin);
-                margin = account::add(margin, taken, "backstop margin")?;
-                closed.push(coin);
             }
             // The cross margin moves with the cross backstop (docs); if every
             // cross transfer was refused, nothing moves at all — the log names
@@ -457,6 +449,43 @@ enum Rescue {
 /// The waterfall's entry decision (docs: "the positions are first attempted
 /// to be entirely closed by sending market orders to the book" — for every
 /// account below its maintenance requirement, a negative value included).
+/// One position's backstop transfer: the vault takes it at the mark (the
+/// same side, entered there) and the position's own isolated margin moves
+/// with it. A refused transfer names itself and moves nothing — the
+/// position stays for the next pass.
+fn vault_take_coin(
+    vault: &mut Account,
+    me: &mut Account,
+    address: Address,
+    coin: &str,
+    feed: &MarketFeed,
+) -> Option<Decimal> {
+    let (taken, is_long, size, entry_px, leverage) = me.positions.get(coin).map(|p| {
+        (
+            p.isolated_margin,
+            p.is_long(),
+            p.szi.abs(),
+            p.entry_px,
+            p.leverage_value,
+        )
+    })?;
+    let facts = account::FillFacts {
+        coin: coin.to_string(),
+        is_buy: is_long,
+        size,
+        px: feed.mark(coin).unwrap_or(entry_px),
+        leverage,
+        reduce_only: false,
+        fee: Decimal::ZERO,
+    };
+    if let Err(e) = account::apply_fill(vault, &facts, feed.meta().as_ref()) {
+        tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
+        return None;
+    }
+    me.positions.remove(coin);
+    Some(taken)
+}
+
 fn rescue_step(equity: Decimal, maintenance: Decimal) -> Rescue {
     if equity >= maintenance {
         Rescue::Solvent

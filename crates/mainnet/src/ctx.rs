@@ -6,7 +6,7 @@
 //! chosen at boot: the source ([`RethSource`] — native BALs with the trace
 //! rung), the reset detector (cursor hash), and the scope (whole accounts).
 //! The composer itself is the spine's generic one (`mirror_devnet::bal`).
-use crate::beacon::BeaconClient;
+use crate::source_sync::beacon::BeaconClient;
 use crate::error::{Error, Result};
 use crate::metrics::MainnetMetrics;
 use futures_util::future::BoxFuture;
@@ -41,7 +41,7 @@ pub struct Ctx {
     pub(crate) beacon: BeaconClient,
     /// Engine API client (reth authrpc) for the top-up loop; None when disabled
     /// or unconfigured.
-    pub(crate) engine_api: Option<crate::engine_api::EngineClient>,
+    pub(crate) engine_api: Option<crate::source_sync::engine_api::EngineClient>,
     /// The devnet plane: the shadow registry, the journal, the cursor state,
     /// the shared admin gauges and flags — the same bundle the venue engine
     /// embeds (one home for the wiring that must not drift).
@@ -184,10 +184,10 @@ fn build_clients(
 /// The top-up loop's authrpc client. A configured boundary that cannot be
 /// built is a boot error naming itself: silently disabling it would stop the
 /// top-up loop while every dashboard still says "enabled".
-fn build_engine_api(engine: &EngineSection) -> Result<Option<crate::engine_api::EngineClient>> {
+fn build_engine_api(engine: &EngineSection) -> Result<Option<crate::source_sync::engine_api::EngineClient>> {
     match (&engine.source_sync.engine_url, &engine.source_sync.jwt_path) {
         (Some(url), Some(jwt)) if engine.source_sync.enabled => {
-            Ok(Some(crate::engine_api::EngineClient::new(url, jwt)?))
+            Ok(Some(crate::source_sync::engine_api::EngineClient::new(url, jwt)?))
         }
         _ => Ok(None),
     }
