@@ -784,7 +784,13 @@ harness's `test-endpoints` env names only NodePorts the overlay declares) and
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;
 test modules are out of scope). The tool's report is the analysis half and
 carries readings the gates cannot: **fan-in** (the workspace's own free
-functions by caller count — the atomic blocks actually in use), **reuse**
+functions by caller count — the atomic blocks actually in use), **dead
+members** (struct fields and enum variants nothing touches — a name-based
+scan of every field access, struct literal and pattern, with two exemptions:
+types whose derive reads the members — serde's wire, clap's CLI — and
+variants carrying `#[from]`, constructed by `thiserror`'s generated `From`;
+its first find: `BeaconError::NoHead`, which the official header type makes
+unreachable), **reuse**
 (3–6-operation sequences shared by ≥ 3 functions, longest first: a long shared
 sequence is the stronger extraction candidate, and a shorter one already
 contained in a reported longer one is skipped), **duplicates** (bodies that

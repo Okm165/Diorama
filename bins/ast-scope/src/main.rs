@@ -80,9 +80,17 @@ struct Item {
     /// with the same shape differ only in their data (the near-duplicates
     /// reading's input).
     shape: String,
-    /// A struct's declared field names: the similar-records reading's input
-    /// (two types carrying the same fields are one type, or an external one).
+    /// A struct's declared field names (or an enum's variants): the
+    /// similar-records and dead-members readings' input.
     declared: Vec<String>,
+    /// The type derives a member-driving trait (`Serialize`/`Deserialize`,
+    /// clap's `Parser`/`Subcommand`/`Args`/`ValueEnum`): its members are read
+    /// by the derive rather than by `.field` accesses, so the dead-members
+    /// reading exempts it.
+    derived: bool,
+    /// An enum's variants carrying `#[from]`: constructed by `thiserror`'s
+    /// generated `From`, invisible to the expression visitor.
+    from: Vec<String>,
 }
 
 impl Item {
@@ -128,20 +136,26 @@ fn main() {
     files.sort();
     let mut items = Vec::new();
     let mut fields: FieldAccesses = HashMap::new();
+    let mut uses = MemberUses::default();
     let mut corpus = Vec::new();
     for file in &files {
-        parse_into(file, &mut items, &mut fields);
+        parse_into(file, &mut items, &mut fields, &mut uses);
         if let Ok(text) = std::fs::read_to_string(file) {
             corpus.push(text);
         }
     }
-    report(&items, &fields, &corpus);
+    report(&items, &fields, &corpus, &uses);
     std::process::exit(gate(&items));
 }
 
 /// The file's production items and the `self.field` accesses its impl blocks
 /// make (the dispersion reading's input).
-fn parse_into(path: &Path, items: &mut Vec<Item>, fields: &mut FieldAccesses) {
+fn parse_into(
+    path: &Path,
+    items: &mut Vec<Item>,
+    fields: &mut FieldAccesses,
+    uses: &mut MemberUses,
+) {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) => {
@@ -159,6 +173,7 @@ fn parse_into(path: &Path, items: &mut Vec<Item>, fields: &mut FieldAccesses) {
     let file = path.to_string_lossy().to_string();
     walk(&file, &parsed.items, false, items);
     walk_fields(&file, &parsed.items, false, fields);
+    uses.visit_file(&parsed);
 }
 
 /// The `self.<field>` accesses per type per file: where a type's behavior
@@ -225,24 +240,7 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
         match item {
             syn::Item::Fn(f) => out.push(fn_item(file, &f.sig, &f.block, &f.attrs, test)),
             syn::Item::Struct(s) => out.push(struct_item(file, s, test)),
-            syn::Item::Enum(e) => out.push(Item {
-                file: file.into(),
-                kind: "enum",
-                name: e.ident.to_string(),
-                lines: span_lines(e.span()),
-                depth: 0,
-                size: e.variants.len(),
-                test,
-                ops: Vec::new(),
-                body: String::new(),
-                divisions: Vec::new(),
-                ctx_fields: Vec::new(),
-                ctx_params: 0,
-                ctx_passed_on: false,
-                refs: Vec::new(),
-                shape: String::new(),
-                declared: Vec::new(),
-            }),
+            syn::Item::Enum(e) => out.push(enum_item(file, e, test)),
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
                     walk(file, inner, test || has_test_attr(&m.attrs), out);
@@ -277,6 +275,147 @@ fn walk_impl(file: &str, i: &syn::ItemImpl, test: bool, out: &mut Vec<Item>) {
 
 /// One function's shape: span lines (docs included), nesting depth, and
 /// whether it is a test.
+/// Whether a type's attributes derive a trait that reads its members: serde's
+/// `Serialize`/`Deserialize` and clap's `Parser`/`Subcommand`/`Args`/
+/// `ValueEnum` (the CLI types are constructed by clap, never by our code).
+/// Matched by the derive path's last segment.
+fn derived_members(attrs: &[syn::Attribute]) -> bool {
+    const DRIVING: [&str; 6] = [
+        "Serialize",
+        "Deserialize",
+        "Parser",
+        "Subcommand",
+        "Args",
+        "ValueEnum",
+    ];
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("derive")
+            && attr
+                .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+                .map(|paths| {
+                    paths.iter().any(|p| {
+                        p.segments
+                            .last()
+                            .is_some_and(|s| DRIVING.contains(&s.ident.to_string().as_str()))
+                    })
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// Every member name the workspace *touches*: `x.field` reads and writes,
+/// `Foo { field }` constructions, `let Foo { field } = …` destructures, and
+/// `Foo::Variant` expression paths (constructions; matches are patterns, not
+/// expressions). Names, not types: the reading finds members with no touch at
+/// all — a name collision can only hide one, never invent one.
+#[derive(Default)]
+struct MemberUses {
+    fields: std::collections::HashSet<String>,
+    variants: std::collections::HashSet<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for MemberUses {
+    fn visit_expr_field(&mut self, e: &'ast syn::ExprField) {
+        if let syn::Member::Named(name) = &e.member {
+            self.fields.insert(name.to_string());
+        }
+        syn::visit::visit_expr_field(self, e);
+    }
+
+    fn visit_expr_struct(&mut self, e: &'ast syn::ExprStruct) {
+        // A struct literal is also a variant construction when its path is
+        // qualified (`Error::Transport { … }`).
+        if e.path.segments.len() >= 2 {
+            if let Some(seg) = e.path.segments.last() {
+                self.variants.insert(seg.ident.to_string());
+            }
+        }
+        for field in &e.fields {
+            if let syn::Member::Named(name) = &field.member {
+                self.fields.insert(name.to_string());
+            }
+        }
+        syn::visit::visit_expr_struct(self, e);
+    }
+
+    fn visit_pat_struct(&mut self, p: &'ast syn::PatStruct) {
+        for field in &p.fields {
+            if let syn::Member::Named(name) = &field.member {
+                self.fields.insert(name.to_string());
+            }
+        }
+        syn::visit::visit_pat_struct(self, p);
+    }
+
+    fn visit_expr_path(&mut self, e: &'ast syn::ExprPath) {
+        if e.path.segments.len() >= 2 {
+            if let Some(seg) = e.path.segments.last() {
+                self.variants.insert(seg.ident.to_string());
+            }
+        }
+        syn::visit::visit_expr_path(self, e);
+    }
+
+    fn visit_expr_call(&mut self, e: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(p) = &*e.func {
+            if p.path.segments.len() >= 2 {
+                if let Some(seg) = p.path.segments.last() {
+                    self.variants.insert(seg.ident.to_string());
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, e);
+    }
+}
+
+/// One enum's shape: the variant count (the gate), the declared names (the
+/// similar-records and dead-members readings) and the `#[from]` variants
+/// (constructed by `thiserror`'s generated `From`, invisible to the
+/// expression visitor). `#[from]` rides the variant itself or its field
+/// (`Devnet(#[from] mirror_devnet::Error)`).
+fn enum_item(file: &str, e: &syn::ItemEnum, test: bool) -> Item {
+    let from = e
+        .variants
+        .iter()
+        .filter(|v| {
+            let on_variant = v.attrs.iter().any(|a| a.path().is_ident("from"));
+            let on_field = match &v.fields {
+                syn::Fields::Unnamed(f) => f
+                    .unnamed
+                    .iter()
+                    .any(|f| f.attrs.iter().any(|a| a.path().is_ident("from"))),
+                syn::Fields::Named(f) => f
+                    .named
+                    .iter()
+                    .any(|f| f.attrs.iter().any(|a| a.path().is_ident("from"))),
+                syn::Fields::Unit => false,
+            };
+            on_variant || on_field
+        })
+        .map(|v| v.ident.to_string())
+        .collect();
+    Item {
+        file: file.into(),
+        kind: "enum",
+        name: e.ident.to_string(),
+        lines: span_lines(e.span()),
+        depth: 0,
+        size: e.variants.len(),
+        test,
+        ops: Vec::new(),
+        body: String::new(),
+        divisions: Vec::new(),
+        ctx_fields: Vec::new(),
+        ctx_params: 0,
+        ctx_passed_on: false,
+        refs: Vec::new(),
+        shape: String::new(),
+        declared: e.variants.iter().map(|v| v.ident.to_string()).collect(),
+        derived: derived_members(&e.attrs),
+        from,
+    }
+}
+
 /// One struct's shape: the field count (the gate) and the declared names
 /// (the similar-records reading).
 fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
@@ -301,6 +440,8 @@ fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
             .iter()
             .filter_map(|f| f.ident.as_ref().map(ToString::to_string))
             .collect(),
+        derived: derived_members(&s.attrs),
+        from: Vec::new(),
     }
 }
 
@@ -329,6 +470,8 @@ fn fn_item(
         body: normalize(block),
         shape: normalize_literals(block),
         declared: Vec::new(),
+        derived: false,
+        from: Vec::new(),
         divisions: body.divisions,
         ctx_fields: body.ctx_fields.into_iter().collect(),
         ctx_params: params.len(),
@@ -517,7 +660,7 @@ fn is_literal(e: &syn::Expr) -> bool {
 
 /// The report: the largest production items per kind, then the reuse and
 /// dispersion analyses (the analysis half).
-fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String]) {
+fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &MemberUses) {
     let prod: Vec<&Item> = items.iter().filter(|i| !i.is_test()).collect();
     println!(
         "ast-scope: {} production items ({} functions, {} structs, {} enums)",
@@ -535,7 +678,44 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String]) {
     similar_records(&prod);
     narrow_context(&prod);
     uncalled(&prod, corpus);
+    dead_members(&prod, uses);
     divisions(&prod);
+}
+
+/// Members no expression or pattern touches: a struct field nothing reads or
+/// writes, an enum variant nothing constructs. Two exemptions: types whose
+/// derive reads the members (serde's wire, clap's CLI) and variants carrying
+/// `#[from]` (constructed by `thiserror`'s generated `From`). The uses are
+/// name-based across the whole workspace (tests included), so a collision can
+/// only hide a dead member, never invent one.
+fn dead_members(prod: &[&Item], uses: &MemberUses) {
+    let mut dead: Vec<(&str, &str, &str)> = Vec::new();
+    for item in prod {
+        if item.derived || item.declared.is_empty() {
+            continue;
+        }
+        let touched = if item.kind == "enum" {
+            &uses.variants
+        } else {
+            &uses.fields
+        };
+        for member in &item.declared {
+            if !touched.contains(member) && !item.from.contains(member) {
+                dead.push((&item.file, &item.name, member));
+            }
+        }
+    }
+    if dead.is_empty() {
+        println!("\ndead members: none (every field and variant is touched or derive-read)");
+        return;
+    }
+    println!("\ndead members: fields and variants nothing touches (derive- and #[from]-exempt):");
+    for (file, name, member) in dead.iter().take(REPORT_TOP) {
+        println!("  {file}:{name}.{member}");
+    }
+    if dead.len() > REPORT_TOP {
+        println!("  … and {} more", dead.len() - REPORT_TOP);
+    }
 }
 
 /// The uncalled reading: production functions no other production function

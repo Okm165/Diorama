@@ -53,9 +53,6 @@ pub enum BeaconError {
         source: serde_json::Error,
     },
 
-    #[error("beacon {url}: no slot in the head response")]
-    NoHead { url: String },
-
     #[error("no beacon sources are configured")]
     NotConfigured,
 }
