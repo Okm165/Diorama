@@ -46,12 +46,12 @@ pub use service::main_entry;
 /// The alloy primitives the bridge's public surface exposes (addresses,
 /// amounts, hashes): the bin reads them from here, never from a second alloy
 /// dependency.
-pub use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, U256};
 
 /// Wall-clock milliseconds: the PENDING window (`attest_after_ms`), receipt
 /// timestamps, and the Iris `lastUpdated` field all read one clock — the
 /// shared definition lives in `mirror-config`'s boot module.
-pub use mirror_config::boot::now_ms;
+use mirror_config::boot::now_ms;
 
 /// A scratch directory for one test (per test + process: the tests may run
 /// concurrently). One definition, so no test forgets the process id and

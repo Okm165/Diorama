@@ -23,7 +23,7 @@
 /// `data` (revert data / validation details) preserved as raw JSON, never
 /// bucketed. A spec change lands here as a compile error, not a silent
 /// mismatch.
-pub use alloy_json_rpc::ErrorPayload as RpcError;
+pub(crate) use alloy_json_rpc::ErrorPayload as RpcError;
 
 /// Codes the client synthesizes for answers that never came from the node
 /// (a batch response missing an item, a result that would not decode). Kept

@@ -6,6 +6,7 @@
 //! lanes they act on (their tests live with the lanes: order.rs, waterfall.rs,
 //! account.rs).
 use super::account::{self, Liquidation};
+use super::funding;
 use super::Sim;
 use crate::error::Result;
 use crate::feed::MarketFeed;
@@ -278,7 +279,7 @@ impl Sim {
         let mut payments = 0u64;
         self.with_state(|state| {
             for account in state.accounts.values_mut() {
-                payments += account::accrue_funding(account, feed, clock)? as u64;
+                payments += funding::accrue_funding(account, feed, clock)? as u64;
             }
             Ok(())
         })?;

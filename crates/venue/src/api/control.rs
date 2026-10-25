@@ -7,7 +7,8 @@
 use super::ApiState;
 use crate::error::{Error, Result};
 use crate::feed::PriceOverride;
-use crate::sim::account::{self, Account, AccountSeed};
+use crate::sim::account::Account;
+use crate::sim::seed::{control_view, AccountSeed};
 use crate::sim::DealClass;
 use crate::wire::{ClearinghouseState, Level, L2Book, SpotBalance, UserAbstraction};
 use alloy_primitives::Address;
@@ -433,10 +434,10 @@ fn control_state(state: &ApiState, address: Address) -> Result<AccountSeed> {
             mode: UserAbstraction::Disabled,
             ..Default::default()
         };
-        return account::control_view(None, &empty, &state.feed, state.feed.meta().as_ref());
+        return control_view(None, &empty, &state.feed, state.feed.meta().as_ref());
     };
     let fixture = state.sim.control_fixture(address)?;
-    account::control_view(
+    control_view(
         fixture.as_ref(),
         &account,
         &state.feed,

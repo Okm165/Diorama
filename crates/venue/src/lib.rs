@@ -77,7 +77,7 @@ mod design_assertions {
         is_normal::<crate::sim::DealClass>();
         is_normal::<crate::sim::AdvanceOutcome>();
         is_normal::<crate::sim::account::Account>();
-        is_normal::<crate::sim::account::AccountSeed>();
+        is_normal::<crate::sim::seed::AccountSeed>();
         is_normal::<crate::sim::account::Position>();
         is_normal::<crate::sim::account::Liquidation>();
         is_normal::<crate::api::ApiState>();

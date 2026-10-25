@@ -1,9 +1,10 @@
 //! The account plane: the simulated accounts registry (COW overlay), its
 //! persistence, and the self-advance automaton (plan §5, §14.8).
 //!
-//! The modules: `account` (the account math and the position totals), `order`
-//! (the matching lane), `waterfall` (the liquidation ladder), `metrics` (the
-//! registry).
+//! The modules: `account` (the account math and the position totals), `seed`
+//! (the served-shape patch), `funding` (the hourly interval), `order` (the
+//! matching lane), `validate` (the lane's rules), `waterfall` (the liquidation
+//! ladder), `tick` (the self-advance automaton), `metrics` (the registry).
 //!
 //! Untouched accounts are not the sim's business — the API layer passes those
 //! reads through to the real venue. A *touched* account (dealt funds, seeded,
@@ -24,15 +25,18 @@
 const ARTIFACT: &str = "sim state";
 
 pub mod account;
+pub mod funding;
 pub mod metrics;
 pub mod order;
+pub mod seed;
 pub mod tick;
 pub mod validate;
 pub mod waterfall;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
-use account::{Account, AccountSeed, Accounts, Liquidation};
+use account::{Account, Accounts, Liquidation};
+use seed::AccountSeed;
 use metrics::SimMetrics;
 use alloy_primitives::Address;
 use mirror_devnet::store;
@@ -264,7 +268,7 @@ impl Sim {
     ) -> Result<T> {
         let clock = self.clock(crate::now_ms())?;
         self.with_account(address, |account| {
-            account::accrue_funding(account, feed, clock)?;
+            funding::accrue_funding(account, feed, clock)?;
             f(account)
         })
     }
