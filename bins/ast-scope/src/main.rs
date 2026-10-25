@@ -1235,6 +1235,12 @@ fn divisions(prod: &[&Item]) {
 fn repeated_literals(prod: &[&Item]) {
     let mut counts: HashMap<&str, Vec<&str>> = HashMap::new();
     for item in prod {
+        // The instrument's own vocabulary is not the workspace's: the tool's
+        // labels ("struct", "enum", the tree prefixes) are how the readings
+        // speak, not values to name once.
+        if item.file.starts_with("bins/ast-scope/") {
+            continue;
+        }
         for literal in item.sites.literals.iter().map(String::as_str) {
             let users = counts.entry(literal).or_default();
             if users.last() != Some(&item.name.as_str()) {
