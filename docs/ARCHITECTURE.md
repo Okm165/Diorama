@@ -759,9 +759,10 @@ public type), `closure-matrix` (the dependency law above), `no-orphans` (no
 `utils`/`common`/`helpers` homes), `docs-metrics` (every metric the docs name
 exists in the code), `trust-audit` (every `// TRUST:` names its guard),
 `clock-labels` (every logged block label appears in its crate's `//! Clocks:`
-ledger), `no-panics` (the production code carries exactly two panic-family
-sites, both named invariants in the script's allow-list — a service that panics
-on an upstream answer is a crash loop, not a degradation), `config-check`
+ledger), `no-panics` (the production code carries exactly one panic-family
+site, named in the script's allow-list, and an entry whose site disappears
+fails the gate too — a service that panics on an upstream answer is a crash
+loop, not a degradation), `config-check`
 (every instance file through the layered loader), `docker-members` (the image
 build's dependency layer sees every workspace member: cargo resolves the whole
 workspace before building one package, so a member added or renamed without the

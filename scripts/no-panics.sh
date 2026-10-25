@@ -16,17 +16,13 @@ python3 - <<'PY'
 import os, re, sys
 
 # The allow-list: (file, normalized source snippet, why it is not a data-path
-# panic). A new site — or an edit to one of these — fails the gate.
+# panic). A new site — or an edit to one of these — fails the gate, and an
+# entry whose site disappears fails it too (a stale allow-list hides drift).
 ALLOWED = [
     (
         "crates/cctp/src/transfer.rs",
         'u32::from_be_bytes(raw[at..at + 4].try_into().expect("length checked"))',
         "a 4-byte slice: the caller checked the length first",
-    ),
-    (
-        "bins/cctp-bridge/src/main.rs",
-        '.expect("both served chains are configured (checked at boot)")',
-        "a boot-time invariant, checked at boot: a loud refusal, never a silent skip",
     ),
 ]
 
@@ -60,7 +56,7 @@ def normalize(s: str) -> str:
 
 
 allowed = {(path, normalize(snippet)) for path, snippet, _ in ALLOWED}
-allowed_paths = {path for path, _, _ in ALLOWED}
+used = set()
 
 found, unexpected = 0, []
 for root in ("crates", "bins"):
@@ -76,18 +72,21 @@ for root in ("crates", "bins"):
                 for n, line in enumerate(production(open(path).read()).splitlines(), 1):
                     if PATTERN.search(line):
                         found += 1
-                        if (path, normalize(line)) not in allowed:
+                        key = (path, normalize(line))
+                        if key not in allowed:
                             unexpected.append(f"{path}:{n}: {line.strip()[:120]}")
+                        else:
+                            used.add(key)
 
 for line in unexpected:
     print(f"UNEXPECTED PANIC SITE: {line}")
     print("  (a data path must refuse or degrade; if this is a named invariant, add it to the allow-list with its reason)")
 
-used = sum(1 for path, _, _ in ALLOWED)
-for path, _, why in ALLOWED:
-    if not any(path == p for p in allowed_paths):
-        print(f"STALE ALLOW-LIST ENTRY: {path} ({why})")
+stale = [(path, why) for path, snippet, why in ALLOWED if (path, normalize(snippet)) not in used]
+for path, why in stale:
+    print(f"STALE ALLOW-LIST ENTRY: {path} ({why})")
 
-print(f"no-panics: {'OK' if not unexpected else 'FAIL'} ({found} production panic-family sites, {used} allowed by name)")
-sys.exit(1 if unexpected else 0)
+ok = not unexpected and not stale
+print(f"no-panics: {'OK' if ok else 'FAIL'} ({found} production panic-family sites, {len(used)} of {len(ALLOWED)} allow-list entries used)")
+sys.exit(0 if ok else 1)
 PY
