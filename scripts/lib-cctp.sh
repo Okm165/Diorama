@@ -45,13 +45,13 @@ if [ -n "${BRIDGE_CTRL_URL:-}" ]; then
   SRC_ENGINE="${ENGINE_T_URL:-}"; DST_ENGINE="${ENGINE_V_URL:-}"
 else
   exec_pod() { kubectl -n "$NS" exec -i deploy/cctp-bridge -- "$@"; }
-  bget()  { exec_pod curl -sf -m 30 "localhost:8096$1"; }
-  bpost() { exec_pod curl -sf -m 120 -X POST "localhost:8096$1" -H 'Content-Type: application/json' -d "$2"; }
-  biget() { exec_pod curl -sf -m 30 "localhost:8095$1"; }
-  cget()  { exec_pod curl -sf -m 60 "$2$1"; }
-  cpost() { exec_pod curl -sf -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
+  bget()  { exec_pod curl -s --fail-with-body -m 30 "localhost:8096$1"; }
+  bpost() { exec_pod curl -s --fail-with-body -m 120 -X POST "localhost:8096$1" -H 'Content-Type: application/json' -d "$2"; }
+  biget() { exec_pod curl -s --fail-with-body -m 30 "localhost:8095$1"; }
+  cget()  { exec_pod curl -s --fail-with-body -m 60 "$2$1"; }
+  cpost() { exec_pod curl -s --fail-with-body -m 60 -X POST "$2$1" -H 'Content-Type: application/json' -d "$3"; }
   balance() { exec_pod "$CAST" call "$1" 'balanceOf(address)(uint256)' "$2" --rpc-url "$3" 2>/dev/null | awk '{print $1}'; }
-  rpcv()  { exec_pod curl -sf -m 60 -X POST "$1" -H 'Content-Type: application/json' -d "$2"; }
+  rpcv()  { exec_pod curl -s --fail-with-body -m 60 -X POST "$1" -H 'Content-Type: application/json' -d "$2"; }
   SRC_URL="http://anvil-t.mainnet-mirror.svc:8545"
   DST_URL="http://anvil-v:8545"
   SRC_ENGINE="http://mainnet-engine.mainnet-mirror.svc:8080"

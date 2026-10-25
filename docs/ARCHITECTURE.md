@@ -260,7 +260,10 @@ need >6 GiB (it OOM-looped at 6Gi) - the deployment requests 2Gi and limits 16Gi
 **Anvil `--prune-history`** is a memory knob, not a disk knob: it keeps up to N
 full *state snapshots* in memory for rollback/tracing. Measured with 1000:
 anvil-t reached 9.8 GB in minutes. Now: T keeps 32 (its state is small and the
-devnet uses `evm_snapshot`/`evm_revert`). T's own journal (`/admin/rewind`) is
+devnet uses `evm_snapshot`/`evm_revert`). The shadow scan's trace window is
+the same 32: blocks older than it are named and skipped (the scan probes for
+the window's edge and resumes there, the watermark advancing) rather than
+retried forever. T's own journal (`/admin/rewind`) is
 engine-side and unaffected.
 
 **State dumps are disabled**: `--state`/`--state-interval` wrote per-block

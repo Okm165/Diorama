@@ -64,6 +64,13 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
 
     let head = ctx.anvil_t.block_number().await?;
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, head);
+    // The cursor's gauges, refreshed per pass like the venue's
+    // (`record_cursor_metrics`): the apply path sets them too, but a paused
+    // applier (gap) would otherwise leave `mirror_cursor_block` at 0 across a
+    // restart and the computed `mirror_lag_blocks` would read the whole
+    // follow head (measured: 26,264,761 after a restart with the applier
+    // paused, with reth's real lag ~3k).
+    record_cursor_metrics(&ctx.mainnet_metrics, ctx.plane.state.cursor()?.as_ref(), head);
     if let Ok(Some(fork)) = ctx.anvil_t.fork_block().await {
         ctx.plane
             .metrics
@@ -79,11 +86,39 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
         tracing::debug!(head, follow, start, "chain is at the follow head");
         return Ok(None);
     }
-    if !gap_within_limit(follow.saturating_sub(start), ctx.mirror.policies().gap, rebased) {
+    let gap = follow.saturating_sub(start);
+    if !gap_within_limit(gap, ctx.mirror.policies().gap, rebased) {
+        // One record per pause (the venue's guard fires on the same edge).
+        if ctx.plane.gap_pause_started() {
+            tracing::error!(
+                gap,
+                rebased,
+                "sync gap too large - paused; run the re-pin drill (make repin)"
+            );
+        }
         return Ok(None);
+    }
+    if ctx.plane.gap_pause_cleared() {
+        tracing::info!(gap, "sync gap cleared; the applier resumes");
     }
     reorg_continuity(ctx, start).await?;
     Ok(Some(start))
+}
+
+/// The cursor's gauges: the cursor height and the pin-age reading (blocks
+/// since the epoch's first). Per pass, so a paused applier still reports the
+/// real cursor; the venue's `record_cursor_metrics` is the same shape.
+fn record_cursor_metrics(
+    metrics: &crate::metrics::MainnetMetrics,
+    cursor: Option<&ChainCursor>,
+    head: u64,
+) {
+    let Some(c) = cursor else { return };
+    metrics.set(&metrics.cursor, c.block);
+    metrics.set(
+        &metrics.pin_age_blocks,
+        head.saturating_sub(c.first_block) + 1,
+    );
 }
 
 /// Validate the cursor against T; a mismatch is a reset (re-pin / wiped
@@ -171,16 +206,7 @@ fn gap_within_limit(gap: u64, limit: Option<u64>, rebased: bool) -> bool {
             None => return true,
         }
     };
-    if gap > limit {
-        tracing::error!(
-            gap,
-            max = limit,
-            rebased,
-            "sync gap too large - paused; run the re-pin drill (make repin)"
-        );
-        return false;
-    }
-    true
+    gap <= limit
 }
 
 /// Upstream reorg continuity: the parent hash of `start` must follow the last

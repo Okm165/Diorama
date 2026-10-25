@@ -98,13 +98,22 @@ impl Error {
         )
     }
 
+    /// See [`mirror_anvil::Error::is_history_unavailable`]: the shadow scan
+    /// branches on it to name and skip blocks beyond anvil's history window
+    /// instead of retrying them forever.
+    pub fn is_history_unavailable(&self) -> bool {
+        matches!(self, Error::Rpc(e) if e.is_history_unavailable())
+    }
+
     /// A server-side state that blocks correct answers until it clears: the
     /// HTTP surfaces answer 503 (retryable — never a 500, which would read as
     /// a bug). [`Error::ShadowScan`] is here because the shadow scan fails
-    /// closed on a block whose trace it cannot get (measured: a cursor that
-    /// fell further behind than anvil's `--prune-history` window deadlocked
-    /// the scan and 500'd every hand-back; the re-pin remedy clears it, and
-    /// until then the surface says "not now", with the block named).
+    /// closed on a block whose trace it cannot get *transiently* (the block
+    /// stays named and the scan retries) — the pruned-history case no longer
+    /// deadlocks: the scan names and skips blocks older than anvil's
+    /// `--prune-history` window and advances the watermark (measured: a
+    /// cursor 3k blocks behind re-logged one block 150 times in five minutes
+    /// and 500'd every hand-back; the re-pin used to be the only remedy).
     pub fn is_unavailable(&self) -> bool {
         matches!(self, Error::Poisoned { .. } | Error::ShadowScan { .. })
     }

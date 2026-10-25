@@ -26,10 +26,10 @@ num() { printf '%d' "${1:-0}" 2>/dev/null || echo 0; }
 # Overrides lib-common's plain rpc: the cluster's runs inside the pod.
 rpc() { # rpc <url> <method> [params-json]
   local url=$1 method=$2 params=${3:-[]}
-  $ENGINE curl -sf -m 25 "$url" -H 'Content-Type: application/json' \
+  $ENGINE curl -s --fail-with-body -m 25 "$url" -H 'Content-Type: application/json' \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" 2>/dev/null
 }
-engine_api() { $ENGINE curl -sf -m 20 "localhost:8080$1" 2>/dev/null; }
+engine_api() { $ENGINE curl -s --fail-with-body -m 20 "localhost:8080$1" 2>/dev/null; }
 castoff() { $ANVIL_T cast "$@" 2>/dev/null | tr -d '\r'; }
 castT() { $ANVIL_T cast "$@" --rpc-url http://localhost:8545 2>/dev/null | tr -d '\r'; }
 castR() { $ANVIL_T cast "$@" --rpc-url http://reth:8545 2>/dev/null | tr -d '\r'; }

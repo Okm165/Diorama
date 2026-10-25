@@ -182,6 +182,7 @@ mod tests {
             metrics: Metrics::default(),
             facts: crate::facts::FactBus::default(),
             halted: AtomicBool::new(false),
+            gap_paused: AtomicBool::new(false),
             time_offset: AtomicU64::new(0),
             shadow_scanned_upto: AtomicU64::new(0),
             reapply_from: Shared::new("reapply range", None),

@@ -54,6 +54,23 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// V's block production, its own cadence: the pool is drained on a tick
+/// independent of the follow's window work. A slow window against the public
+/// source must not delay an external tx (measured: a 143-block compose ran
+/// 3m49s and the bridge's 30 s receipt window missed while its tx sat
+/// pending) — T's producer is the applier's per-parent mine, V's is this
+/// loop (the `MinePolicy` split).
+pub(crate) async fn mine_loop(ctx: Arc<Ctx>) {
+    let poll = ctx.engine.loops.poll();
+    loop {
+        if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
+            continue;
+        }
+        mine_pending_best_effort(&ctx).await;
+        tokio::time::sleep(poll).await;
+    }
+}
+
 /// The steady-state loop (boot has already run) — the venue's counterpart
 /// of the applier's `apply_loop`.
 pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
@@ -100,7 +117,6 @@ enum Pass {
 }
 
 async fn pass(ctx: &Ctx) -> Result<Pass> {
-    mine_pending_best_effort(ctx).await;
     let head = ctx.anvil_v.block_number().await?;
     ctx.venue_metrics.set(&ctx.venue_metrics.head, head);
 

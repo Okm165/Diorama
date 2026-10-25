@@ -307,6 +307,7 @@ impl mirror_devnet::engine::EngineService for Ctx {
             let tasks = vec![
                 mirror_devnet::engine::spawn_http(ctx, http::app(ctx.clone())),
                 tokio::spawn(driver::follow_loop(ctx.clone())),
+                tokio::spawn(driver::mine_loop(ctx.clone())),
             ];
             Ok(tasks)
         })

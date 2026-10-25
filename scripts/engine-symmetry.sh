@@ -25,8 +25,11 @@ ACCT="${ACCT:-0x00000000000000000000000000000000000000f1}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
-# fetch <side> <curl args...> — LAST_PATH selects the route; the body lands in
-# /tmp/sym-<side>.out, the status is echoed.
+# fetch <side> <curl args...> — LAST_PATH selects the route; the body lands
+# clean in /tmp/sym-<side>.out, the status is echoed. One shape for both
+# modes: the cluster's `kubectl exec` output carries the status line, so it
+# is split off here — a reader of the body file never sees it (the dupes
+# check read the raw file and tripped on the trailing `200`).
 fetch() {
   local side=$1; shift
   if [ -n "${ENGINE_T_URL:-}" ]; then
@@ -34,12 +37,13 @@ fetch() {
     curl -s -o "/tmp/sym-$side.out" -w '%{http_code}' -m 30 "$@" "$url$LAST_PATH"
   else
     local ns; [ "$side" = t ] && ns="$NS_T" || ns="$NS_V"
-    kubectl -n "$ns" exec -i deploy/engine -- curl -s -w '\n%{http_code}' -m 30 "$@" "localhost:8080$LAST_PATH" > "/tmp/sym-$side.out"
-    tail -1 "/tmp/sym-$side.out"
+    kubectl -n "$ns" exec -i deploy/engine -- curl -s -w '\n%{http_code}' -m 30 "$@" "localhost:8080$LAST_PATH" > "/tmp/sym-$side.raw"
+    tail -1 "/tmp/sym-$side.raw"
+    sed '$d' "/tmp/sym-$side.raw" > "/tmp/sym-$side.out"
   fi
 }
-body() { # the response body (the status line is stripped in cluster mode)
-  if [ -n "${ENGINE_T_URL:-}" ]; then cat "/tmp/sym-$1.out"; else sed '$d' "/tmp/sym-$1.out"; fi
+body() { # the response body: the file is clean in both modes
+  cat "/tmp/sym-$1.out"
 }
 keys() { python3 -c 'import json,sys
 try: print(",".join(sorted(json.load(sys.stdin).keys())))

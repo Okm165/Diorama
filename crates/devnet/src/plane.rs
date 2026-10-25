@@ -41,6 +41,11 @@ pub struct Plane {
     pub facts: crate::facts::FactBus,
     /// Set by `/admin/pause`: the profile's loops hold where they are.
     pub halted: AtomicBool,
+    /// The gap guard's state: a persistent gap is a state, not a per-pass
+    /// event — the counter, the drift row and the error fire on the edge in
+    /// (measured: a 760-block gap re-logged every pass), the resume line on
+    /// the edge out.
+    pub gap_paused: AtomicBool,
     /// Seconds the devnet's clock runs ahead of the parent block
     /// (`/admin/time`). The mainnet profile's applier aligns to
     /// `parent + offset` and clamps for monotonicity, so a jump sticks while
@@ -105,6 +110,7 @@ impl Plane {
             metrics: Metrics::default(),
             facts: crate::facts::FactBus::default(),
             halted: AtomicBool::new(false),
+            gap_paused: AtomicBool::new(false),
             time_offset: AtomicU64::new(offset),
             shadow_scanned_upto: AtomicU64::new(0),
             reapply_from: Shared::new("reapply range", None),
@@ -152,6 +158,17 @@ impl Plane {
 
     pub fn is_halted(&self) -> bool {
         self.halted.load(Ordering::Relaxed)
+    }
+
+    /// `true` only on the edge into the gap pause (the record fires once per
+    /// pause event, never once per pass).
+    pub fn gap_pause_started(&self) -> bool {
+        !self.gap_paused.swap(true, Ordering::Relaxed)
+    }
+
+    /// `true` only on the edge out of the gap pause (the resume line).
+    pub fn gap_pause_cleared(&self) -> bool {
+        self.gap_paused.swap(false, Ordering::Relaxed)
     }
 
     /// The devnet admin surface (plan §11.3), wired to the profile's chain and

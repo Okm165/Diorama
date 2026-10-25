@@ -10,7 +10,7 @@ use crate::shadow::Shadow;
 use crate::shared::Shared;
 use alloy_consensus::Transaction as _;
 use alloy_network_primitives::TransactionResponse as _;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::{Block, Transaction};
 use mirror_anvil::Rpc;
 use std::sync::atomic::Ordering;
@@ -46,16 +46,84 @@ pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Resu
         empty: 0,
         shadowed: 0,
     };
-    for n in (from + 1)..=to {
-        let marked = scan_block(target, &plane.shadow, n).await?;
-        if marked == 0 {
+    let mut pruned = 0u64;
+    let mut n = from + 1;
+    while n <= to {
+        let scanned = scan_block(target, &plane.shadow, n).await?;
+        if scanned.pruned {
+            // The prefix is beyond anvil's history window. Walking it costs an
+            // RPC round trip per block (measured: an 8k-block lag meant hours
+            // of walking, with the *newer* devnet writes — the ones COW must
+            // protect — still unmarked). Find the window's edge once and
+            // resume there; the skipped blocks are named in the summary below.
+            let edge = find_history_edge(target, n, to).await?;
+            pruned += edge - n;
+            plane
+                .shadow_scanned_upto
+                .fetch_max(edge.saturating_sub(1), Ordering::Relaxed);
+            if edge > to {
+                break;
+            }
+            n = edge;
+            continue;
+        }
+        if scanned.marked == 0 {
             walk.empty += 1;
         }
-        walk.shadowed += marked as u64;
+        walk.shadowed += scanned.marked as u64;
         plane.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
         walk.walked += 1;
+        n += 1;
+    }
+    if pruned > 0 {
+        // One summary per walk: a stale watermark after a restart can sit
+        // thousands of blocks behind anvil's `--prune-history` window
+        // (measured: one block re-logged 150 times in five minutes while the
+        // scan starved). The blocks are named and skipped — their writes
+        // cannot be recovered, and the watermark must advance past them.
+        tracing::warn!(
+            pruned,
+            from = from + 1,
+            to,
+            "shadow scan skipped blocks older than anvil's history window"
+        );
     }
     Ok(walk)
+}
+
+/// The first block after `pruned` whose traces can succeed — or `to + 1`
+/// when every block up to `to` is beyond the window. A trace at `pruned`
+/// already failed, so the state after `pruned - 1` is gone: the search's
+/// lower bound is that predecessor. The probe is a zero-slot storage read —
+/// it needs the same state replay a trace does, without a transaction to find
+/// (an empty block has none), and a dozen probes cover thousands of blocks.
+async fn find_history_edge(target: &Rpc, pruned: u64, to: u64) -> Result<u64> {
+    let mut lo = pruned.saturating_sub(1);
+    if !history_reaches(target, to).await? {
+        return Ok(to + 1);
+    }
+    let mut hi = to;
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if history_reaches(target, mid).await? {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Ok(hi + 1)
+}
+
+/// Whether anvil can replay block `n`'s state: the zero-slot read needs the
+/// same history a tx trace does, and the pruned refusal is the classifier's
+/// ([`mirror_anvil::Error::is_history_unavailable`]). Any other fault
+/// propagates: the walk fails closed, exactly as on a trace fault.
+async fn history_reaches(target: &Rpc, n: u64) -> Result<bool> {
+    match target.storage_at(Address::ZERO, U256::ZERO, n).await {
+        Ok(_) => Ok(true),
+        Err(e) if e.is_history_unavailable() => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// One scan walk's counts.
@@ -134,17 +202,30 @@ async fn mark_tx(target: &Rpc, shadow: &Shared<Shadow>, tx: &Transaction) -> Res
     Ok(marked)
 }
 
+/// One block's scan outcome.
+struct BlockScan {
+    /// Writes marked (`0` = the empty-block skip the caller counts).
+    marked: usize,
+    /// A trace was refused because anvil's history window no longer reaches
+    /// the block: its writes cannot be recovered, and retrying would starve
+    /// every later scan — the block is named and skipped.
+    pruned: bool,
+}
+
 /// Mark one block's writes devnet-owned: every sender's account fields, the
 /// recipients of value transfers, and the storage writes from the tx traces.
 /// Returns how many writes were marked; `0` is the empty-block skip the
 /// caller counts.
-pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<usize> {
+async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<BlockScan> {
     let block = target.block_by_number(n, true).await?;
     let txs = block_txs(&block);
     if txs.is_empty() {
-        return Ok(0);
+        return Ok(BlockScan {
+            marked: 0,
+            pruned: false,
+        });
     }
-    let (shadowed, trace_failures) = mark_block(target, shadow, txs).await;
+    let (shadowed, trace_failures, pruned) = mark_block(target, shadow, txs).await;
     if trace_failures > 0 {
         return Err(Error::ShadowScan {
             block: n,
@@ -157,25 +238,39 @@ pub async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result
         shadowed_writes = shadowed,
         "scanned devnet block for shadow writes"
     );
-    Ok(shadowed)
+    Ok(BlockScan {
+        marked: shadowed,
+        pruned: pruned > 0,
+    })
 }
 
 /// Mark every tx's writes, returning (marks added, traces that failed). A
 /// failed trace hides its tx's writes: the block is *not* cleanly scanned and
 /// the watermark must not advance past it.
-async fn mark_block(target: &Rpc, shadow: &Shared<Shadow>, txs: &[Transaction]) -> (usize, usize) {
+async fn mark_block(
+    target: &Rpc,
+    shadow: &Shared<Shadow>,
+    txs: &[Transaction],
+) -> (usize, usize, usize) {
     let mut shadowed = 0usize;
     let mut trace_failures = 0usize;
+    let mut pruned = 0usize;
     for tx in txs {
         match mark_tx(target, shadow, tx).await {
             Ok(marked) => shadowed += marked,
+            // The history window no longer reaches the block: a retry can
+            // never succeed (the range's summary names the count).
+            Err(e) if e.is_history_unavailable() => {
+                pruned += 1;
+                tracing::debug!(tx = %tx.tx_hash(), "shadow trace pruned by anvil's history window");
+            }
             Err(e) => {
                 trace_failures += 1;
                 tracing::warn!(tx = %tx.tx_hash(), error = %e, "shadow trace failed");
             }
         }
     }
-    (shadowed, trace_failures)
+    (shadowed, trace_failures, pruned)
 }
 
 /// Read a block's hash (for cursor validation).

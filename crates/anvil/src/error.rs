@@ -147,6 +147,20 @@ impl Error {
         matches!(self, Error::Rpc { payload, .. } if payload.code == -32601)
     }
 
+    /// Anvil's history-pruned refusals — two measured shapes for the same
+    /// `--prune-history` window: a `debug_traceTransaction` answers `-32000`
+    /// "historical state needed to replay block N is not available", while a
+    /// state read (`eth_getStorageAt`) answers `-32602` "BlockOutOfRangeError:
+    /// block height is H but requested was R". A block older than the window
+    /// can never be replayed: the caller names it and moves on, never retries.
+    pub fn is_history_unavailable(&self) -> bool {
+        matches!(self, Error::Rpc { payload, .. }
+            if (payload.code == -32000
+                && payload.message.contains("historical state needed to replay"))
+                || (payload.code == -32602
+                    && payload.message.contains("BlockOutOfRangeError")))
+    }
+
     /// The contract's dispatcher refused the selector: a revert carrying no
     /// data (measured 2026-10-25: mainnet's older TokenMessenger revision
     /// answers code 3 with `data: "0x"` for a fee surface it does not have).
@@ -226,6 +240,34 @@ mod tests {
             },
         };
         assert!(!method.is_bare_revert());
+    }
+
+    /// The history-window refusal has two measured shapes — a trace's `-32000`
+    /// "historical state needed to replay" and a state read's `-32602`
+    /// "BlockOutOfRangeError" — and both classify; an unrelated `-32000` (a
+    /// node-side fault) does not, so it keeps failing the walk closed.
+    #[test]
+    fn history_unavailable_matches_both_measured_shapes() {
+        let rpc = |code: i64, message: &'static str| Error::Rpc {
+            endpoint: "http://anvil-t:8545".into(),
+            method: "debug_traceTransaction".into(),
+            payload: RpcError {
+                code,
+                message: message.into(),
+                data: None,
+            },
+        };
+        assert!(rpc(
+            -32000,
+            "historical state needed to replay block 26256874 is not available"
+        )
+        .is_history_unavailable());
+        assert!(rpc(
+            -32602,
+            "BlockOutOfRangeError: block height is 26259938 but requested was 26259712"
+        )
+        .is_history_unavailable());
+        assert!(!rpc(-32000, "some other node fault").is_history_unavailable());
     }
 
     /// This error is wrapped by the engine's, which must stay under clippy's

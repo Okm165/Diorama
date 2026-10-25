@@ -232,7 +232,7 @@ x=$(spost /control/stall '{"seconds":45}')
 sleep 31
 code=$(sreadyz)
 [ "$code" = "503" ] && ok "readyz answers 503 on the stalled plane" || bad "readyz during stall: $code"
-x=$(spost /control/order "{\"address\":\"$ORDER_ACCT\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"0.01\"}" || true)
+x=$(spost /control/order "{\"address\":\"$ORDER_ACCT\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"0.01\"}" 2>/dev/null || true)
 echo "$x" | grep -q "stale" && ok "an order on the stale book refuses by name" || bad "stale order: $x"
 spost /control/stall '{"seconds":0}' > /dev/null
 code=""

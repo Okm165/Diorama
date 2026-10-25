@@ -166,24 +166,37 @@ fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> Result<bool> {
         return Ok(true);
     };
     if !gap_within_limit(gap, limit) {
-        ctx.venue_metrics
-            .inc(&ctx.venue_metrics.follow_gap_pauses_total);
-        ctx.drift.append(&GapPauseEntry {
-            chain: ctx.mirror.label(),
-            kind: "gap_pause",
-            followed,
-            source_head,
-            gap,
-            limit,
-        })?;
-        tracing::error!(
-            followed,
-            source_head,
-            gap,
-            max = limit,
-            "follow gap too large - paused; run the re-pin drill (make repin)"
-        );
+        // One record per pause: a persistent gap is a state, not a per-pass
+        // event (measured: a 760-block gap against the public source
+        // re-logged every pass — 88 errors and 88 drift rows in ten minutes).
+        if ctx.plane.gap_pause_started() {
+            ctx.venue_metrics
+                .inc(&ctx.venue_metrics.follow_gap_pauses_total);
+            ctx.drift.append(&GapPauseEntry {
+                chain: ctx.mirror.label(),
+                kind: "gap_pause",
+                followed,
+                source_head,
+                gap,
+                limit,
+            })?;
+            tracing::error!(
+                followed,
+                source_head,
+                gap,
+                max = limit,
+                "follow gap too large - paused; run the re-pin drill (make repin)"
+            );
+        }
         return Ok(false);
+    }
+    if ctx.plane.gap_pause_cleared() {
+        tracing::info!(
+            followed,
+            source_head,
+            gap,
+            "follow gap cleared; the follow resumes"
+        );
     }
     Ok(true)
 }

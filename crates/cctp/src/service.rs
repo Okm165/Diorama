@@ -452,7 +452,7 @@ async fn install_attester(
 /// (§15.4's boot funding; `anvil_setBalance` on both chains).
 const RELAY_GAS_STIPEND: u64 = 1_000_000_000_000_000_000;
 
-async fn fund_relayer(
+pub(crate) async fn fund_relayer(
     chains: &[Chain],
     wallet: crate::Address,
     low: U256,

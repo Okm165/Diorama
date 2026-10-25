@@ -66,19 +66,24 @@ covers the ones that page someone; these are the rest.
 | `mirror_shadowed_slots` | devnet-owned storage keys (see `/status.shadowed` for the accounts) |
 | `mirror_shadow_scanned_blocks_total` / `mirror_shadow_skipped_empty_blocks_total` | T blocks the shadow scan walked / the empty share of the walk (one call, no traces — the harness mines one block per poll, so this is the scan-cost reading) |
 
-The shadow scan fails **closed** on a block whose `callTracer` trace it cannot
-get, and retries from the last clean block: an owned-key registry that skipped
-a block would let parent diffs clobber devnet writes silently. The one way to
-deadlock it is a cursor that falls further behind than anvil's
-`--prune-history` window (measured: a 390-block lag put the poison block's
-pre-state out of reach, the scan retried forever, and every hand-back answered
-a bare 500). The surfaces now answer **503** for that state (retryable, the
-block named in the body — `Error::ShadowScan` is in the shared unavailable
-taxonomy), and the remedy is the epoch reset: `POST /admin/epoch` re-forks T at
-the source head, the registry clears, and the scan re-anchors at the new pin
-(measured live: after the re-pin the same hand-back answered 400, the same as
-V's). Keep the scan's cursor within the prune window by letting it run — a
-long engine stop with the harness still mining T is the way to fall behind.
+The shadow scan fails **closed** on a block whose trace it cannot get
+*transiently*, and retries from the last clean block: an owned-key registry
+that skipped a block would let parent diffs clobber devnet writes silently.
+A cursor that falls further behind than anvil's `--prune-history` window is a
+different case — the pre-state is gone for good, so the scan **names and
+skips** those blocks: the window's edge is found with ~a dozen zero-slot
+storage probes and the walk resumes there (one summary per walk, the watermark
+advances; measured: an 8k-block lag would have been hours of
+one-call-per-block walking, while the stuck scan re-logged one block 150 times
+in five minutes and 500'd every hand-back, with the re-pin as the only way
+out). A transient fault still
+answers **503** (retryable, the block named in the body — `Error::ShadowScan`
+is in the shared unavailable taxonomy), and the epoch reset remains the
+operator's remedy: `POST /admin/epoch` re-forks T at the source head, the
+registry clears, and the scan re-anchors at the new pin (measured live: after
+the re-pin the same hand-back answered 400, the same as V's). Keep the scan's
+cursor within the prune window by letting it run — a long engine stop with the
+harness still mining T is the way to fall behind.
 | `mirror_t_convergence_ok_total` / `mirror_t_convergence_failures_total` | the same probes against T at the applied parent block (the plan's "probe parity on T after context alignment"); devnet-owned targets are skipped, and the check is suspended while a `/admin/time` offset is set |
 | `mirror_t_probe_skipped_total` | informational | probes skipped because their target is devnet-owned - a devnet write to a shared contract (e.g. the Aave oracle) hides *all* of that contract's probes until it is handed back. If it grows while you are not writing, inspect `/status` `shadowed` and unshadow the venue |
 | `mirror_t_convergence_last_failed` | how many T probes diverged in the last applied block (0 in steady state) |
@@ -97,6 +102,19 @@ make mainnet-smoke             # endpoint checks + parity spot check on T's head
 make mainnet-scenario          # self-containment + T-vs-reth parity + devnet workflow
 make pin-show          # current fork pins
 ```
+
+Debug logs: `RUST_LOG` filters at boot, and its targets match by **literal
+prefix** — a `mirror_*=debug` wildcard is a silent no-op (measured: zero debug
+lines with the filter looking right). Name the crates, scoped to what you are
+reading:
+
+```bash
+kubectl -n mainnet-mirror set env deploy/engine \
+  RUST_LOG='info,mirror_mainnet=debug,mirror_devnet=debug,mirror_anvil=debug,mirror_config=debug'
+```
+
+`info` is the shipped default (the manifests carry no `RUST_LOG`), and the
+imperative env is lost on a kustomize apply — re-set it after `make apply`.
 
 ## The engine image and its manifest travel together
 
@@ -491,14 +509,30 @@ reorgs, uncovered emitters), the venue counterpart of the applier's lines.
 `make venue-secrets CCTP_RELAY_KEY=0x…` creates the bridge's relay-wallet
 Secret (`cctp-relay-key`, referenced by the manifest but not in the k8s tree —
 a key is not a manifest). Use a dedicated key, never the deployer's; on the
-devnet the bridge self-funds the wallet at boot, so it needs no balance yet.
+devnet the bridge self-funds the wallet — at boot and whenever the balance
+falls below the low threshold (a re-pin wipes V's state and the stipend with
+it; measured: the gas alert stayed critical until the next boot) — so it needs
+no balance yet.
 Without the Secret the bridge pod waits in `CreateContainerConfigError`; the
 engine and the simulator boot without it.
 
+**The follow's cadence against the public source** (measured): the composer's
+per-block reads (block + receipts + system txs) cost ~0.5 s per call against
+`rpc.hyperliquid.xyz`, so a window composes at ~1.6 s per source block — slower
+than the source's 1 s. The follow therefore falls behind by design and the gap
+guard pauses it at 300; the re-pin drill re-bases V (the devnet's own writes
+are unaffected — they are COW-owned, and the sim's market plane is its own).
+Watch `venue_follow_gap_pauses_total` and the drift log's `gap_pause` rows
+(one per pause event, not per pass): a paused follow is the expected steady
+state on a busy public source, never a fault.
+
 **V's block production is the engine's** — the counterpart of T's applier
-(one block per applied parent block): the driver mines a non-empty pool once
-per pass (`venue_mined_blocks_total`). The bridge's boot txs and relay mints
-land without waiting for a harness mine (measured: without it the attester
+(one block per applied parent block): the driver mines a non-empty pool on its
+own tick (`venue_mined_blocks_total`) — a dedicated producer loop, so the
+follow's window work (minutes against the public source) cannot delay an
+external tx (measured: a 143-block compose ran 3m49s and the bridge's 30s
+receipt window missed while its tx sat pending). The bridge's boot txs and
+relay mints land without waiting for a harness mine (measured: without it the attester
 install failed `… was not mined within 120s` on a chain nobody mined); an idle
 chain stays static, and the harness's own `anvil_mine` calls are just extra
 (empty) blocks.

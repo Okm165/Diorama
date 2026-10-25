@@ -93,17 +93,17 @@ if [ -n "${ENGINE_URL:-}" ]; then
   }
 else
   exec_pod() { kubectl -n "$NS" exec -i deploy/engine -- "$@"; }
-  eget()   { exec_pod curl -sf -m 60 "localhost:8080$1"; }
-  epost()  { exec_pod curl -sf -m 60 -X POST "localhost:8080$1" -H 'Content-Type: application/json' -d "$2"; }
-  rpcv()   { exec_pod curl -sf -m 30 -X POST http://anvil-v:8545 -H 'Content-Type: application/json' -d "$1"; }
-  sget()   { exec_pod curl -sf -m 30 "http://venue-sim:8090$1"; }
-  sipost() { exec_pod curl -sf -m 30 -X POST "http://venue-sim:8090$1" -H 'Content-Type: application/json' -d "$2"; }
-  spost()  { exec_pod curl -sf -m 30 -X POST "http://venue-sim:8091$1" -H 'Content-Type: application/json' -d "$2"; }
-  smetrics() { exec_pod curl -sf -m 30 "http://venue-sim:8091/metrics"; }
+  eget()   { exec_pod curl -s --fail-with-body -m 60 "localhost:8080$1"; }
+  epost()  { exec_pod curl -s --fail-with-body -m 60 -X POST "localhost:8080$1" -H 'Content-Type: application/json' -d "$2"; }
+  rpcv()   { exec_pod curl -s --fail-with-body -m 30 -X POST http://anvil-v:8545 -H 'Content-Type: application/json' -d "$1"; }
+  sget()   { exec_pod curl -s --fail-with-body -m 30 "http://venue-sim:8090$1"; }
+  sipost() { exec_pod curl -s --fail-with-body -m 30 -X POST "http://venue-sim:8090$1" -H 'Content-Type: application/json' -d "$2"; }
+  spost()  { exec_pod curl -s --fail-with-body -m 30 -X POST "http://venue-sim:8091$1" -H 'Content-Type: application/json' -d "$2"; }
+  smetrics() { exec_pod curl -s --fail-with-body -m 30 "http://venue-sim:8091/metrics"; }
   sreadyz() { # the sim's readiness code: 200 live, 503 on the stalled plane
     exec_pod curl -s -m 5 -o /dev/null -w '%{http_code}' "http://venue-sim:8090/readyz" | tr -d '\r'; }
   balance() { # balance <token> <address> -> decimal units
-    exec_pod curl -sf -m 30 -X POST http://anvil-v:8545 -H 'Content-Type: application/json' \
+    exec_pod curl -s --fail-with-body -m 30 -X POST http://anvil-v:8545 -H 'Content-Type: application/json' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[{\"to\":\"$1\",\"data\":\"0x70a08231000000000000000000000000${2:2}\"},\"latest\"]}" \
       | python3 -c "import json,sys; r=json.load(sys.stdin).get('result','0x0'); print(int(r,16))"
   }

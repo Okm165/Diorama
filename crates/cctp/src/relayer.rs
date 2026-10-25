@@ -83,6 +83,15 @@ impl Relayer {
     /// `auto` mode) every SIGNED record once. Manual mode keeps the alerts and
     /// the rewind check — both only *park*, never relay.
     pub async fn tick(&self) -> Result<usize> {
+        // Self-fund before the alerts: a re-pin wipes V's state, and the
+        // relay wallet's stipend with it (measured: the gas alert stayed
+        // critical until the next boot) — funding again keeps the alerts
+        // honest, and the funding itself is idempotent.
+        if let Err(e) =
+            crate::service::fund_relayer(&self.chains, self.sender.address(), self.balance_low).await
+        {
+            tracing::warn!(error = %e, "cctp relayer stipend check failed");
+        }
         if let Err(e) = self.gas_alerts().await {
             tracing::warn!(error = %e, "cctp gas alert read failed");
         }
