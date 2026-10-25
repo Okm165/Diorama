@@ -76,7 +76,11 @@ Struct level: both `Ctx`es carry the same ordered core (the chain section, the
 engine section, the target anvil, the source, the mirror bundle, the composer
 target, the plane, the profile metrics, the drift log) with the profile's own
 fields at the ends (`pin`/`uncovered_seen`; `beacon`/`engine_api`/
-`feed_bridge_metrics`); both `StatusResponse`s flatten the shared `SharedStatus`
+`feed_bridge_metrics`) — one *shape*, not one struct: the core's middle fields
+are the profile's own types (the `Source` impl, the `Bundle`, the metrics), so
+a shared type would need generics where the ordered shape already gives the
+reading, and the construction is a struct literal (there is no `Core::new` to
+grow past the 5-arg ratchet); both `StatusResponse`s flatten the shared `SharedStatus`
 beside the profile's fields; both `profile::Deps` are the "one struct, not five
 arguments" input to `build`.
 
