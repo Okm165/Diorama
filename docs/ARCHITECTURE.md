@@ -119,7 +119,7 @@ Per applied block on T the engine does, in order:
 ### Devnet transactions: the prepend rule
 
 The applier mines the devnet's pending transactions in **their own block,
-before** the parent's BAL is applied (`apply.rs` step 0), then applies the
+before** the parent's BAL is applied (`apply/prepend.rs` step 0), then applies the
 diffs and mines the parent's block. Two reasons, both measured:
 
 1. **The replayed block must contain only the parent's effects** (plan,
@@ -1259,7 +1259,7 @@ does not lose boundary activity mined meanwhile.
 
 ## The feed bridge
 
-`crates/mainnet/src/feed_bridge/` (the bridge; its wire in `chainlink.rs`, its rules in `policy.rs`) - daloc's harness periodically re-publishes
+`crates/mainnet/src/feed_bridge/` (the bridge; its wire in `chainlink.rs`, its rules in `policy.rs`, its routes in `http.rs`) - daloc's harness periodically re-publishes
 its own mock aggregator answers; in mirror mode **the bridge is the single price
 writer** for those mocks (their refresher is off, plan §17.2). The value's
 source is the *parent chain's* aggregator for the same feed, read at the follow

@@ -8,8 +8,8 @@
 //! something moved).
 use crate::Result;
 use crate::{driver, http};
-use clap::Parser as _;
 use crate::ctx::Ctx;
+use clap::{Parser, Subcommand};
 use mirror_config::boot;
 use std::sync::Arc;
 use std::time::Duration;
@@ -177,7 +177,7 @@ fn serve(
 /// Shutdown mirrors the mainnet engine's: the signal aborts the tasks; every
 /// mutation persists its state as it happens (shadow registry, cursor), so
 /// there is nothing to drain.
-#[derive(clap::Parser)]
+#[derive(Parser)]
 #[command(name = "venue-engine", version, about)]
 struct Cli {
     #[command(subcommand)]
@@ -187,7 +187,7 @@ struct Cli {
 /// The engine's CLI, the same shape as the mainnet engine's (`run` |
 /// `selftest`; no `rewind` — the venue's journal holds only the engine's own
 /// writes, so a parent-diff rewind is not a venue operation).
-#[derive(clap::Subcommand)]
+#[derive(Subcommand)]
 enum Cmd {
     /// Run the engine loops and the HTTP API.
     Run {
@@ -211,7 +211,7 @@ enum Cmd {
 
 pub async fn main_entry(args: Vec<String>) -> Result<()> {
     mirror_config::boot::init_logging();
-    let cli = Cli::parse_from(std::iter::once("venue-engine".to_string()).chain(args));
+    let cli: Cli = boot::parse_cli("venue-engine", args);
     match cli.cmd {
         Cmd::Run { config } => run(config).await,
         Cmd::Selftest {
@@ -233,7 +233,7 @@ async fn selftest_cmd(
     let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
     require_wiring(&cfg, &unresolved)?;
     let ok = crate::selftest::run(cfg, targets, windows).await?;
-    std::process::exit(if ok { 0 } else { 1 });
+    boot::exit_verdict(ok);
 }
 
 async fn run(config: std::path::PathBuf) -> Result<()> {

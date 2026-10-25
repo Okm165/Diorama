@@ -45,9 +45,6 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
 pub async fn boot(ctx: &Ctx) -> Result<()> {
-    // 2 minutes: a fork-mode anvil comes up in seconds; a coordinated restart
-    // (the init container re-resolving the pin, the fork source slow) is the
-    // only normal delay — and a crash-loop is worse than a bounded wait.
     mirror_devnet::engine::assert_chain(ctx, "anvil-v", VENUE_CHAIN_ID, BOOT_TIMEOUT).await?;
     // The declared capabilities are audited once, against the live endpoint
     // (a declaration that disagrees is named here, never discovered mid-window).

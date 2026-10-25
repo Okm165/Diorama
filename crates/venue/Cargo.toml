@@ -7,7 +7,6 @@ license.workspace = true
 description = "The Venue Mirror: the fork driver over anvil V, the market/account simulator, the daloc-facing API"
 
 [dependencies]
-clap = { workspace = true }
 mirror-config = { path = "../config" }
 mirror-anvil = { path = "../anvil" }
 mirror-devnet = { path = "../devnet" }
@@ -17,6 +16,7 @@ alloy-rpc-types-eth = { workspace = true }
 alloy-rpc-types-trace = { workspace = true }
 alloy-sol-types = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
+clap = { workspace = true }
 futures-util = { workspace = true }
 reqwest = { workspace = true }
 rust_decimal = { workspace = true }

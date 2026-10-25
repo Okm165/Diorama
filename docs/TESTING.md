@@ -134,7 +134,7 @@ kubectl -n mainnet-mirror get cm mainnet-instance -o jsonpath='{.data.instance\.
 
 | Invariant | Class | Where |
 |---|---|---|
-| sampled storage parity on written keys vs reth at N (all keys with `full_sweep`) | apply | `apply.rs` |
+| sampled storage parity on written keys vs reth at N (all keys with `full_sweep`) | apply | `apply/parity.rs` |
 | state probes: `eth_call` parity vs reth at N, devnet-owned targets skipped | convergence | `probes.rs` |
 | watch-list filter counts (applied / not-watched / shadowed) | COW | `cow.rs` |
 | reth parent-hash continuity between consecutive blocks (reorg detection) | structural | `driver.rs` |
@@ -594,9 +594,11 @@ substrate — `mirror-devnet` (shadow, journal, cursor, admin, probes, metrics,
 the epoch rule, the atomic state-file body, the devnet plane) —
 `mirror-anvil` (the RPC boundary), `mirror-config` (the layered config plus the
 binaries' shared boot conventions: the worker stack budget, the logging init,
-the fatal-error report, the runtime shell `run_main` and the default instance
+the fatal-error report, the runtime shell `run_main`, the subcommand CLI shell
+`parse_cli` with the selftest verdict's `exit_verdict`, and the default instance
 path) — and each project owns its driver
-(`crates/mainnet/src/driver.rs`, `crates/venue/src/driver.rs`), its
+(`crates/mainnet/src/driver.rs`, `crates/venue/src/driver.rs`: the boot asserts
+and the loops), its
 source-specific loops, its `Engine` impl (the shell's facts), and its extra
 routes + error mapping. The admin *semantics* are shared whole: the hand-back carries its own scan-to-head race guard
 (`AdminSurface::shadow_hand_back`), the rewind response is assembled once

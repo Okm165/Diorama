@@ -52,7 +52,7 @@ enum Cmd {
 
 pub async fn main_entry(args: Vec<String>) -> Result<()> {
     mirror_config::boot::init_logging();
-    let cli = Cli::parse_from(std::iter::once("mainnet-engine".to_string()).chain(args));
+    let cli: Cli = mirror_config::boot::parse_cli("mainnet-engine", args);
     match cli.cmd {
         Cmd::Run { config } => run(config).await,
         Cmd::Selftest {
@@ -92,7 +92,7 @@ async fn selftest_cmd(
         .reth
         .request_timeout_secs = timeout_secs;
     let ok = selftest::run(cfg, targets, blocks).await?;
-    std::process::exit(if ok { 0 } else { 1 });
+    mirror_config::boot::exit_verdict(ok);
 }
 
 /// The `rewind` subcommand: undo the last N applied parent blocks on T.
@@ -144,13 +144,6 @@ fn require_wiring(
     mirror_config::require_resolved_logged(what, &values, unresolved)
 }
 
-/// 15 minutes: reth unwinding and the anvils re-forking both take minutes on
-/// a bad source day, and a crash-loop is worse than a slow boot.
-const ANVIL_BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
-
-/// Ethereum mainnet: what both anvils must fork (a code fact, plan §19.6).
-const MAINNET_CHAIN_ID: u64 = 1;
-
 async fn run(config: PathBuf) -> Result<()> {
     // One instance file, many readers: this pod provides only the mainnet
     // engine's wiring. `inspect` reports the other services' unresolved
@@ -161,7 +154,7 @@ async fn run(config: PathBuf) -> Result<()> {
     let (reth_url, t_url) = cfg.mainnet_urls()?;
     require_wiring(&cfg, &unresolved, "mainnet engine wiring", &[&reth_url, &t_url])?;
     let ctx = Arc::new(Ctx::new(cfg, &reth_url, &t_url)?);
-    boot_asserts(&ctx).await?;
+    driver::boot(&ctx).await?;
 
     tracing::info!(
         reth = %ctx.reth.url(),
@@ -171,57 +164,42 @@ async fn run(config: PathBuf) -> Result<()> {
         "mirror engine starting"
     );
 
-    let tasks = spawn_loops(&ctx).await?;
+    let bridge = build_bridge(&ctx).await?;
+    let tasks = spawn_loops(&ctx, bridge);
     mirror_devnet::engine::shutdown(tasks).await;
     Ok(())
 }
 
-/// The boot asserts: the shared chain assert (the wait, the identity — a
-/// wrong source would mirror the wrong chain silently — and the automine
-/// discipline), then this profile's own — the epoch pin is anchored before
-/// any writes exist (a fresh registry's epoch *is* the current fork base;
-/// without the record a later same-pin restart would be an unprovable epoch
-/// and the rule would have to fail closed, dropping the devnet's writes).
-async fn boot_asserts(ctx: &Ctx) -> Result<()> {
-    mirror_devnet::engine::assert_chain(ctx, "anvil-t", MAINNET_CHAIN_ID, ANVIL_BOOT_TIMEOUT)
-        .await?;
-    let t_pin = ctx.anvil_t.anvil_node_info().await?.fork_config.fork_block_number;
-    mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
-    // The declared capabilities are audited once, against the live endpoint
-    // (a declaration that disagrees is named here, never discovered
-    // mid-window).
-    mirror_devnet::source::audit_capabilities(
-        "reth",
-        ctx.mirror.follow_source().capabilities(),
-        &ctx.reth,
-    )
-    .await?;
-    Ok(())
+/// The feed bridge, when configured. Built before any loop serves: a fault
+/// here is fatal (a mis-scaled price would poison every scenario).
+async fn build_bridge(ctx: &Arc<Ctx>) -> Result<Option<Arc<feed_bridge::FeedBridge>>> {
+    if ctx.engine.feed_bridge.is_none() {
+        return Ok(None);
+    }
+    let bridge = Arc::new(feed_bridge::FeedBridge::new(ctx).await?);
+    tracing::info!(feeds = bridge.list().len(), "feed bridge active");
+    Ok(Some(bridge))
 }
 
 /// Spawn the profile's loops (the applier, the top-up supervisor, the shadow
 /// scan, the feed bridge, the HTTP surface) and return their handles for the
-/// shutdown tail. The feed bridge is built only when configured; a boot fault
-/// there is fatal (a mis-scaled price would poison every scenario).
-async fn spawn_loops(ctx: &Arc<Ctx>) -> Result<Vec<tokio::task::JoinHandle<()>>> {
+/// shutdown tail.
+fn spawn_loops(
+    ctx: &Arc<Ctx>,
+    bridge: Option<Arc<feed_bridge::FeedBridge>>,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
     if ctx.engine_api.is_some() {
         tasks.push(tokio::spawn(driver::source_sync_supervisor(ctx.clone())));
     }
     tasks.push(tokio::spawn(driver::apply_loop(ctx.clone())));
     tasks.push(tokio::spawn(driver::shadow_loop(ctx.clone())));
-    let bridge = match ctx.engine.feed_bridge.is_some() {
-        true => {
-            let bridge = Arc::new(feed_bridge::FeedBridge::new(ctx).await?);
-            tracing::info!(feeds = bridge.list().len(), "feed bridge active");
-            tasks.push(tokio::spawn(bridge.clone().run(ctx.clone())));
-            Some(bridge)
-        }
-        false => None,
-    };
+    if let Some(bridge) = &bridge {
+        tasks.push(tokio::spawn(bridge.clone().run(ctx.clone())));
+    }
     tasks.push(mirror_devnet::engine::spawn_http(
         ctx,
         http::app(ctx.clone(), bridge),
     ));
-    Ok(tasks)
+    tasks
 }

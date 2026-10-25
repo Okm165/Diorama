@@ -10,18 +10,18 @@ description = "The Mainnet Mirror: the BAL applier (T), the verifier, the top-up
 mirror-config = { path = "../config" }
 mirror-anvil = { path = "../anvil" }
 mirror-devnet = { path = "../devnet" }
-alloy-primitives = { workspace = true }
-alloy-sol-types = { workspace = true }
-alloy-network-primitives = { workspace = true }
 alloy-eips = { workspace = true }
-alloy-rpc-types-eth = { workspace = true }
-# The `Source` trait's boxed futures (`BoxFuture`) on the engine's seams.
-futures-util = { workspace = true }
-alloy-rpc-types-engine = { workspace = true }
-alloy-rpc-types-beacon = { workspace = true }
 alloy-json-rpc = { workspace = true }
+alloy-network-primitives = { workspace = true }
+alloy-primitives = { workspace = true }
+alloy-rpc-types-beacon = { workspace = true }
+alloy-rpc-types-engine = { workspace = true }
+alloy-rpc-types-eth = { workspace = true }
+alloy-sol-types = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
+# The `Source` trait's boxed futures (`BoxFuture`) on the engine's seams.
+futures-util = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }

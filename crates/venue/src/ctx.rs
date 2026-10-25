@@ -120,7 +120,6 @@ impl Ctx {
             uncovered_seen,
         })
     }
-
 }
 
 /// The shell's view of this context (`mirror_devnet::engine::Engine`): the

@@ -5,22 +5,27 @@
 //! fallback) -> COW it against the devnet's own writes -> read before-values
 //! -> batched cheatcode writes -> align block context -> mine -> journal ->
 //! sampled parity + probe parity. Each phase is one function; `apply_block` is
-//! the sequence.
+//! the sequence. The two phase families with their own state live beside it:
+//! [`prepend`] (the devnet's own blocks) and [`parity`] (the drift lens and
+//! the convergence probes).
+mod parity;
+mod prepend;
+
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
-use mirror_anvil::{Key, Rpc, Write};
+use mirror_anvil::{Rpc, Write};
 use mirror_devnet::cow::FilterStats;
 use mirror_devnet::drift::Drift;
-use mirror_devnet::engine::Engine as _;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
-use mirror_devnet::probes::ProbeRunner;
-use mirror_devnet::spine::{ClockPolicy, MinePolicy, ProbeSchedule};
+use mirror_devnet::spine::{ClockPolicy, MinePolicy};
 use mirror_devnet::state::cursor_from;
+use parity::parity_step;
+use prepend::{prepend_and_mark, scan_own_blocks};
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -54,7 +59,7 @@ struct TDriftEntry<'a> {
 
 /// Write the filtered diffs to T (batched; padding is mandatory — measured)
 /// and mine the aligned parent block. Returns the writes applied.
-async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[mirror_anvil::Write]) -> Result<usize> {
+async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[Write]) -> Result<usize> {
     let applied =
         mirror_anvil::apply_writes(&ctx.anvil_t, filtered, ctx.engine.loops.chunk_size).await?;
     let policies = ctx.mirror.policies();
@@ -84,7 +89,7 @@ async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[mirror_anvil::Wr
 async fn journal_and_scan(
     ctx: &Ctx,
     n: u64,
-    entries: &[mirror_devnet::journal::JournalEntry],
+    entries: &[JournalEntry],
     t_head: u64,
 ) -> Result<()> {
     ctx.plane.journal.record(n, entries)?;
@@ -134,23 +139,6 @@ async fn apply_entry(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result
         needs_reapply,
         reapply,
     })
-}
-
-/// Mark the devnet's own writes *before* the parent's are filtered. The scan
-/// used to run only after `write_and_mine`, which left a hole with two shapes:
-/// a devnet tx the prepend mined in *this* pass is written before the parent's
-/// writes are applied with the *previous* pass's marks — deterministic
-/// clobbering when the parent block wrote the same key (a pool's `slot0` is
-/// written by essentially every block); and a block the harness mined
-/// out-of-band waits for the shadow loop's next tick, so a parent apply
-/// landing in that window clobbers it too. A scan fault holds the apply —
-/// writing on stale marks is exactly the clobber this prevents.
-async fn mark_own_writes(ctx: &Ctx) -> Result<()> {
-    let watermark = ctx
-        .plane
-        .shadow_scanned_upto
-        .load(std::sync::atomic::Ordering::Relaxed);
-    scan_own_blocks(ctx, watermark).await
 }
 
 pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
@@ -386,66 +374,6 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
     })
 }
 
-/// Step 0 of one apply: the prepend rule's mine(s), then mark the devnet's
-/// own writes — the COW filter reads the marks, and the parent's diff must
-/// not overwrite the devnet's state.
-async fn prepend_and_mark(ctx: &Ctx, n: u64) -> Result<()> {
-    if let Some(rounds) = ctx.mirror.policies().prepend_rounds {
-        prepend_devnet_txs(&ctx.anvil_t, n, rounds).await?;
-    }
-    mark_own_writes(ctx).await
-}
-
-/// Prepend rule (plan, "Prepend rules"): mine the devnet's pending txs in
-/// their own block *before* this parent's diffs land. Then the parent's block
-/// on T carries only the parent's effects, and a devnet tx executes against
-/// the same state its gas was estimated on (measured: anvil's auto-gas for
-/// `eth_sendTransaction` came out ~5% short when the diffs landed between
-/// estimate and execution, so the tx ran out of gas). Bounded loop: a tx that
-/// arrives *while* this apply is writing diffs would otherwise be mined
-/// together with them, executing against a state its gas was never estimated
-/// on (measured: an Aave borrow estimated pre-diff came out ~5% short and
-/// reverted). Mine until the pool drains, at most 3 rounds so a steady stream
-/// cannot starve the parent block.
-async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()> {
-    let mut rounds = 0;
-    while rounds < rounds_max {
-        let status = match anvil_t.txpool_status().await {
-            Ok(status) => status,
-            Err(e) => {
-                // The prepend is a gas-estimate safeguard; a txpool fault skips
-                // it (named here, bounded: the next apply tries again).
-                tracing::debug!(block = n, error = %e, "prepend skipped: txpool unavailable");
-                return Ok(());
-            }
-        };
-        if status.pending == 0 {
-            return Ok(());
-        }
-        rounds += 1;
-        let last = anvil_t
-            .block_by_number(anvil_t.block_number().await?, false)
-            .await?;
-        if let Err(e) = anvil_t
-            .anvil_set_next_block_timestamp(last.header.timestamp + 1)
-            .await
-        {
-            // The prepend block's timestamp drifts to anvil's default; the
-            // parent's own context alignment below still sets the *applied*
-            // block's timestamp, so this is a named, bounded degradation.
-            tracing::debug!(block = n, error = %e, "prepend timestamp not set");
-        }
-        anvil_t.anvil_mine(1).await?;
-        tracing::info!(
-            block = n,
-            pending = status.pending,
-            round = rounds,
-            "mined devnet txs before the parent diffs"
-        );
-    }
-    Ok(())
-}
-
 /// Before-values for the journal, read at T's current head. A read that fails
 /// fails the apply: a journal with a missing before-value would let a later
 /// rewind report success while leaving that key un-restored.
@@ -500,109 +428,5 @@ async fn align_context(ctx: &Ctx, header: &Header) -> Result<()> {
     if let Err(e) = ctx.anvil_t.set_next_block_context(ts, header).await {
         tracing::warn!(error = %e, "context alignment failed");
     }
-    Ok(())
-}
-
-/// Scan T's blocks from `from` up to the current head (the apply's own devnet
-/// blocks included). Anchored at the pin like every scan: a re-pin mid-apply
-/// must not walk the source's blocks.
-async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
-    let now = ctx.anvil_t.block_number().await?;
-    let pin = ctx.anvil_t.fork_block().await?.unwrap_or(0);
-    let from = mirror_devnet::scan::scan_anchor(from, pin);
-    let walk = mirror_devnet::scan::scan_range(&ctx.plane, &ctx.anvil_t, from, now).await?;
-    ctx.record_scan(&walk);
-    Ok(())
-}
-
-/// The apply's parity step: the drift lens (sampled storage keys vs reth at
-/// n) and — when the profile probes per block — the convergence probe set.
-async fn parity_step(ctx: &Ctx, n: u64, writes: &[Write], t_latest: u64) -> Result<(usize, usize)> {
-    let (sampled, sampled_ok) = sample_parity(ctx, n, writes, t_latest).await;
-    if ctx.mirror.policies().probes == ProbeSchedule::PerBlock {
-        t_convergence_probes(ctx, n).await?;
-    }
-    Ok((sampled, sampled_ok))
-}
-
-/// One sampled storage-parity reading vs reth at n (drift lens). T's *height*
-/// drifts ahead of the parent height (devnet prepend blocks), so compare T's
-/// latest block against reth at n - reading T by height compared unrelated
-/// blocks and produced ~200 false mismatches per 30 min. With
-/// `verifier.full_sweep` every applied storage key is checked, not just the
-/// sample. Returns `(sampled, sampled_ok)`.
-async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> (usize, usize) {
-    let full = ctx.engine.verifier.full_sweep;
-    let mut sample: Vec<Key> = filtered.iter().filter_map(storage_key).collect();
-    if !full {
-        sample.truncate(ctx.engine.verifier.drift_sample_keys);
-    }
-    let mut sampled_ok = 0usize;
-    for key in &sample {
-        if sample_key(ctx, n, t_latest, key, full).await {
-            sampled_ok += 1;
-        }
-    }
-    (sample.len(), sampled_ok)
-}
-
-/// The key of a storage write (`None` for account-field writes: only storage
-/// is sampled).
-fn storage_key(w: &Write) -> Option<Key> {
-    match w {
-        Write::Storage { address, slot, .. } => Some(Key::Storage {
-            address: *address,
-            slot: *slot,
-        }),
-        _ => None,
-    }
-}
-
-/// Compare one storage key at the two chains' own anchors: T's latest block
-/// against reth at n. Equal reads are the reading; a mismatch (or a fault on
-/// either side) is the drift lens's warn — and, under `full_sweep`, a
-/// counted mismatch.
-async fn sample_key(ctx: &Ctx, n: u64, t_latest: u64, key: &Key, full: bool) -> bool {
-    let Key::Storage { address, slot } = key else {
-        return true;
-    };
-    match (
-        ctx.anvil_t.storage_at(*address, *slot, t_latest).await,
-        ctx.reth.storage_at(*address, *slot, n).await,
-    ) {
-        (Ok(a), Ok(b)) if a == b => true,
-        (a, b) => {
-            if full {
-                ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.full_sweep_mismatches);
-            }
-            tracing::warn!(
-                block = n,
-                address = %address,
-                slot = %slot,
-                "drift sample mismatch: t={a:?} reth={b:?}"
-            );
-            false
-        }
-    }
-}
-
-/// Probe parity for T (the plan's invariant: "probe parity on T after context
-/// alignment"). Devnet-owned targets are skipped - their state is the
-/// devnet's, not mainnet's.
-async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
-    let probes = ProbeRunner::devnet(
-        &ctx.engine.verifier.probes,
-        &ctx.plane.shadow,
-        ctx.plane.time_offset.load(Ordering::Relaxed) != 0,
-    )
-    .parity(&ctx.reth, n, &ctx.anvil_t)
-    .await?;
-    ctx.mainnet_metrics.add(&ctx.mainnet_metrics.t_convergence_ok, probes.ok as u64);
-    ctx.mainnet_metrics
-        .add(&ctx.mainnet_metrics.t_convergence_failed, probes.failed as u64);
-    ctx.mainnet_metrics
-        .set(&ctx.mainnet_metrics.t_convergence_last_failed, probes.failed as u64);
-    ctx.mainnet_metrics
-        .add(&ctx.mainnet_metrics.t_probe_skipped, probes.skipped as u64);
     Ok(())
 }

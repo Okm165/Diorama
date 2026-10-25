@@ -60,8 +60,9 @@ pub const DEFAULT_INSTANCE_PATH: &str = "/etc/mirror/instance.toml";
 /// The shared service CLI: `run [--config <path>]`. Every service binary has
 /// exactly one mode today and the instance file is its one flag, so the shape
 /// is parsed here — one definition, and the four bins cannot drift apart in
-/// usage. (The mainnet engine's richer CLI — `selftest`, `rewind` — keeps
-/// its own clap subcommands on top of the same `run --config` shape.)
+/// usage. (The two engines' richer CLIs — `run` / `selftest`, plus the
+/// mainnet's `rewind` — keep their own clap subcommands on top of the same
+/// `run --config` shape, parsed through [`parse_cli`].)
 pub(crate) fn service_config(args: &[String]) -> Result<std::path::PathBuf, String> {
     let mut rest = args.iter().map(String::as_str);
     match rest.next() {
@@ -92,6 +93,21 @@ pub fn service_config_or_exit(args: &[String]) -> std::path::PathBuf {
             std::process::exit(2);
         }
     }
+}
+
+/// Parse a subcommand CLI from the raw args (the engines' shell): the binary
+/// name is restored so `--help` and clap's errors name the service, never the
+/// argv[0] path. The subcommands themselves are the owning crate's (the
+/// engines' `run`/`selftest`, the mainnet's `rewind`); this is only the parse
+/// shell every subcommand CLI shares.
+pub fn parse_cli<T: clap::Parser>(name: &str, args: Vec<String>) -> T {
+    T::parse_from(std::iter::once(name.to_string()).chain(args))
+}
+
+/// The selftest verdict is the process's exit code (the k8s Jobs read it):
+/// one place, so the engines' selftest commands cannot drift on it.
+pub fn exit_verdict(ok: bool) -> ! {
+    std::process::exit(if ok { 0 } else { 1 })
 }
 
 /// The shared `main()` shell: build the runtime with the measured worker-stack

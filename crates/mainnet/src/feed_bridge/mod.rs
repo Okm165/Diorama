@@ -27,8 +27,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod chainlink;
+mod http;
 mod metrics;
 mod policy;
+
+pub(crate) use http::admin_routes;
 
 use crate::feed_bridge::chainlink::{
     publish, read_answer, read_decimals, read_target_decimals, target_decimals,
@@ -192,7 +195,7 @@ impl FeedBridge {
             Err(e) => return Err(e),
         };
         let state = feed_state(feed);
-        let now = mirror_config::boot::now_ms();
+        let now = crate::now_ms();
         match step(state, target_now, source_now, now, self.confirm_window_ms) {
             Step::Confirm => {
                 confirm(feed);
@@ -281,7 +284,7 @@ impl FeedBridge {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.pending = Some(answer);
-        state.pending_since_ms = Some(mirror_config::boot::now_ms());
+        state.pending_since_ms = Some(crate::now_ms());
         drop(state);
         feed.paused.store(true, Ordering::Relaxed);
         Ok(())

@@ -1,8 +1,9 @@
 //! The mainnet engine's HTTP surface: the shared route table
-//! (`mirror_devnet::handlers`) plus this profile's own routes — `/admin/time`
-//! (T's clock offset) and the feed bridge. The admin *semantics* live in
-//! `mirror-devnet`'s admin surface; the shared handlers are one generic
-//! definition there.
+//! (`mirror_devnet::handlers`) plus this profile's own route — `/admin/time`
+//! (T's clock offset). The feed bridge's routes live with the bridge
+//! (`feed_bridge/http.rs`, the venue's simulator-API pattern). The admin
+//! *semantics* live in `mirror-devnet`'s admin surface; the shared handlers
+//! are one generic definition there.
 //!
 //! This module owns the HTTP mapping of the error taxonomy: request refusals
 //! (the devnet's `NoCursor` / `InvalidRewind`) are 4xx; a poisoned registry
@@ -15,7 +16,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::post,
     Json, Router,
 };
 use mirror_devnet::admin::TimeRequest;
@@ -94,31 +95,14 @@ impl IntoResponse for Error {
     }
 }
 
-/// The feed bridge's routes need both the context (override publishes a tx)
-/// and the bridge itself; a separate state keeps the main router untouched.
-#[derive(Clone)]
-struct FeedState {
-    ctx: Arc<Ctx>,
-    bridge: Option<Arc<FeedBridge>>,
-}
-
 /// The engine's control surface: the shared route table plus this profile's
 /// own routes (the exact routes this process serves — the table the
 /// control-plane docs list).
 pub(crate) fn app(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Router {
-    let feed_routes = Router::new()
-        .route("/admin/feed", get(feed_list))
-        .route("/admin/feed/pause", post(feed_pause))
-        .route("/admin/feed/resume", post(feed_resume))
-        .route("/admin/feed/override", post(feed_override))
-        .with_state(FeedState {
-            ctx: ctx.clone(),
-            bridge,
-        });
     mirror_devnet::handlers::shared_routes::<Ctx>()
         .route("/admin/time", post(admin_time))
-        .with_state(ctx)
-        .merge(feed_routes)
+        .with_state(ctx.clone())
+        .merge(crate::feed_bridge::admin_routes(ctx, bridge))
 }
 
 async fn admin_time(
@@ -130,74 +114,6 @@ async fn admin_time(
         offset_seconds: out.offset_seconds,
         t_head: out.head,
         note: "T's timestamps are monotonic; lowering the offset lets the clock converge, it cannot jump backwards",
-    }))
-}
-
-/// `/admin/feed` — the bridged feeds and their state.
-async fn feed_list(State(state): State<FeedState>) -> Result<Json<Vec<crate::feed_bridge::FeedStatus>>> {
-    let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
-    Ok(Json(bridge.list()))
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct FeedNameRequest {
-    name: String,
-}
-
-#[derive(Debug, Serialize)]
-struct FeedAck {
-    name: String,
-    paused: bool,
-}
-
-/// `/admin/feed/pause` — the scenario takes the value (the bridge stops
-/// writing this feed; divergence detection does the same automatically).
-async fn feed_pause(
-    State(state): State<FeedState>,
-    Json(req): Json<FeedNameRequest>,
-) -> Result<Json<FeedAck>> {
-    let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
-    bridge.pause(&req.name)?;
-    Ok(Json(FeedAck {
-        name: req.name,
-        paused: true,
-    }))
-}
-
-/// `/admin/feed/resume` — hand the feed back: the bridge forgets what it last
-/// wrote, so the next pass re-establishes the parent chain's value.
-async fn feed_resume(
-    State(state): State<FeedState>,
-    Json(req): Json<FeedNameRequest>,
-) -> Result<Json<FeedAck>> {
-    let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
-    bridge.resume(&req.name)?;
-    Ok(Json(FeedAck {
-        name: req.name,
-        paused: false,
-    }))
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct FeedOverrideRequest {
-    name: String,
-    /// The raw aggregator answer (the feed's own decimals).
-    answer: i128,
-}
-
-/// `/admin/feed/override` — publish a scripted value now and pause the feed
-/// (the same net effect as a scenario's crash write, driven explicitly).
-async fn feed_override(
-    State(state): State<FeedState>,
-    Json(req): Json<FeedOverrideRequest>,
-) -> Result<Json<FeedAck>> {
-    let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
-    bridge
-        .override_answer(&state.ctx.anvil_t, &req.name, req.answer)
-        .await?;
-    Ok(Json(FeedAck {
-        name: req.name,
-        paused: true,
     }))
 }
 

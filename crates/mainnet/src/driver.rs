@@ -1,6 +1,6 @@
-//! The engine's loop machinery: the devnet applier loop (one T block per
-//! applied parent block), the shadow scanner, the source-sync supervisor, and
-//! the on-demand probe run.
+//! The engine's loop machinery: the boot asserts, the devnet applier loop (one
+//! T block per applied parent block), the shadow scanner, the source-sync
+//! supervisor, and the on-demand probe run.
 //!
 //! One Anvil, one parent stream. The cursor/rebase/gap/reorg rules live here;
 //! the epoch rule itself is shared (`mirror_devnet::epoch`).
@@ -17,6 +17,37 @@ use mirror_devnet::state::{self, ChainCursor};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Ethereum mainnet: what both anvils must fork (a code fact, plan §19.6).
+const MAINNET_CHAIN_ID: u64 = 1;
+
+/// The boot wait (see `boot`): reth unwinding and the anvils re-forking both
+/// take minutes on a bad source day, and a crash-loop is worse than a slow
+/// boot.
+const BOOT_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// Boot: wait for T, assert the chain, anchor the epoch pin, audit the
+/// declared capabilities. A boot fault is fatal (the bin exits): an applier
+/// over the wrong chain or an unanchored epoch must not serve.
+pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
+    mirror_devnet::engine::assert_chain(ctx, "anvil-t", MAINNET_CHAIN_ID, BOOT_TIMEOUT).await?;
+    // The epoch pin is anchored before any writes exist (a fresh registry's
+    // epoch *is* the current fork base; without the record a later same-pin
+    // restart would be an unprovable epoch and the rule would have to fail
+    // closed, dropping the devnet's writes).
+    let t_pin = ctx.anvil_t.anvil_node_info().await?.fork_config.fork_block_number;
+    mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
+    // The declared capabilities are audited once, against the live endpoint
+    // (a declaration that disagrees is named here, never discovered
+    // mid-window).
+    mirror_devnet::source::audit_capabilities(
+        "reth",
+        ctx.mirror.follow_source().capabilities(),
+        &ctx.reth,
+    )
+    .await?;
+    Ok(())
+}
 
 /// The next parent block to apply, or `None`. Applies the cursor, rebase,
 /// gap, and reorg rules.
