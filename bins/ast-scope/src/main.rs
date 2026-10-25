@@ -772,6 +772,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
     dispersion(fields);
     similar_records(&prod);
     twin_shapes(&prod);
+    wrappers(&prod);
     narrow_context(&prod);
     uncalled(&prod, corpus);
     dead_members(&prod, uses);
@@ -999,6 +1000,27 @@ fn gram_overlap(a: &[String], b: &[String]) -> f64 {
         return 0.0;
     }
     ga.intersection(&gb).count() as f64 / smaller as f64
+}
+
+/// One-field structs: a name around a value. Each is either a spelling the
+/// external crates already have (the audit's "import it" axis) or a domain
+/// name the workspace keeps deliberately — the reading lists them so the
+/// judgment is made once, not rediscovered.
+fn wrappers(prod: &[&Item]) {
+    let mut rows: Vec<&&Item> = prod
+        .iter()
+        .filter(|i| i.kind == "struct" && i.size == 1)
+        .collect();
+    rows.sort_by(|a, b| {
+        (a.file.as_str(), a.name.as_str()).cmp(&(b.file.as_str(), b.name.as_str()))
+    });
+    println!(
+        "\nwrappers: {} one-field structs (an external spelling, or a kept domain name):",
+        rows.len()
+    );
+    for i in rows.iter() {
+        println!("  {} ({})", i.name, i.file);
+    }
 }
 
 /// The narrow-scope reading: functions that take the whole `Ctx` but touch at
