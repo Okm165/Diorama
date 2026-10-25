@@ -248,8 +248,16 @@ def role_operator():
     check("unified account seeded (userAbstraction + spotBalances)", status == 200, str(body)[:160])
     status, abstraction = info("userAbstraction", user=UNIFIED)
     check("unified abstraction served", abstraction == "unifiedAccount", str(abstraction))
+    # Hold ETH's mark for the identity: each read computes with the mark of its
+    # own instant, so live ticks between the two reads drift the sum (measured:
+    # 0.004 on a 250 balance — the check failed intermittently until the mark
+    # was held). Their client's gate assumes one snapshot; a hairline crash
+    # owns the mark (the identity is mark-independent once both reads share
+    # one), and the hand-back restores the live one.
+    post(f"{SIM_CTRL}/control/crash", {"coin": "ETH", "pct": "0.01"})
     _, spot = info("spotClearinghouseState", user=UNIFIED)
     _, perp = info("clearinghouseState", user=UNIFIED)
+    post(f"{SIM_CTRL}/control/crash", {"coin": "ETH"})
     available = {int(t): Decimal(v) for t, v in spot.get("tokenToAvailableAfterMaintenance", [])}
     maintenance = Decimal(perp["crossMaintenanceMarginUsed"]) + sum(
         (Decimal(a["position"]["marginUsed"]) for a in perp["assetPositions"]

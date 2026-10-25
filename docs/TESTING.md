@@ -12,12 +12,14 @@ Three layers, each runnable on demand:
 | Follow (local) | `make venue-follow-local` | anvil + the venue engine binary (no cluster/Docker) | the venue engine UX natively: a local anvil stands in for the HL public API, V forks it, the watched account is mirrored 1:1, a devnet write on V survives the next source window (COW), and the shared admin surface answers — pause/resume effects, the shadow hand-back and its designed latest-only refusal, probes, the deal (a mock ERC-20 on the source), the events, the rewind refusal |
 | Selftest (local) | `make mainnet-selftest-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet applier natively: a local source anvil with a storage-writing contract, T forks it, the engine applies the blocks above the pin through the trace rung (anvil's block trace is empty, so the per-tx fallback runs) and the sampled storage parity passes |
 | Engine UX (local) | `make mainnet-engine-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet engine UX natively — the four shared verbs end to end: T follows the source 1:1 (Amsterdam BALs), a devnet tx on T is COW-marked and survives the source's next diffs, `/admin/deal` discovers a mock ERC-20's balance-mapping key and mints, the configured probe converges (`mirror_t_convergence_ok_total`), plus `/status`, `/events` (block/deal/reset/epoch facts), `/admin/time`, the shadow hand-back (re-synced from the source), `/admin/rewind` and `/admin/epoch` |
+| daloc arc (local) | `make daloc-local` | the four binaries + outbound HTTPS/WSS to api.hyperliquid.xyz (no cluster/Docker) | the daloc use-case arc (`scripts/daloc-sim.py`) against a local scratch stack: T + the mainnet engine, V + the venue engine, and the venue simulator on **live** market data — the venue reads and client gates, the crash/drawdown arc, the time jumps, the venue-side liquidation, and the epoch on both mirrors |
+| Container (local) | `make container-smoke` | podman + host anvils | the deployable `mainnet-engine` image, run for real: the container drives the host's scratch stack over host networking, serves `/status` + `/metrics` and applies blocks — the image build's own gate (a missing COPY fails here, minutes into podman) |
 
 ## Unit tests (`cargo test --workspace`)
 
-226 tests, all offline, one suite per crate: `mirror-anvil` 16,
+227 tests, all offline, one suite per crate: `mirror-anvil` 16,
 `mirror-devnet` 45, `mirror-config` 17, `mirror-mainnet` 9,
-`mirror-venue` 108, `mirror-cctp` 31. The suites carry the measured rules
+`mirror-venue` 109, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
 - `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with

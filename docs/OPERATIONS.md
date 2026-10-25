@@ -726,7 +726,7 @@ curl -s -X POST localhost:31091/control/crash -d '{"coin":"ETH"}'   # hand back
 ```
 
 The crash owns mark *and* oracle until handed back; below maintenance the
-waterfall runs (partial book closes, the backstop, ADL - `sim/waterfall.rs`).
+waterfall runs (the book first, then the backstop, then ADL - `sim/waterfall.rs`).
 The L1 analog is the feed bridge: a scenario's write to
 a mock aggregator pauses that feed automatically; `POST .../admin/feed/resume`
 hands it back, and `GET .../admin/feed` shows confirmed/pending state. Locally

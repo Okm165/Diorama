@@ -45,6 +45,10 @@ RUN for d in crates/anvil crates/cctp crates/config crates/devnet crates/mainnet
 # artifacts' mtimes (COPY preserves the build context's mtimes).
 COPY crates ./crates
 COPY bins ./bins
+# The config crate embeds the defaults layer (`include_str!`), so the image
+# build needs it beside the sources (found by a local podman build: every
+# image failed here — `config/defaults.toml` was never copied).
+COPY config ./config
 RUN find crates bins -name '*.rs' -exec touch {} + \
     && cargo build --release --locked -p ${BIN}
 

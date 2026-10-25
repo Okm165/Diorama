@@ -988,8 +988,13 @@ default 5 s poll of four markets spends ~600 weight/min at the measured
 weights (metaAndAssetCtxs + spotMeta at 20, four books + allMids at 2), well
 inside the cap. Per-coin staleness gauges
 (`venue_sim_stale_ms{coin}`) are the freshness signal, and `/readyz` gates on it
-(meta present + every configured market fresher than 30 s; the client's own gate
-is ≤6 s). The same window (`MarketFeed::MAX_STALE_MS`, one home) gates the
+(meta present + the spot token registry loaded + every configured market's mark
+fresher than 30 s *and* its book present; the client's own gate is ≤6 s). The
+registry and the books are part of the served contract — spot deals,
+`spotClearinghouseState`'s token mapping and `l2Book` refuse without them, and
+the poller fetches them a call after the meta (found by the local daloc run:
+readiness passed between the calls and the first spot deal and l2Book read hit
+the gap). The same window (`MarketFeed::MAX_STALE_MS`, one home) gates the
 **order lane**: a fill on a live-sourced book older than it refuses by name
 (a scripted book is the scenario's present and never stale), so trading on
 stale data is impossible, not merely discouraged. `POST /control/stall
@@ -1034,10 +1039,11 @@ venue's hourly rate and the oracle price
 boundary crossed — never a prorated share), all-or-nothing per account (a
 missing coin's context defers the whole account's accrual - a partially accrued
 account would silently lose the skipped positions' funding forever); below
-maintenance the waterfall runs (`sim/waterfall.rs`: partial book closes at
-20 % per attempt above $100k, the backstop below ⅔ of the requirement, ADL on
-negative equity). An account with no positions is never "below maintenance":
-negative equity alone is a state the venue reports.
+maintenance the waterfall runs (`sim/waterfall.rs`: the book first — full
+size, or 20 % per attempt above $100k with the 30 s full-size cooldown; what
+the book cannot act on escalates: the vault below ⅔ of the requirement, ADL
+on a still-negative value). An account with no positions is never "below
+maintenance": negative equity alone is a state the venue reports.
 
 **Self-advance** (the plan's §14.8 decision): the evaluation — funding
 accrued to now, liquidations checked against current marks, persist-if-dirty —

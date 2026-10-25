@@ -292,6 +292,13 @@ mainnet-selftest-local: mainnet-build ## Native local selftest (two anvils; no r
 mainnet-engine-local: mainnet-build ## Native local proof of the engine UX (mirror/modify/mint/measure; two anvils)
 	./scripts/mainnet-engine-local.sh
 
+daloc-local: venue-build mainnet-build ## The daloc use-case arc against a local scratch stack (live HL market data)
+	./scripts/daloc-local.sh
+
+container-smoke: ## The mainnet-engine image, run for real (host anvils; needs podman)
+	podman build -q -f Dockerfile --build-arg BIN=mainnet-engine -t localhost/mainnet-engine:v1 .
+	./scripts/container-smoke.sh
+
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
 	@for c in reth lighthouse anvil-t engine; do \
 	  printf "== %s\n" "$$c"; \
@@ -356,4 +363,4 @@ help: ## Show this help
 	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
 	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help \
-	venue-follow-local mainnet-selftest-local mainnet-engine-local
+	venue-follow-local mainnet-selftest-local mainnet-engine-local daloc-local container-smoke

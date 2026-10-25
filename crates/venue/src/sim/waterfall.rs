@@ -1,13 +1,17 @@
 //! The venue's liquidation waterfall (docs): an account below its
-//! maintenance requirement is first closed by market orders to the book
-//! (20 % per attempt above $100k, the full size during the 30 s cooldown that
-//! follows a partial); below ⅔ of the maintenance requirement the backstop
-//! (the liquidator vault) takes the positions and margin over; a negative
-//! account value goes to ADL — the opposite side, ranked by
+//! maintenance requirement is first attempted to be entirely closed by
+//! market orders to the book (20 % per attempt above $100k, the full size
+//! during the 30 s cooldown that follows a partial); what the book cannot act
+//! on escalates — below ⅔ of the maintenance requirement the backstop (the
+//! liquidator vault) takes the positions and margin over, and a negative
+//! account value goes to ADL: the opposite side, ranked by
 //! `(mark/entry)·(notional/account_value)` at the previous mark, is closed
 //! against the underwater account. The two scopes (`Leg`) are the docs'
 //! independence rule: isolated liquidations touch only their own position and
-//! margin, cross ones only the cross side.
+//! margin, cross ones only the cross side. The thin venue's boundary: the
+//! ADL's opposite side is the sim's accounts, not the real venue's whole
+//! book — an empty ranking leaves the position for the next tick (named in
+//! the log).
 use super::account::{self, Liquidation};
 use super::{Account, Sim, BACKSTOP};
 use crate::error::Result;
@@ -18,13 +22,14 @@ use std::sync::atomic::Ordering;
 
 impl Sim {
     /// The venue's liquidation waterfall (docs): an account below its
-    /// maintenance requirement is first closed by market orders to the book
-    /// (20 % per attempt above $100k, the full size during the 30 s cooldown
-    /// that follows a partial); below ⅔ of the maintenance requirement the
-    /// backstop (the liquidator vault) takes the positions and margin over
-    /// (the maintenance is not returned); a negative account value goes to
-    /// ADL — the opposite side, ranked by `(mark/entry)·(notional/account_value)`
-    /// at the previous mark, is closed against the underwater account.
+    /// maintenance requirement is first attempted through the book (20 % per
+    /// attempt above $100k, the full size during the 30 s cooldown that
+    /// follows a partial); what the book cannot act on escalates — below ⅔ of
+    /// the maintenance requirement the backstop (the liquidator vault) takes
+    /// the positions and margin over (the maintenance is not returned), and a
+    /// negative account value goes to ADL — the opposite side, ranked by
+    /// `(mark/entry)·(notional/account_value)` at the previous mark, is
+    /// closed against the underwater account.
     pub fn check_all(&self, feed: &MarketFeed, now_ms: u64) -> Result<Vec<Liquidation>> {
         // The maintenance is tiered from the live meta; with none (the feed
         // still warming) the requirement reads zero and no liquidation fires —
@@ -88,8 +93,16 @@ impl Sim {
         let cross = rescue_step(
             v.cross_margin_summary.account_value,
             v.cross_maintenance_margin_used,
-        )?;
-        closed.extend(self.rescue_leg(&pass, Leg::Cross, cross)?);
+        );
+        closed.extend(self.rescue_leg(
+            &pass,
+            Leg::Cross,
+            cross,
+            (
+                v.cross_margin_summary.account_value,
+                v.cross_maintenance_margin_used,
+            ),
+        )?);
         // The isolated legs: each position alone — its isolated margin plus
         // its unrealized pnl (docs: "isolated positions will apply unrealized
         // pnl as additional margin for the open position") against its own
@@ -104,8 +117,13 @@ impl Sim {
                 p.unrealized_pnl(facts.mark)?,
                 "isolated equity",
             )?;
-            let rescue = rescue_step(equity, facts.maintenance)?;
-            closed.extend(self.rescue_leg(&pass, Leg::Isolated(coin), rescue)?);
+            let rescue = rescue_step(equity, facts.maintenance);
+            closed.extend(self.rescue_leg(
+                &pass,
+                Leg::Isolated(coin),
+                rescue,
+                (equity, facts.maintenance),
+            )?);
         }
         if closed.is_empty() {
             return Ok(None);
@@ -113,14 +131,44 @@ impl Sim {
         self.liquidated(closed, v.margin_summary.account_value)
     }
 
-    /// One leg's rescue: the step run over the leg's own scope.
-    fn rescue_leg(&self, pass: &Pass<'_>, leg: Leg<'_>, rescue: Rescue) -> Result<Vec<String>> {
-        match rescue {
-            Rescue::Solvent => Ok(Vec::new()),
-            Rescue::Adl => self.adl(pass, leg),
-            Rescue::Backstop => self.backstop(pass, leg),
-            Rescue::Book => self.liquidate_via_book(pass, leg),
+    /// One leg's rescue (docs): below the maintenance requirement the
+    /// positions are first attempted to be entirely closed by market orders
+    /// to the book — for every below-maintenance account, a negative value
+    /// included. What the book *cannot act on at all* escalates: a still
+    /// negative value goes to ADL ("the users on the opposite side ... are
+    /// closed at the previous mark price against the now underwater user"),
+    /// and a non-negative value below ⅔ of the maintenance requirement goes
+    /// to the vault ("without successful liquidation through the book, a
+    /// backstop liquidation happens"). A book that *did* act — a partial —
+    /// waits out the cooldown: the next attempt is full-size, exactly the
+    /// docs' partial-liquidation rule.
+    ///
+    /// `figures` is the leg's pre-attempt `(equity, maintenance)`; it is only
+    /// read on the escalate path, where the book's attempt changed nothing.
+    fn rescue_leg(
+        &self,
+        pass: &Pass<'_>,
+        leg: Leg<'_>,
+        rescue: Rescue,
+        figures: (Decimal, Decimal),
+    ) -> Result<Vec<String>> {
+        let Rescue::Book = rescue else {
+            return Ok(Vec::new());
+        };
+        let closed = self.liquidate_via_book(pass, leg)?;
+        if !closed.is_empty() {
+            return Ok(closed);
         }
+        let (equity, maintenance) = figures;
+        if equity < Decimal::ZERO {
+            return self.adl(pass, leg);
+        }
+        let backstop = account::mul(equity, Decimal::from(3), "backstop check")?
+            < account::mul(maintenance, Decimal::from(2), "backstop check")?;
+        if backstop {
+            return self.backstop(pass, leg);
+        }
+        Ok(Vec::new())
     }
 
     /// Step 1: market orders to the book. Above the $100k partial threshold
@@ -275,6 +323,13 @@ impl Sim {
                 meta.as_ref(),
             )?;
             ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
+            if ranked.is_empty() {
+                // The thin venue's opposite side is empty: the real venue's
+                // ADL ranks the whole book's other side, which always exists.
+                // Nothing closes — the attempt is retried next tick.
+                tracing::warn!(account = %pass.address, coin = %coin, "ADL found no counterparties (the thin venue's opposite side is empty); the position stays");
+                continue;
+            }
             let mut left = remaining;
             for (_, other, size, _entry) in ranked {
                 if left <= Decimal::ZERO {
@@ -290,7 +345,13 @@ impl Sim {
                 tracing::warn!(account = %pass.address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
                 left = left.saturating_sub(take);
             }
-            closed.push(coin.clone());
+            // Only an acted-on coin is a close: the report feeds the control
+            // response, the metrics and the facts (found by the local daloc
+            // run: the unconditional push claimed a close that never
+            // happened).
+            if left < remaining {
+                closed.push(coin.clone());
+            }
         }
         Ok(closed)
     }
@@ -367,36 +428,25 @@ impl Sim {
     }
 }
 
-/// The waterfall's step for one underwater leg.
+/// The waterfall's entry step for one underwater leg.
 #[derive(Clone, Copy)]
 enum Rescue {
     /// At or above the maintenance requirement: nothing to do.
     Solvent,
-    /// Negative equity: ADL against the opposite side.
-    Adl,
-    /// Below the backstop ratio (`3·equity < 2·maintenance`): the vault takes
-    /// the positions over.
-    Backstop,
-    /// Otherwise: market orders to the book.
+    /// Below the maintenance requirement: attempt the book, escalating what
+    /// the book cannot act on (see `rescue_leg`).
     Book,
 }
 
-/// The waterfall's step from the two readings (docs: ADL when underwater, the
-/// vault below the backstop ratio, the book otherwise).
-fn rescue_step(equity: Decimal, maintenance: Decimal) -> Result<Rescue> {
+/// The waterfall's entry decision (docs: "the positions are first attempted
+/// to be entirely closed by sending market orders to the book" — for every
+/// account below its maintenance requirement, a negative value included).
+fn rescue_step(equity: Decimal, maintenance: Decimal) -> Rescue {
     if equity >= maintenance {
-        return Ok(Rescue::Solvent);
-    }
-    if equity < Decimal::ZERO {
-        return Ok(Rescue::Adl);
-    }
-    let backstop = account::mul(equity, Decimal::from(3), "backstop check")?
-        < account::mul(maintenance, Decimal::from(2), "backstop check")?;
-    Ok(if backstop {
-        Rescue::Backstop
+        Rescue::Solvent
     } else {
         Rescue::Book
-    })
+    }
 }
 
 /// One account's walk through the waterfall: the snapshot the check reads,
@@ -484,13 +534,18 @@ mod tests {
         meta_of(&[(coin, max_leverage)])
     }
 
-    /// The waterfall's fixture: one account holding a single ETH position.
-    fn put_account(sim: &Sim, address: Address, facts: (Decimal, Decimal, Decimal, u32)) {
+    /// The waterfall's fixture: one account holding a single position.
+    fn put_position(
+        sim: &Sim,
+        address: Address,
+        coin: &str,
+        facts: (Decimal, Decimal, Decimal, u32),
+    ) {
         let (balance, entry, szi, leverage) = facts;
         sim.with_account(address, |acc| {
             acc.perp_balance = balance;
             acc.positions.insert(
-                "ETH".into(),
+                coin.into(),
                 crate::sim::account::Position {
                     szi,
                     entry_px: entry,
@@ -506,6 +561,11 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// The ETH shorthand the older fixtures use.
+    fn put_account(sim: &Sim, address: Address, facts: (Decimal, Decimal, Decimal, u32)) {
+        put_position(sim, address, "ETH", facts);
     }
 
     /// Below ⅔ of the maintenance requirement the backstop takes the position
@@ -542,9 +602,10 @@ mod tests {
         );
     }
 
-    /// A negative account value goes to ADL: the opposite side (ranked by
-    /// (mark/entry)·(notional/account_value)) is closed at the previous mark,
-    /// and the platform stays solvent (docs).
+    /// A negative account value goes to ADL — after the book's attempt
+    /// (the fixture has no book, so it cannot act): the opposite side
+    /// (ranked by (mark/entry)·(notional/account_value)) is closed at the
+    /// previous mark, and the platform stays solvent (docs).
     #[test]
     fn adl_closes_the_opposite_side_at_the_previous_mark() {
         let feed = feed_with(&[("ETH", "100", "100")]);
@@ -583,6 +644,52 @@ mod tests {
             1
         );
     }
+    /// The docs' sequence, first step: below the maintenance requirement the
+    /// book is attempted — a negative value included ("the positions are
+    /// first attempted to be entirely closed by sending market orders to the
+    /// book"). With liquidity the close lands at the book, the account ends
+    /// negative, and ADL is not reached (found by the local daloc run: the
+    /// negative account skipped the book and stuck in ADL with no
+    /// counterparties, while the docs' first step would have closed it).
+    #[test]
+    fn a_negative_value_is_book_closed_first() {
+        let now = crate::now_ms();
+        let feed = MarketFeed::memory(vec!["BTC".to_string()]);
+        feed.put_meta(meta_with("BTC", 10), now);
+        feed.put_ctx("BTC".into(), crate::wire::test_ctx("80", "80"), now);
+        let level = |px: &str, sz: &str| crate::wire::Level {
+            px: px.parse().unwrap(),
+            sz: sz.parse().unwrap(),
+            n: 1,
+        };
+        feed.put_book(
+            crate::wire::L2Book {
+                coin: "BTC".into(),
+                time: now,
+                levels: [vec![level("80", "2")], vec![level("81", "2")]],
+                spread: None,
+            },
+            now,
+        );
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa); // long 1 @ 100, balance 10 → equity −10
+        put_position(&sim, a, "BTC", (Decimal::from(10), Decimal::from(100), Decimal::ONE, 10));
+        let out = sim.check_all(&feed, now).unwrap();
+        assert_eq!(out.len(), 1, "one liquidation record");
+        assert_eq!(out[0].positions_closed, vec!["BTC".to_string()]);
+        let acc = sim.account(a).unwrap().unwrap();
+        assert!(acc.positions.is_empty(), "the book closed the position");
+        // The close at the book's 80: (80 − 100)·1 = −20 → balance −10.
+        assert_eq!(acc.perp_balance, Decimal::from(-10));
+        assert_eq!(
+            sim.metrics
+                .adl_closes_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "ADL is not reached: the book acted"
+        );
+    }
+
     /// The waterfall's fixture for an isolated leg: one isolated position
     /// carrying its own margin (the mode switch parks it there).
     fn put_isolated(
@@ -623,7 +730,8 @@ mod tests {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         put_account(&sim, a, (Decimal::from(10), Decimal::from(100), Decimal::ONE, 10));
-        // BTC isolated: margin 1, maintenance 100/10/2 = 5 → 3·1 < 2·5: the vault.
+        // BTC isolated: margin 1, maintenance 100/10/2 = 5 → 3·1 < 2·5: the
+        // vault (the fixture has no book, so the book cannot act first).
         put_isolated(&sim, a, "BTC", (Decimal::from(100), Decimal::ONE, 10, Decimal::ONE));
         let out = sim.check_all(&feed, crate::now_ms()).unwrap();
         assert_eq!(out.len(), 1, "one liquidation record");
@@ -653,7 +761,8 @@ mod tests {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         // Cross: balance 3, ETH long 1 @ 100 → cross value 3 < 5 and
-        // 3·3 < 2·5 → the vault.
+        // 3·3 < 2·5 → the vault (no book in the fixture: the book cannot
+        // act first).
         put_account(&sim, a, (Decimal::from(3), Decimal::from(100), Decimal::ONE, 10));
         // BTC isolated, margin 6: 6 >= maintenance 5 → solvent.
         put_isolated(&sim, a, "BTC", (Decimal::from(100), Decimal::ONE, 10, Decimal::from(6)));

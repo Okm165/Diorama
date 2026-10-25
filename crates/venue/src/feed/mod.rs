@@ -429,6 +429,13 @@ impl MarketFeed {
             .map(|t| t.index)
     }
 
+    /// The spot token registry's presence: the readiness gate's third fact
+    /// and the spot surface's precondition (spot deals and
+    /// `spotClearinghouseState`'s token mapping refuse without it).
+    pub fn spot_registry_loaded(&self) -> bool {
+        self.read().spot_meta.is_some()
+    }
+
     /// `metaAndAssetCtxs` with the overrides applied: the served contexts are
     /// exactly what the account plane prices from.
     pub(crate) fn meta_and_ctxs(&self) -> Option<(Meta, Vec<AssetCtx>)> {

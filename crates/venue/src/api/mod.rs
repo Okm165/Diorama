@@ -62,12 +62,26 @@ impl ApiState {
         if self.feed.meta().is_none() {
             return false;
         }
+        // The spot token registry is part of the served contract (spot deals,
+        // `spotClearinghouseState`'s token mapping). The poller fetches it in
+        // the same pass as the meta, one HEAVY call later — readiness that
+        // passed between the two left the first spot deal hitting the gap
+        // (found by the local daloc run).
+        if !self.feed.spot_registry_loaded() {
+            return false;
+        }
         let now = crate::now_ms();
         self.feed.markets.iter().all(|coin| {
-            self.feed
+            let fresh_mark = self
+                .feed
                 .stale_ms(coin, now)
                 .map(|stale| stale <= max_stale_ms)
-                .unwrap_or(false)
+                .unwrap_or(false);
+            // The served book is part of the same contract (daloc's l2Book
+            // read): the poller fetches it a call after the meta, so
+            // readiness that passed between the two left the book read
+            // hitting the gap (the same local-run finding, one call later).
+            fresh_mark && self.feed.book(coin, now).is_some()
         })
     }
 }
