@@ -376,6 +376,12 @@ impl MarketFeed {
         self.read().ctxs.get(coin).map(|c| c.mark_px)
     }
 
+    /// The coin's mark, or `fallback` when no mark has landed (the caller's
+    /// standing price): the order lane's one read.
+    pub fn mark_or(&self, coin: &str, fallback: Decimal) -> Decimal {
+        self.mark(coin).unwrap_or(fallback)
+    }
+
     /// The coin's oracle price (funding and liquidations price from it).
     pub fn oracle(&self, coin: &str) -> Option<Decimal> {
         if let Some(p) = self.read_overrides().prices.get(coin) {

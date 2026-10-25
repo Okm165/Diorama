@@ -395,7 +395,7 @@ impl Sim {
         let leverage = self.leverage_for(r.account, &r.coin, meta.as_ref())?;
         let requirement = order_requirement(
             r.sz,
-            feed.mark(&r.coin).unwrap_or(r.px),
+            feed.mark_or(&r.coin, r.px),
             leverage,
             r.reduce_only,
         )?;
@@ -442,7 +442,7 @@ impl Sim {
         let (px, sz) = resting_at;
         let meta = feed.meta();
         let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
-        let requirement = order_requirement(sz, feed.mark(&req.coin).unwrap_or(px), leverage, false)?;
+        let requirement = order_requirement(sz, feed.mark_or(&req.coin, px), leverage, false)?;
         let Some(available) = self.available_for(feed, address, None, meta.as_ref())? else {
             return Ok(());
         };
@@ -497,7 +497,7 @@ impl Sim {
                 continue;
             }
             let leverage = self.leverage_for(account, &r.coin, meta)?;
-            let px = feed.mark(&r.coin).unwrap_or(r.px);
+            let px = feed.mark_or(&r.coin, r.px);
             total = super::account::add(
                 total,
                 order_requirement(r.sz, px, leverage, false)?,
@@ -917,11 +917,10 @@ impl Sim {
             filled_sz: Decimal::ZERO,
             filled_ntl: Decimal::ZERO,
         };
-        self.with_state(|st| {
+        self.mutate_state(|st| {
             st.resting.insert(oid, order);
             Ok(())
         })?;
-        self.mark_dirty()?;
         tracing::info!(account = %account, coin = %req.coin, oid, px = %px, sz = %sz, "order resting");
         Ok(oid)
     }
@@ -1075,7 +1074,7 @@ impl Sim {
     /// order of the account is canceled (the tick enforces it).
     pub(crate) fn schedule_cancel(&self, account: Address, time_ms: Option<u64>) -> Result<u64> {
         let now = crate::now_ms();
-        let t = self.with_state(|st| match time_ms {
+        let t = self.mutate_state(|st| match time_ms {
             None => {
                 st.scheduled_cancels.remove(&account);
                 Ok(0)
@@ -1105,7 +1104,6 @@ impl Sim {
                 Ok(t)
             }
         })?;
-        self.mark_dirty()?;
         Ok(t)
     }
 

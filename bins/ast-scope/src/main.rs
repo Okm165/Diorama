@@ -771,6 +771,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
     reuse(&prod);
     dispersion(fields);
     similar_records(&prod);
+    twin_shapes(&prod);
     narrow_context(&prod);
     uncalled(&prod, corpus);
     dead_members(&prod, uses);
@@ -951,6 +952,53 @@ fn similar_records(prod: &[&Item]) {
             b.file
         );
     }
+}
+
+/// The two mirrors' same-named functions: the share of the smaller side's
+/// 3-op sequences the other side carries. The symmetrization's own reading —
+/// a pair near 100% is a candidate for one spine helper, a pair near 0% is a
+/// real divergence (both are facts the profiles may keep).
+fn twin_shapes(prod: &[&Item]) {
+    let side = |prefix: &str| -> Vec<&Item> {
+        prod.iter()
+            .copied()
+            .filter(|i| i.kind == "fn" && i.file.starts_with(prefix))
+            .collect()
+    };
+    let mainnet = side("crates/mainnet/");
+    let venue = side("crates/venue/");
+    let mut rows: Vec<(f64, &Item, &Item)> = Vec::new();
+    for m in &mainnet {
+        for v in &venue {
+            if m.name == v.name {
+                rows.push((gram_overlap(&m.ops, &v.ops), m, v));
+            }
+        }
+    }
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    println!("\ntwins: same-named fns across the mirrors (shared 3-op sequences over the smaller side):");
+    for (overlap, m, v) in rows.iter().take(REPORT_TOP) {
+        println!(
+            "  {:>3.0}%  {} ({} <-> {})",
+            overlap * 100.0,
+            m.name,
+            m.file,
+            v.file
+        );
+    }
+}
+
+/// The share of the smaller op-sequence's 3-grams the other side carries.
+fn gram_overlap(a: &[String], b: &[String]) -> f64 {
+    let grams = |ops: &[String]| -> HashSet<String> {
+        ops.windows(3).map(|w| w.join(" -> ")).collect()
+    };
+    let (ga, gb) = (grams(a), grams(b));
+    let smaller = ga.len().min(gb.len());
+    if smaller == 0 {
+        return 0.0;
+    }
+    ga.intersection(&gb).count() as f64 / smaller as f64
 }
 
 /// The narrow-scope reading: functions that take the whole `Ctx` but touch at
@@ -1281,40 +1329,45 @@ fn registry_sets(file: &str, items: &[syn::Item], out: &mut Vec<RegistrySet>) {
             .segments
             .last()
             .is_some_and(|s| s.ident == "registry");
-        if !registry {
-            continue;
+        if registry {
+            out.push(registry_set(file, m));
         }
-        let tokens: Vec<proc_macro2::TokenTree> = m.mac.tokens.clone().into_iter().collect();
-        let mut name = String::new();
-        let mut fields = 0;
-        let mut computed = 0;
-        let mut i = 0;
-        while i < tokens.len() {
-            match &tokens[i] {
-                proc_macro2::TokenTree::Ident(id) if *id == "struct" => {
-                    if let Some(proc_macro2::TokenTree::Ident(n)) = tokens.get(i + 1) {
-                        name = n.to_string();
-                    }
-                    if let Some(proc_macro2::TokenTree::Group(g)) = tokens.get(i + 2) {
-                        fields = count_declared(&g.stream());
-                    }
-                    i += 3;
+    }
+}
+
+/// One invocation's tokens: the generated struct's name and the declared and
+/// computed counts (the macro's own grammar, walked by hand).
+fn registry_set(file: &str, m: &syn::ItemMacro) -> RegistrySet {
+    let tokens: Vec<proc_macro2::TokenTree> = m.mac.tokens.clone().into_iter().collect();
+    let mut name = String::new();
+    let mut fields = 0;
+    let mut computed = 0;
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            proc_macro2::TokenTree::Ident(id) if *id == "struct" => {
+                if let Some(proc_macro2::TokenTree::Ident(n)) = tokens.get(i + 1) {
+                    name = n.to_string();
                 }
-                proc_macro2::TokenTree::Ident(id) if *id == "computed" => {
-                    if let Some(proc_macro2::TokenTree::Group(g)) = tokens.get(i + 1) {
-                        computed = count_computed(&g.stream());
-                    }
-                    i += 2;
+                if let Some(proc_macro2::TokenTree::Group(g)) = tokens.get(i + 2) {
+                    fields = count_declared(&g.stream());
                 }
-                _ => i += 1,
+                i += 3;
             }
+            proc_macro2::TokenTree::Ident(id) if *id == "computed" => {
+                if let Some(proc_macro2::TokenTree::Group(g)) = tokens.get(i + 1) {
+                    computed = count_computed(&g.stream());
+                }
+                i += 2;
+            }
+            _ => i += 1,
         }
-        out.push(RegistrySet {
-            file: file.to_string(),
-            name,
-            fields,
-            computed,
-        });
+    }
+    RegistrySet {
+        file: file.to_string(),
+        name,
+        fields,
+        computed,
     }
 }
 

@@ -473,7 +473,7 @@ fn vault_take_coin(
         coin: coin.to_string(),
         is_buy: is_long,
         size,
-        px: feed.mark(coin).unwrap_or(entry_px),
+        px: feed.mark_or(coin, entry_px),
         leverage,
         reduce_only: false,
         fee: Decimal::ZERO,

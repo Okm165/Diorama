@@ -287,6 +287,15 @@ impl Sim {
         Ok(())
     }
 
+    /// One state mutation, then the durable save: the writer's shared tail
+    /// (`with_state` + `mark_dirty`). `touch` is the batched flag; this one
+    /// saves, for the verbs whose write must survive the call.
+    fn mutate_state<T>(&self, f: impl FnOnce(&mut SimState) -> Result<T>) -> Result<T> {
+        let out = self.with_state(f)?;
+        self.mark_dirty()?;
+        Ok(out)
+    }
+
     pub(crate) fn deal(&self, feed: &MarketFeed, deal: &Deal) -> Result<Decimal> {
         let now = crate::now_ms();
         let clock = self.clock(now)?;
@@ -571,7 +580,7 @@ impl Sim {
     pub(crate) fn use_nonce(&self, signer: Address, nonce: u64, now_ms: u64) -> Result<()> {
         const TWO_DAYS_MS: u64 = 2 * 24 * 60 * 60 * 1_000;
         const ONE_DAY_MS: u64 = 24 * 60 * 60 * 1_000;
-        self.with_state(|st| {
+        self.mutate_state(|st| {
             let set = st.nonces.entry(signer).or_default();
             if set.contains(&nonce) {
                 return Err(crate::error::Error::bad_request("Nonce already used."));
@@ -599,9 +608,7 @@ impl Sim {
                 set.pop_first();
             }
             Ok(())
-        })?;
-        self.mark_dirty()?;
-        Ok(())
+        })
     }
 
     pub fn save_if_dirty(&self) -> Result<bool> {
