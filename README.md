@@ -87,7 +87,8 @@ impact is measured 1:1:
 Both proofs run locally against the real engine binaries: `make
 mainnet-engine-local` (two anvils; the mainnet side), `make venue-follow-local`
 (anvil + the venue engine), `make venue-selftest-local` (against the real
-HyperEVM) and `make daloc-local` (the whole daloc arc on live market data).
+HyperEVM), `make daloc-local` (the whole daloc arc on live market data) and
+`make ux-symmetry-local` (both mirrors, the same four verbs, side by side).
 
 ## Quickstart
 

@@ -230,6 +230,9 @@ venue-follow-local: venue-build ## Native local proof of the source follow (two 
 venue-selftest-local: venue-build ## Native local proof of the follow against the real HyperEVM (one forked anvil)
 	./scripts/venue-selftest-local.sh
 
+ux-symmetry-local: mainnet-build venue-build ## Both mirrors, the same four verbs, side by side (two minimal stacks)
+	./scripts/ux-symmetry-local.sh
+
 venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
 	kubectl apply -f k8s/base/venue-mirror/pvcs.yaml
 	$(MAKE) INSTANCE=venue-mirror apply
@@ -372,4 +375,4 @@ help: ## Show this help
 	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
 	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help \
-	venue-follow-local venue-selftest-local mainnet-selftest-local mainnet-engine-local daloc-local container-smoke
+	venue-follow-local venue-selftest-local mainnet-selftest-local mainnet-engine-local ux-symmetry-local daloc-local container-smoke
