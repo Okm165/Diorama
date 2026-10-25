@@ -1,4 +1,5 @@
 //! The bridge's metrics: what crossed the Core↔EVM boundary.
+use mirror_devnet::metrics::push_counter;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
@@ -59,13 +60,7 @@ impl BridgeMetrics {
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
         let c = |out: &mut String, name: &str, help: &str, v: u64| {
-            mirror_devnet::metrics::push_metric(
-                out,
-                mirror_devnet::metrics::COUNTER,
-                name,
-                help,
-                v,
-            );
+            push_counter(out, name, help, &[], v);
         };
         c(&mut out, "venue_bridge_credits_total", "EVM→Core credits applied", self.credits.load(Ordering::Relaxed));
         c(&mut out, "venue_bridge_completions_total", "Core→EVM completions submitted", self.completions.load(Ordering::Relaxed));

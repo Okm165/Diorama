@@ -1,10 +1,9 @@
 //! The market plane's metrics: WS health, the rate budget, REST faults, and
 //! the per-coin staleness gauges (plan §5: "per-coin staleness metric").
 //!
-//! The hand-rolled Prometheus conventions are `mirror-devnet`'s; the one
-//! extension here is labels (`{coin="BTC"}`), which only the per-coin gauges
-//! need — a labeled series per configured market.
-use mirror_devnet::metrics::{push_metric_line, MetricLine};
+//! The Prometheus conventions are `mirror-devnet`'s (its labeled wrappers:
+//! `push_gauge`/`push_counter`), a labeled series per configured market.
+use mirror_devnet::metrics::{push_counter, push_gauge};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -104,35 +103,6 @@ impl FeedMetrics {
         }
         out
     }
-}
-
-// The two wrappers below are the kind's only delta; merging them into one
-// fn would be six arguments, past the repo's five (clippy.toml) — the rule
-// wins.
-fn push_gauge(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
-    push_metric_line(
-        out,
-        &MetricLine {
-            kind: mirror_devnet::metrics::GAUGE,
-            name,
-            help,
-            labels,
-            value,
-        },
-    );
-}
-
-fn push_counter(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
-    push_metric_line(
-        out,
-        &MetricLine {
-            kind: mirror_devnet::metrics::COUNTER,
-            name,
-            help,
-            labels,
-            value,
-        },
-    );
 }
 
 #[cfg(test)]

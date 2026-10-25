@@ -28,7 +28,7 @@ for path in sorted(pathlib.Path("scripts").glob("*.sh")):
         elif line.strip() == in_here:
             in_here = None
         else:
-            if "`" in line:
+            if re.search(r"(?<!\\)`", line):
                 print(
                     f"VIOLATION: {path}:{i}: a backtick in <<{in_here} runs as a "
                     f"command: {line.strip()}"

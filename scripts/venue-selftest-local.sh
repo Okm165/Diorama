@@ -86,7 +86,7 @@ ws_url = "wss://api.hyperliquid.xyz/ws"
 address = "$WATCH"
 note = "the busiest recent sender (derived live by this script)"
 
-# The USDC balance closure (FiatTokenV2_2's `balanceAndBlacklistStates` at
+# The USDC balance closure (FiatTokenV2_2's \`balanceAndBlacklistStates\` at
 # slot 9, verified live with the prestate tracer + the keccak derivation):
 # the composer derives every Transfer participant's balance key, so the
 # windows carry real balance changes and the closure itself is proven.

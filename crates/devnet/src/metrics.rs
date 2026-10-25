@@ -22,6 +22,35 @@ pub fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, v: u64)
     );
 }
 
+/// One gauge line (the labeled form): the profiles' registries and their
+/// hand-written renders write through these — the kind cannot be wrong.
+pub fn push_gauge(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
+    push_metric_line(
+        out,
+        &MetricLine {
+            kind: GAUGE,
+            name,
+            help,
+            labels,
+            value,
+        },
+    );
+}
+
+/// One counter line (the labeled form).
+pub fn push_counter(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
+    push_metric_line(
+        out,
+        &MetricLine {
+            kind: COUNTER,
+            name,
+            help,
+            labels,
+            value,
+        },
+    );
+}
+
 /// One exposition line's fields: the render's one shape, labeled series
 /// included. The venue's feed used to carry a second implementation of this
 /// exact format; one home now (`push_metric` is the unlabeled shorthand).

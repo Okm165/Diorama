@@ -41,22 +41,19 @@ impl FeedBridgeMetrics {
 
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
-        let series = |out: &mut String, name: &str, help: &str, kind: &str, values: &Mutex<Vec<(String, u64)>>| {
+        let series = |out: &mut String, name: &str, help: &str, values: &Mutex<Vec<(String, u64)>>| {
             let values = values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for (feed, v) in values.iter() {
-                out.push_str(&format!(
-                    "# HELP {name} {help}\n# TYPE {name} {kind}\n{name}{{feed=\"{feed}\"}} {v}\n"
-                ));
+                mirror_devnet::metrics::push_counter(out, name, help, &[("feed", feed.as_str())], *v);
             }
         };
-        let counter = mirror_devnet::metrics::COUNTER;
-        series(&mut out, "feed_bridge_updates_total", "answers published to mock aggregators", counter, &self.updates);
-        series(&mut out, "feed_bridge_pauses_total", "feeds paused on a scenario's write", counter, &self.pauses);
-        mirror_devnet::metrics::push_metric(
+        series(&mut out, "feed_bridge_updates_total", "answers published to mock aggregators", &self.updates);
+        series(&mut out, "feed_bridge_pauses_total", "feeds paused on a scenario's write", &self.pauses);
+        mirror_devnet::metrics::push_counter(
             &mut out,
-            counter,
             "feed_bridge_pass_errors_total",
             "feed bridge passes that failed (the feed's last_error names the cause)",
+            &[],
             self.pass_errors.load(Ordering::Relaxed),
         );
         out
