@@ -145,8 +145,14 @@ ok "the capital-efficiency read is above"
 
 echo "-- G. the hand-back"
 spost /control/set_funding "{\"coin\":\"$COIN\"}" > /dev/null
+# Flatten first: the close itself consumes a level. Then the book hand-back
+# (absent levels = hand back; the order-proof's shape) clears the fill
+# consumptions and the owned-levels gauge returns to 0.
 flatten_coin "$TRADER" "$COIN" > /dev/null 2>&1 || true
-ok "the overrides cleared, the trader flattened"
+spost /control/set_book "{\"coin\":\"$COIN\"}" > /dev/null
+own=$(smetrics 2>/dev/null | awk '/^venue_sim_owned_levels /{print $2}')
+[ "$own" = "0" ] && ok "the overrides cleared, the book handed back (owned_levels 0), the trader flattened" \
+  || bad "the hand-back left owned_levels=$own"
 
 echo "== portfolio simulation: $pass passed, $fail failed"
 [ "$fail" = "0" ]
