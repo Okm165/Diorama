@@ -273,6 +273,20 @@ impl Sim {
         })
     }
 
+    /// One account's mutation, then the dirty flag: the account verbs' shared
+    /// tail (`with_account` + `touch`). The conditional paths (a refused
+    /// transfer) touch themselves, and `mark_dirty` is the durable writer's
+    /// flag — this is the plain mutation.
+    fn mutate_account(
+        &self,
+        address: Address,
+        f: impl FnOnce(&mut Account) -> Result<()>,
+    ) -> Result<()> {
+        self.with_account(address, f)?;
+        self.touch();
+        Ok(())
+    }
+
     pub(crate) fn deal(&self, feed: &MarketFeed, deal: &Deal) -> Result<Decimal> {
         let now = crate::now_ms();
         let clock = self.clock(now)?;
@@ -341,14 +355,12 @@ impl Sim {
         // Read the clock *before* taking the state lock: `clock()` locks the
         // same mutex, and a std Mutex is not reentrant.
         let clock = self.clock(crate::now_ms())?;
-        self.with_account(address, |account| {
+        self.mutate_account(address, |account| {
             stamp_funding_baseline(account, clock);
             let entry = account::spot_entry(account, token);
             entry.total = account::add(entry.total, amount, "spot credit")?;
             Ok(())
-        })?;
-        self.touch();
-        Ok(())
+        })
     }
 
     /// Core→EVM / spot send: debit the spot balance; `None` when the account
@@ -431,7 +443,7 @@ impl Sim {
 
     /// Record an API wallet (CoreWriter action 9).
     pub fn note_agent(&self, address: Address, wallet: Address, name: &str) -> Result<()> {
-        self.with_account(address, |account| {
+        self.mutate_account(address, |account| {
             if account.agents.iter().all(|a| a.wallet != wallet) {
                 account.agents.push(account::AgentWallet {
                     wallet,
@@ -439,21 +451,17 @@ impl Sim {
                 });
             }
             Ok(())
-        })?;
-        self.touch();
-        Ok(())
+        })
     }
 
     /// Set the account's abstraction mode (CoreWriter action 16). Portfolio
     /// margin is refused by name (see `account::refuse_unmodeled_mode`).
     pub(crate) fn set_mode(&self, address: Address, mode: crate::wire::UserAbstraction) -> Result<()> {
         account::refuse_unmodeled_mode(mode)?;
-        self.with_account(address, |account| {
+        self.mutate_account(address, |account| {
             account.mode = mode;
             Ok(())
-        })?;
-        self.touch();
-        Ok(())
+        })
     }
 
     /// `reset`: blank the scenario (accounts + clock offset), bump the epoch.
@@ -922,5 +930,20 @@ mod tests {
             sim.account(a).unwrap().unwrap().mode,
             crate::wire::UserAbstraction::UnifiedAccount
         );
+    }
+
+    /// The account verbs' shared tail: a plain mutation marks the sim dirty
+    /// (the bridge's per-block save is driven by this flag).
+    #[test]
+    fn the_account_verbs_mark_the_sim_dirty() {
+        let sim = Sim::memory();
+        assert!(!sim.save_if_dirty().unwrap());
+        sim.note_agent(
+            Address::repeat_byte(0xaa),
+            Address::repeat_byte(0xbb),
+            "bot",
+        )
+        .unwrap();
+        assert!(sim.save_if_dirty().unwrap());
     }
 }

@@ -83,9 +83,9 @@ impl Journal {
     /// Create the journal directory (a boot failure here is typed, not
     /// swallowed: a journal that cannot exist silently disables rewind).
     pub fn new(dir: PathBuf, keep: u64) -> Result<Self> {
-        std::fs::create_dir_all(&dir).map_err(|source| Error::Io {
+        crate::store::ensure_dir(&dir).map_err(|(path, source)| Error::Io {
             what: JOURNAL_DIR,
-            path: dir.clone(),
+            path,
             source,
         })?;
         Ok(Self { dir, keep })

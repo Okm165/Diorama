@@ -221,7 +221,7 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<FollowOutcome> 
     }
     .plan(&ctx.plane.shadow, mirror_devnet::bal::Window::new(from, to))
     .await?;
-    record_window_metrics(ctx, &plan.compose);
+    record_window_metrics(&ctx.venue_metrics, &plan.compose);
     audit::record(ctx, &plan.compose.uncovered)?;
     let applied = if plan.writes.is_empty() {
         0
@@ -243,8 +243,7 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<FollowOutcome> 
 
 /// The poll's gauges: what the window's composition touched, planned and
 /// changed (the uncovered-log trail is [`audit`]'s).
-fn record_window_metrics(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) {
-    let metrics = &ctx.venue_metrics;
+fn record_window_metrics(metrics: &crate::metrics::VenueMetrics, stats: &mirror_devnet::bal::ComposeStats) {
     metrics.set(&metrics.poll_touched, stats.touched as u64);
     metrics.set(&metrics.poll_planned_keys, stats.planned as u64);
     metrics.set(&metrics.poll_changed_keys, stats.changed as u64);

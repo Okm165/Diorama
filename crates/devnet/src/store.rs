@@ -41,6 +41,13 @@ pub fn save<T: Serialize>(path: &Path, value: &T, what: &'static str) -> Result<
     save_bytes(path, &bytes, what)
 }
 
+/// The stores' first write step: the directory must exist before the temp
+/// file lands in it. `Err` carries the directory, so each caller names its
+/// own `what` in its own error (`drift`, `journal`, [`save_bytes`]).
+pub(crate) fn ensure_dir(dir: &Path) -> Result<(), (std::path::PathBuf, std::io::Error)> {
+    std::fs::create_dir_all(dir).map_err(|source| (dir.to_path_buf(), source))
+}
+
 /// Write bytes atomically (temp + rename), creating missing parent
 /// directories. The temp sibling is `<name>.tmp`; a crash between the write
 /// and the rename leaves it behind, and the reader of the *target* name never
@@ -51,11 +58,7 @@ pub fn save<T: Serialize>(path: &Path, value: &T, what: &'static str) -> Result<
 /// directory fault, the parent).
 pub fn save_bytes(path: &Path, bytes: &[u8], what: &'static str) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| Error::Io {
-            what,
-            path: parent.to_path_buf(),
-            source,
-        })?;
+        ensure_dir(parent).map_err(|(path, source)| Error::Io { what, path, source })?;
     }
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).map_err(|source| Error::Io {

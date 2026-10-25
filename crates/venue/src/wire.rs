@@ -990,6 +990,13 @@ pub(crate) struct Builder {
     pub f: u64,
 }
 
+/// A wire field's decimal, or the 400 naming the field and its value (the
+/// order forms' one reading).
+fn decimal_or_refuse(what: &str, s: &str) -> Result<Decimal> {
+    s.parse()
+        .map_err(|_| Error::bad_request(format!("{what} `{s}` is not a decimal")))
+}
+
 impl OrderAction {
     /// The compact action → the lane's order: the asset index resolves
     /// through the live meta (unknown = a named refusal), size and limit are
@@ -1003,9 +1010,9 @@ impl OrderAction {
                     "unknown asset index {} (the live meta has not landed, or is shorter)",
                     self.a
                 ),))?;
-        let size: Decimal = self.s.parse().map_err(|_| Error::bad_request(format!("size `{}` is not a decimal", self.s),))?;
+        let size: Decimal = decimal_or_refuse("size", &self.s)?;
         let limit_px = match &self.p {
-            Some(p) => Some(p.parse().map_err(|_| Error::bad_request(format!("limit price `{p}` is not a decimal"),))?),
+            Some(p) => Some(decimal_or_refuse("limit price", p)?),
             None => None,
         };
         let (tif, trigger) = self.type_of()?;
@@ -1031,9 +1038,7 @@ impl OrderAction {
                 trigger_px,
                 tpsl,
             }) => {
-                let px: Decimal = trigger_px.parse().map_err(|_| {
-                    Error::bad_request(format!("trigger price `{trigger_px}` is not a decimal"))
-                })?;
+                let px: Decimal = decimal_or_refuse("trigger price", trigger_px)?;
                 let tpsl = match tpsl.as_str() {
                     "tp" => crate::sim::order::Tpsl::Tp,
                     "sl" => crate::sim::order::Tpsl::Sl,

@@ -32,9 +32,9 @@ impl Drift {
     /// fault, not a silent no-op: it is the forensic trail an alarm points at.
     pub fn new(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| Error::Io {
+            crate::store::ensure_dir(parent).map_err(|(path, source)| Error::Io {
                 what: "drift log directory",
-                path: parent.to_path_buf(),
+                path,
                 source,
             })?;
         }
