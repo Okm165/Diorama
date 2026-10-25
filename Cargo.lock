@@ -2619,6 +2619,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
  "alloy-serde",
+ "axum",
  "futures-util",
  "mirror-anvil",
  "mirror-config",

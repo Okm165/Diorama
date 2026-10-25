@@ -18,8 +18,12 @@ pub enum Error {
 
     /// Anvil V answered with a different chain id: the profile would fork the
     /// wrong chain (state, addresses and the CCTP domain all follow from it).
-    #[error("anvil-v is not the venue chain: chain id {got}, expected {want}")]
-    WrongChain { got: u64, want: u64 },
+    #[error("{anvil} is not the venue chain: chain id {got}, expected {want}")]
+    WrongChain {
+        anvil: &'static str,
+        got: u64,
+        want: u64,
+    },
 
     /// The HTTP listener could not bind.
     #[error("binding the http api at {addr}")]
@@ -96,6 +100,27 @@ pub enum Error {
 
 /// The crate's result: `Result<T>` everywhere (the error is fixed).
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// The shared shell's error contract (`mirror_devnet::engine::ShellError`):
+/// the constructors the shared boot/serve helpers need. The rest of the
+/// taxonomy stays the venue's own.
+impl mirror_devnet::engine::ShellError for Error {
+    fn bind(addr: String, source: std::io::Error) -> Self {
+        Error::Bind { addr, source }
+    }
+
+    fn io(what: &'static str, path: String, source: std::io::Error) -> Self {
+        Error::Io {
+            what,
+            path: path.into(),
+            source,
+        }
+    }
+
+    fn wrong_chain(anvil: &'static str, got: u64, want: u64) -> Self {
+        Error::WrongChain { anvil, got, want }
+    }
+}
 
 impl Error {
     /// A refused request with its reason — one constructor for the most

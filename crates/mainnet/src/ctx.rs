@@ -8,13 +8,16 @@
 //! The composer itself is the spine's generic one (`mirror_devnet::bal`).
 use crate::beacon::BeaconClient;
 use crate::drift::Drift;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::metrics::MainnetMetrics;
+use futures_util::future::BoxFuture;
 use mirror_anvil::Rpc;
 use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
-use mirror_devnet::admin::AdminSurface;
+use mirror_devnet::engine::Engine;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
+use mirror_devnet::probes::ProbeOutcome;
+use mirror_devnet::scan::ScanWalk;
 use mirror_devnet::source::Source;
 use mirror_devnet::spine::Mirror;
 use std::sync::Arc;
@@ -88,43 +91,6 @@ impl Ctx {
         })
     }
 
-    /// The devnet admin surface, wired to this engine's chain and re-sync
-    /// source (the semantics live in `mirror-devnet`; the wiring is the
-    /// profile's: T's chain, reth-as-source, the configured chunk size, and a
-    /// journal that holds the applier's parent before-values, not the engine's
-    /// own writes).
-    pub fn admin(&self) -> AdminSurface<'_> {
-        self.plane.admin(
-            &self.anvil_t,
-            self.mirror.source().as_ref(),
-            self.engine.loops.chunk_size,
-            false,
-        )
-    }
-
-    /// Record one shadow-scan walk in this profile's counters: the drivers'
-    /// inline scans and the shared admin hand-back all report through here.
-    pub(crate) fn record_scan(&self, walk: &mirror_devnet::scan::ScanWalk) {
-        self.mainnet_metrics.record_scan(
-            walk,
-            &self.mainnet_metrics.shadow_scanned_blocks,
-            &self.mainnet_metrics.shadow_skipped_empty_blocks,
-        );
-    }
-
-    /// Re-pin T to the source's latest block (the `/admin/epoch` route's one
-    /// profile-specific fact: which chain, which source URL).
-    pub(crate) async fn epoch_repin(&self) -> Result<mirror_devnet::admin::EpochResponse> {
-        Ok(mirror_devnet::admin::AdminSurface::epoch_repin(&self.anvil_t, &self.l1.source_url)
-            .await?)
-    }
-
-    /// Run the configured probes now and report the run (the shared
-    /// `/admin/probes` route; the per-block counters stay the loop's).
-    pub(crate) async fn probes_now(&self) -> Result<mirror_devnet::probes::ProbeOutcome> {
-        crate::driver::probes_now(self).await
-    }
-
     /// reth follow head (safe/latest/finalized per config).
     pub async fn follow_head(&self) -> Result<Option<u64>> {
         let tag = self.l1.follow.tag();
@@ -138,6 +104,66 @@ impl Ctx {
             FollowHead::Latest => "latest",
             FollowHead::Finalized => "finalized",
         }
+    }
+}
+
+/// The shell's view of this context (`mirror_devnet::engine::Engine`): the
+/// facts that differ, in one place — the chain (T), the source URL, the
+/// journal semantics (the applier's parent before-values), the probes, the
+/// counters, the status document, and the metric exposition. The admin
+/// surface, the epoch re-pin, the boot asserts, the HTTP surface and the
+/// service tail are the shell's.
+impl Engine for Ctx {
+    type Error = Error;
+    type Status = crate::http::StatusResponse;
+
+    fn plane(&self) -> &Plane {
+        &self.plane
+    }
+
+    fn mirror(&self) -> &Arc<dyn Mirror> {
+        &self.mirror
+    }
+
+    fn target(&self) -> &Arc<Rpc> {
+        &self.anvil_t
+    }
+
+    fn source_url(&self) -> &str {
+        &self.l1.source_url
+    }
+
+    fn journal_writes(&self) -> bool {
+        // T's journal holds the applier's parent before-values, not the
+        // engine's own writes: a rewind restores them and the applier
+        // re-derives.
+        false
+    }
+
+    fn engine(&self) -> &EngineSection {
+        &self.engine
+    }
+
+    fn probes_now(&self) -> BoxFuture<'_, Result<ProbeOutcome>> {
+        Box::pin(crate::driver::probes_now(self))
+    }
+
+    fn record_scan(&self, walk: &ScanWalk) {
+        self.mainnet_metrics.record_scan(
+            walk,
+            &self.mainnet_metrics.shadow_scanned_blocks,
+            &self.mainnet_metrics.shadow_skipped_empty_blocks,
+        );
+    }
+
+    fn profile_metrics(&self) -> String {
+        let mut out = self.mainnet_metrics.render();
+        out.push_str(&self.feed_bridge_metrics.render());
+        out
+    }
+
+    fn status(&self) -> BoxFuture<'_, Result<Self::Status>> {
+        Box::pin(crate::http::status_doc(self))
     }
 }
 

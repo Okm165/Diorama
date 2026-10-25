@@ -52,25 +52,53 @@ impl ResetDetector for PinCanary {
 }
 
 /// Read the canary word: `Some(pin)` when the recorded instance wrote it,
-/// `None` when the storage is empty (a fresh fork) — a read fault is the
-/// caller's error.
+/// `None` when the storage is empty (a fresh fork) or carries a word that is
+/// not a stamped pin — a read fault is the caller's error.
 // TRUST: the fork pin is the trusted root (A1/A2 — the base's state is the
 // source's, unverifiable by construction). The guards are this canary and the
 // epoch rule: a moved base clears marks *and* values; a same-pin reset
 // restores the recorded writes; a fresh chain cannot carry the canary word.
 pub async fn read_canary(v: &Rpc) -> mirror_devnet::Result<Option<u64>> {
     let word = v.storage_at_latest(CANARY_ADDRESS, CANARY_SLOT).await?;
-    let value = U256::from_be_bytes(word.0);
-    if value.is_zero() {
-        return Ok(None);
-    }
-    Ok(Some(value.to::<u64>()))
+    Ok(decode_canary(U256::from_be_bytes(word.0)))
 }
 
 /// Mark this chain instance (see [`CANARY_ADDRESS`]).
 pub async fn write_canary(v: &Rpc, pin: u64) -> mirror_devnet::Result<()> {
-    let value = B256::from(U256::from(pin));
+    let value = B256::from(encode_canary(pin));
     v.anvil_set_storage_at(CANARY_ADDRESS, CANARY_SLOT, value)
         .await?;
     Ok(())
+}
+
+/// The canary word's encoding: `pin + 1`. A raw zero would make a genesis pin
+/// (0 — a legitimate fork base) indistinguishable from "never stamped", so a
+/// chain forked at block 0 could never read its canary back (measured: the
+/// driver reconciled on every pass, rewriting the word forever).
+fn encode_canary(pin: u64) -> U256 {
+    U256::from(pin + 1)
+}
+
+/// Decode the canary word: `None` for a zero word (never stamped) or a
+/// foreign word that does not fit a block number.
+fn decode_canary(value: U256) -> Option<u64> {
+    u64::try_from(value).ok()?.checked_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_canary, encode_canary};
+    use alloy_primitives::U256;
+
+    /// The encoding's whole point: a genesis pin round-trips (a raw word
+    /// cannot — zero means unstamped), and unstamped/foreign words decode to
+    /// `None` (the epoch rule then reconciles).
+    #[test]
+    fn the_canary_round_trips_including_genesis() {
+        assert_eq!(decode_canary(encode_canary(0)), Some(0));
+        assert_eq!(decode_canary(encode_canary(1)), Some(1));
+        assert_eq!(decode_canary(encode_canary(20_000_000)), Some(20_000_000));
+        assert_eq!(decode_canary(U256::ZERO), None, "unstamped");
+        assert_eq!(decode_canary(U256::MAX), None, "a foreign word");
+    }
 }

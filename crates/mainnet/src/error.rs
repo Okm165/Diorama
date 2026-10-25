@@ -153,6 +153,27 @@ impl From<mirror_anvil::Error> for Error {
     }
 }
 
+/// The shared shell's error contract (`mirror_devnet::engine::ShellError`):
+/// the constructors the shared boot/serve helpers need. The rest of the
+/// taxonomy stays the engine's own.
+impl mirror_devnet::engine::ShellError for Error {
+    fn bind(addr: String, source: std::io::Error) -> Self {
+        Error::Bind { addr, source }
+    }
+
+    fn io(what: &'static str, path: String, source: std::io::Error) -> Self {
+        Error::Io {
+            what,
+            path: path.into(),
+            source,
+        }
+    }
+
+    fn wrong_chain(anvil: &'static str, got: u64, want: u64) -> Self {
+        Error::WrongChain { anvil, got, want }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

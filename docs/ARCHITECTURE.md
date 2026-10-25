@@ -13,7 +13,9 @@ The repo is one cargo workspace (`crates/*` + `bins/*`): `crates/anvil` (the
 JSON-RPC client and the measured cheatcode conventions), `crates/config` (the
 layered instance loader), `crates/devnet` (the substrate both mirrors share:
 shadow registry, journal, cursor state with `epoch_pin`, admin surface,
-chain-generic scanner, probes, metrics), the two projects `crates/mainnet`
+chain-generic scanner, probes, metrics — and the engine shell: the `Engine`
+trait, the handlers/route table, the boot assert, `serve`), the two projects
+`crates/mainnet`
 and `crates/venue`, and the binaries `bins/{mainnet-engine,venue-engine,
 venue-sim,cctp-bridge}` — the fourth is element 3 (`crates/cctp` on the common
 client + config only; it does not depend on the devnet substrate or either
@@ -427,8 +429,8 @@ they read (`&Rpc` for a chain client, `&Drift`, `&Plane`, `&MainnetMetrics`,
 `&EngineSection`, `&BeaconClient`, `&AtomicBool`/`&AtomicU64` for one flag),
 never the whole `Ctx`. A compiler-assisted audit (per-function field-use
 analysis over both engines' crates, 2026-10-23) found and narrowed the leaves:
-`prepend_devnet_txs` / `read_before_values` / `read_canary` / `write_canary` /
-`assert_venue_chain` (`&Rpc`), `log_drift_if_anomalous` (`&Drift`),
+`prepend_devnet_txs` / `read_before_values` / `read_canary` / `write_canary`
+(`&Rpc`), `log_drift_if_anomalous` (`&Drift`),
 `deliver_slot` / `cl_head_el_block` (`&BeaconClient`), `gap_within_limit`
 (`&EngineSection`), `clear_reapply` (`&Plane`). What stays `&Ctx` is a
 *composition point*: `apply_block` / `apply_entry` / `advance_cursor` /
@@ -668,6 +670,11 @@ the engine's equivalent today is the HTTP surface above plus the cheatcodes.
 
 ## Engine HTTP API
 
+The routes are one generic definition in `crates/devnet/src/handlers.rs` (the
+`Engine` trait names the mirror's facts); each engine adds its own beside the
+shared table — the mainnet's `/admin/time` and the feed bridge. The exact
+surface:
+
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | 200 unless `/admin/pause` halted the loops (an operator *state* signal) |
@@ -835,10 +842,12 @@ reset detection (the cursor's block hash) is unsound here: heights below the
 fork resolve to the *source's* real blocks, so a re-pin to a later base keeps
 every cursor hash valid (measured live: the driver kept scanning a stale range),
 and a same-pin restart leaves no trace at all. The driver instead writes one
-storage word - address `0x…ca11ca11`, slot 0 - with the current pin as its
-value, and reads it once per pass: "the canary reads back the recorded pin"
-means "this is still the chain instance the registry was built against". A
-fresh fork cannot carry the canary (empty = reset).
+storage word - address `0x…ca11ca11`, slot 0 - with `pin + 1` as its value
+(a raw zero would make a genesis pin indistinguishable from "never stamped" —
+measured: a chain forked at block 0 reconciled on every pass, rewriting the
+word forever), and reads it once per pass: "the canary reads back the recorded
+pin" means "this is still the chain instance the registry was built against".
+A fresh fork cannot carry the canary (empty = reset).
 
 **The epoch rule.** A canary mismatch triggers `reconcile`: read V's fork pin
 from `anvil_nodeInfo`, then decide, fail-closed on the pin read (without it the

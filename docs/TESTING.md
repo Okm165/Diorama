@@ -14,9 +14,9 @@ Three layers, each runnable on demand:
 
 ## Unit tests (`cargo test --workspace`)
 
-225 tests, all offline, one suite per crate: `mirror-anvil` 16,
+226 tests, all offline, one suite per crate: `mirror-anvil` 16,
 `mirror-devnet` 45, `mirror-config` 17, `mirror-mainnet` 9,
-`mirror-venue` 107, `mirror-cctp` 31. The suites carry the measured rules
+`mirror-venue` 108, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
 - `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with
@@ -577,8 +577,8 @@ binaries' shared boot conventions: the worker stack budget, the logging init,
 the fatal-error report, the runtime shell `run_main` and the default instance
 path) — and each project owns its driver
 (`crates/mainnet/src/driver.rs`, `crates/venue/src/driver.rs`), its
-HTTP surface, and its source-specific loops. The admin *semantics* are shared
-whole: the hand-back carries its own scan-to-head race guard
+source-specific loops, its `Engine` impl (the shell's facts), and its extra
+routes + error mapping. The admin *semantics* are shared whole: the hand-back carries its own scan-to-head race guard
 (`AdminSurface::shadow_hand_back`), the rewind response is assembled once
 (`AdminSurface::rewind_response`), and the `/status` shadowed-addresses
 presentation is the registry's (`Shadow::shadowed_addresses`). The refusal
@@ -586,8 +586,18 @@ taxonomy is shared too: `mirror_devnet::Error::{is_request_refusal,
 is_unavailable}` classify 4xx vs 503 once, and both engines map an upstream
 transport fault (anvil, the venue API) to 502.
 
-Four more single homes keep the two engines from drifting:
+Five more single homes keep the two engines from drifting:
 
+- **the engine shell** (`mirror_devnet::engine` + `mirror_devnet::handlers`):
+  the `Engine` trait names exactly the facts that differ (the chain, the
+  source URL, the journal semantics, the probes, the scan counters, the
+  status document, the metric exposition); everything else — the admin
+  surface's construction, `/admin/epoch`, the boot assert (`assert_chain`),
+  the handlers (one generic definition per route, where a two-invocation
+  macro used to expand them), the route table, `serve`/`spawn_http`, and the
+  shutdown tail — has one implementation. `ShellError` is the constructors
+  those helpers need (bind / IO / chain identity). A new refusal class or a
+  renamed status field lands on both surfaces in one commit.
 - **the devnet plane** (`mirror_devnet::Plane`): the shadow registry, the
   journal, the cursor state, the shared admin gauges and the flags (halt,
   freeze, clock offset, scan watermark, re-apply marker) are one bundle both

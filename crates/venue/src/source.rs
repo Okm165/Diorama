@@ -27,7 +27,7 @@ use alloy_primitives::{Address, B256, U256};
 use mirror_anvil::{Error, Rpc};
 use futures_util::future::BoxFuture;
 use mirror_devnet::source::{Capabilities, Source};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 pub struct VenueSource {
@@ -71,13 +71,12 @@ impl VenueSource {
         if self.capabilities().historical {
             return Ok(());
         }
-        let pin = self.pin.load(Ordering::Relaxed);
-        if pin == 0 {
+        let Some(pin) = crate::ctx::resolved_pin(&self.pin) else {
             return Err(Error::Corrupt {
                 what: "venue source",
                 detail: "the fork pin is not resolved yet".into(),
             });
-        }
+        };
         let head = self.rpc.block_number().await?;
         if head != pin {
             return Err(Error::Corrupt {
@@ -115,8 +114,7 @@ impl Source for VenueSource {
     /// answer left; it is never the steady-state path.
     fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
         Box::pin(async move {
-            let pin = self.pin.load(Ordering::Relaxed);
-            if pin != 0 {
+            if let Some(pin) = crate::ctx::resolved_pin(&self.pin) {
                 return Ok(pin);
             }
             self.rpc.block_number().await

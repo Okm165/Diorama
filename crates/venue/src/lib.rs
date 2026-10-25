@@ -47,6 +47,9 @@ mod source;
 mod wire;
 
 pub use error::{Error, Result};
+/// The `/status` document's typed shape (the shared fields flattened beside
+/// this profile's own).
+pub use http::StatusResponse;
 pub use service::{main_entry, sim_entry};
 
 /// Wall-clock milliseconds (the wire's `time` fields and the sim clock's
@@ -88,5 +91,6 @@ mod design_assertions {
         is_normal::<crate::wire::MetaAndAssetCtxs>();
         is_normal::<crate::wire::L2Book>();
         is_normal::<crate::wire::SpotMeta>();
+        is_normal::<crate::http::StatusResponse>();
     }
 }

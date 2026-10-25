@@ -69,8 +69,10 @@ in `crates/devnet`; none of them is per-mirror code.
 
 ## The interfaces
 
-Five traits carry every seam. The projects implement them; `crates/devnet`
-never names a mirror.
+Seven traits carry every seam: the five semantic ones below, plus the shared
+shell's two (`Engine` — the shell's view of a mirror's context — and
+`ShellError` — the error contract its helpers construct). The projects
+implement them; `crates/devnet` never names a mirror.
 
 | Interface | Where | Consumed by | Mainnet impl | Venue impl |
 |---|---|---|---|---|
@@ -79,11 +81,14 @@ never names a mirror.
 | `ResetDetector` | `devnet/src/spine.rs` | the engine's reset pass | `CursorHash` (the cursor's block must carry its recorded hash; below the fork base = stale by position) | `PinCanary` (ADR-0002: heights below a fork's pin resolve to the source, so cursor hashes are unsound there) |
 | `KeyClosure` | `devnet/src/closure.rs` | the COW filter | the declared closures (watch-set keys the devnet owns) | same, plus the sim's own writes |
 | `Registry` | `devnet/src/metrics.rs` | `/metrics` | one registry per engine, declared series + computed ones | same |
+| `Engine` | `devnet/src/engine.rs` | the shared shell: the HTTP handlers and route table, the boot assert, the admin surface's wiring, `/admin/epoch`, `serve`, the shutdown tail | `impl Engine for Ctx` (the required facts: T's chain, the source URL, the parent-before-values journal, `probes_now`, the scan counters, the status document, the metric exposition) | `impl Engine for Ctx` (V's chain, the source URL, the own-writes journal, the at-pin probes, its counters, its status document, its exposition) |
+| `ShellError` | `devnet/src/engine.rs` | the shell's helpers (the bind / IO / chain-identity constructors) | `impl ShellError for Error` | `impl ShellError for Error` |
 
 The vocabulary types are the contracts between the traits: `Window`,
 `WindowBal`, `WindowPlan`, `Write`, `DiffKind`, `Capabilities`, `Policies`,
-`ResetSignal`/`ResetWitness`, `Fact`/`Notice`. A change to any of them is a
-change to both mirrors by construction.
+`ResetSignal`/`ResetWitness`, `Fact`/`Notice`, and `SharedStatus` (the status
+fields both surfaces must report, gathered once). A change to any of them is
+a change to both mirrors by construction.
 
 **Deliberately not an interface:** the venue simulator. Only one mirror has a
 closed-source parent; wrapping the sim behind a trait would invent a second
@@ -106,6 +111,7 @@ field), never by a branch in shared code.
 | 7 | Probes | `PerBlock` (reth can serve the applied block) | `LiveParity` (the source is latest-only; the composed BAL is the expected side) | `ProbeSchedule` | divergence #1 |
 | 8 | Gap guard | `Some(max_gap_blocks)` | `Some(max_gap_blocks)` | `Policies::gap` | shared policy, per-instance value |
 | 9 | Simulation | none — real EVM, real state | the Core (closed-source matching engine) simulated; the EVM side (V) real | `crates/venue/src/sim` (its own crate folder) | see the cross-reference table |
+| 10 | The shell's mirror facts | T's chain + source URL + parent-before-values journal + per-block probes + its counters + its status document | V's chain + source URL + own-writes journal + at-pin probes + its counters + its status document | `Engine` (the shell itself — the boot assert, the admin surface's wiring, `/admin/epoch`, the handlers, the route table, `serve`, the shutdown tail — is shared; only the facts are per-mirror) | the 2026-10-25 unification: the shells' same-role files (`ctx` / `http` / `service` / the error classes / the metrics pattern) had duplicated ~2,700 lines; the handlers went from a two-invocation macro to one generic definition |
 
 ## The event model
 
@@ -153,6 +159,8 @@ Common components (`crates/devnet`, `crates/anvil`, `crates/config`):
 | `devnet::scanner` | the re-read of touched keys, parity | interpret a value (that is `probes`) |
 | `devnet::facts` | the bus, sequence numbers, the notification contract | persist anything |
 | `devnet::spine` | the seams (traits), `Policies`, `ResetSignal` | name a mirror |
+| `devnet::engine` | the shared shell: the `Engine`/`ShellError` contracts, `SharedStatus`, the boot assert, `serve`/`spawn_http`/`shutdown` | know a mirror's fields (the impl does) |
+| `devnet::handlers` | the shared HTTP surface: one generic handler per route + the route table | own a route's semantics (the admin surface does) |
 | `config` | the layered loader, `${VAR}` resolution, validation | default a chain behavior |
 
 Profile components, each in its own folder and never importing the other
@@ -161,9 +169,11 @@ Profile components, each in its own folder and never importing the other
 | Component | Owns | Must not |
 |---|---|---|
 | `mainnet::profile` | the bundle: reth source, `CursorHash`, the policies, the watch scope | grow a second source |
+| `mainnet::ctx` | the context assembly + `impl Engine` (T's chain, the source URL, the parent-before-values journal, the status document, the counters) | re-implement the shell (the trait provides it) |
 | `mainnet::feed_bridge` | the beacon/engine wiring (checkpoint sync, the top-up loop) | touch the applier |
 | `mainnet::engine_api` | the JWT-authenticated engine transport, `parse_response` | share a type with the venue |
 | `venue::profile` | the bundle: the HL sources, `PinCanary`, the policies | read the sim directly (the feed does) |
+| `venue::ctx` | the context assembly + `impl Engine` (V's chain, the source URL, the own-writes journal, the pin fields, the status document, the counters) | re-implement the shell (the trait provides it) |
 | `venue::bridge` | the CoreWriter action table, the system-tx completions, the Core↔EVM boundary | interpret an action's economics (the sim does) |
 | `venue::feed` | WS-first market data (ADR-0006), REST backfill, the served book | decide margin |
 | `venue::sim` | the closed-source semantics: accounts, orders, the waterfall, funding, the served wire | exist behind a shared trait (only one mirror has this) |
@@ -220,7 +230,7 @@ order:
 |---|---|---|
 | 1 | `crates/<name>/src/source.rs` — the `Source` impl; every `Capabilities` flag declared (`resolve` audits each method at boot); a source serving native BALs owes `verify_bal_commitment` on every retrieval (the EIP's header commitment) | `spine-purity` (the crate may not name a mirror; `crates/devnet` may not name it), `no-orphans` |
 | 2 | the watch set and the declared closures | `closure-matrix` |
-| 3 | `crates/<name>/src/profile.rs` — the `Bundle` data, `Deps`, `build` | `spine-purity` |
+| 3 | `crates/<name>/src/profile.rs` — the `Bundle` data, `Deps`, `build` — and the context with `impl Engine` (the shell's required facts) + `impl ShellError` for the error taxonomy | `spine-purity` |
 | 4 | `bins/<name>-engine` + the compose/Dockerfile members | `docker-members` |
 | 5 | the k8s manifests | `k8s-wiring` |
 | 6 | the registry's series + the docs' series table | `metrics-written`, `docs-metrics` |

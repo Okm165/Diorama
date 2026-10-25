@@ -9,6 +9,7 @@ use crate::apply::apply_block;
 use crate::error::Result;
 use crate::source_sync;
 use mirror_anvil::Rpc;
+use mirror_devnet::engine::Engine as _;
 use mirror_devnet::facts::{Fact, ResetWitness};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::spine::ResetSignal;

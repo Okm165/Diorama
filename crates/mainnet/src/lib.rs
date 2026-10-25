@@ -22,6 +22,9 @@ mod source;
 mod source_sync;
 
 pub use error::{Error, Result};
+/// The `/status` document's typed shape (the shared fields flattened beside
+/// this profile's own).
+pub use http::StatusResponse;
 pub use service::main_entry;
 
 #[cfg(test)]
@@ -32,5 +35,6 @@ mod design_assertions {
     fn design_assertions() {
         fn is_normal<T: Send + Sync + Sized + Unpin>() {}
         is_normal::<crate::ctx::Ctx>();
+        is_normal::<crate::http::StatusResponse>();
     }
 }

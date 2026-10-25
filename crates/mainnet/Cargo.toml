@@ -15,8 +15,7 @@ alloy-sol-types = { workspace = true }
 alloy-network-primitives = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
-# The shared `mirror_handlers!` SSE handler expands `::futures_util` at the
-# call site, so every invoking crate depends on it directly.
+# The `Source` trait's boxed futures (`BoxFuture`) on the engine's seams.
 futures-util = { workspace = true }
 alloy-rpc-types-engine = { workspace = true }
 alloy-rpc-types-beacon = { workspace = true }

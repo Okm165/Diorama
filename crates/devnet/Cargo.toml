@@ -15,11 +15,14 @@ alloy-network-primitives = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-serde = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }
+# The shared engine shell owns the HTTP surface (handlers, route table,
+# serve) and the error contract the mirrors implement.
+axum = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 tracing = { workspace = true }
 
 [lints]

@@ -196,16 +196,12 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
     tracing::info!(
         source = %ctx.source_rpc.url(),
         anvil_v = %ctx.anvil_v.url(),
-        pin = ctx.pin.load(std::sync::atomic::Ordering::Relaxed),
+        pin = ?crate::ctx::resolved_pin(&ctx.pin),
         watchlist = ctx.mirror.scope().watch().accounts.len(),
         "mirror engine starting"
     );
     let tasks = spawn_loops(&ctx);
-    mirror_config::boot::shutdown_signal().await;
-    tracing::info!("shutdown signal received");
-    for t in tasks {
-        t.abort();
-    }
+    mirror_devnet::engine::shutdown(tasks).await;
     Ok(())
 }
 
@@ -228,18 +224,12 @@ fn require_wiring(
     )
 }
 
-/// The engine's two loops (HTTP and the driver), each exiting with a named
-/// error and neither taking the process down (the shutdown signal does).
+/// The engine's two loops (the shared HTTP surface and the driver), each
+/// exiting with a named error and neither taking the process down (the
+/// shutdown signal does).
 fn spawn_loops(ctx: &std::sync::Arc<Ctx>) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
-    {
-        let ctx = ctx.clone();
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = http::serve(ctx).await {
-                tracing::error!(error = %e, "http server exited");
-            }
-        }));
-    }
+    tasks.push(mirror_devnet::engine::spawn_http(ctx, http::app(ctx.clone())));
     {
         let ctx = ctx.clone();
         tasks.push(tokio::spawn(async move {

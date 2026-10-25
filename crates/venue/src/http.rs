@@ -20,36 +20,40 @@
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use axum::{
-    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
+    Router,
 };
+use mirror_devnet::engine::SharedStatus;
 use serde::Serialize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// `/status` — the venue's diagnostic report (a typed shape: scripts read it
-/// by field name).
+/// `/status` — the venue's diagnostic report: the shared fields
+/// (`SharedStatus`) flattened beside this profile's own. A typed shape:
+/// scripts read it by field name.
 #[derive(Debug, Serialize)]
-struct StatusResponse {
-    head: u64,
-    cursor: Option<u64>,
+pub struct StatusResponse {
+    #[serde(flatten)]
+    shared: SharedStatus,
     fork_pin: Option<u64>,
     epoch_pin: Option<u64>,
-    halted: bool,
-    shadowed_slots: usize,
-    shadowed_accounts: usize,
-    /// The shadowed account list (not just counts): these accounts are the
-    /// devnet's own state (COW), so parity checks must skip them.
-    shadowed: Vec<String>,
     probes: usize,
     /// The source URL the pin derives from (the unshadow truth's home).
     source: String,
-    /// What the source declares it can serve (the follow source's audited
-    /// capability matrix: native BALs, traces, historical state, system txs).
-    capabilities: mirror_devnet::source::Capabilities,
+}
+
+/// The document's gathering: the shared fields from the shell, the rest from
+/// this engine's own state.
+pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
+    let shared =
+        SharedStatus::gather(ctx.anvil_v.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
+    Ok(StatusResponse {
+        fork_pin: crate::ctx::resolved_pin(&ctx.pin),
+        epoch_pin: ctx.plane.state.epoch_pin()?,
+        probes: ctx.engine.verifier.probes.len(),
+        source: ctx.chain.source_url.clone(),
+        shared,
+    })
 }
 
 /// The HTTP mapping of the error taxonomy (the engine and the simulator
@@ -78,82 +82,12 @@ impl IntoResponse for Error {
     }
 }
 
-/// The engine's control surface: the exact routes this process serves (the
-/// table the control-plane docs list; the mirror's twin keeps the same shape).
-fn app(ctx: Arc<Ctx>) -> Router {
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/livez", get(livez))
-        .route("/status", get(status))
-        .route("/metrics", get(metrics))
-        .route("/events", get(admin_events))
-        .route("/admin/resume", post(admin_resume))
-        .route("/admin/pause", post(admin_pause))
-        .route("/admin/rewind", post(admin_rewind))
-        .route("/admin/shadow", post(admin_shadow))
-        .route("/admin/deal", post(admin_deal))
-        .route("/admin/epoch", post(admin_epoch))
-        .route("/admin/probes", post(admin_probes))
-        .with_state(ctx)
+/// The engine's control surface: the shared route table, this profile's own
+/// routes added beside it (the exact routes this process serves — the table
+/// the control-plane docs list).
+pub(crate) fn app(ctx: Arc<Ctx>) -> Router {
+    mirror_devnet::handlers::shared_routes::<Ctx>().with_state(ctx)
 }
-
-/// Bind the configured address and serve the control surface until the
-/// process is torn down.
-pub async fn serve(ctx: Arc<Ctx>) -> Result<()> {
-    let addr = format!("{}:{}", ctx.engine.http.addr, ctx.engine.http.port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|source| Error::Bind {
-            addr: addr.clone(),
-            source,
-        })?;
-    tracing::info!(addr, "venue http api listening");
-    axum::serve(listener, app(ctx))
-        .await
-        .map_err(|source| Error::Io {
-            what: "http api",
-            path: addr.into(),
-            source,
-        })?;
-    Ok(())
-}
-
-// The health and admin handlers both mirrors must keep byte-identical: one
-// macro, two invocations (crates/devnet/src/handlers.rs).
-mirror_devnet::mirror_handlers!(Ctx, crate::error::Error);
-
-async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
-    // Head gauges: an endpoint that cannot answer degrades the report to 0,
-    // never fails it - /status is a diagnostic, not a fact source.
-    let head = ctx.anvil_v.block_number().await.unwrap_or(0);
-    let cursor = ctx.plane.state.cursor()?;
-    let shadow = ctx.plane.shadow.lock()?;
-    Ok(Json(StatusResponse {
-        head,
-        cursor: cursor.as_ref().map(|c| c.block),
-        fork_pin: match ctx.pin.load(Ordering::Relaxed) {
-            0 => None,
-            p => Some(p),
-        },
-        epoch_pin: ctx.plane.state.epoch_pin()?,
-        halted: ctx.plane.is_halted(),
-        shadowed_slots: shadow.slot_count(),
-        shadowed_accounts: shadow.accounts.len(),
-        shadowed: shadow.shadowed_addresses(),
-        probes: ctx.engine.verifier.probes.len(),
-        source: ctx.chain.source_url.clone(),
-        capabilities: ctx.mirror.follow_source().capabilities(),
-    }))
-}
-
-async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
-    // The same composition as the mainnet engine: this profile's own set,
-    // then the shared admin gauges (one definition — `Metrics::render`).
-    let mut out = ctx.venue_metrics.render();
-    out.push_str(&ctx.plane.metrics.render());
-    out
-}
-
 
 
 #[cfg(test)]

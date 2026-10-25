@@ -1,9 +1,8 @@
-//! Engine HTTP API: health, status, Prometheus metrics, and the admin surface
-//! (rewind / resume / pause / time / shadow / deal / epoch / probes) — the
-//! fork controls that belong to the mirror itself rather than to Anvil.
-//!
-//! The routes are wired here (axum binds [`Ctx`]); the admin *semantics* live
-//! in `mirror-devnet`'s admin surface, which both projects share.
+//! The mainnet engine's HTTP surface: the shared route table
+//! (`mirror_devnet::handlers`) plus this profile's own routes — `/admin/time`
+//! (T's clock offset) and the feed bridge. The admin *semantics* live in
+//! `mirror-devnet`'s admin surface; the shared handlers are one generic
+//! definition there.
 //!
 //! This module owns the HTTP mapping of the error taxonomy: request refusals
 //! (the devnet's `NoCursor` / `InvalidRewind`) are 4xx; a poisoned registry
@@ -20,38 +19,47 @@ use axum::{
     Json, Router,
 };
 use mirror_devnet::admin::TimeRequest;
+use mirror_devnet::engine::{Engine as _, SharedStatus};
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-/// `/status` — the engine's diagnostic report. A typed shape: the scripts and
-/// dashboards read it by field name, so a rename must be a compile error here,
-/// not a silent `null`.
+/// `/status` — the engine's diagnostic report: the shared fields
+/// (`SharedStatus`) flattened beside this profile's own. A typed shape: the
+/// scripts and dashboards read it by field name, so a rename must be a
+/// compile error here, not a silent `null`.
 #[derive(Debug, Serialize)]
-struct StatusResponse {
+pub struct StatusResponse {
+    #[serde(flatten)]
+    shared: SharedStatus,
     reth_head: u64,
     follow_head: u64,
     follow: &'static str,
-    head: u64,
-    /// The devnet chain's cursor (T-height; the shared field's meaning on both
-    /// engines; the plan's clock-labels rule).
-    cursor: Option<u64>,
     /// T's cursor by its profile name (the scripts' established spelling).
     cursor_t: Option<u64>,
     lag: u64,
-    halted: bool,
     watchlist: usize,
-    shadowed_slots: usize,
-    shadowed_accounts: usize,
-    /// The shadowed account list (not just counts): the devnet's own writes
-    /// are copy-on-write, so these accounts are expected to differ from
-    /// mainnet — parity checks (scenario probes) must skip them instead of
-    /// alarming.
-    shadowed: Vec<String>,
     time_offset_seconds: u64,
-    /// What the source declares it can serve (the follow source's audited
-    /// capability matrix: native BALs, traces, historical state, system txs).
-    capabilities: mirror_devnet::source::Capabilities,
+}
+
+/// The document's gathering: the shared fields from the shell, the rest from
+/// this engine's own endpoints. A read that cannot answer degrades to 0 —
+/// `/status` is a diagnostic, not a fact source.
+pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
+    let shared =
+        SharedStatus::gather(ctx.anvil_t.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
+    let reth_head = ctx.reth.block_number().await.unwrap_or(0);
+    let follow = ctx.follow_head().await.ok().flatten().unwrap_or(0);
+    Ok(StatusResponse {
+        reth_head,
+        follow_head: follow,
+        follow: ctx.follow_tag(),
+        cursor_t: shared.cursor,
+        lag: follow.saturating_sub(shared.cursor.unwrap_or(follow)),
+        watchlist: ctx.mirror.scope().watch().accounts.len(),
+        time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
+        shared,
+    })
 }
 
 /// `/admin/time` — the devnet clock offset is set (and persisted).
@@ -94,9 +102,10 @@ struct FeedState {
     bridge: Option<Arc<FeedBridge>>,
 }
 
-/// The engine's control surface: the exact routes this process serves (the
-/// table the control-plane docs list; the mirror's twin keeps the same shape).
-fn app(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Router {
+/// The engine's control surface: the shared route table plus this profile's
+/// own routes (the exact routes this process serves — the table the
+/// control-plane docs list).
+pub(crate) fn app(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Router {
     let feed_routes = Router::new()
         .route("/admin/feed", get(feed_list))
         .route("/admin/feed/pause", post(feed_pause))
@@ -106,83 +115,10 @@ fn app(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Router {
             ctx: ctx.clone(),
             bridge,
         });
-    Router::new()
-        .route("/healthz", get(healthz))
-        .route("/livez", get(livez))
-        .route("/status", get(status))
-        .route("/metrics", get(metrics))
-        .route("/events", get(admin_events))
-        .route("/admin/rewind", post(admin_rewind))
-        .route("/admin/resume", post(admin_resume))
-        .route("/admin/pause", post(admin_pause))
+    mirror_devnet::handlers::shared_routes::<Ctx>()
         .route("/admin/time", post(admin_time))
-        .route("/admin/shadow", post(admin_shadow))
-        .route("/admin/deal", post(admin_deal))
-        .route("/admin/epoch", post(admin_epoch))
-        .route("/admin/probes", post(admin_probes))
         .with_state(ctx)
         .merge(feed_routes)
-}
-
-/// Bind the configured address and serve the control surface until the
-/// process is torn down.
-pub async fn serve(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Result<()> {
-    let addr = format!("{}:{}", ctx.engine.http.addr, ctx.engine.http.port);
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|source| Error::Bind {
-            addr: addr.clone(),
-            source,
-        })?;
-    tracing::info!(addr, "engine http api listening");
-    axum::serve(listener, app(ctx, bridge))
-        .await
-        .map_err(|source| Error::Io {
-            what: "http api",
-            path: addr.into(),
-            source,
-        })?;
-    Ok(())
-}
-
-// The health and admin handlers both mirrors must keep byte-identical: one
-// macro, two invocations (crates/devnet/src/handlers.rs).
-mirror_devnet::mirror_handlers!(Ctx, crate::error::Error);
-
-async fn status(State(ctx): State<Arc<Ctx>>) -> Result<Json<StatusResponse>> {
-    // Head gauges: an endpoint that cannot answer degrades the report to 0,
-    // never fails it - /status is a diagnostic, not a fact source.
-    let reth_head = ctx.reth.block_number().await.unwrap_or(0);
-    let follow = ctx.follow_head().await.ok().flatten().unwrap_or(0);
-    let head = ctx.anvil_t.block_number().await.unwrap_or(0);
-    let ct = ctx.plane.state.cursor()?;
-    let shadow = ctx.plane.shadow.lock()?;
-    Ok(Json(StatusResponse {
-        reth_head,
-        follow_head: follow,
-        follow: ctx.follow_tag(),
-        head,
-        cursor: ct.as_ref().map(|c| c.block),
-        cursor_t: ct.as_ref().map(|c| c.block),
-        lag: follow.saturating_sub(ct.as_ref().map(|c| c.block).unwrap_or(follow)),
-        halted: ctx.plane.is_halted(),
-        watchlist: ctx.mirror.scope().watch().accounts.len(),
-        shadowed_slots: shadow.slot_count(),
-        shadowed_accounts: shadow.accounts.len(),
-        shadowed: shadow.shadowed_addresses(),
-        time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
-        capabilities: ctx.mirror.follow_source().capabilities(),
-    }))
-}
-
-async fn metrics(State(ctx): State<Arc<Ctx>>) -> String {
-    // The same composition as the venue engine: this profile's own set, then
-    // the shared admin gauges (one definition — `Metrics::render`), then the
-    // feed bridge's counters.
-    let mut out = ctx.mainnet_metrics.render();
-    out.push_str(&ctx.plane.metrics.render());
-    out.push_str(&ctx.feed_bridge_metrics.render());
-    out
 }
 
 async fn admin_time(

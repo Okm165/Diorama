@@ -137,7 +137,7 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
         anvil_v,
         watch,
     } = deps;
-    let pin = Arc::new(AtomicU64::new(0));
+    let pin = Arc::new(AtomicU64::new(crate::ctx::PIN_UNRESOLVED));
     let source: Arc<dyn Source> = Arc::new(VenueSource::new(source_rpc.clone(), pin.clone()));
     let follow: Arc<dyn Source> = Arc::new(RawSource::new(source_rpc, public_capabilities()));
     let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_v));

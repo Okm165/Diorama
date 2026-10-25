@@ -8,6 +8,7 @@ use crate::{driver, feed_bridge, http, selftest};
 use crate::ctx::Ctx;
 use clap::{Parser, Subcommand};
 use mirror_config::Instance;
+use mirror_devnet::engine::Engine as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -126,36 +127,19 @@ async fn run(config: PathBuf) -> Result<()> {
     );
 
     let tasks = spawn_loops(&ctx).await?;
-    mirror_config::boot::shutdown_signal().await;
-    tracing::info!("shutdown signal received");
-    for t in tasks {
-        t.abort();
-    }
+    mirror_devnet::engine::shutdown(tasks).await;
     Ok(())
 }
 
-/// The boot asserts, in order: the anvil answers (a coordinated restart —
-/// anvil, reth or lighthouse rolling — must not turn into CrashLoopBackOff),
-/// automine is off (T is engine-owned: transactions are batched and mined
-/// explicitly), it forks Ethereum mainnet (a wrong source — a testnet reth, a
-/// misdirected URL — would mirror the wrong chain silently: state, addresses
-/// and every measured fact follow from the id; the venue asserts V's identity
-/// the same way at boot), and the epoch pin is anchored before any writes
-/// exist (a fresh registry's epoch *is* the current fork base; without the
-/// record a later same-pin restart would be an unprovable epoch and the rule
-/// would have to fail closed, dropping the devnet's writes — the venue's
-/// boot-time reconcile anchors the same way).
+/// The boot asserts: the shared chain assert (the wait, the identity — a
+/// wrong source would mirror the wrong chain silently — and the automine
+/// discipline), then this profile's own — the epoch pin is anchored before
+/// any writes exist (a fresh registry's epoch *is* the current fork base;
+/// without the record a later same-pin restart would be an unprovable epoch
+/// and the rule would have to fail closed, dropping the devnet's writes).
 async fn boot_asserts(ctx: &Ctx) -> Result<()> {
-    ctx.anvil_t.wait_until_up("anvil-t", ANVIL_BOOT_TIMEOUT).await?;
-    ctx.anvil_t.anvil_set_automine(false).await?;
-    let got = ctx.anvil_t.chain_id().await?;
-    if got != MAINNET_CHAIN_ID {
-        return Err(Error::WrongChain {
-            anvil: "anvil-t",
-            got,
-            want: MAINNET_CHAIN_ID,
-        });
-    }
+    mirror_devnet::engine::assert_chain(ctx, "anvil-t", MAINNET_CHAIN_ID, ANVIL_BOOT_TIMEOUT)
+        .await?;
     let t_pin = ctx.anvil_t.anvil_node_info().await?.fork_config.fork_block_number;
     mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
     // The declared capabilities are audited once, against the live endpoint
@@ -190,11 +174,9 @@ async fn spawn_loops(ctx: &Arc<Ctx>) -> Result<Vec<tokio::task::JoinHandle<()>>>
         }
         false => None,
     };
-    let http_ctx = ctx.clone();
-    tasks.push(tokio::spawn(async move {
-        if let Err(e) = http::serve(http_ctx, bridge).await {
-            tracing::error!(error = %e, "http server exited");
-        }
-    }));
+    tasks.push(mirror_devnet::engine::spawn_http(
+        ctx,
+        http::app(ctx.clone(), bridge),
+    ));
     Ok(tasks)
 }

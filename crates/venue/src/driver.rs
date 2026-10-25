@@ -19,9 +19,9 @@
 //!   last composed source block and land the changed keys on V under the COW
 //!   filter — the venue's counterpart of the mainnet applier's parent stream.
 use crate::ctx::Ctx;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::reset::{read_canary, write_canary};
-use mirror_anvil::Rpc;
+use mirror_devnet::engine::Engine as _;
 use mirror_devnet::facts::{Fact, ResetWitness};
 use mirror_devnet::plane::Plane;
 use mirror_devnet::metrics::Registry as _;
@@ -36,6 +36,11 @@ use std::time::Duration;
 /// HyperEVM's chain id on mainnet (998 on testnet). A code fact.
 const VENUE_CHAIN_ID: u64 = 999;
 
+/// The boot wait (see `boot`): a fork-mode anvil comes up in seconds; the
+/// only normal delay is a coordinated restart, and a crash-loop is worse
+/// than a bounded wait.
+const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Boot: wait for V, assert the chain, reconcile the registry, run the at-pin
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
@@ -43,10 +48,7 @@ pub async fn boot(ctx: &Ctx) -> Result<()> {
     // 2 minutes: a fork-mode anvil comes up in seconds; a coordinated restart
     // (the init container re-resolving the pin, the fork source slow) is the
     // only normal delay — and a crash-loop is worse than a bounded wait.
-    ctx.anvil_v
-        .wait_until_up("anvil-v", Duration::from_secs(120))
-        .await?;
-    assert_venue_chain(&ctx.anvil_v).await?;
+    mirror_devnet::engine::assert_chain(ctx, "anvil-v", VENUE_CHAIN_ID, BOOT_TIMEOUT).await?;
     // The declared capabilities are audited once, against the live endpoint
     // (a declaration that disagrees is named here, never discovered mid-window).
     mirror_devnet::source::audit_capabilities(
@@ -83,7 +85,9 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
 /// succeeds).
 async fn recover_from_reset(ctx: &Ctx) {
     tracing::warn!("V was reset under the driver - reconciling (epoch rule)");
-    if let Err(e) = assert_venue_chain(&ctx.anvil_v).await {
+    if let Err(e) =
+        mirror_devnet::engine::assert_chain(ctx, "anvil-v", VENUE_CHAIN_ID, BOOT_TIMEOUT).await
+    {
         tracing::warn!(error = %e, "venue chain assert failed after a reset");
     }
     match reconcile(ctx).await {
@@ -182,7 +186,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     let walk = scan::scan_to(
         &ctx.plane,
         &ctx.anvil_v,
-        ctx.pin.load(Ordering::Relaxed),
+        crate::ctx::resolved_pin(&ctx.pin).unwrap_or(0),
         head,
         first,
     )
@@ -228,23 +232,6 @@ async fn mine_pending(ctx: &Ctx) -> Result<()> {
     ctx.anvil_v.anvil_mine(1).await?;
     ctx.venue_metrics.inc(&ctx.venue_metrics.mined_blocks_total);
     tracing::debug!(pending = %status.pending, "mined V's pending transactions");
-    Ok(())
-}
-
-/// Wait for V to answer (a coordinated restart must not become
-/// CrashLoopBackOff).
-/// V must be the venue chain with automine off. An anvil restart resets
-/// automine to its default (on) — measured — so the discipline is re-asserted
-/// on every boot and after every reset.
-async fn assert_venue_chain(v: &Rpc) -> Result<()> {
-    let got = v.chain_id().await?;
-    if got != VENUE_CHAIN_ID {
-        return Err(Error::WrongChain {
-            got,
-            want: VENUE_CHAIN_ID,
-        });
-    }
-    v.anvil_set_automine(false).await?;
     Ok(())
 }
 

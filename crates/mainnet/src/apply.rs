@@ -13,6 +13,7 @@ use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
 use mirror_anvil::{Key, Rpc, Write};
 use mirror_devnet::cow::FilterStats;
+use mirror_devnet::engine::Engine as _;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
 use mirror_devnet::metrics::Registry as _;
