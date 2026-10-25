@@ -616,7 +616,9 @@ fn expect_default_dex(dex: &Option<String>) -> Result<()> {
     if dex.as_deref().unwrap_or("").is_empty() {
         return Ok(());
     }
-    Err(Error::bad_request("the sim serves the first perp dex only (multi-dex is Phase 2)",))
+    Err(Error::bad_request(
+        "the sim serves the first perp dex only (multi-dex is deferred; see docs/INTEGRATION.md)",
+    ))
 }
 
 /// `activeAssetData`: the coin's mark, the user's leverage, and the sizes the

@@ -1,4 +1,4 @@
-//! The feed bridge (plan §7.1, Phase 0): the parent chain's live feed answers
+//! The feed bridge (plan §7.1): the parent chain's live feed answers
 //! → `updateAnswer` on the devnet's mock aggregators.
 //!
 //! Why it exists: daloc's harness periodically re-publishes its own mock

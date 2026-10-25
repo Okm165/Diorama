@@ -12,10 +12,12 @@
 //! restart does not lose a scenario.
 //!
 //! Time: the sim has its own clock (`wall + offset`, offset = 0 until
-//! `advance` scripts a jump). Funding accrues on that clock and liquidations
-//! are checked against current marks — the §14.8 evaluation runs on every
-//! account-scoped read and on the 1 Hz tick — so daloc's set-and-read tests
-//! see live funding/liquidation behavior without ever calling `advance`. The
+//! `advance` scripts a jump). Funding steps at the hour on that clock (the
+//! docs' interval: whole hourly payments, nothing between — `accrue_funding`)
+//! and liquidations are checked against current marks — the §14.8 evaluation
+//! runs on every account-scoped read and on the 1 Hz tick — so daloc's
+//! set-and-read tests see live liquidation behavior without ever calling
+//! `advance`, and script a funding step by crossing the hour. The
 //! wire's `time` field stays *wall* now: it is the read's freshness, which the
 //! client's ≤6 s staleness gate compares against its own clock.
 /// The artifact's name in errors and load messages: one home.
@@ -935,14 +937,26 @@ fn stamp_funding_baseline(account: &mut Account, clock: u64) {
     }
 }
 
-/// The sim tests' feed fixture: one market per triple with a funding ctx
-/// (`crate::wire::test_ctx`), fresh at `now_ms = 1`. The account tests share
-/// it through `super::*`.
+/// The sim tests' feed fixture: one market per triple with a rate-free ctx
+/// (`crate::wire::test_ctx`), stamped at `now_ms = 1`. The account tests
+/// share it through `super::*`.
 #[cfg(test)]
 pub(crate) fn feed_with(marks: &[(&str, &str, &str)]) -> MarketFeed {
     let feed = MarketFeed::memory(marks.iter().map(|(c, _, _)| c.to_string()).collect());
     for (coin, mark, oracle) in marks {
         feed.put_ctx(coin.to_string(), crate::wire::test_ctx(mark, oracle), 1);
+    }
+    feed
+}
+
+/// The same fixture with the published hourly rate on every coin: the
+/// funding tests opt in (see `test_ctx` for why the shared fixture is
+/// rate-free).
+#[cfg(test)]
+pub(crate) fn feed_with_funding(marks: &[(&str, &str, &str)]) -> MarketFeed {
+    let feed = feed_with(marks);
+    for (coin, mark, oracle) in marks {
+        feed.put_ctx(coin.to_string(), crate::wire::funding_ctx(mark, oracle), 1);
     }
     feed
 }
@@ -1144,7 +1158,7 @@ mod tests {
 
     #[test]
     fn advance_jumps_the_clock_and_accrues() {
-        let feed = feed_with(&[("BTC", "100", "100")]);
+        let feed = feed_with_funding(&[("BTC", "100", "100")]);
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         sim.set_account(

@@ -715,14 +715,14 @@ counterpart of `mainnet-closure-check`: the venue has no incoming parent diffs
 to close a scope over — its standing scope check is the at-pin probe set
 (`/admin/probes`, `venue_probe_*`), which the venue-drill and smoke exercise.
 
-There is also no unified "facade" service (plan §7 Phase 5): each mirror's
+There is also no unified "facade" service (plan §7): each mirror's
 scenario surface is its own — `/admin/*` on the two engines, `/control/*` on
 the simulator — and the Make targets parameterize by `INSTANCE`. A proxy would
 add a hop without adding a fact: the harness speaks each surface directly
 (§7.7), and the shared crates already make the two surfaces one vocabulary
 (`mirror_devnet::admin`, the same control shapes).
 
-## The feed bridge — measured behavior (Phase 0)
+## The feed bridge — measured behavior
 
 The bridge is the single price writer for the devnet's mock aggregators in
 mirror mode (the harness's periodic refresher is off, plan §17.2): it reads
@@ -778,7 +778,7 @@ the *same answer* as the live mainnet source, and its `updatedAt` was a **T
 block timestamp** (chain-native stamping, plan §17.2: the feeds are stamped in
 the devnet chain's own domain).
 
-## daloc's `deploy-contracts` against mirror T (Phase 0 acceptance)
+## daloc's `deploy-contracts` against mirror T (acceptance)
 
 Measured 2026-10-23: their `docker/scripts/deploy-contracts.sh` ran
 end-to-end against the scratch T (`ANVIL_RPC_URL` → T, `CONTRACTS_DIR`, the
@@ -1004,7 +1004,7 @@ verify against). Verdicts:
 | **SAME** (same modules) | A1, A2, A5, A8, A11, A13, A14, A15, A18, A19, A20 + the pins/epochs/journal/COW/automine decisions | `crates/anvil` + `crates/devnet`, exercised by `make venue-smoke` and the epoch drill (same-pin restore / new-pin epoch) |
 | **IMPOSSIBLE (permanent)** | A3, A4, A6, A7, A9, A12, A16, A17 + the mainnet guarantee (per-block BAL apply, sampled parity, the probes) | no replay exists to verify; the fork keeps the source's exact state and hashes at the pin |
 | **REFRAMED** | L9 freshness → the pin (chain) + the live public API (venue data); the T guarantee → at-pin parity | `venue_fork_pin`, probes-at-pin (skip+count when the pin ≠ source head — measured: the source ignores the block parameter) |
-| **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (Phase 2), bridge round-trip exactness | `crates/venue`; the identity is re-checked at the serve boundary |
+| **NEW (venue plane)** | sim invariants: the served identity (`venue_sim_identity_violations_total` must stay 0), funding cadence, liquidation determinism, book/mark ownership (I3), bridge round-trip exactness | `crates/venue`; the identity is re-checked at the serve boundary |
 
 Measured on the scratch stacks (2026-10-22) — facts an integration run can rely on:
 

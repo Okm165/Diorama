@@ -143,7 +143,7 @@ pub struct EngineSection {
 }
 
 /// `[services.engine.feed_bridge]`: live parent-chain feed answers →
-/// `updateAnswer` on the devnet's mock aggregators (plan §7.1, Phase 0).
+/// `updateAnswer` on the devnet's mock aggregators (plan §7.1).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedBridgeSection {

@@ -359,13 +359,14 @@ pub(crate) struct AssetCtx {
     pub day_base_vlm: Decimal,
 }
 
-/// The tests' `AssetCtx` fixture (funding ⅛e-7, marks/oracle from the args):
+/// The tests' `AssetCtx` fixture (marks/oracle from the args; rate-free):
 /// one definition — the feed tests, the sim tests and the account tests all
-/// build on it.
+/// build on it. Rate-free so the lane and waterfall tests' exact balances
+/// stay untouched by funding; the funding tests opt in with `funding_ctx`.
 #[cfg(test)]
 pub(crate) fn test_ctx(mark: &str, oracle: &str) -> AssetCtx {
     AssetCtx {
-        funding: Decimal::new(125, 7),
+        funding: Decimal::ZERO,
         open_interest: Decimal::ZERO,
         prev_day_px: Decimal::ZERO,
         day_ntl_vlm: Decimal::ZERO,
@@ -378,12 +379,21 @@ pub(crate) fn test_ctx(mark: &str, oracle: &str) -> AssetCtx {
     }
 }
 
+/// The same fixture carrying the published hourly rate (0.00125 %/h — the
+/// venue's `activeAssetCtx.funding`): the funding tests' ctx.
+#[cfg(test)]
+pub(crate) fn funding_ctx(mark: &str, oracle: &str) -> AssetCtx {
+    let mut ctx = test_ctx(mark, oracle);
+    ctx.funding = Decimal::new(125, 7);
+    ctx
+}
+
 /// `metaAndAssetCtxs`: a `[meta, ctxs]` tuple on the wire.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct MetaAndAssetCtxs(pub Meta, pub Vec<AssetCtx>);
 
 /// `perpDexs`: `[null, …]` (the first dex is null). The sim serves the first
-/// dex only until the multi-dex mechanics land (Phase 2).
+/// dex only (multi-dex is deferred — docs/INTEGRATION.md).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PerpDex {

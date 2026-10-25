@@ -2,7 +2,7 @@
 # End-to-end scenario test: is the mirror really a live, exact mainnet mirror,
 # and is T really a usable devnet with copy-on-write semantics?
 #
-# Phases
+# Stages
 #   1. self-containment   reth has no peers, the top-up gap is 0, blobs are local
 #   2. live parity        heads agree; the 11 state probes match reth on T
 #   3. devnet workflow    fund, send, shadow, rewind, snapshot/revert on T

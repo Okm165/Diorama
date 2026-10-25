@@ -126,6 +126,6 @@ vanished-burn/keeper caveats.
 | Portfolio margin | §5 | the mode's cross-asset portfolio (the eligible set HYPE/BTC/USDC/USDT valued and margined together; the portfolio-wide `tokenToAvailableAfterMaintenance`): `setAbstraction`'s value 3 and the control patch refuse it by name and count the refusal — `unifiedAccount` is the modeled single balance (its live identity holds to the digit) |
 | TP/SL groupings | §5 | `normalTpsl`/`positionTpsl` are refused by name: the parent/child lifecycle (children placed iff the parent fully fills, or is partially filled then margin-canceled) and the position-linked resizing are not modeled; plain trigger orders (grouping `"na"`) cover the product's need |
 | User-stream reads and pushes | §5 | the venue's per-user subscriptions (`orderUpdates`, `userEvents`, `userFills`) and the history reads (`userFills`, `historicalOrders`, `userFunding`): the product reads fills through `orderStatus` and `openOrders` today (the flows the daloc simulation proves), and adding the push channel needs the docs' measured frame shapes — the sim's mutations would publish to a subscriber set instead of being polled |
-| Phase 4 lanes | §7.1 | the HIP-3 star venue on testnet; the real-data replay lane |
-| Phase 5 facade | §7.1 | one deal/crash/reset surface across both mirrors (each mirror's own admin works today) |
+| HIP-3 venue + replay lanes | §7.1 | the HIP-3 star venue on testnet; the real-data replay lane |
+| Unified facade | §7.1 | one deal/crash/reset surface across both mirrors (each mirror's own admin works today) |
 | `venue-closure` | §7.8 | the V-side closure audit (no BALs on HyperEVM; `make engine-symmetry` covers the shared verbs) |

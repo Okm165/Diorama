@@ -725,8 +725,9 @@ curl -s -X POST localhost:31091/control/crash -d '{"coin":"ETH","pct":"30"}'
 curl -s -X POST localhost:31091/control/crash -d '{"coin":"ETH"}'   # hand back
 ```
 
-The crash owns mark *and* oracle until handed back; a position below maintenance
-closes at the mark (v1). The L1 analog is the feed bridge: a scenario's write to
+The crash owns mark *and* oracle until handed back; below maintenance the
+waterfall runs (partial book closes, the backstop, ADL - `sim/waterfall.rs`).
+The L1 analog is the feed bridge: a scenario's write to
 a mock aggregator pauses that feed automatically; `POST .../admin/feed/resume`
 hands it back, and `GET .../admin/feed` shows confirmed/pending state. Locally
 the mocks are absent (daloc's fixture deploy installs them on the cluster), so

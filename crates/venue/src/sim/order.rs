@@ -1743,11 +1743,13 @@ mod tests {
     #[test]
     fn a_fill_settles_funding_and_restarts_since_change() {
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        // The shared fixture is rate-free (see `test_ctx`); this test is
+        // about funding, so its ctx carries the published hourly rate.
+        feed.put_ctx("ETH".into(), crate::wire::funding_ctx("101", "101"), crate::now_ms());
         let (sim, a) = funded_sim(&feed, "1000");
         sim.order(&feed, a, &ioc(true, "0.1")).unwrap();
-        // An hour passes (the fixture's ctx carries a nonzero funding rate),
-        // then a second fill: the pre-fill size pays the hour, and the change
-        // restarts since-change.
+        // An hour passes, then a second fill: the pre-fill size pays the
+        // hour, and the change restarts since-change.
         sim.advance(&feed, 3600, 1).unwrap();
         sim.order(&feed, a, &ioc(true, "0.1")).unwrap();
         let p = sim.account(a).unwrap().unwrap().positions.remove("ETH").unwrap();

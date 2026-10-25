@@ -96,7 +96,7 @@ ENG_PID=$!
 for _ in $(seq 1 40); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
 curl -sf "$HTTP/livez" >/dev/null || { bad "engine did not come up (see $DIR/engine.log)"; exit 1; }
 
-# Phase 1: the source moves; the follow must land the watched fields on V 1:1.
+# Stage 1: the source moves; the follow must land the watched fields on V 1:1.
 send "$SRC" "$WATCH" 0x000000000000000000000000000000000000dEaD 0xde0b6b3a7640000
 sleep 5
 if [ "$(bal "$SRC")" = "$(bal "$V")" ] && [ "$(nonce "$SRC")" = "$(nonce "$V")" ]; then
@@ -106,7 +106,7 @@ else
 fi
 base_v=$(bal "$V")
 
-# Phase 2: a devnet write on V, then another source move: COW must skip it.
+# Stage 2: a devnet write on V, then another source move: COW must skip it.
 send "$V" "$OTHER" "$WATCH" 0x4563918244f40000
 sleep 4
 expect=$(python3 -c "print($base_v + 5 * 10**18)")

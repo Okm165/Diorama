@@ -422,8 +422,9 @@ impl Bridge {
     }
 
     /// The `sendAsset` dex guard: this sim models the spot dex, so a perp-dex
-    /// move (plan §18.4's multi-dex Phase 2) is refused by name and counted —
-    /// never applied as a spot send. `true` when the action was refused.
+    /// move (multi-dex is deferred — docs/INTEGRATION.md) is refused by name
+    /// and counted — never applied as a spot send. `true` when the action was
+    /// refused.
     fn refuse_off_spot_send_asset(&self, caller: Address, source_dex: u32, destination_dex: u32) -> bool {
         if source_dex == corewriter::SPOT_DEX && destination_dex == corewriter::SPOT_DEX {
             return false;
@@ -433,7 +434,7 @@ impl Bridge {
             caller = %caller,
             source_dex,
             destination_dex,
-            "bridge: sendAsset outside the spot dex refused (multi-dex is Phase 2)"
+            "bridge: sendAsset outside the spot dex refused (multi-dex is deferred)"
         );
         true
     }

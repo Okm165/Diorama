@@ -1018,21 +1018,24 @@ unsigned with the side in `szi`, as the venue does). Seeding preserves
 `totalRawUsd` exactly (`balance = totalRawUsd + Σ szi·entryPx`), so the
 operator's recall amount round-trips byte-for-byte.
 
-Mechanics (v1): maintenance margin is ½ the initial margin of the tier the
-position's notional sits in; funding accrues **pro-rata** on the sim clock at
-the venue's hourly rate and the oracle price
-(`payment = −szi·oracle·rate·hours`), all-or-nothing per account (a
+Mechanics: maintenance margin is ½ the initial margin of the tier the
+position's notional sits in; funding pays on the hour on the sim clock at the
+venue's hourly rate and the oracle price
+(`payment = position_size · oracle_price · rate`, one whole hourly payment per
+boundary crossed — never a prorated share), all-or-nothing per account (a
 missing coin's context defers the whole account's accrual - a partially accrued
 account would silently lose the skipped positions' funding forever); below
-maintenance, positions close at the mark (the full waterfall - partial closes,
-the backstop, ADL - is Phase 2). An account with no positions is never "below
-maintenance": negative equity alone is a state the venue reports.
+maintenance the waterfall runs (`sim/waterfall.rs`: partial book closes at
+20 % per attempt above $100k, the backstop below ⅔ of the requirement, ADL on
+negative equity). An account with no positions is never "below maintenance":
+negative equity alone is a state the venue reports.
 
 **Self-advance** (the plan's §14.8 decision): the evaluation — funding
 accrued to now, liquidations checked against current marks, persist-if-dirty —
 runs on every account-scoped read *and* on a 1 Hz tick, so daloc's
-set-and-read tests see live funding and liquidation behavior without ever
-calling `advance`; `advance` stays for deterministic scripting (n blocks of
+set-and-read tests see live liquidation behavior without ever calling
+`advance` (funding steps at the hour — script the crossing with `advance`);
+`advance` stays for deterministic scripting (n blocks of
 the same evaluation, clock included). The sim has its own clock (wall + offset,
 offset 0 until `advance` scripts a jump); the wire's `time` field is the
 **served clock** — `max(wall, the sim clock, V's head timestamp)`. The bridge
@@ -1198,7 +1201,8 @@ account); a trace fault degrades to top-level txs only and is counted
 (`venue_bridge_trace_faults_total`) - internal calls are missed that block,
 never silently dropped. Applied to the sim: USD-class transfer, spot send,
 sendAsset (spot→spot — a perp-dex `sendAsset`, a multi-dex move, is refused by
-name, Phase 2), API-wallet registration, abstraction mode;
+name — multi-dex is deferred: `docs/INTEGRATION.md`), API-wallet
+registration, abstraction mode;
 insufficient-balance refusals are counted, not retried. The CoreWriter limit
 order (id 1) fills through the **same lane** as `/exchange` and
 `/control/order`: prices and sizes arrive as 10^8 × the human value and the
@@ -1234,7 +1238,7 @@ does not lose boundary activity mined meanwhile.
 | `venue_bridge_trace_faults_total` | blocks whose callTracer failed (internal calls unseen that block) |
 | `venue_bridge_actions_total{id}` | decoded CoreWriter actions by id |
 
-## The feed bridge (Phase 0)
+## The feed bridge
 
 `crates/mainnet/src/feed_bridge.rs` - daloc's harness periodically re-publishes
 its own mock aggregator answers; in mirror mode **the bridge is the single price
