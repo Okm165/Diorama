@@ -25,13 +25,16 @@ symmetry sweeps — regenerate the readings with
 
 ## The trees
 
+In the trees, **bold** marks a file name both sides carry (the pairs);
+the rest of each row is the profile's own logic, named for its mechanism.
+
 | `crates/mainnet/src/` | `crates/venue/src/` | role |
 |---|---|---|
 | `lib.rs` | `lib.rs` | the crate doc, the mod list, the public types' compile-time pin |
 | `service.rs` | `service.rs` | the service entry: CLI (`run`/`selftest`[`/rewind`]), the boot call, the loop spawner (the venue's carries the simulator's entry too) |
 | `ctx.rs` | `ctx.rs` | `Ctx` (the profile's clients + sections + the shared `Plane`) and its `impl Engine` |
 | `driver.rs` | `driver.rs` | `boot` (wait, assert the chain, anchor/reconcile, audit capabilities) and the loops |
-| `apply/` (mod, prepend, parity) | `follow/` (mod, parity, audit) | the per-unit step: compose → COW → land → measure — the same parts on both sides (the step, the measurement, one distinct concern: the mainnet's devnet prepend / the venue's uncovered-log trail) |
+| `apply/` (**mod**, prepend, **parity**) | `follow/` (**mod**, **parity**, audit) | the per-unit step: compose → COW → land → measure — the same parts on both sides (the step, the measurement, one distinct concern: the mainnet's devnet prepend / the venue's uncovered-log trail) |
 | `error.rs` | `error.rs` | the profile's error vocabulary (the shared devnet/anvil boundaries composed in) |
 | `http.rs` | `http.rs` | the shared route table + the profile's own routes (`/admin/time`; the venue's simulator API is `api/`) |
 | `metrics.rs` | `metrics.rs` | the profile's metric set (rendered beside the shared gauges) |
@@ -39,7 +42,7 @@ symmetry sweeps — regenerate the readings with
 | `reset.rs` | `reset.rs` | the profile's `ResetDetector` (cursor hash / pin canary) |
 | `selftest.rs` | `selftest.rs` | the scratch-stack selftest (`Targets` + `run`) |
 | `source.rs` | `source.rs` | the profile's source facts: the `Source` impl (`RethSource`) + the `reth`/`target` builders / the `DECLARED` capabilities + the `pinned`/`follow`/`target` builders (the shared `target` is the map's paired row); the pin-exact read shape is the spine's `PinnedSource` |
-| `feed/` (mod, chainlink, http, metrics, policy) | `feed/` (mod, budget, metrics, rest, ws) | the market/price plane: the Chainlink feed bridge (the parent's answers → T's mock aggregators) / the HL market feed (REST + WS + budget) into the simulator |
+| `feed/` (**mod**, chainlink, http, **metrics**, policy) | `feed/` (**mod**, budget, **metrics**, rest, ws) | the market/price plane: the Chainlink feed bridge (the parent's answers → T's mock aggregators) / the HL market feed (REST + WS + budget) into the simulator |
 | `source_sync/` (mod, beacon, engine_api) | `bridge/` (mod, corewriter, metrics, system) | mainnet-only transports (CL + engine API, EIP-8379 top-up) / venue-only Core↔EVM bridge |
 | — | `api/` (mod, control, exchange, info, ws) | the simulator's served API (info 8090 / control 8091) |
 | — | `sim/` (mod, account, funding, metrics, order, seed, tick, validate, waterfall) | the simulator's model |
