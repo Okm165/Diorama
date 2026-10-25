@@ -101,13 +101,13 @@ every reading below was acted on or judged:
 
 | reading | outcome |
 |---|---|
-| scope (`fn` ≤ 60 lines / depth ≤ 5, struct ≤ 20 fields, enum ≤ 25 variants) | the largest production fn is `apply::step` (50 lines, a deliberate linear sequence); depth ≤ 4 |
+| scope (`fn` ≤ 60 lines / depth ≤ 5, struct ≤ 20 fields, enum ≤ 25 variants, `registry!` ≤ 40 series) | the largest production fn is `apply::step` (50 lines, a deliberate linear sequence); depth ≤ 4; the macro-generated sets are read by the tool since this pass (`VenueMetrics` 26, `MainnetMetrics` 22, `Metrics` 3) — the one shape `syn` cannot see from the item walk |
 | dead functions / dead members | none (the AST and the text agree) |
-| duplicates | only deliberate twins (the two `impl Engine` accessors, `healthz`/`livez`, the two reset detectors' constructors, the per-profile error helpers) |
+| duplicates | only deliberate twins (the two `run`s and the `EngineService` hooks — the symmetrized spine — the `impl Engine` accessors, the reset detectors' constructors, the per-profile error helpers); `healthz`/`livez` is the tool's one false positive (one is pause-aware, one is not — the bodies differ) |
 | near-duplicates / similar records | none after the pass; the `FrontendOpenOrder`/`StatusOrderInner` overlap is the API's own two shapes — the *mapping* is now one function (`frontend_row`), the shapes stay exact |
-| reuse (shared op sequences) | the one real extraction the tool saw: the cursor advance (`3× … cursor_from → set_cursor`) became `mirror_devnet::state::advance_cursor`, used by the applier, the venue scan and the admin's reset; the rest are axum's router idiom. By inspection: the poll cadence's 200 ms floor became `LoopsSection::poll()` (three drivers) and the config's section pairs became `take_pair` (five sites). Judged: the feed's `mark`/`oracle`/`funding` stay three 4-line readers (their override sources differ; a helper would need a closure pair per site) |
+| reuse (shared op sequences) | the one real extraction the tool saw: the cursor advance (`3× … cursor_from → set_cursor`) became `mirror_devnet::state::advance_cursor`, used by the applier, the venue scan and the admin's reset; the rest are axum's router idiom. By inspection: the poll cadence's 200 ms floor became `LoopsSection::poll()` (three drivers) and the config's section pairs became `take_pair` (five sites). Judged: the feed's `mark`/`oracle`/`funding` stay three 4-line readers (their override sources differ; a helper would need a closure pair per site). Second pass: `store::ensure_dir` (three stores), `wire::decimal_or_refuse` (three order fields), `Sim::mutate_account` (three account verbs) extracted; `record_window_metrics` narrowed |
 | dispersion | `Sim` spans four files — the domain folder's pattern (one impl block per concern) |
-| narrow context | none: every `Ctx`-taking function touches ≥ 2 fields or passes the context on |
+| narrow context | `record_window_metrics` was narrowed to the metrics it writes; `parity_step` keeps `&Ctx` (the mainnet's lens takes `&Ctx` too — the pair's shape wins) |
 | plumbing | judged: pure policy/formatting helpers (`step`, `push_metric`, `scan_to`) keep positional parameters — a parameter object would obscure them |
 | the `Engine` accessors + the reset detectors' `new` | judged: the accessor hooks are the trait's required *data* (fields, not behavior — a default cannot read a field), and the detectors' single-field constructors are Rust's newtype idiom, not shared behavior; a shared base type would add indirection without removing a divergence |
 | the test-only `is_normal` helper | judged: one line per crate's test module; a spine helper would ship test scaffolding in the public API |
@@ -133,6 +133,9 @@ family by type family:
 | the beacon/engine wire | `alloy-rpc-types-beacon`/`-engine` | **imported** |
 | ABI encode/decode | `alloy-sol-types` | **imported** |
 | ISO-8601 timestamps (the Iris API) | `chrono` | **imported** this wave: a hand-rolled civil-from-days became `DateTime::from_timestamp_millis` (the tests pin the identical output) |
+| the KZG versioned hash | `alloy-eips::eip4844::kzg_to_versioned_hash` | **imported** this wave: the local wrapper keeps its `&Bytes48` signature (stronger than the external's `&[u8]`), the `sha2` dependency retired |
+| `0x`-prefixed hex | const-hex's `encode_prefixed` | **imported** this wave (three CCTP sites); `decode_hex`'s redundant prefix trim dropped (const-hex strips it itself) |
+| `pow10` | `rust_decimal::Decimal::from_scientific` | **imported** this wave: the same `Option` at the scale cap, pinned by a test |
 | money | `rust_decimal` | **imported** (f64 is not a money type) |
 | HTTP/WS/JSON/CLI/runtime | `axum`, `tokio-tungstenite`, `serde`, `clap`, `tokio`, `reqwest` | **imported** |
 | the write/read model (`Write`, `Key`, `Capabilities`) | — | ours: no crate models anvil's cheatcode surface; the enums are narrower than any general diff type |

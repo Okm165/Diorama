@@ -25,6 +25,10 @@ const MAX_LINES: usize = 60;
 const MAX_DEPTH: usize = 5;
 const MAX_FIELDS: usize = 20;
 const MAX_VARIANTS: usize = 25;
+/// The `registry!` sets' budget: the macro's generated structs are flat
+/// declaration lists (no branches to audit), but a set is still a scope —
+/// this bound is well past any measured profile (venue 26, mainnet 22).
+const MAX_GENERATED: usize = 40;
 /// How many offenders each report section lists.
 const REPORT_TOP: usize = 12;
 /// The reuse analysis's window (consecutive operations), longest first — a
@@ -50,6 +54,16 @@ struct Sites {
     divisions: Vec<String>,
     casts: Vec<String>,
     literals: Vec<String>,
+}
+
+/// One `registry!` set: the metric struct the macro generates. The item walk
+/// sees the invocation, never its expansion — the generated struct's shape is
+/// counted here, the one reading syn cannot make itself.
+struct RegistrySet {
+    file: String,
+    name: String,
+    fields: usize,
+    computed: usize,
 }
 
 /// One production item's shape.
@@ -150,15 +164,17 @@ fn main() {
     let mut items = Vec::new();
     let mut fields: FieldAccesses = HashMap::new();
     let mut uses = MemberUses::default();
+    let mut registries = Vec::new();
     let mut corpus = Vec::new();
     for file in &files {
-        parse_into(file, &mut items, &mut fields, &mut uses);
+        parse_into(file, &mut items, &mut fields, &mut uses, &mut registries);
         if let Ok(text) = std::fs::read_to_string(file) {
             corpus.push(text);
         }
     }
     report(&items, &fields, &corpus, &uses);
-    std::process::exit(gate(&items));
+    generated_records(&registries);
+    std::process::exit(gate(&items, &registries));
 }
 
 /// The file's production items and the `self.field` accesses its impl blocks
@@ -168,6 +184,7 @@ fn parse_into(
     items: &mut Vec<Item>,
     fields: &mut FieldAccesses,
     uses: &mut MemberUses,
+    registries: &mut Vec<RegistrySet>,
 ) {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -186,6 +203,7 @@ fn parse_into(
     let file = path.to_string_lossy().to_string();
     walk(&file, &parsed.items, false, items);
     walk_fields(&file, &parsed.items, false, fields);
+    registry_sets(&file, &parsed.items, registries);
     uses.visit_file(&parsed);
 }
 
@@ -1251,7 +1269,98 @@ fn count(prod: &[&Item], kind: &str) -> usize {
 
 /// The gate: every production item inside its threshold; violations are
 /// named (file, item, metric, limit) and the exit code is the verdict.
-fn gate(items: &[Item]) -> i32 {
+/// The `registry!` invocations' generated sets, from the macro's tokens
+/// (`pub struct $name { $kind $field = $series, $help; }` then an optional
+/// `computed { $kind $series, $help, $value; }`).
+fn registry_sets(file: &str, items: &[syn::Item], out: &mut Vec<RegistrySet>) {
+    for item in items {
+        let syn::Item::Macro(m) = item else { continue };
+        let registry = m
+            .mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "registry");
+        if !registry {
+            continue;
+        }
+        let tokens: Vec<proc_macro2::TokenTree> = m.mac.tokens.clone().into_iter().collect();
+        let mut name = String::new();
+        let mut fields = 0;
+        let mut computed = 0;
+        let mut i = 0;
+        while i < tokens.len() {
+            match &tokens[i] {
+                proc_macro2::TokenTree::Ident(id) if *id == "struct" => {
+                    if let Some(proc_macro2::TokenTree::Ident(n)) = tokens.get(i + 1) {
+                        name = n.to_string();
+                    }
+                    if let Some(proc_macro2::TokenTree::Group(g)) = tokens.get(i + 2) {
+                        fields = count_declared(&g.stream());
+                    }
+                    i += 3;
+                }
+                proc_macro2::TokenTree::Ident(id) if *id == "computed" => {
+                    if let Some(proc_macro2::TokenTree::Group(g)) = tokens.get(i + 1) {
+                        computed = count_computed(&g.stream());
+                    }
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+        }
+        out.push(RegistrySet {
+            file: file.to_string(),
+            name,
+            fields,
+            computed,
+        });
+    }
+}
+
+/// The `$kind $field = $series, $help;` triples in a generated struct body.
+fn count_declared(stream: &proc_macro2::TokenStream) -> usize {
+    let tokens: Vec<proc_macro2::TokenTree> = stream.clone().into_iter().collect();
+    tokens
+        .windows(3)
+        .filter(|w| {
+            matches!(&w[0], proc_macro2::TokenTree::Ident(k) if k == "gauge" || k == "counter")
+                && matches!(&w[1], proc_macro2::TokenTree::Ident(_))
+                && matches!(&w[2], proc_macro2::TokenTree::Punct(p) if p.as_char() == '=')
+        })
+        .count()
+}
+
+/// The `$kind $series, $help, $value;` entries in a `computed` block.
+fn count_computed(stream: &proc_macro2::TokenStream) -> usize {
+    let tokens: Vec<proc_macro2::TokenTree> = stream.clone().into_iter().collect();
+    tokens
+        .windows(2)
+        .filter(|w| {
+            matches!(&w[0], proc_macro2::TokenTree::Ident(k) if k == "gauge" || k == "counter")
+                && matches!(&w[1], proc_macro2::TokenTree::Literal(_))
+        })
+        .count()
+}
+
+/// The macro-generated metric sets, printed beside the item shapes (the gate
+/// bounds them; the item walk cannot see them).
+fn generated_records(sets: &[RegistrySet]) {
+    if sets.is_empty() {
+        return;
+    }
+    println!("\ngenerated records: registry! metric sets (macro-generated; the item walk sees the macro):");
+    let mut rows: Vec<&RegistrySet> = sets.iter().collect();
+    rows.sort_by_key(|s| std::cmp::Reverse(s.fields));
+    for s in rows {
+        println!(
+            "  {} fields, {} computed  {} ({})",
+            s.fields, s.computed, s.name, s.file
+        );
+    }
+}
+
+fn gate(items: &[Item], registries: &[RegistrySet]) -> i32 {
     let mut bad = 0;
     for item in items.iter().filter(|i| !i.is_test()) {
         if let Some((metric, limit)) = item.violation() {
@@ -1265,10 +1374,20 @@ fn gate(items: &[Item]) -> i32 {
             bad = 1;
         }
     }
+    for set in registries {
+        if set.fields > MAX_GENERATED {
+            println!(
+                "VIOLATION: {}:{} is {} declared series (limit {MAX_GENERATED})",
+                set.file, set.name, set.fields
+            );
+            bad = 1;
+        }
+    }
     if bad == 0 {
         println!(
             "\nast-scope: OK (fn <= {MAX_LINES} lines / depth <= {MAX_DEPTH}, \
-             struct <= {MAX_FIELDS} fields, enum <= {MAX_VARIANTS} variants)"
+             struct <= {MAX_FIELDS} fields, enum <= {MAX_VARIANTS} variants, \
+             registry! <= {MAX_GENERATED} series)"
         );
     }
     bad
