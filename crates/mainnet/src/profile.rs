@@ -123,4 +123,45 @@ mod tests {
         assert_eq!(p.prepend_rounds, Some(3));
         assert_eq!(p.gap, Some(32));
     }
+
+    struct NoReset;
+
+    impl ResetDetector for NoReset {
+        fn detect<'a>(
+            &'a self,
+            _target: &'a mirror_anvil::Rpc,
+        ) -> futures_util::future::BoxFuture<'a, mirror_devnet::Result<mirror_devnet::spine::ResetSignal>>
+        {
+            Box::pin(async { Ok(mirror_devnet::spine::ResetSignal::Steady) })
+        }
+    }
+
+    /// The bundle's own divergences, pinned: the label, the journal scope
+    /// (T's parent before-values — the rewind's semantics), and the watch
+    /// scope. The engine section is the deployed instance's, so a config
+    /// drift fails here too (the venue's test pins its column the same way).
+    #[test]
+    fn the_bundle_pins_the_mainnet_divergences() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/instances/mainnet-mirror/instance.toml"
+        ));
+        let (mut inst, _) = mirror_config::Instance::inspect(path).unwrap();
+        let (_, engine) = inst.take_mainnet().unwrap();
+        let rpc = Arc::new(
+            mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
+                .unwrap(),
+        );
+        let source: Arc<dyn Source> = Arc::new(RawSource::target(rpc));
+        let watched = alloy_primitives::Address::repeat_byte(0xaa);
+        let scope =
+            Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
+        let mirror = bundle(&engine, Arc::clone(&source), Arc::new(NoReset), scope);
+        assert_eq!(mirror.label(), "t");
+        assert_eq!(
+            mirror.journal_scope(),
+            mirror_devnet::engine::JournalScope::ParentBeforeValues
+        );
+        assert!(mirror.scope().watch().accounts.contains(&watched));
+    }
 }

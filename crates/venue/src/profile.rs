@@ -124,4 +124,56 @@ mod tests {
         assert_eq!(p.prepend_rounds, None);
         assert_eq!(p.gap, Some(32));
     }
+
+    struct NoReset;
+
+    impl ResetDetector for NoReset {
+        fn detect<'a>(
+            &'a self,
+            _target: &'a mirror_anvil::Rpc,
+        ) -> futures_util::future::BoxFuture<'a, mirror_devnet::Result<mirror_devnet::spine::ResetSignal>>
+        {
+            Box::pin(async { Ok(mirror_devnet::spine::ResetSignal::Steady) })
+        }
+    }
+
+    /// The bundle's own divergences, pinned: the label, the journal scope
+    /// (V's *own* writes — the rewind's semantics), and the two-source split
+    /// (the truth source is the pin-guarded one, the follow reads raw). The
+    /// engine section is the deployed instance's (the mainnet's test pins its
+    /// column the same way).
+    #[test]
+    fn the_bundle_pins_the_venue_divergences() {
+        let path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/instances/venue-mirror/instance.toml"
+        ));
+        let (mut inst, _) = mirror_config::Instance::inspect(path).unwrap();
+        let (_, engine) = inst.take_venue().unwrap();
+        let rpc = Arc::new(
+            mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
+                .unwrap(),
+        );
+        let source: Arc<dyn Source> = crate::source::pinned(
+            rpc.clone(),
+            Arc::new(std::sync::atomic::AtomicU64::new(
+                mirror_devnet::pin::PIN_UNRESOLVED,
+            )),
+        );
+        let follow: Arc<dyn Source> = crate::source::follow(rpc);
+        let watched = alloy_primitives::Address::repeat_byte(0xaa);
+        let scope =
+            Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
+        let mirror = bundle(&engine, source, follow, Arc::new(NoReset), scope);
+        assert_eq!(mirror.label(), "v");
+        assert_eq!(
+            mirror.journal_scope(),
+            mirror_devnet::engine::JournalScope::OwnWrites
+        );
+        assert!(
+            !Arc::ptr_eq(mirror.source(), mirror.follow_source()),
+            "the truth and follow sources are distinct objects"
+        );
+        assert!(mirror.scope().watch().accounts.contains(&watched));
+    }
 }
