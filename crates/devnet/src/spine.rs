@@ -21,6 +21,17 @@ use futures_util::future::BoxFuture;
 use mirror_anvil::Rpc;
 use std::sync::Arc;
 
+/// What a profile's `build` needs (the context assembles it): the shared
+/// state handle, the source and target endpoints, the watch set. The field
+/// names are the roles, not the chains — each profile passes its own handles
+/// (reth / the HL public API; T / V).
+pub struct ProfileDeps {
+    pub state: crate::shared::Shared<crate::state::StateFile>,
+    pub source_rpc: Arc<Rpc>,
+    pub target_rpc: Arc<Rpc>,
+    pub watch: std::collections::HashSet<alloy_primitives::Address>,
+}
+
 /// One mirror's divergence bundle — the single object the engines read
 /// everything profile-specific through. The implementations live in the
 /// mirror folders; this crate never names one.

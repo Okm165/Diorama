@@ -21,15 +21,12 @@
 //! the two mirrors differ in *data* (source, scope), not in algorithm.
 use mirror_config::{EngineSection, LoopsSection};
 use mirror_devnet::cow::Scope;
-use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
 use crate::reset::CursorHash;
 use mirror_devnet::engine::JournalScope;
 use mirror_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
-use mirror_devnet::state::StateFile;
-use std::collections::HashSet;
 use std::sync::Arc;
 
 /// The mainnet mirror's bundle: reth as the truth (one object serves both
@@ -82,29 +79,23 @@ pub struct Wiring {
     pub target: Arc<dyn Source>,
 }
 
-/// The wiring's inputs — the venue profile's `Deps`' twin: one struct, not
-/// five positional arguments (the plumbing reading's finding; the two
-/// profiles then read the same way).
-pub struct Deps {
-    pub state: Shared<StateFile>,
-    pub reth: Arc<mirror_anvil::Rpc>,
-    pub anvil_t: Arc<mirror_anvil::Rpc>,
-    pub watch: HashSet<alloy_primitives::Address>,
-}
+/// The wiring's inputs: the spine's one `ProfileDeps` (the venue profile's
+/// `Deps` is the same struct — the roles, not the chains, name the fields).
+pub use mirror_devnet::spine::ProfileDeps as Deps;
 
 pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let Deps {
         state,
-        reth,
-        anvil_t,
+        source_rpc,
+        target_rpc,
         watch,
     } = deps;
-    let source: Arc<dyn Source> = Arc::new(crate::source::RethSource::new(reth));
+    let source: Arc<dyn Source> = Arc::new(crate::source::RethSource::new(source_rpc));
     let reset: Arc<dyn ResetDetector> = Arc::new(CursorHash::new(state));
     // The mainnet watches whole accounts: the BAL enumerates every changed
     // slot, so no closures are needed (the scope's slot set stays empty).
     let scope = Scope::from_config(watch, &engine.closures);
-    let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_t));
+    let target: Arc<dyn Source> = Arc::new(RawSource::target(target_rpc));
     Wiring {
         mirror: bundle(engine, source, reset, scope),
         target,

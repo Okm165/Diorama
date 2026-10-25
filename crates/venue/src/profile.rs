@@ -24,14 +24,11 @@
 use crate::reset::PinCanary;
 use mirror_config::{EngineSection, LoopsSection};
 use mirror_devnet::cow::Scope;
-use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
 use mirror_devnet::engine::JournalScope;
 use mirror_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
-use mirror_devnet::state::StateFile;
-use mirror_anvil::Rpc;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -84,25 +81,22 @@ pub struct Wiring {
     pub target: Arc<dyn Source>,
 }
 
-/// What the wiring needs (the context assembles it; `build` consumes it).
-pub struct Deps {
-    pub state: Shared<StateFile>,
-    pub source_rpc: Arc<Rpc>,
-    pub anvil_v: Arc<Rpc>,
-    pub watch: std::collections::HashSet<alloy_primitives::Address>,
-}
+/// What the wiring needs: the spine's one `ProfileDeps` (the mainnet
+/// profile's `Deps` is the same struct — the roles, not the chains, name the
+/// fields).
+pub use mirror_devnet::spine::ProfileDeps as Deps;
 
 pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let Deps {
         state,
         source_rpc,
-        anvil_v,
+        target_rpc,
         watch,
     } = deps;
     let pin = Arc::new(AtomicU64::new(mirror_devnet::pin::PIN_UNRESOLVED));
     let source: Arc<dyn Source> = crate::source::pinned(source_rpc.clone(), pin.clone());
     let follow: Arc<dyn Source> = crate::source::follow(source_rpc);
-    let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_v));
+    let target: Arc<dyn Source> = Arc::new(RawSource::target(target_rpc));
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
     let scope = Scope::from_config(watch, &engine.closures);
     let mirror = bundle(engine, source, follow, reset, scope);

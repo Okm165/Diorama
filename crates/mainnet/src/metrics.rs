@@ -4,7 +4,6 @@
 //! (`mirror_devnet::metrics::Metrics::render`) and the feed bridge's own set —
 //! the split keeps the shared crate's exposition to exactly what both
 //! profiles own (the venue's mirror of this file is `VenueMetrics`).
-use mirror_devnet::metrics::push_metric;
 use std::sync::atomic::Ordering;
 
 mirror_devnet::registry! {
@@ -46,18 +45,11 @@ mirror_devnet::registry! {
         /// is re-read from the source after the apply. Non-zero is a real finding.
         counter full_sweep_mismatches = "mirror_full_sweep_mismatches_total", "full-sweep parity mismatches (verifier.full_sweep)";
     }
-}
-
-/// The registry convention (`set`/`add`/`inc`) is the shared trait's; this
-/// type adds only its own exposition.
-impl mirror_devnet::metrics::Registry for MainnetMetrics {}
-
-impl MainnetMetrics {
-    pub fn render(&self) -> String {
-        let mut out = String::with_capacity(1024);
-        self.render_declared(&mut out);
-        push_metric(&mut out, mirror_devnet::metrics::GAUGE, "mirror_lag_blocks", "follow head - applied cursor", self.reth_follow_head.load(Ordering::Relaxed).saturating_sub(self.cursor.load(Ordering::Relaxed)));
-        out
+    computed {
+        gauge "mirror_lag_blocks", "follow head - applied cursor", |m: &MainnetMetrics| m
+            .reth_follow_head
+            .load(Ordering::Relaxed)
+            .saturating_sub(m.cursor.load(Ordering::Relaxed));
     }
 }
 

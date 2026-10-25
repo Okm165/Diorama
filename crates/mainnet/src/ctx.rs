@@ -69,8 +69,8 @@ impl Ctx {
             &engine,
             crate::profile::Deps {
                 state: plane.state.clone(),
-                reth: reth.clone(),
-                anvil_t: anvil_t.clone(),
+                source_rpc: reth.clone(),
+                target_rpc: anvil_t.clone(),
                 watch: cfg.watch_set(),
             },
         );

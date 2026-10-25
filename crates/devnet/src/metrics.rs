@@ -63,10 +63,12 @@ pub fn push_metric_line(out: &mut String, m: &MetricLine<'_>) {
 /// series.
 ///
 /// A pair may carry a unit divisor (`field = "series", "help" / 1000`), for a
-/// series the field stores in a finer unit. The generated `render_declared`
-/// writes the declared lines in declaration order; a registry with a computed
-/// series (the mainnet engine's `mirror_lag_blocks`, a difference of two
-/// fields) writes its own `render` beside it.
+/// series the field stores in a finer unit. The generated `render` writes the
+/// declared lines in declaration order, then the registry's computed series —
+/// the optional `computed { kind "series", "help", |m| expr; }` clause (the
+/// mainnet engine's `mirror_lag_blocks`, a difference of two fields) — and
+/// `impl Registry` comes with it: one definition of the convention, no
+/// hand-written render pairs.
 #[macro_export]
 macro_rules! registry {
     (
@@ -77,6 +79,11 @@ macro_rules! registry {
                 $kind:ident $field:ident = $series:literal, $help:literal $(/ $div:literal)?;
             )*
         }
+        $( computed {
+            $(
+                $ckind:ident $cseries:literal, $chelp:literal, $cvalue:expr;
+            )*
+        } )?
     ) => {
         $(#[$sattr])*
         #[derive(Default)]
@@ -100,7 +107,26 @@ macro_rules! registry {
                     );
                 )*
             }
+
+            /// The whole exposition: the declared series, then the computed
+            /// ones (the macro owns the order).
+            pub fn render(&self) -> String {
+                let mut out = String::with_capacity(1024);
+                self.render_declared(&mut out);
+                $($(
+                    $crate::metrics::push_metric(
+                        &mut out,
+                        stringify!($ckind),
+                        $cseries,
+                        $chelp,
+                        ($cvalue)(self),
+                    );
+                )*)?
+                out
+            }
         }
+
+        impl $crate::metrics::Registry for $name {}
     };
 }
 
@@ -139,19 +165,6 @@ pub trait Registry {
     fn record_scan(&self, walk: &crate::scan::ScanWalk, scanned: &AtomicU64, skipped_empty: &AtomicU64) {
         self.add(scanned, walk.walked);
         self.add(skipped_empty, walk.empty);
-    }
-}
-
-impl Registry for Metrics {}
-
-impl Metrics {
-    /// The shared admin gauges: the whole of this crate's exposition. Each
-    /// profile renders these beside its own set (the mainnet engine's
-    /// `MainnetMetrics`, the venue's `VenueMetrics`).
-    pub fn render(&self) -> String {
-        let mut out = String::with_capacity(256);
-        self.render_declared(&mut out);
-        out
     }
 }
 

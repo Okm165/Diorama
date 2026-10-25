@@ -69,18 +69,6 @@ mirror_devnet::registry! {
     }
 }
 
-/// The registry convention (`set`/`add`/`inc`) is the shared trait's; this
-/// type adds only its own exposition.
-impl mirror_devnet::metrics::Registry for VenueMetrics {}
-
-impl VenueMetrics {
-    pub fn render(&self) -> String {
-        let mut out = String::with_capacity(1024);
-        self.render_declared(&mut out);
-        out
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
