@@ -241,6 +241,25 @@ grep -q "deal_applied" "$DIR/events2.out" \
   && bad "the no-slot deal published deal_applied (it wrote nothing)" \
   || ok "the no-slot deal publishes no deal_applied (the fact is a state change)"
 
+# ---- stability: a SIGKILLed engine resumes from its state -----------------
+# The state files are written atomically (temp + rename), so a kill -9 leaves
+# no torn file: the restarted engine reads the same cursor and keeps the COW
+# state. The kill is the point — a graceful stop would not prove it.
+cursor_before=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
+kill -9 "$ENG_PID" 2>/dev/null || true
+sleep 1
+"$ENGINE" run --config "$DIR/instance.toml" >> "$DIR/engine.log" 2>&1 &
+ENG_PID=$!
+for _ in $(seq 1 40); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
+cursor_after=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
+[ "$cursor_after" -ge "$cursor_before" ] \
+  && ok "restart: the cursor resumed from the state file ($cursor_before -> $cursor_after)" \
+  || bad "restart: cursor went backwards ($cursor_before -> $cursor_after)"
+tb_after=$(rpc "$V" eth_call "[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231000000000000000000000000$(echo "$OTHER" | cut -c3-)\"},\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))')
+[ "$tb_after" = "100000000" ] \
+  && ok "restart: the devnet-owned deal survived (COW mark intact, $tb_after)" \
+  || bad "restart: dealt balance $tb_after != 100000000"
+
 # ---- the epoch rule (the mainnet script's section, V's own facts) ----------
 # A one-call re-pin moves V's base: the driver detects the reset and the
 # epoch rule runs — the events carry both facts, the counter moves.

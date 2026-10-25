@@ -266,6 +266,23 @@ curl -s -X POST "$HTTP/admin/resume" -H 'content-type: application/json' -d '{}'
 rc=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HTTP/admin/rewind" -H 'content-type: application/json' -d '{"blocks":9999999}')
 [ "$rc" = "400" ] && ok "/admin/rewind beyond ring: 400 (the named refusal)" || bad "/admin/rewind beyond ring: $rc"
 
+# ---- stability: a SIGKILLed engine resumes from its state -----------------
+# The venue script's stanza (the same atomic state files, the mainnet's
+# cursor field): a kill -9 leaves no torn file, and the COW mark survives.
+cursor_before=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor_t"])')
+kill -9 "$ENG_PID" 2>/dev/null || true
+sleep 1
+"$ENGINE" run --config "$DIR/instance.toml" >> "$DIR/engine.log" 2>&1 &
+ENG_PID=$!
+for _ in $(seq 1 120); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
+cursor_after=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor_t"])')
+[ "$cursor_after" -ge "$cursor_before" ] \
+  && ok "restart: the cursor resumed from the state file ($cursor_before -> $cursor_after)" \
+  || bad "restart: cursor went backwards ($cursor_before -> $cursor_after)"
+[ "$(bal "$T" "$A0")" = "$dev_a0" ] \
+  && ok "restart: the devnet-owned write survived (COW mark intact, $dev_a0)" \
+  || bad "restart: A0 balance $(bal "$T" "$A0") != $dev_a0"
+
 # epoch: one-call re-pin; the engine detects the reset and reconciles
 timeout 20 curl -s -N "$HTTP/events" > "$DIR/events2.out" 2>/dev/null &
 for _ in $(seq 1 20); do grep -q ": connected" "$DIR/events2.out" 2>/dev/null && break; sleep 0.1; done
