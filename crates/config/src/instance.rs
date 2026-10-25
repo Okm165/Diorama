@@ -448,9 +448,7 @@ fn mismatch(what: &str) -> ConfigError {
 /// The CCTP bridge's coherence: endpoints, the secret-shaped relay key (never
 /// a path), the deterministic attester seed, and ordered gas thresholds.
 fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
-    if cctp.state_dir.as_os_str().is_empty() {
-        issues.push("services.cctp_bridge.state_dir must not be empty".into());
-    }
+    require_path(&cctp.state_dir, "services.cctp_bridge.state_dir", issues);
     check_http_url("services.cctp_bridge.t_url", &cctp.t_url, issues);
     check_http_url("services.cctp_bridge.v_url", &cctp.v_url, issues);
     // After `${VAR}` expansion the value must be the 32-byte hex key; a raw
@@ -476,6 +474,14 @@ fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
     }
     if cctp.balance_critical_wei >= cctp.balance_low_wei {
         issues.push("services.cctp_bridge.balance_critical_wei must be below balance_low_wei".into());
+    }
+}
+
+/// A section's path must be set: one rule, four sites (the message names the
+/// section's field).
+fn require_path(path: &std::path::Path, field: &str, issues: &mut Vec<String>) {
+    if path.as_os_str().is_empty() {
+        issues.push(format!("{field} must not be empty"));
     }
 }
 
@@ -545,12 +551,8 @@ fn check_engine(eng: &EngineSection, issues: &mut Vec<String>) {
             );
         }
     }
-    if eng.state_dir.as_os_str().is_empty() {
-        issues.push("services.engine.state_dir must not be empty".into());
-    }
-    if eng.journal.dir.as_os_str().is_empty() {
-        issues.push("services.engine.journal.dir must not be empty".into());
-    }
+    require_path(&eng.state_dir, "services.engine.state_dir", issues);
+    require_path(&eng.journal.dir, "services.engine.journal.dir", issues);
     if let Some(fb) = &eng.feed_bridge {
         check_feed_bridge(fb, issues);
     }
@@ -588,9 +590,7 @@ fn check_feed_bridge(fb: &FeedBridgeSection, issues: &mut Vec<String>) {
 /// The simulator's section: the state dir, at least one market, the cadence
 /// and the optional chain URLs.
 fn check_venue_sim(sim: &VenueSimSection, issues: &mut Vec<String>) {
-    if sim.state_dir.as_os_str().is_empty() {
-        issues.push("services.venue_sim.state_dir must not be empty".into());
-    }
+    require_path(&sim.state_dir, "services.venue_sim.state_dir", issues);
     if sim.markets.is_empty() {
         issues.push("services.venue_sim.markets must name at least one market".into());
     }
