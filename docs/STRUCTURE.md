@@ -17,8 +17,8 @@ symmetry sweeps — regenerate the readings with
 | instance | `config/instances/mainnet-mirror/` | `config/instances/venue-mirror/` | TOML + kustomization, section-for-section alike |
 | k8s base | `k8s/base/mainnet-mirror/` | `k8s/base/venue-mirror/` | + the shared and cctp-bridge bases |
 | k8s overlay | `k8s/overlays/mainnet-mirror/` | `k8s/overlays/venue-mirror/` | |
-| cluster suites | `mainnet-{smoke,scenario,proof,product-sim,closure-check,feed-bridge}` | `venue-{smoke,scenario,proof,order-proof,product-sim}` | one-sided rows say why (docs/TESTING.md) |
-| local proofs | `mainnet-{engine-local,selftest-local,workshop-local,feed-local}` | `venue-{engine-local,selftest-local,workshop-local,sim-parity-local}` | |
+| cluster suites | `mainnet-{smoke,scenario,proof,product-sim,closure-check,feed-bridge}` | `venue-{smoke,scenario,proof}` | one-sided rows say why (docs/TESTING.md); the venue's order lane and the arc (`venue-order-proof`, `venue-product-sim`) also run against the deployed stack, listed below because their proven mode is local |
+| local proofs | `mainnet-{engine-local,selftest-local,workshop-local,feed-local}` | `venue-{engine-local,selftest-local,workshop-local,sim-parity-local,order-proof,product-sim}` | |
 | cross-mirror | `engine-symmetry` (cluster) · `engine-symmetry-local`, `cctp-*`, `daloc-*`, `container-smoke` (local) | (shared) | |
 | explainer | `docs/HOW-IT-WORKS.md` | `docs/HOW-IT-WORKS-VENUE.md` | the same §-numbered walk-through |
 | topology image | `docs/img/how-topology.png` | `docs/img/how-topology-venue.png` | rendered from the docs' ASCII art |
