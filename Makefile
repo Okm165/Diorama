@@ -280,6 +280,9 @@ cctp-margin-cycle: ## The crosschain unified-margin cycle (T mint -> CCTP -> ven
 portfolio-sim: ## The portfolio simulation: a delta-neutral basis book across both mirrors (carry + shock + capital efficiency)
 	NS=venue-mirror ./scripts/portfolio-sim.sh
 
+crosschain-margin: ## The crosschain margin book: bridged collateral, funding costs, served unrealized PnL, the loop closed
+	NS=venue-mirror ./scripts/crosschain-margin.sh
+
 cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locally (both chains forked from the real ones: the round trip + the unified-margin cycle)
 	./scripts/cctp-local.sh
 

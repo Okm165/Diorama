@@ -276,6 +276,20 @@ order) and the return leg closing exactly. In cluster mode the script derives
 the bridge's wallet from the venue secret (`cctp-relay-key`), so the actor is
 always the wallet the burn sends from — never the local harness's.
 
+### The crosschain margin book — `make crosschain-margin`
+
+The collateral's whole journey measured: the T mint, the CCTP burn/relay/mint
+(exact), the venue spot ledger, the CoreWriter spot→perp transfer, a long
+filled on V's real book, N scripted funding hours read as cost (the account
+delta and the served `cumFunding.sinceOpen`), a mark move read as served
+`unrealizedPnl` with the margin state (accountValue vs marginUsed), the
+economics (effective leverage, funding in bps of notional, unrealized on the
+collateral) and the loop closed — the CoreWriter perp→spot *reverse* plus the
+CCTP return landing exactly. The bridge leg's fee is zero on the devnet and
+the deltas are exact, so the cost line is the funding itself. The faucet sets
+a balance (a slot write), never adds; the reverse transfer moves the whole
+perp balance at 8-dec (the measured costs leave less than the original).
+
 ### The portfolio simulation — `make portfolio-sim`
 
 A delta-neutral basis book across both mirrors (long WETH on T, short the ETH
