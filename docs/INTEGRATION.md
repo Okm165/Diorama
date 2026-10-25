@@ -110,7 +110,7 @@ vanished-burn/keeper caveats.
 | Boundary | Refusal |
 |---|---|
 | sim `/info` | an unknown type answers `"unrouted"` (200) |
-| sim `/exchange` | an order fills, or refuses per-order by name (IOC only); `noop` answers the no-data success; any other action answers HL's err envelope naming the boundary (200) |
+| sim `/exchange` | an order fills, rests, or refuses per-order by name; `cancel`, `cancelByCloid`, `modify`, `batchModify`, `updateLeverage`, `updateIsolatedMargin` and `scheduleCancel` are modeled; `noop` answers the no-data success; an unmodeled action answers HL's err envelope naming it (200); the `normalTpsl`/`positionTpsl` groupings and builder fees are refused by name |
 | sim readiness | 503, naming the cause (`market plane warming up` / `sim state poisoned`) |
 | engine `/admin/deal` | 400 naming the numbers (`holds 0 USDC on ethereum, needs 1000000 (deal via the chain's admin surface)`) |
 | engine `/admin/shadow` | 400 naming the missing keys (`clear` needs `slots`, `account_fields`, or `all`) |

@@ -139,7 +139,11 @@ fn terminalize(
 }
 
 /// One order's initial margin requirement: notional over the account's
-/// leverage (reduce-only orders free margin instead of using it).
+/// leverage, the notional at the *mark* (docs, margining: "The margin
+/// required to open a position is `position_size * mark_price / leverage`";
+/// robust price indices: mark "is used for margining, liquidations,
+/// triggering TP/SL, and computing unrealized pnl"). Reduce-only orders free
+/// margin instead of using it.
 pub(crate) fn order_requirement(sz: Decimal, px: Decimal, leverage: u32, reduce_only: bool) -> Result<Decimal> {
     if reduce_only {
         return Ok(Decimal::ZERO);
@@ -314,23 +318,18 @@ impl Sim {
     /// margin (value minus the positions' margin minus the account's other
     /// open orders' reservations) must cover the order's own requirement.
     pub(crate) fn remargin_ok(&self, feed: &MarketFeed, r: &RestingOrder) -> Result<bool> {
-        let Some(maker) = self.account(r.account)? else {
-            return Ok(true); // no account state: nothing to re-margin against
-        };
         let meta = feed.meta();
         let leverage = self.leverage_for(r.account, &r.coin, meta.as_ref())?;
-        let requirement = order_requirement(r.sz, r.px, leverage, r.reduce_only)?;
-        let v = super::account::view(&maker, feed, meta.as_ref())?;
-        let reserved = self.reserved_margin(r.account, Some(r.oid), meta.as_ref())?;
-        let available = super::account::sub(
-            super::account::sub(
-                v.margin_summary.account_value,
-                v.margin_summary.total_margin_used,
-                "available margin",
-            )?,
-            reserved,
-            "available margin",
+        let requirement = order_requirement(
+            r.sz,
+            feed.mark(&r.coin).unwrap_or(r.px),
+            leverage,
+            r.reduce_only,
         )?;
+        let Some(available) = self.available_for(feed, r.account, Some(r.oid), meta.as_ref())?
+        else {
+            return Ok(true); // no account state: nothing to re-margin against
+        };
         Ok(available >= requirement)
     }
 
@@ -368,15 +367,36 @@ impl Sim {
             return Ok(());
         }
         let (px, sz) = resting_at;
-        let Some(account) = self.account(address)? else {
-            return Ok(());
-        };
         let meta = feed.meta();
         let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
-        let requirement = order_requirement(sz, px, leverage, false)?;
-        let v = super::account::view(&account, feed, meta.as_ref())?;
-        let reserved = self.reserved_margin(address, None, meta.as_ref())?;
-        let available = super::account::sub(
+        let requirement = order_requirement(sz, feed.mark(&req.coin).unwrap_or(px), leverage, false)?;
+        let Some(available) = self.available_for(feed, address, None, meta.as_ref())? else {
+            return Ok(());
+        };
+        if available < requirement {
+            return Err(Error::bad_request("Insufficient margin to place order."));
+        }
+        Ok(())
+    }
+
+    /// The account's free margin (the venue's `availableToTrade`): value minus
+    /// the positions' margin minus the open orders' reservations at the marks.
+    /// One home — the placement check, the match-time re-margin and the served
+    /// `activeAssetData` read the same figure. `exclude_oid` skips one resting
+    /// order (the re-margin's own); `None` = no account state.
+    pub(crate) fn available_for(
+        &self,
+        feed: &MarketFeed,
+        address: Address,
+        exclude_oid: Option<u64>,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<Option<Decimal>> {
+        let Some(account) = self.account(address)? else {
+            return Ok(None);
+        };
+        let v = super::account::view(&account, feed, meta)?;
+        let reserved = self.reserved_margin(address, exclude_oid, feed, meta)?;
+        Ok(Some(super::account::sub(
             super::account::sub(
                 v.margin_summary.account_value,
                 v.margin_summary.total_margin_used,
@@ -384,20 +404,18 @@ impl Sim {
             )?,
             reserved,
             "available margin",
-        )?;
-        if available < requirement {
-            return Err(Error::bad_request("Insufficient margin to place order."));
-        }
-        Ok(())
+        )?))
     }
 
-    /// The account's open orders' reserved margin (their own notional over the
-    /// account's leverage at their prices; reduce-only orders reserve
+    /// The account's open orders' reserved margin (their notional over the
+    /// account's leverage, at the *mark* — the margining price; a warming mark
+    /// falls back to the order's own price; reduce-only orders reserve
     /// nothing). `exclude_oid` skips the order under check.
     pub(crate) fn reserved_margin(
         &self,
         account: Address,
         exclude_oid: Option<u64>,
+        feed: &MarketFeed,
         meta: Option<&crate::wire::Meta>,
     ) -> Result<Decimal> {
         let mut total = Decimal::ZERO;
@@ -406,9 +424,10 @@ impl Sim {
                 continue;
             }
             let leverage = self.leverage_for(account, &r.coin, meta)?;
+            let px = feed.mark(&r.coin).unwrap_or(r.px);
             total = super::account::add(
                 total,
-                order_requirement(r.sz, r.px, leverage, false)?,
+                order_requirement(r.sz, px, leverage, false)?,
                 "reserved margin",
             )?;
         }
@@ -1920,6 +1939,62 @@ mod tests {
         );
     }
 
+    /// The docs' margining price: "The margin required to open a position is
+    /// `position_size * mark_price / leverage`" — a resting order reserves at
+    /// the *mark*, not at its own price (the fixture's mark is the best ask,
+    /// 101). A deep bid whose own-price margin would fit is refused.
+    #[test]
+    fn the_order_margin_reserves_at_the_mark() {
+        let feed = feed_with_book(
+            book("ETH", &[("50", "50")], &[("101", "50")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "100");
+        // 15 × 50 / 10 = 75 at its own price — fits; 15 × 101 / 10 = 151.5 at
+        // the mark — refused.
+        let mut deep = ioc(true, "15");
+        deep.tif = Tif::Gtc;
+        deep.limit_px = Some("50".parse().unwrap());
+        let err = sim.place(&feed, a, &deep).unwrap_err();
+        assert!(format!("{err}").contains("Insufficient margin"), "{err}");
+        // A size the mark-margin can carry places.
+        let mut ok = ioc(true, "5");
+        ok.tif = Tif::Gtc;
+        ok.limit_px = Some("50".parse().unwrap());
+        assert!(sim.place(&feed, a, &ok).is_ok(), "5 × 101 / 10 = 50.5 ≤ 100");
+    }
+
+    /// The docs' transfer rule reaches the isolated margin transfer:
+    /// "transferring ... includes ... isolated margin transfers", and the
+    /// margin left must be at least max(initial, 10 % of the notional).
+    #[test]
+    fn an_isolated_removal_must_leave_the_transfer_margin() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        sim.order(&feed, a, &ioc(true, "1")).unwrap();
+        sim.update_isolated_margin(a, "ETH", 200_000_000, &feed).unwrap();
+        // 1 ETH at the mark 101: initial = 10.1, the 10 % floor = 10.1 →
+        // leaving 5 must refuse; leaving 11 may.
+        let err = sim
+            .update_isolated_margin(a, "ETH", -195_000_000, &feed)
+            .unwrap_err();
+        assert!(format!("{err}").contains("below the required"), "{err}");
+        sim.update_isolated_margin(a, "ETH", -189_000_000, &feed)
+            .unwrap();
+        let margin = sim
+            .account(a)
+            .unwrap()
+            .unwrap()
+            .positions
+            .get("ETH")
+            .unwrap()
+            .isolated_margin;
+        assert_eq!(margin, Decimal::from(11));
+    }
+
     /// The docs' band: a limit more than 80 % from the oracle is refused by
     /// their own string.
     #[test]
@@ -1998,7 +2073,7 @@ mod tests {
         sim.order(&feed, a, &ioc(true, "1")).unwrap();
         let before = sim.account(a).unwrap().unwrap().perp_balance;
         // $100 = 100_000_000 at the docs' 6 decimals.
-        sim.update_isolated_margin(a, "ETH", 100_000_000, None).unwrap();
+        sim.update_isolated_margin(a, "ETH", 100_000_000, &feed).unwrap();
         let account = sim.account(a).unwrap().unwrap();
         let p = account.positions.get("ETH").unwrap();
         assert_eq!(p.isolated_margin, Decimal::from(100));
@@ -2006,7 +2081,7 @@ mod tests {
         assert_eq!(p.leverage, crate::wire::LeverageType::Isolated);
         assert_eq!(account.perp_balance, before - Decimal::from(100));
         // And back off the position.
-        sim.update_isolated_margin(a, "ETH", -40_000_000, None).unwrap();
+        sim.update_isolated_margin(a, "ETH", -40_000_000, &feed).unwrap();
         let account = sim.account(a).unwrap().unwrap();
         assert_eq!(account.positions.get("ETH").unwrap().isolated_margin, Decimal::from(60));
         assert_eq!(account.perp_balance, before - Decimal::from(60));

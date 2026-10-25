@@ -53,7 +53,9 @@ pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoRespo
 /// crash. Any other action tag is refused by name in the venue's own `err`
 /// envelope (HTTP 200 — the shape their client parses). The signature is
 /// accepted, never verified (the devnet has no keys — the anvil-impersonation
-/// analogue), and the acting account is read from `user`.
+/// analogue), and the acting account is read from `user` — or from
+/// `vaultAddress`, which routes the action to that vault or subaccount
+/// (see `acting_owner`).
 pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
     let req: ExchangeBody = serde_json::from_slice(&body).map_err(|source| Error::bad_request(format!("invalid exchange request: {source}"),))?;
     // The noop action (docs): no side effects, the venue's no-data success —
@@ -66,11 +68,11 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
         }
         return Ok(noop_response(&req));
     }
-    let user = match acting_user(&state, &req) {
-        Ok(user) => user,
+    let owner = match acting_user(&state, &req) {
+        Ok((_, owner)) => owner,
         Err(response) => return Ok(*response),
     };
-    Ok(dispatch(&state, user, &body, &req))
+    Ok(dispatch(&state, owner, &body, &req))
 }
 
 /// The docs' pre-validation pass: `Some(reason)` refuses the whole payload
@@ -115,32 +117,31 @@ where
 }
 
 /// The action dispatch (its own fn: the handler is the parse + the preamble).
-fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBody) -> Response {
+fn dispatch(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeBody) -> Response {
     match &req.action {
-        ExchangeAction::Order { .. } => order_action(state, user, body, req),
+        ExchangeAction::Order { .. } => order_action(state, owner, body, req),
         ExchangeAction::Cancel { cancels, fast } => {
             let fast = *fast;
-            flagged("f", fast, || cancel_action(state, user, cancels, fast.unwrap_or(false)))
+            flagged("f", fast, || cancel_action(state, owner, cancels, fast.unwrap_or(false)))
         }
         ExchangeAction::CancelByCloid { cancels, fast } => {
             let fast = *fast;
             flagged("f", fast, || {
-                cancel_by_cloid_action(state, user, cancels, fast.unwrap_or(false))
+                cancel_by_cloid_action(state, owner, cancels, fast.unwrap_or(false))
             })
         }
         ExchangeAction::Modify {
             oid,
             order,
             always_place,
-        } => modify_action(state, user, oid, order, always_place.unwrap_or(false)),
+        } => modify_action(state, owner, oid, order, always_place.unwrap_or(false)),
         ExchangeAction::BatchModify {
             modifies,
             always_place,
-        } => batch_modify(state, user, modifies, always_place.unwrap_or(false)),
+        } => batch_modify(state, owner, modifies, always_place.unwrap_or(false)),
         ExchangeAction::UpdateIsolatedMargin { asset, ntli, .. } => {
-            let meta = state.feed.meta();
             asset_action(state, *asset, |coin| {
-                state.sim.update_isolated_margin(user, coin, *ntli, meta.as_ref())
+                state.sim.update_isolated_margin(owner, coin, *ntli, &state.feed)
             })
         }
         ExchangeAction::UpdateLeverage {
@@ -148,9 +149,9 @@ fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBo
             is_cross,
             leverage,
         } => asset_action(state, *asset, |coin| {
-            state.sim.set_leverage(user, coin, *is_cross, *leverage)
+            state.sim.set_leverage(owner, coin, *is_cross, *leverage)
         }),
-        ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(user, *time) {
+        ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(owner, *time) {
             Ok(_) => default_ok(),
             Err(e) => err_envelope(e.to_string()).into_response(),
         },
@@ -162,10 +163,24 @@ fn dispatch(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBo
 /// The acting account + the venue's nonce rule (plan §5: the 100 highest per
 /// signer, window (T − 2 d, T + 1 d), no reuse). `Err` carries the ready
 /// err-envelope response.
+/// The acting account's owner: a request that names a `vaultAddress` acts on
+/// that vault or subaccount instead of the signer (docs: "Subaccounts and
+/// vaults do not have private keys. To perform actions on behalf of a
+/// subaccount or vault signing should be done by the master account and the
+/// vaultAddress field should be set to the address of the subaccount or
+/// vault."). Pure, so the routing is testable without a state.
+fn acting_owner(req: &ExchangeBody) -> Option<Address> {
+    req.vault_address.or(req.user)
+}
+
+/// The signer and the owner. The request's `user` is the signer — nonces are
+/// consumed per signer (the docs' per-address nonce set) — and the state the
+/// action touches is the owner's. The signature is never verified, so the
+/// master's authority is moot (plan §17).
 fn acting_user(
     state: &Arc<ApiState>,
     req: &ExchangeBody,
-) -> std::result::Result<Address, Box<Response>> {
+) -> std::result::Result<(Address, Address), Box<Response>> {
     let Some(user) = req.user else {
         return Err(Box::new(
             err_envelope(
@@ -181,7 +196,7 @@ fn acting_user(
             return Err(Box::new(err_envelope(e.to_string()).into_response()));
         }
     }
-    Ok(user)
+    Ok((user, acting_owner(req).unwrap_or(user)))
 }
 
 /// The docs' `isCross` defaults to true when omitted.
@@ -215,12 +230,12 @@ fn flagged(name: &str, flag: Option<bool>, action: impl FnOnce() -> Response) ->
 /// batch all-or-nothing).
 fn batch_modify(
     state: &Arc<ApiState>,
-    user: Address,
+    owner: Address,
     modifies: &[ModifyItem],
     always: bool,
 ) -> Response {
     for m in modifies {
-        if let Err(e) = modify_one(state, user, &m.oid, &m.order, always) {
+        if let Err(e) = modify_one(state, owner, &m.oid, &m.order, always) {
             return err_envelope(e.to_string()).into_response();
         }
     }
@@ -237,13 +252,13 @@ fn default_ok() -> Response {
 }
 
 /// The `order` action (its own fn so the dispatcher stays small).
-fn order_action(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &ExchangeBody) -> Response {
+fn order_action(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeBody) -> Response {
     let (orders, grouping) = match order_parts(body, &req.action) {
         Ok(parts) => parts,
         Err(reason) => return err_envelope(reason).into_response(),
     };
     tracing::info!(
-        user = %user,
+        owner = %owner,
         nonce = ?req.nonce,
         expires_after = ?req.expires_after,
         signed = req.signature.as_ref().is_some_and(Signature::is_shaped),
@@ -266,7 +281,7 @@ fn order_action(state: &Arc<ApiState>, user: Address, body: &Bytes, req: &Exchan
     }
     let statuses = orders
         .iter()
-        .map(|action| fill_status(state, user, meta.as_ref(), action))
+        .map(|action| fill_status(state, owner, meta.as_ref(), action))
         .collect();
     order_response(statuses)
 }
@@ -303,7 +318,7 @@ fn coin_of(meta: Option<&crate::wire::Meta>, asset: u32) -> Option<String> {
 /// `cancel`: per-entry statuses in the venue's own shape.
 fn cancel_action(
     state: &ApiState,
-    user: Address,
+    owner: Address,
     cancels: &[CancelAction],
     fast: bool,
 ) -> Response {
@@ -317,7 +332,7 @@ fn cancel_action(
     let statuses = cancels
         .iter()
         .map(|c| match coin_of(meta.as_ref(), c.a) {
-            Some(coin) => match state.sim.cancel(user, &coin, c.o, fast) {
+            Some(coin) => match state.sim.cancel(owner, &coin, c.o, fast) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
                 Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
             },
@@ -339,7 +354,7 @@ fn cancel_action(
 /// `cancelByCloid`: the same, addressed by client id.
 fn cancel_by_cloid_action(
     state: &ApiState,
-    user: Address,
+    owner: Address,
     cancels: &[CancelByCloidAction],
     fast: bool,
 ) -> Response {
@@ -351,7 +366,7 @@ fn cancel_by_cloid_action(
     let statuses = cancels
         .iter()
         .map(|c| match coin_of(meta.as_ref(), c.asset) {
-            Some(coin) => match state.sim.cancel_by_cloid(user, &coin, c.cloid, fast) {
+            Some(coin) => match state.sim.cancel_by_cloid(owner, &coin, c.cloid, fast) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
                 Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
             },
@@ -373,12 +388,12 @@ fn cancel_by_cloid_action(
 /// `modify` (single): cancel + place, with the docs' `always_place` rules.
 fn modify_action(
     state: &ApiState,
-    user: Address,
+    owner: Address,
     oid: &crate::wire::OidOrCloid,
     order: &OrderAction,
     always_place: bool,
 ) -> Response {
-    match modify_one(state, user, oid, order, always_place) {
+    match modify_one(state, owner, oid, order, always_place) {
         Ok(()) => default_ok(),
         Err(e) => err_envelope(e.to_string()).into_response(),
     }
@@ -390,7 +405,7 @@ fn modify_action(
 /// `always_place = true` the placement happens regardless.
 fn modify_one(
     state: &ApiState,
-    user: Address,
+    owner: Address,
     oid: &crate::wire::OidOrCloid,
     order: &OrderAction,
     always_place: bool,
@@ -402,13 +417,13 @@ fn modify_one(
             let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
                 Error::bad_request(format!("unknown asset index {}", order.a))
             })?;
-            state.sim.cancel(user, &coin, *o, false)
+            state.sim.cancel(owner, &coin, *o, false)
         }
         crate::wire::OidOrCloid::Cloid(c) => {
             let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
                 Error::bad_request(format!("unknown asset index {}", order.a))
             })?;
-            state.sim.cancel_by_cloid(user, &coin, *c, false)
+            state.sim.cancel_by_cloid(owner, &coin, *c, false)
         }
     };
     if !always_place {
@@ -426,7 +441,7 @@ fn modify_one(
             mapped.tif = crate::sim::order::Tif::Alo;
         }
     }
-    state.sim.place(&state.feed, user, &mapped)?;
+    state.sim.place(&state.feed, owner, &mapped)?;
     Ok(())
 }
 
@@ -464,8 +479,9 @@ fn order_parts<'a>(
             .map(|t| t.action.r#type)
             .unwrap_or_else(|_| "unknown".into());
         return Err(format!(
-            "venue-sim: only the order and noop actions are modeled (plan §4.5/§5, Phase 2); \
-             `{tag}` is not. See docs/INTEGRATION.md."
+            "venue-sim: `{tag}` is not an order action; the modeled exchange actions are \
+             order, cancel, cancelByCloid, modify, batchModify, updateLeverage, \
+             updateIsolatedMargin, scheduleCancel and noop. See docs/INTEGRATION.md."
         ));
     };
     if let Some(builder) = builder {
@@ -1488,7 +1504,6 @@ fn active_asset_data(
         coin: coin.to_string(),
     })?;
     let meta = state.feed.meta();
-    let view = account::view(account, &state.feed, meta.as_ref())?;
     let leverage = account
         .positions
         .get(coin)
@@ -1505,7 +1520,14 @@ fn active_asset_data(
             value: 20,
             raw_usd: None,
         });
-    let available = view.withdrawable.max(Decimal::ZERO);
+    // `availableToTrade` is the free margin (value minus used minus the open
+    // orders' reservations) — the same figure the placement check reads — not
+    // `withdrawable`, which the docs' transfer rule bounds.
+    let available = state
+        .sim
+        .available_for(&state.feed, user, None, meta.as_ref())?
+        .unwrap_or(Decimal::ZERO)
+        .max(Decimal::ZERO);
     let max_sz = account::ratio_or(
         account::mul(available, Decimal::from(leverage.value), "max size")?,
         mark,
@@ -1545,6 +1567,27 @@ mod tests {
             is_delisted: None,
         });
         meta
+    }
+
+    /// The docs' subaccount/vault routing: "Subaccounts and vaults do not
+    /// have private keys. To perform actions on behalf of a subaccount or
+    /// vault signing should be done by the master account and the
+    /// vaultAddress field should be set to the address of the subaccount or
+    /// vault." — the owner is the vault when present, the signer otherwise.
+    #[test]
+    fn acting_owner_routes_vault_and_subaccount_actions() {
+        let master = "0x00000000000000000000000000000000000000e1".parse().unwrap();
+        let vault = "0x00000000000000000000000000000000000000e2".parse().unwrap();
+        let plain: ExchangeBody = serde_json::from_str(
+            r#"{"action":{"type":"order","orders":[]},"user":"0x00000000000000000000000000000000000000e1"}"#,
+        )
+        .unwrap();
+        assert_eq!(acting_owner(&plain), Some(master), "no vault: the signer acts");
+        let routed: ExchangeBody = serde_json::from_str(
+            r#"{"action":{"type":"order","orders":[]},"user":"0x00000000000000000000000000000000000000e1","vaultAddress":"0x00000000000000000000000000000000000000e2"}"#,
+        )
+        .unwrap();
+        assert_eq!(acting_owner(&routed), Some(vault), "the vault's state is touched");
     }
 
     #[test]

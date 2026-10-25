@@ -733,10 +733,11 @@ impl Sim {
         address: Address,
         coin: &str,
         ntli: i64,
-        meta: Option<&crate::wire::Meta>,
+        feed: &MarketFeed,
     ) -> Result<()> {
+        let meta = feed.meta();
         let delta = Decimal::from(ntli) / Decimal::from(1_000_000);
-        if delta < Decimal::ZERO && account::strict_isolated(coin, meta) {
+        if delta < Decimal::ZERO && account::strict_isolated(coin, meta.as_ref()) {
             return Err(crate::error::Error::bad_request(
                 "Strict isolated margin cannot be removed.",
             ));
@@ -752,6 +753,28 @@ impl Sim {
                 return Err(crate::error::Error::bad_request(
                     "isolated margin cannot go below zero",
                 ));
+            }
+            // The docs' transfer rule (margining): "Unrealized pnl can be
+            // withdrawn from isolated positions or cross account, but only if
+            // the remaining margin is at least 10% of the total notional
+            // position value ... transfer_margin_required =
+            // max(initial_margin_required, 0.1 * total_position_value)" — and
+            // "transferring" includes isolated margin transfers.
+            if delta < Decimal::ZERO {
+                let mark = feed.mark(coin).ok_or(crate::error::Error::Warming)?;
+                let notional = account::mul(p.szi.abs(), mark, "position notional")?;
+                let initial = account::div(
+                    notional,
+                    Decimal::from(p.leverage_value.max(1)),
+                    "initial margin",
+                )?;
+                let ten = account::mul(notional, Decimal::new(1, 1), "transfer floor")?;
+                let required = initial.max(ten);
+                if next < required {
+                    return Err(crate::error::Error::bad_request(format!(
+                        "Isolated margin transfer would leave {next} below the required                          {required} (the initial margin or 10% of the position's notional;                          docs: margining)"
+                    )));
+                }
             }
             account.perp_balance = account::sub(account.perp_balance, delta, "isolated margin move")?;
             p.isolated_margin = next;
@@ -1798,7 +1821,7 @@ mod tests {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         put_isolated(&sim, a, "ETH", (Decimal::from(100), Decimal::from(2), 10, Decimal::from(8)));
-        let refused = sim.update_isolated_margin(a, "ETH", -1_000_000, feed.meta().as_ref());
+        let refused = sim.update_isolated_margin(a, "ETH", -1_000_000, &feed);
         assert!(refused.is_err(), "strict isolated margin cannot be removed");
         assert_eq!(
             sim.account(a).unwrap().unwrap().positions["ETH"].isolated_margin,

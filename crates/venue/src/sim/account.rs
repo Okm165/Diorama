@@ -544,7 +544,7 @@ fn assemble(
     totals: &PositionTotals,
     rows: Vec<AssetPosition>,
     facts: BTreeMap<String, PositionFacts>,
-) -> AccountView {
+) -> Result<AccountView> {
     // The unified account's single balance per asset (docs: "USDC unifies
     // perps + spot"): the collateral token's spot side is part of the raw
     // balance, so the identity holds with it included — `totalRawUsd` is the
@@ -582,14 +582,29 @@ fn assemble(
         total_raw_usd: cross_raw,
         total_margin_used: totals.cross_margin,
     };
-    AccountView {
+    Ok(AccountView {
         margin_summary,
         cross_margin_summary,
         cross_maintenance_margin_used: totals.cross_maintenance,
-        withdrawable: cross_account_value,
+        withdrawable: withdrawable_of(cross_account_value, totals)?,
         asset_positions: rows,
         facts,
-    }
+    })
+}
+
+/// The docs' transfer rule (margining): "Unrealized pnl can be withdrawn
+/// from isolated positions or cross account, but only if the remaining margin
+/// is at least 10% of the total notional position value of all open
+/// positions. The margin remaining must also meet the initial margin
+/// requirement, i.e. `transfer_margin_required = max(initial_margin_required,
+/// 0.1 * total_position_value)`" — and "transferring" includes isolated
+/// margin transfers. The cross summary is the scope (isolated margins are the
+/// positions' own); the info endpoint's own example pins the flat case
+/// (withdrawable = cross accountValue − totalMarginUsed, cross side flat).
+fn withdrawable_of(cross_account_value: Decimal, totals: &PositionTotals) -> Result<Decimal> {
+    let ten = mul(totals.cross_notional, Decimal::new(1, 1), "transfer floor")?;
+    let floor = totals.cross_margin.max(ten);
+    Ok(sub(cross_account_value, floor, "withdrawable")?.max(Decimal::ZERO))
 }
 
 /// Compute the served figures at the feed's current marks.
@@ -608,7 +623,7 @@ pub(crate) fn view(account: &Account, feed: &MarketFeed, meta: Option<&crate::wi
         rows.push(position_row(coin, p, &facts, meta)?);
         by_coin.insert(coin.clone(), facts);
     }
-    Ok(assemble(account, &totals, rows, by_coin))
+    assemble(account, &totals, rows, by_coin)
 }
 
 /// The served `clearinghouseState` (fresh `time` from the caller's wall clock).
@@ -1223,7 +1238,20 @@ mod tests {
         );
         // Cross view with no isolated positions equals the summary.
         assert_eq!(s.cross_margin_summary.account_value, s.margin_summary.account_value);
-        assert_eq!(s.withdrawable, s.cross_margin_summary.account_value);
+        // The docs' transfer rule bounds `withdrawable` by
+        // max(initial_margin_required, 0.1 * total_position_value). The seed
+        // here is a *cross* position (the endpoint's own example is an
+        // isolated one, whose cross side is flat and whose withdrawable is
+        // therefore the full cross value), so the 10 % floor binds.
+        let floor = s
+            .cross_margin_summary
+            .total_margin_used
+            .max(p.position_value * Decimal::new(1, 1));
+        assert_eq!(
+            s.withdrawable,
+            s.cross_margin_summary.account_value - floor,
+            "the transfer floor stays behind"
+        );
     }
 
     /// The seed round-trips totalRawUsd exactly (the operator's recall).
