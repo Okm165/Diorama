@@ -1,4 +1,4 @@
-//! The venue's reset detector: the chain-instance canary.
+//! The venue profile's reset detector: the chain-instance canary.
 //!
 //! V is a fork-mode anvil, and a fresh fork cannot carry the canary word — so
 //! "the canary reads back the recorded pin" means "this is still the chain

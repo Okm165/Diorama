@@ -65,7 +65,7 @@ pub async fn boot(ctx: &Ctx) -> Result<()> {
 
 /// The steady-state loop (boot has already run).
 pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
-    let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
+    let poll = ctx.engine.loops.poll();
     loop {
         if ctx.plane.is_halted() {
             tokio::time::sleep(poll).await;

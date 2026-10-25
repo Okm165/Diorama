@@ -1,6 +1,6 @@
-//! Engine context: the profile's clients and config, plus the devnet plane
-//! (registry, journal, cursor state, admin gauges and flags) as one
-//! [`Plane`] — the same bundle the venue engine embeds.
+//! The mainnet engine's context: reth's and T's clients, the devnet plane
+//! (registry, journal, cursor state, admin gauges and flags) as one [`Plane`]
+//! — the same bundle the venue engine embeds — and the mainnet's own metrics.
 //!
 //! One Anvil (T) and one source (reth). The spine's seams are wired here,
 //! chosen at boot: the source ([`RethSource`] — native BALs with the trace

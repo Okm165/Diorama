@@ -1,4 +1,4 @@
-//! The engine's error taxonomy (boundary-discipline; §11.3 rule 1).
+//! The mainnet boundary's error taxonomy (boundary-discipline; §11.3 rule 1).
 //!
 //! Variants classify by **failure class**, never by call site; each carries the
 //! structured fields an operator needs (endpoint, block, path). The

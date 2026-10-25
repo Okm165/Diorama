@@ -232,7 +232,9 @@ async fn selftest_cmd(
     windows: u64,
 ) -> Result<()> {
     let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
-    require_wiring(&cfg, &unresolved)?;
+    // The scratch run's endpoints come from the CLI: only the boundaries
+    // `Ctx::new` builds regardless are this command's to require.
+    require_wiring(&cfg, &unresolved, "venue selftest wiring", &[])?;
     let ok = crate::selftest::run(cfg, targets, windows).await?;
     boot::exit_verdict(ok);
 }
@@ -243,8 +245,8 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
     // references instead of failing on them; the engine's own sections are
     // then required here, by name (the cctp bridge's pattern).
     let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
-    require_wiring(&cfg, &unresolved)?;
     let (source_url, v_url) = cfg.venue_urls()?;
+    require_wiring(&cfg, &unresolved, "venue engine wiring", &[&source_url, &v_url])?;
     let ctx = std::sync::Arc::new(Ctx::new(cfg, &source_url, &v_url)?);
 
     driver::boot(&ctx).await?;
@@ -260,23 +262,24 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// This pod's wiring, by name (the venue chain's source URL, V's URL, the
-/// state dir): unresolved here is a boot error naming the section.
+/// This command's wiring, by name: the endpoint values it needs (`endpoints`
+/// — empty when the CLI supplies them) plus the state dir, which `Ctx::new`
+/// builds unconditionally. Unresolved here is a boot error naming the
+/// variable, never a literal used as an endpoint; the other services'
+/// references in the same instance file are not this pod's to provide.
 fn require_wiring(
     cfg: &mirror_config::Instance,
     unresolved: &[String],
+    what: &'static str,
+    endpoints: &[&str],
 ) -> std::result::Result<(), mirror_config::ConfigError> {
-    let (Some(chain), Some(engine)) = (cfg.chains.venue.as_ref(), cfg.services.engine.as_ref())
-    else {
+    let Some(engine) = cfg.services.engine.as_ref() else {
         return Ok(());
     };
-    let state_dir = engine.state_dir.to_string_lossy().to_string();
-    let v_url = engine.anvil.target_url.as_deref().unwrap_or_default();
-    mirror_config::require_resolved_logged(
-        "venue engine wiring",
-        &[&chain.source_url, v_url, &state_dir],
-        unresolved,
-    )
+    let state_dir = engine.state_dir.to_string_lossy().into_owned();
+    let mut values: Vec<&str> = endpoints.to_vec();
+    values.push(&state_dir);
+    mirror_config::require_resolved_logged(what, &values, unresolved)
 }
 
 /// The engine's two loops (the shared HTTP surface and the driver), each

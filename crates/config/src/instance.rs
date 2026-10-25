@@ -226,32 +226,32 @@ impl Instance {
     /// already validated presence; a missing one is still a named error, never
     /// a silent default).
     pub fn take_mainnet(&mut self) -> Result<(ChainL1, EngineSection), ConfigError> {
-        let l1 = required(self.chains.l1.take(), MAINNET_CHAIN_REQUIRED)?;
-        let engine = required(
+        take_pair(
+            self.chains.l1.take(),
+            MAINNET_CHAIN_REQUIRED,
             self.services.engine.take(),
             MAINNET_ENGINE_REQUIRED,
-        )?;
-        Ok((l1, engine))
+        )
     }
 
     /// The venue profile's sections, moved out for the run path.
     pub fn take_venue(&mut self) -> Result<(ChainVenue, EngineSection), ConfigError> {
-        let chain = required(self.chains.venue.take(), VENUE_CHAIN_REQUIRED)?;
-        let engine = required(
+        take_pair(
+            self.chains.venue.take(),
+            VENUE_CHAIN_REQUIRED,
             self.services.engine.take(),
             VENUE_ENGINE_REQUIRED,
-        )?;
-        Ok((chain, engine))
+        )
     }
 
     /// The simulator's sections, moved out for the run path.
     pub fn take_venue_sim(&mut self) -> Result<(ChainVenue, VenueSimSection), ConfigError> {
-        let chain = required(self.chains.venue.take(), VENUE_CHAIN_REQUIRED)?;
-        let sim = required(
+        take_pair(
+            self.chains.venue.take(),
+            VENUE_CHAIN_REQUIRED,
             self.services.venue_sim.take(),
             "the simulator requires [services.venue_sim]",
-        )?;
-        Ok((chain, sim))
+        )
     }
 
     /// The CCTP bridge's section, moved out for the run path. Cross-cutting:
@@ -266,8 +266,9 @@ impl Instance {
     /// The mainnet profile's endpoints: the pre-context reads the run path
     /// needs (`Ctx::new` takes the sections itself).
     pub fn mainnet_urls(&self) -> Result<(String, String), ConfigError> {
-        let l1 = required(self.chains.l1.as_ref(), MAINNET_CHAIN_REQUIRED)?;
-        let engine = required(
+        let (l1, engine) = take_pair(
+            self.chains.l1.as_ref(),
+            MAINNET_CHAIN_REQUIRED,
             self.services.engine.as_ref(),
             MAINNET_ENGINE_REQUIRED,
         )?;
@@ -282,8 +283,9 @@ impl Instance {
 
     /// The venue profile's endpoints (the fork source and anvil V).
     pub fn venue_urls(&self) -> Result<(String, String), ConfigError> {
-        let chain = required(self.chains.venue.as_ref(), VENUE_CHAIN_REQUIRED)?;
-        let engine = required(
+        let (chain, engine) = take_pair(
+            self.chains.venue.as_ref(),
+            VENUE_CHAIN_REQUIRED,
             self.services.engine.as_ref(),
             VENUE_ENGINE_REQUIRED,
         )?;
@@ -418,6 +420,17 @@ fn ws_of(url: &str) -> String {
         Some(rest) => format!("ws{rest}"),
         None => url.to_string(),
     }
+}
+
+/// Take two required sections at once (the profiles' pairs), each named when
+/// absent: the same rule as [`required`], named for the call-site shape.
+fn take_pair<A, B>(
+    a: Option<A>,
+    a_msg: &str,
+    b: Option<B>,
+    b_msg: &str,
+) -> Result<(A, B), ConfigError> {
+    Ok((required(a, a_msg)?, required(b, b_msg)?))
 }
 
 /// Take a required section, naming the need when it is absent: the one shape

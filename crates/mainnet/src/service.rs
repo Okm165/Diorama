@@ -1,7 +1,8 @@
-//! The engine service's entry: the CLI (`run` / `selftest` / `rewind`), the
-//! boot asserts, and the loop spawner — the story the `mainnet-engine` bin
-//! shells over (`main_entry`). One home per service: the venue crate's engine
-//! and simulator entries and the bridge's entry live the same way.
+//! The engine service's composition root: the CLI (`run` / `selftest` /
+//! `rewind`), the boot call, and the loop spawner — the story the
+//! `mainnet-engine` bin shells over (`main_entry`). One home per service: the
+//! venue crate's engine and simulator entries and the bridge's entry live the
+//! same way.
 
 use crate::error::{Error, Result};
 use crate::{driver, feed_bridge, http, selftest};

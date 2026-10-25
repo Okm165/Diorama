@@ -1,9 +1,11 @@
-//! The engine's loop machinery: the boot asserts, the devnet applier loop (one
-//! T block per applied parent block), the shadow scanner, the source-sync
-//! supervisor, and the on-demand probe run.
+//! The applier driver: T's lifecycle from boot to the steady state.
 //!
-//! One Anvil, one parent stream. The cursor/rebase/gap/reorg rules live here;
-//! the epoch rule itself is shared (`mirror_devnet::epoch`).
+//! T is a fork-mode anvil (chain id 1). The driver's jobs: the boot asserts
+//! (wait, the chain identity, the epoch anchor, the capability audit), the
+//! devnet applier loop (one T block per applied parent block), the shadow
+//! scanner, the source-sync supervisor, and the on-demand probe run. The
+//! cursor/rebase/gap/reorg rules live here; the epoch rule itself is shared
+//! (`mirror_devnet::epoch`).
 use crate::ctx::Ctx;
 use crate::apply::apply_block;
 use crate::error::Result;
@@ -231,7 +233,7 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
 }
 
 pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
-    let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
+    let poll = ctx.engine.loops.poll();
     loop {
         if ctx.plane.is_halted() {
             tokio::time::sleep(poll).await;
@@ -276,7 +278,7 @@ pub(crate) async fn source_sync_supervisor(ctx: Arc<Ctx>) {
 /// exactly what keeps the next parent diffs (after resume) from clobbering
 /// them.
 pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
-    let poll = Duration::from_millis(ctx.engine.loops.poll_interval_ms.max(200));
+    let poll = ctx.engine.loops.poll();
     loop {
         tokio::time::sleep(poll * 2).await;
         if let Err(e) = scan_once(&ctx).await {

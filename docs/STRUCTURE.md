@@ -46,7 +46,7 @@ reads identically on both sides; everything else is the profile's own rule set:
 |---|---|---|
 | `ctx.rs` | `Ctx::{new, follow_head, follow_tag}` + `impl Engine` | `Ctx::{new}` + `resolved_pin` + `impl Engine` |
 | `driver.rs` | `boot` + `apply_loop`/`shadow_loop`/`source_sync_supervisor` + the cursor/reorg rules (`next_block`, `validate_cursor`, `on_reset`, `rebase`, `resume_point`, `on_rebase`, `gap_within_limit`, `reorg_continuity`) + `scan_once`, `probes_now` | `boot` + `run`/`pass` + `reconcile`/`pin_read`/`anchor_cursor`/`recover_from_reset`/`run_epoch_rule` + `scan_and_advance`, `mine_pending`, `probes_at_pin`, `probes_now` |
-| `service.rs` | `main_entry` + `run` + `require_wiring` + `build_bridge` + `spawn_loops` | `main_entry` + `run` + `require_wiring` + `spawn_loops` (+ `sim_entry` and the simulator's spawns) |
+| `service.rs` | `main_entry` + `run` + `require_wiring(what, endpoints)` + `build_bridge` + `spawn_loops` | `main_entry` + `run` + `require_wiring(what, endpoints)` + `spawn_loops` (+ `sim_entry` and the simulator's spawns) |
 | `profile.rs` | `bundle`/`policies`/`build` + `Wiring`/`Deps` | `bundle`/`policies`/`build` + `Wiring`/`Deps` (+ `closures`/`watch_set`) |
 | `http.rs` | `app` + `status_doc` (+ `admin_time`) | `app` + `status_doc` |
 | `selftest.rs` | `run` (+ `run_one_block`) | `run` (+ `windows_loop`, `wait_for_move`) |
@@ -88,7 +88,7 @@ every reading below was acted on or judged:
 | dead functions / dead members | none (the AST and the text agree) |
 | duplicates | only deliberate twins (the two `impl Engine` accessors, `healthz`/`livez`, the two reset detectors' constructors, the per-profile error helpers) |
 | near-duplicates / similar records | none after the pass; the `FrontendOpenOrder`/`StatusOrderInner` overlap is the API's own two shapes — the *mapping* is now one function (`frontend_row`), the shapes stay exact |
-| reuse (shared op sequences) | the one real extraction: the cursor advance (`3× … cursor_from → set_cursor`) became `mirror_devnet::state::advance_cursor`, used by the applier, the venue scan and the admin's reset; the rest are axum's router idiom |
+| reuse (shared op sequences) | the one real extraction the tool saw: the cursor advance (`3× … cursor_from → set_cursor`) became `mirror_devnet::state::advance_cursor`, used by the applier, the venue scan and the admin's reset; the rest are axum's router idiom. By inspection: the poll cadence's 200 ms floor became `LoopsSection::poll()` (three drivers) and the config's section pairs became `take_pair` (five sites). Judged: the feed's `mark`/`oracle`/`funding` stay three 4-line readers (their override sources differ; a helper would need a closure pair per site) |
 | dispersion | `Sim` spans four files — the domain folder's pattern (one impl block per concern) |
 | narrow context | none: every `Ctx`-taking function touches ≥ 2 fields or passes the context on |
 | plumbing | judged: pure policy/formatting helpers (`step`, `push_metric`, `scan_to`) keep positional parameters — a parameter object would obscure them |
@@ -124,7 +124,8 @@ family by type family:
   becomes a folder when it has parts: `apply/`, `feed_bridge/`);
 - a shared fact goes to the spine (`mirror-devnet`/`mirror-anvil`/
   `mirror-config`) the moment a second profile needs it (`advance_cursor`,
-  `parse_cli`, `exit_verdict`, `witness_for`, `holds_state`);
+  `parse_cli`, `exit_verdict`, `poll`, `witness_for`, `holds_state`,
+  `LATEST`, `HEALTHZ`);
 - naming: the profiles' verbs stay their own (`apply`/`follow`), the shared
   vocabulary is one spelling (`LATEST`, `HEALTHZ`, `ANVIL`);
 - the fitness gates (`make fitness`) hold the line: the closure matrix, the

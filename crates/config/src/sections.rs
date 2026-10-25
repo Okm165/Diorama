@@ -207,6 +207,16 @@ pub struct LoopsSection {
     pub chunk_size: usize,
 }
 
+impl LoopsSection {
+    /// The poll cadence, floored at 200 ms: both mirrors poll a *local* anvil
+    /// (sub-millisecond round trips), so a faster interval buys no freshness
+    /// and only spins the loop — the floor lives here, so every driver reads
+    /// the same cadence.
+    pub fn poll(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.poll_interval_ms.max(200))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VerifierSection {
