@@ -47,7 +47,7 @@ pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
     // forgot it (plan §7.8's `venue_feed_overrides`).
     mirror_devnet::metrics::push_metric(
         &mut out,
-        "gauge",
+        mirror_devnet::metrics::GAUGE,
         "venue_feed_overrides",
         "scenario-owned feed values (crash prices + funding + books)",
         state.feed.owned_count(),

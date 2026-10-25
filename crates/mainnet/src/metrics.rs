@@ -56,7 +56,7 @@ impl MainnetMetrics {
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
         self.render_declared(&mut out);
-        push_metric(&mut out, "gauge", "mirror_lag_blocks", "follow head - applied cursor", self.reth_follow_head.load(Ordering::Relaxed).saturating_sub(self.cursor.load(Ordering::Relaxed)));
+        push_metric(&mut out, mirror_devnet::metrics::GAUGE, "mirror_lag_blocks", "follow head - applied cursor", self.reth_follow_head.load(Ordering::Relaxed).saturating_sub(self.cursor.load(Ordering::Relaxed)));
         out
     }
 }

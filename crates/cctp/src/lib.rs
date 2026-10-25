@@ -25,6 +25,9 @@
 //! Clocks: `block` = the scanned chain's height (per lane: T or V);
 //! `cursor` = that lane's scan cursor; `pin` = the chain's fork base.
 
+/// The method the burn watchers share (the relayer, the sender's pool check,
+/// the watcher's vanished-tx check): one home.
+pub(crate) const TX_BY_HASH: &str = "eth_getTransactionByHash";
 pub mod attester;
 pub mod chains;
 pub mod control;

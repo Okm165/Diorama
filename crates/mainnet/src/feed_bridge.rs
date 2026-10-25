@@ -152,11 +152,12 @@ impl FeedBridgeMetrics {
                 ));
             }
         };
-        series(&mut out, "feed_bridge_updates_total", "answers published to mock aggregators", "counter", &self.updates);
-        series(&mut out, "feed_bridge_pauses_total", "feeds paused on a scenario's write", "counter", &self.pauses);
+        let counter = mirror_devnet::metrics::COUNTER;
+        series(&mut out, "feed_bridge_updates_total", "answers published to mock aggregators", counter, &self.updates);
+        series(&mut out, "feed_bridge_pauses_total", "feeds paused on a scenario's write", counter, &self.pauses);
         mirror_devnet::metrics::push_metric(
             &mut out,
-            "counter",
+            counter,
             "feed_bridge_pass_errors_total",
             "feed bridge passes that failed (the feed's last_error names the cause)",
             self.pass_errors.load(Ordering::Relaxed),

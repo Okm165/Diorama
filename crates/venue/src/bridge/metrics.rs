@@ -59,7 +59,13 @@ impl BridgeMetrics {
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
         let c = |out: &mut String, name: &str, help: &str, v: u64| {
-            mirror_devnet::metrics::push_metric(out, "counter", name, help, v);
+            mirror_devnet::metrics::push_metric(
+                out,
+                mirror_devnet::metrics::COUNTER,
+                name,
+                help,
+                v,
+            );
         };
         c(&mut out, "venue_bridge_credits_total", "EVM→Core credits applied", self.credits.load(Ordering::Relaxed));
         c(&mut out, "venue_bridge_completions_total", "Core→EVM completions submitted", self.completions.load(Ordering::Relaxed));
@@ -68,7 +74,7 @@ impl BridgeMetrics {
         c(&mut out, "venue_bridge_trace_faults_total", "blocks whose callTracer failed", self.trace_faults.load(Ordering::Relaxed));
         mirror_devnet::metrics::push_metric(
             &mut out,
-            "gauge",
+            mirror_devnet::metrics::GAUGE,
             "venue_bridge_lag_blocks",
             "V head minus the bridge's processed cursor (growing = stuck)",
             self.lag_blocks.load(Ordering::Relaxed),

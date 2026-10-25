@@ -218,7 +218,7 @@ impl Watcher {
             let exists: Option<alloy_rpc_types_eth::Transaction> = self
                 .chain
                 .rpc
-                .call("eth_getTransactionByHash", (burn_tx,))
+                .call(crate::TX_BY_HASH, (burn_tx,))
                 .await?;
             if exists.is_some() {
                 continue;

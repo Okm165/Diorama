@@ -185,7 +185,7 @@ async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, bool, U256
 /// unfunded senders).
 async fn ensure_manager_gas(rpc: &Rpc, chain: &'static str, manager: Address) -> Result<()> {
     let balance = rpc
-        .call::<U256>("eth_getBalance", (manager, "latest"))
+        .call::<U256>(mirror_anvil::ETH_GET_BALANCE, (manager, "latest"))
         .await?;
     if balance.is_zero() {
         tracing::warn!(chain, %manager, "attester manager has no gas on the fork; setting a devnet stipend");

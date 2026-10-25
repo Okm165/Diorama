@@ -1483,7 +1483,12 @@ async fn pass_through(state: &ApiState, body: &Bytes) -> Result<Response> {
     let resp = state.api.raw_info(body.to_vec()).await?;
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let bytes = resp.bytes().await?;
-    Ok((status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response())
+    Ok((
+        status,
+        [(header::CONTENT_TYPE, mirror_anvil::JSON_CONTENT_TYPE)],
+        bytes,
+    )
+        .into_response())
 }
 
 fn empty_clearinghouse(time: u64) -> ClearinghouseState {

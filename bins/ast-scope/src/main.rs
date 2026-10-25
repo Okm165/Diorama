@@ -42,6 +42,16 @@ const DISPERSED_BY: usize = 3;
 /// Entry points: uncalled by construction (the runtime calls them).
 const ENTRY_POINTS: [&str; 1] = ["main"];
 
+/// The per-site sketches (a `line: …` string each) the report-only readings
+/// print: divisions (the zero-guard audit), casts (the truncation audit),
+/// literals (the name-it-once reading).
+#[derive(Default)]
+struct Sites {
+    divisions: Vec<String>,
+    casts: Vec<String>,
+    literals: Vec<String>,
+}
+
 /// One production item's shape.
 struct Item {
     file: String,
@@ -59,14 +69,10 @@ struct Item {
     /// The body's token stream, whitespace-stripped (the duplicate detector's
     /// key).
     body: String,
-    /// The body's divisions whose divisor is not a literal, as
-    /// `line: divisor` sketches: the arithmetic-panic audit's input (a zero
-    /// divisor panics; `no-panics` has no regex for arithmetic).
-    divisions: Vec<String>,
-    /// The body's narrowing casts, as `line: as target <- expr` sketches: the
-    /// silent-truncation audit's input (the AST gives the target's name, not
-    /// the source's width — the expression is shown for the auditor).
-    casts: Vec<String>,
+    /// The per-site sketches the report-only readings print (divisions,
+    /// casts, repeated literals): one struct so `Item` stays within its own
+    /// field budget.
+    sites: Sites,
     /// The distinct `ctx.<field>` accesses of a function whose parameters
     /// include a `Ctx`: the narrow-scope reading (a function that needs one
     /// field should take the field, not the whole context).
@@ -411,8 +417,7 @@ fn enum_item(file: &str, e: &syn::ItemEnum, test: bool) -> Item {
         test,
         ops: Vec::new(),
         body: String::new(),
-        divisions: Vec::new(),
-        casts: Vec::new(),
+        sites: Sites::default(),
         ctx_fields: Vec::new(),
         ctx_params: 0,
         ctx_passed_on: false,
@@ -438,8 +443,7 @@ fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
         test,
         ops: Vec::new(),
         body: String::new(),
-        divisions: Vec::new(),
-        casts: Vec::new(),
+        sites: Sites::default(),
         ctx_fields: Vec::new(),
         ctx_params: 0,
         ctx_passed_on: false,
@@ -484,8 +488,11 @@ fn fn_item(
         params: param_names(sig),
         derived: false,
         from: Vec::new(),
-        divisions: body.divisions,
-        casts: body.casts,
+        sites: Sites {
+            divisions: body.divisions,
+            casts: body.casts,
+            literals: body.literals,
+        },
         ctx_fields: body.ctx_fields.into_iter().collect(),
         ctx_params: params.len(),
         ctx_passed_on: body.ctx_passed_on,
@@ -585,6 +592,7 @@ struct Body {
     ops: Vec<String>,
     divisions: Vec<String>,
     casts: Vec<String>,
+    literals: Vec<String>,
     /// The parameter names that hold the engine context (`ctx`, `context`).
     ctx_params: HashSet<String>,
     ctx_fields: HashSet<String>,
@@ -675,6 +683,30 @@ impl<'ast> Visit<'ast> for Body {
         visit::visit_expr_binary(self, n);
     }
 
+    fn visit_expr_lit(&mut self, n: &'ast syn::ExprLit) {
+        let value = match &n.lit {
+            syn::Lit::Str(s) => {
+                let v = s.value();
+                if v.chars().count() < 3 {
+                    return;
+                }
+                format!("\"{v}\"")
+            }
+            syn::Lit::Int(i) => {
+                // Small numbers (indices, scales) are context-local: only
+                // five-digit values are name-it-once candidates.
+                let v = i.base10_digits().to_string();
+                if v.len() < 5 {
+                    return;
+                }
+                v
+            }
+            _ => return,
+        };
+        self.literals.push(value);
+        visit::visit_expr_lit(self, n);
+    }
+
     fn visit_expr_cast(&mut self, n: &'ast syn::ExprCast) {
         // A narrowing `as` can silently truncate. The AST carries the
         // target's name only (the source's width is the checker's), so the
@@ -727,6 +759,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
     plumbing(&prod);
     divisions(&prod);
     casts(&prod);
+    repeated_literals(&prod);
 }
 
 /// Functions that mostly *forward* their parameters: all but at most one
@@ -929,13 +962,46 @@ fn narrow_context(prod: &[&Item]) {
 fn divisions(prod: &[&Item]) {
     let mut rows: Vec<(&Item, &String)> = Vec::new();
     for item in prod {
-        for site in &item.divisions {
+        for site in &item.sites.divisions {
             rows.push((item, site));
         }
     }
     println!("\ndivisions: non-literal divisors ({} sites; each needs a zero guard):", rows.len());
     for (item, site) in rows.iter().take(REPORT_TOP * 2) {
         println!("  {}:{}  {site}", item.file, item.name);
+    }
+}
+
+/// The repeated literals: a string (>= 3 chars) or a five-digit number
+/// appearing in three or more production bodies is a constant (or a table)
+/// waiting to be named — the "narrow and auditable" clause's lens. Tests are
+/// out of scope (their fixtures repeat by nature); small numbers and short
+/// strings are context-local noise.
+fn repeated_literals(prod: &[&Item]) {
+    let mut counts: HashMap<&str, Vec<&str>> = HashMap::new();
+    for item in prod {
+        for literal in item.sites.literals.iter().map(String::as_str) {
+            let users = counts.entry(literal).or_default();
+            if users.last() != Some(&item.name.as_str()) {
+                users.push(&item.name);
+            }
+        }
+    }
+    let mut rows: Vec<(&str, Vec<&str>)> = counts
+        .into_iter()
+        .filter(|(_, users)| users.len() >= 3)
+        .collect();
+    rows.sort_by_key(|(_, users)| std::cmp::Reverse(users.len()));
+    if rows.is_empty() {
+        println!("\nrepeated literals: none (no value appears in three production bodies)");
+        return;
+    }
+    println!("\nrepeated literals: a value in >= 3 production bodies (name it once):");
+    for (literal, users) in rows.iter().take(REPORT_TOP) {
+        let mut names: Vec<&str> = users.clone();
+        names.sort_unstable();
+        names.dedup();
+        println!("  {}x  {literal}  ({})", names.len(), names.join(", "));
     }
 }
 
@@ -947,7 +1013,7 @@ fn divisions(prod: &[&Item]) {
 fn casts(prod: &[&Item]) {
     let mut rows: Vec<(&Item, &String)> = Vec::new();
     for item in prod {
-        for site in &item.casts {
+        for site in &item.sites.casts {
             rows.push((item, site));
         }
     }

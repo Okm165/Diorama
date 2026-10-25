@@ -13,6 +13,9 @@ use mirror_anvil::{Rpc, Write};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// The artifact's name in errors: one home.
+const ARTIFACT: &str = "journal entry";
+
 /// One recorded before-value, tagged by kind in the JSONL file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -151,7 +154,7 @@ impl Journal {
         let mut buf = String::new();
         for e in entries {
             let line = serde_json::to_string(e).map_err(|source| Error::Encode {
-                what: "journal entry",
+                what: ARTIFACT,
                 source,
             })?;
             buf.push_str(&line);
@@ -159,7 +162,7 @@ impl Journal {
         }
         // The shared atomic writer: a crash mid-write must not leave a
         // truncated file that parses as a shorter, valid journal.
-        crate::store::save_bytes(&path, buf.as_bytes(), "journal entry")
+        crate::store::save_bytes(&path, buf.as_bytes(), ARTIFACT)
     }
 
     /// Does a journal file exist for this block?
@@ -173,7 +176,7 @@ impl Journal {
             Ok(_) => Ok(true),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(source) => Err(Error::Io {
-                what: "journal entry",
+                what: ARTIFACT,
                 path: self.dir.join(format!("{block}.jsonl")),
                 source,
             }),
@@ -183,7 +186,7 @@ impl Journal {
     pub fn load(&self, block: u64) -> Result<Vec<JournalEntry>> {
         let path = self.dir.join(format!("{block}.jsonl"));
         let s = std::fs::read_to_string(&path).map_err(|source| Error::Io {
-            what: "journal entry",
+            what: ARTIFACT,
             path: path.clone(),
             source,
         })?;
@@ -193,7 +196,7 @@ impl Journal {
                 continue;
             }
             let entry = serde_json::from_str(line).map_err(|source| Error::Corrupt {
-                what: "journal entry",
+                what: ARTIFACT,
                 path: path.clone(),
                 source,
             })?;

@@ -273,7 +273,7 @@ impl Relayer {
         let source = by_domain(&self.chains, record.source_domain)?;
         let burn: Option<alloy_rpc_types_eth::Transaction> = source
             .rpc
-            .call("eth_getTransactionByHash", (record.burn_tx,))
+            .call(crate::TX_BY_HASH, (record.burn_tx,))
             .await?;
         Ok(burn.is_some())
     }

@@ -10,6 +10,14 @@ mod trace;
 mod writes;
 
 pub use backoff::Backoff;
+
+/// The JSON content type every transport in the workspace sends (and the
+/// venue's HTTP surface answers): one home — a typo here would break a
+/// client silently (the repeated-literal reading's finding).
+pub const JSON_CONTENT_TYPE: &str = "application/json";
+
+/// The balance read the transport and the CCTP helpers share.
+pub const ETH_GET_BALANCE: &str = "eth_getBalance";
 pub use bal::*;
 pub use client::*;
 pub use error::*;

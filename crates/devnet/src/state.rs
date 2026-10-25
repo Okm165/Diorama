@@ -63,12 +63,12 @@ impl StateFile {
     /// here, with the path named, because a silently defaulted cursor would
     /// re-run or skip blocks with no trace of why).
     pub fn open(path: PathBuf) -> Result<Self> {
-        let data = store::load(&path, "cursor state")?.unwrap_or_default();
+        let data = store::load(&path, crate::CURSOR_ARTIFACT)?.unwrap_or_default();
         Ok(Self { path, data })
     }
 
     pub fn save(&self) -> Result<()> {
-        store::save(&self.path, &self.data, "cursor state")
+        store::save(&self.path, &self.data, crate::CURSOR_ARTIFACT)
     }
 }
 

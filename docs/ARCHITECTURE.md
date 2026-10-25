@@ -800,7 +800,14 @@ whose target can truncate a wider source — `u8`/`u16`/`u32`/`i8`/`i16`/`i32`/
 source's width, so the auditor judges; its first run: eleven sites, all
 deliberate — the CCTP civil-date algorithm's bounded month/day, a
 significant-figures render's `ilog10`/`scale` (≤ 28), and `u8`-decimal
-narrowings that are widening in fact), **reuse**
+narrowings that are widening in fact), **repeated literals** (a string
+(≥ 3 chars) or five-digit number appearing in three or more production
+*bodies* — a constant or table waiting to be named; small numbers and short
+strings are context-local noise, tests are out of scope; its first fixes: the
+Prometheus kind vocabulary (`COUNTER`/`GAUGE`, one home in the shared
+metrics), the artifact labels (`ARTIFACT` in the CCTP store and the journal),
+the JSON content type, and the two RPC method names three helpers each
+shared), **reuse**
 (3–6-operation sequences shared by ≥ 3 functions, longest first: a long shared
 sequence is the stronger extraction candidate, and a shorter one already
 contained in a reported longer one is skipped), **duplicates** (bodies that

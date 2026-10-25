@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+/// The artifact's name in errors and load messages: one home.
+const ARTIFACT: &str = "shadow registry";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Shadow {
     /// Storage slots the devnet has written.
@@ -389,7 +392,7 @@ impl Shadow {
     /// vanished). Heals state files from the era when unmark kept recorded
     /// values: orphans are dropped, never re-owned (see `prune_orphans`).
     pub fn load(path: &Path) -> Result<Self> {
-        let mut s: Self = store::load(path, "shadow registry")?.unwrap_or_default();
+        let mut s: Self = store::load(path, ARTIFACT)?.unwrap_or_default();
         let (slots, accounts) = s.prune_orphans();
         if slots > 0 || accounts > 0 {
             tracing::warn!(
@@ -402,7 +405,7 @@ impl Shadow {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        store::save(path, self, "shadow registry")
+        store::save(path, self, ARTIFACT)
     }
 }
 

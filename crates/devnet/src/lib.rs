@@ -4,6 +4,10 @@
 //! Clocks: `block` = the **devnet chain's height** (T on the mainnet profile,
 //! V on the venue profile — the shared crates drive whichever chain the
 //! profile owns); `pin` = that chain's fork base.
+/// The cursor artifact's name in errors and load messages (the epoch rule,
+/// the plane's shadow, the state file): one home.
+pub(crate) const CURSOR_ARTIFACT: &str = "cursor state";
+
 pub mod admin;
 pub mod bal;
 pub mod closure;

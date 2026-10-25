@@ -167,7 +167,7 @@ mod tests {
             shadow_path: dir.join("shadow.json"),
             journal: Journal::new(dir.join("journal"), 16).unwrap(),
             state: Shared::new(
-                "cursor state",
+                crate::CURSOR_ARTIFACT,
                 StateFile::open(dir.join("cursor.json")).unwrap(),
             ),
             metrics: Metrics::default(),

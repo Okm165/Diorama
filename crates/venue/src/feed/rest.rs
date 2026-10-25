@@ -59,7 +59,7 @@ impl RestClient {
         let resp = self
             .http
             .post(format!("{}/info", self.api_url))
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, mirror_anvil::JSON_CONTENT_TYPE)
             .body(body)
             .send()
             .await?;

@@ -260,7 +260,10 @@ impl Chain {
 
     /// The native balance of `who` (gas alerts; the relay key pays its own).
     pub async fn native_balance(&self, who: Address) -> Result<U256> {
-        Ok(self.rpc.call("eth_getBalance", (who, "latest")).await?)
+        Ok(self
+            .rpc
+            .call(mirror_anvil::ETH_GET_BALANCE, (who, "latest"))
+            .await?)
     }
 
     /// A devnet stipend: write the native balance directly

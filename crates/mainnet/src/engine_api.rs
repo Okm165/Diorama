@@ -118,7 +118,7 @@ impl EngineClient {
         let resp = self
             .http
             .post(&self.url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, mirror_anvil::JSON_CONTENT_TYPE)
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", request.token))
             .body(request.json)
             .send()

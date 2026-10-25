@@ -79,6 +79,12 @@ impl Clone for Rpc {
     }
 }
 
+/// The method the three block helpers share.
+const BLOCK_BY_NUMBER: &str = "eth_getBlockByNumber";
+
+/// The one method name the three call helpers share.
+const ETH_CALL: &str = "eth_call";
+
 impl Rpc {
     /// Build a client for `url`. Fallible: the TLS backend's initialization can
     /// fail, and a boundary that cannot be built is a boot error naming itself,
@@ -167,7 +173,7 @@ impl Rpc {
         let resp = self
             .http
             .post(&self.url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, crate::JSON_CONTENT_TYPE)
             .body(body.get().to_string())
             .send()
             .await
@@ -399,7 +405,7 @@ impl Rpc {
     }
 
     pub async fn block_by_number(&self, n: u64, full: bool) -> Result<Block> {
-        self.call_opt("eth_getBlockByNumber", (U64::from(n), full))
+        self.call_opt(BLOCK_BY_NUMBER, (U64::from(n), full))
             .await?
             .ok_or_else(|| Error::BlockMissing {
                 endpoint: self.url.clone(),
@@ -408,14 +414,14 @@ impl Rpc {
     }
 
     pub async fn block_by_number_opt(&self, n: u64, full: bool) -> Result<Option<Block>> {
-        self.call_opt("eth_getBlockByNumber", (U64::from(n), full))
+        self.call_opt(BLOCK_BY_NUMBER, (U64::from(n), full))
             .await
     }
 
     /// `tag` is the protocol's own block-parameter string: `latest`,
     /// `finalized`, `safe`, `pending`, `earliest`, or a hex height.
     pub async fn block_by_tag(&self, tag: &str, full: bool) -> Result<Option<Block>> {
-        self.call_opt("eth_getBlockByNumber", (tag, full)).await
+        self.call_opt(BLOCK_BY_NUMBER, (tag, full)).await
     }
 
     pub async fn block_access_list(&self, n: u64) -> Result<Option<BlockAccessList>> {
@@ -468,14 +474,14 @@ impl Rpc {
 
     pub async fn call_at(&self, to: Address, data: &Bytes, block: u64) -> Result<Bytes> {
         let params = (Self::call_tx(to, data), BlockNumberOrTag::Number(block));
-        self.call("eth_call", params).await
+        self.call(ETH_CALL, params).await
     }
 
     /// eth_call against the current state, including unmined cheatcode writes
     /// (the latest-state read: the probes and the composed-BAL parity compare
     /// the devnet chain against the parent).
     pub async fn call_latest(&self, to: Address, data: &Bytes) -> Result<Bytes> {
-        self.call("eth_call", (Self::call_tx(to, data), BlockNumberOrTag::Latest))
+        self.call(ETH_CALL, (Self::call_tx(to, data), BlockNumberOrTag::Latest))
             .await
     }
 
@@ -510,11 +516,11 @@ impl Rpc {
         overrides: &StateOverride,
     ) -> Result<Bytes> {
         let params = (Self::call_tx(to, data), BlockNumberOrTag::Latest, overrides);
-        self.call("eth_call", params).await
+        self.call(ETH_CALL, params).await
     }
 
     pub async fn balance_at(&self, addr: Address, block: u64) -> Result<U256> {
-        self.call("eth_getBalance", (addr, U64::from(block))).await
+        self.call(crate::ETH_GET_BALANCE, (addr, U64::from(block))).await
     }
 
     pub async fn storage_at(&self, addr: Address, slot: U256, block: u64) -> Result<B256> {

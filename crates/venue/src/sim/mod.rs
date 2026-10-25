@@ -14,6 +14,9 @@
 //! see live funding/liquidation behavior without ever calling `advance`. The
 //! wire's `time` field stays *wall* now: it is the read's freshness, which the
 //! client's ≤6 s staleness gate compares against its own clock.
+/// The artifact's name in errors and load messages: one home.
+const ARTIFACT: &str = "sim state";
+
 pub mod account;
 pub mod order;
 
@@ -103,18 +106,18 @@ pub(crate) struct SimMetrics {
 impl SimMetrics {
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
-        mirror_devnet::metrics::push_metric(&mut out, "gauge", "venue_sim_accounts", "simulated (touched) accounts", self.accounts.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "gauge", "venue_sim_epoch", "scenario epoch (reset bumps it)", self.epoch.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_liquidations_total", "liquidations executed by the sim", self.liquidations_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_partial_liquidations_total", "waterfall step 1: partial (20%) book liquidations", self.partial_liquidations_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_backstop_liquidations_total", "waterfall step 2: backstop (the vault took the position)", self.backstop_liquidations_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_adl_closes_total", "waterfall step 3: ADL closes at the previous mark", self.adl_closes_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_funding_payments_total", "funding payments applied", self.funding_payments_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_identity_violations_total", "served states that failed the identity re-check (must stay 0)", self.identity_violations.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_advances_total", "scenario advance() steps", self.advances_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_orders_filled_total", "orders filled against the real book (the impact lane)", self.orders_filled_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_fees_charged_total", "fills that charged a fee (taker and maker sides)", self.fees_charged_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, "counter", "venue_sim_triggers_armed_total", "trigger orders armed (tp/sl)", self.triggers_armed_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::GAUGE, "venue_sim_accounts", "simulated (touched) accounts", self.accounts.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::GAUGE, "venue_sim_epoch", "scenario epoch (reset bumps it)", self.epoch.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_liquidations_total", "liquidations executed by the sim", self.liquidations_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_partial_liquidations_total", "waterfall step 1: partial (20%) book liquidations", self.partial_liquidations_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_backstop_liquidations_total", "waterfall step 2: backstop (the vault took the position)", self.backstop_liquidations_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_adl_closes_total", "waterfall step 3: ADL closes at the previous mark", self.adl_closes_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_funding_payments_total", "funding payments applied", self.funding_payments_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_identity_violations_total", "served states that failed the identity re-check (must stay 0)", self.identity_violations.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_advances_total", "scenario advance() steps", self.advances_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_orders_filled_total", "orders filled against the real book (the impact lane)", self.orders_filled_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_fees_charged_total", "fills that charged a fee (taker and maker sides)", self.fees_charged_total.load(Ordering::Relaxed));
+        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_triggers_armed_total", "trigger orders armed (tp/sl)", self.triggers_armed_total.load(Ordering::Relaxed));
         out
     }
 }
@@ -187,7 +190,7 @@ pub struct Sim {
 impl Sim {
     /// Load the registry from its state file (absent = first boot, empty).
     pub fn load(path: PathBuf) -> Result<Self> {
-        let state = store::load::<SimState>(&path, "sim state")?.unwrap_or_default();
+        let state = store::load::<SimState>(&path, ARTIFACT)?.unwrap_or_default();
         Ok(Self::from_state(state, Some(path)))
     }
 
@@ -199,7 +202,7 @@ impl Sim {
 
     fn from_state(state: SimState, path: Option<PathBuf>) -> Self {
         let sim = Self {
-            state: Shared::new("sim state", state),
+            state: Shared::new(ARTIFACT, state),
             path,
             dirty: AtomicBool::new(false),
             chain_time_ms: AtomicU64::new(0),
@@ -564,34 +567,53 @@ impl Sim {
             let Some(oracle) = feed.oracle(&coin) else {
                 continue;
             };
-            for r in self.resting_orders(None)? {
-                if r.coin == coin {
-                    self.cancel(r.account, &coin, r.oid, false)?;
-                }
+            self.cancel_market_orders(&coin)?;
+            self.settle_market_positions(feed, &coin, oracle, &meta)?;
+        }
+        Ok(())
+    }
+
+    /// The delisting's first clause: "open orders are cancelled".
+    fn cancel_market_orders(&self, coin: &str) -> Result<()> {
+        for r in self.resting_orders(None)? {
+            if r.coin == coin {
+                self.cancel(r.account, coin, r.oid, false)?;
             }
-            for address in self.account_addresses()? {
-                let Some(account) = self.account(address)? else {
-                    continue;
-                };
-                let Some(position) = account.positions.get(&coin) else {
-                    continue;
-                };
-                let size = position.szi.abs();
-                if size.is_zero() {
-                    continue;
-                }
-                let facts = account::FillFacts::close(
-                    &coin,
-                    position.szi.is_sign_negative(),
-                    size,
-                    oracle,
-                    position.leverage_value.max(1),
-                );
-                self.with_account_now(address, feed, |account| {
-                    account::apply_fill(account, &facts, Some(&meta))
-                })?;
-                tracing::info!(account = %address, coin = %coin, %size, %oracle, "delisted position settled at the oracle");
+        }
+        Ok(())
+    }
+
+    /// The delisting's second clause: "all positions are settled" — closed at
+    /// the served oracle (the docs' 1 h TWAP spot oracle, simplified).
+    fn settle_market_positions(
+        &self,
+        feed: &MarketFeed,
+        coin: &str,
+        oracle: Decimal,
+        meta: &crate::wire::Meta,
+    ) -> Result<()> {
+        for address in self.account_addresses()? {
+            let Some(account) = self.account(address)? else {
+                continue;
+            };
+            let Some(position) = account.positions.get(coin) else {
+                continue;
+            };
+            let size = position.szi.abs();
+            if size.is_zero() {
+                continue;
             }
+            let facts = account::FillFacts::close(
+                coin,
+                position.szi.is_sign_negative(),
+                size,
+                oracle,
+                position.leverage_value.max(1),
+            );
+            self.with_account_now(address, feed, |account| {
+                account::apply_fill(account, &facts, Some(meta))
+            })?;
+            tracing::info!(account = %address, coin = %coin, %size, %oracle, "delisted position settled at the oracle");
         }
         Ok(())
     }
@@ -1254,7 +1276,7 @@ impl Sim {
             return Ok(());
         };
         let snapshot = self.with_state(|state| Ok(state.clone()))?;
-        store::save(path, &snapshot, "sim state")?;
+        store::save(path, &snapshot, ARTIFACT)?;
         self.dirty.store(false, Ordering::Relaxed);
         self.publish_gauges();
         Ok(())

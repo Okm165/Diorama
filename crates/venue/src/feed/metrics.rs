@@ -110,7 +110,7 @@ fn push_gauge(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)],
     push_metric_line(
         out,
         &MetricLine {
-            kind: "gauge",
+            kind: mirror_devnet::metrics::GAUGE,
             name,
             help,
             labels,
@@ -123,7 +123,7 @@ fn push_counter(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)
     push_metric_line(
         out,
         &MetricLine {
-            kind: "counter",
+            kind: mirror_devnet::metrics::COUNTER,
             name,
             help,
             labels,

@@ -85,7 +85,7 @@ impl Plane {
             shadow: Shared::new("shadow registry", shadow),
             shadow_path,
             journal,
-            state: Shared::new("cursor state", state),
+            state: Shared::new(crate::CURSOR_ARTIFACT, state),
             metrics: Metrics::default(),
             facts: crate::facts::FactBus::default(),
             halted: AtomicBool::new(false),

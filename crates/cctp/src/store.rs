@@ -94,6 +94,9 @@ impl MessageRecord {
 }
 
 /// The persisted file: every message this bridge has watched.
+/// The artifact's name in errors and poison messages: one home.
+const ARTIFACT: &str = "cctp state";
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CctpState {
     #[serde(default)]
@@ -152,14 +155,14 @@ impl Store {
     pub fn load(path: PathBuf) -> Result<Self> {
         let state = match std::fs::read_to_string(&path) {
             Ok(text) => serde_json::from_str(&text).map_err(|source| Error::Corrupt {
-                what: "cctp state",
+                what: ARTIFACT,
                 path: path.clone(),
                 source,
             })?,
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => CctpState::default(),
             Err(source) => {
                 return Err(Error::Io {
-                    what: "cctp state",
+                    what: ARTIFACT,
                     path,
                     source,
                 })
@@ -177,7 +180,7 @@ impl Store {
         let mut guard = self
             .state
             .lock()
-            .map_err(|_| Error::Poisoned { what: "cctp state" })?;
+            .map_err(|_| Error::Poisoned { what: ARTIFACT })?;
         f(&mut guard)
     }
 
@@ -248,16 +251,16 @@ impl Store {
         }
         let tmp = self.path.with_extension("tmp");
         let bytes = serde_json::to_vec_pretty(&snapshot).map_err(|source| Error::Encode {
-            what: "cctp state",
+            what: ARTIFACT,
             source,
         })?;
         std::fs::write(&tmp, bytes).map_err(|source| Error::Io {
-            what: "cctp state",
+            what: ARTIFACT,
             path: tmp.clone(),
             source,
         })?;
         std::fs::rename(&tmp, &self.path).map_err(|source| Error::Io {
-            what: "cctp state",
+            what: ARTIFACT,
             path: self.path.clone(),
             source,
         })

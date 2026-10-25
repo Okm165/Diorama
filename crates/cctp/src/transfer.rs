@@ -519,7 +519,7 @@ impl TxSender {
     /// Whether the tx is still in the pool. `false` + no receipt = the tx was
     /// dropped (an anvil restart loses its pool): the caller may re-send.
     pub async fn in_pool(&self, rpc: &Rpc, tx: B256) -> Result<bool> {
-        let found: Option<Transaction> = rpc.call("eth_getTransactionByHash", (tx,)).await?;
+        let found: Option<Transaction> = rpc.call(crate::TX_BY_HASH, (tx,)).await?;
         Ok(found.is_some())
     }
 }

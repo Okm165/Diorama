@@ -4,6 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// One Prometheus text block (HELP/TYPE/value). The shared shape for every
 /// registry's render (the engine's `Metrics`, the venue's `VenueMetrics`).
+/// The Prometheus kind vocabulary, named once: a typo'd kind would render a
+/// wrong `# TYPE` line silently (the repeated-literal reading's finding).
+pub const COUNTER: &str = "counter";
+pub const GAUGE: &str = "gauge";
+
 pub fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, v: u64) {
     push_metric_line(
         out,
