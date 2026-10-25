@@ -790,17 +790,7 @@ impl Sim {
         address: Address,
         req: &Order,
     ) -> Result<Option<&'static str>> {
-        let Some(asset) = meta.and_then(|m| m.asset(&req.coin)) else {
-            return Ok(None);
-        };
-        let Some(table_id) = asset.margin_table_id else {
-            return Ok(None);
-        };
-        let Some((_, table)) = meta.and_then(|m| {
-            m.margin_tables
-                .iter()
-                .find(|(id, _)| *id == table_id)
-        }) else {
+        let Some(table) = meta.and_then(|m| m.margin_table(&req.coin)) else {
             return Ok(None);
         };
         let leverage = self.leverage_for(address, &req.coin, meta)?;

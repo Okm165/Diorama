@@ -289,6 +289,16 @@ impl Meta {
     pub(crate) fn asset(&self, coin: &str) -> Option<&AssetInfo> {
         self.universe.iter().find(|a| a.name == coin)
     }
+
+    /// The asset's margin table: the table id resolved through the meta's
+    /// tables (the margin checks' shared lookup).
+    pub(crate) fn margin_table(&self, coin: &str) -> Option<&MarginTable> {
+        let id = self.asset(coin)?.margin_table_id?;
+        self.margin_tables
+            .iter()
+            .find(|(tid, _)| *tid == id)
+            .map(|(_, t)| t)
+    }
 }
 
 /// The asset's margin mode (docs, margining: "strictIsolated" means margin

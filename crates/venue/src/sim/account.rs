@@ -550,11 +550,8 @@ pub(crate) fn maintenance_rate(coin: &str, notional: Decimal, meta: Option<&crat
     let Some(asset) = meta.asset(coin) else {
         return Decimal::ZERO;
     };
-    let table = asset
-        .margin_table_id
-        .and_then(|id| meta.margin_tables.iter().find(|(tid, _)| *tid == id))
-        .map(|(_, t)| t);
-    let max_leverage = table
+    let max_leverage = meta
+        .margin_table(coin)
         .and_then(|t| {
             t.margin_tiers
                 .iter()
