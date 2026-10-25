@@ -36,6 +36,33 @@ trace flattening), `mirror-config` (the layered config + the boot
 conventions: `run_main`, `parse_cli`, `exit_verdict`, `service_config_or_exit`,
 `init_logging`, the worker stack budget, `DEFAULT_INSTANCE_PATH`).
 
+## The paired names (fn level)
+
+The files pair, and so do the entry points inside them. The shared vocabulary
+(`boot`, `run`, `app`, `status_doc`, `bundle`, `policies`, `build`, `probes_now`)
+reads identically on both sides; everything else is the profile's own rule set:
+
+| file | mainnet | venue |
+|---|---|---|
+| `ctx.rs` | `Ctx::{new, follow_head, follow_tag}` + `impl Engine` | `Ctx::{new}` + `resolved_pin` + `impl Engine` |
+| `driver.rs` | `boot` + `apply_loop`/`shadow_loop`/`source_sync_supervisor` + the cursor/reorg rules (`next_block`, `validate_cursor`, `on_reset`, `rebase`, `resume_point`, `on_rebase`, `gap_within_limit`, `reorg_continuity`) + `scan_once`, `probes_now` | `boot` + `run`/`pass` + `reconcile`/`pin_read`/`anchor_cursor`/`recover_from_reset`/`run_epoch_rule` + `scan_and_advance`, `mine_pending`, `probes_at_pin`, `probes_now` |
+| `service.rs` | `main_entry` + `run` + `require_wiring` + `build_bridge` + `spawn_loops` | `main_entry` + `run` + `require_wiring` + `spawn_loops` (+ `sim_entry` and the simulator's spawns) |
+| `profile.rs` | `bundle`/`policies`/`build` + `Wiring`/`Deps` | `bundle`/`policies`/`build` + `Wiring`/`Deps` (+ `closures`/`watch_set`) |
+| `http.rs` | `app` + `status_doc` (+ `admin_time`) | `app` + `status_doc` |
+| `selftest.rs` | `run` (+ `run_one_block`) | `run` (+ `windows_loop`, `wait_for_move`) |
+| `source.rs` | `RethSource::{new, trace_block_per_tx}` + `impl Source` | `VenueSource::{new}` + `public_capabilities` + `impl Source` |
+| `reset.rs` | `CursorHash` + `below_fork_base` | `PinCanary` + the canary io |
+| `metrics.rs` | `MainnetMetrics` (registry + render + overlap test) | `VenueMetrics` (the same three) |
+| `error.rs` | the profile's variants + `impl ShellError` | the same shape |
+
+Struct level: both `Ctx`es carry the same ordered core (the chain section, the
+engine section, the target anvil, the source, the mirror bundle, the composer
+target, the plane, the profile metrics, the drift log) with the profile's own
+fields at the ends (`pin`/`uncovered_seen`; `beacon`/`engine_api`/
+`feed_bridge_metrics`); both `StatusResponse`s flatten the shared `SharedStatus`
+beside the profile's fields; both `profile::Deps` are the "one struct, not five
+arguments" input to `build`.
+
 ## The judged asymmetries
 
 Each of these is a decision, not drift (the design record's divergence table
