@@ -849,7 +849,7 @@ impl Sim {
             .unwrap_or(Decimal::ZERO);
         let signed = if req.is_buy { req.size } else { -req.size };
         let increases =
-            old.is_zero() || super::account::sign(old) == super::account::sign(signed);
+            super::account::same_direction(old, signed);
         if !increases {
             return Ok(None);
         }

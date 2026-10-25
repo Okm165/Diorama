@@ -646,6 +646,13 @@ pub(crate) fn liquidation_px(p: &Position, mark: Decimal, maintenance_rate: Deci
 /// (`accountValue == totalRawUsd + Σ signed positionValue`) stays exact; the
 /// initial margin follows `|szi|·entry/leverage`. A flip (through zero) opens
 /// the remainder at the fill price.
+/// Whether the new signed size keeps the position's direction (a flat
+/// position has none): the reduce-only, fill and cap checks' shared
+/// predicate.
+pub(crate) fn same_direction(old: Decimal, new: Decimal) -> bool {
+    old.is_zero() || sign(old) == sign(new)
+}
+
 /// The sign of a decimal (−1/0/1); `rust_decimal` has no `signum`.
 pub(crate) fn sign(d: Decimal) -> i8 {
     if d > Decimal::ZERO {
@@ -705,7 +712,7 @@ pub(crate) fn apply_fill(
         .positions
         .entry(fill.coin.clone())
         .or_insert_with(|| fresh_position(fill));
-    let closed = if old.is_zero() || sign(old) == sign(signed) {
+    let closed = if same_direction(old, signed) {
         apply_increase(position, old, fill)?;
         Decimal::ZERO
     } else {
@@ -775,7 +782,7 @@ fn release_isolated_margin(
 /// The reduce-only guard: the venue's own string (plan §16.3) when the fill
 /// would not reduce the position it names.
 fn refuse_non_reducing(old: Decimal, signed: Decimal, fill: &FillFacts) -> Result<()> {
-    if fill.reduce_only && (old.is_zero() || sign(old) == sign(signed) || fill.size > old.abs()) {
+    if fill.reduce_only && (same_direction(old, signed) || fill.size > old.abs()) {
         return Err(Error::bad_request(
             "Reduce only order would increase position.",
         ));
@@ -1022,6 +1029,16 @@ mod tests {
     /// The unified account's spot collateral is part of the raw balance (the
     /// single USDC figure the docs describe), so it backs perp margin and the
     /// identity stays exact.
+    /// The direction predicate: flat is no direction, signs decide (the
+    /// reduce-only, fill and cap checks' shared rule).
+    #[test]
+    fn same_direction_treats_flat_as_no_direction() {
+        assert!(same_direction(Decimal::ZERO, Decimal::from(3)));
+        assert!(same_direction(Decimal::from(2), Decimal::from(3)));
+        assert!(same_direction(Decimal::from(-2), Decimal::from(-3)));
+        assert!(!same_direction(Decimal::from(2), Decimal::from(-3)));
+    }
+
     #[test]
     fn unified_spot_collateral_backs_the_perp_side() {
         let feed = feed_with(&[("BTC", "100.0", "100.0")]);
