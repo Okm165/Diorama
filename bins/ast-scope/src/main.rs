@@ -63,6 +63,10 @@ struct Item {
     /// `line: divisor` sketches: the arithmetic-panic audit's input (a zero
     /// divisor panics; `no-panics` has no regex for arithmetic).
     divisions: Vec<String>,
+    /// The body's narrowing casts, as `line: as target <- expr` sketches: the
+    /// silent-truncation audit's input (the AST gives the target's name, not
+    /// the source's width — the expression is shown for the auditor).
+    casts: Vec<String>,
     /// The distinct `ctx.<field>` accesses of a function whose parameters
     /// include a `Ctx`: the narrow-scope reading (a function that needs one
     /// field should take the field, not the whole context).
@@ -408,6 +412,7 @@ fn enum_item(file: &str, e: &syn::ItemEnum, test: bool) -> Item {
         ops: Vec::new(),
         body: String::new(),
         divisions: Vec::new(),
+        casts: Vec::new(),
         ctx_fields: Vec::new(),
         ctx_params: 0,
         ctx_passed_on: false,
@@ -434,6 +439,7 @@ fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
         ops: Vec::new(),
         body: String::new(),
         divisions: Vec::new(),
+        casts: Vec::new(),
         ctx_fields: Vec::new(),
         ctx_params: 0,
         ctx_passed_on: false,
@@ -479,6 +485,7 @@ fn fn_item(
         derived: false,
         from: Vec::new(),
         divisions: body.divisions,
+        casts: body.casts,
         ctx_fields: body.ctx_fields.into_iter().collect(),
         ctx_params: params.len(),
         ctx_passed_on: body.ctx_passed_on,
@@ -577,6 +584,7 @@ struct Body {
     max_depth: usize,
     ops: Vec<String>,
     divisions: Vec<String>,
+    casts: Vec<String>,
     /// The parameter names that hold the engine context (`ctx`, `context`).
     ctx_params: HashSet<String>,
     ctx_fields: HashSet<String>,
@@ -666,7 +674,26 @@ impl<'ast> Visit<'ast> for Body {
         }
         visit::visit_expr_binary(self, n);
     }
+
+    fn visit_expr_cast(&mut self, n: &'ast syn::ExprCast) {
+        // A narrowing `as` can silently truncate. The AST carries the
+        // target's name only (the source's width is the checker's), so the
+        // reading flags the narrow targets and shows the expression.
+        let target = n.ty.to_token_stream().to_string().replace(' ', "");
+        if NARROW_TARGETS.contains(&target.as_str()) {
+            let expr = n.expr.to_token_stream().to_string().replace(' ', "");
+            let expr: String = expr.chars().take(48).collect();
+            self.casts
+                .push(format!("{}: as {target} <- {expr}", n.span().start().line));
+        }
+        visit::visit_expr_cast(self, n);
+    }
 }
+
+/// Cast targets narrow enough to truncate a wider source: the cast audit's
+/// flag set. `usize`/`u64`/`i64` targets are 64-bit on every supported
+/// platform and stay out.
+const NARROW_TARGETS: [&str; 7] = ["u8", "u16", "u32", "i8", "i16", "i32", "f32"];
 
 /// A literal divisor (`2`, `3_600_000`) cannot be zero — nothing to audit.
 fn is_literal(e: &syn::Expr) -> bool {
@@ -699,6 +726,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
     dead_members(&prod, uses);
     plumbing(&prod);
     divisions(&prod);
+    casts(&prod);
 }
 
 /// Functions that mostly *forward* their parameters: all but at most one
@@ -906,6 +934,28 @@ fn divisions(prod: &[&Item]) {
         }
     }
     println!("\ndivisions: non-literal divisors ({} sites; each needs a zero guard):", rows.len());
+    for (item, site) in rows.iter().take(REPORT_TOP * 2) {
+        println!("  {}:{}  {site}", item.file, item.name);
+    }
+}
+
+/// The narrowing casts: every `as` whose target can truncate a wider source
+/// (`NARROW_TARGETS`), with the expression shown — the source's width is the
+/// checker's, so the auditor judges. Report-only, like the division audit: a
+/// deliberate cast (a checked value's final narrowing) is fine, an
+/// unexplained one is a silent-truncation candidate.
+fn casts(prod: &[&Item]) {
+    let mut rows: Vec<(&Item, &String)> = Vec::new();
+    for item in prod {
+        for site in &item.casts {
+            rows.push((item, site));
+        }
+    }
+    if rows.is_empty() {
+        println!("\ncasts: none (no production cast targets a narrow type)");
+        return;
+    }
+    println!("\ncasts: narrowing `as` targets ({} sites; judge each):", rows.len());
     for (item, site) in rows.iter().take(REPORT_TOP * 2) {
         println!("  {}:{}  {site}", item.file, item.name);
     }

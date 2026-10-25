@@ -794,7 +794,13 @@ unreachable), **plumbing** (functions that mostly forward their parameters —
 all but at most one parameter appears as a bare reference — so a parameter
 object or a narrower type would name the shape once; its first finds: the
 composer family, now the spine's `Composer` struct, and the mainnet profile's
-`build`, now the venue `Deps`' twin), **reuse**
+`build`, now the venue `Deps`' twin), **casts** (every production `as`
+whose target can truncate a wider source — `u8`/`u16`/`u32`/`i8`/`i16`/`i32`/
+`f32` — with the expression shown: the AST gives the target's name, not the
+source's width, so the auditor judges; its first run: eleven sites, all
+deliberate — the CCTP civil-date algorithm's bounded month/day, a
+significant-figures render's `ilog10`/`scale` (≤ 28), and `u8`-decimal
+narrowings that are widening in fact), **reuse**
 (3–6-operation sequences shared by ≥ 3 functions, longest first: a long shared
 sequence is the stronger extraction candidate, and a shorter one already
 contained in a reported longer one is skipped), **duplicates** (bodies that

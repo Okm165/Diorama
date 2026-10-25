@@ -598,12 +598,25 @@ fn assemble(
 /// positions. The margin remaining must also meet the initial margin
 /// requirement, i.e. `transfer_margin_required = max(initial_margin_required,
 /// 0.1 * total_position_value)`" — and "transferring" includes isolated
-/// margin transfers. The cross summary is the scope (isolated margins are the
-/// positions' own); the info endpoint's own example pins the flat case
-/// (withdrawable = cross accountValue − totalMarginUsed, cross side flat).
+/// margin transfers. One home for the rule: the served `withdrawable` (the
+/// cross summary's scope — isolated margins are the positions' own; the info
+/// endpoint's own example pins the flat case) and the isolated removal's
+/// floor (`transfer_floor`).
+pub(crate) fn transfer_floor_of(notional: Decimal, initial: Decimal) -> Result<Decimal> {
+    let ten = mul(notional, Decimal::new(1, 1), "transfer floor")?;
+    Ok(initial.max(ten))
+}
+
+/// One position's transfer floor at the served mark: the same rule, at the
+/// position's granularity (the isolated removal's check).
+pub(crate) fn transfer_floor(p: &Position, mark: Decimal) -> Result<Decimal> {
+    let notional = mul(p.szi.abs(), mark, "position notional")?;
+    let initial = div(notional, Decimal::from(p.leverage_value.max(1)), "initial margin")?;
+    transfer_floor_of(notional, initial)
+}
+
 fn withdrawable_of(cross_account_value: Decimal, totals: &PositionTotals) -> Result<Decimal> {
-    let ten = mul(totals.cross_notional, Decimal::new(1, 1), "transfer floor")?;
-    let floor = totals.cross_margin.max(ten);
+    let floor = transfer_floor_of(totals.cross_notional, totals.cross_margin)?;
     Ok(sub(cross_account_value, floor, "withdrawable")?.max(Decimal::ZERO))
 }
 

@@ -822,14 +822,7 @@ impl Sim {
             // "transferring" includes isolated margin transfers.
             if delta < Decimal::ZERO {
                 let mark = feed.mark(coin).ok_or(crate::error::Error::Warming)?;
-                let notional = account::mul(p.szi.abs(), mark, "position notional")?;
-                let initial = account::div(
-                    notional,
-                    Decimal::from(p.leverage_value.max(1)),
-                    "initial margin",
-                )?;
-                let ten = account::mul(notional, Decimal::new(1, 1), "transfer floor")?;
-                let required = initial.max(ten);
+                let required = account::transfer_floor(p, mark)?;
                 if next < required {
                     return Err(crate::error::Error::bad_request(format!(
                         "Isolated margin transfer would leave {next} below the required                          {required} (the initial margin or 10% of the position's notional;                          docs: margining)"

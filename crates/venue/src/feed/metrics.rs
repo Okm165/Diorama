@@ -4,6 +4,7 @@
 //! The hand-rolled Prometheus conventions are `mirror-devnet`'s; the one
 //! extension here is labels (`{coin="BTC"}`), which only the per-coin gauges
 //! need — a labeled series per configured market.
+use mirror_devnet::metrics::{push_metric_line, MetricLine};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -105,37 +106,30 @@ impl FeedMetrics {
     }
 }
 
-/// One metric line's fields (the render's one shape; the wrappers fill the
-/// kind).
-struct MetricLine<'a> {
-    kind: &'a str,
-    name: &'a str,
-    help: &'a str,
-    labels: &'a [(&'a str, &'a str)],
-    value: u64,
-}
-
 fn push_gauge(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
-    push_metric(out, &MetricLine { kind: "gauge", name, help, labels, value });
+    push_metric_line(
+        out,
+        &MetricLine {
+            kind: "gauge",
+            name,
+            help,
+            labels,
+            value,
+        },
+    );
 }
 
 fn push_counter(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
-    push_metric(out, &MetricLine { kind: "counter", name, help, labels, value });
-}
-
-fn push_metric(out: &mut String, m: &MetricLine<'_>) {
-    let MetricLine { kind, name, help, labels, value } = m;
-    let series = if labels.is_empty() {
-        name.to_string()
-    } else {
-        let l = labels
-            .iter()
-            .map(|(k, v)| format!("{k}=\"{v}\""))
-            .collect::<Vec<_>>()
-            .join(",");
-        format!("{name}{{{l}}}")
-    };
-    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{series} {value}\n"));
+    push_metric_line(
+        out,
+        &MetricLine {
+            kind: "counter",
+            name,
+            help,
+            labels,
+            value,
+        },
+    );
 }
 
 #[cfg(test)]

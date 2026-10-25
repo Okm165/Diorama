@@ -138,22 +138,8 @@ impl Bridge {
         // initializes an account in the same block still cannot act.
         let pre_block = self.sim.account_addresses()?;
 
-        // EVM→Core: transfers to system addresses, from the receipts' logs.
-        let receipts = self.anvil_v.receipts(n).await?;
-        for receipt in &receipts {
-            for log in receipt.logs() {
-                // HYPE's boundary is the system contract's `Received` event
-                // (docs): a tx value sent to `0x2222…2` credits Core HYPE.
-                if log.address() == system::HYPE_SYSTEM {
-                    self.apply_hype_credit(log.data(), &tokens)?;
-                    continue;
-                }
-                let Some(transfer) = system::transfer_of(log.data()) else {
-                    continue;
-                };
-                self.apply_credit(&transfer, log.address(), &tokens).await?;
-            }
-        }
+        // EVM→Core: the docs' intra-block step 3.
+        self.apply_credits(n, &tokens).await?;
 
         // CoreWriter: top-level txs plus contract-internal calls. The Core
         // sorts a block's actions by category before applying them (docs:
@@ -174,6 +160,29 @@ impl Bridge {
         }
         for (caller, action) in calls {
             self.apply_action(caller, action, &tokens).await?;
+        }
+        Ok(())
+    }
+
+    /// The block's EVM→Core side (the docs' intra-block step 3: "EVM -> Core
+    /// transfers are processed" before the CoreWriter actions): HYPE's system
+    /// contract (`Received`) and every token's system-address transfers,
+    /// from the receipts' logs.
+    async fn apply_credits(&self, n: u64, tokens: &[TokenInfo]) -> Result<()> {
+        let receipts = self.anvil_v.receipts(n).await?;
+        for receipt in &receipts {
+            for log in receipt.logs() {
+                // HYPE's boundary is the system contract's `Received` event
+                // (docs): a tx value sent to `0x2222…2` credits Core HYPE.
+                if log.address() == system::HYPE_SYSTEM {
+                    self.apply_hype_credit(log.data(), tokens)?;
+                    continue;
+                }
+                let Some(transfer) = system::transfer_of(log.data()) else {
+                    continue;
+                };
+                self.apply_credit(&transfer, log.address(), tokens).await?;
+            }
         }
         Ok(())
     }

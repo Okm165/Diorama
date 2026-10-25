@@ -5,7 +5,50 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// One Prometheus text block (HELP/TYPE/value). The shared shape for every
 /// registry's render (the engine's `Metrics`, the venue's `VenueMetrics`).
 pub fn push_metric(out: &mut String, kind: &str, name: &str, help: &str, v: u64) {
-    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{name} {v}\n"));
+    push_metric_line(
+        out,
+        &MetricLine {
+            kind,
+            name,
+            help,
+            labels: &[],
+            value: v,
+        },
+    );
+}
+
+/// One exposition line's fields: the render's one shape, labeled series
+/// included. The venue's feed used to carry a second implementation of this
+/// exact format; one home now (`push_metric` is the unlabeled shorthand).
+pub struct MetricLine<'a> {
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub help: &'a str,
+    pub labels: &'a [(&'a str, &'a str)],
+    pub value: u64,
+}
+
+/// The labeled form: `name{k="v",…} value`, with its `# HELP`/`# TYPE`
+/// header (the same bytes the unlabeled shorthand renders).
+pub fn push_metric_line(out: &mut String, m: &MetricLine<'_>) {
+    let MetricLine {
+        kind,
+        name,
+        help,
+        labels,
+        value,
+    } = m;
+    let series = if labels.is_empty() {
+        name.to_string()
+    } else {
+        let l = labels
+            .iter()
+            .map(|(k, v)| format!("{k}=\"{v}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("{name}{{{l}}}")
+    };
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{series} {value}\n"));
 }
 
 /// Declare a registry: one line per series, expanding to the atomic fields and
@@ -139,5 +182,30 @@ mod tests {
             .map(String::from)
             .collect();
         assert_eq!(names, want);
+    }
+
+    /// The labeled form renders the same bytes as the unlabeled shorthand,
+    /// with the series carrying its labels — one formatter for both (the
+    /// venue's feed used to carry a second copy of this format).
+    #[test]
+    fn labeled_metric_lines_render() {
+        let mut out = String::new();
+        push_metric(&mut out, "gauge", "x_total", "help", 7);
+        assert_eq!(out, "# HELP x_total help\n# TYPE x_total gauge\nx_total 7\n");
+        out.clear();
+        push_metric_line(
+            &mut out,
+            &MetricLine {
+                kind: "counter",
+                name: "x_total",
+                help: "help",
+                labels: &[("coin", "ETH")],
+                value: 9,
+            },
+        );
+        assert_eq!(
+            out,
+            "# HELP x_total help\n# TYPE x_total counter\nx_total{coin=\"ETH\"} 9\n"
+        );
     }
 }
