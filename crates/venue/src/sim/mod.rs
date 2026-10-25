@@ -935,6 +935,30 @@ mod tests {
         );
     }
 
+    /// The state round trip: what a save writes is what a load serves — the
+    /// durability the per-block writer and the restart legs rely on.
+    #[test]
+    fn the_state_round_trips_through_the_file() {
+        let dir = std::env::temp_dir().join(format!("venue-sim-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("sim.json");
+        let a = Address::repeat_byte(0xaa);
+        let sim = Sim::load(path.clone()).unwrap();
+        sim.credit_spot(a, TokenRef { index: 0, coin: "USDC" }, Decimal::from(250))
+            .unwrap();
+        sim.save().unwrap();
+        let reloaded = Sim::load(path).unwrap();
+        let total = reloaded
+            .account(a)
+            .unwrap()
+            .unwrap()
+            .spot
+            .get(&0)
+            .map(|e| e.total);
+        assert_eq!(total, Some(Decimal::from(250)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The two tails are distinct: `mutate_account` batches (`touch` leaves
     /// the dirty flag for the block writer), `mutate_state` saves
     /// (`mark_dirty` clears it).

@@ -260,6 +260,34 @@ tb_after=$(rpc "$V" eth_call "[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231000000000
   && ok "restart: the devnet-owned deal survived (COW mark intact, $tb_after)" \
   || bad "restart: dealt balance $tb_after != 100000000"
 
+# ---- stability: a corrupt state file fails closed -------------------------
+# A corrupt state must refuse at boot, never silently reset to empty (the
+# store's contract: absent is a fact, corruption is a fault). The cursor
+# file is truncated, the restart must exit non-zero naming the state, and
+# the backup is restored.
+kill -9 "$ENG_PID" 2>/dev/null || true
+sleep 1
+[ -f "$DIR/state/cursor.json" ] \
+  && ok "corrupt state: the cursor file is there to corrupt" \
+  || bad "corrupt state: no $DIR/state/cursor.json"
+cp "$DIR/state/cursor.json" "$DIR/state/cursor.json.bak"
+printf '{not json' > "$DIR/state/cursor.json"
+if "$ENGINE" run --config "$DIR/instance.toml" > "$DIR/engine-corrupt.log" 2>&1; then
+  bad "corrupt state: the engine started anyway (a silent reset would be data loss)"
+else
+  ok "corrupt state: the engine refused at boot (exit != 0)"
+fi
+grep -q "cursor state" "$DIR/engine-corrupt.log" \
+  && ok "corrupt state: the fault names the state (cursor state)" \
+  || bad "corrupt state: the log does not name the state (see $DIR/engine-corrupt.log)"
+mv "$DIR/state/cursor.json.bak" "$DIR/state/cursor.json"
+"$ENGINE" run --config "$DIR/instance.toml" >> "$DIR/engine.log" 2>&1 &
+ENG_PID=$!
+for _ in $(seq 1 120); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
+curl -sf "$HTTP/livez" >/dev/null \
+  && ok "corrupt state: the restored file boots again" \
+  || bad "corrupt state: the engine did not come back (see $DIR/engine.log)"
+
 # ---- the epoch rule (the mainnet script's section, V's own facts) ----------
 # A one-call re-pin moves V's base: the driver detects the reset and the
 # epoch rule runs — the events carry both facts, the counter moves.
