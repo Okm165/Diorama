@@ -51,7 +51,7 @@ pub struct Ctx {
     pub(crate) mainnet_metrics: MainnetMetrics,
     /// The feed bridge's counters (shared with the bridge task; /metrics
     /// renders them whether or not the bridge is configured).
-    pub(crate) feed_bridge_metrics: Arc<crate::feed_bridge::FeedBridgeMetrics>,
+    pub(crate) feed_bridge_metrics: Arc<crate::feed::FeedBridgeMetrics>,
     pub(crate) drift: Drift,
 }
 
@@ -86,7 +86,7 @@ impl Ctx {
             engine_api,
             plane,
             mainnet_metrics: MainnetMetrics::default(),
-            feed_bridge_metrics: Arc::new(crate::feed_bridge::FeedBridgeMetrics::default()),
+            feed_bridge_metrics: Arc::new(crate::feed::FeedBridgeMetrics::default()),
             drift,
         })
     }

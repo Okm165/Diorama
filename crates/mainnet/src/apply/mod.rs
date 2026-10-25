@@ -4,12 +4,12 @@
 //! BAL (the spine's generic composer: native on reth, the trace rung as
 //! fallback) -> COW it against the devnet's own writes -> read before-values
 //! -> batched cheatcode writes -> align block context -> mine -> journal ->
-//! sampled parity + probe parity. Each phase is one function; `apply_block` is
+//! sampled parity + probe parity. Each phase is one function; `step` is
 //! the sequence. The two phase families with their own state live beside it:
 //! [`prepend`] (the devnet's own blocks) and [`parity`] (the drift lens and
 //! the convergence probes).
-mod parity;
-mod prepend;
+pub(crate) mod parity;
+pub(crate) mod prepend;
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
@@ -140,7 +140,7 @@ async fn apply_entry(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result
     })
 }
 
-pub(crate) async fn apply_block(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
+pub(crate) async fn step(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let started = Instant::now();
     let header = ctx.mirror.source().header(n).await?;
 

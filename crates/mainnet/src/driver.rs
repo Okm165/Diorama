@@ -7,7 +7,7 @@
 //! cursor/rebase/gap/reorg rules live here; the epoch rule itself is shared
 //! (`mirror_devnet::epoch`).
 use crate::ctx::Ctx;
-use crate::apply::apply_block;
+use crate::apply::step;
 use crate::error::Result;
 use crate::source_sync;
 use mirror_anvil::Rpc;
@@ -243,7 +243,7 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
         }
         match next_block(&ctx).await {
             Ok(Some(n)) => {
-                if let Err(e) = apply_block(&ctx, n).await {
+                if let Err(e) = step(&ctx, n).await {
                     tracing::error!(block = n, error = %e, "diff apply failed (will retry)");
                     tokio::time::sleep(poll * 5).await;
                 }

@@ -6,6 +6,23 @@ deliberately differ (with the reason). It is the artifact behind the
 symmetry sweeps — regenerate the readings with
 `cargo run -q -p ast-scope -- crates bins`.
 
+## The layout at a glance
+
+| concern | mainnet | venue | note |
+|---|---|---|---|
+| crate | `crates/mainnet` | `crates/venue` | the trees below |
+| engine bin | `bins/mainnet-engine` | `bins/venue-engine` | |
+| profile-only bin | — | `bins/venue-sim` | the simulator has no mainnet twin |
+| cross-mirror bins | `bins/cctp-bridge`, `bins/ast-scope` | (shared) | the bridge and the fitness gate span both |
+| instance | `config/instances/mainnet-mirror/` | `config/instances/venue-mirror/` | TOML + kustomization, section-for-section alike |
+| k8s base | `k8s/base/mainnet-mirror/` | `k8s/base/venue-mirror/` | + the shared and cctp-bridge bases |
+| k8s overlay | `k8s/overlays/mainnet-mirror/` | `k8s/overlays/venue-mirror/` | |
+| cluster suites | `mainnet-{smoke,scenario,proof,product-sim,closure-check,feed-bridge}` | `venue-{smoke,scenario,proof,order-proof,product-sim}` | one-sided rows say why (docs/TESTING.md) |
+| local proofs | `mainnet-{engine-local,selftest-local,workshop-local,feed-local}` | `venue-{engine-local,selftest-local,workshop-local,sim-parity-local}` | |
+| cross-mirror | `engine-symmetry` (cluster) · `engine-symmetry-local`, `cctp-*`, `daloc-*`, `container-smoke` (local) | (shared) | |
+| explainer | `docs/HOW-IT-WORKS.md` | `docs/HOW-IT-WORKS-VENUE.md` | the same §-numbered walk-through |
+| topology image | `docs/img/how-topology.png` | `docs/img/how-topology-venue.png` | rendered from the docs' ASCII art |
+
 ## The trees
 
 | `crates/mainnet/src/` | `crates/venue/src/` | role |
@@ -21,8 +38,8 @@ symmetry sweeps — regenerate the readings with
 | `profile.rs` | `profile.rs` | the divergence set, filled: `bundle`/`policies`/`build` + the `Wiring`/`Deps` pair, under the same decision table |
 | `reset.rs` | `reset.rs` | the profile's `ResetDetector` (cursor hash / pin canary) |
 | `selftest.rs` | `selftest.rs` | the scratch-stack selftest (`Targets` + `run`) |
-| `source.rs` | `source.rs` | the profile's source facts: the `Source` impl (`RethSource`) / the declared capabilities (`public_capabilities`); the pin-exact read shape is the spine's `PinnedSource` (chosen in `profile.rs`) |
-| `feed_bridge/` (mod, chainlink, http, metrics, policy) | `feed/` (mod, budget, metrics, rest, ws) | the market/price plane: the Chainlink feed bridge (the parent's answers → T's mock aggregators) / the HL market feed (REST + WS + budget) into the simulator |
+| `source.rs` | `source.rs` | the profile's source facts: the `Source` impl (`RethSource`) / the `DECLARED` capabilities + the `pinned`/`follow` builders; the pin-exact read shape is the spine's `PinnedSource` |
+| `feed/` (mod, chainlink, http, metrics, policy) | `feed/` (mod, budget, metrics, rest, ws) | the market/price plane: the Chainlink feed bridge (the parent's answers → T's mock aggregators) / the HL market feed (REST + WS + budget) into the simulator |
 | `source_sync/` (mod, beacon, engine_api) | `bridge/` (mod, corewriter, metrics, system) | mainnet-only transports (CL + engine API, EIP-8379 top-up) / venue-only Core↔EVM bridge |
 | — | `api/` (mod, control, exchange, info, ws) | the simulator's served API (info 8090 / control 8091) |
 | — | `sim/` (mod, account, funding, metrics, order, seed, tick, validate, waterfall) | the simulator's model |
@@ -45,12 +62,12 @@ reads identically on both sides; everything else is the profile's own rule set:
 | file | mainnet | venue |
 |---|---|---|
 | `ctx.rs` | `Ctx::{new, follow_head, follow_tag}` + `impl Engine` (`core()` + the profile's pieces) | `Ctx::{new}` + `impl Engine` (the same shape; the pin vocabulary is the spine's `pin`) |
-| `driver.rs` | `boot` + `apply_loop`/`shadow_loop`/`source_sync_supervisor` + the cursor/reorg rules (`next_block`, `validate_cursor`, `on_reset`, `rebase`, `resume_point`, `on_rebase`, `gap_within_limit`, `reorg_continuity`) + `scan_once`, `probes_now` | `boot` + `run`/`pass` + `reconcile`/`pin_read`/`anchor_cursor`/`recover_from_reset`/`run_epoch_rule` + `scan_and_advance`, `mine_pending`, `probes_at_pin`, `probes_now` |
+| `driver.rs` | `boot` + `apply_loop`/`shadow_loop`/`source_sync_supervisor` + the cursor/reorg rules (`next_block`, `validate_cursor`, `on_reset`, `rebase`, `resume_point`, `on_rebase`, `gap_within_limit`, `reorg_continuity`) + `scan_once`, `probes_now` | `boot` + `follow_loop`/`pass` + `reconcile`/`pin_read`/`anchor_cursor`/`recover_from_reset`/`run_epoch_rule` + `scan_and_advance`, `mine_pending`, `probes_at_pin`, `probes_now` |
 | `service.rs` | `main_entry` + `run` + `require_wiring(what, endpoints)` + `build_bridge` + `spawn_loops` | `main_entry` + `run` + `require_wiring(what, endpoints)` + `spawn_loops` (+ `sim_entry` and the simulator's spawns) |
 | `profile.rs` | `bundle`/`policies`/`build` + `Wiring`/`Deps` | `bundle`/`policies`/`build` + `Wiring`/`Deps` (the closures/watch-set builders are the spine's `closure::{closures, watch_set}`) |
 | `http.rs` | `app` + `status_doc` (+ `admin_time`) | `app` + `status_doc` |
 | `selftest.rs` | `run` (+ `run_one_block`) | `run` (+ `windows_loop`, `wait_for_move`) |
-| `source.rs` | `RethSource::{new, trace_block_per_tx}` (a `RawSource` wrapper: the raw reads are the spine's) + `impl Source` | `public_capabilities` (the read shape is the spine's `PinnedSource`) |
+| `source.rs` | `RethSource::{new, trace_block_per_tx}` (a `RawSource` wrapper: the raw reads are the spine's) + `impl Source` + the `DECLARED` caps | `DECLARED` + `pinned`/`follow` (the read shape is the spine's `PinnedSource`; both crates declare their caps as one `DECLARED` const) |
 | `reset.rs` | `CursorHash` + `below_fork_base` | `PinCanary` + the canary io |
 | `metrics.rs` | `MainnetMetrics` (registry + render + overlap test) | `VenueMetrics` (the same three) |
 | `error.rs` | the profile's variants + `impl ShellError` + `mirror_devnet::shell_fault_conversion!` | the same shape |
@@ -71,7 +88,7 @@ in `SPINE.md` and the profiles' own tables are the full list):
 | asymmetry | why it stands |
 |---|---|
 | `apply/` (3 files) vs `follow/` (3 files) | the parts are symmetric now (step + `parity.rs` + one distinct concern); the third file's name follows its mechanism: the mainnet's devnet prepend, the venue's uncovered-log audit (venue-only — reth's native BALs cannot leave a log uncovered) |
-| `feed_bridge/` vs `feed/` | different domains: a price *bridge* (Chainlink mocks) vs the *market feed* (HL REST/WS) |
+| `feed/` vs `feed/` (same name, both sides) | the same role — the profile's live-data plane — in different domains: a price *bridge* (Chainlink answers → T's mock aggregators) vs the *market feed* (HL REST/WS into the simulator); the internals differ by domain (`chainlink`/`policy`/`http` vs `rest`/`ws`/`budget`), and the component names (`FeedBridge`, `feed_bridge_*` series, the config key) keep the bridge's own vocabulary |
 | `source_sync/` (mainnet) | the CL + engine-API transports have no venue counterpart (the HL API is one HTTP client) |
 | `api/`, `sim/`, `wire.rs` (venue) | the simulator's served surface has no mainnet counterpart |
 | `service.rs` carries `sim_entry` | one home per service: the venue crate serves two binaries (`venue-engine`, `venue-sim`) |
@@ -84,7 +101,7 @@ every reading below was acted on or judged:
 
 | reading | outcome |
 |---|---|
-| scope (`fn` ≤ 60 lines / depth ≤ 5, struct ≤ 20 fields, enum ≤ 25 variants) | the largest production fn is `apply_block` (50 lines, a deliberate linear sequence); depth ≤ 4 |
+| scope (`fn` ≤ 60 lines / depth ≤ 5, struct ≤ 20 fields, enum ≤ 25 variants) | the largest production fn is `apply::step` (50 lines, a deliberate linear sequence); depth ≤ 4 |
 | dead functions / dead members | none (the AST and the text agree) |
 | duplicates | only deliberate twins (the two `impl Engine` accessors, `healthz`/`livez`, the two reset detectors' constructors, the per-profile error helpers) |
 | near-duplicates / similar records | none after the pass; the `FrontendOpenOrder`/`StatusOrderInner` overlap is the API's own two shapes — the *mapping* is now one function (`frontend_row`), the shapes stay exact |
@@ -128,7 +145,7 @@ family by type family:
 ## Keeping it symmetric
 
 - new files land in the *domain folders*, one file per concern (a domain
-  becomes a folder when it has parts: `apply/`, `feed_bridge/`);
+  becomes a folder when it has parts: `apply/`, `feed/`);
 - a shared fact goes to the spine (`mirror-devnet`/`mirror-anvil`/
   `mirror-config`) the moment a second profile needs it (`advance_cursor`,
   `parse_cli`, `exit_verdict`, `poll`, `witness_for`, `holds_state`,

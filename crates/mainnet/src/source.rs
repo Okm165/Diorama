@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 /// What reth serves (measured): the native BAL rung, traces, a 10,064-block
 /// state window, WS heads; no system transactions (Ethereum has none).
-const DECLARED: Capabilities = Capabilities {
+pub(crate) const DECLARED: Capabilities = Capabilities {
     native_bal: true,
     traces: true,
     historical: true,

@@ -16,7 +16,7 @@ const CAPACITY: u64 = 1200;
 
 /// The measured per-endpoint weights (docs, §16.3). A code fact: a weight
 /// change is a protocol change, not a deployment knob.
-pub mod weight {
+pub(crate) mod weight {
     /// `metaAndAssetCtxs`, `meta`, and every unpriced info type.
     pub const HEAVY: u64 = 20;
     /// `l2Book`, `allMids`, `clearinghouseState`, `spotClearinghouseState`,

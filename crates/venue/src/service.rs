@@ -291,7 +291,7 @@ fn spawn_loops(ctx: &std::sync::Arc<Ctx>) -> Vec<tokio::task::JoinHandle<()>> {
     {
         let ctx = ctx.clone();
         tasks.push(tokio::spawn(async move {
-            if let Err(e) = driver::run(ctx).await {
+            if let Err(e) = driver::follow_loop(ctx).await {
                 tracing::error!(error = %e, "venue driver exited");
             }
         }));

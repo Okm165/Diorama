@@ -63,8 +63,9 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-/// The steady-state loop (boot has already run).
-pub(crate) async fn run(ctx: Arc<Ctx>) -> Result<()> {
+/// The steady-state loop (boot has already run) — the venue's counterpart
+/// of the applier's `apply_loop`.
+pub(crate) async fn follow_loop(ctx: Arc<Ctx>) -> Result<()> {
     let poll = ctx.engine.loops.poll();
     loop {
         if ctx.plane.is_halted() {

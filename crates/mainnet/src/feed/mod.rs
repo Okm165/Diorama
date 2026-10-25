@@ -26,18 +26,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-mod chainlink;
-mod http;
-mod metrics;
-mod policy;
+pub(crate) mod chainlink;
+pub(crate) mod http;
+pub(crate) mod metrics;
+pub(crate) mod policy;
 
 pub(crate) use http::admin_routes;
 
-use crate::feed_bridge::chainlink::{
+use crate::feed::chainlink::{
     publish, read_answer, read_decimals, read_target_decimals, target_decimals,
 };
-use crate::feed_bridge::policy::{step, Step, ValueState};
-pub(crate) use crate::feed_bridge::metrics::FeedBridgeMetrics;
+use crate::feed::policy::{step, Step, ValueState};
+pub(crate) use crate::feed::metrics::FeedBridgeMetrics;
 
 /// One feed's runtime state (the section is the config; this is the truth the
 /// pass compares against).

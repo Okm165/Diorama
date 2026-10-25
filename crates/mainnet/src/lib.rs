@@ -33,7 +33,7 @@ mod apply;
 mod ctx;
 mod driver;
 mod error;
-mod feed_bridge;
+mod feed;
 mod http;
 mod metrics;
 mod profile;
@@ -65,9 +65,9 @@ mod design_assertions {
     fn public_types_are_normal() {
         is_normal::<crate::ctx::Ctx>();
         is_normal::<crate::metrics::MainnetMetrics>();
-        is_normal::<crate::feed_bridge::FeedBridge>();
-        is_normal::<crate::feed_bridge::FeedStatus>();
-        is_normal::<crate::feed_bridge::FeedBridgeMetrics>();
+        is_normal::<crate::feed::FeedBridge>();
+        is_normal::<crate::feed::FeedStatus>();
+        is_normal::<crate::feed::FeedBridgeMetrics>();
         is_normal::<crate::source_sync::beacon::BeaconClient>();
         is_normal::<crate::source_sync::beacon::TopUpBody>();
         is_normal::<crate::source_sync::beacon::BeaconBlock>();

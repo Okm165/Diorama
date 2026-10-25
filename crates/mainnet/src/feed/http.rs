@@ -4,7 +4,7 @@
 //! them beside the shared table.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::feed_bridge::{FeedBridge, FeedStatus};
+use crate::feed::{FeedBridge, FeedStatus};
 use axum::{
     extract::State,
     routing::{get, post},

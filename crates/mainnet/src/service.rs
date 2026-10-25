@@ -5,7 +5,7 @@
 //! same way.
 
 use crate::error::{Error, Result};
-use crate::{driver, feed_bridge, http, selftest};
+use crate::{driver, feed, http, selftest};
 use crate::ctx::Ctx;
 use clap::{Parser, Subcommand};
 use mirror_config::Instance;
@@ -188,11 +188,11 @@ async fn run(config: PathBuf) -> Result<()> {
 
 /// The feed bridge, when configured. Built before any loop serves: a fault
 /// here is fatal (a mis-scaled price would poison every scenario).
-async fn build_bridge(ctx: &Arc<Ctx>) -> Result<Option<Arc<feed_bridge::FeedBridge>>> {
+async fn build_bridge(ctx: &Arc<Ctx>) -> Result<Option<Arc<feed::FeedBridge>>> {
     if ctx.engine.feed_bridge.is_none() {
         return Ok(None);
     }
-    let bridge = Arc::new(feed_bridge::FeedBridge::new(ctx).await?);
+    let bridge = Arc::new(feed::FeedBridge::new(ctx).await?);
     tracing::info!(feeds = bridge.list().len(), "feed bridge active");
     Ok(Some(bridge))
 }
@@ -202,7 +202,7 @@ async fn build_bridge(ctx: &Arc<Ctx>) -> Result<Option<Arc<feed_bridge::FeedBrid
 /// shutdown tail.
 fn spawn_loops(
     ctx: &Arc<Ctx>,
-    bridge: Option<Arc<feed_bridge::FeedBridge>>,
+    bridge: Option<Arc<feed::FeedBridge>>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut tasks = Vec::new();
     if ctx.engine_api.is_some() {

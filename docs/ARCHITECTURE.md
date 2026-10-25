@@ -436,7 +436,7 @@ analysis over both engines' crates, 2026-10-23) found and narrowed the leaves:
 (`&Rpc`), `log_drift_if_anomalous` (`&Drift`),
 `deliver_slot` / `cl_head_el_block` (`&BeaconClient`), `gap_within_limit`
 (`&EngineSection`), `clear_reapply` (`&Plane`). What stays `&Ctx` is a
-*composition point*: `apply_block` / `apply_entry` / `advance_cursor` /
+*composition point*: `apply::step` / `apply_entry` / `advance_cursor` /
 `late_completion` / `finalize` / `journal_and_scan` thread several sections
 plus the cursor accessors, and `probes_now` drives the probe runner. The
 payoff is mechanical: a leaf whose body grows a second dependency cannot
@@ -1259,7 +1259,7 @@ does not lose boundary activity mined meanwhile.
 
 ## The feed bridge
 
-`crates/mainnet/src/feed_bridge/` (the bridge; its wire in `chainlink.rs`, its rules in `policy.rs`, its routes in `http.rs`) - daloc's harness periodically re-publishes
+`crates/mainnet/src/feed/` (the bridge; its wire in `chainlink.rs`, its rules in `policy.rs`, its routes in `http.rs`) - daloc's harness periodically re-publishes
 its own mock aggregator answers; in mirror mode **the bridge is the single price
 writer** for those mocks (their refresher is off, plan §17.2). The value's
 source is the *parent chain's* aggregator for the same feed, read at the follow

@@ -28,7 +28,7 @@ use std::time::Instant;
 /// numbers the fact carries. The field names are the applier's fact
 /// vocabulary (`total`/`applied`/`filtered`), so the two mirrors' facts and
 /// logs read the same way.
-pub(crate) struct WindowStats {
+pub(crate) struct FollowOutcome {
     /// The compose rung's name (`plan.kind.as_str()`: `poll` for the public
     /// API's touches; `bal`/`trace` if a future source serves them).
     pub(crate) source: &'static str,
@@ -76,7 +76,7 @@ struct SourceReorgEntry {
 /// The window's writes are the *source's* state, not the devnet's: they are
 /// not journaled (a rewind restores devnet writes, never source history), and
 /// a key the devnet owns is skipped until it is handed back.
-pub(crate) async fn step(ctx: &Ctx) -> Result<Option<WindowStats>> {
+pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     let source_head = ctx.source_rpc.block_number().await?;
     ctx.venue_metrics
         .set(&ctx.venue_metrics.source_head, source_head);
@@ -96,14 +96,14 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<WindowStats>> {
     let started = Instant::now();
     continuity_check(ctx, followed).await?;
     let mut stats = compose_window(ctx, followed, source_head).await?;
-    advance_follow(ctx, source_head).await?;
+    advance_cursor(ctx, source_head).await?;
     stats.duration_ms = started.elapsed().as_millis() as u64;
-    report_window(ctx, followed, source_head, &stats);
+    report_applied(ctx, followed, source_head, &stats);
     Ok(Some(stats))
 }
 
 /// One place for the window's gauges, fact, and log.
-fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats) {
+fn report_applied(ctx: &Ctx, from: u64, to: u64, window: &FollowOutcome) {
     ctx.venue_metrics
         .inc(&ctx.venue_metrics.follow_windows_total);
     ctx.venue_metrics
@@ -211,7 +211,7 @@ async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
 /// Compose the window and land its writes on V under the COW filter, then
 /// record the live parity of what was applied. The composer is the spine's
 /// generic one: the venue's source has no native BAL, so it synthesizes.
-async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
+async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<FollowOutcome> {
     // The shared pipeline half (compose → COW → flatten): the same call the
     // applier makes for one parent block, here for the whole window.
     let plan = mirror_devnet::bal::Composer {
@@ -221,7 +221,7 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
     }
     .plan(&ctx.plane.shadow, mirror_devnet::bal::Window::new(from, to))
     .await?;
-    record_poll_gauges(ctx, &plan.compose);
+    record_window_metrics(ctx, &plan.compose);
     audit::record(ctx, &plan.compose.uncovered)?;
     let applied = if plan.writes.is_empty() {
         0
@@ -229,7 +229,7 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
         mirror_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size).await?
     };
     let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
-    Ok(WindowStats {
+    Ok(FollowOutcome {
         source: plan.kind.as_str(),
         total: plan.total,
         applied,
@@ -243,7 +243,7 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
 
 /// The poll's gauges: what the window's composition touched, planned and
 /// changed (the uncovered-log trail is [`audit`]'s).
-fn record_poll_gauges(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) {
+fn record_window_metrics(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) {
     let metrics = &ctx.venue_metrics;
     metrics.set(&metrics.poll_touched, stats.touched as u64);
     metrics.set(&metrics.poll_planned_keys, stats.planned as u64);
@@ -252,7 +252,7 @@ fn record_poll_gauges(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) {
 
 /// Advance the follow cursor to `source_head` (recording the source's own
 /// block hash — the continuity check's anchor) and persist the state.
-async fn advance_follow(ctx: &Ctx, source_head: u64) -> Result<()> {
+async fn advance_cursor(ctx: &Ctx, source_head: u64) -> Result<()> {
     let head_block = ctx.source_rpc.block_by_number(source_head, false).await?;
     ctx.plane.state.set_source_last(source_head, head_block.header.hash)?;
     ctx.plane.save_state()?;

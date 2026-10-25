@@ -84,7 +84,7 @@ mod tests {
     fn the_registry_series_do_not_overlap() {
         let profile = MainnetMetrics::default();
         let admin = mirror_devnet::metrics::Metrics::default();
-        let bridge = crate::feed_bridge::FeedBridgeMetrics::default();
+        let bridge = crate::feed::FeedBridgeMetrics::default();
         let mut names = series(&profile.render());
         for other in [series(&admin.render()), series(&bridge.render())] {
             let dupes: Vec<String> = names.intersection(&other).cloned().collect();

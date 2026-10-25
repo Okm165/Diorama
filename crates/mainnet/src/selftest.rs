@@ -2,7 +2,7 @@
 //! Anvil forked from a public RPC. Needs no reth, so it can validate the
 //! whole apply pipeline before the local fork source is synced.
 use crate::ctx::Ctx;
-use crate::apply::apply_block;
+use crate::apply::step;
 use crate::error::{Error, Result};
 use mirror_config::Instance;
 use std::sync::Arc;
@@ -51,7 +51,7 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
 
 /// Apply one block, printing the per-check lines; returns whether it passed.
 async fn run_one_block(ctx: &Ctx, n: u64) -> Result<bool> {
-    let a = apply_block(ctx, n).await.map_err(|source| Error::Step {
+    let a = step(ctx, n).await.map_err(|source| Error::Step {
         step: "apply",
         block: n,
         source: Box::new(source),

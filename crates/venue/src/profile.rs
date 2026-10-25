@@ -22,12 +22,11 @@
 //! implementations diverge. The composer itself is generic
 //! (`mirror_devnet::bal::compose`).
 use crate::reset::PinCanary;
-use crate::source::public_capabilities;
 use mirror_config::{EngineSection, LoopsSection};
 use mirror_devnet::closure::{closures, watch_set};
 use mirror_devnet::cow::Scope;
 use mirror_devnet::shared::Shared;
-use mirror_devnet::source::{PinnedSource, RawSource, Source};
+use mirror_devnet::source::{RawSource, Source};
 use mirror_devnet::engine::JournalScope;
 use mirror_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
@@ -102,12 +101,8 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
         watch,
     } = deps;
     let pin = Arc::new(AtomicU64::new(mirror_devnet::pin::PIN_UNRESOLVED));
-    let source: Arc<dyn Source> = Arc::new(PinnedSource::new(
-        source_rpc.clone(),
-        pin.clone(),
-        public_capabilities(),
-    ));
-    let follow: Arc<dyn Source> = Arc::new(RawSource::new(source_rpc, public_capabilities()));
+    let source: Arc<dyn Source> = crate::source::pinned(source_rpc.clone(), pin.clone());
+    let follow: Arc<dyn Source> = crate::source::follow(source_rpc);
     let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_v));
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
     let scope = Scope::new(watch_set(watch, &engine.closures), closures(&engine.closures));

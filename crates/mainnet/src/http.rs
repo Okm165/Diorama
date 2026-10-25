@@ -1,7 +1,7 @@
 //! The mainnet engine's HTTP surface: the shared route table
 //! (`mirror_devnet::handlers`) plus this profile's own route — `/admin/time`
 //! (T's clock offset). The feed bridge's routes live with the bridge
-//! (`feed_bridge/http.rs`, the venue's simulator-API pattern). The admin
+//! (`feed/http.rs`, the venue's simulator-API pattern). The admin
 //! *semantics* live in `mirror-devnet`'s admin surface; the shared handlers
 //! are one generic definition there.
 //!
@@ -11,7 +11,7 @@
 //! everything else is a server-side fault, logged with its typed cause.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::feed_bridge::FeedBridge;
+use crate::feed::FeedBridge;
 use axum::{
     extract::State,
     http::StatusCode,
@@ -103,7 +103,7 @@ pub(crate) fn app(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Router {
     mirror_devnet::handlers::shared_routes::<Ctx>()
         .route("/admin/time", post(admin_time))
         .with_state(ctx.clone())
-        .merge(crate::feed_bridge::admin_routes(ctx, bridge))
+        .merge(crate::feed::admin_routes(ctx, bridge))
 }
 
 async fn admin_time(

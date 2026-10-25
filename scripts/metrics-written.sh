@@ -35,7 +35,7 @@ homes = {
     pathlib.Path("crates/devnet/src/plane.rs"): "manual",
 }
 # (The push-style homes — `feed/metrics.rs`, `bridge/metrics.rs`,
-# `feed_bridge/metrics.rs` — declare private counters and push their literal
+# `feed/metrics.rs` — declare private counters and push their literal
 # series from their own methods; `docs-metrics` checks those names both ways
 # and the AST gate sees the methods' call sites.)
 dead, total = [], 0
