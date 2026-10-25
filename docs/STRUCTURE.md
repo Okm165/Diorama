@@ -34,7 +34,7 @@ the rest of each row is the profile's own logic, named for its mechanism.
 | `service.rs` | `service.rs` | the service entry: CLI (`run`/`selftest`[`/rewind`]), the boot call, the loop spawner (the venue's carries the simulator's entry too) |
 | `ctx.rs` | `ctx.rs` | `Ctx` (the profile's clients + sections + the shared `Plane`) and its `impl Engine` |
 | `driver.rs` | `driver.rs` | `boot` (wait, assert the chain, anchor/reconcile, audit capabilities) and the loops |
-| `apply/` (**mod**, prepend, **parity**) | `follow/` (**mod**, **parity**, audit) | the per-unit step: compose → COW → land → measure — the same parts on both sides (the step, the measurement, one distinct concern: the mainnet's devnet prepend / the venue's uncovered-log trail) |
+| `apply/` (**mod**, **parity**, prepend) | `follow/` (**mod**, **parity**, audit) | the per-unit step: compose → COW → land → measure — the same parts on both sides (the step, the measurement, one distinct concern: the mainnet's devnet prepend / the venue's uncovered-log trail) |
 | `error.rs` | `error.rs` | the profile's error vocabulary (the shared devnet/anvil boundaries composed in) |
 | `http.rs` | `http.rs` | the shared route table + the profile's own routes (`/admin/time`; the venue's simulator API is `api/`) |
 | `metrics.rs` | `metrics.rs` | the profile's metric set (rendered beside the shared gauges) |
