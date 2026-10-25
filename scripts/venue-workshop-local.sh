@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # venue-workshop-local: a financial workshop on live venue state, natively —
+# ports-shared-with: daloc-local.sh (the workshop runs on this stack)
 # the counterpart of `mainnet-workshop-local` (there a strategy meets the real
 # Aave/Uniswap state; here it meets the real Hyperliquid book). The same acts,
 # the venue's mechanisms:

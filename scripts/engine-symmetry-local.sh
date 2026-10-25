@@ -9,14 +9,16 @@
 #
 # Requires: anvil (ANVIL=), both engine binaries built
 # (`make mainnet-build venue-build`), python3, curl.
-# Ports: 19900/19902/19980 (T) and 19908/19910/19981 (V) — override below.
+# Ports: 19900/19902/19920 (T) and 19908/19910/19928 (V) — override below.
+# (The admins follow the base+18 pattern; 19980 would collide with the
+# workshop's HTTP port.)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ANVIL="${ANVIL:-/tmp/opencode/anvil-186-bin/anvil}"
 DIR="${DIR:-/tmp/engine-symmetry-local}"
-ST_PORT="${ST_PORT:-19900}"; T_PORT="${T_PORT:-19902}"; T_ADMIN="${T_ADMIN:-19980}"
-SV_PORT="${SV_PORT:-19908}"; V_PORT="${V_PORT:-19910}"; V_ADMIN="${V_ADMIN:-19981}"
+ST_PORT="${ST_PORT:-19900}"; T_PORT="${T_PORT:-19902}"; T_ADMIN="${T_ADMIN:-19920}"
+SV_PORT="${SV_PORT:-19908}"; V_PORT="${V_PORT:-19910}"; V_ADMIN="${V_ADMIN:-19928}"
 A0=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 TOKEN=0x00000000000000000000000000000000000000e7
 # balanceOf(address) = SLOAD(keccak256(addr ‖ slot 0)): the deal's probe target.

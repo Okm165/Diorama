@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # daloc-local: the daloc use-case arc (scripts/daloc-sim.py) against a local
+# ports-shared-with: venue-workshop-local.sh (the workshop runs on this stack)
 # scratch stack — exactly the shape the arc's default endpoints describe:
 # T (a scratch Ethereum fork) + the mainnet engine, V (a scratch HyperEVM
 # fork) + the venue engine, and the venue simulator polling the *real*

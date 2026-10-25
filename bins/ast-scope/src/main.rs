@@ -1016,42 +1016,47 @@ fn structure_map(items: &[Item]) {
         if !v_only.is_empty() {
             println!("      venue-only:   {}", v_only.join(", "));
         }
-        // The test modules, the same reading: the shared test names (the
-        // twins TESTING lists) and the one-sided ones.
-        let side_tests = |prefix: &str, suffix: &str| -> Vec<&Item> {
-            let path = format!("{prefix}{suffix}");
-            items
-                .iter()
-                .filter(|i| i.is_test() && i.file == path)
-                .collect()
-        };
-        let mt = side_tests("crates/mainnet/src/", mn);
-        let vt = side_tests("crates/venue/src/", vn);
-        if !mt.is_empty() || !vt.is_empty() {
-            let mt_names: HashSet<&str> = mt.iter().map(|i| i.name.as_str()).collect();
-            let vt_names: HashSet<&str> = vt.iter().map(|i| i.name.as_str()).collect();
-            let mut shared: Vec<&str> = mt_names.intersection(&vt_names).copied().collect();
-            let mut m_tests: Vec<&str> = mt_names.difference(&vt_names).copied().collect();
-            let mut v_tests: Vec<&str> = vt_names.difference(&mt_names).copied().collect();
-            shared.sort_unstable();
-            m_tests.sort_unstable();
-            v_tests.sort_unstable();
-            println!(
-                "      tests: {} shared, {} mainnet-only, {} venue-only",
-                shared.len(),
-                m_tests.len(),
-                v_tests.len()
-            );
-            if !shared.is_empty() {
-                println!("        shared:       {}", shared.join(", "));
-            }
-            if !m_tests.is_empty() {
-                println!("        mainnet-only: {}", m_tests.join(", "));
-            }
-            if !v_tests.is_empty() {
-                println!("        venue-only:   {}", v_tests.join(", "));
-            }
-        }
+        pair_tests(items, mn, vn);
+    }
+}
+
+/// One pair's test modules: the shared test names (the twins TESTING lists)
+/// and the one-sided ones — the same reading as the production items.
+fn pair_tests(items: &[Item], mn: &str, vn: &str) {
+    let side = |prefix: &str, suffix: &str| -> Vec<&Item> {
+        let path = format!("{prefix}{suffix}");
+        items
+            .iter()
+            .filter(|i| i.is_test() && i.file == path)
+            .collect()
+    };
+    let mainnet_tests = side("crates/mainnet/src/", mn);
+    let venue_tests = side("crates/venue/src/", vn);
+    if mainnet_tests.is_empty() && venue_tests.is_empty() {
+        return;
+    }
+    let m_names: HashSet<&str> = mainnet_tests.iter().map(|i| i.name.as_str()).collect();
+    let v_names: HashSet<&str> = venue_tests.iter().map(|i| i.name.as_str()).collect();
+    let mut shared: Vec<&str> = m_names.intersection(&v_names).copied().collect();
+    let mut m_only: Vec<&str> = m_names.difference(&v_names).copied().collect();
+    let mut v_only: Vec<&str> = v_names.difference(&m_names).copied().collect();
+    shared.sort_unstable();
+    m_only.sort_unstable();
+    v_only.sort_unstable();
+    println!(
+        "      tests: {} shared, {} mainnet-only, {} venue-only",
+        shared.len(),
+        m_only.len(),
+        v_only.len()
+    );
+    if !shared.is_empty() {
+        println!("        shared:       {}", shared.join(", "));
+    }
+    if !m_only.is_empty() {
+        println!("        mainnet-only: {}", m_only.join(", "));
+    }
+    if !v_only.is_empty() {
+        println!("        venue-only:   {}", v_only.join(", "));
     }
 }
 
