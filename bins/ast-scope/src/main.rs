@@ -771,6 +771,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
     reuse(&prod);
     dispersion(fields);
     similar_records(&prod);
+    compositions(&prod);
     twin_shapes(&prod);
     wrappers(&prod);
     narrow_context(&prod);
@@ -952,6 +953,36 @@ fn similar_records(prod: &[&Item]) {
             b.name,
             b.file
         );
+    }
+}
+
+/// The reuse reading over *only the workspace's own* fns: the domain
+/// compositions (the `.map`/`.clone` noise filtered out), so a shared
+/// pipeline of named blocks is visible as such.
+fn compositions(prod: &[&Item]) {
+    let own: HashSet<&str> = prod.iter().map(|i| i.name.as_str()).collect();
+    let mut grams: HashMap<String, Vec<&str>> = HashMap::new();
+    for item in prod {
+        let ops: Vec<&str> = item
+            .ops
+            .iter()
+            .map(String::as_str)
+            .filter(|op| own.contains(op))
+            .collect();
+        for window in ops.windows(2) {
+            grams
+                .entry(window.join(" -> "))
+                .or_default()
+                .push(item.name.as_str());
+        }
+    }
+    let mut shared: Vec<(&String, &Vec<&str>)> =
+        grams.iter().filter(|(_, fns)| fns.len() >= SHARED_BY).collect();
+    shared.sort_by_key(|(_, fns)| std::cmp::Reverse(fns.len()));
+    println!("\ncompositions: own-fn sequences shared by >= {SHARED_BY} functions (the domain pipelines):");
+    for (key, fns) in shared.iter().take(REPORT_TOP) {
+        println!("  {:>2}x  {key}", fns.len());
+        println!("       in {}", list(fns));
     }
 }
 

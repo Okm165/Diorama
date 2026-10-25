@@ -312,9 +312,7 @@ impl Sim {
                     let index = feed.token_of(coin).ok_or_else(|| Error::bad_request(format!(
                             "spot coin `{coin}` is not in the venue's token registry yet"
                         ),))?;
-                    let entry = account::spot_entry(account, TokenRef { index, coin });
-                    entry.total = account::add(entry.total, deal.amount, "spot deal")?;
-                    Ok(entry.total)
+                    account::credit_entry(account, TokenRef { index, coin }, deal.amount, "spot deal")
                 }
             }
         })?;
@@ -366,8 +364,7 @@ impl Sim {
         let clock = self.clock(crate::now_ms())?;
         self.mutate_account(address, |account| {
             stamp_funding_baseline(account, clock);
-            let entry = account::spot_entry(account, token);
-            entry.total = account::add(entry.total, amount, "spot credit")?;
+            account::credit_entry(account, token, amount, "spot credit")?;
             Ok(())
         })
     }
@@ -416,8 +413,7 @@ impl Sim {
                 }
                 account.perp_balance =
                     account::sub(account.perp_balance, amount, "usd class transfer")?;
-                let entry = account::spot_entry(account, token);
-                entry.total = account::add(entry.total, amount, "usd class transfer")?;
+                account::credit_entry(account, token, amount, "usd class transfer")?;
             }
             Ok(true)
         })?;

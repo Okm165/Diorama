@@ -196,6 +196,19 @@ pub(crate) fn spot_entry<'a>(account: &'a mut Account, token: crate::sim::TokenR
     })
 }
 
+/// Credit a spot entry by `amount`, naming the context in the error; the new
+/// total is returned (the deal serves it). The spot lane's one credit.
+pub(crate) fn credit_entry(
+    account: &mut Account,
+    token: crate::sim::TokenRef<'_>,
+    amount: Decimal,
+    what: &'static str,
+) -> Result<Decimal> {
+    let entry = spot_entry(account, token);
+    entry.total = add(entry.total, amount, what)?;
+    Ok(entry.total)
+}
+
 /// The computed account figures, one pass over the positions.
 pub(crate) struct AccountView {
     pub margin_summary: MarginSummary,
