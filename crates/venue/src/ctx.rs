@@ -72,6 +72,12 @@ pub struct Ctx {
     /// the follow's anomalies — a gap-guard pause, a source reorg, uncovered
     /// log emitters — the mainnet applier's counterpart.
     pub(crate) drift: Drift,
+    /// The uncovered emitters the drift log has already carried. The counter
+    /// counts every window; only emitters *new* to the log are written —
+    /// a busy chain's narrow scope would otherwise write one line per window
+    /// forever (measured live: ~40 emitters per window, mostly different
+    /// bots). A restart re-reports the first window's set once.
+    pub(crate) uncovered_seen: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Ctx {
@@ -87,6 +93,7 @@ impl Ctx {
         let timeout = Duration::from_secs(30);
         let plane = Plane::from_engine(&engine)?;
         let drift = Drift::new(engine.state_dir.join("drift.jsonl"))?;
+        let uncovered_seen = std::sync::Mutex::new(std::collections::HashSet::new());
         let venue_metrics = Arc::new(VenueMetrics::default());
         let source_rpc = Arc::new(Rpc::new(source_url, timeout)?);
         let anvil_v = Arc::new(Rpc::new(v_url, timeout)?);
@@ -110,6 +117,7 @@ impl Ctx {
             plane,
             venue_metrics,
             drift,
+            uncovered_seen,
         })
     }
 

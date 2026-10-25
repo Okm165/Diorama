@@ -35,8 +35,9 @@ PY
 
 render README.md             "reth + Lighthouse"     docs/img/readme-overview.png
 render docs/HOW-IT-WORKS.md  "Lighthouse"            docs/img/how-topology.png
+render docs/HOW-IT-WORKS-VENUE.md "the HL public API" docs/img/how-topology-venue.png
 render docs/HOW-IT-WORKS.md  "parent diff for key K" docs/img/how-cow.png
 render docs/ARCHITECTURE.md  "anvil T"               docs/img/arch-data-flow.png
 render docs/ARCHITECTURE.md  "no prepend"            docs/img/arch-prepend.png
 render docs/SPINE.md         "the spine (crates/devnet)" docs/img/spine-overview.png
-echo "6 diagrams regenerated from the docs"
+echo "7 diagrams regenerated from the docs"

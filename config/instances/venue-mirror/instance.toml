@@ -15,8 +15,9 @@ profile = "venue"
 # this source's `latest`, then **follows** it: each pass composes the window
 # since the last composed source block (the generic composer over the window's
 # envelopes + the declared closures, `[services.engine.closures]` below) and
-# lands the changed keys on V under the COW filter. The API URLs are the
-# simulator's market plane (REST snapshots + WS pushes).
+# lands the changed keys on V under the COW filter — the devnet's own writes
+# (the fixture mocks, the bridge's relays, the deal) are shadowed and skipped.
+# The API URLs are the simulator's market plane (REST snapshots + WS pushes).
 kind = "hyperliquid"
 source_url = "${HL_RPC_URL}"
 api_url = "https://api.hyperliquid.xyz"
@@ -39,6 +40,58 @@ fixture_addresses = [
   "0x5555555555555555555555555555555555555555", # WHYPE (999's wrapped gas token)
   "0x94e8396e0869c9F2200760aF0621aFd240E1CF38", # wstHYPE
 ]
+
+# The follow's declared scope: the venue stack's own dependencies on the real
+# HyperEVM — every address verified live (code present) 2026-10-25. Watching
+# an account keeps its whole account state fresh; a *closure* additionally
+# follows the storage its logs imply (see below). An emitter no closure covers
+# is counted and named (the audit), never silent.
+[[watchlist]]
+address = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+note = "USDC (999): the CCTP burn/mint token and the at-pin probe's contract"
+[[watchlist]]
+address = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+note = "CCTP V2 TokenMessenger (999): the bridge's burn/mint door"
+[[watchlist]]
+address = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+note = "CCTP V2 MessageTransmitter (999)"
+[[watchlist]]
+address = "0xfd78EE919681417d192449715b2594ab58f5D002"
+note = "CCTP V2 TokenMinter (999)"
+[[watchlist]]
+address = "0xec546b6B005471ECf012e5aF77FBeC07e0FD8f78"
+note = "CCTP V2 Message (999)"
+[[watchlist]]
+address = "0x3333333333333333333333333333333333333333"
+note = "CoreWriter: the Core's door into the EVM (the bridge's other side)"
+[[watchlist]]
+address = "0x5555555555555555555555555555555555555555"
+note = "WHYPE: the wrapped gas token"
+[[watchlist]]
+address = "0x94e8396e0869c9F2200760aF0621aFd240E1CF38"
+note = "wstHYPE: the staked gas token"
+
+# Balances the Transfer logs imply: the composer derives each participant's
+# mapping key from the log's topics. Both layouts verified live 2026-10-25
+# with anvil's prestate tracer on a fork plus the keccak derivation (USDC is
+# FiatTokenV2_2: `balanceAndBlacklistStates` at slot 9; WHYPE is WETH9-shaped:
+# slot 3). Both topic positions are declared — a transfer changes both sides.
+[[services.engine.closures.mappings]]
+contract = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+base_slot = "0x9"
+topic_index = 1
+[[services.engine.closures.mappings]]
+contract = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+base_slot = "0x9"
+topic_index = 2
+[[services.engine.closures.mappings]]
+contract = "0x5555555555555555555555555555555555555555"
+base_slot = "0x3"
+topic_index = 1
+[[services.engine.closures.mappings]]
+contract = "0x5555555555555555555555555555555555555555"
+base_slot = "0x3"
+topic_index = 2
 
 [services.engine.anvil]
 target_url = "${ANVIL_V_URL}"

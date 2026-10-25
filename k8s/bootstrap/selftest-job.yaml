@@ -85,6 +85,13 @@ spec:
             - --timeout-secs=300
           env:
             - { name: MAINNET_RPC, value: "https://eth.drpc.org" }
+          # The instance references ${STATE_DIR} and the rest of the stack's
+          # wiring; the selftest only needs them *resolved* (the endpoints come
+          # from the CLI), so the deployment's own env ConfigMap serves here —
+          # its state root is an ephemeral path in this pod, which is what a
+          # scratch run wants.
+          envFrom:
+            - configMapRef: { name: mirror-config }
           volumeMounts:
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
           resources:

@@ -1,0 +1,101 @@
+# Engine self test: follows real HyperEVM windows onto one scratch Anvil fork
+# of a public RPC. Validates the follow pipeline — the system-tx envelope, the
+# latest-only reads, the closures, the live parity — before the deployed stack
+# is trusted (the mainnet counterpart is selftest-job.yaml).
+#
+# Test-only external dependency: a public RPC. The deployed stack is
+# self-contained (its own HL_RPC_URL is the deployment's fork source).
+#
+#   make venue-selftest
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: venue-selftest
+  namespace: venue-mirror
+  labels:
+    app.kubernetes.io/name: venue-selftest
+    app.kubernetes.io/part-of: venue-mirror
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: venue-selftest
+        app.kubernetes.io/part-of: venue-mirror
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: resolve-pin
+          image: docker.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              i=0; HEAD=""
+              while [ -z "$HEAD" ] && [ "$i" -lt 120 ]; do
+                HEAD=$(wget -qO- --header='Content-Type: application/json' \
+                  --post-data='{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                  "$HL_RPC" 2>/dev/null \
+                  | sed -n 's/.*"result":"\(0x[0-9a-fA-F]*\)".*/\1/p')
+                [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
+              done
+              [ -n "$HEAD" ] || { echo "ERROR: rpc unreachable"; exit 1; }
+              PIN=$((HEAD - OFFSET))
+              echo "$PIN" > /shared/pin
+              echo "selftest pin=$PIN (head=$HEAD offset=$OFFSET)"
+          env:
+            # The public endpoint the deployed stack's HL_RPC_URL also uses.
+            - { name: HL_RPC, value: "https://rpc.hyperliquid.xyz/evm" }
+            # 16 blocks back: well inside BFT finality, still forkable.
+            - { name: OFFSET, value: "16" }
+          volumeMounts:
+            - { name: shared, mountPath: /shared }
+      containers:
+        - name: anvil-v
+          image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              PIN=$(cat /shared/pin)
+              echo "anvil-v: fork=$HL_RPC pin=$PIN"
+              exec anvil --host 0.0.0.0 --port 8545 \
+                --fork-url "$HL_RPC" --fork-block-number "$PIN" \
+                --chain-id 999 --hardfork cancun --gas-limit 100000000 \
+                --code-size-limit 99999 --disable-pool-balance-checks \
+                --order fifo --no-mining --auto-impersonate --prune-history 32 \
+                --transaction-block-keeper 1000000 \
+                --no-rate-limit --no-request-size-limit --no-fork-node-info
+          env:
+            - { name: HL_RPC, value: "https://rpc.hyperliquid.xyz/evm" }
+          volumeMounts:
+            - { name: shared, mountPath: /shared }
+          resources:
+            requests: { cpu: "250m", memory: 256Mi }
+            limits: { memory: 2Gi }
+        - name: engine
+          image: localhost/venue-engine:v1
+          imagePullPolicy: IfNotPresent
+          args:
+            - selftest
+            - --rpc=$(HL_RPC)
+            - --anvil-v=http://127.0.0.1:8545
+            - --config=/etc/mirror/instance.toml
+            - --windows=5
+          env:
+            - { name: HL_RPC, value: "https://rpc.hyperliquid.xyz/evm" }
+          # The instance references ${STATE_DIR} and the rest of the stack's
+          # wiring; the selftest only needs them *resolved* (the endpoints come
+          # from the CLI), so the deployment's own env ConfigMap serves here —
+          # its state root is an ephemeral path in this pod, which is what a
+          # scratch run wants.
+          envFrom:
+            - configMapRef: { name: mirror-config }
+          volumeMounts:
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+          resources:
+            requests: { cpu: "250m", memory: 256Mi }
+            limits: { memory: 2Gi }
+      volumes:
+        - { name: shared, emptyDir: {} }
+        - { name: instance, configMap: { name: venue-instance } }

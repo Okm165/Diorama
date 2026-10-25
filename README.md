@@ -134,6 +134,7 @@ run `make mainnet-repin` so T starts from a live, exact base. See
 ```bash
 make logs-reth              # or logs-lighthouse / logs-engine / logs-anvil-t
 make mainnet-selftest       # apply 3 real blocks' BALs against a public RPC (no reth needed)
+make venue-selftest         # follow real HyperEVM windows against a public RPC (no cluster stack needed)
 make mainnet-product-sim    # the margin-product workflow end to end on T (leverage, live data, liquidation)
 make mainnet-closure-check  # every market-data view's storage deps must be in the watchlist
 make pin-show               # resolved fork pin of T
@@ -210,7 +211,8 @@ docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, OPERATIO
 ## Docs
 
 - **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — the short technical
-  explainer: architecture, pipelines, information flow, algorithms.
+  explainer: architecture, pipelines, information flow, algorithms (the
+  Venue Mirror's counterpart: [docs/HOW-IT-WORKS-VENUE.md](docs/HOW-IT-WORKS-VENUE.md)).
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — components, data flow, the
   measured lean profile, design decisions (one Anvil, divergence policy,
   COW, journal), config reference, source

@@ -292,6 +292,12 @@ mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no
 mainnet-selftest-local: mainnet-build ## Native local selftest (two anvils; no reth/public RPC/cluster)
 	./scripts/mainnet-selftest-local.sh
 
+venue-selftest: ## Run the venue selftest Job (public RPC + scratch anvil; no cluster stack needed)
+	kubectl -n venue-mirror delete job venue-selftest --ignore-not-found
+	kubectl apply -f $(BOOTSTRAP)/venue-selftest-job.yaml
+	kubectl -n venue-mirror wait --for=condition=complete job/venue-selftest --timeout=900s || true
+	kubectl -n venue-mirror logs job/venue-selftest
+
 mainnet-engine-local: mainnet-build ## Native local proof of the engine UX (mirror/modify/mint/measure; two anvils)
 	./scripts/mainnet-engine-local.sh
 

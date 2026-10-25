@@ -146,6 +146,43 @@ fn terminalize(
 /// integer between 1 and the max leverage" (margining); the exchange
 /// endpoint's updateLeverage is "subject to leverage constraints on that
 /// coin"; a strict-isolated or no-cross asset "does not allow cross margin".
+/// One position's leverage-mode switch: the leverage fields and the initial
+/// margin, then the margin moving across the boundary — converting to
+/// isolated parks it on the position (an isolated position always carries its
+/// margin: the waterfall's per-leg check reads it), converting back returns
+/// it to the cross balance.
+fn switch_position_mode(
+    balance: &mut Decimal,
+    p: &mut super::account::Position,
+    is_cross: bool,
+    leverage: u32,
+) -> Result<()> {
+    let was_isolated = p.leverage == crate::wire::LeverageType::Isolated;
+    let initial = super::account::div(
+        super::account::mul(p.szi.abs(), p.entry_px, "margin notional")?,
+        Decimal::from(leverage),
+        "margin notional",
+    )?;
+    p.leverage = if is_cross {
+        crate::wire::LeverageType::Cross
+    } else {
+        crate::wire::LeverageType::Isolated
+    };
+    p.leverage_value = leverage;
+    p.margin_used = initial;
+    if is_cross {
+        *balance = super::account::add(
+            *balance,
+            std::mem::take(&mut p.isolated_margin),
+            "isolated margin return",
+        )?;
+    } else if !was_isolated {
+        *balance = super::account::sub(*balance, initial, "isolated margin allocation")?;
+        p.isolated_margin = initial;
+    }
+    Ok(())
+}
+
 fn validate_leverage(
     coin: &str,
     is_cross: bool,
@@ -737,38 +774,7 @@ impl Sim {
                 super::account::LeverageSetting { is_cross, leverage },
             );
             if let Some(p) = account.positions.get_mut(coin) {
-                let was_isolated = p.leverage == crate::wire::LeverageType::Isolated;
-                let initial = super::account::div(
-                    super::account::mul(p.szi.abs(), p.entry_px, "margin notional")?,
-                    Decimal::from(leverage),
-                    "margin notional",
-                )?;
-                p.leverage = if is_cross {
-                    crate::wire::LeverageType::Cross
-                } else {
-                    crate::wire::LeverageType::Isolated
-                };
-                p.leverage_value = leverage;
-                p.margin_used = initial;
-                // The mode switch moves the initial margin across the
-                // boundary: converting to isolated parks it on the position
-                // (an isolated position always carries its margin — the
-                // waterfall's per-leg check reads it); converting back
-                // returns it to the cross balance.
-                if is_cross {
-                    account.perp_balance = super::account::add(
-                        account.perp_balance,
-                        std::mem::take(&mut p.isolated_margin),
-                        "isolated margin return",
-                    )?;
-                } else if !was_isolated {
-                    account.perp_balance = super::account::sub(
-                        account.perp_balance,
-                        initial,
-                        "isolated margin allocation",
-                    )?;
-                    p.isolated_margin = initial;
-                }
+                switch_position_mode(&mut account.perp_balance, p, is_cross, leverage)?;
             }
             Ok(())
         })

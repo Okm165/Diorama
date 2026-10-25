@@ -58,7 +58,8 @@ struct SourceReorgEntry {
 
 /// The uncovered-log audit's drift line: log emitters no declared closure
 /// covers — their state changes cannot be followed until a closure is
-/// declared (the metric counts them; the line names them).
+/// declared (the metric counts every window; the line carries the emitters
+/// new to the log — see [`fresh_emitters`]).
 #[derive(serde::Serialize)]
 struct UncoveredLogsEntry {
     chain: &'static str,
@@ -240,7 +241,10 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
     })
 }
 
-/// The poll's gauges and the audit trail, one place.
+/// The poll's gauges and the audit trail, one place. The counter counts every
+/// window; the drift line and the warning carry only the emitters *new* to
+/// the log — a busy chain touches dozens of contracts per window and the set
+/// churns, so a per-window line would grow forever while saying nothing new.
 fn record_poll_stats(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) -> Result<()> {
     let metrics = &ctx.venue_metrics;
     metrics.set(&metrics.poll_touched, stats.touched as u64);
@@ -248,17 +252,37 @@ fn record_poll_stats(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) -> Res
     metrics.set(&metrics.poll_changed_keys, stats.changed as u64);
     if !stats.uncovered.is_empty() {
         metrics.add(&metrics.poll_uncovered_logs, stats.uncovered.len() as u64);
-        ctx.drift.append(&UncoveredLogsEntry {
-            chain: ctx.mirror.label(),
-            kind: "uncovered_logs",
-            emitters: stats.uncovered.iter().map(ToString::to_string).collect(),
-        })?;
-        tracing::warn!(
-            emitters = ?stats.uncovered,
-            "follow: logs from contracts no closure covers (declare a closure to follow them)"
-        );
+        let fresh = fresh_emitters(&ctx.uncovered_seen, &stats.uncovered);
+        if !fresh.is_empty() {
+            ctx.drift.append(&UncoveredLogsEntry {
+                chain: ctx.mirror.label(),
+                kind: "uncovered_logs",
+                emitters: fresh.clone(),
+            })?;
+            tracing::warn!(
+                emitters = ?fresh,
+                "follow: logs from contracts no closure covers (declare a closure to follow them)"
+            );
+        }
     }
     Ok(())
+}
+
+/// The emitters in `current` that the seen set had not carried yet, adding
+/// them as it goes. A poisoned lock is recovered by construction (the set is
+/// a cache of what was logged; there is no invariant a panic could break).
+fn fresh_emitters(
+    seen: &std::sync::Mutex<std::collections::HashSet<String>>,
+    current: &[alloy_primitives::Address],
+) -> Vec<String> {
+    let mut seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    current
+        .iter()
+        .map(ToString::to_string)
+        .filter(|emitter| seen.insert(emitter.clone()))
+        .collect()
 }
 
 /// Advance the follow cursor to `source_head` (recording the source's own
@@ -268,4 +292,27 @@ async fn advance_follow(ctx: &Ctx, source_head: u64) -> Result<()> {
     ctx.plane.state.set_source_last(source_head, head_block.header.hash)?;
     ctx.plane.save_state()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fresh_emitters;
+    use alloy_primitives::Address;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    /// The audit's bound: the first sighting of an emitter is fresh, its
+    /// repeats are not, and a churning set reports only what is new.
+    #[test]
+    fn fresh_emitters_reports_each_address_once() {
+        let seen = Mutex::new(HashSet::new());
+        let a = Address::repeat_byte(0xaa);
+        let b = Address::repeat_byte(0xbb);
+        assert_eq!(fresh_emitters(&seen, &[a, b]).len(), 2);
+        assert!(fresh_emitters(&seen, &[a, b]).is_empty());
+        assert_eq!(fresh_emitters(&seen, &[b, a]).len(), 0);
+        let c = Address::repeat_byte(0xcc);
+        let fresh = fresh_emitters(&seen, &[a, c]);
+        assert_eq!(fresh, vec![c.to_string()]);
+    }
 }

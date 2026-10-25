@@ -12,7 +12,9 @@ A local, production-shaped mirror of Ethereum mainnet. A local `reth` +
 chain fresh by applying the real EIP-7928 block access lists — per key,
 copy-on-write. Your transactions live on **T**, next to live mainnet state.
 (This page is the mainnet mirror's walk-through; the Venue Mirror — the same
-workspace, its own chain **V** — is in [SPINE](SPINE.md).) At runtime nothing outside the namespace is needed: reth
+machine, its own chain **V** — is in
+[HOW-IT-WORKS-VENUE](HOW-IT-WORKS-VENUE.md), the shared design in
+[SPINE](SPINE.md).) At runtime nothing outside the namespace is needed: reth
 has no P2P peers and is fed by the local Lighthouse over the Engine API.
 
 | | T (`anvil-t`) |

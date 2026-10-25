@@ -86,27 +86,38 @@ impl Sim {
             account,
             now_ms,
         };
-        let mut closed = Vec::new();
-        // The cross leg: the venue's own cross figure (the total minus the
-        // isolated margins — the served identity, measured live) against the
-        // cross maintenance.
-        let cross = rescue_step(
-            v.cross_margin_summary.account_value,
-            v.cross_maintenance_margin_used,
-        );
-        closed.extend(self.rescue_leg(
-            &pass,
+        let mut closed = self.check_cross_leg(&pass, &v)?;
+        closed.extend(self.check_isolated_legs(&pass, &v, account)?);
+        if closed.is_empty() {
+            return Ok(None);
+        }
+        self.liquidated(closed, v.margin_summary.account_value)
+    }
+
+    /// The cross leg: the venue's own cross figure (the total minus the
+    /// isolated margins — the served identity, measured live) against the
+    /// cross maintenance.
+    fn check_cross_leg(&self, pass: &Pass<'_>, v: &account::AccountView) -> Result<Vec<String>> {
+        let equity = v.cross_margin_summary.account_value;
+        let maintenance = v.cross_maintenance_margin_used;
+        self.rescue_leg(
+            pass,
             Leg::Cross,
-            cross,
-            (
-                v.cross_margin_summary.account_value,
-                v.cross_maintenance_margin_used,
-            ),
-        )?);
-        // The isolated legs: each position alone — its isolated margin plus
-        // its unrealized pnl (docs: "isolated positions will apply unrealized
-        // pnl as additional margin for the open position") against its own
-        // maintenance.
+            rescue_step(equity, maintenance),
+            (equity, maintenance),
+        )
+    }
+
+    /// The isolated legs: each position alone — its isolated margin plus its
+    /// unrealized pnl (docs: "isolated positions will apply unrealized pnl as
+    /// additional margin for the open position") against its own maintenance.
+    fn check_isolated_legs(
+        &self,
+        pass: &Pass<'_>,
+        v: &account::AccountView,
+        account: &Account,
+    ) -> Result<Vec<String>> {
+        let mut closed = Vec::new();
         for (coin, p) in &account.positions {
             if p.leverage != crate::wire::LeverageType::Isolated {
                 continue;
@@ -117,18 +128,14 @@ impl Sim {
                 p.unrealized_pnl(facts.mark)?,
                 "isolated equity",
             )?;
-            let rescue = rescue_step(equity, facts.maintenance);
             closed.extend(self.rescue_leg(
-                &pass,
+                pass,
                 Leg::Isolated(coin),
-                rescue,
+                rescue_step(equity, facts.maintenance),
                 (equity, facts.maintenance),
             )?);
         }
-        if closed.is_empty() {
-            return Ok(None);
-        }
-        self.liquidated(closed, v.margin_summary.account_value)
+        Ok(closed)
     }
 
     /// One leg's rescue (docs): below the maintenance requirement the
@@ -308,52 +315,61 @@ impl Sim {
             if !leg.holds(coin, p) {
                 continue;
             }
-            let Some(prev_mark) =
-                self.with_state(|state| Ok(state.prev_marks.get(coin).copied()))?
-            else {
-                tracing::warn!(account = %pass.address, coin = %coin, "ADL skipped: no previous mark recorded yet");
-                continue;
-            };
-            let remaining = p.szi.abs();
-            let my_side_long = p.is_long();
-            let mut ranked = self.adl_ranking(
-                pass.feed,
-                pass.address,
-                (coin, prev_mark, my_side_long),
-                meta.as_ref(),
-            )?;
-            ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
-            if ranked.is_empty() {
-                // The thin venue's opposite side is empty: the real venue's
-                // ADL ranks the whole book's other side, which always exists.
-                // Nothing closes — the attempt is retried next tick.
-                tracing::warn!(account = %pass.address, coin = %coin, "ADL found no counterparties (the thin venue's opposite side is empty); the position stays");
-                continue;
-            }
-            let mut left = remaining;
-            for (_, other, size, _entry) in ranked {
-                if left <= Decimal::ZERO {
-                    break;
-                }
-                let take = left.min(size);
-                // The counterparty closes at the previous mark; the underwater
-                // account's side closes against it at the same price.
-                let own =
-                    account::FillFacts::close(coin, !my_side_long, take, prev_mark, p.leverage_value);
-                let theirs = account::FillFacts::close(coin, my_side_long, take, prev_mark, 1);
-                self.adl_close_pair(pass.address, other, (&own, &theirs), meta.as_ref())?;
-                tracing::warn!(account = %pass.address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
-                left = left.saturating_sub(take);
-            }
-            // Only an acted-on coin is a close: the report feeds the control
-            // response, the metrics and the facts (found by the local daloc
-            // run: the unconditional push claimed a close that never
-            // happened).
-            if left < remaining {
+            if self.adl_coin(pass, coin, p, meta.as_ref())? {
                 closed.push(coin.clone());
             }
         }
         Ok(closed)
+    }
+
+    /// One coin's ADL: rank the opposite side and close it against the
+    /// underwater account at the previous mark. Answers whether anything was
+    /// acted on — only an acted-on coin is a close: the report feeds the
+    /// control response, the metrics and the facts (found by the local daloc
+    /// run: the unconditional push claimed a close that never happened).
+    fn adl_coin(
+        &self,
+        pass: &Pass<'_>,
+        coin: &str,
+        p: &account::Position,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<bool> {
+        let Some(prev_mark) = self.with_state(|state| Ok(state.prev_marks.get(coin).copied()))? else {
+            tracing::warn!(account = %pass.address, coin = %coin, "ADL skipped: no previous mark recorded yet");
+            return Ok(false);
+        };
+        let remaining = p.szi.abs();
+        let my_side_long = p.is_long();
+        let mut ranked = self.adl_ranking(
+            pass.feed,
+            pass.address,
+            (coin, prev_mark, my_side_long),
+            meta,
+        )?;
+        ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
+        if ranked.is_empty() {
+            // The thin venue's opposite side is empty: the real venue's ADL
+            // ranks the whole book's other side, which always exists. Nothing
+            // closes — the attempt is retried next tick.
+            tracing::warn!(account = %pass.address, coin = %coin, "ADL found no counterparties (the thin venue's opposite side is empty); the position stays");
+            return Ok(false);
+        }
+        let mut left = remaining;
+        for (_, other, size, _entry) in ranked {
+            if left <= Decimal::ZERO {
+                break;
+            }
+            let take = left.min(size);
+            // The counterparty closes at the previous mark; the underwater
+            // account's side closes against it at the same price.
+            let own =
+                account::FillFacts::close(coin, !my_side_long, take, prev_mark, p.leverage_value);
+            let theirs = account::FillFacts::close(coin, my_side_long, take, prev_mark, 1);
+            self.adl_close_pair(pass.address, other, (&own, &theirs), meta)?;
+            tracing::warn!(account = %pass.address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
+            left = left.saturating_sub(take);
+        }
+        Ok(left < remaining)
     }
 
     /// Close both sides of one ADL fill — the underwater account's own side

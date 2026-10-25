@@ -6,6 +6,7 @@ Three layers, each runnable on demand:
 |---|---|---|---|
 | Unit | `make test-engine` (cargo test) | nothing | pure logic: BAL composition (`bal_from_writes` through the spec validator) and flattening, padding, COW granularity, journal, cursor/rebase rules, the shared wire/HTTP conventions |
 | Self test | `make mainnet-selftest` | a public mainnet RPC + beacon API (**test-only** external deps; the runtime stack has none) | the whole pipeline end-to-end on **real mainnet blocks** (compose the parent's BAL → COW filter → apply → sampled storage parity) |
+| Self test (venue) | `make venue-selftest` | a public HyperEVM RPC (**test-only**; the runtime stack forks its own `HL_RPC_URL`) | the follow pipeline on **real HyperEVM windows** (compose → COW → land → live parity), the system-tx envelope included |
 | Smoke | `make mainnet-smoke` | the deployed stack | service health + parity spot check on T's head vs reth |
 | Scenario | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **T** (the 11 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
 | Product sim | `make mainnet-product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
@@ -64,24 +65,36 @@ each module documents:
   table, the four attester-filled fields, the fee table, the Iris shapes
   (404/pending/signed), the watcher's pin-as-rest-state predicate.
 
-## Self test (`k8s/bootstrap/selftest-job.yaml`)
+## Self tests (`k8s/bootstrap/{selftest,venue-selftest}-job.yaml`)
 
-One Job, two containers in one pod:
+One Job per mirror, the same three-step shape:
 
 1. `resolve-pin` (alpine) resolves `pin = rpc head - 16`,
-2. `anvil-t` forks a public RPC at that pin,
-3. `engine selftest` applies blocks `pin+1 .. pin+3`, printing a
-   check-by-check report (source, writes/filtered/shadowed, sampled storage
-   parity) and exiting non-zero on any failure.
+2. a scratch anvil forks a public RPC at that pin (`anvil-t` for the
+   mainnet's Job, `anvil-v` for the venue's),
+3. the engine's `selftest` subcommand runs the pipeline and prints a
+   check-by-check report, exiting non-zero on any failure.
 
-This is the fastest full-pipeline check and it exercises the **trace fallback**
-(public RPCs do not serve `eth_getBlockAccessList`).
+The mainnet's applies blocks `pin+1 .. pin+3` (source, writes/filtered/
+shadowed, sampled storage parity) — the fastest full-pipeline check, and it
+exercises the **trace fallback** (public RPCs do not serve
+`eth_getBlockAccessList`). The venue's follows windows (compose → COW → land →
+**live parity**) — the system-tx envelope and the latest-only reads a scratch
+anvil cannot serve. Both containers take the deployment's env ConfigMap
+(`mirror-config`) so the instance's `${…}` wiring resolves; their state roots
+are ephemeral paths in the pod, which is what a scratch run wants.
 
-Expected output shape:
+Expected output shape (the mainnet's):
 
 ```
 -- block 26242174
    apply: source=trace writes=... filtered=... skipped_shadowed=... sampled=8/8 ms=...
+```
+
+and the venue's:
+
+```
+-- window 2: source=poll total=14 applied=14 filtered=14 skipped_shadowed=0 sampled=14/14
 ```
 
 ## Smoke (`scripts/mainnet-smoke.sh`)
