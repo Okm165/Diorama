@@ -164,19 +164,7 @@ fn serve(
 
 // ---- the engine entry -----------------------------------------------------
 
-/// The Venue Mirror engine's entrypoint (the bin is the shell over this; the
-/// same shell as `mainnet-engine`, R3).
-///
-/// Boot order (plan §7.2): wait for anvil V, assert the chain, reconcile the
-/// registry (reset detection + the epoch rule; the reconcile also anchors the
-/// epoch pin before any writes exist — the counterpart of the mainnet
-/// engine's explicit boot anchor), run the at-pin probes, then serve the HTTP
-/// surface and the driver loop. A boot fault is fatal: a driver over the wrong
-/// chain or a broken registry must not serve.
-///
-/// Shutdown mirrors the mainnet engine's: the signal aborts the tasks; every
-/// mutation persists its state as it happens (shadow registry, cursor), so
-/// there is nothing to drain.
+/// The Venue Mirror engine's CLI.
 #[derive(Parser)]
 #[command(name = "venue-engine", version, about)]
 struct Cli {
@@ -184,8 +172,8 @@ struct Cli {
     cmd: Cmd,
 }
 
-/// The engine's CLI, the same shape as the mainnet engine's (`run` |
-/// `selftest`; no `rewind` — the venue's journal holds only the engine's own
+/// The subcommands: `run` | `selftest` (the same shape as the mainnet
+/// engine's, minus `rewind` — the venue's journal holds only the engine's own
 /// writes, so a parent-diff rewind is not a venue operation).
 #[derive(Subcommand)]
 enum Cmd {
@@ -209,6 +197,19 @@ enum Cmd {
     },
 }
 
+/// The Venue Mirror engine's entrypoint (the bin is the shell over this; the
+/// same shell as `mainnet-engine`, R3).
+///
+/// Boot order (plan §7.2): wait for anvil V, assert the chain, reconcile the
+/// registry (reset detection + the epoch rule; the reconcile also anchors the
+/// epoch pin before any writes exist — the counterpart of the mainnet
+/// engine's explicit boot anchor), run the at-pin probes, then serve the HTTP
+/// surface and the driver loop. A boot fault is fatal: a driver over the wrong
+/// chain or a broken registry must not serve.
+///
+/// Shutdown mirrors the mainnet engine's: the signal aborts the tasks; every
+/// mutation persists its state as it happens (shadow registry, cursor), so
+/// there is nothing to drain.
 pub async fn main_entry(args: Vec<String>) -> Result<()> {
     mirror_config::boot::init_logging();
     let cli: Cli = boot::parse_cli("venue-engine", args);

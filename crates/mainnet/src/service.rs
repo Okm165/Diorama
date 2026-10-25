@@ -12,6 +12,7 @@ use mirror_devnet::engine::Engine as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// The Mainnet Mirror engine's CLI.
 #[derive(Parser)]
 #[command(name = "mainnet-engine", version, about)]
 struct Cli {
@@ -19,6 +20,7 @@ struct Cli {
     cmd: Cmd,
 }
 
+/// The subcommands: `run` | `selftest` | `rewind`.
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the engine loops and the HTTP API.
@@ -50,6 +52,19 @@ enum Cmd {
     },
 }
 
+/// The Mainnet Mirror engine's entrypoint (the bin is the shell over this; the
+/// same shell as `venue-engine`, R3).
+///
+/// Boot order (plan §7.2): wait for T, assert the chain, anchor the epoch pin
+/// (a fresh registry's epoch *is* the current fork base — the counterpart of
+/// the venue engine's reconcile, which anchors it the same way), audit the
+/// declared capabilities, then serve the HTTP surface and the applier, shadow
+/// and top-up loops. A boot fault is fatal: an applier over the wrong chain or
+/// an unanchored epoch must not serve.
+///
+/// Shutdown mirrors the venue engine's: the signal aborts the tasks; every
+/// mutation persists its state as it happens (shadow registry, cursor,
+/// journal), so there is nothing to drain.
 pub async fn main_entry(args: Vec<String>) -> Result<()> {
     mirror_config::boot::init_logging();
     let cli: Cli = mirror_config::boot::parse_cli("mainnet-engine", args);
