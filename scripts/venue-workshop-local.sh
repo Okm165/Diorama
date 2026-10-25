@@ -33,7 +33,7 @@ DIR=/tmp/opencode/daloc-local
 # Our own capture dir: daloc-local resets its `$DIR` at boot (a `tee` into it
 # would write to an unlinked inode), and the summaries below are cosmetic —
 # the suites' exit codes are the verdict (`set -euo pipefail`).
-LOGS=/tmp/opencode/venue-workshop
+LOGS=/tmp/opencode/venue-workshop-local
 mkdir -p "$LOGS"
 SRC_T_PORT="${SRC_T_PORT:-18600}"; T_PORT="${T_PORT:-18602}"; T_ADMIN_PORT="${T_ADMIN_PORT:-18680}"
 SRC_V_PORT="${SRC_V_PORT:-18608}"; V_PORT="${V_PORT:-18610}"; V_ADMIN_PORT="${V_ADMIN_PORT:-18681}"

@@ -43,7 +43,7 @@ CAST="${CAST:-cast}"
 ENGINE="${ENGINE:-target/debug/mainnet-engine}"
 RPC="${MAINNET_RPC:-https://eth.drpc.org}"
 SRC_PORT="${SRC_PORT:-19960}"; T_PORT="${T_PORT:-19962}"; HTTP="${HTTP:-19980}"
-DIR="${DIR:-/tmp/opencode/mainnet-workshop}"
+DIR="${DIR:-/tmp/opencode/mainnet-workshop-local}"
 SRC="http://127.0.0.1:$SRC_PORT"; T="http://127.0.0.1:$T_PORT"
 USDC=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 WETH=0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2
