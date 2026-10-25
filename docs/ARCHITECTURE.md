@@ -57,7 +57,10 @@ spine's generic composer (`mirror_devnet::bal::compose`) has no native BAL to
 take from the HL public API, so it synthesizes one — each pass composes the
 window's touched set from the envelopes (txs, receipts, system txs), derives
 concrete keys from the declared closures, reads source and target, and frames
-the changes as a BAL. The shared COW filter then drops devnet-owned keys and
+the changes as a BAL. The follow's anomalies (a gap-guard pause, a source
+continuity mismatch, uncovered log emitters) land in the shared `drift.jsonl`
+— the same forensic file the applier writes, each producer with its own
+entry schema. The shared COW filter then drops devnet-owned keys and
 the applier lands the rest on V ("The Venue Mirror" below), with the
 simulator's market and account planes beside it ("The venue simulator").
 
@@ -81,7 +84,7 @@ after are shared code.
 | **mirror the parent chain** | reth local full node; the native BAL rung (`eth_getBlockAccessList`, prestateTracer fallback); one T block per applied parent block | HL public API; the synthesized BAL rung (envelopes → touches → declared closures → reads) applied to V's latest state | `Source` (both rungs), `bal::plan` (compose → COW → flatten), the applier/follow sequences, the journal, the cursor state |
 | **modify market state** | `/admin/deal` (mint balances), the feed bridge (live prices → mock aggregators), fixture deploys (`anvil_setCode`) | `/admin/deal` on V's tokens, the venue simulator's control API (orders, positions, accounts, prices) | `deal`, the shadow registry (COW), `anvil_setStorageAt`/`setCode` |
 | **minted liquidity** | `deal` mints ERC20 balances at the discovered slot; the CCTP bridge mints USDC via relay | `deal` mints on V; the sim mints perp/spot balances through its account plane | the same deal path — the mint is the devnet's own write, never the parent's |
-| **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `full_sweep`), configured probes per block, the drift log | live parity (applied keys re-read vs the composed BAL), at-pin probes, the uncovered-emitter audit | `ProbeRunner`, `bal::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`) |
+| **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `full_sweep`), configured probes per block, the applier's drift entries | live parity (applied keys re-read vs the composed BAL), at-pin probes, the uncovered-emitter audit, the follow's drift entries | `ProbeRunner`, `bal::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`); both write the shared `drift.jsonl` (`mirror_devnet::drift` — one home, each producer's entry schema) |
 | **reset / epoch** | cursor hash + below-base witness | chain-instance canary (pin witness) | `ResetDetector`, `mirror_devnet::epoch` |
 | **time travel** | `/admin/time` clock offset (persists across parent blocks) + `evm_increaseTime` | none on V's chain by design (V's clock is native; the harness drives `evm_increaseTime`/`anvil_mine` directly and an engine offset nobody re-aligns would be a no-op route) — the *product's* clock is the sim's served time | the plane's `time_offset` (mainnet only) |
 

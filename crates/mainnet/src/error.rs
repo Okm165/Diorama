@@ -40,15 +40,6 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    /// A drift-log entry could not be serialized (a bug in an entry type,
-    /// never a runtime condition): named so the gap cannot look like a clean
-    /// run.
-    #[error("drift log: encoding the entry")]
-    DriftEncode {
-        #[source]
-        source: serde_json::Error,
-    },
-
     /// The HTTP listener could not bind.
     #[error("binding the http api at {addr}")]
     Bind {

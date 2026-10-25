@@ -20,6 +20,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::StreamExt as _;
 use std::sync::Arc;
 
 /// The shared route table: health, status, metrics, the fact stream, and the
@@ -161,7 +162,10 @@ async fn admin_probes<E: Engine>(
 /// replays nothing on reconnect — a consumer that missed events re-reads
 /// `/status` and the state files. A lagged subscriber resumes from the
 /// oldest retained fact (tokio broadcast semantics), which is the
-/// notification contract.
+/// notification contract. An opening `: connected` comment makes the live
+/// subscription observable, so a consumer that must act *after* the stream
+/// is live (the local proofs' sequencing) need not race the subscribe — a
+/// comment, not a fact, so the no-replay contract is untouched.
 async fn admin_events<E: Engine>(State(ctx): State<Arc<E>>) -> impl IntoResponse {
     let rx = ctx.plane().facts.subscribe();
     let stream = futures_util::stream::unfold(rx, |mut rx| async move {
@@ -180,5 +184,8 @@ async fn admin_events<E: Engine>(State(ctx): State<Arc<E>>) -> impl IntoResponse
             }
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    let opening = futures_util::stream::once(async {
+        Ok::<_, std::convert::Infallible>(Event::default().comment("connected"))
+    });
+    Sse::new(opening.chain(stream)).keep_alive(KeepAlive::default())
 }

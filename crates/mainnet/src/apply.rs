@@ -7,12 +7,12 @@
 //! sampled parity + probe parity. Each phase is one function; `apply_block` is
 //! the sequence.
 use crate::ctx::Ctx;
-use crate::drift::Drift;
 use crate::error::{Error, Result};
 use alloy_primitives::U256;
 use alloy_rpc_types_eth::Header;
 use mirror_anvil::{Key, Rpc, Write};
 use mirror_devnet::cow::FilterStats;
+use mirror_devnet::drift::Drift;
 use mirror_devnet::engine::Engine as _;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
@@ -359,7 +359,8 @@ fn log_drift_if_anomalous(
         sampled: outcome.sampled,
         sampled_ok: outcome.sampled_ok,
         duration_ms: outcome.duration_ms,
-    })
+    })?;
+    Ok(())
 }
 
 /// Late completion after a timeout: the writes are already in (the journal

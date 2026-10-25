@@ -145,6 +145,20 @@ else
   bad "follow applied_total=$applied (expected >= 2)"
 fi
 
+# Stage 3: the forensic trail. A log from a contract no declared closure
+# covers cannot be followed — it must land in the shared drift log
+# (`drift.jsonl`, the venue's counterpart of the applier's anomaly lines),
+# beside the counter.
+EMITTER=0x00000000000000000000000000000000000000e9
+rpc "$SRC" anvil_setCode "[\"$EMITTER\",\"0x60006000a0\"]" >/dev/null # PUSH1 0 PUSH1 0 LOG0
+send "$SRC" "$WATCH" "$EMITTER" 0
+sleep 5
+if grep -q '"uncovered_logs"' "$DIR/state/drift.jsonl" 2>/dev/null; then
+  ok "drift.jsonl: the uncovered emitter is on the venue's forensic trail"
+else
+  bad "drift.jsonl missing the uncovered_logs line (see $DIR/state/drift.jsonl)"
+fi
+
 # ---- the shared admin surface (the venue side of the engine UX) ------------
 # The exact verbs `make engine-symmetry` checks cluster-side, driven here
 # against the one engine: /status, pause/resume effects, the shadow
@@ -189,6 +203,7 @@ printf '%s' "$po" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exi
   && ok "/admin/probes reports {ok, failed, skipped}" || bad "/admin/probes: $po"
 
 timeout 5 curl -s -N "$HTTP/events" > "$DIR/events.out" 2>/dev/null &
+for _ in $(seq 1 20); do grep -q ": connected" "$DIR/events.out" 2>/dev/null && break; sleep 0.1; done
 deal=$(curl -s -X POST "$HTTP/admin/deal" -H 'content-type: application/json' \
   -d '{"token":"'$TOKEN'","to":"'$OTHER'","amount":"100000000"}')
 printf '%s' "$deal" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") and d.get("slot") else 1)' \
@@ -206,6 +221,7 @@ rc=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HTTP/admin/rewind" -H 'con
 # A token without the standard layout writes nothing, so it must publish
 # nothing: the fact is a state change, never a request receipt.
 timeout 4 curl -s -N "$HTTP/events" > "$DIR/events2.out" 2>/dev/null &
+for _ in $(seq 1 20); do grep -q ": connected" "$DIR/events2.out" 2>/dev/null && break; sleep 0.1; done
 bad_deal=$(curl -s -X POST "$HTTP/admin/deal" -H 'content-type: application/json' \
   -d '{"token":"0x00000000000000000000000000000000000000e8","to":"'$OTHER'","amount":"1"}')
 printf '%s' "$bad_deal" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is False else 1)' \

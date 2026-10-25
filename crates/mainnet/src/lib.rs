@@ -9,7 +9,6 @@ mod beacon;
 mod ctx;
 mod apply;
 mod driver;
-mod drift;
 mod engine_api;
 mod error;
 mod feed_bridge;

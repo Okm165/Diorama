@@ -7,12 +7,12 @@
 //! rung), the reset detector (cursor hash), and the scope (whole accounts).
 //! The composer itself is the spine's generic one (`mirror_devnet::bal`).
 use crate::beacon::BeaconClient;
-use crate::drift::Drift;
 use crate::error::{Error, Result};
 use crate::metrics::MainnetMetrics;
 use futures_util::future::BoxFuture;
 use mirror_anvil::Rpc;
 use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
+use mirror_devnet::drift::Drift;
 use mirror_devnet::engine::Engine;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;

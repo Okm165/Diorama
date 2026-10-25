@@ -28,6 +28,41 @@ struct WindowStats {
     sampled_ok: usize,
 }
 
+/// The gap guard's drift line: the source head ran past the follow cursor by
+/// more than the policy allows, so the window is paused (a re-pin decision).
+/// The log's schema is per producer (`kind` names the anomaly, like the
+/// applier's `source` names its diff rung).
+#[derive(serde::Serialize)]
+struct GapPauseEntry {
+    chain: &'static str,
+    kind: &'static str,
+    followed: u64,
+    source_head: u64,
+    gap: u64,
+    limit: u64,
+}
+
+/// A source continuity mismatch's drift line: the block after the last
+/// composed one carried a different parent hash (a reorg under the follow).
+#[derive(serde::Serialize)]
+struct SourceReorgEntry {
+    chain: &'static str,
+    kind: &'static str,
+    block: u64,
+    expected: String,
+    found: String,
+}
+
+/// The uncovered-log audit's drift line: log emitters no declared closure
+/// covers — their state changes cannot be followed until a closure is
+/// declared (the metric counts them; the line names them).
+#[derive(serde::Serialize)]
+struct UncoveredLogsEntry {
+    chain: &'static str,
+    kind: &'static str,
+    emitters: Vec<String>,
+}
+
 /// Follow the source: compose the window since the last composed source
 /// block, land the changed keys on V (COW: devnet-owned keys are skipped),
 /// and record the live parity of the applied keys. One window per pass; the
@@ -50,7 +85,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<()> {
     if source_head <= followed {
         return Ok(());
     }
-    if !gap_ok(ctx, followed, source_head) {
+    if !gap_ok(ctx, followed, source_head)? {
         return Ok(());
     }
 
@@ -98,14 +133,22 @@ fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats, ms: u64) {
 
 /// The gap guard: a window wider than the profile's limit pauses the follow
 /// (the same regime as the mainnet applier's `max_gap_blocks`).
-fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> bool {
+fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> Result<bool> {
     let gap = source_head - followed;
     let Some(limit) = ctx.mirror.policies().gap else {
-        return true;
+        return Ok(true);
     };
     if gap > limit {
         ctx.venue_metrics
             .inc(&ctx.venue_metrics.follow_gap_pauses_total);
+        ctx.drift.append(&GapPauseEntry {
+            chain: ctx.mirror.label(),
+            kind: "gap_pause",
+            followed,
+            source_head,
+            gap,
+            limit,
+        })?;
         tracing::error!(
             followed,
             source_head,
@@ -113,9 +156,9 @@ fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> bool {
             max = limit,
             "follow gap too large - paused; run the re-pin drill (make repin)"
         );
-        return false;
+        return Ok(false);
     }
-    true
+    Ok(true)
 }
 
 /// Continuity: the block after the last composed one must carry the recorded
@@ -132,6 +175,13 @@ async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
     if next.header.parent_hash != last_hash {
         ctx.venue_metrics
             .inc(&ctx.venue_metrics.source_reorg_total);
+        ctx.drift.append(&SourceReorgEntry {
+            chain: ctx.mirror.label(),
+            kind: "source_reorg",
+            block: followed + 1,
+            expected: last_hash.to_string(),
+            found: next.header.parent_hash.to_string(),
+        })?;
         tracing::error!(
             block = followed + 1,
             expected = %last_hash,
@@ -155,7 +205,7 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
     }
     .plan(&ctx.plane.shadow, mirror_devnet::bal::Window::new(from, to))
     .await?;
-    record_poll_stats(&ctx.venue_metrics, &plan.compose);
+    record_poll_stats(ctx, &plan.compose)?;
     let applied = if plan.writes.is_empty() {
         0
     } else {
@@ -178,18 +228,25 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
     })
 }
 
-/// The poll's gauges and the audit warning, one place.
-fn record_poll_stats(metrics: &crate::metrics::VenueMetrics, stats: &mirror_devnet::bal::ComposeStats) {
+/// The poll's gauges and the audit trail, one place.
+fn record_poll_stats(ctx: &Ctx, stats: &mirror_devnet::bal::ComposeStats) -> Result<()> {
+    let metrics = &ctx.venue_metrics;
     metrics.set(&metrics.poll_touched, stats.touched as u64);
     metrics.set(&metrics.poll_planned_keys, stats.planned as u64);
     metrics.set(&metrics.poll_changed_keys, stats.changed as u64);
     if !stats.uncovered.is_empty() {
         metrics.add(&metrics.poll_uncovered_logs, stats.uncovered.len() as u64);
+        ctx.drift.append(&UncoveredLogsEntry {
+            chain: ctx.mirror.label(),
+            kind: "uncovered_logs",
+            emitters: stats.uncovered.iter().map(ToString::to_string).collect(),
+        })?;
         tracing::warn!(
             emitters = ?stats.uncovered,
             "follow: logs from contracts no closure covers (declare a closure to follow them)"
         );
     }
+    Ok(())
 }
 
 /// Advance the follow cursor to `source_head` (recording the source's own

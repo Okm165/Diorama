@@ -199,6 +199,7 @@ status | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(
 
 # ---- mint: /admin/deal discovers the mock's key and writes it ---------------
 timeout 5 curl -s -N "$HTTP/events" > "$DIR/events.out" 2>/dev/null &
+for _ in $(seq 1 20); do grep -q ": connected" "$DIR/events.out" 2>/dev/null && break; sleep 0.1; done
 deal=$(curl -s -X POST "$HTTP/admin/deal" -H 'content-type: application/json' \
   -d '{"token":"'$TOKEN'","to":"'$A2'","amount":"123000000"}')
 printf '%s' "$deal" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") and d.get("slot") else 1)' \
@@ -228,17 +229,24 @@ printf '%s' "$hb" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.std
 [ "$(bal "$T" "$A2")" = "$src_a2" ] && ok "shadow: T's A2 re-synced to the source ($(bal "$T" "$A2"))" \
   || bad "shadow: T=$(bal "$T" "$A2") src=$src_a2"
 
-# rewind: the journaled parent before-values
+# rewind: the journaled parent before-values. Paused for the two reads — the
+# applier races them otherwise (measured: a catch-up step landed between the
+# reads and the check saw 23 -> 24). A paused engine still serves reads and
+# writes (the documented pause contract), so the rewind itself is unaffected.
+curl -s -X POST "$HTTP/admin/pause" -H 'content-type: application/json' -d '{}' >/dev/null
+sleep 1.5
 before=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor_t"])')
 rw=$(curl -s -X POST "$HTTP/admin/rewind" -H 'content-type: application/json' -d '{"blocks":1}')
 printf '%s' "$rw" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if "cursor" in d and "restored_values" in d else 1)' \
   && ok "/admin/rewind: restored $(printf '%s' "$rw" | python3 -c 'import json,sys; print(json.load(sys.stdin)["restored_values"])') values" \
   || bad "/admin/rewind: $rw"
 after=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor_t"])')
+curl -s -X POST "$HTTP/admin/resume" -H 'content-type: application/json' -d '{}' >/dev/null
 [ "$after" -lt "$before" ] && ok "rewind: the cursor moved back ($before -> $after)" || bad "rewind: cursor $before -> $after"
 
 # epoch: one-call re-pin; the engine detects the reset and reconciles
 timeout 20 curl -s -N "$HTTP/events" > "$DIR/events2.out" 2>/dev/null &
+for _ in $(seq 1 20); do grep -q ": connected" "$DIR/events2.out" 2>/dev/null && break; sleep 0.1; done
 ep=$(curl -s -X POST "$HTTP/admin/epoch")
 printf '%s' "$ep" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("reset") is True and d.get("source") else 1)' \
   && ok "/admin/epoch: re-pinned ($ep)" || bad "/admin/epoch: $ep"

@@ -101,7 +101,7 @@ Venue Mirror (a second namespace in the same cluster; no snapshot needed):
 ```bash
 kubectl apply -k k8s/overlays/venue-mirror   # V + venue engine + venue-sim (namespace venue-mirror)
 make venue-smoke                             # V, engine, sim and bridge checks
-python3 scripts/daloc-sim.py --lane all      # the daloc use-case arc (44 checks; point the
+python3 scripts/daloc-sim.py --lane all      # the daloc use-case arc (46 checks; point the
                                              # script's constants at your endpoints first)
 ```
 
@@ -192,12 +192,15 @@ k8s/bootstrap/              one-shot Jobs: reth snapshot, CL blob prune, engine 
 scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the shared plumbing), the
                             mainnet suites (mainnet-smoke, mainnet-scenario, mainnet-proof,
                             mainnet-product-sim, mainnet-closure-check, mainnet-feed-bridge,
-                            mainnet-feed-local, mainnet-selftest-local, mainnet-secrets), the
+                            mainnet-feed-local, mainnet-selftest-local, mainnet-engine-local,
+                            mainnet-secrets), the
                             venue suites (venue-smoke, venue-drill, venue-proof,
                             venue-order-proof, venue-product-sim, venue-follow-local,
                             venue-secrets), the cross-mirror suites (cctp-smoke,
-                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry), daloc-sim.py,
-                            and the structural fitness scripts (closure-matrix, no-orphans,
+                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry), daloc-sim.py
+                            with daloc-local.sh (the arc against a local scratch stack), the
+                            container proof (container-smoke.sh: the engine image run for
+                            real), and the structural fitness scripts (closure-matrix, no-orphans,
                             docs-metrics, trust-audit, clock-labels, no-panics, config-check,
                             docker-members, k8s-wiring, spec-citations, spine-purity,
                             facts-published, metrics-written, render-diagrams)

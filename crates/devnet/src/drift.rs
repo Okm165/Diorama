@@ -1,15 +1,17 @@
-//! drift.jsonl: the mirror's divergence log.
+//! drift.jsonl: the mirror's divergence log — one home for both mirrors.
 //!
-//! One JSON line per *divergence* (or apply anomaly) - not per block. Per-block
-//! telemetry lives in the Prometheus metrics; this file is the forensic trail
-//! you read when an alarm fires, so it must stay small and readable. Writes are
-//! serialized and flushed as a single write per line: the mirror's write paths
-//! run as separate tasks (the removed M replay was one), and concurrent
+//! One JSON line per *divergence* (an apply anomaly, a follow anomaly) - not
+//! per block. Per-block telemetry lives in the Prometheus metrics; this file
+//! is the forensic trail you read when an alarm fires, so it must stay small
+//! and readable. Writes are serialized and flushed as a single write per
+//! line: the engines' write paths run as separate tasks, and concurrent
 //! appends of long lines interleaved and corrupted the file (measured: 10
 //! broken lines in 48k).
 //!
-//! A drift write that fails is a typed fault the caller surfaces: a divergence
-//! record that could not be written must not look like a clean run.
+//! The entry type owns its schema (each producer defines a narrow struct);
+//! the log owns the file. A drift write that fails is a typed fault the
+//! caller surfaces: a divergence record that could not be written must not
+//! look like a clean run.
 use crate::error::{Error, Result};
 use std::io::Write;
 use std::path::PathBuf;
@@ -17,7 +19,7 @@ use std::sync::Mutex;
 
 const ROTATE_BYTES: u64 = 16 * 1024 * 1024;
 
-pub(crate) struct Drift {
+pub struct Drift {
     path: PathBuf,
     /// Serializes whole-line writes. It protects nothing but ordering, so a
     /// poisoned lock is recovered by construction (there is no value a panic
@@ -47,7 +49,10 @@ impl Drift {
     /// a typed fault the caller surfaces: a divergence record that could not
     /// be written must not look like a clean run.
     pub fn append<T: serde::Serialize>(&self, entry: &T) -> Result<()> {
-        let encoded = serde_json::to_string(entry).map_err(|source| Error::DriftEncode { source })?;
+        let encoded = serde_json::to_string(entry).map_err(|source| Error::Encode {
+            what: "drift log entry",
+            source,
+        })?;
         let line = format!("{encoded}\n");
         let _guard = self
             .lock

@@ -13,6 +13,7 @@ pub mod bal;
 pub mod closure;
 pub mod cow;
 pub mod deal;
+pub mod drift;
 pub mod engine;
 pub mod epoch;
 pub mod facts;
@@ -75,6 +76,7 @@ mod design_assertions {
         is_normal::<crate::cow::WatchSet>();
         is_normal::<crate::cow::Scope>();
         is_normal::<crate::cow::FilterStats>();
+        is_normal::<crate::drift::Drift>();
         is_normal::<crate::engine::SharedStatus>();
         is_normal::<crate::spine::ResetSignal>();
         is_normal::<crate::spine::ClockPolicy>();

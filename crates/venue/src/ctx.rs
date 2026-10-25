@@ -13,6 +13,7 @@ use crate::metrics::VenueMetrics;
 use futures_util::future::BoxFuture;
 use mirror_anvil::Rpc;
 use mirror_config::{ChainVenue, EngineSection};
+use mirror_devnet::drift::Drift;
 use mirror_devnet::engine::Engine;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
@@ -67,6 +68,10 @@ pub struct Ctx {
     pub(crate) plane: Plane,
     /// The venue's own gauges/counters.
     pub(crate) venue_metrics: Arc<VenueMetrics>,
+    /// The shared forensic log (`drift.jsonl`, one home for both mirrors):
+    /// the follow's anomalies — a gap-guard pause, a source reorg, uncovered
+    /// log emitters — the mainnet applier's counterpart.
+    pub(crate) drift: Drift,
 }
 
 impl Ctx {
@@ -81,6 +86,7 @@ impl Ctx {
         // justifies a second knob here.
         let timeout = Duration::from_secs(30);
         let plane = Plane::from_engine(&engine)?;
+        let drift = Drift::new(engine.state_dir.join("drift.jsonl"))?;
         let venue_metrics = Arc::new(VenueMetrics::default());
         let source_rpc = Arc::new(Rpc::new(source_url, timeout)?);
         let anvil_v = Arc::new(Rpc::new(v_url, timeout)?);
@@ -103,6 +109,7 @@ impl Ctx {
             target: wiring.target,
             plane,
             venue_metrics,
+            drift,
         })
     }
 

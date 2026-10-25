@@ -482,7 +482,10 @@ V (`anvil-v`, 8545), the venue engine (`venue-mirror`, 8080), the simulator
 deployed. The NodePorts keep the 31xxx range (31545 / 31880 / 31090 / 31091),
 so both mirrors fit on one node. There is no `reth`/`lighthouse` here and no
 mainnet-side fork: V is a single fork-mode chain, and the engine's job is the
-fork lifecycle plus the devnet's own blocks.
+fork lifecycle plus the devnet's own blocks. The engine's state dir carries
+the same shape as the mainnet engine's (`cursor.json`, `shadow.json`,
+`journal/`) plus `drift.jsonl` — the follow's anomalies (gap pauses, source
+reorgs, uncovered emitters), the venue counterpart of the applier's lines.
 
 **First rollout**: `make ns INSTANCE=venue-mirror` creates the namespace, and
 `make venue-secrets CCTP_RELAY_KEY=0x…` creates the bridge's relay-wallet

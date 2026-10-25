@@ -21,6 +21,7 @@ they share, the places they diverge, and the evidence for every claim below
    |   -> COW filter (your writes win) -> journal -> writes -> align    |
    |   -> mine -> scan -> parity -> cursor                              |
    |   facts -> /events (SSE)        policies + capabilities (data)     |
+   |   anomalies -> drift.jsonl (shared; one schema per producer)       |
    +----------------+----------------------------------+----------------+
                     |                                  |
                     v                                  v
@@ -62,7 +63,7 @@ in `crates/devnet`; none of them is per-mirror code.
 | 2 | The window's effects | `bal::WindowBal { from, to, kind: DiffKind, bal: BlockAccessList }` | **EIP-7928's structure as the universal diff envelope** (`alloy_eips::eip7928::BlockAccessList`): accounts → `storage_changes`/`storage_reads`, balance/nonce/code changes, each with its `block_access_index`. Native on the mainnet (`DiffKind::Bal`), synthesized on the venue (`DiffKind::Poll`, or `Trace` where traces exist). |
 | 3 | The COW filter | `cow::Scope` + `closure::KeyClosure` | The watch set (what the mirror keeps fresh) and the declared closures (what the devnet's own writes own). A key the devnet wrote is skipped, not overwritten: your writes win. |
 | 4 | The applier's step | `bal::WindowPlan { kind, total, bal, writes }` | `flatten_bal` → the journal records before-values → the writes land → the context aligns → the block mines → the scanner re-reads → parity → the cursor advances. One transaction per window (`apply_block`'s pipeline). |
-| 5 | The measurement | `ProbeSchedule` + the drift log | Mainnet: sampled parity against reth at N, configured probes per block. Venue: live parity against the composed BAL, at-pin probes, the uncovered-emitter audit. |
+| 5 | The measurement | `ProbeSchedule` (the schedule seam); `drift.jsonl` is shared (`mirror_devnet::drift`) | Mainnet: sampled parity against reth at N, configured probes per block; the applier's drift entries. Venue: live parity against the composed BAL, at-pin probes, the uncovered-emitter audit; the follow's drift entries (gap pauses, source reorgs, uncovered emitters). Each producer owns its entry schema — the log owns the file. |
 | 6 | The facts | `facts::Fact` / `Notice` | The event stream (see "The event model"). |
 | 7 | The policies | `spine::Policies { clock, mine, probes, prepend_rounds, gap }` | The divergence **as data**: the pipeline reads decisions, never a profile name. |
 | 8 | The capabilities | `source::Capabilities` | What the parent can answer: `native_bal`, `traces`, `historical`, `heads_ws`, `system_txs`, `system_tx_receipts`. Declared at boot and audited (`resolve` probes each one). The composer's rung selector reads this. |
