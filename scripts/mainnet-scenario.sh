@@ -94,15 +94,19 @@ else
 fi
 
 echo "-- 2. live parity"
+# Wait for the applier to reach the head it follows (the status has no
+# `t_head`: T's height is its own — the applier's target is `follow_head`).
 for _ in $(seq 1 30); do
   st=$(engine_api /status)
-  [ "$(echo "$st" | jq -r '.cursor_t')" = "$(echo "$st" | jq -r '.t_head')" ] && break
+  c=$(num "$(echo "$st" | jq -r '.cursor_t')")
+  f=$(num "$(echo "$st" | jq -r '.follow_head')")
+  [ "$c" -ge "$((f - 2))" ] && break
   sleep 2
 done
 reth_head=$(num "$(rpc http://reth:8545 eth_blockNumber | jq -r '.result')")
 follow=$(num "$(engine_api /status | jq -r '.follow_head')")
 cursor_t=$(num "$(engine_api /status | jq -r '.cursor_t')")
-t_head=$(num "$(engine_api /status | jq -r '.t_head')")
+t_head=$(num "$(engine_api /status | jq -r '.head')")
 info "reth=$reth_head follow=$follow cursor_t=$cursor_t T=$t_head"
 [ "$reth_head" -ge "$follow" ] && ok "reth is at/above the follow head" || bad "reth behind follow head"
 if [ "$cursor_t" -lt "$((follow - 2))" ]; then

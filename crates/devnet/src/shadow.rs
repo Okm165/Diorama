@@ -295,19 +295,20 @@ impl Shadow {
             || !self.account_values.is_empty()
     }
 
-    /// The shadowed addresses as the `/status` surface reports them: every
-    /// slot-marked and whole-account-owned address, lowercase, sorted, deduped
-    /// (one presentation for both engines).
+    /// The shadowed addresses as the `/status` surface reports them: the
+    /// registry's whole ownership set — slot-marked, account-marked and
+    /// fixture addresses — lowercase, sorted, deduped (one presentation for
+    /// both engines). Deliberately the same set the probe runner's skip
+    /// consults ([`Shadow::owned_addresses`]): a consumer of the status (the
+    /// scenario's parity probes) must skip exactly what the engine skips
+    /// (measured: USDC/WETH/aEthUSDC are fixtures whose supplies freeze at
+    /// the pin by design; a status without them had the scenario compare
+    /// devnet-owned values against reth).
     pub fn shadowed_addresses(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .slots
-            .keys()
-            .chain(self.accounts.iter())
+        self.owned_addresses()
+            .iter()
             .map(|a| format!("{a:?}").to_lowercase())
-            .collect();
-        out.sort();
-        out.dedup();
-        out
+            .collect()
     }
 
     /// Hand a slot back to mainnet sync. The caller re-syncs its value from
@@ -471,19 +472,24 @@ mod tests {
     use super::*;
 
     /// The `/status` presentation is the registry's: lowercase, sorted,
-    /// deduped, slot-marked and whole-account-owned addresses together.
+    /// deduped, slot-marked, account-marked and fixture addresses together —
+    /// the same set the probe runner skips.
     #[test]
     fn shadowed_addresses_are_presented_once() {
         let mut s = Shadow::default();
         let a = Address::repeat_byte(0xaa);
         let b = Address::repeat_byte(0xbb);
+        let f = Address::repeat_byte(0xcc);
         s.mark_slot(b, U256::from(1u64));
         s.mark_slot(a, U256::from(1u64));
         s.mark_account_fields(a);
+        s.set_fixtures(std::iter::once(f).collect());
         let out = s.shadowed_addresses();
-        assert_eq!(out.len(), 2, "one entry per address: {out:?}");
+        assert_eq!(out.len(), 3, "one entry per address: {out:?}");
         assert_eq!(out[0], format!("{a:?}").to_lowercase());
         assert_eq!(out[1], format!("{b:?}").to_lowercase());
+        assert_eq!(out[2], format!("{f:?}").to_lowercase(), "fixtures are owned");
+        assert_eq!(out, s.owned_addresses().iter().map(|a| format!("{a:?}").to_lowercase()).collect::<Vec<_>>());
     }
 
     #[test]
