@@ -15,6 +15,19 @@ pub(crate) fn validate_order(
     meta: Option<&crate::wire::Meta>,
     req: &Order,
 ) -> Result<()> {
+    // An unknown coin is a permanent refusal, not a warming one: the meta is
+    // the venue's served universe, so a name it does not carry can never warm
+    // up. Without this the order fell through to the book lookup and read as
+    // `503 warming up` (measured) — a transient shape that invites infinite
+    // retries. A *configured* market with no served data keeps the warming
+    // shape: the two faults stay distinct, like the l2Book read's 200-null.
+    if let Some(meta) = meta {
+        if meta.asset(&req.coin).is_none() {
+            return Err(Error::NotFound {
+                what: format!("coin `{}` is not in the venue's meta", req.coin),
+            });
+        }
+    }
     if req.size <= Decimal::ZERO {
         return Err(Error::bad_request("order size must be > 0"));
     }

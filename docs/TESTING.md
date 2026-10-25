@@ -422,6 +422,12 @@ live answers (a recursive path comparison of the same requests, public reads):
 - **`l2Book` for an unknown coin**: the venue answers HTTP 200 `null`; the sim
   answered 404. Fixed (a typed `Option<L2Book>`); a *configured* market with no
   book yet stays a 503 (warming) — a different fault, kept distinct.
+- **An order on an unknown coin**: the meta is the venue's served universe, so
+  a name it does not carry can never warm up — yet the order fell through to
+  the book lookup and read as `503 warming up`, a transient shape that invites
+  infinite retries. Now a named 404 (`not found: coin `X` is not in the venue's
+  meta`); a *configured* market with no served data keeps the warming shape —
+  the two faults stay distinct, like the read's.
 - **`marginTable` id 1**: the venue serves its *implicit default* table
   (`{"description":"","marginTiers":[{"lowerBound":"0.0","maxLeverage":1}]}`)
   although the metadata never lists id 1 (measured live 2026-10-25); the sim

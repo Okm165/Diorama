@@ -1321,7 +1321,7 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Can
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::{meta_with, Deal, DealClass};
+    use crate::sim::{meta_of, meta_with, Deal, DealClass};
     use crate::wire::{Level, Meta};
 
     /// A book with the given (bids, asks) as (px, sz) pairs.
@@ -1400,6 +1400,30 @@ mod tests {
             reduce_only: true,
             ..ioc(is_buy, size)
         }
+    }
+
+    /// An unknown coin refuses by name (404), never the warming shape: a
+    /// name the meta does not carry cannot warm up (measured: it read as
+    /// `503 warming up`, a transient shape that invites infinite retries). A
+    /// *configured* market with no served data keeps the warming shape — the
+    /// two faults stay distinct (the l2Book read's 200-null principle).
+    #[test]
+    fn an_unknown_coin_refuses_by_name_a_bare_market_still_warms() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "2")], &[("101", "2")]),
+            meta_of(&[("ETH", 10), ("SOL", 10)]),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+
+        let err = sim
+            .order(&feed, a, &Order { coin: "NOPE".into(), ..ioc(true, "1") })
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound { .. }), "{err:?}");
+
+        let err = sim
+            .order(&feed, a, &Order { coin: "SOL".into(), ..ioc(true, "1") })
+            .unwrap_err();
+        assert!(matches!(err, Error::Warming), "{err:?}");
     }
 
     /// I3: the fill moves the book and the position, never the mark.

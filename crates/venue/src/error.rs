@@ -92,8 +92,9 @@ pub enum Error {
     #[error("the market plane is warming up (no venue data yet)")]
     Warming,
 
-    /// A read for a target the sim does not have (a coin with no book, a
-    /// margin table id the meta lacks): named, 404 at the API.
+    /// A read (or an order) for a target the sim does not have (a coin with
+    /// no book, a margin table id the meta lacks, an order on a coin the
+    /// meta does not carry): named, 404 at the API.
     #[error("not found: {what}")]
     NotFound { what: String },
 }
