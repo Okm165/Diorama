@@ -787,8 +787,13 @@ one contract: every `${VAR}` an instance names is provided by the tree's pod
 env, and every `mirror-config` key is consumed — a key left behind after a
 feature moves is dead wiring that still shows in `kubectl describe`, measured:
 `CHECKPOINT_SYNC_FALLBACK` and `MAINNET_RPC`; the same gate checks the
-harness's `test-endpoints` env names only NodePorts the overlay declares) and
-`ast-scope`
+harness's `test-endpoints` env names only NodePorts the overlay declares),
+`heredoc-audit`
+(the scripts that generate config files: an unquoted heredoc expands, so a
+backtick in a comment runs as a command and an unset `$var` vanishes —
+measured: `balanceAndBlacklistStates` printed "command not found" and dropped
+out of venue-selftest-local's generated `instance.toml`; a quoted delimiter
+opts out) and `ast-scope`
 (`bins/ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;
