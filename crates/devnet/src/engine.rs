@@ -39,9 +39,8 @@ pub trait Engine: Send + Sync + Sized + 'static {
     fn target(&self) -> &Arc<Rpc>;
     /// The source URL `/admin/epoch` re-pins from.
     fn source_url(&self) -> &str;
-    /// Whether the journal holds the engine's own writes or the applier's
-    /// parent before-values (the rewind's semantics).
-    fn journal_writes(&self) -> bool;
+    /// What this deployment's journal holds (the rewind's semantics).
+    fn journal_scope(&self) -> JournalScope;
     /// The engine's section: loops, HTTP, verifier.
     fn engine(&self) -> &EngineSection;
     /// Run the mirror's probes now (`/admin/probes`; the bodies differ —
@@ -67,7 +66,7 @@ pub trait Engine: Send + Sync + Sized + 'static {
             self.target(),
             self.mirror().source().as_ref(),
             self.engine().loops.chunk_size,
-            self.journal_writes(),
+            self.journal_scope(),
         )
     }
 
@@ -77,6 +76,21 @@ pub trait Engine: Send + Sync + Sized + 'static {
             Ok(AdminSurface::epoch_repin(self.target(), self.source_url()).await?)
         })
     }
+}
+
+/// What a deployment's journal holds — the rewind's semantics, per profile
+/// (a named type, not a bool: the meaning is the trait's contract, and both
+/// mirrors read it here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JournalScope {
+    /// The engine's *own* writes (the venue: the deal faucet's silent storage
+    /// writes), keyed by the devnet's coordinate — `/admin/rewind` undoes
+    /// them.
+    OwnWrites,
+    /// The applier's parent before-values (the mainnet): a rewind restores
+    /// the parent's pre-state and the applier re-derives; mixing the engine's
+    /// own writes in would change what a rewind means.
+    ParentBeforeValues,
 }
 
 /// The shell's error contract: the constructors the shared helpers need

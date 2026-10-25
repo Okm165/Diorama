@@ -126,14 +126,14 @@ impl Plane {
         target: &'a Rpc,
         source: &'a dyn Source,
         chunk_size: usize,
-        journal_writes: bool,
+        journal_scope: crate::engine::JournalScope,
     ) -> AdminSurface<'a> {
         AdminSurface {
             plane: self,
             target,
             source,
             chunk_size,
-            journal_writes,
+            journal_scope,
         }
     }
 }

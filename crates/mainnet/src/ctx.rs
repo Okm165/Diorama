@@ -13,7 +13,7 @@ use futures_util::future::BoxFuture;
 use mirror_anvil::Rpc;
 use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
 use mirror_devnet::drift::Drift;
-use mirror_devnet::engine::Engine;
+use mirror_devnet::engine::{Engine, JournalScope};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::probes::ProbeOutcome;
@@ -133,11 +133,11 @@ impl Engine for Ctx {
         &self.l1.source_url
     }
 
-    fn journal_writes(&self) -> bool {
+    fn journal_scope(&self) -> JournalScope {
         // T's journal holds the applier's parent before-values, not the
         // engine's own writes: a rewind restores them and the applier
         // re-derives.
-        false
+        JournalScope::ParentBeforeValues
     }
 
     fn engine(&self) -> &EngineSection {

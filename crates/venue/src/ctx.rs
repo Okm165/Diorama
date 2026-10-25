@@ -14,7 +14,7 @@ use futures_util::future::BoxFuture;
 use mirror_anvil::Rpc;
 use mirror_config::{ChainVenue, EngineSection};
 use mirror_devnet::drift::Drift;
-use mirror_devnet::engine::Engine;
+use mirror_devnet::engine::{Engine, JournalScope};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::probes::ProbeOutcome;
@@ -141,11 +141,11 @@ impl Engine for Ctx {
         &self.chain.source_url
     }
 
-    fn journal_writes(&self) -> bool {
+    fn journal_scope(&self) -> JournalScope {
         // V's journal is exactly the engine's own writes (the deal faucet's
         // silent storage writes); the follow's source windows are never
         // journaled.
-        true
+        JournalScope::OwnWrites
     }
 
     fn engine(&self) -> &EngineSection {

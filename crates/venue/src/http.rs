@@ -89,7 +89,6 @@ pub(crate) fn app(ctx: Arc<Ctx>) -> Router {
     mirror_devnet::handlers::shared_routes::<Ctx>().with_state(ctx)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

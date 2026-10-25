@@ -29,14 +29,10 @@ pub struct AdminSurface<'a> {
     /// The unshadow re-sync source (reth at the cursor / fork source at the pin).
     pub source: &'a dyn Source,
     pub chunk_size: usize,
-    /// Whether this deployment journals the engine's *own* writes (deal), so
-    /// `/admin/rewind` can undo them. The venue sets this: it has no parent
-    /// stream, so its journal is exactly these writes (keyed by the devnet's
-    /// coordinate — the scan cursor, or the head before the first scan). The
-    /// mainnet keeps it false: its journal is the applier's parent
-    /// before-values, and mixing engine writes in would change what a rewind
-    /// means (frozen behavior).
-    pub journal_writes: bool,
+    /// What this deployment's journal holds (see [`crate::engine::JournalScope`]):
+    /// only `OwnWrites` journals the engine's own writes (the deal), so
+    /// `/admin/rewind` can undo them.
+    pub journal_scope: crate::engine::JournalScope,
 }
 
 impl AdminSurface<'_> {
@@ -91,7 +87,7 @@ impl AdminSurface<'_> {
     /// inside the range `/admin/rewind` walks (a head-anchored key could land
     /// *above* the cursor and be missed by the range).
     async fn journal_sink(&self) -> Result<Option<(&Journal, u64)>> {
-        if !self.journal_writes {
+        if self.journal_scope != crate::engine::JournalScope::OwnWrites {
             return Ok(None);
         }
         let cursor = self.plane.state.cursor()?.as_ref().map(|c| c.block);
