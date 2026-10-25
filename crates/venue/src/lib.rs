@@ -73,7 +73,7 @@ mod design_assertions {
         is_normal::<crate::feed::ws::WsClient>();
         is_normal::<crate::sim::Sim>();
         is_normal::<crate::sim::SimState>();
-        is_normal::<crate::sim::SimMetrics>();
+        is_normal::<crate::sim::metrics::SimMetrics>();
         is_normal::<crate::sim::DealClass>();
         is_normal::<crate::sim::AdvanceOutcome>();
         is_normal::<crate::sim::account::Account>();

@@ -19,6 +19,7 @@
 //! own taxonomies (errors, config, persisted state) stay exhaustive — a new
 //! variant there *should* break every match at compile time.
 use alloy_primitives::Address;
+use crate::error::{Error, Result};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -771,3 +772,376 @@ mod tests {
     }
 }
 
+/// The docs' `isCross` defaults to true when omitted.
+fn default_true() -> bool {
+    true
+}
+
+/// The `/exchange` body: the venue's compact action shape. The devnet reads
+/// the acting account from `user` (the real venue derives it from the
+/// signature) and accepts `signature` without checking it.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExchangeBody {
+    pub action: ExchangeAction,
+    /// The acting account. The real venue derives it from the signature; the
+    /// devnet has no keys, so it reads the field (the documented analogue).
+    /// Optional in the body so the SDK's `noop` (which carries no `user`)
+    /// parses; an order without it refuses by name.
+    #[serde(default)]
+    pub user: Option<Address>,
+    #[serde(default)]
+    pub nonce: Option<u64>,
+    #[serde(default)]
+    pub signature: Option<Signature>,
+    #[serde(default)]
+    pub vault_address: Option<Address>,
+    /// The optional staleness guard (docs: a timestamp in milliseconds after
+    /// which the action is rejected). Accepted, never enforced — the devnet
+    /// has no mempool to go stale in.
+    #[serde(default)]
+    pub expires_after: Option<u64>,
+}
+
+/// The action's tag, read alone so a refusal can *name* the unmodeled action
+/// (`serde(other)` keeps the tag out of the typed enum by construction).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ActionTag {
+    pub action: ActionTagInner,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ActionTagInner {
+    pub r#type: String,
+}
+
+/// The EIP-712 signature's fields (accepted, never verified): the devnet
+/// reads only its presence and shape.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct Signature {
+    pub r: String,
+    pub s: String,
+    pub v: u8,
+}
+
+impl Signature {
+    /// Whether the signature is shaped like the venue's (nonempty `r`/`s`).
+    /// The devnet never verifies it — the anvil-impersonation analogue.
+    pub(crate) fn is_shaped(&self) -> bool {
+        !self.r.is_empty() && !self.s.is_empty()
+    }
+}
+
+/// The action, tagged by `type`. `order` and `noop` are modeled; every other
+/// tag the venue defines lands in `Unmodeled` and is refused by name.
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub(crate) enum ExchangeAction {
+    /// The no-operation action (docs): signature-authentication testing with
+    /// no side effects. Answers the venue's no-data success envelope.
+    Noop,
+    Order {
+        orders: Vec<OrderAction>,
+        /// The batch's grouping (docs: `"na" | "normalTpsl" | "positionTpsl"`).
+        #[serde(default)]
+        grouping: Option<Grouping>,
+        /// The optional builder fee (docs: `{"b": address, "f": tenths of a
+        /// basis point}`): refused by name — fees are a research lane, and a
+        /// fill that silently skips the fee would lie.
+        #[serde(default)]
+        builder: Option<Builder>,
+    },
+    /// `{"type":"cancel","cancels":[{"a":asset,"o":oid}]}` (docs); the `f`
+    /// fast flag must be omitted when false, so a present `false` refuses.
+    Cancel {
+        cancels: Vec<CancelAction>,
+        #[serde(default, rename = "f")]
+        fast: Option<bool>,
+    },
+    /// `{"type":"cancelByCloid","cancels":[{"asset":N,"cloid":"0x…"}]}`.
+    CancelByCloid {
+        cancels: Vec<CancelByCloidAction>,
+        #[serde(default, rename = "f")]
+        fast: Option<bool>,
+    },
+    /// `{"type":"modify","oid":N|cloid,"order":{…},"a":always_place}`.
+    Modify {
+        oid: crate::wire::OidOrCloid,
+        order: OrderAction,
+        #[serde(default, rename = "a")]
+        always_place: Option<bool>,
+    },
+    /// `{"type":"batchModify","modifies":[…],"a":always_place}`.
+    BatchModify {
+        modifies: Vec<ModifyItem>,
+        #[serde(default, rename = "a")]
+        always_place: Option<bool>,
+    },
+    /// `{"type":"scheduleCancel","time":ms}` (the dead-man's switch).
+    ScheduleCancel {
+        #[serde(default)]
+        time: Option<u64>,
+    },
+    /// `{"type":"updateIsolatedMargin","asset":N,"isBuy":bool,"ntli":int}`
+    /// (docs: 6-decimals USDC, signed).
+    UpdateIsolatedMargin {
+        asset: u32,
+        /// The docs' payload carries the position side; the sim resolves the
+        /// position by coin (one per coin), so it is informational.
+        #[serde(default, rename = "isBuy")]
+        _is_buy: bool,
+        ntli: i64,
+    },
+    /// `{"type":"updateLeverage","asset":N,"isCross":bool,"leverage":N}`.
+    UpdateLeverage {
+        asset: u32,
+        #[serde(default = "default_true")]
+        is_cross: bool,
+        leverage: u32,
+    },
+    #[serde(other)]
+    Unmodeled,
+}
+
+/// One `cancel` entry (docs: `a` asset, `o` oid).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CancelAction {
+    pub a: u32,
+    pub o: u64,
+}
+
+/// One `cancelByCloid` entry (docs: `asset`, `cloid`).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct CancelByCloidAction {
+    pub asset: u32,
+    pub cloid: alloy_primitives::B128,
+}
+
+/// One `batchModify` entry (docs).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct ModifyItem {
+    pub oid: crate::wire::OidOrCloid,
+    pub order: OrderAction,
+}
+
+/// One compact order (`a` asset index, `b` is_buy, `p` limit price, `s` size,
+/// `r` reduce-only, `t` type/time-in-force, `c` cloid).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct OrderAction {
+    pub a: u32,
+    pub b: bool,
+    #[serde(default)]
+    pub p: Option<String>,
+    pub s: String,
+    #[serde(default)]
+    pub r: bool,
+    #[serde(default)]
+    pub t: Option<OrderType>,
+    /// The client order id (docs: an optional 128-bit hex string). Accepted
+    /// and echoed in the trace; nothing rests, so there is no id to match on.
+    #[serde(default)]
+    pub c: Option<alloy_primitives::B128>,
+}
+
+/// The order type: the venue's own shapes (docs). A `Gtc`/`Alo` order rests
+/// in the sim's book (`openOrders` serves it, the live book fills it, cancels
+/// and the dead-man's switch close it) and a trigger arms until the mark
+/// crosses (the 1 Hz tick fires it).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum OrderType {
+    Limit {
+        tif: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Trigger {
+        is_market: bool,
+        trigger_px: String,
+        tpsl: String,
+    },
+}
+
+/// The batch grouping (docs: `"na" | "normalTpsl" | "positionTpsl"`).
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub(crate) enum Grouping {
+    #[serde(rename = "na")]
+    Na,
+    #[serde(rename = "normalTpsl")]
+    NormalTpsl,
+    #[serde(rename = "positionTpsl")]
+    PositionTpsl,
+}
+
+/// The optional builder fee (docs: `{"b": address, "f": tenths of a basis
+/// point}`).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct Builder {
+    pub b: Address,
+    pub f: u64,
+}
+
+impl OrderAction {
+    /// The compact action → the lane's order: the asset index resolves
+    /// through the live meta (unknown = a named refusal), size and limit are
+    /// decimal strings; the tif decides what rests (the sim's `place` owns
+    /// the semantics).
+    pub(crate) fn to_order(&self, meta: Option<&crate::wire::Meta>) -> Result<crate::sim::order::Order> {
+        let coin = meta
+            .and_then(|m| m.universe.get(self.a as usize))
+            .map(|a| a.name.clone())
+            .ok_or_else(|| Error::bad_request(format!(
+                    "unknown asset index {} (the live meta has not landed, or is shorter)",
+                    self.a
+                ),))?;
+        let size: Decimal = self.s.parse().map_err(|_| Error::bad_request(format!("size `{}` is not a decimal", self.s),))?;
+        let limit_px = match &self.p {
+            Some(p) => Some(p.parse().map_err(|_| Error::bad_request(format!("limit price `{p}` is not a decimal"),))?),
+            None => None,
+        };
+        let (tif, trigger) = self.type_of()?;
+        Ok(crate::sim::order::Order {
+            coin,
+            is_buy: self.b,
+            size,
+            limit_px,
+            tif,
+            reduce_only: self.r,
+            cloid: self.c,
+            trigger,
+        })
+    }
+
+    /// The order type: the venue's own shapes (`t.limit.tif` or `t.trigger`).
+    pub(crate) fn type_of(&self) -> Result<(crate::sim::order::Tif, Option<crate::sim::order::Trigger>)> {
+        let mut trigger = None;
+        let tif = match &self.t {
+            None => crate::sim::order::Tif::Ioc,
+            Some(OrderType::Trigger {
+                is_market,
+                trigger_px,
+                tpsl,
+            }) => {
+                let px: Decimal = trigger_px.parse().map_err(|_| {
+                    Error::bad_request(format!("trigger price `{trigger_px}` is not a decimal"))
+                })?;
+                let tpsl = match tpsl.as_str() {
+                    "tp" => crate::sim::order::Tpsl::Tp,
+                    "sl" => crate::sim::order::Tpsl::Sl,
+                    other => {
+                        return Err(Error::bad_request(format!(
+                            "unknown tpsl `{other}` (docs: \"tp\" | \"sl\")"
+                        )))
+                    }
+                };
+                trigger = Some(crate::sim::order::Trigger {
+                    is_market: *is_market,
+                    trigger_px: px,
+                    tpsl,
+                });
+                // A trigger does not walk now; its tif is irrelevant (the
+                // execution uses the order's limit price, or a market IOC).
+                crate::sim::order::Tif::Ioc
+            }
+            Some(OrderType::Limit { tif }) => {
+                crate::sim::order::Tif::from_wire(tif).ok_or_else(|| Error::bad_request(format!("unknown tif `{tif}`"),))?
+            }
+        };
+        Ok((tif, trigger))
+    }
+}
+
+/// The ok body for the `order` action (the venue's own shape; the per-order
+/// results inside).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct OrderResponseBody {
+    pub r#type: &'static str,
+    pub data: OrderData,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct OrderData {
+    pub statuses: Vec<OrderStatus>,
+}
+
+/// One per-order status in the venue's own shape: `{"filled": {…}}`, the
+/// `resting` shape, or `{"error": "…"}`.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum OrderStatus {
+    Filled(FilledInfo),
+    /// The venue's third status: the order rests on the book.
+    Resting(RestingInfo),
+    Error(String),
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RestingInfo {
+    pub oid: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FilledInfo {
+    pub total_sz: String,
+    pub avg_px: String,
+    pub oid: u64,
+}
+
+/// The ok envelope (the venue's own shape; the body varies by action).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ExchangeOk<T> {
+    pub status: &'static str,
+    pub response: T,
+}
+
+/// The venue's no-data success body (`noop` and friends: `{"type":"default"}`).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct DefaultBody {
+    pub r#type: &'static str,
+}
+
+/// One cancel's status: the docs' literal `"success"` string or an error
+/// object (the venue's own two shapes).
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum CancelStatus {
+    Success(SuccessStatus),
+    /// Boxed: the error string is far larger than the success marker.
+    Error(Box<ErrorStatus>),
+}
+
+/// The docs' success literal.
+#[derive(Debug)]
+pub(crate) struct SuccessStatus;
+
+impl serde::Serialize for SuccessStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str("success")
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ErrorStatus {
+    pub error: String,
+}
+
+/// The cancel ok body (docs: `{"type":"cancel","data":{"statuses":[…]}}`).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct CancelResponseBody {
+    pub r#type: &'static str,
+    pub data: CancelData,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct CancelData {
+    pub statuses: Vec<CancelStatus>,
+}
+
+/// The `/exchange` err envelope (the named refusal above; complete for the
+/// err shape their client reads).
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct ExchangeResponse {
+    pub status: &'static str,
+    pub response: String,
+}

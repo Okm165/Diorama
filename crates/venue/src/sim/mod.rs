@@ -18,11 +18,13 @@
 const ARTIFACT: &str = "sim state";
 
 pub mod account;
+pub mod metrics;
 pub mod order;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
 use account::{Account, AccountSeed, Accounts, Liquidation};
+use metrics::SimMetrics;
 use alloy_primitives::Address;
 use mirror_devnet::store;
 use mirror_devnet::Shared;
@@ -70,56 +72,6 @@ pub(crate) struct SimState {
     /// The previous tick's mark per coin (ADL closes at the previous mark).
     #[serde(default)]
     pub prev_marks: std::collections::BTreeMap<String, Decimal>,
-}
-
-/// The sim's metrics (rendered beside the feed's).
-#[derive(Default)]
-pub(crate) struct SimMetrics {
-    /// Registered (touched) accounts.
-    pub accounts: AtomicU64,
-    /// The scenario epoch.
-    pub epoch: AtomicU64,
-    /// Liquidations the sim executed (v1: full closes at the mark).
-    pub liquidations_total: AtomicU64,
-    /// Funding payments applied (per position, per accrual).
-    pub funding_payments_total: AtomicU64,
-    /// Served states that failed the identity re-check (the client's own
-    /// gate): any nonzero value is a construction regression to page on.
-    pub identity_violations: AtomicU64,
-    /// The scenario's explicit `advance` steps (the 1 Hz tick is the
-    /// automaton; its work shows in the funding/liquidation counters).
-    pub advances_total: AtomicU64,
-    /// Orders the matching lane filled (the impact lane's liveness).
-    pub orders_filled_total: AtomicU64,
-    /// Trigger orders armed / fired by the tick.
-    pub triggers_armed_total: AtomicU64,
-    pub triggers_fired_total: AtomicU64,
-    /// Fills that charged a fee (the fee lane's liveness).
-    pub fees_charged_total: AtomicU64,
-    /// The waterfall's steps: partial book closes, full book closes, backstop
-    /// takeovers and ADL closes.
-    pub partial_liquidations_total: AtomicU64,
-    pub backstop_liquidations_total: AtomicU64,
-    pub adl_closes_total: AtomicU64,
-}
-
-impl SimMetrics {
-    pub fn render(&self) -> String {
-        let mut out = String::with_capacity(512);
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::GAUGE, "venue_sim_accounts", "simulated (touched) accounts", self.accounts.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::GAUGE, "venue_sim_epoch", "scenario epoch (reset bumps it)", self.epoch.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_liquidations_total", "liquidations executed by the sim", self.liquidations_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_partial_liquidations_total", "waterfall step 1: partial (20%) book liquidations", self.partial_liquidations_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_backstop_liquidations_total", "waterfall step 2: backstop (the vault took the position)", self.backstop_liquidations_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_adl_closes_total", "waterfall step 3: ADL closes at the previous mark", self.adl_closes_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_funding_payments_total", "funding payments applied", self.funding_payments_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_identity_violations_total", "served states that failed the identity re-check (must stay 0)", self.identity_violations.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_advances_total", "scenario advance() steps", self.advances_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_orders_filled_total", "orders filled against the real book (the impact lane)", self.orders_filled_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_fees_charged_total", "fills that charged a fee (taker and maker sides)", self.fees_charged_total.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(&mut out, mirror_devnet::metrics::COUNTER, "venue_sim_triggers_armed_total", "trigger orders armed (tp/sl)", self.triggers_armed_total.load(Ordering::Relaxed));
-        out
-    }
 }
 
 /// One `deal`: mint funds into the account (perp wallet or spot token).

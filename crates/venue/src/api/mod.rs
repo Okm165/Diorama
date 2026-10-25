@@ -7,6 +7,7 @@
 //! mapping keeps the taxonomy's meaning on the wire: control refusals are
 //! 4xx, a warming market plane is 503, a venue fault is 502.
 pub mod control;
+pub mod exchange;
 pub mod info;
 pub mod ws;
 
@@ -79,7 +80,7 @@ pub fn info_router(state: Arc<ApiState>) -> Router {
         .route("/info", axum::routing::post(info::info))
         // The matching lane's named refusal (plan §18.4): their client posts
         // actions here; the envelope is HL's own err shape, never a 404.
-        .route("/exchange", axum::routing::post(info::exchange))
+        .route("/exchange", axum::routing::post(exchange::exchange))
         // The venue's websocket lane (plan §7.5: "info + WS" on this port).
         .route("/ws", axum::routing::get(ws::ws))
         .with_state(state)

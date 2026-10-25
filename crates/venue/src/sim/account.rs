@@ -1106,13 +1106,13 @@ pub(crate) fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u6
     Ok(moved)
 }
 
-/// The maintenance check + the v1 close: when the account value falls below
-/// its maintenance requirement, every position closes at the mark (the
-/// waterfall — partial closes, the backstop, ADL — is Phase 2). An account
-/// with no positions is never "below maintenance": negative equity alone is a
-/// state the venue reports, not a liquidation to re-run every tick.
-/// The v1 full-close (kept for the account-plane tests): the sim's tick runs
-/// the venue's waterfall instead (`Sim::check_all`).
+/// The maintenance check + the test-only full-close: when the account value
+/// falls below its maintenance requirement, every position closes at the
+/// mark. An account with no positions is never "below maintenance": negative
+/// equity alone is a state the venue reports, not a liquidation to re-run
+/// every tick. The full-close is the account-plane tests' path — the sim's
+/// tick runs the venue's waterfall instead (`Sim::check_all`: partial closes,
+/// the backstop, ADL).
 #[cfg(test)]
 pub(crate) fn liquidate_if_needed(account: &mut Account, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<Option<Liquidation>> {
     if account.positions.is_empty() {

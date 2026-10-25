@@ -1,19 +1,18 @@
-//! The matching lane's first slice (plan §4.5/§5, Phase 2): a devnet order
-//! fills against the **real book** — the live depth the feed caches — with
-//! per-level consumption (the COW analogue). The plan's identity (I3): the
-//! order moves the *book*, never the *mark*; the pricing oracle moves only by
-//! an explicit crash. The trader's own state moves the way the venue's would:
-//! size and size-weighted entry update, a reducing fill realizes its PnL into
-//! the perp balance (the measured identity `accountValue == totalRawUsd + Σ
-//! signed positionValue` stays exact), and the initial margin follows
-//! `|szi|·entry/leverage`.
+//! The matching lane: a devnet order fills against the **real book** — the
+//! live depth the feed caches — with per-level consumption (the COW
+//! analogue), or rests, or arms as a trigger; cancels, modifies, schedule
+//! cancels and the isolated-margin moves live here too. The plan's identity
+//! (I3): an order moves the *book*, never the *mark*; the pricing oracle
+//! moves only by an explicit crash. The trader's own state moves the way the
+//! venue's would: size and size-weighted entry update, a reducing fill
+//! realizes its PnL into the perp balance (the measured identity
+//! `accountValue == totalRawUsd + Σ signed positionValue` stays exact), and
+//! the initial margin follows `|szi|·mark/leverage`.
 //!
-//! Scope, named rather than implied: only the IOC shape fills (a Gtc
-//! remainder would have to rest — refused by name, Phase 2), the signature is
-//! accepted but never verified (the devnet has no keys — the
-//! anvil-impersonation analogue), and the depth is the served book's (the live
-//! book minus what the devnet already consumed, so a second order sees the
-//! first one's impact).
+//! Scope, named rather than implied: the signature is accepted but never
+//! verified (the devnet has no keys — the anvil-impersonation analogue), and
+//! the depth is the served book's (the live book minus what the devnet
+//! already consumed, so a second order sees the first one's impact).
 use super::Sim;
 use crate::error::{Error, Result};
 use crate::feed::{Consumption, MarketFeed};

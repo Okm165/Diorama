@@ -10,8 +10,9 @@
 //! - **CoreWriter actions**: every call to `0x3333…3333` (top-level *and*
 //!   contract-internal, via the callTracer — a contract's action is
 //!   attributed to the contract) decodes to a typed action; the sim applies
-//!   the ones it models (USD class transfer, spot send, sendAsset, add API
-//!   wallet, set abstraction), counts the rest (orders are Phase 2 matching);
+//!   the ones it models (limit orders, cancels by oid and cloid, USD class
+//!   transfer, spot send, sendAsset, add API wallet, set abstraction), counts
+//!   the rest;
 //! - **Core→EVM**: a `sendAsset` naming a token's system address is completed
 //!   the way the chain does it — a `transfer(recipient, amount)` call on the
 //!   linked ERC20 **from** the system address (V runs auto-impersonate).
