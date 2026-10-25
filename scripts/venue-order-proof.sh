@@ -230,14 +230,14 @@ echo "-- H. the freshness gate (a stalled live plane refuses by name)"
 x=$(spost /control/stall '{"seconds":45}')
 [ "$(echo "$x" | json 'd["stalled_until_ms"]')" != "0" ] && ok "the live plane is stalled" || bad "stall: $x"
 sleep 31
-code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$SIM_INFO/readyz")
+code=$(sreadyz)
 [ "$code" = "503" ] && ok "readyz answers 503 on the stalled plane" || bad "readyz during stall: $code"
 x=$(spost /control/order "{\"address\":\"$ORDER_ACCT\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"0.01\"}" || true)
 echo "$x" | grep -q "stale" && ok "an order on the stale book refuses by name" || bad "stale order: $x"
 spost /control/stall '{"seconds":0}' > /dev/null
 code=""
 for _ in $(seq 1 20); do
-  code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$SIM_INFO/readyz")
+  code=$(sreadyz)
   [ "$code" = "200" ] && break
   sleep 1
 done

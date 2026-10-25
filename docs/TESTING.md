@@ -38,7 +38,9 @@ exit, the plain `rpc`), which `lib-mainnet.sh`/`lib-venue.sh` build on (their
 in-pod `rpc`/`rpcv` variants) and `lib-cctp.sh` chains through — every source
 line resolves via `${BASH_SOURCE[0]}`, so the libs load from any CWD (a
 sourcing smoke proves the chain), and `port-audit` keeps their default ports
-unique.
+unique. The local proofs and the newer deployed-stack suites run `set -euo
+pipefail` (fail fast); the four oldest deployed-stack suites run leniently so
+every check counts (STRUCTURE's judged row).
 
 ## Unit tests (`cargo test --workspace`)
 

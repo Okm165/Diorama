@@ -245,7 +245,7 @@ t2=$(balance "$USDC_T" "$RELAY" "$SRC_URL")
 
 echo "-- hand-back"
 spost /control/set_book "{\"coin\":\"$COIN\"}" > /dev/null
-owned=$(curl -s --fail-with-body -m 30 "$SIM_CTRL/metrics" | awk '$1 == "venue_sim_owned_levels" {print $2}')
+owned=$(smetrics | awk '$1 == "venue_sim_owned_levels" {print $2}')
 [ "$owned" = "0" ] && ok "consumptions handed back (owned_levels 0)" || info "owned_levels=$owned (a later read will prune)"
 
 echo "== cctp margin cycle: $pass passed, $fail failed"

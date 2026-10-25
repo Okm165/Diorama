@@ -93,6 +93,7 @@ in `SPINE.md` and the profiles' own tables are the full list):
 | `api/`, `sim/`, `wire.rs` (venue) | the simulator's served surface has no mainnet counterpart |
 | `service.rs` carries `sim_entry` | one home per service: the venue crate serves two binaries (`venue-engine`, `venue-sim`) |
 | metric namespaces (`mirror_*` / `venue_*`) | breaking to rename; the docs pin them |
+| the four oldest deployed-stack suites (`mainnet-{proof,scenario,product-sim,closure-check}`) run leniently (no `set -euo pipefail`) | coherent, not drift: every check counts and the verdict is the final count, so one failed stack read cannot mask the sweep; the newer suites (the venue trio, the smokes, the cctps, every local proof) fail fast instead — a failed read aborts with its status. Both reach a verdict; changing the four is unverifiable outside the cluster |
 
 ## The AST readings (and what each one found)
 
