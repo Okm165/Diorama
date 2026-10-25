@@ -89,6 +89,11 @@ mainnet-engine-local` (two anvils; the mainnet side), `make venue-follow-local`
 (anvil + the venue engine), `make venue-selftest-local` (against the real
 HyperEVM), `make daloc-local` (the whole daloc arc on live market data) and
 `make ux-symmetry-local` (both mirrors, the same four verbs, side by side).
+The two *workshops* — a strategy run end to end on live state — also run
+locally: `make mainnet-workshop-local` (a public-RPC fork of mainnet; minted
+liquidity, a real Aave/Uniswap levered position, live measurement, an oracle
+crash and a liquidation) and `make venue-order-local` (the daloc stack kept
+up, then the order lane: fills against the real book and the §4.5 impact).
 
 ## Quickstart
 
@@ -197,10 +202,10 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             mainnet suites (mainnet-smoke, mainnet-scenario, mainnet-proof,
                             mainnet-product-sim, mainnet-closure-check, mainnet-feed-bridge,
                             mainnet-feed-local, mainnet-selftest-local, mainnet-engine-local,
-                            mainnet-secrets), the
+                            mainnet-workshop-local, mainnet-secrets), the
                             venue suites (venue-smoke, venue-drill, venue-proof,
                             venue-order-proof, venue-product-sim, venue-follow-local,
-                            venue-selftest-local, venue-secrets), the cross-mirror suites (cctp-smoke,
+                            venue-selftest-local, venue-order-local, venue-secrets), the cross-mirror suites (cctp-smoke,
                             cctp-roundtrip, cctp-margin-cycle, engine-symmetry), daloc-sim.py
                             with daloc-local.sh (the arc against a local scratch stack), the
                             container proof (container-smoke.sh: the engine image run for

@@ -9,6 +9,8 @@
 #
 # The defaults are the daloc arc's own ports (T 18602/18680, V 18610/18681,
 # sim 18790/18791); override the *_PORT variables when they are taken.
+# KEEP_UP=1 leaves the stack up (PIDs in $DIR/pids) for a follow-up proof
+# (scripts/venue-order-local.sh uses this for the order lane).
 set -euo pipefail
 cd /home/bartosz/.local/share/opencode/worktree/cfbc0b/spine
 
@@ -22,7 +24,14 @@ A0=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 cleanup() {
   for pid in ${PIDS:-}; do kill "$pid" 2>/dev/null || true; done
 }
-trap cleanup EXIT
+# KEEP_UP=1 leaves the stack running (a follow-up proof, e.g. the order lane,
+# can reuse it) and records the PIDs in $DIR/pids so the caller can tear it
+# down when done.
+if [ "${KEEP_UP:-0}" = 1 ]; then
+  trap 'printf "%s\n" ${PIDS:-} > "$DIR/pids"' EXIT
+else
+  trap cleanup EXIT
+fi
 rm -rf "$DIR"; mkdir -p "$DIR/t/state/journal" "$DIR/v/state/journal" "$DIR/sim"
 
 rpc() { curl -s -X POST -H 'content-type: application/json' \
@@ -152,4 +161,10 @@ CAST=/tmp/opencode/foundry-bin/cast python3 scripts/daloc-sim.py --lane all 2>&1
 rc=${PIPESTATUS[0]}
 set -e
 echo "daloc-local: exit=$rc (logs in $DIR)"
+if [ "${KEEP_UP:-0}" = 1 ]; then
+  echo "daloc-local: stack kept up (PIDs in $DIR/pids)"
+  echo "  ENGINE_URL=http://127.0.0.1:$V_ADMIN_PORT V_URL=http://127.0.0.1:$V_PORT \\"
+  echo "    SIM_INFO=http://127.0.0.1:$SIM_INFO_PORT SIM_CTRL=http://127.0.0.1:$SIM_CTRL_PORT \\"
+  echo "    ./scripts/venue-order-proof.sh"
+fi
 exit "$rc"

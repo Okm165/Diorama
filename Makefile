@@ -307,6 +307,12 @@ mainnet-engine-local: mainnet-build ## Native local proof of the engine UX (mirr
 daloc-local: venue-build mainnet-build ## The daloc use-case arc against a local scratch stack (live HL market data)
 	./scripts/daloc-local.sh
 
+mainnet-workshop-local: mainnet-build ## A financial workshop on live mainnet state (public-RPC fork; real Aave/Uniswap; crash + liquidation)
+	./scripts/mainnet-workshop-local.sh
+
+venue-order-local: venue-build mainnet-build ## The venue order lane locally (daloc stack kept up; fills vs the real book, §4.5 impact)
+	./scripts/venue-order-local.sh
+
 container-smoke: ## The mainnet-engine image, run for real (host anvils; needs podman)
 	podman build -q -f Dockerfile --build-arg BIN=mainnet-engine -t localhost/mainnet-engine:v1 .
 	./scripts/container-smoke.sh
