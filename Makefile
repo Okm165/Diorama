@@ -274,7 +274,7 @@ mainnet-scenario: ## Scenario test: self-containment, live parity (T vs reth), d
 mainnet-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
 	NS=mainnet-mirror ./scripts/mainnet-proof.sh
 
-mainnet-feed-local: ## Local feed-bridge proof (live parent answers -> mock aggregators, scenario pause/resume)
+mainnet-feed-local: ## Hermetic local feed-bridge proof (stub source answers -> mock aggregators, scenario pause/resume)
 	./scripts/mainnet-feed-local.sh
 
 mainnet-product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T

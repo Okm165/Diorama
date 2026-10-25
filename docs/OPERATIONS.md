@@ -733,11 +733,14 @@ The crash owns mark *and* oracle until handed back; below maintenance the
 waterfall runs (the book first, then the backstop, then ADL - `sim/waterfall.rs`).
 The L1 analog is the feed bridge: a scenario's write to
 a mock aggregator pauses that feed automatically; `POST .../admin/feed/resume`
-hands it back, and `GET .../admin/feed` shows confirmed/pending state. Locally
-the mocks are absent (daloc's fixture deploy installs them on the cluster), so
-`make mainnet-feed-local` installs a minimal Chainlink-shaped stub at each
-configured target and proves the whole lane — live parent answers published,
-a scenario's write paused (its value preserved), the hand-back restored.
+hands it back, and `GET .../admin/feed` shows confirmed/pending state. On the
+cluster the mocks come from daloc's fixture deploy and the bridge publishes
+the *real* Chainlink answers (`mainnet-feed-bridge` drives the routes);
+`make mainnet-feed-local` boots a scratch stack instead — a stub parent, T
+forked from it, the engine with `[services.engine.feed_bridge]` — installs
+the same Chainlink-shaped stub at each configured target, and proves the
+whole lane: parent answers published, a scenario's write paused (its value
+preserved), the hand-back restored.
 
 **The bridge round-trip.**
 

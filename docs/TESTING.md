@@ -15,6 +15,7 @@ Three layers, each runnable on demand:
 | Engine UX (local) | `make mainnet-engine-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet engine UX natively — the four shared verbs end to end: T follows the source 1:1 (Amsterdam BALs), a devnet tx on T is COW-marked and survives the source's next diffs, `/admin/deal` discovers a mock ERC-20's balance-mapping key and mints, the configured probe converges (`mirror_t_convergence_ok_total`), plus `/status`, `/events` (block/deal/reset/epoch facts), `/admin/time`, the shadow hand-back (re-synced from the source), `/admin/rewind` and `/admin/epoch` |
 | daloc arc (local) | `make daloc-local` | the four binaries + outbound HTTPS/WSS to api.hyperliquid.xyz (no cluster/Docker) | the daloc use-case arc (`scripts/daloc-sim.py`) against a local scratch stack: T + the mainnet engine, V + the venue engine, and the venue simulator on **live** market data — the venue reads and client gates, the crash/drawdown arc, the time jumps, the venue-side liquidation, and the epoch on both mirrors |
 | Workshop (local) | `make mainnet-workshop-local` | anvil + the mainnet engine binary + a public mainnet RPC (state reads; no reth/cluster/Docker) | the financial workshop natively against the **real** protocols: a source anvil forks mainnet at a public RPC and mines amsterdam blocks on the pin (BALs; no traces), T forks the same RPC at the same pin, the engine keeps it fresh — then `/admin/deal` mints WETH and USDC (the real USDC's packed slot found), a trader supplies to the real Aave pool, borrows, swaps on the real Uniswap pool (the swap's impact is measured: the pool's price moves and the engine owns it — the shadowed set act 2 scopes out) and re-supplies, the market views are compared across source blocks (plus the engine's own probes), the oracle's source is swapped to the USDC/USD feed and a bot liquidates the underwater position and takes the bonus |
+| Feed bridge (local) | `make mainnet-feed-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the feed bridge natively: a source anvil mines amsterdam blocks with Chainlink-shaped stubs at the feeds' *source* addresses, T forks it, the engine runs with `[services.engine.feed_bridge]` — the bridge publishes the parent's answers to the targets' stubs, a scenario's write pauses the feed (its value preserved), and the hand-back republishes the parent's value; the deployed-stack counterpart (real Chainlink feeds) is `mainnet-feed-bridge` |
 | Order lane (local) | `make venue-order-local` | the daloc-local stack (both engines, anvil, live HL market data) | the venue's market-impact axiom locally: the daloc arc first (the stack kept up), then `venue-order-proof` against the same endpoints — a devnet order walks the served book, the trader's state moves, the impact persists across live updates, `/exchange` fills in the venue's envelope, a fill leaves an owned mark untouched, and the stalled-live-plane gate refuses by name |
 | Selftest (venue, local) | `make venue-selftest-local` | anvil forked from the **real** HyperEVM + the venue engine binary | the follow pipeline against the real read model: boot (chain assert, capability audit, reconcile, at-pin probes) then windows of compose → COW → land → **live parity**, with the watchlist derived live (the busiest recent sender) — the system-tx envelope and real activity a scratch anvil cannot serve; the mainnet counterpart is `mainnet-selftest-local` |
 | UX symmetry (local) | `make ux-symmetry-local` | anvil + both engine binaries (no cluster/Docker) | **one product, two parents, side by side**: two minimal stacks, then the same four verbs on both — T applies parent blocks / V follows source windows; a devnet write survives the next parent diffs on both; the *same* mock ERC-20 minted through the same `/admin/deal` reads identically (the same discovered key); `/status`, `/admin/probes`, the parity counters and `/admin/epoch` answer symmetrically — the local counterpart of the cluster's `engine-symmetry` |
@@ -405,14 +406,16 @@ live answers (a recursive path comparison of the same requests, public reads):
   stale (31340 ms since the last live update)"); clearing the stall restores
   readyz 200 and fills again. A scripted book is exempt — it is the scenario's
   present, never stale.
-- **The T-side feed bridge, locally** (`make mainnet-feed-local`, 6 checks):
-  the scratch T's feed targets are empty (daloc's fixture deploy installs the
-  mocks on the cluster), so the proof installs a hand-assembled
-  Chainlink-shaped stub (`decimals`/`latestRoundData`/`updateAnswer`) at each
-  configured target — then the bridge publishes the *live mainnet* answers
-  (measured: WETH $2396.35, WBTC $81640.39, USDC $0.9999, USDT $0.9989,
-  wstETH $2400.25), a scenario's write pauses the feed with its value
-  preserved (never overwritten), and the hand-back republishes the live value.
+- **The T-side feed bridge, locally** (`make mainnet-feed-local`, 7 checks):
+  the proof boots its own scratch stack — a source anvil mining amsterdam
+  blocks with hand-assembled Chainlink-shaped stubs (`decimals` /
+  `latestRoundData` / `updateAnswer`) at the feeds' *source* addresses, T
+  forked from it, and the engine with `[services.engine.feed_bridge]` — so
+  the bridge reads live parent answers and publishes them to the stubs it
+  installs at the targets; then a scenario's write pauses the feed with its
+  value preserved (never overwritten), and the hand-back republishes the
+  parent's value. The deployed-stack counterpart (the *real* Chainlink feeds,
+  `mainnet-feed-bridge`) drives the same routes on the cluster.
   A publish's tx mines on the next applied parent block, so the waits are
   budgeted past one mainnet block.
 - **`noop` and the user-less order** (live): `{"type":"noop"}` answers
