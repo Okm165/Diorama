@@ -42,9 +42,7 @@ A2=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC # anvil account 2 (the deal's reci
 CONTRACT=0x000000000000000000000000000000000000c0de # SSTORE(0,1) per call
 TOKEN=0x00000000000000000000000000000000000000e7    # the mock ERC-20
 
-pass=0; fail=0
-ok()  { echo "  ✔ $*"; pass=$((pass + 1)); }
-bad() { echo "  ✘ $*"; fail=$((fail + 1)); }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
 command -v "$ANVIL" >/dev/null || { echo "anvil not found (set ANVIL=)"; exit 2; }
 [ -x "$ENGINE" ] || { echo "$ENGINE not built (make mainnet-build)"; exit 2; }
@@ -57,8 +55,6 @@ cleanup() {
 trap cleanup EXIT
 rm -rf "$DIR"; mkdir -p "$DIR/state/journal"
 
-rpc() { curl -s -X POST -H 'content-type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}" "$1"; }
 send() { rpc "$1" eth_sendTransaction "[{\"from\":\"$2\",\"to\":\"$3\",\"value\":\"$4\"}]"; }
 block_of() { rpc "$SRC" eth_getTransactionReceipt "[\"$1\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"]["blockNumber"],16))'; }
 bal() { rpc "$1" eth_getBalance "[\"$2\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
@@ -326,5 +322,4 @@ grep -q "reset_detected" "$DIR/events2.out" && ok "/events carries reset_detecte
 grep -q "epoch_changed" "$DIR/events2.out" && ok "/events carries epoch_changed (the epoch rule ran)" \
   || bad "/events missing epoch_changed"
 
-echo "mainnet-engine-local: $pass ok, $fail bad (logs in $DIR)"
-[ "$fail" = "0" ]
+summary "mainnet-engine-local" "$DIR"

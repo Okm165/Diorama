@@ -23,9 +23,7 @@ USDC_T="${USDC_T:-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48}"
 USDC_V="${USDC_V:-0xb88339CB7199B77E23DB6E890353E22632Ba630f}"
 ACCT="${ACCT:-0x00000000000000000000000000000000000000f1}"
 
-pass=0; fail=0
-ok()  { echo "  ✔ $*"; pass=$((pass+1)); }
-bad() { echo "  ✘ $*"; fail=$((fail+1)); }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
 # fetch <side> <curl args...> — LAST_PATH selects the route; the body lands in
 # /tmp/sym-<side>.out, the status is echoed.

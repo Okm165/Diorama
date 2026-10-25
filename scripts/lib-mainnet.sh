@@ -20,12 +20,10 @@ NS=${NS:-mainnet-mirror}
 K="kubectl -n $NS"
 ENGINE="$K exec deploy/engine --"
 ANVIL_T="$K exec deploy/anvil-t --"
-pass=0; fail=0
-ok()  { echo "  ✔ $*"; pass=$((pass+1)); }
-bad() { echo "  ✘ $*"; fail=$((fail+1)); }
-info(){ echo "  · $*"; }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 num() { printf '%d' "${1:-0}" 2>/dev/null || echo 0; }
 
+# Overrides lib-common's plain rpc: the cluster's runs inside the pod.
 rpc() { # rpc <url> <method> [params-json]
   local url=$1 method=$2 params=${3:-[]}
   $ENGINE curl -sf -m 25 "$url" -H 'Content-Type: application/json' \

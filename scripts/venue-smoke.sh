@@ -12,10 +12,7 @@ set -euo pipefail
 
 NS="${NS:-venue-mirror}"
 
-pass=0; fail=0
-ok()   { echo "  ✔ $*"; pass=$((pass+1)); }
-bad()  { echo "  ✘ $*"; fail=$((fail+1)); }
-info() { echo "  · $*"; }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
 echo "== venue mirror smoke test (namespace $NS) =="
 
@@ -24,6 +21,7 @@ kubectl -n "$NS" get pods --no-headers | awk '{printf "  %-42s %-10s %s\n", $1, 
 
 run() { kubectl -n "$NS" exec -i deploy/engine -- "$@"; }
 
+# Overrides lib-common's plain rpc: the smoke runs inside the pod.
 rpc() { # rpc <url> <method> [params-json]
   local url="$1" method="$2" params="${3:-[]}"
   run curl -sf -m 20 -X POST "$url" -H 'Content-Type: application/json' \

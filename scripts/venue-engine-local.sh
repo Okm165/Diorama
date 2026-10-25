@@ -30,9 +30,7 @@ WATCH=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 # anvil account 0 (watched)
 OTHER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 # anvil account 1 (devnet tx)
 TOKEN=0x00000000000000000000000000000000000000e7    # the mock ERC-20 (see below)
 
-pass=0; fail=0
-ok()  { echo "  ✔ $*"; pass=$((pass + 1)); }
-bad() { echo "  ✘ $*"; fail=$((fail + 1)); }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
 command -v "$ANVIL" >/dev/null || { echo "anvil not found (set ANVIL=)"; exit 2; }
 [ -x "$ENGINE" ] || { echo "$ENGINE not built (make venue-build)"; exit 2; }
@@ -45,8 +43,6 @@ cleanup() {
 trap cleanup EXIT
 rm -rf "$DIR"; mkdir -p "$DIR/state/journal"
 
-rpc() { curl -s -X POST -H 'content-type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}" "$1"; }
 metric() { curl -s "$HTTP/metrics" | grep "^$1 " | awk '{print $2}'; }
 bal() { rpc "$1" eth_getBalance "[\"$WATCH\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
 nonce() { rpc "$1" eth_getTransactionCount "[\"$WATCH\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
@@ -307,5 +303,4 @@ grep -q "epoch_changed" "$DIR/events3.out" && ok "/events carries epoch_changed 
 e1=$(metric venue_epochs_total)
 [ "${e1:-0}" -ge 1 ] && ok "venue_epochs_total moved ($e1)" || bad "venue_epochs_total did not move ($e1)"
 
-echo "venue-engine-local: $pass ok, $fail bad (logs in $DIR)"
-[ "$fail" -eq 0 ]
+summary "venue-engine-local" "$DIR"

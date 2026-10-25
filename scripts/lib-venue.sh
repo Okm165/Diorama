@@ -25,10 +25,7 @@
 NS="${NS:-venue-mirror}"
 CAST="${CAST:-cast}"
 
-pass=0; fail=0
-ok()   { echo "  ✔ $*"; pass=$((pass+1)); }
-bad()  { echo "  ✘ $*"; fail=$((fail+1)); }
-info() { echo "  · $*"; }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 # Parse a JSON body and print one expression. An empty or unparsable body is a
 # *named* failure with the body echoed to stderr (a curl that suppressed its
 # body must not surface as a Python traceback: the caller's own check reports

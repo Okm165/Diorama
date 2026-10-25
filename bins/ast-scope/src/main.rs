@@ -765,6 +765,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
         count(&prod, "enum")
     );
     structure_map(items);
+    unpaired_files(items);
     section("largest functions (lines, docs included)", &prod, "fn");
     section("deepest functions (nesting)", &prod, "fn-depth");
     section("largest records (fields/variants)", &prod, "record");
@@ -1015,6 +1016,74 @@ fn structure_map(items: &[Item]) {
         if !v_only.is_empty() {
             println!("      venue-only:   {}", v_only.join(", "));
         }
+        // The test modules, the same reading: the shared test names (the
+        // twins TESTING lists) and the one-sided ones.
+        let side_tests = |prefix: &str, suffix: &str| -> Vec<&Item> {
+            let path = format!("{prefix}{suffix}");
+            items
+                .iter()
+                .filter(|i| i.is_test() && i.file == path)
+                .collect()
+        };
+        let mt = side_tests("crates/mainnet/src/", mn);
+        let vt = side_tests("crates/venue/src/", vn);
+        if !mt.is_empty() || !vt.is_empty() {
+            let mt_names: HashSet<&str> = mt.iter().map(|i| i.name.as_str()).collect();
+            let vt_names: HashSet<&str> = vt.iter().map(|i| i.name.as_str()).collect();
+            let mut shared: Vec<&str> = mt_names.intersection(&vt_names).copied().collect();
+            let mut m_tests: Vec<&str> = mt_names.difference(&vt_names).copied().collect();
+            let mut v_tests: Vec<&str> = vt_names.difference(&mt_names).copied().collect();
+            shared.sort_unstable();
+            m_tests.sort_unstable();
+            v_tests.sort_unstable();
+            println!(
+                "      tests: {} shared, {} mainnet-only, {} venue-only",
+                shared.len(),
+                m_tests.len(),
+                v_tests.len()
+            );
+            if !shared.is_empty() {
+                println!("        shared:       {}", shared.join(", "));
+            }
+            if !m_tests.is_empty() {
+                println!("        mainnet-only: {}", m_tests.join(", "));
+            }
+            if !v_tests.is_empty() {
+                println!("        venue-only:   {}", v_tests.join(", "));
+            }
+        }
+    }
+}
+
+/// The files outside the pairing table (the one-sided lanes): every `.rs`
+/// the walk saw, with its production and test item counts — so the map
+/// covers every file, and a new file on either side is visible the day it
+/// lands.
+fn unpaired_files(items: &[Item]) {
+    let paired: HashSet<String> = PAIRS
+        .iter()
+        .flat_map(|(m, v)| {
+            [
+                format!("crates/mainnet/src/{m}"),
+                format!("crates/venue/src/{v}"),
+            ]
+        })
+        .collect();
+    let mut files: Vec<&str> = items
+        .iter()
+        .map(|i| i.file.as_str())
+        .filter(|f| {
+            (f.starts_with("crates/mainnet/src/") || f.starts_with("crates/venue/src/"))
+                && !paired.contains(*f)
+        })
+        .collect();
+    files.sort_unstable();
+    files.dedup();
+    println!("\nunpaired files (the one-sided lanes; prod / test item counts):");
+    for f in files {
+        let prod = items.iter().filter(|i| i.file == f && !i.is_test()).count();
+        let tests = items.iter().filter(|i| i.file == f && i.is_test()).count();
+        println!("  {f}: {prod} prod, {tests} test");
     }
 }
 

@@ -60,12 +60,8 @@ cleanup() { for pid in ${PIDS:-}; do kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT
 rm -rf "$DIR"; mkdir -p "$DIR/state/journal"
 
-rpc() { curl -s -X POST -H 'content-type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}" "$1"; }
 metric() { curl -s "http://127.0.0.1:$HTTP/metrics" | awk -v k="$1" '$1 == k {print $2}'; }
-pass=0; fail=0
-ok()  { echo "  ✔ $*"; pass=$((pass+1)); }
-bad() { echo "  ✘ $*"; fail=$((fail+1)); }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 # Public endpoints rate-limit transiently; every read retries.
 retry() { # retry <attempts> <cmd...>
   local n=$1 out=""; shift
@@ -342,5 +338,4 @@ debt_after=$(acct "$TRADER" | awk '{print $2}')
 bot_weth=$(call_t "$WETH" "balanceOf(address)(uint256)" "$BOT")
 [ "${bot_weth:-0}" -gt 0 ] && ok "the liquidator took the collateral bonus (WETH $bot_weth)" || bad "no bonus (WETH $bot_weth)"
 
-echo "mainnet-workshop-local: $pass ok, $fail bad (logs in $DIR)"
-[ "$fail" -eq 0 ]
+summary "mainnet-workshop-local" "$DIR"

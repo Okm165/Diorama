@@ -47,10 +47,7 @@ TARGET2=0x000000000000000000000000000000000000fe02
 # in the image); the interface is Chainlink's — the same one the mocks speak.
 STUB="0x60003560e01c8063313ce56714610028578063feaf968c14610033578063a87a20ce1461005157005b600860005260206000f35b60016000526000546020524260405242606052600160805260a06000f35b60043560005500"
 
-pass=0
-fail=0
-ok()  { echo "  ✔ $*"; pass=$((pass + 1)); }
-bad() { echo "  ✘ $*"; fail=$((fail + 1)); }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
 command -v "$ANVIL" >/dev/null || { echo "anvil not found (set ANVIL=)"; exit 2; }
 [ -x "$ENGINE" ] || { echo "$ENGINE not built (make mainnet-build)"; exit 2; }
@@ -63,8 +60,6 @@ cleanup() {
 trap cleanup EXIT
 rm -rf "$DIR"; mkdir -p "$DIR/state/journal"
 
-rpc() { curl -s -X POST -H 'content-type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}" "$1"; }
 
 field() { # field <feed-name> <key>  (reads /admin/feed JSON on stdin)
   python3 -c "

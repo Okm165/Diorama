@@ -26,15 +26,11 @@ cleanup() { for pid in ${PIDS:-}; do kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT
 rm -rf "$DIR"; mkdir -p "$DIR/t/state/journal" "$DIR/v/state/journal"
 
-rpc() { curl -s -X POST -H 'content-type: application/json' \
-  --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}" "$1"; }
 jq() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 metric() { curl -s "$1/metrics" | awk -v k="$2" '$1 == k {print $2}'; }
 status() { curl -s "$1/status"; }
 
-pass=0; fail=0
-ok()  { echo "  ✔ $*"; pass=$((pass+1)); }
-bad() { echo "  ✘ $*"; fail=$((fail+1)); }
+source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
 # ---- the two stacks (one shape, two parents) ------------------------------
 "$ANVIL" --port "$ST_PORT" --chain-id 1 --block-time 1 --silent --hardfork amsterdam > "$DIR/src-t.log" 2>&1 &
@@ -175,5 +171,4 @@ done
   && [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$V_ADMIN/admin/epoch")" = "200" ] \
   && ok "/admin/epoch re-pins on both" || bad "/admin/epoch differs"
 
-echo "engine-symmetry-local: $pass ok, $fail bad (logs in $DIR)"
-[ "$fail" -eq 0 ]
+summary "engine-symmetry-local" "$DIR"
