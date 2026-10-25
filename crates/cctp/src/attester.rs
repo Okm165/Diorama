@@ -63,7 +63,7 @@ impl Attester {
             Err(_) => alloy_primitives::keccak256(trimmed.as_bytes()).0,
         };
         Ok(Self {
-            wallet: Wallet::from_secret(&alloy_primitives::hex::encode(secret))?,
+            wallet: Wallet::from_bytes(secret)?,
         })
     }
 
@@ -74,7 +74,7 @@ impl Attester {
     /// The 66-byte uncompressed public key (`0x04…`), the Iris `publicKeys`
     /// encoding.
     pub fn public_key_hex(&self) -> String {
-        format!("0x{}", alloy_primitives::hex::encode(self.wallet.public_key_uncompressed()))
+        alloy_primitives::hex::encode_prefixed(self.wallet.public_key_uncompressed())
     }
 
     /// Sign a served message: `keccak256(message)` under the devnet key,

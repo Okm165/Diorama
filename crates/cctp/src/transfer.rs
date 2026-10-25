@@ -391,6 +391,11 @@ impl Wallet {
                 detail: source.to_string(),
             }
         })?;
+        Self::from_bytes(bytes)
+    }
+
+    /// A key from its 32 bytes (the derived-seed path: no hex round trip).
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self> {
         let key = SigningKey::from_slice(&bytes).map_err(|source| Error::InvalidKey {
             what: "relay_key",
             detail: source.to_string(),

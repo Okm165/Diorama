@@ -201,17 +201,11 @@ fn decimal_of(value: U256) -> Option<Decimal> {
 }
 
 /// `10^decimals`, checked: the exponent comes from the venue's public
-/// metadata (input-reachable), and `Decimal`'s `*` panics past ~28 digits.
+/// metadata (input-reachable). The rule is rust_decimal's
+/// (`from_scientific` caps at `MAX_SCALE`), so an out-of-range exponent is
+/// the same `None` the checked loop produced — pinned by the test below.
 fn pow10(decimals: i32) -> Option<Decimal> {
-    let mut out = Decimal::ONE;
-    for _ in 0..decimals.unsigned_abs() {
-        out = out.checked_mul(Decimal::TEN)?;
-    }
-    Some(if decimals < 0 {
-        Decimal::ONE.checked_div(out)?
-    } else {
-        out
-    })
+    Decimal::from_scientific(&format!("1e{decimals}")).ok()
 }
 
 /// The system address's completion send cannot be built: a typed fault the
@@ -378,5 +372,15 @@ mod tests {
         let calldata = transfer_calldata(from, U256::from(5u64));
         assert_eq!(&calldata[..4], &transferCall::SELECTOR);
         assert_eq!(calldata.len(), 68);
+    }
+
+    /// The exponent contract: in range answers the power, past the scale cap
+    /// answers `None` — the same `Option` the checked loop produced, now
+    /// delegated to rust_decimal.
+    #[test]
+    fn pow10_caps_at_the_scale() {
+        assert_eq!(pow10(6), Some(Decimal::from(1_000_000)));
+        assert_eq!(pow10(-8), Some(Decimal::new(1, 8)));
+        assert_eq!(pow10(29), None);
     }
 }

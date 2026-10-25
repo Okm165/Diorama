@@ -90,6 +90,16 @@ impl ApiState {
 /// health routes that raise it.
 pub(crate) const SIM_POISONED: &str = "sim state poisoned";
 
+/// The sim-poisoned gate every health surface shares: a poisoned account
+/// plane refuses every read, so a 200 would hide an outage from the
+/// orchestrator (the verifier's readiness-gap find). `None` = healthy.
+pub(crate) fn sim_gate(state: &ApiState) -> Option<(axum::http::StatusCode, &'static str)> {
+    state
+        .sim
+        .is_poisoned()
+        .then_some((axum::http::StatusCode::SERVICE_UNAVAILABLE, SIM_POISONED))
+}
+
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.
 pub fn info_router(state: Arc<ApiState>) -> Router {
     Router::new()

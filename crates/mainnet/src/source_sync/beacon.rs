@@ -15,7 +15,6 @@ use alloy_rpc_types_beacon::{
 use alloy_rpc_types_engine::ExecutionPayloadV3;
 use mirror_anvil::truncate;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 /// The beacon-API boundary's error taxonomy (boundary-discipline).
 ///
@@ -256,14 +255,12 @@ impl BeaconClient {
 }
 
 /// Map a KZG commitment to its versioned hash: 0x01 || sha256(commitment)[1..].
+/// The rule is alloy-eips' (the EIP-4844 versioned hash): delegate, so the
+/// version byte and the digest are never re-derived here. The `&Bytes48`
+/// signature stays — the external takes `&[u8]` with a debug-only length
+/// check, and the type is the stronger contract.
 pub(crate) fn commitment_to_versioned_hash(commitment: &Bytes48) -> B256 {
-    let mut hasher = Sha256::new();
-    hasher.update(commitment.as_slice());
-    let digest = hasher.finalize();
-    let mut out = [0u8; 32];
-    out[0] = 0x01;
-    out[1..].copy_from_slice(&digest[1..]);
-    B256::from(out)
+    alloy_eips::eip4844::kzg_to_versioned_hash(commitment.as_slice())
 }
 
 #[cfg(test)]

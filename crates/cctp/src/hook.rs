@@ -54,7 +54,9 @@ fn artifact() -> Result<Artifact> {
 }
 
 fn decode_hex(hex: &str) -> Result<Vec<u8>> {
-    alloy_primitives::hex::decode(hex.trim_start_matches("0x")).map_err(|source| Error::Hex {
+    // const-hex strips an optional `0x`/`0X` prefix itself; the wrapper stays
+    // for its named error mapping.
+    alloy_primitives::hex::decode(hex).map_err(|source| Error::Hex {
         what: "the CCTPHookWrapper artifact bytecode",
         source,
     })

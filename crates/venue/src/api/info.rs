@@ -36,17 +36,15 @@ fn order_type(has_trigger: bool) -> &'static str {
 }
 
 pub async fn healthz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    if state.sim.is_poisoned() {
-        // The account plane refuses every read; a 200 here would hide an
-        // outage from the orchestrator (the verifier's readiness-gap find).
-        return (StatusCode::SERVICE_UNAVAILABLE, super::SIM_POISONED);
+    if let Some(response) = super::sim_gate(&state) {
+        return response;
     }
     (StatusCode::OK, "ok")
 }
 
 pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    if state.sim.is_poisoned() {
-        return (StatusCode::SERVICE_UNAVAILABLE, super::SIM_POISONED);
+    if let Some(response) = super::sim_gate(&state) {
+        return response;
     }
     if state.ready(crate::feed::MarketFeed::MAX_STALE_MS) {
         (StatusCode::OK, "ready")

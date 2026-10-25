@@ -83,13 +83,13 @@ impl MessageRecord {
     /// The Iris entry for this record: the served message always; the
     /// attestation only once it exists.
     pub fn message_hex(&self) -> String {
-        format!("0x{}", alloy_primitives::hex::encode(&self.message))
+        alloy_primitives::hex::encode_prefixed(&self.message)
     }
 
     pub fn attestation_hex(&self) -> Option<String> {
         self.attestation
             .as_ref()
-            .map(|a| format!("0x{}", alloy_primitives::hex::encode(a)))
+            .map(alloy_primitives::hex::encode_prefixed)
     }
 }
 

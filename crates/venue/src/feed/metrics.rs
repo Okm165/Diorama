@@ -106,6 +106,9 @@ impl FeedMetrics {
     }
 }
 
+// The two wrappers below are the kind's only delta; merging them into one
+// fn would be six arguments, past the repo's five (clippy.toml) — the rule
+// wins.
 fn push_gauge(out: &mut String, name: &str, help: &str, labels: &[(&str, &str)], value: u64) {
     push_metric_line(
         out,
