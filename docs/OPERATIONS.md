@@ -154,9 +154,9 @@ Mainnet is not scheduled (Hoodi's 2026-10-26 activation was **cancelled**
 - **EIP-7708** — ETH transfers emit a `Transfer` log from
   `SYSTEM_ADDRESS (0xffff…fffe)` at tx level, before the EVM logs, withdrawals
   excluded. The source's `eth_getLogs` then carries logs a replayed block
-  cannot produce on a pre-Amsterdam anvil, so the verifier's `log_set` and
-  `logs_bloom` checks diverge by construction until the anvil hardfork is
-  raised.
+  cannot produce on a pre-Amsterdam anvil — harmless to the parity checks
+  (storage keys and probes, never logs or blooms); raise the anvil hardfork
+  with the activation.
 - **EIP-7778 + 8037** — `gasUsed = max(exec_gas, state_gas)` and refunds no
   longer subtracted: receipt `gas_used` parity and the gas-limit rules change.
 - **EIP-7928** — BALs leave reth's computed `eth_getBlockAccessList` and become

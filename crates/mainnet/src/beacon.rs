@@ -265,3 +265,22 @@ pub(crate) fn commitment_to_versioned_hash(commitment: &Bytes48) -> B256 {
     out[1..].copy_from_slice(&digest[1..]);
     B256::from(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The beacon header's slot is a **decimal string** (`"4242"`, not hex):
+    /// a hex parse silently yielded a bogus slot and un-bounded the top-up
+    /// walk. The official response type decodes it; this pins the shape.
+    #[test]
+    fn the_beacon_header_slot_is_a_decimal_string() {
+        let z32 = format!("0x{}", "00".repeat(32));
+        let z96 = format!("0x{}", "00".repeat(96));
+        let raw = format!(
+            r#"{{"execution_optimistic":false,"finalized":false,"data":{{"root":"{z32}","canonical":true,"header":{{"message":{{"slot":"4242","proposer_index":"1","parent_root":"{z32}","state_root":"{z32}","body_root":"{z32}"}},"signature":"{z96}"}}}}}}"#
+        );
+        let parsed: HeaderResponse = decode_json("test", &raw).unwrap();
+        assert_eq!(parsed.data.header.message.slot, 4242);
+    }
+}

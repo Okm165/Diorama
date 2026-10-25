@@ -789,8 +789,8 @@ members** (struct fields and enum variants nothing touches — a name-based
 scan of every field access, struct literal and pattern, with two exemptions:
 types whose derive reads the members — serde's wire, clap's CLI — and
 variants carrying `#[from]`, constructed by `thiserror`'s generated `From`;
-its first find: `BeaconError::NoHead`, which the official header type makes
-unreachable), **plumbing** (functions that mostly forward their parameters —
+its first find — `BeaconError::NoHead`, since replaced by the official
+header type), **plumbing** (functions that mostly forward their parameters —
 all but at most one parameter appears as a bare reference — so a parameter
 object or a narrower type would name the shape once; its first finds: the
 composer family, now the spine's `Composer` struct, and the mainnet profile's

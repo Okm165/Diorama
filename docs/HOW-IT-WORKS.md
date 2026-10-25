@@ -10,8 +10,9 @@ evidence in [TESTING](TESTING.md).
 A local, production-shaped mirror of Ethereum mainnet. A local `reth` +
 `Lighthouse` pair follow the real chain; a Rust **engine** keeps one Anvil
 chain fresh by applying the real EIP-7928 block access lists — per key,
-copy-on-write. Your transactions and venue simulations live on **T**, next to
-live mainnet state. At runtime nothing outside the namespace is needed: reth
+copy-on-write. Your transactions live on **T**, next to live mainnet state.
+(This page is the mainnet mirror's walk-through; the Venue Mirror — the same
+workspace, its own chain **V** — is in [SPINE](SPINE.md).) At runtime nothing outside the namespace is needed: reth
 has no P2P peers and is fed by the local Lighthouse over the Engine API.
 
 | | T (`anvil-t`) |
@@ -19,7 +20,7 @@ has no P2P peers and is fed by the local Lighthouse over the Engine API.
 | Contents | the parent's *state* (watch-list BAL diffs) + devnet txs |
 | Written by | the engine (diffs) + your dapp |
 | Guarantee | state parity vs reth at the applied parent, except keys you own |
-| Use | development, venue sims, your product |
+| Use | development, your product |
 
 The BAL is the authoritative post-state of every changed entry (reth rejects a
 block whose BAL mismatches execution), so applying it *is* state

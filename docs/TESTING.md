@@ -14,9 +14,9 @@ Three layers, each runnable on demand:
 
 ## Unit tests (`cargo test --workspace`)
 
-196 tests, all offline, one suite per crate: `mirror-anvil` 16,
-`mirror-devnet` 42, `mirror-config` 17, `mirror-mainnet` 8,
-`mirror-venue` 82, `mirror-cctp` 31. The suites carry the measured rules
+223 tests, all offline, one suite per crate: `mirror-anvil` 16,
+`mirror-devnet` 45, `mirror-config` 17, `mirror-mainnet` 9,
+`mirror-venue` 105, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
 - `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with
@@ -138,7 +138,7 @@ re-converge with the next block's absolute writes; the probes are the alarm.
 | A regular beacon node cannot serve blobs after PeerDAS | bpo2 Lighthouse answers HTTP 400 `Insufficient data columns to reconstruct blobs: required 64, but only 4 were found` unless run with `--supernode`/`--semi-supernode`; the deployment runs `--semi-supernode` locally, so the CL can serve blob custody |
 | reth rejects non-spec `executionRequests` | `-32602 Invalid params: EmptyExecutionRequest` until elements were type-prefixed with empty types excluded (`engine/prague.md`) |
 | jsonwebtoken panics without a crypto provider | alloy's `jwt` feature selects none; the top-up task died silently at the first JWT sign until `rust_crypto` was enabled |
-| Beacon API quantities are **decimal strings**, Engine API wants hex | `head_slot()` parsed the slot as hex, silently un-bounding the top-up walk (`parse_quantity` now accepts both; unit-tested) |
+| Beacon API quantities are **decimal strings**, Engine API wants hex | `head_slot()` parsed the slot as hex, silently un-bounding the top-up walk (the official `HeaderResponse` decodes the decimal string; unit-tested in `beacon.rs`) |
 | T's heights advance independently of mainnet's | one T block per applied parent block plus one per journal rewind; the engine bounds T by `cursor_t` (not by its height), so a rewind drill cannot stall it. A hash-validated cursor always wins (`cursor + 1`) - jumping to `chain_head + 1` skipped parent blocks and stalled T until the cursor semantics were fixed |
 | Watching a proxy is not enough: delegate targets own the state | Chainlink `AggregatorProxy.latestRoundData()` delegatecalls the aggregator; the scenario's T probe caught a one-round-stale price until the aggregators were added to the watchlist |
 | The follow head sets the devnet's block cadence | with `reth.follow: safe` the CL updates the safe block once per epoch: the applier burst-mines 32 blocks every ~6.4 min and a devnet tx sent between bursts waited 180 s+ (cast's own receipt timeout, then "transaction not found" after a pool reset). With `latest` the parent stream advances every ~12 s and a tx confirms in ~12 s |
@@ -478,7 +478,7 @@ status, a priced `Gtc` resting (`openOrders` serves it, `cancel` closes it),
 a non-order action answering the `err` envelope. A live order filled at the
 touch (`2400.0`-class prints) — the real depth, not a simulation of it.
 
-`make cctp-margin-cycle` (26 checks) is the crosschain unified-margin cycle,
+`make cctp-margin-cycle` is the crosschain unified-margin cycle (the section above carries the latest measured count),
 measured live end to end: the T faucet funded the bridge wallet (the deal
 *set* the slot to exactly the amount — used only when short, the roundtrip's
 own pattern), the T→V burn relayed and V minted exactly to the trader, the
