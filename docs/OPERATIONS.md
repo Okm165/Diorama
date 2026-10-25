@@ -734,8 +734,9 @@ waterfall runs (the book first, then the backstop, then ADL - `sim/waterfall.rs`
 The L1 analog is the feed bridge: a scenario's write to
 a mock aggregator pauses that feed automatically; `POST .../admin/feed/resume`
 hands it back, and `GET .../admin/feed` shows confirmed/pending state. On the
-cluster the mocks come from daloc's fixture deploy and the bridge publishes
-the *real* Chainlink answers (`mainnet-feed-bridge` drives the routes);
+cluster the mocks come from daloc's fixture deploy; when the instance
+enables `[services.engine.feed_bridge]`, the bridge publishes the *real*
+Chainlink answers (`mainnet-feed-bridge` drives the routes);
 `make mainnet-feed-local` boots a scratch stack instead — a stub parent, T
 forked from it, the engine with `[services.engine.feed_bridge]` — installs
 the same Chainlink-shaped stub at each configured target, and proves the

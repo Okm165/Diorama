@@ -12,7 +12,7 @@
 # KEEP_UP=1 leaves the stack up (PIDs in $DIR/pids) for a follow-up proof
 # (scripts/venue-workshop-local.sh uses this for the order lane).
 set -euo pipefail
-cd /home/bartosz/.local/share/opencode/worktree/cfbc0b/spine
+cd "$(dirname "$0")/.."
 
 ANVIL="${ANVIL:-/tmp/opencode/anvil-186-bin/anvil}"
 DIR=/tmp/opencode/daloc-local

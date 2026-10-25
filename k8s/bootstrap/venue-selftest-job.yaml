@@ -1,7 +1,7 @@
 # Engine self test: follows real HyperEVM windows onto one scratch Anvil fork
 # of a public RPC. Validates the follow pipeline — the system-tx envelope, the
 # latest-only reads, the closures, the live parity — before the deployed stack
-# is trusted (the mainnet counterpart is selftest-job.yaml).
+# is trusted (the mainnet counterpart is mainnet-selftest-job.yaml).
 #
 # Test-only external dependency: a public RPC. The deployed stack is
 # self-contained (its own HL_RPC_URL is the deployment's fork source).

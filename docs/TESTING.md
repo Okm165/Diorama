@@ -10,11 +10,11 @@ Three layers, each runnable on demand:
 | Smoke (mainnet) | `make mainnet-smoke` | the deployed stack | service health + parity spot check on T's head vs reth |
 | Smoke (venue) | `make venue-smoke` | the deployed venue stack | service health: V, the engine, the sim and the bridge answer (the info/control planes, the bridge's queue) |
 | Scenario (mainnet) | `make mainnet-scenario` | the deployed stack, no external network | self-containment, live parity on **T** (the 11 state probes vs reth at the same parent block), and the devnet workflow: faucet, copy-on-write shadowing, snapshot/revert, journal rewind |
-| Drill (venue) | `make venue-drill` | the deployed venue stack | the epoch rule end to end: a deal survives a same-pin reset (the COW restore), a new-pin epoch clears it (fresh base = fresh epoch) |
+| Scenario (venue) | `make venue-scenario` | the deployed venue stack | the epoch rule end to end: a deal survives a same-pin reset (the COW restore), a new-pin epoch clears it (fresh base = fresh epoch) |
 | Proof (mainnet) | `make mainnet-proof` | the deployed stack, real venues | the three fork capabilities: live tracking (T vs reth), minting (ETH/WETH/USDC via cheatcodes), and the live markets (Aave supply/borrow/repay/withdraw, a Uniswap V3 swap, Chainlink prices, traces) |
 | Proof (venue) | `make venue-proof` | the deployed venue stack | the venue stack's capabilities: a deal on V, a sim deal (the served identity holds), a crash ⇒ liquidation, the bridge's EVM↔Core round trip, the engine's block production, and the scenario controls |
 | Product sim (mainnet) | `make mainnet-product-sim` | the deployed stack, real venues | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
-| Product sim (venue) | `make venue-product-sim` (the daloc arc) | the deployed venue stack, live market data | the daloc use case end to end: the venue reads and client gates, the crash/drawdown arc, the time jumps, the venue-side liquidation, the epoch on both mirrors (46 checks) |
+| Product sim (venue) | `make venue-product-sim` (the daloc arc, via `scripts/venue-product-sim.sh`) | the deployed venue stack, live market data | the daloc use case end to end: the venue reads and client gates, the crash/drawdown arc, the time jumps, the venue-side liquidation, the epoch on both mirrors (46 checks) |
 | Order proof (venue) | `make venue-order-proof` | the deployed venue stack (direct mode: a scratch stack) | no mainnet twin: the venue's order lane is its own door; the mainnet's market-impact measurement rides the workshop's real Uniswap leg — the §4.5 market-impact axiom: the fill walks the real book, the trader's state moves, the impact persists through live updates, the owned mark is never moved (41 checks) |
 | Closure check (mainnet) | `make mainnet-closure-check` | reth (a local node) | no venue twin: the closure audit traces *storage* reads on reth, and the venue's coverage is the in-code uncovered-log audit (`follow/audit.rs`) — the watchlist's closure: for every market-data view the product reads, the read path's accounts are reported, with each storage-only account named |
 | CCTP (cross-mirror) | `make cctp-smoke`, `make cctp-roundtrip`, `make cctp-margin-cycle` | both stacks + the bridge | the cross-mirror lane: the bridge's ports and queue, a scripted T→V round trip (burn → attested → mint), and the unified-margin cycle (deal on T → CCTP → venue collateral → trade → back) |
@@ -29,7 +29,7 @@ Three layers, each runnable on demand:
 | Workshop (venue, local) | `make venue-workshop-local` | the daloc-local stack (both engines, anvil, live HL market data) | the same three acts as the mainnet workshop, on the venue's mechanisms: act 1 the market on live data (the daloc arc: reads and client gates, the served identity, the crash/drawdown arc, the venue-side liquidation, the epoch on both mirrors), act 2 minted liquidity + a fill (a devnet deal, an order walking the served book — `/exchange` fills in the venue's envelope), act 3 the impact measured (the consumed depth does not resurrect, the trader's state moves, a fill leaves an owned mark untouched, the stalled-live-plane gate refuses by name) |
 | Feed bridge (mainnet, local) | `make mainnet-feed-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the feed bridge natively: a source anvil mines amsterdam blocks with Chainlink-shaped stubs at the feeds' *source* addresses, T forks it, the engine runs with `[services.engine.feed_bridge]` — the bridge publishes the parent's answers to the targets' stubs, a scenario's write pauses the feed (its value preserved), and the hand-back republishes the parent's value; the deployed-stack counterpart (real Chainlink feeds) is `mainnet-feed-bridge` |
 | daloc arc (local) | `make daloc-local` | the four binaries + outbound HTTPS/WSS to api.hyperliquid.xyz (no cluster/Docker) | the daloc use-case arc (`scripts/daloc-sim.py`) against a local scratch stack: T + the mainnet engine, V + the venue engine, and the venue simulator on **live** market data — the venue reads and client gates, the crash/drawdown arc, the time jumps, the venue-side liquidation, and the epoch on both mirrors |
-| UX symmetry (local) | `make ux-symmetry-local` | anvil + both engine binaries (no cluster/Docker) | **one product, two parents, side by side**: two minimal stacks, then the same four verbs on both — T applies parent blocks / V follows source windows; a devnet write survives the next parent diffs on both; the *same* mock ERC-20 minted through the same `/admin/deal` reads identically (the same discovered key); `/status`, `/admin/probes`, the parity counters and `/admin/epoch` answer symmetrically — the local counterpart of the cluster's `engine-symmetry` |
+| Engine symmetry (local) | `make engine-symmetry-local` | anvil + both engine binaries (no cluster/Docker) | **one product, two parents, side by side**: two minimal stacks, then the same four verbs on both — T applies parent blocks / V follows source windows; a devnet write survives the next parent diffs on both; the *same* mock ERC-20 minted through the same `/admin/deal` reads identically (the same discovered key); `/status`, `/admin/probes`, the parity counters and `/admin/epoch` answer symmetrically — the local counterpart of the cluster's `engine-symmetry` |
 | Container (local) | `make container-smoke` | podman + host anvils | no venue twin by design (the venue's two binaries are proven natively by the engine-local/sim-parity/workshop proofs; this row is the image-build gate) — the deployable `mainnet-engine` image, run for real: the container drives the host's scratch stack over host networking, serves `/status` + `/metrics` and applies blocks — the image build's own gate (a missing COPY fails here, minutes into podman) |
 
 ## Unit tests (`cargo test --workspace`)
@@ -80,7 +80,7 @@ each module documents:
   table, the four attester-filled fields, the fee table, the Iris shapes
   (404/pending/signed), the watcher's pin-as-rest-state predicate.
 
-## Self tests (`k8s/bootstrap/{selftest,venue-selftest}-job.yaml`)
+## Self tests (`k8s/bootstrap/{mainnet,venue}-selftest-job.yaml`)
 
 One Job per mirror, the same three-step shape:
 
@@ -781,7 +781,7 @@ the engine aborts its tasks (every mutation persists as it happens), the sim
 saves its state, and the CCTP bridge saves its store. There is no venue
 counterpart of `mainnet-closure-check`: the venue has no incoming parent diffs
 to close a scope over — its standing scope check is the at-pin probe set
-(`/admin/probes`, `venue_probe_*`), which the venue-drill and smoke exercise.
+(`/admin/probes`, `venue_probe_*`), which the venue-scenario and smoke exercise.
 
 There is also no unified "facade" service (plan §7): each mirror's
 scenario surface is its own — `/admin/*` on the two engines, `/control/*` on
@@ -792,8 +792,10 @@ add a hop without adding a fact: the harness speaks each surface directly
 
 ## The feed bridge — measured behavior
 
-The bridge is the single price writer for the devnet's mock aggregators in
-mirror mode (the harness's periodic refresher is off, plan §17.2): it reads
+When the instance enables `[services.engine.feed_bridge]` (absent = the
+devnet's own price writers own the mocks), the bridge is the single price
+writer for the devnet's mock aggregators in mirror mode (the harness's
+periodic refresher is off, plan §17.2): it reads
 each feed's *source* (the parent chain's own aggregator, via reth) and
 publishes `updateAnswer` to the configured *target* on T. Verified live on the
 scratch T (2026-10-23; ETH/USD: source = mainnet's aggregator, target = a mock

@@ -7,7 +7,7 @@
 # here, minutes into podman — measured: config/defaults.toml was never
 # copied, so every image failed to build).
 set -euo pipefail
-cd /home/bartosz/.local/share/opencode/worktree/cfbc0b/spine
+cd "$(dirname "$0")/.."
 
 ANVIL="${ANVIL:-/tmp/opencode/anvil-186-bin/anvil}"
 DIR=/tmp/opencode/container-smoke

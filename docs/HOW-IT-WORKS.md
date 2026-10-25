@@ -1,4 +1,4 @@
-# How the mirror works — technical explainer
+# How the mainnet mirror works — technical explainer
 
 A short, precise walk-through: architecture, pipelines, information flow,
 algorithms. Every number here is measured; operations live in

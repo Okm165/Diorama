@@ -9,10 +9,10 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: engine-selftest
+  name: mainnet-selftest
   namespace: mainnet-mirror
   labels:
-    app.kubernetes.io/name: engine-selftest
+    app.kubernetes.io/name: mainnet-selftest
     app.kubernetes.io/part-of: mainnet-mirror
 spec:
   backoffLimit: 0
@@ -20,7 +20,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: engine-selftest
+        app.kubernetes.io/name: mainnet-selftest
         app.kubernetes.io/part-of: mainnet-mirror
     spec:
       restartPolicy: Never

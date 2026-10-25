@@ -236,8 +236,8 @@ venue-selftest-local: venue-build ## Native local proof of the follow against th
 venue-sim-parity-local: venue-build ## The sim's served answers vs the real venue API, request by request (one forked anvil)
 	./scripts/venue-sim-parity-local.sh
 
-ux-symmetry-local: mainnet-build venue-build ## Both mirrors, the same four verbs, side by side (two minimal stacks)
-	./scripts/ux-symmetry-local.sh
+engine-symmetry-local: mainnet-build venue-build ## Both mirrors, the same four verbs, side by side (two minimal stacks)
+	./scripts/engine-symmetry-local.sh
 
 venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
 	kubectl apply -f k8s/base/venue-mirror/pvcs.yaml
@@ -247,8 +247,8 @@ venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace,
 venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/epoch)
 	kubectl -n venue-mirror exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
 
-venue-drill: ## The venue epoch drill (same-pin restore, new-pin epoch, driver liveness)
-	NS=venue-mirror ./scripts/venue-drill.sh
+venue-scenario: ## The venue epoch scenario (same-pin restore, new-pin epoch, driver liveness)
+	NS=venue-mirror ./scripts/venue-scenario.sh
 
 venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation, bridge round-trip, block production)
 	NS=venue-mirror ./scripts/venue-proof.sh
@@ -257,7 +257,7 @@ venue-order-proof: ## The venue order-lane proof (fills vs the real book, the §
 	NS=venue-mirror ./scripts/venue-order-proof.sh
 
 venue-product-sim: ## The daloc use-case simulation against the venue stack (endpoints via env)
-	python3 scripts/daloc-sim.py
+	./scripts/venue-product-sim.sh
 
 cctp-smoke: ## The CCTP bridge smoke (health, store coherence, metric set)
 	NS=venue-mirror ./scripts/cctp-smoke.sh
@@ -296,10 +296,10 @@ diagrams: ## Regenerate docs/img renders from the ASCII diagram blocks (needs pa
 	./scripts/render-diagrams.sh
 
 mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
-	kubectl -n mainnet-mirror delete job engine-selftest --ignore-not-found
-	kubectl apply -f $(BOOTSTRAP)/selftest-job.yaml
-	kubectl -n mainnet-mirror wait --for=condition=complete job/engine-selftest --timeout=900s || true
-	$(KUBECTL) logs job/engine-selftest
+	kubectl -n mainnet-mirror delete job mainnet-selftest --ignore-not-found
+	kubectl apply -f $(BOOTSTRAP)/mainnet-selftest-job.yaml
+	kubectl -n mainnet-mirror wait --for=condition=complete job/mainnet-selftest --timeout=900s || true
+	$(KUBECTL) logs job/mainnet-selftest
 
 mainnet-selftest-local: mainnet-build ## Native local selftest (two anvils; no reth/public RPC/cluster)
 	./scripts/mainnet-selftest-local.sh
@@ -382,13 +382,13 @@ help: ## Show this help
 
 .PHONY: fitness lint design-assertions closure-matrix no-orphans docs-metrics \
 	trust-audit clock-labels no-panics config-check docker-members k8s-wiring ast-scope \
-	spec-citations facts-published metrics-written
+	spec-citations facts-published metrics-written spine-purity
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \
-	status logs logs-check check-pins mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-drill \
-	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle cctp-local engine-symmetry \
+	status logs logs-check check-pins mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-scenario \
+	venue-proof venue-order-proof venue-product-sim venue-selftest cctp-smoke cctp-roundtrip cctp-margin-cycle cctp-local engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
 	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help diagrams \
 	venue-engine-local venue-selftest-local venue-sim-parity-local mainnet-selftest-local mainnet-engine-local \
-	mainnet-workshop-local venue-workshop-local ux-symmetry-local daloc-local container-smoke
+	mainnet-workshop-local venue-workshop-local engine-symmetry-local daloc-local container-smoke

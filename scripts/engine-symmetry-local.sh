@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ux-symmetry-local: both mirrors, the same four verbs, side by side (the
+# engine-symmetry-local: both mirrors, the same four verbs, side by side (the
 # local counterpart of the cluster's `engine-symmetry`). Boots one minimal
 # stack per mirror (a source anvil + a devnet anvil + the engine), then drives
 # — with the same code path for both — mirror 1:1, modify (copy-on-write),
@@ -11,10 +11,10 @@
 # (`make mainnet-build venue-build`), python3, curl.
 # Ports: 19900/19902/19980 (T) and 19908/19910/19981 (V) — override below.
 set -euo pipefail
-cd /home/bartosz/.local/share/opencode/worktree/cfbc0b/spine
+cd "$(dirname "$0")/.."
 
 ANVIL="${ANVIL:-/tmp/opencode/anvil-186-bin/anvil}"
-DIR="${DIR:-/tmp/ux-symmetry-local}"
+DIR="${DIR:-/tmp/engine-symmetry-local}"
 ST_PORT="${ST_PORT:-19900}"; T_PORT="${T_PORT:-19902}"; T_ADMIN="${T_ADMIN:-19980}"
 SV_PORT="${SV_PORT:-19908}"; V_PORT="${V_PORT:-19910}"; V_ADMIN="${V_ADMIN:-19981}"
 A0=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
@@ -175,5 +175,5 @@ done
   && [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$V_ADMIN/admin/epoch")" = "200" ] \
   && ok "/admin/epoch re-pins on both" || bad "/admin/epoch differs"
 
-echo "ux-symmetry-local: $pass ok, $fail bad (logs in $DIR)"
+echo "engine-symmetry-local: $pass ok, $fail bad (logs in $DIR)"
 [ "$fail" -eq 0 ]

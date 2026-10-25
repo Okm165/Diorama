@@ -90,7 +90,7 @@ mainnet-engine-local` (two anvils; the mainnet side), `make venue-engine-local`
 HyperEVM), `make venue-sim-parity-local` (the simulator's served answers vs
 the real venue API, request by request), `make daloc-local` (the whole daloc
 arc on live market data) and
-`make ux-symmetry-local` (both mirrors, the same four verbs, side by side)
+`make engine-symmetry-local` (both mirrors, the same four verbs, side by side)
 and `make cctp-local` (the cross-mirror lane: both chains forked from the real
 ones — the CCTP round trip and the unified-margin cycle end to end).
 The two *workshops* — a strategy run end to end on live state — also run
@@ -159,7 +159,7 @@ Venue Mirror counterparts:
 
 ```bash
 make venue-smoke         # the venue stack end to end (V, engine, sim, bridge)
-make venue-drill         # epoch drill: a write survives a same-pin reset, dies with a new pin
+make venue-scenario      # epoch scenario: a write survives a same-pin reset, dies with a new pin
 make venue-proof         # capability proof: mint, sim deal, crash⇒liquidation, bridge round-trip
 make venue-order-proof   # order-lane proof: fills vs the real book, the §4.5 impact invariants
 make cctp-margin-cycle   # crosschain unified-margin cycle: T mint -> CCTP -> venue trade -> CCTP back
@@ -209,10 +209,10 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             mainnet-product-sim, mainnet-closure-check, mainnet-feed-bridge,
                             mainnet-feed-local, mainnet-selftest-local, mainnet-engine-local,
                             mainnet-workshop-local, mainnet-secrets), the
-                            venue suites (venue-smoke, venue-drill, venue-proof,
+                            venue suites (venue-smoke, venue-scenario, venue-proof,
                             venue-order-proof, venue-engine-local,
                             venue-selftest-local, venue-sim-parity-local, venue-workshop-local, venue-secrets), the cross-mirror suites (cctp-smoke,
-                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry, ux-symmetry-local)
+                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry, engine-symmetry-local)
                             with cctp-local.sh (the same lane against forked real chains, no
                             cluster), daloc-sim.py with daloc-local.sh (the arc against a local
                             scratch stack), the container proof (container-smoke.sh: the engine
@@ -221,8 +221,8 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             no-panics, docker-members, k8s-wiring, spec-citations, spine-purity,
                             facts-published, metrics-written, render-diagrams). The
                             `venue-product-sim` and `config-check` make targets drive
-                            `daloc-sim.py` and the config loader rather than a script of their
-                            own
+                            `scripts/venue-product-sim.sh` (the `daloc-sim.py` arc's entry) and
+                            the config loader
 docs/                       HOW-IT-WORKS.md, HOW-IT-WORKS-VENUE.md, ARCHITECTURE.md, SPINE.md, STRUCTURE.md, OPERATIONS.md, TESTING.md, INTEGRATION.md, adr/
 ```
 

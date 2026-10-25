@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# The venue epoch drill (plan §7.8, the counterpart of `make mainnet-scenario`):
+# The venue epoch scenario (plan §7.8, the counterpart of `make mainnet-scenario`):
 # proves the epoch rule end-to-end — a deal survives a same-pin reset (the
 # COW restore), and a new-pin epoch clears it (fresh base = fresh epoch).
 #
 # Run from the repo root:
-#   make venue-drill                 # against the deployed venue-mirror
+#   make venue-scenario              # against the deployed venue-mirror
 #   ENGINE_URL=http://127.0.0.1:18681 V_URL=http://127.0.0.1:18610 \
-#     ./scripts/venue-drill.sh       # direct mode: a scratch stack, no kubectl
+#     ./scripts/venue-scenario.sh    # direct mode: a scratch stack, no kubectl
 set -euo pipefail
 
 NS="${NS:-venue-mirror}"
@@ -19,7 +19,7 @@ source "$(dirname "$0")/lib-venue.sh"
 
 status_now() { eget /status; }
 
-echo "== venue epoch drill (namespace $NS) =="
+echo "== venue epoch scenario (namespace $NS) =="
 
 echo "-- preconditions"
 status=$(status_now)
@@ -76,7 +76,7 @@ done
 b=$(balance "$USDC" "$ACCT")
 [ "$b" = "0" ] && ok "the old base's write is gone with its epoch (balance=0)" || bad "stale write survived the epoch (balance=$b)"
 
-echo "-- 3. the driver stays live after the drill"
+echo "-- 3. the driver stays live after the scenario"
 rpcv '{"jsonrpc":"2.0","id":1,"method":"evm_mine","params":[]}' > /dev/null
 live=0; cur=""; h=""
 for _ in $(seq 1 15); do
@@ -86,7 +86,7 @@ for _ in $(seq 1 15); do
   h=$(echo "$s" | json 'd["head"]')
   [ "$cur" = "$h" ] && live=1 && break
 done
-[ "$live" = "1" ] && ok "the driver scanned to the head after the drill (cursor=head=$h)" \
+[ "$live" = "1" ] && ok "the driver scanned to the head after the scenario (cursor=head=$h)" \
   || bad "the driver is not tracking the head (cursor=$cur head=$h)"
 
 echo

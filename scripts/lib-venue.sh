@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared helpers for the venue-family scripts that run in both modes — the
-# epoch drill, the capability proof, the order-lane proof — and for the cctp
+# epoch scenario, the capability proof, the order-lane proof — and for the cctp
 # family (through `lib-cctp.sh`, which sources this one for the venue-shaped
 # gates). Source it, never run it:
 #   source "$(dirname "$0")/lib-venue.sh"
