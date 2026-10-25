@@ -80,6 +80,18 @@ each module documents:
   table, the four attester-filled fields, the fee table, the Iris shapes
   (404/pending/signed), the watcher's pin-as-rest-state predicate.
 
+The twins — the same name in both suites (the spine's paired contracts, tests
+and their helpers): `a_wrapped_fault_keeps_its_cause_chain`,
+`error_size_is_bounded`, `gap_within_limit`, `public_types_are_normal`,
+`renders_labeled_series`, `the_gap_guard_honors_its_limit`,
+`the_http_status_mapping_follows_the_shared_convention`,
+`the_policies_pin_the_divergence_table`, `the_registry_series_do_not_overlap`,
+`the_shell_fault_converts_into_the_taxonomy`. The near-twins — one contract,
+each profile's spelling: the sources' capability declarations
+(`the_reth_source_declares_the_measured_capabilities` ↔
+`the_public_source_declares_the_measured_capabilities`) and
+`the_bundle_pins_the_{mainnet,venue}_divergences`.
+
 ## Self tests (`k8s/bootstrap/{mainnet,venue}-selftest-job.yaml`)
 
 One Job per mirror, the same three-step shape:
