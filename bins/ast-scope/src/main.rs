@@ -1009,7 +1009,7 @@ fn twin_shapes(prod: &[&Item]) {
     }
     rows.sort_by(|a, b| b.0.total_cmp(&a.0));
     println!("\ntwins: same-named fns across the mirrors (shared 3-op sequences over the smaller side):");
-    for (overlap, m, v) in rows.iter().take(REPORT_TOP) {
+    for (overlap, m, v) in rows.iter() {
         println!(
             "  {:>3.0}%  {} ({} <-> {})",
             overlap * 100.0,
