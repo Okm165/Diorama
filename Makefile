@@ -347,11 +347,13 @@ help: ## Show this help
 	@echo
 
 .PHONY: fitness lint design-assertions closure-matrix no-orphans docs-metrics \
-	trust-audit clock-labels no-panics config-check docker-members k8s-wiring ast-scope
+	trust-audit clock-labels no-panics config-check docker-members k8s-wiring ast-scope \
+	spec-citations facts-published metrics-written
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build import deploy-engine test-engine config-check \
 	status logs mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-drill \
 	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
-	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help
+	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help \
+	venue-follow-local mainnet-selftest-local mainnet-engine-local
