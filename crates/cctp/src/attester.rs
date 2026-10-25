@@ -120,15 +120,21 @@ pub async fn install(
     // a devnet stipend (the pool refuses unfunded senders).
     ensure_manager_gas(rpc, chain, manager).await?;
     rpc.anvil_impersonate_account(manager).await?;
+    let sender = Impersonated {
+        rpc,
+        chain,
+        from: manager,
+        timeout,
+    };
     if !enabled {
         let input = IMessageTransmitterV2::enableAttesterCall { newAttester: attester }.abi_encode();
-        send_impersonated(rpc, chain, manager, input, timeout).await?;
+        sender.send(input).await?;
     }
     if threshold != U256::ONE {
         let input =
             IMessageTransmitterV2::setSignatureThresholdCall { newSignatureThreshold: U256::ONE }
                 .abi_encode();
-        send_impersonated(rpc, chain, manager, input, timeout).await?;
+        sender.send(input).await?;
     }
     rpc.anvil_stop_impersonating_account(manager).await?;
 
@@ -181,29 +187,38 @@ async fn ensure_manager_gas(rpc: &Rpc, chain: &'static str, manager: Address) ->
     Ok(())
 }
 
-/// One impersonated `eth_sendTransaction`, waited to a mined receipt.
-async fn send_impersonated(
-    rpc: &Rpc,
+/// The impersonated attester manager on one chain: the two typed setters
+/// differ only in their calldata, so the sender — endpoint, chain, manager,
+/// timeout — is one value with one verb.
+struct Impersonated<'a> {
+    rpc: &'a Rpc,
     chain: &'static str,
     from: Address,
-    input: Vec<u8>,
     timeout: Duration,
-) -> Result<()> {
-    let tx = TransactionRequest::default()
-        .from(from)
-        .to(MESSAGE_TRANSMITTER_V2)
-        .input(input.into());
-    let hash = rpc.send_transaction(tx).await?;
-    match wait_for_receipt(rpc, hash, timeout).await? {
-        Some(receipt) if receipt.status() => Ok(()),
-        Some(_) => Err(Error::TxReverted { chain, tx: hash }),
-        None => Err(Error::AttesterInstall {
-            chain,
-            reason: format!(
-                "tx {hash} was not mined within {}s (the chain's block producer owns mining)",
-                timeout.as_secs()
-            ),
-        }),
+}
+
+impl Impersonated<'_> {
+    /// One impersonated `eth_sendTransaction`, waited to a mined receipt.
+    async fn send(&self, input: Vec<u8>) -> Result<()> {
+        let tx = TransactionRequest::default()
+            .from(self.from)
+            .to(MESSAGE_TRANSMITTER_V2)
+            .input(input.into());
+        let hash = self.rpc.send_transaction(tx).await?;
+        match wait_for_receipt(self.rpc, hash, self.timeout).await? {
+            Some(receipt) if receipt.status() => Ok(()),
+            Some(_) => Err(Error::TxReverted {
+                chain: self.chain,
+                tx: hash,
+            }),
+            None => Err(Error::AttesterInstall {
+                chain: self.chain,
+                reason: format!(
+                    "tx {hash} was not mined within {}s (the chain's block producer owns mining)",
+                    self.timeout.as_secs()
+                ),
+            }),
+        }
     }
 }
 

@@ -103,72 +103,6 @@ impl ComposeStats {
     }
 }
 
-/// The generic composer: a window's BAL, however the source can produce one.
-pub async fn compose(
-    source: &dyn Source,
-    target: &dyn Source,
-    scope: &Scope,
-    from: u64,
-    to: u64,
-) -> Result<(WindowBal, ComposeStats)> {
-    if to <= from {
-        return Ok((WindowBal::empty(from, to), ComposeStats::default()));
-    }
-    if source.capabilities().native_bal {
-        native_window(source, target, scope, from, to).await
-    } else {
-        synth_window(source, target, scope, from, to).await
-    }
-}
-
-/// Rung 1: the source records BALs — fetch each block of the window and merge
-/// them. A block without one falls back to rung 2 for that block alone; the
-/// window's kind then names the rung that answered.
-async fn native_window(
-    source: &dyn Source,
-    target: &dyn Source,
-    scope: &Scope,
-    from: u64,
-    to: u64,
-) -> Result<(WindowBal, ComposeStats)> {
-    let mut acc: BTreeMap<Address, AccountChanges> = BTreeMap::new();
-    let mut stats = ComposeStats::default();
-    let mut kind = DiffKind::Bal;
-    for n in (from + 1)..=to {
-        if let Some(bal) = source.bal(n).await? {
-            merge_into(&mut acc, bal);
-        } else {
-            let (bal, s) = synthesize(source, target, scope, n - 1, n).await?;
-            merge_into(&mut acc, bal);
-            stats.absorb(s);
-            kind = source.touched_kind();
-        }
-    }
-    let bal: BlockAccessList = acc.into_values().collect();
-    Ok((WindowBal { from, to, kind, bal }, stats))
-}
-
-/// Rung 2: the source reports the window's touches; the declared scope plans
-/// the keys and the differing reads become the BAL.
-async fn synth_window(
-    source: &dyn Source,
-    target: &dyn Source,
-    scope: &Scope,
-    from: u64,
-    to: u64,
-) -> Result<(WindowBal, ComposeStats)> {
-    let (bal, stats) = synthesize(source, target, scope, from, to).await?;
-    Ok((
-        WindowBal {
-            from,
-            to,
-            kind: source.touched_kind(),
-            bal,
-        },
-        stats,
-    ))
-}
-
 /// A composed window: `(from, to]`. The mainnet composes one parent block at
 /// a time ([`Window::single`]); the venue composes everything since its last
 /// composed source block.
@@ -209,86 +143,139 @@ pub struct WindowPlan {
     pub compose: ComposeStats,
 }
 
-/// The shared pipeline half: compose the window, COW it against the devnet's
-/// own writes, and lower it to the write set. The registry is locked only for
-/// the filter step (the compose awaits with the lock free).
-pub async fn plan(
-    source: &dyn Source,
-    target: &dyn Source,
-    scope: &Scope,
-    shadow: &crate::shared::Shared<crate::shadow::Shadow>,
-    window: Window,
-) -> Result<WindowPlan> {
-    let (composed, compose) = compose(source, target, scope, window.from, window.to).await?;
-    let total = change_count(&composed.bal);
-    let (bal, filter) = {
-        let shadow = shadow.lock()?;
-        crate::cow::filter_bal(scope.watch(), &shadow, composed.bal)
-    };
-    let writes = mirror_anvil::flatten_bal(&bal);
-    Ok(WindowPlan {
-        kind: composed.kind,
-        total,
-        bal,
-        writes,
-        filter,
-        compose,
-    })
+/// The composer: the source/target/scope triple every composition reads —
+/// the family's shared shape, named once. [`Self::compose`] is the generic
+/// entry (the rung follows the source's capabilities); [`Self::plan`] is the
+/// shared pipeline half (compose → COW → flatten).
+pub struct Composer<'a> {
+    pub source: &'a dyn Source,
+    pub target: &'a dyn Source,
+    pub scope: &'a Scope,
 }
 
-/// Rung 2: touches → the declared scope's read plan → source/target reads →
-/// a BAL of the differing keys. Keys the touched set already carries values
-/// for (the trace rung) are not re-read.
-async fn synthesize(
-    source: &dyn Source,
-    target: &dyn Source,
-    scope: &Scope,
-    from: u64,
-    to: u64,
-) -> Result<(BlockAccessList, ComposeStats)> {
-    let touched = source.touched(from, to).await?;
-    let plan = plan_reads(scope.closures(), scope.watch(), &touched);
-    let valued: HashSet<Key> = touched.values.iter().map(Write::key).collect();
-    let mut writes: Vec<Write> = touched.values.clone();
-    // The read anchors: the source at the window's end (reth serves that
-    // block; the public venue RPC serves its latest — the block parameter is
-    // ignored, measured), the target at its own head (the devnet chain's
-    // height is not the source's: a window end above it is out of range).
-    let target_at = target.head().await?;
-    for key in &plan {
-        if valued.contains(key) {
-            continue;
+impl<'a> Composer<'a> {
+    /// The generic composer: a window's BAL, however the source can produce
+    /// one.
+    pub async fn compose(&self, window: Window) -> Result<(WindowBal, ComposeStats)> {
+        let Window { from, to } = window;
+        if to <= from {
+            return Ok((WindowBal::empty(from, to), ComposeStats::default()));
         }
-        if let Some(w) = diff_key(source, target, *key, (to, target_at)).await? {
-            writes.push(w);
+        if self.source.capabilities().native_bal {
+            self.native_window(window).await
+        } else {
+            self.synth_window(window).await
         }
     }
-    let stats = ComposeStats {
-        touched: touched.addresses.len(),
-        planned: plan.len(),
-        changed: writes.len(),
-        uncovered: uncovered_emitters(scope, &plan, &touched),
-    };
-    Ok((mirror_anvil::bal_from_writes(&writes), stats))
-}
 
-/// One planned key's read-diff: the source's value at the window's end against
-/// the target's at its own head; a difference becomes a write (the value the
-/// source serves). Equal reads emit nothing.
-async fn diff_key(
-    source: &dyn Source,
-    target: &dyn Source,
-    key: Key,
-    at: (u64, u64),
-) -> Result<Option<Write>> {
-    let (source_at, target_at) = at;
-    let source_value = source.read_key(key, source_at).await?;
-    let target_value = target.read_key(key, target_at).await?;
-    Ok(if source_value != target_value {
-        Write::new(key, source_value)
-    } else {
-        None
-    })
+    /// Rung 1: the source records BALs — fetch each block of the window and
+    /// merge them. A block without one falls back to rung 2 for that block
+    /// alone; the window's kind then names the rung that answered.
+    async fn native_window(&self, window: Window) -> Result<(WindowBal, ComposeStats)> {
+        let Window { from, to } = window;
+        let mut acc: BTreeMap<Address, AccountChanges> = BTreeMap::new();
+        let mut stats = ComposeStats::default();
+        let mut kind = DiffKind::Bal;
+        for n in (from + 1)..=to {
+            if let Some(bal) = self.source.bal(n).await? {
+                merge_into(&mut acc, bal);
+            } else {
+                let (bal, s) = self.synthesize(Window::new(n - 1, n)).await?;
+                merge_into(&mut acc, bal);
+                stats.absorb(s);
+                kind = self.source.touched_kind();
+            }
+        }
+        let bal: BlockAccessList = acc.into_values().collect();
+        Ok((WindowBal { from, to, kind, bal }, stats))
+    }
+
+    /// Rung 2: the source reports the window's touches; the declared scope
+    /// plans the keys and the differing reads become the BAL.
+    async fn synth_window(&self, window: Window) -> Result<(WindowBal, ComposeStats)> {
+        let (bal, stats) = self.synthesize(window).await?;
+        Ok((
+            WindowBal {
+                from: window.from,
+                to: window.to,
+                kind: self.source.touched_kind(),
+                bal,
+            },
+            stats,
+        ))
+    }
+
+    /// The shared pipeline half: compose the window, COW it against the
+    /// devnet's own writes, and lower it to the write set. The registry is
+    /// locked only for the filter step (the compose awaits with the lock
+    /// free).
+    pub async fn plan(
+        &self,
+        shadow: &crate::shared::Shared<crate::shadow::Shadow>,
+        window: Window,
+    ) -> Result<WindowPlan> {
+        let (composed, compose) = self.compose(window).await?;
+        let total = change_count(&composed.bal);
+        let (bal, filter) = {
+            let shadow = shadow.lock()?;
+            crate::cow::filter_bal(self.scope.watch(), &shadow, composed.bal)
+        };
+        let writes = mirror_anvil::flatten_bal(&bal);
+        Ok(WindowPlan {
+            kind: composed.kind,
+            total,
+            bal,
+            writes,
+            filter,
+            compose,
+        })
+    }
+
+    /// Rung 2's read side: touches → the declared scope's read plan →
+    /// source/target reads → a BAL of the differing keys. Keys the touched
+    /// set already carries values for (the trace rung) are not re-read.
+    async fn synthesize(&self, window: Window) -> Result<(BlockAccessList, ComposeStats)> {
+        let Window { from, to } = window;
+        let touched = self.source.touched(from, to).await?;
+        let plan = plan_reads(self.scope.closures(), self.scope.watch(), &touched);
+        let valued: HashSet<Key> = touched.values.iter().map(Write::key).collect();
+        let mut writes: Vec<Write> = touched.values.clone();
+        // The read anchors: the source at the window's end (reth serves that
+        // block; the public venue RPC serves its latest — the block parameter
+        // is ignored, measured), the target at its own head (the devnet
+        // chain's height is not the source's: a window end above it is out of
+        // range).
+        let target_at = self.target.head().await?;
+        for key in &plan {
+            if valued.contains(key) {
+                continue;
+            }
+            if let Some(w) = self.diff_key(*key, (to, target_at)).await? {
+                writes.push(w);
+            }
+        }
+        let stats = ComposeStats {
+            touched: touched.addresses.len(),
+            planned: plan.len(),
+            changed: writes.len(),
+            uncovered: uncovered_emitters(self.scope, &plan, &touched),
+        };
+        Ok((mirror_anvil::bal_from_writes(&writes), stats))
+    }
+
+    /// One planned key's read-diff: the source's value at the window's end
+    /// against the target's at its own head; a difference becomes a write
+    /// (the value the source serves). Equal reads emit nothing.
+    async fn diff_key(&self, key: Key, at: (u64, u64)) -> Result<Option<Write>> {
+        let (source_at, target_at) = at;
+        let source_value = self.source.read_key(key, source_at).await?;
+        let target_value = self.target.read_key(key, target_at).await?;
+        Ok(if source_value != target_value {
+            Write::new(key, source_value)
+        } else {
+            None
+        })
+    }
 }
 
 /// Log emitters no closure covers and that are not watched accounts: a state
@@ -712,7 +699,14 @@ mod tests {
         let scope = Scope::default();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (window, stats) = rt
-            .block_on(compose(&source, &target, &scope, 0, 1))
+            .block_on(
+                Composer {
+                    source: &source,
+                    target: &target,
+                    scope: &scope,
+                }
+                .compose(Window::new(0, 1)),
+            )
             .unwrap();
         assert_eq!(window.kind, DiffKind::Bal);
         assert_eq!(window.bal, native);
@@ -748,7 +742,14 @@ mod tests {
         let scope = Scope::new(WatchSet::new([watched].into_iter().collect()), Vec::new());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (window, stats) = rt
-            .block_on(compose(&source, &target, &scope, 0, 1))
+            .block_on(
+                Composer {
+                    source: &source,
+                    target: &target,
+                    scope: &scope,
+                }
+                .compose(Window::new(0, 1)),
+            )
             .unwrap();
         assert_eq!(window.kind, DiffKind::Poll);
         assert_eq!(stats.touched, 1);
@@ -786,7 +787,14 @@ mod tests {
         let scope = Scope::new(WatchSet::new([watched].into_iter().collect()), Vec::new());
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (window, _) = rt
-            .block_on(compose(&source, &target, &scope, 0, 1))
+            .block_on(
+                Composer {
+                    source: &source,
+                    target: &target,
+                    scope: &scope,
+                }
+                .compose(Window::new(0, 1)),
+            )
             .unwrap();
         let writes = mirror_anvil::flatten_bal(&window.bal);
         assert_eq!(writes.len(), 1);
@@ -842,7 +850,14 @@ mod tests {
         });
         let rt = tokio::runtime::Runtime::new().unwrap();
         let plan = rt
-            .block_on(plan(&source, &target, &scope, &shadow, Window::single(1)))
+            .block_on(
+                Composer {
+                    source: &source,
+                    target: &target,
+                    scope: &scope,
+                }
+                .plan(&shadow, Window::single(1)),
+            )
             .unwrap();
         assert_eq!(plan.kind, DiffKind::Bal);
         assert_eq!(plan.total, 2, "the pre-COW change count");

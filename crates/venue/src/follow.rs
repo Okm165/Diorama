@@ -148,13 +148,12 @@ async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
 async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<WindowStats> {
     // The shared pipeline half (compose → COW → flatten): the same call the
     // applier makes for one parent block, here for the whole window.
-    let plan = mirror_devnet::bal::plan(
-        ctx.mirror.follow_source().as_ref(),
-        ctx.target.as_ref(),
-        ctx.mirror.scope(),
-        &ctx.plane.shadow,
-        mirror_devnet::bal::Window::new(from, to),
-    )
+    let plan = mirror_devnet::bal::Composer {
+        source: ctx.mirror.follow_source().as_ref(),
+        target: ctx.target.as_ref(),
+        scope: ctx.mirror.scope(),
+    }
+    .plan(&ctx.plane.shadow, mirror_devnet::bal::Window::new(from, to))
     .await?;
     record_poll_stats(&ctx.venue_metrics, &plan.compose);
     let applied = if plan.writes.is_empty() {

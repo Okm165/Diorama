@@ -83,6 +83,9 @@ struct Item {
     /// A struct's declared field names (or an enum's variants): the
     /// similar-records and dead-members readings' input.
     declared: Vec<String>,
+    /// Every typed parameter's name (receivers excluded): the plumbing
+    /// reading's input.
+    params: Vec<String>,
     /// The type derives a member-driving trait (`Serialize`/`Deserialize`,
     /// clap's `Parser`/`Subcommand`/`Args`/`ValueEnum`): its members are read
     /// by the derive rather than by `.field` accesses, so the dead-members
@@ -411,6 +414,7 @@ fn enum_item(file: &str, e: &syn::ItemEnum, test: bool) -> Item {
         refs: Vec::new(),
         shape: String::new(),
         declared: e.variants.iter().map(|v| v.ident.to_string()).collect(),
+        params: Vec::new(),
         derived: derived_members(&e.attrs),
         from,
     }
@@ -440,6 +444,7 @@ fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
             .iter()
             .filter_map(|f| f.ident.as_ref().map(ToString::to_string))
             .collect(),
+        params: Vec::new(),
         derived: derived_members(&s.attrs),
         from: Vec::new(),
     }
@@ -470,6 +475,7 @@ fn fn_item(
         body: normalize(block),
         shape: normalize_literals(block),
         declared: Vec::new(),
+        params: param_names(sig),
         derived: false,
         from: Vec::new(),
         divisions: body.divisions,
@@ -482,6 +488,18 @@ fn fn_item(
 
 /// The parameters that hold an engine context: the type's last path segment
 /// is `Ctx` (`ctx: &Ctx`, `context: &Arc<Ctx>`).
+/// Every typed parameter's name, in order (receivers excluded).
+fn param_names(sig: &syn::Signature) -> Vec<String> {
+    sig.inputs
+        .iter()
+        .filter_map(|arg| {
+            let syn::FnArg::Typed(pat) = arg else { return None };
+            let syn::Pat::Ident(name) = &*pat.pat else { return None };
+            Some(name.ident.to_string())
+        })
+        .collect()
+}
+
 fn ctx_params(sig: &syn::Signature) -> HashSet<String> {
     let mut out = HashSet::new();
     for arg in &sig.inputs {
@@ -679,7 +697,35 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
     narrow_context(&prod);
     uncalled(&prod, corpus);
     dead_members(&prod, uses);
+    plumbing(&prod);
     divisions(&prod);
+}
+
+/// Functions that mostly *forward* their parameters: all but at most one
+/// parameter appears as a bare reference (a value handed to another call, not
+/// a field read). Caller and callee then share a shape a parameter object — or
+/// a narrower type — would name once; the sim's `Pass` is the hand-made
+/// precedent. Threshold: three or more parameters.
+fn plumbing(prod: &[&Item]) {
+    let mut rows: Vec<(&str, usize, usize)> = Vec::new();
+    for item in prod {
+        if item.kind != "fn" || item.params.len() < 3 {
+            continue;
+        }
+        let forwarded = item.params.iter().filter(|p| item.refs.contains(p)).count();
+        if forwarded + 1 >= item.params.len() {
+            rows.push((&item.name, item.params.len(), forwarded));
+        }
+    }
+    rows.sort_by_key(|(_, params, forwarded)| std::cmp::Reverse((*params, *forwarded)));
+    if rows.is_empty() {
+        println!("\nplumbing: none (no three-parameter function mostly forwards its parameters)");
+        return;
+    }
+    println!("\nplumbing: parameters mostly forwarded (a parameter-object candidate):");
+    for (name, params, forwarded) in rows.iter().take(REPORT_TOP) {
+        println!("  {forwarded}/{params} forwarded  {name}");
+    }
 }
 
 /// Members no expression or pattern touches: a struct field nothing reads or

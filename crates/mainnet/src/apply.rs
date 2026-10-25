@@ -214,13 +214,12 @@ async fn plan_and_check_base(
     // The shared pipeline half (compose → COW → flatten), then the check: the
     // compose awaits for seconds, and a re-pin racing it must abort before any
     // write (the next pass reconciles).
-    let plan = mirror_devnet::bal::plan(
-        ctx.mirror.follow_source().as_ref(),
-        ctx.target.as_ref(),
-        ctx.mirror.scope(),
-        &ctx.plane.shadow,
-        mirror_devnet::bal::Window::single(n),
-    )
+    let plan = mirror_devnet::bal::Composer {
+        source: ctx.mirror.follow_source().as_ref(),
+        target: ctx.target.as_ref(),
+        scope: ctx.mirror.scope(),
+    }
+    .plan(&ctx.plane.shadow, mirror_devnet::bal::Window::single(n))
     .await?;
     if ctx.anvil_t.fork_block().await? != base {
         return Err(Error::ResetDuringApply { n });

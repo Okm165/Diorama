@@ -76,13 +76,23 @@ pub struct Wiring {
     pub target: Arc<dyn Source>,
 }
 
-pub fn build(
-    engine: &EngineSection,
-    state: Shared<StateFile>,
-    reth: Arc<mirror_anvil::Rpc>,
-    anvil_t: Arc<mirror_anvil::Rpc>,
-    watch: HashSet<alloy_primitives::Address>,
-) -> Wiring {
+/// The wiring's inputs — the venue profile's `Deps`' twin: one struct, not
+/// five positional arguments (the plumbing reading's finding; the two
+/// profiles then read the same way).
+pub struct Deps {
+    pub state: Shared<StateFile>,
+    pub reth: Arc<mirror_anvil::Rpc>,
+    pub anvil_t: Arc<mirror_anvil::Rpc>,
+    pub watch: HashSet<alloy_primitives::Address>,
+}
+
+pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
+    let Deps {
+        state,
+        reth,
+        anvil_t,
+        watch,
+    } = deps;
     let source: Arc<dyn Source> = Arc::new(crate::source::RethSource::new(reth));
     let reset: Arc<dyn ResetDetector> = Arc::new(CursorHash::new(state));
     // The mainnet watches whole accounts: the BAL enumerates every changed

@@ -64,10 +64,12 @@ impl Ctx {
         let (reth, anvil_t) = build_clients(&engine, reth_url, anvil_t_url)?;
         let wiring = crate::profile::build(
             &engine,
-            plane.state.clone(),
-            reth.clone(),
-            anvil_t.clone(),
-            cfg.watch_set(),
+            crate::profile::Deps {
+                state: plane.state.clone(),
+                reth: reth.clone(),
+                anvil_t: anvil_t.clone(),
+                watch: cfg.watch_set(),
+            },
         );
         let engine_api = build_engine_api(&engine)?;
         Ok(Self {
