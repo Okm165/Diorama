@@ -128,6 +128,7 @@ those keys; the recorded values restore them after a re-fork.
                             +-- no  -> write the source's
                             +-- yes -> keep the devnet's
 ```
+![copy-on-write decision](img/how-cow-venue.png)
 
 ### 5.2 The declared scope and its closures
 

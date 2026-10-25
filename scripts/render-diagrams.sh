@@ -37,7 +37,8 @@ render README.md             "reth + Lighthouse"     docs/img/readme-overview.pn
 render docs/HOW-IT-WORKS.md  "Lighthouse"            docs/img/how-topology.png
 render docs/HOW-IT-WORKS-VENUE.md "the HL public API" docs/img/how-topology-venue.png
 render docs/HOW-IT-WORKS.md  "parent diff for key K" docs/img/how-cow.png
+render docs/HOW-IT-WORKS-VENUE.md "source diff for key K" docs/img/how-cow-venue.png
 render docs/ARCHITECTURE.md  "anvil T"               docs/img/arch-data-flow.png
 render docs/ARCHITECTURE.md  "no prepend"            docs/img/arch-prepend.png
 render docs/SPINE.md         "the spine (crates/devnet)" docs/img/spine-overview.png
-echo "7 diagrams regenerated from the docs"
+echo "$(grep -c '^render ' "$0") diagrams regenerated from the docs"
