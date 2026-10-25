@@ -11,7 +11,7 @@ pub mod exchange;
 pub mod info;
 pub mod ws;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::feed::rest::RestClient;
 use crate::feed::MarketFeed;
 use crate::sim::Sim;
@@ -127,21 +127,10 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
         .with_state(state)
 }
 
-/// Serve one router on one listener (the bin's two ports).
+/// Serve one router on one listener (the bin's two ports): the spine's
+/// shared boundary — one bind fault, one listening line, one serve fault.
 pub async fn serve(addr: String, router: Router) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .map_err(|source| Error::Bind {
-            addr: addr.clone(),
-            source,
-        })?;
-    axum::serve(listener, router)
-        .await
-        .map_err(|source| Error::Io {
-            what: "http api",
-            path: addr.into(),
-            source,
-        })
+    mirror_devnet::engine::serve_router("venue sim api", addr, router).await
 }
 
 // The HTTP mapping of the error taxonomy lives in the engine's `http` module

@@ -93,15 +93,47 @@ pub enum JournalScope {
     ParentBeforeValues,
 }
 
-/// The shell's error contract: the constructors the shared helpers need
-/// (the listener's bind, the IO wrapper, the chain-identity refusal). The
+/// The shared shell faults: the boundaries the spine's own helpers cross —
+/// the listener's bind, the HTTP api's IO, the chain-identity refusal. The
+/// *fields* live here once (the spine constructs them); each shell maps them
+/// into its own taxonomy through `From`, so the message stays the mirror's
+/// own ("anvil-t is not the mainnet chain", "anvil-v is not the venue
+/// chain").
+#[derive(Debug, thiserror::Error)]
+pub enum ShellFault {
+    #[error("binding the http api at {addr}")]
+    Bind {
+        addr: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{what}: {path}")]
+    Io {
+        what: &'static str,
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{anvil} answered with chain id {got}, expected {want}")]
+    WrongChain {
+        anvil: &'static str,
+        got: u64,
+        want: u64,
+    },
+}
+
+/// The shell's error contract: the conversions the shared helpers need (the
+/// devnet's own errors, the anvil boundary, the shared faults above). The
 /// rest of each taxonomy is the mirror's own.
 pub trait ShellError:
-    std::error::Error + IntoResponse + From<crate::Error> + From<mirror_anvil::Error> + Send + 'static
+    std::error::Error
+    + IntoResponse
+    + From<crate::Error>
+    + From<mirror_anvil::Error>
+    + From<ShellFault>
+    + Send
+    + 'static
 {
-    fn bind(addr: String, source: std::io::Error) -> Self;
-    fn io(what: &'static str, path: String, source: std::io::Error) -> Self;
-    fn wrong_chain(anvil: &'static str, got: u64, want: u64) -> Self;
 }
 
 /// The shared status fields every engine reports: one gathering, so the
@@ -162,7 +194,11 @@ pub async fn assert_chain<E: Engine>(
     ctx.target().wait_until_up(anvil, wait).await?;
     let got = ctx.target().chain_id().await?;
     if got != chain_id {
-        return Err(E::Error::wrong_chain(anvil, got, chain_id));
+        return Err(E::Error::from(ShellFault::WrongChain {
+            anvil,
+            got,
+            want: chain_id,
+        }));
     }
     ctx.target().anvil_set_automine(false).await?;
     Ok(())
@@ -172,13 +208,24 @@ pub async fn assert_chain<E: Engine>(
 /// torn down.
 pub async fn serve<E: Engine>(ctx: &E, router: axum::Router) -> crate::Result<(), E::Error> {
     let addr = format!("{}:{}", ctx.engine().http.addr, ctx.engine().http.port);
+    serve_router("engine http api", addr, router).await
+}
+
+/// Serve one router on one listener: the bind fault, the listening line and
+/// the serve fault in one place — every listener (the engines' HTTP api, the
+/// simulator's two ports, the bridge's) crosses the same boundary, and the
+/// label names the service in the log and in the fault.
+pub async fn serve_router<E>(what: &'static str, addr: String, router: axum::Router) -> Result<(), E>
+where
+    E: From<ShellFault>,
+{
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .map_err(|source| E::Error::bind(addr.clone(), source))?;
-    tracing::info!(addr, "engine http api listening");
+        .map_err(|source| E::from(ShellFault::Bind { addr: addr.clone(), source }))?;
+    tracing::info!(addr, "{} listening", what);
     axum::serve(listener, router)
         .await
-        .map_err(|source| E::Error::io("http api", addr, source))
+        .map_err(|source| E::from(ShellFault::Io { what, path: addr, source }))
 }
 
 /// Spawn the HTTP surface as a task: a serve fault is logged, never fatal —

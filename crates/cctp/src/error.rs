@@ -32,6 +32,14 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// The HTTP listener could not bind (the spine's `ShellFault::Bind`).
+    #[error("binding the http api at {addr}")]
+    Bind {
+        addr: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("{what}: {path}")]
     Corrupt {
         what: &'static str,

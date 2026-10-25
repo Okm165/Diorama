@@ -21,6 +21,7 @@ pub mod handlers;
 pub mod error;
 pub mod journal;
 pub mod metrics;
+pub mod pin;
 pub mod plane;
 pub mod probes;
 pub mod scan;

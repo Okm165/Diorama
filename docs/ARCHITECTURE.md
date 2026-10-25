@@ -904,7 +904,7 @@ source's truth and probes can skip what the devnet owns. The watermark starts
 from the persisted cursor, so blocks mined while the driver was down are
 scanned too.
 
-**The unshadow source.** `VenueSource` re-syncs a handed-back key from the fork
+**The unshadow source.** The spine's `PinnedSource` (the venue's profile wires it) re-syncs a handed-back key from the fork
 source *at the pin*, and is fail-closed: the source's `eth_call` serves its
 latest state, so a read is only exact while the source's head is still the pin;
 once the source has advanced the read is refused with the numbers (pin X, head

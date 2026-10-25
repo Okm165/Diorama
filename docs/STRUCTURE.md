@@ -21,7 +21,7 @@ symmetry sweeps — regenerate the readings with
 | `profile.rs` | `profile.rs` | the divergence set, filled: `bundle`/`policies`/`build` + the `Wiring`/`Deps` pair, under the same decision table |
 | `reset.rs` | `reset.rs` | the profile's `ResetDetector` (cursor hash / pin canary) |
 | `selftest.rs` | `selftest.rs` | the scratch-stack selftest (`Targets` + `run`) |
-| `source.rs` | `source.rs` | the `Source` impl (`RethSource` / `VenueSource`) |
+| `source.rs` | `source.rs` | the profile's source facts: the `Source` impl (`RethSource`) / the declared capabilities (`public_capabilities`); the pin-exact read shape is the spine's `PinnedSource` (chosen in `profile.rs`) |
 | `feed_bridge/` (mod, chainlink, http, metrics, policy) | `feed/` (mod, budget, metrics, rest, ws) | the market/price plane: the Chainlink feed bridge (the parent's answers → T's mock aggregators) / the HL market feed (REST + WS + budget) into the simulator |
 | `source_sync/` (mod, beacon, engine_api) | `bridge/` (mod, corewriter, metrics, system) | mainnet-only transports (CL + engine API, EIP-8379 top-up) / venue-only Core↔EVM bridge |
 | — | `api/` (mod, control, exchange, info, ws) | the simulator's served API (info 8090 / control 8091) |
@@ -50,10 +50,10 @@ reads identically on both sides; everything else is the profile's own rule set:
 | `profile.rs` | `bundle`/`policies`/`build` + `Wiring`/`Deps` | `bundle`/`policies`/`build` + `Wiring`/`Deps` (+ `closures`/`watch_set`) |
 | `http.rs` | `app` + `status_doc` (+ `admin_time`) | `app` + `status_doc` |
 | `selftest.rs` | `run` (+ `run_one_block`) | `run` (+ `windows_loop`, `wait_for_move`) |
-| `source.rs` | `RethSource::{new, trace_block_per_tx}` + `impl Source` | `VenueSource::{new}` + `public_capabilities` + `impl Source` |
+| `source.rs` | `RethSource::{new, trace_block_per_tx}` + `impl Source` | `public_capabilities` (the read shape is the spine's `PinnedSource`) |
 | `reset.rs` | `CursorHash` + `below_fork_base` | `PinCanary` + the canary io |
 | `metrics.rs` | `MainnetMetrics` (registry + render + overlap test) | `VenueMetrics` (the same three) |
-| `error.rs` | the profile's variants + `impl ShellError` | the same shape |
+| `error.rs` | the profile's variants + `impl ShellError` + `From<ShellFault>` | the same shape |
 
 Struct level: both `Ctx`es carry the same ordered core (the chain section, the
 engine section, the target anvil, the source, the mirror bundle, the composer

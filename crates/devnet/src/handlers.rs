@@ -34,6 +34,21 @@ pub const HEALTHZ: &str = "/healthz";
 /// its own — it does not depend on the spine).
 pub const METRICS: &str = "/metrics";
 
+/// The shared HTTP status of the spine's own taxonomy: a request refusal is
+/// 400, an unavailable boundary is 503 (retryable — never a 500, which would
+/// read as a bug). `None` means the shell's own variant decides: each surface
+/// maps its own refusals beside this, so the same shared refusal can never
+/// answer two statuses.
+pub fn devnet_status(error: &crate::Error) -> Option<StatusCode> {
+    if error.is_request_refusal() {
+        return Some(StatusCode::BAD_REQUEST);
+    }
+    if error.is_unavailable() {
+        return Some(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    None
+}
+
 pub fn shared_routes<E: Engine>() -> Router<Arc<E>> {
     Router::new()
         .route(HEALTHZ, get(healthz::<E>))
@@ -197,4 +212,30 @@ async fn admin_events<E: Engine>(State(ctx): State<Arc<E>>) -> impl IntoResponse
         Ok::<_, std::convert::Infallible>(Event::default().comment("connected"))
     });
     Sse::new(opening.chain(stream)).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared taxonomy's statuses: refusals 400, unavailable 503, and
+    /// everything else leaves the decision to the shell (`None`).
+    #[test]
+    fn the_shared_taxonomy_maps_once() {
+        assert_eq!(
+            devnet_status(&crate::Error::NoCursor),
+            Some(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            devnet_status(&crate::Error::ShadowScan { block: 7, failed: 1 }),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        assert_eq!(
+            devnet_status(&crate::Error::KindMismatch {
+                write_kind: "storage",
+                before_kind: "balance",
+            }),
+            None
+        );
+    }
 }

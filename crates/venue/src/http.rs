@@ -48,7 +48,7 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
     let shared =
         SharedStatus::gather(ctx.anvil_v.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
     Ok(StatusResponse {
-        fork_pin: crate::ctx::resolved_pin(&ctx.pin),
+        fork_pin: mirror_devnet::pin::resolved_pin(&ctx.pin),
         epoch_pin: ctx.plane.state.epoch_pin()?,
         probes: ctx.engine.verifier.probes.len(),
         source: ctx.chain.source_url.clone(),
@@ -62,9 +62,11 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
-            // The shared devnet taxonomy (mirror-devnet's typed predicates):
-            // both engines classify the same refusals identically.
-            Error::Devnet(e) if e.is_request_refusal() => StatusCode::BAD_REQUEST,
+            // The shared devnet taxonomy (mirror-devnet's one
+            // classification): both engines answer the same refusal the same
+            // way by construction.
+            Error::Devnet(e) => mirror_devnet::handlers::devnet_status(e)
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Error::BadRequest { .. } => StatusCode::BAD_REQUEST,
             Error::NotFound { .. } | Error::NoMarket { .. } => StatusCode::NOT_FOUND,
             Error::NotConfigured { .. } => StatusCode::CONFLICT,
@@ -72,7 +74,6 @@ impl IntoResponse for Error {
             // fault is a bad gateway, not this service's fault.
             Error::Rpc(_) | Error::ApiStatus { .. } | Error::Http(_) => StatusCode::BAD_GATEWAY,
             Error::Warming => StatusCode::SERVICE_UNAVAILABLE,
-            Error::Devnet(e) if e.is_unavailable() => StatusCode::SERVICE_UNAVAILABLE,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         if status == StatusCode::INTERNAL_SERVER_ERROR {

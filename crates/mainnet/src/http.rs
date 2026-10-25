@@ -74,10 +74,11 @@ struct TimeResponse {
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = match &self {
-            // The shared devnet taxonomy (mirror-devnet's typed predicates):
-            // both engines classify the same refusals identically.
-            Error::Devnet(e) if e.is_request_refusal() => StatusCode::BAD_REQUEST,
-            Error::Devnet(e) if e.is_unavailable() => StatusCode::SERVICE_UNAVAILABLE,
+            // The shared devnet taxonomy (mirror-devnet's one
+            // classification): both engines answer the same refusal the same
+            // way by construction.
+            Error::Devnet(e) => mirror_devnet::handlers::devnet_status(e)
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             // The upstream anvil boundary: a transport fault is a bad
             // gateway, not this service's fault.
             Error::Rpc(_) => StatusCode::BAD_GATEWAY,

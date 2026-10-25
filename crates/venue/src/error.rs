@@ -105,24 +105,31 @@ pub enum Error {
 /// The crate's result: `Result<T>` everywhere (the error is fixed).
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// The shared shell's error contract (`mirror_devnet::engine::ShellError`):
-/// the constructors the shared boot/serve helpers need. The rest of the
-/// taxonomy stays the venue's own.
-impl mirror_devnet::engine::ShellError for Error {
-    fn bind(addr: String, source: std::io::Error) -> Self {
-        Error::Bind { addr, source }
-    }
+impl mirror_devnet::engine::ShellError for Error {}
 
-    fn io(what: &'static str, path: String, source: std::io::Error) -> Self {
-        Error::Io {
-            what,
-            path: path.into(),
-            source,
+/// The shell contract (`mirror_devnet::engine::ShellError`): this taxonomy
+/// accepts the spine's shared errors — the devnet's own, the anvil boundary,
+/// and the shared [`mirror_devnet::engine::ShellFault`]s the boot/serve
+/// helpers construct. The rest of the taxonomy stays the venue's own.
+impl From<mirror_devnet::engine::ShellFault> for Error {
+    fn from(fault: mirror_devnet::engine::ShellFault) -> Self {
+        match fault {
+            mirror_devnet::engine::ShellFault::Bind { addr, source } => {
+                Error::Bind { addr, source }
+            }
+            mirror_devnet::engine::ShellFault::Io {
+                what,
+                path,
+                source,
+            } => Error::Io {
+                what,
+                path: path.into(),
+                source,
+            },
+            mirror_devnet::engine::ShellFault::WrongChain { anvil, got, want } => {
+                Error::WrongChain { anvil, got, want }
+            }
         }
-    }
-
-    fn wrong_chain(anvil: &'static str, got: u64, want: u64) -> Self {
-        Error::WrongChain { anvil, got, want }
     }
 }
 
@@ -170,4 +177,18 @@ mod size_guard {
             std::mem::size_of::<Error>()
         );
     }
+    /// The spine's shared fault converts into this taxonomy, this mirror's
+    /// message and all (the other mirror's test pins its own wording).
+    #[test]
+    fn the_shell_fault_converts_into_the_taxonomy() {
+        let e: Error = mirror_devnet::engine::ShellFault::WrongChain {
+            anvil: "anvil-v",
+            got: 1,
+            want: 999,
+        }
+        .into();
+        assert!(matches!(e, Error::WrongChain { got: 1, want: 999, .. }), "{e}");
+        assert!(e.to_string().contains("is not the venue chain"), "{e}");
+    }
+
 }

@@ -189,7 +189,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     let walk = scan::scan_to(
         &ctx.plane,
         &ctx.anvil_v,
-        crate::ctx::resolved_pin(&ctx.pin).unwrap_or(0),
+        mirror_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
         head,
         first,
     )

@@ -72,24 +72,28 @@ in `crates/devnet`; none of them is per-mirror code.
 
 Seven traits carry every seam: the five semantic ones below, plus the shared
 shell's two (`Engine` — the shell's view of a mirror's context — and
-`ShellError` — the error contract its helpers construct). The projects
+`ShellError` — the error contract its helpers construct: the shared
+`ShellFault`s convert into each mirror's taxonomy through `From`). The projects
 implement them; `crates/devnet` never names a mirror.
 
 | Interface | Where | Consumed by | Mainnet impl | Venue impl |
 |---|---|---|---|---|
-| `Source` | `devnet/src/source.rs` | the composer (reads), the applier (target reads), re-sync/hand-back | reth (historical, BALs, traces, WS heads) | the HL public API (latest-only) + the EVM RPC; `Mirror::follow_source` splits truth reads from follow reads (the pin guard would refuse the follow's reads — reth serves both roles) |
+| `Source` | `devnet/src/source.rs` | the composer (reads), the applier (target reads), re-sync/hand-back | reth (historical, BALs, traces, WS heads) | the HL public API (latest-only) + the EVM RPC; the pin-exact read shape is the spine's `PinnedSource` over `RawSource` (the guard refuses once the source's head moves past the pin), and `Mirror::follow_source` splits truth reads from follow reads (the guard would refuse the follow's reads — reth serves both roles) |
 | `Mirror` | `devnet/src/spine.rs` | both engines' assembly | the profile's `Bundle` (label `t`) | the profile's `Bundle` (label `v`) |
 | `ResetDetector` | `devnet/src/spine.rs` | the engine's reset pass | `CursorHash` (the cursor's block must carry its recorded hash; below the fork base = stale by position) | `PinCanary` (ADR-0002: heights below a fork's pin resolve to the source, so cursor hashes are unsound there) |
 | `KeyClosure` | `devnet/src/closure.rs` | the COW filter | the declared closures (watch-set keys the devnet owns) | same, plus the sim's own writes |
 | `Registry` | `devnet/src/metrics.rs` | `/metrics` | one registry per engine, declared series + computed ones | same |
-| `Engine` | `devnet/src/engine.rs` | the shared shell: the HTTP handlers and route table, the boot assert, the admin surface's wiring, `/admin/epoch`, `serve`, the shutdown tail; `JournalScope` names what the journal holds (the rewind's semantics) | `impl Engine for Ctx` (the required facts: T's chain, the source URL, `JournalScope::ParentBeforeValues`, `probes_now`, the scan counters, the status document, the metric exposition) | `impl Engine for Ctx` (V's chain, the source URL, `JournalScope::OwnWrites`, the at-pin probes, its counters, its status document, its exposition) |
-| `ShellError` | `devnet/src/engine.rs` | the shell's helpers (the bind / IO / chain-identity constructors) | `impl ShellError for Error` | `impl ShellError for Error` |
+| `Engine` | `devnet/src/engine.rs` | the shared shell: the HTTP handlers and route table, the boot assert, the admin surface's wiring, `/admin/epoch`, `serve` (and `serve_router`, the one listener boundary every service shares), the shutdown tail; `JournalScope` names what the journal holds (the rewind's semantics) | `impl Engine for Ctx` (the required facts: T's chain, the source URL, `JournalScope::ParentBeforeValues`, `probes_now`, the scan counters, the status document, the metric exposition) | `impl Engine for Ctx` (V's chain, the source URL, `JournalScope::OwnWrites`, the at-pin probes, its counters, its status document, its exposition) |
+| `ShellError` | `devnet/src/engine.rs` | the shell's helpers: they construct `ShellFault`s (bind / IO / chain identity), the mirror converts them into its own taxonomy (`From<ShellFault>`) | `impl ShellError for Error` + `From<ShellFault>` | `impl ShellError for Error` + `From<ShellFault>` |
 
 The vocabulary types are the contracts between the traits: `Window`,
 `WindowBal`, `WindowPlan`, `Write`, `DiffKind`, `Capabilities`, `Policies`,
 `ResetSignal`/`ResetWitness`, `Fact`/`Notice`, and `SharedStatus` (the status
-fields both surfaces must report, gathered once). A change to any of them is
-a change to both mirrors by construction.
+fields both surfaces must report, gathered once). Shared the same way: the
+shell faults (`engine::ShellFault` — the spine constructs them, the mirror
+words them) and the fork-pin vocabulary (`pin::{PIN_UNRESOLVED, resolved_pin}`
+— the driver resolves it, the pinned source reads it). A change to any of
+them is a change to both mirrors by construction.
 
 **Deliberately not an interface:** the venue simulator. Only one mirror has a
 closed-source parent; wrapping the sim behind a trait would invent a second
@@ -161,7 +165,7 @@ Common components (`crates/devnet`, `crates/anvil`, `crates/config`):
 | `devnet::facts` | the bus, sequence numbers, the notification contract | persist anything |
 | `devnet::spine` | the seams (traits), `Policies`, `ResetSignal` | name a mirror |
 | `devnet::engine` | the shared shell: the `Engine`/`ShellError` contracts, `SharedStatus`, the boot assert, `serve`/`spawn_http`/`shutdown` | know a mirror's fields (the impl does) |
-| `devnet::handlers` | the shared HTTP surface: one generic handler per route + the route table | own a route's semantics (the admin surface does) |
+| `devnet::handlers` | the shared HTTP surface: one generic handler per route, the route table, and the taxonomy's one status mapping (`devnet_status` — a shared refusal cannot answer two statuses) | own a route's semantics (the admin surface does) |
 | `config` | the layered loader, `${VAR}` resolution, validation | default a chain behavior |
 
 Profile components, each in its own folder and never importing the other
@@ -233,7 +237,7 @@ order:
 |---|---|---|
 | 1 | `crates/<name>/src/source.rs` — the `Source` impl; every `Capabilities` flag declared (`resolve` audits each method at boot); a source serving native BALs owes `verify_bal_commitment` on every retrieval (the EIP's header commitment) | `spine-purity` (the crate may not name a mirror; `crates/devnet` may not name it), `no-orphans` |
 | 2 | the watch set and the declared closures | `closure-matrix` |
-| 3 | `crates/<name>/src/profile.rs` — the `Bundle` data, `Deps`, `build` — and the context with `impl Engine` (the shell's required facts) + `impl ShellError` for the error taxonomy | `spine-purity` |
+| 3 | `crates/<name>/src/profile.rs` — the `Bundle` data, `Deps`, `build` — and the context with `impl Engine` (the shell's required facts) + the error taxonomy (`impl ShellError` + `From<ShellFault>`) | `spine-purity` |
 | 4 | `bins/<name>-engine` + the compose/Dockerfile members | `docker-members` |
 | 5 | the k8s manifests | `k8s-wiring` |
 | 6 | the registry's series + the docs' series table | `metrics-written`, `docs-metrics` |

@@ -253,7 +253,7 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
     tracing::info!(
         source = %ctx.source_rpc.url(),
         anvil_v = %ctx.anvil_v.url(),
-        pin = ?crate::ctx::resolved_pin(&ctx.pin),
+        pin = ?mirror_devnet::pin::resolved_pin(&ctx.pin),
         watchlist = ctx.mirror.scope().watch().accounts.len(),
         "mirror engine starting"
     );

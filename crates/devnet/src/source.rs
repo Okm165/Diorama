@@ -2,11 +2,12 @@
 //!
 //! One implementation per profile, chosen at boot (`Arc<dyn Source>` — a
 //! boundary, not a hot loop; the two projects never monomorphize each other's
-//! types). `RethSource` reads reth (BALs, traces, a 10,064-block state
-//! window); `VenueSource` reads the HL public RPC (latest-only state, no
-//! traces/BAL/proofs — measured 2026-10-24). The trait is exactly what the
-//! pipeline and a hand-back ask for: capabilities, the head, a block header,
-//! and the three account reads an unshadow restores.
+//! types). `RethSource` (the mainnet crate) reads reth (BALs, traces, a
+//! 10,064-block state window); the venue's profile composes the spine's
+//! [`PinnedSource`] over [`RawSource`] for the HL public RPC (latest-only
+//! state, no traces/BAL/proofs — measured 2026-10-24). The trait is exactly
+//! what the pipeline and a hand-back ask for: capabilities, the head, a block
+//! header, and the three account reads an unshadow restores.
 use alloy_primitives::{Address, B256, U256};
 // The seam's reads are dynamic (`&dyn Source`): one box per call, the
 // standard `futures_util` form. These are per-block and admin-path reads,
@@ -198,10 +199,8 @@ pub async fn audit_capabilities(
 /// A source over a raw RPC: the reads are forwarded verbatim and the
 /// capabilities are the caller's declaration. For reads that are
 /// latest-by-design (the venue's follow reads the public RPC at
-/// latest, where the pin guard would refuse every read) and for tools; a
-/// profile whose reads carry invariants (the venue's pin-exact
-/// [`crate::source::Source`] for unshadow restores) keeps its own
-/// implementation.
+/// latest, where the pin guard would refuse every read) and for tools; the
+/// pin-exact shape for unshadow restores is [`PinnedSource`] over this.
 pub struct RawSource {
     rpc: Arc<mirror_anvil::Rpc>,
     capabilities: Capabilities,
@@ -284,5 +283,188 @@ impl Source for RawSource {
 
     fn touched_kind(&self) -> crate::bal::DiffKind {
         crate::bal::DiffKind::Poll
+    }
+}
+
+/// A pinned, latest-only source: the endpoint serves only its *latest* state
+/// (the block parameter is ignored — measured), so a state read is exact only
+/// while the source's head is still the pin — and the pin *is* the head. The
+/// guard refuses with the numbers instead of silently answering from newer
+/// state ("never hand back a poisoned value"); a source that declares
+/// `historical` (reth's 10,064-block window, an archive) needs no check and
+/// passes through. Headers and envelopes are historical-safe by measurement
+/// and are never guarded.
+pub struct PinnedSource {
+    inner: RawSource,
+    pin: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl PinnedSource {
+    /// The handle is shared (`Arc`): one client per endpoint, referenced by
+    /// every object that reads through it.
+    pub fn new(
+        rpc: Arc<mirror_anvil::Rpc>,
+        pin: Arc<std::sync::atomic::AtomicU64>,
+        capabilities: Capabilities,
+    ) -> Self {
+        Self {
+            inner: RawSource::new(rpc, capabilities),
+            pin,
+        }
+    }
+
+    /// The pin guard: every state read is only exact while the source's head
+    /// is still the pin. The declaration drives it — a source that can serve
+    /// historical state needs no check; this one cannot (measured: the block
+    /// parameter is ignored, latest is all there is).
+    async fn guard(&self) -> mirror_anvil::Result<()> {
+        if self.inner.capabilities().historical {
+            return Ok(());
+        }
+        let Some(pin) = crate::pin::resolved_pin(&self.pin) else {
+            return Err(mirror_anvil::Error::Corrupt {
+                what: "pinned source",
+                detail: "the fork pin is not resolved yet".into(),
+            });
+        };
+        let head = self.inner.head().await?;
+        if head != pin {
+            return Err(mirror_anvil::Error::Corrupt {
+                what: "pinned source",
+                detail: format!(
+                    "the source advanced past the pin (pin {pin}, head {head}): it \
+                     serves only its latest state for eth_call (measured), so the \
+                     pin's truth cannot be read back. A re-pin restores the whole \
+                     source state (the re-fork is the wholesale hand-back); a \
+                     *selective* hand-back is possible only while the source's head \
+                     is still the pin — seconds on a 1s-block source"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Source for PinnedSource {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    /// The pin is the head: the source cannot serve history, so its own head
+    /// would drift past every read's truth (a latest-by-design reader — the
+    /// venue's follow — takes the raw source instead).
+    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
+        Box::pin(async move {
+            if let Some(pin) = crate::pin::resolved_pin(&self.pin) {
+                return Ok(pin);
+            }
+            self.inner.head().await
+        })
+    }
+
+    /// Historical-safe on the public source (unlike state reads): the header
+    /// is what makes forking and cursor hashes possible at all. No guard.
+    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
+        self.inner.header(n)
+    }
+
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {
+        Box::pin(async move {
+            self.guard().await?;
+            self.inner.balance_at(address, block).await
+        })
+    }
+
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
+        Box::pin(async move {
+            self.guard().await?;
+            self.inner.nonce_at(address, block).await
+        })
+    }
+
+    fn storage_at(
+        &self,
+        address: Address,
+        slot: U256,
+        block: u64,
+    ) -> BoxFuture<'_, mirror_anvil::Result<B256>> {
+        Box::pin(async move {
+            self.guard().await?;
+            self.inner.storage_at(address, slot, block).await
+        })
+    }
+
+    fn code_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+        Box::pin(async move {
+            self.guard().await?;
+            self.inner.code_at(address, block).await
+        })
+    }
+
+    /// Envelope reads are historical-safe, so the pin guard does not apply.
+    fn touched(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> BoxFuture<'_, mirror_anvil::Result<crate::closure::TouchedSet>> {
+        self.inner.touched(from, to)
+    }
+
+    fn touched_kind(&self) -> crate::bal::DiffKind {
+        self.inner.touched_kind()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
+
+    fn caps(historical: bool) -> Capabilities {
+        Capabilities {
+            native_bal: false,
+            traces: false,
+            historical,
+            heads_ws: false,
+            system_txs: false,
+            system_tx_receipts: false,
+        }
+    }
+
+    fn pinned(capabilities: Capabilities, pin: u64) -> PinnedSource {
+        // The endpoint is never reached by the declaration and unresolved-pin
+        // branches: both decide before any read.
+        PinnedSource::new(
+            Arc::new(mirror_anvil::Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap()),
+            Arc::new(AtomicU64::new(pin)),
+            capabilities,
+        )
+    }
+
+    /// A source that declares history passes the guard untouched (reth's
+    /// window, an archive): the pin never refuses a historical read.
+    #[tokio::test]
+    async fn a_historical_source_is_never_guarded() {
+        assert!(pinned(caps(true), crate::pin::PIN_UNRESOLVED).guard().await.is_ok());
+        assert!(pinned(caps(true), 7).guard().await.is_ok());
+    }
+
+    /// An unresolved pin refuses before any read, naming the state; a
+    /// resolved pin moves the check to the head read (the transport fault
+    /// proves the read was attempted, not skipped).
+    #[tokio::test]
+    async fn an_unresolved_pin_refuses_before_any_read() {
+        let err = pinned(caps(false), crate::pin::PIN_UNRESOLVED)
+            .guard()
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pin is not resolved"), "{err}");
+        let err = pinned(caps(false), 7).guard().await.unwrap_err();
+        assert!(matches!(err, mirror_anvil::Error::Transport { .. }), "{err}");
     }
 }

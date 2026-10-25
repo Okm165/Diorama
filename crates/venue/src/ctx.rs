@@ -25,20 +25,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The pin handle's "not resolved yet" sentinel. A fork base is a real block
-/// number and 0 is a legitimate genesis fork, so the sentinel must not be 0
-/// (the canary's zero-word problem, same class — see `reset.rs`).
-pub(crate) const PIN_UNRESOLVED: u64 = u64::MAX;
-
-/// The pin handle's resolved value: `None` while [`PIN_UNRESOLVED`]. One
-/// accessor, so no reader compares against the raw sentinel.
-pub(crate) fn resolved_pin(pin: &AtomicU64) -> Option<u64> {
-    match pin.load(std::sync::atomic::Ordering::Relaxed) {
-        PIN_UNRESOLVED => None,
-        p => Some(p),
-    }
-}
-
 pub struct Ctx {
     /// The venue chain's section (the fork source).
     pub(crate) chain: ChainVenue,
@@ -50,10 +36,10 @@ pub struct Ctx {
     pub(crate) anvil_v: Arc<Rpc>,
     /// The fork source V derives from (the unshadow re-sync truth at the pin).
     pub(crate) source_rpc: Arc<Rpc>,
-    /// V's fork pin ([`PIN_UNRESOLVED`] until the driver's reconcile resolves
-    /// it): the anchor `VenueSource` reads at (V's base state *is* the
-    /// source's state at the pin) and the driver's epoch key. Shared with the
-    /// source, set by the driver's reconcile.
+    /// V's fork pin ([`mirror_devnet::pin::PIN_UNRESOLVED`] until the
+    /// driver's reconcile resolves it): the anchor the pinned source reads at
+    /// (V's base state *is* the source's state at the pin) and the driver's
+    /// epoch key. Shared with the source, set by the driver's reconcile.
     pub(crate) pin: Arc<AtomicU64>,
     /// The mirror bundle: the HL public API as the truth (hand-back and follow
     /// views), the pin canary, the declared scope, and the policies (see
@@ -177,24 +163,5 @@ impl Engine for Ctx {
 
     fn status(&self) -> BoxFuture<'_, Result<Self::Status>> {
         Box::pin(crate::http::status_doc(self))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{resolved_pin, PIN_UNRESOLVED};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    /// The sentinel never leaks as a pin: unresolved reads `None`, and a real
-    /// block (genesis included) reads `Some` (the mainnet's `follow_tag` test
-    /// pins its own ctx accessor).
-    #[test]
-    fn the_pin_sentinel_never_leaks() {
-        let pin = AtomicU64::new(PIN_UNRESOLVED);
-        assert_eq!(resolved_pin(&pin), None);
-        pin.store(0, Ordering::Relaxed);
-        assert_eq!(resolved_pin(&pin), Some(0));
-        pin.store(49_000_000, Ordering::Relaxed);
-        assert_eq!(resolved_pin(&pin), Some(49_000_000));
     }
 }

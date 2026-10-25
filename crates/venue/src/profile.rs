@@ -22,12 +22,12 @@
 //! implementations diverge. The composer itself is generic
 //! (`mirror_devnet::bal::compose`).
 use crate::reset::PinCanary;
-use crate::source::{public_capabilities, VenueSource};
+use crate::source::public_capabilities;
 use mirror_config::{ClosuresSection, EngineSection, LoopsSection};
 use mirror_devnet::closure::{FixedSlots, KeyClosure, TopicMappedSlots};
 use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
-use mirror_devnet::source::{RawSource, Source};
+use mirror_devnet::source::{PinnedSource, RawSource, Source};
 use mirror_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
@@ -116,7 +116,7 @@ pub fn watch_set(
 /// `ctx.rs` reads as assembly).
 pub struct Wiring {
     pub mirror: Arc<dyn Mirror>,
-    /// V's fork pin, shared with [`VenueSource`].
+    /// V's fork pin, shared with the spine's [`PinnedSource`].
     pub pin: Arc<AtomicU64>,
     /// The composer's target side: V itself (shared with the anvil handle).
     pub target: Arc<dyn Source>,
@@ -137,8 +137,12 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
         anvil_v,
         watch,
     } = deps;
-    let pin = Arc::new(AtomicU64::new(crate::ctx::PIN_UNRESOLVED));
-    let source: Arc<dyn Source> = Arc::new(VenueSource::new(source_rpc.clone(), pin.clone()));
+    let pin = Arc::new(AtomicU64::new(mirror_devnet::pin::PIN_UNRESOLVED));
+    let source: Arc<dyn Source> = Arc::new(PinnedSource::new(
+        source_rpc.clone(),
+        pin.clone(),
+        public_capabilities(),
+    ));
     let follow: Arc<dyn Source> = Arc::new(RawSource::new(source_rpc, public_capabilities()));
     let target: Arc<dyn Source> = Arc::new(RawSource::target(anvil_v));
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));

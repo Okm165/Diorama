@@ -34,8 +34,8 @@ Three layers, each runnable on demand:
 
 ## Unit tests (`cargo test --workspace`)
 
-240 tests, all offline, one suite per crate: `mirror-anvil` 17,
-`mirror-devnet` 44, `mirror-config` 17, `mirror-mainnet` 15,
+245 tests, all offline, one suite per crate: `mirror-anvil` 17,
+`mirror-devnet` 48, `mirror-config` 17, `mirror-mainnet` 16,
 `mirror-venue` 116, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
@@ -650,8 +650,11 @@ Five more single homes keep the two engines from drifting:
   surface's construction, `/admin/epoch`, the boot assert (`assert_chain`),
   the handlers (one generic definition per route, where a two-invocation
   macro used to expand them), the route table, `serve`/`spawn_http`, and the
-  shutdown tail — has one implementation. `ShellError` is the constructors
-  those helpers need (bind / IO / chain identity). A new refusal class or a
+  shutdown tail — has one implementation. `ShellError` is the contract those helpers
+  construct (`ShellFault`: bind / IO / chain identity, converted into each
+  mirror's taxonomy through `From`), and the spine's own taxonomy answers one
+  status per class (`handlers::devnet_status`: refusals 400, unavailable 503
+  — a shared refusal cannot answer two statuses). A new refusal class or a
   renamed status field lands on both surfaces in one commit.
 - **the devnet plane** (`mirror_devnet::Plane`): the shadow registry, the
   journal, the cursor state, the shared admin gauges and the flags (halt,

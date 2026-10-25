@@ -66,18 +66,20 @@ pub async fn healthz() -> &'static str {
     "ok"
 }
 
-/// Serve one router on one listener (the bin's two ports).
+/// Serve one router on one listener (the bin's two ports): the same boundary
+/// shape the engines' shell has (bind / serve faults, one listening line),
+/// kept local — this crate's closure is anvil + config only (the fitness
+/// gate pins it), so the shared fault type is out of reach by design.
 pub async fn serve(addr: String, router: Router) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .map_err(|source| Error::Io {
-            what: "http listener",
-            path: addr.clone().into(),
+        .map_err(|source| Error::Bind {
+            addr: addr.clone(),
             source,
         })?;
     tracing::info!(addr, "cctp http api listening");
     axum::serve(listener, router).await.map_err(|source| Error::Io {
-        what: "http api",
+        what: "cctp http api",
         path: addr.into(),
         source,
     })
