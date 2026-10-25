@@ -859,50 +859,70 @@ pub(crate) fn apply_fill(
         .positions
         .entry(fill.coin.clone())
         .or_insert_with(|| fresh_position(fill));
-    if old.is_zero() || sign(old) == sign(signed) {
+    let closed = if old.is_zero() || sign(old) == sign(signed) {
         apply_increase(position, old, fill)?;
+        Decimal::ZERO
     } else {
         let closed = old.abs().min(fill.size);
         let realized = apply_reduction(position, old, fill)?;
         account.perp_balance = add(account.perp_balance, realized, "realized PnL")?;
-        // The margin a close releases (docs): a fully closed isolated position
-        // returns its whole isolated margin to the cross balance — the margin
-        // is the trader's collateral, only the position is gone. A *strict
-        // isolated* asset releases it proportionally as the position closes
-        // (there the margin cannot be moved out by hand); a normal isolated
-        // position's margin is the trader's to move (`updateIsolatedMargin`),
-        // so a partial close keeps it.
-        if position.leverage == LeverageType::Isolated && !position.isolated_margin.is_zero() {
-            let released = if position.szi.is_zero() {
-                position.isolated_margin
-            } else if strict_isolated(&fill.coin, meta) {
-                mul(
-                    position.isolated_margin,
-                    div(closed, old.abs(), "isolated release fraction")?,
-                    "isolated margin release",
-                )?
-            } else {
-                Decimal::ZERO
-            };
-            if !released.is_zero() {
-                position.isolated_margin =
-                    sub(position.isolated_margin, released, "isolated margin release")?;
-                account.perp_balance = add(account.perp_balance, released, "isolated margin release")?;
-            }
-        }
-    }
+        closed
+    };
     // The trading fee (the venue's base tier): charged on the fill's notional,
     // on both sides of a trade, in USDC — so a closing fill pays it too.
     if !fill.fee.is_zero() {
         account.perp_balance = sub(account.perp_balance, fill.fee, "trading fee")?;
     }
-    if position.szi.is_zero() {
+    // The position's last use: the borrow ends here, so the release (which
+    // re-looks the position up) can borrow the account whole.
+    let flat = position.szi.is_zero();
+    release_isolated_margin(account, &fill.coin, old, closed, meta)?;
+    if flat {
         account.positions.remove(&fill.coin);
         return Ok(());
     }
     if let Some(position) = account.positions.get_mut(&fill.coin) {
         settle_margin(position)?;
     }
+    Ok(())
+}
+
+/// The margin a close releases (docs): a fully closed isolated position
+/// returns its whole isolated margin to the cross balance — the margin is the
+/// trader's collateral, only the position is gone. A *strict isolated* asset
+/// releases it proportionally as the position closes (there the margin cannot
+/// be moved out by hand); a normal isolated position's margin is the trader's
+/// to move (`updateIsolatedMargin`), so a partial close keeps it. A fill that
+/// closes nothing (an increase) releases nothing.
+fn release_isolated_margin(
+    account: &mut Account,
+    coin: &str,
+    old: Decimal,
+    closed: Decimal,
+    meta: Option<&crate::wire::Meta>,
+) -> Result<()> {
+    let Some(position) = account.positions.get_mut(coin) else {
+        return Ok(());
+    };
+    if position.leverage != LeverageType::Isolated || position.isolated_margin.is_zero() {
+        return Ok(());
+    }
+    let released = if position.szi.is_zero() {
+        position.isolated_margin
+    } else if !closed.is_zero() && strict_isolated(coin, meta) {
+        mul(
+            position.isolated_margin,
+            div(closed, old.abs(), "isolated release fraction")?,
+            "isolated margin release",
+        )?
+    } else {
+        Decimal::ZERO
+    };
+    if released.is_zero() {
+        return Ok(());
+    }
+    position.isolated_margin = sub(position.isolated_margin, released, "isolated margin release")?;
+    account.perp_balance = add(account.perp_balance, released, "isolated margin release")?;
     Ok(())
 }
 
