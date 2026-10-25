@@ -24,7 +24,7 @@
 use crate::reset::PinCanary;
 use mirror_config::{EngineSection, LoopsSection};
 use mirror_devnet::cow::Scope;
-use mirror_devnet::source::{RawSource, Source};
+use mirror_devnet::source::Source;
 use mirror_devnet::engine::JournalScope;
 use mirror_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
@@ -96,7 +96,7 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let pin = Arc::new(AtomicU64::new(mirror_devnet::pin::PIN_UNRESOLVED));
     let source: Arc<dyn Source> = crate::source::pinned(source_rpc.clone(), pin.clone());
     let follow: Arc<dyn Source> = crate::source::follow(source_rpc);
-    let target: Arc<dyn Source> = Arc::new(RawSource::target(target_rpc));
+    let target: Arc<dyn Source> = crate::source::target(target_rpc);
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
     let scope = Scope::from_config(watch, &engine.closures);
     let mirror = bundle(engine, source, follow, reset, scope);

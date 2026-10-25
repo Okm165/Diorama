@@ -38,7 +38,7 @@ symmetry sweeps — regenerate the readings with
 | `profile.rs` | `profile.rs` | the divergence set, filled: `bundle`/`policies`/`build` + the `Wiring`/`Deps` pair, under the same decision table |
 | `reset.rs` | `reset.rs` | the profile's `ResetDetector` (cursor hash / pin canary) |
 | `selftest.rs` | `selftest.rs` | the scratch-stack selftest (`Targets` + `run`) |
-| `source.rs` | `source.rs` | the profile's source facts: the `Source` impl (`RethSource`) / the `DECLARED` capabilities + the `pinned`/`follow` builders; the pin-exact read shape is the spine's `PinnedSource` |
+| `source.rs` | `source.rs` | the profile's source facts: the `Source` impl (`RethSource`) + the `reth`/`target` builders / the `DECLARED` capabilities + the `pinned`/`follow`/`target` builders (the shared `target` is the map's paired row); the pin-exact read shape is the spine's `PinnedSource` |
 | `feed/` (mod, chainlink, http, metrics, policy) | `feed/` (mod, budget, metrics, rest, ws) | the market/price plane: the Chainlink feed bridge (the parent's answers → T's mock aggregators) / the HL market feed (REST + WS + budget) into the simulator |
 | `source_sync/` (mod, beacon, engine_api) | `bridge/` (mod, corewriter, metrics, system) | mainnet-only transports (CL + engine API, EIP-8379 top-up) / venue-only Core↔EVM bridge |
 | — | `api/` (mod, control, exchange, info, ws) | the simulator's served API (info 8090 / control 8091) |

@@ -25,6 +25,18 @@ pub(crate) const DECLARED: Capabilities = Capabilities {
     system_tx_receipts: false,
 };
 
+/// The profile's truth source: reth, the native BAL rung with the trace
+/// fallback.
+pub(crate) fn reth(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
+    Arc::new(RethSource::new(rpc))
+}
+
+/// The profile's target: the devnet chain's raw reads (T) — the venue's
+/// `source.rs` builds its own the same way.
+pub(crate) fn target(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
+    Arc::new(RawSource::target(rpc))
+}
+
 /// The reth handle is shared (`Arc`): one client per endpoint, referenced by
 /// the context and the source objects (the source is chosen at boot and never
 /// re-created — rule 15). The raw reads are the spine's [`RawSource`]; this

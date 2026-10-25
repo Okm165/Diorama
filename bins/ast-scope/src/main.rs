@@ -764,6 +764,7 @@ fn report(items: &[Item], fields: &FieldAccesses, corpus: &[String], uses: &Memb
         count(&prod, "struct"),
         count(&prod, "enum")
     );
+    structure_map(items);
     section("largest functions (lines, docs included)", &prod, "fn");
     section("deepest functions (nesting)", &prod, "fn-depth");
     section("largest records (fields/variants)", &prod, "record");
@@ -953,6 +954,67 @@ fn similar_records(prod: &[&Item]) {
             b.name,
             b.file
         );
+    }
+}
+
+/// The file pairing (the STRUCTURE doc's trees table): each row is a
+/// (mainnet suffix, venue suffix) pair. The one-sided folders
+/// (`source_sync/` vs `bridge/`+`api/`+`sim/`+`wire.rs`) are documented
+/// there, not paired here.
+const PAIRS: &[(&str, &str)] = &[
+    ("lib.rs", "lib.rs"),
+    ("service.rs", "service.rs"),
+    ("ctx.rs", "ctx.rs"),
+    ("driver.rs", "driver.rs"),
+    ("error.rs", "error.rs"),
+    ("http.rs", "http.rs"),
+    ("metrics.rs", "metrics.rs"),
+    ("profile.rs", "profile.rs"),
+    ("reset.rs", "reset.rs"),
+    ("selftest.rs", "selftest.rs"),
+    ("source.rs", "source.rs"),
+    ("apply/mod.rs", "follow/mod.rs"),
+    ("apply/parity.rs", "follow/parity.rs"),
+    ("apply/prepend.rs", "follow/audit.rs"),
+    ("feed/mod.rs", "feed/mod.rs"),
+    ("feed/metrics.rs", "feed/metrics.rs"),
+];
+
+/// The structure map: for every paired file, the items both sides share and
+/// the items only one side carries — the symmetrization's worklist. The
+/// role pairs (the mainnet's prepend vs the venue's audit) read as one-sided
+/// here by construction: their names differ on purpose.
+fn structure_map(items: &[Item]) {
+    println!("\nstructure map: the paired files, their production items, and the one-sided names:");
+    for (mn, vn) in PAIRS {
+        let side = |prefix: &str, suffix: &str| -> Vec<&Item> {
+            let path = format!("{prefix}{suffix}");
+            items
+                .iter()
+                .filter(|i| !i.is_test() && i.file == path)
+                .collect()
+        };
+        let m = side("crates/mainnet/src/", mn);
+        let v = side("crates/venue/src/", vn);
+        let m_names: HashSet<&str> = m.iter().map(|i| i.name.as_str()).collect();
+        let v_names: HashSet<&str> = v.iter().map(|i| i.name.as_str()).collect();
+        let mut paired: Vec<&str> = m_names.intersection(&v_names).copied().collect();
+        let mut m_only: Vec<&str> = m_names.difference(&v_names).copied().collect();
+        let mut v_only: Vec<&str> = v_names.difference(&m_names).copied().collect();
+        paired.sort_unstable();
+        m_only.sort_unstable();
+        v_only.sort_unstable();
+        println!(
+            "  {mn} <-> {vn}: {} items, {} paired",
+            m_names.len().max(v_names.len()),
+            paired.len()
+        );
+        if !m_only.is_empty() {
+            println!("      mainnet-only: {}", m_only.join(", "));
+        }
+        if !v_only.is_empty() {
+            println!("      venue-only:   {}", v_only.join(", "));
+        }
     }
 }
 

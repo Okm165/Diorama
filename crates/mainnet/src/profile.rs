@@ -21,7 +21,7 @@
 //! the two mirrors differ in *data* (source, scope), not in algorithm.
 use mirror_config::{EngineSection, LoopsSection};
 use mirror_devnet::cow::Scope;
-use mirror_devnet::source::{RawSource, Source};
+use mirror_devnet::source::Source;
 use crate::reset::CursorHash;
 use mirror_devnet::engine::JournalScope;
 use mirror_devnet::spine::{
@@ -90,12 +90,12 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
         target_rpc,
         watch,
     } = deps;
-    let source: Arc<dyn Source> = Arc::new(crate::source::RethSource::new(source_rpc));
+    let source: Arc<dyn Source> = crate::source::reth(source_rpc);
     let reset: Arc<dyn ResetDetector> = Arc::new(CursorHash::new(state));
     // The mainnet watches whole accounts: the BAL enumerates every changed
     // slot, so no closures are needed (the scope's slot set stays empty).
     let scope = Scope::from_config(watch, &engine.closures);
-    let target: Arc<dyn Source> = Arc::new(RawSource::target(target_rpc));
+    let target: Arc<dyn Source> = crate::source::target(target_rpc);
     Wiring {
         mirror: bundle(engine, source, reset, scope),
         target,
@@ -152,7 +152,7 @@ mod tests {
             mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
                 .unwrap(),
         );
-        let source: Arc<dyn Source> = Arc::new(RawSource::target(rpc));
+        let source: Arc<dyn Source> = crate::source::target(rpc);
         let watched = alloy_primitives::Address::repeat_byte(0xaa);
         let scope =
             Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
