@@ -480,7 +480,7 @@ the bridge documents, never a silent retry).
 
 ### The order lane (measured live, 2026-10-23)
 
-`make venue-order-proof` (37 checks, direct mode against the scratch stack) is
+`make venue-order-proof` (41 checks, direct mode against the scratch stack) is
 the §4.5 impact lane's acceptance: with a **scripted** base the walk is
 deterministic — a 2.5 buy across asks `3001×2, 3002×1` filled at the
 size-weighted `3001.20`, the fill's `consumed` recorded the two levels

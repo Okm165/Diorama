@@ -214,7 +214,7 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             docs-metrics, trust-audit, clock-labels, no-panics, config-check,
                             docker-members, k8s-wiring, spec-citations, spine-purity,
                             facts-published, metrics-written, render-diagrams)
-docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, STRUCTURE.md, OPERATIONS.md, TESTING.md, adr/
+docs/                       HOW-IT-WORKS.md, HOW-IT-WORKS-VENUE.md, ARCHITECTURE.md, SPINE.md, STRUCTURE.md, OPERATIONS.md, TESTING.md, INTEGRATION.md, adr/
 ```
 
 ## Docs
@@ -237,6 +237,9 @@ docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, STRUCTUR
 - **[docs/OPERATIONS.md](docs/OPERATIONS.md)** — signals/thresholds, day-to-day,
   source-liveness playbook, drills, storage/PVC handling, failure playbook,
   venue operations.
+- **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — the integration surface index:
+  every endpoint, shape and named refusal both mirrors expose (plus the
+  deferred lanes), for the daloc devnet to plan against.
 - **[docs/TESTING.md](docs/TESTING.md)** — test layers, per-block invariants and
   their classes, the measured facts behind the verifier, the venue smoke, the
   daloc use-case simulation, known limitations.
