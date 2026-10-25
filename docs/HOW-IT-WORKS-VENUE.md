@@ -260,3 +260,9 @@ Full reference and playbook: [OPERATIONS](OPERATIONS.md).
   book's other side).
 - Both chains are single-sequencer devnets: no consensus; the engine orders
   blocks.
+- **The spot plane is the ledger, not an order book**: the venue's spot side
+  is served as balances (`spotClearinghouseState`) moved by CoreWriter
+  USD-class transfers — both directions measured (spot→perp, and the perp→spot
+  reverse leaves 8-dec dust) — while spot *order* trading is unimplemented by
+  design: the market plane (the real book, funding, the waterfall) is
+  perps-only.

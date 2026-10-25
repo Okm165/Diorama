@@ -148,6 +148,13 @@ reads on reth and flags unwatched dependencies. A watchlist addition only
 affects *future* writes; heal a gap by writing reth's values for the slots the
 view reads.
 
+**The strategy surface is the watchlist** (measured): the WETH/USDC 0.05%
+pool's `slot0` on T is identical to reth's at the applied parent, while an
+*unwatched* pool (WETH/USDC 0.3%) still equals reth's value at the fork pin
+after mainnet has moved — a trade there prices off the pin, not the market.
+Execute on watched venues; the closure check keeps every view the product
+reads inside them.
+
 ### 5.3 Fork pins and re-basing
 
 The anvil forks reth at `reth_head − FORK_OFFSET` (128), re-resolved on every
