@@ -148,9 +148,7 @@ fn dispatch(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeB
             asset,
             is_cross,
             leverage,
-        } => asset_action(state, *asset, |coin| {
-            state.sim.set_leverage(owner, coin, *is_cross, *leverage)
-        }),
+        } => leverage_action(state, owner, *asset, *is_cross, *leverage),
         ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(owner, *time) {
             Ok(_) => default_ok(),
             Err(e) => err_envelope(e.to_string()).into_response(),
@@ -249,6 +247,26 @@ fn default_ok() -> Response {
         response: DefaultBody { r#type: "default" },
     })
     .into_response()
+}
+
+/// The `updateLeverage` action (its own fn so the dispatcher stays small):
+/// the sim's setting carries the docs' constraints.
+fn leverage_action(
+    state: &Arc<ApiState>,
+    owner: Address,
+    asset: u32,
+    is_cross: bool,
+    leverage: u32,
+) -> Response {
+    let meta = state.feed.meta();
+    asset_action(state, asset, |coin| {
+        state.sim.set_leverage(
+            owner,
+            coin,
+            crate::sim::account::LeverageSetting { is_cross, leverage },
+            meta.as_ref(),
+        )
+    })
 }
 
 /// The `order` action (its own fn so the dispatcher stays small).
@@ -1565,6 +1583,7 @@ mod tests {
             margin_table_id: None,
             only_isolated: None,
             is_delisted: None,
+            margin_mode: None,
         });
         meta
     }

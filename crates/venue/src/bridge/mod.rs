@@ -133,6 +133,11 @@ impl Bridge {
         };
         let tokens = system::token_registry(&spot);
 
+        // The docs' pre-existence rule (interaction timings): the snapshot is
+        // taken *before* this block's credits, so an EVM→Core transfer that
+        // initializes an account in the same block still cannot act.
+        let pre_block = self.sim.account_addresses()?;
+
         // EVM→Core: transfers to system addresses, from the receipts' logs.
         let receipts = self.anvil_v.receipts(n).await?;
         for receipt in &receipts {
@@ -158,6 +163,15 @@ impl Bridge {
         // visible from the EVM side; one batch per block is the usual case.
         let mut calls = self.corewriter_calls(n, &block).await?;
         calls.sort_by_key(|(_, action)| action_rank(action));
+        let (calls, refused) = callers_eligible(&pre_block, calls);
+        if refused > 0 {
+            self.metrics.inc_refusals_by(refused as u64);
+            tracing::warn!(
+                block = n,
+                refused,
+                "CoreWriter actions refused: the account must exist on HyperCore before the block (docs: interaction timings)"
+            );
+        }
         for (caller, action) in calls {
             self.apply_action(caller, action, &tokens).await?;
         }
@@ -563,6 +577,30 @@ impl Bridge {
 /// with the non-order actions; `Gtc`/`Ioc` (bytes 2/3) are the book-sending
 /// category. `sort_by_key` is stable, so each category keeps the proposed
 /// order.
+/// The docs' pre-existence rule (interaction timings): "the account
+/// performing the CoreWriter action must exist on HyperCore before the EVM
+/// block is built. An EVM -> Core transfer to initialize the account in the
+/// same block will still result in the CoreWriter action being rejected."
+/// The bridge snapshots the accounts before the block's credits and filters
+/// the calls through this — pure, so the rule is testable without a chain.
+fn callers_eligible(
+    pre_block: &std::collections::HashSet<Address>,
+    calls: Vec<(Address, CoreAction)>,
+) -> (Vec<(Address, CoreAction)>, usize) {
+    let mut refused = 0;
+    let eligible = calls
+        .into_iter()
+        .filter(|(caller, _)| {
+            let known = pre_block.contains(caller);
+            if !known {
+                refused += 1;
+            }
+            known
+        })
+        .collect();
+    (eligible, refused)
+}
+
 fn action_rank(action: &CoreAction) -> u8 {
     match action {
         CoreAction::CancelByOid { .. } | CoreAction::CancelByCloid { .. } => 1,
@@ -648,6 +686,7 @@ mod tests {
             margin_table_id: None,
             only_isolated: None,
             is_delisted: None,
+            margin_mode: None,
         });
         let action = CoreAction::LimitOrder {
             asset: 0,
@@ -677,6 +716,26 @@ mod tests {
         };
         assert!(core_order(Some(&meta), &oob, crate::sim::order::Tif::Ioc).is_none());
         assert!(core_order(None, &action, crate::sim::order::Tif::Ioc).is_none());
+    }
+
+    /// The pre-existence rule is pure: a caller outside the pre-block set is
+    /// refused (and counted); a known caller passes.
+    #[test]
+    fn corewriter_actions_require_a_pre_existing_account() {
+        use std::collections::HashSet;
+        let known = Address::repeat_byte(0x0a);
+        let fresh = Address::repeat_byte(0x0b);
+        let pre: HashSet<Address> = [known].into_iter().collect();
+        let (eligible, refused) = callers_eligible(
+            &pre,
+            vec![
+                (known, CoreAction::Malformed),
+                (fresh, CoreAction::Malformed),
+            ],
+        );
+        assert_eq!(refused, 1, "the same-block initialization still refuses");
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].0, known);
     }
 
     #[test]

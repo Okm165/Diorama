@@ -138,6 +138,34 @@ fn terminalize(
     }
 }
 
+/// The docs' leverage constraints: "Leverage can be set by a user to any
+/// integer between 1 and the max leverage" (margining); the exchange
+/// endpoint's updateLeverage is "subject to leverage constraints on that
+/// coin"; a strict-isolated or no-cross asset "does not allow cross margin".
+fn validate_leverage(
+    coin: &str,
+    is_cross: bool,
+    leverage: u32,
+    meta: Option<&crate::wire::Meta>,
+) -> Result<()> {
+    if leverage == 0 {
+        return Err(Error::bad_request("leverage must be at least 1"));
+    }
+    if let Some(max) = super::account::max_leverage(coin, meta) {
+        if leverage > max {
+            return Err(Error::bad_request(format!(
+                "leverage {leverage} exceeds {coin}'s max leverage {max}"
+            )));
+        }
+    }
+    if is_cross && super::account::isolated_only(coin, meta) {
+        return Err(Error::bad_request(format!(
+            "{coin} does not allow cross margin (docs: margin modes)"
+        )));
+    }
+    Ok(())
+}
+
 /// One order's initial margin requirement: notional over the account's
 /// leverage, the notional at the *mark* (docs, margining: "The margin
 /// required to open a position is `position_size * mark_price / leverage`";
@@ -690,12 +718,11 @@ impl Sim {
         &self,
         address: Address,
         coin: &str,
-        is_cross: bool,
-        leverage: u32,
+        setting: super::account::LeverageSetting,
+        meta: Option<&crate::wire::Meta>,
     ) -> Result<()> {
-        if leverage == 0 {
-            return Err(Error::bad_request("leverage must be at least 1"));
-        }
+        let super::account::LeverageSetting { is_cross, leverage } = setting;
+        validate_leverage(coin, is_cross, leverage, meta)?;
         self.with_account(address, |account| {
             account.leverage_settings.insert(
                 coin.to_string(),
@@ -1196,6 +1223,19 @@ pub(crate) fn validate_order(
     if req.limit_px.is_none() && req.trigger.is_none() && req.tif != Tif::Ioc {
         return Err(Error::bad_request("Order has invalid price."));
     }
+    // The docs (delisting): "When an asset is delisted, all positions are
+    // settled and open orders are cancelled ... After settlement, no new
+    // orders will be accepted." (The settlement itself is the sim's
+    // `settle_delisted` pass.)
+    if meta
+        .and_then(|m| m.asset(&req.coin))
+        .and_then(|a| a.is_delisted)
+        .unwrap_or(false)
+    {
+        return Err(Error::bad_request(
+            "After settlement, no new orders will be accepted.",
+        ));
+    }
     validate_tick_lot(meta, req)?;
     validate_min_notional(feed, req)?;
     validate_price_band(feed, req)?;
@@ -1491,6 +1531,7 @@ mod tests {
             margin_table_id: None,
             only_isolated: None,
             is_delisted: None,
+            margin_mode: None,
         });
         m
     }
@@ -1993,6 +2034,67 @@ mod tests {
             .unwrap()
             .isolated_margin;
         assert_eq!(margin, Decimal::from(11));
+    }
+
+    /// The docs' delisting: "When an asset is delisted, all positions are
+    /// settled and open orders are cancelled ... After settlement, no new
+    /// orders will be accepted." The settlement closes at the served oracle
+    /// (the docs' 1 h TWAP spot oracle, a named simplification); no fee.
+    #[test]
+    fn a_delisted_asset_settles_and_refuses_new_orders() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        sim.order(&feed, a, &ioc(true, "1")).unwrap(); // long 1 at the ask 101
+        let mut rest = ioc(false, "1");
+        rest.tif = Tif::Gtc;
+        rest.limit_px = Some("120".parse().unwrap());
+        let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
+        let before = sim.account(a).unwrap().unwrap().perp_balance;
+        // The meta flips to delisted (the operator's act; the feed carries it
+        // live) — the next tick settles.
+        let mut meta = meta_with("ETH", 10);
+        meta.universe[0].is_delisted = Some(true);
+        feed.put_meta(meta, crate::now_ms());
+        sim.evaluate(&feed).unwrap();
+        assert!(
+            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            "the open order is cancelled"
+        );
+        let account = sim.account(a).unwrap().unwrap();
+        assert!(!account.positions.contains_key("ETH"), "settled flat");
+        // Entry 101, the oracle 101 (the fixture's ctx): zero PnL, no fee.
+        assert_eq!(account.perp_balance, before);
+        let err = sim.place(&feed, a, &ioc(true, "1")).unwrap_err();
+        assert!(format!("{err}").contains("no new orders"), "{err}");
+    }
+
+    /// The docs' margin modes and the leverage bound: a strict-isolated or
+    /// no-cross asset refuses cross leverage, and leverage cannot exceed the
+    /// asset's max ("any integer between 1 and the max leverage").
+    #[test]
+    fn margin_modes_and_the_leverage_bound_refuse_by_name() {
+        use crate::wire::MarginMode;
+        let mut meta = meta_with("ETH", 10);
+        meta.universe[0].margin_mode = Some(MarginMode::StrictIsolated);
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta);
+        let (sim, a) = funded_sim(&feed, "1000");
+        let setting =
+            |is_cross, leverage| crate::sim::account::LeverageSetting { is_cross, leverage };
+        let meta = feed.meta();
+        let err = sim
+            .set_leverage(a, "ETH", setting(true, 10), meta.as_ref())
+            .unwrap_err();
+        assert!(format!("{err}").contains("does not allow cross"), "{err}");
+        assert!(sim
+            .set_leverage(a, "ETH", setting(false, 10), meta.as_ref())
+            .is_ok());
+        let err = sim
+            .set_leverage(a, "ETH", setting(false, 999), meta.as_ref())
+            .unwrap_err();
+        assert!(format!("{err}").contains("max leverage"), "{err}");
     }
 
     /// The docs' band: a limit more than 80 % from the oracle is refused by

@@ -290,6 +290,21 @@ impl Meta {
     }
 }
 
+/// The asset's margin mode (docs, margining: "strictIsolated" means margin
+/// cannot be removed; the info endpoint: "noCross" means only isolated margin
+/// allowed; `onlyIsolated` is deprecated — "Means either strictIsolated or
+/// noCross"). Unknown future values parse as `Unknown` rather than failing
+/// the whole meta.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum MarginMode {
+    #[serde(rename = "strictIsolated")]
+    StrictIsolated,
+    #[serde(rename = "noCross")]
+    NoCross,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssetInfo {
@@ -298,6 +313,8 @@ pub(crate) struct AssetInfo {
     pub max_leverage: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub margin_table_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub margin_mode: Option<MarginMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub only_isolated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

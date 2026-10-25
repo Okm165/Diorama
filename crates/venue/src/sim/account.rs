@@ -778,16 +778,37 @@ pub(crate) fn maintenance_margin(coin: &str, notional: Decimal, meta: Option<&cr
 /// closed. The flag is the live meta's (`onlyIsolated`); a warming meta or an
 /// unknown coin reads false.
 pub(crate) fn strict_isolated(coin: &str, meta: Option<&crate::wire::Meta>) -> bool {
-    meta.and_then(|m| m.asset(coin))
-        .and_then(|a| a.only_isolated)
-        .unwrap_or(false)
+    let Some(a) = meta.and_then(|m| m.asset(coin)) else {
+        return false;
+    };
+    match a.margin_mode {
+        Some(crate::wire::MarginMode::StrictIsolated) => true,
+        // The deprecated alias, only when the live field is absent (docs:
+        // `onlyIsolated` "means either strictIsolated or noCross").
+        None => a.only_isolated.unwrap_or(false),
+        Some(_) => false,
+    }
+}
+
+/// Only isolated margin is allowed for the asset: the deprecated
+/// `onlyIsolated` flag or a live `strictIsolated`/`noCross` mode (docs:
+/// "noCross" "does not allow cross margin").
+pub(crate) fn isolated_only(coin: &str, meta: Option<&crate::wire::Meta>) -> bool {
+    let Some(a) = meta.and_then(|m| m.asset(coin)) else {
+        return false;
+    };
+    a.only_isolated.unwrap_or(false)
+        || matches!(
+            a.margin_mode,
+            Some(crate::wire::MarginMode::StrictIsolated | crate::wire::MarginMode::NoCross)
+        )
 }
 
 /// The coin's live max leverage — `None` when the live meta does not carry
 /// the coin (a seeded position outside the tracked markets: the feed is
 /// warming). Callers pick their own bounded fallback; a fabricated default
 /// here would be a silent lie about a margin bound.
-fn max_leverage(coin: &str, meta: Option<&crate::wire::Meta>) -> Option<u32> {
+pub(crate) fn max_leverage(coin: &str, meta: Option<&crate::wire::Meta>) -> Option<u32> {
     meta.and_then(|m| m.asset(coin))
         .map(|a| a.max_leverage)
 }
@@ -1188,6 +1209,7 @@ mod tests {
                 margin_table_id: Some(50),
                 only_isolated: None,
                 is_delisted: None,
+                margin_mode: None,
             }],
             margin_tables: vec![(
                 50,

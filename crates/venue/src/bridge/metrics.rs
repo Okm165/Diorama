@@ -35,6 +35,10 @@ impl BridgeMetrics {
         self.refusals.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn inc_refusals_by(&self, n: u64) {
+        self.refusals.fetch_add(n, Ordering::Relaxed);
+    }
+
     pub fn inc_malformed(&self) {
         self.malformed.fetch_add(1, Ordering::Relaxed);
     }

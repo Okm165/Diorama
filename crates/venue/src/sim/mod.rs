@@ -537,6 +537,65 @@ impl Sim {
 
     // ---- the automaton ----------------------------------------------------
 
+    /// The addresses with Core account state (the bridge's pre-block set for
+    /// the docs' CoreWriter pre-existence rule).
+    pub(crate) fn account_addresses(&self) -> Result<std::collections::HashSet<Address>> {
+        Ok(self.state.lock()?.accounts.keys().copied().collect())
+    }
+
+    /// The delisting settlement (docs: "When an asset is delisted, all
+    /// positions are settled and open orders are cancelled ... After
+    /// settlement, no new orders will be accepted"): each delisted market's
+    /// open orders are cancelled and every position is closed at the served
+    /// oracle — the docs' settlement price is the 1 h TWAP spot oracle, a
+    /// named simplification; no fee is charged (a settlement is not a trade).
+    fn settle_delisted(&self, feed: &MarketFeed) -> Result<()> {
+        let Some(meta) = feed.meta() else {
+            return Ok(());
+        };
+        for coin in feed.markets.clone() {
+            let delisted = meta
+                .asset(&coin)
+                .and_then(|a| a.is_delisted)
+                .unwrap_or(false);
+            if !delisted {
+                continue;
+            }
+            let Some(oracle) = feed.oracle(&coin) else {
+                continue;
+            };
+            for r in self.resting_orders(None)? {
+                if r.coin == coin {
+                    self.cancel(r.account, &coin, r.oid, false)?;
+                }
+            }
+            for address in self.account_addresses()? {
+                let Some(account) = self.account(address)? else {
+                    continue;
+                };
+                let Some(position) = account.positions.get(&coin) else {
+                    continue;
+                };
+                let size = position.szi.abs();
+                if size.is_zero() {
+                    continue;
+                }
+                let facts = account::FillFacts::close(
+                    &coin,
+                    position.szi.is_sign_negative(),
+                    size,
+                    oracle,
+                    position.leverage_value.max(1),
+                );
+                self.with_account_now(address, feed, |account| {
+                    account::apply_fill(account, &facts, Some(&meta))
+                })?;
+                tracing::info!(account = %address, coin = %coin, %size, %oracle, "delisted position settled at the oracle");
+            }
+        }
+        Ok(())
+    }
+
     /// One tick of the self-advance loop: accrue funding to the sim clock and
     /// run the liquidation checks; persist when something moved. A warming
     /// market plane (no meta yet) is a no-op, not a fault storm.
@@ -551,6 +610,7 @@ impl Sim {
         }
         let now = crate::now_ms();
         self.accrue_all(feed, now)?;
+        self.settle_delisted(feed)?;
         self.run_resting(feed, now)?;
         let liquidated = self.check_all(feed, now)?;
         self.record_marks(feed)?;
@@ -1592,6 +1652,7 @@ mod tests {
                 margin_table_id: None,
                 only_isolated: None,
                 is_delisted: None,
+                margin_mode: None,
             });
         }
         m
@@ -1849,7 +1910,8 @@ mod tests {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         put_account(&sim, a, (Decimal::from(50), Decimal::from(100), Decimal::ONE, 10));
-        sim.set_leverage(a, "ETH", false, 10).unwrap();
+        sim.set_leverage(a, "ETH", account::LeverageSetting { is_cross: false, leverage: 10 }, None)
+            .unwrap();
         let acc = sim.account(a).unwrap().unwrap();
         assert_eq!(
             acc.positions.get("ETH").map(|p| p.isolated_margin),
@@ -1857,7 +1919,8 @@ mod tests {
             "the initial margin is parked on the position"
         );
         assert_eq!(acc.perp_balance, Decimal::from(40));
-        sim.set_leverage(a, "ETH", true, 10).unwrap();
+        sim.set_leverage(a, "ETH", account::LeverageSetting { is_cross: true, leverage: 10 }, None)
+            .unwrap();
         let acc = sim.account(a).unwrap().unwrap();
         assert_eq!(
             acc.positions.get("ETH").map(|p| p.isolated_margin),
