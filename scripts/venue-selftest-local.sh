@@ -118,8 +118,9 @@ addr = "127.0.0.1"
 port = 18096
 EOF
 
+WINDOWS="${WINDOWS:-5}" # the default run; a soak raises it
 if ! "$ENGINE" selftest --rpc "$RPC" --anvil-v "$V" --config "$DIR/instance.toml" \
-    --windows 5 > "$DIR/engine.log" 2>&1; then
+    --windows "$WINDOWS" > "$DIR/engine.log" 2>&1; then
   tail -30 "$DIR/engine.log"
   echo "venue-selftest-local: FAILED (engine exit)"
   exit 1
