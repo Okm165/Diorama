@@ -75,7 +75,15 @@ macro_rules! mirror_handlers {
             ::axum::extract::State(ctx): ::axum::extract::State<::std::sync::Arc<$ctx>>,
             ::axum::Json(req): ::axum::Json<$crate::admin::RewindRequest>,
         ) -> ::std::result::Result<::axum::Json<$crate::admin::RewindResponse>, $error> {
-            Ok(::axum::Json(ctx.admin().rewind_response(req.blocks).await?))
+            let out = ctx.admin().rewind_response(req.blocks).await?;
+            // The event model's one fact per state change: the rewind moved the
+            // chain and the cursor backwards together.
+            ctx.plane.facts.publish($crate::facts::Fact::RewindApplied {
+                chain: ctx.mirror.label(),
+                blocks: out.rewound_blocks,
+                cursor: out.cursor,
+            });
+            Ok(::axum::Json(out))
         }
 
         /// `/admin/shadow` — the COW hand-back: clear the named keys' marks

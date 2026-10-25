@@ -72,6 +72,13 @@ pub enum Fact {
     TopUpDelivered { delivered: usize },
     /// The faucet wrote a key and marked it devnet-owned.
     DealApplied { chain: &'static str, address: Address },
+    /// The journal rewind undid applied blocks (`/admin/rewind`): the chain
+    /// and the cursor moved backwards together.
+    RewindApplied {
+        chain: &'static str,
+        blocks: u64,
+        cursor: u64,
+    },
 }
 
 /// A fact with its bus sequence number — the SSE `id:` and the consumer's

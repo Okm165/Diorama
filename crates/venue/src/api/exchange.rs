@@ -33,6 +33,14 @@ use std::sync::Arc;
 /// (see `acting_owner`).
 pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
     let req: ExchangeBody = serde_json::from_slice(&body).map_err(|source| Error::bad_request(format!("invalid exchange request: {source}"),))?;
+    // The docs' `expiresAfter` (the exchange page): a millisecond timestamp
+    // after which the action is rejected — the venue's own string is "Action
+    // already expired" (the FAQ's 15 s protection is the client-side default).
+    // The sim's clock is the scenario's, so a scripted time jump expires
+    // actions exactly as the venue's would.
+    if let Some(reason) = expired(&req, state.sim.clock(crate::now_ms())?) {
+        return Ok(err_envelope(reason));
+    }
     // The noop action (docs): no side effects, the venue's no-data success —
     // but it still consumes its nonce, as the venue's does.
     if matches!(req.action, ExchangeAction::Noop) {
@@ -48,6 +56,14 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
         Err(response) => return Ok(*response),
     };
     Ok(dispatch(&state, owner, &body, &req))
+}
+
+/// The docs' `expiresAfter`: `Some(reason)` refuses the whole payload when
+/// the timestamp has passed ("a timestamp in milliseconds *after which* the
+/// action will be rejected" — strict, so the timestamp itself is still valid).
+fn expired(req: &ExchangeBody, now_ms: u64) -> Option<String> {
+    let expires = req.expires_after?;
+    (expires < now_ms).then(|| "Action already expired".to_string())
 }
 
 /// The docs' pre-validation pass: `Some(reason)` refuses the whole payload
@@ -606,6 +622,25 @@ mod tests {
         // An index past the meta is a named refusal.
         let oob: OrderAction = serde_json::from_str(r#"{"a":7,"b":false,"s":"1"}"#).unwrap();
         assert!(format!("{}", oob.to_order(Some(&meta)).unwrap_err()).contains("unknown asset index"));
+    }
+
+    /// The docs' `expiresAfter` (the exchange page + the FAQ's "Action already
+    /// expired"): a passed timestamp refuses the whole payload; the timestamp
+    /// itself is still valid ("after which"), and an absent field never
+    /// expires.
+    #[test]
+    fn a_stale_expires_after_is_refused() {
+        let body = Bytes::from(
+            r#"{"action":{"type":"noop"},"user":"0x00000000000000000000000000000000000000e1","expiresAfter":1000}"#,
+        );
+        let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
+        assert!(expired(&req, 1000).is_none(), "the timestamp itself is valid");
+        assert_eq!(expired(&req, 1001).as_deref(), Some("Action already expired"));
+        let body = Bytes::from(
+            r#"{"action":{"type":"noop"},"user":"0x00000000000000000000000000000000000000e1"}"#,
+        );
+        let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
+        assert!(expired(&req, u64::MAX).is_none());
     }
 
     /// The complete wire shapes parse (cloid as alloy's `B128`, the trigger

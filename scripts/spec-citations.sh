@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 # parameter, EIP-8379's method and status, and the Hyperliquid docs'
 # MAX_DECIMALS (the tick rule's constant; ours is the perp value, 6) plus the
 # info/WS endpoint names the venue table quotes (candleSnapshot, fastAssetCtxs).
-spec_vocabulary="block_access_index storage_reads MISSING_STATE engine_getSyncStatus MAX_DECIMALS HISTORY_PRUNE_EPOCHS blockAccessList ExecutionPayloadV4 newPayloadV5 getPayloadV6 forkchoiceUpdatedV4 slotNumber SLOTNUM MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS expectedBlobVersionedHashes parentBeaconBlockRoot executionRequests deneb electra BlockTag candleSnapshot fastAssetCtxs"
+spec_vocabulary="block_access_index storage_reads MISSING_STATE engine_getSyncStatus MAX_DECIMALS HISTORY_PRUNE_EPOCHS blockAccessList ExecutionPayloadV4 newPayloadV5 getPayloadV6 forkchoiceUpdatedV4 slotNumber SLOTNUM MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS expectedBlobVersionedHashes parentBeaconBlockRoot executionRequests deneb electra BlockTag candleSnapshot fastAssetCtxs eth_bigBlockGasPrice evmUserModify usingBigBlocks"
 
 tokens=$(python3 -c '
 import re
