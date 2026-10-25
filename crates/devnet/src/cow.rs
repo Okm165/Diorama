@@ -1,6 +1,10 @@
 //! COW: what a mirror keeps fresh (the scope) and the one filter that skips
 //! what the devnet already owns.
 //!
+//! The name is the OS analogy — the devnet's writes shadow the parent's the
+//! way copy-on-write pages shadow a fork's; there is no page sharing here,
+//! the mechanism is the shadow registry plus this filter.
+//!
 //! The scope is per-mirror data — the watched accounts (both mirrors) plus the
 //! declared closures (the venue's polled rung) — while the filter is one
 //! implementation over the shared currency (a BAL's changes). Account fields

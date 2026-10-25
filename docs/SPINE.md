@@ -204,6 +204,32 @@ devnet's own writes win (COW); one transaction per window (the journal's
 before-values and the cursor move together); the epoch rule on a pin change;
 parity as the measurement; every step published as one fact.
 
+### Adding a third mirror: the checklist, and the gate that fails until each step is done
+
+The interfaces above are the whole contract; the gates make the steps
+mechanical. A third kind (an OP-stack parent, a second venue) is this list, in
+order:
+
+| Step | Artifact | The gate that fails until it exists |
+|---|---|---|
+| 1 | `crates/<name>/src/source.rs` — the `Source` impl; every `Capabilities` flag declared (`resolve` audits each method at boot); a source serving native BALs owes `verify_bal_commitment` on every retrieval (the EIP's header commitment) | `spine-purity` (the crate may not name a mirror; `crates/devnet` may not name it), `no-orphans` |
+| 2 | the watch set and the declared closures | `closure-matrix` |
+| 3 | `crates/<name>/src/profile.rs` — the `Bundle` data, `Deps`, `build` | `spine-purity` |
+| 4 | `bins/<name>-engine` + the compose/Dockerfile members | `docker-members` |
+| 5 | the k8s manifests | `k8s-wiring` |
+| 6 | the registry's series + the docs' series table | `metrics-written`, `docs-metrics` |
+| 7 | the clock policy | `clock-labels` |
+| 8 | the config schema | `config-check` |
+| 9 | the fact publishes (the vocabulary is shared — nothing to add) | `facts-published` |
+| 10 | the spec rows in this file | `spec-citations` |
+| 11 | the trust surface (who may call what) | `trust-audit` |
+| 12 | small scopes as it grows | `ast-scope` |
+
+The whole-workspace gates (`lint`, `no-panics`, `design-assertions`) apply to
+every step. A simulator (step 8 of the ranking table above) is the one step
+with no gate: it must not exist unless the parent's state cannot be read at
+all — and then it owes its own cross-reference table (the venue's discipline).
+
 ## The venue sim, cross-referenced
 
 Every behavior against the sentence it implements (sources: Hyperliquid docs,
@@ -240,6 +266,7 @@ fetched 2026-10-24; the probe rows are live API measurements).
 | CoreWriter action IDs/encodings: 1/2/3/4/5/6/7/8/9/10/11/12/13/15/16/17, tif 1/2/3, 10⁸ scaling, `uint32::MAX` = spot | the CoreWriter table | implemented (`bridge::corewriter`, `SPOT_DEX = u32::MAX`) |
 | CoreWriter does not revert on Core failures | "CoreWriter does not revert on HyperCore failures" | implemented (the tx succeeds; the refusal is named in the logs) |
 | Actions are delayed a few seconds onchain | "order actions and vault transfers sent from CoreWriter are delayed onchain for a few seconds" | **simplification**: the bridge applies at the log (the delay is an anti-latency-advantage measure; our product is not racing) |
+| Vaults: legacy HyperCore vaults (2023; no HIP-3 or spot trading) vs HyperEVM-tokenized vaults (CoreWriter/precompiles; ERC-4626 as the followable spec) | "This is a strict improvement over the \"legacy\" HyperCore vaults, which were introduced in 2023 and do not support HIP-3 or spot trading." | boundary: the sim's backstop is the legacy shape (a plain account — no shares or deposits); a tokenized vault's Core activity arrives as CoreWriter actions, the lane already modeled — no new seam |
 | Rate limits: 1200 weight/min per IP; address limits (1 request per 1 USDC traded, 10 000 initial buffer, one request per 10 s when limited); open-order limits (1000 + 1 per 5M USDC volume, cap 5000; ≥1000 open refuses reduce-only and trigger orders); 100 EVM RPC requests/min | the rate-limits page | **deliberately not simulated**: a devnet that throttles its own product is hostile, and the limits are the public venue's operational property, not state semantics. The 100 req/min EVM budget *is* an operational constraint on our source reads (the follow window is sized to it) |
 | Boundary errors carry code 10055 | the HyperEVM page's error table | **not applicable**: V is a real EVM (anvil) and the bridge completes Core→EVM transfers itself; named here for the record |
 | Cancun without blobs; priority fees burned; HYPE is gas | the HyperEVM page | V pins `--hardfork cancun` (the manifest's comment names the intent); **gap**: anvil has no knob to refuse blob txs the real chain rejects (its `--help` has no blob flag). Fees are anvil's own — the product does not depend on fee semantics |
@@ -253,8 +280,15 @@ fetched 2026-10-24; the probe rows are live API measurements).
 | No-op writes land in `storage_reads`, not `storage_changes` | EIP-7928's recording semantics | implemented (the composer reads `storage_reads`; the synthesized rung emits the same shape) |
 | Ordering/uniqueness: accounts lexicographic, slots ascending, changes by index | EIP-7928 | implemented (`bal_from_writes` sorts; the parity check compares post-values) |
 | Retrieval: `eth_getBlockAccessList` + the engine API's payload-bodies V2 | EIP-7928's engine API section; reth's RPC | implemented (native rung; a block without one falls back per block) |
+| The header commits to the list: `block_access_list_hash = keccak256(rlp(BAL))` (the empty list hashes to `keccak256(rlp.encode([]))`, `0x1dcc4de8…`) | EIP-7928 (Block Structure Modification; State Transition Function: "Implementations MAY validate by … hashing it, and comparing against the `block_access_list_hash` in the header") | implemented this wave: the native rung authenticates every retrieval against the block's own commitment (`verify_bal_commitment`, alloy's `compute_block_access_list_hash` — never a local RLP writer). A mismatched list is refused (`Corrupt`), never applied; the per-block fallback stays for an *absent* list, and a pre-fork block carries no commitment to check |
+| Retention: the EL keeps lists at least `HISTORY_PRUNE_EPOCHS` (14299 epochs); `blockAccessList` is `null` for pre-Amsterdam blocks or when pruned | EIP-7928 (Engine API) | implemented in shape: an absent list — `null`, or an endpoint without the method — is the per-block fallback's case, exactly the spec's `null`; the synthesized rung carries no such window |
 | Size budget: ~90 KiB average per BAL at 60 M gas | EIP-7928's analysis | measured against our window sizes; the window framing on the venue exists for the same reason |
 | CL-driven EL sync: deliver payloads ascending; the EL may close the gap by "acquiring state directly (e.g., … EIP-7928 block access list fast-forward) and skipping execution" | **EIP-8379 "Top-up Sync"** (Draft, 2026-08-06) | implemented in substance: the top-up loop (`engine_newPayload` + `forkchoiceUpdated`) + BAL-based state application. Forward note: when reth implements `engine_getSyncStatus`/`MISSING_STATE`, the loop can read the standardized status instead of its own probes |
+| Blobs are never executed: the payload needs only `expectedBlobVersionedHashes`, derived from the beacon block's KZG commitments (`kzg_to_versioned_hash = 0x01 ‖ sha256(commitment)[1:]`); the CL persists sidecars, the EL does not (`MIN_EPOCHS_FOR_BLOB_SIDECARS_REQUESTS` ≈ 18 days) | EIP-4844 (abstract, execution-layer validation, networking) | implemented: `versioned_hashes` derives them from the beacon block (`commitment_to_versioned_hash`); sidecars left the engine's path; the supernode's 18-day DA-window pruning cannot affect the mirror |
+| The follow head's tags: `finalized` = crypto-economically secure, `safe` = honest-majority + synchronicity assumptions, `latest` = re-orgable; an unresolvable tag answers as an unknown block | the execution-apis spec, `BlockTag` | implemented 1:1 (`FollowHead`); the unresolvable case is `follow_head`'s `Ok(None)` |
+| The engine API's version↔fork pairing: `newPayloadV4` = the V3 payload + `expectedBlobVersionedHashes` + `parentBeaconBlockRoot` + `executionRequests`; V3 **MUST** reject Prague payloads (`-38005`); `forkchoiceUpdatedV3` spans Cancun *or* Prague | the execution-apis spec, Prague | implemented data-driven (requests present → V4): a config-driven choice would send a Prague payload to a method the spec requires to reject it |
+| The Beacon API's v2 blocks: the response carries a `version` enum (… `deneb`, `electra`, …) and a version-union `data`; Electra+ blocks carry the EIP-7685 requests | the beacon-APIs spec, `block.v2` | implemented: the official types (alloy's `BlockResponse`/`HeaderResponse`), and the version union is what makes the requests' presence detectable — which selects the engine method |
+| Forward — one engine bump from two EIPs: EIP-7928 adds `blockAccessList` and EIP-7843 adds `slotNumber` to the *same* `ExecutionPayloadV4`; `newPayloadV5` and `getPayloadV6` (both EIPs), `forkchoiceUpdatedV4` (7843), payload-bodies V2 retrieval (7928); EIP-7843's `SLOTNUM` opcode is `0x4b` | EIP-7928 (Engine API) + EIP-7843 (Last Call; header extension) | forward seam: `engine_api.rs`'s method names + the payload object. Then the loop can read the EL's own `slotNumber` (alloy's header accessor already exists) instead of the beacon's, and `engine_getPayloadBodiesBy*V2` becomes a second native retrieval |
 | No simulation: the parent's own effects land on a real EVM | — | by construction: anvil/revm computes; the mirror only transports and measures |
 | Hash-dependent code diverges (the A17 class): a fork cannot reproduce the parent's block hashes | — (the fork's own semantics) | documented limitation (measured: a hash-gated MEV entry flips, cascading into WETH supply and Uniswap logs — ARCHITECTURE's "Divergences are recorded, not fatal"); recorded in `drift.jsonl` and metrics, re-converged by the next block's absolute writes; the alarm that matters is `mirror_t_convergence_failures_total` |
 
@@ -276,6 +310,7 @@ fetched 2026-10-24; the probe rows are live API measurements).
 | CoreWriter's onchain delay | the CoreWriter page | documented simplification (above) |
 | Cancun-without-blobs on V | the HyperEVM page + anvil's `--help` | documented gap (no anvil knob; the manifest's comment records the intent) |
 | Funding rate computation | the funding page | deliberate: the served rate is consumed, not recomputed |
+| The native rung trusted the RPC's list | EIP-7928's header commitment (`block_access_list_hash`; the EIP's own validation note) | fixed this wave: `verify_bal_commitment` — a list the header does not commit to is refused, never applied (the EIP's empty-list vector pins the test) |
 | `engine_getSyncStatus` | EIP-8379 | forward note (the top-up loop's own probes stand) |
 
 ## Sources

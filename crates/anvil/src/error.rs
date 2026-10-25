@@ -129,7 +129,8 @@ pub enum Error {
         source: serde_json::Error,
     },
 
-    /// An answer that parsed but is not the expected shape (tracer output).
+    /// An answer that parsed but is not the expected shape: tracer output,
+    /// or a BAL the header does not commit to (EIP-7928).
     #[error("{what}: {detail}")]
     Corrupt { what: &'static str, detail: String },
 

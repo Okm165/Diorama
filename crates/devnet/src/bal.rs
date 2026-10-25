@@ -278,6 +278,29 @@ impl<'a> Composer<'a> {
     }
 }
 
+/// EIP-7928's commitment check: the header's `block_access_list_hash` is
+/// `keccak256(rlp(BAL))`, so a native retrieval is authenticated against the
+/// block's own commitment whenever the block carries one. The hash comes from
+/// alloy's own encoder (`compute_block_access_list_hash`) — never a local RLP
+/// writer. `None` is a block predating the fork: there is nothing to check,
+/// and only a *present* commitment that disagrees is refused — a mismatched
+/// list is a fault, never the per-block fallback's case (that is an absent
+/// list). Returns the refusal's description; the source wraps it in its own
+/// error vocabulary.
+pub fn verify_bal_commitment(committed: Option<B256>, bal: &BlockAccessList) -> Result<(), String> {
+    let Some(expected) = committed else {
+        return Ok(());
+    };
+    let computed = alloy_eips::eip7928::compute_block_access_list_hash(bal);
+    if computed == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "the list hashes to {computed}, the header commits to {expected}"
+        ))
+    }
+}
+
 /// Log emitters no closure covers and that are not watched accounts: a state
 /// change the declared watch model cannot follow. The audit's audible form —
 /// counted and warned by the engine, never silent.
@@ -871,6 +894,31 @@ mod tests {
             mirror_anvil::flatten_bal(&plan.bal),
             plan.writes,
             "the filtered BAL and the write set agree"
+        );
+    }
+
+    /// EIP-7928's commitment: the empty list hashes to the EIP's own constant
+    /// (`keccak256(rlp.encode([])) = 0x1dcc4de8…`), a list verifies against
+    /// its own hash, a different commitment is refused, and a pre-fork block
+    /// (no commitment) has nothing to check.
+    #[test]
+    fn bal_commitment_matches_the_eips_vector_and_refuses_a_lie() {
+        let empty: BlockAccessList = Vec::new();
+        let spec_empty: B256 =
+            "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+                .parse()
+                .unwrap();
+        assert!(verify_bal_commitment(Some(spec_empty), &empty).is_ok());
+        let bal = mirror_anvil::bal_from_writes(&[Write::Balance {
+            address: address!("00000000000000000000000000000000000000aa"),
+            value: U256::from(7),
+        }]);
+        let committed = alloy_eips::eip7928::compute_block_access_list_hash(&bal);
+        assert!(verify_bal_commitment(Some(committed), &bal).is_ok());
+        assert!(verify_bal_commitment(Some(B256::repeat_byte(0x11)), &bal).is_err());
+        assert!(
+            verify_bal_commitment(None, &bal).is_ok(),
+            "pre-fork: no commitment, nothing to check"
         );
     }
 }

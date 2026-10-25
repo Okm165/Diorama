@@ -83,7 +83,29 @@ impl Source for RethSource {
         &self,
         n: u64,
     ) -> BoxFuture<'_, mirror_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
-        Box::pin(self.reth.block_access_list(n))
+        Box::pin(async move {
+            // TRUST: the native list is the parent's own record. The guard:
+            // EIP-7928's commitment — the header's `block_access_list_hash`
+            // must equal keccak256(rlp(BAL)) (`verify_bal_commitment`), so a
+            // list the header does not commit to is refused, never applied.
+            //
+            // EIP-7928: the header commits to the list
+            // (`block_access_list_hash = keccak256(rlp(BAL))`), so the native
+            // retrieval is authenticated against the block's own commitment
+            // whenever the block carries one. An *absent* list (null, or an
+            // endpoint without the method) is the per-block fallback's case; a
+            // *mismatched* one is refused — never applied.
+            let Some(bal) = self.reth.block_access_list(n).await? else {
+                return Ok(None);
+            };
+            let header = self.header(n).await?;
+            mirror_devnet::bal::verify_bal_commitment(header.inner.block_access_list_hash, &bal)
+                .map_err(|detail| mirror_anvil::Error::Corrupt {
+                    what: "block access list",
+                    detail: format!("block {n}: {detail}"),
+                })?;
+            Ok(Some(bal))
+        })
     }
 
     /// The trace rung: the prestateTracer diff per block, as values (the
