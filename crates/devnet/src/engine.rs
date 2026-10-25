@@ -204,6 +204,32 @@ macro_rules! shell_fault_conversion {
     };
 }
 
+/// The selftest's scratch targets: the source RPC and the devnet chain's
+/// anvil endpoint (the CLI flags stay per-engine — `--anvil-t`/`--anvil-v` —
+/// and map into this one struct).
+pub struct ScratchTargets {
+    pub rpc: String,
+    pub anvil: String,
+}
+
+/// The selftest banner both mirrors print: the identity line, the endpoints,
+/// the pin, then the profile's own unit line. One shape, so the two runs read
+/// alike.
+pub fn selftest_banner(name: &str, rpc: &str, anvil: &str, pin: u64, unit: &str) {
+    println!("== {name} ==");
+    println!("rpc:      {rpc}");
+    println!("anvil:    {anvil}");
+    println!("pin:      {pin}");
+    println!("{unit}");
+    println!();
+}
+
+/// The selftest verdict line (the exit code is [`mirror_config::boot::
+/// exit_verdict`]'s; this is the human line, one spelling).
+pub fn selftest_verdict(ok: bool) {
+    println!("== selftest {} ==", if ok { "PASSED" } else { "FAILED" });
+}
+
 /// The boot prefix both engines share: wait for the chain, assert its
 /// identity and take block production, then audit the follow source's declared
 /// capabilities against the live endpoint (a declaration that disagrees is

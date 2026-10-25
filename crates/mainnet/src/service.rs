@@ -78,7 +78,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             blocks,
             timeout_secs,
         } => {
-            let targets = selftest::Targets { rpc, anvil_t };
+            let targets = selftest::Targets { rpc, anvil: anvil_t };
             selftest_cmd(config, targets, blocks, timeout_secs).await
         }
         Cmd::Rewind { config, blocks } => rewind_cmd(config, blocks).await,

@@ -13,11 +13,9 @@ use mirror_config::Instance;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The selftest's scratch targets: the source RPC and the anvil endpoint.
-pub struct Targets {
-    pub rpc: String,
-    pub anvil_v: String,
-}
+/// The selftest's scratch targets: the spine's one `ScratchTargets` (the
+/// mainnet selftest reads the same struct).
+pub use mirror_devnet::engine::ScratchTargets as Targets;
 
 /// The wait bound for one window's source movement: the public chain produces
 /// a block about every second, so the bound only fires on a stalled source
@@ -25,8 +23,8 @@ pub struct Targets {
 const MOVE_WAIT: Duration = Duration::from_secs(120);
 
 pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<bool> {
-    let Targets { rpc, anvil_v } = targets;
-    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_v)?);
+    let Targets { rpc, anvil } = targets;
+    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil)?);
 
     // The engine's own boot: the chain assert, the capability audit, the
     // reconcile (which anchors the cursor and the follow at V's pin), and the
@@ -34,12 +32,15 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<bool> 
     crate::driver::boot(&ctx).await?;
     let pin = mirror_devnet::pin::fork_pin(&ctx.anvil_v, "anvil-v").await?;
 
-    println!("== venue engine selftest ==");
-    println!("rpc:      {rpc}");
-    println!("anvil-v:  {anvil_v}");
-    println!("pin:      {pin}");
-    println!("windows:  {windows} at least; the run continues, bounded, until a window composes a change");
-    println!();
+    mirror_devnet::engine::selftest_banner(
+        "venue engine selftest",
+        &rpc,
+        &anvil,
+        pin,
+        &format!(
+            "windows:  {windows} at least; the run continues, bounded, until a window composes a change"
+        ),
+    );
 
     let (done, writes, ok) = windows_loop(&ctx, windows).await?;
     println!();
@@ -49,7 +50,7 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<bool> 
         all_ok = false;
     }
     println!("   windows={done} composed_keys={writes}");
-    println!("== selftest {} ==", if all_ok { "PASSED" } else { "FAILED" });
+    mirror_devnet::engine::selftest_verdict(all_ok);
     Ok(all_ok)
 }
 

@@ -78,6 +78,10 @@ mod tests {
         let admin = mirror_devnet::metrics::Metrics::default();
         let bridge = crate::feed::FeedBridgeMetrics::default();
         let mut names = series(&profile.render());
+        assert!(
+            names.contains("mirror_lag_blocks"),
+            "the computed series renders: {names:?}"
+        );
         for other in [series(&admin.render()), series(&bridge.render())] {
             let dupes: Vec<String> = names.intersection(&other).cloned().collect();
             assert!(dupes.is_empty(), "duplicate series: {dupes:?}");

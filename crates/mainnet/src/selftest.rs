@@ -7,15 +7,13 @@ use crate::error::{Error, Result};
 use mirror_config::Instance;
 use std::sync::Arc;
 
-/// The selftest's scratch targets: the source RPC and the anvil endpoint.
-pub struct Targets {
-    pub rpc: String,
-    pub anvil_t: String,
-}
+/// The selftest's scratch targets: the spine's one `ScratchTargets` (the
+/// venue selftest reads the same struct).
+pub use mirror_devnet::engine::ScratchTargets as Targets;
 
 pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
-    let Targets { rpc, anvil_t } = targets;
-    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil_t)?);
+    let Targets { rpc, anvil } = targets;
+    let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil)?);
 
     // Wait for the scratch anvil (same pod, it starts in parallel).
     let boot = std::time::Duration::from_secs(120);
@@ -25,12 +23,13 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
     // The pin comes from the scratch anvil itself (forkConfig.forkBlockNumber).
     let pin = mirror_devnet::pin::fork_pin(&ctx.anvil_t, "anvil-t").await?;
 
-    println!("== mirror engine selftest ==");
-    println!("rpc:      {rpc}");
-    println!("anvil-t:  {anvil_t}");
-    println!("pin:      {pin}");
-    println!("blocks:   {blocks}");
-    println!();
+    mirror_devnet::engine::selftest_banner(
+        "mirror engine selftest",
+        &rpc,
+        &anvil,
+        pin,
+        &format!("blocks:   {blocks}"),
+    );
 
     let mut all_ok = true;
     for n in (pin + 1)..=(pin + blocks) {
@@ -41,7 +40,7 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
         println!();
     }
 
-    println!("== selftest {} ==", if all_ok { "PASSED" } else { "FAILED" });
+    mirror_devnet::engine::selftest_verdict(all_ok);
     Ok(all_ok)
 }
 

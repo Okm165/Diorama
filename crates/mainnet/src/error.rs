@@ -200,4 +200,23 @@ mod size_guard {
         assert!(e.to_string().contains("is not the mainnet chain"), "{e}");
     }
 
+    /// The anvil ABI boundary's conversion: a contract answer that does not
+    /// decode becomes the feed bridge's own named fault, never a generic
+    /// transport error (the venue has no bridge, so this aspect is one-sided
+    /// by design — its own `Io`/API faults are pinned in its `error.rs`).
+    #[test]
+    fn an_abi_fault_becomes_the_feed_bridges_own() {
+        let abi =
+            <alloy_sol_types::sol_data::Bool as alloy_sol_types::SolType>::abi_decode(&[2u8])
+                .expect_err("2 is not a bool");
+        let e: Error = mirror_anvil::Error::Abi {
+            what: "decimals",
+            source: abi,
+        }
+        .into();
+        assert!(
+            matches!(e, Error::FeedBridgeAbi { what: "decimals", .. }),
+            "{e}"
+        );
+    }
 }

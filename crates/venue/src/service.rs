@@ -220,7 +220,15 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             anvil_v,
             config,
             windows,
-        } => selftest_cmd(config, crate::selftest::Targets { rpc, anvil_v }, windows).await,
+        } => selftest_cmd(
+                config,
+                crate::selftest::Targets {
+                    rpc,
+                    anvil: anvil_v,
+                },
+                windows,
+            )
+            .await,
     }
 }
 
