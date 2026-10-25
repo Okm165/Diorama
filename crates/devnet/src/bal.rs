@@ -897,6 +897,40 @@ mod tests {
         );
     }
 
+    /// Measured (anvil 1.8.6, `--hardfork amsterdam`, 2026-10-24): a real
+    /// producer's list, decoded by alloy and re-hashed by alloy's own encoder,
+    /// reproduces the header's commitment — the retrieval's authentication is
+    /// interop-proven, not only self-consistent. Two shapes: a value transfer
+    /// (balance + nonce changes) and a contract deploy (a code change). The
+    /// fixtures are the RPC's own `result` arrays; the commitments are the
+    /// blocks' `blockAccessListHash`.
+    #[test]
+    fn anvil_amsterdam_commitments_verify_against_alloy() {
+        const TRANSFER: &str = r#"[{"address":"0x0000000000000000000000000000000000000000","storageChanges":[],"storageReads":[],"balanceChanges":[{"index":"0x1","value":"0x1319718a5000"}],"nonceChanges":[],"codeChanges":[]},{"address":"0x00000961ef480eb55e80d19ad83579a64c007002","storageChanges":[],"storageReads":["0x0","0x1","0x2","0x3"],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x000064d678505ad48f8ccb093bc65613800e8282","storageChanges":[],"storageReads":[],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x0000bbddc7ce488642fb579f8b00f3a590007251","storageChanges":[],"storageReads":["0x0","0x1","0x2","0x3"],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x0000bff46984e3725691fa540a8c7589300d8282","storageChanges":[],"storageReads":[],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x0000f90827f1c53a10cb7a02335b175320002935","storageChanges":[{"key":"0x0","changes":[{"index":"0x0","value":"0x1bfa47c5e746c6bd3f4005d9a37cdf9232725e4af2d4c2d973029ce3ba09b5e5"}]}],"storageReads":[],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x000f3df6d732807ef1319fb7b8bb8522d0beac02","storageChanges":[{"key":"0x408","changes":[{"index":"0x0","value":"0x6add4d03"}]}],"storageReads":["0x2407"],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x70997970c51812dc3a010c7d01b50e0d17dc79c8","storageChanges":[],"storageReads":[],"balanceChanges":[{"index":"0x1","value":"0x21e19e0c9bab2400005"}],"nonceChanges":[],"codeChanges":[]},{"address":"0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266","storageChanges":[],"storageReads":[],"balanceChanges":[{"index":"0x1","value":"0x21e19e0a387cf2b5ffb"}],"nonceChanges":[{"index":"0x1","value":"0x1"}],"codeChanges":[]}]"#;
+        const DEPLOY: &str = r#"[{"address":"0x0000000000000000000000000000000000000000","storageChanges":[],"storageReads":[],"balanceChanges":[{"index":"0x1","value":"0x455d0fd6a400"}],"nonceChanges":[],"codeChanges":[]},{"address":"0x00000961ef480eb55e80d19ad83579a64c007002","storageChanges":[],"storageReads":["0x0","0x1","0x2","0x3"],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x000064d678505ad48f8ccb093bc65613800e8282","storageChanges":[],"storageReads":[],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x0000bbddc7ce488642fb579f8b00f3a590007251","storageChanges":[],"storageReads":["0x0","0x1","0x2","0x3"],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x0000bff46984e3725691fa540a8c7589300d8282","storageChanges":[],"storageReads":[],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x0000f90827f1c53a10cb7a02335b175320002935","storageChanges":[{"key":"0x1","changes":[{"index":"0x0","value":"0x4fff463a43781880e517f2af6eaa614377c5eff414e297e3af18fa554c6aec59"}]}],"storageReads":[],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0x000f3df6d732807ef1319fb7b8bb8522d0beac02","storageChanges":[],"storageReads":["0x408","0x2407"],"balanceChanges":[],"nonceChanges":[],"codeChanges":[]},{"address":"0xe7f1725e7734ce288f8367e1bb143e90bb3f0512","storageChanges":[],"storageReads":[],"balanceChanges":[],"nonceChanges":[{"index":"0x1","value":"0x1"}],"codeChanges":[{"index":"0x1","code":"0x60016000550000000000"}]},{"address":"0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266","storageChanges":[],"storageReads":[],"balanceChanges":[{"index":"0x1","value":"0x21e19e04546c5e41e4b"}],"nonceChanges":[{"index":"0x1","value":"0x2"}],"codeChanges":[]}]"#;
+        for (bal_json, committed) in [
+            (
+                TRANSFER,
+                "0x4bff2c9bf38eca6b2aa7d601d50eb7a9d1ddd9af202f9bdd737a88b599f94055",
+            ),
+            (
+                DEPLOY,
+                "0x676bc45a7caca21806d76384214456311c92e8450228d23839c2e834eb28be0f",
+            ),
+        ] {
+            let bal: BlockAccessList = serde_json::from_str(bal_json).unwrap();
+            let expected: B256 = committed.parse().unwrap();
+            assert!(
+                verify_bal_commitment(Some(expected), &bal).is_ok(),
+                "alloy's encoder must reproduce the producer's commitment"
+            );
+            assert!(
+                verify_bal_commitment(Some(B256::repeat_byte(0x11)), &bal).is_err(),
+                "a different commitment is refused"
+            );
+        }
+    }
+
     /// EIP-7928's commitment: the empty list hashes to the EIP's own constant
     /// (`keccak256(rlp.encode([])) = 0x1dcc4de8…`), a list verifies against
     /// its own hash, a different commitment is refused, and a pre-fork block

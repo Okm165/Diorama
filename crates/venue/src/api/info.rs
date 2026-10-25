@@ -476,6 +476,24 @@ fn order_parts<'a>(
             builder.b, builder.f
         ));
     }
+    // The grouping's association semantics are not modeled: a `normalTpsl`
+    // parent's children are placed only when it fully fills (or is
+    // margin-canceled — the docs' exception), and `positionTpsl` orders
+    // resize with the position. Placing them as plain orders would diverge
+    // silently, so they are refused by name (the portfolio-margin
+    // precedent); plain trigger orders cover the product's need.
+    if let Some(Grouping::NormalTpsl | Grouping::PositionTpsl) = *grouping {
+        return Err(format!(
+            "venue-sim: the `{}` grouping is not modeled (the parent/child TP/SL \
+             lifecycle); send the TP/SL as plain trigger orders (grouping \"na\"). See \
+             docs/INTEGRATION.md.",
+            if matches!(*grouping, Some(Grouping::NormalTpsl)) {
+                "normalTpsl"
+            } else {
+                "positionTpsl"
+            }
+        ));
+    }
     Ok((orders, *grouping))
 }
 
@@ -1614,6 +1632,20 @@ mod tests {
         let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
         let err = order_parts(&body, &req.action).unwrap_err();
         assert!(err.contains("builder fees"), "{err}");
+        // The TP/SL groupings are refused by name (the parent/child
+        // lifecycle and the position-linked resizing are not modeled);
+        // `"na"` is the plain path.
+        let body = Bytes::from(
+            r#"{"action":{"type":"order","orders":[],"grouping":"normalTpsl"},"user":"0x00000000000000000000000000000000000000e1"}"#,
+        );
+        let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
+        let err = order_parts(&body, &req.action).unwrap_err();
+        assert!(err.contains("normalTpsl"), "{err}");
+        let body = Bytes::from(
+            r#"{"action":{"type":"order","orders":[],"grouping":"na"},"user":"0x00000000000000000000000000000000000000e1"}"#,
+        );
+        let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
+        assert!(order_parts(&body, &req.action).is_ok(), "\"na\" is the plain path");
         // A trigger order maps into its typed shape (armed, not walked).
         let action: OrderAction = serde_json::from_str(
             r#"{"a":0,"b":true,"s":"1","t":{"trigger":{"isMarket":true,"triggerPx":"100","tpsl":"sl"}}}"#,

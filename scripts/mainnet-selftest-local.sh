@@ -4,9 +4,14 @@
 #
 # A local source anvil stands in for the parent chain: it serves the same
 # envelopes and the prestateTracer (anvil's *block*-level trace answers an
-# empty list, so the rung's per-tx fallback runs — the measured path). T forks
-# it at a pin, and the engine's selftest applies the blocks above the pin,
-# checking the sampled storage parity per block.
+# empty list, so the trace rung's per-tx fallback runs — the measured path).
+# The source runs `--hardfork amsterdam`, so its blocks carry real block
+# access lists with header commitments: the composer's native rung answers
+# every block and `verify_bal_commitment` authenticates each retrieval
+# against the header — the path the fixture test pins, here end to end (the
+# script asserts the rung actually answered). T forks it at a pin, and the
+# engine's selftest applies the blocks above the pin, checking the sampled
+# storage parity per block.
 #
 # Requires: anvil (ANVIL=/path/to/anvil), the engine binary built
 # (`make mainnet-build`), python3, curl. Ports: 8588/8589 (override below).
@@ -39,7 +44,7 @@ rpc() { curl -s -X POST -H 'content-type: application/json' --data "{\"jsonrpc\"
 send() { rpc "$SRC" eth_sendTransaction "[{\"from\":\"$1\",\"to\":\"$2\",\"value\":\"$3\"}]" | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])'; }
 block_of() { rpc "$SRC" eth_getTransactionReceipt "[\"$1\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"]["blockNumber"],16))'; }
 
-"$ANVIL" --port "$SRC_PORT" --chain-id 1 --block-time 1 --silent > "$DIR/source.log" 2>&1 &
+"$ANVIL" --port "$SRC_PORT" --chain-id 1 --block-time 1 --silent --hardfork amsterdam > "$DIR/source.log" 2>&1 &
 SRC_PID=$!
 sleep 1.5
 
@@ -113,4 +118,18 @@ addr = "127.0.0.1"
 port = 18084
 EOF
 
-"$ENGINE" selftest --rpc "$SRC" --anvil-t "$T" --config "$DIR/instance.toml" --blocks "$NBLOCKS" --timeout-secs 300
+if ! "$ENGINE" selftest --rpc "$SRC" --anvil-t "$T" --config "$DIR/instance.toml" \
+    --blocks "$NBLOCKS" --timeout-secs 300 > "$DIR/engine.log" 2>&1; then
+  tail -30 "$DIR/engine.log"
+  echo "mainnet-selftest-local: FAILED (engine exit)"
+  exit 1
+fi
+# The native rung must have answered: the source's Amsterdam blocks carry
+# commitments, so every applied block's compose source is `bal` — the
+# authentication ran in anger, not only in the fixture test.
+if ! grep -q "source=bal" "$DIR/engine.log"; then
+  echo "mainnet-selftest-local: FAILED (the native rung did not answer; engine log:)"
+  tail -30 "$DIR/engine.log"
+  exit 1
+fi
+tail -3 "$DIR/engine.log"

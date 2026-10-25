@@ -440,6 +440,10 @@ impl Sim {
             cloid: None,
             trigger: None,
         };
+        // The venue's self-trade rule reaches this close too: the account's
+        // own crossed resting orders are expired, not matched (the same
+        // docs sentence; the close is a market order to the book).
+        self.expire_self_crossing(address, feed, &req)?;
         let resting = self.resting_orders(None)?;
         let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), &req, &resting)?;
         let leverage = self.leverage_for(address, coin, meta.as_ref())?;
@@ -1844,6 +1848,75 @@ mod tests {
         assert_eq!(
             st.terminal.get(&oid).map(|t| t.status),
             Some(TerminalStatus::MarginCanceled)
+        );
+    }
+
+    /// The docs' self-trade rule: "Trades between the same address cancel
+    /// the resting order instead of causing a fill. No fees are deducted,
+    /// nor does the the cancel show up in the trade feed." The taker's own
+    /// crossed order is expired and the walk continues against the
+    /// liquidity behind it.
+    #[test]
+    fn a_self_crossing_resting_order_expires_and_the_walk_continues() {
+        // The user's own bid at 100 sits above the served bid at 98.
+        let feed = feed_with_book(
+            book("ETH", &[("98", "5")], &[("101", "2")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let mut rest = ioc(true, "1");
+        rest.tif = Tif::Gtc;
+        rest.limit_px = Some("100".parse().unwrap());
+        let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
+        // The same address sells through its own bid: expired, not filled;
+        // the served bid behind it takes the fill.
+        let sell = ioc(false, "1");
+        let fill = sim
+            .place(&feed, a, &sell)
+            .unwrap()
+            .fill
+            .expect("the served bid fills");
+        assert_eq!(fill.total_sz, "1".parse().unwrap());
+        assert_eq!(fill.avg_px, "98".parse().unwrap(), "behind the expired order");
+        assert!(
+            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            "the user's own order is off the book"
+        );
+        // Expired, not filled: the terminal history says canceled.
+        let st = sim.state.lock().unwrap();
+        assert_eq!(
+            st.terminal.get(&oid).map(|t| t.status),
+            Some(TerminalStatus::Canceled)
+        );
+    }
+
+    /// The same docs sentence reaches the liquidation's close: the account's
+    /// own crossed resting orders are expired, not matched.
+    #[test]
+    fn a_liquidation_expires_the_accounts_own_crossing_order() {
+        // The account's own bid at 100 sits above the served bid at 98.
+        let feed = feed_with_book(
+            book("ETH", &[("98", "5")], &[("101", "2")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        // A long position (the served ask), then a resting bid of its own.
+        let mut open = ioc(true, "1");
+        open.limit_px = Some("101".parse().unwrap());
+        sim.place(&feed, a, &open).unwrap();
+        let mut rest = ioc(true, "1");
+        rest.tif = Tif::Gtc;
+        rest.limit_px = Some("100".parse().unwrap());
+        let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
+        // The close: the account's own bid must be expired; the served bid
+        // behind it takes the fill.
+        let fill = sim
+            .liquidate_position(&feed, a, "ETH", "1".parse().unwrap())
+            .unwrap();
+        assert_eq!(fill.avg_px, "98".parse().unwrap(), "behind the expired order");
+        assert!(
+            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            "the account's own order is off the book"
         );
     }
 
