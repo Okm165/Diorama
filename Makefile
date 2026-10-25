@@ -289,6 +289,9 @@ mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no
 mainnet-selftest-local: mainnet-build ## Native local selftest (two anvils; no reth/public RPC/cluster)
 	./scripts/mainnet-selftest-local.sh
 
+mainnet-engine-local: mainnet-build ## Native local proof of the engine UX (mirror/modify/mint/measure; two anvils)
+	./scripts/mainnet-engine-local.sh
+
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
 	@for c in reth lighthouse anvil-t engine; do \
 	  printf "== %s\n" "$$c"; \

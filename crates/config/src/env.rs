@@ -2,9 +2,9 @@
 use crate::ConfigError;
 
 /// Expand `${VAR}` references in every string value. Returns the names that
-/// could not be resolved; the raw reference is kept in place (the service
-/// entry [`crate::Instance::load`] turns them into a boot error; the tooling
-/// entry reports them).
+/// could not be resolved; the raw reference is kept in place (each service's
+/// entry requires its own, by name — [`require_resolved_logged`] — and the
+/// loader reports the full list).
 pub(crate) fn expand(value: &mut toml::Value, vars: &[(String, String)]) -> Vec<String> {
     let mut unresolved = Vec::new();
     expand_in(value, vars, &mut unresolved);
@@ -85,9 +85,9 @@ fn resolve(
 /// any of them (the loader keeps an unresolvable `${VAR}` verbatim) is a
 /// named refusal, never a literal used as an endpoint or a path.
 ///
-/// `Instance::inspect` + this is the per-section counterpart of
-/// `Instance::load`: the venue engine, the simulator and the CCTP bridge all
-/// boot from the same instance file with only their own wiring present.
+/// `Instance::inspect` + this is the boot contract: every service boots from
+/// the same instance file with only its own wiring present (both engines, the
+/// simulator and the CCTP bridge).
 pub fn require_resolved(what: &'static str, values: &[&str]) -> Result<(), ConfigError> {
     // The same scanner the loader uses, with an empty environment: every
     // `${VAR}` it meets is by definition unresolved. `${}` stays literal.

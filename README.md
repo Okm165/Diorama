@@ -64,6 +64,29 @@ layered config) and never each other. Detail:
 | venue plane | — | `venue-sim` (market + account planes, an `hl_mock` superset) |
 | admin | deal / shadow / epoch / rewind / probes / pause / resume / time / feed* | deal / shadow / epoch / rewind / probes / pause / resume |
 | namespace | `mainnet-mirror` | `venue-mirror` |
+
+**One UX, two parents.** Both mirrors do the same four things — so strategies
+and financial workflows can be workshopped against live market data whose
+impact is measured 1:1:
+
+1. **Follow the parent 1:1** — T applies real EIP-7928 BALs per block; V
+   follows the venue's public API in poll windows (the same composer, the same
+   COW filter, the same journal).
+2. **Accept your writes** — a key your dapp writes is *devnet-owned* forever
+   (copy-on-write): parent diffs never clobber it, and a hand-back
+   (`/admin/shadow`) re-syncs it from the source on demand.
+3. **Mint liquidity** — `/admin/deal` discovers any ERC-20's balance slot and
+   writes it silently; the venue's simulator adds account-level deals, funding
+   and liquidations on the same chain.
+4. **Measure the divergence** — probes (T vs reth at the applied parent; V vs
+   the source at the pin), sampled storage parity, the drift log (T) and the
+   uncovered-emitter audit (V) turn "did my write behave like the real market
+   would?" into counters and facts.
+
+Both proofs run locally against the real engine binaries: `make
+mainnet-engine-local` (two anvils; the mainnet side) and `make
+venue-follow-local` (anvil + the venue engine).
+
 ## Quickstart
 
 ```bash
@@ -82,8 +105,10 @@ python3 scripts/daloc-sim.py --lane all      # the daloc use-case arc (44 checks
                                              # script's constants at your endpoints first)
 ```
 
-The local, no-cluster shape (Anvil V + the two binaries) is in
-[docs/TESTING.md](docs/TESTING.md) → "Venue smoke".
+The local, no-cluster shapes — `make venue-follow-local` (Anvil V + the venue
+engine) and `make mainnet-engine-local` (two anvils + the mainnet engine, the
+shared UX end to end) — are in [docs/TESTING.md](docs/TESTING.md) → the layer
+table.
 
 The bootstrap is ordered on purpose: the reth snapshot lands in the PVC first,
 then reth starts, Lighthouse checkpoint-syncs to the CL head, and the anvil

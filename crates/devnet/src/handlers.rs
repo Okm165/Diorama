@@ -90,12 +90,18 @@ async fn admin_deal<E: Engine>(
 ) -> crate::Result<Json<DealOutcome>, E::Error> {
     let outcome = ctx.admin().deal(&req).await?;
     // The event model's one fact per state change: the faucet's write is
-    // visible to `/events` consumers. The sim service has no bus (it is
-    // plane-less by design), so the engine's door is the fact's home.
-    ctx.plane().facts.publish(Fact::DealApplied {
-        chain: ctx.label(),
-        address: req.to,
-    });
+    // visible to `/events` consumers. A no-slot verdict writes nothing, so it
+    // publishes nothing — the fact would otherwise claim a write that never
+    // happened (found by the local engine proof: a token without the standard
+    // layout answered `ok: false` and still emitted `deal_applied`). The sim
+    // service has no bus (it is plane-less by design), so the engine's door is
+    // the fact's home.
+    if outcome.ok {
+        ctx.plane().facts.publish(Fact::DealApplied {
+            chain: ctx.label(),
+            address: req.to,
+        });
+    }
     Ok(Json(outcome))
 }
 

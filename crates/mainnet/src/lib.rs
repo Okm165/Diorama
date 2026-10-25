@@ -16,6 +16,7 @@ mod feed_bridge;
 mod http;
 mod metrics;
 mod profile;
+mod reset;
 mod selftest;
 mod service;
 mod source;

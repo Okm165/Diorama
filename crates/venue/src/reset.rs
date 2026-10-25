@@ -9,9 +9,10 @@
 //! other trace. One storage read per pass; one write per reconcile.
 //!
 //! The detector is the venue's implementation of the spine's
-//! [`ResetDetector`]: the mainnet mirror's is `CursorHash` (in the spine),
-//! this one is the pin canary — the divergence is declared in
-//! `crates/venue/src/profile.rs` and this module holds its mechanics.
+//! [`ResetDetector`]: the mainnet mirror's is `CursorHash` (in
+//! `crates/mainnet/src/reset.rs`), this one is the pin canary — the
+//! divergence is declared in `crates/venue/src/profile.rs` and this module
+//! holds its mechanics.
 use alloy_primitives::{Address, B256, U256};
 use mirror_anvil::Rpc;
 use mirror_devnet::shared::Shared;

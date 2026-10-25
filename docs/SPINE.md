@@ -170,10 +170,12 @@ Profile components, each in its own folder and never importing the other
 |---|---|---|
 | `mainnet::profile` | the bundle: reth source, `CursorHash`, the policies, the watch scope | grow a second source |
 | `mainnet::ctx` | the context assembly + `impl Engine` (T's chain, the source URL, the parent-before-values journal, the status document, the counters) | re-implement the shell (the trait provides it) |
+| `mainnet::reset` | the cursor-hash detector (the cursor's block must carry its recorded hash; below the fork base = stale by position) | know the pin semantics (the venue's canary is its counterpart) |
 | `mainnet::feed_bridge` | the beacon/engine wiring (checkpoint sync, the top-up loop) | touch the applier |
 | `mainnet::engine_api` | the JWT-authenticated engine transport, `parse_response` | share a type with the venue |
 | `venue::profile` | the bundle: the HL sources, `PinCanary`, the policies | read the sim directly (the feed does) |
 | `venue::ctx` | the context assembly + `impl Engine` (V's chain, the source URL, the own-writes journal, the pin fields, the status document, the counters) | re-implement the shell (the trait provides it) |
+| `venue::reset` | the pin canary (the recorded instance's storage word reads back its pin; the word stores `pin + 1` so a genesis pin is witnessable) | know the cursor-hash semantics |
 | `venue::bridge` | the CoreWriter action table, the system-tx completions, the Core↔EVM boundary | interpret an action's economics (the sim does) |
 | `venue::feed` | WS-first market data (ADR-0006), REST backfill, the served book | decide margin |
 | `venue::sim` | the closed-source semantics: accounts, orders, the waterfall, funding, the served wire | exist behind a shared trait (only one mirror has this) |

@@ -16,10 +16,8 @@
 //! and scope. COW ([`crate::cow`]) and everything after are shared.
 use crate::cow::Scope;
 use crate::error::Result;
-use crate::shared::Shared;
 use crate::source::Source;
 use futures_util::future::BoxFuture;
-use crate::state::StateFile;
 use mirror_anvil::Rpc;
 use std::sync::Arc;
 
@@ -117,64 +115,13 @@ pub enum ResetSignal {
 
 /// How a chain reset is detected. The detector is self-sufficient: it holds
 /// the state whose expectation it validates (the cursor or the recorded
-/// instance), reads the chain, and answers with the witness.
-///
-/// `CursorHash` (the mainnet mirror): the cursor's block must carry its
-/// recorded hash, and a cursor below the fork base is stale by position (the
-/// base proves it — the hash read would forward a pre-pin request to the fork
-/// source). `PinCanary` (the venue mirror, in its folder): the recorded
-/// instance's storage word must read back its pin.
+/// instance), reads the chain, and answers with the witness. Each mirror's
+/// detector lives in its own folder — `crates/mainnet/src/reset.rs` (the
+/// cursor hash; a cursor below the fork base is stale by position) and
+/// `crates/venue/src/reset.rs` (the pin canary: the recorded instance's
+/// storage word must read back its pin).
 pub trait ResetDetector: Send + Sync {
     fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, Result<ResetSignal>>;
-}
-
-/// The cursor-hash detector: the cursor's block must carry its recorded hash,
-/// and a cursor below the chain's fork base is stale by position.
-pub struct CursorHash {
-    /// The cursor state (the plane's state file) the check reads.
-    pub state: Shared<StateFile>,
-}
-
-impl CursorHash {
-    pub fn new(state: Shared<StateFile>) -> Self {
-        Self { state }
-    }
-}
-
-/// Is the cursor below the chain's fork base? A re-pin moves the base past the
-/// cursor, so the cursor points at blocks the current chain never carried —
-/// a stale derivation by position, no read needed. `cursor == base` is the
-/// legitimate rest state right after a rebase and must not fire.
-pub fn below_fork_base(cursor_block: u64, base: Option<u64>) -> bool {
-    base.is_some_and(|base| cursor_block < base)
-}
-
-impl ResetDetector for CursorHash {
-    fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, Result<ResetSignal>> {
-        Box::pin(async move {
-            // No cursor: nothing to invalidate (the fresh-chain path).
-            let Some(cursor) = self.state.cursor()? else {
-                return Ok(ResetSignal::Steady);
-            };
-            let base = target.fork_block().await?;
-            if below_fork_base(cursor.block, base) {
-                return Ok(ResetSignal::BaseMoved {
-                    base,
-                    cursor: cursor.block,
-                });
-            }
-            let found = crate::scan::block_hash(target, cursor.block).await?;
-            Ok(if found == Some(cursor.hash) {
-                ResetSignal::Steady
-            } else {
-                ResetSignal::HashMismatch {
-                    block: cursor.block,
-                    expected: cursor.hash,
-                    found,
-                }
-            })
-        })
-    }
 }
 
 /// The clock rule.
@@ -225,21 +172,4 @@ pub struct Policies {
     pub gap: Option<u64>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::below_fork_base;
 
-    /// The cursor-below-base rule: a re-pin moves the base past the cursor,
-    /// which makes the cursor a stale derivation by position — no hash read
-    /// (the read would forward a pre-pin request to the fork source, where the
-    /// public RPCs time out; measured: a re-pin while the engine ran left the
-    /// rebase unfired). `cursor == base` is the rest state right after a
-    /// rebase and must not fire.
-    #[test]
-    fn below_fork_base_is_strict() {
-        assert!(below_fork_base(99, Some(100)), "a re-pin moved the base past the cursor");
-        assert!(!below_fork_base(100, Some(100)), "cursor at the base: the rest state");
-        assert!(!below_fork_base(101, Some(100)), "cursor above the base");
-        assert!(!below_fork_base(99, None), "a real chain has no base");
-    }
-}

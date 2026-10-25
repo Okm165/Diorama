@@ -23,8 +23,9 @@ use mirror_config::EngineSection;
 use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
+use crate::reset::CursorHash;
 use mirror_devnet::spine::{
-    Bundle, ClockPolicy, CursorHash, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
+    Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
 use mirror_devnet::state::StateFile;
 use std::collections::HashSet;

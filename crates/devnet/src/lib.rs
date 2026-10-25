@@ -77,7 +77,6 @@ mod design_assertions {
         is_normal::<crate::cow::FilterStats>();
         is_normal::<crate::engine::SharedStatus>();
         is_normal::<crate::spine::ResetSignal>();
-        is_normal::<crate::spine::CursorHash>();
         is_normal::<crate::spine::ClockPolicy>();
         is_normal::<crate::spine::MinePolicy>();
         is_normal::<crate::spine::ProbeSchedule>();

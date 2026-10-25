@@ -77,7 +77,10 @@ async fn selftest_cmd(
     blocks: u64,
     timeout_secs: u64,
 ) -> Result<()> {
-    let mut cfg = Instance::load(&config)?;
+    let (mut cfg, unresolved) = Instance::inspect(&config)?;
+    // The scratch run's endpoints come from the CLI: only the boundaries
+    // `Ctx::new` builds regardless are this command's to require.
+    require_wiring(&cfg, &unresolved, "mainnet selftest wiring", &[])?;
     cfg.services
         .engine
         .as_mut()
@@ -94,8 +97,9 @@ async fn selftest_cmd(
 
 /// The `rewind` subcommand: undo the last N applied parent blocks on T.
 async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
-    let cfg = Instance::load(&config)?;
+    let (cfg, unresolved) = Instance::inspect(&config)?;
     let (reth, t) = cfg.mainnet_urls()?;
+    require_wiring(&cfg, &unresolved, "mainnet engine wiring", &[&reth, &t])?;
     let ctx = Ctx::new(cfg, &reth, &t)?;
     let out = ctx.admin().rewind(blocks).await?;
     println!(
@@ -103,6 +107,41 @@ async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
         out.restored, out.cursor
     );
     Ok(())
+}
+
+/// This command's wiring, by name: the endpoint values it needs (`endpoints`
+/// — empty when the CLI supplies them), the state dirs, the CL endpoints and
+/// the top-up boundary, which `Ctx::new` builds unconditionally. Unresolved
+/// here is a boot error naming the variable, never a literal used as an
+/// endpoint; the other services' references in the same instance file are not
+/// this pod's to provide.
+fn require_wiring(
+    cfg: &Instance,
+    unresolved: &[String],
+    what: &'static str,
+    endpoints: &[&str],
+) -> std::result::Result<(), mirror_config::ConfigError> {
+    let Some(engine) = cfg.services.engine.as_ref() else {
+        return Ok(());
+    };
+    let state_dir = engine.state_dir.to_string_lossy().into_owned();
+    let journal = engine.journal.dir.to_string_lossy().into_owned();
+    let jwt = engine
+        .source_sync
+        .jwt_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
+    let mut values: Vec<&str> = endpoints.to_vec();
+    values.push(&state_dir);
+    values.push(&journal);
+    values.extend(engine.beacon.urls.iter().map(String::as_str));
+    if let Some(url) = &engine.source_sync.engine_url {
+        values.push(url);
+    }
+    if let Some(jwt) = &jwt {
+        values.push(jwt);
+    }
+    mirror_config::require_resolved_logged(what, &values, unresolved)
 }
 
 /// 15 minutes: reth unwinding and the anvils re-forking both take minutes on
@@ -113,8 +152,14 @@ const ANVIL_BOOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(9
 const MAINNET_CHAIN_ID: u64 = 1;
 
 async fn run(config: PathBuf) -> Result<()> {
-    let cfg = Instance::load(&config)?;
+    // One instance file, many readers: this pod provides only the mainnet
+    // engine's wiring. `inspect` reports the other services' unresolved
+    // references instead of failing on them; the engine's own sections are
+    // then required here, by name (the venue engine's, the simulator's and
+    // the bridge's pattern).
+    let (cfg, unresolved) = Instance::inspect(&config)?;
     let (reth_url, t_url) = cfg.mainnet_urls()?;
+    require_wiring(&cfg, &unresolved, "mainnet engine wiring", &[&reth_url, &t_url])?;
     let ctx = Arc::new(Ctx::new(cfg, &reth_url, &t_url)?);
     boot_asserts(&ctx).await?;
 

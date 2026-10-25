@@ -32,8 +32,8 @@ use std::sync::Arc;
 
 pub struct VenueSource {
     rpc: Arc<Rpc>,
-    /// V's fork pin (0 = not yet resolved: the driver sets it during boot's
-    /// reconcile, before the HTTP surface serves).
+    /// V's fork pin ([`crate::ctx::PIN_UNRESOLVED`] until the driver's boot
+    /// reconcile resolves it, before the HTTP surface serves).
     pin: Arc<AtomicU64>,
 }
 

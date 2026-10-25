@@ -8,10 +8,11 @@
 //! are errors at every level.
 //!
 //! `${VAR}` references in string values resolve from the environment at load
-//! time (deploy-time wiring, §19.4). [`Instance::load`] is the service entry
-//! and fails on an unresolved reference, naming the variable;
-//! [`Instance::inspect`] is the tooling entry (`mirror-config`) and reports
-//! unresolved wiring instead of failing on it.
+//! time (deploy-time wiring, §19.4). [`Instance::inspect`] is the one entry
+//! every service and the tooling share: it reports unresolved wiring instead
+//! of failing on it — each service then requires only its own sections by
+//! name (`require_resolved` / `require_resolved_logged`; one instance file,
+//! many readers).
 //!
 //! The loader is the only environment reader: services never call
 //! `std::env::var` themselves ([`boot::init_logging`] is the one exception,
@@ -61,27 +62,12 @@ pub enum ConfigError {
 }
 
 impl Instance {
-    /// Service entry: strict env expansion + cross-validation. A missing
-    /// `${VAR}` or a failed check is a boot error naming the key.
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let vars: Vec<(String, String)> = std::env::vars().collect();
-        let (instance, unresolved) = load_merged(path, &vars)?;
-        if !unresolved.is_empty() {
-            return Err(ConfigError::Invalid {
-                issues: unresolved
-                    .iter()
-                    .map(|v| format!("unresolved ${{{v}}} - deploy-time wiring must set it"))
-                    .collect(),
-            });
-        }
-        instance.check()?;
-        Ok(instance)
-    }
-
-    /// Tooling entry (`mirror-config check|get|export-env`): the instance is
-    /// returned even when `${VAR}` references are unresolved (the deployment
-    /// environment is not present here); the names are reported for the
-    /// caller to surface. Structural checks still run.
+    /// The service and tooling entry: layered load, `${VAR}` expansion and
+    /// structural cross-validation. The instance is returned even when
+    /// references are unresolved (the deployment environment resolves each
+    /// service's own); the names are reported for the caller to require
+    /// per-section (`require_resolved` / `require_resolved_logged`) — one
+    /// instance file, many readers.
     pub fn inspect(path: &Path) -> Result<(Self, Vec<String>), ConfigError> {
         let vars: Vec<(String, String)> = std::env::vars().collect();
         let (instance, unresolved) = load_merged(path, &vars)?;
