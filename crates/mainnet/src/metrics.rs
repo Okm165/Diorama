@@ -19,7 +19,7 @@ mirror_devnet::registry! {
         /// Times T was found re-forked under the engine (its OOM restart, a re-pin).
         /// The engine re-applies the devnet's recorded writes; the chain history is
         /// gone. A steady increase means T is restarting often (check its RSS).
-        counter t_resets_total = "mirror_t_resets_total", "times T was re-forked under the engine (devnet writes re-applied)";
+        counter epochs_total = "mirror_t_resets_total", "times T was re-forked under the engine (the epoch rule ran; devnet writes re-applied)";
         /// `T's head - T's fork block`: reads below the fork block are served by
         /// reth, whose state window is 10,064 blocks. Past that, any slot T has
         /// not written cannot be read at all - re-pin (make repin) before it.

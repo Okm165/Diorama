@@ -284,6 +284,20 @@ curl -sf "$HTTP/livez" >/dev/null \
   && ok "corrupt state: the restored file boots again" \
   || bad "corrupt state: the engine did not come back (see $DIR/engine.log)"
 
+# ---- a successful rewind (the mainnet script's twin) ----------------------
+# The venue's own writes are journaled (OwnWrites), so one block back restores
+# them. Paused for the two reads — the follow races them otherwise.
+curl -s -X POST "$HTTP/admin/pause" -H 'content-type: application/json' -d '{}' >/dev/null
+sleep 1.5
+before=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
+rw=$(curl -s -X POST "$HTTP/admin/rewind" -H 'content-type: application/json' -d '{"blocks":1}')
+printf '%s' "$rw" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if "cursor" in d and "restored_values" in d else 1)' \
+  && ok "/admin/rewind: restored $(printf '%s' "$rw" | python3 -c 'import json,sys; print(json.load(sys.stdin)["restored_values"])') values" \
+  || bad "/admin/rewind: $rw"
+after=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
+curl -s -X POST "$HTTP/admin/resume" -H 'content-type: application/json' -d '{}' >/dev/null
+[ "$after" -lt "$before" ] && ok "rewind: the cursor moved back ($before -> $after)" || bad "rewind: cursor $before -> $after"
+
 # ---- the epoch rule (the mainnet script's section, V's own facts) ----------
 # A one-call re-pin moves V's base: the driver detects the reset and the
 # epoch rule runs — the events carry both facts, the counter moves.

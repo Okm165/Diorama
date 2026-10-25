@@ -793,7 +793,12 @@ harness's `test-endpoints` env names only NodePorts the overlay declares),
 backtick in a comment runs as a command and an unset `$var` vanishes —
 measured: `balanceAndBlacklistStates` printed "command not found" and dropped
 out of venue-selftest-local's generated `instance.toml`; a quoted delimiter
-opts out) and `ast-scope`
+opts out), `port-audit`
+(the proof scripts' port-valued defaults must be unique across the tree — two
+scripts defaulting to the same port collide when run in parallel, measured:
+engine-symmetry-local's T admin 19980 vs the workshop's HTTP 19980, the
+workshop's engine losing the bind; an intentional sharing is declared with
+`# ports-shared-with:`) and `ast-scope`
 (`bins/ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;

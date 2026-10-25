@@ -116,7 +116,7 @@ async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<Ch
 /// `mirror_pin_age_blocks` counts across epochs).
 async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
     let pin = ctx.anvil_t.fork_block().await?;
-    ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.t_resets_total);
+    ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.epochs_total);
     ctx.epoch_rule(pin).await?;
     ctx.plane.state.clear_cursor()?;
     ctx.plane.save_state()?;

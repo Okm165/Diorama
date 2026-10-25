@@ -171,8 +171,23 @@ done
 
 # ---- measure: the configured probe converges --------------------------------
 po=$(curl -s -X POST "$HTTP/admin/probes" -H 'content-type: application/json' -d '{}')
-printf '%s' "$po" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok",0)>=1 else 1)' \
-  && ok "/admin/probes: the token probe converged ($po)" || bad "/admin/probes: $po"
+printf '%s' "$po" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok",0)>=1 and all(k in d for k in ("ok","failed","skipped")) else 1)' \
+  && ok "/admin/probes: the token probe converged, the shape holds ($po)" || bad "/admin/probes: $po"
+
+# The pause contract (the venue script's twin): a paused engine reports
+# halted, answers /healthz 503, and the shared gauge says 1.
+curl -s -X POST "$HTTP/admin/pause" -H 'content-type: application/json' -d '{}' >/dev/null
+h=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["halted"])')
+hz=$(curl -s -o /dev/null -w '%{http_code}' "$HTTP/healthz")
+g=$(metric mirror_halted || true)
+if [ "$h" = "True" ] && [ "$hz" = "503" ] && [ "$g" = "1" ]; then
+  ok "pause holds (halted, /healthz 503, mirror_halted 1)"
+else
+  bad "pause: halted=$h /healthz=$hz gauge=$g"
+fi
+curl -s -X POST "$HTTP/admin/resume" -H 'content-type: application/json' -d '{}' >/dev/null
+h=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["halted"])')
+[ "$h" = "False" ] && ok "resume releases" || bad "resume: halted=$h"
 ok_n=$(metric mirror_t_convergence_ok_total || true)
 [ -n "$ok_n" ] && [ "$ok_n" -ge 1 ] 2>/dev/null \
   && ok "metrics: mirror_t_convergence_ok_total=$ok_n" \
@@ -321,5 +336,8 @@ grep -q "reset_detected" "$DIR/events2.out" && ok "/events carries reset_detecte
   || bad "/events missing reset_detected (see $DIR/events2.out)"
 grep -q "epoch_changed" "$DIR/events2.out" && ok "/events carries epoch_changed (the epoch rule ran)" \
   || bad "/events missing epoch_changed"
+
+e1=$(metric mirror_t_resets_total)
+[ "${e1:-0}" -ge 1 ] && ok "mirror_t_resets_total moved ($e1)" || bad "mirror_t_resets_total did not move ($e1)"
 
 summary "mainnet-engine-local" "$DIR"
