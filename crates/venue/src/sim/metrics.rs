@@ -9,7 +9,8 @@ pub(crate) struct SimMetrics {
     pub accounts: AtomicU64,
     /// The scenario epoch.
     pub epoch: AtomicU64,
-    /// Liquidations the sim executed (v1: full closes at the mark).
+    /// Liquidations the waterfall executed (every step; the partial, the
+    /// backstop and the ADL counters below carry the individual paths).
     pub liquidations_total: AtomicU64,
     /// Funding payments applied (per position, per accrual).
     pub funding_payments_total: AtomicU64,
