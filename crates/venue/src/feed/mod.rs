@@ -559,6 +559,23 @@ mod tests {
     /// not the served base, so they neither refresh nor prune its consumed
     /// levels (the measured bug: an unscoped prune dropped a scripted level's
     /// consumption on the next live update and the level reappeared).
+    /// The standing-price read: a mark when one has landed, the caller's
+    /// fallback otherwise (the order lane's rule, named once).
+    #[test]
+    fn mark_or_answers_the_mark_then_the_fallback() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        assert_eq!(feed.mark_or("BTC", Decimal::from(42)), Decimal::from(42));
+        feed.own_price(
+            "BTC",
+            PriceOverride {
+                mark: Decimal::from(7),
+                oracle: Decimal::from(7),
+            },
+        )
+        .unwrap();
+        assert_eq!(feed.mark_or("BTC", Decimal::from(42)), Decimal::from(7));
+    }
+
     #[test]
     fn live_updates_leave_a_scripted_books_consumptions_alone() {
         let feed = MarketFeed::memory(vec!["BTC".into()]);

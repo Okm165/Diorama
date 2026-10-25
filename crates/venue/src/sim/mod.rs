@@ -939,6 +939,20 @@ mod tests {
         );
     }
 
+    /// The two tails are distinct: `mutate_account` batches (`touch` leaves
+    /// the dirty flag for the block writer), `mutate_state` saves
+    /// (`mark_dirty` clears it).
+    #[test]
+    fn the_durable_writer_saves_and_the_batched_one_defers() {
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        sim.note_agent(a, Address::repeat_byte(0xbb), "bot").unwrap();
+        assert!(sim.save_if_dirty().unwrap()); // the batched tail left it dirty
+        let now = crate::now_ms();
+        sim.use_nonce(a, now, now).unwrap();
+        assert!(!sim.save_if_dirty().unwrap()); // the durable tail already saved
+    }
+
     /// The account verbs' shared tail: a plain mutation marks the sim dirty
     /// (the bridge's per-block save is driven by this flag).
     #[test]
