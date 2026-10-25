@@ -252,6 +252,54 @@ pub async fn boot_prefix<E: Engine>(
     Ok(())
 }
 
+/// The engine service's hooks: what each profile's `run` differs in. The
+/// sequence — inspect the instance, resolve the endpoints, require the
+/// wiring, assemble the context, boot, log, spawn the loops, shut down — is
+/// one invariant in [`run_engine`]; these are the profile's own pieces.
+pub trait EngineService: Engine {
+    /// The wiring check, labelled with this engine's name (each profile adds
+    /// its own boundaries' values beside the endpoints).
+    fn require_wiring(
+        cfg: &mirror_config::Instance,
+        unresolved: &[String],
+        source_url: &str,
+        target_url: &str,
+    ) -> Result<(), Self::Error>;
+    /// The instance's endpoints for this engine (source, target).
+    fn urls(cfg: &mirror_config::Instance) -> Result<(String, String), Self::Error>;
+    /// The context assembly.
+    fn context(
+        cfg: mirror_config::Instance,
+        source_url: &str,
+        target_url: &str,
+    ) -> Result<Self, Self::Error>;
+    /// The profile's boot (the shared prefix + its own tail).
+    fn boot(ctx: &Self) -> BoxFuture<'_, Result<(), Self::Error>>;
+    /// The start log's fields.
+    fn log_start(ctx: &Self);
+    /// The profile's loops, the shared HTTP task included (the mainnet builds
+    /// its feed bridge here too — a fault before any loop serves is fatal).
+    fn spawn_loops(
+        ctx: &Arc<Self>,
+    ) -> BoxFuture<'_, Result<Vec<tokio::task::JoinHandle<()>>, Self::Error>>;
+}
+
+/// The engine service future, one sequence for both mirrors. One instance
+/// file, many readers: `inspect` reports the other services' unresolved
+/// references instead of failing on them; this engine's own sections are then
+/// required by name (via the profile's [`EngineService::require_wiring`]).
+pub async fn run_engine<S: EngineService>(config: std::path::PathBuf) -> Result<(), S::Error> {
+    let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
+    let (source_url, target_url) = S::urls(&cfg)?;
+    S::require_wiring(&cfg, &unresolved, &source_url, &target_url)?;
+    let ctx = Arc::new(S::context(cfg, &source_url, &target_url)?);
+    S::boot(&ctx).await?;
+    S::log_start(&ctx);
+    let tasks = S::spawn_loops(&ctx).await?;
+    shutdown(tasks).await;
+    Ok(())
+}
+
 /// The boot wiring check both engines share: every value the instance
 /// references must be resolvable — the profile's `endpoints`, the engine's own
 /// state dir, and `extra` (the boundaries only that profile builds).
@@ -282,6 +330,7 @@ pub trait ShellError:
     + From<crate::Error>
     + From<mirror_anvil::Error>
     + From<ShellFault>
+    + From<mirror_config::ConfigError>
     + Send
     + 'static
 {

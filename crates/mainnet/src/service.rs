@@ -131,14 +131,82 @@ async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
 /// here is a boot error naming the variable, never a literal used as an
 /// endpoint; the other services' references in the same instance file are not
 /// this pod's to provide.
+async fn run(config: PathBuf) -> Result<()> {
+    mirror_devnet::engine::run_engine::<Ctx>(config).await
+}
+
+/// The shell's service hooks (`mirror_devnet::engine::EngineService`): the
+/// sequence is the spine's; these are T's own pieces.
+impl mirror_devnet::engine::EngineService for Ctx {
+    fn require_wiring(
+        cfg: &Instance,
+        unresolved: &[String],
+        source_url: &str,
+        target_url: &str,
+    ) -> Result<()> {
+        Ok(self::require_wiring(
+            cfg,
+            unresolved,
+            "mainnet engine wiring",
+            &[source_url, target_url],
+        )?)
+    }
+
+    fn urls(cfg: &Instance) -> Result<(String, String)> {
+        Ok(cfg.mainnet_urls()?)
+    }
+
+    fn context(cfg: Instance, source_url: &str, target_url: &str) -> Result<Self> {
+        Ctx::new(cfg, source_url, target_url)
+    }
+
+    fn boot(ctx: &Self) -> futures_util::future::BoxFuture<'_, Result<()>> {
+        Box::pin(driver::boot(ctx))
+    }
+
+    fn log_start(ctx: &Self) {
+        tracing::info!(
+            reth = %ctx.reth.url(),
+            anvil_t = %ctx.anvil_t.url(),
+            follow = ctx.follow_tag(),
+            watchlist = ctx.mirror.scope().watch().accounts.len(),
+            "mirror engine starting"
+        );
+    }
+
+    fn spawn_loops(
+        ctx: &Arc<Ctx>,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<tokio::task::JoinHandle<()>>>> {
+        Box::pin(async move {
+            let bridge = build_bridge(ctx).await?;
+            let mut tasks = Vec::new();
+            if ctx.engine_api.is_some() {
+                tasks.push(tokio::spawn(driver::source_sync_supervisor(ctx.clone())));
+            }
+            tasks.push(tokio::spawn(driver::apply_loop(ctx.clone())));
+            tasks.push(tokio::spawn(driver::shadow_loop(ctx.clone())));
+            if let Some(bridge) = &bridge {
+                tasks.push(tokio::spawn(bridge.clone().run(ctx.clone())));
+            }
+            tasks.push(mirror_devnet::engine::spawn_http(
+                ctx,
+                http::app(ctx.clone(), bridge),
+            ));
+            Ok(tasks)
+        })
+    }
+}
+
+/// This command's wiring, by name: the endpoints plus the boundaries only
+/// this profile builds (the journal's ring, the beacon sources, the engine
+/// API's URL and JWT). Unresolved here is a boot error naming the variable,
+/// never a literal used as an endpoint.
 fn require_wiring(
     cfg: &Instance,
     unresolved: &[String],
     what: &'static str,
     endpoints: &[&str],
 ) -> std::result::Result<(), mirror_config::ConfigError> {
-    // The boundaries only this profile builds (the venue's are the endpoints
-    // and the state dir, which the shared check covers).
     let engine = cfg.services.engine.as_ref();
     let journal = engine.map(|e| e.journal.dir.to_string_lossy().into_owned());
     let jwt = engine.and_then(|e| {
@@ -163,32 +231,6 @@ fn require_wiring(
     mirror_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &extra)
 }
 
-async fn run(config: PathBuf) -> Result<()> {
-    // One instance file, many readers: this pod provides only the mainnet
-    // engine's wiring. `inspect` reports the other services' unresolved
-    // references instead of failing on them; the engine's own sections are
-    // then required here, by name (the venue engine's, the simulator's and
-    // the bridge's pattern).
-    let (cfg, unresolved) = Instance::inspect(&config)?;
-    let (reth_url, t_url) = cfg.mainnet_urls()?;
-    require_wiring(&cfg, &unresolved, "mainnet engine wiring", &[&reth_url, &t_url])?;
-    let ctx = Arc::new(Ctx::new(cfg, &reth_url, &t_url)?);
-    driver::boot(&ctx).await?;
-
-    tracing::info!(
-        reth = %ctx.reth.url(),
-        anvil_t = %ctx.anvil_t.url(),
-        follow = ctx.follow_tag(),
-        watchlist = ctx.mirror.scope().watch().accounts.len(),
-        "mirror engine starting"
-    );
-
-    let bridge = build_bridge(&ctx).await?;
-    let tasks = spawn_loops(&ctx, bridge);
-    mirror_devnet::engine::shutdown(tasks).await;
-    Ok(())
-}
-
 /// The feed bridge, when configured. Built before any loop serves: a fault
 /// here is fatal (a mis-scaled price would poison every scenario).
 async fn build_bridge(ctx: &Arc<Ctx>) -> Result<Option<Arc<feed::FeedBridge>>> {
@@ -200,25 +242,3 @@ async fn build_bridge(ctx: &Arc<Ctx>) -> Result<Option<Arc<feed::FeedBridge>>> {
     Ok(Some(bridge))
 }
 
-/// Spawn the profile's loops (the applier, the top-up supervisor, the shadow
-/// scan, the feed bridge, the HTTP surface) and return their handles for the
-/// shutdown tail.
-fn spawn_loops(
-    ctx: &Arc<Ctx>,
-    bridge: Option<Arc<feed::FeedBridge>>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut tasks = Vec::new();
-    if ctx.engine_api.is_some() {
-        tasks.push(tokio::spawn(driver::source_sync_supervisor(ctx.clone())));
-    }
-    tasks.push(tokio::spawn(driver::apply_loop(ctx.clone())));
-    tasks.push(tokio::spawn(driver::shadow_loop(ctx.clone())));
-    if let Some(bridge) = &bridge {
-        tasks.push(tokio::spawn(bridge.clone().run(ctx.clone())));
-    }
-    tasks.push(mirror_devnet::engine::spawn_http(
-        ctx,
-        http::app(ctx.clone(), bridge),
-    ));
-    tasks
-}

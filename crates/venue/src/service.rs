@@ -248,26 +248,7 @@ async fn selftest_cmd(
 }
 
 async fn run(config: std::path::PathBuf) -> Result<()> {
-    // One instance file, many readers: this pod provides only the venue
-    // engine's wiring. `inspect` reports the other services' unresolved
-    // references instead of failing on them; the engine's own sections are
-    // then required here, by name (the cctp bridge's pattern).
-    let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
-    let (source_url, v_url) = cfg.venue_urls()?;
-    require_wiring(&cfg, &unresolved, "venue engine wiring", &[&source_url, &v_url])?;
-    let ctx = std::sync::Arc::new(Ctx::new(cfg, &source_url, &v_url)?);
-
-    driver::boot(&ctx).await?;
-    tracing::info!(
-        source = %ctx.source_rpc.url(),
-        anvil_v = %ctx.anvil_v.url(),
-        pin = ?mirror_devnet::pin::resolved_pin(&ctx.pin),
-        watchlist = ctx.mirror.scope().watch().accounts.len(),
-        "mirror engine starting"
-    );
-    let tasks = spawn_loops(&ctx);
-    mirror_devnet::engine::shutdown(tasks).await;
-    Ok(())
+    mirror_devnet::engine::run_engine::<Ctx>(config).await
 }
 
 /// This command's wiring, by name: the endpoint values it needs (`endpoints`
@@ -284,19 +265,61 @@ fn require_wiring(
     mirror_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &[])
 }
 
-/// The engine's two loops (the shared HTTP surface and the driver), each
-/// exiting with a named error and neither taking the process down (the
-/// shutdown signal does).
-fn spawn_loops(ctx: &std::sync::Arc<Ctx>) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut tasks = Vec::new();
-    tasks.push(mirror_devnet::engine::spawn_http(ctx, http::app(ctx.clone())));
-    {
-        let ctx = ctx.clone();
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = driver::follow_loop(ctx).await {
-                tracing::error!(error = %e, "venue driver exited");
-            }
-        }));
+/// The shell's service hooks (`mirror_devnet::engine::EngineService`): the
+/// sequence is the spine's; these are V's own pieces.
+impl mirror_devnet::engine::EngineService for Ctx {
+    fn require_wiring(
+        cfg: &mirror_config::Instance,
+        unresolved: &[String],
+        source_url: &str,
+        target_url: &str,
+    ) -> Result<()> {
+        Ok(self::require_wiring(
+            cfg,
+            unresolved,
+            "venue engine wiring",
+            &[source_url, target_url],
+        )?)
     }
-    tasks
+
+    fn urls(cfg: &mirror_config::Instance) -> Result<(String, String)> {
+        Ok(cfg.venue_urls()?)
+    }
+
+    fn context(cfg: mirror_config::Instance, source_url: &str, target_url: &str) -> Result<Self> {
+        Ctx::new(cfg, source_url, target_url)
+    }
+
+    fn boot(ctx: &Self) -> futures_util::future::BoxFuture<'_, Result<()>> {
+        Box::pin(driver::boot(ctx))
+    }
+
+    fn log_start(ctx: &Self) {
+        tracing::info!(
+            source = %ctx.source_rpc.url(),
+            anvil_v = %ctx.anvil_v.url(),
+            pin = ?mirror_devnet::pin::resolved_pin(&ctx.pin),
+            watchlist = ctx.mirror.scope().watch().accounts.len(),
+            "mirror engine starting"
+        );
+    }
+
+    fn spawn_loops(
+        ctx: &std::sync::Arc<Ctx>,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<tokio::task::JoinHandle<()>>>> {
+        Box::pin(async move {
+            let mut tasks = Vec::new();
+            tasks.push(mirror_devnet::engine::spawn_http(ctx, http::app(ctx.clone())));
+            {
+                let ctx = ctx.clone();
+                tasks.push(tokio::spawn(async move {
+                    if let Err(e) = driver::follow_loop(ctx).await {
+                        tracing::error!(error = %e, "venue driver exited");
+                    }
+                }));
+            }
+            Ok(tasks)
+        })
+    }
 }
+
