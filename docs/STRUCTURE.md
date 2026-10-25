@@ -97,7 +97,10 @@ in `SPINE.md` and the profiles' own tables are the full list):
 ## The AST readings (and what each one found)
 
 The tool (`bins/ast-scope`) reads the workspace with `syn` and reports;
-every reading below was acted on or judged:
+every reading below was acted on or judged. It also prints the **structure
+map** first: the trees table's file pairing, item by item — each pair's
+shared names and its one-sided ones (the symmetrization's live worklist; its
+first fix was the `source.rs` builders, split across the profiles before):
 
 | reading | outcome |
 |---|---|
