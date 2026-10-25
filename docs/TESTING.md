@@ -32,6 +32,14 @@ Three layers, each runnable on demand:
 | Engine symmetry (local) | `make engine-symmetry-local` | anvil + both engine binaries (no cluster/Docker) | **one product, two parents, side by side**: two minimal stacks, then the same four verbs on both — T applies parent blocks / V follows source windows; a devnet write survives the next parent diffs on both; the *same* mock ERC-20 minted through the same `/admin/deal` reads identically (the same discovered key); `/status`, `/admin/probes`, the parity counters and `/admin/epoch` answer symmetrically — the local counterpart of the cluster's `engine-symmetry` |
 | Container (local) | `make container-smoke` | podman + host anvils | no venue twin by design (the venue's two binaries are proven natively by the engine-local/sim-parity/workshop proofs; this row is the image-build gate) — the deployable `mainnet-engine` image, run for real: the container drives the host's scratch stack over host networking, serves `/status` + `/metrics` and applies blocks — the image build's own gate (a missing COPY fails here, minutes into podman) |
 
+The scripts behind these suites share one furniture: `scripts/lib-common.sh`
+(the pass/fail ledger `ok`/`bad`/`info`, the `summary` line with its failure
+exit, the plain `rpc`), which `lib-mainnet.sh`/`lib-venue.sh` build on (their
+in-pod `rpc`/`rpcv` variants) and `lib-cctp.sh` chains through — every source
+line resolves via `${BASH_SOURCE[0]}`, so the libs load from any CWD (a
+sourcing smoke proves the chain), and `port-audit` keeps their default ports
+unique.
+
 ## Unit tests (`cargo test --workspace`)
 
 266 tests, all offline, one suite per crate: `mirror-anvil` 17,
