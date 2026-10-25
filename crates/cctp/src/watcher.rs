@@ -450,7 +450,11 @@ struct MessageSent {
 /// base has no scanned blocks yet (the scan starts at `pin + 1`), so it must
 /// not fire (measured: treating it as off-base warned and re-parked every
 /// pass while the fresh chain sat at its base).
-fn cursor_off_base(cursor: u64, head: u64, pin: Option<u64>) -> bool {
+///
+/// Shared with the relayer, which applies it to each *destination's*
+/// watermark (its last-seen head): the same window rule decides when relayed
+/// mints may have been un-minted, so a forward re-pin reconciles live.
+pub(crate) fn cursor_off_base(cursor: u64, head: u64, pin: Option<u64>) -> bool {
     cursor > 0 && (cursor > head || pin.is_some_and(|pin| cursor < pin))
 }
 

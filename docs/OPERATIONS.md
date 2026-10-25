@@ -726,9 +726,11 @@ The relayer picks it up on its next pass. A burn that a re-pin removed cannot
 be recovered — re-run the transfer.
 
 **A re-pin or a snapshot revert.** The watcher clamps its scan at the fork pin
-and parks records whose burn vanished; the relayer parks relayed records whose
-mint was rewound. Watch `cctp_*` metrics and the `parked` count; the reasons
-name the case.
+and parks records whose burn vanished; the relayer applies the same window to
+each destination and parks relayed records whose mint was un-minted — a rewind
+(head below the watermark) or a forward re-pin (fork base above it: the epoch
+model's live path; a restart's boot pass reconciles the rest). Watch `cctp_*`
+metrics and the `parked` count; the reasons name the case.
 
 A re-pin also removes the bridge's own devnet deployments — the **attester
 install** and the **hook wrapper** live on the old base. The bridge detects

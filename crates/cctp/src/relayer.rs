@@ -52,10 +52,10 @@ pub struct Relayer {
     /// for the next tick.
     pub receipt_timeout: Duration,
     /// Last head seen per chain (parallel to `chains`): a head below the
-    /// watermark is a rewind (a snapshot revert) that un-minted relayed
-    /// messages — their records are parked, never re-relayed (a stale
-    /// derivation, I6; `POST /v2/reattest/{nonce}` is the deliberate way
-    /// back).
+    /// watermark is a rewind (a snapshot revert), a fork base above it a
+    /// forward re-pin (the epoch model) — either un-minted relayed messages,
+    /// so their records are parked, never re-relayed (a stale derivation,
+    /// I6; `POST /v2/reattest/{nonce}` is the deliberate way back).
     pub heads: Vec<std::sync::atomic::AtomicU64>,
 }
 
@@ -79,9 +79,9 @@ impl Relayer {
         }
     }
 
-    /// One pass: gas alerts, destination-rewind reconciliation, then (in
+    /// One pass: gas alerts, destination-window reconciliation, then (in
     /// `auto` mode) every SIGNED record once. Manual mode keeps the alerts and
-    /// the rewind check — both only *park*, never relay.
+    /// the window check — both only *park*, never relay.
     pub async fn tick(&self) -> Result<usize> {
         // Self-fund before the alerts: a re-pin wipes V's state, and the
         // relay wallet's stipend with it (measured: the gas alert stayed
@@ -95,8 +95,8 @@ impl Relayer {
         if let Err(e) = self.gas_alerts().await {
             tracing::warn!(error = %e, "cctp gas alert read failed");
         }
-        if let Err(e) = self.reconcile_rewinds().await {
-            tracing::warn!(error = %e, "cctp destination rewind check failed");
+        if let Err(e) = self.reconcile_destinations().await {
+            tracing::warn!(error = %e, "cctp destination window check failed");
         }
         if self.mode == RelayerMode::Manual {
             return Ok(0);
@@ -130,26 +130,33 @@ impl Relayer {
         Ok(confirmed)
     }
 
-    /// A destination head below its watermark is a rewind: any relayed
-    /// message whose nonce is no longer consumed has lost its mint — park it
-    /// (the destination's rollback is a deliberate test action; re-minting
-    /// into it would fight the revert). The chain stays the dedup truth: a
-    /// still-consumed nonce means the mint predates the rewind and stands.
-    async fn reconcile_rewinds(&self) -> Result<()> {
+    /// A destination whose history window moved under its watermark has lost
+    /// mints: a head below the watermark is a rewind, a fork base above it a
+    /// forward re-pin (the epoch model re-pins live — a restart's boot pass
+    /// must not be the only way back). Any relayed message whose nonce is no
+    /// longer consumed is parked (the destination's reset is a deliberate
+    /// action; re-minting into it would fight it). The chain stays the dedup
+    /// truth: a still-consumed nonce means the mint predates the move and
+    /// stands.
+    async fn reconcile_destinations(&self) -> Result<()> {
         for (index, chain) in self.chains.iter().enumerate() {
             let head = chain.rpc.block_number().await?;
+            let pin = chain.rpc.fork_block().await?;
             let watermark = self.heads[index].load(Ordering::Relaxed);
-            let rewound = watermark > 0 && head < watermark;
-            if watermark > 0 && !rewound {
+            // The watcher's window predicate, shared: a watermark above the
+            // head is a rewind, below the fork base a forward re-pin.
+            let moved = crate::watcher::cursor_off_base(watermark, head, pin);
+            if watermark > 0 && !moved {
                 self.heads[index].store(head, Ordering::Relaxed);
                 continue;
             }
-            if rewound {
+            if moved {
                 tracing::warn!(
                     chain = chain.name,
                     head,
                     watermark,
-                    "destination rewound; reconciling relayed messages"
+                    pin = ?pin,
+                    "destination rewound or re-pinned; reconciling relayed messages"
                 );
             }
             // The full pass also runs at boot (`watermark == 0`): a restart
