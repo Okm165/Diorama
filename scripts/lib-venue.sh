@@ -13,9 +13,8 @@
 #           venue engine pod (cluster-internal service names — the same
 #           transport the engine itself uses).
 #
-# What lives here: the counters (`ok`/`bad`/`info`), the JSON reader, the
-# engine + simulator doors, and the venue-shaped client gates every family
-# shares — `sim_account`, `sim_spot`, `identity_ok` (the served-identity
+# What lives here: the engine + simulator doors, and the venue-shaped client
+# gates every family shares — `sim_account`, `sim_spot`, `identity_ok` (the served-identity
 # check daloc gates on) and `flatten_coin` (a proof's rerunnable start).
 #
 # Conventions (measured, plan §7.6): V reads/writes go through eth_call /
@@ -26,23 +25,6 @@ NS="${NS:-venue-mirror}"
 CAST="${CAST:-cast}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
-# Parse a JSON body and print one expression. An empty or unparsable body is a
-# *named* failure with the body echoed to stderr (a curl that suppressed its
-# body must not surface as a Python traceback: the caller's own check reports
-# the miss).
-json() {
-  python3 -c "
-import json, sys
-raw = sys.stdin.read()
-try:
-    d = json.loads(raw)
-except Exception:
-    sys.stderr.write('json: unparsable body: ' + raw.strip()[:200] + '\n')
-    print('None')
-    raise SystemExit
-print($1)
-"
-}
 
 # The venue-shaped client gates (transport-agnostic — they read stdin or the
 # sim doors above, so every venue-family script shares one definition):

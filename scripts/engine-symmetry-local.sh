@@ -28,7 +28,6 @@ cleanup() { for pid in ${PIDS:-}; do kill "$pid" 2>/dev/null || true; done; }
 trap cleanup EXIT
 rm -rf "$DIR"; mkdir -p "$DIR/t/state/journal" "$DIR/v/state/journal"
 
-jq() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 metric() { curl -s "$1/metrics" | awk -v k="$2" '$1 == k {print $2}'; }
 status() { curl -s "$1/status"; }
 
@@ -43,8 +42,8 @@ sleep 1.5
 rpc "http://127.0.0.1:$ST_PORT" anvil_setCode "[\"$TOKEN\",\"$TOKEN_CODE\"]" >/dev/null
 rpc "http://127.0.0.1:$SV_PORT" anvil_setCode "[\"$TOKEN\",\"$TOKEN_CODE\"]" >/dev/null
 sleep 0.5
-PIN_T=$(rpc "http://127.0.0.1:$ST_PORT" eth_blockNumber '[]' | jq 'int(d["result"],16)')
-PIN_V=$(rpc "http://127.0.0.1:$SV_PORT" eth_blockNumber '[]' | jq 'int(d["result"],16)')
+PIN_T=$(rpc "http://127.0.0.1:$ST_PORT" eth_blockNumber '[]' | json 'int(d["result"],16)')
+PIN_V=$(rpc "http://127.0.0.1:$SV_PORT" eth_blockNumber '[]' | json 'int(d["result"],16)')
 "$ANVIL" --port "$T_PORT" --chain-id 1 --fork-url "http://127.0.0.1:$ST_PORT" --fork-block-number "$PIN_T" --silent > "$DIR/t.log" 2>&1 &
 PIDS="$PIDS $!"
 "$ANVIL" --port "$V_PORT" --chain-id 999 --fork-url "http://127.0.0.1:$SV_PORT" --fork-block-number "$PIN_V" --silent > "$DIR/v.log" 2>&1 &
@@ -134,12 +133,12 @@ sleep 5
 rpc "http://127.0.0.1:$ST_PORT" eth_sendTransaction "[{\"from\":\"$A0\",\"to\":\"$TOKEN\",\"value\":\"0x0\"}]" >/dev/null
 rpc "http://127.0.0.1:$SV_PORT" eth_sendTransaction "[{\"from\":\"$A0\",\"to\":\"$TOKEN\",\"value\":\"0x0\"}]" >/dev/null
 sleep 6
-bal_t=$(rpc "http://127.0.0.1:$T_PORT" eth_getBalance "[\"$A0\",\"latest\"]" | jq 'int(d["result"],16)')
-bal_v=$(rpc "http://127.0.0.1:$V_PORT" eth_getBalance "[\"$A0\",\"latest\"]" | jq 'int(d["result"],16)')
+bal_t=$(rpc "http://127.0.0.1:$T_PORT" eth_getBalance "[\"$A0\",\"latest\"]" | json 'int(d["result"],16)')
+bal_v=$(rpc "http://127.0.0.1:$V_PORT" eth_getBalance "[\"$A0\",\"latest\"]" | json 'int(d["result"],16)')
 [ "$bal_t" != "0" ] && ok "T kept the devnet write through the next parent diffs ($bal_t)" || bad "T lost the devnet write"
 [ "$bal_v" != "0" ] && ok "V kept the devnet write through the next source window ($bal_v)" || bad "V lost the devnet write"
-sh_t=$(status "http://127.0.0.1:$T_ADMIN" | jq 'd["shadowed_accounts"]')
-sh_v=$(status "http://127.0.0.1:$V_ADMIN" | jq 'd["shadowed_accounts"]')
+sh_t=$(status "http://127.0.0.1:$T_ADMIN" | json 'd["shadowed_accounts"]')
+sh_v=$(status "http://127.0.0.1:$V_ADMIN" | json 'd["shadowed_accounts"]')
 [ "$sh_t" -ge 1 ] && [ "$sh_v" -ge 1 ] && ok "both engines mark devnet-owned accounts (T=$sh_t V=$sh_v)" \
   || bad "shadow marks: T=$sh_t V=$sh_v"
 
@@ -149,11 +148,11 @@ deal_t=$(curl -s -X POST "http://127.0.0.1:$T_ADMIN/admin/deal" -H 'content-type
 deal_v=$(curl -s -X POST "http://127.0.0.1:$V_ADMIN/admin/deal" -H 'content-type: application/json' \
   -d "{\"token\":\"$TOKEN\",\"to\":\"$A0\",\"amount\":\"777\"}")
 printf '%s' "$deal_t" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") and d.get("slot") else 1)' \
-  && ok "T minted (key $(printf '%s' "$deal_t" | jq 'd["slot"]'))" || bad "T deal: $deal_t"
+  && ok "T minted (key $(printf '%s' "$deal_t" | json 'd["slot"]'))" || bad "T deal: $deal_t"
 printf '%s' "$deal_v" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") and d.get("slot") else 1)' \
-  && ok "V minted (key $(printf '%s' "$deal_v" | jq 'd["slot"]'))" || bad "V deal: $deal_v"
-tb=$(rpc "http://127.0.0.1:$T_PORT" eth_call "[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231000000000000000000000000$(echo "$A0" | cut -c3-)\"},\"latest\"]" | jq 'int(d["result"],16)')
-vb=$(rpc "http://127.0.0.1:$V_PORT" eth_call "[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231000000000000000000000000$(echo "$A0" | cut -c3-)\"},\"latest\"]" | jq 'int(d["result"],16)')
+  && ok "V minted (key $(printf '%s' "$deal_v" | json 'd["slot"]'))" || bad "V deal: $deal_v"
+tb=$(rpc "http://127.0.0.1:$T_PORT" eth_call "[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231000000000000000000000000$(echo "$A0" | cut -c3-)\"},\"latest\"]" | json 'int(d["result"],16)')
+vb=$(rpc "http://127.0.0.1:$V_PORT" eth_call "[{\"to\":\"$TOKEN\",\"data\":\"0x70a08231000000000000000000000000$(echo "$A0" | cut -c3-)\"},\"latest\"]" | json 'int(d["result"],16)')
 [ "$tb" = "777" ] && [ "$vb" = "777" ] && ok "the same mint reads 777 on both devnets" || bad "mint reads T=$tb V=$vb"
 
 echo "== verb 4: measure the divergence =="

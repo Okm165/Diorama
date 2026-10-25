@@ -18,7 +18,7 @@ Three layers, each runnable on demand:
 | Order proof (venue) | `make venue-order-proof` | the venue stack (the deployed one, or direct mode: the daloc-local stack / a scratch one) | no mainnet twin: the venue's order lane is its own door; the mainnet's market-impact measurement rides the workshop's real Uniswap leg — the §4.5 market-impact axiom: the fill walks the real book, the trader's state moves, the impact persists through live updates, the owned mark is never moved (41 checks) |
 | Closure check (mainnet) | `make mainnet-closure-check` | reth (a local node) | no venue twin: the closure audit traces *storage* reads on reth, and the venue's coverage is the in-code uncovered-log audit (`follow/audit.rs`) — the watchlist's closure: for every market-data view the product reads, the read path's accounts are reported, with each storage-only account named |
 | CCTP (cross-mirror) | `make cctp-smoke`, `make cctp-roundtrip`, `make cctp-margin-cycle` | both stacks + the bridge | the cross-mirror lane: the bridge's ports and queue, a scripted T→V round trip (burn → attested → mint), and the unified-margin cycle (deal on T → CCTP → venue collateral → trade → back) |
-| CCTP (cross-mirror, local) | `make cctp-local` | anvil + the four binaries + a public mainnet RPC and the real HyperEVM (fork fetches) | the same lane without a cluster: both chains forked from the real ones, the round trip and the unified-margin cycle in direct mode |
+| CCTP (cross-mirror, local) | `make cctp-local` | anvil + the four service binaries + a public mainnet RPC and the real HyperEVM (fork fetches) | the same lane without a cluster: both chains forked from the real ones, the round trip and the unified-margin cycle in direct mode |
 | Engine symmetry (cross-mirror) | `make engine-symmetry` | both deployed stacks | the two engines' HTTP surfaces answer the shared verbs identically: status and shapes, the admin surface, the counters (21 checks in cluster mode, 22 direct — `/admin/rewind` is direct-only) |
 | Selftest (mainnet, local) | `make mainnet-selftest-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet applier natively: a local source anvil with a storage-writing contract, T forks it, the engine applies the blocks above the pin through the trace rung (anvil's block trace is empty, so the per-tx fallback runs) and the sampled storage parity passes |
 | Selftest (venue, local) | `make venue-selftest-local` | anvil forked from the **real** HyperEVM + the venue engine binary | the follow pipeline against the real read model: boot (chain assert, capability audit, reconcile, at-pin probes) then windows of compose → COW → land → **live parity**, with the watchlist derived live (the busiest recent sender) — the system-tx envelope and real activity a scratch anvil cannot serve; the script pins the rung (every window's compose source is the live poll, at least one window applied); the mainnet counterpart is `mainnet-selftest-local` |
@@ -28,13 +28,13 @@ Three layers, each runnable on demand:
 | Workshop (mainnet, local) | `make mainnet-workshop-local` | anvil + the mainnet engine binary + a public mainnet RPC (state reads; no reth/cluster/Docker) | the financial workshop natively against the **real** protocols: a source anvil forks mainnet at a public RPC and mines amsterdam blocks on the pin (BALs; no traces), T forks the same RPC at the same pin, the engine keeps it fresh — then `/admin/deal` mints WETH and USDC (the real USDC's packed slot found), a trader supplies to the real Aave pool, borrows, swaps on the real Uniswap pool (the swap's impact is measured: the pool's price moves and the engine owns it — the shadowed set act 2 scopes out) and re-supplies, the market views are compared across source blocks (plus the engine's own probes), the oracle's source is swapped to the USDC/USD feed and a bot liquidates the underwater position and takes the bonus |
 | Workshop (venue, local) | `make venue-workshop-local` | the daloc-local stack (both engines, anvil, live HL market data) | the same three acts as the mainnet workshop, on the venue's mechanisms: act 1 the market on live data (the daloc arc: reads and client gates, the served identity, the crash/drawdown arc, the venue-side liquidation, the epoch on both mirrors), act 2 minted liquidity + a fill (a devnet deal, an order walking the served book — `/exchange` fills in the venue's envelope), act 3 the impact measured (the consumed depth does not resurrect, the trader's state moves, a fill leaves an owned mark untouched, the stalled-live-plane gate refuses by name) |
 | Feed bridge (mainnet, local) | `make mainnet-feed-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the feed bridge natively: a source anvil mines amsterdam blocks with Chainlink-shaped stubs at the feeds' *source* addresses, T forks it, the engine runs with `[services.engine.feed_bridge]` — the bridge publishes the parent's answers to the targets' stubs, a scenario's write pauses the feed (its value preserved), and the hand-back republishes the parent's value; the deployed-stack counterpart (real Chainlink feeds) is `mainnet-feed-bridge` |
-| daloc arc (local) | `make daloc-local` | the four binaries + outbound HTTPS/WSS to api.hyperliquid.xyz (no cluster/Docker) | the daloc use-case arc (`scripts/daloc-sim.py`) against a local scratch stack: T + the mainnet engine, V + the venue engine, and the venue simulator on **live** market data — the venue reads and client gates, the crash/drawdown arc, the time jumps, the venue-side liquidation, and the epoch on both mirrors |
+| daloc arc (local) | `make daloc-local` | the four service binaries + outbound HTTPS/WSS to api.hyperliquid.xyz (no cluster/Docker) | the daloc use-case arc (`scripts/daloc-sim.py`) against a local scratch stack: T + the mainnet engine, V + the venue engine, and the venue simulator on **live** market data — the venue reads and client gates, the crash/drawdown arc, the time jumps, the venue-side liquidation, and the epoch on both mirrors |
 | Engine symmetry (local) | `make engine-symmetry-local` | anvil + both engine binaries (no cluster/Docker) | **one product, two parents, side by side**: two minimal stacks, then the same four verbs on both — T applies parent blocks / V follows source windows; a devnet write survives the next parent diffs on both; the *same* mock ERC-20 minted through the same `/admin/deal` reads identically (the same discovered key); `/status`, `/admin/probes`, the parity counters and `/admin/epoch` answer symmetrically — the local counterpart of the cluster's `engine-symmetry` |
 | Container (local) | `make container-smoke` | podman + host anvils | no venue twin by design (the venue's two binaries are proven natively by the engine-local/sim-parity/workshop proofs; this row is the image-build gate) — the deployable `mainnet-engine` image, run for real: the container drives the host's scratch stack over host networking, serves `/status` + `/metrics` and applies blocks — the image build's own gate (a missing COPY fails here, minutes into podman) |
 
 The scripts behind these suites share one furniture: `scripts/lib-common.sh`
 (the pass/fail ledger `ok`/`bad`/`info`, the `summary` line with its failure
-exit, the plain `rpc`), which `lib-mainnet.sh`/`lib-venue.sh` build on (their
+exit, the JSON reader `json`, the plain `rpc`), which `lib-mainnet.sh`/`lib-venue.sh` build on (their
 in-pod `rpc`/`rpcv` variants) and `lib-cctp.sh` chains through — every source
 line resolves via `${BASH_SOURCE[0]}`, so the libs load from any CWD (a
 sourcing smoke proves the chain), and `port-audit` keeps their default ports
@@ -740,7 +740,7 @@ The behavioral checks, not just shapes:
   keccak slot for its layout (`0xa5701d…` = keccak(pad(acct)‖pad(0)),
   `0x9a4401…` = keccak(pad(acct)‖pad(9))) — so such runs set
   `DEAL_LAYOUT_TOLERANT=1`, which keeps the behavioral symmetry required.
-- **the documented absences**: `/admin/time` — the ethereum's persistent clock
+- **the documented absences**: `/admin/time` — the mainnet's persistent clock
   offset; V's clock is native anvil (`setNextBlockTimestamp`/`evm_mine`), so a
   route nobody re-aligns would be a no-op (measured: engine-mined venue blocks
   advance the clock ~1 s each, so the head's lag behind wall is the time since
@@ -790,12 +790,12 @@ venue: `restored_values: 1`, the balance returned to its pre-deal value); the
 T-side shadow round-trip on the extracted path (`register` → `clear` →
 `clear all`) was re-verified after the extraction (resynced 1, then 2 keys).
 
-Entry shape follows the need, not symmetry for its own sake: the ethereum's
-lib owns a `main_entry` with subcommands (`run` / `selftest` / `rewind`); the
+Entry shape follows the need, not symmetry for its own sake: the mainnet
+crate's lib owns a `main_entry` with subcommands (`run` / `selftest` / `rewind`); the
 venue crate exposes `main_entry` (the engine) and `sim_entry` (the simulator);
 the cctp crate exposes `main_entry` — and every bin is the same thin shell
 over its entry (the composition roots live in the crates, plan §11.3 rule 10),
-with the same shutdown path shared by all four binaries:
+with the same shutdown path shared by all four service binaries:
 `boot::shutdown_signal` waits for **SIGINT *and* SIGTERM** (Kubernetes sends
 SIGTERM; measured 2026-10-23: before the fix, no service log had ever shown
 its shutdown line — a `ctrl_c`-only wait was dead code under a rollout), then

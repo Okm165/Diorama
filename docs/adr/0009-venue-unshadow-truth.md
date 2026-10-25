@@ -35,7 +35,7 @@ the source's before-state; serving them would hand back a poisoned value.
 
 ## Consequences
 
-- The venue's hand-back is the one deliberate asymmetry with the ethereum's
+- The venue's hand-back is the one deliberate asymmetry with the mainnet's
   (reth can serve the cursor's state at any time); it is documented in
   TESTING's limitations and the module doc, and it never writes a wrong value.
 - The refusal's wording is load-bearing: it was corrected once (the earlier
