@@ -2,7 +2,7 @@
 # venue-selftest-local: the venue follow pipeline proven against the *real*
 # HyperEVM read model (one anvil forked from the public RPC; no cluster).
 #
-# The other local proofs (venue-follow-local, daloc-local) use a scratch anvil
+# The other local proofs (venue-engine-local, daloc-local) use a scratch anvil
 # as the source, so they cannot exercise what the real source serves: the
 # system-tx envelope (`eth_getSystemTxsByBlockNumber` — a chain without it
 # answers an empty list by design), the live latest-only reads, and real

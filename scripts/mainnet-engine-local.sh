@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mainnet-engine-local: the Mainnet Mirror's engine UX, proven natively (two
 # anvils; no reth, no public RPC, no cluster) — the mainnet counterpart of
-# `venue-follow-local.sh`.
+# `venue-engine-local.sh`.
 #
 # A source anvil (chain 1, `--hardfork amsterdam`, so its blocks carry real
 # EIP-7928 BALs with header commitments) stands in for the parent; T forks it

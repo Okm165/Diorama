@@ -179,3 +179,22 @@ impl Engine for Ctx {
         Box::pin(crate::http::status_doc(self))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{resolved_pin, PIN_UNRESOLVED};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// The sentinel never leaks as a pin: unresolved reads `None`, and a real
+    /// block (genesis included) reads `Some` (the mainnet's `follow_tag` test
+    /// pins its own ctx accessor).
+    #[test]
+    fn the_pin_sentinel_never_leaks() {
+        let pin = AtomicU64::new(PIN_UNRESOLVED);
+        assert_eq!(resolved_pin(&pin), None);
+        pin.store(0, Ordering::Relaxed);
+        assert_eq!(resolved_pin(&pin), Some(0));
+        pin.store(49_000_000, Ordering::Relaxed);
+        assert_eq!(resolved_pin(&pin), Some(49_000_000));
+    }
+}

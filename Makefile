@@ -224,8 +224,8 @@ mainnet-smoke: ## End-to-end smoke test (mainnet)
 venue-smoke: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
 	NS=venue-mirror ./scripts/venue-smoke.sh
 
-venue-follow-local: venue-build ## Native local proof of the source follow (two anvils; no cluster/Docker)
-	./scripts/venue-follow-local.sh
+venue-engine-local: venue-build ## Native local proof of the engine UX (mirror/modify/mint/measure; two anvils)
+	./scripts/venue-engine-local.sh
 
 venue-selftest-local: venue-build ## Native local proof of the follow against the real HyperEVM (one forked anvil)
 	./scripts/venue-selftest-local.sh
@@ -310,8 +310,8 @@ daloc-local: venue-build mainnet-build ## The daloc use-case arc against a local
 mainnet-workshop-local: mainnet-build ## A financial workshop on live mainnet state (public-RPC fork; real Aave/Uniswap; crash + liquidation)
 	./scripts/mainnet-workshop-local.sh
 
-venue-order-local: venue-build mainnet-build ## The venue order lane locally (daloc stack kept up; fills vs the real book, §4.5 impact)
-	./scripts/venue-order-local.sh
+venue-workshop-local: venue-build mainnet-build ## A workshop on live venue state locally (daloc stack kept up; fills vs the real book, the §4.5 impact)
+	./scripts/venue-workshop-local.sh
 
 container-smoke: ## The mainnet-engine image, run for real (host anvils; needs podman)
 	podman build -q -f Dockerfile --build-arg BIN=mainnet-engine -t localhost/mainnet-engine:v1 .
@@ -381,4 +381,4 @@ help: ## Show this help
 	venue-proof venue-order-proof venue-product-sim cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
 	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help \
-	venue-follow-local venue-selftest-local mainnet-selftest-local mainnet-engine-local ux-symmetry-local daloc-local container-smoke
+	venue-engine-local venue-selftest-local mainnet-selftest-local mainnet-engine-local ux-symmetry-local daloc-local container-smoke

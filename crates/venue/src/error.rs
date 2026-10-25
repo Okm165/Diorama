@@ -135,3 +135,39 @@ impl Error {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A wrapped boundary fault keeps its cause chain (the mainnet's `Step`
+    /// wrapper test pins the same rule).
+    #[test]
+    fn the_source_chain_is_preserved() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let e = Error::Io {
+            what: "journal directory",
+            path: "/tmp/x".into(),
+            source: io,
+        };
+        let source = std::error::Error::source(&e).expect("source is preserved");
+        assert!(source.to_string().contains("missing"), "{source}");
+    }
+}
+
+#[cfg(test)]
+mod size_guard {
+    use super::*;
+
+    /// The error travels in every `Result` on the hot paths; clippy's
+    /// `result_large_err` threshold is 128 bytes (the mainnet's mirror test
+    /// pins its own enum the same way).
+    #[test]
+    fn error_size_is_bounded() {
+        assert!(
+            std::mem::size_of::<Error>() <= 128,
+            "venue Error grew to {} bytes",
+            std::mem::size_of::<Error>()
+        );
+    }
+}

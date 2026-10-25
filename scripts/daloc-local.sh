@@ -10,7 +10,7 @@
 # The defaults are the daloc arc's own ports (T 18602/18680, V 18610/18681,
 # sim 18790/18791); override the *_PORT variables when they are taken.
 # KEEP_UP=1 leaves the stack up (PIDs in $DIR/pids) for a follow-up proof
-# (scripts/venue-order-local.sh uses this for the order lane).
+# (scripts/venue-workshop-local.sh uses this for the order lane).
 set -euo pipefail
 cd /home/bartosz/.local/share/opencode/worktree/cfbc0b/spine
 

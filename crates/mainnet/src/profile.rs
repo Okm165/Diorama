@@ -19,7 +19,7 @@
 //! The composer itself is generic (`mirror_devnet::bal::compose`): it picks the
 //! native rung from `Capabilities::native_bal` and synthesizes otherwise, so
 //! the two mirrors differ in *data* (source, scope), not in algorithm.
-use mirror_config::EngineSection;
+use mirror_config::{EngineSection, LoopsSection};
 use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
 use mirror_devnet::source::{RawSource, Source};
@@ -46,15 +46,15 @@ pub fn bundle(
         follow_source: Arc::clone(&source),
         source,
         reset,
-        policies: policies(engine),
+        policies: policies(&engine.loops),
         scope,
     })
 }
 
-/// The profile's decisions, assembled from the engine section: the gap guard
+/// The profile's decisions, assembled from the loops section: the gap guard
 /// is the config's `max_gap_blocks` (a rebased cursor gets the plan's 10,064
 /// replay bound instead — the caller's branch).
-pub fn policies(engine: &EngineSection) -> Policies {
+pub fn policies(loops: &LoopsSection) -> Policies {
     Policies {
         clock: ClockPolicy::AlignToSource,
         mine: MinePolicy::PerAppliedBlock,
@@ -64,7 +64,7 @@ pub fn policies(engine: &EngineSection) -> Policies {
         // drained first — bounded so a steady stream cannot starve the parent
         // block.
         prepend_rounds: Some(3),
-        gap: Some(engine.loops.max_gap_blocks),
+        gap: Some(loops.max_gap_blocks),
     }
 }
 
@@ -103,5 +103,28 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     Wiring {
         mirror: bundle(engine, source, reset, scope),
         target,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The divergence table above as a test: the mainnet's decisions pinned,
+    /// so a doc row and the code cannot drift apart (the venue's mirror test
+    /// pins its own column).
+    #[test]
+    fn the_policies_pin_the_divergence_table() {
+        let loops = LoopsSection {
+            poll_interval_ms: 1000,
+            max_gap_blocks: 32,
+            chunk_size: 100,
+        };
+        let p = policies(&loops);
+        assert_eq!(p.clock, ClockPolicy::AlignToSource);
+        assert_eq!(p.mine, MinePolicy::PerAppliedBlock);
+        assert_eq!(p.probes, ProbeSchedule::PerBlock);
+        assert_eq!(p.prepend_rounds, Some(3));
+        assert_eq!(p.gap, Some(32));
     }
 }

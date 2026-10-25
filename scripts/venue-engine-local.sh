@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# venue-follow-local: the venue engine UX, proven natively (no cluster, no
+# venue-engine-local: the venue engine UX, proven natively (no cluster, no
 # Docker): a local anvil stands in for the HL public API, V forks it, and the
 # engine must (1) mirror the watched account 1:1 as the source moves, (2) keep
 # a devnet write on V when the next source window lands (the COW filter), and
@@ -22,7 +22,7 @@ ENGINE="${ENGINE:-target/debug/venue-engine}"
 SRC_PORT="${SRC_PORT:-8799}"
 V_PORT="${V_PORT:-8798}"
 HTTP_PORT="${HTTP_PORT:-18082}"
-DIR="${DIR:-/tmp/venue-follow-local}"
+DIR="${DIR:-/tmp/venue-engine-local}"
 SRC="http://127.0.0.1:$SRC_PORT"
 V="http://127.0.0.1:$V_PORT"
 HTTP="http://127.0.0.1:$HTTP_PORT"
@@ -69,8 +69,8 @@ sleep 2
 
 cat > "$DIR/instance.toml" <<EOF
 [instance]
-name = "venue-follow-local"
-namespace = "venue-follow-local"
+name = "venue-engine-local"
+namespace = "venue-engine-local"
 profile = "venue"
 
 [chains.venue]
@@ -241,5 +241,5 @@ grep -q "deal_applied" "$DIR/events2.out" \
   && bad "the no-slot deal published deal_applied (it wrote nothing)" \
   || ok "the no-slot deal publishes no deal_applied (the fact is a state change)"
 
-echo "venue-follow-local: $pass ok, $fail bad (logs in $DIR)"
+echo "venue-engine-local: $pass ok, $fail bad (logs in $DIR)"
 [ "$fail" -eq 0 ]

@@ -141,12 +141,19 @@ fn report_window(ctx: &Ctx, from: u64, to: u64, window: &WindowStats, ms: u64) {
 
 /// The gap guard: a window wider than the profile's limit pauses the follow
 /// (the same regime as the mainnet applier's `max_gap_blocks`).
+/// The gap guard's predicate: a gap at or below the limit follows (the
+/// mainnet's `gap_within_limit` adds the rebase bound; the venue's windows
+/// have none).
+fn gap_within_limit(gap: u64, limit: u64) -> bool {
+    gap <= limit
+}
+
 fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> Result<bool> {
     let gap = source_head - followed;
     let Some(limit) = ctx.mirror.policies().gap else {
         return Ok(true);
     };
-    if gap > limit {
+    if !gap_within_limit(gap, limit) {
         ctx.venue_metrics
             .inc(&ctx.venue_metrics.follow_gap_pauses_total);
         ctx.drift.append(&GapPauseEntry {
@@ -296,10 +303,20 @@ async fn advance_follow(ctx: &Ctx, source_head: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::fresh_emitters;
+    use super::{fresh_emitters, gap_within_limit};
     use alloy_primitives::Address;
     use std::collections::HashSet;
     use std::sync::Mutex;
+
+    /// The gap guard's predicate: at or below the limit follows, beyond it
+    /// pauses (the mainnet's test pins the same boundary with its rebase
+    /// bound).
+    #[test]
+    fn the_gap_guard_follows_within_the_limit() {
+        assert!(gap_within_limit(0, 32));
+        assert!(gap_within_limit(32, 32));
+        assert!(!gap_within_limit(33, 32));
+    }
 
     /// The audit's bound: the first sighting of an emitter is fresh, its
     /// repeats are not, and a churning set reports only what is new.

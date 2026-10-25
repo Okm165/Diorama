@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# venue-order-local: the venue order lane — the market-impact axiom (plan
+# venue-workshop-local: the venue order lane — the market-impact axiom (plan
 # §4.5) — proven locally: a devnet order fills against the *real* Hyperliquid
 # book and its consequences persist (the consumed depth does not resurrect,
 # the trader's state moves, the mark is never moved by a fill). The

@@ -190,3 +190,21 @@ fn build_engine_api(engine: &EngineSection) -> Result<Option<crate::source_sync:
         _ => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use mirror_config::FollowHead;
+
+    /// The follow tag is the config's own mapping, never a second copy (the
+    /// venue's `resolved_pin` test pins its own ctx accessor).
+    #[test]
+    fn the_follow_tag_is_the_configs_mapping() {
+        for (head, tag) in [
+            (FollowHead::Safe, "safe"),
+            (FollowHead::Latest, "latest"),
+            (FollowHead::Finalized, "finalized"),
+        ] {
+            assert_eq!(head.tag(), tag);
+        }
+    }
+}

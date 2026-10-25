@@ -105,3 +105,30 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
         .add(&ctx.mainnet_metrics.t_probe_skipped, probes.skipped as u64);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::storage_key;
+    use alloy_primitives::{Address, U256};
+    use mirror_anvil::{Key, Write};
+
+    /// Only storage writes are sampled (the drift lens); account-field writes
+    /// carry no storage key (the venue's live parity re-reads the composed
+    /// BAL's storage keys the same way).
+    #[test]
+    fn only_storage_writes_carry_a_sampled_key() {
+        let address = Address::repeat_byte(0x11);
+        let slot = U256::from(7);
+        let storage = Write::Storage {
+            address,
+            slot,
+            value: U256::ZERO,
+        };
+        assert_eq!(storage_key(&storage), Some(Key::Storage { address, slot }));
+        let balance = Write::Balance {
+            address,
+            value: U256::ZERO,
+        };
+        assert_eq!(storage_key(&balance), None);
+    }
+}

@@ -23,7 +23,7 @@
 //! (`mirror_devnet::bal::compose`).
 use crate::reset::PinCanary;
 use crate::source::{public_capabilities, VenueSource};
-use mirror_config::{ClosuresSection, EngineSection};
+use mirror_config::{ClosuresSection, EngineSection, LoopsSection};
 use mirror_devnet::closure::{FixedSlots, KeyClosure, TopicMappedSlots};
 use mirror_devnet::cow::{Scope, WatchSet};
 use mirror_devnet::shared::Shared;
@@ -53,7 +53,7 @@ pub fn bundle(
         source,
         follow_source: follow,
         reset,
-        policies: policies(engine),
+        policies: policies(&engine.loops),
         scope,
     })
 }
@@ -62,13 +62,13 @@ pub fn bundle(
 /// idle chain stays static), probes compare against the composed BAL, and the
 /// gap guard pauses the poll when the source head runs too far ahead (a wide
 /// window is a re-pin decision, never a silent partial poll).
-pub fn policies(engine: &EngineSection) -> Policies {
+pub fn policies(loops: &LoopsSection) -> Policies {
     Policies {
         clock: ClockPolicy::Native,
         mine: MinePolicy::PoolDrain,
         probes: ProbeSchedule::LiveParity,
         prepend_rounds: None,
-        gap: Some(engine.loops.max_gap_blocks),
+        gap: Some(loops.max_gap_blocks),
     }
 }
 
@@ -145,4 +145,27 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let scope = Scope::new(watch_set(watch, &engine.closures), closures(&engine.closures));
     let mirror = bundle(engine, source, follow, reset, scope);
     Wiring { mirror, pin, target }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The divergence table above as a test: the venue's decisions pinned, so
+    /// a doc row and the code cannot drift apart (the mainnet's mirror test
+    /// pins its own column).
+    #[test]
+    fn the_policies_pin_the_divergence_table() {
+        let loops = LoopsSection {
+            poll_interval_ms: 1000,
+            max_gap_blocks: 32,
+            chunk_size: 100,
+        };
+        let p = policies(&loops);
+        assert_eq!(p.clock, ClockPolicy::Native);
+        assert_eq!(p.mine, MinePolicy::PoolDrain);
+        assert_eq!(p.probes, ProbeSchedule::LiveParity);
+        assert_eq!(p.prepend_rounds, None);
+        assert_eq!(p.gap, Some(32));
+    }
 }

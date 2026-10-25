@@ -320,6 +320,14 @@ fn clear_reapply(plane: &Plane, n: u64, reapply: Option<(u64, u64)>) -> Result<(
     Ok(())
 }
 
+/// Whether the apply is a drift-log candidate: a re-apply of a rewound
+/// range, or a sampled-parity mismatch (the venue's `fresh_emitters` bound
+/// pins the other side of the same "only anomalies land in drift.jsonl"
+/// rule).
+fn is_anomalous(facts: &ApplyFacts, outcome: &ApplyOutcome) -> bool {
+    facts.needs_reapply || outcome.sampled_ok < outcome.sampled
+}
+
 /// Divergence log, not a flight recorder: only anomalies land here (the
 /// re-apply of a rewound range, or a sampled-parity mismatch). Counts live in
 /// the metrics.
@@ -329,7 +337,7 @@ fn log_drift_if_anomalous(
     facts: &ApplyFacts,
     outcome: &ApplyOutcome,
 ) -> Result<()> {
-    if !(facts.needs_reapply || outcome.sampled_ok < outcome.sampled) {
+    if !is_anomalous(facts, outcome) {
         return Ok(());
     }
     drift.append(&TDriftEntry {
@@ -426,4 +434,47 @@ async fn align_context(ctx: &Ctx, header: &Header) -> Result<()> {
         tracing::warn!(error = %e, "context alignment failed");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facts(needs_reapply: bool) -> ApplyFacts {
+        ApplyFacts {
+            chain: "t",
+            source: "bal",
+            total: 1,
+            applied: 1,
+            filtered: 1,
+            stats: FilterStats::default(),
+            sampled: 2,
+            sampled_ok: 2,
+            needs_reapply,
+            reapply: None,
+            t_latest: 1,
+            started: Instant::now(),
+        }
+    }
+
+    fn outcome(sampled: usize, sampled_ok: usize) -> ApplyOutcome {
+        ApplyOutcome {
+            source: "bal",
+            writes: 1,
+            filtered: 1,
+            skipped_shadowed: 0,
+            sampled,
+            sampled_ok,
+            duration_ms: 1,
+        }
+    }
+
+    /// Only anomalies are drift-log candidates: a clean apply is not, a
+    /// re-apply of a rewound range is, and a sampled-parity mismatch is.
+    #[test]
+    fn only_anomalies_are_logged() {
+        assert!(!is_anomalous(&facts(false), &outcome(2, 2)));
+        assert!(is_anomalous(&facts(true), &outcome(2, 2)));
+        assert!(is_anomalous(&facts(false), &outcome(2, 1)));
+    }
 }

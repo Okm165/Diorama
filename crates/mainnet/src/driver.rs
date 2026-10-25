@@ -336,3 +336,21 @@ pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::Probe
     mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), cursor.block, &probes);
     Ok(probes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::gap_within_limit;
+
+    /// The gap guard: a configured limit applies, a rebased cursor gets the
+    /// plan's 10,064-block replay bound instead, and no limit means no guard
+    /// (the venue's `gap_within_limit` test pins its own column).
+    #[test]
+    fn the_gap_guard_honors_the_limit_and_the_replay_bound() {
+        assert!(gap_within_limit(0, Some(32), false));
+        assert!(gap_within_limit(32, Some(32), false));
+        assert!(!gap_within_limit(33, Some(32), false));
+        assert!(gap_within_limit(10_064, None, true));
+        assert!(!gap_within_limit(10_065, None, true));
+        assert!(gap_within_limit(u64::MAX, None, false));
+    }
+}
