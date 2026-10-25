@@ -129,6 +129,15 @@ make diff                        # expect: engine-config gone, mainnet-instance 
 make apply && make deploy-engine
 ```
 
+A rolling `make deploy-engine` **does not sync manifests** — it restarts the
+deployment only. Any manifest change must ride a `make apply` (the docs' order
+above); otherwise the retired fields survive every rollout (measured: the
+retired `engine-config` volume, unmanaged by apply's three-way merge, lived
+through eight rollouts and would have failed the next pod creation once the
+ConfigMap was pruned — `make diff` would have shown it). The same rule covers
+the ConfigMap prunes: `kubectl apply -k` never deletes removed resources —
+check `make diff` for `configmap/<name>` lines and delete them by hand.
+
 Rollback = re-import the previous image **and** `git revert` the manifest
 change (the old image needs the old ConfigMap). `make mainnet-smoke` + `make mainnet-scenario`
 are the gate; the anvil pods pick the offset up from the mounted instance file
