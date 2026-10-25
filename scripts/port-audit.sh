@@ -33,6 +33,19 @@ for path in sorted(pathlib.Path("scripts").glob("*.sh")):
     for name, _, port in pat.findall(text):
         if is_port_name(name):
             seen.setdefault(port, []).append((path.name, name))
+# The convention's other half: a port-valued assignment must be the
+# overridable form. A fixed one is invisible to the duplicate scan (and to
+# the operator). Comments are stripped (the instrument's own notes name the
+# measured case); the value decides per assignment.
+fixed_pat = re.compile(r'([A-Z_]+)=(\$\{[A-Z_]+:-[0-9]+\}|[0-9]{2,5})(?![0-9])')
+for path in sorted(pathlib.Path("scripts").glob("*.sh")):
+    for line in path.read_text().splitlines():
+        code = line.split("#", 1)[0]
+        for name, value in fixed_pat.findall(code):
+            if is_port_name(name) and not value.startswith("$"):
+                print(f"VIOLATION: {path.name}: {name} is a fixed port (use ${{NAME:-PORT}} so it can be overridden)")
+                bad = 1
+
 for port, sites in sorted(seen.items()):
     if len(sites) <= 1:
         continue

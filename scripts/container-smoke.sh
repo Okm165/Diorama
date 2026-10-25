@@ -6,12 +6,14 @@
 # the `docker-members` gate's other half (a missing COPY is a build failure
 # here, minutes into podman — measured: config/defaults.toml was never
 # copied, so every image failed to build).
+#
+# Ports: 19800/19802/19880 (override with SRC_PORT/T_PORT/HTTP_PORT).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ANVIL="${ANVIL:-/tmp/opencode/anvil-186-bin/anvil}"
 DIR=/tmp/opencode/container-smoke
-SRC_PORT=19800; T_PORT=19802; HTTP_PORT=19880
+SRC_PORT="${SRC_PORT:-19800}"; T_PORT="${T_PORT:-19802}"; HTTP_PORT="${HTTP_PORT:-19880}"
 A0=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 
 cleanup() {
