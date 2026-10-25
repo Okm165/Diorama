@@ -3,7 +3,7 @@
 # epoch scenario, the capability proof, the order-lane proof — and for the cctp
 # family (through `lib-cctp.sh`, which sources this one for the venue-shaped
 # gates). Source it, never run it:
-#   source "$(dirname "$0")/lib-venue.sh"
+#   source "$(dirname "${BASH_SOURCE[0]}")/lib-venue.sh"
 #
 # One transport per mode, chosen once (the same convention in every venue
 # script that supports it):

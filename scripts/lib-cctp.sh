@@ -2,7 +2,7 @@
 # Shared helpers for the cctp-* scripts (the bridge family: smoke, roundtrip,
 # margin-cycle) — the third family, beside lib-mainnet.sh and lib-venue.sh.
 # Source it, never run it:
-#   source "$(dirname "$0")/lib-cctp.sh"
+#   source "$(dirname "${BASH_SOURCE[0]}")/lib-cctp.sh"
 #
 # One transport per mode, chosen once (the same convention as lib-venue.sh):
 #   direct  (BRIDGE_CTRL_URL set): the scratch stack's URLs — BRIDGE_CTRL_URL,
@@ -29,7 +29,7 @@ CAST="${CAST:-cast}"
 if [ -n "${BRIDGE_CTRL_URL:-}" ]; then
   ENGINE_URL="${ENGINE_URL:-${ENGINE_V_URL:-}}"
 fi
-source "$(dirname "$0")/lib-venue.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib-venue.sh"
 
 if [ -n "${BRIDGE_CTRL_URL:-}" ]; then
   bget()  { curl -s --fail-with-body -m 30 "$BRIDGE_CTRL_URL$1"; }

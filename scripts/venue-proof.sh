@@ -46,7 +46,7 @@ SIM_ACCT="${SIM_ACCT:-0x00000000000000000000000000000000000000e2}"
 UNDER="${UNDER:-0x00000000000000000000000000000000000000e3}"
 MINT="${MINT:-100000000}"                                     # 100 USDC (6-dec ERC20)
 
-source "$(dirname "$0")/lib-venue.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib-venue.sh"
 
 metric() { smetrics | awk -v k="$1" '$1 == k || $1 ~ "^"k"\\{" {s+=$2; found=1} END {print (found ? s : 0)}'; }
 # Poll a metric to a threshold (bounded): the bridge's and the sim's passes are

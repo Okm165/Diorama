@@ -10,7 +10,7 @@
 #     ./scripts/cctp-smoke.sh                # direct mode: a scratch stack
 set -euo pipefail
 
-source "$(dirname "$0")/lib-cctp.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib-cctp.sh"
 
 echo "== CCTP bridge smoke =="
 

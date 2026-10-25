@@ -43,7 +43,7 @@ USDC_T="${USDC_T:-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48}"
 USDC_V="${USDC_V:-0xb88339CB7199b77E23DB6E890353E22632Ba630f}"
 CORE_WRITER=0x3333333333333333333333333333333333333333
 
-source "$(dirname "$0")/lib-cctp.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib-cctp.sh"
 require_chain_urls
 
 # The CoreWriter calldata for a raw action stream (docs: the `sendRawAction`

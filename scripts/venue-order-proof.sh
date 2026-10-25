@@ -30,7 +30,7 @@
 #     SIM_CTRL=http://127.0.0.1:18791 ./scripts/venue-order-proof.sh
 set -euo pipefail
 
-source "$(dirname "$0")/lib-venue.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib-venue.sh"
 
 ORDER_ACCT="${ORDER_ACCT:-0x00000000000000000000000000000000000000e4}"
 COIN="${COIN:-ETH}"

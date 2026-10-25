@@ -17,7 +17,7 @@
 # the miss).
 set -euo pipefail
 
-source "$(dirname "$0")/lib-cctp.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib-cctp.sh"
 
 SOURCE="${SOURCE:-0}"                 # 0 = Ethereum/T, 19 = HyperEVM/V
 DESTINATION="${DESTINATION:-19}"

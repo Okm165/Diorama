@@ -15,7 +15,7 @@ ACCT="${ACCT:-0x00000000000000000000000000000000000000d1}"   # a scratch account
 AMOUNT="${AMOUNT:-100000000}"                                 # 100 USDC (6-dec ERC20)
 CAST="${CAST:-cast}"
 
-source "$(dirname "$0")/lib-venue.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/lib-venue.sh"
 
 status_now() { eget /status; }
 
