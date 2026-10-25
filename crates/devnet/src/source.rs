@@ -231,6 +231,12 @@ impl RawSource {
     }
 }
 
+/// The composer's target: the devnet chain's raw reads (T / V) — the one
+/// builder both profiles call.
+pub fn target(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
+    Arc::new(RawSource::target(rpc))
+}
+
 impl Source for RawSource {
     fn capabilities(&self) -> Capabilities {
         self.capabilities

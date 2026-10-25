@@ -65,6 +65,22 @@ pub struct Plane {
 }
 
 impl Plane {
+    /// Clear the journal-rewind marker once `block` is at or past the range's
+    /// end; returns the cleared range so the caller logs its own wording.
+    pub fn clear_reapply_from(
+        &self,
+        block: u64,
+        reapply: Option<(u64, u64)>,
+    ) -> Result<Option<(u64, u64)>> {
+        if let Some((_, until)) = reapply {
+            if block >= until {
+                *self.reapply_from.lock()? = None;
+                return Ok(Some((block, until)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Open the plane from a state directory: the registry (`shadow.json`),
     /// the journal, the cursor state (`cursor.json`), the admin gauges and the
     /// flags. The layout is one convention for both profiles; the fixtures are

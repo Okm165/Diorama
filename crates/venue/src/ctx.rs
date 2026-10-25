@@ -53,7 +53,7 @@ pub struct Ctx {
     /// keep the shared surface's shape (documented on the plane).
     pub(crate) plane: Plane,
     /// The venue's own gauges/counters.
-    pub(crate) venue_metrics: Arc<VenueMetrics>,
+    pub(crate) venue_metrics: VenueMetrics,
     /// The shared forensic log (`drift.jsonl`, one home for both mirrors):
     /// the follow's anomalies — a gap-guard pause, a source reorg, uncovered
     /// log emitters — the mainnet applier's counterpart.
@@ -73,10 +73,15 @@ impl Ctx {
     pub fn new(mut cfg: mirror_config::Instance, source_url: &str, v_url: &str) -> Result<Self> {
         let (chain, engine) = cfg.take_venue()?;
         let plane = Plane::from_engine(&engine)?;
-        let drift = Drift::new(engine.state_dir.join("drift.jsonl"))?;
+        let drift = Drift::from_engine(&engine)?;
+        // A fixed, generous budget: V's chain is a local anvil.
+        let (source_rpc, anvil_v) = mirror_devnet::engine::build_clients(
+            source_url,
+            v_url,
+            Duration::from_secs(30),
+        )?;
         let uncovered_seen = std::sync::Mutex::new(std::collections::HashSet::new());
-        let venue_metrics = Arc::new(VenueMetrics::default());
-        let (source_rpc, anvil_v) = build_clients(source_url, v_url)?;
+        let venue_metrics = VenueMetrics::default();
         let wiring = crate::profile::build(
             &engine,
             crate::profile::Deps {
@@ -100,17 +105,6 @@ impl Ctx {
             uncovered_seen,
         })
     }
-}
-
-/// The clients: one per endpoint, built once. A fixed, generous per-call
-/// budget: V's chain is a local anvil and the source is one HTTP client (the
-/// mainnet profile's timeout is configurable because its reth queries race
-/// the sync; no measured need justifies a second knob here).
-fn build_clients(source_url: &str, v_url: &str) -> Result<(Arc<Rpc>, Arc<Rpc>)> {
-    let timeout = Duration::from_secs(30);
-    let source_rpc = Arc::new(Rpc::new(source_url, timeout)?);
-    let anvil_v = Arc::new(Rpc::new(v_url, timeout)?);
-    Ok((source_rpc, anvil_v))
 }
 
 /// The shell's view of this context (`mirror_devnet::engine::Engine`): the
@@ -141,8 +135,8 @@ impl Engine for Ctx {
     fn record_scan(&self, walk: &ScanWalk) {
         self.venue_metrics.record_scan(
             walk,
-            &self.venue_metrics.scanned_blocks_total,
-            &self.venue_metrics.skipped_empty_blocks_total,
+            &self.venue_metrics.shadow_scanned_blocks,
+            &self.venue_metrics.shadow_skipped_empty_blocks,
         );
     }
 

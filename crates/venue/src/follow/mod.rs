@@ -12,8 +12,8 @@
 //! guards, [`parity`] is the measurement (the applier's drift-lens
 //! counterpart), [`audit`] is the uncovered-log trail (venue-only: reth's
 //! native BALs carry every write).
-mod audit;
-mod parity;
+pub(crate) mod audit;
+pub(crate) mod parity;
 
 use crate::ctx::Ctx;
 use crate::error::Result;
@@ -33,7 +33,7 @@ pub(crate) struct FollowOutcome {
     /// API's touches; `bal`/`trace` if a future source serves them).
     pub(crate) source: &'static str,
     /// The composed change count, before COW (the fact's `writes`).
-    pub(crate) total: usize,
+    pub(crate) writes: usize,
     pub(crate) applied: usize,
     pub(crate) filtered: usize,
     pub(crate) skipped_shadowed: usize,
@@ -95,9 +95,20 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
 
     let started = Instant::now();
     continuity_check(ctx, followed).await?;
-    let mut stats = compose_window(ctx, followed, source_head).await?;
-    advance_cursor(ctx, source_head).await?;
-    stats.duration_ms = started.elapsed().as_millis() as u64;
+    let plan = plan_window(ctx, followed, source_head).await?;
+    let applied = apply_window(ctx, &plan).await?;
+    let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
+    advance_source_cursor(ctx, source_head).await?;
+    let stats = FollowOutcome {
+        source: plan.kind.as_str(),
+        writes: plan.total,
+        applied,
+        filtered: plan.writes.len(),
+        skipped_shadowed: plan.filter.skipped_shadowed,
+        sampled,
+        sampled_ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+    };
     report_applied(ctx, followed, source_head, &stats);
     Ok(Some(stats))
 }
@@ -120,7 +131,7 @@ fn report_applied(ctx: &Ctx, from: u64, to: u64, window: &FollowOutcome) {
         chain: ctx.mirror.label(),
         block: to,
         source: window.source,
-        writes: window.total,
+        writes: window.writes,
         filtered: window.filtered,
         skipped_shadowed: window.skipped_shadowed,
         sampled: window.sampled,
@@ -130,7 +141,7 @@ fn report_applied(ctx: &Ctx, from: u64, to: u64, window: &FollowOutcome) {
     tracing::info!(
         from,
         to,
-        writes = window.total,
+        writes = window.writes,
         applied = window.applied,
         skipped_shadowed = window.skipped_shadowed,
         sampled_ok = window.sampled_ok,
@@ -140,8 +151,6 @@ fn report_applied(ctx: &Ctx, from: u64, to: u64, window: &FollowOutcome) {
     );
 }
 
-/// The gap guard: a window wider than the profile's limit pauses the follow
-/// (the same regime as the mainnet applier's `max_gap_blocks`).
 /// The gap guard's predicate: a gap at or below the limit follows (the
 /// mainnet's `gap_within_limit` adds the rebase bound; the venue's windows
 /// have none).
@@ -149,6 +158,8 @@ fn gap_within_limit(gap: u64, limit: u64) -> bool {
     gap <= limit
 }
 
+/// The gap guard: a window wider than the profile's limit pauses the follow
+/// (the same regime as the mainnet applier's `max_gap_blocks`).
 fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> Result<bool> {
     let gap = source_head - followed;
     let Some(limit) = ctx.mirror.policies().gap else {
@@ -211,9 +222,10 @@ async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
 /// Compose the window and land its writes on V under the COW filter, then
 /// record the live parity of what was applied. The composer is the spine's
 /// generic one: the venue's source has no native BAL, so it synthesizes.
-async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<FollowOutcome> {
-    // The shared pipeline half (compose → COW → flatten): the same call the
-    // applier makes for one parent block, here for the whole window.
+/// The window's first phase, the applier's `plan_and_check_base` slot: the
+/// shared pipeline half (compose → COW → flatten) for the whole window, its
+/// gauges recorded and the uncovered log audited.
+async fn plan_window(ctx: &Ctx, from: u64, to: u64) -> Result<mirror_devnet::bal::WindowPlan> {
     let plan = mirror_devnet::bal::Composer {
         source: ctx.mirror.follow_source().as_ref(),
         target: ctx.target.as_ref(),
@@ -223,22 +235,16 @@ async fn compose_window(ctx: &Ctx, from: u64, to: u64) -> Result<FollowOutcome> 
     .await?;
     record_window_metrics(&ctx.venue_metrics, &plan.compose);
     audit::record(ctx, &plan.compose.uncovered)?;
-    let applied = if plan.writes.is_empty() {
-        0
-    } else {
-        mirror_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size).await?
-    };
-    let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
-    Ok(FollowOutcome {
-        source: plan.kind.as_str(),
-        total: plan.total,
-        applied,
-        filtered: plan.writes.len(),
-        skipped_shadowed: plan.filter.skipped_shadowed,
-        sampled,
-        sampled_ok,
-        duration_ms: 0, // set by `step` once the window's work is timed
-    })
+    Ok(plan)
+}
+
+/// The window's second phase, the applier's `write_and_mine` slot: land the
+/// planned writes on V (chunked), counted.
+async fn apply_window(ctx: &Ctx, plan: &mirror_devnet::bal::WindowPlan) -> Result<usize> {
+    if plan.writes.is_empty() {
+        return Ok(0);
+    }
+    Ok(mirror_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size).await?)
 }
 
 /// The poll's gauges: what the window's composition touched, planned and
@@ -249,9 +255,10 @@ fn record_window_metrics(metrics: &crate::metrics::VenueMetrics, stats: &mirror_
     metrics.set(&metrics.poll_changed_keys, stats.changed as u64);
 }
 
-/// Advance the follow cursor to `source_head` (recording the source's own
-/// block hash — the continuity check's anchor) and persist the state.
-async fn advance_cursor(ctx: &Ctx, source_head: u64) -> Result<()> {
+/// Advance the source cursor to `source_head` (recording the source's own
+/// block hash — the continuity check's anchor) and persist the state. The
+/// name says which cursor: the devnet cursor is the spine's `advance_cursor`.
+async fn advance_source_cursor(ctx: &Ctx, source_head: u64) -> Result<()> {
     let head_block = ctx.source_rpc.block_by_number(source_head, false).await?;
     ctx.plane.state.set_source_last(source_head, head_block.header.hash)?;
     ctx.plane.save_state()?;

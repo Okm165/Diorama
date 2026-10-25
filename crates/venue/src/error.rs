@@ -16,13 +16,12 @@ pub enum Error {
     #[error(transparent)]
     Devnet(#[from] mirror_devnet::Error),
 
-    /// Anvil V answered with a different chain id: the profile would fork the
-    /// wrong chain (state, addresses and the CCTP domain all follow from it).
-    #[error("{anvil} is not the venue chain: chain id {got}, expected {want}")]
-    WrongChain {
-        anvil: &'static str,
-        got: u64,
-        want: u64,
+    #[error("{what}: {path}")]
+    Io {
+        what: &'static str,
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
     },
 
     /// The HTTP listener could not bind.
@@ -33,12 +32,13 @@ pub enum Error {
         source: std::io::Error,
     },
 
-    #[error("{what}: {path}")]
-    Io {
-        what: &'static str,
-        path: std::path::PathBuf,
-        #[source]
-        source: std::io::Error,
+    /// Anvil V answered with a different chain id: the profile would fork the
+    /// wrong chain (state, addresses and the CCTP domain all follow from it).
+    #[error("{anvil} is not the venue chain: chain id {got}, expected {want}")]
+    WrongChain {
+        anvil: &'static str,
+        got: u64,
+        want: u64,
     },
 
     // ---- the venue's public API boundary (market plane, passthrough) ------

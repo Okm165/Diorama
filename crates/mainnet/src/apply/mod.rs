@@ -246,7 +246,9 @@ async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> 
         duration_ms: facts.started.elapsed().as_millis() as u64,
     };
     record_apply_metrics(ctx, n, &facts, outcome.duration_ms);
-    clear_reapply(&ctx.plane, n, facts.reapply)?;
+    if let Some((_, until)) = ctx.plane.clear_reapply_from(n, facts.reapply)? {
+        tracing::info!(block = n, until, "rewound range re-applied");
+    }
     log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome)?;
     report_applied(&ctx.plane, n, &facts, &outcome);
     Ok(outcome)
@@ -307,17 +309,6 @@ fn record_apply_metrics(ctx: &Ctx, n: u64, facts: &ApplyFacts, duration_ms: u64)
         .set(&ctx.mainnet_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.last_apply_ms, duration_ms);
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, facts.t_latest);
-}
-
-/// The rewound range is fully re-applied: resume normal late-completion skips.
-fn clear_reapply(plane: &Plane, n: u64, reapply: Option<(u64, u64)>) -> Result<()> {
-    if let Some((_, until)) = reapply {
-        if n >= until {
-            *plane.reapply_from.lock()? = None;
-            tracing::info!(block = n, until, "rewound range re-applied");
-        }
-    }
-    Ok(())
 }
 
 /// Whether the apply is a drift-log candidate: a re-apply of a rewound

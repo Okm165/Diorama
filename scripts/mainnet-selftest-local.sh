@@ -132,4 +132,12 @@ if ! grep -q "source=bal" "$DIR/engine.log"; then
   tail -30 "$DIR/engine.log"
   exit 1
 fi
+# At least one block must have moved (the rung answering is not the pipeline
+# applying — the venue's twin asserts its windows the same way).
+if ! grep -q "writes=[1-9]" "$DIR/engine.log"; then
+  echo "mainnet-selftest-local: FAILED (no block applied; engine log:)"
+  tail -30 "$DIR/engine.log"
+  exit 1
+fi
 tail -3 "$DIR/engine.log"
+echo "mainnet-selftest-local: PASSED (the native rung applied the blocks above the pin)"

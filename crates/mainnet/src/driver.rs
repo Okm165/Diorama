@@ -213,8 +213,7 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
 pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
     loop {
-        if ctx.plane.is_halted() {
-            tokio::time::sleep(poll).await;
+        if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
         match next_block(&ctx).await {

@@ -43,6 +43,7 @@ cleanup() {
 trap cleanup EXIT
 rm -rf "$DIR"; mkdir -p "$DIR/state/journal"
 
+status() { curl -s "$HTTP/status"; }
 metric() { curl -s "$HTTP/metrics" | grep "^$1 " | awk '{print $2}'; }
 bal() { rpc "$1" eth_getBalance "[\"$WATCH\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
 nonce() { rpc "$1" eth_getTransactionCount "[\"$WATCH\",\"latest\"]" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"],16))'; }
@@ -120,6 +121,9 @@ if [ "$(bal "$V")" = "$expect" ]; then
 else
   bad "devnet write did not land ($(bal "$V") != $expect)"
 fi
+status | python3 -c 'import json,sys; w="'"$WATCH"'".lower(); d=json.load(sys.stdin); sys.exit(0 if any(w in a.lower() for a in d["shadowed"]) else 1)' \
+  && ok "/status lists the devnet-owned account (shadowed)" \
+  || bad "/status shadowed: $(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["shadowed"])')"
 
 send "$SRC" "$WATCH" 0x000000000000000000000000000000000000dEaD 0xde0b6b3a7640000
 sleep 5
@@ -172,13 +176,13 @@ fi
 # refusal.
 TOKEN=0x00000000000000000000000000000000000000e7 # the mock ERC-20 (deployed on the source)
 
-st=$(curl -s "$HTTP/status")
+st=$(status)
 for k in head cursor halted shadowed shadowed_slots shadowed_accounts capabilities fork_pin epoch_pin probes source; do
   printf '%s' "$st" | python3 -c "import json,sys; sys.exit(0 if '$k' in json.load(sys.stdin) else 1)"     && ok "/status has $k" || bad "/status missing $k"
 done
 
 curl -s -X POST "$HTTP/admin/pause" -H 'content-type: application/json' -d '{}' >/dev/null
-h=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["halted"])')
+h=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["halted"])')
 hz=$(curl -s -o /dev/null -w '%{http_code}' "$HTTP/healthz")
 g=$(metric mirror_halted || true)
 if [ "$h" = "True" ] && [ "$hz" = "503" ] && [ "$g" = "1" ]; then
@@ -187,7 +191,7 @@ else
   bad "pause: halted=$h /healthz=$hz gauge=$g"
 fi
 curl -s -X POST "$HTTP/admin/resume" -H 'content-type: application/json' -d '{}' >/dev/null
-h=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["halted"])')
+h=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["halted"])')
 [ "$h" = "False" ] && ok "resume releases" || bad "resume: halted=$h"
 
 # The bare clear is the designed refusal (a clear with nothing to hand back
@@ -241,13 +245,13 @@ grep -q "deal_applied" "$DIR/events2.out" \
 # The state files are written atomically (temp + rename), so a kill -9 leaves
 # no torn file: the restarted engine reads the same cursor and keeps the COW
 # state. The kill is the point — a graceful stop would not prove it.
-cursor_before=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
+cursor_before=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
 kill -9 "$ENG_PID" 2>/dev/null || true
 sleep 1
 "$ENGINE" run --config "$DIR/instance.toml" >> "$DIR/engine.log" 2>&1 &
 ENG_PID=$!
 for _ in $(seq 1 40); do curl -sf "$HTTP/livez" >/dev/null 2>&1 && break; sleep 0.5; done
-cursor_after=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
+cursor_after=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
 [ "$cursor_after" -ge "$cursor_before" ] \
   && ok "restart: the cursor resumed from the state file ($cursor_before -> $cursor_after)" \
   || bad "restart: cursor went backwards ($cursor_before -> $cursor_after)"
@@ -289,12 +293,12 @@ curl -sf "$HTTP/livez" >/dev/null \
 # them. Paused for the two reads — the follow races them otherwise.
 curl -s -X POST "$HTTP/admin/pause" -H 'content-type: application/json' -d '{}' >/dev/null
 sleep 1.5
-before=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
+before=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
 rw=$(curl -s -X POST "$HTTP/admin/rewind" -H 'content-type: application/json' -d '{"blocks":1}')
 printf '%s' "$rw" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if "cursor" in d and "restored_values" in d else 1)' \
   && ok "/admin/rewind: restored $(printf '%s' "$rw" | python3 -c 'import json,sys; print(json.load(sys.stdin)["restored_values"])') values" \
   || bad "/admin/rewind: $rw"
-after=$(curl -s "$HTTP/status" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
+after=$(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["cursor"])')
 curl -s -X POST "$HTTP/admin/resume" -H 'content-type: application/json' -d '{}' >/dev/null
 [ "$after" -lt "$before" ] && ok "rewind: the cursor moved back ($before -> $after)" || bad "rewind: cursor $before -> $after"
 

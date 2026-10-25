@@ -20,7 +20,7 @@ Three layers, each runnable on demand:
 | CCTP (cross-mirror) | `make cctp-smoke`, `make cctp-roundtrip`, `make cctp-margin-cycle` | both stacks + the bridge | the cross-mirror lane: the bridge's ports and queue, a scripted T→V round trip (burn → attested → mint), and the unified-margin cycle (deal on T → CCTP → venue collateral → trade → back) |
 | CCTP (cross-mirror, local) | `make cctp-local` | anvil + the four service binaries + a public mainnet RPC and the real HyperEVM (fork fetches) | the same lane without a cluster: both chains forked from the real ones, the round trip and the unified-margin cycle in direct mode |
 | Engine symmetry (cross-mirror) | `make engine-symmetry` | both deployed stacks | the two engines' HTTP surfaces answer the shared verbs identically: status and shapes, the admin surface, the counters (21 checks in cluster mode, 22 direct — `/admin/rewind` is direct-only) |
-| Selftest (mainnet, local) | `make mainnet-selftest-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet applier natively: a local source anvil with a storage-writing contract, T forks it, the engine applies the blocks above the pin through the trace rung (anvil's block trace is empty, so the per-tx fallback runs) and the sampled storage parity passes |
+| Selftest (mainnet, local) | `make mainnet-selftest-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet applier natively: a local source anvil with a storage-writing contract, T forks it, the engine applies the blocks above the pin through the native BAL rung (the source runs `--hardfork amsterdam`, so its blocks carry real block access lists) and the sampled storage parity passes |
 | Selftest (venue, local) | `make venue-selftest-local` | anvil forked from the **real** HyperEVM + the venue engine binary | the follow pipeline against the real read model: boot (chain assert, capability audit, reconcile, at-pin probes) then windows of compose → COW → land → **live parity**, with the watchlist derived live (the busiest recent sender) — the system-tx envelope and real activity a scratch anvil cannot serve; the script pins the rung (every window's compose source is the live poll, at least one window applied); the mainnet counterpart is `mainnet-selftest-local` |
 | Engine UX (mainnet, local) | `make mainnet-engine-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet engine UX natively — the four shared verbs end to end: T follows the source 1:1 (Amsterdam BALs), a devnet tx on T is COW-marked and survives the source's next diffs, `/admin/deal` discovers a mock ERC-20's balance-mapping key and mints, the configured probe converges and the shared `{ok, failed, skipped}` shape holds (`mirror_t_convergence_ok_total`), plus `/status`, `/events` (block/deal/reset/epoch facts), `/admin/time`, the shadow hand-back (re-synced from the source), `/admin/rewind` and `/admin/epoch`, and the three admin negatives (the bare clear and the beyond-ring rewind refuse 400; a no-layout deal answers `ok:false` and publishes no fact) — and the stability legs: a SIGKILLed engine restarts from its state files (the cursor resumes, the COW mark intact), a corrupt `cursor.json` fails closed (the boot refuses, the fault names the state, the restored file boots), plus the pause contract (halted, `/healthz` 503, `mirror_halted` 1) and the epochs counter (`mirror_t_resets_total`) |
 | Engine UX (venue, local) | `make venue-engine-local` | anvil + the venue engine binary (no cluster/Docker) | the venue engine UX natively: a local anvil stands in for the HL public API, V forks it, the watched account is mirrored 1:1, a devnet write on V survives the next source window (COW), an uncovered emitter lands in the shared drift log, and the shared admin surface answers — pause/resume effects, the shadow hand-back and its designed latest-only refusal, probes, the deal (a mock ERC-20 on the source), the events, the rewind refusal and a successful rewind (its own writes are journaled), the epoch facts (the re-pin response, `reset_detected` + `epoch_changed`, `venue_epochs_total`) — and the stability legs: a SIGKILLed engine restarts from its state files (the cursor resumes, the COW mark intact), and a corrupt `cursor.json` fails closed (the boot refuses, the fault names the state, the restored file boots) |
@@ -112,7 +112,7 @@ One Job per mirror, the same three-step shape:
 3. the engine's `selftest` subcommand runs the pipeline and prints a
    check-by-check report, exiting non-zero on any failure.
 
-The mainnet's applies blocks `pin+1 .. pin+3` (source, writes/filtered/
+The mainnet's applies blocks `pin+1 .. pin+4` (source, writes/filtered/
 shadowed, sampled storage parity) — the fastest full-pipeline check, and it
 exercises the **trace fallback** (public RPCs do not serve
 `eth_getBlockAccessList`). The venue's follows windows (compose → COW → land →
@@ -803,7 +803,9 @@ the engine aborts its tasks (every mutation persists as it happens), the sim
 saves its state, and the CCTP bridge saves its store. There is no venue
 counterpart of `mainnet-closure-check`: the venue has no incoming parent diffs
 to close a scope over — its standing scope check is the at-pin probe set
-(`/admin/probes`, `venue_probe_*`), which the venue-scenario and smoke exercise.
+(`/admin/probes`, `venue_probe_*`), which the venue's engine-local and the
+symmetry scripts exercise (the scenario and smoke do not — measured: no
+`venue_probe_*` reference exists in their scripts).
 
 There is also no unified "facade" service (plan §7): each mirror's
 scenario surface is its own — `/admin/*` on the two engines, `/control/*` on

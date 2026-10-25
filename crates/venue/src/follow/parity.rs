@@ -19,30 +19,8 @@ pub(super) async fn parity_step(
     if !matches!(ctx.mirror.policies().probes, ProbeSchedule::LiveParity) {
         return Ok((0, 0));
     }
-    // `verify` answers `(ok, failed)`; the fact's contract is `(sample size,
-    // passed)` — the applier's naming, so the two mirrors' facts read the
-    // same way (found by the venue selftest: the inverted pair reported every
-    // clean window as a failure).
-    let (ok, failed) = mirror_devnet::bal::verify(ctx.target.as_ref(), bal).await?;
-    Ok(sample_pair(ok, failed))
-}
-
-/// The fact's pair contract, one expression with a name: `(size, passed)`.
-fn sample_pair(ok: usize, failed: usize) -> (usize, usize) {
-    (ok + failed, ok)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sample_pair;
-
-    /// The pair the window's fact carries is `(size, passed)` — never the
-    /// inverted `(passed, size)` the venue selftest once caught (every clean
-    /// window read as a failure).
-    #[test]
-    fn the_parity_pair_is_size_then_passed() {
-        assert_eq!(sample_pair(3, 1), (4, 3));
-        assert_eq!(sample_pair(0, 0), (0, 0));
-        assert_eq!(sample_pair(0, 2), (2, 0));
-    }
+    // The spine builds the fact's pair `(sampled, sampled_ok)` — never the
+    // inverted `(passed, size)` the venue selftest once caught (every clean
+    // window read as a failure).
+    Ok(mirror_devnet::bal::verify(ctx.target.as_ref(), bal).await?)
 }

@@ -194,9 +194,16 @@ ok_n=$(metric mirror_t_convergence_ok_total || true)
   || bad "metrics: mirror_t_convergence_ok_total=$ok_n"
 
 # ---- modify: a devnet tx on T is COW-marked and survives parent diffs -------
+a0_before=$(bal "$T" "$A0")
 send "$T" "$A0" "$A2" 0x4563918244f40000 >/dev/null   # 5 ETH, devnet-owned
 sleep 4
 dev_a0=$(bal "$T" "$A0")
+landed=$(python3 -c "print(1 if $a0_before - $dev_a0 >= 5 * 10**18 else 0)")
+if [ "$landed" = "1" ]; then
+  ok "devnet write landed on T (balance + 5 ETH; the source's rewards may add)"
+else
+  bad "devnet write did not land ($dev_a0 vs $a0_before)"
+fi
 send "$SRC" "$A0" "$A1" 0xde0b6b3a7640000 >/dev/null # the source moves A0 too
 sleep 6
 if [ "$(bal "$T" "$A0")" = "$dev_a0" ] && [ "$dev_a0" != "$(bal "$SRC" "$A0")" ]; then
@@ -207,6 +214,12 @@ fi
 status | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any("f39f" in a.lower() for a in d["shadowed"]) else 1)' \
   && ok "/status lists the devnet-owned account (shadowed)" \
   || bad "/status shadowed: $(status | python3 -c 'import json,sys; print(json.load(sys.stdin)["shadowed"])')"
+applied=$(metric mirror_blocks_applied_total || true)
+if [ "${applied:-0}" -ge 1 ]; then
+  ok "applied_total=$applied (the pre-COW window's blocks)"
+else
+  bad "applied_total=$applied (expected >= 1)"
+fi
 
 # ---- mint: /admin/deal discovers the mock's key and writes it ---------------
 timeout 5 curl -s -N "$HTTP/events" > "$DIR/events.out" 2>/dev/null &

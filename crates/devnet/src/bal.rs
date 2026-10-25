@@ -433,6 +433,8 @@ pub fn absorb_envelope(
 /// compare it with the value the composition expected. The venue's probe
 /// schedule (`ProbeSchedule::LiveParity`); the mainnet's per-block parity is
 /// its own sampled check.
+/// The fact's pair `(sampled, sampled_ok)`: the count and how many passed —
+/// the one place the pair is built (the profiles publish it verbatim).
 pub async fn verify(target: &dyn Source, bal: &BlockAccessList) -> Result<(usize, usize)> {
     let mut ok = 0usize;
     let mut failed = 0usize;
@@ -463,7 +465,10 @@ pub async fn verify(target: &dyn Source, bal: &BlockAccessList) -> Result<(usize
             failed += f;
         }
     }
-    Ok((ok, failed))
+    // The fact's pair `(sampled, sampled_ok)`: the count and how many
+    // passed — the inversion (passed first) once read every clean window as
+    // a failure.
+    Ok((ok + failed, ok))
 }
 
 /// One change's post-condition: the target must read back the expected value.
@@ -483,6 +488,17 @@ mod tests {
     use crate::closure::TopicMappedSlots;
     use crate::cow::WatchSet;
     use crate::source::Capabilities;
+
+    /// The fact's pair contract: `(sampled, sampled_ok)` — never the inverted
+    /// `(passed, size)` the venue selftest once caught (every clean window
+    /// read as a failure). Pinned beside `verify`, the one place it is built.
+    #[test]
+    fn the_parity_pair_is_size_then_passed() {
+        let pair = |ok: usize, failed: usize| (ok + failed, ok);
+        assert_eq!(pair(3, 1), (4, 3));
+        assert_eq!(pair(0, 0), (0, 0));
+        assert_eq!(pair(0, 2), (2, 0));
+    }
     use alloy_primitives::{address, Bytes, U256};
     use std::collections::HashMap;
 

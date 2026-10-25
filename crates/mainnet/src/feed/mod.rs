@@ -18,6 +18,11 @@
 //! Stamping is chain-native by construction: `updateAnswer` records the block
 //! timestamp of the T block that mines the bridge's tx — feeds are stamped in
 //! the devnet chain's own domain, never in wall time.
+pub(crate) mod chainlink;
+pub(crate) mod http;
+pub(crate) mod metrics;
+pub(crate) mod policy;
+
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::Address;
@@ -25,11 +30,6 @@ use mirror_config::FeedSection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-pub(crate) mod chainlink;
-pub(crate) mod http;
-pub(crate) mod metrics;
-pub(crate) mod policy;
 
 pub(crate) use http::admin_routes;
 

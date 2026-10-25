@@ -137,12 +137,6 @@ async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
     Ok(())
 }
 
-/// This command's wiring, by name: the endpoint values it needs (`endpoints`
-/// — empty when the CLI supplies them), the state dirs, the CL endpoints and
-/// the top-up boundary, which `Ctx::new` builds unconditionally. Unresolved
-/// here is a boot error naming the variable, never a literal used as an
-/// endpoint; the other services' references in the same instance file are not
-/// this pod's to provide.
 async fn run(config: PathBuf) -> Result<()> {
     mirror_devnet::engine::run_engine::<Ctx>(config).await
 }
@@ -192,6 +186,10 @@ impl mirror_devnet::engine::EngineService for Ctx {
         Box::pin(async move {
             let bridge = build_bridge(ctx).await?;
             let mut tasks = Vec::new();
+            tasks.push(mirror_devnet::engine::spawn_http(
+                ctx,
+                http::app(ctx.clone(), bridge.clone()),
+            ));
             if ctx.engine_api.is_some() {
                 tasks.push(tokio::spawn(driver::source_sync_supervisor(ctx.clone())));
             }
@@ -200,10 +198,6 @@ impl mirror_devnet::engine::EngineService for Ctx {
             if let Some(bridge) = &bridge {
                 tasks.push(tokio::spawn(bridge.clone().run(ctx.clone())));
             }
-            tasks.push(mirror_devnet::engine::spawn_http(
-                ctx,
-                http::app(ctx.clone(), bridge),
-            ));
             Ok(tasks)
         })
     }

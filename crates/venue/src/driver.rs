@@ -23,7 +23,6 @@ use crate::error::Result;
 use crate::reset::{read_canary, write_canary};
 use mirror_devnet::engine::Engine as _;
 use mirror_devnet::facts::Fact;
-use mirror_devnet::plane::Plane;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::probes::ProbeOutcome;
 use mirror_devnet::scan;
@@ -57,11 +56,10 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
 
 /// The steady-state loop (boot has already run) — the venue's counterpart
 /// of the applier's `apply_loop`.
-pub(crate) async fn follow_loop(ctx: Arc<Ctx>) -> Result<()> {
+pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
     loop {
-        if ctx.plane.is_halted() {
-            tokio::time::sleep(poll).await;
+        if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
         match pass(&ctx).await {
@@ -126,7 +124,10 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // state ignores them.
     let _ = crate::follow::step(ctx).await?;
 
-    clear_rewound_range(&ctx.plane, head)?;
+    let reapply = *ctx.plane.reapply_from.lock()?;
+    if let Some((_, until)) = ctx.plane.clear_reapply_from(head, reapply)? {
+        tracing::info!(block = head, until, "rewound range passed");
+    }
     Ok(Pass::Steady)
 }
 
@@ -149,22 +150,6 @@ fn record_cursor_metrics(metrics: &crate::metrics::VenueMetrics, cursor: Option<
         &metrics.pin_age_blocks,
         head.saturating_sub(c.first_block) + 1,
     );
-}
-
-/// Clear the journal-rewind marker once the head is past the rolled-back
-/// range (there is no parent diff to re-apply — the devnet re-creates its own
-/// writes). The value is copied out first: a guard held by the `if let`
-/// scrutinee across the body's second `lock()` would self-deadlock (std
-/// mutexes are not reentrant) — the mainnet's applier copies the same way.
-fn clear_rewound_range(plane: &Plane, head: u64) -> Result<()> {
-    let reapply = *plane.reapply_from.lock()?;
-    if let Some((_, until)) = reapply {
-        if head >= until {
-            *plane.reapply_from.lock()? = None;
-            tracing::info!(block = head, until, "rewound range passed");
-        }
-    }
-    Ok(())
 }
 
 /// Scan V's own blocks since `cursor` and persist the walk: the shadow
@@ -325,6 +310,13 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     Ok(())
 }
 
+/// Run the at-pin probes now (the admin route's entry: boot and re-pin run
+/// them automatically; this is the on-demand trigger, e.g. after a hand-back).
+pub(crate) async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
+    let pin = ctx.anvil_v.fork_block().await?;
+    probes_at_pin(ctx, pin).await
+}
+
 /// Run the at-pin probes: V vs the fork source at the pin, devnet-owned
 /// targets skipped and counted (COW means that state is the devnet's).
 ///
@@ -335,16 +327,10 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// meaningful while the pin *is* the source's head — i.e. right after a
 /// `latest` pin (boot, re-pin). An older pin is skipped and counted, never
 /// alarmed: the source cannot serve it, and a mismatch would be a lie.
-/// Run the at-pin probes now (the admin route's entry: boot and re-pin run
-/// them automatically; this is the on-demand trigger, e.g. after a hand-back).
-pub(crate) async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
-    let pin = ctx.anvil_v.fork_block().await?;
-    probes_at_pin(ctx, pin).await
-}
-
-/// Run the at-pin probe set and return the run's outcome (the cumulative
-/// counters are updated here — an at-pin run is the only probe source on the
-/// venue side). The route reports the run; `/metrics` carries the totals.
+///
+/// The run's outcome is returned (the cumulative counters are updated here —
+/// an at-pin run is the only probe source on the venue side). The route
+/// reports the run; `/metrics` carries the totals.
 pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOutcome> {
     let skipped_all = || ProbeOutcome::skipped(ctx.engine.verifier.probes.len());
     let Some(pin) = pin else {

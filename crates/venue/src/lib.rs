@@ -67,6 +67,11 @@ mod design_assertions {
 
     #[test]
     fn public_types_are_normal() {
+        is_normal::<crate::reset::PinCanary>();
+        is_normal::<crate::profile::Wiring>();
+        is_normal::<crate::profile::Deps>();
+        is_normal::<crate::selftest::Targets>();
+        is_normal::<crate::ctx::Ctx>();
         is_normal::<crate::metrics::VenueMetrics>();
         is_normal::<crate::feed::MarketFeed>();
         is_normal::<crate::feed::Overrides>();

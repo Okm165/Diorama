@@ -22,9 +22,9 @@ mirror_devnet::registry! {
         /// V blocks the shadow scan walked (the harness mines one block per poll;
         /// empty blocks are skipped cheaply — this counter makes the cost visible,
         /// plan §17.4).
-        counter scanned_blocks_total = "venue_scanned_blocks_total", "V blocks the shadow scan walked";
+        counter shadow_scanned_blocks = "venue_scanned_blocks_total", "V blocks the shadow scan walked";
         /// The empty share of the walk (one call, no traces).
-        counter skipped_empty_blocks_total = "venue_skipped_empty_blocks_total", "empty blocks the shadow scan skipped (one call, no traces)";
+        counter shadow_skipped_empty_blocks = "venue_skipped_empty_blocks_total", "empty blocks the shadow scan skipped (one call, no traces)";
         /// V blocks the engine mined because the pool was non-empty: the engine is
         /// V's block producer (T's is the applier), so the bridge's boot txs and
         /// relay mints land without a harness mine.

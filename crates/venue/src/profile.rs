@@ -96,9 +96,9 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let pin = Arc::new(AtomicU64::new(mirror_devnet::pin::PIN_UNRESOLVED));
     let source: Arc<dyn Source> = crate::source::pinned(source_rpc.clone(), pin.clone());
     let follow: Arc<dyn Source> = crate::source::follow(source_rpc);
-    let target: Arc<dyn Source> = crate::source::target(target_rpc);
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
     let scope = Scope::from_config(watch, &engine.closures);
+    let target: Arc<dyn Source> = mirror_devnet::source::target(target_rpc);
     let mirror = bundle(engine, source, follow, reset, scope);
     Wiring { mirror, pin, target }
 }

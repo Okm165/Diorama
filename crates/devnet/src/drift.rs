@@ -30,6 +30,12 @@ pub struct Drift {
 impl Drift {
     /// Create the log's directory. A drift log that cannot exist is a boot
     /// fault, not a silent no-op: it is the forensic trail an alarm points at.
+    /// Open the log from an engine section: the state dir's `drift.jsonl` —
+    /// the one spelling both profiles use.
+    pub fn from_engine(engine: &mirror_config::EngineSection) -> Result<Self> {
+        Self::new(engine.state_dir.join("drift.jsonl"))
+    }
+
     pub fn new(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {
             crate::store::ensure_dir(parent).map_err(|(path, source)| Error::Io {

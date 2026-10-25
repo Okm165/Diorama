@@ -29,8 +29,8 @@ pub struct Ctx {
     /// The engine's section (the run path moved it out of the instance: the
     /// context carries exactly the sections it reads).
     pub(crate) engine: EngineSection,
-    pub(crate) reth: Arc<Rpc>,
     pub(crate) anvil_t: Arc<Rpc>,
+    pub(crate) reth: Arc<Rpc>,
     /// The mirror bundle: reth-as-source, the cursor-hash reset detector, the
     /// whole-account scope, and the policies (see `profile.rs` — the
     /// divergence set, in the profile's own folder).
@@ -62,9 +62,13 @@ impl Ctx {
     pub fn new(mut cfg: Instance, reth_url: &str, anvil_t_url: &str) -> Result<Self> {
         let (l1, engine) = cfg.take_mainnet()?;
         let plane = Plane::from_engine(&engine)?;
-        let drift = Drift::new(engine.state_dir.join("drift.jsonl"))?;
-        let beacon = BeaconClient::new(engine.beacon.urls.clone())?;
-        let (reth, anvil_t) = build_clients(&engine, reth_url, anvil_t_url)?;
+        let drift = Drift::from_engine(&engine)?;
+        // The timeout is the config's: reth queries race the sync.
+        let (reth, anvil_t) = mirror_devnet::engine::build_clients(
+            reth_url,
+            anvil_t_url,
+            Duration::from_secs(engine.reth.request_timeout_secs),
+        )?;
         let wiring = crate::profile::build(
             &engine,
             crate::profile::Deps {
@@ -74,12 +78,13 @@ impl Ctx {
                 watch: cfg.watch_set(),
             },
         );
+        let beacon = BeaconClient::new(engine.beacon.urls.clone())?;
         let engine_api = build_engine_api(&engine)?;
         Ok(Self {
             l1,
             engine,
-            reth,
             anvil_t,
+            reth,
             mirror: wiring.mirror,
             target: wiring.target,
             beacon,
@@ -147,20 +152,6 @@ impl Engine for Ctx {
     fn status(&self) -> BoxFuture<'_, Result<Self::Status>> {
         Box::pin(crate::http::status_doc(self))
     }
-}
-
-/// One client per endpoint, shared (`Arc`): the context, the source objects
-/// and the composer's target all reference the same handle.
-fn build_clients(
-    engine: &EngineSection,
-    reth_url: &str,
-    anvil_t_url: &str,
-) -> Result<(Arc<Rpc>, Arc<Rpc>)> {
-    let timeout = Duration::from_secs(engine.reth.request_timeout_secs);
-    Ok((
-        Arc::new(Rpc::new(reth_url, timeout)?),
-        Arc::new(Rpc::new(anvil_t_url, timeout)?),
-    ))
 }
 
 /// The top-up loop's authrpc client. A configured boundary that cannot be

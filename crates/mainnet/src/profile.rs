@@ -36,13 +36,14 @@ use std::sync::Arc;
 pub fn bundle(
     engine: &EngineSection,
     source: Arc<dyn Source>,
+    follow: Arc<dyn Source>,
     reset: Arc<dyn ResetDetector>,
     scope: Scope,
 ) -> Arc<dyn Mirror> {
     Arc::new(Bundle {
         label: "t",
-        follow_source: Arc::clone(&source),
         source,
+        follow_source: follow,
         reset,
         policies: policies(&engine.loops),
         // T's journal holds the applier's parent before-values, not the
@@ -95,9 +96,9 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     // The mainnet watches whole accounts: the BAL enumerates every changed
     // slot, so no closures are needed (the scope's slot set stays empty).
     let scope = Scope::from_config(watch, &engine.closures);
-    let target: Arc<dyn Source> = crate::source::target(target_rpc);
+    let target: Arc<dyn Source> = mirror_devnet::source::target(target_rpc);
     Wiring {
-        mirror: bundle(engine, source, reset, scope),
+        mirror: bundle(engine, Arc::clone(&source), source, reset, scope),
         target,
     }
 }
@@ -152,11 +153,11 @@ mod tests {
             mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
                 .unwrap(),
         );
-        let source: Arc<dyn Source> = crate::source::target(rpc);
+        let source: Arc<dyn Source> = mirror_devnet::source::target(rpc);
         let watched = alloy_primitives::Address::repeat_byte(0xaa);
         let scope =
             Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
-        let mirror = bundle(&engine, Arc::clone(&source), Arc::new(NoReset), scope);
+        let mirror = bundle(&engine, Arc::clone(&source), source, Arc::new(NoReset), scope);
         assert_eq!(mirror.label(), "t");
         assert_eq!(
             mirror.journal_scope(),

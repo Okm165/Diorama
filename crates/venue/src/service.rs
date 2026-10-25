@@ -314,16 +314,10 @@ impl mirror_devnet::engine::EngineService for Ctx {
         ctx: &std::sync::Arc<Ctx>,
     ) -> futures_util::future::BoxFuture<'_, Result<Vec<tokio::task::JoinHandle<()>>>> {
         Box::pin(async move {
-            let mut tasks = Vec::new();
-            tasks.push(mirror_devnet::engine::spawn_http(ctx, http::app(ctx.clone())));
-            {
-                let ctx = ctx.clone();
-                tasks.push(tokio::spawn(async move {
-                    if let Err(e) = driver::follow_loop(ctx).await {
-                        tracing::error!(error = %e, "venue driver exited");
-                    }
-                }));
-            }
+            let tasks = vec![
+                mirror_devnet::engine::spawn_http(ctx, http::app(ctx.clone())),
+                tokio::spawn(driver::follow_loop(ctx.clone())),
+            ];
             Ok(tasks)
         })
     }

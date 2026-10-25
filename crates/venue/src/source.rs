@@ -57,12 +57,6 @@ pub(crate) fn follow(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
     Arc::new(RawSource::new(rpc, DECLARED))
 }
 
-/// The profile's target: the devnet chain's raw reads (V) — the mainnet's
-/// `source.rs` builds its own the same way.
-pub(crate) fn target(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
-    Arc::new(RawSource::target(rpc))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Capabilities, DECLARED};

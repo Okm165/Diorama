@@ -235,6 +235,30 @@ pub fn selftest_verdict(ok: bool) {
 /// capabilities against the live endpoint (a declaration that disagrees is
 /// named here, never discovered mid-window). Read-only: the profile's own
 /// first write (the epoch anchor / the pin reconcile) follows.
+/// One client per endpoint, shared (`Arc`): the context, the source objects
+/// and the composer's target all reference the same handle.
+pub fn build_clients(
+    source_url: &str,
+    target_url: &str,
+    timeout: std::time::Duration,
+) -> mirror_anvil::Result<(std::sync::Arc<Rpc>, std::sync::Arc<Rpc>)> {
+    Ok((
+        std::sync::Arc::new(Rpc::new(source_url, timeout)?),
+        std::sync::Arc::new(Rpc::new(target_url, timeout)?),
+    ))
+}
+
+/// The profile loops' halt gate: while `/admin/pause` holds the loops, sleep
+/// one cadence and hold where you are. `true` means the caller continues.
+pub async fn halt_gate<E: Engine>(ctx: &E, poll: std::time::Duration) -> bool {
+    if ctx.plane().is_halted() {
+        tokio::time::sleep(poll).await;
+        true
+    } else {
+        false
+    }
+}
+
 pub async fn boot_prefix<E: Engine>(
     ctx: &E,
     anvil: &'static str,

@@ -76,11 +76,11 @@ async fn windows_loop(ctx: &Ctx, windows: u64) -> Result<(u64, usize, bool)> {
             continue;
         };
         done += 1;
-        writes += stats.total;
+        writes += stats.writes;
         println!(
-            "-- window {done}: source={} total={} applied={} filtered={} skipped_shadowed={} sampled={}/{}",
+            "-- window {done}: source={} writes={} applied={} filtered={} skipped_shadowed={} sampled={}/{}",
             stats.source,
-            stats.total,
+            stats.writes,
             stats.applied,
             stats.filtered,
             stats.skipped_shadowed,
