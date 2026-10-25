@@ -139,6 +139,15 @@ pub async fn install(
     rpc.anvil_stop_impersonating_account(manager).await?;
 
     // Verify what the setters claim: a failed installation must not serve.
+    verify_installed(rpc, chain, attester).await?;
+    tracing::info!(chain, %attester, %manager, "devnet attester installed (threshold 1)");
+    Ok(InstallOutcome::Installed)
+}
+
+/// The post-state check: serving attestations the destination would reject is
+/// worse than not serving, so the installation refuses unless the setters
+/// verifiably took.
+async fn verify_installed(rpc: &Rpc, chain: &'static str, attester: Address) -> Result<()> {
     let (_, enabled, threshold) = read_state(rpc, attester).await?;
     if !enabled || threshold != U256::ONE {
         return Err(Error::AttesterInstall {
@@ -148,8 +157,7 @@ pub async fn install(
             ),
         });
     }
-    tracing::info!(chain, %attester, %manager, "devnet attester installed (threshold 1)");
-    Ok(InstallOutcome::Installed)
+    Ok(())
 }
 
 /// The transmitter's attester state: the manager, whether `attester` is
