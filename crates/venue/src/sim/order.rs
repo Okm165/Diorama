@@ -22,6 +22,10 @@ use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+/// The docs' default open-order limit (the rate-limits page); the volume
+/// bonus (one per 5M USDC traded, capped at 5000) is not modeled.
+const OPEN_ORDER_LIMIT: usize = 1000;
+
 /// One order: the venue's own fields, decoded from either surface (the
 /// control route's body or the `/exchange` action).
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -331,6 +335,10 @@ impl Sim {
         req: &Order,
         meta: Option<&crate::wire::Meta>,
     ) -> Result<()> {
+        if let Some(reason) = self.open_order_limit_refusal(address)? {
+            tracing::warn!(coin = %req.coin, "order refused: open-order limit");
+            return Err(Error::bad_request(reason));
+        }
         if let Some(reason) = self.oi_cap_refusal(feed, address, req)? {
             tracing::warn!(coin = %req.coin, "order refused: open interest cap");
             return Err(Error::bad_request(reason));
@@ -814,6 +822,22 @@ impl Sim {
 
     /// The venue's OI-cap refusal: a coin at its cap accepts only orders that
     /// reduce the position (plan §5's own string).
+    /// The docs' open-order limit (the rate-limits page: "Each user has a
+    /// default open order limit of 1000 plus one additional order for every
+    /// 5M USDC of volume, capped at a total of 5000 open orders"): the base
+    /// 1000 is enforced; the volume bonus is not modeled (a named
+    /// simplification — without it the limit subsumes the page's rule that a
+    /// reduce-only or trigger order is rejected once 1000 others are open).
+    fn open_order_limit_refusal(&self, address: Address) -> Result<Option<String>> {
+        let open = self.resting_orders(Some(address))?.len();
+        if open >= OPEN_ORDER_LIMIT {
+            return Ok(Some(format!(
+                "venue-sim: the open-order limit is {OPEN_ORDER_LIMIT} (docs: the default limit; the volume bonus is not modeled). See docs/INTEGRATION.md."
+            )));
+        }
+        Ok(None)
+    }
+
     fn oi_cap_refusal(
         &self,
         feed: &MarketFeed,
@@ -1874,6 +1898,24 @@ mod tests {
         assert_eq!(account.perp_balance, before);
         let err = sim.place(&feed, a, &ioc(true, "1")).unwrap_err();
         assert!(format!("{err}").contains("no new orders"), "{err}");
+    }
+
+    /// The docs' open-order limit (the rate-limits page): the 1000th resting
+    /// order is the last; the next refuses by name (the volume bonus is not
+    /// modeled — the named simplification above the rule).
+    #[test]
+    fn the_open_order_limit_refuses_by_name() {
+        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let (sim, a) = funded_sim(&feed, "100000");
+        let mut rest = ioc(false, "0.1");
+        rest.tif = Tif::Gtc;
+        rest.limit_px = Some("120".parse().unwrap());
+        for i in 0..1000 {
+            sim.place(&feed, a, &rest)
+                .unwrap_or_else(|e| panic!("order {i}: {e}"));
+        }
+        let err = sim.place(&feed, a, &rest).unwrap_err();
+        assert!(format!("{err}").contains("open-order limit"), "{err}");
     }
 
     /// The docs' margin modes and the leverage bound: a strict-isolated or

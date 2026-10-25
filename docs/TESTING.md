@@ -14,9 +14,9 @@ Three layers, each runnable on demand:
 
 ## Unit tests (`cargo test --workspace`)
 
-223 tests, all offline, one suite per crate: `mirror-anvil` 16,
+224 tests, all offline, one suite per crate: `mirror-anvil` 16,
 `mirror-devnet` 45, `mirror-config` 17, `mirror-mainnet` 9,
-`mirror-venue` 105, `mirror-cctp` 31. The suites carry the measured rules
+`mirror-venue` 106, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
 - `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with
