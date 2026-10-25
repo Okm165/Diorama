@@ -239,12 +239,18 @@ async fn selftest_cmd(
     targets: crate::selftest::Targets,
     windows: u64,
 ) -> Result<()> {
-    let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
-    // The scratch run's endpoints come from the CLI: only the boundaries
-    // `Ctx::new` builds regardless are this command's to require.
-    require_wiring(&cfg, &unresolved, "venue selftest wiring", &[])?;
-    let ok = crate::selftest::run(cfg, targets, windows).await?;
-    boot::exit_verdict(ok);
+    mirror_devnet::engine::selftest_entry(
+        &config,
+        |cfg, unresolved| {
+            // The scratch run's endpoints come from the CLI: only the
+            // boundaries `Ctx::new` builds regardless are this command's to
+            // require.
+            require_wiring(cfg, unresolved, "venue selftest wiring", &[])
+                .map_err(crate::error::Error::from)
+        },
+        move |cfg| Box::pin(crate::selftest::run(cfg, targets, windows)),
+    )
+    .await
 }
 
 async fn run(config: std::path::PathBuf) -> Result<()> {

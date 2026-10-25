@@ -300,6 +300,21 @@ pub async fn run_engine<S: EngineService>(config: std::path::PathBuf) -> Result<
     Ok(())
 }
 
+/// The selftest command's skeleton both engines share: inspect the instance,
+/// run the command's wiring check, hand the instance to the profile's
+/// pipeline, and exit with its verdict (the k8s Jobs read the exit code).
+pub async fn selftest_entry<E, C, F>(config: &std::path::Path, check: C, run: F) -> Result<(), E>
+where
+    E: From<mirror_config::ConfigError>,
+    C: FnOnce(&mirror_config::Instance, &[String]) -> Result<(), E>,
+    F: FnOnce(mirror_config::Instance) -> BoxFuture<'static, Result<bool, E>>,
+{
+    let (cfg, unresolved) = mirror_config::Instance::inspect(config)?;
+    check(&cfg, &unresolved)?;
+    let ok = run(cfg).await?;
+    mirror_config::boot::exit_verdict(ok);
+}
+
 /// The boot wiring check both engines share: every value the instance
 /// references must be resolvable — the profile's `endpoints`, the engine's own
 /// state dir, and `extra` (the boundaries only that profile builds).

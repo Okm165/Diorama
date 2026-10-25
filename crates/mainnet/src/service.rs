@@ -93,22 +93,34 @@ async fn selftest_cmd(
     blocks: u64,
     timeout_secs: u64,
 ) -> Result<()> {
-    let (mut cfg, unresolved) = Instance::inspect(&config)?;
-    // The scratch run's endpoints come from the CLI: only the boundaries
-    // `Ctx::new` builds regardless are this command's to require.
-    require_wiring(&cfg, &unresolved, "mainnet selftest wiring", &[])?;
-    cfg.services
-        .engine
-        .as_mut()
-        .ok_or_else(|| {
-            Error::Config(mirror_config::ConfigError::Invalid {
-                issues: vec!["profile \"mainnet\" requires [services.engine]".into()],
+    mirror_devnet::engine::selftest_entry(
+        &config,
+        |cfg, unresolved| {
+            // The scratch run's endpoints come from the CLI: only the
+            // boundaries `Ctx::new` builds regardless are this command's to
+            // require.
+            require_wiring(cfg, unresolved, "mainnet selftest wiring", &[]).map_err(Error::from)
+        },
+        move |mut cfg| {
+            Box::pin(async move {
+                // The CLI's request timeout wins for the scratch run.
+                cfg.services
+                    .engine
+                    .as_mut()
+                    .ok_or_else(|| {
+                        Error::Config(mirror_config::ConfigError::Invalid {
+                            issues: vec![
+                                "profile \"mainnet\" requires [services.engine]".into(),
+                            ],
+                        })
+                    })?
+                    .reth
+                    .request_timeout_secs = timeout_secs;
+                selftest::run(cfg, targets, blocks).await
             })
-        })?
-        .reth
-        .request_timeout_secs = timeout_secs;
-    let ok = selftest::run(cfg, targets, blocks).await?;
-    mirror_config::boot::exit_verdict(ok);
+        },
+    )
+    .await
 }
 
 /// The `rewind` subcommand: undo the last N applied parent blocks on T.
