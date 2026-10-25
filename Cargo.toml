@@ -50,6 +50,10 @@ alloy-rpc-types-anvil = { version = "2.5" }
 alloy-rpc-types-txpool = { version = "2.5" }
 
 axum = "0.8"
+# ISO-8601 timestamps for the Iris-compatible API's `lastUpdated` fields: a
+# calendar is a library's job, not a hand-rolled civil-from-days (the
+# external-libs reading's finding).
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 # Stream/Sink adapters for the venue websocket client.
 futures-util = "0.3"

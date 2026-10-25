@@ -76,12 +76,15 @@ pub struct Journal {
     keep: u64,
 }
 
+/// The io-error context for the journal directory (one spelling).
+const JOURNAL_DIR: &str = "journal directory";
+
 impl Journal {
     /// Create the journal directory (a boot failure here is typed, not
     /// swallowed: a journal that cannot exist silently disables rewind).
     pub fn new(dir: PathBuf, keep: u64) -> Result<Self> {
         std::fs::create_dir_all(&dir).map_err(|source| Error::Io {
-            what: "journal directory",
+            what: JOURNAL_DIR,
             path: dir.clone(),
             source,
         })?;
@@ -105,7 +108,7 @@ impl Journal {
     /// quiet block — and a huge range would cost one lookup per block.
     pub fn blocks_in(&self, from: u64, to: u64) -> Result<Vec<u64>> {
         let entries = std::fs::read_dir(&self.dir).map_err(|source| Error::Io {
-            what: "journal directory",
+            what: JOURNAL_DIR,
             path: self.dir.clone(),
             source,
         })?;
@@ -130,7 +133,7 @@ impl Journal {
 
     pub fn clear(&self) -> Result<()> {
         let entries = std::fs::read_dir(&self.dir).map_err(|source| Error::Io {
-            what: "journal directory",
+            what: JOURNAL_DIR,
             path: self.dir.clone(),
             source,
         })?;

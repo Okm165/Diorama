@@ -551,7 +551,7 @@ impl Rpc {
     /// and write-tracking): one alloy `TraceResult` per transaction.
     pub async fn trace_block_prestate(&self, n: u64) -> Result<Vec<TraceResult>> {
         self.call(
-            "debug_traceBlockByNumber",
+            crate::TRACE_BLOCK_METHOD,
             (U64::from(n), prestate_diff_options()),
         )
         .await
@@ -571,7 +571,7 @@ impl Rpc {
     /// sender).
     pub async fn trace_block_calls(&self, n: u64) -> Result<Vec<TraceResult>> {
         let options = GethDebugTracingOptions::call_tracer(Default::default());
-        self.call("debug_traceBlockByNumber", (U64::from(n), options)).await
+        self.call(crate::TRACE_BLOCK_METHOD, (U64::from(n), options)).await
     }
 
     // ---- anvil namespace -----------------------------------------------

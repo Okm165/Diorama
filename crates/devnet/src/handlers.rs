@@ -25,12 +25,21 @@ use std::sync::Arc;
 
 /// The shared route table: health, status, metrics, the fact stream, and the
 /// admin surface. The mirror's own routes are added beside it.
+/// The shared health path: the engines' table and the venue simulator's info
+/// router answer the same route (one spelling; the k8s probes hit it on both).
+pub const HEALTHZ: &str = "/healthz";
+
+/// The shared metrics path: the engines' table and the venue simulator's
+/// control router answer the same route (the cctp bridge's own router spells
+/// its own — it does not depend on the spine).
+pub const METRICS: &str = "/metrics";
+
 pub fn shared_routes<E: Engine>() -> Router<Arc<E>> {
     Router::new()
-        .route("/healthz", get(healthz::<E>))
+        .route(HEALTHZ, get(healthz::<E>))
+        .route(METRICS, get(metrics::<E>))
         .route("/livez", get(livez))
         .route("/status", get(status::<E>))
-        .route("/metrics", get(metrics::<E>))
         .route("/events", get(admin_events::<E>))
         .route("/admin/resume", post(admin_resume::<E>))
         .route("/admin/pause", post(admin_pause::<E>))

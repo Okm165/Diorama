@@ -214,7 +214,7 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             docs-metrics, trust-audit, clock-labels, no-panics, config-check,
                             docker-members, k8s-wiring, spec-citations, spine-purity,
                             facts-published, metrics-written, render-diagrams)
-docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, OPERATIONS.md, TESTING.md, adr/
+docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, STRUCTURE.md, OPERATIONS.md, TESTING.md, adr/
 ```
 
 ## Docs
@@ -227,6 +227,9 @@ docs/                       HOW-IT-WORKS.md, ARCHITECTURE.md, SPINE.md, OPERATIO
   COW, journal), config reference, source
   liveness, and the Venue Mirror (fork driver, simulator, Core↔EVM bridge,
   feed bridge).
+- **[docs/STRUCTURE.md](docs/STRUCTURE.md)** — the file-by-file map of both
+  crates: which files pair, the judged asymmetries, and what the AST readings
+  found.
 - **[docs/SPINE.md](docs/SPINE.md)** — the spine: the information both mirrors
   carry, the interfaces they share, the complete divergence list, the event
   model, and the spec cross-references (EIP-7928/EIP-8379/reth for the

@@ -23,7 +23,6 @@ use mirror_devnet::journal::{entry_for_write, BeforeValue, JournalEntry};
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::spine::{ClockPolicy, MinePolicy};
-use mirror_devnet::state::cursor_from;
 use parity::parity_step;
 use prepend::{prepend_and_mark, scan_own_blocks};
 use std::sync::atomic::Ordering;
@@ -286,13 +285,11 @@ fn report_applied(plane: &Plane, n: u64, facts: &ApplyFacts, outcome: &ApplyOutc
 }
 
 /// Advance the devnet cursor to `n` — the applier's and the late-completion
-/// path's shared step: the cursor block's hash is read from the chain and the
-/// state persisted.
+/// path's shared step: the block's hash is read from the chain and the
+/// cursor written through the spine's one cursor step.
 async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
-    let t_block = ctx.anvil_t.block_by_number(n, false).await?;
-    let first_block = ctx.plane.state.cursor()?.map(|c| c.first_block).unwrap_or(n);
-    ctx.plane.state.set_cursor(cursor_from(&t_block, first_block))?;
-    ctx.plane.save_state()?;
+    let block = ctx.anvil_t.block_by_number(n, false).await?;
+    mirror_devnet::state::advance_cursor(&ctx.plane.state, &block, n)?;
     Ok(())
 }
 

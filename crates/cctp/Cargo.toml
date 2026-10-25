@@ -10,6 +10,7 @@ description = "The CCTP bridge: the devnet attester, the Iris-compatible API, th
 mirror-config = { path = "../config" }
 mirror-anvil = { path = "../anvil" }
 alloy-chains = { workspace = true }
+chrono = { workspace = true }
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
 # "k256" gives the Ethereum `Signature` type its k256 conversions and

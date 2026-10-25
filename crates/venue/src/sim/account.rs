@@ -25,6 +25,14 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// The margin mode's wire string (the venue's own vocabulary): one spelling.
+pub(crate) const ISOLATED_MARGIN: &str = "isolated margin";
+
+/// The checked-money contexts, one spelling each (they name the field in every
+/// overflow/zero-division fault).
+pub(crate) const COST_BASIS: &str = "cost basis";
+pub(crate) const FILL_NOTIONAL: &str = "fill notional";
+
 /// One recorded API wallet (the agent identity daloc's cosigner registers).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct AgentWallet {
@@ -122,7 +130,7 @@ impl Position {
 
     /// The cost basis: szi·entry.
     pub fn cost_basis(&self) -> Result<Decimal> {
-        mul(self.szi, self.entry_px, "cost basis")
+        mul(self.szi, self.entry_px, COST_BASIS)
     }
 
     pub fn is_long(&self) -> bool {
@@ -252,14 +260,14 @@ impl PositionTotals {
         self.notional = add(self.notional, facts.value, "total notional")?;
         self.margin = add(self.margin, p.margin_used, "total margin")?;
         self.signed_value = add(self.signed_value, signed, "signed value")?;
-        self.cost_basis = add(self.cost_basis, p.cost_basis()?, "cost basis")?;
+        self.cost_basis = add(self.cost_basis, p.cost_basis()?, COST_BASIS)?;
         if p.leverage == LeverageType::Cross {
             self.cross_notional = add(self.cross_notional, facts.value, "cross notional")?;
             self.cross_margin = add(self.cross_margin, p.margin_used, "cross margin")?;
             self.cross_maintenance =
                 add(self.cross_maintenance, facts.maintenance, "cross maintenance")?;
         } else {
-            self.isolated_margin = add(self.isolated_margin, p.margin_used, "isolated margin")?;
+            self.isolated_margin = add(self.isolated_margin, p.margin_used, ISOLATED_MARGIN)?;
             self.isolated_signed = add(self.isolated_signed, signed, "isolated signed value")?;
         }
         Ok(())
@@ -524,7 +532,7 @@ pub(crate) fn available_after_maintenance(
         .iter()
         .filter(|row| row.position.leverage.kind == LeverageType::Isolated)
         .try_fold(Decimal::ZERO, |acc, row| {
-            add(acc, row.position.margin_used, "isolated margin")
+            add(acc, row.position.margin_used, ISOLATED_MARGIN)
         })?;
     let maintenance = add(v.cross_maintenance_margin_used, isolated, "maintenance")?;
     Ok(vec![(
@@ -808,7 +816,7 @@ fn settle_margin(position: &mut Position) -> Result<()> {
 fn apply_increase(position: &mut Position, old: Decimal, fill: &FillFacts) -> Result<()> {
     let signed = if fill.is_buy { fill.size } else { -fill.size };
     let old_notional = mul(old.abs(), position.entry_px, "entry notional")?;
-    let fill_notional = mul(fill.size, fill.px, "fill notional")?;
+    let fill_notional = mul(fill.size, fill.px, FILL_NOTIONAL)?;
     let new_szi = add(old, signed, "position size")?;
     position.entry_px = div(
         add(old_notional, fill_notional, "entry notional total")?,

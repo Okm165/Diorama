@@ -370,39 +370,16 @@ fn entry(record: &MessageRecord) -> MessageEntry {
     }
 }
 
-// ---- ISO 8601 (the `lastUpdated` shape; no chrono in the workspace) --------
+// ---- ISO 8601 (the `lastUpdated` shape) ------------------------------------
 
-/// UTC `YYYY-MM-DDTHH:MM:SS.mmmZ` from epoch milliseconds (Howard Hinnant's
-/// civil-from-days).
+/// UTC `YYYY-MM-DDTHH:MM:SS.mmmZ` from epoch milliseconds (chrono: a calendar
+/// is a library's job — this replaced a hand-rolled civil-from-days). An
+/// out-of-range value degrades to the epoch, never a panic.
 pub(crate) fn iso8601_ms(ms: u64) -> String {
-    let secs = ms / 1000;
-    let days = (secs / 86_400) as i64;
-    let rem = secs % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60,
-        ms % 1000
-    )
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    (
-        if month <= 2 { year + 1 } else { year },
-        month as u32,
-        day as u32,
-    )
+    chrono::DateTime::from_timestamp_millis(ms as i64)
+        .unwrap_or_default()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
 }
 
 #[cfg(test)]

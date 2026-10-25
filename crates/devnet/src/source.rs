@@ -141,7 +141,7 @@ impl Capabilities {
 
         let trace = rpc
             .call::<serde_json::Value>(
-                "debug_traceBlockByNumber",
+                mirror_anvil::TRACE_BLOCK_METHOD,
                 (
                     U64::from(future),
                     serde_json::json!({"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}),

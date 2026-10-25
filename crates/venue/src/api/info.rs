@@ -25,18 +25,28 @@ use std::sync::Arc;
 
 /// The readiness gate's freshness window (the plan's ≤6 s client gate, with
 /// margin for a poll interval).
+/// The wire's order-type names (the venue's own vocabulary): one spelling.
+const LIMIT: &str = "Limit";
+const MARKET: &str = "Market";
+const TRIGGER: &str = "Trigger";
+
+/// The wire's order-type name: a trigger rests as `Trigger`.
+fn order_type(has_trigger: bool) -> &'static str {
+    if has_trigger { TRIGGER } else { LIMIT }
+}
+
 pub async fn healthz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     if state.sim.is_poisoned() {
         // The account plane refuses every read; a 200 here would hide an
         // outage from the orchestrator (the verifier's readiness-gap find).
-        return (StatusCode::SERVICE_UNAVAILABLE, "sim state poisoned");
+        return (StatusCode::SERVICE_UNAVAILABLE, super::SIM_POISONED);
     }
     (StatusCode::OK, "ok")
 }
 
 pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     if state.sim.is_poisoned() {
-        return (StatusCode::SERVICE_UNAVAILABLE, "sim state poisoned");
+        return (StatusCode::SERVICE_UNAVAILABLE, super::SIM_POISONED);
     }
     if state.ready(crate::feed::MarketFeed::MAX_STALE_MS) {
         (StatusCode::OK, "ready")
@@ -178,8 +188,8 @@ fn trigger_condition(order: &crate::sim::order::RestingOrder) -> String {
                 crate::sim::order::Tpsl::Tp => "Take Profit",
                 crate::sim::order::Tpsl::Sl => "Stop",
             };
-            let dir = if order.is_buy { "Market" } else { "Limit" };
-            format!("{kind} {dir} {}({})", if t.is_market { "Market" } else { "Limit" }, t.trigger_px)
+            let dir = if order.is_buy { MARKET } else { LIMIT };
+            format!("{kind} {dir} {}({})", if t.is_market { MARKET } else { LIMIT }, t.trigger_px)
         }
     }
 }
@@ -213,28 +223,7 @@ async fn frontend_open_orders(state: &ApiState, body: Bytes, user: Address) -> R
             .sim
             .resting_orders(Some(user))?
             .into_iter()
-            .map(|r| FrontendOpenOrder {
-                coin: r.coin.clone(),
-                is_position_tpsl: false,
-                is_trigger: r.trigger.is_some(),
-                limit_px: r.px.to_string(),
-                oid: r.oid,
-                order_type: if r.trigger.is_some() {
-                    "Trigger"
-                } else {
-                    "Limit"
-                },
-                orig_sz: r.orig_sz.to_string(),
-                reduce_only: r.reduce_only,
-                side: side_letter(r.is_buy),
-                sz: r.sz.to_string(),
-                timestamp: r.placed_ms,
-                trigger_condition: trigger_condition(&r),
-                trigger_px: r
-                    .trigger
-                    .map(|t| t.trigger_px.to_string())
-                    .unwrap_or_else(|| "0.0".into()),
-            })
+            .map(|r| frontend_row(&r))
             .collect();
         Ok(Json(rows).into_response())
     })
@@ -298,32 +287,60 @@ fn tif_name(tif: crate::sim::order::Tif) -> &'static str {
     }
 }
 
-fn status_inner(r: &crate::sim::order::RestingOrder, sz: String) -> StatusOrderInner {
-    StatusOrderInner {
+/// One resting order's frontend-row fields: the single mapping the two served
+/// shapes share (`frontendOpenOrders` uses it whole; `orderStatus` extends it
+/// with its own fields).
+fn frontend_row(r: &crate::sim::order::RestingOrder) -> FrontendOpenOrder {
+    FrontendOpenOrder {
         coin: r.coin.clone(),
-        side: side_letter(r.is_buy),
+        is_position_tpsl: false,
+        is_trigger: r.trigger.is_some(),
         limit_px: r.px.to_string(),
-        sz,
         oid: r.oid,
+        order_type: order_type(r.trigger.is_some()),
+        orig_sz: r.orig_sz.to_string(),
+        reduce_only: r.reduce_only,
+        side: side_letter(r.is_buy),
+        sz: r.sz.to_string(),
         timestamp: r.placed_ms,
         trigger_condition: trigger_condition(r),
-        is_trigger: r.trigger.is_some(),
         trigger_px: r
             .trigger
             .map(|t| t.trigger_px.to_string())
             .unwrap_or_else(|| "0.0".into()),
-        children: Vec::new(),
-        is_position_tpsl: false,
-        reduce_only: r.reduce_only,
-        order_type: if r.trigger.is_some() {
-            "Trigger"
-        } else {
-            "Limit"
-        },
-        orig_sz: r.orig_sz.to_string(),
-        tif: tif_name(r.tif),
-        cloid: r.cloid,
     }
+}
+
+/// The status row: the frontend row's fields (one mapping for both shapes)
+/// plus the status-only extras.
+fn status_from_frontend(
+    front: FrontendOpenOrder,
+    sz: String,
+    tif: &'static str,
+    cloid: Option<alloy_primitives::B128>,
+) -> StatusOrderInner {
+    StatusOrderInner {
+        coin: front.coin,
+        side: front.side,
+        limit_px: front.limit_px,
+        sz,
+        oid: front.oid,
+        timestamp: front.timestamp,
+        trigger_condition: front.trigger_condition,
+        is_trigger: front.is_trigger,
+        trigger_px: front.trigger_px,
+        children: Vec::new(),
+        is_position_tpsl: front.is_position_tpsl,
+        reduce_only: front.reduce_only,
+        order_type: front.order_type,
+        orig_sz: front.orig_sz,
+        tif,
+        cloid,
+    }
+}
+
+fn status_inner(r: &crate::sim::order::RestingOrder, sz: String) -> StatusOrderInner {
+    status_from_frontend(frontend_row(r), sz, tif_name(r.tif), r.cloid)
 }
 
 /// The terminal status label (the docs' orderStatus strings).

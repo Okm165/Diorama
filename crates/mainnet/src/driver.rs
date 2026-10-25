@@ -21,6 +21,9 @@ use std::time::Duration;
 /// Ethereum mainnet: what both anvils must fork (a code fact, plan §19.6).
 const MAINNET_CHAIN_ID: u64 = 1;
 
+/// T's name in every fault it raises (one spelling; the venue's is `anvil-v`).
+const ANVIL: &str = "anvil-t";
+
 /// The boot wait (see `boot`): reth unwinding and the anvils re-forking both
 /// take minutes on a bad source day, and a crash-loop is worse than a slow
 /// boot.
@@ -30,7 +33,7 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(900);
 /// declared capabilities. A boot fault is fatal (the bin exits): an applier
 /// over the wrong chain or an unanchored epoch must not serve.
 pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
-    mirror_devnet::engine::assert_chain(ctx, "anvil-t", MAINNET_CHAIN_ID, BOOT_TIMEOUT).await?;
+    mirror_devnet::engine::assert_chain(ctx, ANVIL, MAINNET_CHAIN_ID, BOOT_TIMEOUT).await?;
     // The epoch pin is anchored before any writes exist (a fresh registry's
     // epoch *is* the current fork base; without the record a later same-pin
     // restart would be an unprovable epoch and the rule would have to fail

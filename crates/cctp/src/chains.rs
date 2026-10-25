@@ -262,7 +262,7 @@ impl Chain {
     pub async fn native_balance(&self, who: Address) -> Result<U256> {
         Ok(self
             .rpc
-            .call(mirror_anvil::ETH_GET_BALANCE, (who, "latest"))
+            .call(mirror_anvil::ETH_GET_BALANCE, (who, mirror_anvil::LATEST))
             .await?)
     }
 

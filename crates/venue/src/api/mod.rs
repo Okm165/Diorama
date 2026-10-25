@@ -86,10 +86,14 @@ impl ApiState {
     }
 }
 
+/// The account plane's poison answer (503): one spelling for the three
+/// health routes that raise it.
+pub(crate) const SIM_POISONED: &str = "sim state poisoned";
+
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.
 pub fn info_router(state: Arc<ApiState>) -> Router {
     Router::new()
-        .route("/healthz", axum::routing::get(info::healthz))
+        .route(mirror_devnet::handlers::HEALTHZ, axum::routing::get(info::healthz))
         .route("/readyz", axum::routing::get(info::readyz))
         .route("/info", axum::routing::post(info::info))
         // The matching lane's named refusal (plan §18.4): their client posts
@@ -105,7 +109,7 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
     use axum::routing::{get, post};
     Router::new()
         .route("/health", get(control::health))
-        .route("/metrics", get(control::metrics))
+        .route(mirror_devnet::handlers::METRICS, get(control::metrics))
         .route("/control/deal", post(control::deal))
         .route("/control/order", post(control::order))
         .route("/control/advance", post(control::advance))

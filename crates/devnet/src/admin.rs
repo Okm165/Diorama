@@ -356,24 +356,13 @@ impl AdminSurface<'_> {
     /// at the chain head + 1 and skip parent blocks); only a *missing* block
     /// means "reset under us".
     async fn reset_cursor_to(&self, target: u64) -> Result<()> {
-        match self.target.block_by_number_opt(target, false).await? {
-            Some(b) => {
-                let first = self
-                    .plane
-                    .state
-                    .lock()?
-                    .data
-                    .devnet
-                    .as_ref()
-                    .map(|c| c.first_block)
-                    .unwrap_or(target);
-                self.plane.state.set_cursor(crate::state::cursor_from(&b, first))?;
-            }
-            None => {
-                self.plane.state.clear_cursor()?;
-            }
+        if let Some(b) = self.target.block_by_number_opt(target, false).await? {
+            crate::state::advance_cursor(&self.plane.state, &b, target)?;
+        } else {
+            self.plane.state.clear_cursor()?;
+            self.plane.save_state()?;
         }
-        self.plane.state.lock()?.save()
+        Ok(())
     }
 
     /// `POST /admin/rewind` — the route's response: the request's block count

@@ -36,6 +36,10 @@ use std::time::Duration;
 /// HyperEVM's chain id on mainnet (998 on testnet). A code fact.
 const VENUE_CHAIN_ID: u64 = 999;
 
+/// V's name in every fault it raises (one spelling; the mainnet's is
+/// `anvil-t`).
+const ANVIL: &str = "anvil-v";
+
 /// The boot wait (see `boot`): a fork-mode anvil comes up in seconds; the
 /// only normal delay is a coordinated restart, and a crash-loop is worse
 /// than a bounded wait.
@@ -45,7 +49,7 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
 pub async fn boot(ctx: &Ctx) -> Result<()> {
-    mirror_devnet::engine::assert_chain(ctx, "anvil-v", VENUE_CHAIN_ID, BOOT_TIMEOUT).await?;
+    mirror_devnet::engine::assert_chain(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT).await?;
     // The declared capabilities are audited once, against the live endpoint
     // (a declaration that disagrees is named here, never discovered mid-window).
     mirror_devnet::source::audit_capabilities(
@@ -83,7 +87,7 @@ pub async fn run(ctx: Arc<Ctx>) -> Result<()> {
 async fn recover_from_reset(ctx: &Ctx) {
     tracing::warn!("V was reset under the driver - reconciling (epoch rule)");
     if let Err(e) =
-        mirror_devnet::engine::assert_chain(ctx, "anvil-v", VENUE_CHAIN_ID, BOOT_TIMEOUT).await
+        mirror_devnet::engine::assert_chain(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT).await
     {
         tracing::warn!(error = %e, "venue chain assert failed after a reset");
     }
@@ -201,9 +205,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     // pruned; the venue's journal holds its own writes — the deal).
     ctx.plane.journal.prune(head);
     let block = ctx.anvil_v.block_by_number(head, false).await?;
-    let first_block = cursor.map(|c| c.first_block).unwrap_or(head);
-    ctx.plane.state.set_cursor(cursor_from(&block, first_block))?;
-    ctx.plane.save_state()?;
+    mirror_devnet::state::advance_cursor(&ctx.plane.state, &block, head)?;
     ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
     ctx.plane.facts.publish(Fact::CursorAdvanced {
         chain: ctx.mirror.label(),
@@ -317,6 +319,8 @@ async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     let watermark = if let Some(p) = pin {
         let block = ctx.anvil_v.block_by_number(p, false).await?;
+        // Not the shared advance step: a new epoch's `first_block` *is* the
+        // pin (the shared step keeps the current cursor's first block).
         ctx.plane.state.set_cursor(cursor_from(&block, p))?;
         // The follow cursor starts at the pin: V's state *is* the source's
         // state at the pin, so the next window composes pin+1 onward. The

@@ -18,6 +18,14 @@ pub const JSON_CONTENT_TYPE: &str = "application/json";
 
 /// The balance read the transport and the CCTP helpers share.
 pub const ETH_GET_BALANCE: &str = "eth_getBalance";
+
+/// The `latest` block tag: the read the devnet's scanners and the services'
+/// chain reads ask for (the repeated-literal reading's finding).
+pub const LATEST: &str = "latest";
+
+/// The block-level prestate tracer's method: the trace rung's call and the
+/// capability audit's check, one spelling.
+pub const TRACE_BLOCK_METHOD: &str = "debug_traceBlockByNumber";
 pub use bal::*;
 pub use client::*;
 pub use error::*;

@@ -625,7 +625,7 @@ impl Sim {
         let resting = self.remargin_makers(feed, req, resting)?;
         let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), req, &resting)?;
         let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
-        let notional = super::account::mul(filled, avg_px, "fill notional")?;
+        let notional = super::account::mul(filled, avg_px, super::account::FILL_NOTIONAL)?;
         let facts = super::account::FillFacts {
             coin: req.coin.clone(),
             is_buy: req.is_buy,
@@ -1311,7 +1311,7 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Can
         remaining -= take;
         notional = super::account::add(
             notional,
-            super::account::mul(take, px, "fill notional")?,
+            super::account::mul(take, px, super::account::FILL_NOTIONAL)?,
             "fill total",
         )?;
         if is_maker {

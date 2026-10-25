@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::metrics::MainnetMetrics;
 use futures_util::future::BoxFuture;
 use mirror_anvil::Rpc;
-use mirror_config::{ChainL1, EngineSection, FollowHead, Instance};
+use mirror_config::{ChainL1, EngineSection, Instance};
 use mirror_devnet::drift::Drift;
 use mirror_devnet::engine::{Engine, JournalScope};
 use mirror_devnet::metrics::Registry as _;
@@ -98,12 +98,10 @@ impl Ctx {
         Ok(block.map(|b| b.header.number))
     }
 
+    /// reth follow tag (safe/latest/finalized per config) — the config's own
+    /// mapping, never a second copy.
     pub fn follow_tag(&self) -> &'static str {
-        match self.l1.follow {
-            FollowHead::Safe => "safe",
-            FollowHead::Latest => "latest",
-            FollowHead::Finalized => "finalized",
-        }
+        self.l1.follow.tag()
     }
 }
 

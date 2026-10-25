@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 pub async fn health(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     if state.sim.is_poisoned() {
-        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, "sim state poisoned");
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, super::SIM_POISONED);
     }
     (axum::http::StatusCode::OK, "ok")
 }

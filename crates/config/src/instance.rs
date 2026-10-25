@@ -8,6 +8,13 @@ use crate::sections::{
 };
 use crate::ConfigError;
 
+/// The section requirements' one spelling each: a message naming a missing
+/// section must read the same wherever it is raised.
+const VENUE_CHAIN_REQUIRED: &str = "profile \"venue\" requires [chains.venue]";
+const VENUE_ENGINE_REQUIRED: &str = "profile \"venue\" requires [services.engine]";
+const MAINNET_CHAIN_REQUIRED: &str = "profile \"mainnet\" requires [chains.l1]";
+const MAINNET_ENGINE_REQUIRED: &str = "profile \"mainnet\" requires [services.engine]";
+
 /// One mirror deployment: identity, chains, watchlist, service sections.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -219,27 +226,27 @@ impl Instance {
     /// already validated presence; a missing one is still a named error, never
     /// a silent default).
     pub fn take_mainnet(&mut self) -> Result<(ChainL1, EngineSection), ConfigError> {
-        let l1 = required(self.chains.l1.take(), "profile \"mainnet\" requires [chains.l1]")?;
+        let l1 = required(self.chains.l1.take(), MAINNET_CHAIN_REQUIRED)?;
         let engine = required(
             self.services.engine.take(),
-            "profile \"mainnet\" requires [services.engine]",
+            MAINNET_ENGINE_REQUIRED,
         )?;
         Ok((l1, engine))
     }
 
     /// The venue profile's sections, moved out for the run path.
     pub fn take_venue(&mut self) -> Result<(ChainVenue, EngineSection), ConfigError> {
-        let chain = required(self.chains.venue.take(), "profile \"venue\" requires [chains.venue]")?;
+        let chain = required(self.chains.venue.take(), VENUE_CHAIN_REQUIRED)?;
         let engine = required(
             self.services.engine.take(),
-            "profile \"venue\" requires [services.engine]",
+            VENUE_ENGINE_REQUIRED,
         )?;
         Ok((chain, engine))
     }
 
     /// The simulator's sections, moved out for the run path.
     pub fn take_venue_sim(&mut self) -> Result<(ChainVenue, VenueSimSection), ConfigError> {
-        let chain = required(self.chains.venue.take(), "profile \"venue\" requires [chains.venue]")?;
+        let chain = required(self.chains.venue.take(), VENUE_CHAIN_REQUIRED)?;
         let sim = required(
             self.services.venue_sim.take(),
             "the simulator requires [services.venue_sim]",
@@ -259,10 +266,10 @@ impl Instance {
     /// The mainnet profile's endpoints: the pre-context reads the run path
     /// needs (`Ctx::new` takes the sections itself).
     pub fn mainnet_urls(&self) -> Result<(String, String), ConfigError> {
-        let l1 = required(self.chains.l1.as_ref(), "profile \"mainnet\" requires [chains.l1]")?;
+        let l1 = required(self.chains.l1.as_ref(), MAINNET_CHAIN_REQUIRED)?;
         let engine = required(
             self.services.engine.as_ref(),
-            "profile \"mainnet\" requires [services.engine]",
+            MAINNET_ENGINE_REQUIRED,
         )?;
         Ok((
             l1.source_url.clone(),
@@ -275,10 +282,10 @@ impl Instance {
 
     /// The venue profile's endpoints (the fork source and anvil V).
     pub fn venue_urls(&self) -> Result<(String, String), ConfigError> {
-        let chain = required(self.chains.venue.as_ref(), "profile \"venue\" requires [chains.venue]")?;
+        let chain = required(self.chains.venue.as_ref(), VENUE_CHAIN_REQUIRED)?;
         let engine = required(
             self.services.engine.as_ref(),
-            "profile \"venue\" requires [services.engine]",
+            VENUE_ENGINE_REQUIRED,
         )?;
         let target_url = required(
             engine.anvil.target_url.clone(),

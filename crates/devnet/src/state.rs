@@ -155,6 +155,23 @@ pub fn cursor_from(block: &alloy_rpc_types_eth::Block, first_block: u64) -> Chai
     }
 }
 
+/// Advance the persisted cursor to a chain block: the epoch's `first_block` is
+/// kept from the current cursor (the block itself when there is none) and the
+/// state is saved — the one place both mirrors and the admin build a cursor
+/// from a block (the applier's per-block step, the venue's scan, the admin's
+/// reset). Returns the cursor that was written.
+pub fn advance_cursor(
+    state: &crate::shared::Shared<StateFile>,
+    block: &alloy_rpc_types_eth::Block,
+    first_fallback: u64,
+) -> Result<ChainCursor> {
+    let first_block = state.cursor()?.map(|c| c.first_block).unwrap_or(first_fallback);
+    let cursor = cursor_from(block, first_block);
+    state.set_cursor(cursor.clone())?;
+    state.lock()?.save()?;
+    Ok(cursor)
+}
+
 /// Decide which block to process next for a chain.
 ///
 /// Replay must be contiguous. A hash-validated cursor always wins: resume at

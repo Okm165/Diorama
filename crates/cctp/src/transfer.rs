@@ -297,7 +297,7 @@ pub(crate) fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> 
 /// relay path must check this rather than trust a status (measured
 /// 2026-10-23: a stale wrapper made a hook relay land as a no-op).
 pub(crate) async fn has_code(rpc: &Rpc, address: Address) -> Result<bool> {
-    let code: Bytes = rpc.call("eth_getCode", (address, "latest")).await?;
+    let code: Bytes = rpc.call("eth_getCode", (address, mirror_anvil::LATEST)).await?;
     Ok(!code.is_empty())
 }
 

@@ -525,7 +525,7 @@ impl Sim {
                     "no {coin} position to margin (the docs' `updateIsolatedMargin` targets a position)"
                 )));
             };
-            let next = account::add(p.isolated_margin, delta, "isolated margin")?;
+            let next = account::add(p.isolated_margin, delta, account::ISOLATED_MARGIN)?;
             if next < Decimal::ZERO {
                 return Err(crate::error::Error::bad_request(
                     "isolated margin cannot go below zero",

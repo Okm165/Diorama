@@ -4,7 +4,10 @@
 //! balances), and the patch is remembered as the control fixture so
 //! `/control/state` reads back what was set. The measured divergences fixed
 //! 2026-10-23 live here.
-use super::account::{add, available_after_maintenance, refuse_unmodeled_mode, spot_balances, sub, view, Account, Position, SpotEntry, COLLATERAL_TOKEN};
+use super::account::{
+    add, available_after_maintenance, refuse_unmodeled_mode, spot_balances, sub, view, Account,
+    Position, SpotEntry, COLLATERAL_TOKEN, COST_BASIS,
+};
 use crate::error::Result;
 use crate::feed::MarketFeed;
 use crate::wire::{AssetPosition, LeverageType, MarginSummary, SpotBalance, UserAbstraction};
@@ -176,7 +179,7 @@ fn cost_basis_total(account: &Account) -> Result<Decimal> {
     account
         .positions
         .values()
-        .try_fold(Decimal::ZERO, |acc, p| add(acc, p.cost_basis()?, "cost basis"))
+        .try_fold(Decimal::ZERO, |acc, p| add(acc, p.cost_basis()?, COST_BASIS))
 }
 
 /// Replace the spot balances (the patch's `spotBalances`: a replace, never a
