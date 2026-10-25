@@ -91,9 +91,10 @@ HyperEVM), `make daloc-local` (the whole daloc arc on live market data) and
 `make ux-symmetry-local` (both mirrors, the same four verbs, side by side).
 The two *workshops* — a strategy run end to end on live state — also run
 locally: `make mainnet-workshop-local` (a public-RPC fork of mainnet; minted
-liquidity, a real Aave/Uniswap levered position, live measurement, an oracle
-crash and a liquidation) and `make venue-order-local` (the daloc stack kept
-up, then the order lane: fills against the real book and the §4.5 impact).
+liquidity, a real Aave/Uniswap levered position whose pool impact is measured,
+live parity, an oracle crash and a liquidation) and `make venue-order-local`
+(the daloc stack kept up, then the order lane: fills against the real book
+and the §4.5 impact).
 
 ## Quickstart
 

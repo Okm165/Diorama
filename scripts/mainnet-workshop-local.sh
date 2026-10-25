@@ -14,7 +14,10 @@
 #   act 1  the trader   /admin/deal mints WETH and USDC (slot discovery — the
 #                       real USDC's packed slot included) -> supply WETH to
 #                       the real Aave pool -> borrow USDC -> swap on the real
-#                       Uniswap pool -> re-supply the swap
+#                       Uniswap pool -> re-supply the swap. The swap's impact
+#                       is measured the way the venue measures book
+#                       consumption: the real pool's price moves, and the
+#                       engine owns it (the pool lands in the shadowed set)
 #   act 2  live data    the same market views sampled across several *source
 #                       blocks* all match the source at the applied cursor
 #                       (the engine's own probe contract), and the engine's
@@ -24,11 +27,11 @@
 #                       health factor falls under 1, and a bot liquidates the
 #                       position and takes the collateral bonus
 #
-# Requires: anvil (ANVIL=/path/to/anvil), the engine binary built
-# (`make mainnet-build`), python3, curl, and a public mainnet RPC that serves
-# state reads (MAINNET_RPC; drpc is the deployed stack's endpoint, nodies and
-# tenderly's public gateway also pass). Ports: 19960/19962/19980 (override
-# with SRC_PORT/T_PORT/HTTP). Never touches the cluster.
+# Requires: anvil (ANVIL=/path/to/anvil), cast (CAST=/path/to/cast), the engine
+# binary built (`make mainnet-build`), python3, curl, and a public mainnet RPC
+# that serves state reads (MAINNET_RPC; drpc is the deployed stack's endpoint,
+# nodies and tenderly's public gateway also pass). Ports: 19960/19962/19980
+# (override with SRC_PORT/T_PORT/HTTP). Never touches the cluster.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -94,6 +97,24 @@ echo "== mainnet workshop (rpc $RPC, pin $PIN)"
 "$ANVIL" --port "$SRC_PORT" --chain-id 1 --fork-url "$RPC" --fork-block-number "$PIN" \
   --hardfork amsterdam --block-time 1 --silent > "$DIR/source.log" 2>&1 &
 PIDS="$!"
+# The source's fork fetch can be throttled when two forks race the same
+# endpoint: wait for it to answer, and retry when it died on the fetch.
+up=false
+for attempt in 1 2 3; do
+  for _ in $(seq 1 30); do
+    curl -sf -m 2 -X POST -H 'content-type: application/json' \
+      --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' "$SRC" >/dev/null 2>&1 \
+      && { up=true; break; }
+    sleep 1
+  done
+  [ "$up" = true ] && break
+  echo "the source anvil did not answer (attempt $attempt); retrying"
+  sleep 3
+  "$ANVIL" --port "$SRC_PORT" --chain-id 1 --fork-url "$RPC" --fork-block-number "$PIN" \
+    --hardfork amsterdam --block-time 1 --silent > "$DIR/source.log" 2>&1 &
+  PIDS="$PIDS $!"
+done
+[ "$up" = true ] || { echo "the source anvil did not come up"; tail -5 "$DIR/source.log"; exit 1; }
 # T forks the *public* RPC directly at the same pin as the source: its base is
 # the source's base by construction, and the workshop's protocol calls do not
 # hop through the source. The engine's source stays the local anvil (its
@@ -101,7 +122,14 @@ PIDS="$!"
 "$ANVIL" --port "$T_PORT" --chain-id 1 --fork-url "$RPC" --fork-block-number "$PIN" \
   --hardfork amsterdam --auto-impersonate --no-mining --silent > "$DIR/t.log" 2>&1 &
 PIDS="$PIDS $!"
-sleep 2
+up=false
+for _ in $(seq 1 30); do
+  curl -sf -m 2 -X POST -H 'content-type: application/json' \
+    --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' "$T" >/dev/null 2>&1 \
+    && { up=true; break; }
+  sleep 1
+done
+[ "$up" = true ] || { echo "the T anvil did not come up"; tail -5 "$DIR/t.log"; exit 1; }
 
 # The workshop's scope is the deployed stack's audited watchlist (the cluster
 # instance) with the market views as probes: the same closure and the same
@@ -215,6 +243,7 @@ sys.exit(0 if d.get("ok") else 1)' 2>/dev/null \
 }
 deal_ok "trader funded: 1.05 WETH via /admin/deal" "$WETH" "$TRADER" 1050000000000000000
 deal_ok "bot funded: 2000 USDC via /admin/deal" "$USDC" "$BOT" 2000000000
+slot0_before=$(call_t "$UNIV3" "slot0()(uint160,int24,uint16,uint16,uint16,uint8,bool)")
 
 try_send "trader approved WETH" "$TRADER" "$WETH" "approve(address,uint256)" "$POOL" 1000000000000000000
 try_send "trader supplied 1 WETH to Aave" "$TRADER" "$POOL" "supply(address,uint256,address,uint16)" "$WETH" 1000000000000000000 "$TRADER" 0
@@ -222,6 +251,26 @@ try_send "trader borrowed 100 USDC" "$TRADER" "$POOL" "borrow(address,uint256,ui
 try_send "trader approved USDC to Uniswap" "$TRADER" "$USDC" "approve(address,uint256)" "$ROUTER" 50000000
 try_send "trader swapped 50 USDC on the real UniV3 pool" "$TRADER" "$ROUTER" \
   "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))" "($USDC,$WETH,500,$TRADER,50000000,0,0)"
+# The market impact, measured like the venue's book consumption: the swap is a
+# real trade on the real pool (the price moved), and the engine owns it — the
+# pool lands in the shadowed set, which is exactly what act 2's parity check
+# scopes out while everything else stays 1:1 with the source.
+slot0_after=$(call_t "$UNIV3" "slot0()(uint160,int24,uint16,uint16,uint16,uint8,bool)")
+[ -n "$slot0_after" ] && [ "$slot0_after" != "$slot0_before" ] \
+  && ok "the swap moved the real pool (sqrtPriceX96 $slot0_before -> $slot0_after)" \
+  || bad "the pool did not move ($slot0_before -> $slot0_after)"
+owned=false
+for _ in $(seq 1 20); do
+  s=$(curl -s "http://127.0.0.1:$HTTP/status" | python3 -c 'import json,sys
+try:
+    print(" ".join(json.load(sys.stdin).get("shadowed", [])))
+except Exception:
+    print("")' 2>/dev/null || true)
+  case " ${s,,} " in *" ${UNIV3,,} "*) owned=true; break;; esac
+  sleep 1
+done
+[ "$owned" = true ] && ok "the engine owns the impact (the pool is devnet-owned; act 2 scopes it out)" \
+  || bad "the pool never entered the shadowed set"
 weth_got=$(call_t "$WETH" "balanceOf(address)(uint256)" "$TRADER")
 if [ "${weth_got:-0}" -gt 0 ]; then
   try_send "trader approved the swapped WETH" "$TRADER" "$WETH" "approve(address,uint256)" "$POOL" "$weth_got"
