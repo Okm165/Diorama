@@ -157,7 +157,7 @@ config-check: ## Validate every instance file through the layered loader (struct
 	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check "$$f" || exit 1; \
 	done
 
-fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels no-panics config-check docker-members k8s-wiring spec-citations spine-purity facts-published metrics-written heredoc-audit port-audit ast-scope ## Run every structural fitness function (plan §11.3)
+fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels no-panics config-check docker-members k8s-wiring spec-citations spine-purity facts-published metrics-written heredoc-audit port-audit shell-mode ast-scope ## Run every structural fitness function (plan §11.3)
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
@@ -203,6 +203,9 @@ heredoc-audit: ## The generated-config heredocs: no backticks, no unset expansio
 
 port-audit: ## The proof scripts' default ports: unique across the tree
 	./scripts/port-audit.sh
+
+shell-mode: ## The scripts' conventions: strict mode (with the judged four) and BASH_SOURCE sources
+	./scripts/shell-mode.sh
 
 metrics-written: ## every metric series a registry declares is written by real code
 	./scripts/metrics-written.sh
@@ -388,7 +391,7 @@ help: ## Show this help
 
 .PHONY: fitness lint design-assertions closure-matrix no-orphans docs-metrics \
 	trust-audit clock-labels no-panics config-check docker-members k8s-wiring ast-scope \
-	spec-citations facts-published metrics-written heredoc-audit port-audit spine-purity
+	spec-citations facts-published metrics-written heredoc-audit port-audit shell-mode spine-purity
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \

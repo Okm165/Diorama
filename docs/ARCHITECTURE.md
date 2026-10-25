@@ -799,7 +799,12 @@ opts out), `port-audit`
 scripts defaulting to the same port collide when run in parallel, measured:
 engine-symmetry-local's T admin 19980 vs the workshop's HTTP 19980, the
 workshop's engine losing the bind; an intentional sharing is declared with
-`# ports-shared-with:`) and `ast-scope`
+`# ports-shared-with:`), `shell-mode`
+(every standalone script opens with `set -euo pipefail` — the four oldest
+deployed-stack suites are the judged lenient exceptions, the sourced libs
+never set the mode — and every `source` line resolves through
+`${BASH_SOURCE[0]}`; measured: lib-cctp's `./lib-venue.sh` worked only under
+the exact `./scripts/x.sh` invocation) and `ast-scope`
 (`bins/ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;
