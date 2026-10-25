@@ -528,8 +528,26 @@ fn round_to_sig_figs(px: Decimal, n: u8, mantissa: u8) -> Decimal {
     (px / step).round().saturating_mul(step)
 }
 
-/// `marginTable`: one table out of the cached metadata by id.
+/// The venue's implicit default table (id 1): the metadata never lists it,
+/// but the real API serves it (measured live 2026-10-25:
+/// `{"description":"","marginTiers":[{"lowerBound":"0.0","maxLeverage":1}]}`),
+/// so the simulator must too.
+pub(crate) fn default_margin_table() -> crate::wire::MarginTable {
+    crate::wire::MarginTable {
+        description: String::new(),
+        margin_tiers: vec![crate::wire::MarginTier {
+            lower_bound: Decimal::new(0, 1),
+            max_leverage: 1,
+        }],
+    }
+}
+
+/// `marginTable`: one table out of the cached metadata by id, with the
+/// venue's implicit default served for id 1.
 fn margin_table(id: u32, state: &ApiState) -> Result<Response> {
+    if id == 1 {
+        return Ok(Json(default_margin_table()).into_response());
+    }
     let meta = state.feed.meta().ok_or(Error::Warming)?;
     let table = meta
         .margin_tables
@@ -736,5 +754,20 @@ mod tests {
         assert!(book_params_ok(None, Some(5)).is_err());
         assert!(book_params_ok(Some(4), Some(5)).is_err());
         assert!(book_params_ok(Some(5), Some(3)).is_err());
+    }
+
+    /// The implicit default table's served body, pinned against the real
+    /// API's measured answer (live 2026-10-25) — the venue serves it for
+    /// `marginTable` id 1 although the metadata never lists id 1.
+    #[test]
+    fn the_default_margin_table_matches_the_venue() {
+        let body = serde_json::to_value(default_margin_table()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "description": "",
+                "marginTiers": [{"lowerBound": "0.0", "maxLeverage": 1}]
+            })
+        );
     }
 }

@@ -18,11 +18,13 @@ Three layers, each runnable on demand:
 | Order proof (venue) | `make venue-order-proof` | the deployed venue stack (direct mode: a scratch stack) | the §4.5 market-impact axiom: the fill walks the real book, the trader's state moves, the impact persists through live updates, the owned mark is never moved (41 checks) |
 | Closure check (mainnet) | `make mainnet-closure-check` | reth (a local node) | the watchlist's closure: for every market-data view the product reads, the read path's accounts are reported, with each storage-only account named |
 | CCTP (cross-mirror) | `make cctp-smoke`, `make cctp-roundtrip`, `make cctp-margin-cycle` | both stacks + the bridge | the cross-mirror lane: the bridge's ports and queue, a scripted T→V round trip (burn → attested → mint), and the unified-margin cycle (deal on T → CCTP → venue collateral → trade → back) |
+| CCTP (cross-mirror, local) | `make cctp-local` | anvil + the four binaries + a public mainnet RPC and the real HyperEVM (fork fetches) | the same lane without a cluster: both chains forked from the real ones, the round trip and the unified-margin cycle in direct mode |
 | Engine symmetry (cross-mirror) | `make engine-symmetry` | both deployed stacks | the two engines' HTTP surfaces answer the shared verbs identically: status and shapes, the admin surface, the counters (23 checks) |
 | Selftest (mainnet, local) | `make mainnet-selftest-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet applier natively: a local source anvil with a storage-writing contract, T forks it, the engine applies the blocks above the pin through the trace rung (anvil's block trace is empty, so the per-tx fallback runs) and the sampled storage parity passes |
 | Selftest (venue, local) | `make venue-selftest-local` | anvil forked from the **real** HyperEVM + the venue engine binary | the follow pipeline against the real read model: boot (chain assert, capability audit, reconcile, at-pin probes) then windows of compose → COW → land → **live parity**, with the watchlist derived live (the busiest recent sender) — the system-tx envelope and real activity a scratch anvil cannot serve; the mainnet counterpart is `mainnet-selftest-local` |
 | Engine UX (mainnet, local) | `make mainnet-engine-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the mainnet engine UX natively — the four shared verbs end to end: T follows the source 1:1 (Amsterdam BALs), a devnet tx on T is COW-marked and survives the source's next diffs, `/admin/deal` discovers a mock ERC-20's balance-mapping key and mints, the configured probe converges (`mirror_t_convergence_ok_total`), plus `/status`, `/events` (block/deal/reset/epoch facts), `/admin/time`, the shadow hand-back (re-synced from the source), `/admin/rewind` and `/admin/epoch` |
 | Engine UX (venue, local) | `make venue-engine-local` | anvil + the venue engine binary (no cluster/Docker) | the venue engine UX natively: a local anvil stands in for the HL public API, V forks it, the watched account is mirrored 1:1, a devnet write on V survives the next source window (COW), an uncovered emitter lands in the shared drift log, and the shared admin surface answers — pause/resume effects, the shadow hand-back and its designed latest-only refusal, probes, the deal (a mock ERC-20 on the source), the events, the rewind refusal |
+| Sim parity (venue, local) | `make venue-sim-parity-local` | anvil + the venue binaries + the real Hyperliquid API (**test-only** external) | the simulator's served answers vs the real API's, request by request: every served type's key/type signature, the meta/spotMeta content, the book's liveness, the implicit default margin table |
 | Workshop (mainnet, local) | `make mainnet-workshop-local` | anvil + the mainnet engine binary + a public mainnet RPC (state reads; no reth/cluster/Docker) | the financial workshop natively against the **real** protocols: a source anvil forks mainnet at a public RPC and mines amsterdam blocks on the pin (BALs; no traces), T forks the same RPC at the same pin, the engine keeps it fresh — then `/admin/deal` mints WETH and USDC (the real USDC's packed slot found), a trader supplies to the real Aave pool, borrows, swaps on the real Uniswap pool (the swap's impact is measured: the pool's price moves and the engine owns it — the shadowed set act 2 scopes out) and re-supplies, the market views are compared across source blocks (plus the engine's own probes), the oracle's source is swapped to the USDC/USD feed and a bot liquidates the underwater position and takes the bonus |
 | Workshop (venue, local) | `make venue-workshop-local` | the daloc-local stack (both engines, anvil, live HL market data) | the venue's market-impact axiom locally: the daloc arc first (the stack kept up), then `venue-order-proof` against the same endpoints — a devnet order walks the served book, the trader's state moves, the impact persists across live updates, `/exchange` fills in the venue's envelope, a fill leaves an owned mark untouched, and the stalled-live-plane gate refuses by name |
 | Feed bridge (mainnet, local) | `make mainnet-feed-local` | anvil + the mainnet engine binary (no reth/public RPC/cluster) | the feed bridge natively: a source anvil mines amsterdam blocks with Chainlink-shaped stubs at the feeds' *source* addresses, T forks it, the engine runs with `[services.engine.feed_bridge]` — the bridge publishes the parent's answers to the targets' stubs, a scenario's write pauses the feed (its value preserved), and the hand-back republishes the parent's value; the deployed-stack counterpart (real Chainlink feeds) is `mainnet-feed-bridge` |
@@ -32,9 +34,9 @@ Three layers, each runnable on demand:
 
 ## Unit tests (`cargo test --workspace`)
 
-238 tests, all offline, one suite per crate: `mirror-anvil` 16,
+240 tests, all offline, one suite per crate: `mirror-anvil` 17,
 `mirror-devnet` 44, `mirror-config` 17, `mirror-mainnet` 15,
-`mirror-venue` 115, `mirror-cctp` 31. The suites carry the measured rules
+`mirror-venue` 116, `mirror-cctp` 31. The suites carry the measured rules
 each module documents:
 
 - `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with
@@ -229,6 +231,10 @@ own doors (burn, the relay wait, the two chains' reads and the V-side mine)
 the same way: one transport per mode (direct URLs for a scratch stack, or
 `kubectl exec` from the venue engine pod in the cluster), plus the assertion
 helpers and the balance read - so a fix to the transport lands in one place.
+`scripts/cctp-local.sh` is the family's cluster-free wrapper: it forks both
+chains from the real ones (T from a public mainnet RPC, V from the HyperEVM),
+runs the two engines, the simulator and the bridge against them, and then runs
+the round trip and the margin cycle in direct mode.
 
 ## The daloc use-case simulation (`scripts/daloc-sim.py`)
 
@@ -392,6 +398,12 @@ live answers (a recursive path comparison of the same requests, public reads):
 - **`l2Book` for an unknown coin**: the venue answers HTTP 200 `null`; the sim
   answered 404. Fixed (a typed `Option<L2Book>`); a *configured* market with no
   book yet stays a 503 (warming) — a different fault, kept distinct.
+- **`marginTable` id 1**: the venue serves its *implicit default* table
+  (`{"description":"","marginTiers":[{"lowerBound":"0.0","maxLeverage":1}]}`)
+  although the metadata never lists id 1 (measured live 2026-10-25); the sim
+  answered 404. Fixed: the default is served by name (pinned by a test), ids
+  in the metadata serve from the cache as before, and an unknown id keeps the
+  named 404 divergence below.
 - Everything else matched exactly: `meta`, `metaAndAssetCtxs`, `l2Book`,
   `allMids` (1388 leaf paths — every coin the venue lists), `clearinghouseState`,
   `spotMeta` (after the fix), `spotClearinghouseState`, `exchangeStatus`,
@@ -521,7 +533,16 @@ spot → perp through the bridge's decoder with exact deltas, an order filled
 `0.01 ETH` at the live touch with the identity exact, the reduce-only close
 flattened, the trader returned the V USDC and the V→T burn closed the cycle
 exactly on T (the burn left the source, the return mint restored it), and the
-hand-back cleared the consumptions.
+hand-back cleared the consumptions. Measured locally 2026-10-25
+(`make cctp-local`: both chains forked from the real ones, the real CCTP V2
+contracts, the real USDC): the round trip passes 5/5 and the cycle 34/34 —
+and the unified section's *order* is part of the rule: an account must exist
+on HyperCore before its actions apply (the bridge's measured eligibility
+rule, docs: interaction timings), so the spot deal creates the account
+*before* the CoreWriter action 16. A fresh sim without the deal refuses the
+action (`CoreWriter actions refused: the account must exist …`) and the
+abstraction stays `default`; the cycle now deals first, which makes it
+deterministic on a fresh stack (it had depended on a pre-existing account).
 
 ### The served clock after a harness time jump (measured 2026-10-23)
 
@@ -821,6 +842,12 @@ published and confirmed — each aggregator's `latestRoundData()` then returned
 the *same answer* as the live mainnet source, and its `updatedAt` was a **T
 block timestamp** (chain-native stamping, plan §17.2: the feeds are stamped in
 the devnet chain's own domain).
+- the *source* aggregators are the real Chainlink contracts (AggregatorV3:
+  `decimals`/`description`/`latestRoundData`). Re-checked live 2026-10-25 via
+  a public RPC: ETH/USD (`0x5f4eC3Df…`), BTC/USD (`0xF4030086…`) and USDC/USD
+  (`0x8fFfFfd4…`) all answer 8 decimals with fresh rounds — the interface and
+  the decimals the mocks must mirror (a present-but-mismatched target is a
+  bridge fault, not a wait).
 
 ## daloc's `deploy-contracts` against mirror T (acceptance)
 
@@ -870,8 +897,17 @@ host's `forge`/`cast`/`jq`; the repo's submodules `lib/hyper-evm-lib` +
 The real lane (`cctp-bridge`, Iris 8095 / control 8096) moves native USDC
 between T and V over the real V2 contracts; the only substitutions are the
 devnet attester (installed through the contracts' own setters) and the local
-Iris. Proven live on scratch forks:
+Iris. `make cctp-local` runs the same lane without a cluster: both chains are
+forks of the real ones (the real contracts on each), and the round trip plus
+the unified-margin cycle run in direct mode. Proven live on scratch forks:
 
+- **the fee surface's absence has two manifestations** (measured 2026-10-25):
+  mainnet's older TokenMessenger revision lacks `minFee`/`getMinFeeAmount`,
+  and the call comes back as a **revert with no data** (code 3, `data:"0x"`)
+  — not as the node's `-32601` the boot probe had only recognized. The probe
+  now classifies both as absence (a revert *with* data, a transport or decode
+  fault still propagates), and the bridge boots against the real mainnet
+  state again; the same revision speaks the V2 burn (the round trip passes);
 - bidirectional burns with exact mints, both directions through the service
   (measured 2026-10-23: a V burn 19→0 relayed to T, the wallet's T USDC 0 →
   2,000,000; the T→V leg mints on V). The scratch chains have no block producer

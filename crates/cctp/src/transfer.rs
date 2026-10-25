@@ -313,10 +313,13 @@ pub(crate) async fn probe_min_fee(rpc: &Rpc, token_messenger: Address) -> Result
         .await
     {
         Ok(min_fee) => Ok(Some(min_fee)),
-        // The node's own "no such method" refusal is the surface being absent
-        // (measured: the mainnet instance's older revision). A transport or
-        // decode fault is **not** absence (boundary-discipline) and propagates.
-        Err(e) if e.is_method_not_found() => Ok(None),
+        // Absence has two measured manifestations: the node refusing the
+        // method (`-32601`) and the contract's own dispatcher reverting with
+        // *no* data (mainnet's older TokenMessenger revision lacks the fee
+        // surface — measured 2026-10-25; the revision still speaks the V2
+        // burn). A revert *with* data, a transport fault or a decode fault is
+        // **not** absence (boundary-discipline) and propagates.
+        Err(e) if e.is_method_not_found() || e.is_bare_revert() => Ok(None),
         Err(e) => Err(e.into()),
     }
 }

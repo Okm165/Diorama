@@ -146,6 +146,9 @@ venue-build: ## Build the venue binaries on the host (cargo: venue-engine + venu
 mainnet-build: ## Build the mainnet engine on the host (cargo: mainnet-engine)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p mainnet-engine
 
+cctp-build: ## Build the CCTP bridge on the host (cargo: cctp-bridge)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p cctp-bridge
+
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
@@ -230,6 +233,9 @@ venue-engine-local: venue-build ## Native local proof of the engine UX (mirror/m
 venue-selftest-local: venue-build ## Native local proof of the follow against the real HyperEVM (one forked anvil)
 	./scripts/venue-selftest-local.sh
 
+venue-sim-parity-local: venue-build ## The sim's served answers vs the real venue API, request by request (one forked anvil)
+	./scripts/venue-sim-parity-local.sh
+
 ux-symmetry-local: mainnet-build venue-build ## Both mirrors, the same four verbs, side by side (two minimal stacks)
 	./scripts/ux-symmetry-local.sh
 
@@ -261,6 +267,9 @@ cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTIN
 
 cctp-margin-cycle: ## The crosschain unified-margin cycle (T mint -> CCTP -> venue collateral -> trade -> CCTP back)
 	NS=venue-mirror ./scripts/cctp-margin-cycle.sh
+
+cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locally (both chains forked from the real ones: the round trip + the unified-margin cycle)
+	./scripts/cctp-local.sh
 
 engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fitness function)
 	./scripts/engine-symmetry.sh

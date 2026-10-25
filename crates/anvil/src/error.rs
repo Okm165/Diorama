@@ -147,6 +147,19 @@ impl Error {
         matches!(self, Error::Rpc { payload, .. } if payload.code == -32601)
     }
 
+    /// The contract's dispatcher refused the selector: a revert carrying no
+    /// data (measured 2026-10-25: mainnet's older TokenMessenger revision
+    /// answers code 3 with `data: "0x"` for a fee surface it does not have).
+    /// A revert *with* data is a real fault, never absence.
+    pub fn is_bare_revert(&self) -> bool {
+        matches!(self, Error::Rpc { payload, .. }
+            if payload.code == 3
+                && payload
+                    .data
+                    .as_deref()
+                    .is_none_or(|d| d.get().trim_matches('"') == "0x"))
+    }
+
     /// The endpoint the failure belongs to (for logs and error aggregation).
     pub fn endpoint(&self) -> &str {
         match self {
@@ -184,6 +197,35 @@ mod tests {
             },
         };
         assert!(err.is_method_not_found());
+    }
+
+    /// The bare revert is typed by code and empty data, never text: a revert
+    /// carrying a custom error's data is a real fault, and a method refusal
+    /// is not a revert.
+    #[test]
+    fn bare_revert_is_typed_not_text_matched() {
+        let revert = |data: Option<&str>| Error::Rpc {
+            endpoint: "http://anvil-t:8545".into(),
+            method: "eth_call".into(),
+            payload: RpcError {
+                code: 3,
+                message: "execution reverted".into(),
+                data: data.map(|d| serde_json::value::RawValue::from_string(d.into()).unwrap()),
+            },
+        };
+        assert!(revert(Some("\"0x\"")).is_bare_revert());
+        assert!(revert(None).is_bare_revert());
+        assert!(!revert(Some("\"0x08c379a0\"")).is_bare_revert());
+        let method = Error::Rpc {
+            endpoint: "http://reth:8545".into(),
+            method: "eth_getBlockAccessList".into(),
+            payload: RpcError {
+                code: -32601,
+                message: "no such method".into(),
+                data: None,
+            },
+        };
+        assert!(!method.is_bare_revert());
     }
 
     /// This error is wrapped by the engine's, which must stay under clippy's

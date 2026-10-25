@@ -87,8 +87,12 @@ impact is measured 1:1:
 Both proofs run locally against the real engine binaries: `make
 mainnet-engine-local` (two anvils; the mainnet side), `make venue-engine-local`
 (anvil + the venue engine), `make venue-selftest-local` (against the real
-HyperEVM), `make daloc-local` (the whole daloc arc on live market data) and
-`make ux-symmetry-local` (both mirrors, the same four verbs, side by side).
+HyperEVM), `make venue-sim-parity-local` (the simulator's served answers vs
+the real venue API, request by request), `make daloc-local` (the whole daloc
+arc on live market data) and
+`make ux-symmetry-local` (both mirrors, the same four verbs, side by side)
+and `make cctp-local` (the cross-mirror lane: both chains forked from the real
+ones — the CCTP round trip and the unified-margin cycle end to end).
 The two *workshops* — a strategy run end to end on live state — also run
 locally: `make mainnet-workshop-local` (a public-RPC fork of mainnet; minted
 liquidity, a real Aave/Uniswap levered position whose pool impact is measured,
@@ -206,8 +210,9 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             mainnet-workshop-local, mainnet-secrets), the
                             venue suites (venue-smoke, venue-drill, venue-proof,
                             venue-order-proof, venue-product-sim, venue-engine-local,
-                            venue-selftest-local, venue-workshop-local, venue-secrets), the cross-mirror suites (cctp-smoke,
-                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry), daloc-sim.py
+                            venue-selftest-local, venue-sim-parity-local, venue-workshop-local, venue-secrets), the cross-mirror suites (cctp-smoke,
+                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry) with cctp-local.sh (the
+                            same lane against forked real chains, no cluster), daloc-sim.py
                             with daloc-local.sh (the arc against a local scratch stack), the
                             container proof (container-smoke.sh: the engine image run for
                             real), and the structural fitness scripts (closure-matrix, no-orphans,

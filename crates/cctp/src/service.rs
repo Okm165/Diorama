@@ -46,7 +46,7 @@ pub async fn main_entry(args: Vec<String>) -> crate::Result<()> {
 }
 
 /// Load the instance and require this pod's wiring: one instance file, many
-/// readers — the bridge reads only `[services.cctp]`, so the venue engine's /
+/// readers — the bridge reads only `[services.cctp_bridge]`, so the venue engine's /
 /// simulator's `${VAR}` wiring is not this pod's to provide (`inspect` reports
 /// unresolved references instead of failing on them; the cctp section's own
 /// wiring is then required here, by name).

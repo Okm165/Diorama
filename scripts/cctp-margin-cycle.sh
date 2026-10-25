@@ -179,7 +179,11 @@ state=$(sim_account "$TRADER")
   && ok "the CoreWriter size closed through /control/order (flat)" || bad "not flat: $state"
 
 echo "-- D3. unified collateral (spot USDC backs the perp side; the docs' single balance)"
-# The real abstraction path: CoreWriter action 16 (16 = 0x10), abstraction 2.
+# The account must exist on HyperCore before its actions apply (the bridge's
+# measured eligibility rule, docs: interaction timings): the spot deal creates
+# it first, then the real abstraction path runs — CoreWriter action 16
+# (16 = 0x10), abstraction 2.
+spost /control/deal "{\"address\":\"$UNIFIED\",\"class\":\"spot\",\"amount\":\"250\"}" > /dev/null
 stream=$(python3 - "$UNIFIED" <<'PY'
 import sys
 user = int(sys.argv[1], 16)
@@ -198,7 +202,6 @@ for _ in $(seq 1 20); do
 done
 [ "$abs" = "unifiedAccount" ] && ok "the sim serves unifiedAccount (the real path, not a fixture)" \
   || bad "abstraction=$abs"
-spost /control/deal "{\"address\":\"$UNIFIED\",\"class\":\"spot\",\"amount\":\"250\"}" > /dev/null
 ufill=$(spost /control/order "{\"address\":\"$UNIFIED\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"0.01\"}")
 usz=$(echo "$ufill" | json 'd.get("totalSz")')
 [ "$usz" = "0.01" ] && ok "a spot-only unified account fills a perp order (collateral backs margin)" \
