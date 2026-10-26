@@ -64,7 +64,7 @@ spec:
             # No CPU limit (the applier's passes are latency-sensitive);
             # measured steady state ~25 MiB, the limit leaves a wide margin
             # for a wide window's composition state.
-            requests: { cpu: "100m", memory: 128Mi }
+            requests: { cpu: "50m", memory: 192Mi }
             limits: { memory: 512Mi }
       volumes:
         - name: instance

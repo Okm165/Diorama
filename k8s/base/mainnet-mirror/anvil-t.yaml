@@ -165,8 +165,8 @@ spec:
             # small (measured ~2.5 GB with --prune-history 32; the snapshots
             # are the dominant term). The request covers the measured peak;
             # the limit keeps a ~2.4x margin for fork materialization spikes.
-            requests: { cpu: "500m", memory: 1Gi }
-            limits: { memory: 6Gi }
+            requests: { cpu: "100m", memory: 768Mi }
+            limits: { memory: 4Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-t-state }

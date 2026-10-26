@@ -69,8 +69,8 @@ spec:
             periodSeconds: 30
           resources:
             # No CPU limit; measured steady state ~6 MiB.
-            requests: { cpu: "50m", memory: 64Mi }
-            limits: { memory: 256Mi }
+            requests: { cpu: "25m", memory: 96Mi }
+            limits: { memory: 384Mi }
       volumes:
         - name: instance
           configMap: { name: venue-instance }

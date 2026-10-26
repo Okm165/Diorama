@@ -122,8 +122,8 @@ spec:
             # (~8 GiB) so the scheduler reserves it. 6Gi OOM-looped during the
             # initial sync (measured); the limit keeps a ~1.5x margin over the
             # steady state for the prune/backfill peaks.
-            requests: { cpu: "1", memory: 8Gi }
-            limits: { memory: 12Gi }
+            requests: { cpu: "500m", memory: 7Gi }
+            limits: { memory: 9Gi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: lighthouse-data }

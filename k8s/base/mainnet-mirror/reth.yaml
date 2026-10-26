@@ -89,8 +89,8 @@ spec:
             # silently), the memory request at the measured steady state
             # (~5.7 GiB) so the scheduler reserves the truth, and the limit
             # with a ~1.8x margin for the sync/prune peaks.
-            requests: { cpu: "2", memory: 6Gi }
-            limits: { memory: 10Gi }
+            requests: { cpu: "500m", memory: 4Gi }
+            limits: { memory: 8Gi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: reth-data }

@@ -146,8 +146,8 @@ spec:
             # state on demand and carries the devnet's own writes (measured
             # ~50 MiB). The request covers the measured state; the limit
             # keeps a wide margin for the live follow's write volume.
-            requests: { cpu: "500m", memory: 1Gi }
-            limits: { memory: 4Gi }
+            requests: { cpu: "50m", memory: 192Mi }
+            limits: { memory: 1Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-v-state }
