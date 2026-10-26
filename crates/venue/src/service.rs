@@ -39,7 +39,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     )?);
 
     spawn_market_plane(&feed, api_client, &chain.ws_url, &sim_section);
-    spawn_plane_heartbeat(&feed, &sim);
+    spawn_plane_heartbeat(&feed, &sim, &chain.api_url);
     spawn_bridge(&sim_section, &sim, &feed, &bridge_metrics)?;
     spawn_tick(&sim, &feed);
     let (info, control) = serve(&sim_section, &state);
@@ -101,9 +101,14 @@ fn spawn_market_plane(
 /// market — each coin's mark and its age (the live-following visibility the
 /// WS connect line alone never gives; a scripted coin's mark reads
 /// `scripted`).
-fn spawn_plane_heartbeat(feed: &Arc<crate::feed::MarketFeed>, sim: &Arc<crate::sim::Sim>) {
+fn spawn_plane_heartbeat(
+    feed: &Arc<crate::feed::MarketFeed>,
+    sim: &Arc<crate::sim::Sim>,
+    api_url: &str,
+) {
     let feed = feed.clone();
     let sim = sim.clone();
+    let via = mirror_devnet::engine::source_host(api_url).to_string();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -125,6 +130,7 @@ fn spawn_plane_heartbeat(feed: &Arc<crate::feed::MarketFeed>, sim: &Arc<crate::s
             // violations (any nonzero value is a construction regression).
             tracing::info!(
                 coins = %coins.join(" "),
+                via = %via,
                 accounts = sim.metrics.accounts.load(std::sync::atomic::Ordering::Relaxed),
                 owned_levels = feed.owned_levels(),
                 identity_violations = sim

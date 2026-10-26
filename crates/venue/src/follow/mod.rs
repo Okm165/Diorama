@@ -192,6 +192,9 @@ fn report_applied(ctx: &Ctx, from: u64, to: u64, source_head: u64, window: &Foll
         // The compose rung, named as the mainnet's per-block line names its
         // diff rung (`source = facts.source`): the two lines are mirrors.
         source = window.source,
+        // The watched-account denominator, so a quiet window's `writes = 0`
+        // reads as "N accounts probed, nothing changed" — never as silence.
+        watched = ctx.mirror.scope().watch().accounts.len(),
         source_head,
         lag = source_head.saturating_sub(to),
         writes = window.writes,

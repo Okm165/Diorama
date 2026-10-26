@@ -270,7 +270,19 @@ pub fn build_clients(
 /// invisible in the logs (measured: 7 DEBUG lines in 20 minutes against the
 /// mainnet's 1697). `applied` counts the mirror's own unit: parent blocks
 /// (T), composed windows (V).
-pub struct FollowStatus {
+/// The source's short identity for the steady lines: the URL's host without
+/// the scheme or port (`reth` for the mainnet's local node, the venue's live
+/// RPC host) — a heartbeat's reader should never have to guess which chain
+/// the numbers describe.
+pub fn source_host(url: &str) -> &str {
+    let no_scheme = url.split("://").nth(1).unwrap_or(url);
+    let host_port = no_scheme.split('/').next().unwrap_or(no_scheme);
+    host_port.split(':').next().unwrap_or(host_port)
+}
+
+pub struct FollowStatus<'a> {
+    /// The source's short identity (see [`source_host`]).
+    pub via: &'a str,
     pub source_head: u64,
     pub followed: u64,
     pub applied: u64,
@@ -279,7 +291,7 @@ pub struct FollowStatus {
     pub paused: bool,
 }
 
-impl FollowStatus {
+impl<'a> FollowStatus<'a> {
     /// One line when `interval_ms` has passed since `last` (a ms stamp the
     /// caller owns); returns whether it logged.
     pub fn log_if_due(&self, mirror: &str, last: &mut u64, interval_ms: u64) -> bool {
@@ -298,6 +310,7 @@ impl FollowStatus {
         };
         tracing::info!(
             mirror,
+            via = self.via,
             source_head = self.source_head,
             followed = self.followed,
             lag_blocks = lag,
@@ -575,6 +588,17 @@ pub async fn shutdown(tasks: Vec<tokio::task::JoinHandle<()>>) {
 #[cfg(test)]
 mod tests {
     use super::ShellFault;
+
+    #[test]
+    fn source_host_strips_scheme_port_and_path() {
+        assert_eq!(super::source_host("http://reth:8545"), "reth");
+        assert_eq!(
+            super::source_host("https://rpc.hyperliquid.xyz/evm"),
+            "rpc.hyperliquid.xyz"
+        );
+        // A bare host passes through (the helper never panics on odd input).
+        assert_eq!(super::source_host("reth"), "reth");
+    }
 
     #[derive(Debug, thiserror::Error)]
     enum TestErr {

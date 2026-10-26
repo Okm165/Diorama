@@ -50,10 +50,10 @@ evidence beats every minute on both sides (all measured live):
 | Line | Level | Cadence | Where |
 |---|---|---|---|
 | `parent diffs applied to T` | INFO | per applied block | mainnet engine |
-| `source window composed onto V` (carries `source` + `source_head` + `lag`) | INFO | per composed window (~4 s) | venue engine |
+| `source window composed onto V` (carries `source` + `source_head` + `lag` + `watched`) | INFO | per composed window (~4 s) | venue engine |
 | `probes complete {block, ok, failed, skipped}` | INFO | per applied block (T) / per re-pin (V) | both engines (one `probes::report`) |
-| `follow status {mirror, source_head, followed, lag_blocks, applied, guard}` | INFO | 60 s | both engines (one `FollowStatus`) |
-| `market plane live {coins, accounts, owned_levels, identity_violations}` | INFO | 60 s | venue sim |
+| `follow status {mirror, via, source_head, followed, lag_blocks, applied, guard}` | INFO | 60 s | both engines (one `FollowStatus`) |
+| `market plane live {coins, via, accounts, owned_levels, identity_violations}` | INFO | 60 s | venue sim |
 | `bridge status {pending, signed, relayed, parked}` | INFO | 60 s | cctp-bridge |
 | `sim order filled` (carries `levels` + `book`) | INFO | per fill | venue sim |
 

@@ -78,14 +78,14 @@ for pair in "T:$t_hb" "V:$v_hb"; do
   fi
   a=$(age "$line")
   if [ "$a" -le "$FRESH_S" ] && [ "$(field "$line" source_head)" != "0" ]; then
-    ok "$side follow status fresh (${a}s): source_head=$(field "$line" source_head) followed=$(field "$line" followed) lag=$(field "$line" lag_blocks) guard=$(field "$line" guard)"
+    ok "$side follow status fresh (${a}s): via=$(field "$line" via) source_head=$(field "$line" source_head) followed=$(field "$line" followed) lag=$(field "$line" lag_blocks) guard=$(field "$line" guard)"
   else
     bad "$side follow status stale or still booting (${a}s, source_head=$(field "$line" source_head))"
   fi
 done
 
 # 3. the same field set on both sides (the symmetry invariant)
-want="applied,followed,guard,lag_blocks,mirror,source_head"
+want="applied,followed,guard,lag_blocks,mirror,source_head,via"
 if [ -n "$t_hb" ] && [ -n "$v_hb" ]; then
   tf=$(fields_of "$t_hb"); vf=$(fields_of "$v_hb")
   if [ "$tf" = "$want" ] && [ "$vf" = "$want" ]; then

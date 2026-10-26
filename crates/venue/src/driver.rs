@@ -76,6 +76,7 @@ pub(crate) async fn mine_loop(ctx: Arc<Ctx>) {
 pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
     let mut last_status = 0u64;
+    let via = mirror_devnet::engine::source_host(ctx.source_rpc.url());
     // The pass's own backoff: a failed pass — the public source throttling,
     // a transient transport fault — doubles the pause up to the cap, and a
     // pass that serves resets it. The fixed cadence alone hammered a
@@ -89,6 +90,7 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
         // mirrors): the steady DEBUG line only speaks for an idle chain, and
         // the live source is never at the followed height.
         mirror_devnet::engine::FollowStatus {
+            via,
             source_head: ctx.venue_metrics.source_head.load(std::sync::atomic::Ordering::Relaxed),
             followed: ctx
                 .venue_metrics
