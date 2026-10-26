@@ -292,6 +292,9 @@ hedged-book: ## The hedged book: same collateral and gross exposure as the unhed
 impact-scenarios: ## The impact ladder: a whale moves the book and the mark; the portfolio's reaction measured
 	NS=venue-mirror ./scripts/impact-scenarios.sh
 
+shadow-audit: ## The shadowing audit: deliberate anvil states vs the COW shadow, both mirrors
+	./scripts/shadow-audit.sh
+
 benchmark: ## The prime-brokerage benchmark session: the five portfolio studies in sequence
 	@echo "== benchmark session: the five portfolio studies =="
 	@$(MAKE) --no-print-directory portfolio-sim

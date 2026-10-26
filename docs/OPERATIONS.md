@@ -611,6 +611,22 @@ no balance yet.
 Without the Secret the bridge pod waits in `CreateContainerConfigError`; the
 engine and the simulator boot without it.
 
+**The shadow audit** (`make shadow-audit`, measured live on both mirrors):
+puts each anvil into a deliberate state and checks the copy-on-write shadow
+end to end — a devnet deal diverges the anvil from the source, the shadow
+registry marks the keys, a follow window (V) / an applier pass (T) runs with
+the divergent value and the devnet's truth survives (the COW hold), the
+parity skips the devnet-owned account (no new probe failures), and the
+hand-back's behavior matches each source's nature: T's reth serves the pin's
+truth (a 10,064-block window), so `POST /admin/shadow` restores it; V's
+pinned-latest source cannot read the pin's truth once the head has moved, so
+the same call *refuses* with the numbers (the guard never poisons — the
+anvil's value is untouched). The hand-back's keys are per-address: a token's
+storage slot is named *on the token* (`{"address": <token>, "slots": [...]}`),
+an account's balance/nonce/code on the account (`account_fields`). The
+fixture-owned tokens (the devnet's mocks over the source's addresses) report
+their mock supply and are never overwritten by the follow.
+
 **The follow's cadence against the public source** (measured): the reads ride
 JSON-RPC batches, and every one of the endpoint's measured limits is honored —
 20 items per batch, 1 MiB per answer (the logs range halves on the refusal and
