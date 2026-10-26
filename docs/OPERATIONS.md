@@ -710,7 +710,20 @@ anvil's value is untouched). The hand-back's keys are per-address: a token's
 storage slot is named *on the token* (`{"address": <token>, "slots": [...]}`),
 an account's balance/nonce/code on the account (`account_fields`). The
 fixture-owned tokens (the devnet's mocks over the source's addresses) report
-their mock supply and are never overwritten by the follow.
+their mock supply and are never overwritten by the follow. Two deeper legs
+close the reliability question: the **BAL accounting** is asserted per block
+(`applied <= filtered <= bal_writes`, with the fixture's skips live in
+`skipped_shadowed` — the source's BAL touches the mock every busy block, so
+the skip evidence is continuous), and the **watched-field pair** is
+deterministic: a watched account's balance/nonce/code are planned every
+window, so a staged divergence on an unshadowed watched account is written
+back to the source's truth within one window (the control), while the same
+divergence survives once the account's fields are shadowed (the COW). The
+deal-cycle's own hold check is a regression guard, not a live skip: the
+deal's slot lives in the token's storage and the parent rarely touches it.
+The pair rotates through the non-fixture watched accounts (a mark cannot be
+cleared while V's source is pinned-latest) and re-stages the value to the
+source's own at the end, so the marks stay inert.
 
 **The follow's cadence against the public source** (measured): the reads ride
 JSON-RPC batches, and every one of the endpoint's measured limits is honored —
