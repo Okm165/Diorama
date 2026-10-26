@@ -4,7 +4,7 @@
 //! them beside the shared table.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use crate::feed::{FeedBridge, FeedStatus};
+use crate::feed::{FeedBridge, FeedOwner, FeedStatus};
 use axum::{
     extract::State,
     routing::{get, post},
@@ -45,7 +45,7 @@ struct FeedNameRequest {
 #[derive(Debug, Serialize)]
 struct FeedAck {
     name: String,
-    paused: bool,
+    owner: FeedOwner,
 }
 
 /// `/admin/feed/pause` — the scenario takes the value (the bridge stops
@@ -58,7 +58,7 @@ async fn feed_pause(
     bridge.pause(&req.name)?;
     Ok(Json(FeedAck {
         name: req.name,
-        paused: true,
+        owner: FeedOwner::Scenario,
     }))
 }
 
@@ -72,7 +72,7 @@ async fn feed_resume(
     bridge.resume(&req.name)?;
     Ok(Json(FeedAck {
         name: req.name,
-        paused: false,
+        owner: FeedOwner::Bridge,
     }))
 }
 
@@ -95,6 +95,6 @@ async fn feed_override(
         .await?;
     Ok(Json(FeedAck {
         name: req.name,
-        paused: true,
+        owner: FeedOwner::Scenario,
     }))
 }

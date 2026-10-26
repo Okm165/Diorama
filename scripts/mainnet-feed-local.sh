@@ -212,15 +212,15 @@ confirmed=$(answer "$ftarget")
 sentinel=$((confirmed + 1))
 $CAST send "$ftarget" "updateAnswer(int256)" "$sentinel" \
   --rpc-url "$ANVIL_T_URL" --private-key "$SCENARIO_KEY" > /dev/null 2>&1
-paused=""
+owner=""
 for _ in $(seq 1 30); do
-  paused=$(curl -sf -m 10 "$ENGINE_T_URL/admin/feed" | field "$first" paused)
-  [ "$paused" = "True" ] && break
+  owner=$(curl -sf -m 10 "$ENGINE_T_URL/admin/feed" | field "$first" owner)
+  [ "$owner" = "scenario" ] && break
   sleep 1
 done
-[ "$paused" = "True" ] \
+[ "$owner" = "scenario" ] \
   && ok "the scenario's write paused the feed ($first)" \
-  || bad "paused=$paused (the bridge kept writing over the scenario)"
+  || bad "owner=$owner (the bridge kept writing over the scenario)"
 held=$(answer "$ftarget")
 [ "$held" = "$sentinel" ] \
   && ok "the scenario's value is preserved (the bridge did not overwrite)" \

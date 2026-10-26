@@ -98,6 +98,17 @@ async fn journal_and_scan(
     Ok(())
 }
 
+/// Whether this block's writes were rolled back by a journal rewind and must
+/// be re-applied even though `t_head >= n`: the late-completion skip would
+/// otherwise leave the rolled-back values stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reapply {
+    /// The rewind covers this block: re-apply its writes.
+    RolledBack,
+    /// The normal forward case.
+    Forward,
+}
+
 /// What the apply's entry checks decided.
 enum ApplyEntry {
     /// The block's writes are already in (a timed-out apply that finished):
@@ -105,8 +116,8 @@ enum ApplyEntry {
     Late(ApplyOutcome),
     /// Proceed, with the re-apply state the applier must carry.
     Proceed {
-        needs_reapply: bool,
-        reapply: Option<(u64, u64)>,
+        reapply: Reapply,
+        reapply_from: Option<(u64, u64)>,
     },
 }
 
@@ -124,18 +135,22 @@ enum ApplyEntry {
 ///   the engine (anvil_reset), which the incremental diff applier cannot
 ///   recover from — alarm and keep retrying instead of corrupting state.
 async fn apply_entry(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result<ApplyEntry> {
-    let reapply = *ctx.plane.reapply_from.lock()?;
-    let needs_reapply = matches!(reapply, Some((from, _)) if n >= from);
+    let reapply_from = *ctx.plane.reapply_from.lock()?;
+    let reapply = if matches!(reapply_from, Some((from, _)) if n >= from) {
+        Reapply::RolledBack
+    } else {
+        Reapply::Forward
+    };
     let journaled = ctx.plane.journal.has_entry(n)?;
-    if t_head >= n && journaled && !needs_reapply {
+    if t_head >= n && journaled && reapply == Reapply::Forward {
         return Ok(ApplyEntry::Late(late_completion(ctx, n, t_head, started).await?));
     }
     if t_head + 1 < n {
         return Err(Error::ApplierBehind { t_head, n });
     }
     Ok(ApplyEntry::Proceed {
-        needs_reapply,
         reapply,
+        reapply_from,
     })
 }
 
@@ -148,12 +163,12 @@ pub(crate) async fn step(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     // re-pin races the (slow) compose, before any write; the next pass
     // reconciles (the cursor sits below the base → the epoch rule).
     let base = ctx.anvil_t.fork_block().await?;
-    let (needs_reapply, reapply) = match apply_entry(ctx, n, t_head, started).await? {
+    let (reapply, reapply_from) = match apply_entry(ctx, n, t_head, started).await? {
         ApplyEntry::Late(outcome) => return Ok(outcome),
         ApplyEntry::Proceed {
-            needs_reapply,
             reapply,
-        } => (needs_reapply, reapply),
+            reapply_from,
+        } => (reapply, reapply_from),
     };
 
     prepend_and_mark(ctx, n).await?;
@@ -175,15 +190,19 @@ pub(crate) async fn step(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
         n,
         ApplyFacts {
             chain: ctx.mirror.label(),
-            source: if needs_reapply { "reapply" } else { plan.kind.as_str() },
+            source: if reapply == Reapply::RolledBack {
+                "reapply"
+            } else {
+                plan.kind.as_str()
+            },
             total: plan.total,
             applied,
             filtered: plan.writes.len(),
             stats: plan.filter,
             sampled,
             sampled_ok,
-            needs_reapply,
             reapply,
+            reapply_from,
             t_latest,
             started,
         },
@@ -227,8 +246,8 @@ struct ApplyFacts {
     stats: FilterStats,
     sampled: usize,
     sampled_ok: usize,
-    needs_reapply: bool,
-    reapply: Option<(u64, u64)>,
+    reapply: Reapply,
+    reapply_from: Option<(u64, u64)>,
     t_latest: u64,
     started: Instant,
 }
@@ -246,7 +265,7 @@ async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> 
         duration_ms: facts.started.elapsed().as_millis() as u64,
     };
     record_apply_metrics(ctx, n, &facts, outcome.duration_ms);
-    if let Some((_, until)) = ctx.plane.clear_reapply_from(n, facts.reapply)? {
+    if let Some((_, until)) = ctx.plane.clear_reapply_from(n, facts.reapply_from)? {
         tracing::info!(block = n, until, "rewound range re-applied");
     }
     log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome)?;
@@ -316,7 +335,7 @@ fn record_apply_metrics(ctx: &Ctx, n: u64, facts: &ApplyFacts, duration_ms: u64)
 /// pins the other side of the same "only anomalies land in drift.jsonl"
 /// rule).
 fn is_anomalous(facts: &ApplyFacts, outcome: &ApplyOutcome) -> bool {
-    facts.needs_reapply || outcome.sampled_ok < outcome.sampled
+    facts.reapply == Reapply::RolledBack || outcome.sampled_ok < outcome.sampled
 }
 
 /// Divergence log, not a flight recorder: only anomalies land here (the
@@ -402,7 +421,7 @@ async fn align_context(ctx: &Ctx, header: &Header) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn facts(needs_reapply: bool) -> ApplyFacts {
+    fn facts(reapply: Reapply) -> ApplyFacts {
         ApplyFacts {
             chain: "t",
             source: "bal",
@@ -412,8 +431,8 @@ mod tests {
             stats: FilterStats::default(),
             sampled: 2,
             sampled_ok: 2,
-            needs_reapply,
-            reapply: None,
+            reapply,
+            reapply_from: None,
             t_latest: 1,
             started: Instant::now(),
         }
@@ -435,8 +454,8 @@ mod tests {
     /// re-apply of a rewound range is, and a sampled-parity mismatch is.
     #[test]
     fn only_anomalies_are_logged() {
-        assert!(!is_anomalous(&facts(false), &outcome(2, 2)));
-        assert!(is_anomalous(&facts(true), &outcome(2, 2)));
-        assert!(is_anomalous(&facts(false), &outcome(2, 1)));
+        assert!(!is_anomalous(&facts(Reapply::Forward), &outcome(2, 2)));
+        assert!(is_anomalous(&facts(Reapply::RolledBack), &outcome(2, 2)));
+        assert!(is_anomalous(&facts(Reapply::Forward), &outcome(2, 1)));
     }
 }

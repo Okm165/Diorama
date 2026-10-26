@@ -27,7 +27,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::Address;
 use mirror_config::FeedSection;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -39,13 +39,60 @@ use crate::feed::chainlink::{
 use crate::feed::policy::{step, Step, ValueState};
 pub(crate) use crate::feed::metrics::FeedBridgeMetrics;
 
+/// Who owns a feed's value: the bridge writes it from the source; a scenario
+/// owns it (the pause) until the hand-back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FeedOwner {
+    Bridge,
+    Scenario,
+}
+
+impl FeedOwner {
+    /// The byte the atomic carries.
+    fn byte(self) -> u8 {
+        match self {
+            FeedOwner::Bridge => 0,
+            FeedOwner::Scenario => 1,
+        }
+    }
+
+    /// The byte back (an unknown value reads as the bridge's own: the safe
+    /// default).
+    fn of_byte(byte: u8) -> Self {
+        match byte {
+            0 => FeedOwner::Bridge,
+            _ => FeedOwner::Scenario,
+        }
+    }
+}
+
+/// An atomic [`FeedOwner`] (Rust has no atomic enums): the pass's read path
+/// never takes the values lock.
+struct AtomicOwner(AtomicU8);
+
+impl AtomicOwner {
+    fn new(owner: FeedOwner) -> Self {
+        Self(AtomicU8::new(owner.byte()))
+    }
+
+    fn load(&self) -> FeedOwner {
+        FeedOwner::of_byte(self.0.load(Ordering::Relaxed))
+    }
+
+    fn store(&self, owner: FeedOwner) {
+        self.0.store(owner.byte(), Ordering::Relaxed);
+    }
+}
+
 /// One feed's runtime state (the section is the config; this is the truth the
 /// pass compares against).
 struct FeedRuntime {
     section: FeedSection,
     values: Mutex<ValueState>,
-    /// The scenario owns this feed's value until resumed.
-    paused: AtomicBool,
+    /// Who owns this feed's value: the bridge from the source, or a scenario
+    /// (the pause) until the hand-back.
+    owner: AtomicOwner,
     /// The last pass fault, when one happened (the verifier caught a wiped
     /// target error-looping invisibly: /admin/feed showed a stale confirmed
     /// value and the counter never moved).
@@ -151,7 +198,7 @@ impl FeedBridge {
         Ok(FeedRuntime {
             section: feed.clone(),
             values: Mutex::new(ValueState::default()),
-            paused: AtomicBool::new(false),
+            owner: AtomicOwner::new(FeedOwner::Bridge),
             last_error: Mutex::new(None),
             source_decimals: source,
             decimals: Mutex::new(decimals),
@@ -177,7 +224,7 @@ impl FeedBridge {
 
     /// One feed, one pass.
     async fn pass_one(&self, ctx: &Ctx, feed: &FeedRuntime) -> Result<()> {
-        if feed.paused.load(Ordering::Relaxed) {
+        if feed.owner.load() == FeedOwner::Scenario {
             return Ok(());
         }
         let Some(decimals) = feed.decimals(&ctx.anvil_t).await? else {
@@ -225,7 +272,7 @@ impl FeedBridge {
                     name: f.section.name.clone(),
                     target: format!("{:?}", f.section.target).to_lowercase(),
                     source: format!("{:?}", f.section.source).to_lowercase(),
-                    paused: f.paused.load(Ordering::Relaxed),
+                    owner: f.owner.load(),
                     confirmed_answer: values.confirmed,
                     pending_answer: values.pending,
                     pending_since_ms: values.pending_since_ms,
@@ -246,7 +293,7 @@ impl FeedBridge {
     /// Pause a feed (the scenario takes the value).
     pub fn pause(&self, name: &str) -> Result<()> {
         let feed = self.find(name)?;
-        feed.paused.store(true, Ordering::Relaxed);
+        feed.owner.store(FeedOwner::Scenario);
         Ok(())
     }
 
@@ -255,7 +302,7 @@ impl FeedBridge {
     /// while a value published by `override` is still awaited as pending.
     pub fn resume(&self, name: &str) -> Result<()> {
         let feed = self.find(name)?;
-        feed.paused.store(false, Ordering::Relaxed);
+        feed.owner.store(FeedOwner::Bridge);
         feed.values
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -286,7 +333,7 @@ impl FeedBridge {
         state.pending = Some(answer);
         state.pending_since_ms = Some(crate::now_ms());
         drop(state);
-        feed.paused.store(true, Ordering::Relaxed);
+        feed.owner.store(FeedOwner::Scenario);
         Ok(())
     }
 
@@ -365,7 +412,7 @@ fn forget_target(feed: &FeedRuntime, error: &Error) {
 /// A scenario owns this feed's value now; the bridge pauses it (resume hands
 /// back).
 fn pause_feed(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, state: ValueState, found: i128) {
-    feed.paused.store(true, Ordering::Relaxed);
+    feed.owner.store(FeedOwner::Scenario);
     metrics.record_pause(&feed.section.name);
     tracing::warn!(
         feed = %feed.section.name,
@@ -382,7 +429,8 @@ pub(crate) struct FeedStatus {
     pub name: String,
     pub target: String,
     pub source: String,
-    pub paused: bool,
+    /// Who owns the value now (the pause's own name).
+    pub owner: FeedOwner,
     /// The last value the chain confirmed the bridge wrote.
     pub confirmed_answer: Option<i128>,
     /// A publish awaiting its block, when one is in flight.
