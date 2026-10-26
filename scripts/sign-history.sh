@@ -45,9 +45,16 @@ echo "   complete history backed up ($(du -h "$BACKUP" | cut -f1))"
 
 total=$(git rev-list --count --branches --tags)
 echo "== rewriting ${total} commits (every local branch and tag) through git commit-tree -S"
-FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --force \
+# The per-commit progress is 365 lines of noise; keep the ref summary and
+# print the tail on a failure.
+if ! out=$(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --force \
   --commit-filter 'git commit-tree -S "$@"' \
-  --tag-name-filter cat -- --branches --tags
+  --tag-name-filter cat -- --branches --tags 2>&1); then
+  echo "$out" | tail -30 >&2
+  echo "sign-history: the rewrite failed; nothing was cleaned up" >&2
+  exit 1
+fi
+echo "$out" | tr '\r' '\n' | grep -v '^Rewrite ' | sed 's/^/   /' | tail -8
 
 echo "== verification"
 total_after=$(git rev-list --count --branches --tags)
