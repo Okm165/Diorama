@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mainnet-feed-local: the feed bridge, proven natively (two anvils; no reth,
 # no public RPC, no cluster) — the local counterpart of the deployed stack's
-# bridge, which `mainnet-feed-bridge` drives on the cluster against the real
+# bridge, which the engine's `/admin/feed` surface drives on the cluster against the real
 # Chainlink feeds.
 #
 # The source anvil (chain 1, `--hardfork amsterdam`, mining every second)

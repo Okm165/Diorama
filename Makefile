@@ -34,10 +34,23 @@ ns: ## Create namespace + StorageClass (idempotent)
 	kubectl apply -f k8s/base/shared/storageclass.yaml
 
 mainnet-secrets: ## Create the reth<->lighthouse JWT secret if missing (mainnet namespace)
-	NS=mainnet-mirror ./scripts/mainnet-secrets.sh
+	@NS=mainnet-mirror; \
+	if kubectl -n $$NS get secret reth-jwt >/dev/null 2>&1; then \
+	  echo "secret reth-jwt already exists in $$NS (left untouched)"; \
+	else \
+	  kubectl -n $$NS create secret generic reth-jwt --from-literal=jwt.hex="$$(openssl rand -hex 32)" >/dev/null; \
+	  echo "created secret reth-jwt in $$NS"; \
+	fi
 
 venue-secrets: ## Create the CCTP relay-wallet secret (CCTP_RELAY_KEY=0x…; venue namespace)
-	NS=venue-mirror ./scripts/venue-secrets.sh
+	@NS=venue-mirror; \
+	if kubectl -n $$NS get secret cctp-relay-key >/dev/null 2>&1; then \
+	  echo "secret cctp-relay-key already exists in $$NS (left untouched)"; \
+	else \
+	  test -n "$$CCTP_RELAY_KEY" || { echo "set CCTP_RELAY_KEY - the dedicated relay wallet hex key" >&2; exit 1; }; \
+	  kubectl -n $$NS create secret generic cctp-relay-key --from-literal=relay-key="$$CCTP_RELAY_KEY" >/dev/null; \
+	  echo "created secret cctp-relay-key in $$NS"; \
+	fi
 
 apply: ## Apply the selected instance's stack (INSTANCE selects the overlay)
 	kubectl apply -k $(OVERLAY)
@@ -329,8 +342,6 @@ attest: ## The behavioral attestation: the pass over both mirrors, then the asse
 	./scripts/log-surface.sh
 	./scripts/engine-symmetry.sh
 
-mainnet-feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
-	./scripts/mainnet-feed-bridge.sh $(ARGS)
 
 mainnet-scenario: ## Scenario test: self-containment, live parity (T vs reth), devnet workflow
 	NS=mainnet-mirror ./scripts/mainnet-scenario.sh
@@ -347,8 +358,6 @@ mainnet-product-sim: ## Product simulation: levered position, live-data sampling
 mainnet-closure-check: ## Audit the watchlist closure: every storage dep of every market-data view
 	NS=mainnet-mirror ./scripts/mainnet-closure-check.sh
 
-diagrams: ## Regenerate docs/img renders from the ASCII diagram blocks (needs pango-view)
-	./scripts/render-diagrams.sh
 
 mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
 	kubectl -n mainnet-mirror delete job mainnet-selftest --ignore-not-found
@@ -441,9 +450,9 @@ help: ## Show this help
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \
-	status logs logs-check check-pins mainnet-smoke venue-smoke mainnet-feed-bridge venue-repin venue-scenario \
+	status logs logs-check check-pins mainnet-smoke venue-smoke venue-repin venue-scenario \
 	venue-proof venue-order-proof venue-product-sim venue-selftest cctp-smoke cctp-roundtrip cctp-margin-cycle cctp-local engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
-	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help diagrams \
+	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help \
 	venue-engine-local venue-selftest-local venue-sim-parity-local mainnet-selftest-local mainnet-engine-local \
 	mainnet-workshop-local venue-workshop-local engine-symmetry-local daloc-local container-smoke

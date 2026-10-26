@@ -215,7 +215,7 @@ k8s/overlays/venue-mirror/    the venue stack overlay (V, engine, sim, bridge, N
 k8s/bootstrap/              one-shot Jobs: reth snapshot, CL blob prune, engine selftest, re-pin wipe
 scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the shared plumbing), the
                             mainnet suites (mainnet-smoke, mainnet-scenario, mainnet-proof,
-                            mainnet-product-sim, mainnet-closure-check, mainnet-feed-bridge,
+                            mainnet-product-sim, mainnet-closure-check,
                             mainnet-feed-local, mainnet-selftest-local, mainnet-engine-local,
                             mainnet-workshop-local, mainnet-secrets), the
                             venue suites (venue-smoke, venue-scenario, venue-proof,
@@ -228,7 +228,7 @@ scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sha
                             image run for real), and the structural fitness scripts
                             (closure-matrix, no-orphans, docs-metrics, trust-audit, clock-labels,
                             no-panics, docker-members, k8s-wiring, spec-citations, spine-purity,
-                            facts-published, metrics-written, render-diagrams). The
+                            facts-published, metrics-written). The
                             `venue-product-sim` and `config-check` make targets drive
                             `scripts/venue-product-sim.sh` (the `daloc-sim.py` arc's entry) and
                             the config loader

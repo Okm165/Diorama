@@ -21,7 +21,7 @@ symmetry sweeps — regenerate the readings with
 | local proofs | `mainnet-{engine-local,selftest-local,workshop-local,feed-local}` | `venue-{engine-local,selftest-local,workshop-local,sim-parity-local,order-proof,product-sim}` | |
 | cross-mirror | `engine-symmetry` (cluster) · `engine-symmetry-local`, `cctp-*`, `daloc-*`, `container-smoke` (local) | (shared) | |
 | explainer | `docs/HOW-IT-WORKS.md` | `docs/HOW-IT-WORKS-VENUE.md` | the same §-numbered walk-through |
-| diagram pairs | `docs/img/how-topology.png`, `how-cow.png` | `docs/img/how-topology-venue.png`, `how-cow-venue.png` | each rendered from its explainer's ASCII art (`scripts/render-diagrams.sh`) |
+| diagram pairs | `docs/img/how-topology.png`, `how-cow.png` | `docs/img/how-topology-venue.png`, `how-cow-venue.png` | each rendered from its explainer's ASCII art |
 
 ## The trees
 
