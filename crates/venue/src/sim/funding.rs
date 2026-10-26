@@ -4,7 +4,7 @@
 //! every account (tick.rs).
 use super::account::{add, mul, Account};
 use crate::error::Result;
-use crate::feed::MarketFeed;
+use crate::feed::{MarketFeed, Prices};
 use rust_decimal::Decimal;
 
 /// One hour in milliseconds: the funding interval (the docs: "funding is
@@ -50,7 +50,7 @@ pub(crate) fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u6
     }
     let mut moved = 0;
     for (coin, p) in account.positions.iter_mut() {
-        let Some((_mark, oracle)) = feed.required_prices(coin) else {
+        let Some(Prices { oracle, .. }) = feed.required_prices(coin) else {
             continue;
         };
         let Some(rate) = feed.funding(coin) else {

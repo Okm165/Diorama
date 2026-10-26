@@ -164,21 +164,34 @@ struct Item {
     from: Vec<String>,
 }
 
+/// The threshold an item exceeds (the gate's verdict): the metric's name and
+/// its limit.
+struct Violation {
+    metric: &'static str,
+    limit: usize,
+}
+
 impl Item {
     /// The threshold this item exceeds, if any (the gate's verdict).
-    fn violation(&self) -> Option<(&'static str, usize)> {
+    fn violation(&self) -> Option<Violation> {
         match self.kind {
             "fn" => {
                 if self.lines > MAX_LINES {
-                    Some(("lines", MAX_LINES))
+                    Some(Violation { metric: "lines", limit: MAX_LINES })
                 } else if self.depth > MAX_DEPTH {
-                    Some(("depth", MAX_DEPTH))
+                    Some(Violation { metric: "depth", limit: MAX_DEPTH })
                 } else {
                     None
                 }
             }
-            "struct" => (self.size > MAX_FIELDS).then_some(("fields", MAX_FIELDS)),
-            "enum" => (self.size > MAX_VARIANTS).then_some(("variants", MAX_VARIANTS)),
+            "struct" => (self.size > MAX_FIELDS).then_some(Violation {
+                metric: "fields",
+                limit: MAX_FIELDS,
+            }),
+            "enum" => (self.size > MAX_VARIANTS).then_some(Violation {
+                metric: "variants",
+                limit: MAX_VARIANTS,
+            }),
             _ => None,
         }
     }
@@ -1767,13 +1780,14 @@ fn generated_records(sets: &[RegistrySet]) {
 fn gate(items: &[Item], registries: &[RegistrySet]) -> i32 {
     let mut bad = 0;
     for item in items.iter().filter(|i| !i.is_test()) {
-        if let Some((metric, limit)) = item.violation() {
+        if let Some(v) = item.violation() {
             println!(
-                "VIOLATION: {}:{} is {} {} (limit {limit})",
+                "VIOLATION: {}:{} is {} {} (limit {})",
                 item.file,
                 item.name,
                 item.metric(),
-                metric
+                v.metric,
+                v.limit
             );
             bad = 1;
         }

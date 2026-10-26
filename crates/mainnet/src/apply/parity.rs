@@ -43,7 +43,7 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
     // chunks transparently), concurrently: different endpoints, one body in
     // flight each. A full sweep's sample is every applied storage key; the
     // per-key form cost two round trips per key, serialized.
-    let Some((t_calls, r_calls)) = sample_calls(n, t_latest, &sample) else {
+    let Some(calls) = sample_calls(n, t_latest, &sample) else {
         return (sample.len(), 0);
     };
     // T's side is the local anvil: its own 500-item contract (one body for
@@ -51,8 +51,8 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
     // not documented here — 1000 answered live once, not relied on).
     let (t_answers, r_answers) = match tokio::try_join!(
         ctx.anvil_t
-            .batch_limited(&t_calls, mirror_anvil::ANVIL_BATCH_MAX_ITEMS, 1 << 20),
-        ctx.reth.batch(&r_calls)
+            .batch_limited(&calls.t, mirror_anvil::ANVIL_BATCH_MAX_ITEMS, 1 << 20),
+        ctx.reth.batch(&calls.reth)
     ) {
         Ok(pair) => pair,
         Err(e) => {
@@ -69,13 +69,16 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
     (sample.len(), sampled_ok)
 }
 
-/// Both sides' call plans for the sample: `None` when a plan cannot encode
-/// (already warned; every sampled key then counts not-ok).
-fn sample_calls(
-    n: u64,
-    t_latest: u64,
-    sample: &[Key],
-) -> Option<(Vec<mirror_anvil::Call>, Vec<mirror_anvil::Call>)> {
+/// Both sides' call plans for the drift sample: T at the parent block, reth
+/// at its own latest.
+struct SampleCalls {
+    t: Vec<mirror_anvil::Call>,
+    reth: Vec<mirror_anvil::Call>,
+}
+
+/// The sample's call plans; `None` when a plan cannot encode (already warned;
+/// every sampled key then counts not-ok).
+fn sample_calls(n: u64, t_latest: u64, sample: &[Key]) -> Option<SampleCalls> {
     let plan = |at: u64| match mirror_anvil::Rpc::key_calls(sample, at) {
         Ok(calls) => Some(calls),
         Err(e) => {
@@ -83,7 +86,10 @@ fn sample_calls(
             None
         }
     };
-    Some((plan(t_latest)?, plan(n)?))
+    Some(SampleCalls {
+        t: plan(t_latest)?,
+        reth: plan(n)?,
+    })
 }
 
 /// Whether the profile verifies every applied key (the full sweep) or the

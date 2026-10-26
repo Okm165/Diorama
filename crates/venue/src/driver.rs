@@ -183,8 +183,8 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     let _ = crate::follow::step(ctx).await?;
 
     let reapply = *ctx.plane.reapply_from.lock()?;
-    if let Some((_, until)) = ctx.plane.clear_reapply_from(head, reapply)? {
-        tracing::info!(block = head, until, "rewound range passed");
+    if let Some(range) = ctx.plane.clear_reapply_from(head, reapply)? {
+        tracing::info!(block = head, until = range.upto, "rewound range passed");
     }
     Ok(Pass::Steady)
 }

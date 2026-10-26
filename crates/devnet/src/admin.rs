@@ -9,7 +9,7 @@ use crate::deal;
 use crate::error::{Error, Result};
 use crate::journal::JournalSink;
 use crate::metrics::Registry;
-use crate::plane::Plane;
+use crate::plane::{Plane, ReapplyRange};
 use crate::source::Source;
 use alloy_primitives::{Address, U256};
 use mirror_anvil::Rpc;
@@ -351,8 +351,11 @@ impl AdminSurface<'_> {
     fn mark_reapply(&self, from: u64, upto: u64) -> Result<()> {
         let mut ra = self.plane.reapply_from.lock()?;
         *ra = Some(match *ra {
-            Some((f, u)) => (f.min(from), u.max(upto)),
-            None => (from, upto),
+            Some(range) => ReapplyRange {
+                from: range.from.min(from),
+                upto: range.upto.max(upto),
+            },
+            None => ReapplyRange { from, upto },
         });
         Ok(())
     }

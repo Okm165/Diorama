@@ -35,8 +35,8 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict
     let mut verdict = mirror_devnet::engine::Verdict::Passed;
     for n in (pin + 1)..=(pin + blocks) {
         println!("-- block {n}");
-        if !run_one_block(&ctx, n).await? {
-            verdict = mirror_devnet::engine::Verdict::Failed;
+        if matches!(run_one_block(&ctx, n).await?, Verdict::Failed) {
+            verdict = Verdict::Failed;
         }
         println!();
     }
@@ -47,21 +47,21 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict
     Ok(verdict)
 }
 
-/// Apply one block, printing the per-check lines; returns whether it passed.
-async fn run_one_block(ctx: &Ctx, n: u64) -> Result<bool> {
+/// Apply one block, printing the per-check lines; returns the verdict.
+async fn run_one_block(ctx: &Ctx, n: u64) -> Result<Verdict> {
     let a = step(ctx, n).await.map_err(|source| Error::Step {
         step: "apply",
         block: n,
         source: Box::new(source),
     })?;
-    let mut ok = true;
+    let mut verdict = Verdict::Passed;
     println!(
         "   apply: source={} writes={} filtered={} skipped_shadowed={} sampled={}/{} ms={}",
         a.source, a.writes, a.filtered, a.skipped_shadowed, a.sampled_ok, a.sampled, a.duration_ms
     );
     if a.sampled != a.sampled_ok {
-        ok = false;
+        verdict = Verdict::Failed;
         println!("   ✘ sampled storage parity failed");
     }
-    Ok(ok)
+    Ok(verdict)
 }

@@ -38,7 +38,7 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
     // already expired" (the FAQ's 15 s protection is the client-side default).
     // The sim's clock is the scenario's, so a scripted time jump expires
     // actions exactly as the venue's would.
-    if let Some(reason) = expired(&req, state.sim.clock(crate::now_ms())?) {
+    if let Err(reason) = expired(&req, state.sim.clock(crate::now_ms())?) {
         return Ok(err_envelope(reason));
     }
     // The noop action (docs): no side effects, the venue's no-data success —
@@ -58,19 +58,24 @@ pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) ->
     Ok(dispatch(&state, owner, &body, &req))
 }
 
-/// The docs' `expiresAfter`: `Some(reason)` refuses the whole payload when
-/// the timestamp has passed ("a timestamp in milliseconds *after which* the
+/// The docs' `expiresAfter`: `Err(reason)` refuses the whole payload when the
+/// timestamp has passed ("a timestamp in milliseconds *after which* the
 /// action will be rejected" — strict, so the timestamp itself is still valid).
-fn expired(req: &ExchangeBody, now_ms: u64) -> Option<String> {
-    let expires = req.expires_after?;
-    (expires < now_ms).then(|| "Action already expired".to_string())
+fn expired(req: &ExchangeBody, now_ms: u64) -> Result<(), String> {
+    let Some(expires) = req.expires_after else {
+        return Ok(());
+    };
+    if expires < now_ms {
+        return Err("Action already expired".to_string());
+    }
+    Ok(())
 }
 
-/// The docs' pre-validation pass: `Some(reason)` refuses the whole payload
+/// The docs' pre-validation pass: `Err(reason)` refuses the whole payload
 /// with one error (the venue duplicates it n times for their clients).
-fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Option<String> {
+fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Result<(), String> {
     if orders.is_empty() {
-        return Some("venue-sim: an empty order batch is rejected (docs: pre-validation)".into());
+        return Err("venue-sim: an empty order batch is rejected (docs: pre-validation)".into());
     }
     let meta = state.feed.meta();
     for action in orders {
@@ -78,18 +83,18 @@ fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Option<String> 
             continue; // a per-order mapping error keeps its own status
         };
         if order.trigger.is_some() && !order.reduce_only {
-            return Some(
+            return Err(
                 "venue-sim: TP/SL orders must be reduce-only (docs: pre-validation)".into(),
             );
         }
         if let Err(e) = crate::sim::validate::validate_order(&state.feed, meta.as_ref(), &order) {
             let reason = e.to_string();
             if reason.contains("too far from oracle") {
-                return Some(reason);
+                return Err(reason);
             }
         }
     }
-    None
+    Ok(())
 }
 
 /// The asset-index actions (`updateLeverage`, `updateIsolatedMargin`): resolve
@@ -113,29 +118,38 @@ const MODELED_ACTIONS: &str = "the modeled exchange actions are order, cancel, \
      cancelByCloid, modify, batchModify, updateLeverage, updateIsolatedMargin, \
      scheduleCancel and noop. See docs/INTEGRATION.md.";
 
+/// The wire's optional `fast` flag, converted once for the cancel actions.
+fn cancel_speed(fast: Option<bool>) -> crate::sim::order::CancelSpeed {
+    crate::sim::order::CancelSpeed::of(fast.unwrap_or(false))
+}
+
+/// The wire's optional `alwaysPlace` flag, converted once for the modify
+/// actions.
+fn always_mode(always_place: Option<bool>) -> crate::sim::order::AlwaysPlace {
+    crate::sim::order::AlwaysPlace::of(always_place.unwrap_or(false))
+}
+
 /// The action dispatch (its own fn: the handler is the parse + the preamble).
 fn dispatch(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeBody) -> Response {
     match &req.action {
         ExchangeAction::Order { .. } => order_action(state, owner, body, req),
         ExchangeAction::Cancel { cancels, fast } => {
-            let fast = *fast;
-            flagged("f", fast, || cancel_action(state, owner, cancels, fast.unwrap_or(false)))
+            flagged("f", *fast, || cancel_action(state, owner, cancels, cancel_speed(*fast)))
         }
         ExchangeAction::CancelByCloid { cancels, fast } => {
-            let fast = *fast;
-            flagged("f", fast, || {
-                cancel_by_cloid_action(state, owner, cancels, fast.unwrap_or(false))
+            flagged("f", *fast, || {
+                cancel_by_cloid_action(state, owner, cancels, cancel_speed(*fast))
             })
         }
         ExchangeAction::Modify {
             oid,
             order,
             always_place,
-        } => modify_action(state, owner, oid, order, always_place.unwrap_or(false)),
+        } => modify_action(state, owner, oid, order, always_mode(*always_place)),
         ExchangeAction::BatchModify {
             modifies,
             always_place,
-        } => batch_modify(state, owner, modifies, always_place.unwrap_or(false)),
+        } => batch_modify(state, owner, modifies, always_mode(*always_place)),
         ExchangeAction::UpdateIsolatedMargin { asset, ntli, .. } => {
             asset_action(state, *asset, |coin| {
                 state.sim.update_isolated_margin(owner, coin, *ntli, &state.feed)
@@ -145,8 +159,11 @@ fn dispatch(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeB
             asset,
             is_cross,
             leverage,
-        } => leverage_action(state, owner, *asset, *is_cross, *leverage),
-        ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(owner, *time) {
+        } => leverage_action(state, owner, *asset, crate::wire::LeverageType::of(*is_cross), *leverage),
+        ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(
+            owner,
+            crate::sim::order::ScheduleCancel::of(*time),
+        ) {
             Ok(_) => default_ok(),
             Err(e) => err_envelope(e.to_string()),
         },
@@ -221,10 +238,10 @@ fn batch_modify(
     state: &Arc<ApiState>,
     owner: Address,
     modifies: &[ModifyItem],
-    always: bool,
+    mode: crate::sim::order::AlwaysPlace,
 ) -> Response {
     for m in modifies {
-        if let Err(e) = modify_one(state, owner, &m.oid, &m.order, always) {
+        if let Err(e) = modify_one(state, owner, &m.oid, &m.order, mode) {
             return err_envelope(e.to_string());
         }
     }
@@ -252,7 +269,7 @@ fn leverage_action(
     state: &Arc<ApiState>,
     owner: Address,
     asset: u32,
-    is_cross: bool,
+    mode: crate::wire::LeverageType,
     leverage: u32,
 ) -> Response {
     let meta = state.feed.meta();
@@ -260,14 +277,7 @@ fn leverage_action(
         state.sim.set_leverage(
             owner,
             coin,
-            crate::sim::account::LeverageSetting {
-                mode: if is_cross {
-                    crate::wire::LeverageType::Cross
-                } else {
-                    crate::wire::LeverageType::Isolated
-                },
-                leverage,
-            },
+            crate::sim::account::LeverageSetting { mode, leverage },
             meta.as_ref(),
         )
     })
@@ -294,7 +304,7 @@ fn order_action(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &Excha
     // The docs' pre-validation class: one error for the whole payload
     // (empty batches, non-reduce-only TP/SL, an order too far from the
     // reference price) — every status carries it, as their clients expect.
-    if let Some(reason) = prevalidate(state, orders) {
+    if let Err(reason) = prevalidate(state, orders) {
         let statuses = orders
             .iter()
             .map(|_| OrderStatus::Error(reason.clone()))
@@ -335,7 +345,7 @@ fn cancel_action(
     state: &ApiState,
     owner: Address,
     cancels: &[CancelAction],
-    fast: bool,
+    speed: crate::sim::order::CancelSpeed,
 ) -> Response {
     if cancels.is_empty() {
         // The venue's batched actions answer an error for an empty payload
@@ -346,12 +356,7 @@ fn cancel_action(
     let statuses = cancels
         .iter()
         .map(|c| match coin_of(meta.as_ref(), c.a) {
-            Some(coin) => match state.sim.cancel(
-                owner,
-                &coin,
-                c.o,
-                crate::sim::order::CancelSpeed::of(fast),
-            ) {
+            Some(coin) => match state.sim.cancel(owner, &coin, c.o, speed) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
                 Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
             },
@@ -371,7 +376,7 @@ fn cancel_by_cloid_action(
     state: &ApiState,
     owner: Address,
     cancels: &[CancelByCloidAction],
-    fast: bool,
+    speed: crate::sim::order::CancelSpeed,
 ) -> Response {
     if cancels.is_empty() {
         return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string());
@@ -380,12 +385,7 @@ fn cancel_by_cloid_action(
     let statuses = cancels
         .iter()
         .map(|c| match coin_of(meta.as_ref(), c.asset) {
-            Some(coin) => match state.sim.cancel_by_cloid(
-                owner,
-                &coin,
-                c.cloid,
-                crate::sim::order::CancelSpeed::of(fast),
-            ) {
+            Some(coin) => match state.sim.cancel_by_cloid(owner, &coin, c.cloid, speed) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
                 Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
             },
@@ -410,24 +410,24 @@ fn modify_action(
     owner: Address,
     oid: &crate::wire::OidOrCloid,
     order: &OrderAction,
-    always_place: bool,
+    mode: crate::sim::order::AlwaysPlace,
 ) -> Response {
-    match modify_one(state, owner, oid, order, always_place) {
+    match modify_one(state, owner, oid, order, mode) {
         Ok(()) => default_ok(),
         Err(e) => err_envelope(e.to_string()),
     }
 }
 
 /// One modify: the cancel of the old order, then the placement. With
-/// `always_place = false` the cancel must succeed, the new order must be
-/// non-trigger, and an executable Gtc is overridden to Alo (docs); with
-/// `always_place = true` the placement happens regardless.
+/// [`AlwaysPlace::RequiresCancel`] the cancel must succeed, the new order must
+/// be non-trigger, and an executable Gtc is overridden to Alo (docs); with
+/// [`AlwaysPlace::Regardless`] the placement happens regardless.
 fn modify_one(
     state: &ApiState,
     owner: Address,
     oid: &crate::wire::OidOrCloid,
     order: &OrderAction,
-    always_place: bool,
+    mode: crate::sim::order::AlwaysPlace,
 ) -> Result<()> {
     let meta = state.feed.meta();
     let canceled = match oid {
@@ -445,11 +445,11 @@ fn modify_one(
             state.sim.cancel_by_cloid(owner, &coin, *c, crate::sim::order::CancelSpeed::Normal)
         }
     };
-    if !always_place {
+    if matches!(mode, crate::sim::order::AlwaysPlace::RequiresCancel) {
         canceled?;
     }
     let mut mapped = order.to_order(meta.as_ref())?;
-    if !always_place {
+    if matches!(mode, crate::sim::order::AlwaysPlace::RequiresCancel) {
         if mapped.trigger.is_some() {
             return Err(Error::bad_request(
                 "always_place=false requires a non-trigger order (docs)",
@@ -645,13 +645,13 @@ mod tests {
             r#"{"action":{"type":"noop"},"user":"0x00000000000000000000000000000000000000e1","expiresAfter":1000}"#,
         );
         let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
-        assert!(expired(&req, 1000).is_none(), "the timestamp itself is valid");
-        assert_eq!(expired(&req, 1001).as_deref(), Some("Action already expired"));
+        assert!(expired(&req, 1000).is_ok(), "the timestamp itself is valid");
+        assert_eq!(expired(&req, 1001).unwrap_err(), "Action already expired");
         let body = Bytes::from(
             r#"{"action":{"type":"noop"},"user":"0x00000000000000000000000000000000000000e1"}"#,
         );
         let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
-        assert!(expired(&req, u64::MAX).is_none());
+        assert!(expired(&req, u64::MAX).is_ok());
     }
 
     /// The complete wire shapes parse (cloid as alloy's `B128`, the trigger

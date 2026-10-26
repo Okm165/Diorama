@@ -66,7 +66,18 @@ pub struct Plane {
     /// late-completion skip would leave them stale, so it re-applies the range
     /// (idempotent writes; re-journaling records the rolled-back values as the
     /// new before-values). Cleared once the whole range is re-applied.
-    pub reapply_from: Shared<Option<(u64, u64)>>,
+    pub reapply_from: Shared<Option<ReapplyRange>>,
+}
+
+/// The journal-rewind re-apply range: the devnet-chain blocks whose writes
+/// were rolled back while their chain head is already past them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReapplyRange {
+    /// The first block to re-apply.
+    pub from: u64,
+    /// The last block to re-apply (the marker clears once the head reaches
+    /// it).
+    pub upto: u64,
 }
 
 impl Plane {
@@ -75,12 +86,12 @@ impl Plane {
     pub fn clear_reapply_from(
         &self,
         block: u64,
-        reapply: Option<(u64, u64)>,
-    ) -> Result<Option<(u64, u64)>> {
-        if let Some((_, until)) = reapply {
-            if block >= until {
+        reapply: Option<ReapplyRange>,
+    ) -> Result<Option<ReapplyRange>> {
+        if let Some(range) = reapply {
+            if block >= range.upto {
                 *self.reapply_from.lock()? = None;
-                return Ok(Some((block, until)));
+                return Ok(Some(range));
             }
         }
         Ok(None)

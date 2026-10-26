@@ -232,19 +232,19 @@ impl Bridge {
     /// EVM→Core credit from one transfer log (the emitting contract must be
     /// the token's linked EVM contract).
     async fn apply_credit(&self, transfer: &Transfer, emitter: Address, tokens: &[TokenInfo]) -> Result<()> {
-        let Some((sender, token, amount)) = system::credit_of(transfer, tokens, emitter) else {
+        let Some(credit) = system::credit_of(transfer, tokens, emitter) else {
             return Ok(());
         };
         self.sim.credit_spot(
-            sender,
-            TokenRef { index: token.index, coin: &token.name },
-            amount,
+            credit.sender,
+            TokenRef { index: credit.token.index, coin: &credit.token.name },
+            credit.amount,
         )?;
         self.metrics.inc_credits();
         tracing::info!(
-            from = %sender,
-            token = %token.name,
-            amount = %amount,
+            from = %credit.sender,
+            token = %credit.token.name,
+            amount = %credit.amount,
             "bridge: EVM→Core credit"
         );
         Ok(())
@@ -257,19 +257,19 @@ impl Bridge {
         let Some(token) = tokens.iter().find(|t| t.name == "HYPE") else {
             return Ok(());
         };
-        let Some((user, amount)) = system::hype_received_of(data, token) else {
+        let Some(credit) = system::hype_received_of(data, token) else {
             return Ok(());
         };
         self.sim.credit_spot(
-            user,
+            credit.sender,
             TokenRef {
                 index: token.index,
                 coin: &token.name,
             },
-            amount,
+            credit.amount,
         )?;
         self.metrics.inc_credits();
-        tracing::info!(from = %user, amount = %amount, "bridge: EVM→Core HYPE credit");
+        tracing::info!(from = %credit.sender, amount = %credit.amount, "bridge: EVM→Core HYPE credit");
         Ok(())
     }
 

@@ -19,11 +19,11 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub async fn health(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    if let Some(response) = super::sim_gate(&state) {
-        return response;
+pub async fn health(State(state): State<Arc<ApiState>>) -> axum::response::Response {
+    if let Err(refusal) = super::sim_gate(&state) {
+        return refusal.into_response();
     }
-    (axum::http::StatusCode::OK, "ok")
+    (axum::http::StatusCode::OK, "ok").into_response()
 }
 
 /// A control write that names a coin the market plane does not track is a
@@ -603,8 +603,7 @@ pub(crate) struct EpochNewResponse {
     /// The engine accepted the re-pin (`POST {engine_admin}/admin/epoch`).
     pub engine_repinned: bool,
     /// The fork source the engine re-pinned to (the engine's answer).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub engine_source: Option<String>,
+    pub engine_source: String,
 }
 
 /// `epoch_new`: blank the scenario and re-pin V through the engine's
@@ -645,6 +644,6 @@ pub(crate) async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json
     Ok(Json(EpochNewResponse {
         epoch,
         engine_repinned: engine.reset,
-        engine_source: Some(engine.source),
+        engine_source: engine.source,
     }))
 }

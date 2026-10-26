@@ -19,6 +19,7 @@ use mirror_devnet::cow::FilterStats;
 use mirror_devnet::drift::Drift;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::journal::JournalEntry;
+use mirror_devnet::plane::ReapplyRange;
 use mirror_devnet::metrics::Registry as _;
 use mirror_devnet::plane::Plane;
 use mirror_devnet::spine::{ClockPolicy, MinePolicy};
@@ -117,7 +118,7 @@ enum ApplyEntry {
     /// Proceed, with the re-apply state the applier must carry.
     Proceed {
         reapply: Reapply,
-        reapply_from: Option<(u64, u64)>,
+        reapply_from: Option<ReapplyRange>,
     },
 }
 
@@ -136,7 +137,7 @@ enum ApplyEntry {
 ///   recover from — alarm and keep retrying instead of corrupting state.
 async fn apply_entry(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result<ApplyEntry> {
     let reapply_from = *ctx.plane.reapply_from.lock()?;
-    let reapply = if matches!(reapply_from, Some((from, _)) if n >= from) {
+    let reapply = if matches!(reapply_from, Some(range) if n >= range.from) {
         Reapply::RolledBack
     } else {
         Reapply::Forward
@@ -247,7 +248,7 @@ struct ApplyFacts {
     sampled: usize,
     sampled_ok: usize,
     reapply: Reapply,
-    reapply_from: Option<(u64, u64)>,
+    reapply_from: Option<ReapplyRange>,
     t_latest: u64,
     started: Instant,
 }
@@ -265,8 +266,8 @@ async fn finalize(ctx: &Ctx, n: u64, facts: ApplyFacts) -> Result<ApplyOutcome> 
         duration_ms: facts.started.elapsed().as_millis() as u64,
     };
     record_apply_metrics(ctx, n, &facts, outcome.duration_ms);
-    if let Some((_, until)) = ctx.plane.clear_reapply_from(n, facts.reapply_from)? {
-        tracing::info!(block = n, until, "rewound range re-applied");
+    if let Some(range) = ctx.plane.clear_reapply_from(n, facts.reapply_from)? {
+        tracing::info!(block = n, until = range.upto, "rewound range re-applied");
     }
     log_drift_if_anomalous(&ctx.drift, n, &facts, &outcome)?;
     report_applied(&ctx.plane, n, &facts, &outcome);

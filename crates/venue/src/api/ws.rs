@@ -121,7 +121,7 @@ fn request_reply(text: &str, subs: &mut Vec<Subscription>, feed: &MarketFeed) ->
     match request {
         WsRequest::Ping => WsPush::Pong,
         WsRequest::Subscribe { subscription } => {
-            if let Some(reason) = unsupported(&subscription, feed) {
+            if let Err(reason) = unsupported(&subscription, feed) {
                 return WsPush::Error { data: reason };
             }
             if !subs.contains(&subscription) {
@@ -136,12 +136,12 @@ fn request_reply(text: &str, subs: &mut Vec<Subscription>, feed: &MarketFeed) ->
     }
 }
 
-/// Why the sim cannot serve a subscription (`None` = it can).
-fn unsupported(sub: &Subscription, feed: &MarketFeed) -> Option<String> {
+/// Why the sim cannot serve a subscription; `Err` = the refusal.
+fn unsupported(sub: &Subscription, feed: &MarketFeed) -> Result<(), String> {
     match sub {
-        Subscription::AllMids => None,
-        Subscription::ActiveAssetCtx { coin } if feed.mark(coin).is_some() => None,
-        Subscription::ActiveAssetCtx { coin } => Some(format!(
+        Subscription::AllMids => Ok(()),
+        Subscription::ActiveAssetCtx { coin } if feed.mark(coin).is_some() => Ok(()),
+        Subscription::ActiveAssetCtx { coin } => Err(format!(
             "coin `{coin}` is not in the venue's tracked markets"
         )),
     }

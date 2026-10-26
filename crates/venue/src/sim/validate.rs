@@ -5,7 +5,7 @@
 //! tests (order.rs).
 use super::order::{bbo, Order, Tif, Tpsl, Trigger};
 use crate::error::{Error, Result};
-use crate::feed::MarketFeed;
+use crate::feed::{BookAge, MarketFeed};
 use rust_decimal::Decimal;
 
 /// The shared order validations — size, tick/lot, the $10 minimum, and the
@@ -57,7 +57,7 @@ pub(crate) fn validate_order(
     // than the shared window is not tradable — the fill would price off a
     // snapshot the venue has already left. A scripted book is the scenario's
     // present and never stale.
-    if let Some(age) = feed.book_stale_ms(&req.coin, crate::now_ms(), MarketFeed::MAX_STALE_MS) {
+    if let BookAge::Stale(age) = feed.book_age(&req.coin, crate::now_ms(), MarketFeed::MAX_STALE_MS) {
         tracing::warn!(coin = %req.coin, age_ms = age, "order refused: stale book");
         return Err(Error::bad_request(format!(
             "the {} book is stale ({age} ms since the last live update); trading on stale data is refused",

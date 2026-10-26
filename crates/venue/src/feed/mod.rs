@@ -70,6 +70,25 @@ pub(crate) struct PriceOverride {
     pub oracle: Decimal,
 }
 
+/// The prices the account plane prices a coin from (the live context's mark
+/// and oracle, overrides applied).
+pub(crate) struct Prices {
+    pub mark: Decimal,
+    pub oracle: Decimal,
+}
+
+/// The book's staleness for the readiness gate: a scripted book's present is
+/// never stale; a coin whose live base has not landed yet is warming (a
+/// different fault — absence, not staleness); a live book is fresh within the
+/// budget or stale past it, carrying its age.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BookAge {
+    Scripted,
+    Warming,
+    Fresh,
+    Stale(u64),
+}
+
 /// The live cache (never persisted: it is a cache, and a stale file would
 /// masquerade as fresh data).
 #[derive(Default)]
@@ -165,11 +184,15 @@ impl MarketFeed {
     /// `None` for a scripted book (the scenario's present is never stale) and
     /// for a coin whose live base has not landed yet (that read is `Warming`,
     /// a different fault — absence, not staleness).
-    pub fn book_stale_ms(&self, coin: &str, now_ms: u64, max_ms: u64) -> Option<u64> {
+    pub fn book_age(&self, coin: &str, now_ms: u64, max_ms: u64) -> BookAge {
         if self.read_overrides().books.contains_key(coin) {
-            return None;
+            return BookAge::Scripted;
         }
-        self.stale_ms(coin, now_ms).filter(|age| *age > max_ms)
+        match self.stale_ms(coin, now_ms) {
+            None => BookAge::Warming,
+            Some(age) if age > max_ms => BookAge::Stale(age),
+            Some(_) => BookAge::Fresh,
+        }
     }
 
     /// Whether the served book has a scenario-owned base (the fills then walk
@@ -455,7 +478,7 @@ impl MarketFeed {
 
     /// `metaAndAssetCtxs` with the overrides applied: the served contexts are
     /// exactly what the account plane prices from.
-    pub(crate) fn meta_and_ctxs(&self) -> Option<(Meta, Vec<AssetCtx>)> {
+    pub(crate) fn meta_and_ctxs(&self) -> Option<crate::wire::MetaAndAssetCtxs> {
         let meta = self.meta()?;
         let overrides = self.read_overrides().clone();
         let c = self.read();
@@ -474,7 +497,7 @@ impl MarketFeed {
                 Some(ctx)
             })
             .collect();
-        Some((meta, ctxs))
+        Some(crate::wire::MetaAndAssetCtxs(meta, ctxs))
     }
 
     /// `allMids` with the overrides applied.
@@ -491,8 +514,11 @@ impl MarketFeed {
     /// The prices the account plane prices a coin from (mark, oracle). A coin
     /// with no live context and no override is a fault at the read that needs
     /// it, never a zero (a zero mark would liquidate every position).
-    pub fn required_prices(&self, coin: &str) -> Option<(Decimal, Decimal)> {
-        Some((self.mark(coin)?, self.oracle(coin)?))
+    pub fn required_prices(&self, coin: &str) -> Option<Prices> {
+        Some(Prices {
+            mark: self.mark(coin)?,
+            oracle: self.oracle(coin)?,
+        })
     }
 
     /// Milliseconds since the coin's last live context update (`None` = never
@@ -695,10 +721,10 @@ mod tests {
         };
         feed.put_ctx("BTC".into(), test_ctx("100", "101"), now);
         feed.put_book(book("100"), now);
-        assert_eq!(feed.book_stale_ms("BTC", now, MarketFeed::MAX_STALE_MS), None);
+        assert_eq!(feed.book_age("BTC", now, MarketFeed::MAX_STALE_MS), BookAge::Fresh);
         assert_eq!(
-            feed.book_stale_ms("BTC", now + MarketFeed::MAX_STALE_MS + 1, MarketFeed::MAX_STALE_MS),
-            Some(MarketFeed::MAX_STALE_MS + 1),
+            feed.book_age("BTC", now + MarketFeed::MAX_STALE_MS + 1, MarketFeed::MAX_STALE_MS),
+            BookAge::Stale(MarketFeed::MAX_STALE_MS + 1),
             "an aged live book is stale"
         );
         // The stall: live writes drop, scripted writes land.
@@ -720,7 +746,7 @@ mod tests {
             Decimal::from(77),
             "the scripted plane is never gated"
         );
-        assert_eq!(feed.book_stale_ms("BTC", now + 60_000, MarketFeed::MAX_STALE_MS), None);
+        assert_eq!(feed.book_age("BTC", now + 60_000, MarketFeed::MAX_STALE_MS), BookAge::Scripted);
         // Clearing the stall lets the live plane back in.
         feed.stall(0);
         assert!(!feed.stalled());

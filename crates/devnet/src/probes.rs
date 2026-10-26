@@ -8,6 +8,7 @@ use crate::error::Result;
 use crate::shadow::Shadow;
 use crate::shared::Shared;
 use alloy_primitives::{Address, Bytes};
+use alloy_rpc_types_eth::BlockNumberOrTag;
 use mirror_anvil::Rpc;
 use mirror_config::Probe;
 use std::collections::HashSet;
@@ -136,8 +137,8 @@ impl<'a> ProbeRunner<'a> {
             .iter()
             .map(|probe| (probe.to, probe.data.clone()))
             .collect();
-        let source_calls = Rpc::call_calls(&reads, Some(at))?;
-        let target_calls = Rpc::call_calls(&reads, None)?;
+        let source_calls = Rpc::call_calls(&reads, BlockNumberOrTag::Number(at))?;
+        let target_calls = Rpc::call_calls(&reads, BlockNumberOrTag::Latest)?;
         let (source_answers, target_answers) = match tokio::try_join!(
             source.batch(&source_calls),
             target.batch(&target_calls)

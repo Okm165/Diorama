@@ -161,16 +161,25 @@ pub(crate) fn transfer_of(log: &LogData) -> Option<Transfer> {
     Transfer::decode_log_data_validate(log).ok()
 }
 
+/// The EVM→Core HYPE credit one `Received` log carries.
+pub(crate) struct HypeCredit {
+    pub(crate) sender: Address,
+    pub(crate) amount: Decimal,
+}
+
 /// The EVM→Core HYPE credit a system-contract `Received` log represents:
 /// the sender and the Core amount (18 EVM decimals floored to the token's
 /// Core wei — the docs' burn caveat applies to HYPE too).
-pub(crate) fn hype_received_of(log: &LogData, token: &TokenInfo) -> Option<(Address, Decimal)> {
+pub(crate) fn hype_received_of(log: &LogData, token: &TokenInfo) -> Option<HypeCredit> {
     let event = Received::decode_log_data_validate(log).ok()?;
     let credited = floor_to_core_wei(
         evm_to_human(event.amount, HYPE_EVM_DECIMALS)?,
         token.wei_decimals,
     )?;
-    Some((event.user, credited))
+    Some(HypeCredit {
+        sender: event.user,
+        amount: credited,
+    })
 }
 
 /// The EVM→Core credit an observed transfer represents: the sender, the
@@ -180,11 +189,19 @@ pub(crate) fn hype_received_of(log: &LogData, token: &TokenInfo) -> Option<(Addr
 /// than the token's *linked* EVM contract (a malicious or unrelated emitter
 /// could mint Core balances with a look-alike event; the docs' rule is the
 /// linked contract's own log).
+pub(crate) struct EvmCredit<'a> {
+    pub(crate) sender: Address,
+    pub(crate) token: &'a TokenInfo,
+    pub(crate) amount: Decimal,
+}
+
+/// The EVM→Core credit an observed transfer represents: the sender, the
+/// token, and the human amount (the guards above).
 pub(crate) fn credit_of<'a>(
     transfer: &Transfer,
     tokens: &'a [TokenInfo],
     emitter: Address,
-) -> Option<(Address, &'a TokenInfo, Decimal)> {
+) -> Option<EvmCredit<'a>> {
     if transfer.from.0[0] == 0x20 {
         // The completion path: the system sends out; never re-credit.
         return None;
@@ -200,7 +217,11 @@ pub(crate) fn credit_of<'a>(
     let evm_decimals = token.evm_decimals()?;
     let credited =
         floor_to_core_wei(evm_to_human(transfer.value, evm_decimals)?, token.wei_decimals)?;
-    Some((transfer.from, token, credited))
+    Some(EvmCredit {
+        sender: transfer.from,
+        token,
+        amount: credited,
+    })
 }
 
 /// A U256 as a decimal: `None` when the value has more digits than the
@@ -318,9 +339,9 @@ mod tests {
         };
         let user = Address::repeat_byte(0xaa);
         let log = received_log(user, U256::from(1_500_000_000_000_000_001u128));
-        let (credited_user, amount) = hype_received_of(&log, &hype).expect("decodes");
-        assert_eq!(credited_user, user);
-        assert_eq!(amount, Decimal::from_str("1.50000000").unwrap(), "18 decimals floored to Core wei");
+        let credit = hype_received_of(&log, &hype).expect("decodes");
+        assert_eq!(credit.sender, user);
+        assert_eq!(credit.amount, Decimal::from_str("1.50000000").unwrap(), "18 decimals floored to Core wei");
         // A malformed look-alike is not a credit.
         let malformed = LogData::new_unchecked(vec![Received::SIGNATURE_HASH], Bytes::new());
         assert!(hype_received_of(&malformed, &hype).is_none());
@@ -342,10 +363,10 @@ mod tests {
         let linked = Address::repeat_byte(0x88);
         let t = transfer_of(&transfer_log(from, system_address(0), U256::from(5_000_000u64)))
             .unwrap();
-        let (sender, token, amount) = credit_of(&t, &tokens, linked).unwrap();
-        assert_eq!(sender, from);
-        assert_eq!(token.name, "USDC");
-        assert_eq!(amount, Decimal::from(5));
+        let credit = credit_of(&t, &tokens, linked).unwrap();
+        assert_eq!(credit.sender, from);
+        assert_eq!(credit.token.name, "USDC");
+        assert_eq!(credit.amount, Decimal::from(5));
         // The completion direction (from the system) is never a credit.
         let t = transfer_of(&transfer_log(system_address(0), from, U256::from(5_000_000u64)))
             .unwrap();

@@ -15,7 +15,7 @@
 //! (verified exact on the live sample, `wire::tests::live_sample_identity_holds`).
 use super::seed::AccountSeed;
 use crate::error::{Error, Result};
-use crate::feed::MarketFeed;
+use crate::feed::{MarketFeed, Prices};
 use crate::wire::{
     AssetCtx, AssetPosition, ClearinghouseState, CumFunding, Leverage, LeverageType, MarginSummary,
     Position as WirePosition, PositionKind, SpotBalance, UserAbstraction,
@@ -263,7 +263,7 @@ pub(crate) struct PositionFacts {
 
 impl PositionFacts {
     fn of(coin: &str, p: &Position, feed: &MarketFeed, meta: Option<&crate::wire::Meta>) -> Result<Self> {
-        let (mark, _oracle) = feed
+        let Prices { mark, .. } = feed
             .required_prices(coin)
             .ok_or_else(|| crate::error::Error::NoMarket { coin: coin.to_string() })?;
         let value = p.position_value(mark)?;
@@ -979,8 +979,8 @@ pub(crate) fn mode_of(account: &Account) -> UserAbstraction {
 /// The coin's live context for `activeAssetData`'s mark (the full live ctx
 /// when the feed has one, else a minimal shape from the composed prices).
 pub(crate) fn ctx_of(feed: &MarketFeed, coin: &str) -> Option<AssetCtx> {
-    let (mark, oracle) = feed.required_prices(coin)?;
-    if let Some((_, ctxs)) = feed.meta_and_ctxs() {
+    let Prices { mark, oracle } = feed.required_prices(coin)?;
+    if let Some(crate::wire::MetaAndAssetCtxs(_, ctxs)) = feed.meta_and_ctxs() {
         if let Some(found) = ctxs.iter().find(|c| c.mark_px == mark && c.oracle_px == oracle) {
             return Some(found.clone());
         }

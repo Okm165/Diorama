@@ -42,6 +42,13 @@ use std::time::{Duration, Instant};
 const MAINNET_GENESIS_TIME: u64 = 1_606_824_023;
 const SECONDS_PER_SLOT: u64 = 12;
 
+/// The CL head's cache: when it was fetched and the execution block it named
+/// (one beacon call per minute).
+struct HeadCache {
+    at: Instant,
+    block: u64,
+}
+
 pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
     let Some(engine) = ctx.engine_api.clone() else {
         return;
@@ -49,7 +56,7 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
     let interval = Duration::from_millis(ctx.engine.source_sync.interval_ms.max(250));
     let mut last_report = Instant::now();
     // CL head execution block, cached for a minute (one beacon call per minute).
-    let mut head_cache: Option<(Instant, u64)> = None;
+    let mut head_cache: Option<HeadCache> = None;
     loop {
         match top_up(&ctx, &engine).await {
             Ok(0) => tokio::time::sleep(interval).await,
@@ -77,7 +84,7 @@ async fn report_top_up(
     ctx: &Ctx,
     payloads: usize,
     last_report: &mut Instant,
-    head_cache: &mut Option<(Instant, u64)>,
+    head_cache: &mut Option<HeadCache>,
 ) {
     if last_report.elapsed() <= Duration::from_secs(5) {
         return;
@@ -97,10 +104,10 @@ async fn report_top_up(
 
 /// The CL head's execution block number, cached for a minute. Metrics-only:
 /// a beacon fault here degrades the gauge, not the top-up itself.
-async fn cl_head_el_block(beacon: &BeaconClient, cache: &mut Option<(Instant, u64)>) -> Option<u64> {
-    if let Some((at, n)) = cache {
-        if at.elapsed() < Duration::from_secs(60) {
-            return Some(*n);
+async fn cl_head_el_block(beacon: &BeaconClient, cache: &mut Option<HeadCache>) -> Option<u64> {
+    if let Some(cache) = cache {
+        if cache.at.elapsed() < Duration::from_secs(60) {
+            return Some(cache.block);
         }
     }
     let slot = beacon.head_slot().await.ok()?;
@@ -113,7 +120,7 @@ async fn cl_head_el_block(beacon: &BeaconClient, cache: &mut Option<(Instant, u6
         .payload_inner
         .payload_inner
         .block_number;
-    *cache = Some((Instant::now(), n));
+    *cache = Some(HeadCache { at: Instant::now(), block: n });
     Some(n)
 }
 

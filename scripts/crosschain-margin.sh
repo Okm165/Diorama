@@ -117,6 +117,7 @@ t1=$(balance "$USDC_T" "$RELAY" "$SRC_URL")
 # The faucet sets the balance (a slot write), not adds: the post-mint reading
 # is the exact amount, and the return leg closes against it.
 [ "$t1" = "$AMOUNT" ] && ok "T minted to the bridge's wallet ($t0 -> $t1, the faucet sets)" || bad "T mint: $t0 -> $t1 (wanted $AMOUNT)"
+v0=$(balance "$USDC_V" "$TRADER" "$DST_URL")
 burn_resp=$(burn 0 19 "$TRADER")
 burn_tx=$(echo "$burn_resp" | json 'd.get("burn_tx","")')
 [ -n "$burn_tx" ] && ok "burn submitted ($burn_tx)" || bad "no burn_tx: $burn_resp"
@@ -125,8 +126,11 @@ case "$state" in
   relayed) ok "the record relayed" ;;
   *) bad "not relayed: $state" ;;
 esac
+# The mint *adds*: the trader's V balance may carry earlier credits (the
+# roundtrip's hook lane shares this address), so the check is the delta —
+# the exact-equality form only held while the balance happened to start at 0.
 v_bal=$(balance "$USDC_V" "$TRADER" "$DST_URL")
-[ "$v_bal" = "$AMOUNT" ] && ok "the V mint landed exactly ($AMOUNT to the trader)" || bad "V mint: $v_bal (wanted $AMOUNT)"
+[ "$((v_bal - v0))" = "$AMOUNT" ] && ok "the V mint added exactly ($v0 -> $v_bal)" || bad "V mint delta: $v0 -> $v_bal (wanted +$AMOUNT)"
 spot0=$(sim_spot "$TRADER")
 spost /control/deal "{\"address\":\"$TRADER\",\"class\":\"spot\",\"amount\":\"$((AMOUNT / 1000000))\"}" > /dev/null
 spot1=$(sim_spot "$TRADER")

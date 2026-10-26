@@ -20,6 +20,23 @@ use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use std::sync::atomic::Ordering;
 
+/// Whether any of the account's positions held for the leg: the cross-margin
+/// rule needs "nothing to take" (the margin moves) apart from "taken and
+/// refused" (nothing moves at all).
+#[derive(PartialEq, Eq)]
+enum Held {
+    Any,
+    None,
+}
+
+/// One coin's ADL outcome: only an acted-on coin is a close (the report feeds
+/// the control response, the metrics and the facts).
+#[derive(PartialEq, Eq)]
+enum AdlOutcome {
+    Acted,
+    Idle,
+}
+
 impl Sim {
     /// The venue's liquidation waterfall (docs): an account below its
     /// maintenance requirement is first attempted through the book (20 % per
@@ -274,7 +291,7 @@ impl Sim {
             let mut me = st.accounts.remove(&pass.address).unwrap_or_default();
             let mut vault = st.accounts.remove(&BACKSTOP).unwrap_or_default();
             let mut margin = Decimal::ZERO;
-            let mut held = false;
+            let mut held = Held::None;
             let coins: Vec<String> = me.positions.keys().cloned().collect();
             for coin in coins {
                 let holds = me
@@ -285,7 +302,7 @@ impl Sim {
                 if !holds {
                     continue;
                 }
-                held = true;
+                held = Held::Any;
                 if let Some(taken) =
                     vault_take_coin(&mut vault, &mut me, pass.address, &coin, pass.feed)
                 {
@@ -296,7 +313,7 @@ impl Sim {
             // The cross margin moves with the cross backstop (docs); if every
             // cross transfer was refused, nothing moves at all — the log names
             // each refusal.
-            if matches!(leg, Leg::Cross) && (!held || !closed.is_empty()) {
+            if matches!(leg, Leg::Cross) && (held == Held::None || !closed.is_empty()) {
                 margin = account::add(margin, std::mem::take(&mut me.perp_balance), "backstop margin")?;
             }
             vault.perp_balance = account::add(vault.perp_balance, margin, "backstop balance")?;
@@ -316,7 +333,7 @@ impl Sim {
             if !leg.holds(coin, p) {
                 continue;
             }
-            if self.adl_coin(pass, coin, p, meta.as_ref())? {
+            if matches!(self.adl_coin(pass, coin, p, meta.as_ref())?, AdlOutcome::Acted) {
                 closed.push(coin.clone());
             }
         }
@@ -334,10 +351,10 @@ impl Sim {
         coin: &str,
         p: &account::Position,
         meta: Option<&crate::wire::Meta>,
-    ) -> Result<bool> {
+    ) -> Result<AdlOutcome> {
         let Some(prev_mark) = self.with_state(|state| Ok(state.prev_marks.get(coin).copied()))? else {
             tracing::warn!(account = %pass.address, coin = %coin, "ADL skipped: no previous mark recorded yet");
-            return Ok(false);
+            return Ok(AdlOutcome::Idle);
         };
         let remaining = p.szi.abs();
         let direction = p.direction();
@@ -357,7 +374,7 @@ impl Sim {
             // ranks the whole book's other side, which always exists. Nothing
             // closes — the attempt is retried next tick.
             tracing::warn!(account = %pass.address, coin = %coin, "ADL found no counterparties (the thin venue's opposite side is empty); the position stays");
-            return Ok(false);
+            return Ok(AdlOutcome::Idle);
         }
         let mut left = remaining;
         for (_, other, size, _entry) in ranked {
@@ -374,7 +391,11 @@ impl Sim {
             tracing::warn!(account = %pass.address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
             left = left.saturating_sub(take);
         }
-        Ok(left < remaining)
+        Ok(if left < remaining {
+            AdlOutcome::Acted
+        } else {
+            AdlOutcome::Idle
+        })
     }
 
     /// Close both sides of one ADL fill — the underwater account's own side

@@ -894,19 +894,12 @@ impl Rpc {
             .collect()
     }
 
-    /// The wire calls for a set of `eth_call`s — `Some(block)` pins the
-    /// number, `None` reads latest (the probes' two shapes) — the same
+    /// The wire calls for a set of `eth_call`s at one block tag — the same
     /// encoding [`Self::call_at`] and [`Self::call_latest`] send.
-    pub fn call_calls(calls: &[(Address, Bytes)], block: Option<u64>) -> Result<Vec<Call>> {
+    pub fn call_calls(calls: &[(Address, Bytes)], at: BlockNumberOrTag) -> Result<Vec<Call>> {
         calls
             .iter()
-            .map(|(to, data)| {
-                let at = match block {
-                    Some(n) => BlockNumberOrTag::Number(n),
-                    None => BlockNumberOrTag::Latest,
-                };
-                call(ETH_CALL, (Self::call_tx(*to, data), at))
-            })
+            .map(|(to, data)| call(ETH_CALL, (Self::call_tx(*to, data), at)))
             .collect()
     }
 

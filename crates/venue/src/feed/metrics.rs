@@ -41,8 +41,14 @@ impl FeedMetrics {
         }
     }
 
-    pub fn set_ws_connected(&self, connected: bool) {
-        self.ws_connected.store(connected, Ordering::Relaxed);
+    /// The WS link came up (the gauge renders it 0/1).
+    pub fn mark_ws_up(&self) {
+        self.ws_connected.store(true, Ordering::Relaxed);
+    }
+
+    /// The WS link dropped.
+    pub fn mark_ws_down(&self) {
+        self.ws_connected.store(false, Ordering::Relaxed);
     }
 
     pub fn inc_rest_errors(&self) {
@@ -113,7 +119,7 @@ mod tests {
     fn renders_labeled_series() {
         let m = FeedMetrics::new(&["BTC".into(), "ETH".into()]);
         m.set_stale("BTC", 1500);
-        m.set_ws_connected(true);
+        m.mark_ws_up();
         let out = m.render();
         assert!(out.contains("venue_sim_stale_ms{coin=\"BTC\"} 1500"), "{out}");
         assert!(out.contains("venue_sim_ws_connected 1"), "{out}");

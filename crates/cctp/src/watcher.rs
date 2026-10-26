@@ -78,6 +78,13 @@ pub struct Watcher {
 const PARK_REASON: &str =
     "source chain re-pinned or rewound: the burn transaction no longer exists";
 
+/// The park's outcome: the record was marked with the reason, or it is gone
+/// from the store (a stale derivation whose record no longer exists).
+enum Park {
+    Marked,
+    Gone,
+}
+
 impl Watcher {
     /// The steady loop: one pass per interval; failures are logged and
     /// counted, never fatal (a chain that is down must not stop the other).
@@ -223,7 +230,7 @@ impl Watcher {
             if exists.is_some() {
                 continue;
             }
-            if self.park(burn_tx)? {
+            if matches!(self.park(burn_tx)?, Park::Marked) {
                 parked += 1;
             }
         }
@@ -247,9 +254,10 @@ impl Watcher {
         })
     }
 
-    /// Park one record (mark it with the reason); `false` when it is gone.
-    fn park(&self, burn_tx: B256) -> Result<bool> {
-        Ok(self
+    /// Park one record (mark it with the reason); [`Park::Gone`] when it is
+    /// gone.
+    fn park(&self, burn_tx: B256) -> Result<Park> {
+        let marked = self
             .store
             .update_message(
                 |m| m.burn_tx == burn_tx,
@@ -258,7 +266,8 @@ impl Watcher {
                     record.park_reason = Some(PARK_REASON.into());
                 },
             )?
-            .is_some())
+            .is_some();
+        Ok(if marked { Park::Marked } else { Park::Gone })
     }
 
     /// The parked count's report: the counter, the saved store, and the warn

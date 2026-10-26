@@ -90,14 +90,25 @@ impl ApiState {
 /// health routes that raise it.
 pub(crate) const SIM_POISONED: &str = "sim state poisoned";
 
+/// The sim-poisoned gate's refusal: the 503 every health surface returns
+/// while the account plane is poisoned (the reason is the shared constant).
+pub(crate) struct SimPoisoned;
+
+impl axum::response::IntoResponse for SimPoisoned {
+    fn into_response(self) -> axum::response::Response {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, SIM_POISONED).into_response()
+    }
+}
+
 /// The sim-poisoned gate every health surface shares: a poisoned account
 /// plane refuses every read, so a 200 would hide an outage from the
-/// orchestrator (the verifier's readiness-gap find). `None` = healthy.
-pub(crate) fn sim_gate(state: &ApiState) -> Option<(axum::http::StatusCode, &'static str)> {
-    state
-        .sim
-        .is_poisoned()
-        .then_some((axum::http::StatusCode::SERVICE_UNAVAILABLE, SIM_POISONED))
+/// orchestrator (the verifier's readiness-gap find). `Err` = the refusal.
+pub(crate) fn sim_gate(state: &ApiState) -> Result<(), SimPoisoned> {
+    if state.sim.is_poisoned() {
+        Err(SimPoisoned)
+    } else {
+        Ok(())
+    }
 }
 
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.

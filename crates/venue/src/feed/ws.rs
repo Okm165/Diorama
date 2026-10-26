@@ -95,7 +95,7 @@ impl WsClient {
                     mirror_anvil::Progress::Stalled
                 }
             };
-            self.feed.metrics.set_ws_connected(false);
+            self.feed.metrics.mark_ws_down();
             self.feed.metrics.inc_ws_reconnects();
             let delay = backoff.delay();
             backoff.record(progress);
@@ -116,7 +116,7 @@ impl WsClient {
         for sub in self.subscriptions()? {
             sink.send(Message::Text(sub.into())).await.map_err(WsError::Send)?;
         }
-        self.feed.metrics.set_ws_connected(true);
+        self.feed.metrics.mark_ws_up();
         tracing::info!(url = %self.ws_url, markets = self.feed.markets.len(), "market websocket connected");
 
         let mut ping = tokio::time::interval(Duration::from_secs(30));

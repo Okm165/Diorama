@@ -209,6 +209,17 @@ pub(crate) enum LeverageType {
     Isolated,
 }
 
+impl LeverageType {
+    /// The wire's `isCross` flag, converted once at the boundary.
+    pub(crate) fn of(is_cross: bool) -> Self {
+        if is_cross {
+            LeverageType::Cross
+        } else {
+            LeverageType::Isolated
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for LeverageType {
     /// Reads both spellings: the wire's own lowercase names and the pre-enum
     /// state files' `isCross` boolean (true = cross). A persisted state

@@ -149,6 +149,45 @@ impl CancelSpeed {
     }
 }
 
+/// The wire's `alwaysPlace` flag (the modify actions), converted once here:
+/// with [`AlwaysPlace::RequiresCancel`] the cancel must succeed, the new order
+/// must be non-trigger and an executable Gtc is overridden to Alo (docs); with
+/// [`AlwaysPlace::Regardless`] the placement happens even if the cancel fails.
+#[derive(Clone, Copy)]
+pub(crate) enum AlwaysPlace {
+    RequiresCancel,
+    Regardless,
+}
+
+impl AlwaysPlace {
+    /// The wire's `alwaysPlace` flag, converted once at the boundary.
+    pub(crate) fn of(always: bool) -> Self {
+        if always {
+            AlwaysPlace::Regardless
+        } else {
+            AlwaysPlace::RequiresCancel
+        }
+    }
+}
+
+/// The `scheduleCancel` action's time: arm the dead-man's switch, or clear it
+/// (the docs' absent-time form).
+#[derive(Clone, Copy)]
+pub(crate) enum ScheduleCancel {
+    At(u64),
+    Clear,
+}
+
+impl ScheduleCancel {
+    /// The wire's optional `time`, converted once at the boundary.
+    pub(crate) fn of(time: Option<u64>) -> Self {
+        match time {
+            Some(t) => ScheduleCancel::At(t),
+            None => ScheduleCancel::Clear,
+        }
+    }
+}
+
 /// Whether an order may only reduce the position (the wire's `reduce_only`,
 /// named): a reduce-only order frees margin instead of using it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1203,14 +1242,14 @@ impl Sim {
 
     /// `scheduleCancel`: a dead-man's switch — at `time` (ms) every resting
     /// order of the account is canceled (the tick enforces it).
-    pub(crate) fn schedule_cancel(&self, account: Address, time_ms: Option<u64>) -> Result<u64> {
+    pub(crate) fn schedule_cancel(&self, account: Address, when: ScheduleCancel) -> Result<u64> {
         let now = crate::now_ms();
-        let t = self.mutate_state(|st| match time_ms {
-            None => {
+        let t = self.mutate_state(|st| match when {
+            ScheduleCancel::Clear => {
                 st.scheduled_cancels.remove(&account);
                 Ok(0)
             }
-            Some(t) => {
+            ScheduleCancel::At(t) => {
                 if t < now + 5_000 {
                     return Err(Error::bad_request(
                         "Scheduled cancel time must be at least 5 seconds in the future.",
@@ -2301,10 +2340,10 @@ mod tests {
         let now = crate::now_ms();
         for i in 0..10u64 {
             let t = now + 6_000 + i * 1_000;
-            sim.schedule_cancel(a, Some(t)).unwrap();
+            sim.schedule_cancel(a, ScheduleCancel::At(t)).unwrap();
             sim.fire_scheduled_cancels(t).unwrap();
         }
-        let refused = sim.schedule_cancel(a, Some(now + 60_000));
+        let refused = sim.schedule_cancel(a, ScheduleCancel::At(now + 60_000));
         assert!(refused.is_err(), "the 11th trigger of the day is refused");
         assert!(refused.unwrap_err().to_string().contains("per day"));
     }

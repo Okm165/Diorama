@@ -133,20 +133,28 @@ fn no_slot(fault: Option<mirror_anvil::Error>, probes: Vec<ProbeRecord>) -> Deal
     }
 }
 
+/// The slot's before-value for the undo entry: recorded when the deployment
+/// journals its own writes, frozen on a deployment whose deals have no undo
+/// (the mainnet's).
+enum Before {
+    Recorded(U256),
+    Frozen,
+}
+
 /// Read the slot's before-value when the deployment journals its own writes
-/// (the rewind undo entry); `None` otherwise — the mainnet does not journal
-/// its deals (frozen behavior).
+/// (the rewind undo entry) — the mainnet does not journal its deals (frozen
+/// behavior).
 async fn read_before(
     target: &Rpc,
     journaling: Journaling,
     token: Address,
     slot: U256,
-) -> Result<Option<U256>> {
+) -> Result<Before> {
     match journaling {
-        Journaling::Journaled => Ok(Some(U256::from_be_bytes(
+        Journaling::Journaled => Ok(Before::Recorded(U256::from_be_bytes(
             target.storage_at_latest(token, slot).await?.0,
         ))),
-        Journaling::Frozen => Ok(None),
+        Journaling::Frozen => Ok(Before::Frozen),
     }
 }
 
@@ -200,15 +208,15 @@ fn record_undo(
     journal: Option<JournalSink<'_>>,
     token: Address,
     slot: U256,
-    before: Option<U256>,
+    before: Before,
 ) -> Result<()> {
-    if let (Some(sink), Some(before)) = (journal, before) {
+    if let (Some(sink), Before::Recorded(value)) = (journal, before) {
         sink.journal.record(
             sink.at,
             &[JournalEntry::Storage {
                 address: token,
                 slot,
-                before,
+                before: value,
             }],
         )?;
     }
@@ -262,17 +270,22 @@ fn deal_sentinel() -> U256 {
 /// Returns the found slot (with its hex index), the first four probe records
 /// (the error shape carries them) and the first probe *fault*: a probe that
 /// could not run is not "this is not the balance slot" (boundary-discipline).
+/// One candidate probe's answer: the raw word, or the read fault.
+enum ProbeAnswer {
+    Answered(Bytes),
+    Faulted(mirror_anvil::Error),
+}
+
 /// One candidate slot: override `token`'s slot `idx` with the full-width
 /// sentinel word and re-run `balanceOf`. The override is alloy's own
 /// state-override model — anvil rejects quantized (short) hex here (measured).
-/// Returns the raw answer, or the read fault.
 async fn probe_candidate(
     target: &Rpc,
     token: Address,
     data: &Bytes,
     idx: B256,
     sentinel: U256,
-) -> (Option<Bytes>, Option<mirror_anvil::Error>) {
+) -> ProbeAnswer {
     let over = StateOverride::from_iter([(
         token,
         AccountOverride {
@@ -281,8 +294,8 @@ async fn probe_candidate(
         },
     )]);
     match target.call_with_override(token, data, &over).await {
-        Ok(probe) => (Some(probe), None),
-        Err(e) => (None, Some(e)),
+        Ok(probe) => ProbeAnswer::Answered(probe),
+        Err(e) => ProbeAnswer::Faulted(e),
     }
 }
 
@@ -315,11 +328,14 @@ async fn discover_balance_slot(
     for slot in 0u64..16 {
         let idx = mirror_anvil::mapping_slot(to, U256::from(slot));
         let idx_hex = format!("0x{idx:064x}");
-        let (probe, err) = probe_candidate(target, token, data, B256::from(idx), sentinel).await;
-        if let Some(e) = err {
-            tracing::warn!(slot = %idx_hex, error = %e, "deal probe failed");
-            fault = Some(e);
-        }
+        let probe = match probe_candidate(target, token, data, B256::from(idx), sentinel).await {
+            ProbeAnswer::Answered(probe) => Some(probe),
+            ProbeAnswer::Faulted(e) => {
+                tracing::warn!(slot = %idx_hex, error = %e, "deal probe failed");
+                fault = Some(e);
+                None
+            }
+        };
         if probes.len() < 4 {
             probes.push(ProbeRecord {
                 slot: idx_hex.clone(),

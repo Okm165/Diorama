@@ -85,6 +85,24 @@ fn caller_mismatch(caller: B256, consumer: Address) -> bool {
     caller != B256::ZERO && caller != consumer.into_word()
 }
 
+/// Which SIGNED records a relay pass carries: one by `nonce`, or every one
+/// (the auto tick and the manual trigger share this path).
+#[derive(Clone, Copy)]
+pub enum RelayNow {
+    All,
+    One(B256),
+}
+
+impl RelayNow {
+    /// The control trigger's optional `nonce`, converted once at the boundary.
+    pub fn of(nonce: Option<B256>) -> Self {
+        match nonce {
+            Some(nonce) => RelayNow::One(nonce),
+            None => RelayNow::All,
+        }
+    }
+}
+
 impl Relayer {
     /// The steady loop: one pass per interval; per-message failures are logged
     /// and counted, never fatal.
@@ -138,18 +156,24 @@ impl Relayer {
         if self.mode == RelayerMode::Manual {
             return Ok(0);
         }
-        self.relay_now(None).await
+        self.relay_now(RelayNow::All).await
     }
 
-    /// Relay the SIGNED records now: one by `nonce`, every one when `None`
-    /// (the auto tick and the manual trigger share this path). Returns the
-    /// number confirmed in this pass.
-    pub async fn relay_now(&self, nonce: Option<B256>) -> Result<usize> {
+    /// Relay the SIGNED records now: the target's records (the auto tick and
+    /// the manual trigger share this path). Returns the number confirmed in
+    /// this pass.
+    pub async fn relay_now(&self, target: RelayNow) -> Result<usize> {
         let signed = self.store.with(|state| {
             Ok(state
                 .messages
                 .iter()
-                .filter(|m| m.state == RelayState::Signed && nonce.is_none_or(|n| m.nonce == n))
+                .filter(|m| {
+                    m.state == RelayState::Signed
+                        && match target {
+                            RelayNow::All => true,
+                            RelayNow::One(nonce) => m.nonce == nonce,
+                        }
+                })
                 .cloned()
                 .collect::<Vec<_>>())
         })?;

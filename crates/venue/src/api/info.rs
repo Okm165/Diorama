@@ -31,25 +31,25 @@ const MARKET: &str = "Market";
 const TRIGGER: &str = "Trigger";
 
 /// The wire's order-type name: a trigger rests as `Trigger`.
-fn order_type(has_trigger: bool) -> &'static str {
-    if has_trigger { TRIGGER } else { LIMIT }
+fn order_type(r: &crate::sim::order::RestingOrder) -> &'static str {
+    if r.trigger.is_some() { TRIGGER } else { LIMIT }
 }
 
-pub async fn healthz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    if let Some(response) = super::sim_gate(&state) {
-        return response;
+pub async fn healthz(State(state): State<Arc<ApiState>>) -> Response {
+    if let Err(refusal) = super::sim_gate(&state) {
+        return refusal.into_response();
     }
-    (StatusCode::OK, "ok")
+    (StatusCode::OK, "ok").into_response()
 }
 
-pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
-    if let Some(response) = super::sim_gate(&state) {
-        return response;
+pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> Response {
+    if let Err(refusal) = super::sim_gate(&state) {
+        return refusal.into_response();
     }
     if state.ready(crate::feed::MarketFeed::MAX_STALE_MS) {
-        (StatusCode::OK, "ready")
+        (StatusCode::OK, "ready").into_response()
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "market plane warming up")
+        (StatusCode::SERVICE_UNAVAILABLE, "market plane warming up").into_response()
     }
 }
 
@@ -297,7 +297,7 @@ fn frontend_row(r: &crate::sim::order::RestingOrder) -> FrontendOpenOrder {
         is_trigger: r.trigger.is_some(),
         limit_px: r.px.to_string(),
         oid: r.oid,
-        order_type: order_type(r.trigger.is_some()),
+        order_type: order_type(r),
         orig_sz: r.orig_sz.to_string(),
         reduce_only: matches!(r.reduce, crate::sim::order::Reduce::Only),
         side: side_letter(r.side),
@@ -419,7 +419,7 @@ fn meta(dex: &Option<String>, state: &ApiState) -> Result<Response> {
 /// `metaAndAssetCtxs`: the cached metadata + per-market ctxs, default dex.
 fn meta_and_ctxs(dex: &Option<String>, state: &ApiState) -> Result<Response> {
     expect_default_dex(dex)?;
-    let (meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
+    let MetaAndAssetCtxs(meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
     Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response())
 }
 

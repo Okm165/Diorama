@@ -11,7 +11,7 @@
 use crate::chains::{by_domain, Chain, Domain, FINALITY_THRESHOLD_FINALIZED, TOKEN_MESSENGER_V2};
 use crate::error::{Error, Result};
 use crate::metrics::{render_counts, CctpMetrics};
-use crate::relayer::Relayer;
+use crate::relayer::{RelayNow, Relayer};
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{
     validate_max_fee, wait_for_receipt, IERC20, ITokenMessengerV2, TxSender,
@@ -202,7 +202,7 @@ pub(crate) async fn relay(
                 ),));
         }
     }
-    let confirmed = state.relayer.relay_now(request.nonce).await?;
+    let confirmed = state.relayer.relay_now(RelayNow::of(request.nonce)).await?;
     Ok(Json(RelayResponse { confirmed }))
 }
 

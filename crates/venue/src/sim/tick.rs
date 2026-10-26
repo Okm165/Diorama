@@ -9,7 +9,7 @@ use super::account::{self, Liquidation};
 use super::funding;
 use super::Sim;
 use crate::error::Result;
-use crate::feed::MarketFeed;
+use crate::feed::{MarketFeed, Prices};
 use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use std::sync::atomic::Ordering;
@@ -161,7 +161,7 @@ impl Sim {
     fn fire_triggers(&self, feed: &MarketFeed) -> Result<()> {
         for r in self.resting_orders(None)? {
             let Some(t) = r.trigger else { continue };
-            let Some((mark, _)) = feed.required_prices(&r.coin) else {
+            let Some(Prices { mark, .. }) = feed.required_prices(&r.coin) else {
                 continue;
             };
             let fires = match (r.side, t.tpsl) {
