@@ -352,6 +352,23 @@ and the capital-efficiency table (effective leverage, annualized carry on
 capital, shock PnL on capital) — the prime-brokerage read the daloc benchmarks
 extend.
 
+### The basis capture — `make basis-capture`
+
+The live cross-venue basis, sampled and then traded: T's Chainlink ETH/USD
+against V's perp mark, `SAMPLES` times `INTERVAL` seconds apart — measured
+live: min +19.8 / mean +23.6 / max +25.8 bps, std 2.0 bps over 12 samples
+(the perp's premium is the trade). The book is the same delta-neutral pair
+(long WETH on T, short the ETH perp on V), the hold is one hour at the
+*venue's own* funding rate, and every read stays the venue's own: the carry
+is `cumFunding.sinceOpen`, the capture is the served `unrealizedPnl` delta
+plus the T leg's move (stated), and the identity — the served equity delta =
+the served unrealized delta + the carry — holds exactly (residual 0.0000).
+Two numbers are deliberately distinct: the *quoted* basis move (the samples)
+and the *served* capture, because `advance` pins the sim's accounting mark at
+the advance while the live plane keeps ticking — the sim never invents a
+future price. The fill's own basis (e.g. +33.9 bps against the quoted
++28.8) is the book's cost line.
+
 ### Re-pin — `make mainnet-repin`
 
 Three occasions:
