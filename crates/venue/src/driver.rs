@@ -75,16 +75,30 @@ pub(crate) async fn mine_loop(ctx: Arc<Ctx>) {
 /// of the applier's `apply_loop`.
 pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
+    // The pass's own backoff (the feed's idiom): a failed pass — the public
+    // source throttling a burst, a transient transport fault — doubles the
+    // pause up to the cap, and a pass that serves resets it. The fixed
+    // cadence alone hammered a throttled endpoint (measured live: a burst
+    // tripped the public RPC's limiter and the retry loop kept it hot).
+    let mut backoff = mirror_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
     loop {
         if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
-        match pass(&ctx).await {
-            Ok(Pass::Steady) => {}
-            Ok(Pass::Reset) => recover_from_reset(&ctx).await,
-            Err(e) => tracing::warn!(error = %e, "venue driver pass failed; will retry"),
-        }
-        tokio::time::sleep(poll).await;
+        let progressed = match pass(&ctx).await {
+            Ok(Pass::Steady) => true,
+            Ok(Pass::Reset) => {
+                recover_from_reset(&ctx).await;
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "venue driver pass failed; will retry");
+                false
+            }
+        };
+        let delay = backoff.delay();
+        backoff.record(progressed);
+        tokio::time::sleep(poll.max(delay)).await;
     }
 }
 

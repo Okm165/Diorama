@@ -44,6 +44,14 @@ fixture_addresses = [
 [services.engine.anvil]
 target_url = "${ANVIL_V_URL}"
 
+# The follow's cadence: the public source's budget is request-bound, and a
+# 1 s pass (head poll + window reads) ran ~3 req/s — measured to sit at the
+# edge of the endpoint's limiter (the driver's backoff rides out what
+# remains). 2 s keeps the follow at ~1.5 req/s, still fresher than the
+# source's own block cadence.
+[services.engine.loops]
+poll_interval_ms = 2000
+
 # At-pin probes: V vs the fork source at the pin, devnet-owned targets
 # skipped and counted. USDC's totalSupply is the one canonical HyperEVM
 # fact worth a standing check (Circle's native USDC, the CCTP burn token -

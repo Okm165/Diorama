@@ -88,6 +88,27 @@ pub trait Source: Send + Sync {
         })
     }
 
+    /// Read a plan of keys: the default is the sequential composition (every
+    /// source stays correct); the RPC sources override with one mixed batch.
+    /// A wide window's plan reaches thousands of keys (every transfer's
+    /// holder), and the per-key form cost a round-trip per key against the
+    /// public source (measured live: a 300-block catch-up window ground for
+    /// minutes).
+    fn read_keys(
+        &self,
+        keys: &[mirror_anvil::Key],
+        block: u64,
+    ) -> BoxFuture<'_, mirror_anvil::Result<Vec<mirror_anvil::Value>>> {
+        let keys = keys.to_vec();
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(keys.len());
+            for key in keys {
+                out.push(self.read_key(key, block).await?);
+            }
+            Ok(out)
+        })
+    }
+
     /// The native BAL for block `n`, when the source records one (EIP-7928).
     /// Default: none — the composer falls to the synthesized rung (the
     /// capability flag selects the rung; this answers per block, because a
@@ -275,6 +296,17 @@ impl Source for RawSource {
         Box::pin(self.rpc.code_at(address, block))
     }
 
+    /// The read plan in one mixed body: the four key kinds map to their RPC
+    /// methods (the client owns the mapping and the decode).
+    fn read_keys(
+        &self,
+        keys: &[mirror_anvil::Key],
+        block: u64,
+    ) -> BoxFuture<'_, mirror_anvil::Result<Vec<mirror_anvil::Value>>> {
+        let keys = keys.to_vec();
+        Box::pin(async move { self.rpc.read_keys(&keys, block).await })
+    }
+
     /// The envelope rung: the generic EVM touches (txs, receipts, and — when
     /// declared — HyperEVM's system txs), no values (the state reads fill
     /// them).
@@ -408,6 +440,20 @@ impl Source for PinnedSource {
         Box::pin(async move {
             self.guard().await?;
             self.inner.code_at(address, block).await
+        })
+    }
+
+    /// One guard for the whole plan (the per-key form paid it per key), then
+    /// the batched read.
+    fn read_keys(
+        &self,
+        keys: &[mirror_anvil::Key],
+        block: u64,
+    ) -> BoxFuture<'_, mirror_anvil::Result<Vec<mirror_anvil::Value>>> {
+        let keys = keys.to_vec();
+        Box::pin(async move {
+            self.guard().await?;
+            self.inner.read_keys(&keys, block).await
         })
     }
 

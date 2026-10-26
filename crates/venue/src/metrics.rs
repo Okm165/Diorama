@@ -56,7 +56,7 @@ mirror_devnet::registry! {
         /// Keys the follow skipped because the devnet owns them (COW).
         counter follow_skipped_shadowed_total = "venue_follow_skipped_shadowed_total", "keys the follow skipped (devnet-owned, COW)";
         /// Follow windows paused by the gap guard.
-        counter follow_gap_pauses_total = "venue_follow_gap_pauses_total", "follow windows paused (gap guard)";
+        counter follow_gap_catchups_total = "venue_follow_gap_catchups_total", "follow catch-up states entered (the source ran ahead of one bounded window)";
         /// The live parity's sample: keys the follow re-read on V after
         /// applying them (the composed BAL's entries), and how many read
         /// back the composed value. The pair is the follow's measurement

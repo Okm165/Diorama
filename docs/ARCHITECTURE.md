@@ -966,7 +966,7 @@ one block per applied parent block, V's driver mines a non-empty pool
 | `venue_source_head` / `venue_source_followed` | the HL source's head / the highest source block composed onto V (the follow cursor) |
 | `venue_follow_windows_total` / `venue_follow_applied_total` / `venue_follow_skipped_shadowed_total` | follow windows composed / keys applied / keys skipped because the devnet owns them (COW) |
 | `venue_follow_sampled_total` / `venue_follow_sampled_ok_total` | the live parity: applied keys re-read on V / how many read back the composed value (the pair is the follow's measurement) |
-| `venue_follow_gap_pauses_total` / `venue_source_reorg_total` | windows paused by the gap guard / source continuity mismatches (a parent hash changed under the follow) |
+| `venue_follow_gap_catchups_total` / `venue_source_reorg_total` | catch-up states entered (the source ran ahead of one bounded window; bounded windows compose until current) / source continuity mismatches (a parent hash changed under the follow) |
 | `venue_poll_touched` / `venue_poll_planned_keys` / `venue_poll_changed_keys` | the last window: addresses touched / keys the closures planned / keys found changed |
 | `venue_poll_uncovered_logs_total` | logs from contracts no closure covers (declare a closure to follow them) |
 | `venue_probe_ok_total` / `venue_probe_failures_total` / `venue_probe_skipped_total` / `venue_probe_last_failed` | the at-pin probes (skipped = a devnet-owned target, or a pin the source cannot serve) |

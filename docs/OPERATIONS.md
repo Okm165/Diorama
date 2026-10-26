@@ -611,15 +611,22 @@ no balance yet.
 Without the Secret the bridge pod waits in `CreateContainerConfigError`; the
 engine and the simulator boot without it.
 
-**The follow's cadence against the public source** (measured): the composer's
-per-block reads (block + receipts + system txs) cost ~0.5 s per call against
-`rpc.hyperliquid.xyz`, so a window composes at ~1.6 s per source block — slower
-than the source's 1 s. The follow therefore falls behind by design and the gap
-guard pauses it at 300; the re-pin drill re-bases V (the devnet's own writes
-are unaffected — they are COW-owned, and the sim's market plane is its own).
-Watch `venue_follow_gap_pauses_total` and the drift log's `gap_pause` rows
-(one per pause event, not per pass): a paused follow is the expected steady
-state on a busy public source, never a fault.
+**The follow's cadence against the public source** (measured): the reads ride
+JSON-RPC batches — a window is two envelope bodies (receipts capped at 16
+blocks each, then the system txs) plus one mixed body per side for the planned
+keys, one request in flight (the endpoint's burst limiter refused concurrent
+bodies; one-at-a-time is the pre-batching era's own proven-safe shape). A
+steady-state pass is ~5 requests for ~2-3 source blocks — inside the public
+endpoint's budget — and a pass that fails (a throttle, a transport fault)
+backs off 1 s → 30 s, reset by a pass that serves. A gap past
+`max_gap_blocks` (300) composes bounded windows until the cursor reaches the
+source head (the chunked catch-up; `venue_follow_gap_catchups_total` and one
+drift `gap_catchup` row per catch-up state, never per pass) — the follow never
+latches paused (measured: the old latching pause froze V's chain-side state
+~9.9k blocks behind while the source moved ~60 blocks/min, and only a manual
+re-pin recovered it). The devnet's own writes are unaffected throughout (they
+are COW-owned, and the sim's market plane is its own); a re-pin remains the
+operator's choice for a fresh base.
 
 **V's block production is the engine's** — the counterpart of T's applier
 (one block per applied parent block): the driver mines a non-empty pool on its
@@ -679,7 +686,7 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_scanned_blocks_total` / `venue_skipped_empty_blocks_total` / `venue_mined_blocks_total` | V blocks the shadow scan walked / the empty share of the walk (one call, no traces) / V blocks the engine mined (the pool was non-empty — the engine is V's block producer; T's is the applier) |
 | `venue_source_head` / `venue_source_followed` | the HL source's head / the highest source block composed onto V (the follow cursor) |
 | `venue_follow_windows_total` / `venue_follow_applied_total` / `venue_follow_skipped_shadowed_total` | follow windows composed / keys applied / keys skipped because the devnet owns them (COW) |
-| `venue_follow_gap_pauses_total` / `venue_source_reorg_total` | windows paused by the gap guard / source continuity mismatches (a parent hash changed under the follow) |
+| `venue_follow_gap_catchups_total` / `venue_source_reorg_total` | catch-up states entered (the source ran ahead of one bounded window; bounded windows compose until current) / source continuity mismatches (a parent hash changed under the follow) |
 | `venue_follow_sampled_total` / `venue_follow_sampled_ok_total` | the live parity's sample and its passes: the follow re-reads every applied key on V and compares against the composed value |
 | `venue_poll_touched` / `venue_poll_planned_keys` / `venue_poll_changed_keys` | the last window: addresses touched / keys the closures planned / keys found changed |
 | `venue_poll_uncovered_logs_total` | logs from contracts no closure covers (declare a closure to follow them) |

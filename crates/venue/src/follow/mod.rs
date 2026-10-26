@@ -1,12 +1,16 @@
 //! The follow step: the venue's counterpart of the mainnet applier.
 //!
-//! One window per pass: compose the source's window BAL (the spine's generic
-//! composer — the HL public API has no native BAL, so it synthesizes one from
-//! the envelopes and the declared scope), COW it against the devnet's own
-//! writes, land the rest on V, and record the live parity of what was
-//! applied. The gap guard pauses a window that is too wide (a re-pin
-//! decision, never a silent partial poll); the continuity check names a
-//! source reorg.
+//! One bounded window per pass: compose the source's window BAL (the spine's
+//! generic composer — the HL public API has no native BAL, so it synthesizes
+//! one from the envelopes and the declared scope), COW it against the
+//! devnet's own writes, land the rest on V, and record the live parity of
+//! what was applied. The gap guard *bounds one window's width* — a gap past
+//! the policy composes the oldest `limit` blocks and continues next pass, so
+//! the follow converges on the live source instead of latching paused
+//! (measured: the old latching pause froze V's chain-side state ~9.9k blocks
+//! behind while the public HyperEVM moved ~60 blocks/min — only a manual
+//! re-pin recovered it; that is not live following). The continuity check
+//! names a source reorg.
 //!
 //! The parts mirror the applier's `apply/`: this module is the step and its
 //! guards, [`parity`] is the measurement (the applier's drift-lens
@@ -42,16 +46,18 @@ pub(crate) struct FollowOutcome {
     pub(crate) duration_ms: u64,
 }
 
-/// The gap guard's drift line: the source head ran past the follow cursor by
-/// more than the policy allows, so the window is paused (a re-pin decision).
-/// The log's schema is per producer (`kind` names the anomaly, like the
-/// applier's `source` names its diff rung).
+/// The catch-up state's drift line: the source head ran past the follow
+/// cursor by more than one window's policy width, so the follow composes
+/// bounded windows until it is current. The log's schema is per producer
+/// (`kind` names the anomaly, like the applier's `source` names its diff
+/// rung).
 #[derive(serde::Serialize)]
-struct GapPauseEntry {
+struct GapCatchupEntry {
     chain: &'static str,
     kind: &'static str,
     followed: u64,
     source_head: u64,
+    window_to: u64,
     gap: u64,
     limit: u64,
 }
@@ -87,18 +93,53 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     ctx.venue_metrics
         .set(&ctx.venue_metrics.source_followed, followed);
     if source_head <= followed {
+        // The symmetric steady line: the mainnet driver logs the same
+        // message per pass at its follow head.
+        tracing::debug!(
+            head = source_head,
+            follow = followed,
+            "chain is at the follow head"
+        );
         return Ok(None);
     }
-    if !gap_ok(ctx, followed, source_head)? {
-        return Ok(None);
+    // One bounded window per pass: the policy's limit caps the window's
+    // *width*, never the following itself — a gap past it composes the
+    // oldest chunk and continues next pass (the chunked catch-up). Sequential
+    // chunks land the same final state a single wide window would, each
+    // bounded and logged.
+    let limit = ctx.mirror.policies().gap;
+    let to = catchup_window(followed, source_head, limit);
+    if to < source_head {
+        if ctx.plane.gap_pause_started() {
+            ctx.venue_metrics
+                .inc(&ctx.venue_metrics.follow_gap_catchups_total);
+            ctx.drift.append(&GapCatchupEntry {
+                chain: ctx.mirror.label(),
+                kind: "gap_catchup",
+                followed,
+                source_head,
+                window_to: to,
+                gap: source_head - followed,
+                limit: limit.unwrap_or(0),
+            })?;
+            tracing::warn!(
+                followed,
+                source_head,
+                to,
+                gap = source_head - followed,
+                "follow catching up: the source ran ahead; composing bounded windows"
+            );
+        }
+    } else if ctx.plane.gap_pause_cleared() {
+        tracing::info!(followed, source_head, "follow caught up; the source is live");
     }
 
     let started = Instant::now();
     continuity_check(ctx, followed).await?;
-    let plan = plan_window(ctx, followed, source_head).await?;
+    let plan = plan_window(ctx, followed, to).await?;
     let applied = apply_window(ctx, &plan).await?;
     let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
-    advance_source_cursor(ctx, source_head).await?;
+    advance_source_cursor(ctx, to).await?;
     let stats = FollowOutcome {
         source: plan.kind.as_str(),
         writes: plan.total,
@@ -109,7 +150,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
         sampled_ok,
         duration_ms: started.elapsed().as_millis() as u64,
     };
-    report_applied(ctx, followed, source_head, &stats);
+    report_applied(ctx, followed, to, &stats);
     Ok(Some(stats))
 }
 
@@ -151,54 +192,13 @@ fn report_applied(ctx: &Ctx, from: u64, to: u64, window: &FollowOutcome) {
     );
 }
 
-/// The gap guard's predicate: a gap at or below the limit follows (the
-/// mainnet's `gap_within_limit` adds the rebase bound; the venue's windows
-/// have none).
-fn gap_within_limit(gap: u64, limit: u64) -> bool {
-    gap <= limit
-}
-
-/// The gap guard: a window wider than the profile's limit pauses the follow
-/// (the same regime as the mainnet applier's `max_gap_blocks`).
-fn gap_ok(ctx: &Ctx, followed: u64, source_head: u64) -> Result<bool> {
-    let gap = source_head - followed;
-    let Some(limit) = ctx.mirror.policies().gap else {
-        return Ok(true);
-    };
-    if !gap_within_limit(gap, limit) {
-        // One record per pause: a persistent gap is a state, not a per-pass
-        // event (measured: a 760-block gap against the public source
-        // re-logged every pass — 88 errors and 88 drift rows in ten minutes).
-        if ctx.plane.gap_pause_started() {
-            ctx.venue_metrics
-                .inc(&ctx.venue_metrics.follow_gap_pauses_total);
-            ctx.drift.append(&GapPauseEntry {
-                chain: ctx.mirror.label(),
-                kind: "gap_pause",
-                followed,
-                source_head,
-                gap,
-                limit,
-            })?;
-            tracing::error!(
-                followed,
-                source_head,
-                gap,
-                max = limit,
-                "follow gap too large - paused; run the re-pin drill (make repin)"
-            );
-        }
-        return Ok(false);
+/// The catch-up window's end: one bounded window per pass (the policy's
+/// limit caps the *width*, never the following itself). `None` = unbounded.
+fn catchup_window(followed: u64, source_head: u64, limit: Option<u64>) -> u64 {
+    match limit {
+        Some(limit) => source_head.min(followed.saturating_add(limit)),
+        None => source_head,
     }
-    if ctx.plane.gap_pause_cleared() {
-        tracing::info!(
-            followed,
-            source_head,
-            gap,
-            "follow gap cleared; the follow resumes"
-        );
-    }
-    Ok(true)
 }
 
 /// Continuity: the block after the last composed one must carry the recorded
@@ -280,15 +280,18 @@ async fn advance_source_cursor(ctx: &Ctx, source_head: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::gap_within_limit;
+    use super::catchup_window;
 
-    /// The gap guard's predicate: at or below the limit follows, beyond it
-    /// pauses (the mainnet's test pins the same boundary with its rebase
-    /// bound).
+    /// The catch-up window: one bounded window per pass — the policy's limit
+    /// caps the width, never the following itself (the latching pause it
+    /// replaced froze V's chain-side state for hours; measured live).
     #[test]
-    fn the_gap_guard_honors_its_limit() {
-        assert!(gap_within_limit(0, 32));
-        assert!(gap_within_limit(32, 32));
-        assert!(!gap_within_limit(33, 32));
+    fn the_catchup_window_bounds_one_pass() {
+        assert_eq!(catchup_window(0, 100, Some(32)), 32);
+        assert_eq!(catchup_window(0, 32, Some(32)), 32);
+        assert_eq!(catchup_window(0, 31, Some(32)), 31);
+        assert_eq!(catchup_window(100, 132, Some(32)), 132);
+        assert_eq!(catchup_window(100, 10_000, Some(300)), 400);
+        assert_eq!(catchup_window(100, 10_000, None), 10_000);
     }
 }

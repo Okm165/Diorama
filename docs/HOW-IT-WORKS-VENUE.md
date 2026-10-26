@@ -95,9 +95,13 @@ address.
 
 ## 4. The pipeline (per window)
 
-1. **Guard.** The gap guard pauses a window wider than `max_gap_blocks` (300)
-   — a re-pin decision, never a silent partial poll. A parent-hash continuity
-   mismatch (a source reorg) is counted and named.
+1. **Guard.** The gap guard bounds one window's width at `max_gap_blocks`
+   (300): a gap past it composes the oldest bounded chunk and continues next
+   pass — a chunked catch-up, never a latching pause and never a silent
+   partial poll (measured: the old latching pause froze V's chain-side state
+   ~9.9k blocks behind while the source moved ~60 blocks/min, and only a
+   manual re-pin recovered it). A parent-hash continuity mismatch (a source
+   reorg) is counted and named.
 2. **Compose.** Read the window's envelopes from the source; derive the
    touched set; apply the declared closures to get concrete keys; read source
    and target values; frame the changes as a BAL. Emitters no closure covers
@@ -168,7 +172,9 @@ The source's continuity is checked against the recorded parent hash
 (`venue_source_reorg_total`); the window is recomposed from latest, so the
 applied keys are canonical — keys only the orphaned blocks touched may be
 stale until a later window touches them, which is why the counter is an
-alarm. The gap guard pauses a too-wide window (see 4.1).
+alarm. The gap guard bounds a too-wide window's width (see 4.1): bounded
+windows compose until the cursor reaches the source head, so the follow
+converges on the live source instead of latching paused.
 
 ### 5.6 The devnet clock
 
@@ -239,7 +245,7 @@ state from the registry; the simulator resumes its accounts.
 |---|---|
 | `venue_follow_sampled_ok_total` below `venue_follow_sampled_total` | an applied key did not read back the composed value |
 | `venue_source_reorg_total` rising | source continuity changed under the follow — recompose and re-pin |
-| `venue_follow_gap_pauses_total` rising | the follow is paused (the source ran ahead): run the re-pin drill |
+| `venue_follow_gap_catchups_total` rising | the source ran ahead of one bounded window: the follow composes bounded windows until current (self-healing; a re-pin stays the operator's choice for a fresh base) |
 | `venue_poll_uncovered_logs_total` rising | logs from contracts no closure covers: declare a closure to follow them |
 | `venue_probe_failures_total` > 0 | V diverged from the source at the pin on a probe |
 | `venue_sim_stale_ms{coin}` > 30 s | the market plane is stale — `/readyz` fails |

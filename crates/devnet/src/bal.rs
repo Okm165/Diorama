@@ -35,6 +35,13 @@ use mirror_anvil::{Key, Rpc, Value, Write};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
+/// The receipts' sub-batch cap: a HyperEVM block's receipts are large and a
+/// wide window's receipts batch is a multi-megabyte answer (measured live:
+/// one 300-block batch tripped the public endpoint's throttle). Sixteen
+/// blocks keep each body in the low megabytes while a wide window still
+/// rides a handful of parallel bodies.
+const RECEIPTS_BATCH: usize = 16;
+
 /// ERC20 `Transfer(address,address,uint256)`.
 const TRANSFER_TOPIC: B256 =
     alloy_primitives::b256!("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
@@ -250,12 +257,27 @@ impl<'a> Composer<'a> {
         // chain's height is not the source's: a window end above it is out of
         // range).
         let target_at = self.target.head().await?;
-        for key in &plan {
-            if valued.contains(key) {
-                continue;
-            }
-            if let Some(w) = self.diff_key(*key, (to, target_at)).await? {
-                writes.push(w);
+        // The planned keys' reads ride batches (one mixed body per side): a
+        // wide window's plan reaches thousands of keys — every transfer's
+        // holder becomes a storage key — and the per-key form cost a
+        // round-trip per key against the public source (measured live: a
+        // 300-block catch-up window ground for minutes).
+        let pending: Vec<Key> = plan
+            .iter()
+            .copied()
+            .filter(|key| !valued.contains(key))
+            .collect();
+        if !pending.is_empty() {
+            let source_values = self.source.read_keys(&pending, to).await?;
+            let target_values = self.target.read_keys(&pending, target_at).await?;
+            for ((key, source_value), target_value) in
+                pending.iter().zip(source_values).zip(target_values)
+            {
+                if source_value != target_value {
+                    if let Some(w) = Write::new(*key, source_value) {
+                        writes.push(w);
+                    }
+                }
             }
         }
         let stats = ComposeStats {
@@ -267,19 +289,6 @@ impl<'a> Composer<'a> {
         Ok((mirror_anvil::bal_from_writes(&writes), stats))
     }
 
-    /// One planned key's read-diff: the source's value at the window's end
-    /// against the target's at its own head; a difference becomes a write
-    /// (the value the source serves). Equal reads emit nothing.
-    async fn diff_key(&self, key: Key, at: (u64, u64)) -> Result<Option<Write>> {
-        let (source_at, target_at) = at;
-        let source_value = self.source.read_key(key, source_at).await?;
-        let target_value = self.target.read_key(key, target_at).await?;
-        Ok(if source_value != target_value {
-            Write::new(key, source_value)
-        } else {
-            None
-        })
-    }
 }
 
 /// EIP-7928's commitment check: the header's `block_access_list_hash` is
@@ -359,16 +368,50 @@ pub async fn envelope_touches(
     system_txs: bool,
 ) -> mirror_anvil::Result<TouchedSet> {
     let mut touched = TouchedSet::default();
-    for n in (from + 1)..=to {
-        let block = rpc.block_by_number(n, true).await?;
-        let txs = crate::scan::block_txs(&block);
-        let receipts = rpc.receipts(n).await?;
-        let system = if system_txs {
-            rpc.system_txs(n).await?
-        } else {
-            Vec::new()
-        };
-        absorb_envelope(&mut touched, txs, &receipts, &system);
+    let ns: Vec<alloy_primitives::U64> =
+        ((from + 1)..=to).map(alloy_primitives::U64::from).collect();
+    if ns.is_empty() {
+        return Ok(touched);
+    }
+    // The per-block envelope reads ride JSON-RPC batches, and the receipts
+    // carry everything the touch set needs (each tx's from/to and the logs):
+    // the full block bodies only repeat them and were the bulk of the
+    // payload. The sequential per-block form cost ~1.4-2.8 s per source block
+    // against the public HyperEVM RPC — slower than the source's own ~1 s
+    // cadence, so the follow could never keep up.
+    // Sequential bodies (one request in flight): the public source's burst
+    // limiter refused concurrent ones, and the batching already carries the
+    // count win (two bodies per window, whatever its width).
+    let receipts = rpc
+        .batch_typed_limited::<Vec<TransactionReceipt>, _>(
+            "eth_getBlockReceipts",
+            &ns,
+            RECEIPTS_BATCH,
+        )
+        .await?;
+    let system = if system_txs {
+        match rpc
+            .batch_typed::<Vec<Transaction>, _>("eth_getSystemTxsByBlockNumber", &ns)
+            .await
+        {
+            Ok(v) => v,
+            // A chain without the method answers an empty list (the
+            // sequential form's tolerance, kept).
+            Err(e) if e.is_method_not_found() => vec![None; ns.len()],
+            Err(e) => return Err(e),
+        }
+    } else {
+        vec![None; ns.len()]
+    };
+    for (i, n) in ((from + 1)..=to).enumerate() {
+        let recs = receipts[i]
+            .as_ref()
+            .ok_or_else(|| mirror_anvil::Error::BlockMissing {
+                endpoint: rpc.url().to_string(),
+                n,
+            })?;
+        let sys = system[i].clone().unwrap_or_default();
+        absorb_envelope(&mut touched, recs, &sys);
     }
     Ok(touched)
 }
@@ -388,19 +431,18 @@ pub async fn envelope_touches(
 /// the chain emits: topic1 = the system sender, topic2 = the recipient.
 pub fn absorb_envelope(
     touched: &mut TouchedSet,
-    txs: &[Transaction],
     receipts: &[TransactionReceipt],
     system_txs: &[Transaction],
 ) {
     use alloy_consensus::Transaction as _;
     use alloy_network_primitives::TransactionResponse as _;
-    for tx in txs {
-        touched.touch(tx.from());
-        if let Some(to) = tx.inner.to() {
+    for receipt in receipts {
+        // The receipt carries the transaction's from/to; the block body only
+        // repeats them (dropping the bodies is most of the payload saving).
+        touched.touch(receipt.from);
+        if let Some(to) = receipt.to {
             touched.touch(to);
         }
-    }
-    for receipt in receipts {
         for log in receipt.logs() {
             touched.push_log(log.inner.clone());
         }
@@ -506,14 +548,14 @@ mod tests {
         serde_json::from_value(value).expect("transaction wire shape")
     }
 
-    fn receipt(emitter: Address, topics: &[B256]) -> TransactionReceipt {
+    fn receipt(from: Address, to: Address, emitter: Address, topics: &[B256]) -> TransactionReceipt {
         serde_json::from_value(serde_json::json!({
             "transactionHash": B256::ZERO,
             "transactionIndex": "0x0",
             "blockHash": B256::ZERO,
             "blockNumber": "0x10",
-            "from": Address::ZERO,
-            "to": Address::ZERO,
+            "from": from,
+            "to": to,
             "cumulativeGasUsed": "0x5208",
             "gasUsed": "0x5208",
             "contractAddress": null,
@@ -565,12 +607,12 @@ mod tests {
         let alice = address!("00000000000000000000000000000000000000a1");
         let pool = address!("00000000000000000000000000000000000000b2");
         let holder = address!("28C6c06298d514Db089934071355E5743bf21d60");
-        let normal = transfer_tx(alice, pool, holder);
         let mut touched = TouchedSet::default();
         absorb_envelope(
             &mut touched,
-            &[normal],
             &[receipt(
+                alice,
+                pool,
                 pool,
                 &[
                     TRANSFER_TOPIC,
@@ -598,7 +640,7 @@ mod tests {
         let system = address!("200000000000000000000000000000000000012b");
         let sys = transfer_tx(system, token, recipient);
         let mut touched = TouchedSet::default();
-        absorb_envelope(&mut touched, &[], &[], &[sys]);
+        absorb_envelope(&mut touched, &[], &[sys]);
         assert!(touched.addresses.contains(&token));
         assert!(touched.addresses.contains(&recipient));
         assert!(touched.addresses.contains(&system));
@@ -621,7 +663,7 @@ mod tests {
             recipient,
         );
         let mut touched = TouchedSet::default();
-        absorb_envelope(&mut touched, &[], &[], &[sys]);
+        absorb_envelope(&mut touched, &[], &[sys]);
 
         let closures: Vec<Box<dyn crate::closure::KeyClosure>> = vec![Box::new(TopicMappedSlots {
             contract: token,

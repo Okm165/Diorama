@@ -16,7 +16,9 @@
 //! is `alloy_json_rpc`'s; the results and params are alloy's per-namespace
 //! types (`alloy_rpc_types_eth`, `…-anvil`, `…-trace`, `…-txpool`). A wire
 //! change upstream lands as a compile error here, never as a silent mismatch.
+use crate::backoff::Backoff;
 use crate::error::{missing_from_batch, Error, Result, RpcError};
+use crate::trace::{Key, Value};
 use alloy_eips::eip7928::BlockAccessList;
 use alloy_json_rpc::{
     Id, Request, RequestPacket, Response, ResponsePacket, ResponsePayload, SerializedRequest,
@@ -58,6 +60,35 @@ pub fn call(method: &'static str, params: impl Serialize) -> Result<Call> {
         source,
     })?;
     Ok(Request::new(method, Id::None, params))
+}
+
+/// The batch's sub-chunk concurrency: one request in flight. The batching's
+/// win is the request *count* (a wide window is a handful of bodies, not one
+/// per block), and the public HyperEVM RPC's burst limiter refused concurrent
+/// bodies while one-at-a-time traffic — the pre-batching era's own pattern —
+/// passed (measured live). Sequential sub-batches keep the follow inside that
+/// proven-safe shape.
+const BATCH_CONCURRENCY: usize = 1;
+
+/// The throttle's JSON-RPC code (outside the protocol ranges, like the
+/// client's own synthesized codes).
+const RATE_LIMIT_CODE: i64 = -32005;
+/// The throttle's retry bound (the shared backoff rides between the tries).
+const RATE_LIMIT_TRIES: u32 = 4;
+
+/// The throttle marker: a single JSON-RPC error object with the rate-limit
+/// code. Batch answers are arrays and every error body is small, so only a
+/// body that can carry it is parsed.
+fn is_throttled(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|v| v.get("error")?.get("code")?.as_i64())
+        .map(|code| code == RATE_LIMIT_CODE)
+        .unwrap_or(false)
 }
 
 /// One HTTP client + URL, cloned cheaply (reqwest's client is `Arc`-backed).
@@ -186,6 +217,30 @@ impl Rpc {
         Ok((status, text))
     }
 
+    /// The public endpoints throttle bursts with a JSON-RPC `-32005` ("rate
+    /// limited"): the transport rides a throttle out with a bounded backoff
+    /// before surfacing it. A wide catch-up window issues many bodies at
+    /// once, and a transient throttle must not fail the pass (measured live:
+    /// the burst tripped the public HyperEVM RPC's limiter; the sequential
+    /// era never saw it because it was slow enough). Only the throttle is
+    /// retried — every other refusal is the node's answer.
+    async fn post_raw_throttled(
+        &self,
+        method: &str,
+        body: &RawValue,
+    ) -> Result<(reqwest::StatusCode, String)> {
+        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(8));
+        for attempt in 1..=RATE_LIMIT_TRIES {
+            let (status, text) = self.post_raw(method, body).await?;
+            if attempt == RATE_LIMIT_TRIES || !is_throttled(&text) {
+                return Ok((status, text));
+            }
+            tokio::time::sleep(backoff.delay()).await;
+            backoff.record(false);
+        }
+        unreachable!("the loop returns on its last attempt")
+    }
+
     /// The JSON-RPC-over-HTTP boundary rule: the body is the node's answer
     /// whenever it parses as one, whatever the HTTP status; the status only
     /// classifies bodies that are not answers (gateway pages, auth walls,
@@ -228,7 +283,9 @@ impl Rpc {
     /// Single call, raw result.
     pub async fn call_raw(&self, method: &str, params: impl Serialize) -> Result<Box<RawValue>> {
         let request = self.request(method, params)?;
-        let (status, text) = self.post_raw(method, &request.take_request()).await?;
+        let (status, text) = self
+            .post_raw_throttled(method, &request.take_request())
+            .await?;
         self.answer(method, status, &text)
     }
 
@@ -270,14 +327,67 @@ impl Rpc {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
-        let mut out = Vec::with_capacity(calls.len());
+        // The chunks ride concurrently (bounded): each is an independent HTTP
+        // body, and the join keeps the calls' order (chunk order, item
+        // order). The sequential form made one wide window cost the sum of
+        // every round-trip (measured live: ~450 s for a 300-block window
+        // against the public source — the follow could never keep up).
+        let mut ranges: Vec<std::ops::Range<usize>> = Vec::new();
         let mut start = 0usize;
         while start < calls.len() {
             let end = chunk_end(calls, start, max_items, max_bytes);
-            out.extend(self.batch_once(&calls[start..end]).await?);
+            ranges.push(start..end);
             start = end;
         }
+        let mut results: Vec<Option<Result<Vec<std::result::Result<Box<RawValue>, RpcError>>>>> =
+            (0..ranges.len()).map(|_| None).collect();
+        let mut set = tokio::task::JoinSet::new();
+        let mut next = 0usize;
+        while next < ranges.len() || !set.is_empty() {
+            while set.len() < BATCH_CONCURRENCY && next < ranges.len() {
+                let me = self.clone();
+                let chunk = calls[ranges[next].clone()].to_vec();
+                let idx = next;
+                set.spawn(async move { (idx, me.batch_once(&chunk).await) });
+                next += 1;
+            }
+            match set.join_next().await {
+                Some(Ok((idx, r))) => results[idx] = Some(r),
+                Some(Err(join)) => return Err(self.batch_task_error(join)),
+                None => break,
+            }
+        }
+        let mut out = Vec::with_capacity(calls.len());
+        for (idx, r) in results.into_iter().enumerate() {
+            let chunk = match r {
+                Some(r) => r?,
+                None => {
+                    return Err(self.batch_task_error_text(format!(
+                        "batch chunk {idx} never completed"
+                    )))
+                }
+            };
+            out.extend(chunk);
+        }
         Ok(out)
+    }
+
+    /// A spawned chunk task's failure as the crate's typed error (the code
+    /// stays outside the JSON-RPC ranges, like [`missing_from_batch`]'s).
+    fn batch_task_error(&self, join: tokio::task::JoinError) -> Error {
+        self.batch_task_error_text(format!("batch task failed: {join}"))
+    }
+
+    fn batch_task_error_text(&self, message: String) -> Error {
+        Error::Rpc {
+            endpoint: self.url.clone(),
+            method: "batch".to_string(),
+            payload: RpcError {
+                code: -1,
+                message: message.into(),
+                data: None,
+            },
+        }
     }
 
     async fn batch_once(
@@ -294,6 +404,87 @@ impl Rpc {
             }
         }
         Ok(out)
+    }
+
+    /// The typed form of [`Self::batch`]: one method over many params, each
+    /// answer decoded to `Option<T>` (a null result is `None`; corruption
+    /// still dies here). An item's RPC error becomes the crate's typed error,
+    /// so the per-item error type never leaves the crate. The per-block reads
+    /// of a wide window ride one body — the sequential form cost three
+    /// round-trips per block against the public source, slower than its own
+    /// block cadence (measured live).
+    pub async fn batch_typed<T: DeserializeOwned, P: Serialize>(
+        &self,
+        method: &'static str,
+        params: &[P],
+    ) -> Result<Vec<Option<T>>> {
+        self.batch_typed_limited(method, params, 500).await
+    }
+
+    /// [`Self::batch_typed`] with an explicit sub-batch item cap: receipt-
+    /// heavy methods answer multi-megabyte bodies, so their cap sits far
+    /// below the default (measured live: one 300-block receipts batch made
+    /// the public endpoint throttle — the bodies, not the call count, are
+    /// the budget).
+    pub async fn batch_typed_limited<T: DeserializeOwned, P: Serialize>(
+        &self,
+        method: &'static str,
+        params: &[P],
+        max_items: usize,
+    ) -> Result<Vec<Option<T>>> {
+        let calls: Vec<Call> = params
+            .iter()
+            .map(|p| call(method, p))
+            .collect::<Result<Vec<_>>>()?;
+        let items = self.batch_limited(&calls, max_items, 1 << 20).await?;
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            out.push(self.decode_batch_item::<T>(method, item)?);
+        }
+        Ok(out)
+    }
+
+    /// A mixed batch: each item as its raw value (`None` for a null result);
+    /// an item's RPC error becomes the crate's typed error. The caller owns
+    /// each item's decode — the batch may mix methods (the read plan's four
+    /// key kinds ride one body).
+    pub async fn batch_raw(&self, calls: &[Call]) -> Result<Vec<Option<Box<RawValue>>>> {
+        let items = self.batch(calls).await?;
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                Ok(raw) => out.push(
+                    serde_json::from_str::<Option<Box<RawValue>>>(raw.get())
+                        .map_err(|source| self.decode("batch", source))?,
+                ),
+                Err(payload) => {
+                    return Err(Error::Rpc {
+                        endpoint: self.url.clone(),
+                        method: "batch".to_string(),
+                        payload,
+                    })
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// One batch item decoded: `Ok(raw)` parses (null → `None`), an item's
+    /// RPC error maps to [`Error::Rpc`].
+    fn decode_batch_item<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        item: std::result::Result<Box<RawValue>, RpcError>,
+    ) -> Result<Option<T>> {
+        match item {
+            Ok(raw) => serde_json::from_str::<Option<T>>(raw.get())
+                .map_err(|source| self.decode(method, source)),
+            Err(payload) => Err(Error::Rpc {
+                endpoint: self.url.clone(),
+                method: method.to_string(),
+                payload,
+            }),
+        }
     }
 
     /// The batch request's ids and its serialized body (alloy's request
@@ -321,7 +512,7 @@ impl Rpc {
     /// HTTP status); a body that does not is a `BatchDecode` naming the
     /// request text, and a single answer to a batch call is corrupt.
     async fn post_batch(&self, body: &RawValue) -> Result<Vec<Response>> {
-        let (status, text) = self.post_raw("batch", body).await?;
+        let (status, text) = self.post_raw_throttled("batch", body).await?;
         let packet = match self.classify("batch", status, &text) {
             Ok(packet) => packet,
             Err(Error::Decode { source, .. }) => {
@@ -335,10 +526,17 @@ impl Rpc {
         };
         match packet {
             ResponsePacket::Batch(responses) => Ok(responses),
-            ResponsePacket::Single(_) => Err(self.decode(
-                "batch",
-                serde_json::Error::custom("a single answer to a batch call"),
-            )),
+            // A single answer to a batch: an *error* is the node's refusal
+            // (a throttled batch is answered with one error object) —
+            // surfaced as such, never as a decode fault; a single *success*
+            // is a server that mishandled the batch.
+            ResponsePacket::Single(response) => match Self::response_result(response) {
+                Err(payload) => Err(self.rpc("batch", payload)),
+                Ok(_) => Err(self.decode(
+                    "batch",
+                    serde_json::Error::custom("a single answer to a batch call"),
+                )),
+            },
         }
     }
 
@@ -545,6 +743,70 @@ impl Rpc {
             .call("eth_getTransactionCount", (addr, U64::from(block)))
             .await?;
         Ok(quantity.to::<u64>())
+    }
+
+    /// The read plan's batched form: the four key kinds map to their RPC
+    /// methods in one mixed body, decoded to the write vocabulary. A wide
+    /// window's plan reaches thousands of keys (every transfer's holder), and
+    /// the per-key form cost a round-trip per key against the public source
+    /// (measured live: a 300-block catch-up window ground for minutes). A
+    /// null answer for a key is a fault, never a silent zero.
+    pub async fn read_keys(&self, keys: &[Key], block: u64) -> Result<Vec<Value>> {
+        let mut calls = Vec::with_capacity(keys.len());
+        for key in keys {
+            let call = match key {
+                Key::Storage { address, slot } => {
+                    call("eth_getStorageAt", (*address, *slot, U64::from(block)))?
+                }
+                Key::Balance(address) => {
+                    call(crate::ETH_GET_BALANCE, (*address, U64::from(block)))?
+                }
+                Key::Nonce(address) => {
+                    call("eth_getTransactionCount", (*address, U64::from(block)))?
+                }
+                Key::Code(address) => call("eth_getCode", (*address, U64::from(block)))?,
+            };
+            calls.push(call);
+        }
+        let raws = self.batch_raw(&calls).await?;
+        let mut out = Vec::with_capacity(keys.len());
+        for (key, raw) in keys.iter().zip(raws) {
+            let raw = raw.ok_or_else(|| self.null_key_read())?;
+            out.push(self.decode_key(key, &raw)?);
+        }
+        Ok(out)
+    }
+
+    /// One key's answer, decoded to its value kind.
+    fn decode_key(&self, key: &Key, raw: &RawValue) -> Result<Value> {
+        let method = "batch";
+        Ok(match key {
+            Key::Storage { .. } => {
+                let word: B256 = serde_json::from_str(raw.get())
+                    .map_err(|source| self.decode(method, source))?;
+                Value::Storage(U256::from_be_bytes(word.0))
+            }
+            Key::Balance(_) => Value::Balance(
+                serde_json::from_str(raw.get()).map_err(|source| self.decode(method, source))?,
+            ),
+            Key::Nonce(_) => {
+                let quantity: U64 = serde_json::from_str(raw.get())
+                    .map_err(|source| self.decode(method, source))?;
+                Value::Nonce(quantity.to::<u64>())
+            }
+            Key::Code(_) => Value::Code(
+                serde_json::from_str(raw.get()).map_err(|source| self.decode(method, source))?,
+            ),
+        })
+    }
+
+    /// A null answer to a key read: the same refusal the single-key path's
+    /// decode raises.
+    fn null_key_read(&self) -> Error {
+        self.decode(
+            "batch",
+            serde_json::Error::custom("a null answer to a key read"),
+        )
     }
 
     /// `debug_traceBlockByNumber` with prestateTracer diffMode (BAL fallback
