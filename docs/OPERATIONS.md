@@ -469,6 +469,16 @@ restored state is one block stale for the instant before the re-apply — a
 time-dependent view like Aave's normalized income catches exactly that);
 `mirror_t_convergence_last_failed` returns to 0 on the next block.
 
+The rewind also **hands back the devnet-owned keys it restores** (the
+response's `unshadowed`): a marked key was devnet-owned — the applier never
+writes one — so its claim is undone with its write, or the source's future
+updates to it would be skipped forever. What the journal *holds* is each
+profile's `JournalScope`: the mainnet's is `ParentBeforeValues` (the
+applier's parent before-values; the engine's own deals are frozen), so a
+deal survives a rewind and keeps its claim; the venue's is `OwnWrites` (the
+deal faucet's silent storage writes), so a rewind undoes the deal and hands
+its claim back. Both legs are asserted live by the shadow audit.
+
 ### Fund an account with any ERC20 (the unlimited faucet)
 
 ```bash
@@ -723,7 +733,14 @@ deal-cycle's own hold check is a regression guard, not a live skip: the
 deal's slot lives in the token's storage and the parent rarely touches it.
 The pair rotates through the non-fixture watched accounts (a mark cannot be
 cleared while V's source is pinned-latest) and re-stages the value to the
-source's own at the end, so the marks stay inert.
+source's own at the end, so the marks stay inert. Three further legs close
+the remaining questions: the **hand-back's scoping** (two marked keys — a
+partial clear hands back exactly one, the other stays held; `all` resets the
+account's whole claim), the **scanned devnet write** (a *mined* devnet token
+transfer to a fresh recipient — not the register route — is marked by the
+scan's own walk and held across windows), and the **rewind × devnet
+writes** (T's frozen deals survive a rewind and keep their claims; V's
+journaled deal is restored and handed back — `unshadowed = 1`).
 
 **The follow's cadence against the public source** (measured): the reads ride
 JSON-RPC batches, and every one of the endpoint's measured limits is honored —

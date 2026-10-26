@@ -299,22 +299,66 @@ impl AdminSurface<'_> {
     }
 
     /// `POST /admin/rewind` — undo the last N applied parent blocks using the
-    /// journal. Returns the new cursor block and the number of restored values.
+    /// journal. Returns the new cursor block, the number of restored values,
+    /// and the devnet-owned keys handed back with them.
     pub async fn rewind(&self, blocks: u64) -> Result<RewindOutcome> {
         let (cursor, from) = self.rewind_plan(blocks)?;
         self.mark_reapply(from, cursor)?;
         let restored = self.restore_blocks(from, cursor).await?;
+        let unshadowed = self.hand_back_restored(from, cursor)?;
         self.reset_cursor_to(from - 1).await?;
         // The chain's *head* is still where it was - only the values were
         // rolled back - so the main loop's "diffs already applied"
         // late-completion path would skip the re-application and leave the
         // rewound range stale (measured: T's probes diverged after a rewind
         // drill). The range was marked for re-apply before the first undo.
-        tracing::warn!(blocks, restored, "devnet rewound via journal");
+        tracing::warn!(blocks, restored, unshadowed, "devnet rewound via journal");
         Ok(RewindOutcome {
             cursor: from - 1,
             restored,
+            unshadowed,
         })
+    }
+
+    /// The rewind's ownership hand-back: a key the restore put back to the
+    /// source's truth was devnet-owned (the applier never writes a marked
+    /// key), so its claim is undone with its write — kept, the source's
+    /// future updates to it would be skipped forever. A key whose *older*
+    /// devnet write falls outside the range is handed back holding that older
+    /// value and converges on the source's next diff (self-healing).
+    fn hand_back_restored(&self, from: u64, upto: u64) -> Result<usize> {
+        let mut entries: Vec<crate::journal::JournalEntry> = Vec::new();
+        for b in self.plane.journal.blocks_in(from, upto)? {
+            entries.extend(self.plane.journal.load(b)?);
+        }
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let mut shadow = self.plane.shadow.lock()?;
+        let mut unshadowed = 0usize;
+        for entry in &entries {
+            match entry {
+                crate::journal::JournalEntry::Storage { address, slot, .. } => {
+                    if shadow.slots.get(address).is_some_and(|s| s.contains(slot)) {
+                        shadow.unmark_slot(*address, *slot);
+                        unshadowed += 1;
+                    }
+                }
+                crate::journal::JournalEntry::Balance { address, .. }
+                | crate::journal::JournalEntry::Nonce { address, .. }
+                | crate::journal::JournalEntry::Code { address, .. } => {
+                    if shadow.accounts.contains(address) {
+                        shadow.unmark_account_fields(*address);
+                        unshadowed += 1;
+                    }
+                }
+            }
+        }
+        drop(shadow);
+        if unshadowed > 0 {
+            self.plane.save_shadow()?;
+        }
+        Ok(unshadowed)
     }
 
     /// The rewind's static checks: the ring bounds the window (beyond it the
@@ -398,6 +442,7 @@ impl AdminSurface<'_> {
         Ok(RewindResponse {
             rewound_blocks: blocks,
             restored_values: out.restored,
+            unshadowed: out.unshadowed,
             cursor: out.cursor,
         })
     }
@@ -488,6 +533,8 @@ pub struct EpochResponse {
 pub struct RewindResponse {
     pub rewound_blocks: u64,
     pub restored_values: usize,
+    /// The devnet-owned keys the rewind handed back to parent sync.
+    pub unshadowed: usize,
     pub cursor: u64,
 }
 
@@ -558,6 +605,9 @@ pub struct RewindRequest {
 pub struct RewindOutcome {
     pub cursor: u64,
     pub restored: usize,
+    /// The devnet-owned keys the restore handed back (their claim is undone
+    /// with their write; the range's re-apply converges them to the source).
+    pub unshadowed: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

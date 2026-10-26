@@ -22,6 +22,16 @@
 #                            divergence survives once the fields are shadowed
 #                            (the COW) — deterministic, unlike the deal's
 #                            slot, which the parent rarely touches
+#   H. the hand-back's scoping (T) - two marked keys: a partial clear hands
+#                            back exactly one (the other stays held), and the
+#                            `all` clear resets the account's whole claim
+#   I. the scanned devnet write (V) - a *mined* devnet token transfer (not
+#                            the register route) is marked by the scan
+#                            (fresh storage slots) and held across windows
+#   J. the rewind x devnet writes - the two journal scopes: T (frozen) keeps
+#                            the deal and its claim across a rewind; V
+#                            (journaled) restores the deal's slot and hands
+#                            the claim back (unshadowed)
 #
 # Run from the repo root:
 #   make shadow-audit
@@ -52,6 +62,12 @@ FIELD_STAGE="${FIELD_STAGE:-0xDE0B6B3A7640000}"
 FIELD_STAGE_DEC=$(python3 -c "print(int('${FIELD_STAGE}', 16))")
 
 USDC_T="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+WETH_T="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+PROBE_ACCOUNT_B="${PROBE_ACCOUNT_B:-0x0000000000000000000000000000000000000a12}"
+# The scanned-write leg's sender: anvil's dev key 0 (funded on the fork) and
+# the value its mined tx carries (0.01 ETH).
+SCAN_SENDER="${SCAN_SENDER:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}"
+SCAN_VALUE_WEI="${SCAN_VALUE_WEI:-10000000000000000}"
 USDC_V="0xb88339CB7199b77E23DB6E890353E22632Ba630f"
 SRC_T="http://reth.mainnet-mirror.svc.cluster.local:8545"
 SRC_V="https://rpc.hyperliquid.xyz/evm"
@@ -273,9 +289,160 @@ field_shadow_pair() {
   echo "  the field re-staged to the source's own value (${src_bal}); the mark stays inert"
 }
 
+# --- H. the hand-back's scoping (T): a partial clear is precise, `all` resets ---
+# The two deals land on a *second* fixture token (WETH) so the keys this
+# section clears are its own. The partial clear must hand back exactly one
+# key; the `all` clear is the operator's "reset this account to source
+# truth" (every marked key of the account, nothing else).
+hand_back_scoping() {
+  local ns="$NS_T" anvil="http://anvil-t:8545" src="$SRC_T" token="$WETH_T"
+  echo
+  echo "== the hand-back's scoping (T): partial clear, then all (${token}) =="
+  local d1 d2 s1 s2
+  d1=$(epost "$ns" /admin/deal "{\"token\":\"$token\",\"to\":\"$PROBE_ACCOUNT\",\"amount\":\"$DEAL_AMOUNT\"}")
+  s1=$(echo "$d1" | json "d.get('slot') or ''")
+  d2=$(epost "$ns" /admin/deal "{\"token\":\"$token\",\"to\":\"$PROBE_ACCOUNT_B\",\"amount\":\"$DEAL_AMOUNT\"}")
+  s2=$(echo "$d2" | json "d.get('slot') or ''")
+  check "two deals marked two distinct slots" "$( [ -n "$s1" ] && [ -n "$s2" ] && [ "$s1" != "$s2" ] && echo 1 || echo 0 )"
+  local b1 b2 src_b
+  b1=$(balance_of "$ns" "$anvil" "$token" "$PROBE_ACCOUNT")
+  b2=$(balance_of "$ns" "$anvil" "$token" "$PROBE_ACCOUNT_B")
+  src_b=$(balance_of_source "$ns" "$src" "$token" "$PROBE_ACCOUNT")
+  check "the anvil carries both deals (${b1}, ${b2}; source ${src_b})" "$( [ "$b1" = "$DEAL_AMOUNT" ] && [ "$b2" = "$DEAL_AMOUNT" ] && echo 1 || echo 0 )"
+  local back resynced b1b b2b
+  back=$(epost "$ns" /admin/shadow "{\"address\":\"$token\",\"slots\":[\"$s1\"],\"clear\":true}")
+  resynced=$(echo "$back" | json "d.get('resynced_keys')")
+  b1b=$(balance_of "$ns" "$anvil" "$token" "$PROBE_ACCOUNT")
+  b2b=$(balance_of "$ns" "$anvil" "$token" "$PROBE_ACCOUNT_B")
+  check "the partial clear handed back exactly one key (resynced=${resynced})" "$( [ "${resynced:-0}" = "1" ] && echo 1 || echo 0 )"
+  check "the cleared key restored to the source's truth (${b1b} = ${src_b})" "$( [ "$b1b" = "$src_b" ] && echo 1 || echo 0 )"
+  check "the other key stayed held (${b2b} = ${DEAL_AMOUNT})" "$( [ "$b2b" = "$DEAL_AMOUNT" ] && echo 1 || echo 0 )"
+  local all all_resynced b2c src_b2
+  all=$(epost "$ns" /admin/shadow "{\"address\":\"$token\",\"clear\":true,\"all\":true}")
+  all_resynced=$(echo "$all" | json "d.get('resynced_keys')")
+  b2c=$(balance_of "$ns" "$anvil" "$token" "$PROBE_ACCOUNT_B")
+  src_b2=$(balance_of_source "$ns" "$src" "$token" "$PROBE_ACCOUNT_B")
+  check "the all-clear reset the rest (resynced=${all_resynced}, ${b2c} = ${src_b2})" "$( [ "${all_resynced:-0}" -ge 1 ] && [ "$b2c" = "$src_b2" ] && echo 1 || echo 0 )"
+}
+
+# --- I. the scanned devnet write (V): a mined tx is marked by the scan ---
+# The register route is the cure for *cheatcode* writes; a *mined* devnet tx
+# is the scan's job (every sender's fields, the recipients of value
+# transfers, the traces' storage writes). The watched non-fixture accounts
+# are contracts that reject plain value (no `receive`), so the staging is a
+# mined *token transfer* to a fresh recipient (the head's hex — new every
+# run), and the scan must mark its fresh storage slots with no register
+# involved. The trader is topped up through the deal route, so the leg
+# re-runs forever.
+scanned_write() {
+  local ns="$NS_V" anvil="http://anvil-v:8545"
+  local holder="0x00000000000000000000000000000000000000e5"   # the roundtrip's trader
+  local amount="1000000"                                     # 1 USDC (6 decimals)
+  local head to
+  head=$(eget "$ns" /status | json "d.get('head')")
+  to=$(printf '0x%040x' "$head")
+  echo
+  echo "== the scanned devnet write (V): a mined transfer ${holder} -> ${to} =="
+  local held_usdc; held_usdc=$(balance_of "$ns" "$anvil" "$USDC_V" "$holder")
+  if [ "${held_usdc:-0}" -lt "$amount" ]; then
+    epost "$ns" /admin/deal "{\"token\":\"$USDC_V\",\"to\":\"$holder\",\"amount\":\"$((amount * 2))\"}" > /dev/null
+    echo "  the trader topped up through the deal route (${held_usdc} -> $(balance_of "$ns" "$anvil" "$USDC_V" "$holder"))"
+  fi
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setBalance\",\"params\":[\"$holder\",\"0xDE0B6B3A7640000\"]}" > /dev/null
+  local slots_before; slots_before=$(eget "$ns" /status | json "d.get('shadowed_slots')")
+  local bal_before; bal_before=$(balance_of "$ns" "$anvil" "$USDC_V" "$to")
+  local data="0xa9059cbb000000000000000000000000${to:2}$(printf '%064x' "$amount")"
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_impersonateAccount\",\"params\":[\"$holder\"]}" > /dev/null
+  local tx; tx=$(rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_sendTransaction\",\"params\":[{\"from\":\"$holder\",\"to\":\"$USDC_V\",\"data\":\"$data\"}]}" | json "d.get('result') or ''")
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_stopImpersonatingAccount\",\"params\":[\"$holder\"]}" > /dev/null
+  check "the devnet tx submitted (${tx:0:12}…)" "$( [ -n "$tx" ] && echo 1 || echo 0 )"
+  echo "  waiting ${WINDOW_WAIT}s for the producer to mine and the scan to mark..."
+  sleep "$WINDOW_WAIT"
+  local slots_after; slots_after=$(eget "$ns" /status | json "d.get('shadowed_slots')")
+  check "the scan marked the transfer's fresh storage slots (${slots_before} -> ${slots_after})" "$( [ "$slots_after" -gt "$slots_before" ] && echo 1 || echo 0 )"
+  local marked; marked=$(kubectl -n "$ns" logs deploy/engine --since=2m 2>/dev/null | grep "scanned devnet block for shadow writes" | tail -1 | python3 -c "import json,sys; s=sys.stdin.read().strip(); print(json.loads(s)['fields']['shadowed_writes'] if s else 0)" 2>/dev/null || echo 0)
+  check "the scan's own line names the marks (shadowed_writes=${marked} >= 1)" "$( [ "${marked:-0}" -ge 1 ] && echo 1 || echo 0 )"
+  local bal_after; bal_after=$(balance_of "$ns" "$anvil" "$USDC_V" "$to")
+  check "the mined transfer landed (${bal_before} -> ${bal_after} = +${amount})" "$( [ "$((bal_after - bal_before))" = "$amount" ] && echo 1 || echo 0 )"
+  echo "  waiting 10s for the follow's windows with the marked slots..."
+  sleep 10
+  local bal_held; bal_held=$(balance_of "$ns" "$anvil" "$USDC_V" "$to")
+  check "the follow held the mined transfer (${bal_held} = ${bal_after})" "$( [ "$bal_held" = "$bal_after" ] && echo 1 || echo 0 )"
+  echo "  (the marks stay: the fixture owns the token account; the slots are the scan's record)"
+}
+
+# --- J. the rewind × devnet writes: the two journal scopes ---
+# The mainnet's journal holds the *applier's* parent before-values (its own
+# writes are frozen — `JournalScope::ParentBeforeValues`): a deal survives a
+# rewind and keeps its claim. The venue's journal holds its *own* writes
+# (`OwnWrites`): a rewind restores the deal's slot and hands the claim back
+# — kept, the source's future updates to it would be skipped forever. Both
+# legs are the documented asymmetry, asserted live.
+rewind_hand_back() {
+  local ns="$NS_T" anvil="http://anvil-t:8545" src="$SRC_T" token="$USDC_T"
+  echo
+  echo "== the rewind × devnet writes: T frozen, V journaled =="
+  local c0 slots_before
+  c0=$(eget "$ns" /status | json "d.get('cursor')")
+  slots_before=$(eget "$ns" /status | json "d.get('shadowed_slots')")
+  epost "$ns" /admin/deal "{\"token\":\"$token\",\"to\":\"$PROBE_ACCOUNT\",\"amount\":\"$DEAL_AMOUNT\"}" > /dev/null
+  local c1 blocks rw unshadowed restored
+  c1=$(eget "$ns" /status | json "d.get('cursor')")
+  blocks=$(( c1 - c0 + 1 ))
+  rw=$(epost "$ns" /admin/rewind "{\"blocks\":$blocks}")
+  unshadowed=$(echo "$rw" | json "d.get('unshadowed')")
+  restored=$(echo "$rw" | json "d.get('restored_values')")
+  local bal
+  bal=$(balance_of "$ns" "$anvil" "$token" "$PROBE_ACCOUNT")
+  check "T (frozen): the rewind restored parent values (${restored}) and handed nothing back (unshadowed=${unshadowed})" "$( [ "${restored:-0}" -ge 1 ] && [ "${unshadowed:-0}" = "0" ] && echo 1 || echo 0 )"
+  check "T (frozen): the deal survived the rewind (${bal} = ${DEAL_AMOUNT})" "$( [ "$bal" = "$DEAL_AMOUNT" ] && echo 1 || echo 0 )"
+  local slots_after; slots_after=$(eget "$ns" /status | json "d.get('shadowed_slots')")
+  check "T (frozen): the deal's claim stayed (${slots_before} -> ${slots_after})" "$( [ "$slots_after" -gt "$slots_before" ] && echo 1 || echo 0 )"
+  local back resynced bal2 src_bal
+  back=$(epost "$ns" /admin/shadow "{\"address\":\"$token\",\"clear\":true,\"all\":true}")
+  resynced=$(echo "$back" | json "d.get('resynced_keys')")
+  bal2=$(balance_of "$ns" "$anvil" "$token" "$PROBE_ACCOUNT")
+  src_bal=$(balance_of_source "$ns" "$src" "$token" "$PROBE_ACCOUNT")
+  check "T (frozen): the route handed the claim back (resynced=${resynced}, ${bal2} = ${src_bal})" "$( [ "${resynced:-0}" -ge 1 ] && [ "$bal2" = "$src_bal" ] && echo 1 || echo 0 )"
+  echo "  waiting for the re-apply to converge the range..."
+  local waited=0 recovered=0
+  while [ "$waited" -lt 90 ]; do
+    local last_failed cur
+    last_failed=$(metric "$ns" mirror_t_convergence_last_failed)
+    cur=$(eget "$ns" /status | json "d.get('cursor')")
+    if [ "${last_failed:-1}" = "0" ] && [ "${cur:-0}" -ge "$c1" ]; then recovered=1; break; fi
+    sleep 5; waited=$((waited+5))
+  done
+  check "T: the re-apply converged the range (cursor >= ${c1}, no failed parity)" "$( [ "$recovered" = "1" ] && echo 1 || echo 0 )"
+
+  local ns_v="$NS_V" anvil_v="http://anvil-v:8545" token_v="$USDC_V"
+  local vc0 v_slots_before v_bal_before
+  vc0=$(eget "$ns_v" /status | json "d.get('cursor')")
+  v_slots_before=$(eget "$ns_v" /status | json "d.get('shadowed_slots')")
+  v_bal_before=$(balance_of "$ns_v" "$anvil_v" "$token_v" "$PROBE_ACCOUNT_B")
+  local dv dealt_v
+  dv=$(epost "$ns_v" /admin/deal "{\"token\":\"$token_v\",\"to\":\"$PROBE_ACCOUNT_B\",\"amount\":\"$DEAL_AMOUNT\"}")
+  dealt_v=$(echo "$dv" | json "d.get('ok', False)")
+  check "V (journaled): the deal landed (${v_bal_before} -> ${DEAL_AMOUNT})" "$( [ "$dealt_v" = "True" ] && echo 1 || echo 0 )"
+  local vc1 vblocks rwv v_unshadowed v_restored
+  vc1=$(eget "$ns_v" /status | json "d.get('cursor')")
+  vblocks=$(( vc1 - vc0 + 1 ))
+  rwv=$(epost "$ns_v" /admin/rewind "{\"blocks\":$vblocks}")
+  v_unshadowed=$(echo "$rwv" | json "d.get('unshadowed')")
+  v_restored=$(echo "$rwv" | json "d.get('restored_values')")
+  check "V (journaled): the rewind restored the deal's slot and handed its claim back (unshadowed=${v_unshadowed}, restored=${v_restored})" "$( [ "${v_unshadowed:-0}" -ge 1 ] && [ "${v_restored:-0}" -ge 1 ] && echo 1 || echo 0 )"
+  local v_bal_after; v_bal_after=$(balance_of "$ns_v" "$anvil_v" "$token_v" "$PROBE_ACCOUNT_B")
+  check "V (journaled): the deal was undone (${v_bal_after} = ${v_bal_before})" "$( [ "$v_bal_after" = "$v_bal_before" ] && echo 1 || echo 0 )"
+  local v_slots_after; v_slots_after=$(eget "$ns_v" /status | json "d.get('shadowed_slots')")
+  check "V (journaled): the slot's mark dropped (${v_slots_after} = ${v_slots_before})" "$( [ "$v_slots_after" = "$v_slots_before" ] && echo 1 || echo 0 )"
+}
+
 audit_mirror "$NS_V" "venue (V)" "http://anvil-v:8545" "$SRC_V" "$USDC_V"
 audit_mirror "$NS_T" "l1 (T)" "http://anvil-t:8545" "$SRC_T" "$USDC_T"
 field_shadow_pair
+hand_back_scoping
+scanned_write
+rewind_hand_back
 
 echo
 echo "  shadowing audit: ${pass} ok, ${fail} failed"

@@ -22,6 +22,7 @@ pub(crate) mod parity;
 use crate::ctx::Ctx;
 use crate::error::Result;
 use alloy_rpc_types_eth::Block;
+use mirror_devnet::engine::Engine as _;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use std::time::Instant;
@@ -125,6 +126,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     let started = Instant::now();
     continuity_check(ctx, followed, next_block.as_ref())?;
     let plan = plan_window(ctx, followed, to).await?;
+    pre_land_scan(ctx).await?;
     let applied = apply_window(ctx, &plan).await?;
     let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
     advance_source_cursor(ctx, to).await?;
@@ -140,6 +142,40 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     };
     report_applied(ctx, followed, to, source_head, &stats);
     Ok(Some(stats))
+}
+
+/// The compose's landing guard: scan V's chain up to its *current* head, so
+/// the filter sees the marks of blocks mined while the window composed. The
+/// compose's target reads race the producers (measured: a value transfer to
+/// a watched account, mined between the pass's scan and the landing, was
+/// clobbered by the window's absolute write before the next pass could mark
+/// it). Cheap when nothing moved (one head read, no traces); a fault fails
+/// the window — re-scanning is cheap and the marks are idempotent, while
+/// landing past an unscanned block is the exact COW failure the registry
+/// exists to prevent.
+async fn pre_land_scan(ctx: &Ctx) -> Result<()> {
+    let head = ctx.anvil_v.block_number().await?;
+    let first = ctx
+        .plane
+        .state
+        .cursor()?
+        .as_ref()
+        .map(|c| c.block)
+        .unwrap_or(head);
+    let walk = mirror_devnet::scan::scan_to(
+        &ctx.plane,
+        &ctx.anvil_v,
+        mirror_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
+        head,
+        first,
+    )
+    .await?;
+    if walk.walked > 0 {
+        ctx.record_scan(&walk);
+        mirror_devnet::scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
+        ctx.plane.save_shadow()?;
+    }
+    Ok(())
 }
 
 /// The gap guard's journal and log: a bounded window means the source ran
