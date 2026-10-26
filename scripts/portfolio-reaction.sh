@@ -19,6 +19,11 @@
 #                             long) vs the served buffer and the analytic
 #   E. the hedged portfolio - the same 30% moves both ways: flat, no
 #                             liquidation, the served buffer far
+#   F. the sequence         - different accounts, one after another: the book
+#                             channel leaves the equity untouched; the mark
+#                             moves *compound*, so the buffer erodes
+#                             (7.95% -> 5.11% -> 2.35% -> 0%) and an account
+#                             finds the moved threshold
 #   F. the hand-back        - moves cleared, books handed back, flat
 #
 # Run from the repo root:
@@ -241,6 +246,53 @@ info "the mark-only shock's close executes at the live book (the documented spli
 clear_move
 id=$(acct | identity_ok)
 [ "$id" = "ok" ] && ok "the served identity holds for the hedged book" || bad "identity: $id"
+
+echo "-- F. the sequence (different accounts, one after another: the buffer erodes)"
+# A held short, then three accounts' impacts in a row: the whale's book order
+# (the execution channel), then two rallies (the mark). Each impact erodes the
+# buffer the next one starts from — the threshold is *dynamic*, and the third
+# move should find it. The served buffer after each step is checked against
+# the analytic from the served numbers.
+clear_move
+flatten_coin "$TRADER" "$COIN" > /dev/null 2>&1 || true
+cur=$(acct | jq -r '.marginSummary.totalRawUsd')
+delta=$(python3 -c "print(f'{float('$COLLATERAL') - float('$cur'):.6f}')")
+spost /control/deal "{\"address\":\"$TRADER\",\"class\":\"perp\",\"amount\":\"$delta\"}" > /dev/null
+m0=$(mark)
+size=$(python3 -c "print(f'{$LEVERAGE * $COLLATERAL / float('$m0'):.4f}')")
+spost /control/order "{\"address\":\"$TRADER\",\"coin\":\"$COIN\",\"is_buy\":false,\"size\":\"$size\"}" > /dev/null
+buf0=$(buffer_pct)
+info "the sequence starts: the short $size $COIN, the served buffer $buf0%"
+step_pct=$(python3 -c "print(f'{float('$buf0') / 3:.2f}')")
+step=1
+while [ "$step" -le 5 ]; do
+  if [ "$step" = "1" ]; then
+    # The whale's book order: the execution channel, the equity untouched.
+    eqb=$(acct | jq -r '.marginSummary.accountValue')
+    spost /control/order "{\"address\":\"$WHALE\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"$WHALE_SIZE\"}" > /dev/null
+    eqa=$(acct | jq -r '.marginSummary.accountValue')
+    moved=$(python3 -c "print(float('$eqa') - float('$eqb'))")
+    info "step 1 (the whale's buy, the book channel): the trader's equity moved \$$(python3 -c "print(f'{float('$moved'):+,.2f}')")"
+  else
+    # The steps *compound*: the rally is relative to the owned mark (no
+    # clear between them — clearing would restart each step from the live
+    # mark and the buffer would never erode; the frontier's own lesson,
+    # inverted on purpose).
+    spost /control/rally "{\"coin\":\"$COIN\",\"pct\":\"$step_pct\"}" > /dev/null
+    spost /control/advance '{"seconds":1}' > /dev/null
+  fi
+  buf=$(buffer_pct)
+  state=$(liq_state)
+  info "after step $step: the served buffer $buf% | $state"
+  [ "$state" = "liquidated" ] && break
+  step=$((step + 1))
+done
+[ "$state" = "liquidated" ] \
+  && ok "an account's move found the eroded threshold (the liquidation at step $step; the buffer fell from $buf0% to $buf%)" \
+  || bad "the sequence left the position open (buffer $buf)"
+clear_move
+id=$(acct | identity_ok)
+[ "$id" = "ok" ] && ok "the served identity holds through the sequence" || bad "identity: $id"
 
 echo "-- F. the reads"
 python3 - "$LEVERAGE" "$theory" "$buf" <<'PY' | while IFS= read -r line; do info "$line"; done

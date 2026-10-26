@@ -87,6 +87,9 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     )
     .parity(&ctx.reth, n, &ctx.anvil_t)
     .await?;
+    // The same summary line the venue's at-pin run reports (one shape for
+    // both profiles): the per-probe skips stay DEBUG diagnostics.
+    mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), n, &probes);
     ctx.mainnet_metrics.add(&ctx.mainnet_metrics.t_convergence_ok, probes.ok as u64);
     ctx.mainnet_metrics
         .add(&ctx.mainnet_metrics.t_convergence_failed, probes.failed as u64);

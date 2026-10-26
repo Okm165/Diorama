@@ -71,10 +71,28 @@ impl Relayer {
     /// and counted, never fatal.
     pub async fn run(self: Arc<Self>, poll: Duration) {
         let mut ticker = tokio::time::interval(poll);
+        let mut last_status = 0u64;
         loop {
             ticker.tick().await;
             if let Err(e) = self.tick().await {
                 tracing::warn!(error = %e, "cctp relayer pass failed; will retry");
+            }
+            // The bridge's heartbeat (the mirrors' 60 s cadence): the store's
+            // own counts, so the queue's state is visible in the logs, not
+            // only through /health.
+            let now = mirror_config::boot::now_ms();
+            if now.saturating_sub(last_status) >= 60_000 {
+                last_status = now;
+                match self.store.counts() {
+                    Ok(c) => tracing::info!(
+                        pending = c.pending,
+                        signed = c.signed,
+                        relayed = c.relayed,
+                        parked = c.parked,
+                        "bridge status"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "bridge status counts failed"),
+                }
             }
         }
     }

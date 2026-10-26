@@ -262,7 +262,7 @@ async fn mine_pending(ctx: &Ctx) -> Result<()> {
         return Ok(());
     };
     ctx.venue_metrics.inc(&ctx.venue_metrics.mined_blocks_total);
-    tracing::debug!(pending = %pending, "mined V's pending transactions");
+    tracing::info!(pending = %pending, "mined V's pending transactions");
     Ok(())
 }
 
