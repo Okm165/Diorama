@@ -5,6 +5,15 @@ section), the [Venue Mirror](#the-venue-mirror-in-the-same-workspace), and the
 CCTP bridge between them — one workspace, shared crates, two mirrors that
 never share a runtime.
 
+**Status (final).** One workspace, two mirrors, one spine — deployed and
+attested on a local k8s cluster. The gates: workspace tests 271/0, `make
+fitness` rc=0 (lint, dead-code, AST budgets), the standing pass `make attest`
+(8 pods clean · log-surface 11/11 · engine-symmetry 21/21), the shadow audit
+51/51 (nine staged legs), the CCTP round trip 9/9, and the benchmark's seven
+portfolio studies green (117 checks). `docs/TESTING.md` carries the full
+suite table; `docs/OPERATIONS.md` the runbooks (rewind, re-pin, the shadow
+audit's legs).
+
 A local Ethereum mainnet **fork source** (`reth` + `Lighthouse`) drives a
 **mirror engine** that maintains one Anvil chain:
 
