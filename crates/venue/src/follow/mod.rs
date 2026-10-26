@@ -109,6 +109,31 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     // bounded and logged.
     let limit = ctx.mirror.policies().gap;
     let to = catchup_window(followed, source_head, limit);
+    note_gap(ctx, followed, source_head, to, limit)?;
+
+    let started = Instant::now();
+    continuity_check(ctx, followed).await?;
+    let plan = plan_window(ctx, followed, to).await?;
+    let applied = apply_window(ctx, &plan).await?;
+    let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
+    advance_source_cursor(ctx, to).await?;
+    let stats = FollowOutcome {
+        source: plan.kind.as_str(),
+        writes: plan.total,
+        applied,
+        filtered: plan.writes.len(),
+        skipped_shadowed: plan.filter.skipped_shadowed,
+        sampled,
+        sampled_ok,
+        duration_ms: started.elapsed().as_millis() as u64,
+    };
+    report_applied(ctx, followed, to, &stats);
+    Ok(Some(stats))
+}
+
+/// The gap guard's journal and log: a bounded window means the source ran
+/// ahead (the chunked catch-up); the first live window after it says so.
+fn note_gap(ctx: &Ctx, followed: u64, source_head: u64, to: u64, limit: Option<u64>) -> Result<()> {
     if to < source_head {
         if ctx.plane.gap_pause_started() {
             ctx.venue_metrics
@@ -133,25 +158,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     } else if ctx.plane.gap_pause_cleared() {
         tracing::info!(followed, source_head, "follow caught up; the source is live");
     }
-
-    let started = Instant::now();
-    continuity_check(ctx, followed).await?;
-    let plan = plan_window(ctx, followed, to).await?;
-    let applied = apply_window(ctx, &plan).await?;
-    let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
-    advance_source_cursor(ctx, to).await?;
-    let stats = FollowOutcome {
-        source: plan.kind.as_str(),
-        writes: plan.total,
-        applied,
-        filtered: plan.writes.len(),
-        skipped_shadowed: plan.filter.skipped_shadowed,
-        sampled,
-        sampled_ok,
-        duration_ms: started.elapsed().as_millis() as u64,
-    };
-    report_applied(ctx, followed, to, &stats);
-    Ok(Some(stats))
+    Ok(())
 }
 
 /// One place for the window's gauges, fact, and log.
