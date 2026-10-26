@@ -276,6 +276,18 @@ order) and the return leg closing exactly. In cluster mode the script derives
 the bridge's wallet from the venue secret (`cctp-relay-key`), so the actor is
 always the wallet the burn sends from — never the local harness's.
 
+### The hedged book — `make hedged-book`
+
+The hedge's capital efficiency, measured: the same collateral and the same
+*gross* exposure as the unhedged equivalent, but market-neutral (long ETH,
+short BTC, dollar-matched on V's real books). The venue's maintenance table
+gives the hedge no credit — the cross figure sums both legs (ETH at 25x -> 2%,
+BTC at 40x -> 1.25%) — yet the equity, which is what the waterfall reads,
+stays flat within 0.5% through a 10/30/50/60% market-wide crash. The unhedged
+equivalent with the same gross/collateral ratio liquidates at 48.98%
+(`make capital-frontier`). The hedge's beta coverage is not basis coverage:
+the legs' divergence is the residual risk.
+
 ### The capital-efficiency frontier — `make capital-frontier`
 
 Per leverage, how far can the market move before the venue liquidates? The

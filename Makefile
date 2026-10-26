@@ -286,6 +286,9 @@ crosschain-margin: ## The crosschain margin book: bridged collateral, funding co
 capital-frontier: ## The capital-efficiency frontier: the liquidation distance measured at each leverage
 	NS=venue-mirror ./scripts/capital-frontier.sh
 
+hedged-book: ## The hedged book: same collateral and gross exposure as the unhedged, flat through a 60% crash
+	NS=venue-mirror ./scripts/hedged-book.sh
+
 cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locally (both chains forked from the real ones: the round trip + the unified-margin cycle)
 	./scripts/cctp-local.sh
 
