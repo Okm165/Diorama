@@ -1,4 +1,4 @@
-//! The REST weight budget meter (plan §5): the venue's public API allows
+//! The REST weight budget meter: the venue's public API allows
 //! 1200 weight/min/IP, with per-endpoint weights (measured: `metaAndAssetCtxs`
 //! 20, `l2Book`/`allMids` 2, `clearinghouseState` 2, all other info 20).
 //!

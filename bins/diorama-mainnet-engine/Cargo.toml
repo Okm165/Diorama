@@ -1,0 +1,13 @@
+[package]
+name = "diorama-mainnet-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Mainnet Mirror engine binary (the mainnet profile's entrypoint)"
+
+[dependencies]
+diorama-config = { path = "../../crates/config" }
+diorama-mainnet = { path = "../../crates/mainnet" }
+[lints]
+workspace = true

@@ -8,10 +8,10 @@
 //! re-reading them would be a wasted round trip).
 use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::Header;
-use mirror_devnet::bal::DiffKind;
-use mirror_devnet::closure::TouchedSet;
+use diorama_devnet::bal::DiffKind;
+use diorama_devnet::closure::TouchedSet;
 use futures_util::future::BoxFuture;
-use mirror_devnet::source::{Capabilities, Capability, RawSource, Source};
+use diorama_devnet::source::{Capabilities, Capability, RawSource, Source};
 use std::sync::Arc;
 
 /// What reth serves (measured): the native BAL rung, traces, a 10,064-block
@@ -27,7 +27,7 @@ pub(crate) fn declared() -> Capabilities {
 
 /// The profile's truth source: reth, the native BAL rung with the trace
 /// fallback.
-pub(crate) fn reth(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
+pub(crate) fn reth(rpc: Arc<diorama_anvil::Rpc>) -> Arc<dyn Source> {
     Arc::new(RethSource::new(rpc))
 }
 
@@ -38,11 +38,11 @@ pub(crate) fn reth(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
 /// the trace rung) and its declaration.
 pub struct RethSource {
     inner: RawSource,
-    reth: Arc<mirror_anvil::Rpc>,
+    reth: Arc<diorama_anvil::Rpc>,
 }
 
 impl RethSource {
-    pub fn new(reth: Arc<mirror_anvil::Rpc>) -> Self {
+    pub fn new(reth: Arc<diorama_anvil::Rpc>) -> Self {
         Self {
             inner: RawSource::new(reth.clone(), declared()),
             reth,
@@ -51,13 +51,13 @@ impl RethSource {
 
     /// The per-tx prestate traces of a block, merged (the fallback for nodes
     /// without block-level tracing).
-    async fn trace_block_per_tx(&self, n: u64) -> mirror_anvil::Result<Vec<mirror_anvil::Write>> {
+    async fn trace_block_per_tx(&self, n: u64) -> diorama_anvil::Result<Vec<diorama_anvil::Write>> {
         use alloy_network_primitives::TransactionResponse as _;
-        let block = self.reth.block_by_number(n, mirror_anvil::Txs::Full).await?;
+        let block = self.reth.block_by_number(n, diorama_anvil::Txs::Full).await?;
         let mut out = Vec::new();
-        for tx in mirror_devnet::scan::block_txs(&block) {
+        for tx in diorama_devnet::scan::block_txs(&block) {
             let trace = self.reth.trace_tx_prestate(tx.tx_hash()).await?;
-            out.extend(mirror_anvil::flatten_trace(&trace));
+            out.extend(diorama_anvil::flatten_trace(&trace));
         }
         Ok(out)
     }
@@ -70,19 +70,19 @@ impl Source for RethSource {
 
     // The raw reads are the spine's (one home for how a source read is
     // performed); the rungs below are this source's own.
-    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
+    fn head(&self) -> BoxFuture<'_, diorama_anvil::Result<u64>> {
         self.inner.head()
     }
 
-    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<Header>> {
+    fn header(&self, n: u64) -> BoxFuture<'_, diorama_anvil::Result<Header>> {
         self.inner.header(n)
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
         self.inner.balance_at(address, block)
     }
 
-    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<u64>> {
         self.inner.nonce_at(address, block)
     }
 
@@ -91,7 +91,7 @@ impl Source for RethSource {
         address: Address,
         slot: U256,
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<B256>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<B256>> {
         self.inner.storage_at(address, slot, block)
     }
 
@@ -99,7 +99,7 @@ impl Source for RethSource {
         &self,
         address: Address,
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<alloy_primitives::Bytes>> {
         self.inner.code_at(address, block)
     }
 
@@ -109,7 +109,7 @@ impl Source for RethSource {
     fn bal(
         &self,
         n: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
         Box::pin(async move {
             // TRUST: the native list is the parent's own record. The guard:
             // EIP-7928's commitment — the header's `block_access_list_hash`
@@ -126,8 +126,8 @@ impl Source for RethSource {
                 return Ok(None);
             };
             let header = self.header(n).await?;
-            mirror_devnet::bal::verify_bal_commitment(header.inner.block_access_list_hash, &bal)
-                .map_err(|detail| mirror_anvil::Error::Corrupt {
+            diorama_devnet::bal::verify_bal_commitment(header.inner.block_access_list_hash, &bal)
+                .map_err(|detail| diorama_anvil::Error::Corrupt {
                     what: "block access list",
                     detail: format!("block {n}: {detail}"),
                 })?;
@@ -143,7 +143,7 @@ impl Source for RethSource {
     /// block with transactions and an empty trace falls back to the tx-level
     /// tracer — the scanner's own path — instead of silently composing
     /// nothing.
-    fn touched(&self, from: u64, to: u64) -> BoxFuture<'_, mirror_anvil::Result<TouchedSet>> {
+    fn touched(&self, from: u64, to: u64) -> BoxFuture<'_, diorama_anvil::Result<TouchedSet>> {
         Box::pin(async move {
             let mut touched = TouchedSet::default();
             for n in (from + 1)..=to {
@@ -153,7 +153,7 @@ impl Source for RethSource {
                         touched.value(w);
                     }
                 } else {
-                    for w in mirror_anvil::flatten_trace_block(&traces) {
+                    for w in diorama_anvil::flatten_trace_block(&traces) {
                         touched.value(w);
                     }
                 }
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn the_reth_source_declares_the_measured_capabilities() {
         let rpc = Arc::new(
-            mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
+            diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
         );
         let source = RethSource::new(rpc);
         assert_eq!(source.capabilities(), declared());

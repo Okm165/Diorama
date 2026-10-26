@@ -1,8 +1,8 @@
 //! The mainnet engine's HTTP surface: the shared route table
-//! (`mirror_devnet::handlers`) plus this profile's own route — `/admin/time`
+//! (`diorama_devnet::handlers`) plus this profile's own route — `/admin/time`
 //! (T's clock offset). The feed bridge's routes live with the bridge
 //! (`feed/http.rs`, the venue's simulator-API pattern). The admin
-//! *semantics* live in `mirror-devnet`'s admin surface; the shared handlers
+//! *semantics* live in `diorama-devnet`'s admin surface; the shared handlers
 //! are one generic definition there.
 //!
 //! This module owns the HTTP mapping of the error taxonomy: request refusals
@@ -18,8 +18,8 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use mirror_devnet::admin::TimeRequest;
-use mirror_devnet::engine::{Engine as _, SharedStatus};
+use diorama_devnet::admin::TimeRequest;
+use diorama_devnet::engine::{Engine as _, SharedStatus};
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -70,7 +70,7 @@ struct TimeResponse {
     note: &'static str,
 }
 
-mirror_devnet::http_status_map!(Error, "admin request failed" {
+diorama_devnet::http_status_map!(Error, "admin request failed" {
     // The upstream anvil boundary: a transport fault is a bad gateway, not
     // this service's fault.
     Error::Rpc(_) => StatusCode::BAD_GATEWAY,
@@ -85,7 +85,7 @@ mirror_devnet::http_status_map!(Error, "admin request failed" {
 /// own routes (the exact routes this process serves — the table the
 /// control-plane docs list).
 pub(crate) fn app(ctx: Arc<Ctx>, bridge: Option<Arc<FeedBridge>>) -> Router {
-    mirror_devnet::handlers::shared_routes::<Ctx>()
+    diorama_devnet::handlers::shared_routes::<Ctx>()
         .route("/admin/time", post(admin_time))
         .with_state(ctx.clone())
         .merge(crate::feed::admin_routes(ctx, bridge))
@@ -117,18 +117,18 @@ mod tests {
     #[test]
     fn the_http_status_mapping_follows_the_shared_convention() {
         let status = |e: Error| e.into_response().status();
-        let anvil = || mirror_anvil::Error::Status {
+        let anvil = || diorama_anvil::Error::Status {
             endpoint: "anvil-t".into(),
             method: "eth_call".into(),
             status: 503,
             body: String::new(),
         };
         assert_eq!(
-            status(Error::Devnet(mirror_devnet::Error::NoCursor)),
+            status(Error::Devnet(diorama_devnet::Error::NoCursor)),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            status(Error::Devnet(mirror_devnet::Error::Poisoned {
+            status(Error::Devnet(diorama_devnet::Error::Poisoned {
                 what: "shadow registry"
             })),
             StatusCode::SERVICE_UNAVAILABLE

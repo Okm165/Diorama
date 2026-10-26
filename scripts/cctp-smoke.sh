@@ -5,7 +5,7 @@
 # are the two the instance names.
 #
 # Run from the repo root:
-#   make cctp-smoke                          # against the deployed venue-mirror
+#   make cctp-smoke                          # against the deployed diorama-venue
 #   BRIDGE_CTRL_URL=http://127.0.0.1:8096 BRIDGE_IRIS_URL=http://127.0.0.1:8095 \
 #     ./scripts/cctp-smoke.sh                # direct mode: a scratch stack
 set -euo pipefail

@@ -1,14 +1,14 @@
 [package]
-name = "mirror-cctp"
+name = "diorama-cctp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The CCTP bridge: the devnet attester, the Iris-compatible API, the MessageSent watcher, and the receiveMessage relayer (§15)"
+description = "The CCTP bridge: the devnet attester, the Iris-compatible API, the MessageSent watcher, and the receiveMessage relayer"
 
 [dependencies]
-mirror-config = { path = "../config" }
-mirror-anvil = { path = "../anvil" }
+diorama-config = { path = "../config" }
+diorama-anvil = { path = "../anvil" }
 alloy-chains = { workspace = true }
 chrono = { workspace = true }
 alloy-consensus = { workspace = true }

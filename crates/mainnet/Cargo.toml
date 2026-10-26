@@ -1,5 +1,5 @@
 [package]
-name = "mirror-mainnet"
+name = "diorama-mainnet"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,9 +7,9 @@ license.workspace = true
 description = "The Mainnet Mirror: the BAL applier (T), the verifier, the top-up loop, the feed bridge"
 
 [dependencies]
-mirror-config = { path = "../config" }
-mirror-anvil = { path = "../anvil" }
-mirror-devnet = { path = "../devnet" }
+diorama-config = { path = "../config" }
+diorama-anvil = { path = "../anvil" }
+diorama-devnet = { path = "../devnet" }
 alloy-eips = { workspace = true }
 alloy-json-rpc = { workspace = true }
 alloy-network-primitives = { workspace = true }

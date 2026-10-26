@@ -68,7 +68,7 @@ reconstruction — the spec's own "executionless state updates" use case.
 ```
 ![topology](img/how-topology.png)
 
-One namespace (`mainnet-mirror`). The engine never talks P2P; its only inputs
+One namespace (`diorama-mainnet`). The engine never talks P2P; its only inputs
 are reth (blocks, state, BALs, traces) and the beacon API (top-up reads).
 
 ## 3. Information flow
@@ -111,7 +111,7 @@ re-forks.
    included), so the next filter sees your writes.
 9. **Parity.** 8 sampled storage keys vs reth at `n` (every applied key with
    `verifier.sweep = "full"`), then the 11 probes: T@latest vs reth at `n`.
-   Devnet-owned targets are skipped (counted in `mirror_t_probe_skipped_total`
+   Devnet-owned targets are skipped (counted in `diorama_t_probe_skipped_total`
    - a devnet write to a shared contract hides all of that contract's probes
    until it is handed back), and the applier scans its own prepend blocks
    first, so a write made in this very apply is already marked and cannot fire
@@ -175,7 +175,7 @@ values are always pruned, never re-owned. The journal is cleared either way.
 ### 5.5 Reorg and gap guard
 
 A parent-hash continuity check counts upstream reorgs
-(`mirror_reorgs_detected_total`); the applier continues on the new branch
+(`diorama_reorgs_detected_total`); the applier continues on the new branch
 (absolute post-value writes self-heal for every key mainnet writes again). The
 gap guard pauses when the follow head is more than `max_gap_blocks` (300) ahead
 of the cursor — except a just-rebased cursor, which may re-apply its whole pin
@@ -210,17 +210,17 @@ journal is a ring (1024 blocks); older history is not rewindable.
 | `engine-state` | cursor, `shadow.json` (marks + values), journal, `drift.jsonl` | Retain |
 | `anvil-t` | fork RPC caches, pin | Retain |
 
-StorageClass `mirror-retain`: deleting the namespace never deletes data. The
+StorageClass `diorama-retain`: deleting the namespace never deletes data. The
 engine resumes from its cursor; T restores its devnet state from the registry.
 
 ## 7. Alarms that matter
 
 | Metric | Meaning |
 |---|---|
-| `mirror_lag_blocks` > 60 (steady 2–3) | the applier is behind (reth/CL unhealthy, or a stalled apply) |
-| `mirror_t_convergence_failures_total` > 0 | T drifted on a key you do not own |
-| `mirror_full_sweep_mismatches_total` > 0 | a full-sweep apply mismatch (`verifier.sweep = "full"`) |
-| `mirror_reorgs_detected_total` rising | upstream reorg — the applier continues on the new branch |
+| `diorama_lag_blocks` > 60 (steady 2–3) | the applier is behind (reth/CL unhealthy, or a stalled apply) |
+| `diorama_t_convergence_failures_total` > 0 | T drifted on a key you do not own |
+| `diorama_full_sweep_mismatches_total` > 0 | a full-sweep apply mismatch (`verifier.sweep = "full"`) |
+| `diorama_reorgs_detected_total` rising | upstream reorg — the applier continues on the new branch |
 
 Full reference and playbook: [OPERATIONS](OPERATIONS.md).
 

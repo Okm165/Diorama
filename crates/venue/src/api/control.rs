@@ -1,5 +1,5 @@
 //! The control API (8091): hl_mock's state surface plus the scenario
-//! extensions (plan §7.3).
+//! extensions.
 //!
 //! Every request type is the full documented shape (fields optional where the
 //! route has a default), and every response reports what moved — the
@@ -45,10 +45,10 @@ pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
     out.push_str(&state.feed.metrics.render());
     // Computed at scrape time from the overrides themselves: an owned-count
     // gauge maintained by hand would drift the first time a mutation site
-    // forgot it (plan §7.8's `venue_feed_overrides`).
-    mirror_devnet::metrics::push_metric(
+    // forgot it (`venue_feed_overrides`).
+    diorama_devnet::metrics::push_metric(
         &mut out,
-        mirror_devnet::metrics::GAUGE,
+        diorama_devnet::metrics::GAUGE,
         "venue_feed_overrides",
         "scenario-owned feed values (crash prices + funding + books)",
         state.feed.owned_count(),
@@ -103,7 +103,7 @@ pub(crate) async fn deal(State(state): State<Arc<ApiState>>, Json(req): Json<Dea
 // ---- order ---------------------------------------------------------------
 
 /// The `order` route's body: the account plus the order's own fields (the
-/// matching lane fills against the real book; plan §4.5). The order's fields
+/// matching lane fills against the real book). The order's fields
 /// are spelled out rather than flattened: a typo'd key must refuse by name —
 /// this is the one verb where a silently ignored field would execute the
 /// wrong order (the venue's own wire order stays tolerant on `/exchange`).
@@ -552,7 +552,7 @@ pub(crate) async fn get_state(
 }
 
 /// The resolved control view for `address` — `/control/state`'s one builder.
-/// Read-time evaluation runs first, like every account-scoped read (§14.8).
+/// Read-time evaluation runs first, like every account-scoped read.
 fn control_state(state: &ApiState, address: Address) -> Result<AccountSeed> {
     state.sim.evaluate(&state.feed)?;
     let Some(account) = state.sim.account(address)? else {
@@ -633,9 +633,9 @@ pub(crate) async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json
     }
     let epoch = state.sim.reset()?;
     state.feed.clear_overrides()?;
-    // The engine's own wire type (mirror_devnet::admin), not a local copy:
+    // The engine's own wire type (diorama_devnet::admin), not a local copy:
     // the channel is ours on both ends, so the compiler keeps them consistent.
-    let engine: mirror_devnet::admin::EpochResponse =
+    let engine: diorama_devnet::admin::EpochResponse =
         serde_json::from_str(&text).map_err(|source| Error::Decode {
             what: "engine epoch response",
             source,

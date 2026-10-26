@@ -1,5 +1,5 @@
 [package]
-name = "mirror-venue"
+name = "diorama-venue"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,9 +7,9 @@ license.workspace = true
 description = "The Venue Mirror: the fork driver over anvil V, the market/account simulator, the daloc-facing API"
 
 [dependencies]
-mirror-config = { path = "../config" }
-mirror-anvil = { path = "../anvil" }
-mirror-devnet = { path = "../devnet" }
+diorama-config = { path = "../config" }
+diorama-anvil = { path = "../anvil" }
+diorama-devnet = { path = "../devnet" }
 alloy-consensus = { workspace = true }
 alloy-primitives = { workspace = true }
 alloy-rpc-types-eth = { workspace = true }

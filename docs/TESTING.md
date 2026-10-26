@@ -21,7 +21,7 @@ Three layers, each runnable on demand:
 | Proof (mainnet) | `make mainnet-proof` | the deployed stack, real venues | the three fork capabilities: live tracking (T vs reth), minting (ETH/WETH/USDC via cheatcodes), and the live markets (Aave supply/borrow/repay/withdraw, a Uniswap V3 swap, Chainlink prices, traces) |
 | Proof (venue) | `make venue-proof` | the deployed venue stack | the venue stack's capabilities: a deal on V, a sim deal (the served identity holds), a crash ⇒ liquidation, the bridge's EVM↔Core round trip, the engine's block production, and the scenario controls |
 | Product sim (mainnet) | `make mainnet-product-sim` | the deployed stack, real venues (the cluster is this suite's substrate) | the margin-product workflow end to end: a levered position built through the faucet + Aave + Uniswap, freshness sampled across consecutive parent blocks, and a bot that sees the `Borrow` event over WS and liquidates after an oracle crash |
-| Order proof (venue) | `make venue-order-proof` | the venue stack (the deployed one, or direct mode against a scratch stack) | no mainnet twin: the venue's order lane is its own door; the mainnet's market-impact measurement rides a real Uniswap leg — the §4.5 market-impact axiom: the fill walks the real book, the trader's state moves, the impact persists through live updates, the owned mark is never moved (41 checks) |
+| Order proof (venue) | `make venue-order-proof` | the venue stack (the deployed one, or direct mode against a scratch stack) | no mainnet twin: the venue's order lane is its own door; the mainnet's market-impact measurement rides a real Uniswap leg — the market-impact axiom: the fill walks the real book, the trader's state moves, the impact persists through live updates, the owned mark is never moved (41 checks) |
 | Closure check (mainnet) | `make mainnet-closure-check` | reth (a local node) | no venue twin: the closure audit traces *storage* reads on reth, and the venue's coverage is the in-code uncovered-log audit (`follow/audit.rs`) — the watchlist's closure: for every market-data view the product reads, the read path's accounts are reported, with each storage-only account named |
 | CCTP (cross-mirror) | `make cctp-smoke`, `make cctp-roundtrip`, `make cctp-margin-cycle` | both stacks + the bridge | the cross-mirror lane: the bridge's ports and queue, a scripted T→V round trip (burn → attested → mint), and the unified-margin cycle (deal on T → CCTP → venue collateral → trade → back) |
 | Engine symmetry (cross-mirror) | `make engine-symmetry` | both deployed stacks | the two engines' HTTP surfaces answer the shared verbs identically: status and shapes, the admin surface, the counters (21 checks in cluster mode, 22 direct — `/admin/rewind` is direct-only) |
@@ -39,19 +39,19 @@ oldest run leniently so every check counts (STRUCTURE's judged row).
 
 ## Unit tests (`cargo test --workspace`)
 
-266 tests, all offline, one suite per crate: `mirror-anvil` 17,
-`mirror-devnet` 54, `mirror-config` 18, `mirror-mainnet` 19,
-`mirror-venue` 127, `mirror-cctp` 31. The suites carry the measured rules
+271 tests, all offline, one suite per crate: `diorama-anvil` 18,
+`diorama-devnet` 58, `diorama-config` 18, `diorama-mainnet` 19,
+`diorama-venue` 127, `diorama-cctp` 31. The suites carry the measured rules
 each module documents:
 
-- `mirror-anvil` — the padding rules (odd-length hex is rejected by anvil with
+- `diorama-anvil` — the padding rules (odd-length hex is rejected by anvil with
   `-32602`), the batch body shapes, the wire-error predicates (content
   refusals are never retryable; unknown upstream codes stay verbatim), the
   trace flattening (`prestateTracer{diffMode}` — the fallback shape measured
   on anvil 1.8.5; a slot changed to zero is still a write; unchanged fields
   are not), the BAL composer (`bal_from_writes` round-trips through the
   spec's own validator; `flatten_bal` takes the post-states), the backoff cap.
-- `mirror-devnet` — COW granularity (storage per slot, account fields as one
+- `diorama-devnet` — COW granularity (storage per slot, account fields as one
   unit, other slots keep syncing; fixture addresses are owned whole), the
   journal round-trip + ring + typed faults on malformed entries, the cursor
   rules (resume is contiguous; fresh/reset chains start at head+1), the
@@ -60,13 +60,13 @@ each module documents:
   corruption are errors), the metric registry convention, the epoch rule's
   decision table (the anchor; fail-closed on an unknown pin, including a
   values-only registry; the journal dropped on every reconcile).
-- `mirror-config` — the layered merge (arrays replace, never concatenate),
+- `diorama-config` — the layered merge (arrays replace, never concatenate),
   `${ENV}` expansion (unresolved is reported, then fatal for services; the
   per-pod contract is `inspect` + `require_resolved` over the pod's own
   sections — one instance file, many readers, each pod carrying only its own
-  wiring), `MIRROR__*` overrides, profile coherence, fork-offset bounds; the
+  wiring), `DIORAMA__*` overrides, profile coherence, fork-offset bounds; the
   real instance files load and check.
-- `mirror-mainnet` — the feed bridge's pause rule (`step` never overwrites a
+- `diorama-mainnet` — the feed bridge's pause rule (`step` never overwrites a
   scenario; a publish in flight is not a scenario write; a stale pending
   publish is re-sent), the step wrapper's error chain (the chain walk stays
   readable), the bounded error size, the shared HTTP status mapping (one row
@@ -75,12 +75,12 @@ each module documents:
   BAL flattening, the blob-sidecar and Engine-API encodings — is exercised
   end-to-end by the self test and the deployed stack, not by unit tests
   here.
-- `mirror-venue` — the served identity, funding hourly on the oracle,
+- `diorama-venue` — the served identity, funding hourly on the oracle,
   liquidation at the mark + the isolated `liq_price` formula, the wire shapes
   (requests omit null optionals; the mixed-case spotMeta parses), the
   CoreWriter/system-address decode (sub-wei remainders floor, USDC
   conversions exact), the budget window, the store's three answers.
-- `mirror-cctp` — the attester's seed derivation + keccak-recoverable
+- `diorama-cctp` — the attester's seed derivation + keccak-recoverable
   signing, the message encode/decode round trip against the contracts' index
   table, the four attester-filled fields, the fee table, the Iris shapes
   (404/pending/signed), the watcher's pin-as-rest-state predicate.
@@ -113,7 +113,7 @@ exercises the **trace fallback** (public RPCs do not serve
 `eth_getBlockAccessList`). The venue's follows windows (compose → COW → land →
 **live parity**) — the system-tx envelope and the latest-only reads a scratch
 anvil cannot serve. Both containers take the deployment's env ConfigMap
-(`mirror-config`) so the instance's `${…}` wiring resolves; their state roots
+(`diorama-config`) so the instance's `${…}` wiring resolves; their state roots
 are ephemeral paths in the pod, which is what a scratch run wants.
 
 Expected output shape (the mainnet's):
@@ -133,8 +133,8 @@ and the venue's:
 
 Checks pods, reth head + `eth_syncing` + `eth_getBlockAccessList` availability,
 Lighthouse sync status, the anvil pin, the engine `/status`, and the engine's
-convergence counters (`mirror_t_convergence_failures_total`,
-`mirror_full_sweep_mismatches_total`).
+convergence counters (`diorama_t_convergence_failures_total`,
+`diorama_full_sweep_mismatches_total`).
 
 ## Self-containment checks
 
@@ -142,21 +142,21 @@ Run after any config change; all three must hold:
 
 ```bash
 # 1. reth has no EL peers and no pipeline/backfill activity
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s http://reth:8545 \
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s http://reth:8545 \
   -X POST -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"net_peerCount"}' | jq -r .result   # 0x0
-kubectl -n mainnet-mirror logs deploy/reth --since=10m | grep -ciE "pipeline|backfill"   # 0
+kubectl -n diorama-mainnet logs deploy/reth --since=10m | grep -ciE "pipeline|backfill"   # 0
 
 # 2. the top-up is the only thing moving reth's head
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s localhost:8080/metrics \
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s localhost:8080/metrics \
   | grep -E "source_sync_(gap_blocks|delivered_total)"
-kubectl -n mainnet-mirror logs deploy/engine --tail=50 | grep -c "top-up"  # >0 while catching up
+kubectl -n diorama-mainnet logs deploy/engine --tail=50 | grep -c "top-up"  # >0 while catching up
 
 # 3. blobs come from the local CL only
-kubectl -n mainnet-mirror get cm -l app.kubernetes.io/part-of=mainnet-mirror \
+kubectl -n diorama-mainnet get cm -l app.kubernetes.io/part-of=diorama-mainnet \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'   # mainnet-instance carries instance.toml
-kubectl -n mainnet-mirror get cm mainnet-instance -o jsonpath='{.data.instance\.toml}' \
-  | grep -A2 "beacon_urls"   # ["${BEACON_URL}"] -> mirror-config: http://lighthouse:5052
+kubectl -n diorama-mainnet get cm mainnet-instance -o jsonpath='{.data.instance\.toml}' \
+  | grep -A2 "beacon_urls"   # ["${BEACON_URL}"] -> diorama-config: http://lighthouse:5052
 ```
 
 ## Invariants asserted per applied block (on T)
@@ -170,7 +170,7 @@ kubectl -n mainnet-mirror get cm mainnet-instance -o jsonpath='{.data.instance\.
 | cursor hash matches the chain (reset detection) | lifecycle | `driver.rs` |
 
 Anomalies are recorded in `drift.jsonl` and counted in metrics
-(`mirror_t_convergence_failures_total`, `mirror_full_sweep_mismatches_total`).
+(`diorama_t_convergence_failures_total`, `diorama_full_sweep_mismatches_total`).
 Sampled-parity mismatches are the A17 class (blockhash-dependent values) and
 re-converge with the next block's absolute writes; the probes are the alarm.
 
@@ -183,7 +183,7 @@ re-converge with the next block's absolute writes; the probes are the alarm.
 | Anvil `--prune-history N` keeps N full state snapshots in memory | anvil-t 9.8 GB at 1000; ~2.5 GB at 32 |
 | Lighthouse needs >6 GiB during checkpoint sync | CrashLoopBackOff (OOMKilled ×5) at 6Gi |
 | Anvil restarts reset automine to *on* | with automine on, every raw tx mines its own block: engine blocks were empty, the height ran away (~14 blocks per parent block) and nonces fell hundreds behind. Fixed with `--no-mining` + re-asserting automine=false on rebases |
-| A re-pin moves the chain's base past the shadow watermark | the scan walked the *source's* pre-pin blocks (anvil forwards those ranges upstream) and marked mainnet's real writes devnet-owned (measured: 311 real txs scanned as devnet writes right after a re-pin); every scan is anchored at the pin now (`mirror_devnet::scan::scan_anchor` — the ethereum loop, the applier's inline scan, the admin's hand-back pre-step and the venue driver all use it), and a cursor *at* the base is the legitimate rest state (`cursor_off_base` / `below_fork_base` are strict `<`) |
+| A re-pin moves the chain's base past the shadow watermark | the scan walked the *source's* pre-pin blocks (anvil forwards those ranges upstream) and marked mainnet's real writes devnet-owned (measured: 311 real txs scanned as devnet writes right after a re-pin); every scan is anchored at the pin now (`diorama_devnet::scan::scan_anchor` — the ethereum loop, the applier's inline scan, the admin's hand-back pre-step and the venue driver all use it), and a cursor *at* the base is the legitimate rest state (`cursor_off_base` / `below_fork_base` are strict `<`) |
 | A regular beacon node cannot serve blobs after PeerDAS | bpo2 Lighthouse answers HTTP 400 `Insufficient data columns to reconstruct blobs: required 64, but only 4 were found` unless run with `--supernode`/`--semi-supernode`; the deployment runs `--semi-supernode` locally, so the CL can serve blob custody |
 | reth rejects non-spec `executionRequests` | `-32602 Invalid params: EmptyExecutionRequest` until elements were type-prefixed with empty types excluded (`engine/prague.md`) |
 | jsonwebtoken panics without a crypto provider | alloy's `jwt` feature selects none; the top-up task died silently at the first JWT sign until `rust_crypto` was enabled |
@@ -200,8 +200,8 @@ re-converge with the next block's absolute writes; the probes are the alarm.
 | A devnet reset can make your next tx a no-op that reports success | re-syncing an account's fields puts its nonce back to mainnet's; a byte-identical tx (same nonce, data, gas price) has the same hash, so the node answers with the *old* receipt while the reset state no longer holds its effects (measured: a "successful" approve that changed nothing, then a supply reverting with a bare `revert()`). Vary something - the gas price is enough - or never reset the sender's nonce |
 | `cast send --unlocked` needs an explicit `anvil_impersonateAccount` | anvil's `--auto-impersonate` accepts `eth_sendTransaction` from any sender, but cast's own signer check refuses first ("No Signer available"). The suite sends raw `eth_sendTransaction` through the engine pod instead - no signer involved, and the receipt poll is ours |
 | `cast index` is offline | it ignores/silently mishandles `--rpc-url`; a slot computed with one comes back empty and the storage read looks like "no value" instead of a wrong slot |
-| The tx pool keeps a devnet tx that the engine cannot mine | when the applier bails (T's head behind the cursor after an out-of-band `anvil_reset`), pending txs starve while the probes stay green - watch `mirror_head` vs `cursor_t`, not just the probes |
-| Handing a key back kept its recorded value, so a re-fork resurrected it | `unmark` cleared the mark only; the value stayed in the registry, and a later re-fork restored (and re-owned) it. Measured: the scenario's crashed oracle source (USDC source = the WETH/USD feed, price 240,233,000,110 vs mainnet's 99,983,478) came back this way - and because *any* devnet mark on a probe's target skips that probe, the five oracle probes stayed green while the price was poisoned. Fixed three ways: `unmark` now drops the recorded value, orphan values are pruned (never re-owned), and `mirror_t_probe_skipped_total` counts skipped probes so the blind spot is visible. One unshadow call healed the price (`resynced_keys: 4`). The same audit fixed the epoch semantics (a fresh pin clears marks *and* values) - restoring across a moved base is what resurrected the value in the first place |
+| The tx pool keeps a devnet tx that the engine cannot mine | when the applier bails (T's head behind the cursor after an out-of-band `anvil_reset`), pending txs starve while the probes stay green - watch `diorama_head` vs `cursor_t`, not just the probes |
+| Handing a key back kept its recorded value, so a re-fork resurrected it | `unmark` cleared the mark only; the value stayed in the registry, and a later re-fork restored (and re-owned) it. Measured: the scenario's crashed oracle source (USDC source = the WETH/USD feed, price 240,233,000,110 vs mainnet's 99,983,478) came back this way - and because *any* devnet mark on a probe's target skips that probe, the five oracle probes stayed green while the price was poisoned. Fixed three ways: `unmark` now drops the recorded value, orphan values are pruned (never re-owned), and `diorama_t_probe_skipped_total` counts skipped probes so the blind spot is visible. One unshadow call healed the price (`resynced_keys: 4`). The same audit fixed the epoch semantics (a fresh pin clears marks *and* values) - restoring across a moved base is what resurrected the value in the first place |
 | Restoring devnet writes onto a *moved* base mixes eras | a +30d time-travel run recorded Aave's `lastUpdateTimestamp` ~13 days in the future; a later re-fork re-applied it and every `supply` panicked with `arithmetic underflow` (product sim 2/13, scenario 31/33). The plan's rule decides it - derived values go stale when the base advances (2.2/6.3): a pin change is a new epoch (clear marks and values), the product re-creates positions from its own journal (3.6). After the epoch reset the suites are green again |
 
 ## Capability proof: `scripts/mainnet-proof.sh`
@@ -252,13 +252,13 @@ helpers and the balance read - so a fix to the transport lands in one place.
 ## Venue smoke — running the venue stack locally
 
 The core venue stack is three processes: V (fork-mode Anvil of HyperEVM), the
-venue engine (`venue-mirror`), and the simulator (`venue-sim`). The manifests'
+venue engine (`diorama-venue`), and the simulator (`venue-sim`). The manifests'
 shape, without a cluster:
 
 ```bash
 # 1. V: fork the public chain at its latest block. The flags are the parity
-#    set (plan §17.6): cancun (the real chain is Cancun-without-blobs), the
-#    gas/code-size/keeper values daloc's entrypoint uses, no-mining (the
+#    set: cancun (the real chain is Cancun-without-blobs), the
+#    gas/code-size/keeper values the client's entrypoint uses, no-mining (the
 #    engine owns block production), auto-impersonate (the bridge's Core->EVM
 #    completion sends from the system address).
 export HL_RPC_URL=https://rpc.hyperliquid.xyz/evm
@@ -282,8 +282,8 @@ export STATE_DIR=/tmp/venue-engine-state SIM_STATE_DIR=/tmp/venue-sim-state
 export ANVIL_V_URL=http://127.0.0.1:8545 ENGINE_ADMIN_URL=http://127.0.0.1:8080
 export CCTP_STATE_DIR=/tmp/venue-cctp-state T_RPC_URL=http://127.0.0.1:8545
 export CCTP_RELAY_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
-cargo run -p venue-engine -- run --config config/instances/venue-mirror/instance.toml
-cargo run -p venue-sim    -- config/instances/venue-mirror/instance.toml
+cargo run -p diorama-venue-engine -- run --config config/instances/diorama-venue/instance.toml
+cargo run -p diorama-venue-sim    -- config/instances/diorama-venue/instance.toml
 ```
 
 What to check:
@@ -317,8 +317,8 @@ curl -s -X POST localhost:8091/control/deal \
   blocks.
 - The epoch drill: `curl -s -X POST localhost:8091/control/epoch_new`, then
   watch `fork_pin` advance and `venue_epochs_total` increment.
-- In-cluster: `kubectl apply -k k8s/overlays/venue-mirror` (namespace
-  `venue-mirror`; NodePorts 31545/31880/31090/31091), then `make venue-smoke`
+- In-cluster: `kubectl apply -k k8s/overlays/diorama-venue` (namespace
+  `diorama-venue`; NodePorts 31545/31880/31090/31091), then `make venue-smoke`
   (`scripts/venue-smoke.sh`): V's chain 999 / head ≥ pin / automine off, the
   engine's `/healthz`, `/status` (the engine pin must equal V's pin) and
   `/metrics`, the sim's `/healthz`, `/readyz`, control `/health` and
@@ -410,13 +410,13 @@ hardest doors end to end:
   (CoreWriter action 16, not the control fixture), a spot-only deal funds the
   account, and a perp order fills against the collateral — the docs' "USDC
   unifies perps + spot". The account view's unified branch folds the
-  collateral token's spot balance into `totalRawUsd`, so daloc's identity
+  collateral token's spot balance into `totalRawUsd`, so the client's identity
   gate stays exact with it included (measured: `accountValue 250.003 =
   totalRawUsd 225.985 + positionValue 24.018`); a `usdClassTransfer` moves
   between the two sides and never both. Before this fix a unified account
   funded only on the spot side could not open a perp position at all.
 
-The order refusals now speak the venue's **own vocabulary** (plan §16.3's
+The order refusals now speak the venue's **own vocabulary** (the
 measured strings), and `l2Book`'s `nSigFigs`/`mantissa` are applied and
 validated rather than silently ignored (measured live: `nSigFigs=2` merged
 the top asks to one level at `2400`; `nSigFigs=9` and `mantissa` without
@@ -424,7 +424,7 @@ the top asks to one level at `2400`; `nSigFigs=9` and `mantissa` without
 
 ### The bringup parity their harness needs (measured live, 2026-10-23)
 
-The daloc harness's own chains run with `--code-size-limit 99999` +
+The client harness's own chains run with `--code-size-limit 99999` +
 `--transaction-block-keeper 1000000` (T and V) and `--gas-limit 100000000` (V)
 — their margin-agent deploys exceed EIP-170, and their failing-run forensics
 read the run's own chain. Both manifests carry them (anvil-t.yaml, anvil-v.yaml).
@@ -454,7 +454,7 @@ the bridge documents, never a silent retry).
 ### The order lane (measured live, 2026-10-23)
 
 `make venue-order-proof` (41 checks, direct mode against the scratch stack) is
-the §4.5 impact lane's acceptance: with a **scripted** base the walk is
+the impact lane's acceptance: with a **scripted** base the walk is
 deterministic — a 2.5 buy across asks `3001×2, 3002×1` filled at the
 size-weighted `3001.20`, the fill's `consumed` recorded the two levels
 exactly, the fully consumed level left the served book (asks `3002×0.5`), the
@@ -534,7 +534,7 @@ answers `"unrouted"` (it is a WS channel; hl_mock's contract).
 ### Negative venue equity, end-to-end (measured 2026-10-23)
 
 The master plan's P6.1/P6.2 wiring requires the sim to *produce and serve*
-negative venue equity (the signed venue term — §12.7's first row), and daloc's
+negative venue equity (the signed venue term), and the client's
 gate must pass it through. Measured live on the sim:
 
 - **the identity is exact both ways** — `accountValue == totalRawUsd + Σ signed
@@ -549,7 +549,7 @@ gate must pass it through. Measured live on the sim:
   tick");
 - **liquidation socializes the residual** — an underwater long is closed at the
   mark (counted in `venue_sim_liquidations_total`), the loss is realized into
-  the balance and the residual is burned to zero (§4.6's "collateral consumed,
+  the balance and the residual is burned to zero ("collateral consumed,
   debt burned"), so the *pre-liquidation window* is the only place a
   position-bearing negative equity is visible — a fixture that needs it must be
   read within the tick (measured: the first read serves negative, the tick then
@@ -575,9 +575,9 @@ fields included.
 ## Engine symmetry (the two services read the same way)
 
 The two engines are one design over two sources. The shared crates carry the
-substrate — `mirror-devnet` (shadow, journal, cursor, admin, probes, metrics,
+substrate — `diorama-devnet` (shadow, journal, cursor, admin, probes, metrics,
 the epoch rule, the atomic state-file body, the devnet plane) —
-`mirror-anvil` (the RPC boundary), `mirror-config` (the layered config plus the
+`diorama-anvil` (the RPC boundary), `diorama-config` (the layered config plus the
 binaries' shared boot conventions: the worker stack budget, the logging init,
 the fatal-error report, the runtime shell `run_main`, the subcommand CLI shell
 `parse_cli` with the selftest verdict's `exit_verdict`, and the default instance
@@ -589,13 +589,13 @@ routes + error mapping. The admin *semantics* are shared whole: the hand-back ca
 (`AdminSurface::shadow_hand_back`), the rewind response is assembled once
 (`AdminSurface::rewind_response`), and the `/status` shadowed-addresses
 presentation is the registry's (`Shadow::shadowed_addresses`). The refusal
-taxonomy is shared too: `mirror_devnet::Error::{is_request_refusal,
+taxonomy is shared too: `diorama_devnet::Error::{is_request_refusal,
 is_unavailable}` classify 4xx vs 503 once, and both engines map an upstream
 transport fault (anvil, the venue API) to 502.
 
 Five more single homes keep the two engines from drifting:
 
-- **the engine shell** (`mirror_devnet::engine` + `mirror_devnet::handlers`):
+- **the engine shell** (`diorama_devnet::engine` + `diorama_devnet::handlers`):
   the `Engine` trait names exactly the facts that differ (the chain, the
   source URL, the journal semantics, the probes, the scan counters, the
   status document, the metric exposition); everything else — the admin
@@ -608,7 +608,7 @@ Five more single homes keep the two engines from drifting:
   status per class (`handlers::devnet_status`: refusals 400, unavailable 503
   — a shared refusal cannot answer two statuses). A new refusal class or a
   renamed status field lands on both surfaces in one commit.
-- **the devnet plane** (`mirror_devnet::Plane`): the shadow registry, the
+- **the devnet plane** (`diorama_devnet::Plane`): the shadow registry, the
   journal, the cursor state, the shared admin gauges and the flags (halt,
   freeze, clock offset, scan watermark, re-apply marker) are one bundle both
   contexts embed; the operations that must not drift — save the state, save
@@ -618,7 +618,7 @@ Five more single homes keep the two engines from drifting:
   no-clock/no-freeze facts are documented once, on the plane. The shared
   primitives take the bundle (the scanner and the deal take the plane or the
   surface, never ten loose references).
-- **the epoch rule** (`mirror_devnet::epoch`): a fresh pin drops marks and
+- **the epoch rule** (`diorama_devnet::epoch`): a fresh pin drops marks and
   values, the same pin re-applies the recorded writes, an unknown pin beside a
   non-empty registry is fail-closed as fresh, and the transition is persisted
   *before* the pin moves (a crash must not leave the stale registry on disk
@@ -628,11 +628,11 @@ Five more single homes keep the two engines from drifting:
   restart is a provable restore rather than an unprovable epoch. Each engine
   maps the outcome to its own counters (T counts resets *found*; V counts
   epoch transitions and restored writes).
-- **the state-file body** (`mirror_devnet::store`): one atomic JSON
+- **the state-file body** (`diorama_devnet::store`): one atomic JSON
   load/save (absent is a fact; a fault and corruption are typed errors; a save
   is temp + rename) used by the registries and by the venue's own sim/feed
   caches — the venue's error enum carries it transparently.
-- **the metric registry convention** (`mirror_devnet::metrics::Registry`):
+- **the metric registry convention** (`diorama_devnet::metrics::Registry`):
   `set`/`add`/`inc` take the field as the operand and are defined once for
   every registry (the shared gauges, `MainnetMetrics`, `VenueMetrics`); a
   profile's registry cannot grow its own variant of the convention.
@@ -645,7 +645,7 @@ the shared admin gauges in `/metrics`, and exactly the documented absences.
 The behavioral checks, not just shapes:
 
 - **pause/resume effect**: while paused both report `halted`, refuse
-  `/healthz` with 503, and raise `mirror_halted` to 1; resume restores all
+  `/healthz` with 503, and raise `diorama_halted` to 1; resume restores all
   three (measured live). `/livez` stays 200 throughout — it is the
   orchestrator's probe, deliberately pause-agnostic (a probe on `/healthz`
   would drop the engine — NodePort included — out of the Service and restart
@@ -665,7 +665,7 @@ The behavioral checks, not just shapes:
 - **deal**: both discover a slot and write the same balance. On clean chains
   both USDCs are byte-identical FiatTokenV2 deployments (balances mapping at
   slot 9) and the slots must be *the same*. A scenario that replaces one
-  chain's token bytecode breaks that premise — daloc's fixtures mock T's USDC
+  chain's token bytecode breaks that premise — the client's fixtures mock T's USDC
   with an OZ ERC20 (slot 0); measured, each discovery matched the expected
   keccak slot for its layout (`0xa5701d…` = keccak(pad(acct)‖pad(0)),
   `0x9a4401…` = keccak(pad(acct)‖pad(9))) — so such runs set
@@ -684,7 +684,7 @@ The behavioral checks, not just shapes:
   present on both, and `cursor` means the *devnet chain's* cursor on both
   (T-height; the plan's clock-labelling rule). The mainnet profile names its
   clocks explicitly: `cursor_t` is T's applied-parent cursor.
-- **the venue plane's alarm set** — the plan §7.8 alarms are served under the
+- **the venue plane's alarm set** — the venue's alarms are served under the
   sim's own spellings: API lag as `venue_sim_stale_ms{coin}` (per coin, ms —
   finer-grained than a per-feed seconds gauge); the rate budget as
   `venue_sim_budget_weight_used` (with `venue_sim_budget_skips_total`); the
@@ -724,7 +724,7 @@ Entry shape follows the need, not symmetry for its own sake: the mainnet
 crate's lib owns a `main_entry` with subcommands (`run` / `selftest` / `rewind`); the
 venue crate exposes `main_entry` (the engine) and `sim_entry` (the simulator);
 the cctp crate exposes `main_entry` — and every bin is the same thin shell
-over its entry (the composition roots live in the crates, plan §11.3 rule 10),
+over its entry (the composition roots live in the crates),
 with the same shutdown path shared by all four service binaries:
 `boot::shutdown_signal` waits for **SIGINT *and* SIGTERM** (Kubernetes sends
 SIGTERM; measured 2026-10-23: before the fix, no service log had ever shown
@@ -737,19 +737,19 @@ to close a scope over — its standing scope check is the at-pin probe set
 (the scenario and smoke do not — measured: no
 `venue_probe_*` reference exists in their scripts).
 
-There is also no unified "facade" service (plan §7): each mirror's
+There is also no unified "facade" service: each mirror's
 scenario surface is its own — `/admin/*` on the two engines, `/control/*` on
 the simulator — and the Make targets parameterize by `INSTANCE`. A proxy would
-add a hop without adding a fact: the harness speaks each surface directly
-(§7.7), and the shared crates already make the two surfaces one vocabulary
-(`mirror_devnet::admin`, the same control shapes).
+add a hop without adding a fact: the harness speaks each surface directly,
+and the shared crates already make the two surfaces one vocabulary
+(`diorama_devnet::admin`, the same control shapes).
 
 ## The feed bridge — measured behavior
 
 When the instance enables `[services.engine.feed_bridge]` (absent = the
 devnet's own price writers own the mocks), the bridge is the single price
 writer for the devnet's mock aggregators in mirror mode (the harness's
-periodic refresher is off, plan §17.2): it reads
+periodic refresher is off): it reads
 each feed's *source* (the parent chain's own aggregator, via reth) and
 publishes `updateAnswer` to the configured *target* on T. Verified live on the
 scratch T (2026-10-23; ETH/USD: source = mainnet's aggregator, target = a mock
@@ -768,7 +768,7 @@ aggregator deployed for the test):
   then republished and confirmed on first contact;
 - a publish that does not land within `confirm_window_ms` (default 60 s) is
   **re-sent** — the outcome-unknown reconciliation. An anvil pool is not
-  durable and a same-nonce sender can displace ours: measured, daloc's deploy
+  durable and a same-nonce sender can displace ours: measured, the client's deploy
   shares anvil account 0 with the writer, a publish racing the deploy's last
   txs was displaced, and the feed waited on `pending` forever. Measured live
   after the fix (applier paused so nothing could mine): an override + hand-back
@@ -799,7 +799,7 @@ their `deploy-contracts` ran on the scratch T): all five feeds the fixtures
 install (`CHAINLINK_FEEDS`: WETH/WBTC/USDC/USDT/wstETH, 8 decimals) were
 published and confirmed — each aggregator's `latestRoundData()` then returned
 the *same answer* as the live mainnet source, and its `updatedAt` was a **T
-block timestamp** (chain-native stamping, plan §17.2: the feeds are stamped in
+block timestamp** (chain-native stamping: the feeds are stamped in
 the devnet chain's own domain).
 - the *source* aggregators are the real Chainlink contracts (AggregatorV3:
   `decimals`/`description`/`latestRoundData`). Re-checked live 2026-10-25 via
@@ -808,7 +808,7 @@ the devnet chain's own domain).
   the decimals the mocks must mirror (a present-but-mismatched target is a
   bridge fault, not a wait).
 
-## daloc's `deploy-contracts` against mirror T (acceptance)
+## The client's `deploy-contracts` against T (acceptance)
 
 Measured 2026-10-23: their `docker/scripts/deploy-contracts.sh` ran
 end-to-end against the scratch T (`ANVIL_RPC_URL` → T, `CONTRACTS_DIR`, the
@@ -846,8 +846,7 @@ host's `forge`/`cast`/`jq`; the repo's submodules `lib/hyper-evm-lib` +
   the deploy's blocks (their writes marked). The fixtures script is **not
   idempotent across runs** (a second run reverts); the clean path is a fresh
   re-pin + one run.
-- **`anvil_dealERC20` works against their `MockERC20Fixed`** (the §17.4
-  re-check): deal, lower and drain to 0 all land, and `/admin/deal` discovers
+- **`anvil_dealERC20` works against their `MockERC20Fixed`** (re-checked): deal, lower and drain to 0 all land, and `/admin/deal` discovers
   the same slot — so their `fund_token_on`/drain paths need no mirror-side
   shim.
 
@@ -908,13 +907,13 @@ Iris. Proven live on scratch forks:
   steps are idempotent (`enableAttester`/`setSignatureThreshold` re-run
   cleanly; a hook redeploy lands a fresh wrapper and the store records it) —
   and every service now waits (bounded) for its chains before the first read
-  (`mirror_anvil::Rpc::wait_until_up`: the engines 900 s/120 s, the bridge
+  (`diorama_anvil::Rpc::wait_until_up`: the engines 900 s/120 s, the bridge
   300 s), so only a *slow-but-up* chain can still fail a boot;
 - the vanished-burn guard reads `eth_getTransactionByHash` on the source and
   is **keeper-sensitive**: with `--transaction-block-keeper 2` anvil prunes tx
   bodies, receipts *and* logs beyond 2 blocks (measured), so any burn older
   than 2 blocks false-parks ("the source burn no longer exists"); the parity
-  flags set keeper 1000000 on both chains (plan §17.6) and the lookup survives
+  flags set keeper 1000000 on both chains and the lookup survives
   (re-verified live: a burn 10 blocks old relayed);
 - the hook lane: `depositForBurnWithHook` + `destinationCaller = wrapper` →
   `wrapper.relay` mints **and** runs the encoded call in one tx (a USDC
@@ -925,7 +924,7 @@ Iris. Proven live on scratch forks:
 - the pin clamp: a start block below the fork pin is clamped to the pin with
   one warning (anvil forwards pre-pin `eth_getLogs` ranges upstream, which
   rejects them — measured);
-- the boot wiring asserts cover §15.1's five contracts: chain id,
+- the boot wiring asserts cover the five contracts: chain id,
   `MT.localDomain()`, `MT.version()`, `TM.messageBodyVersion()`,
   `TM.localMessageTransmitter()`, `TM.localMinter()` (measured 2026-10-23: the
   getter is `localMinter()` — a `localTokenMinter()` probe reverts), and
@@ -945,7 +944,7 @@ Iris. Proven live on scratch forks:
   answers 502 carrying the whole chain (`… eth_call: error code -32603: failed
   to get storage for 0xb883…: MPP HTTP request to https://rpc.hyperliquid.xyz/
   failed: … operation timed out`) — a boundary fault is never a bare 500;
-- **daloc's real `cctp-relay` cannot relay a real CCTP V2 message as written**
+- **the client's real `cctp-relay` cannot relay a real CCTP V2 message as written**
   (branch `feat/risk-engine-refactored-dev` @ `a400dbe`, measured 2026-10-23
   against this service with a real burn on the scratch T, and against the live
   Iris with a real mainnet burn): its scanner queues the burn keyed by
@@ -974,15 +973,15 @@ mint with the exact delta; `SOURCE`/`DESTINATION`/`AMOUNT` env-driven).
 
 | # | Fact | Coverage |
 |---|---|---|
-| A1 | fork blocks have no trie | scenario: T head `stateRoot = 0x0`; proofs impossible by design (§6) |
+| A1 | fork blocks have no trie | scenario: T head `stateRoot = 0x0`; proofs impossible by design |
 | A2 | pin byte-identical to mainnet | scenario: pin block hash T == reth; `make pin-show` |
 | A3 | block env aligned exactly | the applier sets all five context fields from the source header; an env error shows up as a probe divergence in the same block |
 | A4 | withdrawals arrive as state | the BAL carries withdrawal recipients' post-balances; the applier writes them like any other balance change |
 | A5 | in-block-funded txs need the flag | `--disable-pool-balance-checks` in the anvil deployment |
 | A6 | devnet txs are never mixed with the source's writes | the prepend rule (own block, `last+1`), asserted by the scenario |
 | A7 | blob data is not executed | the applier never fetches sidecars (blob txs execute by versioned hash); the CL keeps custody |
-| A8 | apply is source-fetch-bound | `mirror_last_apply_seconds`; the local reth keeps it ~1 s/block even cold (remote measured 55-256 s) |
-| A9 | sampled parity catches the A17 class | `drift.jsonl` anomaly entries + `mirror_full_sweep_mismatches_total` with the sweep on |
+| A8 | apply is source-fetch-bound | `diorama_last_apply_seconds`; the local reth keeps it ~1 s/block even cold (remote measured 55-256 s) |
+| A9 | sampled parity catches the A17 class | `drift.jsonl` anomaly entries + `diorama_full_sweep_mismatches_total` with the sweep on |
 | A10 | T exposes the source's logs only through reth | T executes only devnet txs; parent-block logs live in reth (within its 10,064-block window) |
 | A11 | `deal` writes storage silently | scenario: a WETH deal sets the balance with **no** Transfer log; the same probe finds USDC's packed `balanceAndBlacklistStates` slot (the sentinel stays below 2^255 so packed reads return it unmasked) |
 | A12 | exactly one T block per parent block | scenario head parity + `anvil_mine(1)` |
@@ -990,14 +989,14 @@ mint with the exact delta; `SOURCE`/`DESTINATION`/`AMOUNT` env-driven).
 | A14 | warm restart preserves state | anvil `--state` removed (13 GB dumps, leaked tmp dirs, filled T's PVC); a fresh pin re-applies the pin window and the epoch rule restores the recorded writes at the *same* pin (a moved base clears them - plan 2.2/6.3; measured: a +30d time-travel write came back as a future `lastUpdateTimestamp` and every Aave supply panicked with an underflow) |
 | A15 | memory bounded by restart | anvil-t steady state ~6.5 GB after a session of drills; recycles at the 16Gi limit |
 | A16 | upstream reorgs detected | parent-hash continuity check; the applier continues on the new branch (absolute writes self-heal) |
-| A17 | fork block hashes differ | inherent (verified: anvil exposes no blockhash/beacon-root setter); sampled parity records the class and the next block's absolute writes re-converge the state. Measured: ~45% of blocks carry such a mismatch, `mirror_t_convergence_failures_total` stays 0 in steady state |
+| A17 | fork block hashes differ | inherent (verified: anvil exposes no blockhash/beacon-root setter); sampled parity records the class and the next block's absolute writes re-converge the state. Measured: ~45% of blocks carry such a mismatch, `diorama_t_convergence_failures_total` stays 0 in steady state |
 | A18 | delivery is event-driven | consumers subscribe to anvil T WS (`eth_subscribe`) |
 | A19 | scoped manipulation leaves parity intact | scenario: a shadowed slot survives further parent diffs; unshadow re-syncs from reth; T's probes skip the shadowed target |
 | A20 | journal round-trip is faithful | scenario: snapshot/revert + `/admin/rewind` restore T's cursor and re-apply cleanly |
 
 ### The market-impact chain, measured live on T (2026-10-23)
 
-The §4.5 invariants were run end-to-end against the running stack: a real
+The market-impact invariants were run end-to-end against the running stack: a real
 Uniswap V3 swap on the **watched** USDC/WETH 0.05% pool (50 WETH → 119,608
 USDC, fee 500, via the canonical SwapRouter; the actor and its WETH came from
 `/admin/deal`). Measured:
@@ -1029,7 +1028,7 @@ and closed with it: a bare `{clear: true}` with no keys silently returned
 `resynced_keys: 0` — it now refuses, naming `slots` / `account_fields` /
 `all`.
 
-### The same axioms on the Venue Mirror (plan §12.6)
+### The same axioms on the Venue Mirror
 
 The venue mirror shares the substrate axioms by **construction** (`crates/anvil` +
 `crates/devnet` are literally the same modules) and drops the replay axioms by **chain nature**
@@ -1049,7 +1048,7 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   V: absolute writes that raise, lower and drain to 0 — on the real USDC proxy and a slot-0 mock
   alike). The one trap is the argument order: foundry's is `(account, token, amount)`, and the
   reversed order reports "no slot found" — the earlier "fails on forks" measurement was that
-  artifact, not the chain. daloc's `deal_erc20` / `add_erc20` / drain paths therefore work
+  artifact, not the chain. The client's `deal_erc20` / `add_erc20` / drain paths therefore work
   **unchanged**; the mirror's `POST /admin/deal` is the equivalent faucet its own scripts use
   (measured: slot 9 discovered, 200 USDC landed).
 - **The real HyperEVM USDC blacklists its own system address** (`isBlacklisted(0x2000…0) == true`,
@@ -1060,9 +1059,9 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   one log-emitting tx (a WETH/WHYPE `deposit()`) delivered **3 newHeads + 1 log on T and on V**.
   **Re-tested on the *live* T (read-only, 2026-10-23): 4 `newHeads` in 50 s** (the applier mines
   every ~12 s) and **0 `logs`** — the earlier live-T silence was a no-mining window, not the WS,
-  and 0 logs is by design (the applied blocks carry no txs; §A18). Their scanner's logs-filter +
+  and 0 logs is by design (the applied blocks carry no txs; A18). Their scanner's logs-filter +
   HTTP backup is unaffected either way.
-  **§17.4's logs acceptance, closed on scratch T (2026-10-23)**: a `cast logs --subscribe`
+  **The logs acceptance, closed on scratch T (2026-10-23)**: a `cast logs --subscribe`
   subscriber on the WETH address (their filter) stayed connected while a devnet tx emitted a
   `Transfer` — the log was delivered (block 26253639, `logIndex 0`), so the anomaly does not
   persist after an anvil restart; the HTTP backup stays the fallback for empty blocks.
@@ -1073,7 +1072,7 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
   a range reaching below the fork pin is forwarded to reth, which refuses above its 20 000-result
   cap with `query exceeds max results …, retry with the range …` — a wording their detector's
   `range`+`exceed` pattern already matches.
-- **The hook (credit-carrying) lane is proven live** (§15.5's acceptance, measured
+- **The hook (credit-carrying) lane is proven live** (the acceptance, measured
   2026-10-23 on the scratch stack): a burn with `hookData = USDC(20) ‖ approve(spender, 1)`
   and `destinationCaller` = the wrapper was relayed through the wrapper; one relay tx
   produced the mint (**5,000,000 at the wrapper**) *and* the encoded call
@@ -1094,15 +1093,15 @@ Measured on the scratch stacks (2026-10-22) — facts an integration run can rel
 - **Negative equity flows end-to-end** (the master plan's venue-term requirement): seeding
   `totalRawUsd = -80000` with a long BTC position and crashing the mark served signed
   `accountValue = -2771.65…`; the next evaluation (an account read, the 1 Hz tick, or `advance` —
-  §14.8's read-time evaluation) liquidated it, and the bare negative balance
+  the read-time evaluation) liquidated it, and the bare negative balance
   (`-2784.00…`, zero positions) still served — and the identity counter stayed 0, so the gated
   read passes negative values through.
-- **The bridge burns sub-wei remainders like the real chain** (plan §16.3): EVM→Core credits floor
+- **The bridge burns sub-wei remainders like the real chain**: EVM→Core credits floor
   at the Core wei, Core→EVM floors at the EVM wei — a non-round amount transfers with the dust
   burned instead of being refused. Unit-tested (`sub_wei_remainders_are_floored_not_refused`).
 - **Pass-through reads spend the rate budget**: an untouched account's `/info` is forwarded to the
   live venue and accounted at the conservative heavy weight, so test reads and the poller share one
-  budget (plan §18.3).
+  budget.
 - **The venue's hand-back needs a fresh pin**: `/admin/shadow {clear}` re-syncs the source's truth
   at the pin, and the public RPC serves its *latest* state for `eth_call` (measured — the block
   parameter is ignored), so the re-sync is refused while the pin lags the source head. The refusal

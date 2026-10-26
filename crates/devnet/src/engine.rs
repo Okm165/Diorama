@@ -17,8 +17,8 @@ use crate::scan::ScanWalk;
 use crate::spine::Mirror;
 use axum::response::IntoResponse;
 use futures_util::future::BoxFuture;
-use mirror_anvil::Rpc;
-use mirror_config::EngineSection;
+use diorama_anvil::Rpc;
+use diorama_config::EngineSection;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -225,7 +225,7 @@ pub fn selftest_banner(name: &str, rpc: &str, anvil: &str, pin: u64, unit: &str)
 }
 
 /// The selftest verdict: named, so a caller's `Verdict::Failed` reads as the
-/// decision it is (the exit code is [`mirror_config::boot::exit_verdict`]'s;
+/// decision it is (the exit code is [`diorama_config::boot::exit_verdict`]'s;
 /// the printed line is the human spelling, one spelling).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -255,7 +255,7 @@ pub fn build_clients(
     source_url: &str,
     target_url: &str,
     timeout: std::time::Duration,
-) -> mirror_anvil::Result<(std::sync::Arc<Rpc>, std::sync::Arc<Rpc>)> {
+) -> diorama_anvil::Result<(std::sync::Arc<Rpc>, std::sync::Arc<Rpc>)> {
     Ok((
         std::sync::Arc::new(Rpc::new(source_url, timeout)?),
         std::sync::Arc::new(Rpc::new(target_url, timeout)?),
@@ -315,7 +315,7 @@ impl<'a> FollowStatus<'a> {
     /// One line when `interval_ms` has passed since `last` (a ms stamp the
     /// caller owns).
     pub fn log_if_due(&self, mirror: &str, last: &mut u64, interval_ms: u64) {
-        let now = mirror_config::boot::now_ms();
+        let now = diorama_config::boot::now_ms();
         if now.saturating_sub(*last) < interval_ms {
             return;
         }
@@ -375,7 +375,7 @@ pub trait EngineService: Engine {
     /// (`wiring_label`). The profiles implement the two hooks, not this
     /// method.
     fn require_wiring(
-        cfg: &mirror_config::Instance,
+        cfg: &diorama_config::Instance,
         unresolved: &[String],
         source_url: &str,
         target_url: &str,
@@ -399,15 +399,15 @@ pub trait EngineService: Engine {
     /// dir (the journal's ring, the CL sources, the engine API's URL and
     /// JWT). Empty by default — a profile with no extra boundaries implements
     /// only the label.
-    fn wiring_extra(cfg: &mirror_config::Instance) -> Vec<String> {
+    fn wiring_extra(cfg: &diorama_config::Instance) -> Vec<String> {
         let _ = cfg;
         Vec::new()
     }
     /// The instance's endpoints for this engine (source, target).
-    fn urls(cfg: &mirror_config::Instance) -> Result<(String, String), Self::Error>;
+    fn urls(cfg: &diorama_config::Instance) -> Result<(String, String), Self::Error>;
     /// The context assembly.
     fn context(
-        cfg: mirror_config::Instance,
+        cfg: diorama_config::Instance,
         source_url: &str,
         target_url: &str,
     ) -> Result<Self, Self::Error>;
@@ -427,7 +427,7 @@ pub trait EngineService: Engine {
 /// references instead of failing on them; this engine's own sections are then
 /// required by name (via the profile's [`EngineService::require_wiring`]).
 pub async fn run_engine<S: EngineService>(config: std::path::PathBuf) -> Result<(), S::Error> {
-    let (cfg, unresolved) = mirror_config::Instance::inspect(&config)?;
+    let (cfg, unresolved) = diorama_config::Instance::inspect(&config)?;
     let (source_url, target_url) = S::urls(&cfg)?;
     S::require_wiring(&cfg, &unresolved, &source_url, &target_url)?;
     let ctx = Arc::new(S::context(cfg, &source_url, &target_url)?);
@@ -443,16 +443,16 @@ pub async fn run_engine<S: EngineService>(config: std::path::PathBuf) -> Result<
 /// pipeline, and exit with its verdict (the k8s Jobs read the exit code).
 pub async fn selftest_entry<E, C, F>(config: &std::path::Path, check: C, run: F) -> Result<(), E>
 where
-    E: From<mirror_config::ConfigError>,
-    C: FnOnce(&mirror_config::Instance, &[String]) -> Result<(), E>,
-    F: FnOnce(mirror_config::Instance) -> BoxFuture<'static, Result<Verdict, E>>,
+    E: From<diorama_config::ConfigError>,
+    C: FnOnce(&diorama_config::Instance, &[String]) -> Result<(), E>,
+    F: FnOnce(diorama_config::Instance) -> BoxFuture<'static, Result<Verdict, E>>,
 {
-    let (cfg, unresolved) = mirror_config::Instance::inspect(config)?;
+    let (cfg, unresolved) = diorama_config::Instance::inspect(config)?;
     check(&cfg, &unresolved)?;
     let verdict = run(cfg).await?;
     // The exit-code boundary (the runner's own currency); the decision itself
     // is the named verdict.
-    mirror_config::boot::exit_verdict(matches!(verdict, Verdict::Passed));
+    diorama_config::boot::exit_verdict(matches!(verdict, Verdict::Passed));
 }
 
 /// The boot wiring check both engines share: every value the instance
@@ -460,12 +460,12 @@ where
 /// state dir, and `extra` (the boundaries only that profile builds).
 /// `Ok(())` when the instance has no engine section (nothing to check).
 pub fn require_engine_wiring(
-    cfg: &mirror_config::Instance,
+    cfg: &diorama_config::Instance,
     unresolved: &[String],
     what: &'static str,
     endpoints: &[&str],
     extra: &[&str],
-) -> Result<(), mirror_config::ConfigError> {
+) -> Result<(), diorama_config::ConfigError> {
     let Some(engine) = cfg.services.engine.as_ref() else {
         return Ok(());
     };
@@ -473,7 +473,7 @@ pub fn require_engine_wiring(
     let mut values: Vec<&str> = endpoints.to_vec();
     values.push(&state_dir);
     values.extend_from_slice(extra);
-    mirror_config::require_resolved_logged(what, &values, unresolved)
+    diorama_config::require_resolved_logged(what, &values, unresolved)
 }
 
 /// The shell's error contract: the conversions the shared helpers need (the
@@ -483,9 +483,9 @@ pub trait ShellError:
     std::error::Error
     + IntoResponse
     + From<crate::Error>
-    + From<mirror_anvil::Error>
+    + From<diorama_anvil::Error>
     + From<ShellFault>
-    + From<mirror_config::ConfigError>
+    + From<diorama_config::ConfigError>
     + Send
     + 'static
 {
@@ -555,7 +555,7 @@ pub async fn assert_chain<E: Engine>(
             want: chain_id,
         }));
     }
-    ctx.target().anvil_set_automine(mirror_anvil::Automine::Off).await?;
+    ctx.target().anvil_set_automine(diorama_anvil::Automine::Off).await?;
     Ok(())
 }
 
@@ -597,7 +597,7 @@ pub fn spawn_http<E: Engine>(ctx: &Arc<E>, router: axum::Router) -> tokio::task:
 /// The service's shutdown tail: wait for the signal, abort the loops. Every
 /// mutation persists as it happens, so there is nothing to drain.
 pub async fn shutdown(tasks: Vec<tokio::task::JoinHandle<()>>) {
-    mirror_config::boot::shutdown_signal().await;
+    diorama_config::boot::shutdown_signal().await;
     tracing::info!("shutdown signal received");
     for t in tasks {
         t.abort();

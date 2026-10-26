@@ -1,7 +1,7 @@
 //! The CCTP boundary's error taxonomy (boundary-discipline).
 //!
 //! Three vocabularies compose here: the config loader's, the JSON-RPC
-//! boundary's ([`mirror_anvil::Error`], which itself separates a node's typed
+//! boundary's ([`diorama_anvil::Error`], which itself separates a node's typed
 //! refusal from a transport fault), and this crate's own chain-side facts:
 //!
 //! - a **wiring** mismatch (chain id, `localDomain`, message version) is a
@@ -19,10 +19,10 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Config(#[from] mirror_config::ConfigError),
+    Config(#[from] diorama_config::ConfigError),
 
     #[error(transparent)]
-    Rpc(mirror_anvil::Error),
+    Rpc(diorama_anvil::Error),
 
     #[error("{what}: {path}")]
     Io {
@@ -130,10 +130,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// name here ([`Error::Abi`]), so the boundaries that read *absence* from a
 /// node refusal (`probe_min_fee`) never read a decode fault as absence too.
 /// Every other anvil fault is the transparent [`Error::Rpc`].
-impl From<mirror_anvil::Error> for Error {
-    fn from(e: mirror_anvil::Error) -> Self {
+impl From<diorama_anvil::Error> for Error {
+    fn from(e: diorama_anvil::Error) -> Self {
         match e {
-            mirror_anvil::Error::Abi { what, source } => Error::Abi { what, source },
+            diorama_anvil::Error::Abi { what, source } => Error::Abi { what, source },
             other => Error::Rpc(other),
         }
     }

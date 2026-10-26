@@ -11,10 +11,10 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: venue-selftest
-  namespace: venue-mirror
+  namespace: diorama-venue
   labels:
     app.kubernetes.io/name: venue-selftest
-    app.kubernetes.io/part-of: venue-mirror
+    app.kubernetes.io/part-of: diorama-venue
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 7200
@@ -22,7 +22,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: venue-selftest
-        app.kubernetes.io/part-of: venue-mirror
+        app.kubernetes.io/part-of: diorama-venue
     spec:
       restartPolicy: Never
       initContainers:
@@ -74,7 +74,7 @@ spec:
             requests: { cpu: "250m", memory: 256Mi }
             limits: { memory: 2Gi }
         - name: engine
-          image: localhost/venue-engine:v1
+          image: localhost/diorama-venue-engine:v1
           imagePullPolicy: IfNotPresent
           args:
             - selftest
@@ -90,7 +90,7 @@ spec:
           # its state root is an ephemeral path in this pod, which is what a
           # scratch run wants.
           envFrom:
-            - configMapRef: { name: mirror-config }
+            - configMapRef: { name: diorama-config }
           volumeMounts:
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
           resources:

@@ -11,16 +11,16 @@
 use crate::error::{Error, Result};
 use crate::metrics::VenueMetrics;
 use futures_util::future::BoxFuture;
-use mirror_anvil::Rpc;
-use mirror_config::{ChainVenue, EngineSection};
-use mirror_devnet::drift::Drift;
-use mirror_devnet::engine::{Engine, EngineCore};
-use mirror_devnet::metrics::Registry as _;
-use mirror_devnet::plane::Plane;
-use mirror_devnet::probes::ProbeOutcome;
-use mirror_devnet::scan::ScanWalk;
-use mirror_devnet::source::Source;
-use mirror_devnet::spine::Mirror;
+use diorama_anvil::Rpc;
+use diorama_config::{ChainVenue, EngineSection};
+use diorama_devnet::drift::Drift;
+use diorama_devnet::engine::{Engine, EngineCore};
+use diorama_devnet::metrics::Registry as _;
+use diorama_devnet::plane::Plane;
+use diorama_devnet::probes::ProbeOutcome;
+use diorama_devnet::scan::ScanWalk;
+use diorama_devnet::source::Source;
+use diorama_devnet::spine::Mirror;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +36,7 @@ pub struct Ctx {
     pub(crate) anvil_v: Arc<Rpc>,
     /// The fork source V derives from (the unshadow re-sync truth at the pin).
     pub(crate) source_rpc: Arc<Rpc>,
-    /// V's fork pin ([`mirror_devnet::pin::PIN_UNRESOLVED`] until the
+    /// V's fork pin ([`diorama_devnet::pin::PIN_UNRESOLVED`] until the
     /// driver's reconcile resolves it): the anchor the pinned source reads at
     /// (V's base state *is* the source's state at the pin) and the driver's
     /// epoch key. Shared with the source, set by the driver's reconcile.
@@ -70,12 +70,12 @@ impl Ctx {
     /// Build the context. Every boundary that must exist for the driver to be
     /// correct is fallible here (clients, state files): a missing boundary is
     /// a boot error naming it, never a degraded start.
-    pub fn new(mut cfg: mirror_config::Instance, source_url: &str, v_url: &str) -> Result<Self> {
+    pub fn new(mut cfg: diorama_config::Instance, source_url: &str, v_url: &str) -> Result<Self> {
         let (chain, engine) = cfg.take_venue()?;
         let plane = Plane::from_engine(&engine)?;
         let drift = Drift::from_engine(&engine)?;
         // A fixed, generous budget: V's chain is a local anvil.
-        let (source_rpc, anvil_v) = mirror_devnet::engine::build_clients(
+        let (source_rpc, anvil_v) = diorama_devnet::engine::build_clients(
             source_url,
             v_url,
             Duration::from_secs(30),
@@ -107,7 +107,7 @@ impl Ctx {
     }
 }
 
-/// The shell's view of this context (`mirror_devnet::engine::Engine`): the
+/// The shell's view of this context (`diorama_devnet::engine::Engine`): the
 /// facts that differ, in one place — the chain (V), the source URL, the
 /// journal semantics (the engine's own writes), the probes, the counters,
 /// the status document, and the metric exposition. The admin surface, the

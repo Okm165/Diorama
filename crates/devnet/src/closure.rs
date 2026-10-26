@@ -17,7 +17,7 @@
 //!   WETH (slot 3): holder `0x28C6…1d60` ⇒ slot `0xdca77c…a94e`, and the
 //!   storage word equals `balanceOf` exactly.
 use alloy_primitives::{Address, B256, Bytes, Log, U256};
-use mirror_anvil::{Key, Write};
+use diorama_anvil::{Key, Write};
 use std::collections::{HashMap, HashSet};
 
 /// The window's touches as a source can report them: the addresses and logs
@@ -103,9 +103,9 @@ impl KeyClosure for FixedSlots {
 /// This is the layout every Solidity mapping has (the compiler hashes the
 /// concatenation of the key and the slot, both left-padded to 32 bytes);
 /// verified live against WETH's `balanceOf` (see the module docs). The
-/// preimage rule lives once, in `mirror_anvil::mapping_slot_word`.
+/// preimage rule lives once, in `diorama_anvil::mapping_slot_word`.
 pub fn mapping_slot(key: B256, base_slot: U256) -> U256 {
-    mirror_anvil::mapping_slot_word(key, base_slot)
+    diorama_anvil::mapping_slot_word(key, base_slot)
 }
 
 /// Mapping slots derived from one indexed log topic (ERC20/ERC721 balances,
@@ -190,7 +190,7 @@ fn push_new(out: &mut Vec<Key>, seen: &mut HashSet<Key>, keys: impl IntoIterator
 /// The declared closures from config: fixed slot sets and topic-mapped
 /// mapping slots. Empty config = watch-only follow (the watchlist's account
 /// fields; the composer's audit counts every uncovered emitter).
-pub fn closures(section: &mirror_config::ClosuresSection) -> Vec<Box<dyn KeyClosure>> {
+pub fn closures(section: &diorama_config::ClosuresSection) -> Vec<Box<dyn KeyClosure>> {
     let mut out: Vec<Box<dyn KeyClosure>> = Vec::new();
     let mut fixed = FixedSlots::new();
     for spec in &section.fixed {
@@ -213,7 +213,7 @@ pub fn closures(section: &mirror_config::ClosuresSection) -> Vec<Box<dyn KeyClos
 /// closure's keys (fixed slots per contract, the mapping contracts' accounts).
 pub fn watch_set(
     accounts: HashSet<Address>,
-    section: &mirror_config::ClosuresSection,
+    section: &diorama_config::ClosuresSection,
 ) -> crate::cow::WatchSet {
     let mut watch = crate::cow::WatchSet::new(accounts);
     for spec in &section.fixed {
@@ -385,19 +385,19 @@ mod tests {
     fn closures_build_fixed_then_mapped_from_config() {
         let fixed_contract = Address::repeat_byte(0xaa);
         let mapped = Address::repeat_byte(0xbb);
-        let section = mirror_config::ClosuresSection {
-            fixed: vec![mirror_config::FixedSlotsSpec {
+        let section = diorama_config::ClosuresSection {
+            fixed: vec![diorama_config::FixedSlotsSpec {
                 contract: fixed_contract,
                 slots: vec![U256::from(1), U256::from(2)],
             }],
-            mappings: vec![mirror_config::MappingSpec {
+            mappings: vec![diorama_config::MappingSpec {
                 contract: mapped,
                 base_slot: U256::from(3),
                 topic_index: 2,
             }],
         };
         assert_eq!(closures(&section).len(), 2);
-        assert!(closures(&mirror_config::ClosuresSection::default()).is_empty());
+        assert!(closures(&diorama_config::ClosuresSection::default()).is_empty());
     }
 
     /// The watch set folds the same declarations: the mapping contract is
@@ -408,12 +408,12 @@ mod tests {
         let fixed_contract = Address::repeat_byte(0xaa);
         let mapped = Address::repeat_byte(0xbb);
         let watched = Address::repeat_byte(0xcc);
-        let section = mirror_config::ClosuresSection {
-            fixed: vec![mirror_config::FixedSlotsSpec {
+        let section = diorama_config::ClosuresSection {
+            fixed: vec![diorama_config::FixedSlotsSpec {
                 contract: fixed_contract,
                 slots: vec![U256::from(1)],
             }],
-            mappings: vec![mirror_config::MappingSpec {
+            mappings: vec![diorama_config::MappingSpec {
                 contract: mapped,
                 base_slot: U256::from(3),
                 topic_index: 2,
@@ -428,7 +428,7 @@ mod tests {
             .slots
             .get(&fixed_contract)
             .is_some_and(|slots| slots.contains(&U256::from(1))));
-        let bare = watch_set(HashSet::new(), &mirror_config::ClosuresSection::default());
+        let bare = watch_set(HashSet::new(), &diorama_config::ClosuresSection::default());
         assert!(bare.accounts.is_empty());
     }
 }

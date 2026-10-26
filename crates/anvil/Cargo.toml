@@ -1,5 +1,5 @@
 [package]
-name = "mirror-anvil"
+name = "diorama-anvil"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

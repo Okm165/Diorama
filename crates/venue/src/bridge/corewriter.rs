@@ -1,4 +1,4 @@
-//! The CoreWriter action stream decoder (docs-measured, plan §7.4).
+//! The CoreWriter action stream decoder (docs-measured).
 //!
 //! A call to the system contract `0x3333…3333` carries one action:
 //! `byte 1 = encoding version (1)`, `bytes 2–4 = action id (u24 BE)`, then the

@@ -2,8 +2,8 @@
 //! one env read besides the loader's), the measured worker stack budget, and
 //! the fatal-error report.
 //!
-//! One home so the four binaries (`mainnet-engine`, `venue-engine`,
-//! `venue-sim`, `cctp-bridge`) cannot drift: the measured facts below are the
+//! One home so the four binaries (`diorama-mainnet-engine`,
+//! `diorama-venue-engine`, `diorama-venue-sim`, `diorama-cctp-bridge`) cannot drift: the measured facts below are the
 //! engine's, and the others inherit them deliberately — one budget for every
 //! binary is one thing to know.
 use std::error::Error as StdError;
@@ -24,7 +24,7 @@ pub(crate) const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 /// (a compile-time fact, not a runtime test).
 const _: () = assert!(WORKER_STACK_SIZE >= 8 * 1024 * 1024);
 
-/// Install the tracing subscriber. `MIRROR_LOG_JSON` selects the JSON form
+/// Install the tracing subscriber. `DIORAMA_LOG_JSON` selects the JSON form
 /// (any value but `0`); `RUST_LOG` filters (default `info`).
 ///
 /// This is the one env read outside the config loader — a *logging* concern,
@@ -33,7 +33,7 @@ const _: () = assert!(WORKER_STACK_SIZE >= 8 * 1024 * 1024);
 pub fn init_logging() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("MIRROR_LOG_JSON").map(|v| v != "0").unwrap_or(false);
+    let json = std::env::var("DIORAMA_LOG_JSON").map(|v| v != "0").unwrap_or(false);
     if json {
         fmt().with_env_filter(filter).json().init();
     } else {

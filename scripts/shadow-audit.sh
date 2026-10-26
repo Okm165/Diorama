@@ -42,8 +42,8 @@
 set -euo pipefail
 
 CAST="${CAST:-cast}"
-NS_V="${NS_V:-venue-mirror}"
-NS_T="${NS_T:-mainnet-mirror}"
+NS_V="${NS_V:-diorama-venue}"
+NS_T="${NS_T:-diorama-mainnet}"
 PROBE_ACCOUNT="${PROBE_ACCOUNT:-0x0000000000000000000000000000000000000a11}"
 DEAL_AMOUNT="${DEAL_AMOUNT:-12345678}"
 COW_WAIT="${COW_WAIT:-50}"
@@ -72,7 +72,7 @@ PROBE_ACCOUNT_B="${PROBE_ACCOUNT_B:-0x0000000000000000000000000000000000000a12}"
 SCAN_SENDER="${SCAN_SENDER:-0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266}"
 SCAN_VALUE_WEI="${SCAN_VALUE_WEI:-10000000000000000}"
 USDC_V="0xb88339CB7199b77E23DB6E890353E22632Ba630f"
-SRC_T="http://reth.mainnet-mirror.svc.cluster.local:8545"
+SRC_T="http://reth.diorama-mainnet.svc.cluster.local:8545"
 SRC_V="https://rpc.hyperliquid.xyz/evm"
 
 pass=0; fail=0
@@ -133,13 +133,13 @@ audit_mirror() { # audit_mirror <ns> <label> <anvil_url> <src_url> <usdc>
 
   # --- C. the COW hold across a follow window / an applier pass ---
   local failures_before failures_after
-  failures_before=$(metric "$ns" "$( [ "$ns" = "$NS_V" ] && echo venue_probe_failures_total || echo mirror_probe_failures_total )")
+  failures_before=$(metric "$ns" "$( [ "$ns" = "$NS_V" ] && echo venue_probe_failures_total || echo diorama_probe_failures_total )")
   failures_before=${failures_before:-0}
   echo "  waiting ${COW_WAIT}s for a follow window / applier pass with the divergent value..."
   sleep "$COW_WAIT"
   local held; held=$(balance_of "$ns" "$anvil" "$usdc" "$PROBE_ACCOUNT")
   check "${label}: the devnet's truth survives the pass (COW hold: ${held})" "$( [ "$held" = "$DEAL_AMOUNT" ] && echo 1 || echo 0 )"
-  failures_after=$(metric "$ns" "$( [ "$ns" = "$NS_V" ] && echo venue_probe_failures_total || echo mirror_probe_failures_total )")
+  failures_after=$(metric "$ns" "$( [ "$ns" = "$NS_V" ] && echo venue_probe_failures_total || echo diorama_probe_failures_total )")
   failures_after=${failures_after:-0}
   check "${label}: the parity skipped the devnet-owned account (no new failures: ${failures_before} -> ${failures_after})" "$( [ "$failures_after" -le "$failures_before" ] && echo 1 || echo 0 )"
 
@@ -186,7 +186,7 @@ print(json.loads(s).get('cleared', 'cleared') if s.startswith('{') else '(refuse
     check "${label}: every sampled key read back the composed value" "$( [ "$sampled_ok" -ge "$sampled" ] && echo 1 || echo 0 )"
   else
     local conv
-    conv=$(metric "$ns" mirror_t_convergence_ok_total)
+    conv=$(metric "$ns" diorama_t_convergence_ok_total)
     echo "  BAL: t_convergence_ok=${conv} (the applier's applied-block parity)"
   fi
 
@@ -418,7 +418,7 @@ rewind_hand_back() {
   local waited=0 recovered=0
   while [ "$waited" -lt 90 ]; do
     local last_failed cur
-    last_failed=$(metric "$ns" mirror_t_convergence_last_failed)
+    last_failed=$(metric "$ns" diorama_t_convergence_last_failed)
     cur=$(eget "$ns" /status | json "d.get('cursor')")
     if [ "${last_failed:-1}" = "0" ] && [ "${cur:-0}" -ge "$c1" ]; then recovered=1; break; fi
     sleep 5; waited=$((waited+5))

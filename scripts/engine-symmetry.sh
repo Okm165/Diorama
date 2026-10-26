@@ -3,8 +3,8 @@
 # answer the shared verbs identically (status + shape), expose the shared
 # admin gauges, and keep exactly the documented absences.
 #
-# The design rule it enforces (plan §11.3): the admin *semantics* live in
-# `mirror-devnet` and both engines classify them the same way; a new refusal
+# The design rule it enforces: the admin *semantics* live in
+# `diorama-devnet` and both engines classify them the same way; a new refusal
 # variant or a renamed field must land on both sides in one commit.
 #
 # Run from the repo root:
@@ -17,8 +17,8 @@
 #                                                # USDC); see the deal check.
 set -euo pipefail
 
-NS_T="${NS_T:-mainnet-mirror}"
-NS_V="${NS_V:-venue-mirror}"
+NS_T="${NS_T:-diorama-mainnet}"
+NS_V="${NS_V:-diorama-venue}"
 USDC_T="${USDC_T:-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48}"
 USDC_V="${USDC_V:-0xb88339CB7199B77E23DB6E890353E22632Ba630f}"
 ACCT="${ACCT:-0x00000000000000000000000000000000000000f1}"
@@ -115,10 +115,10 @@ LAST_PATH=/healthz
 ht=$(fetch t); hv=$(fetch v)
 LAST_PATH=/metrics
 fetch t >/dev/null; fetch v >/dev/null
-g_t=$(awk '/^mirror_halted /{print $2}' /tmp/sym-t.out)
-g_v=$(awk '/^mirror_halted /{print $2}' /tmp/sym-v.out)
+g_t=$(awk '/^diorama_halted /{print $2}' /tmp/sym-t.out)
+g_v=$(awk '/^diorama_halted /{print $2}' /tmp/sym-v.out)
 if [ "$h_t" = "True" ] && [ "$h_v" = "True" ] && [ "$ht" = "$hv" ] && [ "$g_t" = "1" ] && [ "$g_v" = "1" ]; then
-  ok "pause holds both (halted, /healthz $ht, mirror_halted 1)"
+  ok "pause holds both (halted, /healthz $ht, diorama_halted 1)"
 else
   bad "pause effect: halted T=$h_t V=$h_v /healthz T=$ht V=$hv gauge T=$g_t V=$g_v"
 fi
@@ -231,7 +231,7 @@ fi
 echo "-- the shared gauges in /metrics"
 LAST_PATH=/metrics
 fetch t > /dev/null; fetch v > /dev/null
-for gauge in mirror_shadowed_slots mirror_halted; do
+for gauge in diorama_shadowed_slots diorama_halted; do
   has_t=$(grep -c "^$gauge" "/tmp/sym-t.out" || true)
   has_v=$(grep -c "^$gauge" "/tmp/sym-v.out" || true)
   if [ "$has_t" -ge 1 ] && [ "$has_v" -ge 1 ]; then ok "$gauge on both"; else bad "$gauge: T=$has_t V=$has_v"; fi

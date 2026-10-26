@@ -1,9 +1,9 @@
 //! The market plane's metrics: WS health, the rate budget, REST faults, and
-//! the per-coin staleness gauges (plan §5: "per-coin staleness metric").
+//! the per-coin staleness gauges ("per-coin staleness metric").
 //!
-//! The Prometheus conventions are `mirror-devnet`'s (its labeled wrappers:
+//! The Prometheus conventions are `diorama-devnet`'s (its labeled wrappers:
 //! `push_gauge`/`push_counter`), a labeled series per configured market.
-use mirror_devnet::metrics::{push_counter, push_gauge};
+use diorama_devnet::metrics::{push_counter, push_gauge};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -23,9 +23,9 @@ pub(crate) struct FeedMetrics {
     stale_ms: BTreeMap<String, AtomicU64>,
     /// Devnet-owned book levels (the order lane's consumption records): live
     /// updates keep the consumed delta — the venue analogue of
-    /// `mirror_shadowed_slots`.
+    /// `diorama_shadowed_slots`.
     owned_levels: AtomicU64,
-    /// Live book updates that met a devnet-owned level (plan §4.5.4 I2's skip
+    /// Live book updates that met a devnet-owned level (I2's skip
     /// counter).
     owned_skips: AtomicU64,
     /// Owned levels pruned because the live book no longer carries the price

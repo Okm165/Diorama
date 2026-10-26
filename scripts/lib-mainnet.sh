@@ -16,7 +16,7 @@
 #   - receipts are polled, not awaited client-side: the engine mines one T block
 #     per applied parent block (~12 s), longer while catching up.
 
-NS=${NS:-mainnet-mirror}
+NS=${NS:-diorama-mainnet}
 K="kubectl -n $NS"
 ENGINE="$K exec deploy/engine --"
 ANVIL_T="$K exec deploy/anvil-t --"

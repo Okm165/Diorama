@@ -11,7 +11,7 @@
 use crate::ctx::Ctx;
 use crate::error::Result;
 use alloy_primitives::Address;
-use mirror_devnet::metrics::Registry as _;
+use diorama_devnet::metrics::Registry as _;
 
 /// The audit's drift line: log emitters no declared closure covers (the
 /// metric counts every window; the line carries the emitters new to the log —

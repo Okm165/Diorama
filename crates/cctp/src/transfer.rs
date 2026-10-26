@@ -2,7 +2,7 @@
 //! plumbing both the relayer and the control API submit through.
 //!
 //! Every layout and signature here is the contract's own, re-verified against
-//! `circlefin/evm-cctp-contracts` and the measured forks (§15.1/§15.2):
+//! `circlefin/evm-cctp-contracts` and the measured forks:
 //!
 //! - **Header, 148 B** (`MessageV2`): version 0 · sourceDomain 4 ·
 //!   destinationDomain 8 · nonce 12 · sender 44 · recipient 76 ·
@@ -17,7 +17,7 @@
 //! The emitted `MessageSent` payload carries `EMPTY_NONCE` and
 //! `EMPTY_FINALITY_THRESHOLD_EXECUTED` (both 0) plus zero `feeExecuted` and
 //! `expirationBlock` — it is **not submittable** (the zero-nonce pre-block).
-//! The attester fills all four fields on the *served* message (§15.1/§15.3);
+//! The attester fills all four fields on the *served* message;
 //! [`Message::with_attester_fields`] is that substitution, and the signature
 //! covers the served bytes.
 use crate::chains::{Domain, MIN_FEE_MULTIPLIER};
@@ -29,12 +29,12 @@ use alloy_rpc_types_eth::{Transaction, TransactionReceipt, TransactionRequest};
 use alloy_sol_types::{sol, SolCall};
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::{RecoveryId, SigningKey};
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 sol! {
-    /// The TokenMessengerV2 surface (§15.1). `minFee`/`getMinFeeAmount` are
+    /// The TokenMessengerV2 surface. `minFee`/`getMinFeeAmount` are
     /// the revision-dependent fee surface: absent on the mainnet instance,
     /// present (`0`) on HyperEVM's — both measured, §15.2 — so the builder
     /// capability-probes them instead of assuming either.
@@ -75,7 +75,7 @@ sol! {
 
     /// The MessageTransmitterV2 surface: `receiveMessage` is the real
     /// `Attestable`-verified entry point; the getters are the boot wiring
-    /// asserts and the attester installation (§15.3).
+    /// asserts and the attester installation.
     #[derive(Debug)]
     interface IMessageTransmitterV2 {
         function receiveMessage(bytes message, bytes attestation) external returns (bool);
@@ -239,7 +239,7 @@ impl Message {
 
     /// The attester's substitution: fill the four fields the emitted message
     /// leaves empty (nonce, `finalityThresholdExecuted`, `feeExecuted`,
-    /// `expirationBlock`) — the served artifact the signature covers (§15.1).
+    /// `expirationBlock`) — the served artifact the signature covers.
     pub fn with_attester_fields(
         &self,
         nonce: B256,
@@ -264,7 +264,7 @@ fn word_at(raw: &[u8], at: usize) -> B256 {
     B256::from_slice(&raw[at..at + 32])
 }
 
-/// The measured Iris fee table (§16.2): `0→19` fast burns cost 1 unit at
+/// The measured Iris fee table: `0→19` fast burns cost 1 unit at
 /// threshold 1000, standard is free; `19→0` is free on both thresholds
 /// (HyperEVM has no fast lane — its standard attestation is already fast).
 /// `None` = the pair is not served (the Iris 404 arm).
@@ -303,12 +303,12 @@ pub(crate) fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> 
 /// relay path must check this rather than trust a status (measured
 /// 2026-10-23: a stale wrapper made a hook relay land as a no-op).
 pub(crate) async fn has_code(rpc: &Rpc, address: Address) -> Result<bool> {
-    let code: Bytes = rpc.call("eth_getCode", (address, mirror_anvil::LATEST)).await?;
+    let code: Bytes = rpc.call("eth_getCode", (address, diorama_anvil::LATEST)).await?;
     Ok(!code.is_empty())
 }
 
-/// Probe the revision-dependent min-fee surface, capability-probed at boot
-/// (§15.2): `Some(minFee)` when the node serves `minFee()`, `None` when it
+/// Probe the revision-dependent min-fee surface, capability-probed at boot:
+/// `Some(minFee)` when the node serves `minFee()`, `None` when it
 /// does not (the mainnet instance's older revision reverts). A JSON-RPC
 /// error means "no such method"; a transport or decode fault is **not**
 /// absence (boundary-discipline): it propagates, because a probe that could
@@ -667,7 +667,7 @@ mod tests {
         );
     }
 
-    /// The header and body fields land on the contract's own indices (§15.1).
+    /// The header and body fields land on the contract's own indices.
     #[test]
     fn encode_decode_round_trip_lands_on_the_contracts_index_table() {
         let raw = sample_raw_message();
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(word_at(&raw[HEADER_LEN..], BODY_EXPIRATION_BLOCK_AT), B256::ZERO);
     }
 
-    /// The reverse direction's body carries the HyperEVM burn token (§15.3).
+    /// The reverse direction's body carries the HyperEVM burn token.
     #[test]
     fn reverse_message_carries_the_hyperevm_token() {
         let raw = sample_reverse_message();
@@ -731,7 +731,7 @@ mod tests {
 
     /// The attestation encoding: 65 bytes, r ‖ s ‖ v ∈ {27, 28}, recovering
     /// the signer over `keccak256(message)` — the exact shape the on-chain
-    /// `Attestable._recoverAttesterSignature` accepts (§15.3).
+    /// `Attestable._recoverAttesterSignature` accepts.
     #[test]
     fn attestation_signs_keccak_of_the_served_message() {
         let wallet = sample_wallet();
@@ -846,7 +846,7 @@ mod tests {
         assert_eq!(decoded.attestation.len(), 65);
     }
 
-    /// The measured fee table (§16.2).
+    /// The measured fee table.
     #[test]
     fn fee_table_is_the_measured_one() {
         assert_eq!(

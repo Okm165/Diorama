@@ -95,7 +95,7 @@ pub fn push_metric_line(out: &mut String, m: &MetricLine<'_>) {
 /// series the field stores in a finer unit. The generated `render` writes the
 /// declared lines in declaration order, then the registry's computed series —
 /// the optional `computed { kind "series", "help", |m| expr; }` clause (the
-/// mainnet engine's `mirror_lag_blocks`, a difference of two fields) — and
+/// mainnet engine's `diorama_lag_blocks`, a difference of two fields) — and
 /// `impl Registry` comes with it: one definition of the convention, no
 /// hand-written render pairs.
 #[macro_export]
@@ -160,14 +160,14 @@ macro_rules! registry {
 }
 
 registry! {
-    /// The shared admin surface's gauges (plan §11.3): what the devnet plane
+    /// The shared admin surface's gauges: what the devnet plane
     /// itself owns. Each profile renders its own set beside these (the mainnet
     /// engine's `MainnetMetrics`, the venue's `VenueMetrics`), so this crate
     /// knows nothing about reth, T or the venue's chain.
     pub struct Metrics {
-        gauge shadowed_slots = "mirror_shadowed_slots", "storage slots shadowed by the devnet";
-        gauge shadowed_accounts = "mirror_shadowed_accounts", "accounts with devnet-owned keys (whole-account marks or per-slot marks)";
-        gauge halted = "mirror_halted", "1 while the driver is halted";
+        gauge shadowed_slots = "diorama_shadowed_slots", "storage slots shadowed by the devnet";
+        gauge shadowed_accounts = "diorama_shadowed_accounts", "accounts with devnet-owned keys (whole-account marks or per-slot marks)";
+        gauge halted = "diorama_halted", "1 while the driver is halted";
     }
 }
 
@@ -224,7 +224,7 @@ mod tests {
         let m = Metrics::default();
         let names = series(&m.render());
         let want: BTreeSet<String> =
-            ["mirror_halted", "mirror_shadowed_slots", "mirror_shadowed_accounts"]
+            ["diorama_halted", "diorama_shadowed_slots", "diorama_shadowed_accounts"]
             .into_iter()
             .map(String::from)
             .collect();

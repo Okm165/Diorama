@@ -16,7 +16,7 @@
 //!
 //! Everything after `compose` is shared: [`plan`] is the one call for the
 //! whole pipeline half (`compose` → [`crate::cow::filter_bal`] drops the
-//! devnet-owned keys → [`mirror_anvil::flatten_bal`] lowers the BAL to the
+//! devnet-owned keys → [`diorama_anvil::flatten_bal`] lowers the BAL to the
 //! write set), and the engines' apply/scan/parity sequences run unchanged.
 //! The window is `(from, to]`; the mainnet composes one parent block at a
 //! time, the venue composes everything since its last composed source block.
@@ -31,7 +31,7 @@ pub use alloy_eips::eip7928::BlockAccessList;
 use alloy_eips::eip7928::AccountChanges;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, Transaction};
-use mirror_anvil::{Key, Rpc, Value, Write};
+use diorama_anvil::{Key, Rpc, Value, Write};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -251,7 +251,7 @@ impl<'a> Composer<'a> {
             let shadow = shadow.lock()?;
             crate::cow::filter_bal(self.scope.watch(), &shadow, composed.bal)
         };
-        let writes = mirror_anvil::flatten_bal(&bal);
+        let writes = diorama_anvil::flatten_bal(&bal);
         Ok(WindowPlan {
             kind: composed.kind,
             total,
@@ -317,7 +317,7 @@ impl<'a> Composer<'a> {
             changed: writes.len(),
             uncovered: uncovered_emitters(self.scope, &plan, &touched),
         };
-        Ok((mirror_anvil::bal_from_writes(&writes), stats))
+        Ok((diorama_anvil::bal_from_writes(&writes), stats))
     }
 
 }
@@ -424,7 +424,7 @@ pub async fn envelope_touches(
     from: u64,
     to: u64,
     system_txs: SystemTxs,
-) -> mirror_anvil::Result<TouchedSet> {
+) -> diorama_anvil::Result<TouchedSet> {
     let mut touched = TouchedSet::default();
     if to <= from {
         return Ok(touched);
@@ -707,27 +707,27 @@ mod tests {
         fn capabilities(&self) -> Capabilities {
             self.caps.clone()
         }
-        fn head(&self) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<u64>> {
+        fn head(&self) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<u64>> {
             Box::pin(async { Ok(10) })
         }
         fn header(
             &self,
             _n: u64,
-        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
-            Box::pin(async { Err(mirror_anvil::Error::Corrupt { what: "fake", detail: "header not used".into() }) })
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<alloy_rpc_types_eth::Header>> {
+            Box::pin(async { Err(diorama_anvil::Error::Corrupt { what: "fake", detail: "header not used".into() }) })
         }
         fn balance_at(
             &self,
             _address: Address,
             _block: u64,
-        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<U256>> {
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<U256>> {
             Box::pin(async { Ok(U256::ZERO) })
         }
         fn nonce_at(
             &self,
             _address: Address,
             _block: u64,
-        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<u64>> {
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<u64>> {
             Box::pin(async { Ok(0) })
         }
         fn storage_at(
@@ -735,21 +735,21 @@ mod tests {
             _address: Address,
             _slot: U256,
             _block: u64,
-        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<B256>> {
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<B256>> {
             Box::pin(async { Ok(B256::ZERO) })
         }
         fn code_at(
             &self,
             _address: Address,
             _block: u64,
-        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<Bytes>> {
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<Bytes>> {
             Box::pin(async { Ok(Bytes::new()) })
         }
         fn read_key(
             &self,
             key: Key,
             _block: u64,
-        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<Value>> {
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<Value>> {
             self.read_keys.lock().unwrap().push(key);
             let value = self.reads.get(&key).cloned();
             Box::pin(async move { Ok(value.unwrap_or(Value::Balance(U256::ZERO))) })
@@ -757,7 +757,7 @@ mod tests {
         fn bal(
             &self,
             _n: u64,
-        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<Option<BlockAccessList>>> {
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<Option<BlockAccessList>>> {
             let bal = self.bal.clone();
             Box::pin(async move { Ok(bal) })
         }
@@ -765,7 +765,7 @@ mod tests {
             &self,
             _from: u64,
             _to: u64,
-        ) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<TouchedSet>> {
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<TouchedSet>> {
             let touched = self.touched.clone();
             Box::pin(async move { Ok(touched) })
         }
@@ -853,7 +853,7 @@ mod tests {
         assert_eq!(stats.touched, 1);
         assert_eq!(stats.planned, 3, "balance + nonce + code for the watched account");
         assert_eq!(stats.changed, 1, "only the balance differs");
-        let writes = mirror_anvil::flatten_bal(&window.bal);
+        let writes = diorama_anvil::flatten_bal(&window.bal);
         assert_eq!(writes.len(), 1);
         assert!(matches!(writes[0], Write::Balance { address, value } if address == watched && value == U256::from(500)));
     }
@@ -865,7 +865,7 @@ mod tests {
     fn verify_reads_the_whole_plan_and_counts_the_pair() {
         let a = address!("00000000000000000000000000000000000000ab");
         let b = address!("00000000000000000000000000000000000000cd");
-        let bal = mirror_anvil::bal_from_writes(&[
+        let bal = diorama_anvil::bal_from_writes(&[
             Write::Balance {
                 address: a,
                 value: U256::from(500),
@@ -931,7 +931,7 @@ mod tests {
                 .compose(&crate::cow::SkipSet::default(), Window::new(0, 1)),
             )
             .unwrap();
-        let writes = mirror_anvil::flatten_bal(&window.bal);
+        let writes = diorama_anvil::flatten_bal(&window.bal);
         assert_eq!(writes.len(), 1);
         assert!(matches!(writes[0], Write::Balance { value, .. } if value == U256::from(7)));
         // The valued balance was skipped; nonce/code were still planned (the
@@ -1003,7 +1003,7 @@ mod tests {
             "the kept write is the free account's"
         );
         assert_eq!(
-            mirror_anvil::flatten_bal(&plan.bal),
+            diorama_anvil::flatten_bal(&plan.bal),
             plan.writes,
             "the filtered BAL and the write set agree"
         );
@@ -1055,7 +1055,7 @@ mod tests {
                 .parse()
                 .unwrap();
         assert!(verify_bal_commitment(Some(spec_empty), &empty).is_ok());
-        let bal = mirror_anvil::bal_from_writes(&[Write::Balance {
+        let bal = diorama_anvil::bal_from_writes(&[Write::Balance {
             address: address!("00000000000000000000000000000000000000aa"),
             value: U256::from(7),
         }]);

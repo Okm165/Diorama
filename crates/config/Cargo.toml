@@ -1,10 +1,10 @@
 [package]
-name = "mirror-config"
+name = "diorama-config"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The mirrors' layered configuration loader + the mirror-config CLI (§19)"
+description = "The mirrors' layered configuration loader + the diorama-config CLI"
 
 [dependencies]
 alloy-primitives = { workspace = true }
@@ -16,7 +16,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # boot::shutdown_signal (SIGINT + SIGTERM: what Kubernetes actually sends).
 tokio = { workspace = true }
-# The mirror-config CLI.
+# The diorama-config CLI.
 clap = { workspace = true }
 
 [lints]

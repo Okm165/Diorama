@@ -1,10 +1,10 @@
 # 0010 — Fixture ownership: the mirror-side `fixture_addresses` list, whole-account
 
-**Status:** accepted (integration audit §14.1; both mirrors).
+**Status:** accepted (integration audit; both mirrors).
 
 ## Context
 
-daloc's fixtures write state two ways: **txs** (their mock aggregators'
+the client's fixtures write state two ways: **txs** (their mock aggregators'
 `updateAnswer`, the swap router's rate, oracle-adapter syncs — all impersonated
 txs) and **cheatcodes** (`anvil_setCode` installing `MockERC20Fixed` over the
 canonical token addresses, `setBalance`, `deal_erc20`). The shadow scanner sees
@@ -26,7 +26,7 @@ the audit showed it is unnecessary.
   `anvil_setCode`, so slot-level granularity would be a lie.
 - **No harness-side registration.** The list is complete because only *watched*
   addresses can ever be clobbered: the engine applies parent diffs to the
-  watchlist only, the canonical mocks are the watched addresses daloc replaces,
+  watchlist only, the canonical mocks are the watched addresses the client replaces,
   and everything else the harness writes targets unwatched addresses or goes
   through txs (auto-marked by the scanner).
 - The venue mirror uses the same list shape for V's fixture set (the canonical
@@ -40,6 +40,6 @@ the audit showed it is unnecessary.
   against the public RPC.
 - Hand-back (`/admin/shadow {clear}`) still applies: the fixture list is
   ownership, and ownership is reversible like any other mark.
-- A fixture address that daloc *stops* replacing keeps its parent diffs skipped
+- A fixture address the client *stops* replacing keeps its parent diffs skipped
   until the list is edited — the list is instance data, one edit moves it
-  (and `mirror-config check` + `closure-check` read the same file).
+  (and `diorama-config check` + `closure-check` read the same file).

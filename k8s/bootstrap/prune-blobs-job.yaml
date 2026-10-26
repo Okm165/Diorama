@@ -13,10 +13,10 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: lighthouse-prune-blobs
-  namespace: mainnet-mirror
+  namespace: diorama-mainnet
   labels:
     app.kubernetes.io/name: lighthouse-prune-blobs
-    app.kubernetes.io/part-of: mainnet-mirror
+    app.kubernetes.io/part-of: diorama-mainnet
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 600
@@ -24,7 +24,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: lighthouse-prune-blobs
-        app.kubernetes.io/part-of: mainnet-mirror
+        app.kubernetes.io/part-of: diorama-mainnet
     spec:
       restartPolicy: OnFailure
       containers:

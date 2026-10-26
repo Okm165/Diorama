@@ -1,4 +1,4 @@
-//! Chain facts (§15.1/§15.2): the two domains, the CCTP V2 contract addresses,
+//! Chain facts: the two domains, the CCTP V2 contract addresses,
 //! the USDC addresses, the finality constants, and the boot wiring asserts.
 //!
 //! Everything here is a **protocol constant measured on the forks**, not
@@ -14,7 +14,7 @@ use crate::transfer::{probe_min_fee, IMessageTransmitterV2, ITokenMessengerV2, I
 use alloy_chains::Chain as ChainId;
 use alloy_primitives::{address, Address, B256, U256};
 use alloy_sol_types::SolCall;
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -125,7 +125,7 @@ impl Chain {
         })
     }
 
-    /// The boot wiring asserts (§15.4): the chain must be the one the domain
+    /// The boot wiring asserts: the chain must be the one the domain
     /// pins, the message versions must match, the local transmitter must be
     /// the pinned one, and the peer's TokenMessenger must be registered
     /// before the bridge will move value. The min-fee surface is probed, not
@@ -262,7 +262,7 @@ impl Chain {
     pub async fn native_balance(&self, who: Address) -> Result<U256> {
         Ok(self
             .rpc
-            .call(mirror_anvil::ETH_GET_BALANCE, (who, mirror_anvil::LATEST))
+            .call(diorama_anvil::ETH_GET_BALANCE, (who, diorama_anvil::LATEST))
             .await?)
     }
 

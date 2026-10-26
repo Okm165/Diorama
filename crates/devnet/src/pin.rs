@@ -20,7 +20,7 @@ pub fn resolved_pin(pin: &AtomicU64) -> Option<u64> {
 
 /// The chain's own fork pin, read once (the selftests' one call): a node
 /// without a pin is the named error, never a silent default.
-pub async fn fork_pin(rpc: &mirror_anvil::Rpc, chain: &'static str) -> crate::Result<u64> {
+pub async fn fork_pin(rpc: &diorama_anvil::Rpc, chain: &'static str) -> crate::Result<u64> {
     rpc.fork_block()
         .await?
         .ok_or(crate::Error::NoForkPin { chain })

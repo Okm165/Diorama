@@ -1,5 +1,5 @@
 //! System addresses: the Core↔EVM boundary's addresses, log decoding, and
-//! the Core↔EVM amount conversion (docs-measured, plan §16.3).
+//! the Core↔EVM amount conversion (docs-measured).
 //!
 //! - a token's system address is `0x20` + the token index big-endian in the
 //!   remaining 19 bytes (token 200 → `0x20…c8`); HYPE's is `0x2222…2222`
@@ -126,7 +126,7 @@ pub(crate) fn core_to_human(wei: u64, wei_decimals: u32) -> Option<Decimal> {
 }
 
 /// A human decimal as an EVM-unit amount, floored at the EVM wei: the real
-/// chain burns the sub-wei remainder of a non-round amount (plan §16.3), so
+/// chain burns the sub-wei remainder of a non-round amount, so
 /// the bridge does the same rather than refusing a transfer the chain would
 /// complete. `None` for a negative amount or one the decimal range cannot
 /// carry (the multiply is checked: `Decimal`'s `*` panics on overflow).

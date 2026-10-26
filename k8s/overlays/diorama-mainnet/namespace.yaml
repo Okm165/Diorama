@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: diorama-mainnet
+  labels:
+    app.kubernetes.io/part-of: diorama-mainnet
+    app.kubernetes.io/name: diorama-mainnet

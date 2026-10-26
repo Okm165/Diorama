@@ -1,4 +1,4 @@
-# Global defaults for every mirror instance and service (plan §19).
+# Global defaults for every mirror instance and service.
 #
 # A value lives here iff every deployment of that service carries the same
 # number (workspace conventions: cadences, ring sizes, chunk limits). Values
@@ -61,7 +61,7 @@ urls = []
 addr = "0.0.0.0"
 
 # ---- the venue profile ----------------------------------------------------
-# The venue engine is the same `[services.engine]` section (plan §19.3): its
+# The venue engine is the same `[services.engine]` section: its
 # driver reads the shared `loops`/`journal`/`verifier` sub-sections, so the
 # cadence, write chunk and journal ring live here once for both profiles.
 
@@ -80,7 +80,7 @@ addr = "0.0.0.0"
 [services.venue_sim.control]
 addr = "0.0.0.0"
 
-# ---- the CCTP bridge (optional; either profile, §15) ----------------------
+# ---- the CCTP bridge (optional; either profile) ----------------------------
 # The bridge spans both mirrors: T (Ethereum, domain 0) and V (HyperEVM,
 # domain 19) over the real CCTP V2 contracts. Its stub is kept only when an
 # instance declares [services.cctp_bridge] (the deployment that runs it); the
@@ -91,14 +91,14 @@ addr = "0.0.0.0"
 # One watcher pass per second on each chain: new MessageSent logs + due
 # attestations.
 poll_interval_ms = 1000
-# The emulated PENDING window (§15.5): the attestation is served this many
+# The emulated PENDING window: the attestation is served this many
 # seconds after the burn (0 = immediately).
 finality_delay_secs = 0
 # The served `expirationBlock`: 0 = the message never expires; short values
 # exercise the "must be re-signed" path.
 expiration_blocks = 0
 # `eth_getLogs` range per scan call. The watcher scans the *local* anvils (T and
-# V) — the public-endpoint cap the plan measures (§17.4: 200 answers, 1000
+# V) — the public-endpoint cap (200 answers, 1000
 # rate-limits; chunk <= 50 against a public source) does not apply here, and T
 # runs `--no-rate-limit`. A public chain source would need the conservative
 # chunk.

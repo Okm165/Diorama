@@ -64,7 +64,7 @@ pub struct ChainL1 {
     pub follow: FollowHead,
     pub follow_margin_blocks: u64,
     /// Blocks between the follow head and the fork base; the single home of
-    /// the offset (anvil init containers read it via `mirror-config get`).
+    /// the offset (anvil init containers read it via `diorama-config get`).
     pub fork_offset: u64,
 }
 
@@ -151,7 +151,7 @@ impl Instance {
         self.watchlist.iter().map(|w| w.address).collect()
     }
 
-    /// Cross-validation (§19.5). Every failure names the key and the reason.
+    /// Cross-validation. Every failure names the key and the reason.
     pub fn check(&self) -> Result<(), ConfigError> {
         let mut issues = Vec::new();
         self.check_profile_coherence(&mut issues);
@@ -345,30 +345,30 @@ impl Instance {
                 )?;
                 Ok(vec![format!("FORK_OFFSET={}", l1.fork_offset)])
             }
-            "daloc" => self.daloc_env(),
+            "client" | "daloc" => self.client_env(),
             other => Err(ConfigError::Invalid {
-                issues: vec![format!("unknown section `{other}` (known: anvil, daloc)")],
+                issues: vec![format!("unknown section `{other}` (known: anvil, client)")],
             }),
         }
     }
 
-    /// The daloc-facing endpoint block (plan §7.7/§19.7): our values under
+    /// The client-facing endpoint block: our values under
     /// their names — we provide values, never rename their interface. The
     /// keys are **exactly** the `test-endpoints` ConfigMaps' spellings
     /// (`k8s/base/nodeports.yaml` for the first chain,
-    /// `k8s/overlays/venue-mirror/nodeports.yaml` for the venue's
+    /// `k8s/overlays/diorama-venue/nodeports.yaml` for the venue's
     /// `CHAIN_1_`-prefixed block): one fact, one spelling, whichever surface
     /// renders it. The chain URL is the deployment wiring (the same env the
     /// pods read); the service URLs are in-cluster DNS built from the
     /// instance's own ports, under the manifests' Service names (`engine`,
     /// `venue-sim`, `cctp-bridge` — `k8s/base/engine.yaml`, `base/venue/`).
-    fn daloc_env(&self) -> Result<Vec<String>, ConfigError> {
+    fn client_env(&self) -> Result<Vec<String>, ConfigError> {
         let mut out = match self.instance.profile {
-            Profile::Mainnet => self.daloc_env_mainnet()?,
-            Profile::Venue => self.daloc_env_venue()?,
+            Profile::Mainnet => self.client_env_mainnet()?,
+            Profile::Venue => self.client_env_venue()?,
         };
         // The bridge spans both mirrors: its Iris base is part of the block
-        // whichever profile the instance carries (plan §15.4 — the base, their
+        // whichever profile the instance carries (the base, their
         // client appends /v2/messages/... itself).
         if let Some(cctp) = &self.services.cctp_bridge {
             out.push(format!("IRIS_API_URL=http://cctp-bridge:{}", cctp.iris.port));
@@ -376,36 +376,36 @@ impl Instance {
         Ok(out)
     }
 
-    /// The mainnet profile's daloc block: the first chain's keys.
-    fn daloc_env_mainnet(&self) -> Result<Vec<String>, ConfigError> {
+    /// The mainnet profile's client block: the first chain's keys.
+    fn client_env_mainnet(&self) -> Result<Vec<String>, ConfigError> {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
-            mismatch("export-env daloc (mainnet profile) requires [services.engine]")
+            mismatch("export-env client (mainnet profile) requires [services.engine]")
         })?;
         let t_url = engine.anvil.target_url.as_deref().ok_or_else(|| {
             mismatch(
-                "export-env daloc (mainnet profile) requires [services.engine.anvil].target_url",
+                "export-env client (mainnet profile) requires [services.engine.anvil].target_url",
             )
         })?;
         let t = resolved("ANVIL_T_URL", t_url)?;
         Ok(vec![
             format!("CHAIN_RPC_URL={t}"),
             format!("CHAIN_WS_URL={}", ws_of(&t)),
-            format!("MIRROR_ADMIN_URL=http://engine:{}", engine.http.port),
+            format!("DIORAMA_ADMIN_URL=http://engine:{}", engine.http.port),
         ])
     }
 
-    /// The venue profile's daloc block: the `CHAIN_1_`-prefixed second-chain
+    /// The venue profile's client block: the `CHAIN_1_`-prefixed second-chain
     /// keys and the simulator's URLs.
-    fn daloc_env_venue(&self) -> Result<Vec<String>, ConfigError> {
+    fn client_env_venue(&self) -> Result<Vec<String>, ConfigError> {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
-            mismatch("export-env daloc (venue profile) requires [services.engine]")
+            mismatch("export-env client (venue profile) requires [services.engine]")
         })?;
         let v_url = engine.anvil.target_url.as_deref().ok_or_else(|| {
-            mismatch("export-env daloc (venue profile) requires [services.engine.anvil].target_url")
+            mismatch("export-env client (venue profile) requires [services.engine.anvil].target_url")
         })?;
         let v = resolved("ANVIL_V_URL", v_url)?;
         let sim = self.services.venue_sim.as_ref().ok_or_else(|| {
-            mismatch("export-env daloc (venue profile) requires [services.venue_sim]")
+            mismatch("export-env client (venue profile) requires [services.venue_sim]")
         })?;
         Ok(vec![
             format!("CHAIN_1_CHAIN_RPC_URL={v}"),
@@ -426,7 +426,7 @@ fn resolved(name: &str, value: &str) -> Result<String, ConfigError> {
     if value.contains("${") {
         return Err(ConfigError::Invalid {
             issues: vec![format!(
-                "export-env daloc: {name} is not set (deployment wiring)"
+                "export-env client: {name} is not set (deployment wiring)"
             )],
         });
     }

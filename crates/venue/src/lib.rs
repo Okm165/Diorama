@@ -1,4 +1,4 @@
-//! `mirror-venue` — the Venue Mirror's engine: the fork driver over
+//! `diorama-venue` — the Venue Mirror's engine: the fork driver over
 //! anvil V.
 //!
 //! V is a fork-mode anvil of HyperEVM (chain id 999): it starts as the source's
@@ -13,10 +13,10 @@
 //!
 //! The substrate's half is delivered by the shared crates:
 //!
-//! - the devnet plane (`mirror-devnet`): the shadow registry (COW), the
+//! - the devnet plane (`diorama-devnet`): the shadow registry (COW), the
 //!   journal, the cursor state with `epoch_pin`, the admin surface, the
 //!   chain-generic scanner, the probe runner, the declared closures;
-//! - the anvil boundary (`mirror-anvil`): the typed client, the measured
+//! - the anvil boundary (`diorama-anvil`): the typed client, the measured
 //!   padding/batching rules, the trace flattening;
 //! - the driver (this crate): boot asserts, reset detection, the epoch rule,
 //!   probes-at-pin, the steady-state scan, and the source follow.
@@ -56,14 +56,14 @@ pub use http::StatusResponse;
 pub use service::{main_entry, sim_entry};
 
 /// Wall-clock milliseconds (the wire's `time` fields and the sim clock's
-/// base) — the shared definition lives in `mirror-config`'s boot module; this
+/// base) — the shared definition lives in `diorama-config`'s boot module; this
 /// crate-root binding keeps `crate::now_ms()` the one spelling at the call
 /// sites. Not re-exported: the entry points are this crate's public surface.
-use mirror_config::boot::now_ms;
+use diorama_config::boot::now_ms;
 
 #[cfg(test)]
 mod design_assertions {
-    /// The Rust-for-Rustaceans pin (plan §11.3 rule 11): every public type is
+    /// The Rust-for-Rustaceans pin: every public type is
     /// Send + Sync + Sized + Unpin by construction, asserted at compile time.
     fn is_normal<T: Send + Sync + Sized + Unpin>() {}
 

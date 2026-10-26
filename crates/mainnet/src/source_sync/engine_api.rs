@@ -118,7 +118,7 @@ impl EngineClient {
         let resp = self
             .http
             .post(&self.url)
-            .header(reqwest::header::CONTENT_TYPE, mirror_anvil::JSON_CONTENT_TYPE)
+            .header(reqwest::header::CONTENT_TYPE, diorama_anvil::JSON_CONTENT_TYPE)
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", request.token))
             .body(request.json)
             .send()
@@ -161,7 +161,7 @@ impl EngineClient {
     ) -> Result<T, EngineApiError> {
         serde_json::from_str(result.get()).map_err(|source| EngineApiError::Decode {
             method,
-            body: mirror_anvil::truncate(result.get(), 200).to_string(),
+            body: diorama_anvil::truncate(result.get(), 200).to_string(),
             source,
         })
     }
@@ -240,17 +240,17 @@ fn parse_response(
         },
         Ok(ResponsePacket::Batch(_)) => Err(EngineApiError::Decode {
             method,
-            body: mirror_anvil::truncate(text, 200).to_string(),
+            body: diorama_anvil::truncate(text, 200).to_string(),
             source: serde_json::Error::custom("a batch answer to a single call"),
         }),
         Err(_) if !status.is_success() => Err(EngineApiError::Status {
             method,
             status: status.as_u16(),
-            body: mirror_anvil::truncate(text, 300).to_string(),
+            body: diorama_anvil::truncate(text, 300).to_string(),
         }),
         Err(source) => Err(EngineApiError::Decode {
             method,
-            body: mirror_anvil::truncate(text, 200).to_string(),
+            body: diorama_anvil::truncate(text, 200).to_string(),
             source,
         }),
     }

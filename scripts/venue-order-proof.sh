@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The venue order-lane proof (plan §4.5 — the market-impact axiom): a devnet
+# The venue order-lane proof (the market-impact axiom): a devnet
 # order fills against the *real* book and its consequences are preserved.
 #
 #   A. the fill walks the served book - a scripted base makes the walk
@@ -152,7 +152,7 @@ pruned1=$(metric venue_sim_owned_pruned_total)
   || bad "owned_pruned moved $pruned0 -> $pruned1"
 
 echo "-- D. the /exchange door (the venue's own envelope)"
-# The venue's nonce rule (plan §5): the 100 highest per signer, window
+# The venue's nonce rule: the 100 highest per signer, window
 # (T − 2 d, T + 1 d) — so a fixture nonce must be a fresh millisecond stamp.
 nonce=$(date +%s%3N)
 x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":false,\"p\":\"3000\",\"s\":\"0.2\",\"t\":{\"limit\":{\"tif\":\"Ioc\"}}}]},\"user\":\"$ORDER_ACCT\",\"nonce\":$nonce,\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")

@@ -85,16 +85,16 @@ pub trait Source: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     /// The source's own head: the anchor before the first apply, when the
     /// devnet has no cursor yet (nothing applied to reflect).
-    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>>;
+    fn head(&self) -> BoxFuture<'_, diorama_anvil::Result<u64>>;
 
     /// The block's header: identity (number/hash/parent) plus the context the
     /// applier aligns to (timestamp, coinbase, prevRandao, gas limit, base
     /// fee). The official type — no mirror-owned block shape.
-    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>>;
+    fn header(&self, n: u64) -> BoxFuture<'_, diorama_anvil::Result<alloy_rpc_types_eth::Header>>;
 
-    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>>;
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<U256>>;
 
-    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>>;
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<u64>>;
 
     /// A storage word: the wire form (32 bytes), converted at the write site.
     fn storage_at(
@@ -102,28 +102,28 @@ pub trait Source: Send + Sync {
         address: Address,
         slot: U256,
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<B256>>;
+    ) -> BoxFuture<'_, diorama_anvil::Result<B256>>;
 
-    fn code_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>>;
+    fn code_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<alloy_primitives::Bytes>>;
 
     /// Read one key. The default composes the four typed reads, so a source
     /// implements only the primitives it can serve; the composer reads its
     /// plan through this seam (one call shape for every key kind).
-    fn read_key(&self, key: mirror_anvil::Key, block: u64) -> BoxFuture<'_, mirror_anvil::Result<mirror_anvil::Value>> {
+    fn read_key(&self, key: diorama_anvil::Key, block: u64) -> BoxFuture<'_, diorama_anvil::Result<diorama_anvil::Value>> {
         Box::pin(async move {
             Ok(match key {
-                mirror_anvil::Key::Storage { address, slot } => {
+                diorama_anvil::Key::Storage { address, slot } => {
                     let word = self.storage_at(address, slot, block).await?;
-                    mirror_anvil::Value::Storage(U256::from_be_bytes(word.0))
+                    diorama_anvil::Value::Storage(U256::from_be_bytes(word.0))
                 }
-                mirror_anvil::Key::Balance(address) => {
-                    mirror_anvil::Value::Balance(self.balance_at(address, block).await?)
+                diorama_anvil::Key::Balance(address) => {
+                    diorama_anvil::Value::Balance(self.balance_at(address, block).await?)
                 }
-                mirror_anvil::Key::Nonce(address) => {
-                    mirror_anvil::Value::Nonce(self.nonce_at(address, block).await?)
+                diorama_anvil::Key::Nonce(address) => {
+                    diorama_anvil::Value::Nonce(self.nonce_at(address, block).await?)
                 }
-                mirror_anvil::Key::Code(address) => {
-                    mirror_anvil::Value::Code(self.code_at(address, block).await?)
+                diorama_anvil::Key::Code(address) => {
+                    diorama_anvil::Value::Code(self.code_at(address, block).await?)
                 }
             })
         })
@@ -137,9 +137,9 @@ pub trait Source: Send + Sync {
     /// minutes).
     fn read_keys(
         &self,
-        keys: &[mirror_anvil::Key],
+        keys: &[diorama_anvil::Key],
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<Vec<mirror_anvil::Value>>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<Vec<diorama_anvil::Value>>> {
         let keys = keys.to_vec();
         Box::pin(async move {
             let mut out = Vec::with_capacity(keys.len());
@@ -154,7 +154,7 @@ pub trait Source: Send + Sync {
     /// Default: none — the composer falls to the synthesized rung (the
     /// capability flag selects the rung; this answers per block, because a
     /// node can serve some blocks and not others).
-    fn bal(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
+    fn bal(&self, n: u64) -> BoxFuture<'_, diorama_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
         let _ = n;
         Box::pin(async move { Ok(None) })
     }
@@ -163,7 +163,7 @@ pub trait Source: Send + Sync {
     /// plan from, plus any changed keys the source already carries values for
     /// (the trace rung). Every source implements this — it is the synthesized
     /// rung's data side.
-    fn touched(&self, from: u64, to: u64) -> BoxFuture<'_, mirror_anvil::Result<crate::closure::TouchedSet>>;
+    fn touched(&self, from: u64, to: u64) -> BoxFuture<'_, diorama_anvil::Result<crate::closure::TouchedSet>>;
 
     /// What this source's touched rung is (`Trace` for a trace-based source,
     /// `Poll` for the envelope rung): the window BAL's `kind` label.
@@ -189,7 +189,7 @@ impl Capabilities {
     /// non-latest read rather than silently answering a newer value).
     pub async fn verify_methods(
         &self,
-        rpc: &mirror_anvil::Rpc,
+        rpc: &diorama_anvil::Rpc,
         future: u64,
     ) -> Vec<&'static str> {
         use alloy_primitives::U64;
@@ -204,7 +204,7 @@ impl Capabilities {
 
         let trace = rpc
             .call::<serde_json::Value>(
-                mirror_anvil::TRACE_BLOCK_METHOD,
+                diorama_anvil::TRACE_BLOCK_METHOD,
                 (
                     U64::from(future),
                     serde_json::json!({"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}),
@@ -228,7 +228,7 @@ impl Capabilities {
 
 /// Did the method exist? Anything but `-32601` means yes (a missing block is
 /// an answer from a method that exists).
-fn method_present<T>(r: mirror_anvil::Result<T>) -> bool {
+fn method_present<T>(r: diorama_anvil::Result<T>) -> bool {
     match r {
         Ok(_) => true,
         Err(e) => !e.is_method_not_found(),
@@ -244,8 +244,8 @@ fn method_present<T>(r: mirror_anvil::Result<T>) -> bool {
 pub async fn audit_capabilities(
     what: &str,
     caps: Capabilities,
-    rpc: &mirror_anvil::Rpc,
-) -> mirror_anvil::Result<()> {
+    rpc: &diorama_anvil::Rpc,
+) -> diorama_anvil::Result<()> {
     let head = rpc.block_number().await?;
     let disagree = caps.verify_methods(rpc, head.saturating_add(1_000)).await;
     if !disagree.is_empty() {
@@ -264,21 +264,21 @@ pub async fn audit_capabilities(
 /// latest, where the pin guard would refuse every read) and for tools; the
 /// pin-exact shape for unshadow restores is [`PinnedSource`] over this.
 pub struct RawSource {
-    rpc: Arc<mirror_anvil::Rpc>,
+    rpc: Arc<diorama_anvil::Rpc>,
     capabilities: Capabilities,
 }
 
 impl RawSource {
     /// The handle is shared (`Arc`): one client per endpoint, referenced by
     /// every object that reads through it.
-    pub fn new(rpc: Arc<mirror_anvil::Rpc>, capabilities: Capabilities) -> Self {
+    pub fn new(rpc: Arc<diorama_anvil::Rpc>, capabilities: Capabilities) -> Self {
         Self { rpc, capabilities }
     }
 
     /// The devnet chain as the composer's target: the synthesis rung reads it
     /// for the diff (traces yes; no BAL — the target is only read, never
     /// composed from).
-    pub fn target(rpc: Arc<mirror_anvil::Rpc>) -> Self {
+    pub fn target(rpc: Arc<diorama_anvil::Rpc>) -> Self {
         Self::new(
             rpc,
             Capabilities::of([Capability::Traces, Capability::Historical]),
@@ -288,7 +288,7 @@ impl RawSource {
 
 /// The composer's target: the devnet chain's raw reads (T / V) — the one
 /// builder both profiles call.
-pub fn target(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
+pub fn target(rpc: Arc<diorama_anvil::Rpc>) -> Arc<dyn Source> {
     Arc::new(RawSource::target(rpc))
 }
 
@@ -297,19 +297,19 @@ impl Source for RawSource {
         self.capabilities.clone()
     }
 
-    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
+    fn head(&self) -> BoxFuture<'_, diorama_anvil::Result<u64>> {
         Box::pin(self.rpc.block_number())
     }
 
-    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
-        Box::pin(async move { Ok(self.rpc.block_by_number(n, mirror_anvil::Txs::Hashes).await?.header) })
+    fn header(&self, n: u64) -> BoxFuture<'_, diorama_anvil::Result<alloy_rpc_types_eth::Header>> {
+        Box::pin(async move { Ok(self.rpc.block_by_number(n, diorama_anvil::Txs::Hashes).await?.header) })
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
         Box::pin(self.rpc.balance_at(address, block))
     }
 
-    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<u64>> {
         Box::pin(self.rpc.nonce_at(address, block))
     }
 
@@ -318,7 +318,7 @@ impl Source for RawSource {
         address: Address,
         slot: U256,
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<B256>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<B256>> {
         Box::pin(self.rpc.storage_at(address, slot, block))
     }
 
@@ -326,7 +326,7 @@ impl Source for RawSource {
         &self,
         address: Address,
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<alloy_primitives::Bytes>> {
         Box::pin(self.rpc.code_at(address, block))
     }
 
@@ -334,9 +334,9 @@ impl Source for RawSource {
     /// methods (the client owns the mapping and the decode).
     fn read_keys(
         &self,
-        keys: &[mirror_anvil::Key],
+        keys: &[diorama_anvil::Key],
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<Vec<mirror_anvil::Value>>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<Vec<diorama_anvil::Value>>> {
         let keys = keys.to_vec();
         Box::pin(async move { self.rpc.read_keys(&keys, block).await })
     }
@@ -348,7 +348,7 @@ impl Source for RawSource {
         &self,
         from: u64,
         to: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<crate::closure::TouchedSet>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<crate::closure::TouchedSet>> {
         let system_txs = crate::bal::SystemTxs::of(self.capabilities.has(Capability::SystemTxs));
         Box::pin(crate::bal::envelope_touches(&self.rpc, from, to, system_txs))
     }
@@ -375,7 +375,7 @@ impl PinnedSource {
     /// The handle is shared (`Arc`): one client per endpoint, referenced by
     /// every object that reads through it.
     pub fn new(
-        rpc: Arc<mirror_anvil::Rpc>,
+        rpc: Arc<diorama_anvil::Rpc>,
         pin: Arc<std::sync::atomic::AtomicU64>,
         capabilities: Capabilities,
     ) -> Self {
@@ -389,19 +389,19 @@ impl PinnedSource {
     /// is still the pin. The declaration drives it — a source that can serve
     /// historical state needs no check; this one cannot (measured: the block
     /// parameter is ignored, latest is all there is).
-    async fn guard(&self) -> mirror_anvil::Result<()> {
+    async fn guard(&self) -> diorama_anvil::Result<()> {
         if self.inner.capabilities().has(Capability::Historical) {
             return Ok(());
         }
         let Some(pin) = crate::pin::resolved_pin(&self.pin) else {
-            return Err(mirror_anvil::Error::Corrupt {
+            return Err(diorama_anvil::Error::Corrupt {
                 what: "pinned source",
                 detail: "the fork pin is not resolved yet".into(),
             });
         };
         let head = self.inner.head().await?;
         if head != pin {
-            return Err(mirror_anvil::Error::Corrupt {
+            return Err(diorama_anvil::Error::Corrupt {
                 what: "pinned source",
                 detail: format!(
                     "the source advanced past the pin (pin {pin}, head {head}): it \
@@ -425,7 +425,7 @@ impl Source for PinnedSource {
     /// The pin is the head: the source cannot serve history, so its own head
     /// would drift past every read's truth (a latest-by-design reader — the
     /// venue's follow — takes the raw source instead).
-    fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
+    fn head(&self) -> BoxFuture<'_, diorama_anvil::Result<u64>> {
         Box::pin(async move {
             if let Some(pin) = crate::pin::resolved_pin(&self.pin) {
                 return Ok(pin);
@@ -436,18 +436,18 @@ impl Source for PinnedSource {
 
     /// Historical-safe on the public source (unlike state reads): the header
     /// is what makes forking and cursor hashes possible at all. No guard.
-    fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
+    fn header(&self, n: u64) -> BoxFuture<'_, diorama_anvil::Result<alloy_rpc_types_eth::Header>> {
         self.inner.header(n)
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {
+    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
         Box::pin(async move {
             self.guard().await?;
             self.inner.balance_at(address, block).await
         })
     }
 
-    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
+    fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<u64>> {
         Box::pin(async move {
             self.guard().await?;
             self.inner.nonce_at(address, block).await
@@ -459,7 +459,7 @@ impl Source for PinnedSource {
         address: Address,
         slot: U256,
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<B256>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<B256>> {
         Box::pin(async move {
             self.guard().await?;
             self.inner.storage_at(address, slot, block).await
@@ -470,7 +470,7 @@ impl Source for PinnedSource {
         &self,
         address: Address,
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<alloy_primitives::Bytes>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<alloy_primitives::Bytes>> {
         Box::pin(async move {
             self.guard().await?;
             self.inner.code_at(address, block).await
@@ -481,9 +481,9 @@ impl Source for PinnedSource {
     /// the batched read.
     fn read_keys(
         &self,
-        keys: &[mirror_anvil::Key],
+        keys: &[diorama_anvil::Key],
         block: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<Vec<mirror_anvil::Value>>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<Vec<diorama_anvil::Value>>> {
         let keys = keys.to_vec();
         Box::pin(async move {
             self.guard().await?;
@@ -496,7 +496,7 @@ impl Source for PinnedSource {
         &self,
         from: u64,
         to: u64,
-    ) -> BoxFuture<'_, mirror_anvil::Result<crate::closure::TouchedSet>> {
+    ) -> BoxFuture<'_, diorama_anvil::Result<crate::closure::TouchedSet>> {
         self.inner.touched(from, to)
     }
 
@@ -529,7 +529,7 @@ mod tests {
         // The endpoint is never reached by the declaration and unresolved-pin
         // branches: both decide before any read.
         PinnedSource::new(
-            Arc::new(mirror_anvil::Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap()),
+            Arc::new(diorama_anvil::Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap()),
             Arc::new(AtomicU64::new(pin)),
             capabilities,
         )
@@ -554,7 +554,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("pin is not resolved"), "{err}");
         let err = pinned(caps(History::Refused), 7).guard().await.unwrap_err();
-        assert!(matches!(err, mirror_anvil::Error::Transport { .. }), "{err}");
+        assert!(matches!(err, diorama_anvil::Error::Transport { .. }), "{err}");
     }
 
     /// The pinned head is the pin, not the source's (the guard's premise): a
@@ -567,6 +567,6 @@ mod tests {
             .head()
             .await
             .unwrap_err();
-        assert!(matches!(err, mirror_anvil::Error::Transport { .. }), "{err}");
+        assert!(matches!(err, diorama_anvil::Error::Transport { .. }), "{err}");
     }
 }

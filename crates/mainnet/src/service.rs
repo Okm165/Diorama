@@ -1,6 +1,6 @@
 //! The engine service's composition root: the CLI (`run` / `selftest` /
 //! `rewind`), the boot call, and the loop spawner — the story the
-//! `mainnet-engine` bin shells over (`main_entry`). One home per service: the
+//! `diorama-mainnet-engine` bin shells over (`main_entry`). One home per service: the
 //! venue crate's engine and simulator entries and the bridge's entry live the
 //! same way.
 
@@ -8,14 +8,14 @@ use crate::error::{Error, Result};
 use crate::{driver, feed, http, selftest};
 use crate::ctx::Ctx;
 use clap::{Parser, Subcommand};
-use mirror_config::Instance;
-use mirror_devnet::engine::Engine as _;
+use diorama_config::Instance;
+use diorama_devnet::engine::Engine as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The Mainnet Mirror engine's CLI.
 #[derive(Parser)]
-#[command(name = "mainnet-engine", version, about)]
+#[command(name = "diorama-mainnet-engine", version, about)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -26,7 +26,7 @@ struct Cli {
 enum Cmd {
     /// Run the engine loops and the HTTP API.
     Run {
-        #[arg(long, default_value = mirror_config::boot::DEFAULT_INSTANCE_PATH)]
+        #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
         config: PathBuf,
     },
     /// End-to-end self test against a public RPC + one scratch Anvil fork.
@@ -35,7 +35,7 @@ enum Cmd {
         rpc: String,
         #[arg(long)]
         anvil_t: String,
-        #[arg(long, default_value = mirror_config::boot::DEFAULT_INSTANCE_PATH)]
+        #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
         config: PathBuf,
         /// Number of consecutive blocks to test starting at the anvil pin + 1.
         #[arg(long, default_value_t = 3)]
@@ -46,7 +46,7 @@ enum Cmd {
     },
     /// Rewind the last N applied parent blocks on T (journal-based).
     Rewind {
-        #[arg(long, default_value = mirror_config::boot::DEFAULT_INSTANCE_PATH)]
+        #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
         config: PathBuf,
         #[arg(long)]
         blocks: u64,
@@ -54,9 +54,9 @@ enum Cmd {
 }
 
 /// The Mainnet Mirror engine's entrypoint (the bin is the shell over this; the
-/// same shell as `venue-engine`, R3).
+/// same shell as `diorama-venue-engine`, R3).
 ///
-/// Boot order (plan §7.2): wait for T, assert the chain, anchor the epoch pin
+/// Boot order: wait for T, assert the chain, anchor the epoch pin
 /// (a fresh registry's epoch *is* the current fork base — the counterpart of
 /// the venue engine's reconcile, which anchors it the same way), audit the
 /// declared capabilities, then serve the HTTP surface and the applier, shadow
@@ -67,8 +67,8 @@ enum Cmd {
 /// mutation persists its state as it happens (shadow registry, cursor,
 /// journal), so there is nothing to drain.
 pub async fn main_entry(args: Vec<String>) -> Result<()> {
-    mirror_config::boot::init_logging();
-    let cli: Cli = mirror_config::boot::parse_cli("mainnet-engine", args);
+    diorama_config::boot::init_logging();
+    let cli: Cli = diorama_config::boot::parse_cli("diorama-mainnet-engine", args);
     match cli.cmd {
         Cmd::Run { config } => run(config).await,
         Cmd::Selftest {
@@ -93,7 +93,7 @@ async fn selftest_cmd(
     blocks: u64,
     timeout_secs: u64,
 ) -> Result<()> {
-    mirror_devnet::engine::selftest_entry(
+    diorama_devnet::engine::selftest_entry(
         &config,
         |cfg, unresolved| {
             // The scratch run's endpoints come from the CLI: only the
@@ -108,7 +108,7 @@ async fn selftest_cmd(
                     .engine
                     .as_mut()
                     .ok_or_else(|| {
-                        Error::Config(mirror_config::ConfigError::Invalid {
+                        Error::Config(diorama_config::ConfigError::Invalid {
                             issues: vec![
                                 "profile \"mainnet\" requires [services.engine]".into(),
                             ],
@@ -138,12 +138,12 @@ async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
 }
 
 async fn run(config: PathBuf) -> Result<()> {
-    mirror_devnet::engine::run_engine::<Ctx>(config).await
+    diorama_devnet::engine::run_engine::<Ctx>(config).await
 }
 
-/// The shell's service hooks (`mirror_devnet::engine::EngineService`): the
+/// The shell's service hooks (`diorama_devnet::engine::EngineService`): the
 /// sequence is the spine's; these are T's own pieces.
-impl mirror_devnet::engine::EngineService for Ctx {
+impl diorama_devnet::engine::EngineService for Ctx {
     fn wiring_label() -> &'static str {
         "mainnet engine wiring"
     }
@@ -180,7 +180,7 @@ impl mirror_devnet::engine::EngineService for Ctx {
         Box::pin(async move {
             let bridge = build_bridge(ctx).await?;
             let mut tasks = Vec::new();
-            tasks.push(mirror_devnet::engine::spawn_http(
+            tasks.push(diorama_devnet::engine::spawn_http(
                 ctx,
                 http::app(ctx.clone(), bridge.clone()),
             ));
@@ -205,10 +205,10 @@ fn require_wiring(
     unresolved: &[String],
     what: &'static str,
     endpoints: &[&str],
-) -> std::result::Result<(), mirror_config::ConfigError> {
+) -> std::result::Result<(), diorama_config::ConfigError> {
     let extra = wiring_extra(cfg);
     let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
-    mirror_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &refs)
+    diorama_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &refs)
 }
 
 /// The profile-only boundary values this instance must resolve: the journal's

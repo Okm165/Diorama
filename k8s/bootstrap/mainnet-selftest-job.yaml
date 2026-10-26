@@ -10,10 +10,10 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: mainnet-selftest
-  namespace: mainnet-mirror
+  namespace: diorama-mainnet
   labels:
     app.kubernetes.io/name: mainnet-selftest
-    app.kubernetes.io/part-of: mainnet-mirror
+    app.kubernetes.io/part-of: diorama-mainnet
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 7200
@@ -21,7 +21,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: mainnet-selftest
-        app.kubernetes.io/part-of: mainnet-mirror
+        app.kubernetes.io/part-of: diorama-mainnet
     spec:
       restartPolicy: Never
       initContainers:
@@ -74,7 +74,7 @@ spec:
             requests: { cpu: "250m", memory: 256Mi }
             limits: { memory: 2Gi }
         - name: engine
-          image: localhost/mainnet-engine:v1
+          image: localhost/diorama-mainnet-engine:v1
           imagePullPolicy: IfNotPresent
           args:
             - selftest
@@ -91,7 +91,7 @@ spec:
           # its state root is an ephemeral path in this pod, which is what a
           # scratch run wants.
           envFrom:
-            - configMapRef: { name: mirror-config }
+            - configMapRef: { name: diorama-config }
           volumeMounts:
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
           resources:

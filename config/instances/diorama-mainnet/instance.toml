@@ -1,0 +1,439 @@
+# The Mainnet Mirror instance: deployment facts only.
+#
+# Values that every deployment of a service shares live in config/defaults.toml
+# (layered below this file); `${VAR}` references are resolved from the pod's
+# environment at load time (deploy-time wiring, §19.4).
+
+[instance]
+name = "diorama-mainnet"
+namespace = "diorama-mainnet"
+profile = "mainnet"
+
+[chains.l1]
+# The chain id is a code fact (`kind = "ethereum"` implies chain 1, CCTP
+# domain 0, canonical USDC); only the deployment's source is data.
+kind = "ethereum"
+source_url = "${RETH_URL}"
+# Follow `latest` (the CL head): the parent stream then advances one block
+# per ~12 s, so T mines one block per ~12 s and devnet transactions confirm
+# in ~12 s (measured with `safe`: the safe tag jumps 32 blocks per epoch, so
+# the applier burst-mines every ~6.4 min and a devnet tx waits minutes - a
+# fork that does not confirm is not a fork). The rare shallow reorg is
+# handled by the continuity check + the re-base path
+# (metrics: diorama_reorgs_detected_total).
+follow = "latest"
+# Blocks between the follow head and T's fork base when the engine has to
+# re-base T: the safe head can move backward (CL forkchoice), and a replay is
+# irreversible, so the mirror re-forks behind it instead of stalling.
+# Constraints: well inside reth's 10,064-block state window; inside the
+# range of slots whose blobs the local Lighthouse supernode can reconstruct;
+# and *behind* the follow head (with the offset at 64 the pin sat exactly at
+# the follow head and a safe-head recede of a few blocks left T ahead of it,
+# stalling the replay until the safe head caught up - measured). 128 keeps
+# ~64 blocks of margin. This is the single home of the offset: the anvil
+# pods read it from this file (an anchored sed over the mounted TOML — the
+# foundry image carries no diorama-config binary, so the read is one line,
+# never a second definition).
+fork_offset = 128
+
+[services.engine]
+state_dir = "${STATE_DIR}"
+# Canonical addresses the daloc fixture deploy mutates without txs —
+# `anvil_setCode` over the mock tokens and its seeded Aave aTokens — invisible
+# to the tx scanner, so whole-account owned here or the parent diffs clobber a
+# mock. Everything else that deploy writes goes through txs
+# (auto-marked) or fresh addresses (never watched). Its mock aggregators and
+# oracle adapters deploy at fresh addresses; with `[services.engine.feed_bridge]`
+# enabled the bridge is their live writer (also via txs, auto-marked), so their
+# periodic refresher stays off in mirror mode.
+fixture_addresses = [
+  "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", # USDC (MockERC20Fixed over it)
+  "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", # WETH
+  "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", # WBTC
+  "0x6B175474E89094C44Da98b954EedeAC495271d0F", # DAI
+  "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c", # aEthUSDC (seeded)
+  "0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8", # aEthWETH
+  "0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a", # aEthUSDT
+  "0x5Ee5bf7ae06D1Be5997A1A72006FE6C607eC6DE8", # aEthWBTC
+  "0x0B925eD163218f6662a35e0f0371Ac234f9E9371", # aEthwstETH
+]
+
+[services.engine.anvil]
+target_url = "${ANVIL_T_URL}"
+
+[services.engine.source_sync]
+# reth's authenticated Engine API endpoint + the JWT secret shared with the
+# consensus client (a path, never the secret itself).
+engine_url = "${ENGINE_API_URL}"
+jwt_path = "${JWT_PATH}"
+
+[services.engine.verifier]
+# State probes re-run against T after every repair:
+# diorama_t_convergence_failures_total staying at 0 is the "T is an exact
+# mirror" health signal.
+probes = [
+  { name = "usdc_total_supply", to = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", data = "0x18160ddd" },
+  { name = "weth_total_supply", to = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", data = "0x18160ddd" },
+  { name = "chainlink_weth_usd", to = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419", data = "0xfeaf968c" },
+  { name = "univ3_weth_usdc_slot0", to = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640", data = "0x3850c7bd" },
+  # scaledTotalSupply, not totalSupply: the aToken's totalSupply is
+  # `scaled * liquidityIndex`, and the devnet's own reserve actions
+  # re-price the index at a different second than mainnet's last update -
+  # a dust drift (measured 7.8e-13 aUSDC) that an exact probe cannot tell
+  # from a real divergence. The scaled value is index-independent and
+  # still catches any real supply/withdraw divergence.
+  { name = "aave_aethusdc_scaled_total_supply", to = "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c", data = "0xb1bf962d" },
+  # The oracle's price proves the interaction closure: it only matches
+  # reth when the oracle *and* its source contracts are watched.
+  { name = "aave_usdc_price", to = "0x54586bE62E3c3580375aE3723C145253060Ca0C2", data = "0xb3596f07000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" },
+  # WETH's source is a proxy whose aggregator was missing from the watch
+  # list; its price froze while USDC's stayed live. One WETH price probe
+  # makes that class of gap an alarm instead of a silent staleness.
+  { name = "aave_weth_price", to = "0x54586bE62E3c3580375aE3723C145253060Ca0C2", data = "0xb3596f07000000000000000000000000C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2" },
+  # The full price closure: the composite WBTC source and the other
+  # reserves get the same probe the WETH source has, so a missing
+  # aggregator behind a *composite* source is an alarm, not a silent
+  # staleness (measured: the WBTC price sat stale while all probes stayed
+  # green, 2026-10).
+  { name = "aave_wbtc_price", to = "0x54586bE62E3c3580375aE3723C145253060Ca0C2", data = "0xb3596f070000000000000000000000002260FAC5E5542a773Aa44fBCfeDf7C193bc2C599" },
+  { name = "aave_usdt_price", to = "0x54586bE62E3c3580375aE3723C145253060Ca0C2", data = "0xb3596f07000000000000000000000000dAC17F958D2ee523a2206206994597C13D831ec7" },
+  { name = "aave_wsteth_price", to = "0x54586bE62E3c3580375aE3723C145253060Ca0C2", data = "0xb3596f070000000000000000000000007f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0" },
+  { name = "aave_usdc_normalized_income", to = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2", data = "0xd15e0053000000000000000000000000A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" },
+]
+
+[services.engine.journal]
+dir = "${STATE_DIR}/journal"
+
+[services.engine.beacon]
+# The beacon-API source of the top-up loop (EIP-8379): the local Lighthouse,
+# which also drives reth. Blob sidecars are fetched by reth's CL over the
+# Engine API; the engine reads only head/block here.
+urls = ["${BEACON_URL}"]
+
+[services.engine.http]
+port = 8080
+
+# Watch list seed (plan section 3.5). All slots of a watched account are
+# synced on T; shadowed keys are skipped (COW). Extend with your own
+# deployment addresses from contracts/deployments/ethereum.json.
+
+# Chainlink feeds (config/oracles/ethereum.toml)
+[[watchlist]]
+address = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
+note = "Chainlink WETH/USD"
+[[watchlist]]
+address = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c"
+note = "Chainlink WBTC/USD"
+[[watchlist]]
+address = "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8"
+note = "Chainlink STETH/USD"
+[[watchlist]]
+address = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6"
+note = "Chainlink USDC/USD"
+[[watchlist]]
+address = "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D"
+note = "Chainlink USDT/USD"
+
+# Chainlink feeds are AggregatorProxy contracts: `latestRoundData()` is a
+# delegatecall into the *current aggregator*, whose storage holds the
+# round. Watching only the proxy leaves the price stale on T (measured:
+# the probe diverged by one round). Resolve with `aggregator()` (0x245a7bfc)
+# and re-check after a feed upgrade - the aggregator address changes.
+[[watchlist]]
+address = "0x7d4e742018fb52e48b08be73d041c18b21de6fb5"
+note = "Chainlink WETH/USD aggregator"
+[[watchlist]]
+address = "0x4a3411ac2948b33c69666b35cc6d055b27ea84f1"
+note = "Chainlink WBTC/USD aggregator"
+[[watchlist]]
+address = "0x26f196806f43e88fd27798c9e3fb8fdf4618240f"
+note = "Chainlink STETH/USD aggregator"
+[[watchlist]]
+address = "0x54bcc589d9743e521c64233706fc8cb36d275b07"
+note = "Chainlink USDC/USD aggregator"
+[[watchlist]]
+address = "0x9c41663bb8d6800c8050e2fbf98e86ad01c973e3"
+note = "Chainlink USDT/USD aggregator"
+
+# Assets (config/assets/*.toml)
+[[watchlist]]
+address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+note = "USDC"
+[[watchlist]]
+address = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+note = "USDT"
+[[watchlist]]
+address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+note = "WETH"
+[[watchlist]]
+address = "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
+note = "WBTC"
+[[watchlist]]
+address = "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0"
+note = "wstETH"
+
+# Uniswap
+[[watchlist]]
+address = "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"
+note = "Universal Router"
+[[watchlist]]
+address = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
+note = "UniV3 WETH/USDC 0.05%"
+
+# The dapp's own **mainnet production deployment**, complete:
+# the CREATE2 set from contracts/deployments/ethereum.json (deployed
+# 2026-09-29). Watched so the mirror stays faithful to their live protocol
+# wherever a scenario touches it. Measured 2026-10-23: their *devnet* deploy
+# does NOT reuse this set - DeployDaloc deploys fresh contracts at
+# deployer-derived addresses (deployed.env), which the tx scanner marks
+# devnet-owned, so they need no static watch (and watching them would risk a
+# mainnet collision). The margin-agent factories/beacons are not deployed on
+# mainnet (zero in the JSON) and are absent here; the plan's "whale" addresses
+# hold zero balances today and are deliberately not watched - fund scenarios
+# with the cheatcodes instead.
+[[watchlist]]
+address = "0xDA10C0070a117b6e97EC01E983236F9D39E3152d"
+note = "dapp hub (proxy)"
+[[watchlist]]
+address = "0x68668a7A8CbA5ccfa4462415D464F52185797f18"
+note = "dapp hub beacon"
+[[watchlist]]
+address = "0x91dB1a829b4C81a06F83404278f2269874fDdB8f"
+note = "dapp DeployFactory"
+[[watchlist]]
+address = "0x1c5bB1eC377663C2A84De3c6248BeC1D6b5B8639"
+note = "dapp timelock"
+[[watchlist]]
+address = "0xEb968bF3B7BB24DC0B999623356b532624d78c27"
+note = "dapp governance multisig"
+[[watchlist]]
+address = "0x5907ED3A2b95dAE7f200b81c33800C27AB6Af0D7"
+note = "facts registry"
+[[watchlist]]
+address = "0x07A2Af1983Af54687CE3577FcdED810117202D8B"
+note = "facts registry beacon"
+[[watchlist]]
+address = "0x613Fc72972143E6c9A2b87FdC96569D035383156"
+note = "proof executor"
+[[watchlist]]
+address = "0xa6A86b6280d42C900e45a4072bFc7A2D178C747e"
+note = "proof executor beacon"
+[[watchlist]]
+address = "0xc721d53A9533E7011fb87968cE96DC04CCAfE71C"
+note = "commitment registry"
+[[watchlist]]
+address = "0xd5fFAb56D8Ee803A3d4cCd6caf8ca5a7B07b6393"
+note = "commitment registry beacon"
+[[watchlist]]
+address = "0x6B565056EC2A03630D8daCdd508131e873352032"
+note = "authorization flags"
+[[watchlist]]
+address = "0x33Db1109072a5e0051169971a4Cf96eeE636dBF0"
+note = "authorization flags beacon"
+[[watchlist]]
+address = "0x1BD6e752a6E140264cc9E56725248D3d92105cE8"
+note = "underwriter"
+[[watchlist]]
+address = "0x9f2cd9d209042120F0823AbB7aFA5D8E995915CE"
+note = "underwriter beacon"
+[[watchlist]]
+address = "0xeb9a92791F1be4605fA80aE48e6b3b546D4C82CB"
+note = "liquidation executor"
+[[watchlist]]
+address = "0x231F11f6F00FdC1A37C73177FFACAC2bdFc8A198"
+note = "liquidation executor beacon"
+[[watchlist]]
+address = "0x07B63204FeFb5B984DE8f7fC4336Ffa8Ce6607B7"
+note = "lending adapter"
+[[watchlist]]
+address = "0x98c660636Cbf4AF2B98c46B5EE1D40E090d9aab1"
+note = "lending adapter beacon"
+[[watchlist]]
+address = "0x4e14fbFE3D593D922a91FbEFD0f912f1971c7B40"
+note = "debt issuer"
+[[watchlist]]
+address = "0x7B4ec265317b3D6b435158382c2044B0E68CeADD"
+note = "debt issuer beacon"
+[[watchlist]]
+address = "0x20218D28E5699CBF0ffeEb2FA5b56F646B3C9BdF"
+note = "collateral-manager issuer"
+[[watchlist]]
+address = "0xb529aEF000e771143Cce893eA208758AF06c3eab"
+note = "collateral-manager issuer beacon"
+[[watchlist]]
+address = "0xe93AC354a302a871deF36C06D43c645e6a7ece98"
+note = "collateral-manager beacon"
+[[watchlist]]
+address = "0x31cD9c4888b1F20AC6E7aB3A80f4b97AeEeC736d"
+note = "issued-debt beacon"
+[[watchlist]]
+address = "0xAAD5eBb10c764FA39382FA4BF0874B872B99bbD3"
+note = "curator-vault beacon"
+[[watchlist]]
+address = "0x538B1024f734f05329222021C11811cDFe5a27df"
+note = "curator-vault factory"
+[[watchlist]]
+address = "0xAF6967F0757bEe62434417C6a2976dE6a18d88B0"
+note = "curator-vault factory beacon"
+[[watchlist]]
+address = "0xdD736F662003C016C3F583D320914047154A8DBD"
+note = "oracle syncer"
+[[watchlist]]
+address = "0xD344d7bd24cF6d20A1be08164a168bfF56195D76"
+note = "oracle syncer beacon"
+[[watchlist]]
+address = "0x5B4E995B8D5Fb877dE2B65De038DE46c872BEE4a"
+note = "batch executor"
+[[watchlist]]
+address = "0xA65911f8D6FD989dEcCf2C2e7815588CEFD8EC59"
+note = "batch executor beacon"
+[[watchlist]]
+address = "0xa3Ede4d669b95193C892eE670E4E88243e393c6C"
+note = "oracle adapter ETH"
+[[watchlist]]
+address = "0x47427376fa9C9F2E777412d60132FB05764329eD"
+note = "oracle adapter ETH beacon"
+[[watchlist]]
+address = "0x9Bd1A7A3FC18A3829ADCF1B003A17dd28c1d049B"
+note = "oracle adapter BTC"
+[[watchlist]]
+address = "0x00f0Acd21c9B156c9703f6B28CC9d56a79772C95"
+note = "oracle adapter BTC beacon"
+[[watchlist]]
+address = "0x78b083b7334b8a0D8a151F5570cf437E6dc9CB77"
+note = "oracle adapter USDC"
+[[watchlist]]
+address = "0x49674C0372113BB5ff40e5Da06d63f18Cc98c45B"
+note = "oracle adapter USDC beacon"
+[[watchlist]]
+address = "0x5cB420Ba6aBC649bc2F0b2D8b86aBb1f771F32B2"
+note = "oracle adapter USDT"
+[[watchlist]]
+address = "0x72eA358E86Fa607e504211896053953Ca4863e7e"
+note = "oracle adapter USDT beacon"
+
+# Aave V3 (cascade scenario)
+[[watchlist]]
+address = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+note = "Aave V3 Pool"
+[[watchlist]]
+address = "0x54586bE62E3c3580375aE3723C145253060Ca0C2"
+note = "Aave V3 Oracle"
+[[watchlist]]
+address = "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"
+note = "Aave V3 PoolAddressesProvider"
+[[watchlist]]
+address = "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c"
+note = "aEthUSDC"
+[[watchlist]]
+address = "0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8"
+note = "aEthWETH"
+[[watchlist]]
+address = "0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a"
+note = "aEthUSDT"
+[[watchlist]]
+address = "0x5Ee5bf7ae06D1Be5997A1A72006FE6C607eC6DE8"
+note = "aEthWBTC"
+[[watchlist]]
+address = "0x0B925eD163218f6662a35e0f0371Ac234f9E9371"
+note = "aEthwstETH"
+
+# The debt tokens are part of the same closure: a devnet borrow writes the
+# user's scaled debt *there*, and without the entry those writes are not
+# tracked, so `/admin/shadow {all:true}` cannot clear them - leaving a
+# phantom debt that makes the next run's borrow fail with
+# LtvValidationFailed (measured: $315 against zero collateral). Resolve:
+#   cast call $POOL "getReserveVariableDebtToken(address)(address)" $ASSET
+[[watchlist]]
+address = "0x72E95b8931767C79bA4EeE721354d6E99a61D004"
+note = "variableDebtUSDC"
+[[watchlist]]
+address = "0x6df1C1E379bC5a00a7b4C6e67A203333772f45A8"
+note = "variableDebtUSDT"
+[[watchlist]]
+address = "0xeA51d7853EEFb32b6ee06b1C12E6dcCA88Be0fFE"
+note = "variableDebtWETH"
+[[watchlist]]
+address = "0x40aAbEf1aa8f0eEc637E0E7d92fbfFB2F26A8b7B"
+note = "variableDebtWBTC"
+[[watchlist]]
+address = "0xC96113eED8cAB59cD8A66813bCB0cEb29F06D2e4"
+note = "variableDebtwstETH"
+[[watchlist]]
+address = "0xD322A49006FC828F9B5B37Ab215F99B4E5caB19C"
+note = "Aave V3 WETH Gateway"
+
+# Interaction closure ("closed under interaction") - derived
+# on-chain; re-derive after a feed upgrade:
+#   oracle sources: cast call $ORACLE "getSourceOfAsset(address)(address)" $ASSET
+#   rate strategy:  cast call $POOL "getReserveData(address)(...)" $ASSET  (12th field)
+#   ACL manager:    cast call $PROVIDER "getACLManager()(address)"
+# Without them the devnet reads a pin-era Aave price/rate even though the
+# pool and oracle themselves stay fresh.
+[[watchlist]]
+address = "0xc2aaCf6553D20d1e9d78E365AAba8032af9c85b0"
+note = "Aave V3 ACLManager"
+[[watchlist]]
+address = "0x9ec6F08190DeA04A54f8Afc53Db96134e5E3FdFB"
+note = "Aave V3 rate strategy (shared by all reserves)"
+[[watchlist]]
+address = "0x3f73F03aa83B2A48ed27E964eD0fDb590332095B"
+note = "Aave oracle source: USDC/USD"
+[[watchlist]]
+address = "0x260326c220E469358846b187eE53328303Efe19C"
+note = "Aave oracle source: USDT/USD"
+[[watchlist]]
+address = "0x5424384B256154046E9667dDFaaa5e550145215e"
+note = "Aave oracle source: WETH/USD"
+
+# The WETH/USD source is itself an AggregatorProxy: `latestRoundData()`
+# delegatecalls into its aggregator, so watching only the source leaves
+# the price frozen at the pin era (measured: 8 rounds / ~$44 stale, while
+# USDC's direct-aggregator source stayed fresh and hid the gap). The other
+# four sources answered `aggregator()` with no data - they are direct
+# aggregators and need no extra entry. Re-resolve after a feed upgrade:
+#   cast call <source> "aggregator()(address)" --rpc-url $RETH
+[[watchlist]]
+address = "0x7c7FdFCa295a787ded12Bb5c1A49A8D2cC20E3F8"
+note = "Aave oracle source: WETH/USD aggregator"
+[[watchlist]]
+address = "0xDaa4B74C6bAc4e25188e64ebc68DB5050b690cAc"
+note = "Aave oracle source: WBTC/USD"
+
+# Found by `make mainnet-closure-check` (it traces each view's storage reads):
+# the USDC source is a CAPO wrapper with its own ratio feeds, and the
+# wstETH source reads stETH's share rate (updated daily - T would go
+# stale within a day while every probe stayed green).
+[[watchlist]]
+address = "0xcc31418a98f7afc4a9e2f8ea8fa6cbd4dbb4c9f7"
+note = "Aave USDC source: CAPO ratio feed"
+[[watchlist]]
+address = "0xea674bbc33ae708bc9eb4ba348b04e4eb55b496b"
+note = "Aave USDC source: CAPO ratio feed"
+[[watchlist]]
+address = "0xae7ab96520de3a18e5e111b5eaab095312d7fe84"
+note = "stETH (wstETH source reads the share rate)"
+[[watchlist]]
+address = "0xb8ffc3cd6e7cf5a098a1c92f48009765b24088dc"
+note = "Aave wstETH source: storage dependency"
+
+# The WBTC source is *composite* (BTC/USD x WBTC/BTC), built from two
+# proxy->aggregator pairs. Missing these made the WBTC price stale on T
+# while every probe stayed green (found by the product sim's broad
+# freshness audit, 2026-10): the aggregators hold the round data, so they
+# must be watched, not just the source.
+[[watchlist]]
+address = "0xb41e773f507f7a7ea890b1afb7d2b660c30c8b0a"
+note = "Aave WBTC source: BTC/USD proxy"
+[[watchlist]]
+address = "0xdc715c751f1cc129a6b47fedc87d9918a4580502"
+note = "Aave WBTC source: BTC/USD aggregator"
+[[watchlist]]
+address = "0xfdfd9c85ad200c506cf9e21f1fd8dd01932fbb23"
+note = "Aave WBTC source: WBTC/BTC proxy"
+[[watchlist]]
+address = "0xa5e3a55cea42b86560a5215094981c300899199d"
+note = "Aave WBTC source: WBTC/BTC aggregator"
+[[watchlist]]
+address = "0xe1D97bF61901B075E9626c8A2340a7De385861Ef"
+note = "Aave oracle source: wstETH/USD"

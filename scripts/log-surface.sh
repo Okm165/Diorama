@@ -25,8 +25,8 @@
 #   make log-surface
 set -euo pipefail
 
-NS_T="${NS_T:-mainnet-mirror}"
-NS_V="${NS_V:-venue-mirror}"
+NS_T="${NS_T:-diorama-mainnet}"
+NS_V="${NS_V:-diorama-venue}"
 SIM_CTL_URL="${SIM_CTL_URL:-http://localhost:31091}"
 FRESH_S="${FRESH_S:-180}"
 

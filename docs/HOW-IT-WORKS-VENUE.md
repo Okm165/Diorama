@@ -14,7 +14,7 @@ A local, production-shaped mirror of Hyperliquid. The **HL public API** (REST
 chain — **V**, chain id 999 — fresh by following the real HyperEVM's windows
 and landing their changes per key, copy-on-write. Your transactions live on
 **V**, next to live Hyperliquid state; the **simulator** (`venue-sim`) is the
-venue the daloc product reads: a market plane fed by the real API and a
+venue the client's product reads: a market plane fed by the real API and a
 copy-on-write account plane you can fund, crash, and liquidate.
 
 | | V (`anvil-v`) |
@@ -22,7 +22,7 @@ copy-on-write account plane you can fund, crash, and liquidate.
 | Contents | the parent's *state* (the declared scope's window diffs) + devnet txs |
 | Written by | the engine (diffs, deal) + your dapp + the bridge |
 | Guarantee | state parity vs the fork source at the pin, except keys the devnet owns |
-| Use | development, the daloc venue, the strategy workshop |
+| Use | development, the client's venue, the strategy workshop |
 
 The parent's read model is the whole story: HyperEVM has no EIP-7928 BALs and
 no historical reads, so the composer **synthesizes** a window BAL from the
@@ -62,8 +62,8 @@ that pipeline against the real chain (`make venue-selftest`).
 ```
 ![topology](img/how-topology-venue.png)
 
-One namespace (`venue-mirror`); the CCTP bridge burns on T, which lives in the
-`mainnet-mirror` namespace (the venue namespace has no T of its own). The
+One namespace (`diorama-venue`); the CCTP bridge burns on T, which lives in the
+`diorama-mainnet` namespace (the venue namespace has no T of its own). The
 engine's only inputs are the HL public API (blocks, receipts, system txs,
 state) and V itself.
 
@@ -84,7 +84,7 @@ stays static.
 
 **HL → sim.** The simulator's market plane polls the same API (REST snapshots
 + WS pushes: marks, mids, books, spot tokens) and serves it through the venue
-API (`/info`); the account plane holds the daloc accounts, seeded and driven
+API (`/info`); the account plane holds the client accounts, seeded and driven
 through `/control`.
 
 **V ↔ Core.** EVM→Core is an ERC-20 transfer to a *system address* (`0x20 ‖
@@ -164,7 +164,7 @@ word gone or foreign means the chain instance changed. A *changed* pin is a
 new epoch — the registry's marks and values are derivations of the old base,
 so they are cleared; the same pin restores the recorded writes. Either way the
 journal is dropped and the canary re-stamped. The rule itself is shared with
-the mainnet engine (`mirror_devnet::epoch`).
+the mainnet engine (`diorama_devnet::epoch`).
 
 ### 5.5 Reorg and gap guard
 
@@ -206,7 +206,7 @@ for parent before-values, which V's journal never holds.
 
 ### 5.9 The simulator
 
-`venue-sim` serves the venue API the daloc product reads: the market plane
+`venue-sim` serves the venue API the client's product reads: the market plane
 (live marks, mids, books, spot tokens; staleness gated at 30 s, `/readyz`
 covers the meta, the spot registry and the books), the account plane (the
 persisted registry; `/info` views computed from it, `/control` for scenarios).
@@ -235,7 +235,7 @@ the cluster proof).
 | `sim-state` | the account registry, market overrides, the scripted book | Retain |
 | `cctp-state` | the bridge's watcher cursors and relayed-message store | Retain |
 
-StorageClass `mirror-retain`: deleting the namespace never deletes data. The
+StorageClass `diorama-retain`: deleting the namespace never deletes data. The
 engine resumes from its cursor and the follow cursor; V restores its devnet
 state from the registry; the simulator resumes its accounts.
 

@@ -1,4 +1,4 @@
-//! The Hyperliquid info API's wire model (measured live, plan §16.5).
+//! The Hyperliquid info API's wire model (measured live).
 //!
 //! One request enum (the endpoint is a single `POST /info` tagged by `type`)
 //! and the response structs daloc's services read — complete shapes, not
@@ -372,7 +372,7 @@ pub(crate) struct AssetInfo {
 }
 
 /// `marginTable`: the leverage tiers. Maintenance margin is ½ the initial
-/// margin of the tier the position's notional sits in (plan §16.3).
+/// margin of the tier the position's notional sits in.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MarginTable {

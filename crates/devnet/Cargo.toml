@@ -1,5 +1,5 @@
 [package]
-name = "mirror-devnet"
+name = "diorama-devnet"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,8 +7,8 @@ license.workspace = true
 description = "The devnet plane: shadow registry (COW), journal, state (epoch pins), metrics"
 
 [dependencies]
-mirror-anvil = { path = "../anvil" }
-mirror-config = { path = "../config" }
+diorama-anvil = { path = "../anvil" }
+diorama-config = { path = "../config" }
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-network-primitives = { workspace = true }

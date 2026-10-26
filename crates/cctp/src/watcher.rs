@@ -1,5 +1,5 @@
 //! The watcher: both chains' `MessageSent` events → the persisted attestation
-//! store (§15.4).
+//! store.
 //!
 //! One pass: scan each chain from the configured start block to head
 //! (`eth_getLogs`, chunked — the emitter is the pinned MessageTransmitterV2,
@@ -9,7 +9,7 @@
 //! `expirationBlock = configured`, §15.3), and sign every record whose
 //! emulated PENDING window has elapsed.
 //!
-//! **Restart backfill** (§15.4): the first scan of every run starts at
+//! **Restart backfill**: the first scan of every run starts at
 //! `start_block` — a burn awaiting attestation across a restart is re-read
 //! and re-signed — and later passes continue from the scanned head. Dedupe is
 //! by `(sourceDomain, nonce)`; the nonce is the burn tx hash, so a re-scan is
@@ -321,7 +321,7 @@ impl Watcher {
     }
 
     /// The record one in-lane message makes: the deterministic nonce is the
-    /// burn tx hash (§15.3); the raw event message carries `EMPTY_NONCE` and
+    /// burn tx hash; the raw event message carries `EMPTY_NONCE` and
     /// the served artifact fills it.
     fn record_of(&self, sent: MessageSent, parsed: &Message, expiration: U256) -> MessageRecord {
         let burn_tx = sent.burn_tx;

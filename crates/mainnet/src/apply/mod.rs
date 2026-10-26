@@ -1,6 +1,6 @@
 //! Applier: keeps T's watch-list state fresh by applying parent BALs.
 //!
-//! Per parent block (plan §4.2): prepend devnet txs -> compose the parent's
+//! Per parent block: prepend devnet txs -> compose the parent's
 //! BAL (the spine's generic composer: native on reth, the trace rung as
 //! fallback) -> COW it against the devnet's own writes -> read before-values
 //! -> batched cheatcode writes -> align block context -> mine -> journal ->
@@ -14,15 +14,15 @@ pub(crate) mod prepend;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_rpc_types_eth::Header;
-use mirror_anvil::Write;
-use mirror_devnet::cow::FilterStats;
-use mirror_devnet::drift::Drift;
-use mirror_devnet::facts::Fact;
-use mirror_devnet::journal::JournalEntry;
-use mirror_devnet::plane::ReapplyRange;
-use mirror_devnet::metrics::Registry as _;
-use mirror_devnet::plane::Plane;
-use mirror_devnet::spine::{ClockPolicy, MinePolicy};
+use diorama_anvil::Write;
+use diorama_devnet::cow::FilterStats;
+use diorama_devnet::drift::Drift;
+use diorama_devnet::facts::Fact;
+use diorama_devnet::journal::JournalEntry;
+use diorama_devnet::plane::ReapplyRange;
+use diorama_devnet::metrics::Registry as _;
+use diorama_devnet::plane::Plane;
+use diorama_devnet::spine::{ClockPolicy, MinePolicy};
 use parity::parity_step;
 use prepend::{prepend_and_mark, scan_own_blocks};
 use std::sync::atomic::Ordering;
@@ -60,7 +60,7 @@ struct TDriftEntry<'a> {
 /// and mine the aligned parent block. Returns the writes applied.
 async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[Write]) -> Result<usize> {
     let applied =
-        mirror_anvil::apply_writes(&ctx.anvil_t, filtered, ctx.engine.loops.chunk_size).await?;
+        diorama_anvil::apply_writes(&ctx.anvil_t, filtered, ctx.engine.loops.chunk_size).await?;
     let policies = ctx.mirror.policies();
     // The profile's clock rule: the applied block's context is the parent's
     // (aligned to timestamp + the plane's live offset) or the devnet's own.
@@ -176,7 +176,7 @@ pub(crate) async fn step(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
 
     let plan = plan_and_check_base(ctx, n, base).await?;
     let entries =
-        mirror_devnet::journal::read_before_values(&ctx.anvil_t, &plan.writes, t_head).await?;
+        diorama_devnet::journal::read_before_values(&ctx.anvil_t, &plan.writes, t_head).await?;
 
     let applied = write_and_mine(ctx, &header, &plan.writes).await?;
     journal_and_scan(ctx, n, &entries, t_head).await?;
@@ -218,16 +218,16 @@ async fn plan_and_check_base(
     ctx: &Ctx,
     n: u64,
     base: Option<u64>,
-) -> Result<mirror_devnet::bal::WindowPlan> {
+) -> Result<diorama_devnet::bal::WindowPlan> {
     // The shared pipeline half (compose → COW → flatten), then the check: the
     // compose awaits for seconds, and a re-pin racing it must abort before any
     // write (the next pass reconciles).
-    let plan = mirror_devnet::bal::Composer {
+    let plan = diorama_devnet::bal::Composer {
         source: ctx.mirror.follow_source().as_ref(),
         target: ctx.target.as_ref(),
         scope: ctx.mirror.scope(),
     }
-    .plan(&ctx.plane.shadow, mirror_devnet::bal::Window::single(n))
+    .plan(&ctx.plane.shadow, diorama_devnet::bal::Window::single(n))
     .await?;
     if ctx.anvil_t.fork_block().await? != base {
         return Err(Error::ResetDuringApply { n });
@@ -310,8 +310,8 @@ fn report_applied(plane: &Plane, n: u64, facts: &ApplyFacts, outcome: &ApplyOutc
 /// path's shared step: the block's hash is read from the chain and the
 /// cursor written through the spine's one cursor step.
 async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
-    let block = ctx.anvil_t.block_by_number(n, mirror_anvil::Txs::Hashes).await?;
-    mirror_devnet::state::advance_cursor(&ctx.plane.state, &block, n)?;
+    let block = ctx.anvil_t.block_by_number(n, diorama_anvil::Txs::Hashes).await?;
+    diorama_devnet::state::advance_cursor(&ctx.plane.state, &block, n)?;
     Ok(())
 }
 
@@ -407,7 +407,7 @@ async fn align_context(ctx: &Ctx, header: &Header) -> Result<()> {
     let offset = ctx.plane.time_offset.load(Ordering::Relaxed);
     let last_ts = ctx
         .anvil_t
-        .block_by_number(ctx.anvil_t.block_number().await?, mirror_anvil::Txs::Hashes)
+        .block_by_number(ctx.anvil_t.block_number().await?, diorama_anvil::Txs::Hashes)
         .await?
         .header
         .timestamp;

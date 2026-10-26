@@ -1,0 +1,13 @@
+[package]
+name = "diorama-venue-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Venue Mirror engine binary (the venue profile's entrypoint)"
+
+[dependencies]
+diorama-config = { path = "../../crates/config" }
+diorama-venue = { path = "../../crates/venue" }
+[lints]
+workspace = true

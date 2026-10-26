@@ -1,0 +1,27 @@
+# Shared runtime wiring for the Venue Mirror stack: the venue wiring env the
+# instance TOML references as ${...}. Operational tunables live
+# in config/instances/*.toml; this ConfigMap carries only deployment wiring,
+# and the config loader is their only reader.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: diorama-config
+  labels:
+    app.kubernetes.io/part-of: diorama-venue
+data:
+  # The fork source V pins at (its latest block; the source is archive-deep).
+  HL_RPC_URL: "https://rpc.hyperliquid.xyz/evm"
+
+  # The devnet chain and the engine's admin base, by in-namespace service DNS.
+  ANVIL_V_URL: "http://anvil-v:8545"
+  ENGINE_ADMIN_URL: "http://engine:8080"
+
+  # The Ethereum fork the CCTP bridge burns on: anvil-t lives in the
+  # diorama-mainnet namespace (the venue namespace has no T of its own), so the
+  # bridge reaches it over cross-namespace service DNS.
+  T_RPC_URL: "http://anvil-t.diorama-mainnet.svc.cluster.local:8545"
+
+  # State roots on the pods' own PVCs (paths, not claims).
+  STATE_DIR: "/state"
+  SIM_STATE_DIR: "/state"
+  CCTP_STATE_DIR: "/state"

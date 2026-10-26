@@ -1,5 +1,5 @@
-# The mirrors workspace: one workspace, the two mirror projects (mainnet,
-# venue), the shared crates, and the CCTP bridge (refactor plan §11).
+# Diorama: one workspace, the two mirror projects (mainnet,
+# venue), the shared crates, and the CCTP bridge.
 [workspace]
 members = ["crates/*", "bins/*"]
 resolver = "2"
@@ -31,7 +31,7 @@ alloy-rpc-types-engine = { version = "2.5", features = ["jwt", "serde"] }
 alloy-json-rpc = { version = "2.5" }
 # The official chain-id newtype (`alloy_chains::ChainId`): a chain id is a
 # namespace of its own, never a bare u64 and never a CCTP domain
-# (`mirror-cctp::chains::Domain`).
+# (`diorama-cctp::chains::Domain`).
 alloy-chains = { version = "0.2" }
 # Quantity (0x-hex) and other wire serde helpers.
 alloy-serde = { version = "2.5" }
@@ -70,7 +70,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-# Config is TOML (§19): crates/config, the layered loader.
+# Config is TOML: crates/config, the layered loader.
 toml = "1.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 # The venue's websocket lane (market plane: allMids + activeAssetCtx pushes).
@@ -79,7 +79,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [workspace.lints.clippy]
-# The anti-patterns the design doctrine names (§11.0); CI runs -D warnings.
+# The anti-patterns the design doctrine names; CI runs -D warnings.
 needless_pass_by_value = "warn"
 unused_self = "warn"
 unnecessary_wraps = "warn"

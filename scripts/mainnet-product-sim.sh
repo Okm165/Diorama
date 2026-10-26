@@ -14,7 +14,7 @@
 #
 # Everything runs against the real Aave pool/oracle and the real Uniswap pool;
 # the venues touched are handed back to mainnet sync at the end.
-# Usage: NS=mainnet-mirror ./scripts/mainnet-product-sim.sh
+# Usage: NS=diorama-mainnet ./scripts/mainnet-product-sim.sh
 set -uo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-mainnet.sh"

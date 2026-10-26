@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The CCTP round trip, scripted (plan §15.5): fund the relay on the source if
+# The CCTP round trip, scripted: fund the relay on the source if
 # short, burn, wait for the record to reach `relayed`, and verify the
 # destination balance delta is exactly the amount. A parked record fails with
 # its own named reason.
@@ -66,7 +66,7 @@ dst_after=$(balance "$DST_USDC" "$RELAY" "$DST_URL")
   && ok "destination minted exactly the amount ($dst_before -> $dst_after)" \
   || bad "destination delta is not the amount ($dst_before -> $dst_after, wanted +$AMOUNT)"
 
-# The hook lane (§15.4): the burn carries `hookData = target(20) ‖ calldata`
+# The hook lane: the burn carries `hookData = target(20) ‖ calldata`
 # and pins the destinationCaller to the wrapper, so one relay tx mints *and*
 # calls the target. The mint goes to the wrapper; the hook (a USDC transfer)
 # forwards it to the trader — the credit-carrying lane's own end-to-end read.

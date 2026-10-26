@@ -1,4 +1,4 @@
-//! The venue's websocket lane (plan §7.5: the sim serves "info + WS" on its
+//! The venue's websocket lane (the sim serves "info + WS" on its
 //! info port): the two market channels the venue pushes — `allMids` and
 //! `activeAssetCtx` — fed from the same composed cache the REST reads serve,
 //! so a subscriber never sees a different mark than the account plane used.

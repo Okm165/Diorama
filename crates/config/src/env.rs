@@ -1,4 +1,4 @@
-//! Deploy-time wiring (`${VAR}`) and the `MIRROR__*` override layer (§19.4).
+//! Deploy-time wiring (`${VAR}`) and the `DIORAMA__*` override layer.
 use crate::ConfigError;
 
 /// Expand `${VAR}` references in every string value. Returns the names that
@@ -79,7 +79,7 @@ fn resolve(
     reference.to_string()
 }
 
-/// The per-pod wiring contract (plan §19.4): one instance file, many readers
+/// The per-pod wiring contract: one instance file, many readers
 /// — each pod sets only the `${VAR}`s its own sections reference. The caller
 /// passes the string values its sections carry; a reference still present in
 /// any of them (the loader keeps an unresolvable `${VAR}` verbatim) is a
@@ -109,7 +109,7 @@ pub fn require_resolved(what: &'static str, values: &[&str]) -> Result<(), Confi
     })
 }
 
-/// `MIRROR__<PATH__SEGMENTS>=<value>`: operator debug overrides applied after
+/// `DIORAMA__<PATH__SEGMENTS>=<value>`: operator debug overrides applied after
 /// the merge. The path must already exist (typo protection); every applied
 /// override is logged loudly at boot.
 pub(crate) fn apply_overrides(
@@ -117,7 +117,7 @@ pub(crate) fn apply_overrides(
     vars: &[(String, String)],
 ) -> Result<(), ConfigError> {
     for (key, raw) in vars {
-        let Some(path) = key.strip_prefix("MIRROR__") else {
+        let Some(path) = key.strip_prefix("DIORAMA__") else {
             continue;
         };
         let segments: Vec<String> = path.split("__").map(str::to_ascii_lowercase).collect();
@@ -126,7 +126,7 @@ pub(crate) fn apply_overrides(
         })?;
         tracing::warn!(
             override_ = %format!("{key} -> {}", segments.join(".")),
-            "MIRROR__ override in effect"
+            "DIORAMA__ override in effect"
         );
     }
     Ok(())

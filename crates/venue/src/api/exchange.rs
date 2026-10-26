@@ -172,7 +172,7 @@ fn dispatch(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeB
     }
 }
 
-/// The acting account + the venue's nonce rule (plan §5: the 100 highest per
+/// The acting account + the venue's nonce rule (the 100 highest per
 /// signer, window (T − 2 d, T + 1 d), no reuse). `Err` carries the ready
 /// err-envelope response.
 /// The acting account's owner: a request that names a `vaultAddress` acts on
@@ -188,7 +188,7 @@ fn acting_owner(req: &ExchangeBody) -> Option<Address> {
 /// The signer and the owner. The request's `user` is the signer — nonces are
 /// consumed per signer (the docs' per-address nonce set) — and the state the
 /// action touches is the owner's. The signature is never verified, so the
-/// master's authority is moot (plan §17).
+/// master's authority is moot.
 fn acting_user(
     state: &Arc<ApiState>,
     req: &ExchangeBody,
@@ -197,7 +197,7 @@ fn acting_user(
         return Err(Box::new(
             err_envelope(
                 "venue-sim: an action must name the acting account in `user` — the devnet has \
-                 no keys to derive it from the signature (plan §17). See docs/INTEGRATION.md."
+                 no keys to derive it from the signature. See docs/INTEGRATION.md."
                     .to_string(),
             ),
         ));
@@ -497,7 +497,7 @@ fn order_parts<'a>(
     };
     if let Some(builder) = builder {
         return Err(format!(
-            "venue-sim: builder fees are not modeled (fees are a research lane, plan §16.3) \
+            "venue-sim: builder fees are not modeled (fees are a research lane) \
              — the order would fill without charging {} its {} tenths of a basis point. See \
              docs/INTEGRATION.md.",
             builder.b, builder.f

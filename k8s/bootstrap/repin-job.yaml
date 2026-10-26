@@ -12,10 +12,10 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: repin-wipe
-  namespace: mainnet-mirror
+  namespace: diorama-mainnet
   labels:
     app.kubernetes.io/name: repin-wipe
-    app.kubernetes.io/part-of: mainnet-mirror
+    app.kubernetes.io/part-of: diorama-mainnet
 spec:
   backoffLimit: 1
   ttlSecondsAfterFinished: 600
@@ -23,7 +23,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: repin-wipe
-        app.kubernetes.io/part-of: mainnet-mirror
+        app.kubernetes.io/part-of: diorama-mainnet
     spec:
       restartPolicy: Never
       containers:

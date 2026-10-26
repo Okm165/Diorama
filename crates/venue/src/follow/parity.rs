@@ -7,14 +7,14 @@
 //! are the expected side).
 use crate::ctx::Ctx;
 use crate::error::Result;
-use mirror_devnet::spine::ProbeSchedule;
+use diorama_devnet::spine::ProbeSchedule;
 
 /// The window's parity step: `(sampled, sampled_ok)` for the composed BAL —
 /// zero when the profile's schedule is not `LiveParity` (the schedule is the
 /// divergence; the contract is shared with the applier's lens).
 pub(super) async fn parity_step(
     ctx: &Ctx,
-    bal: &mirror_devnet::bal::BlockAccessList,
+    bal: &diorama_devnet::bal::BlockAccessList,
 ) -> Result<(usize, usize)> {
     if !matches!(ctx.mirror.policies().probes, ProbeSchedule::LiveParity) {
         return Ok((0, 0));
@@ -22,5 +22,5 @@ pub(super) async fn parity_step(
     // The spine builds the fact's pair `(sampled, sampled_ok)` — never the
     // inverted `(passed, size)` the venue selftest once caught (every clean
     // window read as a failure).
-    Ok(mirror_devnet::bal::verify(ctx.target.as_ref(), bal).await?)
+    Ok(diorama_devnet::bal::verify(ctx.target.as_ref(), bal).await?)
 }

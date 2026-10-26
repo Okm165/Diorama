@@ -44,12 +44,12 @@ impl FeedBridgeMetrics {
         let series = |out: &mut String, name: &str, help: &str, values: &Mutex<Vec<(String, u64)>>| {
             let values = values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             for (feed, v) in values.iter() {
-                mirror_devnet::metrics::push_counter(out, name, help, &[("feed", feed.as_str())], *v);
+                diorama_devnet::metrics::push_counter(out, name, help, &[("feed", feed.as_str())], *v);
             }
         };
         series(&mut out, "feed_bridge_updates_total", "answers published to mock aggregators", &self.updates);
         series(&mut out, "feed_bridge_pauses_total", "feeds paused on a scenario's write", &self.pauses);
-        mirror_devnet::metrics::push_counter(
+        diorama_devnet::metrics::push_counter(
             &mut out,
             "feed_bridge_pass_errors_total",
             "feed bridge passes that failed (the feed's last_error names the cause)",

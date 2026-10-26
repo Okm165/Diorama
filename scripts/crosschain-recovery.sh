@@ -12,7 +12,7 @@
 #   make crosschain-recovery                      # against the deployed stack
 #   CAST=/path/to/cast make crosschain-recovery   # when cast is not on PATH
 set -euo pipefail
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}"
 COIN="${COIN:-ETH}"
 COLLATERAL="${COLLATERAL:-1000}"

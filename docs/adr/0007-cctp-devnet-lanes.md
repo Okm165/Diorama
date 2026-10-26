@@ -5,13 +5,13 @@
 ## Context
 
 The mirrors move USDC between T (Ethereum, domain 0) and V (HyperEVM, domain
-19) two ways: daloc's mock at `0x17` (untouched, theirs) and the real CCTP V2
-contracts already present in both forks (this repo's third element, plan §15).
+19) two ways: the client's mock at `0x17` (untouched, theirs) and the real CCTP V2
+contracts already present in both forks (this repo's third element).
 The real lane keeps every on-chain check real — message format, domains,
 `destinationCaller`, nonce replay, signature threshold, expiration, fee caps —
 so the only substitutions are Circle's off-chain authority (a devnet attester
 key installed through the contracts' own setters) and the Iris API (a local
-service serving the live shapes, measured §16.2).
+service serving the live shapes, measured).
 
 Devnet reality then bites where the real lane never sees it:
 
@@ -69,8 +69,7 @@ Devnet reality then bites where the real lane never sees it:
   `eth_getTransactionByHash` on the source, so it needs the source to *retain*
   tx lookups: measured on anvil 1.8.6, `--transaction-block-keeper 2` prunes tx
   bodies, receipts and logs beyond 2 blocks — every burn older than that
-  false-parks. The parity flags set keeper 1000000 on both chains (plan
-  §17.6), which holds for any realistic test window; a false park is safe
+  false-parks. The parity flags set keeper 1000000 on both chains, which holds for any realistic test window; a false park is safe
   (never minted) and the transfer is simply re-run.
 - **Fees stay zero; the lane is finalized.** Every transfer burns with
   `minFinalityThreshold = 2000` and `maxFee = 0`, and the devnet attester fills

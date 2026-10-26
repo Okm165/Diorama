@@ -1,0 +1,57 @@
+# Persistent volumes for the mirror. All use the diorama-retain StorageClass
+# (reclaimPolicy: Retain) so deleting a PVC never destroys the data.
+#
+# This file is the mainnet mirror's claims; the Venue Mirror's live in
+# diorama-venue/pvcs.yaml - one file per mirror, because a kustomize overlay
+# composes whole files and must not declare the other mirror's claims.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: reth-data
+  labels: { app.kubernetes.io/part-of: diorama-mainnet, app: reth }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: diorama-retain
+  resources:
+    requests:
+      storage: 400Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lighthouse-data
+  labels: { app.kubernetes.io/part-of: diorama-mainnet, app: lighthouse }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: diorama-retain
+  resources:
+    requests:
+      # Data columns (PeerDAS semi-supernode, ~18 day availability window,
+      # ~100 GB) + retained execution payloads (backfill to the weak
+      # subjectivity point) + the beacon DB.
+      storage: 1500Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: anvil-t-state
+  labels: { app.kubernetes.io/part-of: diorama-mainnet, app: anvil-t }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: diorama-retain
+  resources:
+    requests:
+      storage: 40Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: engine-state
+  labels: { app.kubernetes.io/part-of: diorama-mainnet, app: engine }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: diorama-retain
+  resources:
+    requests:
+      storage: 10Gi

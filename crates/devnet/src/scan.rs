@@ -12,7 +12,7 @@ use alloy_consensus::Transaction as _;
 use alloy_network_primitives::TransactionResponse as _;
 use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::{Block, Transaction};
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use std::sync::atomic::Ordering;
 
 /// Transactions of a full block (the scanner always requests full=true).
@@ -39,7 +39,7 @@ pub fn scan_anchor(watermark: u64, pin: u64) -> u64 {
 ///
 /// Returns the walk's counts — the scan-cost reading both profiles count. An
 /// empty block is one call and no traces, and the harness mines one block per
-/// poll, so the empty share is what the counters are for (plan §17.4).
+/// poll, so the empty share is what the counters are for.
 pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Result<ScanWalk> {
     let mut walk = ScanWalk {
         walked: 0,
@@ -122,7 +122,7 @@ async fn find_history_edge(target: &Rpc, pruned: u64, to: u64) -> Result<u64> {
 
 /// Whether anvil can replay block `n`'s state: the zero-slot read needs the
 /// same history a tx trace does, and the pruned refusal is the classifier's
-/// ([`mirror_anvil::Error::is_history_unavailable`]). Any other fault
+/// ([`diorama_anvil::Error::is_history_unavailable`]). Any other fault
 /// propagates: the walk fails closed, exactly as on a trace fault.
 async fn history_reaches(target: &Rpc, n: u64) -> Result<bool> {
     match target.storage_at(Address::ZERO, U256::ZERO, n).await {
@@ -201,7 +201,7 @@ async fn mark_tx(target: &Rpc, shadow: &Shared<Shadow>, tx: &Transaction) -> Res
     }
     // Storage writes come from the tx trace.
     let trace = target.trace_tx_prestate(tx.tx_hash()).await?;
-    for w in mirror_anvil::flatten_trace(&trace) {
+    for w in diorama_anvil::flatten_trace(&trace) {
         shadow.lock()?.mark(&w);
         marked += 1;
     }
@@ -223,7 +223,7 @@ enum BlockScan {
 /// Returns how many writes were marked; `0` is the empty-block skip the
 /// caller counts.
 async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<BlockScan> {
-    let block = target.block_by_number(n, mirror_anvil::Txs::Full).await?;
+    let block = target.block_by_number(n, diorama_anvil::Txs::Full).await?;
     let txs = block_txs(&block);
     if txs.is_empty() {
         return Ok(BlockScan::Marked { writes: 0 });
@@ -278,7 +278,7 @@ async fn mark_block(
 
 /// Read a block's hash (for cursor validation).
 pub async fn block_hash(rpc: &Rpc, n: u64) -> Result<Option<B256>> {
-    let b = rpc.block_by_number_opt(n, mirror_anvil::Txs::Hashes).await?;
+    let b = rpc.block_by_number_opt(n, diorama_anvil::Txs::Hashes).await?;
     Ok(b.map(|b| b.header.hash))
 }
 

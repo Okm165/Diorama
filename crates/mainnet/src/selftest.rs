@@ -1,16 +1,16 @@
 //! End-to-end self test: diff-applies real mainnet blocks onto a scratch
 //! Anvil forked from a public RPC. Needs no reth, so it can validate the
 //! whole apply pipeline before the local fork source is synced.
-use mirror_devnet::engine::Verdict;
+use diorama_devnet::engine::Verdict;
 use crate::ctx::Ctx;
 use crate::apply::step;
 use crate::error::{Error, Result};
-use mirror_config::Instance;
+use diorama_config::Instance;
 use std::sync::Arc;
 
 /// The selftest's scratch targets: the spine's one `ScratchTargets` (the
 /// venue selftest reads the same struct).
-pub use mirror_devnet::engine::ScratchTargets as Targets;
+pub use diorama_devnet::engine::ScratchTargets as Targets;
 
 pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict> {
     let Targets { rpc, anvil } = targets;
@@ -19,12 +19,12 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict
     // Wait for the scratch anvil (same pod, it starts in parallel).
     let boot = std::time::Duration::from_secs(120);
     ctx.anvil_t.wait_until_up("anvil-t", boot).await?;
-    ctx.anvil_t.anvil_set_automine(mirror_anvil::Automine::Off).await?;
+    ctx.anvil_t.anvil_set_automine(diorama_anvil::Automine::Off).await?;
 
     // The pin comes from the scratch anvil itself (forkConfig.forkBlockNumber).
-    let pin = mirror_devnet::pin::fork_pin(&ctx.anvil_t, "anvil-t").await?;
+    let pin = diorama_devnet::pin::fork_pin(&ctx.anvil_t, "anvil-t").await?;
 
-    mirror_devnet::engine::selftest_banner(
+    diorama_devnet::engine::selftest_banner(
         "mirror engine selftest",
         &rpc,
         &anvil,
@@ -32,7 +32,7 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict
         &format!("blocks:   {blocks}"),
     );
 
-    let mut verdict = mirror_devnet::engine::Verdict::Passed;
+    let mut verdict = diorama_devnet::engine::Verdict::Passed;
     for n in (pin + 1)..=(pin + blocks) {
         println!("-- block {n}");
         if matches!(run_one_block(&ctx, n).await?, Verdict::Failed) {
@@ -41,7 +41,7 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict
         println!();
     }
 
-    mirror_devnet::engine::selftest_verdict(verdict);
+    diorama_devnet::engine::selftest_verdict(verdict);
     // The exit-code boundary (the runner's own currency); the decision
     // itself is the named verdict above.
     Ok(verdict)

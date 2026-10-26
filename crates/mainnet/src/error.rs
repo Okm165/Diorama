@@ -17,13 +17,13 @@ pub use crate::source_sync::engine_api::EngineApiError;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Config(#[from] mirror_config::ConfigError),
+    Config(#[from] diorama_config::ConfigError),
 
     #[error(transparent)]
-    Rpc(mirror_anvil::Error),
+    Rpc(diorama_anvil::Error),
 
     #[error(transparent)]
-    Devnet(#[from] mirror_devnet::Error),
+    Devnet(#[from] diorama_devnet::Error),
 
     #[error(transparent)]
     EngineApi(#[from] EngineApiError),
@@ -93,7 +93,7 @@ pub enum Error {
         message: String,
     },
 
-    // ---- the feed bridge (plan §7.1) --------------------------------------
+    // ---- the feed bridge --------------------------------------
     /// A feed-bridge admin call arrived while the bridge is not configured.
     #[error("the feed bridge is not configured ([services.engine.feed_bridge])")]
     FeedBridgeUnconfigured,
@@ -129,10 +129,10 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// the feed bridge's own boundary fact ("the target has no code yet", named
 /// by [`Error::FeedBridgeAbi`]); every other anvil fault is the transparent
 /// [`Error::Rpc`].
-impl From<mirror_anvil::Error> for Error {
-    fn from(e: mirror_anvil::Error) -> Self {
+impl From<diorama_anvil::Error> for Error {
+    fn from(e: diorama_anvil::Error) -> Self {
         match e {
-            mirror_anvil::Error::Abi { what, source } => Error::FeedBridgeAbi {
+            diorama_anvil::Error::Abi { what, source } => Error::FeedBridgeAbi {
                 what,
                 detail: source.to_string(),
             },
@@ -141,14 +141,14 @@ impl From<mirror_anvil::Error> for Error {
     }
 }
 
-impl mirror_devnet::engine::ShellError for Error {}
+impl diorama_devnet::engine::ShellError for Error {}
 
-// The shell contract (`mirror_devnet::engine::ShellError`): this taxonomy
+// The shell contract (`diorama_devnet::engine::ShellError`): this taxonomy
 // accepts the spine's shared errors — the devnet's own, the anvil boundary,
 // and the shared `ShellFault`s the boot/serve helpers construct (the
 // conversion is the spine's one expansion). The rest of the taxonomy stays
 // this mirror's own.
-mirror_devnet::shell_fault_conversion!(Error);
+diorama_devnet::shell_fault_conversion!(Error);
 
 #[cfg(test)]
 mod tests {
@@ -191,7 +191,7 @@ mod size_guard {
     /// message and all (the other mirror's test pins its own wording).
     #[test]
     fn the_shell_fault_converts_into_the_taxonomy() {
-        let e: Error = mirror_devnet::engine::ShellFault::WrongChain {
+        let e: Error = diorama_devnet::engine::ShellFault::WrongChain {
             anvil: "anvil-t",
             got: 999,
             want: 1,
@@ -210,7 +210,7 @@ mod size_guard {
         let abi =
             <alloy_sol_types::sol_data::Bool as alloy_sol_types::SolType>::abi_decode(&[2u8])
                 .expect_err("2 is not a bool");
-        let e: Error = mirror_anvil::Error::Abi {
+        let e: Error = diorama_anvil::Error::Abi {
             what: "decimals",
             source: abi,
         }

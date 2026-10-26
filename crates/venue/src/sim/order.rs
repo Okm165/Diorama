@@ -576,7 +576,7 @@ impl Sim {
         Ok(())
     }
 
-    /// The match-time re-margin (plan §5): the maker's *current* available
+    /// The match-time re-margin: the maker's *current* available
     /// margin (value minus the positions' margin minus the account's other
     /// open orders' reservations) must cover the order's own requirement.
     pub(crate) fn remargin_ok(&self, feed: &MarketFeed, r: &RestingOrder) -> Result<bool> {
@@ -1000,7 +1000,7 @@ impl Sim {
     }
 
     /// The venue's OI-cap refusal: a coin at its cap accepts only orders that
-    /// reduce the position (plan §5's own string).
+    /// reduce the position (the venue's own string).
     /// The docs' open-order limit (the rate-limits page: "Each user has a
     /// default open order limit of 1000 plus one additional order for every
     /// 5M USDC of volume, capped at a total of 5000 open orders"): the base

@@ -5,20 +5,20 @@
 //! devnet applier loop (one T block per applied parent block), the shadow
 //! scanner, the source-sync supervisor, and the on-demand probe run. The
 //! cursor/rebase/gap/reorg rules live here; the epoch rule itself is shared
-//! (`mirror_devnet::epoch`).
+//! (`diorama_devnet::epoch`).
 use crate::ctx::Ctx;
 use crate::apply::step;
 use crate::error::Result;
 use crate::source_sync;
-use mirror_anvil::Rpc;
-use mirror_devnet::engine::Engine as _;
-use mirror_devnet::metrics::Registry as _;
-use mirror_devnet::spine::ResetSignal;
-use mirror_devnet::state::{self, ChainCursor};
+use diorama_anvil::Rpc;
+use diorama_devnet::engine::Engine as _;
+use diorama_devnet::metrics::Registry as _;
+use diorama_devnet::spine::ResetSignal;
+use diorama_devnet::state::{self, ChainCursor};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Ethereum mainnet: what both anvils must fork (a code fact, plan §19.6).
+/// Ethereum mainnet: what both anvils must fork (a code fact).
 const MAINNET_CHAIN_ID: u64 = 1;
 
 /// T's name in every fault it raises (one spelling; the venue's is `anvil-v`).
@@ -36,13 +36,13 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
     // The shared prefix (the same call the venue's boot reads): the chain
     // assert, then the capability audit — read-only, so the epoch anchor
     // below is still the first *write*.
-    mirror_devnet::engine::boot_prefix(ctx, ANVIL, MAINNET_CHAIN_ID, BOOT_TIMEOUT, "reth").await?;
+    diorama_devnet::engine::boot_prefix(ctx, ANVIL, MAINNET_CHAIN_ID, BOOT_TIMEOUT, "reth").await?;
     // The epoch pin is anchored before any writes exist (a fresh registry's
     // epoch *is* the current fork base; without the record a later same-pin
     // restart would be an unprovable epoch and the rule would have to fail
     // closed, dropping the devnet's writes).
     let t_pin = ctx.anvil_t.fork_block().await?;
-    mirror_devnet::epoch::anchor(&ctx.plane, t_pin)?;
+    diorama_devnet::epoch::anchor(&ctx.plane, t_pin)?;
     Ok(())
 }
 
@@ -74,8 +74,8 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, head);
     // The cursor's gauges, refreshed per pass like the venue's
     // (`record_cursor_metrics`): the apply path sets them too, but a paused
-    // applier (gap) would otherwise leave `mirror_cursor_block` at 0 across a
-    // restart and the computed `mirror_lag_blocks` would read the whole
+    // applier (gap) would otherwise leave `diorama_cursor_block` at 0 across a
+    // restart and the computed `diorama_lag_blocks` would read the whole
     // follow head (measured: 26,264,761 after a restart with the applier
     // paused, with reth's real lag ~3k).
     record_cursor_metrics(&ctx.mainnet_metrics, ctx.plane.state.cursor()?.as_ref(), head);
@@ -147,7 +147,7 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
 async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<ChainCursor>> {
     if matches!(
         ctx.plane.witness_reset(ctx.mirror.label(), signal),
-        mirror_devnet::plane::Witnessed::Steady
+        diorama_devnet::plane::Witnessed::Steady
     ) {
         return Ok(None);
     }
@@ -159,7 +159,7 @@ async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<Ch
 /// fresh pin drops marks and values, the same pin re-applies the recorded
 /// writes), the reset counter, and the persisted cursor's drop (`first_block`
 /// is an epoch marker; the next processed block sets a fresh one, or
-/// `mirror_pin_age_blocks` counts across epochs).
+/// `diorama_pin_age_blocks` counts across epochs).
 async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
     let pin = ctx.anvil_t.fork_block().await?;
     ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.epochs_total);
@@ -199,16 +199,16 @@ async fn resume_point(
 /// own block and the engine's mine(1) produces empty blocks. (The epoch
 /// decision - clear vs restore - lives with the reset handling above, where
 /// the fork pin is compared before anything is written.)
-async fn on_rebase(rpc: &mirror_anvil::Rpc, head: u64, follow: u64, start: u64) -> Result<()> {
-    if let Err(e) = rpc.anvil_set_automine(mirror_anvil::Automine::Off).await {
+async fn on_rebase(rpc: &diorama_anvil::Rpc, head: u64, follow: u64, start: u64) -> Result<()> {
+    if let Err(e) = rpc.anvil_set_automine(diorama_anvil::Automine::Off).await {
         tracing::warn!(error = %e, "could not re-assert automine=false");
     }
     tracing::info!(head, follow, start, "starting chain at block");
     Ok(())
 }
 
-/// Two regimes (plan §3 ops): normal operation pauses at the profile's gap
-/// (`max_gap_blocks`; 300 = the plan's "> 300 -> pause and re-sync"), while a
+/// Two regimes: normal operation pauses at the profile's gap
+/// (`max_gap_blocks`; 300 = the "> 300 -> pause and re-sync" rule), while a
 /// *rebased* cursor (a fresh pin after a restart/re-fork) is allowed to replay
 /// its whole pin window - bounded by reth's state window (10,064), the plan's
 /// own limit.
@@ -230,13 +230,13 @@ fn gap_within_limit(gap: u64, limit: Option<u64>, start_kind: state::Start) -> b
 /// continues: its writes are absolute post-values, so keys mainnet writes
 /// again re-converge; orphan-only keys stay until their next mainnet write
 /// (the tradeoff a single-Anvil mirror accepts, and the reason
-/// `mirror_reorgs_detected_total` is an alarm).
+/// `diorama_reorgs_detected_total` is an alarm).
 async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
     let (Some(last_hash), Some(last_block)) = (ctx.plane.state.source_last_hash()?, ctx.plane.state.source_last_block()?) else {
         return Ok(());
     };
     if start > 1 && start - 1 == last_block {
-        if let Some(prev) = mirror_devnet::scan::block_hash(&ctx.reth, start - 1).await? {
+        if let Some(prev) = diorama_devnet::scan::block_hash(&ctx.reth, start - 1).await? {
             if prev != last_hash {
                 ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.reorgs_detected);
                 tracing::warn!(
@@ -254,11 +254,11 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
 pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
     let mut last_status = 0u64;
-    let via = mirror_devnet::engine::source_host(ctx.reth.url());
+    let via = diorama_devnet::engine::source_host(ctx.reth.url());
     loop {
         // The follow's heartbeat (a minute apart, the same shape on both
         // mirrors): the steady DEBUG line only speaks for an idle chain.
-        mirror_devnet::engine::FollowStatus {
+        diorama_devnet::engine::FollowStatus {
             via,
             source_head: ctx.mainnet_metrics.reth_head.load(std::sync::atomic::Ordering::Relaxed),
             followed: ctx.mainnet_metrics.cursor.load(std::sync::atomic::Ordering::Relaxed),
@@ -266,12 +266,12 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
                 .mainnet_metrics
                 .blocks_applied
                 .load(std::sync::atomic::Ordering::Relaxed),
-            guard: mirror_devnet::engine::GapGuard::of(
+            guard: diorama_devnet::engine::GapGuard::of(
                 ctx.plane.gap_paused.load(std::sync::atomic::Ordering::Relaxed),
             ),
         }
         .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);
-        if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
+        if diorama_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
         match next_block(&ctx).await {
@@ -342,26 +342,26 @@ async fn scan_once(ctx: &Ctx) -> Result<()> {
     // (the registry was persisted; T does not advance while the engine is
     // down). The applier's inline scan shares this high-water mark, so its
     // blocks are not re-traced.
-    let walk = mirror_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await?;
+    let walk = diorama_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await?;
     ctx.record_scan(&walk);
-    mirror_devnet::scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
+    diorama_devnet::scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
     Ok(())
 }
 
 /// Run the configured probes now: T at the applied cursor vs reth at the
 /// cursor — the same assertion the applier makes per block, on demand. The
-/// per-block path owns the `mirror_t_convergence_*` counters; this run reports
+/// per-block path owns the `diorama_t_convergence_*` counters; this run reports
 /// its own outcome and leaves them alone. The venue's `/admin/probes` is the
 /// same verb over its at-pin probe set.
-pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::ProbeOutcome> {
+pub(crate) async fn probes_now(ctx: &Ctx) -> Result<diorama_devnet::probes::ProbeOutcome> {
     let Some(cursor) = ctx.plane.state.cursor()? else {
         tracing::warn!("on-demand probes skipped: no cursor yet");
-        return Ok(mirror_devnet::probes::ProbeOutcome::skipped(
+        return Ok(diorama_devnet::probes::ProbeOutcome::skipped(
             ctx.engine.verifier.probes.len(),
         ));
     };
-    let probes = mirror_devnet::probes::run_at(ctx, cursor.block).await?;
-    mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), cursor.block, &probes);
+    let probes = diorama_devnet::probes::run_at(ctx, cursor.block).await?;
+    diorama_devnet::probes::report(&ctx.plane, ctx.mirror.label(), cursor.block, &probes);
     Ok(probes)
 }
 

@@ -1,7 +1,7 @@
 //! The venue mirror's [`Bundle`] — its divergence choices, filled and
 //! documented in its own folder.
 //!
-//! The spine ([`mirror_devnet::spine`]) declares the [`Mirror`] interface and
+//! The spine ([`diorama_devnet::spine`]) declares the [`Mirror`] interface and
 //! never names a mirror; this file is where the venue profile's choices are
 //! made and documented, next to the mainnet profile's `crates/mainnet/src/profile.rs`:
 //!
@@ -20,13 +20,13 @@
 //! compose its changes as a BAL, COW it against the devnet's own writes, and
 //! measure the result — while the decisions above are the only places the
 //! implementations diverge. The composer itself is generic
-//! (`mirror_devnet::bal::compose`).
+//! (`diorama_devnet::bal::compose`).
 use crate::reset::PinCanary;
-use mirror_config::{EngineSection, LoopsSection};
-use mirror_devnet::cow::Scope;
-use mirror_devnet::source::Source;
-use mirror_devnet::engine::JournalScope;
-use mirror_devnet::spine::{
+use diorama_config::{EngineSection, LoopsSection};
+use diorama_devnet::cow::Scope;
+use diorama_devnet::source::Source;
+use diorama_devnet::engine::JournalScope;
+use diorama_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
 use std::sync::atomic::AtomicU64;
@@ -84,7 +84,7 @@ pub struct Wiring {
 /// What the wiring needs: the spine's one `ProfileDeps` (the mainnet
 /// profile's `Deps` is the same struct — the roles, not the chains, name the
 /// fields).
-pub use mirror_devnet::spine::ProfileDeps as Deps;
+pub use diorama_devnet::spine::ProfileDeps as Deps;
 
 pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let Deps {
@@ -93,12 +93,12 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
         target_rpc,
         watch,
     } = deps;
-    let pin = Arc::new(AtomicU64::new(mirror_devnet::pin::PIN_UNRESOLVED));
+    let pin = Arc::new(AtomicU64::new(diorama_devnet::pin::PIN_UNRESOLVED));
     let source: Arc<dyn Source> = crate::source::pinned(source_rpc.clone(), pin.clone());
     let follow: Arc<dyn Source> = crate::source::follow(source_rpc);
     let reset: Arc<dyn ResetDetector> = Arc::new(PinCanary::new(state));
     let scope = Scope::from_config(watch, &engine.closures);
-    let target: Arc<dyn Source> = mirror_devnet::source::target(target_rpc);
+    let target: Arc<dyn Source> = diorama_devnet::source::target(target_rpc);
     let mirror = bundle(engine, source, follow, reset, scope);
     Wiring { mirror, pin, target }
 }
@@ -134,29 +134,29 @@ mod tests {
     fn the_bundle_pins_the_venue_divergences() {
         let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../config/instances/venue-mirror/instance.toml"
+            "/../../config/instances/diorama-venue/instance.toml"
         ));
-        let (mut inst, _) = mirror_config::Instance::inspect(path).unwrap();
+        let (mut inst, _) = diorama_config::Instance::inspect(path).unwrap();
         let (_, engine) = inst.take_venue().unwrap();
         let rpc = Arc::new(
-            mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
+            diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
                 .unwrap(),
         );
         let source: Arc<dyn Source> = crate::source::pinned(
             rpc.clone(),
             Arc::new(std::sync::atomic::AtomicU64::new(
-                mirror_devnet::pin::PIN_UNRESOLVED,
+                diorama_devnet::pin::PIN_UNRESOLVED,
             )),
         );
         let follow: Arc<dyn Source> = crate::source::follow(rpc);
         let watched = alloy_primitives::Address::repeat_byte(0xaa);
         let scope =
             Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
-        let mirror = bundle(&engine, source, follow, Arc::new(mirror_devnet::spine::NoReset), scope);
+        let mirror = bundle(&engine, source, follow, Arc::new(diorama_devnet::spine::NoReset), scope);
         assert_eq!(mirror.label(), "v");
         assert_eq!(
             mirror.journal_scope(),
-            mirror_devnet::engine::JournalScope::OwnWrites
+            diorama_devnet::engine::JournalScope::OwnWrites
         );
         assert!(
             !Arc::ptr_eq(mirror.source(), mirror.follow_source()),

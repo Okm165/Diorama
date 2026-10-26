@@ -31,7 +31,7 @@
 #   CAST=/path/to/cast make portfolio-reaction   # when cast is not on PATH
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 TRADER="${TRADER:-0x00000000000000000000000000000000000000f1}"
 WHALE="${WHALE:-0x00000000000000000000000000000000000000f2}"
 COIN="${COIN:-ETH}"

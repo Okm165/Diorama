@@ -9,7 +9,7 @@
 # script that supports it):
 #   direct  (ENGINE_URL set): the scratch stack's URLs — ENGINE_URL, V_URL,
 #           SIM_INFO, SIM_CTRL — no kubectl;
-#   cluster (default): the venue-mirror namespace, every call exec'd from the
+#   cluster (default): the diorama-venue namespace, every call exec'd from the
 #           venue engine pod (cluster-internal service names — the same
 #           transport the engine itself uses).
 #
@@ -17,11 +17,11 @@
 # gates every family shares — `sim_account`, `sim_spot`, `identity_ok` (the served-identity
 # check daloc gates on) and `flatten_coin` (a proof's rerunnable start).
 #
-# Conventions (measured, plan §7.6): V reads/writes go through eth_call /
+# Conventions (measured): V reads/writes go through eth_call /
 # eth_sendTransaction; the engine's admin reads are /status + /admin/*; the
 # simulator's info plane (8090) serves daloc's shapes and its control plane
 # (8091) the /control/* verbs.
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 CAST="${CAST:-cast}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"

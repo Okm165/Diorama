@@ -1,4 +1,4 @@
-//! The reconnect shape (plan §11.3 rule 3): bounded exponential backoff with a
+//! The reconnect shape: bounded exponential backoff with a
 //! reset on progress — one definition for every client that re-establishes a
 //! session (the venue feed's websocket today; a REST lane or a bridge
 //! reconnect tomorrow), never re-derived per client.

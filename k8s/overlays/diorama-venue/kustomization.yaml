@@ -1,0 +1,19 @@
+# The Venue Mirror instance overlay: the venue base + the instance ConfigMap +
+# the harness NodePorts. The diorama-mainnet overlay is untouched: the two
+# mirrors share the cluster and the diorama-retain StorageClass, not a
+# namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: diorama-venue
+
+resources:
+  - namespace.yaml
+  - ../../base/diorama-venue
+  # The cross-mirror bridge: its own base (it belongs to neither mirror); it
+  # deploys beside the venue stack and reaches T cross-namespace.
+  - ../../base/cctp-bridge
+  # This instance's unit (config/instances/diorama-venue): the file every pod
+  # of this instance mounts at /etc/mirror/instance.toml, and its generator.
+  - ../../../config/instances/diorama-venue
+  - nodeports.yaml

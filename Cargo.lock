@@ -784,15 +784,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
-name = "ast-scope"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1067,14 +1058,6 @@ checksum = "877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df"
 dependencies = [
  "find-msvc-tools",
  "shlex",
-]
-
-[[package]]
-name = "cctp-bridge"
-version = "0.1.0"
-dependencies = [
- "mirror-cctp",
- "mirror-config",
 ]
 
 [[package]]
@@ -1511,6 +1494,177 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
+]
+
+[[package]]
+name = "diorama-anvil"
+version = "0.1.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-json-rpc",
+ "alloy-primitives",
+ "alloy-rpc-types-anvil",
+ "alloy-rpc-types-eth",
+ "alloy-rpc-types-trace",
+ "alloy-rpc-types-txpool",
+ "alloy-sol-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "diorama-ast-scope"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "diorama-cctp"
+version = "0.1.0"
+dependencies = [
+ "alloy-chains",
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
+ "axum",
+ "chrono",
+ "diorama-anvil",
+ "diorama-config",
+ "k256",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "diorama-cctp-bridge"
+version = "0.1.0"
+dependencies = [
+ "diorama-cctp",
+ "diorama-config",
+]
+
+[[package]]
+name = "diorama-config"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "clap",
+ "serde",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "diorama-devnet"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-network-primitives",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-serde",
+ "axum",
+ "diorama-anvil",
+ "diorama-config",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "diorama-mainnet"
+version = "0.1.0"
+dependencies = [
+ "alloy-eips",
+ "alloy-json-rpc",
+ "alloy-network-primitives",
+ "alloy-primitives",
+ "alloy-rpc-types-beacon",
+ "alloy-rpc-types-engine",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
+ "axum",
+ "clap",
+ "diorama-anvil",
+ "diorama-config",
+ "diorama-devnet",
+ "futures-util",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "diorama-mainnet-engine"
+version = "0.1.0"
+dependencies = [
+ "diorama-config",
+ "diorama-mainnet",
+]
+
+[[package]]
+name = "diorama-venue"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
+ "alloy-rpc-types-trace",
+ "alloy-sol-types",
+ "axum",
+ "clap",
+ "diorama-anvil",
+ "diorama-config",
+ "diorama-devnet",
+ "futures-util",
+ "reqwest",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+ "tracing",
+]
+
+[[package]]
+name = "diorama-venue-engine"
+version = "0.1.0"
+dependencies = [
+ "diorama-config",
+ "diorama-venue",
+]
+
+[[package]]
+name = "diorama-venue-sim"
+version = "0.1.0"
+dependencies = [
+ "diorama-config",
+ "diorama-venue",
 ]
 
 [[package]]
@@ -2508,14 +2662,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mainnet-engine"
-version = "0.1.0"
-dependencies = [
- "mirror-config",
- "mirror-mainnet",
-]
-
-[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2551,136 +2697,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mirror-anvil"
-version = "0.1.0"
-dependencies = [
- "alloy-eips",
- "alloy-json-rpc",
- "alloy-primitives",
- "alloy-rpc-types-anvil",
- "alloy-rpc-types-eth",
- "alloy-rpc-types-trace",
- "alloy-rpc-types-txpool",
- "alloy-sol-types",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "mirror-cctp"
-version = "0.1.0"
-dependencies = [
- "alloy-chains",
- "alloy-consensus",
- "alloy-eips",
- "alloy-primitives",
- "alloy-rpc-types-eth",
- "alloy-sol-types",
- "axum",
- "chrono",
- "k256",
- "mirror-anvil",
- "mirror-config",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "mirror-config"
-version = "0.1.0"
-dependencies = [
- "alloy-primitives",
- "clap",
- "serde",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mirror-devnet"
-version = "0.1.0"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-network-primitives",
- "alloy-primitives",
- "alloy-rpc-types-eth",
- "alloy-serde",
- "axum",
- "futures-util",
- "mirror-anvil",
- "mirror-config",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "mirror-mainnet"
-version = "0.1.0"
-dependencies = [
- "alloy-eips",
- "alloy-json-rpc",
- "alloy-network-primitives",
- "alloy-primitives",
- "alloy-rpc-types-beacon",
- "alloy-rpc-types-engine",
- "alloy-rpc-types-eth",
- "alloy-sol-types",
- "axum",
- "clap",
- "futures-util",
- "jsonwebtoken",
- "mirror-anvil",
- "mirror-config",
- "mirror-devnet",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "mirror-venue"
-version = "0.1.0"
-dependencies = [
- "alloy-consensus",
- "alloy-primitives",
- "alloy-rpc-types-eth",
- "alloy-rpc-types-trace",
- "alloy-sol-types",
- "axum",
- "clap",
- "futures-util",
- "mirror-anvil",
- "mirror-config",
- "mirror-devnet",
- "reqwest",
- "rust_decimal",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-tungstenite 0.30.0",
- "tracing",
 ]
 
 [[package]]
@@ -4489,22 +4505,6 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
-
-[[package]]
-name = "venue-engine"
-version = "0.1.0"
-dependencies = [
- "mirror-config",
- "mirror-venue",
-]
-
-[[package]]
-name = "venue-sim"
-version = "0.1.0"
-dependencies = [
- "mirror-config",
- "mirror-venue",
-]
 
 [[package]]
 name = "version_check"

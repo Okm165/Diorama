@@ -1,6 +1,6 @@
 //! Shadow registry: tracks the devnet's own writes on T (copy-on-write).
 //!
-//! COW rules (plan §2.2):
+//! COW rules:
 //!   - storage shadows per slot;
 //!   - account fields (balance + nonce + code) shadow as one unit;
 //!   - the applier skips any parent write whose key is shadowed, so the devnet's
@@ -8,7 +8,7 @@
 //!
 //! Writes are discovered by watching T's own blocks (traces + tx semantics) and
 //! can be added explicitly through the admin API.
-use mirror_anvil::{Rpc, Write};
+use diorama_anvil::{Rpc, Write};
 use alloy_primitives::{Address, Bytes, U256};
 use crate::error::{Error, Result};
 use crate::metrics::{Metrics, Registry};
@@ -37,7 +37,7 @@ pub struct Shadow {
     /// have a default zero restored over a real value on a re-fork.
     #[serde(default)]
     pub(crate) account_values: BTreeMap<Address, AccountValues>,
-    /// Whole-account ownership for the devnet's fixtures (plan §14.1): the
+    /// Whole-account ownership for the devnet's fixtures: the
     /// canonical addresses daloc's deploy replaces via `anvil_setCode` write
     /// through *cheatcodes*, which the tx scanner cannot see — without this,
     /// the next parent diff would clobber the mock. Config carries the list;
@@ -104,7 +104,7 @@ impl From<RawAccountValues> for AccountValues {
 impl Shadow {
     /// The key-level shadow check (the BAL-typed COW filter asks keys, not
     /// writes).
-    pub fn is_shadowed_key(&self, key: &mirror_anvil::Key) -> bool {
+    pub fn is_shadowed_key(&self, key: &diorama_anvil::Key) -> bool {
         if self.is_fixture(&key.address()) {
             // Whole-account ownership: every write to a fixture address is
             // devnet-owned, marked or not (the fixture deploy is invisible to
@@ -112,7 +112,7 @@ impl Shadow {
             return true;
         }
         match key {
-            mirror_anvil::Key::Storage { address, slot } => self
+            diorama_anvil::Key::Storage { address, slot } => self
                 .slots
                 .get(address)
                 .map(|s| s.contains(slot))
@@ -235,7 +235,7 @@ impl Shadow {
     /// restore that reported success would leave T holding some devnet values
     /// and some pin-era ones with no way to tell which (the caller retries or
     /// halts; the marks are still in place either way).
-    pub async fn reapply(&self, rpc: &mirror_anvil::Rpc, chunk_size: usize) -> Result<usize> {
+    pub async fn reapply(&self, rpc: &diorama_anvil::Rpc, chunk_size: usize) -> Result<usize> {
         let mut writes: Vec<Write> = Vec::new();
         for (address, slots) in &self.values {
             for (slot, value) in slots {
@@ -269,7 +269,7 @@ impl Shadow {
                 });
             }
         }
-        mirror_anvil::apply_writes(rpc, &writes, chunk_size)
+        diorama_anvil::apply_writes(rpc, &writes, chunk_size)
             .await
             .map_err(Error::from)
     }
@@ -498,18 +498,18 @@ mod tests {
         let a = Address::repeat_byte(0xaa);
         s.mark_slot(a, U256::from(1u64));
         s.mark_account_fields(a);
-        assert!(s.is_shadowed_key(&mirror_anvil::Key::Storage {
+        assert!(s.is_shadowed_key(&diorama_anvil::Key::Storage {
             address: a,
             slot: U256::from(1u64),
         }));
         // other slots of the same account still sync
-        assert!(!s.is_shadowed_key(&mirror_anvil::Key::Storage {
+        assert!(!s.is_shadowed_key(&diorama_anvil::Key::Storage {
             address: a,
             slot: U256::from(2u64),
         }));
         // account fields shadow as one unit
-        assert!(s.is_shadowed_key(&mirror_anvil::Key::Balance(a)));
-        assert!(s.is_shadowed_key(&mirror_anvil::Key::Nonce(a)));
+        assert!(s.is_shadowed_key(&diorama_anvil::Key::Balance(a)));
+        assert!(s.is_shadowed_key(&diorama_anvil::Key::Nonce(a)));
     }
 
     #[test]
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(s.prune_orphans(), (0, 0));
     }
 
-    /// Fixture addresses are whole-account owned (plan §14.1): the fixture
+    /// Fixture addresses are whole-account owned: the fixture
     /// deploy writes through cheatcodes the scanner cannot see, so every
     /// write to those addresses must be skipped without a mark — and the
     /// list is runtime state, never persisted.
@@ -642,18 +642,18 @@ mod tests {
         let mut s = Shadow::default();
         s.set_fixtures([fixture].into_iter().collect());
         assert!(
-            s.is_shadowed_key(&mirror_anvil::Key::Storage {
+            s.is_shadowed_key(&diorama_anvil::Key::Storage {
                 address: fixture,
                 slot: U256::from(7u64),
             }),
             "any fixture slot is owned"
         );
         assert!(
-            s.is_shadowed_key(&mirror_anvil::Key::Balance(fixture)),
+            s.is_shadowed_key(&diorama_anvil::Key::Balance(fixture)),
             "fixture account fields are owned"
         );
         assert!(
-            !s.is_shadowed_key(&mirror_anvil::Key::Storage {
+            !s.is_shadowed_key(&diorama_anvil::Key::Storage {
                 address: other,
                 slot: U256::from(7u64),
             }),

@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# The venue epoch scenario (plan §7.8, the counterpart of `make mainnet-scenario`):
+# The venue epoch scenario (the counterpart of `make mainnet-scenario`):
 # proves the epoch rule end-to-end — a deal survives a same-pin reset (the
 # COW restore), and a new-pin epoch clears it (fresh base = fresh epoch).
 #
 # Run from the repo root:
-#   make venue-scenario              # against the deployed venue-mirror
+#   make venue-scenario              # against the deployed diorama-venue
 #   ENGINE_URL=http://127.0.0.1:18681 V_URL=http://127.0.0.1:18610 \
 #     ./scripts/venue-scenario.sh    # direct mode: a scratch stack, no kubectl
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 USDC="${USDC:-0xb88339CB7199b77E23DB6E890353E22632Ba630f}"   # HyperEVM native USDC
 ACCT="${ACCT:-0x00000000000000000000000000000000000000d1}"   # a scratch account
 AMOUNT="${AMOUNT:-100000000}"                                 # 100 USDC (6-dec ERC20)

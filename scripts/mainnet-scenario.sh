@@ -13,7 +13,7 @@ set -uo pipefail
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-mainnet.sh"
 
-# The probes mirror config/instances/mainnet-mirror/instance.toml:probes (all watched
+# The probes mirror config/instances/diorama-mainnet/instance.toml:probes (all watched
 # accounts, so T must match reth exactly; none is blockhash-dependent either
 # (the engine's convergence repair is what makes that true).
 probe() { # probe <rpc-url> <block-hex> <to> <data>
@@ -69,7 +69,7 @@ echo "== mirror scenario test (namespace $NS)"
 echo "-- 1. self-containment"
 peers=$(rpc http://reth:8545 net_peerCount | jq -r '.result // "ERR"')
 [ "$(num "$peers")" -eq 0 ] && ok "reth has no EL peers (${peers})" || bad "reth has peers: $peers"
-gap=$(engine_api /metrics | awk '/^mirror_source_sync_gap_blocks /{print $2}')
+gap=$(engine_api /metrics | awk '/^diorama_source_sync_gap_blocks /{print $2}')
 [ "$(num "$gap")" -eq 0 ] && ok "top-up gap is 0 (reth tracks the CL head)" || bad "top-up gap: $gap"
 urls=$($K get cm engine-config -o jsonpath='{.data.engine\.yaml}' | awk '/beacon_urls:/{getline; print}' | tr -d ' -')
 case "$urls" in *lighthouse*) ok "blob source is the local CL ($urls)";; *) bad "blob source: $urls";; esac
@@ -239,7 +239,7 @@ sleep 20
 at=$(printf '0x%x' "$(num "$(engine_api /status | jq -r '.cursor_t')")")
 probes_match http://reth:8545 http://anvil-t:8545 "T after rewind" "$at"
 
-echo "-- 5. cascade lever (plan §7: the real Aave crash path)"
+echo "-- 5. cascade lever (the real Aave crash path)"
 # The mirror's signature scenario: take over the Aave oracle through its own
 # admin path and crash a price, with no mock contracts - the devnet's
 # dependency closure (all watched) makes the lever real.
@@ -405,12 +405,12 @@ fi
 
 echo "-- 4. integrity counters"
 m=$(engine_api /metrics)
-for counter in mirror_t_convergence_failures_total \
-               mirror_full_sweep_mismatches_total \
-               mirror_reorgs_detected_total; do
+for counter in diorama_t_convergence_failures_total \
+               diorama_full_sweep_mismatches_total \
+               diorama_reorgs_detected_total; do
   v=$(echo "$m" | awk -v c="$counter" '$1==c {print $2}')
   case "$counter" in
-    mirror_reorgs_detected_total) info "$counter = ${v:-0} (upstream reorgs; informational, the applier self-heals)";;
+    diorama_reorgs_detected_total) info "$counter = ${v:-0} (upstream reorgs; informational, the applier self-heals)";;
     *) [ "$(num "$v")" -eq 0 ] && ok "$counter = 0" || info "$counter = ${v:-?} (cumulative; see the latest drift entry)";;
   esac
 done

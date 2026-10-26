@@ -9,7 +9,7 @@
 //! leaving part of the rolled-back range un-restored.
 use crate::error::{Error, Result};
 use alloy_primitives::{Address, Bytes, U256};
-use mirror_anvil::{Key, Value, Rpc, Write};
+use diorama_anvil::{Key, Value, Rpc, Write};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -234,7 +234,7 @@ impl Journal {
     pub async fn undo_block(&self, block: u64, t: &Rpc, chunk: usize) -> Result<usize> {
         let entries = self.load(block)?;
         let writes: Vec<Write> = entries.iter().map(JournalEntry::to_write).collect();
-        mirror_anvil::apply_writes(t, &writes, chunk)
+        diorama_anvil::apply_writes(t, &writes, chunk)
             .await
             .map_err(Error::from)
     }
@@ -293,7 +293,7 @@ pub async fn read_before_values(
     // The target is the devnet chain (an anvil): its own 500-item contract,
     // so a block's whole write set rides one body.
     let values = target
-        .read_keys_limited(&keys, at, mirror_anvil::ANVIL_BATCH_MAX_ITEMS)
+        .read_keys_limited(&keys, at, diorama_anvil::ANVIL_BATCH_MAX_ITEMS)
         .await?;
     let mut entries = Vec::with_capacity(writes.len());
     for (w, value) in writes.iter().zip(values) {

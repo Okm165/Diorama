@@ -22,9 +22,9 @@ pub(crate) mod parity;
 use crate::ctx::Ctx;
 use crate::error::Result;
 use alloy_rpc_types_eth::Block;
-use mirror_devnet::engine::Engine as _;
-use mirror_devnet::facts::Fact;
-use mirror_devnet::metrics::Registry as _;
+use diorama_devnet::engine::Engine as _;
+use diorama_devnet::facts::Fact;
+use diorama_devnet::metrics::Registry as _;
 use std::time::Instant;
 
 
@@ -162,17 +162,17 @@ async fn pre_land_scan(ctx: &Ctx) -> Result<()> {
         .as_ref()
         .map(|c| c.block)
         .unwrap_or(head);
-    let walk = mirror_devnet::scan::scan_to(
+    let walk = diorama_devnet::scan::scan_to(
         &ctx.plane,
         &ctx.anvil_v,
-        mirror_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
+        diorama_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
         head,
         first,
     )
     .await?;
     if walk.walked > 0 {
         ctx.record_scan(&walk);
-        mirror_devnet::scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
+        diorama_devnet::scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
         ctx.plane.save_shadow()?;
     }
     Ok(())
@@ -302,13 +302,13 @@ fn continuity_check(ctx: &Ctx, followed: u64, next: Option<&Block>) -> Result<()
 /// The window's first phase, the applier's `plan_and_check_base` slot: the
 /// shared pipeline half (compose → COW → flatten) for the whole window, its
 /// gauges recorded and the uncovered log audited.
-async fn plan_window(ctx: &Ctx, from: u64, to: u64) -> Result<mirror_devnet::bal::WindowPlan> {
-    let plan = mirror_devnet::bal::Composer {
+async fn plan_window(ctx: &Ctx, from: u64, to: u64) -> Result<diorama_devnet::bal::WindowPlan> {
+    let plan = diorama_devnet::bal::Composer {
         source: ctx.mirror.follow_source().as_ref(),
         target: ctx.target.as_ref(),
         scope: ctx.mirror.scope(),
     }
-    .plan(&ctx.plane.shadow, mirror_devnet::bal::Window::new(from, to))
+    .plan(&ctx.plane.shadow, diorama_devnet::bal::Window::new(from, to))
     .await?;
     record_window_metrics(&ctx.venue_metrics, &plan.compose);
     audit::record(ctx, &plan.compose.uncovered)?;
@@ -317,16 +317,16 @@ async fn plan_window(ctx: &Ctx, from: u64, to: u64) -> Result<mirror_devnet::bal
 
 /// The window's second phase, the applier's `write_and_mine` slot: land the
 /// planned writes on V (chunked), counted.
-async fn apply_window(ctx: &Ctx, plan: &mirror_devnet::bal::WindowPlan) -> Result<usize> {
+async fn apply_window(ctx: &Ctx, plan: &diorama_devnet::bal::WindowPlan) -> Result<usize> {
     if plan.writes.is_empty() {
         return Ok(0);
     }
-    Ok(mirror_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size).await?)
+    Ok(diorama_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size).await?)
 }
 
 /// The poll's gauges: what the window's composition touched, planned and
 /// changed (the uncovered-log trail is [`audit`]'s).
-fn record_window_metrics(metrics: &crate::metrics::VenueMetrics, stats: &mirror_devnet::bal::ComposeStats) {
+fn record_window_metrics(metrics: &crate::metrics::VenueMetrics, stats: &diorama_devnet::bal::ComposeStats) {
     metrics.set(&metrics.poll_touched, stats.touched as u64);
     metrics.set(&metrics.poll_planned_keys, stats.planned as u64);
     metrics.set(&metrics.poll_changed_keys, stats.changed as u64);
@@ -336,7 +336,7 @@ fn record_window_metrics(metrics: &crate::metrics::VenueMetrics, stats: &mirror_
 /// block hash — the continuity check's anchor) and persist the state. The
 /// name says which cursor: the devnet cursor is the spine's `advance_cursor`.
 async fn advance_source_cursor(ctx: &Ctx, source_head: u64) -> Result<()> {
-    let head_block = ctx.source_rpc.block_by_number(source_head, mirror_anvil::Txs::Hashes).await?;
+    let head_block = ctx.source_rpc.block_by_number(source_head, diorama_anvil::Txs::Hashes).await?;
     ctx.plane.state.set_source_last(source_head, head_block.header.hash)?;
     ctx.plane.save_state()?;
     Ok(())

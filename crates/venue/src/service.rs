@@ -1,7 +1,7 @@
-//! The simulator service's composition root (the `venue-sim` bin is the
+//! The simulator service's composition root (the `diorama-venue-sim` bin is the
 //! shell over [`sim_entry`] — the same shell as the engines').
 //!
-//! Boot order (plan §7.2): load the instance, build the market plane (REST
+//! Boot order: load the instance, build the market plane (REST
 //! poller + WS client) and the account plane (persisted registry), then serve
 //! the daloc-facing info API (8090) and the control API (8091) beside the
 //! self-advance tick (1 Hz: accrue funding, check liquidations, persist when
@@ -10,7 +10,7 @@ use crate::Result;
 use crate::{driver, http};
 use crate::ctx::Ctx;
 use clap::{Parser, Subcommand};
-use mirror_config::boot;
+use diorama_config::boot;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,11 +62,11 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
 /// Load the instance and require this pod's wiring to be resolved: one
 /// instance file, many readers — the venue engine's and the bridge's
 /// references stay unresolved here, by design.
-fn load_wiring(config: &std::path::Path) -> crate::Result<mirror_config::Instance> {
-    let (cfg, unresolved) = mirror_config::Instance::inspect(config)?;
+fn load_wiring(config: &std::path::Path) -> crate::Result<diorama_config::Instance> {
+    let (cfg, unresolved) = diorama_config::Instance::inspect(config)?;
     if let (Some(chain), Some(sim)) = (cfg.chains.venue.as_ref(), cfg.services.venue_sim.as_ref()) {
         let state_dir = sim.state_dir.to_string_lossy().to_string();
-        mirror_config::require_resolved_logged(
+        diorama_config::require_resolved_logged(
             "venue simulator wiring",
             &[
                 &chain.source_url,
@@ -85,7 +85,7 @@ fn spawn_market_plane(
     feed: &Arc<crate::feed::MarketFeed>,
     api_client: crate::feed::rest::RestClient,
     ws_url: &str,
-    sim_section: &mirror_config::VenueSimSection,
+    sim_section: &diorama_config::VenueSimSection,
 ) {
     let poller = crate::feed::rest::Poller::new(
         feed.clone(),
@@ -110,7 +110,7 @@ fn spawn_plane_heartbeat(
     let feed = feed.clone();
     let sim = sim.clone();
     let bridge = bridge.clone();
-    let via = mirror_devnet::engine::source_host(api_url).to_string();
+    let via = diorama_devnet::engine::source_host(api_url).to_string();
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -152,14 +152,14 @@ fn spawn_plane_heartbeat(
 /// The Core↔EVM bridge (when V is configured): system-address credits and
 /// CoreWriter actions become sim state.
 fn spawn_bridge(
-    sim_section: &mirror_config::VenueSimSection,
+    sim_section: &diorama_config::VenueSimSection,
     sim: &Arc<crate::sim::Sim>,
     feed: &Arc<crate::feed::MarketFeed>,
     metrics: &Arc<crate::bridge::metrics::BridgeMetrics>,
 ) -> crate::Result<()> {
     match &sim_section.anvil_url {
         Some(v_url) => {
-            let v = mirror_anvil::Rpc::new(v_url, Duration::from_secs(30))?;
+            let v = diorama_anvil::Rpc::new(v_url, Duration::from_secs(30))?;
             let bridge = crate::bridge::Bridge::new(
                 v,
                 sim.clone(),
@@ -196,7 +196,7 @@ fn spawn_tick(
 /// Serve the two listeners: the info API daloc reads, the control API the
 /// harness drives. The handles are the shutdown tail's.
 fn serve(
-    sim_section: &mirror_config::VenueSimSection,
+    sim_section: &diorama_config::VenueSimSection,
     state: &Arc<crate::api::ApiState>,
 ) -> (
     tokio::task::JoinHandle<crate::Result<()>>,
@@ -219,7 +219,7 @@ fn serve(
 
 /// The Venue Mirror engine's CLI.
 #[derive(Parser)]
-#[command(name = "venue-engine", version, about)]
+#[command(name = "diorama-venue-engine", version, about)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -232,7 +232,7 @@ struct Cli {
 enum Cmd {
     /// Run the engine loops and the HTTP API.
     Run {
-        #[arg(long, default_value = mirror_config::boot::DEFAULT_INSTANCE_PATH)]
+        #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
         config: std::path::PathBuf,
     },
     /// End-to-end self test against a public RPC + one scratch Anvil fork.
@@ -241,7 +241,7 @@ enum Cmd {
         rpc: String,
         #[arg(long)]
         anvil_v: String,
-        #[arg(long, default_value = mirror_config::boot::DEFAULT_INSTANCE_PATH)]
+        #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
         config: std::path::PathBuf,
         /// Minimum windows to compose (the run continues, bounded, until a
         /// window composes a change).
@@ -251,9 +251,9 @@ enum Cmd {
 }
 
 /// The Venue Mirror engine's entrypoint (the bin is the shell over this; the
-/// same shell as `mainnet-engine`, R3).
+/// same shell as `diorama-mainnet-engine`, R3).
 ///
-/// Boot order (plan §7.2): wait for anvil V, assert the chain, reconcile the
+/// Boot order: wait for anvil V, assert the chain, reconcile the
 /// registry (reset detection + the epoch rule; the reconcile also anchors the
 /// epoch pin before any writes exist — the counterpart of the mainnet
 /// engine's explicit boot anchor), run the at-pin probes, then serve the HTTP
@@ -264,8 +264,8 @@ enum Cmd {
 /// mutation persists its state as it happens (shadow registry, cursor), so
 /// there is nothing to drain.
 pub async fn main_entry(args: Vec<String>) -> Result<()> {
-    mirror_config::boot::init_logging();
-    let cli: Cli = boot::parse_cli("venue-engine", args);
+    diorama_config::boot::init_logging();
+    let cli: Cli = boot::parse_cli("diorama-venue-engine", args);
     match cli.cmd {
         Cmd::Run { config } => run(config).await,
         Cmd::Selftest {
@@ -292,7 +292,7 @@ async fn selftest_cmd(
     targets: crate::selftest::Targets,
     windows: u64,
 ) -> Result<()> {
-    mirror_devnet::engine::selftest_entry(
+    diorama_devnet::engine::selftest_entry(
         &config,
         |cfg, unresolved| {
             // The scratch run's endpoints come from the CLI: only the
@@ -307,7 +307,7 @@ async fn selftest_cmd(
 }
 
 async fn run(config: std::path::PathBuf) -> Result<()> {
-    mirror_devnet::engine::run_engine::<Ctx>(config).await
+    diorama_devnet::engine::run_engine::<Ctx>(config).await
 }
 
 /// This command's wiring, by name: the endpoint values it needs (`endpoints`
@@ -316,26 +316,26 @@ async fn run(config: std::path::PathBuf) -> Result<()> {
 /// variable, never a literal used as an endpoint; the other services'
 /// references in the same instance file are not this pod's to provide.
 fn require_wiring(
-    cfg: &mirror_config::Instance,
+    cfg: &diorama_config::Instance,
     unresolved: &[String],
     what: &'static str,
     endpoints: &[&str],
-) -> std::result::Result<(), mirror_config::ConfigError> {
-    mirror_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &[])
+) -> std::result::Result<(), diorama_config::ConfigError> {
+    diorama_devnet::engine::require_engine_wiring(cfg, unresolved, what, endpoints, &[])
 }
 
-/// The shell's service hooks (`mirror_devnet::engine::EngineService`): the
+/// The shell's service hooks (`diorama_devnet::engine::EngineService`): the
 /// sequence is the spine's; these are V's own pieces.
-impl mirror_devnet::engine::EngineService for Ctx {
+impl diorama_devnet::engine::EngineService for Ctx {
     fn wiring_label() -> &'static str {
         "venue engine wiring"
     }
 
-    fn urls(cfg: &mirror_config::Instance) -> Result<(String, String)> {
+    fn urls(cfg: &diorama_config::Instance) -> Result<(String, String)> {
         Ok(cfg.venue_urls()?)
     }
 
-    fn context(cfg: mirror_config::Instance, source_url: &str, target_url: &str) -> Result<Self> {
+    fn context(cfg: diorama_config::Instance, source_url: &str, target_url: &str) -> Result<Self> {
         Ctx::new(cfg, source_url, target_url)
     }
 
@@ -347,7 +347,7 @@ impl mirror_devnet::engine::EngineService for Ctx {
         tracing::info!(
             source = %ctx.source_rpc.url(),
             anvil_v = %ctx.anvil_v.url(),
-            pin = ?mirror_devnet::pin::resolved_pin(&ctx.pin),
+            pin = ?diorama_devnet::pin::resolved_pin(&ctx.pin),
             watchlist = ctx.mirror.scope().watch().accounts.len(),
             "mirror engine starting"
         );
@@ -358,7 +358,7 @@ impl mirror_devnet::engine::EngineService for Ctx {
     ) -> futures_util::future::BoxFuture<'_, Result<Vec<tokio::task::JoinHandle<()>>>> {
         Box::pin(async move {
             let tasks = vec![
-                mirror_devnet::engine::spawn_http(ctx, http::app(ctx.clone())),
+                diorama_devnet::engine::spawn_http(ctx, http::app(ctx.clone())),
                 tokio::spawn(driver::follow_loop(ctx.clone())),
                 tokio::spawn(driver::mine_loop(ctx.clone())),
             ];

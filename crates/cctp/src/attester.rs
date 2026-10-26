@@ -1,4 +1,4 @@
-//! The devnet attester (§15.3): the substituted off-chain authority, real
+//! The devnet attester: the substituted off-chain authority, real
 //! on-chain verification.
 //!
 //! Circle's attestation is an m-of-n threshold ECDSA multisig over
@@ -27,7 +27,7 @@ use crate::transfer::{
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use std::time::Duration;
 
 /// One gas stipend for an impersonated attester-manager tx (a devnet
@@ -213,7 +213,7 @@ async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, AttesterSt
 /// unfunded senders).
 async fn ensure_manager_gas(rpc: &Rpc, chain: &'static str, manager: Address) -> Result<()> {
     let balance = rpc
-        .call::<U256>(mirror_anvil::ETH_GET_BALANCE, (manager, mirror_anvil::LATEST))
+        .call::<U256>(diorama_anvil::ETH_GET_BALANCE, (manager, diorama_anvil::LATEST))
         .await?;
     if balance.is_zero() {
         tracing::warn!(chain, %manager, "attester manager has no gas on the fork; setting a devnet stipend");
@@ -266,8 +266,8 @@ mod tests {
     /// hex seed is used verbatim.
     #[test]
     fn seed_derivation_is_deterministic() {
-        let a = Attester::from_seed("mirror-cctp-devnet-attester").unwrap();
-        let b = Attester::from_seed("mirror-cctp-devnet-attester").unwrap();
+        let a = Attester::from_seed("diorama-cctp-devnet-attester").unwrap();
+        let b = Attester::from_seed("diorama-cctp-devnet-attester").unwrap();
         assert_eq!(a.address(), b.address());
         assert_ne!(a.address(), Attester::from_seed("other").unwrap().address());
 
@@ -281,7 +281,7 @@ mod tests {
     /// (raw — no EIP-191 prefix), recovering the attester address.
     #[test]
     fn sign_is_keccak_recoverable_and_verifiable() {
-        let attester = Attester::from_seed("mirror-cctp-devnet-attester").unwrap();
+        let attester = Attester::from_seed("diorama-cctp-devnet-attester").unwrap();
         let message = b"a served CCTP message";
         let attestation = attester.sign(message).unwrap();
         assert_eq!(attestation.len(), 65);

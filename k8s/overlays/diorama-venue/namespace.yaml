@@ -1,0 +1,10 @@
+# The Venue Mirror namespace: a sibling of diorama-mainnet in the same cluster
+# - its own storage, services and NodePorts, one shared
+# diorama-retain StorageClass.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: diorama-venue
+  labels:
+    app.kubernetes.io/part-of: diorama-venue
+    app.kubernetes.io/name: diorama-venue

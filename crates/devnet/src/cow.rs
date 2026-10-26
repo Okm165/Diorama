@@ -17,7 +17,7 @@ use alloy_eips::eip7928::{
     SlotChanges,
 };
 use alloy_primitives::{Address, U256};
-use mirror_anvil::Key;
+use diorama_anvil::Key;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// What the mirror keeps fresh.
@@ -64,7 +64,7 @@ impl WatchSet {
     /// Is this write's key watched? Account fields follow the account; a
     /// storage write is watched when its account is (mainnet: all slots) or
     /// its slot is declared (venue closure).
-    pub fn contains(&self, w: &mirror_anvil::Write) -> bool {
+    pub fn contains(&self, w: &diorama_anvil::Write) -> bool {
         self.contains_key(&w.key())
     }
 
@@ -101,7 +101,7 @@ impl Scope {
     /// mainnet profile's case).
     pub fn from_config(
         accounts: HashSet<Address>,
-        closures: &mirror_config::ClosuresSection,
+        closures: &diorama_config::ClosuresSection,
     ) -> Self {
         Self::new(
             crate::closure::watch_set(accounts, closures),
@@ -129,7 +129,7 @@ pub struct FilterStats {
 /// account fields count as one unit, whole-account fixtures included). The
 /// output is a change document — storage reads and per-tx indices are not part
 /// of what the pipeline writes, so the kept changes are re-framed at index 1
-/// (the same framing [`mirror_anvil::bal_from_writes`] uses).
+/// (the same framing [`diorama_anvil::bal_from_writes`] uses).
 pub fn filter_bal(watch: &WatchSet, shadow: &Shadow, bal: BlockAccessList) -> (BlockAccessList, FilterStats) {
     let mut out: BlockAccessList = Vec::new();
     let mut stats = FilterStats::default();
@@ -169,12 +169,12 @@ impl SkipSet {
     }
 
     /// Would the filter drop this key? Then the compose need not read it.
-    pub fn skips(&self, key: &mirror_anvil::Key) -> bool {
+    pub fn skips(&self, key: &diorama_anvil::Key) -> bool {
         if self.fixtures.contains(&key.address()) {
             return true;
         }
         match key {
-            mirror_anvil::Key::Storage { address, slot } => self
+            diorama_anvil::Key::Storage { address, slot } => self
                 .slots
                 .get(address)
                 .map(|slots| slots.contains(slot))

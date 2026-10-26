@@ -1,5 +1,5 @@
 //! The account plane: the simulated accounts registry (COW overlay), its
-//! persistence, and the self-advance automaton (plan §5, §14.8).
+//! persistence, and the self-advance automaton.
 //!
 //! The modules: `account` (the account math and the position totals), `seed`
 //! (the served-shape patch), `funding` (the hourly interval), `order` (the
@@ -39,8 +39,8 @@ use account::{Account, Accounts, Liquidation};
 use seed::AccountSeed;
 use metrics::SimMetrics;
 use alloy_primitives::Address;
-use mirror_devnet::store;
-use mirror_devnet::Shared;
+use diorama_devnet::store;
+use diorama_devnet::Shared;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -607,7 +607,7 @@ impl Sim {
         })
     }
 
-    /// The venue's nonce rule (plan §5): the 100 highest nonces per signer,
+    /// The venue's nonce rule: the 100 highest nonces per signer,
     /// accepted in the window (T − 2 d, T + 1 d); a duplicate is refused by
     /// name. Called only when the body carries a nonce (their harness's
     /// nonce-less shape stays accepted — the devnet's impersonation analogue).

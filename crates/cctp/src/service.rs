@@ -9,8 +9,8 @@
 use crate::chains::{Chain, Domain, DOMAIN_ETHEREUM, DOMAIN_HYPER_EVM};
 use crate::transfer::{TxSender, Wallet};
 use crate::{Address, B256, U256};
-use mirror_config::boot;
-use mirror_config::CctpSection;
+use diorama_config::boot;
+use diorama_config::CctpSection;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,10 +51,10 @@ pub async fn main_entry(args: Vec<String>) -> crate::Result<()> {
 /// unresolved references instead of failing on them; the cctp section's own
 /// wiring is then required here, by name).
 fn load_wiring(config: &std::path::Path) -> crate::Result<CctpSection> {
-    let (mut cfg, unresolved) = mirror_config::Instance::inspect(config)?;
+    let (mut cfg, unresolved) = diorama_config::Instance::inspect(config)?;
     let section = cfg.take_cctp()?;
     let state_dir = section.state_dir.to_string_lossy().to_string();
-    mirror_config::require_resolved_logged(
+    diorama_config::require_resolved_logged(
         "cctp wiring",
         &[
             &state_dir,

@@ -1,4 +1,4 @@
-//! Service sections: one per service; each service reads its own (§19.3).
+//! Service sections: one per service; each service reads its own.
 //!
 //! Values live here only as *shapes*; the numbers live in
 //! `config/defaults.toml` (shared) or the instance file (deployment-specific).
@@ -8,7 +8,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// `[services]`: one section per service; each service reads its own (§19.3).
+/// `[services]`: one section per service; each service reads its own.
 /// The engine's key is the same for both profiles — what differs is the
 /// profile's shape (`[services.engine.anvil]` carries the devnet chain's
 /// URL, T's or V's, and the coherence check requires exactly the profile's
@@ -32,7 +32,7 @@ pub enum RelayerMode {
     Manual,
 }
 
-/// `[services.cctp_bridge]`: the CCTP bridge (plan §15): Iris-compatible API (8095)
+/// `[services.cctp_bridge]`: the CCTP bridge: Iris-compatible API (8095)
 /// + control API (8096), one watcher per chain and one relayer.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -70,7 +70,7 @@ pub struct CctpSection {
     pub receipt_timeout_secs: u64,
     /// Who drives relays: the relayer's own tick (`auto`) or only
     /// `POST /control/relay` (`manual`) — the deterministic mode for
-    /// expiry/reattest tests (§15.4).
+    /// expiry/reattest tests.
     pub relayer: RelayerMode,
     /// Gas alerts (daloc's defaults: 0.1 ETH low / 0.01 ETH critical, wei).
     pub balance_low_wei: U256,
@@ -108,8 +108,8 @@ pub struct VenueSimSection {
     pub anvil_url: Option<String>,
 }
 
-/// `[services.engine]`: the mirror engine — one section for both profiles
-/// (plan §19.3's grammar). What differs by profile is which sub-sections the
+/// `[services.engine]`: the mirror engine — one section for both profiles.
+/// What differs by profile is which sub-sections the
 /// profile's code reads; `loops`/`journal`/`verifier` are the shared homes —
 /// the venue's cadence, write chunk and journal ring are the same knobs under
 /// the same keys.
@@ -131,7 +131,7 @@ pub struct EngineSection {
     pub feed_bridge: Option<FeedBridgeSection>,
     /// Canonical addresses the devnet's fixture deploy replaces via
     /// `anvil_setCode` (daloc's mock tokens and seeded aTokens): whole-account
-    /// owned, so the parent diffs never clobber them (plan §14.1). The list is
+    /// owned, so the parent diffs never clobber them. The list is
     /// exactly what the deploy mutates — only watched addresses can be
     /// clobbered, and these are the watched ones it replaces.
     #[serde(default)]
@@ -143,7 +143,7 @@ pub struct EngineSection {
 }
 
 /// `[services.engine.feed_bridge]`: live parent-chain feed answers →
-/// `updateAnswer` on the devnet's mock aggregators (plan §7.1).
+/// `updateAnswer` on the devnet's mock aggregators.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedBridgeSection {

@@ -25,7 +25,7 @@ call sites read or wrote across that boundary, each with a measured failure:
 
 ## Decision
 
-- **Every scan is anchored at the pin** (`mirror_devnet::scan::scan_anchor`):
+- **Every scan is anchored at the pin** (`diorama_devnet::scan::scan_anchor`):
   the ethereum shadow loop, the applier's inline scan, the admin hand-back
   pre-step and the venue driver all clamp `watermark.max(pin)`; a cursor at
   the base is the rest state.

@@ -1,9 +1,8 @@
-//! `mirror-config` — the mirrors' configuration: one grammar, three layers
-//! (plan §19).
+//! `diorama-config` — the mirrors' configuration: one grammar, three layers.
 //!
 //! `config/defaults.toml` (global, embedded at build time) <-
 //! `config/instances/<name>/instance.toml` (one deployment, mounted) <-
-//! `MIRROR__*` environment overrides (operator debug tooling, logged loudly).
+//! `DIORAMA__*` environment overrides (operator debug tooling, logged loudly).
 //! The merge is a deep merge; arrays replace, never concatenate; unknown keys
 //! are errors at every level.
 //!
@@ -78,7 +77,7 @@ impl Instance {
 }
 
 /// The layered pipeline: parse both files, deep-merge, expand `${VAR}`,
-/// apply `MIRROR__*` overrides, deserialize into the typed instance.
+/// apply `DIORAMA__*` overrides, deserialize into the typed instance.
 fn load_merged(
     path: &Path,
     vars: &[(String, String)],
@@ -195,7 +194,7 @@ mod tests {
             .collect()
     }
 
-    /// The wiring the mainnet-mirror instance references (its deploy-time env).
+    /// The wiring the diorama-mainnet instance references (its deploy-time env).
     fn wiring() -> Vec<(String, String)> {
         vars(&[
             ("RETH_URL", "http://reth:8545"),
@@ -306,7 +305,7 @@ port = 8080
     #[test]
     fn daloc_export_uses_the_manifests_spellings() {
         // The two `test-endpoints` ConfigMaps are the other surface of these
-        // facts (`k8s/base/nodeports.yaml` + `overlays/venue-mirror/`): one
+        // facts (`k8s/base/nodeports.yaml` + `overlays/diorama-venue/`): one
         // spelling on both sides, or the harness's env silently carries the
         // wrong name (the venue is the second chain, so its keys carry the
         // merge script's `CHAIN_1_` prefix).
@@ -316,7 +315,7 @@ port = 8080
             vec![
                 "CHAIN_RPC_URL=http://anvil-t:8545",
                 "CHAIN_WS_URL=ws://anvil-t:8545",
-                "MIRROR_ADMIN_URL=http://engine:8080",
+                "DIORAMA_ADMIN_URL=http://engine:8080",
             ]
         );
 
@@ -412,16 +411,16 @@ port = 8096
     }
 
     #[test]
-    fn mirror_overrides_apply_and_unknown_paths_fail() {
+    fn diorama_overrides_apply_and_unknown_paths_fail() {
         let (inst, _) = load_str(
             minimal_instance(),
-            &vars(&[("MIRROR__SERVICES__ENGINE__LOOPS__POLL_INTERVAL_MS", "2000")]),
+            &vars(&[("DIORAMA__SERVICES__ENGINE__LOOPS__POLL_INTERVAL_MS", "2000")]),
         )
         .unwrap();
         assert_eq!(engine(&inst).loops.poll_interval_ms, 2000);
         let err = load_str(
             minimal_instance(),
-            &vars(&[("MIRROR__SERVICES__ENGINE__LOOPS__POL_INTERVAL_MS", "2000")]),
+            &vars(&[("DIORAMA__SERVICES__ENGINE__LOOPS__POL_INTERVAL_MS", "2000")]),
         )
         .unwrap_err();
         assert!(format!("{err}").contains("POL_INTERVAL_MS"), "{err}");
@@ -456,13 +455,13 @@ port = 8096
     }
 
     #[test]
-    fn the_real_mainnet_mirror_instance_loads_and_checks() {
+    fn the_real_mainnet_diorama_instance_loads_and_checks() {
         let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../config/instances/mainnet-mirror/instance.toml"
+            "/../../config/instances/diorama-mainnet/instance.toml"
         ));
         let (inst, unresolved) = Instance::inspect(path).unwrap();
-        assert_eq!(inst.instance.name, "mainnet-mirror");
+        assert_eq!(inst.instance.name, "diorama-mainnet");
         // 46 market/protocol entries + the dapp's 41-address mainnet
         // deployment (contracts/deployments/ethereum.json; measured complete
         // 2026-10-23). The codeless "facts registrar" was removed 2026-10-25
@@ -564,10 +563,10 @@ port = 8096
     fn the_venue_instance_file_loads() {
         let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../config/instances/venue-mirror/instance.toml"
+            "/../../config/instances/diorama-venue/instance.toml"
         ));
         let (inst, unresolved) = Instance::inspect(path).unwrap();
-        assert_eq!(inst.instance.name, "venue-mirror");
+        assert_eq!(inst.instance.name, "diorama-venue");
         assert_eq!(inst.instance.profile, Profile::Venue);
         assert_eq!(inst.chains.venue.as_ref().unwrap().kind, ChainKind::Hyperliquid);
         let mut names = unresolved.clone();

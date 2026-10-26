@@ -1,4 +1,4 @@
-//! The devnet admin surface (plan §11.3): deal / shadow / time / rewind /
+//! The devnet admin surface: deal / shadow / time / rewind /
 //! pause / resume — the controls that belong to the devnet itself, independent
 //! of which chain the mirror serves. The engine's `http.rs` owns the axum
 //! routes; the semantics live here, wired per profile through [`AdminSurface`].
@@ -12,7 +12,7 @@ use crate::metrics::Registry;
 use crate::plane::{Plane, ReapplyRange};
 use crate::source::Source;
 use alloy_primitives::{Address, U256};
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 
@@ -190,7 +190,7 @@ impl AdminSurface<'_> {
         // here leaves the marks in memory but not on disk; a restart restores
         // them (conservative: the key stays devnet-owned), and the next request
         // retries - the writes are absolute and idempotent.
-        let resynced = mirror_anvil::apply_writes(self.target, &writes, self.chunk_size).await?;
+        let resynced = diorama_anvil::apply_writes(self.target, &writes, self.chunk_size).await?;
         self.plane.save_shadow()?;
         Ok(resynced)
     }
@@ -242,14 +242,14 @@ impl AdminSurface<'_> {
         slots: &[U256],
         fields: Fields,
         anchor: u64,
-    ) -> Result<Vec<mirror_anvil::Write>> {
-        let mut writes: Vec<mirror_anvil::Write> = Vec::new();
+    ) -> Result<Vec<diorama_anvil::Write>> {
+        let mut writes: Vec<diorama_anvil::Write> = Vec::new();
         if matches!(fields, Fields::Account) {
-            writes.push(mirror_anvil::Write::Balance {
+            writes.push(diorama_anvil::Write::Balance {
                 address: req.address,
                 value: self.source.balance_at(req.address, anchor).await?,
             });
-            writes.push(mirror_anvil::Write::Nonce {
+            writes.push(diorama_anvil::Write::Nonce {
                 address: req.address,
                 value: self.source.nonce_at(req.address, anchor).await?,
             });
@@ -258,24 +258,24 @@ impl AdminSurface<'_> {
             // The slots ride the source's own batches (≤20 keys per body —
             // the same read plan the composer uses) instead of a round trip
             // per slot: `all: true` on a busy account covers its whole set.
-            let keys: Vec<mirror_anvil::Key> = slots
+            let keys: Vec<diorama_anvil::Key> = slots
                 .iter()
-                .map(|slot| mirror_anvil::Key::Storage {
+                .map(|slot| diorama_anvil::Key::Storage {
                     address: req.address,
                     slot: *slot,
                 })
                 .collect();
             for (slot, value) in slots.iter().zip(self.source.read_keys(&keys, anchor).await?) {
-                let mirror_anvil::Value::Storage(word) = value else {
+                let diorama_anvil::Value::Storage(word) = value else {
                     // The kinds are by construction (a storage key decodes to
                     // a storage word); a different kind is a contract fault.
-                    return Err(mirror_anvil::Error::Corrupt {
+                    return Err(diorama_anvil::Error::Corrupt {
                         what: "hand-back read",
                         detail: "a storage key read back as another kind".to_string(),
                     }
                     .into());
                 };
-                writes.push(mirror_anvil::Write::Storage {
+                writes.push(diorama_anvil::Write::Storage {
                     address: req.address,
                     slot: *slot,
                     value: word,
@@ -425,7 +425,7 @@ impl AdminSurface<'_> {
     /// at the chain head + 1 and skip parent blocks); only a *missing* block
     /// means "reset under us".
     async fn reset_cursor_to(&self, target: u64) -> Result<()> {
-        if let Some(b) = self.target.block_by_number_opt(target, mirror_anvil::Txs::Hashes).await? {
+        if let Some(b) = self.target.block_by_number_opt(target, diorama_anvil::Txs::Hashes).await? {
             crate::state::advance_cursor(&self.plane.state, &b, target)?;
         } else {
             self.plane.state.clear_cursor()?;
@@ -473,8 +473,7 @@ impl AdminSurface<'_> {
         })
     }
 
-    /// `POST /admin/pause` — hold both loops where they are (plan §4.4
-    /// stop-sync). Devnet writes, cheatcodes and reads keep working; nothing
+    /// `POST /admin/pause` — hold both loops where they are (stop-sync). Devnet writes, cheatcodes and reads keep working; nothing
     /// new is applied until [`AdminSurface::resume`]. Useful for a long
     /// manipulation you do not want a parent block to land in the middle of.
     pub fn pause(&self) {
@@ -501,7 +500,7 @@ async fn fork_base(target: &Rpc) -> Result<Option<u64>> {
 /// An applied-but-unanswered reset is a success, not a failure (the
 /// retry-discipline rule: never report a fault for a completed effect). A
 /// fork base that did not move means the reset never landed: the fault stands.
-async fn confirm_reset(target: &Rpc, before: Option<u64>, e: mirror_anvil::Error) -> Result<()> {
+async fn confirm_reset(target: &Rpc, before: Option<u64>, e: diorama_anvil::Error) -> Result<()> {
     let after = fork_base(target).await?;
     if after == before {
         return Err(e.into());

@@ -13,7 +13,7 @@ use alloy_rpc_types_beacon::{
     block::BlockResponse, header::HeaderResponse, requests::ExecutionRequestsV4,
 };
 use alloy_rpc_types_engine::ExecutionPayloadV3;
-use mirror_anvil::truncate;
+use diorama_anvil::truncate;
 use serde::Deserialize;
 
 /// The beacon-API boundary's error taxonomy (boundary-discipline).

@@ -4,16 +4,16 @@
 
 | Metric (`/metrics`) | Threshold | Action |
 |---|---|---|
-| `mirror_reth_head` | not moving | top-up stalled: check `logs-engine` for "top-up failed" (reth unreachable, beacon API down, or a gap the CL cannot serve) |
-| `mirror_source_sync_gap_blocks` | > 0 for long | reth is catching up to the CL head via the Engine API (~10-11 blocks/s measured); a stuck gap means the CL's backfill has not reached the gap window yet |
-| `mirror_source_sync_delivered_total` | rate 0 while `gap_blocks` > 0 | the top-up loop is dead or erroring - it is supervised, so check `logs-engine` |
-| `mirror_lag_blocks` | > 60 | `follow_head - cursor_t`. A steady 2-3 is the scheduling margin (`reth.follow_margin_blocks`); a *growing* value means the applier is behind - check reth/CL health and the engine log |
-| `mirror_lag_blocks` | > `max_gap_blocks` (300) | engine pauses itself (the plan's "> 300 → pause and re-sync"); re-pin drill or restore reth. A cursor that was just rebased to a fresh pin is exempt and may re-apply its whole pin window (bounded by reth's 10,064-block state window) |
-| `mirror_t_convergence_failures_total` | increase | T's state ≠ mainnet at the parent block just applied, on a probe whose target the devnet does *not* own (shadowed targets are skipped by design). A missing BAL entry, a watchlist gap, or a clock offset left set (`/admin/time`). A deliberate manipulation whose target is shadowed does *not* fire it; one that is read *through* an unowned contract (e.g. crashing a Chainlink aggregator behind its proxy) does, until restored - the counter is cumulative, `mirror_t_convergence_last_failed` shows the current state |
-| `mirror_full_sweep_mismatches_total` | increase | a full-sweep apply mismatch (`verifier.sweep = "full"`): T's value ≠ reth's at the applied block for a key that was applied. Inspect `drift.jsonl` and re-run with the sweep for a conformance window |
-| `mirror_reorgs_detected_total` | any increase | upstream reorg: the applier continues on the new branch (absolute writes self-heal); re-pin only if it keeps recurring |
-| `mirror_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make mainnet-repin`) - the fresh pin starts a new epoch: the devnet's writes are gone with the old base (re-create positions from your journal) |
-| `mirror_pin_age_blocks` | informational | blocks since this epoch's first parent block (the journal/cursor marker) |
+| `diorama_reth_head` | not moving | top-up stalled: check `logs-engine` for "top-up failed" (reth unreachable, beacon API down, or a gap the CL cannot serve) |
+| `diorama_source_sync_gap_blocks` | > 0 for long | reth is catching up to the CL head via the Engine API (~10-11 blocks/s measured); a stuck gap means the CL's backfill has not reached the gap window yet |
+| `diorama_source_sync_delivered_total` | rate 0 while `gap_blocks` > 0 | the top-up loop is dead or erroring - it is supervised, so check `logs-engine` |
+| `diorama_lag_blocks` | > 60 | `follow_head - cursor_t`. A steady 2-3 is the scheduling margin (`reth.follow_margin_blocks`); a *growing* value means the applier is behind - check reth/CL health and the engine log |
+| `diorama_lag_blocks` | > `max_gap_blocks` (300) | engine pauses itself (the plan's "> 300 → pause and re-sync"); re-pin drill or restore reth. A cursor that was just rebased to a fresh pin is exempt and may re-apply its whole pin window (bounded by reth's 10,064-block state window) |
+| `diorama_t_convergence_failures_total` | increase | T's state ≠ mainnet at the parent block just applied, on a probe whose target the devnet does *not* own (shadowed targets are skipped by design). A missing BAL entry, a watchlist gap, or a clock offset left set (`/admin/time`). A deliberate manipulation whose target is shadowed does *not* fire it; one that is read *through* an unowned contract (e.g. crashing a Chainlink aggregator behind its proxy) does, until restored - the counter is cumulative, `diorama_t_convergence_last_failed` shows the current state |
+| `diorama_full_sweep_mismatches_total` | increase | a full-sweep apply mismatch (`verifier.sweep = "full"`): T's value ≠ reth's at the applied block for a key that was applied. Inspect `drift.jsonl` and re-run with the sweep for a conformance window |
+| `diorama_reorgs_detected_total` | any increase | upstream reorg: the applier continues on the new branch (absolute writes self-heal); re-pin only if it keeps recurring |
+| `diorama_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make mainnet-repin`) - the fresh pin starts a new epoch: the devnet's writes are gone with the old base (re-create positions from your journal) |
+| `diorama_pin_age_blocks` | informational | blocks since this epoch's first parent block (the journal/cursor marker) |
 | Anvil RSS (kubectl top) | see table below | restart the pod; the engine rebases and re-applies |
 
 Anvil memory is a *state* cost, not a leak:
@@ -27,7 +27,7 @@ post-restart re-apply to `FORK_OFFSET` (~128 blocks) instead of the pin age.
 
 **A T restart starts a new epoch.** The engine detects the reset (the cursor's
 block hash no longer matches) and, when the pin changed, clears the shadow
-registry - marks *and* values (WARN + `mirror_t_resets_total`). The devnet
+registry - marks *and* values (WARN + `diorama_t_resets_total`). The devnet
 starts clean on the fresh base; **re-create your positions from your journal**
 (the plan's 3.6 venue-restart discipline). Restoring instead is what mixes
 eras: measured, a +30d time-travel write came back as a future
@@ -40,7 +40,7 @@ writes per-block historical state: a T dump grew to 13 GB and never completed,
 leaving orphaned `~/.foundry/anvil/tmp/anvil-state-*` dirs that filled the 40Gi
 PVC (measured: 3 dirs, 41 GB). State is rebuilt instead - a fresh pin re-applies
 the pin window, and T re-applies its parent diffs from its own pin. If tmp dirs
-ever reappear: `kubectl -n mainnet-mirror exec deploy/anvil-t -- rm -rf /state/.foundry/anvil/tmp/*`.
+ever reappear: `kubectl -n diorama-mainnet exec deploy/anvil-t -- rm -rf /state/.foundry/anvil/tmp/*`.
 
 ## The symmetric log surface
 
@@ -97,22 +97,22 @@ covers the ones that page someone; these are the rest.
 
 | Metric | Meaning |
 |---|---|
-| `mirror_reth_head` / `mirror_reth_follow_head` | reth's head / the follow head the engine schedules against (raw, before the replay margin) |
-| `mirror_source_sync_gap_blocks` / `mirror_source_sync_delivered_total` | the CL-head gap reth's top-up still owes / blocks it has delivered |
-| `mirror_head` | the devnet chain's height (T drifts ahead: one block per parent block plus one per devnet batch) |
-| `mirror_cursor_block` | the last *parent* block applied (the honest progress signal) |
-| `mirror_t_fork_age_blocks` | how far T's fork base is behind its head (reth serves reads below it) |
-| `mirror_t_resets_total` | times T was found re-forked (its OOM restart / a re-pin): a new epoch starts (the devnet's writes are gone with the old base) - re-create positions from your journal |
-| `mirror_lag_blocks` | `follow_head - cursor_t` (2-3 in steady state = the scheduling margin) |
-| `mirror_halted` | 1 while `/admin/pause` holds both loops |
-| `mirror_blocks_applied_total` | parent blocks applied to T |
-| `mirror_last_apply_seconds` | duration of the last T apply |
-| `mirror_pin_age_blocks` | blocks since the epoch's first block (re-pin before reth's 10,064-block window) |
-| `mirror_bal_writes_last_block` | watch-list writes applied to T in the last applied parent block (a gauge: this is a per-block value, not a cumulative total) |
-| `mirror_bal_filtered_out_last_block` | BAL entries for accounts outside the watchlist in the last block (skipped by design) |
-| `mirror_bal_skipped_shadowed_last_block` | BAL entries skipped in the last block because the devnet owns the key (copy-on-write) |
-| `mirror_shadowed_slots` | devnet-owned storage keys (see `/status.shadowed` for the accounts) |
-| `mirror_shadow_scanned_blocks_total` / `mirror_shadow_skipped_empty_blocks_total` | T blocks the shadow scan walked / the empty share of the walk (one call, no traces — the harness mines one block per poll, so this is the scan-cost reading) |
+| `diorama_reth_head` / `diorama_reth_follow_head` | reth's head / the follow head the engine schedules against (raw, before the replay margin) |
+| `diorama_source_sync_gap_blocks` / `diorama_source_sync_delivered_total` | the CL-head gap reth's top-up still owes / blocks it has delivered |
+| `diorama_head` | the devnet chain's height (T drifts ahead: one block per parent block plus one per devnet batch) |
+| `diorama_cursor_block` | the last *parent* block applied (the honest progress signal) |
+| `diorama_t_fork_age_blocks` | how far T's fork base is behind its head (reth serves reads below it) |
+| `diorama_t_resets_total` | times T was found re-forked (its OOM restart / a re-pin): a new epoch starts (the devnet's writes are gone with the old base) - re-create positions from your journal |
+| `diorama_lag_blocks` | `follow_head - cursor_t` (2-3 in steady state = the scheduling margin) |
+| `diorama_halted` | 1 while `/admin/pause` holds both loops |
+| `diorama_blocks_applied_total` | parent blocks applied to T |
+| `diorama_last_apply_seconds` | duration of the last T apply |
+| `diorama_pin_age_blocks` | blocks since the epoch's first block (re-pin before reth's 10,064-block window) |
+| `diorama_bal_writes_last_block` | watch-list writes applied to T in the last applied parent block (a gauge: this is a per-block value, not a cumulative total) |
+| `diorama_bal_filtered_out_last_block` | BAL entries for accounts outside the watchlist in the last block (skipped by design) |
+| `diorama_bal_skipped_shadowed_last_block` | BAL entries skipped in the last block because the devnet owns the key (copy-on-write) |
+| `diorama_shadowed_slots` | devnet-owned storage keys (see `/status.shadowed` for the accounts) |
+| `diorama_shadow_scanned_blocks_total` / `diorama_shadow_skipped_empty_blocks_total` | T blocks the shadow scan walked / the empty share of the walk (one call, no traces — the harness mines one block per poll, so this is the scan-cost reading) |
 
 The shadow scan fails **closed** on a block whose trace it cannot get
 *transiently*, and retries from the last clean block: an owned-key registry
@@ -132,11 +132,11 @@ registry clears, and the scan re-anchors at the new pin (measured live: after
 the re-pin the same hand-back answered 400, the same as V's). Keep the scan's
 cursor within the prune window by letting it run — a long engine stop with the
 harness still mining T is the way to fall behind.
-| `mirror_t_convergence_ok_total` / `mirror_t_convergence_failures_total` | the same probes against T at the applied parent block (the plan's "probe parity on T after context alignment"); devnet-owned targets are skipped, and the check is suspended while a `/admin/time` offset is set |
-| `mirror_t_probe_skipped_total` | informational | probes skipped because their target is devnet-owned - a devnet write to a shared contract (e.g. the Aave oracle) hides *all* of that contract's probes until it is handed back. If it grows while you are not writing, inspect `/status` `shadowed` and unshadow the venue |
-| `mirror_t_convergence_last_failed` | how many T probes diverged in the last applied block (0 in steady state) |
-| `mirror_full_sweep_mismatches_total` | full-sweep parity mismatches (`verifier.sweep = "full"`); should stay 0 |
-| `mirror_reorgs_detected_total` | parent-hash discontinuities seen by the applier |
+| `diorama_t_convergence_ok_total` / `diorama_t_convergence_failures_total` | the same probes against T at the applied parent block (the plan's "probe parity on T after context alignment"); devnet-owned targets are skipped, and the check is suspended while a `/admin/time` offset is set |
+| `diorama_t_probe_skipped_total` | informational | probes skipped because their target is devnet-owned - a devnet write to a shared contract (e.g. the Aave oracle) hides *all* of that contract's probes until it is handed back. If it grows while you are not writing, inspect `/status` `shadowed` and unshadow the venue |
+| `diorama_t_convergence_last_failed` | how many T probes diverged in the last applied block (0 in steady state) |
+| `diorama_full_sweep_mismatches_total` | full-sweep parity mismatches (`verifier.sweep = "full"`); should stay 0 |
+| `diorama_reorgs_detected_total` | parent-hash discontinuities seen by the applier |
 
 ## Day-to-day
 
@@ -152,13 +152,13 @@ make pin-show          # current fork pins
 ```
 
 Debug logs: `RUST_LOG` filters at boot, and its targets match by **literal
-prefix** — a `mirror_*=debug` wildcard is a silent no-op (measured: zero debug
+prefix** — a `diorama_*=debug` wildcard is a silent no-op (measured: zero debug
 lines with the filter looking right). Name the crates, scoped to what you are
 reading:
 
 ```bash
-kubectl -n mainnet-mirror set env deploy/engine \
-  RUST_LOG='info,mirror_mainnet=debug,mirror_devnet=debug,mirror_anvil=debug,mirror_config=debug'
+kubectl -n diorama-mainnet set env deploy/engine \
+  RUST_LOG='info,diorama_mainnet=debug,diorama_devnet=debug,diorama_anvil=debug,diorama_config=debug'
 ```
 
 `info` is the shipped default (the manifests carry no `RUST_LOG`), and the
@@ -201,7 +201,7 @@ mainnet users need not upgrade, and the mirror follows a mainnet CL, so the
 Hoodi schedule was never ours. The bump is a two-step rollout (pull + import
 the new tag+digest, then `make apply` with the manifest edit) and therefore
 rides the **next rollout window**, together with the venue overlay: replace
-the line in `k8s/base/mainnet-mirror/lighthouse.yaml` with
+the line in `k8s/base/diorama-mainnet/lighthouse.yaml` with
 
 ```
 image: docker.io/sigp/lighthouse:v8.3.2@sha256:1fda7c2d9c067dcfab20a0bfb83cb3c351a05673859455df4516e5708c5fa031
@@ -217,8 +217,7 @@ we stand on: log-filter expiry refresh (#17617 — the long-running log-delivery
 class), fork RPC connection isolation (#17598), fork `prefetch` (#17673),
 delegated-EOA nonce reset (#17686, EIP-7702), the EIP-8037 state-gas reservoir
 (#17719), genesis-number RPC lookups (#17731), and fork blob-fee params
-(#17754/#17756). Watch for the tag and ride the same rollout; re-run the §17.4
-WS acceptance after the bump (a long-running instance is the case to re-check).
+(#17754/#17756). Watch for the tag and ride the same rollout; re-run the WS acceptance after the bump (a long-running instance is the case to re-check).
 
 ### Watch item: the Amsterdam (Glamsterdam) activation
 
@@ -248,11 +247,11 @@ them before the activation, then re-run the capability proof and review
 Read the flight recorder:
 
 ```bash
-kubectl -n mainnet-mirror exec deploy/engine -- tail -5 /state/drift.jsonl | jq .
+kubectl -n diorama-mainnet exec deploy/engine -- tail -5 /state/drift.jsonl | jq .
 # drift.jsonl is a *divergence* log (one line per divergence or apply anomaly),
 # rotated at 16 MiB. Clean blocks are only in /metrics.
-kubectl -n mainnet-mirror exec deploy/engine -- ls -la /state/journal | tail
-kubectl -n mainnet-mirror exec deploy/engine -- cat /state/cursor.json
+kubectl -n diorama-mainnet exec deploy/engine -- ls -la /state/journal | tail
+kubectl -n diorama-mainnet exec deploy/engine -- cat /state/cursor.json
 ```
 
 Every divergence line carries `divergence_class` (`none` | `value_level` |
@@ -260,7 +259,7 @@ Every divergence line carries `divergence_class` (`none` | `value_level` |
 
 ## Source liveness (self-contained)
 
-The mirror needs no external nodes at runtime. reth's head (`mirror_reth_head`)
+The mirror needs no external nodes at runtime. reth's head (`diorama_reth_head`)
 advances when the local Lighthouse feeds it payloads, and for any gap between
 the snapshot's head and the CL's checkpoint the engine's top-up loop supplies
 the missing ancestors over the Engine API (EIP-8379, see ARCHITECTURE →
@@ -271,11 +270,11 @@ Check:
 
 ```bash
 # catch-up progress (should fall to 0 and stay there)
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s localhost:8080/metrics | grep -E "source_sync_gap_blocks|source_sync_delivered_total"
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s localhost:8080/metrics | grep -E "source_sync_gap_blocks|source_sync_delivered_total"
 # the top-up is delivering (one line per ~5 s while catching up)
-kubectl -n mainnet-mirror logs deploy/engine --tail=20 | grep "top-up"
+kubectl -n diorama-mainnet logs deploy/engine --tail=20 | grep "top-up"
 # reth really has no peers
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s http://reth:8545 -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"net_peerCount"}' | jq -r .result
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s http://reth:8545 -X POST -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"net_peerCount"}' | jq -r .result
 ```
 
 - `top-up failed: top-up gap: reth head X, next CL payload Y (missing ancestors
@@ -302,13 +301,13 @@ re-forks at `reth head - FORK_OFFSET` and the engine applies from there. There
 is no state dump any more (see "The anvil state dump is disabled").
 
 ```bash
-kubectl -n mainnet-mirror rollout restart deploy/anvil-t
-kubectl -n mainnet-mirror rollout status  deploy/anvil-t
+kubectl -n diorama-mainnet rollout restart deploy/anvil-t
+kubectl -n diorama-mainnet rollout status  deploy/anvil-t
 ```
 
 - **T**: the cursor's block hash no longer matches, so the engine reconciles
   and re-applies from the pin. The engine re-applies the devnet's own writes
-  from the shadow registry's value map (`mirror_t_resets_total` increments, one
+  from the shadow registry's value map (`diorama_t_resets_total` increments, one
   WARN per reset, keys without a recorded value are handed back to mainnet
   sync). The devnet's *transaction history* does not survive a re-fork; its
   *state* does. The journal is cleared with the old chain, so rewind drills
@@ -370,7 +369,7 @@ to the *current* mark and repeated steps would compound — and the sim's own
 waterfall decides. The measured distances match the classic
 `(1/L - 0.02)/0.98` bound (the maintenance is half the initial margin at max
 leverage 25 *of the crashed value*); the max-leverage row refuses at the
-fill's margin check — the edge is real. This is the frontier daloc's
+fill's margin check — the edge is real. This is the frontier the client's
 capital-efficiency benchmarks read.
 
 ### The crosschain margin book — `make crosschain-margin`
@@ -397,7 +396,7 @@ T's Chainlink feed), the fills against V's real book with their impact, the
 coin and dollar deltas, one scripted hour of funding read as collected carry,
 a crash's hedged PnL (the short gains, the T leg under the same shock stated),
 and the capital-efficiency table (effective leverage, annualized carry on
-capital, shock PnL on capital) — the prime-brokerage read the daloc benchmarks
+capital, shock PnL on capital) — the prime-brokerage read the client benchmarks
 extend.
 
 ### The basis capture — `make basis-capture`
@@ -438,7 +437,7 @@ the *live* book (the documented split — the book channel is
 Three occasions:
 
 1. **After a fresh bootstrap**, once the top-up catch-up has finished
-   (`mirror_source_sync_gap_blocks` = 0). The first pin is resolved while reth
+   (`diorama_source_sync_gap_blocks` = 0). The first pin is resolved while reth
    is still behind, so the mirror starts near the snapshot's head; re-pinning
    moves T to a live, exact base instead of applying the catch-up window.
 2. When the pin ages out of reth's state window (~10k blocks ≈ 1.4 days).
@@ -458,7 +457,7 @@ The drill:
 ### Rewind applied parent blocks
 
 ```bash
-kubectl -n mainnet-mirror exec deploy/engine -- \
+kubectl -n diorama-mainnet exec deploy/engine -- \
   curl -s -X POST localhost:8080/admin/rewind -H 'Content-Type: application/json' -d '{"blocks":5}'
 ```
 
@@ -467,7 +466,7 @@ moves the T cursor back, so the applier re-applies from there. Expect at
 most one transient convergence-probe mismatch at the rewound block (the
 restored state is one block stale for the instant before the re-apply — a
 time-dependent view like Aave's normalized income catches exactly that);
-`mirror_t_convergence_last_failed` returns to 0 on the next block.
+`diorama_t_convergence_last_failed` returns to 0 on the next block.
 
 The rewind also **hands back the devnet-owned keys it restores** (the
 response's `unshadowed`): a marked key was devnet-owned — the applier never
@@ -482,7 +481,7 @@ its claim back. Both legs are asserted live by the shadow audit.
 ### Fund an account with any ERC20 (the unlimited faucet)
 
 ```bash
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/deal \
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s -X POST localhost:8080/admin/deal \
   -H 'Content-Type: application/json' \
   -d '{"token":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48","to":"0xYourAddr","amount":"1000000000"}'
 # -> {"ok":true,"slot":"0x…"}   (1000 USDC; silent storage write)
@@ -506,12 +505,12 @@ watched token the mark is what keeps a parent diff from taking it back).
 
 ```bash
 # 30 days ahead of mainnet, persistently (mainnet data keeps flowing):
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/time \
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s -X POST localhost:8080/admin/time \
   -H 'Content-Type: application/json' -d '{"offset_seconds": 2592000}'
 # ... your scenario: read the accrued debt, exercise the expiry, ...
 # back to mainnet's clock (timestamps are monotonic: the clock converges, it
 # cannot jump backwards - the offset shrinks as mainnet advances):
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/time \
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s -X POST localhost:8080/admin/time \
   -H 'Content-Type: application/json' -d '{"offset_seconds": 0}'
 ```
 
@@ -532,13 +531,13 @@ loops and mine by hand instead:
 
 ```bash
 # 1. hold both loops (reads, writes and cheatcodes keep working):
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/pause
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s -X POST localhost:8080/admin/pause
 # 2. send transactions - automine is off by design, so they queue in T's pool
 # 3. mine when *you* want, with the timestamp you want:
-kubectl -n mainnet-mirror exec deploy/anvil-t -- cast rpc anvil_mine 1 --rpc-url http://localhost:8545
+kubectl -n diorama-mainnet exec deploy/anvil-t -- cast rpc anvil_mine 1 --rpc-url http://localhost:8545
 #    (or anvil_setNextBlockTimestamp <ts> first, for a chosen clock)
 # 4. resume: the engine applies the parent blocks it missed, then re-aligns
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/resume
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s -X POST localhost:8080/admin/resume
 ```
 
 While paused, mainnet keeps advancing on reth; on resume the engine catches up
@@ -567,7 +566,7 @@ curl -X POST .../admin/shadow -H 'Content-Type: application/json' \
 parent diffs never overwrite them. To give a key back:
 
 ```bash
-kubectl -n mainnet-mirror exec deploy/engine -- \
+kubectl -n diorama-mainnet exec deploy/engine -- \
   curl -s -X POST localhost:8080/admin/shadow -H 'Content-Type: application/json' \
   -d '{"address":"0xYourContract","slots":["0x1"],"account_fields":false,"clear":true}'
 ```
@@ -579,7 +578,7 @@ applied).
 ### Resume after a pause
 
 ```bash
-kubectl -n mainnet-mirror exec deploy/engine -- curl -s -X POST localhost:8080/admin/resume
+kubectl -n diorama-mainnet exec deploy/engine -- curl -s -X POST localhost:8080/admin/resume
 ```
 
 `/admin/resume` clears a `/admin/pause` halt; divergences are recorded, never
@@ -645,12 +644,12 @@ curl -s -X POST -H 'content-type: application/json' http://reth:8545 \
 | `anvil-t-state` | 40 Gi | pin (the fork cache is RAM; no state dump - see above) |
 | `engine-state` | 10 Gi | cursor.json, shadow.json, drift.jsonl (divergence-only; a legacy `drift.jsonl.1` may hold older per-block records from before that rewrite), journal/ |
 
-All PVCs use the `mirror-retain` StorageClass (`reclaimPolicy: Retain`):
+All PVCs use the `diorama-retain` StorageClass (`reclaimPolicy: Retain`):
 **deleting a PVC never deletes the data**. The PV stays; re-create a PVC with
 the same name to re-attach it, or delete the PV explicitly to free the space.
 
 - Inspect on the host: `/var/lib/rancher/k3s/storage/pvc-*`.
-- Grow a PVC: edit `k8s/base/mainnet-mirror/pvcs.yaml` and `make apply`. With `local-path` the
+- Grow a PVC: edit `k8s/base/diorama-mainnet/pvcs.yaml` and `make apply`. With `local-path` the
   numbers are **nominal**: `allowVolumeExpansion` lets the *request* be raised,
   but the driver never resizes anything, so `status.capacity` can lag it
   (measured: `lighthouse-data` request 1500Gi, capacity 500Gi, no condition).
@@ -667,11 +666,11 @@ the same name to re-attach it, or delete the PV explicitly to free the space.
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `mirror_reth_head` static for hours | top-up stalled (CL backfill not yet at the gap, reth restarting, beacon API down) | check `logs-engine` for "top-up failed"; see "Source liveness" |
+| `diorama_reth_head` static for hours | top-up stalled (CL backfill not yet at the gap, reth restarting, beacon API down) | check `logs-engine` for "top-up failed"; see "Source liveness" |
 | Lighthouse in CrashLoopBackOff | OOM during checkpoint sync (needs >6 GiB) | keep the 16Gi limit; `logs-lighthouse` shows `State cache missed` before OOM |
 | Anvil OOMKilled | state snapshots + fork cache (`--prune-history`) | restart; lower `--prune-history`; see the memory table above |
 | reth `eth_syncing` true for a long time | unwind/replay after a restart, or a stale engine buffer | wait; check `logs-reth` for stage progress |
-| Lighthouse "no checkpoint" / sync stuck | checkpoint provider down | switch `CHECKPOINT_SYNC_URL` in `mirror-config` to a working provider (beaconcha.in's sync endpoint is the known-good alternative) |
+| Lighthouse "no checkpoint" / sync stuck | checkpoint provider down | switch `CHECKPOINT_SYNC_URL` in `diorama-config` to a working provider (beaconcha.in's sync endpoint is the known-good alternative) |
 | Lighthouse `system resources may be overloaded` (WARN) | a state advance at an epoch boundary took longer than usual | during the one-time backfill it recurs every ~32 slots (the backfill's I/O competes with the advance) and clears when the backfill completes - measured: 6 events in one 30-min window, none after. Not an alarm while reth tracks the CL head |
 | Engine: "cursor not found on chain" | anvil restarted with a stale dump | expected; the engine re-bases T and re-applies its recorded writes |
 | Engine: "gap too large" | engine was down > `max_gap_blocks` | re-pin (fast) or raise `max_gap_blocks` and restart the engine |
@@ -679,13 +678,13 @@ the same name to re-attach it, or delete the PV explicitly to free the space.
 | T mines empty blocks (`tx_count: reth=N t=0`) | automine is on (anvil restart reset it) | check `anvil_getAutomine` on T; the deployment runs `--no-mining` (the engine also re-asserts it on rebases) |
 | Senders' nonces hundreds behind | automine incident (chain height ran away) | re-pin for a clean chain |
 
-| `mirror_t_convergence_failures_total` climbing | T drifted from mainnet on a devnet-unowned probe (missing BAL entry, watchlist gap) | check `/status.shadowed`; extend the watchlist if the account should be tracked; clear any `/admin/time` offset |
-| T state looks stale | the applier is behind, or the account is not watched | check `mirror_lag_blocks` and `mirror_cursor_block`; extend `watchlist` |
+| `diorama_t_convergence_failures_total` climbing | T drifted from mainnet on a devnet-unowned probe (missing BAL entry, watchlist gap) | check `/status.shadowed`; extend the watchlist if the account should be tracked; clear any `/admin/time` offset |
+| T state looks stale | the applier is behind, or the account is not watched | check `diorama_lag_blocks` and `diorama_cursor_block`; extend `watchlist` |
 
 ## Venue operations
 
-The Venue Mirror is its own namespace (`venue-mirror`) with its own components:
-V (`anvil-v`, 8545), the venue engine (`venue-mirror`, 8080), the simulator
+The Venue Mirror is its own namespace (`diorama-venue`) with its own components:
+V (`anvil-v`, 8545), the venue engine (`diorama-venue`, 8080), the simulator
 (`venue-sim`, info 8090 / control 8091), and the CCTP bridge (8095/8096) when
 deployed. The NodePorts keep the 31xxx range (31545 / 31880 / 31090 / 31091),
 so both mirrors fit on one node. There is no `reth`/`lighthouse` here and no
@@ -695,7 +694,7 @@ the same shape as the mainnet engine's (`cursor.json`, `shadow.json`,
 `journal/`) plus `drift.jsonl` — the follow's anomalies (gap pauses, source
 reorgs, uncovered emitters), the venue counterpart of the applier's lines.
 
-**First rollout**: `make ns INSTANCE=venue-mirror` creates the namespace, and
+**First rollout**: `make ns INSTANCE=diorama-venue` creates the namespace, and
 `make venue-secrets CCTP_RELAY_KEY=0x…` creates the bridge's relay-wallet
 Secret (`cctp-relay-key`, referenced by the manifest but not in the k8s tree —
 a key is not a manifest). Use a dedicated key, never the deployer's; on the
@@ -841,7 +840,7 @@ gauges; the simulator's control `/metrics` (8091) renders `venue_sim_*` and
 | `venue_probe_ok_total` / `venue_probe_failures_total` | at-pin probes matching / diverging from the fork source |
 | `venue_probe_skipped_total` / `venue_probe_last_failed` | probes skipped (devnet-owned target, or a pin the source cannot serve) / diverged in the last run |
 | `venue_bridge_lag_blocks` | V head minus the bridge's processed cursor (growing = stuck) |
-| `mirror_shadowed_slots` / `mirror_shadowed_accounts` / `mirror_halted` | the shared admin gauges, rendered beside the venue's own (the registry pushes them on change) |
+| `diorama_shadowed_slots` / `diorama_shadowed_accounts` / `diorama_halted` | the shared admin gauges, rendered beside the venue's own (the registry pushes them on change) |
 | `venue_sim_accounts` / `venue_sim_epoch` | simulated (touched) accounts / scenario epoch |
 | `venue_sim_liquidations_total` / `venue_sim_funding_payments_total` | liquidations executed / funding payments applied |
 | `venue_sim_partial_liquidations_total` / `venue_sim_backstop_liquidations_total` / `venue_sim_adl_closes_total` | the waterfall's steps: partial (20 %) book closes above $100k / backstop takeovers (the vault) below ⅔ maintenance / ADL closes at the previous mark |
@@ -866,8 +865,8 @@ window means `/readyz` will fail; `venue_bridge_trace_faults_total` rising means
 contract-internal CoreWriter calls are being missed that block;
 `venue_bridge_lag_blocks` growing means the bridge is stuck behind V.
 
-**Plan §7.8's sketch names vs the implemented series** (the plan's operations
-map was written before the `venue_sim_*`/`venue_bridge_*` prefixes settled; the
+**The venue alarm sketch vs the implemented series** (the sketch was written
+before the `venue_sim_*`/`venue_bridge_*` prefixes settled; the
 implemented names are the contract with the alarms above):
 
 - the probe-failure counter is `venue_probe_failures_total` (the plan's sketch
@@ -877,24 +876,24 @@ implemented names are the contract with the alarms above):
 - the WS flag, the rate-budget gauge and the identity counter carry the
   `venue_sim_` prefix (`venue_sim_ws_connected`,
   `venue_sim_budget_weight_used`, `venue_sim_identity_violations_total`);
-- the registry's size is the **shared** `mirror_shadowed_slots` /
-  `mirror_shadowed_accounts` pair (one fact, one home — the same series on both
+- the registry's size is the **shared** `diorama_shadowed_slots` /
+  `diorama_shadowed_accounts` pair (one fact, one home — the same series on both
   engines, pushed by the registry on every change), not a venue-prefixed twin;
 - the bridge's signal is the lag, `venue_bridge_lag_blocks`: the bridge scans V
   block by block, so there is no pending queue to gauge.
 
 
-### The daloc-facing endpoints
+### The client-facing endpoints
 
 The harness's external-mode env block lives in the manifests: the
-`test-endpoints` ConfigMap of each overlay (`k8s/overlays/mainnet-mirror/nodeports.yaml` for the
-L1 side — `CHAIN_RPC_URL`/`CHAIN_WS_URL`/`MIRROR_ADMIN_URL` — and
-`k8s/overlays/venue-mirror/nodeports.yaml` for the venue side, whose keys carry
+`test-endpoints` ConfigMap of each overlay (`k8s/overlays/diorama-mainnet/nodeports.yaml` for the
+L1 side — `CHAIN_RPC_URL`/`CHAIN_WS_URL`/`DIORAMA_ADMIN_URL` — and
+`k8s/overlays/diorama-venue/nodeports.yaml` for the venue side, whose keys carry
 the second chain's `CHAIN_1_` prefix so sourcing both blocks yields one
 collision-free env). The NodePorts are the services' own (`kubectl get svc`),
 so the ConfigMaps and the Services cannot drift.
 
-`mirror-config export-env --section daloc` (alias `--for`) renders the same
+`diorama-config export-env --section client` (alias `--for`) renders the same
 block from the mounted instance file with **in-cluster** addresses — the
 Service names (`engine`, `venue-sim`, `cctp-bridge`) and the instance's own
 ports, under exactly the ConfigMaps' key spellings (a unit test pins the
@@ -907,7 +906,7 @@ lingering `${VAR}` — its purpose is values, never references.
 ### The CCTP bridge
 
 The bridge (`cctp-bridge`, Iris 8095 / control 8096; 31095/31096 in-cluster)
-serves the real CCTP lane beside daloc's untouched `0x17` mock. Its boot
+serves the real CCTP lane beside the client's untouched `0x17` mock. Its boot
 installs the devnet attester on both chains and deploys the hook wrapper
 (owner = the relay key); both are idempotent and verified read-back.
 
@@ -970,7 +969,7 @@ tx then mints and runs the call (non-atomic: a failing hook cannot lose the
 mint). `mint_recipient` is usually the wrapper itself when the hook forwards
 the funds.
 
-**Pointing daloc's `cctp-relay` at this service — one known fix needed.** Their
+**Pointing the client's `cctp-relay` at this service — one known fix needed.** Their
 relay is written against their own mock lane, which serves the *event* message
 verbatim; a protocol-faithful Iris (Circle's, and ours) serves the
 **attester-patched** message — nonce and `finalityThresholdExecuted` filled, so
@@ -1020,7 +1019,7 @@ waterfall runs (the book first, then the backstop, then ADL - `sim/waterfall.rs`
 The L1 analog is the feed bridge: a scenario's write to
 a mock aggregator pauses that feed automatically; `POST .../admin/feed/resume`
 hands it back, and `GET .../admin/feed` shows confirmed/pending state. On the
-cluster the mocks come from daloc's fixture deploy; when the instance
+cluster the mocks come from the client's fixture deploy; when the instance
 enables `[services.engine.feed_bridge]`, the bridge publishes the *real*
 Chainlink answers (the engine's `/admin/feed` routes drive them).
 
@@ -1049,7 +1048,7 @@ the system address; `venue_bridge_completions_total` +1 and the recipient's
 ERC20 balance rises. A `sendAsset` to any other address is a spot send inside
 Core (no EVM tx).
 
-**Storage.** The venue namespace's PVCs use the same `mirror-retain`
+**Storage.** The venue namespace's PVCs use the same `diorama-retain`
 StorageClass as the mainnet mirror; the state layout is the shared one
 (`cursor.json`, `shadow.json`, `journal/` on the engine's PVC; `sim.json`,
 `feed.json` on the simulator's).

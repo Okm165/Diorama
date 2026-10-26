@@ -14,11 +14,11 @@
 //! divergence is declared in `crates/venue/src/profile.rs` and this module
 //! holds its mechanics.
 use alloy_primitives::{Address, B256, U256};
-use mirror_anvil::Rpc;
-use mirror_devnet::shared::Shared;
+use diorama_anvil::Rpc;
+use diorama_devnet::shared::Shared;
 use futures_util::future::BoxFuture;
-use mirror_devnet::spine::{ResetDetector, ResetSignal};
-use mirror_devnet::state::StateFile;
+use diorama_devnet::spine::{ResetDetector, ResetSignal};
+use diorama_devnet::state::StateFile;
 
 /// The canary word's address (a scratch address with no code) and slot.
 pub(crate) const CANARY_ADDRESS: Address =
@@ -39,7 +39,7 @@ impl PinCanary {
 }
 
 impl ResetDetector for PinCanary {
-    fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, mirror_devnet::Result<ResetSignal>> {
+    fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, diorama_devnet::Result<ResetSignal>> {
         Box::pin(async move {
             let expected = self.state.epoch_pin()?;
             let found = read_canary(target).await?;
@@ -59,13 +59,13 @@ impl ResetDetector for PinCanary {
 // source's, unverifiable by construction). The guards are this canary and the
 // epoch rule: a moved base clears marks *and* values; a same-pin reset
 // restores the recorded writes; a fresh chain cannot carry the canary word.
-pub async fn read_canary(v: &Rpc) -> mirror_devnet::Result<Option<u64>> {
+pub async fn read_canary(v: &Rpc) -> diorama_devnet::Result<Option<u64>> {
     let word = v.storage_at_latest(CANARY_ADDRESS, CANARY_SLOT).await?;
     Ok(decode_canary(U256::from_be_bytes(word.0)))
 }
 
 /// Mark this chain instance (see [`CANARY_ADDRESS`]).
-pub async fn write_canary(v: &Rpc, pin: u64) -> mirror_devnet::Result<()> {
+pub async fn write_canary(v: &Rpc, pin: u64) -> diorama_devnet::Result<()> {
     let value = B256::from(encode_canary(pin));
     v.anvil_set_storage_at(CANARY_ADDRESS, CANARY_SLOT, value)
         .await?;

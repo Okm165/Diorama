@@ -6,7 +6,7 @@
 //! The persisted unit is the **message record**: the watcher inserts one per
 //! `MessageSent` log, the attester transitions it PENDING → SIGNED, the
 //! relayer marks it RELAYED or PARKED. Parked records are kept, never
-//! dropped: a failed mint is a fact an operator must see (§15.4).
+//! dropped: a failed mint is a fact an operator must see.
 use crate::chains::Domain;
 use crate::error::{Error, Result};
 use crate::transfer::Message;

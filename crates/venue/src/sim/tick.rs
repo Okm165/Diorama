@@ -1,4 +1,4 @@
-//! The self-advance automaton (plan §14.8): the evaluation the 1 Hz tick and
+//! The self-advance automaton: the evaluation the 1 Hz tick and
 //! every account-scoped read share — funding accrues, delistings settle, the
 //! resting book's passes run (scheduled cancels, armed triggers, passive
 //! fills), the waterfall checks every account, the marks are recorded and the

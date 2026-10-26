@@ -1,0 +1,51 @@
+# reth.toml - lean pruned-full node tuned for the mainnet mirror.
+#
+# Retention profile (everything the mirror needs, nothing more):
+#   - state window 10,064 blocks  = reth's minimum unwind-safe distance; also the
+#     window the Anvil pin (reth head - FORK_OFFSET, 128 blocks) lives in (state
+#     reads at the pin, eth_call, debug_traceBlockByNumber for the BAL fallback).
+#   - receipts/bodies 20,000 blocks = verifier slack + replayable catch-up backlog
+#     after an engine restart.
+#   - senders + tx-lookup fully pruned (the mirror never serves historical lookups).
+#
+# Steady-state disk: ~300 GB. RAM: ~4-6 GB.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reth-config
+  labels:
+    app.kubernetes.io/part-of: diorama-mainnet
+data:
+  reth.toml: |
+    [prune]
+    # Minimum pruning interval measured in blocks
+    block_interval = 5
+
+    [prune.segments]
+    sender_recovery = "full"
+    transaction_lookup = "full"
+    receipts = { distance = 20000 }
+    account_history = { distance = 10064 }
+    storage_history = { distance = 10064 }
+    bodies_history = { distance = 20000 }
+
+    [stages.bodies]
+    # Default is ~2 GB; 512 MB is plenty for a node that only backfills short gaps.
+    downloader_max_buffered_blocks_size_bytes = 536870912
+
+    [stages.execution]
+    # Leaner commit thresholds than default (5M changes / 10m).
+    max_changes = 1000000
+    max_duration = "5m"
+
+    [stages.etl]
+    file_size = 268435456
+
+    [peers.connection_info]
+    # Lean peer set; still ample for checkpoint-gap backfill.
+    max_outbound = 25
+    max_inbound = 15
+
+    [sessions]
+    session_command_buffer = 16
+    session_event_buffer = 128

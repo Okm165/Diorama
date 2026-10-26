@@ -1,4 +1,4 @@
-//! `mirror-devnet` — the devnet plane: shadow registry, journal, state, the
+//! `diorama-devnet` — the devnet plane: shadow registry, journal, state, the
 //! admin surface, deal, probes, metrics, and the unshadow re-sync `Source`.
 //! The devnet axioms live here; the projects compose these with chain clients.
 //! Clocks: `block` = the **devnet chain's height** (T on the mainnet profile,
@@ -43,12 +43,12 @@ pub use shared::Shared;
 /// collides with a parallel run.
 #[cfg(test)]
 pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("mirror-devnet-{tag}-{}", std::process::id()))
+    std::env::temp_dir().join(format!("diorama-devnet-{tag}-{}", std::process::id()))
 }
 
 #[cfg(test)]
 mod design_assertions {
-    /// The Rust-for-Rustaceans pin (plan §11.3 rule 11).
+    /// The Rust-for-Rustaceans pin.
     fn is_normal<T: Send + Sync + Sized + Unpin>() {}
 
     #[test]

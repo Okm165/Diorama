@@ -1,0 +1,16 @@
+# The Mainnet Mirror's manifest base: reth + the local CL, the devnet Anvil,
+# the engine. The namespace, the instance ConfigMap and the harness NodePorts
+# are the overlay's (instance identity/topology, not service templates) — the
+# same split as k8s/base/diorama-venue.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../shared
+  - diorama-config.yaml
+  - reth-config.yaml
+  - pvcs.yaml
+  - reth.yaml
+  - lighthouse.yaml
+  - anvil-t.yaml
+  - engine.yaml

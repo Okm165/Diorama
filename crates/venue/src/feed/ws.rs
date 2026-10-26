@@ -83,16 +83,16 @@ impl WsClient {
     }
 
     /// Run forever with exponential backoff between sessions (the shared
-    /// `mirror_anvil::Backoff`: 1 s for the first failure, doubling to 30 s,
+    /// `diorama_anvil::Backoff`: 1 s for the first failure, doubling to 30 s,
     /// reset by a session that served).
     pub async fn run(self) {
-        let mut backoff = mirror_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+        let mut backoff = diorama_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
         loop {
             let progress = match self.session().await {
-                Ok(()) => mirror_anvil::Progress::Progressed,
+                Ok(()) => diorama_anvil::Progress::Progressed,
                 Err(e) => {
                     tracing::warn!(error = %e, "market websocket session failed; reconnecting");
-                    mirror_anvil::Progress::Stalled
+                    diorama_anvil::Progress::Stalled
                 }
             };
             self.feed.metrics.mark_ws_down();

@@ -1,6 +1,6 @@
 //! The fork driver: V's lifecycle from boot to epoch to steady state.
 //!
-//! V is a fork-mode anvil (chain id 999). The driver's jobs (plan §7.2):
+//! V is a fork-mode anvil (chain id 999). The driver's jobs:
 //!
 //! - **boot asserts**: V answers, is the venue chain, and automine is off;
 //! - **reset detection**: the mirror bundle's detector — V's chain-instance
@@ -21,13 +21,13 @@
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::reset::{read_canary, write_canary};
-use mirror_devnet::engine::Engine as _;
-use mirror_devnet::facts::Fact;
-use mirror_devnet::metrics::Registry as _;
-use mirror_devnet::probes::ProbeOutcome;
-use mirror_devnet::scan;
-use mirror_devnet::spine::{MinePolicy, ResetSignal};
-use mirror_devnet::state::{cursor_from, ChainCursor};
+use diorama_devnet::engine::Engine as _;
+use diorama_devnet::facts::Fact;
+use diorama_devnet::metrics::Registry as _;
+use diorama_devnet::probes::ProbeOutcome;
+use diorama_devnet::scan;
+use diorama_devnet::spine::{MinePolicy, ResetSignal};
+use diorama_devnet::state::{cursor_from, ChainCursor};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,7 +48,7 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
 pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
-    mirror_devnet::engine::boot_prefix(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT, "hl public api").await?;
+    diorama_devnet::engine::boot_prefix(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT, "hl public api").await?;
     let pin = reconcile(ctx).await?;
     probes_at_pin(ctx, pin).await?;
     Ok(())
@@ -63,7 +63,7 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
 pub(crate) async fn mine_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
     loop {
-        if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
+        if diorama_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
         mine_pending_best_effort(&ctx).await;
@@ -76,7 +76,7 @@ pub(crate) async fn mine_loop(ctx: Arc<Ctx>) {
 pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
     let mut last_status = 0u64;
-    let via = mirror_devnet::engine::source_host(ctx.source_rpc.url());
+    let via = diorama_devnet::engine::source_host(ctx.source_rpc.url());
     // The pass's own backoff: a failed pass — the public source throttling,
     // a transient transport fault — doubles the pause up to the cap, and a
     // pass that serves resets it. The fixed cadence alone hammered a
@@ -84,12 +84,12 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     // limiter and the retry loop kept it hot). The cap stays at a minute:
     // the refusals measured live are transient bursts, and a longer pause
     // only wastes the good windows between them.
-    let mut backoff = mirror_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(60));
+    let mut backoff = diorama_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(60));
     loop {
         // The follow's heartbeat (a minute apart, the same shape on both
         // mirrors): the steady DEBUG line only speaks for an idle chain, and
         // the live source is never at the followed height.
-        mirror_devnet::engine::FollowStatus {
+        diorama_devnet::engine::FollowStatus {
             via,
             source_head: ctx.venue_metrics.source_head.load(std::sync::atomic::Ordering::Relaxed),
             followed: ctx
@@ -100,31 +100,31 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
                 .venue_metrics
                 .follow_windows_total
                 .load(std::sync::atomic::Ordering::Relaxed),
-            guard: mirror_devnet::engine::GapGuard::of(
+            guard: diorama_devnet::engine::GapGuard::of(
                 ctx.plane.gap_paused.load(std::sync::atomic::Ordering::Relaxed),
             ),
         }
         .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);
-        if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
+        if diorama_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
         let progress = match pass(&ctx).await {
-            Ok(Pass::Steady) => mirror_anvil::Progress::Progressed,
+            Ok(Pass::Steady) => diorama_anvil::Progress::Progressed,
             Ok(Pass::Reset) => {
                 recover_from_reset(&ctx).await;
-                mirror_anvil::Progress::Progressed
+                diorama_anvil::Progress::Progressed
             }
             Err(e) => {
                 tracing::warn!(error = %e, "venue driver pass failed; will retry");
-                mirror_anvil::Progress::Stalled
+                diorama_anvil::Progress::Stalled
             }
         };
         backoff.record(progress);
         // A pass that served sleeps the plain cadence; a failed one sleeps
         // the grown delay.
         let pause = match progress {
-            mirror_anvil::Progress::Progressed => poll,
-            mirror_anvil::Progress::Stalled => poll.max(backoff.delay()),
+            diorama_anvil::Progress::Progressed => poll,
+            diorama_anvil::Progress::Stalled => poll.max(backoff.delay()),
         };
         tokio::time::sleep(pause).await;
     }
@@ -137,7 +137,7 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
 async fn recover_from_reset(ctx: &Ctx) {
     tracing::warn!("V was reset under the driver - reconciling (epoch rule)");
     if let Err(e) =
-        mirror_devnet::engine::assert_chain(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT).await
+        diorama_devnet::engine::assert_chain(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT).await
     {
         tracing::warn!(error = %e, "venue chain assert failed after a reset");
     }
@@ -225,7 +225,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     let walk = scan::scan_to(
         &ctx.plane,
         &ctx.anvil_v,
-        mirror_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
+        diorama_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
         head,
         first,
     )
@@ -240,8 +240,8 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     // same 1024 blocks on both mirrors (files older than head - keep are
     // pruned; the venue's journal holds its own writes — the deal).
     ctx.plane.journal.prune(head);
-    let block = ctx.anvil_v.block_by_number(head, mirror_anvil::Txs::Hashes).await?;
-    mirror_devnet::state::advance_cursor(&ctx.plane.state, &block, head)?;
+    let block = ctx.anvil_v.block_by_number(head, diorama_anvil::Txs::Hashes).await?;
+    diorama_devnet::state::advance_cursor(&ctx.plane.state, &block, head)?;
     ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
     ctx.plane.facts.publish(Fact::CursorAdvanced {
         chain: ctx.mirror.label(),
@@ -262,7 +262,7 @@ async fn mine_pending(ctx: &Ctx) -> Result<()> {
     if ctx.mirror.policies().mine != MinePolicy::PoolDrain {
         return Ok(());
     }
-    let mirror_anvil::Mined::Block { pending } = ctx.anvil_v.mine_pending().await? else {
+    let diorama_anvil::Mined::Block { pending } = ctx.anvil_v.mine_pending().await? else {
         return Ok(());
     };
     ctx.venue_metrics.inc(&ctx.venue_metrics.mined_blocks_total);
@@ -287,7 +287,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     // transition: there is no instance the registry recorded, so the boot is
     // an anchor and stays silent — the mainnet's boot anchor behaves the
     // same way (the epoch rule's fresh case is the negation of `holds_state`).
-    if mirror_devnet::epoch::holds_state(&ctx.plane)? {
+    if diorama_devnet::epoch::holds_state(&ctx.plane)? {
         let signal = ResetSignal::PinMismatch {
             expected: ctx.plane.state.epoch_pin()?,
             found: pin,
@@ -314,18 +314,18 @@ async fn pin_read(ctx: &Ctx) -> Result<Option<u64>> {
     Ok(pin)
 }
 
-/// The epoch rule (shared with the mainnet engine, `mirror-devnet::epoch`):
+/// The epoch rule (shared with the mainnet engine, `diorama-devnet::epoch`):
 /// a fresh pin drops marks and values, the same pin re-applies the recorded
 /// writes; the journal goes either way. The transition's logs are the shared
 /// module's; the counters are V's (epoch transitions, not resets found).
 async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     match ctx.epoch_rule(pin).await? {
-        mirror_devnet::epoch::Epoch::Steady => {}
-        mirror_devnet::epoch::Epoch::Cleared => {
+        diorama_devnet::epoch::Epoch::Steady => {}
+        diorama_devnet::epoch::Epoch::Cleared => {
             ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
             ctx.plane.publish_epoch_changed(ctx.mirror.label(), pin);
         }
-        mirror_devnet::epoch::Epoch::Restored { restored } => {
+        diorama_devnet::epoch::Epoch::Restored { restored } => {
             ctx.venue_metrics.inc(&ctx.venue_metrics.epochs_total);
             ctx.venue_metrics
                 .add(&ctx.venue_metrics.restore_writes_total, restored as u64);
@@ -341,7 +341,7 @@ async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// the base the registry was just rebuilt against.
 async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     let watermark = if let Some(p) = pin {
-        let block = ctx.anvil_v.block_by_number(p, mirror_anvil::Txs::Hashes).await?;
+        let block = ctx.anvil_v.block_by_number(p, diorama_anvil::Txs::Hashes).await?;
         // Not the shared advance step: a new epoch's `first_block` *is* the
         // pin (the shared step keeps the current cursor's first block).
         ctx.plane.state.set_cursor(cursor_from(&block, p))?;
@@ -349,7 +349,7 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
         // state at the pin, so the next window composes pin+1 onward. The
         // hash is the source's own block hash (the continuity check compares
         // it to the next block's parent).
-        let source_block = ctx.source_rpc.block_by_number(p, mirror_anvil::Txs::Hashes).await?;
+        let source_block = ctx.source_rpc.block_by_number(p, diorama_anvil::Txs::Hashes).await?;
         ctx.plane.state.set_source_last(p, source_block.header.hash)?;
         p
     } else {
@@ -405,9 +405,9 @@ pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOu
         );
         return Ok(skipped_all());
     }
-    let probes = mirror_devnet::probes::run_at(ctx, pin).await?;
+    let probes = diorama_devnet::probes::run_at(ctx, pin).await?;
     let out = count_probes(ctx, probes, pin, source_head).await?;
-    mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), pin, &out);
+    diorama_devnet::probes::report(&ctx.plane, ctx.mirror.label(), pin, &out);
     Ok(out)
 }
 

@@ -19,7 +19,7 @@ use crate::shared::Shared;
 use crate::source::Source;
 use crate::state::StateFile;
 use alloy_primitives::Address;
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -147,7 +147,7 @@ impl Plane {
 
     /// Open the plane from the engine section's layout (state dir, journal
     /// dir/blocks, fixture addresses): the one convention both profiles use.
-    pub fn from_engine(engine: &mirror_config::EngineSection) -> Result<Self> {
+    pub fn from_engine(engine: &diorama_config::EngineSection) -> Result<Self> {
         Self::open(
             &engine.state_dir,
             engine.journal.dir.clone(),
@@ -194,7 +194,7 @@ impl Plane {
         self.gap_paused.swap(false, Ordering::Relaxed)
     }
 
-    /// The devnet admin surface (plan §11.3), wired to the profile's chain and
+    /// The devnet admin surface, wired to the profile's chain and
     /// re-sync source: the semantics live in [`crate::admin`], the wiring here.
     pub fn admin<'a>(
         &'a self,

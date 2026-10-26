@@ -9,15 +9,15 @@
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::follow;
-use mirror_config::Instance;
+use diorama_config::Instance;
 use std::sync::Arc;
 use std::time::Duration;
 
 /// The selftest's scratch targets: the spine's one `ScratchTargets` (the
 /// mainnet selftest reads the same struct).
-pub use mirror_devnet::engine::ScratchTargets as Targets;
+pub use diorama_devnet::engine::ScratchTargets as Targets;
 
-use mirror_devnet::engine::Verdict;
+use diorama_devnet::engine::Verdict;
 
 /// The wait bound for one window's source movement: the public chain produces
 /// a block about every second, so the bound only fires on a stalled source
@@ -32,9 +32,9 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<Verdic
     // reconcile (which anchors the cursor and the follow at V's pin), and the
     // at-pin probes — a boot fault is the selftest's first failure.
     crate::driver::boot(&ctx).await?;
-    let pin = mirror_devnet::pin::fork_pin(&ctx.anvil_v, "anvil-v").await?;
+    let pin = diorama_devnet::pin::fork_pin(&ctx.anvil_v, "anvil-v").await?;
 
-    mirror_devnet::engine::selftest_banner(
+    diorama_devnet::engine::selftest_banner(
         "venue engine selftest",
         &rpc,
         &anvil,
@@ -48,10 +48,10 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<Verdic
     println!();
     if writes == 0 {
         println!("   ✘ no window composed a change (the watchlist saw no activity)");
-        verdict = mirror_devnet::engine::Verdict::Failed;
+        verdict = diorama_devnet::engine::Verdict::Failed;
     }
     println!("   windows={done} composed_keys={writes}");
-    mirror_devnet::engine::selftest_verdict(verdict);
+    diorama_devnet::engine::selftest_verdict(verdict);
     Ok(verdict)
 }
 

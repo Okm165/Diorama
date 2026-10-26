@@ -1,10 +1,10 @@
-//! The venue profile's metric set (plan §7.8): V's head/pin/epoch, the scan
+//! The venue profile's metric set: V's head/pin/epoch, the scan
 //! cost, the engine-mined blocks, the at-pin probes. Rendered beside the
-//! shared admin gauges (`mirror_devnet::metrics::Metrics::render`) — the split
+//! shared admin gauges (`diorama_devnet::metrics::Metrics::render`) — the split
 //! keeps the shared crate's exposition to exactly what both profiles own (the
 //! mainnet engine's mirror of this file is `MainnetMetrics`).
 
-mirror_devnet::registry! {
+diorama_devnet::registry! {
     pub struct VenueMetrics {
         /// V's head.
         gauge head = "venue_head", "anvil-v head";
@@ -20,8 +20,7 @@ mirror_devnet::registry! {
         /// Writes re-applied by a same-pin restore.
         counter restore_writes_total = "venue_restore_writes_total", "writes re-applied by same-pin restores";
         /// V blocks the shadow scan walked (the harness mines one block per poll;
-        /// empty blocks are skipped cheaply — this counter makes the cost visible,
-        /// plan §17.4).
+        /// empty blocks are skipped cheaply — this counter makes the cost visible).
         counter shadow_scanned_blocks = "venue_scanned_blocks_total", "V blocks the shadow scan walked";
         /// The empty share of the walk (one call, no traces).
         counter shadow_skipped_empty_blocks = "venue_skipped_empty_blocks_total", "empty blocks the shadow scan skipped (one call, no traces)";
@@ -90,7 +89,7 @@ mod tests {
     #[test]
     fn the_registry_series_do_not_overlap() {
         let venue = VenueMetrics::default();
-        let admin = mirror_devnet::metrics::Metrics::default();
+        let admin = diorama_devnet::metrics::Metrics::default();
         let dupes: Vec<String> = series(&venue.render())
             .intersection(&series(&admin.render()))
             .cloned()

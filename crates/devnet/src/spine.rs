@@ -18,7 +18,7 @@ use crate::cow::Scope;
 use crate::error::Result;
 use crate::source::Source;
 use futures_util::future::BoxFuture;
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use std::sync::Arc;
 
 /// What a profile's `build` needs (the context assembles it): the shared

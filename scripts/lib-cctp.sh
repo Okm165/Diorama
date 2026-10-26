@@ -8,10 +8,10 @@
 #   direct  (BRIDGE_CTRL_URL set): the scratch stack's URLs — BRIDGE_CTRL_URL,
 #           BRIDGE_IRIS_URL, T_URL, V_URL, ENGINE_T_URL, ENGINE_V_URL,
 #           SIM_INFO, SIM_CTRL — no kubectl;
-#   cluster (default): the venue-mirror namespace, every call exec'd from the
+#   cluster (default): the diorama-venue namespace, every call exec'd from the
 #           cctp-bridge pod. From there the same-namespace services resolve by
 #           name (anvil-v, engine, venue-sim) and T resolves cross-namespace
-#           (anvil-t.mainnet-mirror.svc — the same value the venue's ConfigMap
+#           (anvil-t.diorama-mainnet.svc — the same value the venue's ConfigMap
 #           carries as T_RPC_URL). The engines are driven through `cget`/
 #           `cpost` with explicit URLs (the family must reach *two* engines);
 #           lib-venue's `eget`/`epost` doors are inert here.
@@ -19,7 +19,7 @@
 # lib-venue.sh (sourced below) owns the venue-shaped gates the family shares:
 # the counters, `json`, the simulator doors (`sipost`/`spost`/`smetrics`), the
 # served-identity check (`identity_ok`) and `flatten_coin`.
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 CAST="${CAST:-cast}"
 
 # The venue lib picks its mode from ENGINE_URL; the bridge family keys on
@@ -59,9 +59,9 @@ else
       | python3 -c "import json,sys; r=json.load(sys.stdin).get('result','0x0'); print(int(r,16))"
   }
   rpcv()  { exec_pod curl -s --fail-with-body -m 60 -X POST "$1" -H 'Content-Type: application/json' -d "$2"; }
-  SRC_URL="http://anvil-t.mainnet-mirror.svc:8545"
+  SRC_URL="http://anvil-t.diorama-mainnet.svc:8545"
   DST_URL="http://anvil-v:8545"
-  SRC_ENGINE="http://engine.mainnet-mirror.svc:8080"
+  SRC_ENGINE="http://engine.diorama-mainnet.svc:8080"
   DST_ENGINE="http://engine:8080"
 fi
 

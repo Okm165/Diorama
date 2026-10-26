@@ -1,4 +1,4 @@
-//! The feed bridge (plan §7.1): the parent chain's live feed answers
+//! The feed bridge: the parent chain's live feed answers
 //! → `updateAnswer` on the devnet's mock aggregators.
 //!
 //! Why it exists: daloc's harness periodically re-publishes its own mock
@@ -26,7 +26,7 @@ pub(crate) mod policy;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::Address;
-use mirror_config::FeedSection;
+use diorama_config::FeedSection;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -110,7 +110,7 @@ impl FeedRuntime {
     /// The target's decimals, resolved the first time the target is readable
     /// and cached. `None` = not installed yet (the decode of an empty return
     /// is the *fact*; a transport fault still surfaces).
-    async fn decimals(&self, anvil_t: &mirror_anvil::Rpc) -> Result<Option<u8>> {
+    async fn decimals(&self, anvil_t: &diorama_anvil::Rpc) -> Result<Option<u8>> {
         if let Some(d) = *self
             .decimals
             .lock()
@@ -315,7 +315,7 @@ impl FeedBridge {
     /// empty address would report success and change nothing.
     pub async fn override_answer(
         &self,
-        anvil_t: &mirror_anvil::Rpc,
+        anvil_t: &diorama_anvil::Rpc,
         name: &str,
         answer: i128,
     ) -> Result<()> {

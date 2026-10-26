@@ -1,4 +1,4 @@
-//! `mirror-cctp` — the CCTP bridge (plan §15): real USDC between the Mainnet
+//! `diorama-cctp` — the CCTP bridge: real USDC between the Mainnet
 //! Mirror (T, Ethereum, domain 0) and the Venue Mirror (V, HyperEVM, domain 19)
 //! over the real CCTP V2 contracts already present in both forks.
 //!
@@ -50,20 +50,20 @@ use alloy_primitives::{Address, B256, U256};
 
 /// Wall-clock milliseconds: the PENDING window (`attest_after_ms`), receipt
 /// timestamps, and the Iris `lastUpdated` field all read one clock — the
-/// shared definition lives in `mirror-config`'s boot module.
-use mirror_config::boot::now_ms;
+/// shared definition lives in `diorama-config`'s boot module.
+use diorama_config::boot::now_ms;
 
 /// A scratch directory for one test (per test + process: the tests may run
 /// concurrently). One definition, so no test forgets the process id and
 /// collides with a parallel run.
 #[cfg(test)]
 pub(crate) fn test_dir(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("mirror-cctp-{tag}-{}", std::process::id()))
+    std::env::temp_dir().join(format!("diorama-cctp-{tag}-{}", std::process::id()))
 }
 
 #[cfg(test)]
 mod design_assertions {
-    /// The Rust-for-Rustaceans pin (plan §11.3 rule 11).
+    /// The Rust-for-Rustaceans pin.
     fn is_normal<T: Send + Sync + Sized + Unpin>() {}
 
     #[test]

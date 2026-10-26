@@ -12,10 +12,10 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: reth-snapshot
-  namespace: mainnet-mirror
+  namespace: diorama-mainnet
   labels:
     app.kubernetes.io/name: reth-snapshot
-    app.kubernetes.io/part-of: mainnet-mirror
+    app.kubernetes.io/part-of: diorama-mainnet
 spec:
   backoffLimit: 10
   activeDeadlineSeconds: 172800
@@ -25,7 +25,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: reth-snapshot
-        app.kubernetes.io/part-of: mainnet-mirror
+        app.kubernetes.io/part-of: diorama-mainnet
     spec:
       restartPolicy: OnFailure
       containers:

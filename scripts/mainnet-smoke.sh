@@ -6,7 +6,7 @@
 # cluster-internal service names (the same way the engine does).
 set -euo pipefail
 
-NS="${NS:-mainnet-mirror}"
+NS="${NS:-diorama-mainnet}"
 ENGINE_POD_SELECTOR="app.kubernetes.io/name=engine"
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
@@ -46,7 +46,7 @@ if head_hex=$(rpc http://reth:8545 eth_blockNumber | jq -r .result) && [ "$head_
   cl_slot=$(run curl -sf -m 10 http://lighthouse:5052/eth/v1/beacon/headers/head 2>/dev/null | jq -r '.data.header.message.slot' 2>/dev/null || true)
   if [ -n "$cl_slot" ] && [ "$cl_slot" != "null" ]; then
     cl_head=$(run curl -sf -m 20 "http://lighthouse:5052/eth/v2/beacon/blocks/$cl_slot" 2>/dev/null | jq -r '.data.message.body.execution_payload.block_number // empty' 2>/dev/null || true)
-    gap=$(run curl -sf -m 10 localhost:8080/metrics 2>/dev/null | awk '/^mirror_source_sync_gap_blocks /{print $2}' || true)
+    gap=$(run curl -sf -m 10 localhost:8080/metrics 2>/dev/null | awk '/^diorama_source_sync_gap_blocks /{print $2}' || true)
     if [ -n "$cl_head" ] && [ "$cl_head" != "null" ]; then
       lag=$((cl_head - head))
       if [ "$lag" -le 100 ]; then
@@ -82,9 +82,9 @@ fi
 echo "-- state parity (the engine's own convergence counters)"
 m=$(run curl -sf -m 10 http://engine:8080/metrics 2>/dev/null || true)
 if [ -n "$m" ]; then
-  t_fail=$(echo "$m" | awk '/^mirror_t_convergence_failures_total /{print $2}' || true)
-  sweep=$(echo "$m" | awk '/^mirror_full_sweep_mismatches_total /{print $2}' || true)
-  lag=$(echo "$m" | awk '/^mirror_lag_blocks /{print $2}' || true)
+  t_fail=$(echo "$m" | awk '/^diorama_t_convergence_failures_total /{print $2}' || true)
+  sweep=$(echo "$m" | awk '/^diorama_full_sweep_mismatches_total /{print $2}' || true)
+  lag=$(echo "$m" | awk '/^diorama_lag_blocks /{print $2}' || true)
   if [ "${t_fail:-1}" = "0" ] && [ "${sweep:-1}" = "0" ]; then
     ok "probe parity: t_convergence_failures=0, full_sweep_mismatches=0 (lag ${lag:-?} blocks)"
   else

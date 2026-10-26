@@ -19,7 +19,7 @@
 #   CAST=/path/to/cast make hedged-book   # when cast is not on PATH
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}"
 LONG_COIN="${LONG_COIN:-ETH}"
 SHORT_COIN="${SHORT_COIN:-BTC}"

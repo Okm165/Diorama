@@ -1,4 +1,4 @@
-//! The venue bridge: V's Core↔EVM boundary, mirrored (plan §7.4).
+//! The venue bridge: V's Core↔EVM boundary, mirrored.
 //!
 //! V is a fork of the real HyperEVM, so the *contracts* at the boundary are
 //! real (CoreWriter `0x3333…`, the system addresses) but HyperCore is not
@@ -36,7 +36,7 @@ use alloy_rpc_types_eth::TransactionRequest;
 use alloy_rpc_types_trace::geth::{CallFrame, GethTrace, TraceResult};
 use corewriter::{CoreAction, CORE_WRITER};
 use metrics::BridgeMetrics;
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use rust_decimal::Decimal;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -123,7 +123,7 @@ impl Bridge {
         if self.observed_head.load(Ordering::Relaxed) == head {
             return Ok(());
         }
-        let block = self.anvil_v.block_by_number(head, mirror_anvil::Txs::Hashes).await?;
+        let block = self.anvil_v.block_by_number(head, diorama_anvil::Txs::Hashes).await?;
         self.sim.observe_chain_time(block.header.timestamp.saturating_mul(1_000));
         self.observed_head.store(head, Ordering::Relaxed);
         Ok(())
@@ -131,7 +131,7 @@ impl Bridge {
 
     /// Decode one block's boundary activity and apply it.
     async fn scan_block(&self, n: u64) -> Result<()> {
-        let block = self.anvil_v.block_by_number(n, mirror_anvil::Txs::Full).await?;
+        let block = self.anvil_v.block_by_number(n, diorama_anvil::Txs::Full).await?;
         if block.transactions.is_empty() {
             return Ok(());
         }

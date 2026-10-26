@@ -30,7 +30,7 @@ echo "== the behavioral attestation ($(date -u +%H:%M:%S) UTC) =="
 
 # Every pod once: running, ready, and no in-pod restarts (a restart is an
 # anomaly even when the service recovered).
-for ns in mainnet-mirror venue-mirror; do
+for ns in diorama-mainnet diorama-venue; do
   while read -r name ready status restarts _; do
     [ -z "${name:-}" ] && continue
     if [ "$ready" = "1/1" ] && [ "$status" = "Running" ] && [ "$restarts" = "0" ]; then
@@ -42,10 +42,10 @@ for ns in mainnet-mirror venue-mirror; do
 done
 
 echo "-- T engine (30880): the applier and the follow"
-pick http://localhost:30880 mirror_cursor_block mirror_reth_head mirror_lag_blocks mirror_blocks_applied_total \
-  mirror_t_convergence_ok_total mirror_t_convergence_failures_total mirror_t_convergence_last_failed \
-  mirror_t_probe_skipped_total mirror_t_resets_total mirror_reorgs_detected_total \
-  mirror_shadowed_slots mirror_shadowed_accounts mirror_halted mirror_source_sync_gap_blocks
+pick http://localhost:30880 diorama_cursor_block diorama_reth_head diorama_lag_blocks diorama_blocks_applied_total \
+  diorama_t_convergence_ok_total diorama_t_convergence_failures_total diorama_t_convergence_last_failed \
+  diorama_t_probe_skipped_total diorama_t_resets_total diorama_reorgs_detected_total \
+  diorama_shadowed_slots diorama_shadowed_accounts diorama_halted diorama_source_sync_gap_blocks
 
 echo "-- V engine (31880): the follow's windows and the polls"
 pick http://localhost:31880 venue_cursor venue_head venue_source_head venue_source_followed \
@@ -67,7 +67,7 @@ pick http://localhost:31096 cctp_messages_seen_total cctp_messages_pending cctp_
   cctp_scan_errors_total cctp_last_scan_block cctp_gas_low_total cctp_gas_critical_total
 
 echo "-- WARN/ERROR (last $WIN, deduped; deliberate study/drill facts appear here too)"
-for ns in mainnet-mirror venue-mirror; do
+for ns in diorama-mainnet diorama-venue; do
   for d in $(timeout 20 kubectl -n "$ns" get deploy -o name 2>/dev/null | sed 's|deployment.apps/||'); do
     timeout 25 kubectl -n "$ns" logs "deploy/$d" --since="$WIN" 2>/dev/null | python3 -c "
 import json, sys, collections

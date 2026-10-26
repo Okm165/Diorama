@@ -1,4 +1,4 @@
-//! The epoch rule (plan §6.3), one implementation for both profiles: what
+//! The epoch rule, one implementation for both profiles: what
 //! happens to the COW registry when the devnet chain was re-forked under the
 //! engine.
 //!
@@ -23,7 +23,7 @@
 use crate::error::Result;
 use crate::plane::Plane;
 use crate::shadow;
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 
 /// What the epoch rule did, for the caller's metrics.
 #[derive(Debug, Clone, Copy)]
@@ -195,8 +195,8 @@ mod tests {
         Rpc::new("http://127.0.0.1:9", Duration::from_secs(1)).unwrap()
     }
 
-    fn storage_write(addr: Address, slot: U256, value: U256) -> mirror_anvil::Write {
-        mirror_anvil::Write::Storage {
+    fn storage_write(addr: Address, slot: U256, value: U256) -> diorama_anvil::Write {
+        diorama_anvil::Write::Storage {
             address: addr,
             slot,
             value,

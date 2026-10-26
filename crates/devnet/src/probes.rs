@@ -9,8 +9,8 @@ use crate::shadow::Shadow;
 use crate::shared::Shared;
 use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::BlockNumberOrTag;
-use mirror_anvil::Rpc;
-use mirror_config::Probe;
+use diorama_anvil::Rpc;
+use diorama_config::Probe;
 use std::collections::HashSet;
 
 /// One probe run's tally. This is also the `/admin/probes` wire shape on both
@@ -235,8 +235,8 @@ fn log_mismatch(probe: &Probe, at: u64, source: &[u8], target: &[u8]) {
     tracing::warn!(
         block = at,
         probe = %probe.name,
-        source = %mirror_anvil::truncate(&alloy_primitives::hex::encode(source), 80),
-        target = %mirror_anvil::truncate(&alloy_primitives::hex::encode(target), 80),
+        source = %diorama_anvil::truncate(&alloy_primitives::hex::encode(source), 80),
+        target = %diorama_anvil::truncate(&alloy_primitives::hex::encode(target), 80),
         "probe mismatch"
     );
 }
@@ -253,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn an_offset_clock_skips_every_probe() {
         let rpc = Arc::new(
-            mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
+            diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
         );
         let probes = vec![Probe {
             name: "p".into(),

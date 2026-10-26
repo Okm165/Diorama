@@ -170,7 +170,7 @@ pub(crate) async fn state_listing(State(state): State<Arc<ControlState>>) -> Res
 // ---- relay ----------------------------------------------------------------
 
 /// `POST /control/relay`: relay now — one SIGNED message by nonce, or every
-/// SIGNED message. Manual mode's only driver (§15.4); in auto mode a nudge
+/// SIGNED message. Manual mode's only driver; in auto mode a nudge
 /// that skips the poll interval.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RelayRequest {
@@ -219,7 +219,7 @@ pub(crate) struct TransferRequest {
     /// Defaults to the relay wallet (a self-bridge).
     #[serde(default)]
     pub mint_recipient: Option<Address>,
-    /// Optional protocol-native credit (§15.4): the burn carries
+    /// Optional protocol-native credit: the burn carries
     /// `hookData = target(20) ‖ calldata` and pins `destinationCaller` to the
     /// hook wrapper, so one relay tx mints **and** calls the target.
     #[serde(default)]
@@ -501,7 +501,7 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            status(Error::Rpc(mirror_anvil::Error::Status {
+            status(Error::Rpc(diorama_anvil::Error::Status {
                 endpoint: "anvil-t".into(),
                 method: "eth_call".into(),
                 status: 503,

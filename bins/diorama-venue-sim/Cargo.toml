@@ -1,0 +1,13 @@
+[package]
+name = "diorama-venue-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Venue Mirror's simulator service: live market plane + COW account plane (info 8090, control 8091)"
+
+[dependencies]
+diorama-config = { path = "../../crates/config" }
+diorama-venue = { path = "../../crates/venue" }
+[lints]
+workspace = true

@@ -1,7 +1,7 @@
 //! The mainnet mirror's [`Bundle`] — its divergence choices, filled and
 //! documented in its own folder.
 //!
-//! The spine ([`mirror_devnet::spine`]) declares the [`Mirror`] interface and
+//! The spine ([`diorama_devnet::spine`]) declares the [`Mirror`] interface and
 //! never names a mirror; this file is where the mainnet profile's choices are
 //! made and documented, next to the venue's `profile.rs`:
 //!
@@ -16,15 +16,15 @@
 //! | probes | per applied block | live parity against the composed BAL |
 //! | prepend | 3 rounds (a steady stream must not starve the parent) | 1 |
 //!
-//! The composer itself is generic (`mirror_devnet::bal::compose`): it picks the
+//! The composer itself is generic (`diorama_devnet::bal::compose`): it picks the
 //! native rung from `Capabilities::native_bal` and synthesizes otherwise, so
 //! the two mirrors differ in *data* (source, scope), not in algorithm.
-use mirror_config::{EngineSection, LoopsSection};
-use mirror_devnet::cow::Scope;
-use mirror_devnet::source::Source;
+use diorama_config::{EngineSection, LoopsSection};
+use diorama_devnet::cow::Scope;
+use diorama_devnet::source::Source;
 use crate::reset::CursorHash;
-use mirror_devnet::engine::JournalScope;
-use mirror_devnet::spine::{
+use diorama_devnet::engine::JournalScope;
+use diorama_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
 use std::sync::Arc;
@@ -82,7 +82,7 @@ pub struct Wiring {
 
 /// The wiring's inputs: the spine's one `ProfileDeps` (the venue profile's
 /// `Deps` is the same struct — the roles, not the chains, name the fields).
-pub use mirror_devnet::spine::ProfileDeps as Deps;
+pub use diorama_devnet::spine::ProfileDeps as Deps;
 
 pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let Deps {
@@ -96,7 +96,7 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     // The mainnet watches whole accounts: the BAL enumerates every changed
     // slot, so no closures are needed (the scope's slot set stays empty).
     let scope = Scope::from_config(watch, &engine.closures);
-    let target: Arc<dyn Source> = mirror_devnet::source::target(target_rpc);
+    let target: Arc<dyn Source> = diorama_devnet::source::target(target_rpc);
     Wiring {
         mirror: bundle(engine, Arc::clone(&source), source, reset, scope),
         target,
@@ -133,23 +133,23 @@ mod tests {
     fn the_bundle_pins_the_mainnet_divergences() {
         let path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../config/instances/mainnet-mirror/instance.toml"
+            "/../../config/instances/diorama-mainnet/instance.toml"
         ));
-        let (mut inst, _) = mirror_config::Instance::inspect(path).unwrap();
+        let (mut inst, _) = diorama_config::Instance::inspect(path).unwrap();
         let (_, engine) = inst.take_mainnet().unwrap();
         let rpc = Arc::new(
-            mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
+            diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
                 .unwrap(),
         );
-        let source: Arc<dyn Source> = mirror_devnet::source::target(rpc);
+        let source: Arc<dyn Source> = diorama_devnet::source::target(rpc);
         let watched = alloy_primitives::Address::repeat_byte(0xaa);
         let scope =
             Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
-        let mirror = bundle(&engine, Arc::clone(&source), source, Arc::new(mirror_devnet::spine::NoReset), scope);
+        let mirror = bundle(&engine, Arc::clone(&source), source, Arc::new(diorama_devnet::spine::NoReset), scope);
         assert_eq!(mirror.label(), "t");
         assert_eq!(
             mirror.journal_scope(),
-            mirror_devnet::engine::JournalScope::ParentBeforeValues
+            diorama_devnet::engine::JournalScope::ParentBeforeValues
         );
         assert!(mirror.scope().watch().accounts.contains(&watched));
     }

@@ -1,5 +1,5 @@
-# cctp-bridge - the cross-mirror CCTP V2 lane (plan §15): a burn on the
-# Ethereum fork (T, mainnet-mirror namespace), a local Iris-compatible
+# cctp-bridge - the cross-mirror CCTP V2 lane: a burn on the
+# Ethereum fork (T, diorama-mainnet namespace), a local Iris-compatible
 # attestation, and the mint on V - plus the control surface for the devnet
 # lanes. It belongs to neither mirror (it bridges them) and deploys beside the
 # venue stack, its peers; T is reached cross-namespace. Ports: 8095 serves the
@@ -34,16 +34,16 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: cctp-bridge
-          image: localhost/cctp-bridge:v1
+          image: localhost/diorama-cctp-bridge:v1
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The same `envFrom` mechanism as the engines: the ConfigMap carries
           # every wiring key (CCTP_STATE_DIR, ANVIL_V_URL, and T_RPC_URL — the
           # Ethereum fork the bridge burns on: anvil-t lives in the
-          # mainnet-mirror namespace, so the bridge reaches it over
+          # diorama-mainnet namespace, so the bridge reaches it over
           # cross-namespace service DNS).
           envFrom:
-            - configMapRef: { name: mirror-config }
+            - configMapRef: { name: diorama-config }
           env:
             # The funded relay wallet's hex key: a Secret, never a manifest
             # literal (the instance reads it as ${CCTP_RELAY_KEY}); create it
@@ -58,7 +58,7 @@ spec:
             - { name: state, mountPath: /state }
           # /healthz is the Iris router's (8095); the control plane carries
           # /health + /metrics on 8096. The readiness gate narrows to the
-          # attester-installed check when the crate exposes it (plan §11.5).
+          # attester-installed check when the crate exposes it.
           # The boot-wait may outlast a dependency's own restart (the
           # engines wait for their anvil/reth, the bridge for two chains): a
           # startupProbe suspends the liveness/readiness probes through it, so

@@ -3,10 +3,10 @@
 //! probe set.
 use crate::ctx::Ctx;
 use crate::error::Result;
-use mirror_anvil::{Key, Write};
-use mirror_devnet::metrics::Registry as _;
-use mirror_devnet::probes::ProbeRunner;
-use mirror_devnet::spine::ProbeSchedule;
+use diorama_anvil::{Key, Write};
+use diorama_devnet::metrics::Registry as _;
+use diorama_devnet::probes::ProbeRunner;
+use diorama_devnet::spine::ProbeSchedule;
 use std::sync::atomic::Ordering;
 
 /// The apply's parity step: the drift lens (sampled storage keys vs reth at
@@ -51,7 +51,7 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
     // not documented here — 1000 answered live once, not relied on).
     let (t_answers, r_answers) = match tokio::try_join!(
         ctx.anvil_t
-            .batch_limited(&calls.t, mirror_anvil::ANVIL_BATCH_MAX_ITEMS, 1 << 20),
+            .batch_limited(&calls.t, diorama_anvil::ANVIL_BATCH_MAX_ITEMS, 1 << 20),
         ctx.reth.batch(&calls.reth)
     ) {
         Ok(pair) => pair,
@@ -72,14 +72,14 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
 /// Both sides' call plans for the drift sample: T at the parent block, reth
 /// at its own latest.
 struct SampleCalls {
-    t: Vec<mirror_anvil::Call>,
-    reth: Vec<mirror_anvil::Call>,
+    t: Vec<diorama_anvil::Call>,
+    reth: Vec<diorama_anvil::Call>,
 }
 
 /// The sample's call plans; `None` when a plan cannot encode (already warned;
 /// every sampled key then counts not-ok).
 fn sample_calls(n: u64, t_latest: u64, sample: &[Key]) -> Option<SampleCalls> {
-    let plan = |at: u64| match mirror_anvil::Rpc::key_calls(sample, at) {
+    let plan = |at: u64| match diorama_anvil::Rpc::key_calls(sample, at) {
         Ok(calls) => Some(calls),
         Err(e) => {
             tracing::warn!(block = n, keys = sample.len(), error = %e, "drift sample: the call plan failed");
@@ -95,7 +95,7 @@ fn sample_calls(n: u64, t_latest: u64, sample: &[Key]) -> Option<SampleCalls> {
 /// Whether the profile verifies every applied key (the full sweep) or the
 /// configured sample — the one spelling of the switch.
 fn full_sweep(ctx: &Ctx) -> bool {
-    ctx.engine.verifier.sweep == mirror_config::Sweep::Full
+    ctx.engine.verifier.sweep == diorama_config::Sweep::Full
 }
 
 /// One sampled key's verdict: `true` = the two chains' words match; a drift
@@ -158,15 +158,15 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
         &ctx.engine.verifier.probes,
         &ctx.plane.shadow,
         match ctx.plane.time_offset.load(Ordering::Relaxed) {
-            0 => mirror_devnet::probes::ClockOffset::Aligned,
-            _ => mirror_devnet::probes::ClockOffset::Offset,
+            0 => diorama_devnet::probes::ClockOffset::Aligned,
+            _ => diorama_devnet::probes::ClockOffset::Offset,
         },
     )
     .parity(&ctx.reth, n, &ctx.anvil_t)
     .await?;
     // The same summary line the venue's at-pin run reports (one shape for
     // both profiles): the per-probe skips stay DEBUG diagnostics.
-    mirror_devnet::probes::report(&ctx.plane, ctx.mirror.label(), n, &probes);
+    diorama_devnet::probes::report(&ctx.plane, ctx.mirror.label(), n, &probes);
     ctx.mainnet_metrics.add(&ctx.mainnet_metrics.t_convergence_ok, probes.ok as u64);
     ctx.mainnet_metrics
         .add(&ctx.mainnet_metrics.t_convergence_failed, probes.failed as u64);
@@ -180,7 +180,7 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, U256};
-    use mirror_anvil::{Key, Write};
+    use diorama_anvil::{Key, Write};
 
     /// Only storage writes are sampled (the drift lens); account-field writes
     /// carry no storage key (the venue's live parity re-reads the composed

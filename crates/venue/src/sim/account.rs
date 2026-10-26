@@ -486,7 +486,7 @@ pub(crate) fn clearinghouse(account: &Account, feed: &MarketFeed, meta: Option<&
 /// `|accountValue − (totalRawUsd + Σ sign(szi)·positionValue)| ≤ 1e-6`. The
 /// construction makes it hold by definition — the counter exists so a
 /// regression in the construction is *visible* instead of silently failing
-/// daloc's client gate (plan §7.8's invariant counter).
+/// The identity gate (the invariant counter).
 pub(crate) fn identity_holds(state: &ClearinghouseState) -> bool {
     let mut signed = Decimal::ZERO;
     for asset in &state.asset_positions {
@@ -585,7 +585,7 @@ pub(crate) fn available_after_maintenance(
 }
 
 /// The maintenance-margin rate for a notional: the margin tier's
-/// `1/(2·maxLeverage)` (maintenance = ½ initial, plan §16.3).
+/// `1/(2·maxLeverage)` (maintenance = ½ initial).
 pub(crate) fn maintenance_rate(coin: &str, notional: Decimal, meta: Option<&crate::wire::Meta>) -> Decimal {
     let Some(meta) = meta else {
         return Decimal::ZERO;
@@ -653,7 +653,7 @@ pub(crate) fn max_leverage(coin: &str, meta: Option<&crate::wire::Meta>) -> Opti
         .map(|a| a.max_leverage)
 }
 
-/// The isolated liquidation price (exact formula, plan §16.3):
+/// The isolated liquidation price (exact formula):
 /// `price − side·margin_available/position_size/(1 − l·side)`,
 /// with the isolated position's own margin as `margin_available`.
 pub(crate) fn liquidation_px(p: &Position, mark: Decimal, maintenance_rate: Decimal) -> Result<Decimal> {
@@ -818,7 +818,7 @@ fn release_isolated_margin(
     Ok(())
 }
 
-/// The reduce-only guard: the venue's own string (plan §16.3) when the fill
+/// The reduce-only guard: the venue's own string when the fill
 /// would not reduce the position it names.
 fn refuse_non_reducing(old: Decimal, signed: Decimal, fill: &FillFacts) -> Result<()> {
     if fill.reduce == crate::sim::order::Reduce::Only

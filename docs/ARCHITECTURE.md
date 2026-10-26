@@ -2,12 +2,26 @@
 
 ## Components
 
+Each mirror is the same shape: a parent (the source of truth), a fork-mode
+Anvil chain, and the engine that keeps the chain fresh.
+
+**Mainnet Mirror**
+
 | Component | Image / build | Role | Measured footprint |
 |---|---|---|---|
-| `reth` | `ghcr.io/paradigmxyz/reth:v2.8.0` | Source of truth: head state, blocks, receipts, EIP-7928 BALs, `debug` traces | ~300 GB disk, ~2.6 GB RAM idle / ~5.5 GB while following and serving |
-| `lighthouse` | `docker.io/sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator); the engine's top-up loop reads its beacon REST surface | ~160 GB disk and growing to ~200 GB (18-day column custody), ~5-7.5 GB RAM while backfilling (16Gi limit) |
-| `anvil-t` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Devnet chain (T): watch-list state kept fresh by applying EIP-7928 BALs; your writes live here | ~2.5 GB after thousands of applied blocks (16Gi limit) |
-| `engine` | `localhost/mainnet-engine:v1` (this repo) | The applier: BAL → trace composition, COW filter, journal, epoch rule, probes, admin API | ~100 MB RAM |
+| `reth` | `ghcr.io/paradigmxyz/reth:v2.8.0` | Source of truth: head state, blocks, receipts, EIP-7928 BALs, `debug` traces | ~300 GB disk, ~2.6 GB RAM idle / ~5.5 GB while following and serving (8Gi limit) |
+| `lighthouse` | `docker.io/sigp/lighthouse:v8.3.0` | Consensus driver: checkpoint sync, drives reth's head via the engine API (no validator); the engine's top-up loop reads its beacon REST surface | ~160 GB disk and growing to ~200 GB (18-day column custody), ~5-7.5 GB RAM while backfilling (9Gi limit) |
+| `anvil-t` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Devnet chain (T): watch-list state kept fresh by applying EIP-7928 BALs; your writes live here | ~2.5 GB after thousands of applied blocks (4Gi limit) |
+| `engine` | `localhost/diorama-mainnet-engine:v1` (this repo) | The applier: BAL → trace composition, COW filter, journal, epoch rule, probes, admin API | ~100 MB RAM (512Mi limit) |
+
+**Venue Mirror**
+
+| Component | Image / build | Role | Measured footprint |
+|---|---|---|---|
+| `anvil-v` | `ghcr.io/foundry-rs/foundry:v1.8.6` | Devnet chain (V, chain 999): the HyperEVM fork kept fresh by the poll follow; your writes live here | the same fork-mode shape as T (1Gi limit) |
+| `engine` | `localhost/diorama-venue-engine:v1` (this repo) | The follow driver: compose → COW → land → parity, the epoch rule, probes, admin API | the same engine shell as the mainnet's (512Mi limit) |
+| `sim` | `localhost/diorama-venue-sim:v1` (this repo) | The simulator: the venue API from live market data plus the COW account plane (info 8090 / control 8091) | the market + account planes (384Mi limit) |
+| `cctp-bridge` | `localhost/diorama-cctp-bridge:v1` (this repo) | The CCTP bridge: the real Circle V2 lane between T and V (Iris 8095 / control 8096) | the watcher + relayer + attester (384Mi limit) |
 
 The repo is one cargo workspace (`crates/*` + `bins/*`): `crates/anvil` (the
 JSON-RPC client and the measured cheatcode conventions), `crates/config` (the
@@ -16,13 +30,12 @@ shadow registry, journal, cursor state with `epoch_pin`, admin surface,
 chain-generic scanner, probes, metrics — and the engine shell: the `Engine`
 trait, the handlers/route table, the boot assert, `serve`), the two projects
 `crates/mainnet`
-and `crates/venue`, and the binaries `bins/{mainnet-engine,venue-engine,
-venue-sim,cctp-bridge}` — the fourth is element 3 (`crates/cctp` on the common
-client + config only; it does not depend on the devnet substrate or either
-project). The projects are siblings - they share the common crates and
-never each other; the dependency law — no sibling edges — is the structural
-contract. The table above is the Mainnet Mirror's component set; the Venue
-Mirror's components and data flow are in "The Venue Mirror" below.
+and `crates/venue`, and the binaries `bins/{diorama-mainnet-engine,
+diorama-venue-engine,diorama-venue-sim,diorama-cctp-bridge}` — the fourth is
+element 3 (`crates/cctp` on the common client + config only; it does not
+depend on the devnet substrate or either project). The projects are siblings -
+they share the common crates and never each other; the dependency law — no
+sibling edges — is the structural contract.
 
 ## Data flow
 
@@ -53,7 +66,7 @@ list below then walks it step by step):
 ![per-block data flow](img/arch-data-flow.png)
 
 The venue profile follows its parent chain too, through the same pipeline: the
-spine's generic composer (`mirror_devnet::bal::compose`) has no native BAL to
+spine's generic composer (`diorama_devnet::bal::compose`) has no native BAL to
 take from the HL public API, so it synthesizes one — each pass composes the
 window's touched set from the envelopes (txs, receipts, system txs), derives
 concrete keys from the declared closures, reads source and target, and frames
@@ -70,13 +83,13 @@ Both mirrors are the *same product* against different parent chains: each keeps
 a live fork of its parent fresh, each lets the devnet modify the mirrored
 market state with minted liquidity, and each measures the result against the
 parent 1:1. Only the mechanisms differ, and each mechanism lives in its own
-mirror's folder behind a spine interface — `mirror_devnet::spine::Mirror`
+mirror's folder behind a spine interface — `diorama_devnet::spine::Mirror`
 bundles the divergence set (`label`, `source`, `follow_source`, `reset`,
 `policies`, `scope`), implemented by `crates/mainnet/src/profile.rs` and
 `crates/venue/src/profile.rs`. The composer itself is **one generic algorithm**
-(`mirror_devnet::bal::compose`): it takes the native BAL rung when the source
+(`diorama_devnet::bal::compose`): it takes the native BAL rung when the source
 records BALs and synthesizes one otherwise, so the mirrors differ in data
-(source, scope), not in pipeline. COW (`mirror_devnet::cow`) and everything
+(source, scope), not in pipeline. COW (`diorama_devnet::cow`) and everything
 after are shared code.
 
 | capability | Mainnet Mirror (T) | Venue Mirror (V) | shared spine |
@@ -84,12 +97,12 @@ after are shared code.
 | **mirror the parent chain** | reth local full node; the native BAL rung (`eth_getBlockAccessList`, prestateTracer fallback); one T block per applied parent block | HL public API; the synthesized BAL rung (envelopes → touches → declared closures → reads) applied to V's latest state | `Source` (both rungs), `bal::plan` (compose → COW → flatten), the applier/follow sequences, the journal, the cursor state |
 | **modify market state** | `/admin/deal` (mint balances), the feed bridge (live prices → mock aggregators), fixture deploys (`anvil_setCode`) | `/admin/deal` on V's tokens, the venue simulator's control API (orders, positions, accounts, prices) | `deal`, the shadow registry (COW), `anvil_setStorageAt`/`setCode` |
 | **minted liquidity** | `deal` mints ERC20 balances at the discovered slot; the CCTP bridge mints USDC via relay | `deal` mints on V; the sim mints perp/spot balances through its account plane | the same deal path — the mint is the devnet's own write, never the parent's |
-| **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `sweep = "full"`), configured probes per block, the applier's drift entries | live parity (applied keys re-read vs the composed BAL), at-pin probes, the uncovered-emitter audit, the follow's drift entries | `ProbeRunner`, `bal::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`); both write the shared `drift.jsonl` (`mirror_devnet::drift` — one home, each producer's entry schema) |
-| **reset / epoch** | cursor hash + below-base witness | chain-instance canary (pin witness) | `ResetDetector`, `mirror_devnet::epoch` |
+| **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `sweep = "full"`), configured probes per block, the applier's drift entries | live parity (applied keys re-read vs the composed BAL), at-pin probes, the uncovered-emitter audit, the follow's drift entries | `ProbeRunner`, `bal::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`); both write the shared `drift.jsonl` (`diorama_devnet::drift` — one home, each producer's entry schema) |
+| **reset / epoch** | cursor hash + below-base witness | chain-instance canary (pin witness) | `ResetDetector`, `diorama_devnet::epoch` |
 | **time travel** | `/admin/time` clock offset (persists across parent blocks) + `evm_increaseTime` | none on V's chain by design (V's clock is native; the harness drives `evm_increaseTime`/`anvil_mine` directly and an engine offset nobody re-aligns would be a no-op route) — the *product's* clock is the sim's served time | the plane's `time_offset` (mainnet only) |
 
 The remaining divergences are exactly the policy data
-(`mirror_devnet::spine::Policies`: clock, mining, probe cadence, prepend
+(`diorama_devnet::spine::Policies`: clock, mining, probe cadence, prepend
 rounds — `None` on V, which never prepends — and the gap guard) — declared per
 mirror, read by the shared sequences.
 
@@ -149,7 +162,7 @@ owns are skipped (copy-on-write: that state is the devnet's, not mainnet's) and
 the check is suspended while a `/admin/time` offset is set (views are then
 *meant* to differ). The applier scans its own devnet blocks (the prepend) before
 the probes run, so a write made in this very apply is already marked and cannot
-fire a spurious alarm. The alarm is `mirror_t_convergence_failures_total`.
+fire a spurious alarm. The alarm is `diorama_t_convergence_failures_total`.
 
 T's head therefore drifts ahead of the parent cursor by the number of devnet
 blocks (measured: ~70 after a session of drills); that is normal. The cursor stays keyed to the parent height, and the
@@ -230,8 +243,8 @@ derivations of the old base (plan 2.2/6.3) - restoring them would mix eras
 the engine clears the shadow registry (marks *and* values) and the product
 re-creates its positions from its own journal (plan 3.6); a reset at the
 *same* pin restores the recorded writes instead.
-Watch `mirror_t_fork_age_blocks` (reth serves reads below T's fork block, and
-its state window is 10,064 blocks) and `mirror_t_resets_total`.
+Watch `diorama_t_fork_age_blocks` (reth serves reads below T's fork block, and
+its state window is 10,064 blocks) and `diorama_t_resets_total`.
 
 ## The lean profile (measured, not guessed)
 
@@ -240,7 +253,7 @@ State (266 GB), headers (14 GB), last 50k blocks of transactions (2 GB) +
 receipts (1 GB) + changesets (1 GB). Chosen over `--full` (728 GB / 990 GB)
 because the mirror only replays *live* blocks.
 
-**Runtime pruning** (`k8s/base/mainnet-mirror/reth-config.yaml`):
+**Runtime pruning** (`k8s/base/diorama-mainnet/reth-config.yaml`):
 
 | Segment | Retained | Why |
 |---|---|---|
@@ -298,10 +311,10 @@ top-up loop's head/block reads only.
 `blockhash(number-1)`), so the applier's sampled parity can legitimately
 mismatch on such blocks; every anomaly is written to `drift.jsonl` +
 metrics, and the next parent block's absolute writes re-converge the state.
-The alarm that matters is `mirror_t_convergence_failures_total`: probes
+The alarm that matters is `diorama_t_convergence_failures_total`: probes
 compare T against reth at the applied parent block, devnet-owned targets
 skipped. With `verifier.sweep = "full"` enabled, every applied key is re-read
-from the source after the apply (`mirror_full_sweep_mismatches_total`).
+from the source after the apply (`diorama_full_sweep_mismatches_total`).
 
 **Follow `latest`** (`reth.follow: latest|safe|finalized`). This is a devnet
 requirement, not a preference: the applier mines one T block per applied parent
@@ -313,7 +326,7 @@ With `latest` the parent stream advances every ~12 s and a devnet tx confirms in
 ~12 s (measured). A small margin (`reth.follow_margin_blocks`, default 2) sits
 between the head and the applier, so a shallow reorg invalidates at most the
 blocks still behind the head. Reorgs are detected
-(`mirror_reorgs_detected_total`) and the applier continues on the new branch
+(`diorama_reorgs_detected_total`) and the applier continues on the new branch
 (absolute writes self-heal). The mirror follows *reth's* head: see "Source
 liveness" below.
 
@@ -386,7 +399,7 @@ back as a future `lastUpdateTimestamp` and every Aave supply panicked with an
 arithmetic underflow. A reset at the *same* pin (an out-of-band `anvil_reset`)
 restores the recorded writes instead - the base is identical - and orphan
 values (keys handed back earlier) are pruned, never re-owned. `epoch_pin` in
-`/state/cursor.json` records the current pin; `mirror_t_resets_total` counts epoch changes.
+`/state/cursor.json` records the current pin; `diorama_t_resets_total` counts epoch changes.
 
 **Every persisted state file is written atomically** — create the directory,
 write a sibling `.tmp`, rename over the target: the shadow registry, the
@@ -408,12 +421,12 @@ the same way: `crates/mainnet` + `crates/venue` (the mirror projects —
 siblings that never depend on each other), and the four bins — `mainnet-engine`
 + `venue-engine`, `venue-sim`, `cctp-bridge` — are the *same* thin shell over
 their owning crate's entry (`main_entry`; the venue crate's second service is
-`sim_entry`), each declaring the same two dependencies (`mirror-config` + its
+`sim_entry`), each declaring the same two dependencies (`diorama-config` + its
 crate). The simulator and the bridge are the venue stack's own services, and
-`k8s/base/mainnet-mirror` + `k8s/base/venue-mirror` (service templates, with
+`k8s/base/diorama-mainnet` + `k8s/base/diorama-venue` (service templates, with
 the shared cluster-scoped `k8s/base/shared` and one overlay per instance
 owning the namespace, the instance ConfigMap and the NodePorts). The instance
-files `config/instances/{mainnet-mirror,venue-mirror}/instance.toml` are the single
+files `config/instances/{diorama-mainnet,diorama-venue}/instance.toml` are the single
 home of each mirror's wiring, and the Makefile reads one uniform path per
 instance (`k8s/base/$(INSTANCE)/engine.yaml`, `$(OVERLAY)/namespace.yaml`) —
 no per-mirror conditionals, and no deliberate name difference anywhere: the
@@ -549,10 +562,10 @@ registry access** (measured: `Container image ... already present on machine`).
 | Component | Image | Notes |
 |---|---|---|
 | reth | `ghcr.io/paradigmxyz/reth:v2.8.0@sha256:796c8664…` | latest release; opens the v2.7 snapshot DB (a manual `reth db migrate-v2` exists, so older layouts stay supported) |
-| Lighthouse | `docker.io/sigp/lighthouse:v8.3.0@sha256:ca59d3a3…` | latest release; **v8.3.1 is the standing maintenance item** (the eMudhra CA certificate mitigation — High for stakers, Medium for a non-staking mirror; plan §16.4). Bump via `make images` + the manifest pin when the rollout window allows |
+| Lighthouse | `docker.io/sigp/lighthouse:v8.3.0@sha256:ca59d3a3…` | latest release; **v8.3.1 is the standing maintenance item** (the eMudhra CA certificate mitigation — High for stakers, Medium for a non-staking mirror). Bump via `make images` + the manifest pin when the rollout window allows |
 | Foundry (anvil) | `ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f…` | latest release |
 | init containers / wipe job | `docker.io/library/alpine:3.24.2@sha256:294b683c…` | 3.24.3 exists but the registry was unreachable from this node (DNS/IPv6: `dial tcp [2600:…]: connect: network is unreachable`). Bump with `make images` once it is; the running set is complete without it |
-| engine | `localhost/mainnet-engine:v1` | built from this repo; the tag lives in `k8s/base/mainnet-mirror/engine.yaml` and the Makefile reads it from there |
+| engine | `localhost/diorama-mainnet-engine:v1` | built from this repo; the tag lives in `k8s/base/diorama-mainnet/engine.yaml` and the Makefile reads it from there |
 
 **Single source of truth.** The Makefile derives the image list for `make images`
 from the manifests (`grep 'image:' k8s/`), so a version bump is a one-line
@@ -581,9 +594,9 @@ crates.io resolves AAAA first. Build bases are pinned the same way
 (`rust:1.99.1-slim-trixie`, `debian:13.7-slim`).
 
 The anvil pods read `fork_offset` from the mounted instance file (one anchored
-`sed` in their wrappers — the foundry image carries no `mirror-config` binary),
+`sed` in their wrappers — the foundry image carries no `diorama-config` binary),
 so the offset has one home: the instance file. The legacy YAML ConfigMap
-(`engine-config.yaml`) is retired; the wiring env lives in `mirror-config`.
+(`engine-config.yaml`) is retired; the wiring env lives in `diorama-config`.
 
 ## Engine configuration (`config/`)
 
@@ -591,10 +604,10 @@ The engine reads an **instance TOML** (`/etc/mirror/instance.toml`, mounted
 from the instance ConfigMap; `--config` overrides): deployment facts only,
 layered over `config/defaults.toml` (the values every deployment shares) with
 `${VAR}` references resolved from the pod environment (the L1 wiring in
-`mirror-config`) and `MIRROR__SECTION__KEY` env overrides for incidents.
+`diorama-config`) and `DIORAMA__SECTION__KEY` env overrides for incidents.
 Parsing is strict: an unknown key is a startup error, never a silently ignored
 setting (`deny_unknown_fields` on every config struct); a missing required key
-or an unresolvable `${VAR}` names itself. `mirror-config check` validates an
+or an unresolvable `${VAR}` names itself. `diorama-config check` validates an
 instance file (CI + boot gate).
 
 ```toml
@@ -623,7 +636,7 @@ instance file (CI + boot gate).
 [watchlist] [ { address, note } ]   # all slots of a watched account sync to T
 ```
 
-**Watch list** (seed = the plan's §3.5 closure): Chainlink feeds (WETH/WBTC/
+**Watch list** (the declared closure): Chainlink feeds (WETH/WBTC/
 STETH/USDC/USDT-USD) **and their aggregators**, assets (USDC/USDT/WETH/WBTC/
 wstETH), Uniswap Universal Router + WETH/USDC 0.05% pool, Aave V3 (Pool,
 Oracle, PoolAddressesProvider, aEthUSDC/aEthWETH/aEthUSDT, WETH Gateway).
@@ -643,26 +656,26 @@ skipped and counted): USDC/WETH totalSupply, Chainlink WETH/USD
 `getReserveNormalizedIncome(USDC)` (the time-dependence proof – it only
 matches when the block context is aligned).
 
-## The admin surface (plan §4.4, mapped)
+## The admin surface (mapped)
 
 Most of the plan's admin surface is *stock Anvil* - the engine adds only what
 Anvil cannot do. This is the mapping, so nothing is ambiguous:
 
-| Plan §4.4 group | Where it lives | Notes |
+| Control group | Where it lives | Notes |
 |---|---|---|
 | Network customization | anvil: `evm_increaseTime`, `evm_setNextBlockTimestamp`, `evm_mine`/`anvil_mine` | a devnet override is deliberate and is re-aligned by the next parent block |
 | Send | anvil: `eth_sendTransaction` (impersonate first - `anvil_impersonateAccount`, auto-impersonate alone answers "No Signer available"), `eth_createAccessList` | unsigned sends are the devnet's normal path |
-| Unlimited faucet | anvil: `anvil_setBalance`/`anvil_addBalance`; **engine: `POST /admin/deal`** (= the plan's §4.4 ERC-20 faucet) | the engine's deal discovers the balance slot with `eth_call` + a `stateDiff` override probe (sentinel value, slots 0..16), writes it silently and marks it devnet-owned. Anvil's own `anvil_dealERC20` cannot do this on a forked, no-mining chain ("no slot found", measured). The plan's synthetic `Transfer` log has no equivalent - use a real transfer |
+| Unlimited faucet | anvil: `anvil_setBalance`/`anvil_addBalance`; **engine: `POST /admin/deal`** (= the ERC-20 faucet) | the engine's deal discovers the balance slot with `eth_call` + a `stateDiff` override probe (sentinel value, slots 0..16), writes it silently and marks it devnet-owned. Anvil's own `anvil_dealERC20` cannot do this on a forked, no-mining chain ("no slot found", measured). A synthetic `Transfer` log has no equivalent - use a real transfer |
 | Storage / code | anvil: `anvil_setStorageAt`, `anvil_setCode`; engine: `POST /admin/shadow` hands keys back to mainnet sync (immediate: reth's values at the cursor are pushed to T; the engine scans T up to its head first so a just-mined devnet write cannot re-mark the key) | |
-| Snapshots | anvil: `evm_snapshot`/`evm_revert`; engine: `POST /admin/rewind` = the plan's §4.4 sync-revert control (rolls T back per parent block through the journal) | |
+| Snapshots | anvil: `evm_snapshot`/`evm_revert`; engine: `POST /admin/rewind` = the sync-revert control (rolls T back per parent block through the journal) | |
 | Time travel | engine: `POST /admin/time` (persistent clock offset, survives parent blocks) *and* anvil's `evm_increaseTime` (which the next alignment would overwrite - use the offset) | the capability a margin product needs; a static fork's `evm_increaseTime` alone is not enough on a live mirror |
-| Mirror sync control | engine: `POST /admin/pause` = the plan's §4.4 stop-sync, `POST /admin/resume` = start-sync, `GET /status` = sync status (`halted` = active, `lag`, `cursor`/`cursor_t` = latest synced block, `follow_head` = parent latest block, `time_offset_seconds` = the `/admin/time` offset) | the plan's sync-next has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
+| Mirror sync control | engine: `POST /admin/pause` = the stop-sync, `POST /admin/resume` = start-sync, `GET /status` = sync status (`halted` = active, `lag`, `cursor`/`cursor_t` = latest synced block, `follow_head` = parent latest block, `time_offset_seconds` = the `/admin/time` offset) | a sync-next has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
 
 **Scope vs the plan's fork engine (M1-M5).** This repo implements the plan's
 *minimal viable mirror* path - stock Anvil + BAL diff
 applier + verifier + journal + the admin surface above - which the plan
 explicitly allows
-to ship first ("the diff applier alone already works on stock Anvil", §4.3).
+to ship first ("the diff applier alone already works on stock Anvil").
 The custom revm engine (`MirrorDb`, Executor, chain/journal, RPC, native modes)
 is **not** built: its purpose is to drop Anvil's per-write cost and get the
 modes natively. The watch-list filter makes the stock path viable (1-2 orders
@@ -708,8 +721,8 @@ section). The Mainnet Mirror's machinery does not transfer wholesale, and
 deliberately so: HyperEVM cannot be replayed (node-level precompiles, system
 txs, dual 1 s/60 s blocks) and the public API exposes no traces, native BALs or
 proofs — so the *native* BAL rung, the prepend rule, and the clock offset are
-**dropped permanently** (plan §4.4). What replaces them is the **synthesized
-BAL rung**: the generic composer (`mirror_devnet::bal::compose`) derives each
+**dropped permanently**. What replaces them is the **synthesized
+BAL rung**: the generic composer (`diorama_devnet::bal::compose`) derives each
 window's touched set from the envelopes the API does serve (txs, receipts, and
 `eth_getSystemTxsByBlockNumber`), the declared closures turn it into concrete
 keys, the source and target are read, and the changes are framed as a BAL —
@@ -737,26 +750,26 @@ venue's own loop.
           +--------------------------------+ epoch rule, probes,
                           |                | poll follow (COW)
                    +------+-------+       |
-                   | venue-mirror | <-----+
+                   | diorama-venue | <-----+
                    +--------------+  /status /metrics /admin/*
 ```
 
 **Two engine binaries, not one profile flag.** The plan sketched one engine
 binary with `profile: ethereum | hyperliquid`; the implementation ships
-per-profile binaries - `bins/mainnet-engine` (ethereum) and `bins/venue-engine`
-(venue) - over sibling project crates, plus `bins/venue-sim` and
-`bins/cctp-bridge` (the same shell over their crates' entries) and
-`bins/ast-scope` (the structural fitness gate's parser, no internal deps). The
-reason is build isolation: `venue-engine` links only `mirror-venue` + the
+per-profile binaries - `bins/diorama-mainnet-engine` (ethereum) and `bins/diorama-venue-engine`
+(venue) - over sibling project crates, plus `bins/diorama-venue-sim` and
+`bins/diorama-cctp-bridge` (the same shell over their crates' entries) and
+`bins/diorama-ast-scope` (the structural fitness gate's parser, no internal deps). The
+reason is build isolation: `venue-engine` links only `diorama-venue` + the
 shared crates (no ethereum edge; `venue-sim` likewise). With one
-package every build compiled the whole graph (measured, plan §11.3); a
+package every build compiled the whole graph (measured); a
 profile-routing binary would link both projects into every venue build.
 
 **The structural gates.** `make fitness` runs the gates the doctrine makes
 checkable: `lint` (clippy at the committed 50-line / 5-arg ratchet),
 `design-assertions` (`is_normal` over every public type), `config-check`
 (every instance file through the layered loader) and `ast-scope`
-(`bins/ast-scope`, the compiler's own parser over the sources: function bodies
+(`bins/diorama-ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;
 test modules are out of scope). The tool's report is the analysis half and
@@ -823,7 +836,7 @@ A fresh fork cannot carry the canary (empty = reset).
 from `anvil_nodeInfo`, then decide, fail-closed on the pin read (without it the
 decision would default to "same pin" and re-apply writes across a pin change).
 The rule is one implementation for both engines
-(`mirror_devnet::epoch::reconcile`, over the devnet plane):
+(`diorama_devnet::epoch::reconcile`, over the devnet plane):
 
 | Situation | Action |
 |---|---|
@@ -856,7 +869,7 @@ retention window is shorter than a re-pin interval). An older pin is skipped
 and counted, never alarmed - a mismatch there would be a lie; and a source that
 advances mid-run turns the run into "skipped" (a race, not a divergence).
 The skip set includes the instance's **`fixture_addresses`** — the canonical
-addresses daloc's fixture deploy replaces on V via `anvil_setCode` (their
+addresses the client's fixture deploy replaces on V via `anvil_setCode` (their
 chain-999 installs: USDC, WETH, WBTC, DAI, WHYPE, wstHYPE): cheatcode writes
 are invisible to the tx scanner, so without the list a re-pin-to-`latest`
 after their deploy would run the USDC probe against a mock and alarm on a
@@ -886,7 +899,7 @@ the base truth lives in the registry) lands with the venue's journaling slice.
 | `GET /healthz` | 200 unless halted |
 | `GET /livez` | always 200 — the orchestrator's liveness signal (the k8s probes use it, not `/healthz`) |
 | `GET /status` | `head`, `cursor`, `fork_pin`, `epoch_pin`, `halted`, `shadowed_slots`, `shadowed_accounts`, `shadowed` (the list), `probes`, `source`, `capabilities` (the audited source matrix) |
-| `GET /metrics` | the `venue_*` set (below) + the shared admin gauges (`mirror_shadowed_slots`, `mirror_halted`) |
+| `GET /metrics` | the `venue_*` set (below) + the shared admin gauges (`diorama_shadowed_slots`, `diorama_halted`) |
 | `GET /events` | the fact stream (SSE), the same vocabulary (`block_applied` arrives with every composed window; `reset_detected`/`epoch_changed`/`shadow_scanned`/`probes_run` today) |
 | `POST /admin/deal`, `POST /admin/shadow` | the shared devnet surface, verbatim |
 | `POST /admin/rewind` | the engine's own-write journal (the deal faucet's silent storage writes, recorded under the scan cursor); the shared rewind undoes the last N scanned blocks newest-first |
@@ -920,7 +933,7 @@ one block per applied parent block, V's driver mines a non-empty pool
 | `venue_probe_ok_total` / `venue_probe_failures_total` / `venue_probe_skipped_total` / `venue_probe_last_failed` | the at-pin probes (skipped = a devnet-owned target, or a pin the source cannot serve) |
 
 **Profile-coherent config.** The instance file is the deployment's single home
-(`config/instances/{mainnet-mirror,venue-mirror}/instance.toml`, layered over
+(`config/instances/{diorama-mainnet,diorama-venue}/instance.toml`, layered over
 `config/defaults.toml`). `[services.engine]` is the same key for both profiles -
 what differs is the profile's shape: `[services.engine.anvil]` carries
 `target_url` for both profiles (the check requires
@@ -938,8 +951,8 @@ level (`deny_unknown_fields`).
 
 ## The venue simulator
 
-`bins/venue-sim` (image `localhost/venue-sim:v1`) is the venue's own half: it
-serves the info API daloc reads (8090) and a control API for scenarios (8091),
+`bins/diorama-venue-sim` (image `localhost/diorama-venue-sim:v1`) is the venue's own half: it
+serves the info API the client reads (8090) and a control API for scenarios (8091),
 backed by two planes and a persisted state root. It is a **superset of the
 harness's `hl_mock`**: the same info surface and control ergonomics, plus live
 market data and computed mechanics.
@@ -963,7 +976,7 @@ inside the cap. Per-coin staleness gauges
 fresher than 30 s *and* its book present; the client's own gate is ≤6 s). The
 registry and the books are part of the served contract — spot deals,
 `spotClearinghouseState`'s token mapping and `l2Book` refuse without them, and
-the poller fetches them a call after the meta (found by the local daloc run:
+the poller fetches them a call after the meta (found by a local client run:
 readiness passed between the calls and the first spot deal and l2Book read hit
 the gap). The same window (`MarketFeed::MAX_STALE_MS`, one home) gates the
 **order lane**: a fill on a live-sourced book older than it refuses by name
@@ -977,7 +990,7 @@ Scenario overrides compose over the cache: `crash` owns a coin's **mark and
 oracle**, `set_funding` the hourly rate, `set_book` the book (a scripted book is
 stamped *now* at serve time - it is the scenario's present, not a snapshot). The
 composed view is what every read serves - `metaAndAssetCtxs` publishes the same
-owned numbers the account plane prices from, so daloc can never read a different
+owned numbers the account plane prices from, so the client can never read a different
 mark than the sim used for margin. Overrides persist to `feed.json`; the live
 cache never persists (a stale file would masquerade as fresh data).
 
@@ -990,7 +1003,7 @@ its figures are computed from live marks, and it survives a restart.
 
 The internal truth is the *inputs* - the perp wallet's raw USDC balance,
 positions with entry prices, spot balances - and every served figure is computed
-from them, so the identity daloc's client gates on (1e-6) holds by
+from them, so the identity the client gates on (1e-6) holds by
 construction:
 
 ```
@@ -1016,9 +1029,9 @@ the book cannot act on escalates: the vault below ⅔ of the requirement, ADL
 on a still-negative value). An account with no positions is never "below
 maintenance": negative equity alone is a state the venue reports.
 
-**Self-advance** (the plan's §14.8 decision): the evaluation — funding
+**Self-advance**: the evaluation — funding
 accrued to now, liquidations checked against current marks, persist-if-dirty —
-runs on every account-scoped read *and* on a 1 Hz tick, so daloc's
+runs on every account-scoped read *and* on a 1 Hz tick, so the client's
 set-and-read tests see live liquidation behavior without ever calling
 `advance` (funding steps at the hour — script the crossing with `advance`);
 `advance` stays for deterministic scripting (n blocks of
@@ -1080,7 +1093,7 @@ silent mismatch. What stays ours is what no crate defines: the HL info/WS
 shapes (complete, unused fields included, each pinned by a test that parses a
 trimmed **live sample**), the sim's mechanics, the admin/control HTTP bodies,
 the config sections, and the CCTP message codec (a packed custom format).
-Newtypes mark the namespaces the compiler can police: `mirror_cctp::chains::Domain`
+Newtypes mark the namespaces the compiler can police: `diorama_cctp::chains::Domain`
 is ours (Circle publishes no Rust crate) because the message header carries the
 source and destination domains *side by side* — a swap is now a type error, and
 the raw `u32` survives only at the ABI boundary (`.0` in the `sol!` call) and in
@@ -1108,7 +1121,7 @@ reaches a contract.
 
 The served info surface: `clearinghouseState`, `spotClearinghouseState`
 (`balances`; unified accounts also carry `tokenToAvailableAfterMaintenance` —
-the figure daloc's client reconciles: `available + maintenance == the
+the figure the client reconciles: `available + maintenance == the
 collateral token's balance`; in unified mode the view folds that collateral
 into `totalRawUsd`, the docs' single USDC balance — a spot-funded account
 opens perp positions, and the identity stays exact), `userAbstraction`,
@@ -1122,7 +1135,7 @@ no resting orders serves the exact empty shape; `l2Book`'s
 a non-default dex answers the empty shape, a market read scoped to one is a 400).
 Unknown types answer `"unrouted"` (hl_mock's contract).
 
-**The order lane (plan §4.5 — the market-impact axiom).** One lane, three
+**The order lane (the market-impact axiom).** One lane, three
 doors: `POST /exchange`'s `order` action, `POST /control/order`, and the
 CoreWriter limit order (id 1) decoded from V's blocks. `/exchange` also
 models the `noop` action (the venue's no-data success envelope) — `user` is
@@ -1146,7 +1159,7 @@ positionValue` stays exact), and the initial margin follows
 leaves no trace — and refusals are by name (reduce-only that would not
 reduce, no depth within the limit, insufficient margin with the numbers, the
 $10 minimum, a mis-sided trigger). The venue's tick/lot rules are enforced with its **own vocabulary** (plan
-§16.3's measured strings): a size carries at most the asset's `szDecimals`
+the measured strings): a size carries at most the asset's `szDecimals`
 decimals, a price at most 5 significant figures and at most `6 − szDecimals`
 decimals (an integer price is always valid), and a perp order's notional is
 at least $10 — the refusals are `Price must be divisible by tick size.`,
@@ -1227,9 +1240,9 @@ does not lose boundary activity mined meanwhile.
 
 ## The feed bridge
 
-`crates/mainnet/src/feed/` (the bridge; its wire in `chainlink.rs`, its rules in `policy.rs`, its routes in `http.rs`) - daloc's harness periodically re-publishes
+`crates/mainnet/src/feed/` (the bridge; its wire in `chainlink.rs`, its rules in `policy.rs`, its routes in `http.rs`) - the client's harness periodically re-publishes
 its own mock aggregator answers; in mirror mode **the bridge is the single price
-writer** for those mocks (their refresher is off, plan §17.2). The value's
+writer** for those mocks (their refresher is off). The value's
 source is the *parent chain's* aggregator for the same feed, read at the follow
 head via reth; the write target is the devnet's mock aggregator
 (`updateAnswer`).
@@ -1249,7 +1262,7 @@ Decimals are read from both sides at boot; a mismatch (or an unreachable feed)
 is a boot fault naming the feed - a silently mis-scaled price would poison every
 scenario. Stamping is chain-native by construction: `updateAnswer` records the
 block timestamp of the T block that mines the bridge's tx, so feeds are stamped
-in the devnet chain's own domain, never in wall time (daloc's
+in the devnet chain's own domain, never in wall time (the client's
 `assert_chain_time_invariant` holds).
 
 | Route | Purpose |

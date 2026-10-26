@@ -1,8 +1,8 @@
 SHELL := /bin/bash
 
 # INSTANCE selects the mirror: the namespace, the kustomize overlay, the
-# instance TOML and the engine image all follow from it (plan §19.8).
-INSTANCE       ?= mainnet-mirror
+# instance TOML and the engine image all follow from it.
+INSTANCE       ?= diorama-mainnet
 NS             := $(INSTANCE)
 OVERLAY        := k8s/overlays/$(INSTANCE)
 BOOTSTRAP      := k8s/bootstrap
@@ -10,7 +10,7 @@ KUBECTL        := kubectl -n $(NS)
 
 # The engine image/tag of the selected instance, scraped from the manifest
 # that deploys it - the deployed manifest stays the single source of truth.
-# mainnet-mirror runs the ethereum engine, venue-mirror the venue engine: one
+# diorama-mainnet runs the ethereum engine, diorama-venue the venue engine: one
 # deployment shape per profile, one image per binary.
 ENGINE_MANIFEST := k8s/base/$(INSTANCE)/engine.yaml
 ENGINE_REF      := $(shell grep -ohE 'image: localhost/[^ ]+' $(ENGINE_MANIFEST) | head -1 | awk '{print $$2}')
@@ -19,7 +19,7 @@ ENGINE_TAG      := $(lastword $(subst :, ,$(ENGINE_REF)))
 ENGINE_BIN      := $(notdir $(ENGINE_IMAGE))
 
 # The anvil components of the selected instance (pin-show).
-ANVILS := $(if $(filter mainnet-mirror,$(INSTANCE)),anvil-t,anvil-v)
+ANVILS := $(if $(filter diorama-mainnet,$(INSTANCE)),anvil-t,anvil-v)
 
 # The selected instance's Namespace manifest: the overlay owns it (instance
 # identity, not a service template) - one rule for both mirrors.
@@ -34,7 +34,7 @@ ns: ## Create namespace + StorageClass (idempotent)
 	kubectl apply -f k8s/base/shared/storageclass.yaml
 
 mainnet-secrets: ## Create the reth<->lighthouse JWT secret if missing (mainnet namespace)
-	@NS=mainnet-mirror; \
+	@NS=diorama-mainnet; \
 	if kubectl -n $$NS get secret reth-jwt >/dev/null 2>&1; then \
 	  echo "secret reth-jwt already exists in $$NS (left untouched)"; \
 	else \
@@ -43,7 +43,7 @@ mainnet-secrets: ## Create the reth<->lighthouse JWT secret if missing (mainnet 
 	fi
 
 venue-secrets: ## Create the CCTP relay-wallet secret (CCTP_RELAY_KEY=0x…; venue namespace)
-	@NS=venue-mirror; \
+	@NS=diorama-venue; \
 	if kubectl -n $$NS get secret cctp-relay-key >/dev/null 2>&1; then \
 	  echo "secret cctp-relay-key already exists in $$NS (left untouched)"; \
 	else \
@@ -64,11 +64,11 @@ delete: ## Delete the namespace (data survives: StorageClass is reclaimPolicy Re
 ##@ Bootstrap
 
 mainnet-snapshot: ## Download the reth snapshot into the reth PVC (scales reth down first)
-	kubectl -n mainnet-mirror scale deploy/reth --replicas=0 2>/dev/null || true
-	kubectl -n mainnet-mirror delete job reth-snapshot --ignore-not-found
+	kubectl -n diorama-mainnet scale deploy/reth --replicas=0 2>/dev/null || true
+	kubectl -n diorama-mainnet delete job reth-snapshot --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/snapshot-job.yaml
 	@echo "waiting for snapshot to finish (up to 2h; resumable)..."
-	kubectl -n mainnet-mirror wait --for=condition=complete job/reth-snapshot --timeout=7200s || \
+	kubectl -n diorama-mainnet wait --for=condition=complete job/reth-snapshot --timeout=7200s || \
 		{ echo "still running - check: make mainnet-snapshot-status"; exit 1; }
 
 mainnet-snapshot-status: ## Show snapshot job status + progress
@@ -76,7 +76,7 @@ mainnet-snapshot-status: ## Show snapshot job status + progress
 	@$(KUBECTL) logs job/reth-snapshot --tail=3 2>/dev/null || true
 
 mainnet-bootstrap: ns mainnet-secrets images ## First-time setup (mainnet): namespace, secrets, images, snapshot, full stack
-	kubectl apply -f k8s/base/mainnet-mirror/pvcs.yaml
+	kubectl apply -f k8s/base/diorama-mainnet/pvcs.yaml
 	$(MAKE) mainnet-snapshot
 	$(MAKE) apply
 	@echo "bootstrap complete. watch: make status"
@@ -123,18 +123,18 @@ images: ## Build + import the local images, then pull + import the pinned third-
 	  fi; \
 	  printf "== %s (build)\n" "$$ref"; \
 	  podman build -q -f Dockerfile --build-arg BIN=$$bin -t "$$ref" . || exit 1; \
-	  rm -f /tmp/mirror-img.tar; \
-	  podman save -o /tmp/mirror-img.tar "$$ref" || exit 1; \
-	  sudo k3s ctr images import /tmp/mirror-img.tar >/dev/null || exit 1; \
+	  rm -f /tmp/diorama-img.tar; \
+	  podman save -o /tmp/diorama-img.tar "$$ref" || exit 1; \
+	  sudo k3s ctr images import /tmp/diorama-img.tar >/dev/null || exit 1; \
 	done
 	@for img in $(IMAGES); do \
 		printf "== %s\n" "$$img"; \
 		podman pull -q "$$img" || exit 1; \
-		rm -f /tmp/mirror-img.tar; \
-		podman save -o /tmp/mirror-img.tar "$$img" || exit 1; \
-		sudo k3s ctr images import /tmp/mirror-img.tar >/dev/null || exit 1; \
+		rm -f /tmp/diorama-img.tar; \
+		podman save -o /tmp/diorama-img.tar "$$img" || exit 1; \
+		sudo k3s ctr images import /tmp/diorama-img.tar >/dev/null || exit 1; \
 	done
-	@rm -f /tmp/mirror-img.tar
+	@rm -f /tmp/diorama-img.tar
 	@echo "local: $(LOCAL_IMAGES)"
 	@echo "imported: $(IMAGES)"
 	@$(MAKE) --no-print-directory check-pins
@@ -153,21 +153,21 @@ deploy-engine: import ## Rebuild + redeploy the selected instance's engine
 	$(KUBECTL) rollout restart deploy/engine
 	$(KUBECTL) rollout status deploy/engine --timeout=120s
 
-venue-build: ## Build the venue binaries on the host (cargo: venue-engine + venue-sim)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p venue-engine -p venue-sim
+venue-build: ## Build the venue binaries on the host (cargo: diorama-venue-engine + diorama-venue-sim)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p diorama-venue-engine -p diorama-venue-sim
 
-mainnet-build: ## Build the mainnet engine on the host (cargo: mainnet-engine)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p mainnet-engine
+mainnet-build: ## Build the mainnet engine on the host (cargo: diorama-mainnet-engine)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p diorama-mainnet-engine
 
-cctp-build: ## Build the CCTP bridge on the host (cargo: cctp-bridge)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p cctp-bridge
+cctp-build: ## Build the CCTP bridge on the host (cargo: diorama-cctp-bridge)
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p diorama-cctp-bridge
 
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
 config-check: ## Validate every instance file through the layered loader
 	@for f in config/instances/*/instance.toml; do \
-	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check "$$f" || exit 1; \
+	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p diorama-config -- check "$$f" || exit 1; \
 	done
 
 fitness: lint design-assertions config-check ast-scope ## Run the structural gates: lint, design assertions, config check, AST scope
@@ -179,7 +179,7 @@ design-assertions: ## Public types keep Send + Sync (rule 11)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace design_assertions
 
 ast-scope: ## AST scope analysis: fn/struct size and nesting depth (syn, the compiler's parser)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p ast-scope -- crates bins
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p diorama-ast-scope -- crates bins
 
 ##@ Ops
 
@@ -199,60 +199,60 @@ logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-
 # follow INSTANCE): a `mainnet-*` target is about the mainnet mirror, a
 # `venue-*` target about the venue's.
 mainnet-smoke: ## End-to-end smoke test (mainnet)
-	NS=mainnet-mirror ./scripts/mainnet-smoke.sh
+	NS=diorama-mainnet ./scripts/mainnet-smoke.sh
 
 venue-smoke: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
-	NS=venue-mirror ./scripts/venue-smoke.sh
+	NS=diorama-venue ./scripts/venue-smoke.sh
 
 venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
-	kubectl apply -f k8s/base/venue-mirror/pvcs.yaml
-	$(MAKE) INSTANCE=venue-mirror apply
-	@echo "venue bootstrap complete. watch: make INSTANCE=venue-mirror status"
+	kubectl apply -f k8s/base/diorama-venue/pvcs.yaml
+	$(MAKE) INSTANCE=diorama-venue apply
+	@echo "venue bootstrap complete. watch: make INSTANCE=diorama-venue status"
 
 venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/epoch)
-	kubectl -n venue-mirror exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
+	kubectl -n diorama-venue exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
 
 venue-scenario: ## The venue epoch scenario (same-pin restore, new-pin epoch, driver liveness)
-	NS=venue-mirror ./scripts/venue-scenario.sh
+	NS=diorama-venue ./scripts/venue-scenario.sh
 
 venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation, bridge round-trip, block production)
-	NS=venue-mirror ./scripts/venue-proof.sh
+	NS=diorama-venue ./scripts/venue-proof.sh
 
-venue-order-proof: ## The venue order-lane proof (fills vs the real book, the §4.5 impact invariants, hand-back)
-	NS=venue-mirror ./scripts/venue-order-proof.sh
+venue-order-proof: ## The venue order-lane proof (fills vs the real book, the market-impact invariants, hand-back)
+	NS=diorama-venue ./scripts/venue-order-proof.sh
 
 cctp-smoke: ## The CCTP bridge smoke (health, store coherence, metric set)
-	NS=venue-mirror ./scripts/cctp-smoke.sh
+	NS=diorama-venue ./scripts/cctp-smoke.sh
 
 cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTINATION/AMOUNT env)
-	NS=venue-mirror ./scripts/cctp-roundtrip.sh
+	NS=diorama-venue ./scripts/cctp-roundtrip.sh
 
 cctp-margin-cycle: ## The crosschain unified-margin cycle (T mint -> CCTP -> venue collateral -> trade -> CCTP back)
-	NS=venue-mirror ./scripts/cctp-margin-cycle.sh
+	NS=diorama-venue ./scripts/cctp-margin-cycle.sh
 
 portfolio-sim: ## The portfolio simulation: a delta-neutral basis book across both mirrors (carry + shock + capital efficiency)
-	NS=venue-mirror ./scripts/portfolio-sim.sh
+	NS=diorama-venue ./scripts/portfolio-sim.sh
 
 basis-capture: ## The live T-vs-V basis series, traded: the capture + the live carry, the identity checked
-	NS=venue-mirror ./scripts/basis-capture.sh
+	NS=diorama-venue ./scripts/basis-capture.sh
 
 portfolio-reaction: ## A held portfolio vs another account's impact: both directions, the thresholds, the hedge
-	NS=venue-mirror ./scripts/portfolio-reaction.sh
+	NS=diorama-venue ./scripts/portfolio-reaction.sh
 
 crosschain-margin: ## The crosschain margin book: bridged collateral, funding costs, served unrealized PnL, the loop closed
-	NS=venue-mirror ./scripts/crosschain-margin.sh
+	NS=diorama-venue ./scripts/crosschain-margin.sh
 
 crosschain-recovery: ## The deeper crosschain reads: the funding sign flip + the collateral's way back after a forced close
-	NS=venue-mirror ./scripts/crosschain-recovery.sh
+	NS=diorama-venue ./scripts/crosschain-recovery.sh
 
 capital-frontier: ## The capital-efficiency frontier: the liquidation distance measured at each leverage
-	NS=venue-mirror ./scripts/capital-frontier.sh
+	NS=diorama-venue ./scripts/capital-frontier.sh
 
 hedged-book: ## The hedged book: same collateral and gross exposure as the unhedged, flat through a 60% crash
-	NS=venue-mirror ./scripts/hedged-book.sh
+	NS=diorama-venue ./scripts/hedged-book.sh
 
 impact-scenarios: ## The impact ladder: a whale moves the book and the mark; the portfolio's reaction measured
-	NS=venue-mirror ./scripts/impact-scenarios.sh
+	NS=diorama-venue ./scripts/impact-scenarios.sh
 
 shadow-audit: ## The shadowing audit: deliberate anvil states vs the COW shadow, both mirrors
 	./scripts/shadow-audit.sh
@@ -281,29 +281,29 @@ attest: ## The behavioral attestation: the pass over both mirrors, then the asse
 
 
 mainnet-scenario: ## Scenario test: self-containment, live parity (T vs reth), devnet workflow
-	NS=mainnet-mirror ./scripts/mainnet-scenario.sh
+	NS=diorama-mainnet ./scripts/mainnet-scenario.sh
 
 mainnet-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
-	NS=mainnet-mirror ./scripts/mainnet-proof.sh
+	NS=diorama-mainnet ./scripts/mainnet-proof.sh
 
 mainnet-product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T
-	NS=mainnet-mirror ./scripts/mainnet-product-sim.sh
+	NS=diorama-mainnet ./scripts/mainnet-product-sim.sh
 
 mainnet-closure-check: ## Audit the watchlist closure: every storage dep of every market-data view
-	NS=mainnet-mirror ./scripts/mainnet-closure-check.sh
+	NS=diorama-mainnet ./scripts/mainnet-closure-check.sh
 
 
 mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
-	kubectl -n mainnet-mirror delete job mainnet-selftest --ignore-not-found
+	kubectl -n diorama-mainnet delete job mainnet-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/mainnet-selftest-job.yaml
-	kubectl -n mainnet-mirror wait --for=condition=complete job/mainnet-selftest --timeout=900s || true
+	kubectl -n diorama-mainnet wait --for=condition=complete job/mainnet-selftest --timeout=900s || true
 	$(KUBECTL) logs job/mainnet-selftest
 
 venue-selftest: ## Run the venue selftest Job (public RPC + scratch anvil; no cluster stack needed)
-	kubectl -n venue-mirror delete job venue-selftest --ignore-not-found
+	kubectl -n diorama-venue delete job venue-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/venue-selftest-job.yaml
-	kubectl -n venue-mirror wait --for=condition=complete job/venue-selftest --timeout=900s || true
-	kubectl -n venue-mirror logs job/venue-selftest
+	kubectl -n diorama-venue wait --for=condition=complete job/venue-selftest --timeout=900s || true
+	kubectl -n diorama-venue logs job/venue-selftest
 
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
 	@for c in reth lighthouse anvil-t engine; do \
@@ -338,16 +338,16 @@ pin-show: ## Show the resolved fork pins of the instance's anvils
 	done
 
 mainnet-repin: ## Re-pin drill: wipe the pin, restart the anvil (engine auto-rebases; a new epoch starts)
-	kubectl -n mainnet-mirror scale deploy/anvil-t --replicas=0
+	kubectl -n diorama-mainnet scale deploy/anvil-t --replicas=0
 	# Wait until the pod is really gone before wiping: the wipe must not
 	# race a container that is still shutting down (its init container
 	# re-resolves the pin on the next start).
-	kubectl -n mainnet-mirror wait --for=delete pod -l app.kubernetes.io/name=anvil-t --timeout=180s || true
-	kubectl -n mainnet-mirror delete job repin-wipe --ignore-not-found
+	kubectl -n diorama-mainnet wait --for=delete pod -l app.kubernetes.io/name=anvil-t --timeout=180s || true
+	kubectl -n diorama-mainnet delete job repin-wipe --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/repin-job.yaml
-	kubectl -n mainnet-mirror wait --for=condition=complete job/repin-wipe --timeout=300s
-	kubectl -n mainnet-mirror delete job repin-wipe --ignore-not-found
-	kubectl -n mainnet-mirror scale deploy/anvil-t --replicas=1
+	kubectl -n diorama-mainnet wait --for=condition=complete job/repin-wipe --timeout=300s
+	kubectl -n diorama-mainnet delete job repin-wipe --ignore-not-found
+	kubectl -n diorama-mainnet scale deploy/anvil-t --replicas=1
 	kubectl -n $(NS) rollout status deploy/anvil-t --timeout=600s
 	@echo "re-pinned. engine will rebase automatically on its next poll."
 

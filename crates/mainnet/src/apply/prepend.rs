@@ -4,8 +4,8 @@
 //! shared scanner.
 use crate::ctx::Ctx;
 use crate::error::Result;
-use mirror_anvil::Rpc;
-use mirror_devnet::engine::Engine as _;
+use diorama_anvil::Rpc;
+use diorama_devnet::engine::Engine as _;
 use std::sync::atomic::Ordering;
 
 /// Step 0 of one apply: the prepend rule's mine(s), then mark the devnet's
@@ -37,7 +37,7 @@ async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()>
         // before the pool check — a pool that drains first leaves the value
         // for the applied block, which sets its own.
         let last = anvil_t
-            .block_by_number(anvil_t.block_number().await?, mirror_anvil::Txs::Hashes)
+            .block_by_number(anvil_t.block_number().await?, diorama_anvil::Txs::Hashes)
             .await?;
         if let Err(e) = anvil_t
             .anvil_set_next_block_timestamp(last.header.timestamp + 1)
@@ -49,8 +49,8 @@ async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()>
             tracing::debug!(block = n, error = %e, "prepend timestamp not set");
         }
         let pending = match anvil_t.mine_pending().await {
-            Ok(mirror_anvil::Mined::Block { pending }) => pending,
-            Ok(mirror_anvil::Mined::Empty) => return Ok(()),
+            Ok(diorama_anvil::Mined::Block { pending }) => pending,
+            Ok(diorama_anvil::Mined::Empty) => return Ok(()),
             Err(e) => {
                 // The prepend is a gas-estimate safeguard; a txpool fault skips
                 // it (named here, bounded: the next apply tries again).
@@ -89,8 +89,8 @@ async fn mark_own_writes(ctx: &Ctx) -> Result<()> {
 pub(super) async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
     let now = ctx.anvil_t.block_number().await?;
     let pin = ctx.anvil_t.fork_block().await?.unwrap_or(0);
-    let from = mirror_devnet::scan::scan_anchor(from, pin);
-    let walk = mirror_devnet::scan::scan_range(&ctx.plane, &ctx.anvil_t, from, now).await?;
+    let from = diorama_devnet::scan::scan_anchor(from, pin);
+    let walk = diorama_devnet::scan::scan_range(&ctx.plane, &ctx.anvil_t, from, now).await?;
     ctx.record_scan(&walk);
     Ok(())
 }

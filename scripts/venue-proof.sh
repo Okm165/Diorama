@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The venue capability proof (plan §7.8, the counterpart of
+# The venue capability proof (the counterpart of
 # `make mainnet-proof`): the four things the venue stack must do —
 #   A. mint on V       - `/admin/deal` lands an ERC20 balance (silent COW write)
 #   B. sim deal        - the simulator funds an account and the served identity
@@ -19,13 +19,13 @@
 #                        time (the COW overlay's split, measured)
 #
 # Run from the repo root:
-#   make venue-proof                    # against the deployed venue-mirror
+#   make venue-proof                    # against the deployed diorama-venue
 #   ENGINE_URL=http://127.0.0.1:18681 V_URL=http://127.0.0.1:18610 \
 #     SIM_INFO=http://127.0.0.1:18790 SIM_CTRL=http://127.0.0.1:18791 \
 #     ./scripts/venue-proof.sh          # direct mode: a scratch stack
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 USDC="${USDC:-0xb88339CB7199b77E23DB6E890353E22632Ba630f}"    # HyperEVM native USDC
 # The bridge leg uses PURR (spot index 1): Circle's USDC blacklists the system
 # addresses (measured live: `isBlacklisted(0x2000…0000) == true`) and its
@@ -108,7 +108,7 @@ ident=$(sim_account "$SIM_ACCT" | identity_ok)
 
 echo "-- C. crash ⇒ liquidation (the venue-side drawdown, not an oracle crash)"
 seed='{"marginSummary":{"accountValue":"0","totalNtlPos":"0","totalRawUsd":"-90000","totalMarginUsed":"1000"},"assetPositions":[{"type":"oneWay","position":{"coin":"BTC","entryPx":"100000","leverage":{"type":"cross","value":10},"marginUsed":"1000","maxLeverage":40,"positionValue":"0","returnOnEquity":"0","szi":"1","unrealizedPnl":"0","cumFunding":{"allTime":"0","sinceOpen":"0","sinceChange":"0"}}}]}'
-# The §14.8 evaluation (accrual + liquidation check against current marks)
+# The read-time evaluation (accrual + liquidation check against current marks)
 # runs on every account-scoped read as well as on the 1 Hz tick and on
 # `advance` — so the seeding call itself closes an underwater account. The
 # assertion is the metric, not which caller fired the evaluation.

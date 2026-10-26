@@ -1,10 +1,9 @@
-# Integration surface — what the mirrors expose to the daloc devnet
+# Integration surface — what the mirrors expose to an integration client
 
-Our tool is the two mirrors (the mainnet mirror and the HL markets mirror);
-it stays as it is. This page is the single index of every surface they expose
-— endpoints, shapes, named refusals, the env contract — plus the lanes that
-are deliberately deferred, so the daloc devnet's redesign can plan against
-facts. Authoritative details: [ARCHITECTURE](ARCHITECTURE.md) (mechanisms),
+Diorama is the two mirrors (the Mainnet Mirror and the Venue Mirror);
+this page is the single index of every surface they expose — endpoints,
+shapes, named refusals, the env contract — plus the lanes that are
+deliberately deferred, so an integration client can plan against facts. Authoritative details: [ARCHITECTURE](ARCHITECTURE.md) (mechanisms),
 [OPERATIONS](OPERATIONS.md) (drills, alarms), [TESTING](TESTING.md) (measured
 acceptance).
 
@@ -49,7 +48,7 @@ flat; `positionValue` is unsigned with the sign in `szi`.
 `l2Book`'s `nSigFigs`/`mantissa` are applied (the docs' aggregation) and
 validated (a value outside `{2,3,4,5}` / `{1,2,5}` is a named 400).
 
-**Control API (§7.3):** `deal` (`{address, class: spot|perp, coin?, amount}`),
+**Control API:** `deal` (`{address, class: spot|perp, coin?, amount}`),
 `order` (`{address, coin, is_buy, size, limit_px?, tif?, reduce_only?}` — the
 same lane `/exchange` drives; the response carries `totalSz`/`avgPx`/`oid`
 and the consumed levels), `advance`, `crash` (`{coin, pct}`; no `pct` hands
@@ -61,7 +60,7 @@ shape), `reset`, `epoch_new`, `stall` (`{seconds}`; the market plane holds —
 **`POST /exchange`** models the `order` action end to end: a compact order
 (`{"type":"order","orders":[{"a","b","p","s","r","t":{"limit":{"tif"}}}]}`)
 fills against the **real book** — the live depth the feed caches — with
-per-level consumption (plan §4.5's impact lane: the order moves the *book*,
+per-level consumption (the impact lane: the order moves the *book*,
 never the *mark*), answered in HL's own ok envelope
 (`{"status":"ok","response":{"type":"order","data":{"statuses":
 [{"filled":{"totalSz","avgPx","oid"}}]}}}`; a per-order refusal rides as
@@ -95,15 +94,15 @@ vanished-burn/keeper caveats.
 - The config loader is the **only** env reader: `${VAR}` references in the
   instance TOML expand at load time, and a missing one is a boot error naming
   the variable. Services never read env values themselves.
-- `mirror-config export-env --section daloc <instance.toml>` renders the
-  daloc-facing set. Measured: the mainnet instance renders `CHAIN_RPC_URL`,
-  `CHAIN_WS_URL`, `MIRROR_ADMIN_URL`; the venue instance renders
+- `diorama-config export-env --section client <instance.toml>` renders the
+  client-facing set. Measured: the mainnet instance renders `CHAIN_RPC_URL`,
+  `CHAIN_WS_URL`, `DIORAMA_ADMIN_URL`; the venue instance renders
   `CHAIN_1_CHAIN_RPC_URL`/`_WS_URL`, `HL_INFO_API_URL`, `VENUE_CONTROL_URL`,
   `VENUE_ACCOUNT_FEEDS`, `VENUE_RATE_FEEDS`, `VENUE_ADMIN_URL`,
   `IRIS_API_URL`.
 - `--section anvil` renders the anvil pods' wiring (the init containers read
-  it from the mounted instance file); `mirror-config check` validates an
-  instance; `mirror-config get` prints one resolved value.
+  it from the mounted instance file); `diorama-config check` validates an
+  instance; `diorama-config get` prints one resolved value.
 
 ## 5. The refusal discipline (so a probe learns *why*, not just that)
 
@@ -116,16 +115,16 @@ vanished-burn/keeper caveats.
 | engine `/admin/shadow` | 400 naming the missing keys (`clear` needs `slots`, `account_fields`, or `all`) |
 | bridge control | 400 naming the state (`no watched message with nonce …`) |
 | CCTP relay | a record never drops: it parks with `park_reason`, counted by `/health` |
-| `mirror-config` | the missing `${VAR}` by name; a malformed key by rule |
+| `diorama-config` | the missing `${VAR}` by name; a malformed key by rule |
 
-## 6. Deferred lanes (plan refs — nothing is silently absent)
+## 6. Deferred lanes (nothing is silently absent)
 
-| Lane | Plan | What it would add |
+| Lane | What it would add |
 |---|---|---|
-| Remaining venue mechanics | §5, §7.1, §18.4 | the remaining order-error strings (the measured vocabulary — tick size, minimum value, insufficient margin, reduce-only, no-match, no-liquidity, the mis-sided trigger — is served verbatim), multi-dex, spot ledger, fees (a research lane per §16.3 — daloc's paths don't read venue fees). Landed: the `order` action end to end (IOC fills against the real book with per-level consumption, the resting lane — `Gtc`/`Alo`, cancels, triggers, the dead-man's switch — the §4.5 impact invariants I1–I6, three doors), nonces/API wallets (the 100-highest set with the floor, agent wallets), the margin modes (cross and isolated legs, strict isolated), the OI cap and margin-tier refusals |
-| Portfolio margin | §5 | the mode's cross-asset portfolio (the eligible set HYPE/BTC/USDC/USDT valued and margined together; the portfolio-wide `tokenToAvailableAfterMaintenance`): `setAbstraction`'s value 3 and the control patch refuse it by name and count the refusal — `unifiedAccount` is the modeled single balance (its live identity holds to the digit) |
-| TP/SL groupings | §5 | `normalTpsl`/`positionTpsl` are refused by name: the parent/child lifecycle (children placed iff the parent fully fills, or is partially filled then margin-canceled) and the position-linked resizing are not modeled; plain trigger orders (grouping `"na"`) cover the product's need |
-| User-stream reads and pushes | §5 | the venue's per-user subscriptions (`orderUpdates`, `userEvents`, `userFills`) and the history reads (`userFills`, `historicalOrders`, `userFunding`): the product reads fills through `orderStatus` and `openOrders` today (the flows the daloc simulation proves), and adding the push channel needs the docs' measured frame shapes — the sim's mutations would publish to a subscriber set instead of being polled |
-| HIP-3 venue + replay lanes | §7.1 | the HIP-3 star venue on testnet; the real-data replay lane |
-| Unified facade | §7.1 | one deal/crash/reset surface across both mirrors (each mirror's own admin works today) |
-| `venue-closure` | §7.8 | the V-side closure audit (no BALs on HyperEVM; `make engine-symmetry` covers the shared verbs) |
+| Remaining venue mechanics | the remaining order-error strings (the measured vocabulary — tick size, minimum value, insufficient margin, reduce-only, no-match, no-liquidity, the mis-sided trigger — is served verbatim), multi-dex, spot ledger, fees (a research lane — the client's paths don't read venue fees). Landed: the `order` action end to end (IOC fills against the real book with per-level consumption, the resting lane — `Gtc`/`Alo`, cancels, triggers, the dead-man's switch — the market-impact invariants I1–I6, three doors), nonces/API wallets (the 100-highest set with the floor, agent wallets), the margin modes (cross and isolated legs, strict isolated), the OI cap and margin-tier refusals |
+| Portfolio margin | the mode's cross-asset portfolio (the eligible set HYPE/BTC/USDC/USDT valued and margined together; the portfolio-wide `tokenToAvailableAfterMaintenance`): `setAbstraction`'s value 3 and the control patch refuse it by name and count the refusal — `unifiedAccount` is the modeled single balance (its live identity holds to the digit) |
+| TP/SL groupings | `normalTpsl`/`positionTpsl` are refused by name: the parent/child lifecycle (children placed iff the parent fully fills, or is partially filled then margin-canceled) and the position-linked resizing are not modeled; plain trigger orders (grouping `"na"`) cover the product's need |
+| User-stream reads and pushes | the venue's per-user subscriptions (`orderUpdates`, `userEvents`, `userFills`) and the history reads (`userFills`, `historicalOrders`, `userFunding`): the product reads fills through `orderStatus` and `openOrders` today (the flows the client simulation proves), and adding the push channel needs the docs' measured frame shapes — the sim's mutations would publish to a subscriber set instead of being polled |
+| HIP-3 venue + replay lanes | the HIP-3 star venue on testnet; the real-data replay lane |
+| Unified facade | one deal/crash/reset surface across both mirrors (each mirror's own admin works today) |
+| `venue-closure` | the V-side closure audit (no BALs on HyperEVM; `make engine-symmetry` covers the shared verbs) |

@@ -1,0 +1,170 @@
+# The Venue Mirror instance: deployment facts only.
+#
+# Values that every deployment of the venue service shares live in
+# config/defaults.toml (layered below this file); `${VAR}` references are
+# resolved from the pod's environment at load time (deploy-time wiring).
+
+[instance]
+name = "diorama-venue"
+namespace = "diorama-venue"
+profile = "venue"
+
+[chains.venue]
+# The chain id (999) and the canonical HyperEVM addresses are code facts;
+# only the deployment's fork source is data. V (the fork-mode anvil) pins at
+# this source's `latest`, then **follows** it: each pass composes the window
+# since the last composed source block (the generic composer over the window's
+# envelopes + the declared closures, `[services.engine.closures]` below) and
+# lands the changed keys on V under the COW filter — the devnet's own writes
+# (the fixture mocks, the bridge's relays, the deal) are shadowed and skipped.
+# The API URLs are the simulator's market plane (REST snapshots + WS pushes).
+kind = "hyperliquid"
+source_url = "${HL_RPC_URL}"
+api_url = "https://api.hyperliquid.xyz"
+ws_url = "wss://api.hyperliquid.xyz/ws"
+
+[services.engine]
+state_dir = "${STATE_DIR}"
+
+# Canonical addresses daloc's fixture deploy replaces on V via `anvil_setCode`
+# (their `deploy-contracts.sh` installs MockERC20Fixed over the Ethereum-family
+# addresses on every chain — USDC here is chain 999's 0xb883… — and adds
+# WHYPE/wstHYPE on 999). Whole-account owned: the at-pin probes skip them
+# (counted) instead of false-alarming once the mocks are installed. Empty this
+# list for a clean-chain run (no fixtures), and the USDC probe checks again.
+fixture_addresses = [
+  "0xb88339CB7199b77E23DB6E890353E22632Ba630f", # USDC (999)
+  "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", # WETH (their mock is installed on every chain)
+  "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", # WBTC
+  "0x6B175474E89094C44Da98b954EedeAC495271d0F", # DAI
+  "0x5555555555555555555555555555555555555555", # WHYPE (999's wrapped gas token)
+  "0x94e8396e0869c9F2200760aF0621aFd240E1CF38", # wstHYPE
+]
+
+[services.engine.anvil]
+target_url = "${ANVIL_V_URL}"
+
+# The follow's cadence and window width against the public source: the
+# endpoint's budget is request-bound, it caps every JSON-RPC batch at 20
+# items (measured live: `Exceeded max limit of 20`; the client chunks
+# transparently), and it throttles bursts. A 100-block window keeps a pass to
+# ~15 small sequential bodies while amortizing the pass overhead over 100
+# blocks (~5x the source's rate catching up); the steady state composes 1-3
+# block windows anyway. A 1 s pass sat at the endpoint's edge; 2 s stays
+# inside it.
+[services.engine.loops]
+poll_interval_ms = 2000
+max_gap_blocks = 100
+
+# At-pin probes: V vs the fork source at the pin, devnet-owned targets
+# skipped and counted. USDC's totalSupply is the one canonical HyperEVM
+# fact worth a standing check (Circle's native USDC, the CCTP burn token;
+# `evmContract` in spotMeta is a venue link, never this contract).
+[services.engine.verifier]
+probes = [
+  { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
+]
+
+# The journal's before-value ring (the rewind window) lives beside the
+# engine's state; the cadence and write chunk are the shared `loops` defaults.
+[services.engine.journal]
+dir = "${STATE_DIR}/journal"
+
+[services.engine.http]
+port = 8080
+
+# Balances the Transfer logs imply: the composer derives each participant's
+# mapping key from the log's topics. Both layouts verified live 2026-10-25
+# with anvil's prestate tracer on a fork plus the keccak derivation (USDC is
+# FiatTokenV2_2: `balanceAndBlacklistStates` at slot 9; WHYPE is WETH9-shaped:
+# slot 3). Both topic positions are declared — a transfer changes both sides.
+[[services.engine.closures.mappings]]
+contract = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+base_slot = "0x9"
+topic_index = 1
+[[services.engine.closures.mappings]]
+contract = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+base_slot = "0x9"
+topic_index = 2
+[[services.engine.closures.mappings]]
+contract = "0x5555555555555555555555555555555555555555"
+base_slot = "0x3"
+topic_index = 1
+[[services.engine.closures.mappings]]
+contract = "0x5555555555555555555555555555555555555555"
+base_slot = "0x3"
+topic_index = 2
+
+# The simulator (venue-sim): live market plane + COW account plane. Its own
+# state root (accounts + overrides); the info API is what daloc reads, the
+# control API drives scenarios. engine_admin_url lets /control/epoch_new
+# re-pin V through the engine's /admin/epoch.
+[services.venue_sim]
+state_dir = "${SIM_STATE_DIR}"
+markets = ["BTC", "ETH", "HYPE", "SOL"]
+engine_admin_url = "${ENGINE_ADMIN_URL}"
+anvil_url = "${ANVIL_V_URL}"
+
+[services.venue_sim.info]
+addr = "0.0.0.0"
+port = 8090
+
+[services.venue_sim.control]
+addr = "0.0.0.0"
+port = 8091
+
+# The CCTP bridge (the third element): real USDC between T (domain 0)
+# and V (domain 19) over the CCTP V2 contracts already present in both forks.
+# Optional (the venue deployment may run without it); its own state root and
+# two listeners. `relay_key` is the funded relay wallet's hex key (a ${VAR}
+# reference — never a path), `attester_seed` derives the devnet attester
+# deterministically (the same seed always installs the same key).
+[services.cctp_bridge]
+state_dir = "${CCTP_STATE_DIR}"
+t_url = "${T_RPC_URL}"
+v_url = "${ANVIL_V_URL}"
+relay_key = "${CCTP_RELAY_KEY}"
+attester_seed = "diorama-cctp-devnet-attester"
+# The watcher scans from genesis unless pinned. The CCTP contracts predate
+# the fork pins, so pinning the pin block keeps boot scans short; 0 is
+# correct but costs thousands of chunked eth_getLogs calls on a deep fork.
+# t_start_block = 0
+# v_start_block = 0
+
+[services.cctp_bridge.iris]
+addr = "0.0.0.0"
+port = 8095
+
+[services.cctp_bridge.control]
+addr = "0.0.0.0"
+port = 8096
+
+# The follow's declared scope: the venue stack's own dependencies on the real
+# HyperEVM — every address verified live (code present) 2026-10-25. Watching
+# an account keeps its whole account state fresh; a *closure* additionally
+# follows the storage its logs imply (the declared closures above). An emitter
+# no closure covers is counted and named (the audit), never silent.
+[[watchlist]]
+address = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+note = "USDC (999): the CCTP burn/mint token and the at-pin probe's contract"
+[[watchlist]]
+address = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+note = "CCTP V2 TokenMessenger (999): the bridge's burn/mint door"
+[[watchlist]]
+address = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+note = "CCTP V2 MessageTransmitter (999)"
+[[watchlist]]
+address = "0xfd78EE919681417d192449715b2594ab58f5D002"
+note = "CCTP V2 TokenMinter (999)"
+[[watchlist]]
+address = "0xec546b6B005471ECf012e5aF77FBeC07e0FD8f78"
+note = "CCTP V2 Message (999)"
+[[watchlist]]
+address = "0x3333333333333333333333333333333333333333"
+note = "CoreWriter: the Core's door into the EVM (the bridge's other side)"
+[[watchlist]]
+address = "0x5555555555555555555555555555555555555555"
+note = "WHYPE: the wrapped gas token"
+[[watchlist]]
+address = "0x94e8396e0869c9F2200760aF0621aFd240E1CF38"
+note = "wstHYPE: the staked gas token"

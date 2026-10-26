@@ -5,21 +5,21 @@
 //! One Anvil (T) and one source (reth). The spine's seams are wired here,
 //! chosen at boot: the source ([`RethSource`] — native BALs with the trace
 //! rung), the reset detector (cursor hash), and the scope (whole accounts).
-//! The composer itself is the spine's generic one (`mirror_devnet::bal`).
+//! The composer itself is the spine's generic one (`diorama_devnet::bal`).
 use crate::source_sync::beacon::BeaconClient;
 use crate::error::{Error, Result};
 use crate::metrics::MainnetMetrics;
 use futures_util::future::BoxFuture;
-use mirror_anvil::Rpc;
-use mirror_config::{ChainL1, EngineSection, Instance};
-use mirror_devnet::drift::Drift;
-use mirror_devnet::engine::{Engine, EngineCore};
-use mirror_devnet::metrics::Registry as _;
-use mirror_devnet::plane::Plane;
-use mirror_devnet::probes::ProbeOutcome;
-use mirror_devnet::scan::ScanWalk;
-use mirror_devnet::source::Source;
-use mirror_devnet::spine::Mirror;
+use diorama_anvil::Rpc;
+use diorama_config::{ChainL1, EngineSection, Instance};
+use diorama_devnet::drift::Drift;
+use diorama_devnet::engine::{Engine, EngineCore};
+use diorama_devnet::metrics::Registry as _;
+use diorama_devnet::plane::Plane;
+use diorama_devnet::probes::ProbeOutcome;
+use diorama_devnet::scan::ScanWalk;
+use diorama_devnet::source::Source;
+use diorama_devnet::spine::Mirror;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,7 +64,7 @@ impl Ctx {
         let plane = Plane::from_engine(&engine)?;
         let drift = Drift::from_engine(&engine)?;
         // The timeout is the config's: reth queries race the sync.
-        let (reth, anvil_t) = mirror_devnet::engine::build_clients(
+        let (reth, anvil_t) = diorama_devnet::engine::build_clients(
             reth_url,
             anvil_t_url,
             Duration::from_secs(engine.reth.request_timeout_secs),
@@ -99,7 +99,7 @@ impl Ctx {
     /// reth follow head (safe/latest/finalized per config).
     pub async fn follow_head(&self) -> Result<Option<u64>> {
         let tag = self.l1.follow.tag();
-        let block = self.reth.block_by_tag(tag, mirror_anvil::Txs::Hashes).await?;
+        let block = self.reth.block_by_tag(tag, diorama_anvil::Txs::Hashes).await?;
         Ok(block.map(|b| b.header.number))
     }
 
@@ -110,7 +110,7 @@ impl Ctx {
     }
 }
 
-/// The shell's view of this context (`mirror_devnet::engine::Engine`): the
+/// The shell's view of this context (`diorama_devnet::engine::Engine`): the
 /// facts that differ, in one place — the chain (T), the source URL, the
 /// journal semantics (the applier's parent before-values), the probes, the
 /// counters, the status document, and the metric exposition. The admin

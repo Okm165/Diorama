@@ -1,0 +1,89 @@
+# engine - the Venue Mirror engine: the fork-driver loop over V, the at-pin
+# probes, the epoch rule (same pin -> restore, new pin -> clear), the Core<->EVM
+# bridge scan, and the admin surface (/admin/deal, /admin/shadow, /admin/epoch,
+# /admin/pause, /admin/resume).
+#
+# Same shape as the mainnet engine deployment: the image carries the venue
+# binary, the mounted instance file selects the profile, and the
+# driver state (cursor, shadow registry, journal) lives on the engine-state PVC
+# so restarts resume where they left.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: engine
+  labels:
+    app.kubernetes.io/name: engine
+    app.kubernetes.io/part-of: diorama-venue
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: engine
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: engine
+        app.kubernetes.io/part-of: diorama-venue
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: engine
+          image: localhost/diorama-venue-engine:v1
+          imagePullPolicy: IfNotPresent
+          args: ["run", "--config", "/etc/mirror/instance.toml"]
+          # The wiring the instance TOML references as ${...} (HL_RPC_URL,
+          # ANVIL_V_URL, STATE_DIR) — the same `envFrom` mechanism as the
+          # mainnet engine: the ConfigMap carries every key, the pod reads the
+          # ones its instance names, and a new wiring var needs no edit here.
+          envFrom:
+            - configMapRef: { name: diorama-config }
+          ports:
+            - { name: http, containerPort: 8080 }
+          volumeMounts:
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+            - { name: state, mountPath: /state }
+          # `/livez`, not `/healthz` (see the mainnet engine's manifest): the
+          # paused state must not take the engine out of the Service or
+          # restart the pod.
+          # The boot-wait may outlast a dependency's own restart (the
+          # engines wait for their anvil/reth, the bridge for two chains): a
+          # startupProbe suspends the liveness/readiness probes through it, so
+          # a coordinated rollout never kills a booting container (measured:
+          # exit 137 at ~2 minutes when anvil-t restarted under a rolling
+          # engine).
+          startupProbe:
+            httpGet: { path: /livez, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /livez, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /livez, port: 8080 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            # No CPU limit (the follow's passes are latency-sensitive);
+            # measured steady state ~25 MiB, the limit leaves a wide margin
+            # for a wide catch-up window's composition state.
+            requests: { cpu: "50m", memory: 192Mi }
+            limits: { memory: 512Mi }
+      volumes:
+        - name: instance
+          configMap: { name: venue-instance }
+        - name: state
+          persistentVolumeClaim: { claimName: engine-state }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: engine
+  labels: { app.kubernetes.io/name: engine, app.kubernetes.io/part-of: diorama-venue }
+spec:
+  selector: { app.kubernetes.io/name: engine }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }

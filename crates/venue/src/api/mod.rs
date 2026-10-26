@@ -114,13 +114,13 @@ pub(crate) fn sim_gate(state: &ApiState) -> Result<(), SimPoisoned> {
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.
 pub fn info_router(state: Arc<ApiState>) -> Router {
     Router::new()
-        .route(mirror_devnet::handlers::HEALTHZ, axum::routing::get(info::healthz))
+        .route(diorama_devnet::handlers::HEALTHZ, axum::routing::get(info::healthz))
         .route("/readyz", axum::routing::get(info::readyz))
         .route("/info", axum::routing::post(info::info))
-        // The matching lane's named refusal (plan §18.4): their client posts
+        // The matching lane's named refusal: their client posts
         // actions here; the envelope is HL's own err shape, never a 404.
         .route("/exchange", axum::routing::post(exchange::exchange))
-        // The venue's websocket lane (plan §7.5: "info + WS" on this port).
+        // The venue's websocket lane ("info + WS" on this port).
         .route("/ws", axum::routing::get(ws::ws))
         .with_state(state)
 }
@@ -130,7 +130,7 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
     use axum::routing::{get, post};
     Router::new()
         .route("/health", get(control::health))
-        .route(mirror_devnet::handlers::METRICS, get(control::metrics))
+        .route(diorama_devnet::handlers::METRICS, get(control::metrics))
         .route("/control/deal", post(control::deal))
         .route("/control/order", post(control::order))
         .route("/control/advance", post(control::advance))
@@ -152,7 +152,7 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
 /// Serve one router on one listener (the bin's two ports): the spine's
 /// shared boundary — one bind fault, one listening line, one serve fault.
 pub async fn serve(addr: String, router: Router) -> Result<()> {
-    mirror_devnet::engine::serve_router("venue sim api", addr, router).await
+    diorama_devnet::engine::serve_router("venue sim api", addr, router).await
 }
 
 // The HTTP mapping of the error taxonomy lives in the engine's `http` module

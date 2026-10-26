@@ -24,7 +24,7 @@
 #   CAST=/path/to/cast make basis-capture   # when cast is not on PATH
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}"
 COIN="${COIN:-ETH}"
 WETH_AMOUNT="${WETH_AMOUNT:-4}"        # the long leg, in WETH

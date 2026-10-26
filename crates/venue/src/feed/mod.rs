@@ -1,5 +1,5 @@
 //! The market plane: a live cache of the venue's market data with scenario
-//! overrides on top (plan §5).
+//! overrides on top.
 //!
 //! Two layers, one owner each:
 //!
@@ -8,7 +8,7 @@
 //!   with per-coin update stamps (the staleness metrics);
 //! - [`Overrides`] holds the scenario's owned values (`crash` prices,
 //!   `set_funding`, `set_book`) *and* the order lane's level consumptions
-//!   ([`Consumption`] — the plan §4.5 COW analogue: a devnet order owns the
+//!   ([`Consumption`] — the COW analogue: a devnet order owns the
 //!   sizes it took, per level, and the served book shows the remainder while
 //!   the live feed keeps refreshing every other level), persisted to
 //!   `feed.json` so a sim restart mid-scenario does not lose either.
@@ -26,7 +26,7 @@ use crate::error::Result;
 use crate::wire::{AllMids, AssetCtx, L2Book, Meta};
 use budget::Budget;
 use metrics::FeedMetrics;
-use mirror_devnet::store;
+use diorama_devnet::store;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -51,7 +51,7 @@ pub(crate) struct Overrides {
     pub consumptions: Vec<Consumption>,
 }
 
-/// One consumed book level (plan §4.5: per-level ownership + consumption
+/// One consumed book level (per-level ownership + consumption
 /// deltas). Level-scoped: a live update that no longer carries the price
 /// prunes it (I6 — pruned, never re-owned); the *mark is never moved* (I3).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

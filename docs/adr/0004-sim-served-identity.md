@@ -4,7 +4,7 @@
 
 ## Context
 
-daloc's venue client gates on `accountValue == totalRawUsd + Σ
+the venue client gates on `accountValue == totalRawUsd + Σ
 signed(positionValue)` at 1e-6, with `positionValue` unsigned (the side comes
 from `szi`), the mark derived as `positionValue/|szi|`, and money carried as
 decimal text. A seeded state that carries its own `accountValue` can silently
@@ -30,7 +30,7 @@ szi·entryPx`), so the operator's recall amount round-trips byte-for-byte.
 - The identity holds by construction (verified exact on the live sample by a
   wire test); money is `rust_decimal` end to end.
 - Margin, funding, and the liquidation check price from the same composed marks
-  daloc reads - a crashed mark is the number the sim priced with.
+  the client reads - a crashed mark is the number the sim priced with.
 - A seeded account cannot serve a summary that disagrees with its positions.
 - A wire change that alters the derivation breaks a unit test, not a live test
   run.

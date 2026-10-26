@@ -45,7 +45,7 @@ pub enum Error {
     NoForkPin { chain: &'static str },
 
     #[error(transparent)]
-    Rpc(#[from] mirror_anvil::Error),
+    Rpc(#[from] diorama_anvil::Error),
 
     /// A panic happened while a shared registry was locked: the value may be
     /// mid-update, so it is refused loudly — never recovered silently, never
@@ -98,7 +98,7 @@ impl Error {
         )
     }
 
-    /// See [`mirror_anvil::Error::is_history_unavailable`]: the shadow scan
+    /// See [`diorama_anvil::Error::is_history_unavailable`]: the shadow scan
     /// branches on it to name and skip blocks beyond anvil's history window
     /// instead of retrying them forever.
     pub fn is_history_unavailable(&self) -> bool {

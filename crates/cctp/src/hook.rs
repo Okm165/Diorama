@@ -1,7 +1,7 @@
 //! The CCTP V2 hook wrapper: Circle's official sample
 //! (`src/examples/CCTPHookWrapper.sol`, Apache-2.0), deployed by this bridge
 //! and owned by its relay key. It is the protocol-native way to carry a
-//! credit with a transfer (§15.4): the burn message carries
+//! credit with a transfer: the burn message carries
 //! `hookData = target(20) ‖ calldata` and pins `destinationCaller` to the
 //! wrapper, whose owner-gated `relay` calls `receiveMessage` (the mint) and
 //! then the hook. **Non-atomic by design**: a failed hook cannot lose the
@@ -96,7 +96,7 @@ pub(crate) fn relay_calldata(message: &[u8], attestation: &[u8]) -> Bytes {
 /// The caller waits for the receipt and records `contractAddress` (the bin's
 /// boot step, [`verify`] then confirms the wiring).
 pub async fn deploy(
-    rpc: &mirror_anvil::Rpc,
+    rpc: &diorama_anvil::Rpc,
     sender: &TxSender,
     message_transmitter: Address,
 ) -> Result<B256> {
@@ -108,7 +108,7 @@ pub async fn deploy(
 /// exactly what the boot intended (a mismatch is a named fault, never a
 /// silent substitution).
 pub async fn verify(
-    rpc: &mirror_anvil::Rpc,
+    rpc: &diorama_anvil::Rpc,
     wrapper: Address,
     expected_owner: Address,
     expected_transmitter: Address,

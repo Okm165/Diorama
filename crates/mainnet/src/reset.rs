@@ -9,10 +9,10 @@
 //! declared in `crates/mainnet/src/profile.rs` and this module holds its
 //! mechanics.
 use futures_util::future::BoxFuture;
-use mirror_anvil::Rpc;
-use mirror_devnet::shared::Shared;
-use mirror_devnet::spine::{ResetDetector, ResetSignal};
-use mirror_devnet::state::StateFile;
+use diorama_anvil::Rpc;
+use diorama_devnet::shared::Shared;
+use diorama_devnet::spine::{ResetDetector, ResetSignal};
+use diorama_devnet::state::StateFile;
 
 /// The cursor-hash detector: the cursor's block must carry its recorded hash,
 /// and a cursor below the chain's fork base is stale by position.
@@ -36,7 +36,7 @@ pub fn below_fork_base(cursor_block: u64, base: Option<u64>) -> bool {
 }
 
 impl ResetDetector for CursorHash {
-    fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, mirror_devnet::Result<ResetSignal>> {
+    fn detect<'a>(&'a self, target: &'a Rpc) -> BoxFuture<'a, diorama_devnet::Result<ResetSignal>> {
         Box::pin(async move {
             // No cursor: nothing to invalidate (the fresh-chain path).
             let Some(cursor) = self.state.cursor()? else {
@@ -49,7 +49,7 @@ impl ResetDetector for CursorHash {
                     cursor: cursor.block,
                 });
             }
-            let found = mirror_devnet::scan::block_hash(target, cursor.block).await?;
+            let found = diorama_devnet::scan::block_hash(target, cursor.block).await?;
             Ok(if found == Some(cursor.hash) {
                 ResetSignal::Steady
             } else {

@@ -6,7 +6,7 @@
 
 The public venue API allows 1200 weight/min/IP, with measured per-endpoint
 weights (`metaAndAssetCtxs`/`meta`/other info = 20; `l2Book`/`allMids`/
-`clearinghouseState` = 2), and daloc's per-snapshot read costs N+3 requests
+`clearinghouseState` = 2), and the client's per-snapshot read costs N+3 requests
 (model, perp state, perpDexs, one per dex, spot). Naive polling 429s; a 429
 during a test run is an outage.
 

@@ -128,7 +128,7 @@ pub(crate) fn validate_order_value(
     Ok(())
 }
 
-/// The venue's tick/lot rules (plan §5, docs §16.3): a size carries at most
+/// The venue's tick/lot rules (the venue's docs): a size carries at most
 /// the asset's `szDecimals` decimals; a price at most 5 significant figures
 /// and at most `6 − szDecimals` decimals (an integer price is always valid).
 pub(crate) fn validate_tick_lot(meta: Option<&crate::wire::Meta>, req: &Order) -> Result<()> {

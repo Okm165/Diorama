@@ -1,5 +1,5 @@
 //! The bridge's metrics: what crossed the Core↔EVM boundary.
-use mirror_devnet::metrics::push_counter;
+use diorama_devnet::metrics::push_counter;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
@@ -14,7 +14,7 @@ pub(crate) struct BridgeMetrics {
     malformed: AtomicU64,
     /// Blocks whose callTracer failed (internal calls unseen that block).
     trace_faults: AtomicU64,
-    /// V head minus the processed cursor: the plan §7.8's `venue_bridge_pending`
+    /// V head minus the processed cursor: the `venue_bridge_pending`
     /// intent — a growing lag is a stuck bridge, a zero lag is caught up.
     lag_blocks: AtomicU64,
     /// Decoded actions by id (index = id; ids are ≤ 24 bits — the array is
@@ -73,9 +73,9 @@ impl BridgeMetrics {
         c(&mut out, "venue_bridge_refusals_total", "bridge effects refused", self.refusals.load(Ordering::Relaxed));
         c(&mut out, "venue_bridge_malformed_total", "undecodable CoreWriter action streams", self.malformed.load(Ordering::Relaxed));
         c(&mut out, "venue_bridge_trace_faults_total", "blocks whose callTracer failed", self.trace_faults.load(Ordering::Relaxed));
-        mirror_devnet::metrics::push_metric(
+        diorama_devnet::metrics::push_metric(
             &mut out,
-            mirror_devnet::metrics::GAUGE,
+            diorama_devnet::metrics::GAUGE,
             "venue_bridge_lag_blocks",
             "V head minus the bridge's processed cursor (growing = stuck)",
             self.lag_blocks.load(Ordering::Relaxed),

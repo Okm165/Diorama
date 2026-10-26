@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for the Venue Mirror stack. Run from the repo root:
-#   make venue-smoke        (or NS=venue-mirror ./scripts/venue-smoke.sh)
+#   make venue-smoke        (or NS=diorama-venue ./scripts/venue-smoke.sh)
 #
 # Executes curl+jq from inside the venue engine pod so every check talks to the
 # cluster-internal service names (the same way the engine does). The mainnet
@@ -10,7 +10,7 @@
 # parity.
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-common.sh"
 
@@ -46,7 +46,7 @@ if head_hex=$(rpc http://anvil-v:8545 eth_blockNumber | jq -r .result) && [ -n "
       bad "anvil-v head $v_head is below its pin $v_pin"
     fi
   else
-    # A no-params anvil_reset drops the fork entirely (measured, plan §7.6):
+    # A no-params anvil_reset drops the fork entirely (measured):
     # the pin must always be explicit.
     bad "anvil-v has no fork pin (anvil_reset must carry the explicit forking config)"
   fi

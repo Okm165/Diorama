@@ -1,0 +1,186 @@
+# anvil-t - the devnet chain (T).
+#
+# The devnet chain: forks the same source and resolves its pin with the same
+# mechanics, but this is where your dapp
+# writes. The engine keeps watch-list state fresh here by applying EIP-7928
+# block access lists (never by replaying mainnet txs), and tracks your writes
+# so parent diffs never overwrite them (copy-on-write, per slot; account
+# fields as one unit).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anvil-t
+  labels:
+    app.kubernetes.io/name: anvil-t
+    app.kubernetes.io/part-of: diorama-mainnet
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: anvil-t
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: anvil-t
+        app.kubernetes.io/part-of: diorama-mainnet
+    spec:
+      # Give anvil time to shut down cleanly on SIGTERM.
+      terminationGracePeriodSeconds: 90
+      initContainers:
+        # Resolve a *fresh* fork pin on every start. That bounds the
+        # post-restart re-fork to FORK_OFFSET (~128 blocks, minutes) instead
+        # of the whole pin age - and a fresh pin is a *new epoch*: the base
+        # moved, so the engine clears the shadow registry (marks *and* values)
+        # and the devnet starts clean. Re-create positions from your journal;
+        # a value-restore onto a moved base mixes eras (measured: a future
+        # lastUpdateTimestamp made every Aave supply panic).
+        - name: resolve-pin
+          image: docker.io/library/alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Always wait for reth first, even when the pin is persisted:
+              # anvil forks at start-up, so restarting while reth is restarting
+              # would crash-loop (measured: "failed to fetch network chain ID").
+              i=0; HEAD=""
+              while [ -z "$HEAD" ] && [ "$i" -lt 240 ]; do
+                HEAD=$(wget -qO- --header='Content-Type: application/json' \
+                  --post-data='{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
+                  "$RETH_URL" 2>/dev/null \
+                  | sed -n 's/.*"result":"\(0x[0-9a-fA-F]*\)".*/\1/p')
+                [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
+              done
+              [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
+              # The offset's single home is the instance TOML:
+              # this is a read of the mounted file, not a second definition.
+              FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
+              [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
+              echo "resolving pin: $RETH_URL head - $FORK_OFFSET"
+              PIN=$((HEAD - FORK_OFFSET))
+              echo "$PIN" > /state/pin
+              # The container runs unprivileged and re-resolves the pin on every
+              # *container* start (k8s restarts only the container on OOM), so it
+              # must be able to rewrite this file: without the chmod that write
+              # failed with "Permission denied" and the persisted pin silently
+              # aged with the pod (measured).
+              chmod 0777 /state 2>/dev/null || true
+              chmod 0666 /state/pin 2>/dev/null || true
+              echo "resolved pin=$PIN (reth head=$HEAD)"
+          env:
+            - name: RETH_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
+          volumeMounts:
+            - { name: state, mountPath: /state }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+      containers:
+        - name: anvil
+          image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
+          # The image entrypoint is `/bin/sh -c` and swallows bare args; use a
+          # shell wrapper and `exec` so SIGTERM reaches anvil (clean shutdown).
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # Re-resolve the pin on *every container start*, not just every
+              # pod start: k8s restarts only the container on OOM (T's normal
+              # cycle), so the init container's pin would age with the pod and
+              # the post-restart replay would grow to the whole pin age (~1.5 h
+              # measured). The engine restores the devnet's writes from the
+              # shadow registry after a re-fork, so a fresh pin loses nothing.
+              # The offset's single home is the instance TOML:
+              # this is a read of the mounted file, not a second definition.
+              FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
+              [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
+              PIN=$(cast block-number --rpc-url "$RETH_URL" 2>/dev/null || echo 0)
+              if [ "${PIN:-0}" -gt 0 ]; then
+                PIN=$((PIN - FORK_OFFSET))
+                echo "$PIN" > /state/pin
+              else
+                PIN=$(cat /state/pin 2>/dev/null || echo 0)
+                echo "reth unreachable; keeping persisted pin $PIN" >&2
+              fi
+              echo "anvil-t: fork-url=$RETH_URL pin=$PIN"
+              # The engine owns block production on both chains: without
+              # --no-mining, every raw tx / cheatcode write would automine its
+              # own block and the engine's mine(1) would produce empty blocks
+              # (measured: the 2026-10 automine-reset incident). Comments must
+              # stay *above* the exec: a comment inside the backslash-continued
+              # command swallows every flag after it (measured with a stub).
+              #
+              # client bringup parity (adopted at R4): their
+              # entrypoint sets --code-size-limit 99999 deliberately (the
+              # margin-agent deploys exceed EIP-170 — discover it now, not at
+              # runtime) and --transaction-block-keeper 1000000 (their failing-
+              # run forensics read the run's own chain; keeper 2 makes a run
+              # unreadable seconds after it ends). --hardfork stays bpo2 here
+              # (V takes cancun — the real HyperEVM's fork).
+              exec anvil \
+                --host 0.0.0.0 --port 8545 \
+                --fork-url "$RETH_URL" \
+                --fork-block-number "$PIN" \
+                --chain-id 1 \
+                --hardfork bpo2 \
+                --gas-limit 60000000 \
+                --enable-tx-gas-limit \
+                --code-size-limit 99999 \
+                --disable-pool-balance-checks \
+                --order fifo \
+                --no-mining \
+                --auto-impersonate \
+                --prune-history 32 \
+                --transaction-block-keeper 1000000 \
+                --no-rate-limit \
+                --no-request-size-limit \
+                --no-fork-node-info \
+          env:
+            - name: RETH_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
+            # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
+            # flushed on SIGTERM, so restarts keep the read-through warm.
+            - { name: HOME, value: /state }
+          ports:
+            - { name: http, containerPort: 8545 }
+          volumeMounts:
+            - { name: state, mountPath: /state }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+          # A restarted anvil re-forks before it can serve: gate
+          # readiness/liveness behind a startup probe so k8s does not flap them
+          # during the catch-up (measured: "Readiness probe failed: connection
+          # refused" events on every restart).
+          startupProbe:
+            tcpSocket: { port: 8545 }
+            periodSeconds: 5
+            failureThreshold: 60 # up to 5 min to fork + catch up
+          readinessProbe:
+            tcpSocket: { port: 8545 }
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: 8545 }
+            periodSeconds: 30
+          resources:
+            # T never executes mainnet txs (BAL diffs only), so its state stays
+            # small (measured ~2.5 GB with --prune-history 32; the snapshots
+            # are the dominant term). The request covers the measured peak;
+            # the limit keeps a ~2.4x margin for fork materialization spikes.
+            requests: { cpu: "100m", memory: 768Mi }
+            limits: { memory: 4Gi }
+      volumes:
+        - name: state
+          persistentVolumeClaim: { claimName: anvil-t-state }
+        - name: instance
+          configMap: { name: mainnet-instance }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: anvil-t
+  labels: { app.kubernetes.io/name: anvil-t, app.kubernetes.io/part-of: diorama-mainnet }
+spec:
+  selector: { app.kubernetes.io/name: anvil-t }
+  ports:
+    # anvil serves WebSocket upgrades on the same port as HTTP (the plan's A18:
+    # "delivery is event-driven" - eth_subscribe over ws://...:8545).
+    - { name: http, port: 8545, targetPort: 8545 }

@@ -1,0 +1,89 @@
+# venue-sim - the simulator: the live market plane (REST snapshots + WS pushes
+# from the venue's public API) and the COW account plane, served as the
+# daloc-facing info API (8090, the `hl_mock`-compatible surface) beside the
+# control API (8091: deal/advance/crash/set_account/reset/epoch_new).
+#
+# State (sim.json + feed.json) lives on the venue-sim-state PVC: a restart
+# resumes the scenario, and the simulator's epoch is its own (/control/reset
+# blanks the account plane; /control/epoch_new also re-pins V through the
+# engine's /admin/epoch).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: venue-sim
+  labels:
+    app.kubernetes.io/name: venue-sim
+    app.kubernetes.io/part-of: diorama-venue
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: venue-sim
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: venue-sim
+        app.kubernetes.io/part-of: diorama-venue
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: venue-sim
+          image: localhost/diorama-venue-sim:v1
+          imagePullPolicy: IfNotPresent
+          args: ["run", "--config", "/etc/mirror/instance.toml"]
+          # The same `envFrom` mechanism as the engines: the ConfigMap carries
+          # every key (SIM_STATE_DIR, ANVIL_V_URL, ENGINE_ADMIN_URL, and the
+          # ${HL_RPC_URL} the instance's source_url names), the pod reads the
+          # ones its instance resolves, and a new wiring var needs no edit here.
+          envFrom:
+            - configMapRef: { name: diorama-config }
+          ports:
+            - { name: info, containerPort: 8090 }
+            - { name: control, containerPort: 8091 }
+          volumeMounts:
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+            - { name: state, mountPath: /state }
+          # /readyz is the market-plane freshness gate (meta present + every
+          # configured market fresher than the staleness window); it answers
+          # 503 while warming up, which is exactly the readiness signal.
+          # The boot-wait may outlast a dependency's own restart: a
+          # startupProbe (the server's own liveness path) suspends the
+          # liveness/readiness probes through it, so a coordinated rollout
+          # never kills a booting container (measured: exit 137 at ~2 minutes
+          # when a dependency restarted under a rolling engine). Readiness
+          # stays the market-plane freshness gate.
+          startupProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8090 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            # No CPU limit; measured steady state ~9 MiB.
+            requests: { cpu: "25m", memory: 96Mi }
+            limits: { memory: 384Mi }
+      volumes:
+        - name: instance
+          configMap: { name: venue-instance }
+        - name: state
+          persistentVolumeClaim: { claimName: venue-sim-state }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: venue-sim
+  labels: { app.kubernetes.io/name: venue-sim, app.kubernetes.io/part-of: diorama-venue }
+spec:
+  selector: { app.kubernetes.io/name: venue-sim }
+  ports:
+    - { name: info, port: 8090, targetPort: 8090 }
+    - { name: control, port: 8091, targetPort: 8091 }

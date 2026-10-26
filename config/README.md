@@ -1,4 +1,4 @@
-# config/ — the layered configuration (plan §19)
+# config/ — the layered configuration
 
 One grammar, three layers:
 
@@ -6,11 +6,11 @@ One grammar, three layers:
 |---|---|---|
 | defaults | `defaults.toml` | global for every instance and service; the single home of shared numbers (cadences, ring sizes, chunk limits). Embedded into the binaries at build time. |
 | instance | `instances/<name>.toml` | one deployment: identity, chains, watchlist, service sections, ports. Mounted for every pod of the instance (one file per instance, many readers). |
-| env | `MIRROR__*` | operator debug overrides, highest precedence, logged loudly at boot. |
+| env | `DIORAMA__*` | operator debug overrides, highest precedence, logged loudly at boot. |
 
 `${VAR}` references in string values resolve from the pod environment at load
 time (deploy-time wiring). A service refuses to boot on an unresolved
-reference, naming the variable; `mirror-config check` (which needs no
+reference, naming the variable; `diorama-config check` (which needs no
 deployment environment) reports them as deploy-time wiring instead.
 
 **One file per instance, many readers — each pod provides only its own
@@ -38,24 +38,24 @@ are errors at every level.
 | `[watchlist]` | the mainnet engine | the closure scope; one watchlist, two readers (`check` + `closure-check`) |
 
 The engines' sections are named per mirror — `engine` is the mainnet
-profile's, `venue` is the venue profile's (the plan's per-service grouping,
-§19.3; the venue's engine section doubles as the mirror's own section for
+profile's, `venue` is the venue profile's (the per-service grouping;
+the venue's engine section doubles as the mirror's own section for
 chain-level knobs). Each service reads only its own section; one file per
 instance, many readers.
 
 ## The CLI
 
 ```sh
-mirror-config check config/instances/mainnet-mirror/instance.toml          # validate + wiring report
-mirror-config get   config/instances/mainnet-mirror/instance.toml chains.l1.fork_offset
-mirror-config export-env config/instances/mainnet-mirror/instance.toml --section anvil   # FORK_OFFSET=128
+diorama-config check config/instances/diorama-mainnet/instance.toml          # validate + wiring report
+diorama-config get   config/instances/diorama-mainnet/instance.toml chains.l1.fork_offset
+diorama-config export-env config/instances/diorama-mainnet/instance.toml --section anvil   # FORK_OFFSET=128
 ```
 
 `make config-check` checks **every** instance unit under `config/instances/` and is part
 of `make fitness`. The anvil-t init container reads `FORK_OFFSET` straight from
 the mounted TOML (a `sed` read — the alpine init container carries no Rust
 binary; the instance file is the offset's single home), and
-`mirror-config export-env --section anvil` renders the same fact for anything
+`diorama-config export-env --section anvil` renders the same fact for anything
 with the CLI available. The venue's anvil forks at the source's latest block,
 so it reads no offset.
 
@@ -64,11 +64,11 @@ so it reads no offset.
 `/etc/mirror/instance.toml` — the path every pod mounts via
 `configMapGenerator`. The mainnet engine's CLI adds the `selftest` and
 `rewind` subcommands; the plain services accept exactly `run`. The plan's
-`MIRROR_INSTANCE`/`MIRROR_CONFIG` envs are therefore unnecessary: one file per
+`DIORAMA_INSTANCE`/`DIORAMA_CONFIG` envs are therefore unnecessary: one file per
 instance, many readers, and the mount already selects it; the argument exists
 for local runs (the scratch stacks pass their own file).
 
-## Where a fact lives (§19.2)
+## Where a fact lives
 
 - protocol facts and measured conventions → code constants (`crates/anvil`,
   the project crates)
@@ -76,10 +76,10 @@ for local runs (the scratch stacks pass their own file).
 - operational tunables → the two TOML layers above
 - secrets → k8s Secrets (paths only, never values)
 
-## `MIRROR__` override syntax
+## `DIORAMA__` override syntax
 
 ```sh
-MIRROR__SERVICES__ENGINE__LOOPS__POLL_INTERVAL_MS=2000
+DIORAMA__SERVICES__ENGINE__LOOPS__POLL_INTERVAL_MS=2000
 ```
 
 Path segments are the TOML path, uppercased, joined by `__` (a single `_`

@@ -1,5 +1,5 @@
-//! `mirror-config`: check | get | export-env (plan §19.5; `--section daloc`
-//! renders the daloc-facing endpoint block, §19.7).
+//! `diorama-config`: check | get | export-env (`--section client`
+//! renders the client-facing endpoint block).
 //!
 //! The single owner of config semantics: the layered loader lives in this
 //! package's library; this binary is the scripting surface for it.
@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "mirror-config", version, about = "The mirrors' configuration CLI")]
+#[command(name = "diorama-config", version, about = "The mirrors' configuration CLI")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -54,10 +54,10 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run() -> Result<(), mirror_config::ConfigError> {
+fn run() -> Result<(), diorama_config::ConfigError> {
     match Cli::parse().cmd {
         Cmd::Check { instance } => {
-            let (inst, unresolved) = mirror_config::Instance::inspect(&instance)?;
+            let (inst, unresolved) = diorama_config::Instance::inspect(&instance)?;
             println!("{}: ok", inst.instance.name);
             if !unresolved.is_empty() {
                 println!("deploy-time wiring (resolved from the pod environment):");
@@ -67,11 +67,11 @@ fn run() -> Result<(), mirror_config::ConfigError> {
             }
         }
         Cmd::Get { instance, path } => {
-            let (inst, _) = mirror_config::Instance::inspect(&instance)?;
+            let (inst, _) = diorama_config::Instance::inspect(&instance)?;
             println!("{}", render(&inst.get(&path)?));
         }
         Cmd::ExportEnv { instance, section } => {
-            let (inst, _) = mirror_config::Instance::inspect(&instance)?;
+            let (inst, _) = diorama_config::Instance::inspect(&instance)?;
             for line in inst.export_env(&section)? {
                 println!("{line}");
             }

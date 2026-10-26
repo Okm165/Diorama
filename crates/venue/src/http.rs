@@ -1,7 +1,7 @@
 //! The venue engine's HTTP surface: health, status, metrics, and the shared
 //! admin routes (deal / shadow / rewind / pause / resume / epoch / probes).
 //!
-//! The admin *semantics* live in `mirror-devnet`'s [`AdminSurface`] (shared
+//! The admin *semantics* live in `diorama-devnet`'s [`AdminSurface`] (shared
 //! with the Mainnet Mirror); this module owns the routes and the HTTP mapping
 //! of the error taxonomy: request refusals (the devnet's `NoCursor` /
 //! `InvalidRewind` / `InvalidShadow`) are 4xx; a poisoned registry is 503;
@@ -23,7 +23,7 @@ use axum::{
     http::StatusCode,
     Router,
 };
-use mirror_devnet::engine::SharedStatus;
+use diorama_devnet::engine::SharedStatus;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -47,7 +47,7 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
     let shared =
         SharedStatus::gather(ctx.anvil_v.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
     Ok(StatusResponse {
-        fork_pin: mirror_devnet::pin::resolved_pin(&ctx.pin),
+        fork_pin: diorama_devnet::pin::resolved_pin(&ctx.pin),
         epoch_pin: ctx.plane.state.epoch_pin()?,
         probes: ctx.engine.verifier.probes.len(),
         source: ctx.chain.source_url.clone(),
@@ -58,7 +58,7 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
 // The HTTP mapping of the error taxonomy (the engine and the simulator
 // share it): request refusals are 4xx, a warming/poisoned state is 503, the
 // venue's own refusals are 502, everything else is a server-side fault.
-mirror_devnet::http_status_map!(Error, "request failed" {
+diorama_devnet::http_status_map!(Error, "request failed" {
     Error::BadRequest { .. } => StatusCode::BAD_REQUEST,
     Error::NotFound { .. } | Error::NoMarket { .. } => StatusCode::NOT_FOUND,
     Error::NotConfigured { .. } => StatusCode::CONFLICT,
@@ -72,7 +72,7 @@ mirror_devnet::http_status_map!(Error, "request failed" {
 /// routes added beside it (the exact routes this process serves — the table
 /// the control-plane docs list).
 pub(crate) fn app(ctx: Arc<Ctx>) -> Router {
-    mirror_devnet::handlers::shared_routes::<Ctx>().with_state(ctx)
+    diorama_devnet::handlers::shared_routes::<Ctx>().with_state(ctx)
 }
 
 #[cfg(test)]
@@ -92,14 +92,14 @@ mod tests {
     )]
     fn the_http_status_mapping_follows_the_shared_convention() {
         let status = |e: Error| e.into_response().status();
-        let anvil = || mirror_anvil::Error::Status {
+        let anvil = || diorama_anvil::Error::Status {
             endpoint: "anvil-v".into(),
             method: "eth_call".into(),
             status: 503,
             body: String::new(),
         };
         assert_eq!(
-            status(Error::Devnet(mirror_devnet::Error::NoCursor)),
+            status(Error::Devnet(diorama_devnet::Error::NoCursor)),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
@@ -132,7 +132,7 @@ mod tests {
         );
         assert_eq!(status(Error::Warming), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
-            status(Error::Devnet(mirror_devnet::Error::Poisoned {
+            status(Error::Devnet(diorama_devnet::Error::Poisoned {
                 what: "shadow registry"
             })),
             StatusCode::SERVICE_UNAVAILABLE

@@ -1,0 +1,16 @@
+# The Mainnet Mirror instance overlay: the mirror base + the instance
+# ConfigMap + the harness NodePorts. The diorama-venue overlay is untouched:
+# the two mirrors share the cluster and the diorama-retain StorageClass, not a
+# namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: diorama-mainnet
+
+resources:
+  - namespace.yaml
+  - ../../base/diorama-mainnet
+  # This instance's unit (config/instances/diorama-mainnet): the file every pod
+  # of this instance mounts at /etc/mirror/instance.toml, and its generator.
+  - ../../../config/instances/diorama-mainnet
+  - nodeports.yaml

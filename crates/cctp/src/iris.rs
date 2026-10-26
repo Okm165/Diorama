@@ -1,5 +1,5 @@
 //! The Iris-compatible API (8095, §15.4): the local substitution for Circle's
-//! attestation service, serving the **measured live shapes** (§16.2) so
+//! attestation service, serving the **measured live shapes** so
 //! daloc's `cctp-relay` consumes it unchanged.
 //!
 //! Served paths:
@@ -13,8 +13,8 @@
 //!   the client also tolerates `PENDING`/empty).
 //! - `GET /v2/publicKeys` — `{"publicKeys":[{"publicKey":"0x04…","cctpVersion":2}]}`
 //!   with the devnet attester's 66-byte uncompressed key.
-//! - `GET /v2/burn/USDC/fees/{source}/{destination}` — the measured fee table
-//!   (§16.2): `0→19` = `[{1000,1},{2000,0}]`, `19→0` = `[{1000,0},{2000,0}]`.
+//! - `GET /v2/burn/USDC/fees/{source}/{destination}` — the measured fee table:
+//!   `0→19` = `[{1000,1},{2000,0}]`, `19→0` = `[{1000,0},{2000,0}]`.
 //! - `GET /v2/fastBurn/USDC/allowance?sourceDomain=` — `{allowance,
 //!   lastUpdated}` (a devnet stand-in value; the shape is what clients read).
 //!
@@ -142,7 +142,7 @@ pub(crate) struct IrisError {
 }
 
 impl IrisError {
-    /// The exact live 404 body (§16.2), byte for byte: daloc's client keys on
+    /// The exact live 404 body, byte for byte: daloc's client keys on
     /// it ("keep polling").
     pub fn not_found() -> Self {
         Self {
@@ -264,7 +264,7 @@ async fn messages(
 }
 
 /// `POST /v2/reattest/{nonce}` — re-sign a watched message with a *fresh*
-/// expiration window (§15.4/§15.5). The expiry revert rolled back, so the
+/// expiration window. The expiry revert rolled back, so the
 /// nonce is unconsumed and the same nonce can be re-served; the refreshed
 /// record goes back to `signed`, which is what re-arms the relayer (a
 /// deliberate operator action, never a silent retry). The nonce is the burn
@@ -408,7 +408,7 @@ mod tests {
         }
     }
 
-    /// The measured wire shapes (§16.2), asserted as exact JSON.
+    /// The measured wire shapes, asserted as exact JSON.
     #[test]
     fn response_shapes_are_the_measured_ones() {
         let keys = PublicKeysResponse {

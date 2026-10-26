@@ -1,4 +1,4 @@
-//! `deal` — the unlimited ERC20 faucet (plan §4.4).
+//! `deal` — the unlimited ERC20 faucet.
 //!
 //! Anvil's own `anvil_dealERC20` cannot discover balance slots on a forked,
 //! no-mining chain ("no slot found", measured): its probe writes never reach a
@@ -11,7 +11,7 @@ use crate::journal::{JournalEntry, JournalSink};
 use crate::plane::Plane;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
-use mirror_anvil::Rpc;
+use diorama_anvil::Rpc;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,7 +71,7 @@ pub async fn deal(
     let Some(slot) = discovery.found else {
         return Ok(no_slot(discovery.fault, discovery.probes));
     };
-    let write = mirror_anvil::Write::Storage {
+    let write = diorama_anvil::Write::Storage {
         address: req.token,
         slot: slot.idx,
         value: req.amount,
@@ -117,7 +117,7 @@ pub async fn deal(
 
 /// The no-slot outcome: the probe fault when one occurred, else the layout
 /// verdict — a probe that could not run is never reported as a verdict.
-fn no_slot(fault: Option<mirror_anvil::Error>, probes: Vec<ProbeRecord>) -> DealOutcome {
+fn no_slot(fault: Option<diorama_anvil::Error>, probes: Vec<ProbeRecord>) -> DealOutcome {
     let error = match fault {
         Some(e) => format!("balance-slot probe failed: {e}"),
         None => "no standard balance slot found in slots 0..16 (non-standard layout): \
@@ -186,10 +186,10 @@ impl Journaling {
 async fn write_slot(
     target: &Rpc,
     chunk_size: usize,
-    write: &mirror_anvil::Write,
+    write: &diorama_anvil::Write,
     slot_hex: &str,
 ) -> std::result::Result<(), DealOutcome> {
-    match mirror_anvil::apply_writes(target, std::slice::from_ref(write), chunk_size).await {
+    match diorama_anvil::apply_writes(target, std::slice::from_ref(write), chunk_size).await {
         Ok(1) => Ok(()),
         Ok(applied) => Err(write_refused(
             slot_hex.to_string(),
@@ -236,7 +236,7 @@ fn write_refused(slot: String, error: String) -> DealOutcome {
 }
 
 /// Mark the verified write devnet-owned and persist the registry.
-fn mark_owned(plane: &Plane, write: &mirror_anvil::Write) -> Result<()> {
+fn mark_owned(plane: &Plane, write: &diorama_anvil::Write) -> Result<()> {
     plane.shadow.lock()?.mark(write);
     plane.save_shadow()
 }
@@ -273,7 +273,7 @@ fn deal_sentinel() -> U256 {
 /// One candidate probe's answer: the raw word, or the read fault.
 enum ProbeAnswer {
     Answered(Bytes),
-    Faulted(mirror_anvil::Error),
+    Faulted(diorama_anvil::Error),
 }
 
 /// One candidate slot: override `token`'s slot `idx` with the full-width
@@ -311,7 +311,7 @@ struct DiscoveredSlot {
 struct SlotDiscovery {
     found: Option<DiscoveredSlot>,
     probes: Vec<ProbeRecord>,
-    fault: Option<mirror_anvil::Error>,
+    fault: Option<diorama_anvil::Error>,
 }
 
 async fn discover_balance_slot(
@@ -324,9 +324,9 @@ async fn discover_balance_slot(
     let sentinel_hex = format!("0x{sentinel:064x}");
     let sentinel_bytes = sentinel.to_be_bytes::<32>();
     let mut probes: Vec<ProbeRecord> = Vec::new();
-    let mut fault: Option<mirror_anvil::Error> = None;
+    let mut fault: Option<diorama_anvil::Error> = None;
     for slot in 0u64..16 {
-        let idx = mirror_anvil::mapping_slot(to, U256::from(slot));
+        let idx = diorama_anvil::mapping_slot(to, U256::from(slot));
         let idx_hex = format!("0x{idx:064x}");
         let probe = match probe_candidate(target, token, data, B256::from(idx), sentinel).await {
             ProbeAnswer::Answered(probe) => Some(probe),

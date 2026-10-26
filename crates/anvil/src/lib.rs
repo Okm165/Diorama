@@ -1,4 +1,4 @@
-//! `mirror-anvil` — the anvil control plane: the typed RPC client (cheatcodes,
+//! `diorama-anvil` — the anvil control plane: the typed RPC client (cheatcodes,
 //! batching, measured error recognition), the measured padding rules, and the
 //! prestateTracer fallback. No chain semantics live here.
 mod backoff;
@@ -35,7 +35,7 @@ pub use writes::*;
 
 #[cfg(test)]
 mod design_assertions {
-    /// The Rust-for-Rustaceans pin (plan §11.3 rule 11).
+    /// The Rust-for-Rustaceans pin.
     fn is_normal<T: Send + Sync + Sized + Unpin>() {}
 
     #[test]

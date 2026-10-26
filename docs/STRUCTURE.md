@@ -4,19 +4,19 @@ Both engines are one design over two sources. This page is the file-by-file
 map: what each crate carries, which files pair with which, and where the two
 deliberately differ (with the reason). It is the artifact behind the
 symmetry sweeps — regenerate the readings with
-`cargo run -q -p ast-scope -- crates bins`.
+`cargo run -q -p diorama-ast-scope -- crates bins`.
 
 ## The layout at a glance
 
 | concern | mainnet | venue | note |
 |---|---|---|---|
 | crate | `crates/mainnet` | `crates/venue` | the trees below |
-| engine bin | `bins/mainnet-engine` | `bins/venue-engine` | |
-| profile-only bin | — | `bins/venue-sim` | the simulator has no mainnet twin |
-| cross-mirror bins | `bins/cctp-bridge`, `bins/ast-scope` | (shared) | the bridge and the fitness gate span both |
-| instance | `config/instances/mainnet-mirror/` | `config/instances/venue-mirror/` | TOML + kustomization, section-for-section alike |
-| k8s base | `k8s/base/mainnet-mirror/` | `k8s/base/venue-mirror/` | + the shared and cctp-bridge bases |
-| k8s overlay | `k8s/overlays/mainnet-mirror/` | `k8s/overlays/venue-mirror/` | |
+| engine bin | `bins/diorama-mainnet-engine` | `bins/diorama-venue-engine` | |
+| profile-only bin | — | `bins/diorama-venue-sim` | the simulator has no mainnet twin |
+| cross-mirror bins | `bins/diorama-cctp-bridge`, `bins/diorama-ast-scope` | (shared) | the bridge and the fitness gate span both |
+| instance | `config/instances/diorama-mainnet/` | `config/instances/diorama-venue/` | TOML + kustomization, section-for-section alike |
+| k8s base | `k8s/base/diorama-mainnet/` | `k8s/base/diorama-venue/` | + the shared and cctp-bridge bases |
+| k8s overlay | `k8s/overlays/diorama-mainnet/` | `k8s/overlays/diorama-venue/` | |
 | cluster suites | `mainnet-{smoke,scenario,proof,product-sim,closure-check}` | `venue-{smoke,scenario,proof,order-proof}` | one-sided rows say why (docs/TESTING.md) |
 | cross-mirror | `engine-symmetry`, `cctp-*`, `log-surface`, `attest`, `shadow-audit` | (shared) | |
 | explainer | `docs/HOW-IT-WORKS.md` | `docs/HOW-IT-WORKS-VENUE.md` | the same §-numbered walk-through |
@@ -40,18 +40,18 @@ the rest of each row is the profile's own logic, named for its mechanism.
 | `profile.rs` | `profile.rs` | the divergence set, filled: `bundle`/`policies`/`build` + the `Wiring`/`Deps` pair, under the same decision table |
 | `reset.rs` | `reset.rs` | the profile's `ResetDetector` (cursor hash / pin canary) |
 | `selftest.rs` | `selftest.rs` | the scratch-stack selftest (`Targets` + `run`) |
-| `source.rs` | `source.rs` | the profile's source facts: the `Source` impl (`RethSource`) + the `reth`/`target` builders / the `DECLARED` capabilities + the `pinned`/`follow` builders (the shared `target` is the spine's `mirror_devnet::source::target` now); the pin-exact read shape is the spine's `PinnedSource` |
+| `source.rs` | `source.rs` | the profile's source facts: the `Source` impl (`RethSource`) + the `reth`/`target` builders / the `DECLARED` capabilities + the `pinned`/`follow` builders (the shared `target` is the spine's `diorama_devnet::source::target` now); the pin-exact read shape is the spine's `PinnedSource` |
 | `feed/` (**mod**, chainlink, http, **metrics**, policy) | `feed/` (**mod**, budget, **metrics**, rest, ws) | the market/price plane: the Chainlink feed bridge (the parent's answers → T's mock aggregators) / the HL market feed (REST + WS + budget) into the simulator |
 | `source_sync/` (mod, beacon, engine_api) | `bridge/` (mod, corewriter, metrics, system) | mainnet-only transports (CL + engine API, EIP-8379 top-up) / venue-only Core↔EVM bridge |
 | — | `api/` (mod, control, exchange, info, ws) | the simulator's served API (info 8090 / control 8091) |
 | — | `sim/` (mod, account, funding, metrics, order, seed, tick, validate, waterfall) | the simulator's model |
 | — | `wire.rs` | the HL wire schema (requests, served shapes, signatures-as-shapes) |
 
-Shared by both (never each other): `mirror-devnet` (the shadow registry, the
+Shared by both (never each other): `diorama-devnet` (the shadow registry, the
 journal, the cursor state, the admin surface, the scanner, the probes, the
 epoch rule, the composer, the drift log, the fact bus, the shared HTTP
-table), `mirror-anvil` (the typed RPC client, the measured padding rules, the
-trace flattening), `mirror-config` (the layered config + the boot
+table), `diorama-anvil` (the typed RPC client, the measured padding rules, the
+trace flattening), `diorama-config` (the layered config + the boot
 conventions: `run_main`, `parse_cli`, `exit_verdict`, `service_config_or_exit`,
 `init_logging`, the worker stack budget, `DEFAULT_INSTANCE_PATH`).
 
@@ -75,7 +75,7 @@ call (`build_clients`, `halt_gate`, `source::target`, `Drift::from_engine`,
 | `source.rs` | `RethSource::{new, trace_block_per_tx}` (a `RawSource` wrapper: the raw reads are the spine's) + `impl Source` + the `DECLARED` caps | `DECLARED` + `pinned`/`follow` (the read shape is the spine's `PinnedSource`; both crates declare their caps as one `DECLARED` const) |
 | `reset.rs` | `CursorHash` + `below_fork_base` | `PinCanary` + the canary io |
 | `metrics.rs` | `MainnetMetrics` (registry + render + overlap test) | `VenueMetrics` (the same three) |
-| `error.rs` | the profile's variants + `impl ShellError` + `mirror_devnet::shell_fault_conversion!` | the same shape |
+| `error.rs` | the profile's variants + `impl ShellError` + `diorama_devnet::shell_fault_conversion!` | the same shape |
 
 Struct level: both `Ctx`es carry the same ordered core (the chain section, the
 engine section, the target anvil, the source, the mirror bundle, the composer
@@ -101,13 +101,13 @@ in `SPINE.md` and the profiles' own tables are the full list):
 | `source_sync/` (mainnet) | the CL + engine-API transports have no venue counterpart (the HL API is one HTTP client) |
 | `api/`, `sim/`, `wire.rs` (venue) | the simulator's served surface has no mainnet counterpart |
 | `service.rs` carries `sim_entry` | one home per service: the venue crate serves two binaries (`venue-engine`, `venue-sim`) |
-| metric namespaces (`mirror_*` / `venue_*`) | breaking to rename; the docs pin them |
+| metric namespaces (`diorama_*` / `venue_*`) | breaking to rename; the docs pin them |
 | the `EngineCore` construction (both `core()`s) | the two literals are field-for-field identical in order (`plane`, `mirror`, `target`, `source`, `source_url`, `engine`) — the shape is already shared, and the trait reading shows it; an `EngineCore::new` would take six arguments (the 5-arg ratchet) or a params struct that repeats the same literal under another name, so the literal is the minimal shared form |
 | the four oldest deployed-stack suites (`mainnet-{proof,scenario,product-sim,closure-check}`) run leniently (no `set -euo pipefail`) | coherent, not drift: every check counts and the verdict is the final count, so one failed stack read cannot mask the sweep; the newer suites (the venue trio, the smokes, the cctps) fail fast instead — a failed read aborts with its status. Both reach a verdict; changing the four is unverifiable outside the cluster |
 
 ## The AST readings (and what each one found)
 
-The tool (`bins/ast-scope`) reads the workspace with `syn` and reports;
+The tool (`bins/diorama-ast-scope`) reads the workspace with `syn` and reports;
 every reading below was acted on or judged. It measures the mirrors, not
 itself: its own items are excluded from the readings (the scope gate still
 covers them), and it walks trait bodies too — the shell's provided defaults
@@ -128,13 +128,13 @@ counts — so the map covers every file):
 | wrappers (one-field structs) | all 39 judged: the serde wire shapes (the mirrors' contracts, pinned by live probes), the toml sections, the domain newtypes (`Domain`, `CursorHash`, `PinCanary`, `Budget`, `Attester`) — none maps to an external crate's spelling |
 | twins (same-named fns across the mirrors, shared 3-op sequences over the smaller side) | the symmetrization's full map (31 pairs, measured 2026-10-25), in three bands: the shared construction at 100% (`main_entry` — `build_clients`, `halt_gate`, `target` and the reapply rule moved to the spine in the symmetry wave); the measured skeletons (`Ctx::new` 42%, `profile::build` 40%, `selftest_cmd`/`spawn_loops` 33%, `status_doc` 17%); the divergences at 0% (`step`, `report_applied`, `parity_step`, `Ctx::{core,probes_now,record_scan,profile_metrics,status}`, `boot`, `bundle`, `policies`) — pairs by name and contract, not by code. The `EngineService` hooks (`Ctx::{urls,context,boot,log_start}`) and the two `run`s read 0% too: their bodies are one op, and a one-op body has no 3-grams (the `duplicates` reading is where their identical bodies land). Three rows are name collisions, not pairs (`feed/policy::step` vs `follow::step`; the four `run`s across modules; the two `advance_cursor`s — the applier's devnet cursor vs the venue's source cursor) |
 | near-duplicates / similar records | none after the pass; the outcomes read 88% alike (`ApplyOutcome`/`FollowOutcome` — the `writes` vocabulary aligned; the venue's extra `applied` is its windows' count, and a shared type would make the mainnet's one-block apply report an `applied` it does not track); the `FrontendOpenOrder`/`StatusOrderInner` overlap is the API's own two shapes — the *mapping* is now one function (`frontend_row`), the shapes stay exact |
-| reuse (shared op sequences) | the one real extraction the tool saw: the cursor advance (`3× … cursor_from → set_cursor`) became `mirror_devnet::state::advance_cursor`, used by the applier, the venue scan and the admin's reset; the rest are axum's router idiom. By inspection: the poll cadence's 200 ms floor became `LoopsSection::poll()` (three drivers) and the config's section pairs became `take_pair` (five sites). Judged: the feed's `mark`/`oracle`/`funding` stay three 4-line readers (their override sources differ; a helper would need a closure pair per site). Second pass: `store::ensure_dir` (three stores), `wire::decimal_or_refuse` (three order fields), `Sim::mutate_account` (three account verbs) extracted; `record_window_metrics` narrowed. Third pass: `MarketFeed::mark_or` (four order-lane reads), `Sim::mutate_state` (three durable writers — the `touch`/`mark_dirty` pair) |
+| reuse (shared op sequences) | the one real extraction the tool saw: the cursor advance (`3× … cursor_from → set_cursor`) became `diorama_devnet::state::advance_cursor`, used by the applier, the venue scan and the admin's reset; the rest are axum's router idiom. By inspection: the poll cadence's 200 ms floor became `LoopsSection::poll()` (three drivers) and the config's section pairs became `take_pair` (five sites). Judged: the feed's `mark`/`oracle`/`funding` stay three 4-line readers (their override sources differ; a helper would need a closure pair per site). Second pass: `store::ensure_dir` (three stores), `wire::decimal_or_refuse` (three order fields), `Sim::mutate_account` (three account verbs) extracted; `record_window_metrics` narrowed. Third pass: `MarketFeed::mark_or` (four order-lane reads), `Sim::mutate_state` (three durable writers — the `touch`/`mark_dirty` pair) |
 | dispersion | `Sim` spans four files — the domain folder's pattern (one impl block per concern) |
 | narrow context | `record_window_metrics` was narrowed to the metrics it writes; `parity_step` keeps `&Ctx` (the mainnet's lens takes `&Ctx` too — the pair's shape wins) |
 | plumbing | judged: each parameter is a distinct role (the `step`s, the metric writers `push_*`, `scan_to`, `boot_prefix`, `require_engine_wiring`, the wire builders `burn_calldata`/`handle_deploy_receipt`) — a parameter object would obscure them |
 | the `Engine` accessors + the reset detectors' `new` | judged: the accessor hooks are the trait's required *data* (fields, not behavior — a default cannot read a field), and the detectors' single-field constructors are Rust's newtype idiom, not shared behavior; a shared base type would add indirection without removing a divergence |
 | the test-only `is_normal` helper | judged: one line per crate's test module; a spine helper would ship test scaffolding in the public API |
-| the three `NoReset` copies (each profile's test module + the spine's) | resolved: one home in the spine (`mirror_devnet::spine::NoReset`) — a detector, not a fixture: the identity element of the `ResetDetector` algebra, so the public API is where it belongs; the fixture helpers (`is_normal`, `series_names`) stay per-crate |
+| the three `NoReset` copies (each profile's test module + the spine's) | resolved: one home in the spine (`diorama_devnet::spine::NoReset`) — a detector, not a fixture: the identity element of the `ResetDetector` algebra, so the public API is where it belongs; the fixture helpers (`is_normal`, `series_names`) stay per-crate |
 | the gap guard's home (`driver.rs` mainnet / `follow/mod.rs` venue) | judged: the mainnet's is a *cursor* rule beside `next_block`; the venue's is the window's own guard. Both predicates are pure and tested on their own side (the mainnet's adds the rebase bound, the venue has none by design); the pause itself is a plane state — one counter bump, one drift row and one error per pause *event*, never per pass (measured: a 760-block gap re-logged every pass), with a resume line on the edge out |
 | the venue driver's unit tests | judged: its rules (the epoch decision, the pin anchor) read a chain — the live proofs cover them (`venue-selftest`, `venue-scenario`), and a chainless unit test would assert nothing (the placeholder was removed) |
 | the paired test names | pinned: shared files share their test names (`the_http_status_mapping…`, `the_registry_series_do_not_overlap`, `the_shell_fault_converts_into_the_taxonomy`); the step folders' tests name their own contracts (`the_parity_…`) |
@@ -142,7 +142,7 @@ counts — so the map covers every file):
 | the per-crate `series_names` test helper (and `is_normal`) | judged: a shared helper would ship test scaffolding in the public API (and three of the six crates cannot depend on the spine); one line per test module is the honest cost |
 | divisions (non-literal divisors) | all guarded: `ratio_or` (an explicit zero branch), `maintenance_rate` (`max_leverage == 0`), `liquidation_px` (`szi`/`denominator`), `adl_ranking` (a non-positive account value skips), `floor_to_core_wei`/`round_to_sig_figs` (a checked `pow10`/`step ≥ 1`) |
 | casts (narrow `as`) | judged safe: date fields, decimal scales (≤ 28), decimals (≤ 18), booleans to `u8` |
-| repeated literals | named once: `mirror_anvil::{LATEST, TRACE_BLOCK_METHOD, JSON_CONTENT_TYPE, ETH_GET_BALANCE}`, `mirror_devnet::handlers::{HEALTHZ, METRICS}`, the drivers' `ANVIL`, the config's section requirements, the journal's io context, the sim's money contexts, the venue's order-type names and margin mode, `SIM_POISONED` — the reading is now empty: the instrument's own labels (`struct`, `enum`, the tree prefixes) are excluded, and the remaining pair (`"none"`: the diff kind's name and the order status) is two vocabularies, under the three-body line |
+| repeated literals | named once: `diorama_anvil::{LATEST, TRACE_BLOCK_METHOD, JSON_CONTENT_TYPE, ETH_GET_BALANCE}`, `diorama_devnet::handlers::{HEALTHZ, METRICS}`, the drivers' `ANVIL`, the config's section requirements, the journal's io context, the sim's money contexts, the venue's order-type names and margin mode, `SIM_POISONED` — the reading is now empty: the instrument's own labels (`struct`, `enum`, the tree prefixes) are excluded, and the remaining pair (`"none"`: the diff kind's name and the order status) is two vocabularies, under the three-body line |
 
 ## The external-lib audit
 
@@ -174,8 +174,8 @@ family by type family:
 
 - new files land in the *domain folders*, one file per concern (a domain
   becomes a folder when it has parts: `apply/`, `feed/`);
-- a shared fact goes to the spine (`mirror-devnet`/`mirror-anvil`/
-  `mirror-config`) the moment a second profile needs it (`advance_cursor`,
+- a shared fact goes to the spine (`diorama-devnet`/`diorama-anvil`/
+  `diorama-config`) the moment a second profile needs it (`advance_cursor`,
   `parse_cli`, `exit_verdict`, `poll`, `witness_for`, `holds_state`,
   `LATEST`, `HEALTHZ`);
 - naming: the profiles' verbs stay their own (`apply`/`follow`), the shared

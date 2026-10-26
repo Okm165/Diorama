@@ -1,10 +1,10 @@
 # 0011 — The simulator's clock self-advances: lazy evaluation on read, plus a 1 Hz tick
 
-**Status:** accepted (plan §14.8; venue mirror).
+**Status:** accepted (venue mirror).
 
 ## Context
 
-daloc's tests never call `advance` — they **set state and read**. A simulator
+the client's tests never call `advance` — they **set state and read**. A simulator
 whose funding accrual, liquidation checks and mark-derived figures only move on
 an explicit control call would serve frozen numbers to every read: funding
 would never accrue, a crashed mark would never liquidate, and a scenario that

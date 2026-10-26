@@ -1,6 +1,6 @@
 //! The sim's metrics: the series the venue's `/metrics` renders beside the
 //! feed's and the bridge's (the registry pattern's third home in this crate).
-use mirror_devnet::metrics::{push_counter, push_gauge};
+use diorama_devnet::metrics::{push_counter, push_gauge};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The sim's metrics (rendered beside the feed's).

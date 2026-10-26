@@ -34,7 +34,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadStatusEnum};
-use mirror_devnet::metrics::Registry as _;
+use diorama_devnet::metrics::Registry as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,7 +65,7 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
                     .add(&ctx.mainnet_metrics.source_sync_delivered, n as u64);
                 ctx.plane
                     .facts
-                    .publish(mirror_devnet::facts::Fact::TopUpDelivered { delivered: n });
+                    .publish(diorama_devnet::facts::Fact::TopUpDelivered { delivered: n });
                 report_top_up(&ctx, n, &mut last_report, &mut head_cache).await;
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -132,7 +132,7 @@ async fn top_up(ctx: &Ctx, engine: &crate::source_sync::engine_api::EngineClient
         return Ok(0);
     }
     let el_head = ctx.reth.block_number().await?;
-    let el = ctx.reth.block_by_number(el_head, mirror_anvil::Txs::Hashes).await?;
+    let el = ctx.reth.block_by_number(el_head, diorama_anvil::Txs::Hashes).await?;
     let cl_head = ctx.beacon.head_slot().await?;
     // First slot whose payload can follow the EL head.
     let mut slot = first_payload_slot(el.header.timestamp);

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The crosschain unified-margin cycle (plan §15.5 + §4.5): one actor's funds
+# The crosschain unified-margin cycle: one actor's funds
 # travel the whole substrate and trade — the axiom that both mirrors compose.
 #
 #   A. mint on T          - the T engine's `/admin/deal` mints real USDC to the
@@ -14,7 +14,7 @@
 #                           then a **real CoreWriter USD-class transfer** on V
 #                           moves it spot → perp through the bridge's decoder
 #   D. trade              - a perp order fills against the real book (the
-#                           §4.5 lane), the identity stays exact, a reduce-only
+#                           impact lane), the identity stays exact, a reduce-only
 #                           close flattens
 #   E. CCTP V → T         - the trader returns the V-side USDC to the bridge
 #                           wallet, the burn relays, and T's balance lands
@@ -30,7 +30,7 @@
 #   ./scripts/cctp-margin-cycle.sh
 set -euo pipefail
 
-NS="${NS:-venue-mirror}"
+NS="${NS:-diorama-venue}"
 RELAY="${RELAY:-}"                                             # the bridge's wallet (the cycle's actor)
 TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}" # the V-side trader
 UNIFIED="${UNIFIED:-0x00000000000000000000000000000000000000ea}" # a unified-mode account

@@ -1,5 +1,5 @@
 //! The relayer: signed messages → `receiveMessage(message, attestation)` on
-//! the destination chain (§15.4).
+//! the destination chain.
 //!
 //! Design rules this module keeps:
 //!
@@ -26,7 +26,7 @@ use crate::transfer::{
 };
 use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::TransactionReceipt;
-use mirror_config::RelayerMode;
+use diorama_config::RelayerMode;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,7 +117,7 @@ impl Relayer {
             // The bridge's heartbeat (the mirrors' 60 s cadence): the store's
             // own counts, so the queue's state is visible in the logs, not
             // only through /health.
-            let now = mirror_config::boot::now_ms();
+            let now = diorama_config::boot::now_ms();
             if now.saturating_sub(last_status) >= 60_000 {
                 last_status = now;
                 match self.store.counts() {

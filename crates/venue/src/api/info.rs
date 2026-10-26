@@ -613,7 +613,7 @@ async fn simulated(
 }
 
 async fn pass_through(state: &ApiState, body: &Bytes) -> Result<Response> {
-    // Budget accounting (plan §18.3): a pass-through is an outbound venue
+    // Budget accounting: a pass-through is an outbound venue
     // read, so it spends the conservative heavy weight (most info types weigh
     // 20; clearinghouseState/l2Book/allMids weigh 2) — the poller backs off
     // when test reads and its own polls add up. Not gated: refusing a caller's
@@ -624,7 +624,7 @@ async fn pass_through(state: &ApiState, body: &Bytes) -> Result<Response> {
     let bytes = resp.bytes().await?;
     Ok((
         status,
-        [(header::CONTENT_TYPE, mirror_anvil::JSON_CONTENT_TYPE)],
+        [(header::CONTENT_TYPE, diorama_anvil::JSON_CONTENT_TYPE)],
         bytes,
     )
         .into_response())

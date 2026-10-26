@@ -1,7 +1,7 @@
 //! The venue profile's source facts: what the HL public RPC can serve
 //! (measured 2026-10-24), declared once and audited at boot. The read shape —
 //! the pin guard, the head anchor — is the spine's
-//! [`mirror_devnet::source::PinnedSource`], chosen in `profile.rs`; the
+//! [`diorama_devnet::source::PinnedSource`], chosen in `profile.rs`; the
 //! follow reads the raw source at latest by design.
 //!
 //! The truth is the fork source **at the pin**: V's base state *is* the
@@ -23,7 +23,7 @@
 //! (the re-pin's re-fork restores the source's whole state — measured: the
 //! pin is seconds stale on a 1s-block source, so the selective window is only
 //! reliable against a scratch/slow source).
-use mirror_devnet::source::{Capabilities, Capability, PinnedSource, RawSource, Source};
+use diorama_devnet::source::{Capabilities, Capability, PinnedSource, RawSource, Source};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -42,13 +42,13 @@ pub(crate) fn declared() -> Capabilities {
 
 /// The profile's truth source: the pin-guarded decorator over the raw reads
 /// (the guard refuses once the source's head has moved past the pin).
-pub(crate) fn pinned(rpc: Arc<mirror_anvil::Rpc>, pin: Arc<AtomicU64>) -> Arc<dyn Source> {
+pub(crate) fn pinned(rpc: Arc<diorama_anvil::Rpc>, pin: Arc<AtomicU64>) -> Arc<dyn Source> {
     Arc::new(PinnedSource::new(rpc, pin, declared()))
 }
 
 /// The profile's follow source: the raw reads at latest (the follow is
 /// latest-by-design; the guard would refuse its reads).
-pub(crate) fn follow(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
+pub(crate) fn follow(rpc: Arc<diorama_anvil::Rpc>) -> Arc<dyn Source> {
     Arc::new(RawSource::new(rpc, declared()))
 }
 

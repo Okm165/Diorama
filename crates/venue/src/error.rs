@@ -1,20 +1,20 @@
 //! The venue boundary's error taxonomy (boundary-discipline).
 //!
 //! The sub-boundaries keep their own vocabularies with their modules —
-//! `mirror_anvil::Error` (the JSON-RPC boundary), `mirror_devnet::Error` (the
+//! `diorama_anvil::Error` (the JSON-RPC boundary), `diorama_devnet::Error` (the
 //! devnet plane, incl. the admin refusals) — and compose here. V itself has
 //! three answers at boot: it is the venue chain, it is not (a typed refusal
 //! naming what answered), or it never came up (a boot timeout).
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Config(#[from] mirror_config::ConfigError),
+    Config(#[from] diorama_config::ConfigError),
 
     #[error(transparent)]
-    Rpc(#[from] mirror_anvil::Error),
+    Rpc(#[from] diorama_anvil::Error),
 
     #[error(transparent)]
-    Devnet(#[from] mirror_devnet::Error),
+    Devnet(#[from] diorama_devnet::Error),
 
     #[error("{what}: {path}")]
     Io {
@@ -102,14 +102,14 @@ pub enum Error {
 /// The crate's result: `Result<T>` everywhere (the error is fixed).
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-impl mirror_devnet::engine::ShellError for Error {}
+impl diorama_devnet::engine::ShellError for Error {}
 
-// The shell contract (`mirror_devnet::engine::ShellError`): this taxonomy
+// The shell contract (`diorama_devnet::engine::ShellError`): this taxonomy
 // accepts the spine's shared errors — the devnet's own, the anvil boundary,
 // and the shared `ShellFault`s the boot/serve helpers construct (the
 // conversion is the spine's one expansion). The rest of the taxonomy stays
 // this mirror's own.
-mirror_devnet::shell_fault_conversion!(Error);
+diorama_devnet::shell_fault_conversion!(Error);
 
 impl Error {
     /// A refused request with its reason — one constructor for the most
@@ -159,7 +159,7 @@ mod size_guard {
     /// message and all (the other mirror's test pins its own wording).
     #[test]
     fn the_shell_fault_converts_into_the_taxonomy() {
-        let e: Error = mirror_devnet::engine::ShellFault::WrongChain {
+        let e: Error = diorama_devnet::engine::ShellFault::WrongChain {
             anvil: "anvil-v",
             got: 1,
             want: 999,
