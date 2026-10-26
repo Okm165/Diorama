@@ -104,6 +104,12 @@ pub enum Automine {
 /// stays at or below it — the client chunks transparently and sequentially.
 const BATCH_MAX_ITEMS: usize = 20;
 
+/// The local anvil's item contract, measured live: 500 items per body are
+/// answered (1000 too — 500 is the conservative bound the write path
+/// documents). Callers that *know* their target is the local devnet chain
+/// ride this; the public cap stays [`BATCH_MAX_ITEMS`].
+pub const ANVIL_BATCH_MAX_ITEMS: usize = 500;
+
 /// The throttle's JSON-RPC code (outside the protocol ranges, like the
 /// client's own synthesized codes).
 const RATE_LIMIT_CODE: i64 = -32005;
@@ -492,7 +498,19 @@ impl Rpc {
     /// each item's decode — the batch may mix methods (the read plan's four
     /// key kinds ride one body).
     pub async fn batch_raw(&self, calls: &[Call]) -> Result<Vec<Option<Box<RawValue>>>> {
-        let items = self.batch(calls).await?;
+        self.batch_raw_limited(calls, BATCH_MAX_ITEMS).await
+    }
+
+    /// [`Self::batch_raw`] with the caller's own item cap: a local anvil
+    /// answers 500 items per body, so a write-side or journal reader rides
+    /// one body where the public cap (20) would take dozens. The byte cap
+    /// (1 MiB) is unchanged.
+    pub async fn batch_raw_limited(
+        &self,
+        calls: &[Call],
+        max_items: usize,
+    ) -> Result<Vec<Option<Box<RawValue>>>> {
+        let items = self.batch_limited(calls, max_items, 1 << 20).await?;
         let mut out = Vec::with_capacity(items.len());
         for item in items {
             match item {
@@ -830,8 +848,19 @@ impl Rpc {
     /// (measured live: a 300-block catch-up window ground for minutes). A
     /// null answer for a key is a fault, never a silent zero.
     pub async fn read_keys(&self, keys: &[Key], block: u64) -> Result<Vec<Value>> {
+        self.read_keys_limited(keys, block, BATCH_MAX_ITEMS).await
+    }
+
+    /// [`Self::read_keys`] with the caller's own item cap (the anvil
+    /// contract where the target is the local devnet chain).
+    pub async fn read_keys_limited(
+        &self,
+        keys: &[Key],
+        block: u64,
+        max_items: usize,
+    ) -> Result<Vec<Value>> {
         let calls = Self::key_calls(keys, block)?;
-        let raws = self.batch_raw(&calls).await?;
+        let raws = self.batch_raw_limited(&calls, max_items).await?;
         let mut out = Vec::with_capacity(keys.len());
         for (key, raw) in keys.iter().zip(raws) {
             let raw = raw.ok_or_else(|| self.null_key_read())?;

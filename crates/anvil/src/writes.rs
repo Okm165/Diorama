@@ -20,7 +20,13 @@ pub async fn apply_writes(target: &Rpc, writes: &[Write], chunk_size: usize) -> 
     let calls = writes.iter().map(write_call).collect::<Result<Vec<_>>>()?;
     let mut applied = 0usize;
     for chunk in calls.chunks(chunk_size.max(1)) {
-        for result in target.batch(chunk).await? {
+        // The anvil's own contract (500 items / 1 MiB per body — this
+        // module's measured rule), not the public endpoint's 20: the
+        // configured chunk size still bounds the body above it.
+        for result in target
+            .batch_limited(chunk, crate::ANVIL_BATCH_MAX_ITEMS, 1 << 20)
+            .await?
+        {
             match result {
                 Ok(_) => applied += 1,
                 Err(e) => tracing::warn!(error = %e, "cheatcode write failed"),

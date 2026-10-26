@@ -46,8 +46,12 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
     let Some((t_calls, r_calls)) = sample_calls(n, t_latest, &sample) else {
         return (sample.len(), 0);
     };
+    // T's side is the local anvil: its own 500-item contract (one body for
+    // a full sweep); reth keeps the conservative public cap (its ceiling is
+    // not documented here — 1000 answered live once, not relied on).
     let (t_answers, r_answers) = match tokio::try_join!(
-        ctx.anvil_t.batch(&t_calls),
+        ctx.anvil_t
+            .batch_limited(&t_calls, mirror_anvil::ANVIL_BATCH_MAX_ITEMS, 1 << 20),
         ctx.reth.batch(&r_calls)
     ) {
         Ok(pair) => pair,

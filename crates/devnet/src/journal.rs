@@ -281,7 +281,11 @@ pub async fn read_before_values(
     // round trip per write, and this runs on every applied block, for every
     // write in it.
     let keys: Vec<Key> = writes.iter().map(Write::key).collect();
-    let values = target.read_keys(&keys, at).await?;
+    // The target is the devnet chain (an anvil): its own 500-item contract,
+    // so a block's whole write set rides one body.
+    let values = target
+        .read_keys_limited(&keys, at, mirror_anvil::ANVIL_BATCH_MAX_ITEMS)
+        .await?;
     let mut entries = Vec::with_capacity(writes.len());
     for (w, value) in writes.iter().zip(values) {
         entries.push(entry_for_write(w, before_of(value))?);

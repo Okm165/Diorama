@@ -458,7 +458,11 @@ kubectl -n mainnet-mirror exec deploy/engine -- \
 ```
 
 Restores the before-values recorded in the journal (newest block first) and
-moves the T cursor back, so the applier re-applies from there.
+moves the T cursor back, so the applier re-applies from there. Expect at
+most one transient convergence-probe mismatch at the rewound block (the
+restored state is one block stale for the instant before the re-apply — a
+time-dependent view like Aave's normalized income catches exactly that);
+`mirror_t_convergence_last_failed` returns to 0 on the next block.
 
 ### Fund an account with any ERC20 (the unlimited faucet)
 
