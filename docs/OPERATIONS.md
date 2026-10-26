@@ -276,6 +276,21 @@ order) and the return leg closing exactly. In cluster mode the script derives
 the bridge's wallet from the venue secret (`cctp-relay-key`), so the actor is
 always the wallet the burn sends from — never the local harness's.
 
+### The cross-mirror capital-efficiency read (measured)
+
+Per $1,000 of collateral, the venues' buying power, measured on the mirrors:
+
+| venue | max leverage | liquidation distance | the note |
+|---|---|---|---|
+| T — Aave V3 (WETH/USDC) | 5.13x base (LTV 80.5%, LT 83%); 14.29x in the ETH-correlated e-mode (93%/95%) | at 1.88x: ~50% (HF 2.005) | the loop measured live: 1.0x -> 1.88x -> 2.59x, converging to 5.13x |
+| V — ETH perp | 25x (the meta) | 48.98% at 2x; 2.0% at 25x (`make capital-frontier`) | the crash owns the mark/oracle; the liquidation closes at the live book |
+| the hedged book | gross 2x | flat through a 60% market-wide crash (`make hedged-book`) | the maintenance table gives no hedge credit; the equity does |
+
+The Aave base-unit conversion bites: `getUserAccountData` returns 8-decimal
+USD while the tokens are 6/18-decimal — a borrow amount must be converted
+(measured: passing the 8-dec figure as 6-dec is a 100x borrow, correctly
+reverted).
+
 ### The hedged book — `make hedged-book`
 
 The hedge's capital efficiency, measured: the same collateral and the same
