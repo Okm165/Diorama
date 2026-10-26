@@ -276,6 +276,19 @@ order) and the return leg closing exactly. In cluster mode the script derives
 the bridge's wallet from the venue secret (`cctp-relay-key`), so the actor is
 always the wallet the burn sends from — never the local harness's.
 
+### The capital-efficiency frontier — `make capital-frontier`
+
+Per leverage, how far can the market move before the venue liquidates? The
+position is filled on V's real book with the collateral set exactly (the
+faucet *adds*, so the script deals the delta), the mark is crashed in 0.25%
+steps — each step hands the override back first, because `crash` is relative
+to the *current* mark and repeated steps would compound — and the sim's own
+waterfall decides. The measured distances match the classic
+`(1/L - 0.02)/0.98` bound (the maintenance is half the initial margin at max
+leverage 25 *of the crashed value*); the max-leverage row refuses at the
+fill's margin check — the edge is real. This is the frontier daloc's
+capital-efficiency benchmarks read.
+
 ### The crosschain margin book — `make crosschain-margin`
 
 The collateral's whole journey measured: the T mint, the CCTP burn/relay/mint

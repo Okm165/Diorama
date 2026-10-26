@@ -283,6 +283,9 @@ portfolio-sim: ## The portfolio simulation: a delta-neutral basis book across bo
 crosschain-margin: ## The crosschain margin book: bridged collateral, funding costs, served unrealized PnL, the loop closed
 	NS=venue-mirror ./scripts/crosschain-margin.sh
 
+capital-frontier: ## The capital-efficiency frontier: the liquidation distance measured at each leverage
+	NS=venue-mirror ./scripts/capital-frontier.sh
+
 cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locally (both chains forked from the real ones: the round trip + the unified-margin cycle)
 	./scripts/cctp-local.sh
 
