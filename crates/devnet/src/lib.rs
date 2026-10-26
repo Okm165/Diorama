@@ -3,7 +3,10 @@
 //! The devnet axioms live here; the projects compose these with chain clients.
 //! Clocks: `block` = the **devnet chain's height** (T on the mainnet profile,
 //! V on the venue profile — the shared crates drive whichever chain the
-//! profile owns); `pin` = that chain's fork base.
+//! profile owns); `pin` = that chain's fork base; `source_head` = the follow
+//! source's own head (the chain the mirror reads — never the devnet's);
+//! `lag_blocks` = the source-head-minus-followed distance (a block count of
+//! the source's clock, not a devnet height).
 /// The cursor artifact's name in errors and load messages (the epoch rule,
 /// the plane's shadow, the state file): one home.
 pub(crate) const CURSOR_ARTIFACT: &str = "cursor state";
