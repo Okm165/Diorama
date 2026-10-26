@@ -739,14 +739,17 @@ deal-cycle's own hold check is a regression guard, not a live skip: the
 deal's slot lives in the token's storage and the parent rarely touches it.
 The pair rotates through the non-fixture watched accounts (a mark cannot be
 cleared while V's source is pinned-latest) and re-stages the value to the
-source's own at the end, so the marks stay inert. Three further legs close
+source's own at the end, so the marks stay inert. Four further legs close
 the remaining questions: the **hand-back's scoping** (two marked keys — a
 partial clear hands back exactly one, the other stays held; `all` resets the
 account's whole claim), the **scanned devnet write** (a *mined* devnet token
 transfer to a fresh recipient — not the register route — is marked by the
-scan's own walk and held across windows), and the **rewind × devnet
+scan's own walk and held across windows), the **rewind × devnet
 writes** (T's frozen deals survive a rewind and keep their claims; V's
-journaled deal is restored and handed back — `unshadowed = 1`).
+journaled deal is restored and handed back — `unshadowed = 1`), and the
+**rewind's reach** (the journal's, not the registry's: a scanned mark is not
+in the journal, so a rewind leaves its write and its claim untouched — the
+hand-backs are asserted as the identity `marks dropped == unshadowed`).
 
 **The follow's cadence against the public source** (measured): the reads ride
 JSON-RPC batches, and every one of the endpoint's measured limits is honored —
