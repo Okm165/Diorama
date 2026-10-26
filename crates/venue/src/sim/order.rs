@@ -668,13 +668,13 @@ impl Sim {
         size: Decimal,
     ) -> Result<Fill> {
         let meta = feed.meta();
-        let long = self
+        let direction = self
             .account(address)?
-            .and_then(|a| a.positions.get(coin).map(super::account::Position::is_long))
-            .unwrap_or(true);
+            .and_then(|a| a.positions.get(coin).map(super::account::Position::direction))
+            .unwrap_or(super::account::Direction::Long);
         let req = Order {
             coin: coin.to_string(),
-            is_buy: Side::of(long).flip().is_buy(), // close the position
+            is_buy: direction.entry_side().flip().is_buy(), // close the position
             size,
             limit_px: None, // market: whatever the book gives (partial fills ok)
             tif: Tif::Ioc,

@@ -62,6 +62,25 @@ pub struct Relayer {
 /// Whether the message pins a `destinationCaller` this bridge cannot serve
 /// (zero = anyone): such a message is parked instead of paying for the real
 /// revert — the Iris still serves it, it is just not relayable here.
+/// One relay pass's verdict: the message is relayed (or reconciled as
+/// already consumed), still in flight (submitted, no receipt yet), or not
+/// relayed (refused/parked — the store keeps it for a later pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Relayed {
+    Yes,
+    InFlight,
+    No,
+}
+
+/// What a resume found for a recorded attempt: nothing to resume (no tx, or
+/// the tx left the pool without a receipt — re-send), a tx still in the pool
+/// (in flight), or a receipt that settled (carrying its relay verdict).
+enum Resume {
+    ReSend,
+    InFlight,
+    Settled(Relayed),
+}
+
 fn caller_mismatch(caller: B256, consumer: Address) -> bool {
     caller != B256::ZERO && caller != consumer.into_word()
 }
@@ -138,8 +157,8 @@ impl Relayer {
         for record in &signed {
             self.metrics.relay_attempts.fetch_add(1, Ordering::Relaxed);
             match self.relay(record).await {
-                Ok(true) => confirmed += 1,
-                Ok(false) => {}
+                Ok(Relayed::Yes) => confirmed += 1,
+                Ok(Relayed::InFlight | Relayed::No) => {}
                 Err(e) => {
                     tracing::warn!(nonce = %record.nonce, error = %e, "cctp relay pass failed for a message; will retry");
                 }
@@ -234,9 +253,10 @@ impl Relayer {
         Ok(())
     }
 
-    /// Relay one SIGNED record. `Ok(true)` = confirmed (or reconciled as
-    /// already consumed); `Ok(false)` = still in flight, re-checked next tick.
-    async fn relay(&self, record: &MessageRecord) -> Result<bool> {
+    /// Relay one SIGNED record: confirmed (or reconciled as already
+    /// consumed), still in flight (re-checked next tick), or not relayed
+    /// (refused/parked — the store keeps it for a later pass).
+    async fn relay(&self, record: &MessageRecord) -> Result<Relayed> {
         let chain = by_domain(&self.chains, record.destination_domain)?;
         let decoded = record.decoded()?;
         let (target, consumer) = self.consumer(record, &decoded)?;
@@ -276,10 +296,12 @@ impl Relayer {
         if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
             self.mark_relayed(record.nonce, None)?;
             tracing::info!(nonce = %record.nonce, chain = chain.name, "cctp nonce already consumed on-chain; reconciled as relayed");
-            return Ok(true);
+            return Ok(Relayed::Yes);
         }
-        if let Some(settled) = self.resume_in_flight(chain, record).await? {
-            return Ok(settled);
+        match self.resume_in_flight(chain, record).await? {
+            Resume::ReSend => {}
+            Resume::InFlight => return Ok(Relayed::InFlight),
+            Resume::Settled(verdict) => return Ok(verdict),
         }
         self.submit(chain, record, target, &decoded).await
     }
@@ -314,16 +336,16 @@ impl Relayer {
 
     /// A previous attempt's tx: a receipt settles it; still in the pool is
     /// "in flight"; left the pool without a receipt (a restart) means the
-    /// caller re-sends. `None` = no previous attempt (or re-send).
-    async fn resume_in_flight(&self, chain: &Chain, record: &MessageRecord) -> Result<Option<bool>> {
+    /// caller re-sends.
+    async fn resume_in_flight(&self, chain: &Chain, record: &MessageRecord) -> Result<Resume> {
         let Some(hash) = record.relay_tx else {
-            return Ok(None);
+            return Ok(Resume::ReSend);
         };
         if let Some(receipt) = receipt(&chain.rpc, hash).await? {
-            return Ok(Some(self.settle(chain, record, &receipt).await?));
+            return Ok(Resume::Settled(self.settle(chain, record, &receipt).await?));
         }
         if self.sender.in_pool(&chain.rpc, hash).await? {
-            return Ok(Some(false));
+            return Ok(Resume::InFlight);
         }
         tracing::warn!(
             nonce = %record.nonce,
@@ -331,7 +353,7 @@ impl Relayer {
             chain = chain.name,
             "cctp relay tx left the pool without a receipt (restart?); re-sending"
         );
-        Ok(None)
+        Ok(Resume::ReSend)
     }
 
     /// Submit `receiveMessage` (plain) or the wrapper's `relay` (hook), record
@@ -343,7 +365,7 @@ impl Relayer {
         record: &MessageRecord,
         target: Address,
         decoded: &Message,
-    ) -> Result<bool> {
+    ) -> Result<Relayed> {
         let attestation = record.attestation.clone().ok_or_else(|| Error::bad_request(format!("message {} is signed without an attestation", record.nonce),))?;
         let calldata = if decoded.body.hook_data.is_empty() {
             receive_message_calldata(&record.message, &attestation)
@@ -372,7 +394,7 @@ impl Relayer {
                 );
                 match wait_for_receipt(&chain.rpc, hash, self.receipt_timeout).await? {
                     Some(receipt) => self.settle(chain, record, &receipt).await,
-                    None => Ok(false),
+                    None => Ok(Relayed::InFlight),
                 }
             }
             Err(e) => {
@@ -382,7 +404,7 @@ impl Relayer {
                 } else {
                     tracing::warn!(nonce = %record.nonce, attempts, error = %e, "cctp receiveMessage submission failed; will retry");
                 }
-                Ok(false)
+                Ok(Relayed::No)
             }
         }
     }
@@ -394,7 +416,7 @@ impl Relayer {
         chain: &Chain,
         record: &MessageRecord,
         receipt: &TransactionReceipt,
-    ) -> Result<bool> {
+    ) -> Result<Relayed> {
         // Settle by the *effect*, never the status: the nonce is the chain's
         // dedup truth, consumed exactly when the mint happened. A status alone
         // cannot prove a mint — the wrapper's `relay` is non-atomic by design
@@ -409,7 +431,7 @@ impl Relayer {
                 tx = %receipt.transaction_hash,
                 "cctp mint confirmed (the destination nonce is consumed)"
             );
-            return Ok(true);
+            return Ok(Relayed::Yes);
         }
         if receipt.status() {
             self.park(
@@ -419,13 +441,13 @@ impl Relayer {
                     receipt.transaction_hash
                 ),
             )?;
-            return Ok(false);
+            return Ok(Relayed::No);
         }
         self.park(
             record.nonce,
             format!("receiveMessage reverted (tx {})", receipt.transaction_hash),
         )?;
-        Ok(false)
+        Ok(Relayed::No)
     }
 
     async fn used_nonce(&self, chain: &Chain, nonce: B256) -> Result<U256> {
@@ -439,11 +461,11 @@ impl Relayer {
             .map_err(Error::from)
     }
 
-    /// Park a record and report the refusal (`false` = not relayed): the one
-    /// shape every gate in `relay` uses — the reason names what was seen.
-    fn refuse(&self, nonce: B256, reason: String) -> Result<bool> {
+    /// Park a record and report the refusal (not relayed): the one shape
+    /// every gate in `relay` uses — the reason names what was seen.
+    fn refuse(&self, nonce: B256, reason: String) -> Result<Relayed> {
         self.park(nonce, reason)?;
-        Ok(false)
+        Ok(Relayed::No)
     }
 
     fn mark_relayed(&self, nonce: B256, tx: Option<B256>) -> Result<()> {

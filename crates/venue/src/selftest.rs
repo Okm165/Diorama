@@ -17,12 +17,14 @@ use std::time::Duration;
 /// mainnet selftest reads the same struct).
 pub use mirror_devnet::engine::ScratchTargets as Targets;
 
+use mirror_devnet::engine::Verdict;
+
 /// The wait bound for one window's source movement: the public chain produces
 /// a block about every second, so the bound only fires on a stalled source
 /// (which must fail the run, not hang it).
 const MOVE_WAIT: Duration = Duration::from_secs(120);
 
-pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<bool> {
+pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<Verdict> {
     let Targets { rpc, anvil } = targets;
     let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil)?);
 
@@ -42,40 +44,33 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<bool> 
         ),
     );
 
-    let (done, writes, ok) = windows_loop(&ctx, windows).await?;
+    let (done, writes, mut verdict) = windows_loop(&ctx, windows).await?;
     println!();
-    let mut verdict = if ok {
-        mirror_devnet::engine::Verdict::Passed
-    } else {
-        mirror_devnet::engine::Verdict::Failed
-    };
     if writes == 0 {
         println!("   ✘ no window composed a change (the watchlist saw no activity)");
         verdict = mirror_devnet::engine::Verdict::Failed;
     }
     println!("   windows={done} composed_keys={writes}");
     mirror_devnet::engine::selftest_verdict(verdict);
-    // The exit-code boundary (the runner's own currency); the decision
-    // itself is the named verdict above.
-    Ok(matches!(verdict, mirror_devnet::engine::Verdict::Passed))
+    Ok(verdict)
 }
 
 /// The window loop: `windows` windows at least, and up to 6x (never below 12)
 /// while nothing has composed — a run whose windows were all quiet proves
 /// nothing about the pipeline, and the cap keeps a quiet watchlist from
 /// running forever. Returns `(windows, composed keys, ok)`.
-async fn windows_loop(ctx: &Ctx, windows: u64) -> Result<(u64, usize, bool)> {
+async fn windows_loop(ctx: &Ctx, windows: u64) -> Result<(u64, usize, Verdict)> {
     let cap = windows.saturating_mul(6).max(12);
     let mut done = 0u64;
     let mut writes = 0usize;
-    let mut ok = true;
+    let mut verdict = Verdict::Passed;
     while done < cap {
         if !wait_for_move(ctx).await? {
             println!(
                 "   ✘ the source did not move within {}s; stopping",
                 MOVE_WAIT.as_secs()
             );
-            ok = false;
+            verdict = Verdict::Failed;
             break;
         }
         let Some(stats) = follow::step(ctx).await? else {
@@ -94,14 +89,14 @@ async fn windows_loop(ctx: &Ctx, windows: u64) -> Result<(u64, usize, bool)> {
             stats.sampled
         );
         if stats.sampled != stats.sampled_ok {
-            ok = false;
+            verdict = Verdict::Failed;
             println!("   ✘ live parity failed");
         }
         if done >= windows && writes > 0 {
             break;
         }
     }
-    Ok((done, writes, ok))
+    Ok((done, writes, verdict))
 }
 
 /// Wait (bounded) for the source head to move past the follow cursor: a

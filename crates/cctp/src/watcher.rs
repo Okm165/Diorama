@@ -352,7 +352,7 @@ impl Watcher {
             record.destination_domain,
         );
         match self.store.insert_message(record)? {
-            None => {
+            crate::store::Inserted::New => {
                 self.metrics
                     .messages_seen
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -366,8 +366,8 @@ impl Watcher {
                 );
                 Ok(1)
             }
-            Some(true) => Ok(0),
-            Some(false) => {
+            crate::store::Inserted::Rescanned => Ok(0),
+            crate::store::Inserted::NonceCollision => {
                 tracing::warn!(
                     chain = self.chain.name,
                     tx = %burn_tx,

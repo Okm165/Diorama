@@ -1,6 +1,7 @@
 //! End-to-end self test: diff-applies real mainnet blocks onto a scratch
 //! Anvil forked from a public RPC. Needs no reth, so it can validate the
 //! whole apply pipeline before the local fork source is synced.
+use mirror_devnet::engine::Verdict;
 use crate::ctx::Ctx;
 use crate::apply::step;
 use crate::error::{Error, Result};
@@ -11,7 +12,7 @@ use std::sync::Arc;
 /// venue selftest reads the same struct).
 pub use mirror_devnet::engine::ScratchTargets as Targets;
 
-pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
+pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict> {
     let Targets { rpc, anvil } = targets;
     let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil)?);
 
@@ -43,7 +44,7 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
     mirror_devnet::engine::selftest_verdict(verdict);
     // The exit-code boundary (the runner's own currency); the decision
     // itself is the named verdict above.
-    Ok(matches!(verdict, mirror_devnet::engine::Verdict::Passed))
+    Ok(verdict)
 }
 
 /// Apply one block, printing the per-check lines; returns whether it passed.

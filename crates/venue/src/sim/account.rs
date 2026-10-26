@@ -136,8 +136,32 @@ impl Position {
         mul(self.szi, self.entry_px, COST_BASIS)
     }
 
-    pub fn is_long(&self) -> bool {
-        !self.szi.is_sign_negative()
+    /// The position's direction (a flat size reads as long — the callers
+    /// guard the flat case).
+    pub(crate) fn direction(&self) -> Direction {
+        if self.szi.is_sign_negative() {
+            Direction::Short
+        } else {
+            Direction::Long
+        }
+    }
+}
+
+/// Which way a position is on (the ADL ranking's opposite-side test, the
+/// vault's same-side take).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Direction {
+    Long,
+    Short,
+}
+
+impl Direction {
+    /// The side the position was entered on (a long bought; the closes flip).
+    pub(crate) fn entry_side(self) -> crate::sim::order::Side {
+        match self {
+            Direction::Long => crate::sim::order::Side::Buy,
+            Direction::Short => crate::sim::order::Side::Sell,
+        }
     }
 }
 
@@ -272,7 +296,10 @@ struct PositionTotals {
 
 impl PositionTotals {
     fn add(&mut self, p: &Position, facts: &PositionFacts) -> Result<()> {
-        let signed = if p.is_long() { facts.value } else { -facts.value };
+        let signed = match p.direction() {
+            Direction::Long => facts.value,
+            Direction::Short => -facts.value,
+        };
         self.notional = add(self.notional, facts.value, "total notional")?;
         self.margin = add(self.margin, p.margin_used, "total margin")?;
         self.signed_value = add(self.signed_value, signed, "signed value")?;
@@ -633,7 +660,10 @@ pub(crate) fn liquidation_px(p: &Position, mark: Decimal, maintenance_rate: Deci
     if p.szi.is_zero() {
         return Ok(mark);
     }
-    let side = if p.is_long() { Decimal::ONE } else { -Decimal::ONE };
+    let side = match p.direction() {
+        Direction::Long => Decimal::ONE,
+        Direction::Short => -Decimal::ONE,
+    };
     let position_size = p.szi.abs();
     let denominator = sub(Decimal::ONE, mul(maintenance_rate, side, "liquidation denominator")?, "liquidation denominator")?;
     if denominator.is_zero() {

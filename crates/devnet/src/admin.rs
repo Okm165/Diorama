@@ -175,14 +175,14 @@ impl AdminSurface<'_> {
     /// would hand the key back holding a stale devnet value with no mark to
     /// explain it. Returns the number of re-synced keys.
     async fn hand_back(&self, req: &ShadowRequest) -> Result<usize> {
-        let (slots, account_fields) = self.hand_back_keys(req)?;
+        let (slots, fields) = self.hand_back_keys(req)?;
         let anchor = self.hand_back_anchor().await?;
         // Read the source's truth *before* touching the marks: a key without a
         // shadow but with a stale devnet value is the most confusing state
         // there is, and a read fault must abort the hand-back (retryable), not
         // skip the key.
-        let writes = self.source_truth(req, &slots, account_fields, anchor).await?;
-        self.unmark_keys(req, &slots, account_fields)?;
+        let writes = self.source_truth(req, &slots, fields, anchor).await?;
+        self.unmark_keys(req, &slots, fields)?;
         // Push the source's values now, then persist the registry. A fault
         // here leaves the marks in memory but not on disk; a restart restores
         // them (conservative: the key stays devnet-owned), and the next request
@@ -194,7 +194,7 @@ impl AdminSurface<'_> {
 
     /// The keys a hand-back covers: the request's own, plus the account's whole
     /// set when `all` is named.
-    fn hand_back_keys(&self, req: &ShadowRequest) -> Result<(Vec<U256>, bool)> {
+    fn hand_back_keys(&self, req: &ShadowRequest) -> Result<(Vec<U256>, Fields)> {
         let mut slots = req.slots.clone();
         if req.all {
             let s = self.plane.shadow.lock()?;
@@ -207,7 +207,7 @@ impl AdminSurface<'_> {
                 slots.extend(missing);
             }
         }
-        Ok((slots, req.account_fields || req.all))
+        Ok((slots, Fields::of(req.account_fields || req.all)))
     }
 
     /// The block to re-sync from: the devnet's state reflects the last applied
@@ -237,11 +237,11 @@ impl AdminSurface<'_> {
         &self,
         req: &ShadowRequest,
         slots: &[U256],
-        account_fields: bool,
+        fields: Fields,
         anchor: u64,
     ) -> Result<Vec<mirror_anvil::Write>> {
         let mut writes: Vec<mirror_anvil::Write> = Vec::new();
-        if account_fields {
+        if matches!(fields, Fields::Account) {
             writes.push(mirror_anvil::Write::Balance {
                 address: req.address,
                 value: self.source.balance_at(req.address, anchor).await?,
@@ -284,9 +284,9 @@ impl AdminSurface<'_> {
 
     /// Drop the handed-back keys' marks (the account's whole field set when
     /// `account_fields`).
-    fn unmark_keys(&self, req: &ShadowRequest, slots: &[U256], account_fields: bool) -> Result<()> {
+    fn unmark_keys(&self, req: &ShadowRequest, slots: &[U256], fields: Fields) -> Result<()> {
         let mut s = self.plane.shadow.lock()?;
-        if account_fields {
+        if matches!(fields, Fields::Account) {
             s.unmark_account_fields(req.address);
         }
         for slot in slots {
@@ -494,6 +494,25 @@ pub struct PauseResponse {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ResumeResponse {
     pub resumed: bool,
+}
+
+/// The hand-back's key scope: the request's slots, or the account's whole
+/// field set beside them (the request's `account_fields` flag, converted once
+/// at the boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fields {
+    Slots,
+    Account,
+}
+
+impl Fields {
+    fn of(account_fields: bool) -> Self {
+        if account_fields {
+            Fields::Account
+        } else {
+            Fields::Slots
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

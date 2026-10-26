@@ -255,7 +255,9 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
                 .mainnet_metrics
                 .blocks_applied
                 .load(std::sync::atomic::Ordering::Relaxed),
-            paused: ctx.plane.gap_paused.load(std::sync::atomic::Ordering::Relaxed),
+            guard: mirror_devnet::engine::GapGuard::of(
+                ctx.plane.gap_paused.load(std::sync::atomic::Ordering::Relaxed),
+            ),
         }
         .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);
         if mirror_devnet::engine::halt_gate(&*ctx, poll).await {

@@ -287,8 +287,28 @@ pub struct FollowStatus<'a> {
     pub followed: u64,
     pub applied: u64,
     /// The gap guard's latch, read from the plane (the same state the pause
-    /// edges write).
-    pub paused: bool,
+    /// edges write), named.
+    pub guard: GapGuard,
+}
+
+/// The gap guard's state for the heartbeat: the plane's own latch, named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapGuard {
+    /// The guard is holding: the source ran past the policy's window.
+    Paused,
+    /// The guard is clear: the follow composes (or idles) normally.
+    Clear,
+}
+
+impl GapGuard {
+    /// The plane's latch, converted once at the boundary.
+    pub fn of(paused: bool) -> Self {
+        if paused {
+            GapGuard::Paused
+        } else {
+            GapGuard::Clear
+        }
+    }
 }
 
 impl<'a> FollowStatus<'a> {
@@ -301,12 +321,10 @@ impl<'a> FollowStatus<'a> {
         }
         *last = now;
         let lag = self.source_head.saturating_sub(self.followed);
-        let guard = if self.paused {
-            "paused"
-        } else if lag == 0 {
-            "idle"
-        } else {
-            "following"
+        let guard = match (self.guard, lag) {
+            (GapGuard::Paused, _) => "paused",
+            (GapGuard::Clear, 0) => "idle",
+            (GapGuard::Clear, _) => "following",
         };
         tracing::info!(
             mirror,
@@ -428,12 +446,14 @@ pub async fn selftest_entry<E, C, F>(config: &std::path::Path, check: C, run: F)
 where
     E: From<mirror_config::ConfigError>,
     C: FnOnce(&mirror_config::Instance, &[String]) -> Result<(), E>,
-    F: FnOnce(mirror_config::Instance) -> BoxFuture<'static, Result<bool, E>>,
+    F: FnOnce(mirror_config::Instance) -> BoxFuture<'static, Result<Verdict, E>>,
 {
     let (cfg, unresolved) = mirror_config::Instance::inspect(config)?;
     check(&cfg, &unresolved)?;
-    let ok = run(cfg).await?;
-    mirror_config::boot::exit_verdict(ok);
+    let verdict = run(cfg).await?;
+    // The exit-code boundary (the runner's own currency); the decision itself
+    // is the named verdict.
+    mirror_config::boot::exit_verdict(matches!(verdict, Verdict::Passed));
 }
 
 /// The boot wiring check both engines share: every value the instance

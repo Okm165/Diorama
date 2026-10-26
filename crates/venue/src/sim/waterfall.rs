@@ -193,18 +193,18 @@ impl Sim {
             PartialCooldown::Elapsed
         };
         let mut closed = Vec::new();
-        let mut partial = false;
+        let mut fill = Fill::Whole;
         for (coin, p) in &pass.account.positions {
             if !leg.holds(coin, p) {
                 continue;
             }
             let outcome = self.liquidate_one(pass, (coin, p), cooldown)?;
-            partial |= outcome.partial();
+            fill = fill.or(outcome.fill());
             if matches!(outcome, CloseOutcome::Landed { .. }) {
                 closed.push(coin.clone());
             }
         }
-        if partial {
+        if matches!(fill, Fill::Partial) {
             let until = pass.now_ms.saturating_add(COOLDOWN_MS);
             self.with_state(|state| {
                 state.liq_cooldown_until.insert(pass.address, until);
@@ -227,24 +227,26 @@ impl Sim {
     ) -> Result<CloseOutcome> {
         let (coin, p) = position;
         let Some(mark) = pass.feed.mark(coin) else {
-            return Ok(CloseOutcome::Refused { partial: false });
+            return Ok(CloseOutcome::Refused {
+                fill: Fill::Whole,
+            });
         };
         let notional = account::mul(p.szi.abs(), mark, "liquidation notional")?;
-        let (size, partial) = match attempt_size(p.szi.abs(), notional, cooldown)? {
-            Attempt::Full(size) => (size, false),
-            Attempt::Partial(size) => (size, true),
+        let (size, filled) = match attempt_size(p.szi.abs(), notional, cooldown)? {
+            Attempt::Full(size) => (size, Fill::Whole),
+            Attempt::Partial(size) => (size, Fill::Partial),
         };
         if size.is_zero() {
-            return Ok(CloseOutcome::Refused { partial });
+            return Ok(CloseOutcome::Refused { fill: filled });
         }
         match self.liquidate_position(pass.feed, pass.address, coin, size) {
             Ok(fill) => {
-                tracing::warn!(account = %pass.address, coin = %coin, sz = %fill.total_sz, avg_px = %fill.avg_px, partial, "liquidation: market close");
-                Ok(CloseOutcome::Landed { partial })
+                tracing::warn!(account = %pass.address, coin = %coin, sz = %fill.total_sz, avg_px = %fill.avg_px, filled = ?filled, "liquidation: market close");
+                Ok(CloseOutcome::Landed { fill: filled })
             }
             Err(e) => {
                 tracing::warn!(account = %pass.address, coin = %coin, error = %e, "liquidation close refused (no liquidity?)");
-                Ok(CloseOutcome::Refused { partial })
+                Ok(CloseOutcome::Refused { fill: filled })
             }
         }
     }
@@ -338,11 +340,15 @@ impl Sim {
             return Ok(false);
         };
         let remaining = p.szi.abs();
-        let my_side_long = p.is_long();
+        let direction = p.direction();
         let mut ranked = self.adl_ranking(
             pass.feed,
             pass.address,
-            (coin, prev_mark, my_side_long),
+            AdlTarget {
+                coin,
+                prev_mark,
+                direction,
+            },
             meta,
         )?;
         ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
@@ -361,7 +367,7 @@ impl Sim {
             let take = left.min(size);
             // The counterparty closes at the previous mark; the underwater
             // account's side closes against it at the same price.
-            let mine = crate::sim::order::Side::of(my_side_long);
+            let mine = direction.entry_side();
             let own = account::FillFacts::close(coin, mine.flip(), take, prev_mark, p.leverage_value);
             let theirs = account::FillFacts::close(coin, mine, take, prev_mark, 1);
             self.adl_close_pair(pass.address, other, (&own, &theirs), meta)?;
@@ -394,10 +400,14 @@ impl Sim {
         &self,
         feed: &MarketFeed,
         address: Address,
-        target: (&str, Decimal, bool), // (coin, previous mark, the underwater side)
+        target: AdlTarget<'_>,
         meta: Option<&crate::wire::Meta>,
     ) -> Result<Vec<(Decimal, Address, Decimal, Decimal)>> {
-        let (coin, prev_mark, my_side_long) = target;
+        let AdlTarget {
+            coin,
+            prev_mark,
+            direction,
+        } = target;
         let mut ranked: Vec<(Decimal, Address, Decimal, Decimal)> = Vec::new();
         self.with_state(|st| {
             for (other, oa) in st.accounts.iter() {
@@ -405,7 +415,7 @@ impl Sim {
                     continue;
                 }
                 let Some(op) = oa.positions.get(coin) else { continue };
-                if op.is_long() == my_side_long || op.szi.is_zero() {
+                if op.direction() == direction || op.szi.is_zero() {
                     continue;
                 }
                 let ov = account::view(oa, feed, meta)?;
@@ -443,21 +453,38 @@ impl Sim {
     }
 }
 
+/// How much of a liquidation leg the close filled (the cooldown ORs it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    Whole,
+    Partial,
+}
+
+impl Fill {
+    /// Either attempt's fill: partial absorbs (the caller's OR).
+    fn or(self, other: Fill) -> Fill {
+        match (self, other) {
+            (Fill::Whole, Fill::Whole) => Fill::Whole,
+            _ => Fill::Partial,
+        }
+    }
+}
+
 /// One leg's liquidation attempt: the close either landed (the market order
 /// filled) or was refused (no liquidity) — and the attempt may have been
-/// partial either way, so the flag rides both variants (the caller ORs it
+/// partial either way, so the fill rides both variants (the caller ORs it
 /// into the cooldown before it looks at the outcome).
 #[derive(Debug, Clone, Copy)]
 enum CloseOutcome {
-    Landed { partial: bool },
-    Refused { partial: bool },
+    Landed { fill: Fill },
+    Refused { fill: Fill },
 }
 
 impl CloseOutcome {
-    /// Whether the attempt was partial.
-    fn partial(self) -> bool {
+    /// The attempt's fill.
+    fn fill(self) -> Fill {
         match self {
-            CloseOutcome::Landed { partial } | CloseOutcome::Refused { partial } => partial,
+            CloseOutcome::Landed { fill } | CloseOutcome::Refused { fill } => fill,
         }
     }
 }
@@ -486,10 +513,10 @@ fn vault_take_coin(
     coin: &str,
     feed: &MarketFeed,
 ) -> Option<Decimal> {
-    let (taken, is_long, size, entry_px, leverage) = me.positions.get(coin).map(|p| {
+    let (taken, direction, size, entry_px, leverage) = me.positions.get(coin).map(|p| {
         (
             p.isolated_margin,
-            p.is_long(),
+            p.direction(),
             p.szi.abs(),
             p.entry_px,
             p.leverage_value,
@@ -498,7 +525,7 @@ fn vault_take_coin(
     let facts = account::FillFacts {
         coin: coin.to_string(),
         // The vault takes the position on the same side (entered at the mark).
-        side: crate::sim::order::Side::of(is_long),
+        side: direction.entry_side(),
         size,
         px: feed.mark_or(coin, entry_px),
         leverage,
@@ -519,6 +546,15 @@ fn rescue_step(equity: Decimal, maintenance: Decimal) -> Rescue {
     } else {
         Rescue::Book
     }
+}
+
+/// The ADL ranking's target: the leg being closed (its coin, the previous
+/// mark, and the direction the underwater position holds).
+#[derive(Debug, Clone, Copy)]
+struct AdlTarget<'a> {
+    coin: &'a str,
+    prev_mark: Decimal,
+    direction: account::Direction,
 }
 
 /// One account's walk through the waterfall: the snapshot the check reads,

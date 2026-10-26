@@ -148,6 +148,17 @@ impl std::fmt::Debug for Store {
     }
 }
 
+/// What a burn scan's insert found: the record is new, the same message was
+/// already known (the restart backfill — normal), or a *different* burn
+/// carried the same nonce (two burns in one tx — the caller refuses loudly,
+/// keeping the first).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Inserted {
+    New,
+    Rescanned,
+    NonceCollision,
+}
+
 impl Store {
     /// Load the state file. Absent is a fact (first boot starts empty); an IO
     /// fault is not emptiness; corrupt bytes die here, at the load point,
@@ -198,12 +209,10 @@ impl Store {
         self.with(|state| Ok(state.messages.iter().find(|m| pred(m)).cloned()))
     }
 
-    /// Insert the record unless a burn with the same nonce is already known:
-    /// `None` = inserted, `Some(true)` = the same message re-scanned (the
-    /// restart backfill, normal), `Some(false)` = a different burn with the
-    /// same nonce (two burns in one tx — the caller refuses loudly). The
-    /// record is pushed under the lock, so two scanners cannot both insert.
-    pub(crate) fn insert_message(&self, record: MessageRecord) -> Result<Option<bool>> {
+    /// Insert the record unless a burn with the same nonce is already known.
+    /// The record is pushed under the lock, so two scanners cannot both
+    /// insert.
+    pub(crate) fn insert_message(&self, record: MessageRecord) -> Result<Inserted> {
         let nonce = record.burn_tx;
         let source_domain = record.source_domain;
         self.with(move |state| {
@@ -212,10 +221,14 @@ impl Store {
                 .iter()
                 .find(|m| m.nonce == nonce && m.source_domain == source_domain)
             {
-                return Ok(Some(existing.raw_message == record.raw_message));
+                return Ok(if existing.raw_message == record.raw_message {
+                    Inserted::Rescanned
+                } else {
+                    Inserted::NonceCollision
+                });
             }
             state.messages.push(record);
-            Ok(None)
+            Ok(Inserted::New)
         })
     }
 
