@@ -283,6 +283,9 @@ portfolio-sim: ## The portfolio simulation: a delta-neutral basis book across bo
 basis-capture: ## The live T-vs-V basis series, traded: the capture + the live carry, the identity checked
 	NS=venue-mirror ./scripts/basis-capture.sh
 
+portfolio-reaction: ## A held portfolio vs another account's impact: both directions, the thresholds, the hedge
+	NS=venue-mirror ./scripts/portfolio-reaction.sh
+
 crosschain-margin: ## The crosschain margin book: bridged collateral, funding costs, served unrealized PnL, the loop closed
 	NS=venue-mirror ./scripts/crosschain-margin.sh
 
@@ -298,15 +301,16 @@ impact-scenarios: ## The impact ladder: a whale moves the book and the mark; the
 shadow-audit: ## The shadowing audit: deliberate anvil states vs the COW shadow, both mirrors
 	./scripts/shadow-audit.sh
 
-benchmark: ## The prime-brokerage benchmark session: the six portfolio studies in sequence
-	@echo "== benchmark session: the six portfolio studies =="
+benchmark: ## The prime-brokerage benchmark session: the seven portfolio studies in sequence
+	@echo "== benchmark session: the seven portfolio studies =="
 	@$(MAKE) --no-print-directory portfolio-sim
 	@$(MAKE) --no-print-directory basis-capture
+	@$(MAKE) --no-print-directory portfolio-reaction
 	@$(MAKE) --no-print-directory crosschain-margin
 	@$(MAKE) --no-print-directory capital-frontier
 	@$(MAKE) --no-print-directory hedged-book
 	@$(MAKE) --no-print-directory impact-scenarios
-	@echo "== benchmark session: all six studies green ==" 
+	@echo "== benchmark session: all seven studies green ==" 
 
 cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locally (both chains forked from the real ones: the round trip + the unified-margin cycle)
 	./scripts/cctp-local.sh

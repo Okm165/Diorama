@@ -224,22 +224,50 @@ pub(crate) async fn advance(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CrashRequest {
+pub(crate) struct PriceMoveRequest {
     pub coin: String,
-    /// Percent below the current mark; absent = hand the coin back to live
+    /// The move's size in percent; absent = hand the coin back to live
     /// updates.
     #[serde(default)]
     pub pct: Option<Decimal>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct CrashResponse {
+pub(crate) struct PriceMoveResponse {
     pub coin: String,
     pub owned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mark: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oracle: Option<Decimal>,
+}
+
+/// Which way the scenario's price move goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PriceMove {
+    /// Down: the crash primitive.
+    Crash,
+    /// Up: the squeeze (a short's adverse side — the crash's mirror).
+    Rally,
+}
+
+impl PriceMove {
+    /// The verb the messages carry.
+    fn verb(self) -> &'static str {
+        match self {
+            PriceMove::Crash => "crash",
+            PriceMove::Rally => "rally",
+        }
+    }
+
+    /// The moved price: below the current mark for a crash, above for a
+    /// rally.
+    fn apply(self, mark: Decimal, pct: Decimal) -> Decimal {
+        match self {
+            PriceMove::Crash => mark * (Decimal::ONE - pct / Decimal::ONE_HUNDRED),
+            PriceMove::Rally => mark * (Decimal::ONE + pct / Decimal::ONE_HUNDRED),
+        }
+    }
 }
 
 /// `stall`: hold the live market plane for `seconds` (0 clears) — the
@@ -266,38 +294,63 @@ pub(crate) async fn stall(State(state): State<Arc<ApiState>>, Json(req): Json<St
     }))
 }
 
-pub(crate) async fn crash(State(state): State<Arc<ApiState>>, Json(req): Json<CrashRequest>) -> Result<Json<CrashResponse>> {
-    let feed = &state.feed;
+pub(crate) async fn crash(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<PriceMoveRequest>,
+) -> Result<Json<PriceMoveResponse>> {
+    move_price(&state.feed, req, PriceMove::Crash).map(Json)
+}
+
+/// `/control/rally` — the crash's mirror: the mark and oracle move *up* by
+/// `pct` (a squeeze), so a short's adverse side — and a long's upside — is
+/// exercisable too. Absent `pct` hands the coin back, the crash's own clear.
+pub(crate) async fn rally(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<PriceMoveRequest>,
+) -> Result<Json<PriceMoveResponse>> {
+    move_price(&state.feed, req, PriceMove::Rally).map(Json)
+}
+
+/// The scenario's price move, one home for both verbs: own the coin's mark
+/// and oracle at the moved price, or hand it back.
+fn move_price(
+    feed: &crate::feed::MarketFeed,
+    req: PriceMoveRequest,
+    dir: PriceMove,
+) -> Result<PriceMoveResponse> {
     match req.pct {
         None => {
             feed.clear_price(&req.coin)?;
-            Ok(Json(CrashResponse {
+            Ok(PriceMoveResponse {
                 coin: req.coin,
                 owned: false,
                 mark: None,
                 oracle: None,
-            }))
+            })
         }
         Some(pct) => {
             if pct <= Decimal::ZERO || pct >= Decimal::ONE_HUNDRED {
-                return Err(Error::bad_request(format!("crash pct {pct} must be in (0, 100)"),));
+                return Err(Error::bad_request(format!(
+                    "{} pct {pct} must be in (0, 100)",
+                    dir.verb()
+                )));
             }
             let mark = feed.mark(&req.coin).ok_or_else(|| Error::NoMarket {
                 coin: req.coin.clone(),
             })?;
-            let crashed = mark * (Decimal::ONE - pct / Decimal::ONE_HUNDRED);
+            let moved = dir.apply(mark, pct);
             let price = PriceOverride {
-                mark: crashed,
-                oracle: crashed,
+                mark: moved,
+                oracle: moved,
             };
             feed.own_price(&req.coin, price)?;
-            tracing::warn!(coin = %req.coin, pct = %pct, mark = %crashed, "sim crash: mark and oracle owned");
-            Ok(Json(CrashResponse {
+            tracing::warn!(coin = %req.coin, pct = %pct, mark = %moved, move = dir.verb(), "sim price move: mark and oracle owned");
+            Ok(PriceMoveResponse {
                 coin: req.coin,
                 owned: true,
-                mark: Some(crashed),
-                oracle: Some(crashed),
-            }))
+                mark: Some(moved),
+                oracle: Some(moved),
+            })
         }
     }
 }

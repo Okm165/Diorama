@@ -1090,7 +1090,8 @@ own clock — the COW overlay's split, by design.
 |---|---|---|
 | `POST /control/deal` | `{address, class: spot\|perp, coin?, amount}` | mint venue funds (absolute-additive; the perp class is the enforcement's recall source) |
 | `POST /control/advance` | `{seconds?, n?}` | jump the sim clock and run `n` liquidation checks inside it |
-| `POST /control/crash` | `{coin, pct?}` | own the coin's mark + oracle (absent = hand back to live) |
+| `POST /control/crash` | `{coin, pct?}` | own the coin's mark + oracle, moved *down* by `pct` (absent = hand back to live) |
+| `POST /control/rally` | `{coin, pct?}` | the crash's mirror: the mark + oracle moved *up* by `pct` (a short's adverse side, a long's upside) |
 | `POST /control/set_book` | `{coin, levels?}` | scripted book, ≤20 levels per side (absent = hand back) |
 | `POST /control/stall` | `{seconds}` | hold the live market plane (0 clears) — the staleness drill; scripted writes are never gated |
 | `POST /control/set_funding` | `{coin, rate?}` | own the hourly rate (absent = hand back) |

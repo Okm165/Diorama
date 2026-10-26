@@ -369,6 +369,22 @@ the advance while the live plane keeps ticking — the sim never invents a
 future price. The fill's own basis (e.g. +33.9 bps against the quoted
 +28.8) is the book's cost line.
 
+### The portfolio reaction — `make portfolio-reaction`
+
+A held portfolio against another account's market impact, measured on both
+channels: the whale's book round trip moves the *execution* cost (the
+trader's equity moves only by the mark's own delta — measured: `$+0.00` on a
+300 ETH round trip), while the scenario's `crash` and `rally` move the
+*mark*. On the same short the reactions mirror at `-size x delta-mark`
+(measured: `$+1,500.00` / `$-1,499.95` on a 12.87 ETH short, 5%), the served
+buffer matches the sim's own liquidation per direction (the short liquidates
+at a rally of 7.97% against a 7.97% served buffer; the long at a crash of
+8.20% against 7.95% — the 0.25% scan grid), and the hedged book (perp short +
+spot long) is flat both ways (perp `+1,397.16` + spot `-1,397.16` = `0.00`).
+Beyond the buffer the trigger fires; the mark-only shock's close executes at
+the *live* book (the documented split — the book channel is
+`make impact-scenarios`' own test).
+
 ### Re-pin — `make mainnet-repin`
 
 Three occasions:
