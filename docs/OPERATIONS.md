@@ -719,6 +719,12 @@ the same call *refuses* with the numbers (the guard never poisons — the
 anvil's value is untouched). The hand-back's keys are per-address: a token's
 storage slot is named *on the token* (`{"address": <token>, "slots": [...]}`),
 an account's balance/nonce/code on the account (`account_fields`). The
+`all` form (`{"address": <token>, "clear": true, "all": true}`) is the
+deliberate **"reset this account to source truth"** operation: it hands back
+*every* marked key of the address and re-syncs them from the source — on a
+token that is also a live devnet balance (the bridge's wallet, a trader),
+that resets those balances too. Prefer the precise `slots` list when the
+account carries devnet state other suites rely on. The
 fixture-owned tokens (the devnet's mocks over the source's addresses) report
 their mock supply and are never overwritten by the follow. Two deeper legs
 close the reliability question: the **BAL accounting** is asserted per block

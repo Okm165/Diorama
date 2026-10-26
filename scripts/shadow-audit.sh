@@ -385,7 +385,8 @@ rewind_hand_back() {
   local c0 slots_before
   c0=$(eget "$ns" /status | json "d.get('cursor')")
   slots_before=$(eget "$ns" /status | json "d.get('shadowed_slots')")
-  epost "$ns" /admin/deal "{\"token\":\"$token\",\"to\":\"$PROBE_ACCOUNT\",\"amount\":\"$DEAL_AMOUNT\"}" > /dev/null
+  local d
+  d=$(epost "$ns" /admin/deal "{\"token\":\"$token\",\"to\":\"$PROBE_ACCOUNT\",\"amount\":\"$DEAL_AMOUNT\"}")
   local c1 blocks rw unshadowed restored
   c1=$(eget "$ns" /status | json "d.get('cursor')")
   blocks=$(( c1 - c0 + 1 ))
@@ -398,8 +399,14 @@ rewind_hand_back() {
   check "T (frozen): the deal survived the rewind (${bal} = ${DEAL_AMOUNT})" "$( [ "$bal" = "$DEAL_AMOUNT" ] && echo 1 || echo 0 )"
   local slots_after; slots_after=$(eget "$ns" /status | json "d.get('shadowed_slots')")
   check "T (frozen): the deal's claim stayed (${slots_before} -> ${slots_after})" "$( [ "$slots_after" -gt "$slots_before" ] && echo 1 || echo 0 )"
-  local back resynced bal2 src_bal
-  back=$(epost "$ns" /admin/shadow "{\"address\":\"$token\",\"clear\":true,\"all\":true}")
+  # The precise clear (the deal's own slot): the `all` form would reset every
+  # marked key of the token to the source — including balances other suites
+  # rely on (measured: it zeroed the bridge's wallet, which the roundtrip
+  # needs). `all` is the deliberate "reset this account to source truth".
+  local slot_back resynced bal2 src_bal
+  slot_back=$(echo "$d" | json "d.get('slot') or ''")
+  local back
+  back=$(epost "$ns" /admin/shadow "{\"address\":\"$token\",\"slots\":[\"$slot_back\"],\"clear\":true}")
   resynced=$(echo "$back" | json "d.get('resynced_keys')")
   bal2=$(balance_of "$ns" "$anvil" "$token" "$PROBE_ACCOUNT")
   src_bal=$(balance_of_source "$ns" "$src" "$token" "$PROBE_ACCOUNT")
