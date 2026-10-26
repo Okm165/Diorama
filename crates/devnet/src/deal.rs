@@ -15,6 +15,7 @@ use mirror_anvil::Rpc;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DealRequest {
     pub token: Address,
     pub to: Address,

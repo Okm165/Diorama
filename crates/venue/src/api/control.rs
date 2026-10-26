@@ -62,6 +62,7 @@ pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
 // ---- deal ----------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DealRequest {
     pub address: Address,
     pub(crate) class: DealClass,
@@ -134,6 +135,7 @@ pub(crate) async fn order(State(state): State<Arc<ApiState>>, Json(req): Json<Or
 // ---- advance -------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AdvanceRequest {
     /// Total simulated seconds to jump (default: `blocks` seconds).
     #[serde(default)]
@@ -182,6 +184,7 @@ pub(crate) async fn advance(
 // ---- crash / set_funding / set_book --------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CrashRequest {
     pub coin: String,
     /// Percent below the current mark; absent = hand the coin back to live
@@ -205,6 +208,7 @@ pub(crate) struct CrashResponse {
 /// `readyz` and the order lane see the stall exactly as they would a real
 /// one); the scripted plane is never gated.
 #[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StallRequest {
     pub seconds: u64,
 }
@@ -260,6 +264,7 @@ pub(crate) async fn crash(State(state): State<Arc<ApiState>>, Json(req): Json<Cr
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SetFundingRequest {
     pub coin: String,
     /// The hourly rate to own; absent = hand back to live.
@@ -301,6 +306,7 @@ pub(crate) async fn set_funding(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SetBookRequest {
     pub coin: String,
     /// The scripted levels (`[[bids], [asks]]`, ≤20 per side); absent = hand
@@ -356,6 +362,7 @@ pub(crate) async fn set_book(
 // ---- accounts ------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SetAccountRequest {
     pub address: Address,
     pub state: AccountSeed,

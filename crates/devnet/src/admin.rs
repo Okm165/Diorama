@@ -478,6 +478,7 @@ pub struct ResumeResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShadowRequest {
     pub address: Address,
     #[serde(default)]
@@ -504,6 +505,7 @@ pub struct ShadowOutcome {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RewindRequest {
     pub blocks: u64,
 }
