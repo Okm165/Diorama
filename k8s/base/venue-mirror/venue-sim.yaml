@@ -49,6 +49,16 @@ spec:
           # /readyz is the market-plane freshness gate (meta present + every
           # configured market fresher than the staleness window); it answers
           # 503 while warming up, which is exactly the readiness signal.
+          # The boot-wait may outlast a dependency's own restart: a
+          # startupProbe (the server's own liveness path) suspends the
+          # liveness/readiness probes through it, so a coordinated rollout
+          # never kills a booting container (measured: exit 137 at ~2 minutes
+          # when a dependency restarted under a rolling engine). Readiness
+          # stays the market-plane freshness gate.
+          startupProbe:
+            httpGet: { path: /healthz, port: 8090 }
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             httpGet: { path: /readyz, port: 8090 }
             initialDelaySeconds: 5

@@ -48,6 +48,16 @@ spec:
           # `/livez`, not `/healthz` (see the mainnet engine's manifest): the
           # paused state must not take the engine out of the Service or
           # restart the pod.
+          # The boot-wait may outlast a dependency's own restart (the
+          # engines wait for their anvil/reth, the bridge for two chains): a
+          # startupProbe suspends the liveness/readiness probes through it, so
+          # a coordinated rollout never kills a booting container (measured:
+          # exit 137 at ~2 minutes when anvil-t restarted under a rolling
+          # engine).
+          startupProbe:
+            httpGet: { path: /livez, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5

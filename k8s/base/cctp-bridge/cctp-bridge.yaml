@@ -59,6 +59,16 @@ spec:
           # /healthz is the Iris router's (8095); the control plane carries
           # /health + /metrics on 8096. The readiness gate narrows to the
           # attester-installed check when the crate exposes it (plan §11.5).
+          # The boot-wait may outlast a dependency's own restart (the
+          # engines wait for their anvil/reth, the bridge for two chains): a
+          # startupProbe suspends the liveness/readiness probes through it, so
+          # a coordinated rollout never kills a booting container (measured:
+          # exit 137 at ~2 minutes when anvil-t restarted under a rolling
+          # engine).
+          startupProbe:
+            httpGet: { path: /healthz, port: 8095 }
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             httpGet: { path: /healthz, port: 8095 }
             initialDelaySeconds: 5
