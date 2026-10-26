@@ -26,10 +26,12 @@
 //! mainnet project is never compiled here (the closure matrix enforces it).
 //! Clocks: `block` = the **V height** (HyperEVM blocks; the venue profile has
 //! no second chain); `pin` = V's fork base (a block number, not a clock — the
-//! epoch key); the simulator's clock is its served `time` (ms,
-//! self-advancing), never a block label; `age_ms` = the served book's
-//! staleness age (wall ms since the last live context update — the freshness
-//! gate's figure, not a clock).
+//! epoch key); `head` = the devnet chain's own head (V's height; the bridge
+//! anchors and scans it); `source_head` = the follow source's head (the live
+//! HyperEVM height the follow compares against — never V's cursor); the
+//! simulator's clock is its served `time` (ms, self-advancing), never a block
+//! label; `age_ms` = the served book's staleness age (wall ms since the last
+//! live context update — the freshness gate's figure, not a clock).
 mod api;
 mod bridge;
 mod ctx;

@@ -780,6 +780,7 @@ mod tests {
     }
 
     /// The test's capability builder: one knob, named.
+    #[derive(Clone, Copy)]
     enum NativeBal {
         Served,
         Refused,

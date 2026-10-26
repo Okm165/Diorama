@@ -96,7 +96,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
         // The symmetric steady line: the mainnet driver logs the same
         // message per pass at its follow head.
         tracing::debug!(
-            head = source_head,
+            source_head,
             follow = followed,
             "chain is at the follow head"
         );

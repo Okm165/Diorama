@@ -51,6 +51,10 @@ const METHOD_NOT_FOUND: i64 = -32601;
 /// assigned per send; while staging, `Id::None`.
 pub type Call = Request<Box<RawValue>>;
 
+/// One chunk's answers: each call's raw result or its JSON-RPC error (the
+/// batch's own shape; the official `RawValue` keeps the values untouched).
+pub type ChunkAnswers = Vec<std::result::Result<Box<RawValue>, RpcError>>;
+
 /// Stage a call. Params serialize to the JSON-RPC positional form: a tuple
 /// for several (`(U64::from(n), true)`), a 1-tuple for one (`(raw,)`),
 /// [`NO_PARAMS`] for none.
@@ -265,15 +269,18 @@ impl Rpc {
         body: &RawValue,
     ) -> Result<(reqwest::StatusCode, String)> {
         let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(8));
-        for attempt in 1..=RATE_LIMIT_TRIES {
+        // The retries ride a bounded backoff; the last attempt's answer
+        // surfaces whatever it is (the loop backs off only while another
+        // attempt remains).
+        for _ in 1..RATE_LIMIT_TRIES {
             let (status, text) = self.post_raw(method, body).await?;
-            if attempt == RATE_LIMIT_TRIES || !is_retryable(&text) {
+            if !is_retryable(&text) {
                 return Ok((status, text));
             }
             tokio::time::sleep(backoff.delay()).await;
             backoff.record(Progress::Stalled);
         }
-        unreachable!("the loop returns on its last attempt")
+        self.post_raw(method, body).await
     }
 
     /// The JSON-RPC-over-HTTP boundary rule: the body is the node's answer
@@ -349,7 +356,7 @@ impl Rpc {
     /// The batch is split so that no single HTTP body exceeds `max_bytes`
     /// (anvil rejects bodies >= 2 MB with `-32600 Invalid request`; public
     /// endpoints answer 413) and no sub-batch exceeds `max_items`.
-    pub async fn batch(&self, calls: &[Call]) -> Result<Vec<std::result::Result<Box<RawValue>, RpcError>>> {
+    pub async fn batch(&self, calls: &[Call]) -> Result<ChunkAnswers> {
         self.batch_limited(calls, BATCH_MAX_ITEMS, 1 << 20).await
     }
 
@@ -358,7 +365,7 @@ impl Rpc {
         calls: &[Call],
         max_items: usize,
         max_bytes: usize,
-    ) -> Result<Vec<std::result::Result<Box<RawValue>, RpcError>>> {
+    ) -> Result<ChunkAnswers> {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
@@ -374,7 +381,7 @@ impl Rpc {
             ranges.push(start..end);
             start = end;
         }
-        let mut results: Vec<Option<Result<Vec<std::result::Result<Box<RawValue>, RpcError>>>>> =
+        let mut results: Vec<Option<Result<ChunkAnswers>>> =
             (0..ranges.len()).map(|_| None).collect();
         let mut set = tokio::task::JoinSet::new();
         let mut next = 0usize;
@@ -388,7 +395,7 @@ impl Rpc {
             }
             match set.join_next().await {
                 Some(Ok((idx, r))) => results[idx] = Some(r),
-                Some(Err(join)) => return Err(self.batch_task_error(join)),
+                Some(Err(join)) => return Err(self.batch_task_error(&join)),
                 None => break,
             }
         }
@@ -409,7 +416,7 @@ impl Rpc {
 
     /// A spawned chunk task's failure as the crate's typed error (the code
     /// stays outside the JSON-RPC ranges, like [`missing_from_batch`]'s).
-    fn batch_task_error(&self, join: tokio::task::JoinError) -> Error {
+    fn batch_task_error(&self, join: &tokio::task::JoinError) -> Error {
         self.batch_task_error_text(format!("batch task failed: {join}"))
     }
 

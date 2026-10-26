@@ -512,6 +512,7 @@ mod tests {
     use std::time::Duration;
 
     /// The test's capability builder: one knob, named.
+    #[derive(Clone, Copy)]
     enum History {
         Served,
         Refused,

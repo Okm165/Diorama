@@ -689,14 +689,14 @@ impl FillFacts {
     pub(crate) fn close(
         coin: &str,
         side: crate::sim::order::Side,
-        size: Decimal,
+        sz: Decimal,
         px: Decimal,
         leverage: u32,
     ) -> Self {
         Self {
             coin: coin.to_string(),
             side,
-            size,
+            size: sz,
             px,
             leverage,
             reduce: crate::sim::order::Reduce::Only,

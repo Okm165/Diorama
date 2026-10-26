@@ -1535,11 +1535,11 @@ mod tests {
     }
 
     /// An IOC order on ETH.
-    fn ioc(side: Side, size: &str) -> Order {
+    fn ioc(side: Side, sz: &str) -> Order {
         Order {
             coin: "ETH".into(),
             is_buy: side.is_buy(),
-            size: size.parse().unwrap(),
+            size: sz.parse().unwrap(),
             limit_px: None,
             tif: Tif::Ioc,
             reduce_only: false,
@@ -1549,10 +1549,10 @@ mod tests {
     }
 
     /// The same, reduce-only.
-    fn reduce(side: Side, size: &str) -> Order {
+    fn reduce(side: Side, sz: &str) -> Order {
         Order {
             reduce_only: true,
-            ..ioc(side, size)
+            ..ioc(side, sz)
         }
     }
 
