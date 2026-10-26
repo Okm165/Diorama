@@ -55,6 +55,15 @@ impl Order {
     pub(crate) fn side(&self) -> Side {
         Side::of(self.is_buy)
     }
+
+    /// The reduce-only flag, converted from the wire once.
+    pub(crate) fn reduce(&self) -> Reduce {
+        if self.reduce_only {
+            Reduce::Only
+        } else {
+            Reduce::Any
+        }
+    }
 }
 
 /// Time in force (docs: `"Alo" | "Ioc" | "Gtc"`). The two wire encodings live
@@ -142,10 +151,36 @@ impl CancelSpeed {
 
 /// Whether an order may only reduce the position (the wire's `reduce_only`,
 /// named): a reduce-only order frees margin instead of using it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Reduce {
     Only,
     Any,
+}
+
+impl<'de> Deserialize<'de> for Reduce {
+    /// Reads both spellings: the wire's `reduce_only` flag (the compact
+    /// payloads and the pre-enum state files) and the enum's own name.
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Flag(bool),
+            Named(String),
+        }
+        match Wire::deserialize(deserializer)? {
+            Wire::Flag(true) => Ok(Reduce::Only),
+            Wire::Flag(false) => Ok(Reduce::Any),
+            Wire::Named(name) => match name.as_str() {
+                "only" => Ok(Reduce::Only),
+                "any" => Ok(Reduce::Any),
+                other => Err(serde::de::Error::custom(format!("unknown reduce {other:?}"))),
+            },
+        }
+    }
 }
 
 /// Which way an order goes: the sim's own vocabulary. The wire keeps the
@@ -358,7 +393,10 @@ pub(crate) struct RestingOrder {
     /// The remaining size.
     pub sz: Decimal,
     pub orig_sz: Decimal,
-    pub reduce_only: bool,
+    /// The reduce-only flag (`reduceOnly` in pre-enum state files; the alias
+    /// and the tolerant `Reduce` deserializer migrate them).
+    #[serde(alias = "reduceOnly", alias = "reduce_only")]
+    pub reduce: Reduce,
     pub tif: Tif,
     #[serde(default)]
     pub cloid: Option<alloy_primitives::B128>,
@@ -505,16 +543,7 @@ impl Sim {
     pub(crate) fn remargin_ok(&self, feed: &MarketFeed, r: &RestingOrder) -> Result<bool> {
         let meta = feed.meta();
         let leverage = self.leverage_for(r.account, &r.coin, meta.as_ref())?;
-        let requirement = order_requirement(
-            r.sz,
-            feed.mark_or(&r.coin, r.px),
-            leverage,
-            if r.reduce_only {
-                Reduce::Only
-            } else {
-                Reduce::Any
-            },
-        )?;
+        let requirement = order_requirement(r.sz, feed.mark_or(&r.coin, r.px), leverage, r.reduce)?;
         let Some(available) = self.available_for(feed, r.account, Some(r.oid), meta.as_ref())?
         else {
             return Ok(true); // no account state: nothing to re-margin against
@@ -614,7 +643,7 @@ impl Sim {
     ) -> Result<Decimal> {
         let mut total = Decimal::ZERO;
         for r in self.resting_orders(Some(account))? {
-            if Some(r.oid) == exclude_oid || r.reduce_only {
+            if Some(r.oid) == exclude_oid || r.reduce == Reduce::Only {
                 continue;
             }
             let leverage = self.leverage_for(account, &r.coin, meta)?;
@@ -750,7 +779,7 @@ impl Sim {
             size: filled,
             px: avg_px,
             leverage,
-            reduce_only: req.reduce_only,
+            reduce: req.reduce(),
             fee: super::account::mul(notional, taker_fee(), "taker fee")?,
         };
         self.land_fill(feed, address, &facts, meta.as_ref())?;
@@ -797,7 +826,7 @@ impl Sim {
                         size: *sz,
                         px: *px,
                         leverage,
-                        reduce_only: self.resting_flag(*oid)?,
+                        reduce: self.resting_flag(*oid)?,
                         fee: super::account::mul(notional, maker_fee(), "maker fee")?,
                     };
                     self.with_account_now(*maker, feed, |account| {
@@ -861,14 +890,14 @@ impl Sim {
     }
 
     /// The taker's own resting flag (for a maker fill's reduce-only semantics).
-    fn resting_flag(&self, oid: u64) -> Result<bool> {
+    fn resting_flag(&self, oid: u64) -> Result<Reduce> {
         Ok(self
             .state
             .lock()?
             .resting
             .get(&oid)
-            .map(|r| r.reduce_only)
-            .unwrap_or(false))
+            .map(|r| r.reduce)
+            .unwrap_or(Reduce::Any))
     }
 
     /// `updateLeverage`: the account's per-coin setting (docs: "subject to
@@ -1011,7 +1040,7 @@ impl Sim {
             px,
             sz,
             orig_sz: sz,
-            reduce_only: req.reduce_only,
+            reduce: req.reduce(),
             tif: req.tif,
             cloid: req.cloid,
             trigger: req.trigger,
@@ -1360,24 +1389,31 @@ fn walk_served_book(
     Ok((legs, filled, avg_px))
 }
 
-/// The merged opposite side, price-ordered: (px, is_maker, oid, maker, sz).
-/// At the same price the devnet's own resting orders go first (they are
-/// time-stamped; the live level's age is unknowable).
+/// Where a merged candidate comes from: a live book level, or the devnet's
+/// own resting order. The order matters at equal prices: the resting orders
+/// go first (they are time-stamped; the live level's age is unknowable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Origin {
+    Book,
+    Resting,
+}
+
+/// The merged opposite side, price-ordered: (px, origin, oid, maker, sz).
 fn merge_candidates(
     book: &L2Book,
     req: &Order,
     resting: &[RestingOrder],
-) -> Vec<(Decimal, bool, u64, Address, Decimal)> {
+) -> Vec<(Decimal, Origin, u64, Address, Decimal)> {
     let side = req.side().book_index();
-    let mut candidates: Vec<(Decimal, bool, u64, Address, Decimal)> = book.levels[side]
+    let mut candidates: Vec<(Decimal, Origin, u64, Address, Decimal)> = book.levels[side]
         .iter()
-        .map(|l| (l.px, false, 0u64, Address::ZERO, l.sz))
+        .map(|l| (l.px, Origin::Book, 0u64, Address::ZERO, l.sz))
         .collect();
     for r in resting
         .iter()
         .filter(|r| r.coin == book.coin && r.side != req.side() && r.trigger.is_none())
     {
-        candidates.push((r.px, true, r.oid, r.account, r.sz));
+        candidates.push((r.px, Origin::Resting, r.oid, r.account, r.sz));
     }
     candidates.sort_by(|a, b| {
         let by_px = match req.side() {
@@ -1397,7 +1433,7 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Can
     let mut remaining = req.size;
     let mut notional = Decimal::ZERO;
     let mut legs = Vec::new();
-    for (px, is_maker, oid, maker, sz) in candidates {
+    for (px, origin, oid, maker, sz) in candidates {
         if remaining <= Decimal::ZERO {
             break;
         }
@@ -1420,7 +1456,7 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Can
             super::account::mul(take, px, super::account::FILL_NOTIONAL)?,
             "fill total",
         )?;
-        if is_maker {
+        if origin == Origin::Resting {
             legs.push(Candidate::Maker { oid, maker, px, sz: take });
         } else {
             legs.push(Candidate::Live(Consumption {

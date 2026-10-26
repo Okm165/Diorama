@@ -299,7 +299,7 @@ fn frontend_row(r: &crate::sim::order::RestingOrder) -> FrontendOpenOrder {
         oid: r.oid,
         order_type: order_type(r.trigger.is_some()),
         orig_sz: r.orig_sz.to_string(),
-        reduce_only: r.reduce_only,
+        reduce_only: matches!(r.reduce, crate::sim::order::Reduce::Only),
         side: side_letter(r.side),
         sz: r.sz.to_string(),
         timestamp: r.placed_ms,

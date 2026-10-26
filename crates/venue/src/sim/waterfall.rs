@@ -198,9 +198,9 @@ impl Sim {
             if !leg.holds(coin, p) {
                 continue;
             }
-            let (did_close, was_partial) = self.liquidate_one(pass, (coin, p), cooldown)?;
-            partial |= was_partial;
-            if did_close {
+            let outcome = self.liquidate_one(pass, (coin, p), cooldown)?;
+            partial |= outcome.partial();
+            if matches!(outcome, CloseOutcome::Landed { .. }) {
                 closed.push(coin.clone());
             }
         }
@@ -224,27 +224,27 @@ impl Sim {
         pass: &Pass<'_>,
         position: (&str, &account::Position),
         cooldown: PartialCooldown,
-    ) -> Result<(bool, bool)> {
+    ) -> Result<CloseOutcome> {
         let (coin, p) = position;
         let Some(mark) = pass.feed.mark(coin) else {
-            return Ok((false, false));
+            return Ok(CloseOutcome::Refused { partial: false });
         };
         let notional = account::mul(p.szi.abs(), mark, "liquidation notional")?;
-        let (size, was_partial) = match attempt_size(p.szi.abs(), notional, cooldown)? {
+        let (size, partial) = match attempt_size(p.szi.abs(), notional, cooldown)? {
             Attempt::Full(size) => (size, false),
             Attempt::Partial(size) => (size, true),
         };
         if size.is_zero() {
-            return Ok((false, was_partial));
+            return Ok(CloseOutcome::Refused { partial });
         }
         match self.liquidate_position(pass.feed, pass.address, coin, size) {
             Ok(fill) => {
-                tracing::warn!(account = %pass.address, coin = %coin, sz = %fill.total_sz, avg_px = %fill.avg_px, partial = was_partial, "liquidation: market close");
-                Ok((true, was_partial))
+                tracing::warn!(account = %pass.address, coin = %coin, sz = %fill.total_sz, avg_px = %fill.avg_px, partial, "liquidation: market close");
+                Ok(CloseOutcome::Landed { partial })
             }
             Err(e) => {
                 tracing::warn!(account = %pass.address, coin = %coin, error = %e, "liquidation close refused (no liquidity?)");
-                Ok((false, was_partial))
+                Ok(CloseOutcome::Refused { partial })
             }
         }
     }
@@ -443,6 +443,25 @@ impl Sim {
     }
 }
 
+/// One leg's liquidation attempt: the close either landed (the market order
+/// filled) or was refused (no liquidity) — and the attempt may have been
+/// partial either way, so the flag rides both variants (the caller ORs it
+/// into the cooldown before it looks at the outcome).
+#[derive(Debug, Clone, Copy)]
+enum CloseOutcome {
+    Landed { partial: bool },
+    Refused { partial: bool },
+}
+
+impl CloseOutcome {
+    /// Whether the attempt was partial.
+    fn partial(self) -> bool {
+        match self {
+            CloseOutcome::Landed { partial } | CloseOutcome::Refused { partial } => partial,
+        }
+    }
+}
+
 /// The waterfall's entry step for one underwater leg.
 #[derive(Clone, Copy)]
 enum Rescue {
@@ -483,7 +502,7 @@ fn vault_take_coin(
         size,
         px: feed.mark_or(coin, entry_px),
         leverage,
-        reduce_only: false,
+        reduce: crate::sim::order::Reduce::Any,
         fee: Decimal::ZERO,
     };
     if let Err(e) = account::apply_fill(vault, &facts, feed.meta().as_ref()) {

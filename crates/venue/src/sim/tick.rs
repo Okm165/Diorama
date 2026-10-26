@@ -180,7 +180,7 @@ impl Sim {
                 size: r.sz,
                 limit_px: if t.is_market { None } else { Some(r.px) },
                 tif: crate::sim::order::Tif::Ioc,
-                reduce_only: r.reduce_only,
+                reduce_only: r.reduce == crate::sim::order::Reduce::Only,
                 cloid: r.cloid,
                 trigger: None,
             };
@@ -263,7 +263,7 @@ impl Sim {
             size: take,
             px: r.px,
             leverage,
-            reduce_only: r.reduce_only,
+            reduce: r.reduce,
             fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
         };
         self.with_account_now(r.account, feed, |account| {

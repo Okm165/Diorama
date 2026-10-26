@@ -677,7 +677,7 @@ pub(crate) struct FillFacts {
     pub size: Decimal,
     pub px: Decimal,
     pub leverage: u32,
-    pub reduce_only: bool,
+    pub reduce: crate::sim::order::Reduce,
     /// The trading fee (venue base tier; charged on top of the fill — the
     /// plan's `closedPnl = fee + side·(mark−entry)·size`).
     pub fee: Decimal,
@@ -699,7 +699,7 @@ impl FillFacts {
             size,
             px,
             leverage,
-            reduce_only: true,
+            reduce: crate::sim::order::Reduce::Only,
             fee: Decimal::ZERO,
         }
     }
@@ -791,7 +791,9 @@ fn release_isolated_margin(
 /// The reduce-only guard: the venue's own string (plan §16.3) when the fill
 /// would not reduce the position it names.
 fn refuse_non_reducing(old: Decimal, signed: Decimal, fill: &FillFacts) -> Result<()> {
-    if fill.reduce_only && (same_direction(old, signed) || fill.size > old.abs()) {
+    if fill.reduce == crate::sim::order::Reduce::Only
+        && (same_direction(old, signed) || fill.size > old.abs())
+    {
         return Err(Error::bad_request(
             "Reduce only order would increase position.",
         ));
