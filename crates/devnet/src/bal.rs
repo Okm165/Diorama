@@ -168,22 +168,30 @@ pub struct Composer<'a> {
 impl<'a> Composer<'a> {
     /// The generic composer: a window's BAL, however the source can produce
     /// one.
-    pub async fn compose(&self, window: Window) -> Result<(WindowBal, ComposeStats)> {
+    pub async fn compose(
+        &self,
+        skip: &crate::cow::SkipSet,
+        window: Window,
+    ) -> Result<(WindowBal, ComposeStats)> {
         let Window { from, to } = window;
         if to <= from {
             return Ok((WindowBal::empty(from, to), ComposeStats::default()));
         }
         if self.source.capabilities().native_bal {
-            self.native_window(window).await
+            self.native_window(skip, window).await
         } else {
-            self.synth_window(window).await
+            self.synth_window(skip, window).await
         }
     }
 
     /// Rung 1: the source records BALs — fetch each block of the window and
     /// merge them. A block without one falls back to rung 2 for that block
     /// alone; the window's kind then names the rung that answered.
-    async fn native_window(&self, window: Window) -> Result<(WindowBal, ComposeStats)> {
+    async fn native_window(
+        &self,
+        skip: &crate::cow::SkipSet,
+        window: Window,
+    ) -> Result<(WindowBal, ComposeStats)> {
         let Window { from, to } = window;
         let mut acc: BTreeMap<Address, AccountChanges> = BTreeMap::new();
         let mut stats = ComposeStats::default();
@@ -192,7 +200,7 @@ impl<'a> Composer<'a> {
             if let Some(bal) = self.source.bal(n).await? {
                 merge_into(&mut acc, bal);
             } else {
-                let (bal, s) = self.synthesize(Window::new(n - 1, n)).await?;
+                let (bal, s) = self.synthesize(skip, Window::new(n - 1, n)).await?;
                 merge_into(&mut acc, bal);
                 stats.absorb(s);
                 kind = self.source.touched_kind();
@@ -204,8 +212,12 @@ impl<'a> Composer<'a> {
 
     /// Rung 2: the source reports the window's touches; the declared scope
     /// plans the keys and the differing reads become the BAL.
-    async fn synth_window(&self, window: Window) -> Result<(WindowBal, ComposeStats)> {
-        let (bal, stats) = self.synthesize(window).await?;
+    async fn synth_window(
+        &self,
+        skip: &crate::cow::SkipSet,
+        window: Window,
+    ) -> Result<(WindowBal, ComposeStats)> {
+        let (bal, stats) = self.synthesize(skip, window).await?;
         Ok((
             WindowBal {
                 from: window.from,
@@ -226,7 +238,14 @@ impl<'a> Composer<'a> {
         shadow: &crate::shared::Shared<crate::shadow::Shadow>,
         window: Window,
     ) -> Result<WindowPlan> {
-        let (composed, compose) = self.compose(window).await?;
+        // The read-side skip snapshot, taken under the lock the filter will
+        // take again below: keys it would drop are never read (the endpoint's
+        // request budget is the follow's binding constraint).
+        let skip = {
+            let shadow = shadow.lock()?;
+            crate::cow::SkipSet::snapshot(&shadow)
+        };
+        let (composed, compose) = self.compose(&skip, window).await?;
         let total = change_count(&composed.bal);
         let (bal, filter) = {
             let shadow = shadow.lock()?;
@@ -246,7 +265,11 @@ impl<'a> Composer<'a> {
     /// Rung 2's read side: touches → the declared scope's read plan →
     /// source/target reads → a BAL of the differing keys. Keys the touched
     /// set already carries values for (the trace rung) are not re-read.
-    async fn synthesize(&self, window: Window) -> Result<(BlockAccessList, ComposeStats)> {
+    async fn synthesize(
+        &self,
+        skip: &crate::cow::SkipSet,
+        window: Window,
+    ) -> Result<(BlockAccessList, ComposeStats)> {
         let Window { from, to } = window;
         let mut touched = self.source.touched(from, to).await?;
         // The watchlist's own freshness: every watched account's fields are
@@ -273,7 +296,7 @@ impl<'a> Composer<'a> {
         let pending: Vec<Key> = plan
             .iter()
             .copied()
-            .filter(|key| !valued.contains(key))
+            .filter(|key| !valued.contains(key) && !skip.skips(key))
             .collect();
         if !pending.is_empty() {
             let source_values = self.source.read_keys(&pending, to).await?;
@@ -761,7 +784,7 @@ mod tests {
                     target: &target,
                     scope: &scope,
                 }
-                .compose(Window::new(0, 1)),
+                .compose(&crate::cow::SkipSet::default(), Window::new(0, 1)),
             )
             .unwrap();
         assert_eq!(window.kind, DiffKind::Bal);
@@ -804,7 +827,7 @@ mod tests {
                     target: &target,
                     scope: &scope,
                 }
-                .compose(Window::new(0, 1)),
+                .compose(&crate::cow::SkipSet::default(), Window::new(0, 1)),
             )
             .unwrap();
         assert_eq!(window.kind, DiffKind::Poll);
@@ -849,7 +872,7 @@ mod tests {
                     target: &target,
                     scope: &scope,
                 }
-                .compose(Window::new(0, 1)),
+                .compose(&crate::cow::SkipSet::default(), Window::new(0, 1)),
             )
             .unwrap();
         let writes = mirror_anvil::flatten_bal(&window.bal);

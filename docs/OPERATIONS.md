@@ -612,21 +612,29 @@ Without the Secret the bridge pod waits in `CreateContainerConfigError`; the
 engine and the simulator boot without it.
 
 **The follow's cadence against the public source** (measured): the reads ride
-JSON-RPC batches — a window is two envelope bodies (receipts capped at 16
-blocks each, then the system txs) plus one mixed body per side for the planned
-keys, one request in flight (the endpoint's burst limiter refused concurrent
-bodies; one-at-a-time is the pre-batching era's own proven-safe shape). A
-steady-state pass is ~5 requests for ~2-3 source blocks — inside the public
-endpoint's budget — and a pass that fails (a throttle, a transport fault)
-backs off 1 s → 30 s, reset by a pass that serves. A gap past
-`max_gap_blocks` (300) composes bounded windows until the cursor reaches the
+JSON-RPC batches, and every one of the endpoint's measured limits is honored —
+20 items per batch, 1 MiB per answer (the logs range halves on the refusal and
+keeps the last good size), receipts avoided entirely (the endpoint throttles
+their batches; the envelope reads `eth_getLogs` ranges plus the system txs,
+and the watchlist sweep covers plain value transfers). The planned keys the
+COW filter would drop anyway (fixture-owned accounts, the devnet's own
+shadowed marks) are never read — the read-side skip, measured to cut a
+window's plan from ~208 keys to ~55. One request in flight (concurrent bodies
+tripped the burst limiter). Measured steady state after the re-pin: a 5-7
+block window every ~4.6 s, 1.8-2.5 s of compose, a stable ~4-block lag behind
+the source, zero failed passes. A pass that fails (a throttle, a transport
+fault) backs off 1 s → 60 s, reset by a pass that serves. A gap past
+`max_gap_blocks` (100) composes bounded windows until the cursor reaches the
 source head (the chunked catch-up; `venue_follow_gap_catchups_total` and one
 drift `gap_catchup` row per catch-up state, never per pass) — the follow never
 latches paused (measured: the old latching pause froze V's chain-side state
 ~9.9k blocks behind while the source moved ~60 blocks/min, and only a manual
 re-pin recovered it). The devnet's own writes are unaffected throughout (they
 are COW-owned, and the sim's market plane is its own); a re-pin remains the
-operator's choice for a fresh base.
+operator's choice for a fresh base, and after any T or V re-pin: restart the
+bridge so it reinstalls the attester and the wrapper (measured live: a
+mainnet re-fork left the T-side attester from the old base and the return
+direction parked with `Invalid attestation length` until the restart).
 
 **V's block production is the engine's** — the counterpart of T's applier
 (one block per applied parent block): the driver mines a non-empty pool on its

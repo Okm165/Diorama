@@ -18,7 +18,7 @@ use alloy_eips::eip7928::{
 };
 use alloy_primitives::{Address, U256};
 use mirror_anvil::Key;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// What the mirror keeps fresh.
 ///
@@ -140,6 +140,48 @@ pub fn filter_bal(watch: &WatchSet, shadow: &Shadow, bal: BlockAccessList) -> (B
     }
     out.sort_by_key(|acct| acct.address);
     (out, stats)
+}
+
+/// The read-side skip set: the keys a compose may skip *reading* because the
+/// filter would drop them anyway — fixture-owned accounts (whole-account
+/// ownership), unwatched keys, and the devnet's own shadowed marks.
+/// Snapshotted under the shadow lock once per window, then consulted
+/// lock-free: reading a skipped key costs a request against the source for
+/// nothing (measured live: most of a window's plan is fixture-owned token
+/// storage, and the public endpoint's request budget is the follow's binding
+/// constraint). The filter stays authoritative — a stale skip can only delay
+/// a hand-backed key by one window.
+#[derive(Debug, Default)]
+pub struct SkipSet {
+    fixtures: BTreeSet<Address>,
+    slots: BTreeMap<Address, BTreeSet<U256>>,
+    accounts: BTreeSet<Address>,
+}
+
+impl SkipSet {
+    /// The snapshot, taken under the shadow lock.
+    pub fn snapshot(shadow: &Shadow) -> Self {
+        Self {
+            fixtures: shadow.fixtures.clone(),
+            slots: shadow.slots.clone(),
+            accounts: shadow.accounts.clone(),
+        }
+    }
+
+    /// Would the filter drop this key? Then the compose need not read it.
+    pub fn skips(&self, key: &mirror_anvil::Key) -> bool {
+        if self.fixtures.contains(&key.address()) {
+            return true;
+        }
+        match key {
+            mirror_anvil::Key::Storage { address, slot } => self
+                .slots
+                .get(address)
+                .map(|slots| slots.contains(slot))
+                .unwrap_or(false),
+            _ => self.accounts.contains(&key.address()),
+        }
+    }
 }
 
 /// One account's changes: a fixture drops whole (the deploy is invisible to
