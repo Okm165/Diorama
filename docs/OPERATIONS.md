@@ -1022,12 +1022,7 @@ a mock aggregator pauses that feed automatically; `POST .../admin/feed/resume`
 hands it back, and `GET .../admin/feed` shows confirmed/pending state. On the
 cluster the mocks come from daloc's fixture deploy; when the instance
 enables `[services.engine.feed_bridge]`, the bridge publishes the *real*
-Chainlink answers (the engine's `/admin/feed` routes drive them);
-`make mainnet-feed-local` boots a scratch stack instead — a stub parent, T
-forked from it, the engine with `[services.engine.feed_bridge]` — installs
-the same Chainlink-shaped stub at each configured target, and proves the
-whole lane: parent answers published, a scenario's write paused (its value
-preserved), the hand-back restored.
+Chainlink answers (the engine's `/admin/feed` routes drive them).
 
 **The bridge round-trip.**
 

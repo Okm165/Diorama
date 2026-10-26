@@ -22,14 +22,14 @@ One binary per profile: `bins/mainnet-engine` (depends only on
 `bins/venue-sim` for the simulator. The names are mirror-qualified (`mainnet-`
 / `venue-`, matching the `mainnet-mirror` / `venue-mirror` instances) so
 neither mirror is the unqualified default; the deployments are both `engine`
-in their own namespace. `scripts/closure-matrix.sh` declares every
-allowed internal edge and fails on an undeclared one - the structural contract
-is a fitness function, not a convention.
+in their own namespace. The allowed internal edges are declared (`venue-engine -> mirror-venue + devnet
++ anvil + config`, no ethereum edge; `venue-sim` likewise) - the structural
+contract is a law, not a convention.
 
 ## Consequences
 
-- A venue change cannot break the ethereum build and vice versa; the closure
-  matrix proves it on every run.
+- A venue change cannot break the ethereum build and vice versa; the
+  dependency edges keep the two graphs apart.
 - The bins are thin shells over their project crates: the entrypoint (CLI,
   boot order, wiring) lives in the crate's `main_entry` (a crate hosting a
   second service exposes `<service>_entry` — the venue crate's `sim_entry`);

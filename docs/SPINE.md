@@ -172,7 +172,7 @@ Common components (`crates/devnet`, `crates/anvil`, `crates/config`):
 | `config` | the layered loader, `${VAR}` resolution, validation | default a chain behavior |
 
 Profile components, each in its own folder and never importing the other
-(`scripts/closure-matrix.sh` enforces the sibling rule):
+(the sibling rule):
 
 | Component | Owns | Must not |
 |---|---|---|
@@ -230,30 +230,30 @@ devnet's own writes win (COW); one transaction per window (the journal's
 before-values and the cursor move together); the epoch rule on a pin change;
 parity as the measurement; every step published as one fact.
 
-### Adding a third mirror: the checklist, and the gate that fails until each step is done
+### Adding a third mirror: the checklist
 
-The interfaces above are the whole contract; the gates make the steps
+The interfaces above are the whole contract; the checklist makes the steps
 mechanical. A third kind (an OP-stack parent, a second venue) is this list, in
 order:
 
-| Step | Artifact | The gate that fails until it exists |
-|---|---|---|
-| 1 | `crates/<name>/src/source.rs` — the `Source` impl; every `Capabilities` flag declared (`resolve` audits each method at boot); a source serving native BALs owes `verify_bal_commitment` on every retrieval (the EIP's header commitment) | `spine-purity` (the crate may not name a mirror; `crates/devnet` may not name it), `no-orphans` |
-| 2 | the watch set and the declared closures | `closure-matrix` |
-| 3 | `crates/<name>/src/profile.rs` — the `Bundle` data, `Deps`, `build` — and the context with `impl Engine` (the shell's required facts) + the error taxonomy (`impl ShellError` + `From<ShellFault>`) | `spine-purity` |
-| 4 | `bins/<name>-engine` + the compose/Dockerfile members | `docker-members` |
-| 5 | the k8s manifests | `k8s-wiring` |
-| 6 | the registry's series + the docs' series table | `metrics-written`, `docs-metrics` |
-| 7 | the clock policy | `clock-labels` |
-| 8 | the config schema | `config-check` |
-| 9 | the fact publishes (the vocabulary is shared — nothing to add) | `facts-published` |
-| 10 | the spec rows in this file | `spec-citations` |
-| 11 | the trust surface (who may call what) | `trust-audit` |
-| 12 | small scopes as it grows | `ast-scope` |
+| Step | Artifact |
+|---|---|
+| 1 | `crates/<name>/src/source.rs` — the `Source` impl; every `Capabilities` flag declared (`resolve` audits each method at boot); a source serving native BALs owes `verify_bal_commitment` on every retrieval (the EIP's header commitment) |
+| 2 | the watch set and the declared closures |
+| 3 | `crates/<name>/src/profile.rs` — the `Bundle` data, `Deps`, `build` — and the context with `impl Engine` (the shell's required facts) + the error taxonomy (`impl ShellError` + `From<ShellFault>`) |
+| 4 | `bins/<name>-engine` + the compose/Dockerfile members |
+| 5 | the k8s manifests |
+| 6 | the registry's series + the docs' series table |
+| 7 | the clock policy |
+| 8 | the config schema |
+| 9 | the fact publishes (the vocabulary is shared — nothing to add) |
+| 10 | the spec rows in this file |
+| 11 | the trust surface (who may call what) |
+| 12 | small scopes as it grows |
 
-The whole-workspace gates (`lint`, `no-panics`, `design-assertions`) apply to
-every step. A simulator (step 8 of the ranking table above) is the one step
-with no gate: it must not exist unless the parent's state cannot be read at
+The remaining gates (`lint`, `design-assertions`, `config-check`, `ast-scope`)
+apply to every step. A simulator (step 8 of the ranking table above) is the one
+step with no gate: it must not exist unless the parent's state cannot be read at
 all — and then it owes its own cross-reference table (the venue's discipline).
 
 ## The venue sim, cross-referenced

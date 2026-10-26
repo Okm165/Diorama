@@ -135,7 +135,7 @@ fi
 # The rewind success path has one wire shape on both (the counts differ by
 # content: T's applier journals parent-diff writes, V may have none). Direct
 # mode only — on the cluster a rewind is a live mutation. A devnet chain that
-# was just re-pinned (daloc-sim's epoch lane) has no cursor until its applier
+# was just re-pinned (an epoch) has no cursor until its applier
 # catches up, and its refusal then differs from its peer's success *by state,
 # not by design*: wait (bounded) for both cursors before comparing, so the
 # check does not race the catch-up.

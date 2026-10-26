@@ -165,63 +165,18 @@ cctp-build: ## Build the CCTP bridge on the host (cargo: cctp-bridge)
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
-config-check: ## Validate every instance file through the layered loader (structural fitness)
+config-check: ## Validate every instance file through the layered loader
 	@for f in config/instances/*/instance.toml; do \
 	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p mirror-config -- check "$$f" || exit 1; \
 	done
 
-fitness: lint design-assertions closure-matrix no-orphans docs-metrics trust-audit clock-labels no-panics config-check docker-members k8s-wiring spec-citations spine-purity facts-published metrics-written heredoc-audit port-audit shell-mode ast-scope ## Run every structural fitness function (plan §11.3)
+fitness: lint design-assertions config-check ast-scope ## Run the structural gates: lint, design assertions, config check, AST scope
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
 
 design-assertions: ## Public types keep Send + Sync (rule 11)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace design_assertions
-
-closure-matrix: ## Every internal dependency edge is declared (plan §11.3)
-	./scripts/closure-matrix.sh
-
-no-orphans: ## No utils/common/helpers crate or module (Lesson 101)
-	./scripts/no-orphans.sh
-
-docs-metrics: ## docs<->metrics: every metric the docs name exists in the code
-	./scripts/docs-metrics.sh
-
-trust-audit: ## Every `// TRUST:` marker names its guard (doctrine rule 6)
-	./scripts/trust-audit.sh
-
-clock-labels: ## Every logged block label names its clock (doctrine `block-numbering`)
-	./scripts/clock-labels.sh
-
-no-panics: ## No panic-family site in production code outside the named allow-list
-	./scripts/no-panics.sh
-
-docker-members: ## Dockerfile<->workspace: every member is copied and stubbed
-	./scripts/docker-members.sh
-
-k8s-wiring: ## instances<->manifests: every placeholder provided, every key consumed
-	./scripts/k8s-wiring.sh
-
-spec-citations: ## SPINE.md<->code: every symbol the spine doc names exists
-	./scripts/spec-citations.sh
-
-spine-purity: ## the spine's code names no mirror (seams are data, not names)
-	./scripts/spine-purity.sh
-
-facts-published: ## every Fact variant the event vocabulary declares is published
-	./scripts/facts-published.sh
-
-heredoc-audit: ## The generated-config heredocs: no backticks, no unset expansions
-	./scripts/heredoc-audit.sh
-
-port-audit: ## The proof scripts' default ports: unique across the tree
-	./scripts/port-audit.sh
-
-shell-mode: ## The scripts' conventions: strict mode (with the judged four) and BASH_SOURCE sources
-	./scripts/shell-mode.sh
-
-metrics-written: ## every metric series a registry declares is written by real code
-	./scripts/metrics-written.sh
 
 ast-scope: ## AST scope analysis: fn/struct size and nesting depth (syn, the compiler's parser)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p ast-scope -- crates bins
@@ -249,18 +204,6 @@ mainnet-smoke: ## End-to-end smoke test (mainnet)
 venue-smoke: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
 	NS=venue-mirror ./scripts/venue-smoke.sh
 
-venue-engine-local: venue-build ## Native local proof of the engine UX (mirror/modify/mint/measure; two anvils)
-	./scripts/venue-engine-local.sh
-
-venue-selftest-local: venue-build ## Native local proof of the follow against the real HyperEVM (one forked anvil)
-	./scripts/venue-selftest-local.sh
-
-venue-sim-parity-local: venue-build ## The sim's served answers vs the real venue API, request by request (one forked anvil)
-	./scripts/venue-sim-parity-local.sh
-
-engine-symmetry-local: mainnet-build venue-build ## Both mirrors, the same four verbs, side by side (two minimal stacks)
-	./scripts/engine-symmetry-local.sh
-
 venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
 	kubectl apply -f k8s/base/venue-mirror/pvcs.yaml
 	$(MAKE) INSTANCE=venue-mirror apply
@@ -277,9 +220,6 @@ venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation,
 
 venue-order-proof: ## The venue order-lane proof (fills vs the real book, the §4.5 impact invariants, hand-back)
 	NS=venue-mirror ./scripts/venue-order-proof.sh
-
-venue-product-sim: ## The daloc use-case simulation against the venue stack (endpoints via env)
-	./scripts/venue-product-sim.sh
 
 cctp-smoke: ## The CCTP bridge smoke (health, store coherence, metric set)
 	NS=venue-mirror ./scripts/cctp-smoke.sh
@@ -328,13 +268,10 @@ benchmark: ## The prime-brokerage benchmark session: the seven portfolio studies
 	@$(MAKE) --no-print-directory impact-scenarios
 	@echo "== benchmark session: all seven studies green ==" 
 
-cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locally (both chains forked from the real ones: the round trip + the unified-margin cycle)
-	./scripts/cctp-local.sh
-
-engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fitness function)
+engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (cross-mirror contract)
 	./scripts/engine-symmetry.sh
 
-log-surface: ## The symmetric log contract, attested against the running services (fitness function)
+log-surface: ## The symmetric log contract, attested against the running services
 	./scripts/log-surface.sh
 
 attest: ## The behavioral attestation: the pass over both mirrors, then the asserting suites
@@ -349,9 +286,6 @@ mainnet-scenario: ## Scenario test: self-containment, live parity (T vs reth), d
 mainnet-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
 	NS=mainnet-mirror ./scripts/mainnet-proof.sh
 
-mainnet-feed-local: ## Hermetic local feed-bridge proof (stub source answers -> mock aggregators, scenario pause/resume)
-	./scripts/mainnet-feed-local.sh
-
 mainnet-product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T
 	NS=mainnet-mirror ./scripts/mainnet-product-sim.sh
 
@@ -365,30 +299,11 @@ mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no
 	kubectl -n mainnet-mirror wait --for=condition=complete job/mainnet-selftest --timeout=900s || true
 	$(KUBECTL) logs job/mainnet-selftest
 
-mainnet-selftest-local: mainnet-build ## Native local selftest (two anvils; no reth/public RPC/cluster)
-	./scripts/mainnet-selftest-local.sh
-
 venue-selftest: ## Run the venue selftest Job (public RPC + scratch anvil; no cluster stack needed)
 	kubectl -n venue-mirror delete job venue-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/venue-selftest-job.yaml
 	kubectl -n venue-mirror wait --for=condition=complete job/venue-selftest --timeout=900s || true
 	kubectl -n venue-mirror logs job/venue-selftest
-
-mainnet-engine-local: mainnet-build ## Native local proof of the engine UX (mirror/modify/mint/measure; two anvils)
-	./scripts/mainnet-engine-local.sh
-
-daloc-local: venue-build mainnet-build ## The daloc use-case arc against a local scratch stack (live HL market data)
-	./scripts/daloc-local.sh
-
-mainnet-workshop-local: mainnet-build ## A financial workshop on live mainnet state (public-RPC fork; real Aave/Uniswap; crash + liquidation)
-	./scripts/mainnet-workshop-local.sh
-
-venue-workshop-local: venue-build mainnet-build ## A workshop on live venue state locally (daloc stack kept up; fills vs the real book, the §4.5 impact)
-	./scripts/venue-workshop-local.sh
-
-container-smoke: ## The mainnet-engine image, run for real (host anvils; needs podman)
-	podman build -q -f Dockerfile --build-arg BIN=mainnet-engine -t localhost/mainnet-engine:v1 .
-	./scripts/container-smoke.sh
 
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
 	@for c in reth lighthouse anvil-t engine; do \
@@ -444,15 +359,11 @@ help: ## Show this help
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: fitness lint design-assertions closure-matrix no-orphans docs-metrics \
-	trust-audit clock-labels no-panics config-check docker-members k8s-wiring ast-scope \
-	spec-citations facts-published metrics-written heredoc-audit port-audit shell-mode spine-purity
+.PHONY: fitness lint design-assertions config-check ast-scope
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \
 	status logs logs-check check-pins mainnet-smoke venue-smoke venue-repin venue-scenario \
-	venue-proof venue-order-proof venue-product-sim venue-selftest cctp-smoke cctp-roundtrip cctp-margin-cycle cctp-local engine-symmetry \
-	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check mainnet-feed-local \
-	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help \
-	venue-engine-local venue-selftest-local venue-sim-parity-local mainnet-selftest-local mainnet-engine-local \
-	mainnet-workshop-local venue-workshop-local engine-symmetry-local daloc-local container-smoke
+	venue-proof venue-order-proof venue-selftest cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
+	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check \
+	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help

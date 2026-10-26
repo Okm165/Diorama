@@ -118,7 +118,7 @@ async fn boot_bridge(
 impl Bridge {
     /// One watcher per chain; each serves only its peer's domain. The boot
     /// wiring asserts both chains — a missing peer here is a refusal, never a
-    /// panic (the no-panics rule: data paths refuse or degrade).
+    /// panic (data paths refuse or degrade).
     fn spawn_watchers(&self) -> crate::Result<()> {
         for chain in &self.chains {
             let (destination_domain, start_block) = if chain.domain == DOMAIN_ETHEREUM {

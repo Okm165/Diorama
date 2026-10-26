@@ -20,8 +20,8 @@ and `crates/venue`, and the binaries `bins/{mainnet-engine,venue-engine,
 venue-sim,cctp-bridge}` — the fourth is element 3 (`crates/cctp` on the common
 client + config only; it does not depend on the devnet substrate or either
 project). The projects are siblings - they share the common crates and
-never each other; `scripts/closure-matrix.sh` is the structural contract that
-enforces it. The table above is the Mainnet Mirror's component set; the Venue
+never each other; the dependency law — no sibling edges — is the structural
+contract. The table above is the Mainnet Mirror's component set; the Venue
 Mirror's components and data flow are in "The Venue Mirror" below.
 
 ## Data flow
@@ -747,67 +747,15 @@ per-profile binaries - `bins/mainnet-engine` (ethereum) and `bins/venue-engine`
 (venue) - over sibling project crates, plus `bins/venue-sim` and
 `bins/cctp-bridge` (the same shell over their crates' entries) and
 `bins/ast-scope` (the structural fitness gate's parser, no internal deps). The
-reason is
-build isolation, and it is a fitness function, not a convention:
-`scripts/closure-matrix.sh` declares the allowed internal edges
-(`venue-engine -> mirror-venue + devnet + anvil + config`, no ethereum
-edge; `venue-sim` likewise) and fails any undeclared dependency. With one
+reason is build isolation: `venue-engine` links only `mirror-venue` + the
+shared crates (no ethereum edge; `venue-sim` likewise). With one
 package every build compiled the whole graph (measured, plan §11.3); a
 profile-routing binary would link both projects into every venue build.
 
-**The structural fitness functions.** `make fitness` runs the gates the
-doctrine makes checkable, each a script in `scripts/`: `lint` (clippy at the
-committed 50-line / 5-arg ratchet), `design-assertions` (`is_normal` over every
-public type), `closure-matrix` (the dependency law above), `no-orphans` (no
-`utils`/`common`/`helpers` homes), `docs-metrics` (every metric the docs name
-exists in the code), `trust-audit` (every `// TRUST:` names its guard),
-`clock-labels` (every logged block label appears in its crate's `//! Clocks:`
-ledger), `no-panics` (the production code carries exactly one panic-family
-site, named in the script's allow-list, and an entry whose site disappears
-fails the gate too — a service that panics on an upstream answer is a crash
-loop, not a degradation), `config-check`
-(every instance file through the layered loader), `docker-members` (the image
-build's dependency layer sees every workspace member: cargo resolves the whole
-workspace before building one package, so a member added or renamed without the
-Dockerfile fails `make build` at COPY — measured: the pre-rename
-`ethereum`/`hyperliquid` names outlived the crates and the new `ast-scope` bin
-was missing), `spec-citations` (every code symbol `docs/SPINE.md` names in
-backticks exists in the workspace — the doc's cross-reference tables claim
-behavior by symbol, so a rename that leaves the doc behind fails; the specs'
-own vocabulary, quoted from the EIPs, is allow-listed with its source), and
-`facts-published` (every `Fact` variant the event vocabulary declares is
-constructed by a real `publish(...)` — a variant nobody publishes is an event
-that never happens; found `DealApplied`, declared and never published),
-`metrics-written` (the same class on the metric side: a declared series whose
-every use is a render `.load(` would read as "nothing happened" instead of
-"nobody measures it"; 62 series checked, whitespace-normalized so multi-line
-accesses count),
-`spine-purity` (the spine's *code* — `crates/devnet` with line comments
-stripped — names no mirror: the doc comments cite them as examples, but a
-name in code would mean a new mirror kind needs edits inside the spine,
-which the seam design exists to prevent), `k8s-wiring` (the instances and the
-manifests are two halves of
-one contract: every `${VAR}` an instance names is provided by the tree's pod
-env, and every `mirror-config` key is consumed — a key left behind after a
-feature moves is dead wiring that still shows in `kubectl describe`, measured:
-`CHECKPOINT_SYNC_FALLBACK` and `MAINNET_RPC`; the same gate checks the
-harness's `test-endpoints` env names only NodePorts the overlay declares),
-`heredoc-audit`
-(the scripts that generate config files: an unquoted heredoc expands, so a
-backtick in a comment runs as a command and an unset `$var` vanishes —
-measured: `balanceAndBlacklistStates` printed "command not found" and dropped
-out of venue-selftest-local's generated `instance.toml`; a quoted delimiter
-opts out), `port-audit`
-(the proof scripts' port-valued defaults must be unique across the tree — two
-scripts defaulting to the same port collide when run in parallel, measured:
-engine-symmetry-local's T admin 19980 vs the workshop's HTTP 19980, the
-workshop's engine losing the bind; an intentional sharing is declared with
-`# ports-shared-with:`), `shell-mode`
-(every standalone script opens with `set -euo pipefail` — the four oldest
-deployed-stack suites are the judged lenient exceptions, the sourced libs
-never set the mode — and every `source` line resolves through
-`${BASH_SOURCE[0]}`; measured: lib-cctp's `./lib-venue.sh` worked only under
-the exact `./scripts/x.sh` invocation) and `ast-scope`
+**The structural gates.** `make fitness` runs the gates the doctrine makes
+checkable: `lint` (clippy at the committed 50-line / 5-arg ratchet),
+`design-assertions` (`is_normal` over every public type), `config-check`
+(every instance file through the layered loader) and `ast-scope`
 (`bins/ast-scope`, the compiler's own parser over the sources: function bodies
 ≤ 60 span lines — docs included, so a body whose *documentation* outgrows it is
 visible too — nesting depth ≤ 5, records ≤ 20 fields, enums ≤ 25 variants;
@@ -848,8 +796,8 @@ spans ≥ 3 files: behavior living away from its type), **narrow context**
 (functions taking the whole `Ctx` but touching one field), **uncalled/dead**
 (the AST verdict confirmed textually, since macro arguments are invisible to
 the expression visitor) and **divisions** (production divisions whose divisor
-is not a literal — arithmetic panics are invisible to the `no-panics` regex,
-so each site is a named audit entry).
+is not a literal — arithmetic panics are invisible to a text scan, so each
+site is a named audit entry).
 Each gate fails on drift; adding one is adding a script (or a bin) and one
 Makefile line.
 

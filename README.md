@@ -93,23 +93,6 @@ impact is measured 1:1:
    uncovered-emitter audit turn "did my write behave like the real market
    would?" into counters and facts.
 
-Both proofs run locally against the real engine binaries: `make
-mainnet-engine-local` (two anvils; the mainnet side), `make venue-engine-local`
-(anvil + the venue engine), `make venue-selftest-local` (against the real
-HyperEVM), `make venue-sim-parity-local` (the simulator's served answers vs
-the real venue API, request by request), `make daloc-local` (the whole daloc
-arc on live market data) and
-`make engine-symmetry-local` (both mirrors, the same four verbs, side by side)
-and `make cctp-local` (the cross-mirror lane: both chains forked from the real
-ones — the CCTP round trip and the unified-margin cycle end to end).
-The two *workshops* — a strategy run end to end on live state — also run
-locally: `make mainnet-workshop-local` (a public-RPC fork of mainnet; minted
-liquidity, a real Aave/Uniswap levered position whose pool impact is measured,
-live parity, an oracle crash and a liquidation) and `make venue-workshop-local`
-(the same acts on the venue's mechanisms: the daloc arc on live market data,
-a devnet deal's minted collateral, a fill against the real book, and the §4.5
-impact measured).
-
 ## Quickstart
 
 ```bash
@@ -124,14 +107,7 @@ Venue Mirror (a second namespace in the same cluster; no snapshot needed):
 ```bash
 kubectl apply -k k8s/overlays/venue-mirror   # V + venue engine + venue-sim (namespace venue-mirror)
 make venue-smoke                             # V, engine, sim and bridge checks
-python3 scripts/daloc-sim.py --lane all      # the daloc use-case arc (46 checks; point the
-                                             # script's constants at your endpoints first)
 ```
-
-The local, no-cluster shapes — `make venue-engine-local` (Anvil V + the venue
-engine) and `make mainnet-engine-local` (two anvils + the mainnet engine, the
-shared UX end to end) — are in [docs/TESTING.md](docs/TESTING.md) → the layer
-table.
 
 The bootstrap is ordered on purpose: the reth snapshot lands in the PVC first,
 then reth starts, Lighthouse checkpoint-syncs to the CL head, and the anvil
@@ -172,7 +148,7 @@ make venue-scenario      # epoch scenario: a write survives a same-pin reset, di
 make venue-proof         # capability proof: mint, sim deal, crash⇒liquidation, bridge round-trip
 make venue-order-proof   # order-lane proof: fills vs the real book, the §4.5 impact invariants
 make cctp-margin-cycle   # crosschain unified-margin cycle: T mint -> CCTP -> venue trade -> CCTP back
-make engine-symmetry     # both engines' shared verbs answer identically (fitness function)
+make engine-symmetry     # both engines' shared verbs answer identically (cross-mirror contract)
 ```
 
 Engine admin API (controls that belong to the mirror itself):
@@ -215,23 +191,14 @@ k8s/overlays/venue-mirror/    the venue stack overlay (V, engine, sim, bridge, N
 k8s/bootstrap/              one-shot Jobs: reth snapshot, CL blob prune, engine selftest, re-pin wipe
 scripts/                    lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the shared plumbing), the
                             mainnet suites (mainnet-smoke, mainnet-scenario, mainnet-proof,
-                            mainnet-product-sim, mainnet-closure-check,
-                            mainnet-feed-local, mainnet-selftest-local, mainnet-engine-local,
-                            mainnet-workshop-local, mainnet-secrets), the
-                            venue suites (venue-smoke, venue-scenario, venue-proof,
-                            venue-order-proof, venue-engine-local,
-                            venue-selftest-local, venue-sim-parity-local, venue-workshop-local, venue-secrets), the cross-mirror suites (cctp-smoke,
-                            cctp-roundtrip, cctp-margin-cycle, engine-symmetry, engine-symmetry-local)
-                            with cctp-local.sh (the same lane against forked real chains, no
-                            cluster), daloc-sim.py with daloc-local.sh (the arc against a local
-                            scratch stack), the container proof (container-smoke.sh: the engine
-                            image run for real), and the structural fitness scripts
-                            (closure-matrix, no-orphans, docs-metrics, trust-audit, clock-labels,
-                            no-panics, docker-members, k8s-wiring, spec-citations, spine-purity,
-                            facts-published, metrics-written). The
-                            `venue-product-sim` and `config-check` make targets drive
-                            `scripts/venue-product-sim.sh` (the `daloc-sim.py` arc's entry) and
-                            the config loader
+                            mainnet-product-sim, mainnet-closure-check), the venue suites
+                            (venue-smoke, venue-scenario, venue-proof, venue-order-proof),
+                            the cross-mirror suites (cctp-smoke, cctp-roundtrip,
+                            cctp-margin-cycle, engine-symmetry, log-surface, attest,
+                            shadow-audit), and the benchmark studies (portfolio-sim,
+                            basis-capture, portfolio-reaction, crosschain-margin,
+                            crosschain-recovery, capital-frontier, hedged-book,
+                            impact-scenarios)
 docs/                       HOW-IT-WORKS.md, HOW-IT-WORKS-VENUE.md, ARCHITECTURE.md, SPINE.md, STRUCTURE.md, OPERATIONS.md, TESTING.md, INTEGRATION.md, adr/
 ```
 
