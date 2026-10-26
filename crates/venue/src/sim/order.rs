@@ -151,11 +151,37 @@ pub(crate) enum Reduce {
 /// Which way an order goes: the sim's own vocabulary. The wire keeps the
 /// venue's `is_buy` boolean (what daloc sends); [`Side::of`] is the one
 /// conversion.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Side {
     Buy,
     Sell,
+}
+
+impl<'de> Deserialize<'de> for Side {
+    /// Reads both spellings: the wire's `is_buy` flag — the compact payloads
+    /// and the pre-enum state files — and the enum's own snake_case name.
+    /// A persisted state outlives a code change; the deserializer migrates it.
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Flag(bool),
+            Named(String),
+        }
+        match Wire::deserialize(deserializer)? {
+            Wire::Flag(true) => Ok(Side::Buy),
+            Wire::Flag(false) => Ok(Side::Sell),
+            Wire::Named(name) => match name.as_str() {
+                "buy" => Ok(Side::Buy),
+                "sell" => Ok(Side::Sell),
+                other => Err(serde::de::Error::custom(format!("unknown side {other:?}"))),
+            },
+        }
+    }
 }
 
 impl Side {
@@ -323,6 +349,9 @@ pub(crate) struct RestingOrder {
     pub oid: u64,
     pub account: Address,
     pub coin: String,
+    /// The side (`isBuy`/`is_buy` in pre-enum state files; the aliases and
+    /// the tolerant `Side` deserializer migrate them).
+    #[serde(alias = "isBuy", alias = "is_buy")]
     pub side: Side,
     /// The limit price (a resting order always has one).
     pub px: Decimal,

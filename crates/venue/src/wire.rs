@@ -201,12 +201,40 @@ pub(crate) struct Leverage {
     pub raw_usd: Option<Decimal>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub(crate) enum LeverageType {
     Cross,
     Isolated,
+}
+
+impl<'de> Deserialize<'de> for LeverageType {
+    /// Reads both spellings: the wire's own lowercase names and the pre-enum
+    /// state files' `isCross` boolean (true = cross). A persisted state
+    /// outlives a code change; the deserializer migrates it.
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Flag(bool),
+            Named(String),
+        }
+        match Wire::deserialize(deserializer)? {
+            Wire::Flag(true) => Ok(LeverageType::Cross),
+            Wire::Flag(false) => Ok(LeverageType::Isolated),
+            Wire::Named(name) => match name.as_str() {
+                "cross" => Ok(LeverageType::Cross),
+                "isolated" => Ok(LeverageType::Isolated),
+                other => Err(serde::de::Error::custom(format!(
+                    "unknown margin mode {other:?}"
+                ))),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

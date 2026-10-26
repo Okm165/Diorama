@@ -89,7 +89,9 @@ fn default_mode() -> UserAbstraction {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LeverageSetting {
-    /// The margin mode (the wire's `isCross`, named).
+    /// The margin mode (the wire's `isCross`, named; the aliases and the
+    /// tolerant `LeverageType` deserializer migrate pre-enum state files).
+    #[serde(alias = "isCross", alias = "is_cross")]
     pub mode: crate::wire::LeverageType,
     pub leverage: u32,
 }
