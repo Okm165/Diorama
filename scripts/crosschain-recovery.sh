@@ -11,7 +11,7 @@
 # Run from the repo root:
 #   make crosschain-recovery                      # against the deployed stack
 #   CAST=/path/to/cast make crosschain-recovery   # when cast is not on PATH
-set -uo pipefail
+set -euo pipefail
 NS="${NS:-venue-mirror}"
 TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}"
 COIN="${COIN:-ETH}"
