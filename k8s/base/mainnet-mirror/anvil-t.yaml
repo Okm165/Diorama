@@ -161,11 +161,12 @@ spec:
             tcpSocket: { port: 8545 }
             periodSeconds: 30
           resources:
-            requests: { cpu: "500m", memory: 1Gi }
             # T never executes mainnet txs (BAL diffs only), so its state stays
             # small (measured ~2.5 GB with --prune-history 32; the snapshots
-            # are the dominant term). 16Gi keeps a comfortable margin.
-            limits: { memory: 16Gi }
+            # are the dominant term). The request covers the measured peak;
+            # the limit keeps a ~2.4x margin for fork materialization spikes.
+            requests: { cpu: "500m", memory: 1Gi }
+            limits: { memory: 6Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-t-state }

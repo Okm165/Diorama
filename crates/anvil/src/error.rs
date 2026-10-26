@@ -147,6 +147,14 @@ impl Error {
         matches!(self, Error::Rpc { payload, .. } if payload.code == -32601)
     }
 
+    /// The endpoint's response-size refusal (measured live: `-32008`
+    /// `Response is too big` carrying the endpoint's own cap in `data` — the
+    /// public HyperEVM RPC caps answers at 1 MiB). The logs range halves on
+    /// it and retries: the cap is the endpoint's, the chunk size is ours.
+    pub fn is_response_too_big(&self) -> bool {
+        matches!(self, Error::Rpc { payload, .. } if payload.code == -32008)
+    }
+
     /// Anvil's history-pruned refusals — two measured shapes for the same
     /// `--prune-history` window: a `debug_traceTransaction` answers `-32000`
     /// "historical state needed to replay block N is not available", while a

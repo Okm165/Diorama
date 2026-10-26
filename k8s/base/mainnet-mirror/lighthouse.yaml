@@ -117,10 +117,13 @@ spec:
             periodSeconds: 30
             failureThreshold: 5
           resources:
-            requests: { cpu: "1", memory: 2Gi }
-            # Checkpoint sync + backfill caches are memory hungry; 6Gi
-            # OOM-looped during the initial sync (measured), 16Gi is stable.
-            limits: { memory: 16Gi }
+            # No CPU limit (attestation and backfill work is latency-sensitive
+            # and bursty); the memory request tracks the measured steady state
+            # (~8 GiB) so the scheduler reserves it. 6Gi OOM-looped during the
+            # initial sync (measured); the limit keeps a ~1.5x margin over the
+            # steady state for the prune/backfill peaks.
+            requests: { cpu: "1", memory: 8Gi }
+            limits: { memory: 12Gi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: lighthouse-data }

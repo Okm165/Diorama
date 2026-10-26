@@ -142,11 +142,12 @@ spec:
             tcpSocket: { port: 8545 }
             periodSeconds: 30
           resources:
-            requests: { cpu: "500m", memory: 1Gi }
             # Like T, V never executes source txs: it materializes the fork
-            # state on demand and carries the devnet's own writes, so its
-            # state stays small. 16Gi is the T-sized margin.
-            limits: { memory: 16Gi }
+            # state on demand and carries the devnet's own writes (measured
+            # ~50 MiB). The request covers the measured state; the limit
+            # keeps a wide margin for the live follow's write volume.
+            requests: { cpu: "500m", memory: 1Gi }
+            limits: { memory: 4Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-v-state }

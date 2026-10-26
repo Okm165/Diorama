@@ -44,13 +44,17 @@ fixture_addresses = [
 [services.engine.anvil]
 target_url = "${ANVIL_V_URL}"
 
-# The follow's cadence: the public source's budget is request-bound, and a
-# 1 s pass (head poll + window reads) ran ~3 req/s — measured to sit at the
-# edge of the endpoint's limiter (the driver's backoff rides out what
-# remains). 2 s keeps the follow at ~1.5 req/s, still fresher than the
-# source's own block cadence.
+# The follow's cadence and window width against the public source: the
+# endpoint's budget is request-bound, it caps every JSON-RPC batch at 20
+# items (measured live: `Exceeded max limit of 20`; the client chunks
+# transparently), and it throttles bursts. A 100-block window keeps a pass to
+# ~15 small sequential bodies while amortizing the pass overhead over 100
+# blocks (~5x the source's rate catching up); the steady state composes 1-3
+# block windows anyway. A 1 s pass sat at the endpoint's edge; 2 s stays
+# inside it.
 [services.engine.loops]
 poll_interval_ms = 2000
+max_gap_blocks = 100
 
 # At-pin probes: V vs the fork source at the pin, devnet-owned targets
 # skipped and counted. USDC's totalSupply is the one canonical HyperEVM

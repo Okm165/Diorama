@@ -70,24 +70,36 @@ pub fn call(method: &'static str, params: impl Serialize) -> Result<Call> {
 /// proven-safe shape.
 const BATCH_CONCURRENCY: usize = 1;
 
+/// The batch's item cap, measured: the public HyperEVM RPC answers
+/// `Exceeded max limit of 20` for a larger batch (live), so every sub-batch
+/// stays at or below it — the client chunks transparently and sequentially.
+const BATCH_MAX_ITEMS: usize = 20;
+
 /// The throttle's JSON-RPC code (outside the protocol ranges, like the
 /// client's own synthesized codes).
 const RATE_LIMIT_CODE: i64 = -32005;
+/// The node's internal error: the measured retry matrix in `error` names it
+/// the one node code worth retrying (measured live: the system-tx read
+/// answers it transiently under load).
+const INTERNAL_ERROR_CODE: i64 = -32603;
 /// The throttle's retry bound (the shared backoff rides between the tries).
 const RATE_LIMIT_TRIES: u32 = 4;
 
-/// The throttle marker: a single JSON-RPC error object with the rate-limit
-/// code. Batch answers are arrays and every error body is small, so only a
-/// body that can carry it is parsed.
-fn is_throttled(text: &str) -> bool {
+/// The retryable refusals: the throttle and the node's internal error. A
+/// single error object is parsed; a batch array is scanned for the codes
+/// (distinctive strings — a full parse of a large answer is not worth it).
+fn is_retryable(text: &str) -> bool {
     let trimmed = text.trim_start();
+    if trimmed.starts_with('[') {
+        return trimmed.contains("\"code\":-32005") || trimmed.contains("\"code\":-32603");
+    }
     if !trimmed.starts_with('{') {
         return false;
     }
     serde_json::from_str::<serde_json::Value>(trimmed)
         .ok()
         .and_then(|v| v.get("error")?.get("code")?.as_i64())
-        .map(|code| code == RATE_LIMIT_CODE)
+        .map(|code| code == RATE_LIMIT_CODE || code == INTERNAL_ERROR_CODE)
         .unwrap_or(false)
 }
 
@@ -217,13 +229,12 @@ impl Rpc {
         Ok((status, text))
     }
 
-    /// The public endpoints throttle bursts with a JSON-RPC `-32005` ("rate
-    /// limited"): the transport rides a throttle out with a bounded backoff
-    /// before surfacing it. A wide catch-up window issues many bodies at
-    /// once, and a transient throttle must not fail the pass (measured live:
-    /// the burst tripped the public HyperEVM RPC's limiter; the sequential
-    /// era never saw it because it was slow enough). Only the throttle is
-    /// retried — every other refusal is the node's answer.
+    /// The retryable refusals — the public endpoint's throttle (`-32005`,
+    /// "rate limited") and the node's internal error (`-32603`) — ride a
+    /// bounded backoff before surfacing. A wide catch-up window issues many
+    /// bodies, and a transient refusal must not fail the pass (measured
+    /// live: bursts tripped the limiter and the internal error came and went
+    /// under load). Every other refusal is the node's answer.
     async fn post_raw_throttled(
         &self,
         method: &str,
@@ -232,7 +243,7 @@ impl Rpc {
         let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(8));
         for attempt in 1..=RATE_LIMIT_TRIES {
             let (status, text) = self.post_raw(method, body).await?;
-            if attempt == RATE_LIMIT_TRIES || !is_throttled(&text) {
+            if attempt == RATE_LIMIT_TRIES || !is_retryable(&text) {
                 return Ok((status, text));
             }
             tokio::time::sleep(backoff.delay()).await;
@@ -315,7 +326,7 @@ impl Rpc {
     /// (anvil rejects bodies >= 2 MB with `-32600 Invalid request`; public
     /// endpoints answer 413) and no sub-batch exceeds `max_items`.
     pub async fn batch(&self, calls: &[Call]) -> Result<Vec<std::result::Result<Box<RawValue>, RpcError>>> {
-        self.batch_limited(calls, 500, 1 << 20).await
+        self.batch_limited(calls, BATCH_MAX_ITEMS, 1 << 20).await
     }
 
     pub async fn batch_limited(
@@ -418,7 +429,7 @@ impl Rpc {
         method: &'static str,
         params: &[P],
     ) -> Result<Vec<Option<T>>> {
-        self.batch_typed_limited(method, params, 500).await
+        self.batch_typed_limited(method, params, BATCH_MAX_ITEMS).await
     }
 
     /// [`Self::batch_typed`] with an explicit sub-batch item cap: receipt-

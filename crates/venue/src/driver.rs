@@ -75,12 +75,14 @@ pub(crate) async fn mine_loop(ctx: Arc<Ctx>) {
 /// of the applier's `apply_loop`.
 pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
-    // The pass's own backoff (the feed's idiom): a failed pass — the public
-    // source throttling a burst, a transient transport fault — doubles the
-    // pause up to the cap, and a pass that serves resets it. The fixed
-    // cadence alone hammered a throttled endpoint (measured live: a burst
-    // tripped the public RPC's limiter and the retry loop kept it hot).
-    let mut backoff = mirror_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+    // The pass's own backoff: a failed pass — the public source throttling,
+    // a transient transport fault — doubles the pause up to the cap, and a
+    // pass that serves resets it. The fixed cadence alone hammered a
+    // throttled endpoint (measured live: a burst tripped the public RPC's
+    // limiter and the retry loop kept it hot). The cap stays at a minute:
+    // the refusals measured live are transient bursts, and a longer pause
+    // only wastes the good windows between them.
+    let mut backoff = mirror_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(60));
     loop {
         if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
@@ -96,9 +98,11 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
                 false
             }
         };
-        let delay = backoff.delay();
         backoff.record(progressed);
-        tokio::time::sleep(poll.max(delay)).await;
+        // A pass that served sleeps the plain cadence; a failed one sleeps
+        // the grown delay.
+        let pause = if progressed { poll } else { poll.max(backoff.delay()) };
+        tokio::time::sleep(pause).await;
     }
 }
 

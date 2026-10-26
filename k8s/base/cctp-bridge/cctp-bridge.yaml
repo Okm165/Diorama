@@ -68,8 +68,9 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:
-            requests: { cpu: "100m", memory: 128Mi }
-            limits: { memory: 512Mi }
+            # No CPU limit; measured steady state ~6 MiB.
+            requests: { cpu: "50m", memory: 64Mi }
+            limits: { memory: 256Mi }
       volumes:
         - name: instance
           configMap: { name: venue-instance }

@@ -57,8 +57,11 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:
+            # No CPU limit (the follow's passes are latency-sensitive);
+            # measured steady state ~25 MiB, the limit leaves a wide margin
+            # for a wide catch-up window's composition state.
             requests: { cpu: "100m", memory: 128Mi }
-            limits: { memory: 1Gi }
+            limits: { memory: 512Mi }
       volumes:
         - name: instance
           configMap: { name: venue-instance }
