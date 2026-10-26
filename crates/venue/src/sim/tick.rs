@@ -74,7 +74,11 @@ impl Sim {
             }
             let facts = account::FillFacts::close(
                 coin,
-                position.szi.is_sign_negative(),
+                if position.szi.is_sign_negative() {
+                    crate::sim::order::Side::Buy
+                } else {
+                    crate::sim::order::Side::Sell
+                },
                 size,
                 oracle,
                 position.leverage_value.max(1),
@@ -160,11 +164,11 @@ impl Sim {
             let Some((mark, _)) = feed.required_prices(&r.coin) else {
                 continue;
             };
-            let fires = match (r.is_buy, t.tpsl) {
-                (false, crate::sim::order::Tpsl::Tp) => mark >= t.trigger_px,
-                (false, crate::sim::order::Tpsl::Sl) => mark <= t.trigger_px,
-                (true, crate::sim::order::Tpsl::Tp) => mark <= t.trigger_px,
-                (true, crate::sim::order::Tpsl::Sl) => mark >= t.trigger_px,
+            let fires = match (r.side, t.tpsl) {
+                (crate::sim::order::Side::Sell, crate::sim::order::Tpsl::Tp) => mark >= t.trigger_px,
+                (crate::sim::order::Side::Sell, crate::sim::order::Tpsl::Sl) => mark <= t.trigger_px,
+                (crate::sim::order::Side::Buy, crate::sim::order::Tpsl::Tp) => mark <= t.trigger_px,
+                (crate::sim::order::Side::Buy, crate::sim::order::Tpsl::Sl) => mark >= t.trigger_px,
             };
             if !fires {
                 continue;
@@ -172,7 +176,7 @@ impl Sim {
             let _ = self.cancel(r.account, &r.coin, r.oid, crate::sim::order::CancelSpeed::Normal);
             let order = crate::sim::order::Order {
                 coin: r.coin.clone(),
-                is_buy: r.is_buy,
+                is_buy: r.side.is_buy(),
                 size: r.sz,
                 limit_px: if t.is_market { None } else { Some(r.px) },
                 tif: crate::sim::order::Tif::Ioc,
@@ -203,11 +207,14 @@ impl Sim {
             let Some(book) = feed.book(&r.coin, now_ms) else {
                 continue;
             };
-            let opposite = usize::from(r.is_buy);
+            let opposite = r.side.book_index();
             let Some(best) = book.levels[opposite].first() else {
                 continue;
             };
-            let crossed = if r.is_buy { best.px <= r.px } else { best.px >= r.px };
+            let crossed = match r.side {
+                crate::sim::order::Side::Buy => best.px <= r.px,
+                crate::sim::order::Side::Sell => best.px >= r.px,
+            };
             if !crossed {
                 continue;
             }
@@ -252,7 +259,7 @@ impl Sim {
         let notional = crate::sim::account::mul(take, r.px, "maker notional")?;
         let facts = crate::sim::account::FillFacts {
             coin: r.coin.clone(),
-            is_buy: r.is_buy,
+            side: r.side,
             size: take,
             px: r.px,
             leverage,
@@ -264,7 +271,7 @@ impl Sim {
         })?;
         feed.consume(crate::feed::Consumption {
             coin: r.coin.clone(),
-            side: usize::from(r.is_buy) as u8,
+            side: r.side.book_index() as u8,
             price: level_px,
             size: take,
         })?;

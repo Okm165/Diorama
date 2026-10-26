@@ -50,6 +50,13 @@ pub(crate) struct Order {
     pub trigger: Option<Trigger>,
 }
 
+impl Order {
+    /// The side, converted from the wire's `is_buy` once.
+    pub(crate) fn side(&self) -> Side {
+        Side::of(self.is_buy)
+    }
+}
+
 /// Time in force (docs: `"Alo" | "Ioc" | "Gtc"`). The two wire encodings live
 /// here, one home each (the venue's `tif` strings and the CoreWriter byte).
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -139,6 +146,57 @@ impl CancelSpeed {
 pub(crate) enum Reduce {
     Only,
     Any,
+}
+
+/// Which way an order goes: the sim's own vocabulary. The wire keeps the
+/// venue's `is_buy` boolean (what daloc sends); [`Side::of`] is the one
+/// conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Side {
+    Buy,
+    Sell,
+}
+
+impl Side {
+    /// The wire's `is_buy` flag, converted once at the boundary.
+    pub(crate) fn of(is_buy: bool) -> Self {
+        if is_buy {
+            Side::Buy
+        } else {
+            Side::Sell
+        }
+    }
+
+    /// The wire's `is_buy` flag (the venue's own shape).
+    pub(crate) fn is_buy(self) -> bool {
+        matches!(self, Side::Buy)
+    }
+
+    /// The opposite side (a close takes the side the position does not hold).
+    pub(crate) fn flip(self) -> Self {
+        match self {
+            Side::Buy => Side::Sell,
+            Side::Sell => Side::Buy,
+        }
+    }
+
+    /// The sign a fill of this side carries on the position (+1 buy, -1 sell).
+    pub(crate) fn sign(self) -> Decimal {
+        match self {
+            Side::Buy => Decimal::ONE,
+            Side::Sell => -Decimal::ONE,
+        }
+    }
+
+    /// The book side index the served depth uses: bids 0, asks 1 (the venue's
+    /// own l2Book order) — a buy consumes the asks, a sell the bids.
+    pub(crate) fn book_index(self) -> usize {
+        match self {
+            Side::Buy => 1,
+            Side::Sell => 0,
+        }
+    }
 }
 
 /// Move a finished order into the bounded terminal history (`orderStatus`
@@ -265,7 +323,7 @@ pub(crate) struct RestingOrder {
     pub oid: u64,
     pub account: Address,
     pub coin: String,
-    pub is_buy: bool,
+    pub side: Side,
     /// The limit price (a resting order always has one).
     pub px: Decimal,
     /// The remaining size.
@@ -558,7 +616,7 @@ impl Sim {
             .unwrap_or(true);
         let req = Order {
             coin: coin.to_string(),
-            is_buy: !long, // close the position
+            is_buy: Side::of(long).flip().is_buy(), // close the position
             size,
             limit_px: None, // market: whatever the book gives (partial fills ok)
             tif: Tif::Ioc,
@@ -573,7 +631,7 @@ impl Sim {
         let resting = self.resting_orders(None)?;
         let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), &req, &resting)?;
         let leverage = self.leverage_for(address, coin, meta.as_ref())?;
-        let facts = super::account::FillFacts::close(coin, req.is_buy, filled, avg_px, leverage);
+        let facts = super::account::FillFacts::close(coin, req.side(), filled, avg_px, leverage);
         self.with_account_now(address, feed, |account| {
             super::account::apply_fill(account, &facts, meta.as_ref())
         })?;
@@ -599,17 +657,14 @@ impl Sim {
         let mut kept = Vec::with_capacity(resting.len());
         for r in resting {
             let crosses = r.coin == req.coin
-                && r.is_buy != req.is_buy
+                && r.side != req.side()
                 && r.trigger.is_none()
                 && match req.limit_px {
                     None => true,
-                    Some(limit) => {
-                        if req.is_buy {
-                            r.px <= limit
-                        } else {
-                            r.px >= limit
-                        }
-                    }
+                    Some(limit) => match req.side() {
+                        Side::Buy => r.px <= limit,
+                        Side::Sell => r.px >= limit,
+                    },
                 };
             if !crosses {
                 kept.push(r);
@@ -635,7 +690,7 @@ impl Sim {
         };
         let resting = self.resting_orders(Some(address))?;
         if crosses(feed, req, &resting) {
-            let bbo = bbo(feed, &req.coin, req.is_buy)
+            let bbo = bbo(feed, &req.coin, req.side())
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "none".into());
             tracing::warn!(coin = %req.coin, bbo = %bbo, "post-only refused");
@@ -662,7 +717,7 @@ impl Sim {
         let notional = super::account::mul(filled, avg_px, super::account::FILL_NOTIONAL)?;
         let facts = super::account::FillFacts {
             coin: req.coin.clone(),
-            is_buy: req.is_buy,
+            side: req.side(),
             size: filled,
             px: avg_px,
             leverage,
@@ -709,7 +764,7 @@ impl Sim {
                     let notional = super::account::mul(*sz, *px, "maker notional")?;
                     let facts = super::account::FillFacts {
                         coin: req.coin.clone(),
-                        is_buy: !req.is_buy,
+                        side: req.side().flip(),
                         size: *sz,
                         px: *px,
                         leverage,
@@ -757,18 +812,15 @@ impl Sim {
     fn expire_self_crossing(&self, account: Address, feed: &MarketFeed, req: &Order) -> Result<()> {
         let mine = self.resting_orders(Some(account))?;
         for r in mine {
-            if r.coin != req.coin || r.is_buy == req.is_buy || r.trigger.is_some() {
+            if r.coin != req.coin || r.side == req.side() || r.trigger.is_some() {
                 continue;
             }
             let crosses = match req.limit_px {
                 None => true,
-                Some(limit) => {
-                    if req.is_buy {
-                        r.px <= limit
-                    } else {
-                        r.px >= limit
-                    }
-                }
+                Some(limit) => match req.side() {
+                    Side::Buy => r.px <= limit,
+                    Side::Sell => r.px >= limit,
+                },
             };
             if crosses {
                 let _ = feed; // (the feed is the caller's context; no read needed)
@@ -881,7 +933,7 @@ impl Sim {
             .account(address)?
             .and_then(|a| a.positions.get(&req.coin).map(|p| p.szi))
             .unwrap_or(Decimal::ZERO);
-        let signed = if req.is_buy { req.size } else { -req.size };
+        let signed = req.size * req.side().sign();
         let increases =
             super::account::same_direction(old, signed);
         if !increases {
@@ -891,12 +943,9 @@ impl Sim {
         let aggressive = req
             .limit_px
             .zip(feed.oracle(&req.coin))
-            .is_some_and(|(px, oracle)| {
-                if req.is_buy {
-                    px > oracle
-                } else {
-                    px < oracle
-                }
+            .is_some_and(|(px, oracle)| match req.side() {
+                Side::Buy => px > oracle,
+                Side::Sell => px < oracle,
             });
         Ok(Some(if aggressive {
             "Order rejected due to price more aggressive than oracle while at open interest cap"
@@ -929,7 +978,7 @@ impl Sim {
             oid,
             account,
             coin: req.coin.clone(),
-            is_buy: req.is_buy,
+            side: req.side(),
             px,
             sz,
             orig_sz: sz,
@@ -1221,10 +1270,9 @@ pub(crate) enum Candidate {
 
 /// The best opposite price the served book shows (the `bbo` in the venue's
 /// post-only refusal): the cheapest ask for a buy, the richest bid for a sell.
-pub(crate) fn bbo(feed: &MarketFeed, coin: &str, is_buy: bool) -> Option<Decimal> {
+pub(crate) fn bbo(feed: &MarketFeed, coin: &str, side: Side) -> Option<Decimal> {
     let book = feed.book(coin, crate::now_ms())?;
-    let side = usize::from(is_buy);
-    book.levels[side].first().map(|l| l.px)
+    book.levels[side.book_index()].first().map(|l| l.px)
 }
 
 /// Whether `req` would cross anything the served book (live levels *and*
@@ -1238,20 +1286,22 @@ pub(crate) fn crosses(
         return true; // a market order always crosses
     };
     if let Some(book) = feed.book(&req.coin, crate::now_ms()) {
-        let side = usize::from(req.is_buy);
+        let side = req.side().book_index();
         if let Some(level) = book.levels[side].first() {
-            let crosses = if req.is_buy { level.px <= limit } else { level.px >= limit };
+            let crosses = match req.side() {
+                Side::Buy => level.px <= limit,
+                Side::Sell => level.px >= limit,
+            };
             if crosses {
                 return true;
             }
         }
     }
     resting.iter().any(|r| {
-        r.coin == req.coin && r.is_buy != req.is_buy && {
-            if req.is_buy {
-                r.px <= limit
-            } else {
-                r.px >= limit
+        r.coin == req.coin && r.side != req.side() && {
+            match req.side() {
+                Side::Buy => r.px <= limit,
+                Side::Sell => r.px >= limit,
             }
         }
     })
@@ -1289,19 +1339,22 @@ fn merge_candidates(
     req: &Order,
     resting: &[RestingOrder],
 ) -> Vec<(Decimal, bool, u64, Address, Decimal)> {
-    let side = usize::from(req.is_buy);
+    let side = req.side().book_index();
     let mut candidates: Vec<(Decimal, bool, u64, Address, Decimal)> = book.levels[side]
         .iter()
         .map(|l| (l.px, false, 0u64, Address::ZERO, l.sz))
         .collect();
     for r in resting
         .iter()
-        .filter(|r| r.coin == book.coin && r.is_buy != req.is_buy && r.trigger.is_none())
+        .filter(|r| r.coin == book.coin && r.side != req.side() && r.trigger.is_none())
     {
         candidates.push((r.px, true, r.oid, r.account, r.sz));
     }
     candidates.sort_by(|a, b| {
-        let by_px = if req.is_buy { a.0.cmp(&b.0) } else { b.0.cmp(&a.0) };
+        let by_px = match req.side() {
+            Side::Buy => a.0.cmp(&b.0),
+            Side::Sell => b.0.cmp(&a.0),
+        };
         by_px.then_with(|| b.1.cmp(&a.1))
     });
     candidates
@@ -1311,7 +1364,6 @@ fn merge_candidates(
 /// a sell; the limit stops the walk. Returns (the consumed candidates, the
 /// filled size, the size-weighted average).
 fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Candidate>, Decimal, Decimal)> {
-    let side = usize::from(req.is_buy);
     let candidates = merge_candidates(book, req, resting);
     let mut remaining = req.size;
     let mut notional = Decimal::ZERO;
@@ -1321,7 +1373,10 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Can
             break;
         }
         if let Some(limit) = req.limit_px {
-            let within = if req.is_buy { px <= limit } else { px >= limit };
+            let within = match req.side() {
+                Side::Buy => px <= limit,
+                Side::Sell => px >= limit,
+            };
             if !within {
                 break;
             }
@@ -1341,7 +1396,7 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Can
         } else {
             legs.push(Candidate::Live(Consumption {
                 coin: book.coin.clone(),
-                side: side as u8,
+                side: req.side().book_index() as u8,
                 price: px,
                 size: take,
             }));
@@ -1415,10 +1470,10 @@ mod tests {
     }
 
     /// An IOC order on ETH.
-    fn ioc(is_buy: bool, size: &str) -> Order {
+    fn ioc(side: Side, size: &str) -> Order {
         Order {
             coin: "ETH".into(),
-            is_buy,
+            is_buy: side.is_buy(),
             size: size.parse().unwrap(),
             limit_px: None,
             tif: Tif::Ioc,
@@ -1429,10 +1484,10 @@ mod tests {
     }
 
     /// The same, reduce-only.
-    fn reduce(is_buy: bool, size: &str) -> Order {
+    fn reduce(side: Side, size: &str) -> Order {
         Order {
             reduce_only: true,
-            ..ioc(is_buy, size)
+            ..ioc(side, size)
         }
     }
 
@@ -1450,12 +1505,12 @@ mod tests {
         let (sim, a) = funded_sim(&feed, "1000");
 
         let err = sim
-            .order(&feed, a, &Order { coin: "NOPE".into(), ..ioc(true, "1") })
+            .order(&feed, a, &Order { coin: "NOPE".into(), ..ioc(Side::Buy, "1") })
             .unwrap_err();
         assert!(matches!(err, Error::NotFound { .. }), "{err:?}");
 
         let err = sim
-            .order(&feed, a, &Order { coin: "SOL".into(), ..ioc(true, "1") })
+            .order(&feed, a, &Order { coin: "SOL".into(), ..ioc(Side::Buy, "1") })
             .unwrap_err();
         assert!(matches!(err, Error::Warming), "{err:?}");
     }
@@ -1467,7 +1522,7 @@ mod tests {
         let (sim, a) = funded_sim(&feed, "1000");
         let mark_before = feed.mark("ETH").unwrap();
 
-        let fill = sim.order(&feed, a, &ioc(true, "1.5")).unwrap();
+        let fill = sim.order(&feed, a, &ioc(Side::Buy, "1.5")).unwrap();
         assert_eq!(fill.total_sz, "1.5".parse().unwrap());
         assert_eq!(fill.avg_px, "101".parse().unwrap());
         // I3: the mark is untouched.
@@ -1497,14 +1552,14 @@ mod tests {
         );
         let (sim, a) = funded_sim(&feed, "10000");
         // Take the whole 101 ask; the 102 ask stays live.
-        sim.order(&feed, a, &ioc(true, "1")).unwrap();
+        sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
         let served = feed.book("ETH", 0).unwrap();
         assert_eq!(served.levels[1].len(), 1, "the consumed ask left the book");
         assert_eq!(served.levels[1][0].px, "102".parse().unwrap());
         assert_eq!(served.levels[0][0].sz, "5".parse().unwrap(), "the bid is live");
         assert_eq!(feed.owned_levels(), 1);
         // A second order walks into the next level.
-        let fill = sim.order(&feed, a, &ioc(true, "1")).unwrap();
+        let fill = sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
         assert_eq!(fill.avg_px, "102".parse().unwrap());
         assert_eq!(feed.owned_levels(), 2);
     }
@@ -1515,7 +1570,7 @@ mod tests {
     fn live_updates_keep_the_delta_and_prune_stale_records() {
         let feed = feed_with_book(book("ETH", &[], &[("101", "1"), ("102", "1")]), meta_with("ETH", 10));
         let (sim, a) = funded_sim(&feed, "1000");
-        sim.order(&feed, a, &ioc(true, "1")).unwrap();
+        sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
         // The live book refreshes 101 with a bigger size: the delta persists
         // (served = live − consumed) and the untouched 102 refreshes verbatim.
         feed.put_book(book("ETH", &[], &[("101", "3"), ("102", "7")]), 10);
@@ -1535,7 +1590,7 @@ mod tests {
     fn hand_back_restores_the_live_book() {
         let feed = feed_with_book(book("ETH", &[], &[("101", "2")]), meta_with("ETH", 10));
         let (sim, a) = funded_sim(&feed, "1000");
-        sim.order(&feed, a, &ioc(true, "1")).unwrap();
+        sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
         assert_eq!(feed.book("ETH", 0).unwrap().levels[1][0].sz, "1".parse().unwrap());
         feed.clear_book("ETH").unwrap();
         assert_eq!(feed.book("ETH", 0).unwrap().levels[1][0].sz, "2".parse().unwrap());
@@ -1551,10 +1606,10 @@ mod tests {
         // the assertion is exact.
         feed.own_funding("ETH", Decimal::ZERO).unwrap();
         let (sim, a) = funded_sim(&feed, "1000");
-        sim.order(&feed, a, &ioc(true, "2")).unwrap();
+        sim.order(&feed, a, &ioc(Side::Buy, "2")).unwrap();
         let before = sim.account(a).unwrap().unwrap().perp_balance;
         // Sell 1 at 100: closed 1·(100 − 101) = −1.
-        sim.order(&feed, a, &reduce(false, "1")).unwrap();
+        sim.order(&feed, a, &reduce(Side::Sell, "1")).unwrap();
         let after = sim.account(a).unwrap().unwrap().perp_balance;
         // Realized −1, minus the reduce's own taker fee (100 notional × 4.5 bps).
         let fee = Decimal::from(100) * taker_fee();
@@ -1572,11 +1627,11 @@ mod tests {
     fn the_limit_stops_the_walk() {
         let feed = feed_with_book(book("ETH", &[("100", "1")], &[("101", "1")]), meta_with("ETH", 10));
         let (sim, a) = funded_sim(&feed, "1000");
-        let mut o = ioc(true, "1");
+        let mut o = ioc(Side::Buy, "1");
         o.limit_px = Some("100.5".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
         assert!(format!("{err}").contains("could not immediately match"), "{err}");
-        let mut o = ioc(false, "1");
+        let mut o = ioc(Side::Sell, "1");
         o.limit_px = Some("100.5".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
         assert!(format!("{err}").contains("could not immediately match"), "{err}");
@@ -1595,11 +1650,11 @@ mod tests {
             crate::wire::test_ctx("100", "100"),
             old,
         );
-        let err = sim.order(&feed, a, &ioc(true, "0.1")).unwrap_err();
+        let err = sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap_err();
         assert!(format!("{err}").contains("stale"), "{err}");
         // The scenario scripts the coin: its present is never stale.
         feed.own_book(&book("ETH", &[("100", "5")], &[("101", "5")])).unwrap();
-        let fill = sim.order(&feed, a, &ioc(true, "0.1")).unwrap();
+        let fill = sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
         assert_eq!(fill.total_sz, "0.1".parse().unwrap());
     }
 
@@ -1612,11 +1667,11 @@ mod tests {
         // about funding, so its ctx carries the published hourly rate.
         feed.put_ctx("ETH".into(), crate::wire::funding_ctx("101", "101"), crate::now_ms());
         let (sim, a) = funded_sim(&feed, "1000");
-        sim.order(&feed, a, &ioc(true, "0.1")).unwrap();
+        sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
         // An hour passes, then a second fill: the pre-fill size pays the
         // hour, and the change restarts since-change.
         sim.advance(&feed, 3600, 1).unwrap();
-        sim.order(&feed, a, &ioc(true, "0.1")).unwrap();
+        sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
         let p = sim.account(a).unwrap().unwrap().positions.remove("ETH").unwrap();
         assert_ne!(p.funding_all_time, Decimal::ZERO, "the hour was paid");
         assert_eq!(
@@ -1634,10 +1689,10 @@ mod tests {
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 4));
         let (sim, a) = funded_sim(&feed, "1000");
         // 5 decimals > szDecimals 4.
-        let err = sim.order(&feed, a, &ioc(true, "0.00001")).unwrap_err();
+        let err = sim.order(&feed, a, &ioc(Side::Buy, "0.00001")).unwrap_err();
         assert!(format!("{err}").contains("szDecimals"), "{err}");
         // 3 decimals > 6 − 4: the venue's tick-size refusal.
-        let mut o = ioc(true, "1");
+        let mut o = ioc(Side::Buy, "1");
         o.limit_px = Some("100.123".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
         assert!(
@@ -1645,17 +1700,17 @@ mod tests {
             "{err}"
         );
         // 6 significant figures.
-        let mut o = ioc(true, "1");
+        let mut o = ioc(Side::Buy, "1");
         o.limit_px = Some("12345.6".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
         assert!(format!("{err}").contains("significant"), "{err}");
         // 1 × 5 = 5 < the $10 minimum.
-        let mut o = ioc(true, "1");
+        let mut o = ioc(Side::Buy, "1");
         o.limit_px = Some("5".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
         assert!(format!("{err}").contains("minimum"), "{err}");
         // 0.1 × 101 = 10.1 ≥ the minimum: valid.
-        let mut o = ioc(true, "0.1");
+        let mut o = ioc(Side::Buy, "0.1");
         o.limit_px = Some("101".parse().unwrap());
         assert!(sim.order(&feed, a, &o).is_ok(), "a valid order fills");
     }
@@ -1668,13 +1723,13 @@ mod tests {
         let (sim, a) = funded_sim(&feed, "1000");
         // Gtc below the market: nothing crosses, so the order rests (the
         // venue's own behavior; the remainder shows in openOrders).
-        let mut gtc = ioc(true, "0.2");
+        let mut gtc = ioc(Side::Buy, "0.2");
         gtc.tif = Tif::Gtc;
         gtc.limit_px = Some("99".parse().unwrap());
         let placed = sim.place(&feed, a, &gtc).unwrap();
         assert!(placed.resting.is_some(), "a Gtc order rests: {placed:?}");
         // Post-only above the market: the venue's own refusal, with the bbo.
-        let mut alo = ioc(true, "0.2");
+        let mut alo = ioc(Side::Buy, "0.2");
         alo.tif = Tif::Alo;
         alo.limit_px = Some("102".parse().unwrap());
         let err = sim.place(&feed, a, &alo).unwrap_err();
@@ -1683,14 +1738,14 @@ mod tests {
             "{err}"
         );
         // A reduce-only order with nothing to reduce.
-        let err = sim.order(&feed, a, &reduce(false, "1")).unwrap_err();
+        let err = sim.order(&feed, a, &reduce(Side::Sell, "1")).unwrap_err();
         assert!(
             format!("{err}").contains("Reduce only order would increase position"),
             "{err}"
         );
         // An unfunded opening: the numbers ride in the refusal.
         let b = Address::repeat_byte(0xbb);
-        let err = sim.order(&feed, b, &ioc(true, "5")).unwrap_err();
+        let err = sim.order(&feed, b, &ioc(Side::Buy, "5")).unwrap_err();
         assert!(
             format!("{err}").contains("Insufficient margin to place order."),
             "{err}"
@@ -1705,7 +1760,7 @@ mod tests {
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
         let (sim, a) = funded_sim(&feed, "5");
         // $500 notional at 10× needs $50: the thin account cannot rest it.
-        let mut rest = ioc(true, "5");
+        let mut rest = ioc(Side::Buy, "5");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("100".parse().unwrap());
         let err = sim.place(&feed, a, &rest).unwrap_err();
@@ -1714,7 +1769,7 @@ mod tests {
             "{err}"
         );
         // A reduce-only order reserves nothing.
-        let mut close = reduce(false, "0.2");
+        let mut close = reduce(Side::Sell, "0.2");
         close.tif = Tif::Gtc;
         close.limit_px = Some("105".parse().unwrap());
         assert!(sim.place(&feed, a, &close).is_ok(), "reduce-only rests free");
@@ -1741,7 +1796,7 @@ mod tests {
         )
         .unwrap();
         // $500 notional at 10× needs $50: affordable at placement.
-        let mut rest = ioc(true, "5");
+        let mut rest = ioc(Side::Buy, "5");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("100".parse().unwrap());
         let oid = sim
@@ -1762,7 +1817,7 @@ mod tests {
         )
         .unwrap();
         // The taker crosses at the maker's price.
-        let mut cross = ioc(false, "1");
+        let mut cross = ioc(Side::Sell, "1");
         cross.limit_px = Some("100".parse().unwrap());
         let err = sim.place(&feed, taker, &cross).unwrap_err();
         assert!(format!("{err}").contains("could not immediately match"), "{err}");
@@ -1790,13 +1845,13 @@ mod tests {
             meta_with("ETH", 10),
         );
         let (sim, a) = funded_sim(&feed, "1000");
-        let mut rest = ioc(true, "1");
+        let mut rest = ioc(Side::Buy, "1");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("100".parse().unwrap());
         let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
         // The same address sells through its own bid: expired, not filled;
         // the served bid behind it takes the fill.
-        let sell = ioc(false, "1");
+        let sell = ioc(Side::Sell, "1");
         let fill = sim
             .place(&feed, a, &sell)
             .unwrap()
@@ -1827,10 +1882,10 @@ mod tests {
         );
         let (sim, a) = funded_sim(&feed, "1000");
         // A long position (the served ask), then a resting bid of its own.
-        let mut open = ioc(true, "1");
+        let mut open = ioc(Side::Buy, "1");
         open.limit_px = Some("101".parse().unwrap());
         sim.place(&feed, a, &open).unwrap();
-        let mut rest = ioc(true, "1");
+        let mut rest = ioc(Side::Buy, "1");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("100".parse().unwrap());
         let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
@@ -1859,13 +1914,13 @@ mod tests {
         let (sim, a) = funded_sim(&feed, "100");
         // 15 × 50 / 10 = 75 at its own price — fits; 15 × 101 / 10 = 151.5 at
         // the mark — refused.
-        let mut deep = ioc(true, "15");
+        let mut deep = ioc(Side::Buy, "15");
         deep.tif = Tif::Gtc;
         deep.limit_px = Some("50".parse().unwrap());
         let err = sim.place(&feed, a, &deep).unwrap_err();
         assert!(format!("{err}").contains("Insufficient margin"), "{err}");
         // A size the mark-margin can carry places.
-        let mut ok = ioc(true, "5");
+        let mut ok = ioc(Side::Buy, "5");
         ok.tif = Tif::Gtc;
         ok.limit_px = Some("50".parse().unwrap());
         assert!(sim.place(&feed, a, &ok).is_ok(), "5 × 101 / 10 = 50.5 ≤ 100");
@@ -1881,7 +1936,7 @@ mod tests {
             meta_with("ETH", 10),
         );
         let (sim, a) = funded_sim(&feed, "1000");
-        sim.order(&feed, a, &ioc(true, "1")).unwrap();
+        sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
         sim.update_isolated_margin(a, "ETH", 200_000_000, &feed).unwrap();
         // 1 ETH at the mark 101: initial = 10.1, the 10 % floor = 10.1 →
         // leaving 5 must refuse; leaving 11 may.
@@ -1913,8 +1968,8 @@ mod tests {
             meta_with("ETH", 10),
         );
         let (sim, a) = funded_sim(&feed, "1000");
-        sim.order(&feed, a, &ioc(true, "1")).unwrap(); // long 1 at the ask 101
-        let mut rest = ioc(false, "1");
+        sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap(); // long 1 at the ask 101
+        let mut rest = ioc(Side::Sell, "1");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("120".parse().unwrap());
         let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
@@ -1933,7 +1988,7 @@ mod tests {
         assert!(!account.positions.contains_key("ETH"), "settled flat");
         // Entry 101, the oracle 101 (the fixture's ctx): zero PnL, no fee.
         assert_eq!(account.perp_balance, before);
-        let err = sim.place(&feed, a, &ioc(true, "1")).unwrap_err();
+        let err = sim.place(&feed, a, &ioc(Side::Buy, "1")).unwrap_err();
         assert!(format!("{err}").contains("no new orders"), "{err}");
     }
 
@@ -1944,7 +1999,7 @@ mod tests {
     fn the_open_order_limit_refuses_by_name() {
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
         let (sim, a) = funded_sim(&feed, "100000");
-        let mut rest = ioc(false, "0.1");
+        let mut rest = ioc(Side::Sell, "0.1");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("120".parse().unwrap());
         for i in 0..1000 {
@@ -2002,7 +2057,7 @@ mod tests {
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
         let (sim, a) = funded_sim(&feed, "1000");
         // 300 is ~197 % above the oracle (101): outside the band.
-        let mut far = ioc(true, "0.2");
+        let mut far = ioc(Side::Buy, "0.2");
         far.limit_px = Some("300".parse().unwrap());
         let err = sim.order(&feed, a, &far).unwrap_err();
         assert!(
@@ -2010,7 +2065,7 @@ mod tests {
             "{err}"
         );
         // 101 is inside the band.
-        let mut ok = ioc(true, "0.2");
+        let mut ok = ioc(Side::Buy, "0.2");
         ok.limit_px = Some("101".parse().unwrap());
         assert!(sim.order(&feed, a, &ok).is_ok(), "inside the band fills");
     }
@@ -2021,7 +2076,7 @@ mod tests {
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 25));
         let (sim, a) = funded_sim(&feed, "1000");
         // 4M ETH at $100 = $400M > 10 × $30M.
-        let mut huge = ioc(true, "4000000");
+        let mut huge = ioc(Side::Buy, "4000000");
         huge.tif = Tif::Gtc;
         huge.limit_px = Some("100".parse().unwrap());
         let err = sim.place(&feed, a, &huge).unwrap_err();
@@ -2054,7 +2109,7 @@ mod tests {
         let (sim, a) = funded_sim(&feed, "1000");
         // 2M ETH at $100 = $200M > the 40× tier's $150M bound (and inside the
         // 10× limit cap, so the tier rule is the one that fires).
-        let mut huge = ioc(true, "2000000");
+        let mut huge = ioc(Side::Buy, "2000000");
         huge.tif = Tif::Gtc;
         huge.limit_px = Some("100".parse().unwrap());
         let err = sim.place(&feed, a, &huge).unwrap_err();
@@ -2070,7 +2125,7 @@ mod tests {
     fn isolated_margin_moves_onto_the_position() {
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
         let (sim, a) = funded_sim(&feed, "1000");
-        sim.order(&feed, a, &ioc(true, "1")).unwrap();
+        sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
         let before = sim.account(a).unwrap().unwrap().perp_balance;
         // $100 = 100_000_000 at the docs' 6 decimals.
         sim.update_isolated_margin(a, "ETH", 100_000_000, &feed).unwrap();
@@ -2119,7 +2174,7 @@ mod tests {
             meta_with("ETH", 10),
         );
         let (sim, a) = funded_sim(&feed, "1000");
-        let mut t = ioc(true, "1");
+        let mut t = ioc(Side::Buy, "1");
         t.tif = Tif::Gtc;
         t.limit_px = Some("101".parse().unwrap());
         t.trigger = Some(Trigger {
@@ -2145,8 +2200,8 @@ mod tests {
             meta_with("ETH", 10),
         );
         let (sim, a) = funded_sim(&feed, "1000");
-        let trigger = |is_buy: bool, tpsl: Tpsl, px: &str| {
-            let mut o = ioc(is_buy, "1");
+        let trigger = |side: Side, tpsl: Tpsl, px: &str| {
+            let mut o = ioc(side, "1");
             o.tif = Tif::Gtc;
             o.limit_px = Some("100".parse().unwrap());
             o.trigger = Some(Trigger {
@@ -2157,13 +2212,13 @@ mod tests {
             o
         };
         // The mid is (100 + 101) / 2 = 100.5.
-        let refused = sim.place(&feed, a, &trigger(true, Tpsl::Sl, "99"));
+        let refused = sim.place(&feed, a, &trigger(Side::Buy, Tpsl::Sl, "99"));
         assert!(refused.is_err(), "a stop buy below the mid is refused");
         assert!(refused.unwrap_err().to_string().contains("wrong side"));
-        sim.place(&feed, a, &trigger(true, Tpsl::Sl, "110")).unwrap();
-        let refused = sim.place(&feed, a, &trigger(false, Tpsl::Tp, "99"));
+        sim.place(&feed, a, &trigger(Side::Buy, Tpsl::Sl, "110")).unwrap();
+        let refused = sim.place(&feed, a, &trigger(Side::Sell, Tpsl::Tp, "99"));
         assert!(refused.is_err(), "a take sell below the mid is refused");
-        sim.place(&feed, a, &trigger(false, Tpsl::Tp, "110")).unwrap();
+        sim.place(&feed, a, &trigger(Side::Sell, Tpsl::Tp, "110")).unwrap();
     }
 
     /// The scheduled-cancel cap (docs): "The max number of triggers per day is

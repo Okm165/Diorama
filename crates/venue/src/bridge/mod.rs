@@ -665,7 +665,7 @@ fn core_order(
 ) -> Option<crate::sim::order::Order> {
     let CoreAction::LimitOrder {
         asset,
-        is_buy,
+        side,
         limit_px,
         sz,
         reduce_only,
@@ -679,7 +679,7 @@ fn core_order(
     let scale = Decimal::from(100_000_000u64);
     Some(crate::sim::order::Order {
         coin,
-        is_buy: *is_buy,
+        is_buy: side.is_buy(),
         size: Decimal::from(*sz) / scale,
         limit_px: Some(Decimal::from(*limit_px) / scale),
         tif,
@@ -719,7 +719,7 @@ mod tests {
         });
         let action = CoreAction::LimitOrder {
             asset: 0,
-            is_buy: true,
+            side: crate::sim::order::Side::Buy,
             limit_px: 10_150_000_000,
             sz: 250_000_000,
             reduce_only: false,
@@ -736,7 +736,7 @@ mod tests {
         // An index the meta does not carry is a refusal, not a guess.
         let oob = CoreAction::LimitOrder {
             asset: 9,
-            is_buy: true,
+            side: crate::sim::order::Side::Buy,
             limit_px: 1,
             sz: 1,
             reduce_only: false,
@@ -806,7 +806,7 @@ mod tests {
         let cancel = |oid: u64| CoreAction::CancelByOid { asset: 0, oid };
         let order = |tif: u8, cloid: u128| CoreAction::LimitOrder {
             asset: 0,
-            is_buy: true,
+            side: crate::sim::order::Side::Buy,
             limit_px: 100,
             sz: 1,
             reduce_only: false,

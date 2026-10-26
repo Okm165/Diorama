@@ -170,11 +170,10 @@ pub(crate) struct FrontendOpenOrder {
     pub trigger_px: String,
 }
 
-fn side_letter(is_buy: bool) -> &'static str {
-    if is_buy {
-        "B"
-    } else {
-        "A"
+fn side_letter(side: crate::sim::order::Side) -> &'static str {
+    match side {
+        crate::sim::order::Side::Buy => "B",
+        crate::sim::order::Side::Sell => "A",
     }
 }
 
@@ -186,7 +185,10 @@ fn trigger_condition(order: &crate::sim::order::RestingOrder) -> String {
                 crate::sim::order::Tpsl::Tp => "Take Profit",
                 crate::sim::order::Tpsl::Sl => "Stop",
             };
-            let dir = if order.is_buy { MARKET } else { LIMIT };
+            let dir = match order.side {
+                crate::sim::order::Side::Buy => MARKET,
+                crate::sim::order::Side::Sell => LIMIT,
+            };
             format!("{kind} {dir} {}({})", if t.is_market { MARKET } else { LIMIT }, t.trigger_px)
         }
     }
@@ -204,7 +206,7 @@ async fn open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Res
                 coin: r.coin.clone(),
                 limit_px: r.px.to_string(),
                 oid: r.oid,
-                side: side_letter(r.is_buy),
+                side: side_letter(r.side),
                 sz: r.sz.to_string(),
                 timestamp: r.placed_ms,
             })
@@ -298,7 +300,7 @@ fn frontend_row(r: &crate::sim::order::RestingOrder) -> FrontendOpenOrder {
         order_type: order_type(r.trigger.is_some()),
         orig_sz: r.orig_sz.to_string(),
         reduce_only: r.reduce_only,
-        side: side_letter(r.is_buy),
+        side: side_letter(r.side),
         sz: r.sz.to_string(),
         timestamp: r.placed_ms,
         trigger_condition: trigger_condition(r),

@@ -169,7 +169,10 @@ pub(crate) fn validate_tick_lot(meta: Option<&crate::wire::Meta>, req: &Order) -
 /// immediately. The mid is the served book's `(best bid + best ask) / 2`; a
 /// missing or one-sided book skips the check (the feed is warming).
 pub(crate) fn validate_trigger_side(feed: &MarketFeed, req: &Order, trigger: &Trigger) -> Result<()> {
-    let (Some(bid), Some(ask)) = (bbo(feed, &req.coin, true), bbo(feed, &req.coin, false)) else {
+    let (Some(bid), Some(ask)) = (
+        bbo(feed, &req.coin, crate::sim::order::Side::Buy),
+        bbo(feed, &req.coin, crate::sim::order::Side::Sell),
+    ) else {
         return Ok(());
     };
     let mid = super::account::div(
@@ -177,9 +180,10 @@ pub(crate) fn validate_trigger_side(feed: &MarketFeed, req: &Order, trigger: &Tr
         Decimal::from(2),
         "mid price",
     )?;
-    let ok = match (req.is_buy, trigger.tpsl) {
-        (true, Tpsl::Sl) | (false, Tpsl::Tp) => trigger.trigger_px > mid,
-        (true, Tpsl::Tp) | (false, Tpsl::Sl) => trigger.trigger_px < mid,
+    use crate::sim::order::Side;
+    let ok = match (req.side(), trigger.tpsl) {
+        (Side::Buy, Tpsl::Sl) | (Side::Sell, Tpsl::Tp) => trigger.trigger_px > mid,
+        (Side::Buy, Tpsl::Tp) | (Side::Sell, Tpsl::Sl) => trigger.trigger_px < mid,
     };
     if !ok {
         return Err(Error::bad_request(

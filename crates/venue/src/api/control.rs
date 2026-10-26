@@ -122,7 +122,7 @@ pub(crate) async fn order(State(state): State<Arc<ApiState>>, Json(req): Json<Or
     tracing::info!(
         address = %req.address,
         coin = %req.order.coin,
-        is_buy = req.order.is_buy,
+        is_buy = req.order.side().is_buy(),
         sz = %fill.total_sz,
         avg_px = %fill.avg_px,
         consumed = fill.consumed.len(),

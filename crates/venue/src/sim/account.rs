@@ -671,7 +671,7 @@ pub(crate) fn sign(d: Decimal) -> i8 {
 #[derive(Debug, Clone)]
 pub(crate) struct FillFacts {
     pub coin: String,
-    pub is_buy: bool,
+    pub side: crate::sim::order::Side,
     pub size: Decimal,
     pub px: Decimal,
     pub leverage: u32,
@@ -684,10 +684,16 @@ pub(crate) struct FillFacts {
 impl FillFacts {
     /// A reduce-only close at `px` with no fee: the waterfall's shape (the ADL
     /// pairs and the book's reduce closes).
-    pub(crate) fn close(coin: &str, is_buy: bool, size: Decimal, px: Decimal, leverage: u32) -> Self {
+    pub(crate) fn close(
+        coin: &str,
+        side: crate::sim::order::Side,
+        size: Decimal,
+        px: Decimal,
+        leverage: u32,
+    ) -> Self {
         Self {
             coin: coin.to_string(),
-            is_buy,
+            side,
             size,
             px,
             leverage,
@@ -702,7 +708,7 @@ pub(crate) fn apply_fill(
     fill: &FillFacts,
     meta: Option<&crate::wire::Meta>,
 ) -> Result<()> {
-    let signed = if fill.is_buy { fill.size } else { -fill.size };
+    let signed = fill.size * fill.side.sign();
     let old = account
         .positions
         .get(&fill.coin)
@@ -832,7 +838,7 @@ fn settle_margin(position: &mut Position) -> Result<()> {
 /// An increase (or a fresh position): the entry becomes the size-weighted
 /// average of the old notional and the fill.
 fn apply_increase(position: &mut Position, old: Decimal, fill: &FillFacts) -> Result<()> {
-    let signed = if fill.is_buy { fill.size } else { -fill.size };
+    let signed = fill.size * fill.side.sign();
     let old_notional = mul(old.abs(), position.entry_px, "entry notional")?;
     let fill_notional = mul(fill.size, fill.px, FILL_NOTIONAL)?;
     let new_szi = add(old, signed, "position size")?;
@@ -849,7 +855,7 @@ fn apply_increase(position: &mut Position, old: Decimal, fill: &FillFacts) -> Re
 /// caller to credit — the measured identity stays exact); a flip opens the
 /// remainder at the fill price.
 fn apply_reduction(position: &mut Position, old: Decimal, fill: &FillFacts) -> Result<Decimal> {
-    let signed = if fill.is_buy { fill.size } else { -fill.size };
+    let signed = fill.size * fill.side.sign();
     let closed = old.abs().min(fill.size);
     let realized = mul(
         mul(closed, sub(fill.px, position.entry_px, "px − entry")?, "closed PnL")?,

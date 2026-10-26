@@ -83,7 +83,7 @@ pub(crate) enum CoreAction {
     /// 1: `(uint32 asset, bool isBuy, uint64 limitPx, uint64 sz, bool reduceOnly, uint8 tif, uint128 cloid)`.
     LimitOrder {
         asset: u32,
-        is_buy: bool,
+        side: crate::sim::order::Side,
         limit_px: u64,
         sz: u64,
         reduce_only: bool,
@@ -182,7 +182,7 @@ fn decode_limit_order(payload: &[u8]) -> CoreAction {
     match LimitOrderPayload::abi_decode_params(payload) {
         Ok(v) => CoreAction::LimitOrder {
             asset: v.asset,
-            is_buy: v.isBuy,
+            side: crate::sim::order::Side::of(v.isBuy),
             limit_px: v.limitPx,
             sz: v.sz,
             reduce_only: v.reduceOnly,

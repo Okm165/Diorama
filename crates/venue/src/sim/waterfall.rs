@@ -361,9 +361,9 @@ impl Sim {
             let take = left.min(size);
             // The counterparty closes at the previous mark; the underwater
             // account's side closes against it at the same price.
-            let own =
-                account::FillFacts::close(coin, !my_side_long, take, prev_mark, p.leverage_value);
-            let theirs = account::FillFacts::close(coin, my_side_long, take, prev_mark, 1);
+            let mine = crate::sim::order::Side::of(my_side_long);
+            let own = account::FillFacts::close(coin, mine.flip(), take, prev_mark, p.leverage_value);
+            let theirs = account::FillFacts::close(coin, mine, take, prev_mark, 1);
             self.adl_close_pair(pass.address, other, (&own, &theirs), meta)?;
             tracing::warn!(account = %pass.address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
             left = left.saturating_sub(take);
@@ -478,7 +478,8 @@ fn vault_take_coin(
     })?;
     let facts = account::FillFacts {
         coin: coin.to_string(),
-        is_buy: is_long,
+        // The vault takes the position on the same side (entered at the mark).
+        side: crate::sim::order::Side::of(is_long),
         size,
         px: feed.mark_or(coin, entry_px),
         leverage,
@@ -851,7 +852,13 @@ mod tests {
         put_isolated(&sim, a, "ETH", (Decimal::from(100), Decimal::ONE, 10, Decimal::from(4)));
         sim.with_account(a, |acc| {
             let facts =
-                crate::sim::account::FillFacts::close("ETH", false, Decimal::ONE, Decimal::from(100), 10);
+                crate::sim::account::FillFacts::close(
+                    "ETH",
+                    crate::sim::order::Side::Sell,
+                    Decimal::ONE,
+                    Decimal::from(100),
+                    10,
+                );
             crate::sim::account::apply_fill(acc, &facts, None)
         })
         .unwrap();
@@ -882,7 +889,13 @@ mod tests {
         // A half close releases half the margin (4), keeping the other 4.
         sim.with_account(a, |acc| {
             let facts =
-                crate::sim::account::FillFacts::close("ETH", false, Decimal::ONE, Decimal::from(100), 10);
+                crate::sim::account::FillFacts::close(
+                    "ETH",
+                    crate::sim::order::Side::Sell,
+                    Decimal::ONE,
+                    Decimal::from(100),
+                    10,
+                );
             crate::sim::account::apply_fill(acc, &facts, feed.meta().as_ref())
         })
         .unwrap();
