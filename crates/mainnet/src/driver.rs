@@ -185,7 +185,7 @@ async fn resume_point(anvil_t: &Rpc, cursor: Option<&ChainCursor>, head: u64) ->
 /// decision - clear vs restore - lives with the reset handling above, where
 /// the fork pin is compared before anything is written.)
 async fn on_rebase(rpc: &mirror_anvil::Rpc, head: u64, follow: u64, start: u64) -> Result<()> {
-    if let Err(e) = rpc.anvil_set_automine(false).await {
+    if let Err(e) = rpc.anvil_set_automine(mirror_anvil::Automine::Off).await {
         tracing::warn!(error = %e, "could not re-assert automine=false");
     }
     tracing::info!(head, follow, start, "starting chain at block");

@@ -125,7 +125,7 @@ async fn top_up(ctx: &Ctx, engine: &crate::source_sync::engine_api::EngineClient
         return Ok(0);
     }
     let el_head = ctx.reth.block_number().await?;
-    let el = ctx.reth.block_by_number(el_head, false).await?;
+    let el = ctx.reth.block_by_number(el_head, mirror_anvil::Txs::Hashes).await?;
     let cl_head = ctx.beacon.head_slot().await?;
     // First slot whose payload can follow the EL head.
     let mut slot = first_payload_slot(el.header.timestamp);

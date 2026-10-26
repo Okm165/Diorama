@@ -18,7 +18,7 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
     // Wait for the scratch anvil (same pod, it starts in parallel).
     let boot = std::time::Duration::from_secs(120);
     ctx.anvil_t.wait_until_up("anvil-t", boot).await?;
-    ctx.anvil_t.anvil_set_automine(false).await?;
+    ctx.anvil_t.anvil_set_automine(mirror_anvil::Automine::Off).await?;
 
     // The pin comes from the scratch anvil itself (forkConfig.forkBlockNumber).
     let pin = mirror_devnet::pin::fork_pin(&ctx.anvil_t, "anvil-t").await?;

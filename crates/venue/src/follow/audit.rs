@@ -1,10 +1,13 @@
 //! The uncovered-log audit: logs from contracts no declared closure covers —
 //! their state changes cannot be followed until a closure is declared. The
 //! metric counts every window; the drift line and the warning carry only the
-//! emitters *new* to the log (a busy chain touches dozens of contracts per
-//! window and the set churns, so a per-window line would grow forever while
-//! saying nothing new). The applier has no counterpart: reth's native BALs
-//! carry every write, so nothing can be uncovered there.
+//! *watched* emitters new to the log — the actionable subset (declare a
+//! closure, or unwatch the account). The ambient chain's uncovered logs
+//! (every contract the source's blocks touch) stay in the metric: their set
+//! churns forever, so a per-emitter line says nothing an operator can act on
+//! (measured live: 62 warnings in ten minutes before this split). The
+//! applier has no counterpart: reth's native BALs carry every write, so
+//! nothing can be uncovered there.
 use crate::ctx::Ctx;
 use crate::error::Result;
 use alloy_primitives::Address;
@@ -28,7 +31,13 @@ pub(super) fn record(ctx: &Ctx, uncovered: &[Address]) -> Result<()> {
     }
     let metrics = &ctx.venue_metrics;
     metrics.add(&metrics.poll_uncovered_logs, uncovered.len() as u64);
-    let fresh = fresh_emitters(&ctx.uncovered_seen, uncovered);
+    let watch = ctx.mirror.scope().watch();
+    let actionable: Vec<Address> = uncovered
+        .iter()
+        .copied()
+        .filter(|address| watch.accounts.contains(address))
+        .collect();
+    let fresh = fresh_emitters(&ctx.uncovered_seen, &actionable);
     if !fresh.is_empty() {
         ctx.drift.append(&UncoveredLogsEntry {
             chain: ctx.mirror.label(),

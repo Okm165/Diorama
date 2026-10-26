@@ -16,7 +16,7 @@
 //! is `alloy_json_rpc`'s; the results and params are alloy's per-namespace
 //! types (`alloy_rpc_types_eth`, `…-anvil`, `…-trace`, `…-txpool`). A wire
 //! change upstream lands as a compile error here, never as a silent mismatch.
-use crate::backoff::Backoff;
+use crate::backoff::{Backoff, Progress};
 use crate::error::{missing_from_batch, Error, Result, RpcError};
 use crate::trace::{Key, Value};
 use alloy_eips::eip7928::BlockAccessList;
@@ -69,6 +69,30 @@ pub fn call(method: &'static str, params: impl Serialize) -> Result<Call> {
 /// passed (measured live). Sequential sub-batches keep the follow inside that
 /// proven-safe shape.
 const BATCH_CONCURRENCY: usize = 1;
+
+/// Whether a block read carries its transactions' bodies: the RPC's own
+/// `full` flag, named (a bare `true` at a call site says nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Txs {
+    /// Transaction hashes only.
+    Hashes,
+    /// Full transaction bodies.
+    Full,
+}
+
+impl Txs {
+    /// The wire flag (`eth_getBlockByNumber`'s second parameter).
+    fn full(self) -> bool {
+        matches!(self, Txs::Full)
+    }
+}
+
+/// The target's automine mode: `anvil_setAutomine`'s own flag, named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Automine {
+    On,
+    Off,
+}
 
 /// The batch's item cap, measured: the public HyperEVM RPC answers
 /// `Exceeded max limit of 20` for a larger batch (live), so every sub-batch
@@ -247,7 +271,7 @@ impl Rpc {
                 return Ok((status, text));
             }
             tokio::time::sleep(backoff.delay()).await;
-            backoff.record(false);
+            backoff.record(Progress::Stalled);
         }
         unreachable!("the loop returns on its last attempt")
     }
@@ -613,8 +637,8 @@ impl Rpc {
         Ok(quantity.to::<u64>())
     }
 
-    pub async fn block_by_number(&self, n: u64, full: bool) -> Result<Block> {
-        self.call_opt(BLOCK_BY_NUMBER, (U64::from(n), full))
+    pub async fn block_by_number(&self, n: u64, txs: Txs) -> Result<Block> {
+        self.call_opt(BLOCK_BY_NUMBER, (U64::from(n), txs.full()))
             .await?
             .ok_or_else(|| Error::BlockMissing {
                 endpoint: self.url.clone(),
@@ -622,15 +646,15 @@ impl Rpc {
             })
     }
 
-    pub async fn block_by_number_opt(&self, n: u64, full: bool) -> Result<Option<Block>> {
-        self.call_opt(BLOCK_BY_NUMBER, (U64::from(n), full))
+    pub async fn block_by_number_opt(&self, n: u64, txs: Txs) -> Result<Option<Block>> {
+        self.call_opt(BLOCK_BY_NUMBER, (U64::from(n), txs.full()))
             .await
     }
 
     /// `tag` is the protocol's own block-parameter string: `latest`,
     /// `finalized`, `safe`, `pending`, `earliest`, or a hex height.
-    pub async fn block_by_tag(&self, tag: &str, full: bool) -> Result<Option<Block>> {
-        self.call_opt(BLOCK_BY_NUMBER, (tag, full)).await
+    pub async fn block_by_tag(&self, tag: &str, txs: Txs) -> Result<Option<Block>> {
+        self.call_opt(BLOCK_BY_NUMBER, (tag, txs.full())).await
     }
 
     pub async fn block_access_list(&self, n: u64) -> Result<Option<BlockAccessList>> {
@@ -849,8 +873,9 @@ impl Rpc {
 
     // ---- anvil namespace -----------------------------------------------
 
-    pub async fn anvil_set_automine(&self, on: bool) -> Result<()> {
-        self.call_raw("anvil_setAutomine", (on,)).await?;
+    pub async fn anvil_set_automine(&self, mode: Automine) -> Result<()> {
+        self.call_raw("anvil_setAutomine", (matches!(mode, Automine::On),))
+            .await?;
         Ok(())
     }
 

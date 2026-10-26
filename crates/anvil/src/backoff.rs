@@ -9,6 +9,15 @@
 //! hand-rolled copies never had.
 use std::time::Duration;
 
+/// The outcome a backoffed attempt reports: progress resets the delay, a
+/// stall doubles it. Named, so a call site reads (`record(Progress::Stalled)`)
+/// instead of a bare `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    Progressed,
+    Stalled,
+}
+
 /// Bounded exponential backoff: `base` for the first failed attempt, doubling
 /// per consecutive failure, never past `cap`; progress resets it to `base`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,11 +44,10 @@ impl Backoff {
 
     /// Record the attempt's outcome: progress (a session that served) resets
     /// the delay to `base`; a failure doubles it, never past `cap`.
-    pub fn record(&mut self, progressed: bool) {
-        self.current = if progressed {
-            self.base
-        } else {
-            (self.current * 2).min(self.cap)
+    pub fn record(&mut self, progress: Progress) {
+        self.current = match progress {
+            Progress::Progressed => self.base,
+            Progress::Stalled => (self.current * 2).min(self.cap),
         };
     }
 }
@@ -55,11 +63,11 @@ mod tests {
         let mut delays = Vec::new();
         for _ in 0..6 {
             delays.push(backoff.delay().as_secs());
-            backoff.record(false);
+            backoff.record(Progress::Stalled);
         }
         assert_eq!(delays, vec![1, 2, 4, 5, 5, 5]);
         // One session that made progress starts the sequence over.
-        backoff.record(true);
+        backoff.record(Progress::Progressed);
         assert_eq!(backoff.delay(), Duration::from_secs(1));
     }
 }

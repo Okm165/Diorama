@@ -99,7 +99,7 @@ impl Ctx {
     /// reth follow head (safe/latest/finalized per config).
     pub async fn follow_head(&self) -> Result<Option<u64>> {
         let tag = self.l1.follow.tag();
-        let block = self.reth.block_by_tag(tag, false).await?;
+        let block = self.reth.block_by_tag(tag, mirror_anvil::Txs::Hashes).await?;
         Ok(block.map(|b| b.header.number))
     }
 

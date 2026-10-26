@@ -290,7 +290,7 @@ fn report_applied(plane: &Plane, n: u64, facts: &ApplyFacts, outcome: &ApplyOutc
 /// path's shared step: the block's hash is read from the chain and the
 /// cursor written through the spine's one cursor step.
 async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
-    let block = ctx.anvil_t.block_by_number(n, false).await?;
+    let block = ctx.anvil_t.block_by_number(n, mirror_anvil::Txs::Hashes).await?;
     mirror_devnet::state::advance_cursor(&ctx.plane.state, &block, n)?;
     Ok(())
 }
@@ -387,7 +387,7 @@ async fn align_context(ctx: &Ctx, header: &Header) -> Result<()> {
     let offset = ctx.plane.time_offset.load(Ordering::Relaxed);
     let last_ts = ctx
         .anvil_t
-        .block_by_number(ctx.anvil_t.block_number().await?, false)
+        .block_by_number(ctx.anvil_t.block_number().await?, mirror_anvil::Txs::Hashes)
         .await?
         .header
         .timestamp;

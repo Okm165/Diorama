@@ -87,21 +87,24 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
         if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
-        let progressed = match pass(&ctx).await {
-            Ok(Pass::Steady) => true,
+        let progress = match pass(&ctx).await {
+            Ok(Pass::Steady) => mirror_anvil::Progress::Progressed,
             Ok(Pass::Reset) => {
                 recover_from_reset(&ctx).await;
-                true
+                mirror_anvil::Progress::Progressed
             }
             Err(e) => {
                 tracing::warn!(error = %e, "venue driver pass failed; will retry");
-                false
+                mirror_anvil::Progress::Stalled
             }
         };
-        backoff.record(progressed);
+        backoff.record(progress);
         // A pass that served sleeps the plain cadence; a failed one sleeps
         // the grown delay.
-        let pause = if progressed { poll } else { poll.max(backoff.delay()) };
+        let pause = match progress {
+            mirror_anvil::Progress::Progressed => poll,
+            mirror_anvil::Progress::Stalled => poll.max(backoff.delay()),
+        };
         tokio::time::sleep(pause).await;
     }
 }
@@ -216,7 +219,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     // same 1024 blocks on both mirrors (files older than head - keep are
     // pruned; the venue's journal holds its own writes — the deal).
     ctx.plane.journal.prune(head);
-    let block = ctx.anvil_v.block_by_number(head, false).await?;
+    let block = ctx.anvil_v.block_by_number(head, mirror_anvil::Txs::Hashes).await?;
     mirror_devnet::state::advance_cursor(&ctx.plane.state, &block, head)?;
     ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
     ctx.plane.facts.publish(Fact::CursorAdvanced {
@@ -317,7 +320,7 @@ async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// the base the registry was just rebuilt against.
 async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     let watermark = if let Some(p) = pin {
-        let block = ctx.anvil_v.block_by_number(p, false).await?;
+        let block = ctx.anvil_v.block_by_number(p, mirror_anvil::Txs::Hashes).await?;
         // Not the shared advance step: a new epoch's `first_block` *is* the
         // pin (the shared step keeps the current cursor's first block).
         ctx.plane.state.set_cursor(cursor_from(&block, p))?;
@@ -325,7 +328,7 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
         // state at the pin, so the next window composes pin+1 onward. The
         // hash is the source's own block hash (the continuity check compares
         // it to the next block's parent).
-        let source_block = ctx.source_rpc.block_by_number(p, false).await?;
+        let source_block = ctx.source_rpc.block_by_number(p, mirror_anvil::Txs::Hashes).await?;
         ctx.plane.state.set_source_last(p, source_block.header.hash)?;
         p
     } else {

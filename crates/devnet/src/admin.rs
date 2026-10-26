@@ -356,7 +356,7 @@ impl AdminSurface<'_> {
     /// at the chain head + 1 and skip parent blocks); only a *missing* block
     /// means "reset under us".
     async fn reset_cursor_to(&self, target: u64) -> Result<()> {
-        if let Some(b) = self.target.block_by_number_opt(target, false).await? {
+        if let Some(b) = self.target.block_by_number_opt(target, mirror_anvil::Txs::Hashes).await? {
             crate::state::advance_cursor(&self.plane.state, &b, target)?;
         } else {
             self.plane.state.clear_cursor()?;

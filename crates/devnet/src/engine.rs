@@ -464,7 +464,7 @@ pub async fn assert_chain<E: Engine>(
             want: chain_id,
         }));
     }
-    ctx.target().anvil_set_automine(false).await?;
+    ctx.target().anvil_set_automine(mirror_anvil::Automine::Off).await?;
     Ok(())
 }
 

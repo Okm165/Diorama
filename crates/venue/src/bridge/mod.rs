@@ -116,7 +116,7 @@ impl Bridge {
         if self.observed_head.load(Ordering::Relaxed) == head {
             return Ok(());
         }
-        let block = self.anvil_v.block_by_number(head, false).await?;
+        let block = self.anvil_v.block_by_number(head, mirror_anvil::Txs::Hashes).await?;
         self.sim.observe_chain_time(block.header.timestamp.saturating_mul(1_000));
         self.observed_head.store(head, Ordering::Relaxed);
         Ok(())
@@ -124,7 +124,7 @@ impl Bridge {
 
     /// Decode one block's boundary activity and apply it.
     async fn scan_block(&self, n: u64) -> Result<()> {
-        let block = self.anvil_v.block_by_number(n, true).await?;
+        let block = self.anvil_v.block_by_number(n, mirror_anvil::Txs::Full).await?;
         if block.transactions.is_empty() {
             return Ok(());
         }

@@ -211,7 +211,7 @@ async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
     let Some(last_hash) = ctx.plane.state.source_last_hash()? else {
         return Ok(());
     };
-    let next = ctx.source_rpc.block_by_number(followed + 1, false).await?;
+    let next = ctx.source_rpc.block_by_number(followed + 1, mirror_anvil::Txs::Hashes).await?;
     if next.header.parent_hash != last_hash {
         ctx.venue_metrics
             .inc(&ctx.venue_metrics.source_reorg_total);
@@ -272,7 +272,7 @@ fn record_window_metrics(metrics: &crate::metrics::VenueMetrics, stats: &mirror_
 /// block hash — the continuity check's anchor) and persist the state. The
 /// name says which cursor: the devnet cursor is the spine's `advance_cursor`.
 async fn advance_source_cursor(ctx: &Ctx, source_head: u64) -> Result<()> {
-    let head_block = ctx.source_rpc.block_by_number(source_head, false).await?;
+    let head_block = ctx.source_rpc.block_by_number(source_head, mirror_anvil::Txs::Hashes).await?;
     ctx.plane.state.set_source_last(source_head, head_block.header.hash)?;
     ctx.plane.save_state()?;
     Ok(())

@@ -88,17 +88,17 @@ impl WsClient {
     pub async fn run(self) {
         let mut backoff = mirror_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
         loop {
-            let progressed = match self.session().await {
-                Ok(()) => true,
+            let progress = match self.session().await {
+                Ok(()) => mirror_anvil::Progress::Progressed,
                 Err(e) => {
                     tracing::warn!(error = %e, "market websocket session failed; reconnecting");
-                    false
+                    mirror_anvil::Progress::Stalled
                 }
             };
             self.feed.metrics.set_ws_connected(false);
             self.feed.metrics.inc_ws_reconnects();
             let delay = backoff.delay();
-            backoff.record(progressed);
+            backoff.record(progress);
             tokio::time::sleep(delay).await;
         }
     }

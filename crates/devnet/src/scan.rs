@@ -217,7 +217,7 @@ struct BlockScan {
 /// Returns how many writes were marked; `0` is the empty-block skip the
 /// caller counts.
 async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<BlockScan> {
-    let block = target.block_by_number(n, true).await?;
+    let block = target.block_by_number(n, mirror_anvil::Txs::Full).await?;
     let txs = block_txs(&block);
     if txs.is_empty() {
         return Ok(BlockScan {
@@ -275,7 +275,7 @@ async fn mark_block(
 
 /// Read a block's hash (for cursor validation).
 pub async fn block_hash(rpc: &Rpc, n: u64) -> Result<Option<B256>> {
-    let b = rpc.block_by_number_opt(n, false).await?;
+    let b = rpc.block_by_number_opt(n, mirror_anvil::Txs::Hashes).await?;
     Ok(b.map(|b| b.header.hash))
 }
 

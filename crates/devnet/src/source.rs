@@ -268,7 +268,7 @@ impl Source for RawSource {
     }
 
     fn header(&self, n: u64) -> BoxFuture<'_, mirror_anvil::Result<alloy_rpc_types_eth::Header>> {
-        Box::pin(async move { Ok(self.rpc.block_by_number(n, false).await?.header) })
+        Box::pin(async move { Ok(self.rpc.block_by_number(n, mirror_anvil::Txs::Hashes).await?.header) })
     }
 
     fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, mirror_anvil::Result<U256>> {

@@ -53,7 +53,7 @@ impl RethSource {
     /// without block-level tracing).
     async fn trace_block_per_tx(&self, n: u64) -> mirror_anvil::Result<Vec<mirror_anvil::Write>> {
         use alloy_network_primitives::TransactionResponse as _;
-        let block = self.reth.block_by_number(n, true).await?;
+        let block = self.reth.block_by_number(n, mirror_anvil::Txs::Full).await?;
         let mut out = Vec::new();
         for tx in mirror_devnet::scan::block_txs(&block) {
             let trace = self.reth.trace_tx_prestate(tx.tx_hash()).await?;

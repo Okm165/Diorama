@@ -37,7 +37,7 @@ async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()>
         // before the pool check — a pool that drains first leaves the value
         // for the applied block, which sets its own.
         let last = anvil_t
-            .block_by_number(anvil_t.block_number().await?, false)
+            .block_by_number(anvil_t.block_number().await?, mirror_anvil::Txs::Hashes)
             .await?;
         if let Err(e) = anvil_t
             .anvil_set_next_block_timestamp(last.header.timestamp + 1)

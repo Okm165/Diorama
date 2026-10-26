@@ -9,7 +9,7 @@ mod pad;
 mod trace;
 mod writes;
 
-pub use backoff::Backoff;
+pub use backoff::{Backoff, Progress};
 
 /// The JSON content type every transport in the workspace sends (and the
 /// venue's HTTP surface answers): one home — a typo here would break a
