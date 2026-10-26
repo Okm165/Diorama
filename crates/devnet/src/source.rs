@@ -15,28 +15,69 @@ use alloy_primitives::{Address, B256, U256};
 use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
-/// What a source can serve. Probed once at boot and logged; every read path
-/// gates on it — never assumed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct Capabilities {
+/// A source capability, named: what a source can answer beyond the plain
+/// reads (the composer and the probes branch on these). Probed once at boot
+/// and logged; every read path gates on it — never assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
     /// `eth_getBlockAccessList` (reth; anvil ≥ Amsterdam records its own).
-    pub native_bal: bool,
+    NativeBal,
     /// `debug_traceBlockByNumber{prestateTracer, diffMode}`.
-    pub traces: bool,
-    /// State reads at arbitrary blocks; when false, historical reads are
+    Traces,
+    /// State reads at arbitrary blocks; when absent, historical reads are
     /// refused with the numbers, never answered with a newer value.
-    pub historical: bool,
+    Historical,
     /// `eth_subscribe newHeads` (reth; the HL public RPC documents none).
-    pub heads_ws: bool,
+    HeadsWs,
     /// `eth_getSystemTxsByBlockNumber` (HyperEVM's Core→EVM completions).
-    pub system_txs: bool,
+    SystemTxs,
     /// Receipts (and therefore logs) for the system txs. The HL public RPC
     /// serves the txs but **not** their receipts (measured 2026-10-24: a
     /// system tx's receipt is `null` and `eth_getBlockReceipts` returns only
     /// the block's normal txs), so a composer on this source must decode the
     /// system txs' calldata for their touched accounts; a nanoreth archive
     /// serves the receipts.
-    pub system_tx_receipts: bool,
+    SystemTxReceipts,
+}
+
+impl Capability {
+    /// The wire/log spelling (the boot log and the disagreement list).
+    pub fn name(self) -> &'static str {
+        match self {
+            Capability::NativeBal => "native_bal",
+            Capability::Traces => "traces",
+            Capability::Historical => "historical",
+            Capability::HeadsWs => "heads_ws",
+            Capability::SystemTxs => "system_txs",
+            Capability::SystemTxReceipts => "system_tx_receipts",
+        }
+    }
+}
+
+/// The set a source declares.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct Capabilities {
+    set: std::collections::BTreeSet<Capability>,
+}
+
+impl Capabilities {
+    /// The empty set (a source that can serve nothing beyond the plain reads).
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The declared set.
+    pub fn of(capabilities: impl IntoIterator<Item = Capability>) -> Self {
+        Self {
+            set: capabilities.into_iter().collect(),
+        }
+    }
+
+    /// Does the source declare this capability?
+    pub fn has(&self, capability: Capability) -> bool {
+        self.set.contains(&capability)
+    }
 }
 
 /// The truth an unshadow restores from, and the pipeline's read side.
@@ -157,7 +198,7 @@ impl Capabilities {
         let bal = rpc
             .call::<serde_json::Value>("eth_getBlockAccessList", (U64::from(future),))
             .await;
-        if self.native_bal != method_present(bal) {
+        if self.has(Capability::NativeBal) != method_present(bal) {
             disagree.push("native_bal");
         }
 
@@ -170,14 +211,14 @@ impl Capabilities {
                 ),
             )
             .await;
-        if self.traces != method_present(trace) {
+        if self.has(Capability::Traces) != method_present(trace) {
             disagree.push("traces");
         }
 
         let system = rpc
             .call::<serde_json::Value>("eth_getSystemTxsByBlockNumber", (U64::from(future),))
             .await;
-        if self.system_txs != method_present(system) {
+        if self.has(Capability::SystemTxs) != method_present(system) {
             disagree.push("system_txs");
         }
 
@@ -240,14 +281,7 @@ impl RawSource {
     pub fn target(rpc: Arc<mirror_anvil::Rpc>) -> Self {
         Self::new(
             rpc,
-            Capabilities {
-                native_bal: false,
-                traces: true,
-                historical: true,
-                heads_ws: false,
-                system_txs: false,
-                system_tx_receipts: false,
-            },
+            Capabilities::of([Capability::Traces, Capability::Historical]),
         )
     }
 }
@@ -260,7 +294,7 @@ pub fn target(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
 
 impl Source for RawSource {
     fn capabilities(&self) -> Capabilities {
-        self.capabilities
+        self.capabilities.clone()
     }
 
     fn head(&self) -> BoxFuture<'_, mirror_anvil::Result<u64>> {
@@ -315,7 +349,7 @@ impl Source for RawSource {
         from: u64,
         to: u64,
     ) -> BoxFuture<'_, mirror_anvil::Result<crate::closure::TouchedSet>> {
-        let system_txs = self.capabilities.system_txs;
+        let system_txs = self.capabilities.has(Capability::SystemTxs);
         Box::pin(crate::bal::envelope_touches(&self.rpc, from, to, system_txs))
     }
 
@@ -356,7 +390,7 @@ impl PinnedSource {
     /// historical state needs no check; this one cannot (measured: the block
     /// parameter is ignored, latest is all there is).
     async fn guard(&self) -> mirror_anvil::Result<()> {
-        if self.inner.capabilities().historical {
+        if self.inner.capabilities().has(Capability::Historical) {
             return Ok(());
         }
         let Some(pin) = crate::pin::resolved_pin(&self.pin) else {
@@ -477,14 +511,16 @@ mod tests {
     use std::sync::atomic::AtomicU64;
     use std::time::Duration;
 
-    fn caps(historical: bool) -> Capabilities {
-        Capabilities {
-            native_bal: false,
-            traces: false,
-            historical,
-            heads_ws: false,
-            system_txs: false,
-            system_tx_receipts: false,
+    /// The test's capability builder: one knob, named.
+    enum History {
+        Served,
+        Refused,
+    }
+
+    fn caps(history: History) -> Capabilities {
+        match history {
+            History::Served => Capabilities::of([Capability::Historical]),
+            History::Refused => Capabilities::none(),
         }
     }
 
@@ -502,8 +538,8 @@ mod tests {
     /// window, an archive): the pin never refuses a historical read.
     #[tokio::test]
     async fn a_historical_source_is_never_guarded() {
-        assert!(pinned(caps(true), crate::pin::PIN_UNRESOLVED).guard().await.is_ok());
-        assert!(pinned(caps(true), 7).guard().await.is_ok());
+        assert!(pinned(caps(History::Served), crate::pin::PIN_UNRESOLVED).guard().await.is_ok());
+        assert!(pinned(caps(History::Served), 7).guard().await.is_ok());
     }
 
     /// An unresolved pin refuses before any read, naming the state; a
@@ -511,12 +547,12 @@ mod tests {
     /// proves the read was attempted, not skipped).
     #[tokio::test]
     async fn an_unresolved_pin_refuses_before_any_read() {
-        let err = pinned(caps(false), crate::pin::PIN_UNRESOLVED)
+        let err = pinned(caps(History::Refused), crate::pin::PIN_UNRESOLVED)
             .guard()
             .await
             .unwrap_err();
         assert!(err.to_string().contains("pin is not resolved"), "{err}");
-        let err = pinned(caps(false), 7).guard().await.unwrap_err();
+        let err = pinned(caps(History::Refused), 7).guard().await.unwrap_err();
         assert!(matches!(err, mirror_anvil::Error::Transport { .. }), "{err}");
     }
 
@@ -525,8 +561,8 @@ mod tests {
     /// source (the transport fault proves the read was attempted).
     #[tokio::test]
     async fn a_pinned_head_is_the_pin_not_the_sources() {
-        assert_eq!(pinned(caps(false), 7).head().await.unwrap(), 7);
-        let err = pinned(caps(false), crate::pin::PIN_UNRESOLVED)
+        assert_eq!(pinned(caps(History::Refused), 7).head().await.unwrap(), 7);
+        let err = pinned(caps(History::Refused), crate::pin::PIN_UNRESOLVED)
             .head()
             .await
             .unwrap_err();

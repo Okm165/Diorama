@@ -45,7 +45,14 @@ pub async fn run_at<E: crate::engine::Engine>(ctx: &E, at: u64) -> crate::Result
     ProbeRunner::devnet(
         &ctx.engine().verifier.probes,
         &ctx.plane().shadow,
-        ctx.plane().time_offset.load(std::sync::atomic::Ordering::Relaxed) != 0,
+        match ctx
+            .plane()
+            .time_offset
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => ClockOffset::Aligned,
+            _ => ClockOffset::Offset,
+        },
     )
     .parity(ctx.source_rpc(), at, ctx.target())
     .await
@@ -75,17 +82,27 @@ pub struct ProbeRunner<'a> {
     /// The devnet clock is offset: every time-dependent view diverges from the
     /// parent by design (that is what the offset is for), so skip instead of
     /// alarming.
-    clock_offset: bool,
+    clock: ClockOffset,
+}
+
+/// Whether the devnet's clock is offset from the parent chain's: the probes'
+/// skip decision, named (a bare `true` said nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockOffset {
+    /// The clocks agree; time-dependent views are comparable.
+    Aligned,
+    /// The devnet clock is offset; time-dependent views diverge by design.
+    Offset,
 }
 
 impl<'a> ProbeRunner<'a> {
     /// A devnet chain (T/V): skip devnet-owned targets, and everything when the
     /// clock is offset.
-    pub fn devnet(probes: &'a [Probe], shadow: &'a Shared<Shadow>, clock_offset: bool) -> Self {
+    pub fn devnet(probes: &'a [Probe], shadow: &'a Shared<Shadow>, clock: ClockOffset) -> Self {
         Self {
             probes,
             shadow,
-            clock_offset,
+            clock,
         }
     }
 
@@ -94,7 +111,7 @@ impl<'a> ProbeRunner<'a> {
     /// mismatch counter; the fault is logged with its cause).
     pub async fn parity(&self, source: &Rpc, at: u64, target: &Rpc) -> Result<ProbeOutcome> {
         let mut out = ProbeOutcome::default();
-        if self.clock_offset {
+        if matches!(self.clock, ClockOffset::Offset) {
             // The offset hides every probe; count them so the blind spot is
             // visible instead of reading as "no probes configured".
             out.skipped = self.probes.len();
@@ -182,7 +199,7 @@ mod tests {
             data: alloy_primitives::Bytes::new(),
         }];
         let shadow = Shared::new("shadow", crate::shadow::Shadow::default());
-        let out = ProbeRunner::devnet(&probes, &shadow, true)
+        let out = ProbeRunner::devnet(&probes, &shadow, ClockOffset::Offset)
             .parity(&rpc, 1, &rpc)
             .await
             .unwrap();

@@ -80,7 +80,10 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     let probes = ProbeRunner::devnet(
         &ctx.engine.verifier.probes,
         &ctx.plane.shadow,
-        ctx.plane.time_offset.load(Ordering::Relaxed) != 0,
+        match ctx.plane.time_offset.load(Ordering::Relaxed) {
+            0 => mirror_devnet::probes::ClockOffset::Aligned,
+            _ => mirror_devnet::probes::ClockOffset::Offset,
+        },
     )
     .parity(&ctx.reth, n, &ctx.anvil_t)
     .await?;

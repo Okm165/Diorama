@@ -23,7 +23,7 @@
 use crate::closure::{plan_reads, TouchedSet};
 use crate::cow::Scope;
 use crate::error::Result;
-use crate::source::Source;
+use crate::source::{Capability, Source};
 // The BAL is the official alloy type (EIP-7928): re-exported, so a caller
 // that must name it (the venue's parity step) names the official one, never a
 // mirror-owned alias.
@@ -177,7 +177,7 @@ impl<'a> Composer<'a> {
         if to <= from {
             return Ok((WindowBal::empty(from, to), ComposeStats::default()));
         }
-        if self.source.capabilities().native_bal {
+        if self.source.capabilities().has(Capability::NativeBal) {
             self.native_window(skip, window).await
         } else {
             self.synth_window(skip, window).await
@@ -689,7 +689,7 @@ mod tests {
 
     impl Source for Fake {
         fn capabilities(&self) -> Capabilities {
-            self.caps
+            self.caps.clone()
         }
         fn head(&self) -> futures_util::future::BoxFuture<'_, mirror_anvil::Result<u64>> {
             Box::pin(async { Ok(10) })
@@ -758,14 +758,16 @@ mod tests {
         }
     }
 
-    fn caps(native_bal: bool) -> Capabilities {
-        Capabilities {
-            native_bal,
-            traces: false,
-            historical: false,
-            heads_ws: false,
-            system_txs: false,
-            system_tx_receipts: false,
+    /// The test's capability builder: one knob, named.
+    enum NativeBal {
+        Served,
+        Refused,
+    }
+
+    fn caps(bal: NativeBal) -> Capabilities {
+        match bal {
+            NativeBal::Served => Capabilities::of([Capability::NativeBal]),
+            NativeBal::Refused => Capabilities::none(),
         }
     }
 
@@ -805,14 +807,14 @@ mod tests {
         let mut target_reads = HashMap::new();
         target_reads.insert(Key::Balance(watched), Value::Balance(U256::from(400)));
         let source = Fake {
-            caps: caps(false),
+            caps: caps(NativeBal::Refused),
             bal: None,
             touched,
             reads: source_reads,
             read_keys: std::sync::Mutex::new(Vec::new()),
         };
         let target = Fake {
-            caps: caps(false),
+            caps: caps(NativeBal::Refused),
             bal: None,
             touched: TouchedSet::default(),
             reads: target_reads,
@@ -850,14 +852,14 @@ mod tests {
             value: U256::from(7),
         });
         let source = Fake {
-            caps: caps(false),
+            caps: caps(NativeBal::Refused),
             bal: None,
             touched,
             reads: HashMap::new(),
             read_keys: std::sync::Mutex::new(Vec::new()),
         };
         let target = Fake {
-            caps: caps(false),
+            caps: caps(NativeBal::Refused),
             bal: None,
             touched: TouchedSet::default(),
             reads: HashMap::new(),
@@ -897,14 +899,14 @@ mod tests {
     fn bal_pair(native: BlockAccessList) -> (Fake, Fake) {
         (
             Fake {
-                caps: caps(true),
+                caps: caps(NativeBal::Served),
                 bal: Some(native),
                 touched: TouchedSet::default(),
                 reads: HashMap::new(),
                 read_keys: std::sync::Mutex::new(Vec::new()),
             },
             Fake {
-                caps: caps(false),
+                caps: caps(NativeBal::Refused),
                 bal: None,
                 touched: TouchedSet::default(),
                 reads: HashMap::new(),

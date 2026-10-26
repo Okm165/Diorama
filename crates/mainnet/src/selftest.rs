@@ -31,17 +31,19 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<bool> {
         &format!("blocks:   {blocks}"),
     );
 
-    let mut all_ok = true;
+    let mut verdict = mirror_devnet::engine::Verdict::Passed;
     for n in (pin + 1)..=(pin + blocks) {
         println!("-- block {n}");
         if !run_one_block(&ctx, n).await? {
-            all_ok = false;
+            verdict = mirror_devnet::engine::Verdict::Failed;
         }
         println!();
     }
 
-    mirror_devnet::engine::selftest_verdict(all_ok);
-    Ok(all_ok)
+    mirror_devnet::engine::selftest_verdict(verdict);
+    // The exit-code boundary (the runner's own currency); the decision
+    // itself is the named verdict above.
+    Ok(matches!(verdict, mirror_devnet::engine::Verdict::Passed))
 }
 
 /// Apply one block, printing the per-check lines; returns whether it passed.

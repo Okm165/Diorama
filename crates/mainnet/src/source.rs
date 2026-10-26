@@ -11,19 +11,19 @@ use alloy_rpc_types_eth::Header;
 use mirror_devnet::bal::DiffKind;
 use mirror_devnet::closure::TouchedSet;
 use futures_util::future::BoxFuture;
-use mirror_devnet::source::{Capabilities, RawSource, Source};
+use mirror_devnet::source::{Capabilities, Capability, RawSource, Source};
 use std::sync::Arc;
 
 /// What reth serves (measured): the native BAL rung, traces, a 10,064-block
 /// state window, WS heads; no system transactions (Ethereum has none).
-pub(crate) const DECLARED: Capabilities = Capabilities {
-    native_bal: true,
-    traces: true,
-    historical: true,
-    heads_ws: true,
-    system_txs: false,
-    system_tx_receipts: false,
-};
+pub(crate) fn declared() -> Capabilities {
+    Capabilities::of([
+        Capability::NativeBal,
+        Capability::Traces,
+        Capability::Historical,
+        Capability::HeadsWs,
+    ])
+}
 
 /// The profile's truth source: reth, the native BAL rung with the trace
 /// fallback.
@@ -44,7 +44,7 @@ pub struct RethSource {
 impl RethSource {
     pub fn new(reth: Arc<mirror_anvil::Rpc>) -> Self {
         Self {
-            inner: RawSource::new(reth.clone(), DECLARED),
+            inner: RawSource::new(reth.clone(), declared()),
             reth,
         }
     }
@@ -65,7 +65,7 @@ impl RethSource {
 
 impl Source for RethSource {
     fn capabilities(&self) -> Capabilities {
-        DECLARED
+        declared()
     }
 
     // The raw reads are the spine's (one home for how a source read is
@@ -182,17 +182,15 @@ mod tests {
             mirror_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
         );
         let source = RethSource::new(rpc);
-        assert_eq!(source.capabilities(), DECLARED);
+        assert_eq!(source.capabilities(), declared());
         assert_eq!(
-            DECLARED,
-            Capabilities {
-                native_bal: true,
-                traces: true,
-                historical: true,
-                heads_ws: true,
-                system_txs: false,
-                system_tx_receipts: false,
-            },
+            declared(),
+            Capabilities::of([
+                Capability::NativeBal,
+                Capability::Traces,
+                Capability::Historical,
+                Capability::HeadsWs,
+            ]),
             "the declaration the boot audit compares against"
         );
         assert_eq!(source.touched_kind(), DiffKind::Trace);

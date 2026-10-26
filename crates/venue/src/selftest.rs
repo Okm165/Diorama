@@ -44,14 +44,20 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<bool> 
 
     let (done, writes, ok) = windows_loop(&ctx, windows).await?;
     println!();
-    let mut all_ok = ok;
+    let mut verdict = if ok {
+        mirror_devnet::engine::Verdict::Passed
+    } else {
+        mirror_devnet::engine::Verdict::Failed
+    };
     if writes == 0 {
         println!("   ✘ no window composed a change (the watchlist saw no activity)");
-        all_ok = false;
+        verdict = mirror_devnet::engine::Verdict::Failed;
     }
     println!("   windows={done} composed_keys={writes}");
-    mirror_devnet::engine::selftest_verdict(all_ok);
-    Ok(all_ok)
+    mirror_devnet::engine::selftest_verdict(verdict);
+    // The exit-code boundary (the runner's own currency); the decision
+    // itself is the named verdict above.
+    Ok(matches!(verdict, mirror_devnet::engine::Verdict::Passed))
 }
 
 /// The window loop: `windows` windows at least, and up to 6x (never below 12)

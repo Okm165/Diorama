@@ -224,10 +224,24 @@ pub fn selftest_banner(name: &str, rpc: &str, anvil: &str, pin: u64, unit: &str)
     println!();
 }
 
-/// The selftest verdict line (the exit code is [`mirror_config::boot::
-/// exit_verdict`]'s; this is the human line, one spelling).
-pub fn selftest_verdict(ok: bool) {
-    println!("== selftest {} ==", if ok { "PASSED" } else { "FAILED" });
+/// The selftest verdict: named, so a caller's `Verdict::Failed` reads as the
+/// decision it is (the exit code is [`mirror_config::boot::exit_verdict`]'s;
+/// the printed line is the human spelling, one spelling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Passed,
+    Failed,
+}
+
+/// The selftest verdict line.
+pub fn selftest_verdict(verdict: Verdict) {
+    println!(
+        "== selftest {} ==",
+        match verdict {
+            Verdict::Passed => "PASSED",
+            Verdict::Failed => "FAILED",
+        }
+    );
 }
 
 /// The boot prefix both engines share: wait for the chain, assert its

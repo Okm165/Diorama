@@ -23,7 +23,7 @@
 //! (the re-pin's re-fork restores the source's whole state — measured: the
 //! pin is seconds stale on a 1s-block source, so the selective window is only
 //! reliable against a scratch/slow source).
-use mirror_devnet::source::{Capabilities, PinnedSource, RawSource, Source};
+use mirror_devnet::source::{Capabilities, Capability, PinnedSource, RawSource, Source};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
@@ -32,34 +32,29 @@ use std::sync::Arc;
 /// block parameter is ignored), and system transactions (Core→EVM completions)
 /// are exposed through their own RPC method. The follow source declares the
 /// same capabilities on its raw source (the mainnet's `source.rs` declares
-/// its own the same way: one `DECLARED` const per source).
-pub(crate) const DECLARED: Capabilities = Capabilities {
-    native_bal: false,
-    traces: false,
-    historical: false,
-    heads_ws: false,
-    system_txs: true,
+/// its own the same way: one `declared()` per source).
+pub(crate) fn declared() -> Capabilities {
     // Measured 2026-10-24: the public RPC serves the system txs but their
     // receipts are null (and absent from eth_getBlockReceipts); a nanoreth
     // archive serves them.
-    system_tx_receipts: false,
-};
+    Capabilities::of([Capability::SystemTxs])
+}
 
 /// The profile's truth source: the pin-guarded decorator over the raw reads
 /// (the guard refuses once the source's head has moved past the pin).
 pub(crate) fn pinned(rpc: Arc<mirror_anvil::Rpc>, pin: Arc<AtomicU64>) -> Arc<dyn Source> {
-    Arc::new(PinnedSource::new(rpc, pin, DECLARED))
+    Arc::new(PinnedSource::new(rpc, pin, declared()))
 }
 
 /// The profile's follow source: the raw reads at latest (the follow is
 /// latest-by-design; the guard would refuse its reads).
 pub(crate) fn follow(rpc: Arc<mirror_anvil::Rpc>) -> Arc<dyn Source> {
-    Arc::new(RawSource::new(rpc, DECLARED))
+    Arc::new(RawSource::new(rpc, declared()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Capabilities, DECLARED};
+    use super::{declared, Capabilities, Capability};
 
     /// The public source's declaration, pinned flag for flag: the boot audit
     /// compares the live endpoint against exactly this, and the composer
@@ -70,15 +65,8 @@ mod tests {
     #[test]
     fn the_public_source_declares_the_measured_capabilities() {
         assert_eq!(
-            DECLARED,
-            Capabilities {
-                native_bal: false,
-                traces: false,
-                historical: false,
-                heads_ws: false,
-                system_txs: true,
-                system_tx_receipts: false,
-            },
+            declared(),
+            Capabilities::of([Capability::SystemTxs]),
             "the declaration the boot audit compares against (measured 2026-10-24)"
         );
     }

@@ -50,7 +50,7 @@ pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Resu
     let mut n = from + 1;
     while n <= to {
         let scanned = scan_block(target, &plane.shadow, n).await?;
-        if scanned.pruned {
+        if matches!(scanned, BlockScan::Pruned) {
             // The prefix is beyond anvil's history window. Walking it costs an
             // RPC round trip per block (measured: an 8k-block lag meant hours
             // of walking, with the *newer* devnet writes — the ones COW must
@@ -67,10 +67,16 @@ pub async fn scan_range(plane: &Plane, target: &Rpc, from: u64, to: u64) -> Resu
             n = edge;
             continue;
         }
-        if scanned.marked == 0 {
-            walk.empty += 1;
+        match scanned {
+            BlockScan::Marked { writes } => {
+                if writes == 0 {
+                    walk.empty += 1;
+                }
+                walk.shadowed += writes as u64;
+            }
+            // The pruned arm is handled above (it continues the walk).
+            BlockScan::Pruned => {}
         }
-        walk.shadowed += scanned.marked as u64;
         plane.shadow_scanned_upto.fetch_max(n, Ordering::Relaxed);
         walk.walked += 1;
         n += 1;
@@ -202,14 +208,14 @@ async fn mark_tx(target: &Rpc, shadow: &Shared<Shadow>, tx: &Transaction) -> Res
     Ok(marked)
 }
 
-/// One block's scan outcome.
-struct BlockScan {
+/// One block's scan outcome: marked writes, or a history-pruned refusal (the
+/// block's writes cannot be recovered, and retrying would starve every later
+/// scan — the block is named and skipped).
+enum BlockScan {
     /// Writes marked (`0` = the empty-block skip the caller counts).
-    marked: usize,
-    /// A trace was refused because anvil's history window no longer reaches
-    /// the block: its writes cannot be recovered, and retrying would starve
-    /// every later scan — the block is named and skipped.
-    pruned: bool,
+    Marked { writes: usize },
+    /// Anvil's history window no longer reaches the block.
+    Pruned,
 }
 
 /// Mark one block's writes devnet-owned: every sender's account fields, the
@@ -220,10 +226,7 @@ async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<Blo
     let block = target.block_by_number(n, mirror_anvil::Txs::Full).await?;
     let txs = block_txs(&block);
     if txs.is_empty() {
-        return Ok(BlockScan {
-            marked: 0,
-            pruned: false,
-        });
+        return Ok(BlockScan::Marked { writes: 0 });
     }
     let (shadowed, trace_failures, pruned) = mark_block(target, shadow, txs).await;
     if trace_failures > 0 {
@@ -238,9 +241,9 @@ async fn scan_block(target: &Rpc, shadow: &Shared<Shadow>, n: u64) -> Result<Blo
         shadowed_writes = shadowed,
         "scanned devnet block for shadow writes"
     );
-    Ok(BlockScan {
-        marked: shadowed,
-        pruned: pruned > 0,
+    Ok(match pruned {
+        0 => BlockScan::Marked { writes: shadowed },
+        _ => BlockScan::Pruned,
     })
 }
 
