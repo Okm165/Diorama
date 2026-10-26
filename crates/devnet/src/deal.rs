@@ -80,7 +80,8 @@ pub async fn deal(
     // here refuses the deal with nothing written (fail-closed: an unjournaled
     // write on a journaling deployment is an undo that later writes a wrong
     // value).
-    let before = read_before(surface.target, journal.is_some(), req.token, slot).await?;
+    let before = read_before(surface.target, Journaling::of(journal.is_some()), req.token, slot)
+        .await?;
     if let Err(refused) = write_slot(surface.target, surface.chunk_size, &write, &slot_hex).await {
         return Ok(refused);
     }
@@ -132,15 +133,36 @@ fn no_slot(fault: Option<mirror_anvil::Error>, probes: Vec<ProbeRecord>) -> Deal
 /// its deals (frozen behavior).
 async fn read_before(
     target: &Rpc,
-    journaling: bool,
+    journaling: Journaling,
     token: Address,
     slot: U256,
 ) -> Result<Option<U256>> {
     match journaling {
-        true => Ok(Some(U256::from_be_bytes(
+        Journaling::Journaled => Ok(Some(U256::from_be_bytes(
             target.storage_at_latest(token, slot).await?.0,
         ))),
-        false => Ok(None),
+        Journaling::Frozen => Ok(None),
+    }
+}
+
+/// Whether the deployment journals its own writes (the rewind undo entry) or
+/// leaves them frozen (the mainnet's deals).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Journaling {
+    /// Writes get an undo entry (`/admin/rewind` restores them).
+    Journaled,
+    /// The mainnet's frozen deals: no undo.
+    Frozen,
+}
+
+impl Journaling {
+    /// The deployment's own answer: a journal is configured or not.
+    fn of(configured: bool) -> Self {
+        if configured {
+            Journaling::Journaled
+        } else {
+            Journaling::Frozen
+        }
     }
 }
 

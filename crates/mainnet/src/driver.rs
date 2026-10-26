@@ -78,8 +78,8 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
     }
 
     let cursor = validate_cursor(ctx, head).await?;
-    let (start, rebased) = resume_point(&ctx.anvil_t, cursor.as_ref(), head).await?;
-    if rebased {
+    let (start, start_kind) = resume_point(&ctx.anvil_t, cursor.as_ref(), head).await?;
+    if start_kind == state::Start::Rebased {
         on_rebase(&ctx.anvil_t, head, follow, start).await?;
     }
     if start > follow {
@@ -87,12 +87,12 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
         return Ok(None);
     }
     let gap = follow.saturating_sub(start);
-    if !gap_within_limit(gap, ctx.mirror.policies().gap, rebased) {
+    if !gap_within_limit(gap, ctx.mirror.policies().gap, start_kind) {
         // One record per pause (the venue's guard fires on the same edge).
         if ctx.plane.gap_pause_started() {
             tracing::error!(
                 gap,
-                rebased,
+                start = ?start_kind,
                 "sync gap too large - paused; run the re-pin drill (make repin)"
             );
         }
@@ -167,14 +167,18 @@ async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
 /// its height is not a parent height and `head + 1` can land past the follow
 /// head, stalling T forever (measured). Fail-closed on the pin read: a fault
 /// here must not silently pick that stalled path.
-async fn resume_point(anvil_t: &Rpc, cursor: Option<&ChainCursor>, head: u64) -> Result<(u64, bool)> {
+async fn resume_point(
+    anvil_t: &Rpc,
+    cursor: Option<&ChainCursor>,
+    head: u64,
+) -> Result<(u64, state::Start)> {
     let reset_pin = if cursor.is_none() {
         anvil_t.fork_block().await?
     } else {
         None
     };
     Ok(match reset_pin {
-        Some(pin) => (pin + 1, true),
+        Some(pin) => (pin + 1, state::Start::Rebased),
         None => state::next_block(cursor, head),
     })
 }
@@ -197,8 +201,8 @@ async fn on_rebase(rpc: &mirror_anvil::Rpc, head: u64, follow: u64, start: u64) 
 /// *rebased* cursor (a fresh pin after a restart/re-fork) is allowed to replay
 /// its whole pin window - bounded by reth's state window (10,064), the plan's
 /// own limit.
-fn gap_within_limit(gap: u64, limit: Option<u64>, rebased: bool) -> bool {
-    let limit = if rebased {
+fn gap_within_limit(gap: u64, limit: Option<u64>, start_kind: state::Start) -> bool {
+    let limit = if start_kind == state::Start::Rebased {
         10_064
     } else {
         match limit {
@@ -335,18 +339,18 @@ pub(crate) async fn probes_now(ctx: &Ctx) -> Result<mirror_devnet::probes::Probe
 
 #[cfg(test)]
 mod tests {
-    use super::gap_within_limit;
+    use super::{gap_within_limit, state};
 
     /// The gap guard: a configured limit applies, a rebased cursor gets the
     /// plan's 10,064-block replay bound instead, and no limit means no guard
     /// (the venue's `gap_within_limit` test pins its own column).
     #[test]
     fn the_gap_guard_honors_its_limit() {
-        assert!(gap_within_limit(0, Some(32), false));
-        assert!(gap_within_limit(32, Some(32), false));
-        assert!(!gap_within_limit(33, Some(32), false));
-        assert!(gap_within_limit(10_064, None, true));
-        assert!(!gap_within_limit(10_065, None, true));
-        assert!(gap_within_limit(u64::MAX, None, false));
+        assert!(gap_within_limit(0, Some(32), state::Start::Contiguous));
+        assert!(gap_within_limit(32, Some(32), state::Start::Contiguous));
+        assert!(!gap_within_limit(33, Some(32), state::Start::Contiguous));
+        assert!(gap_within_limit(10_064, None, state::Start::Rebased));
+        assert!(!gap_within_limit(10_065, None, state::Start::Rebased));
+        assert!(gap_within_limit(u64::MAX, None, state::Start::Contiguous));
     }
 }

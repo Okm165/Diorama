@@ -104,8 +104,8 @@ pub async fn install(
     attester: Address,
     timeout: Duration,
 ) -> Result<InstallOutcome> {
-    let (manager, enabled, threshold) = read_state(rpc, attester).await?;
-    if enabled && threshold == U256::ONE {
+    let (manager, state, threshold) = read_state(rpc, attester).await?;
+    if state == AttesterState::Enabled && threshold == U256::ONE {
         tracing::info!(
             chain,
             %attester,
@@ -126,7 +126,7 @@ pub async fn install(
         from: manager,
         timeout,
     };
-    if !enabled {
+    if state == AttesterState::Disabled {
         let input = IMessageTransmitterV2::enableAttesterCall { newAttester: attester }.abi_encode();
         sender.send(input).await?;
     }
@@ -148,21 +148,49 @@ pub async fn install(
 /// worse than not serving, so the installation refuses unless the setters
 /// verifiably took.
 async fn verify_installed(rpc: &Rpc, chain: &'static str, attester: Address) -> Result<()> {
-    let (_, enabled, threshold) = read_state(rpc, attester).await?;
-    if !enabled || threshold != U256::ONE {
+    let (_, state, threshold) = read_state(rpc, attester).await?;
+    if state != AttesterState::Enabled || threshold != U256::ONE {
         return Err(Error::AttesterInstall {
             chain,
             reason: format!(
-                "post-state not verified: isEnabledAttester={enabled}, signatureThreshold={threshold}"
+                "post-state not verified: isEnabledAttester={}, signatureThreshold={threshold}",
+                state.as_str()
             ),
         });
     }
     Ok(())
 }
 
+/// Whether the transmitter's attester is enabled (the chain read's own
+/// answer, named): the installation enables it and verifies the post-state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttesterState {
+    Enabled,
+    Disabled,
+}
+
+impl AttesterState {
+    /// The chain read's own answer.
+    fn of(enabled: bool) -> Self {
+        if enabled {
+            AttesterState::Enabled
+        } else {
+            AttesterState::Disabled
+        }
+    }
+
+    /// The chain call's own spelling (the refusal message quotes it).
+    fn as_str(self) -> &'static str {
+        match self {
+            AttesterState::Enabled => "true",
+            AttesterState::Disabled => "false",
+        }
+    }
+}
+
 /// The transmitter's attester state: the manager, whether `attester` is
 /// enabled, and the signature threshold (read before and after the install).
-async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, bool, U256)> {
+async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, AttesterState, U256)> {
     let manager = rpc
         .call_decode(MESSAGE_TRANSMITTER_V2, &IMessageTransmitterV2::attesterManagerCall {})
         .await?;
@@ -178,7 +206,7 @@ async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, bool, U256
             &IMessageTransmitterV2::signatureThresholdCall {},
         )
         .await?;
-    Ok((manager, enabled, threshold))
+    Ok((manager, AttesterState::of(enabled), threshold))
 }
 
 /// A manager with no gas on the fork gets a devnet stipend (the pool refuses

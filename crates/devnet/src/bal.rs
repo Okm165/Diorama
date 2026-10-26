@@ -390,6 +390,27 @@ pub fn changes_in(acct: &AccountChanges) -> usize {
 /// HyperEVM's system txs (the Core-EVM flows emit no logs; their transfers
 /// are reconstructed), folded into a touched set.
 ///
+/// Whether the envelope fold reads the block's system txs (HyperEVM's
+/// L1-attribute and beacon-root transactions) as well as the ordinary ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemTxs {
+    /// Fold them in (the source declares the capability).
+    Fold,
+    /// Ordinary txs only (a chain without the method answers an empty list).
+    Skip,
+}
+
+impl SystemTxs {
+    /// The source's own answer: the capability is declared or not.
+    pub fn of(declared: bool) -> Self {
+        if declared {
+            SystemTxs::Fold
+        } else {
+            SystemTxs::Skip
+        }
+    }
+}
+
 /// The public venue RPC serves no writes, so the touches are what it can
 /// enumerate; the declared closures turn them into concrete keys. The logs
 /// ride one `eth_getLogs` range call per chunk — far fewer and lighter
@@ -402,7 +423,7 @@ pub async fn envelope_touches(
     rpc: &Rpc,
     from: u64,
     to: u64,
-    system_txs: bool,
+    system_txs: SystemTxs,
 ) -> mirror_anvil::Result<TouchedSet> {
     let mut touched = TouchedSet::default();
     if to <= from {
@@ -435,7 +456,7 @@ pub async fn envelope_touches(
             Err(e) => return Err(e),
         }
     }
-    if system_txs {
+    if system_txs == SystemTxs::Fold {
         // One-element *tuples*: a JSON-RPC call's params are an array, and a
         // bare `U64` serializes as a scalar — the endpoint answers `-32602
         // Invalid params` (measured live: every batched window failed on

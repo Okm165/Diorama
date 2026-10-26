@@ -126,6 +126,25 @@ const RETH_STATE_WINDOW_BLOCKS: u64 = 10_064;
 /// The safe-head lag the pin must clear (~32-64 blocks, measured).
 const MIN_FORK_OFFSET_BLOCKS: u64 = 64;
 
+/// Whether a profile-gated section is present (the coherence check's own
+/// vocabulary: `needs` wants `Present`, `forbids` wants `Missing`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    Present,
+    Missing,
+}
+
+impl Presence {
+    /// The section's own answer.
+    fn of(present: bool) -> Self {
+        if present {
+            Presence::Present
+        } else {
+            Presence::Missing
+        }
+    }
+}
+
 impl Instance {
     /// The watched addresses, as the engine's COW scope.
     pub fn watch_set(&self) -> HashSet<Address> {
@@ -149,32 +168,32 @@ impl Instance {
     fn check_profile_coherence(&self, issues: &mut Vec<String>) {
         let mainnet = self.instance.profile == Profile::Mainnet;
         let profile = if mainnet { "mainnet" } else { "venue" };
-        let needs: &[(&str, bool)] = if mainnet {
+        let needs: &[(&str, Presence)] = if mainnet {
             &[
-                ("[chains.l1]", self.chains.l1.is_some()),
-                ("[services.engine]", self.services.engine.is_some()),
+                ("[chains.l1]", Presence::of(self.chains.l1.is_some())),
+                ("[services.engine]", Presence::of(self.services.engine.is_some())),
             ]
         } else {
             &[
-                ("[chains.venue]", self.chains.venue.is_some()),
-                ("[services.engine]", self.services.engine.is_some()),
+                ("[chains.venue]", Presence::of(self.chains.venue.is_some())),
+                ("[services.engine]", Presence::of(self.services.engine.is_some())),
             ]
         };
-        for (section, present) in needs {
-            if !present {
+        for (section, presence) in needs {
+            if *presence == Presence::Missing {
                 issues.push(format!("profile \"{profile}\" requires {section}"));
             }
         }
-        let forbids: &[(&str, bool)] = if mainnet {
+        let forbids: &[(&str, Presence)] = if mainnet {
             &[
-                ("[chains.venue]", self.chains.venue.is_some()),
-                ("[services.venue_sim]", self.services.venue_sim.is_some()),
+                ("[chains.venue]", Presence::of(self.chains.venue.is_some())),
+                ("[services.venue_sim]", Presence::of(self.services.venue_sim.is_some())),
             ]
         } else {
-            &[("[chains.l1]", self.chains.l1.is_some())]
+            &[("[chains.l1]", Presence::of(self.chains.l1.is_some()))]
         };
-        for (section, present) in forbids {
-            if *present {
+        for (section, presence) in forbids {
+            if *presence == Presence::Present {
                 issues.push(format!("profile \"{profile}\" must not carry {section}"));
             }
         }

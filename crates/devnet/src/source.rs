@@ -349,7 +349,7 @@ impl Source for RawSource {
         from: u64,
         to: u64,
     ) -> BoxFuture<'_, mirror_anvil::Result<crate::closure::TouchedSet>> {
-        let system_txs = self.capabilities.has(Capability::SystemTxs);
+        let system_txs = crate::bal::SystemTxs::of(self.capabilities.has(Capability::SystemTxs));
         Box::pin(crate::bal::envelope_touches(&self.rpc, from, to, system_txs))
     }
 

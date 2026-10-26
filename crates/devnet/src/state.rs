@@ -181,11 +181,21 @@ pub fn advance_cursor(
 /// skipped parent blocks and stalled T. A fresh or reset chain (no cursor)
 /// starts at `chain_head + 1`; on first start that is the pin + 1, so the whole
 /// pin window is replayed as the warm-up.
-pub fn next_block(cursor: Option<&ChainCursor>, chain_head: u64) -> (u64, bool) {
+pub fn next_block(cursor: Option<&ChainCursor>, chain_head: u64) -> (u64, Start) {
     match cursor {
-        Some(c) => (c.block + 1, false),
-        None => (chain_head.saturating_add(1), true),
+        Some(c) => (c.block + 1, Start::Contiguous),
+        None => (chain_head.saturating_add(1), Start::Rebased),
     }
+}
+
+/// Where a pass starts: the cursor's own next block (contiguous with what was
+/// applied), or a rebased start — a fresh or reset chain with no cursor,
+/// which replays from the pin + 1 (the warm-up) and carries the reth window's
+/// limit instead of the configured gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    Contiguous,
+    Rebased,
 }
 
 #[cfg(test)]
@@ -199,20 +209,20 @@ mod tests {
             hash: B256::with_last_byte(1),
             first_block: 1,
         };
-        assert_eq!(next_block(Some(&c), 100), (101, false));
+        assert_eq!(next_block(Some(&c), 100), (101, Start::Contiguous));
         // a valid cursor behind the chain head still resumes right after it
         // (T's height advances independently; skipping ahead loses diffs)
-        assert_eq!(next_block(Some(&c), 500), (101, false));
+        assert_eq!(next_block(Some(&c), 500), (101, Start::Contiguous));
         // and a cursor ahead of the head (chain reset) is handled by the
         // caller's hash check, which discards it
-        assert_eq!(next_block(Some(&c), 50), (101, false));
+        assert_eq!(next_block(Some(&c), 50), (101, Start::Contiguous));
     }
 
     #[test]
     fn fresh_or_reset_chain_starts_at_head_plus_one() {
         // fresh chain at pin 900 -> 901 (the pin window is the warm-up)
-        assert_eq!(next_block(None, 900), (901, true));
+        assert_eq!(next_block(None, 900), (901, Start::Rebased));
         // follow behind the chain head (reth catching up) -> still head + 1
-        assert_eq!(next_block(None, 1_000), (1_001, true));
+        assert_eq!(next_block(None, 1_000), (1_001, Start::Rebased));
     }
 }
