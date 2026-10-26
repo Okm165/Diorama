@@ -7,7 +7,7 @@
 use crate::error::Result;
 use crate::shadow::Shadow;
 use crate::shared::Shared;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Bytes};
 use mirror_anvil::Rpc;
 use mirror_config::Probe;
 use std::collections::HashSet;
@@ -122,19 +122,40 @@ impl<'a> ProbeRunner<'a> {
             );
             return Ok(out);
         }
-        let shadowed = self.owned_addresses()?;
-        for probe in self.probes {
-            if shadowed.contains(&probe.to) {
-                // A devnet write anywhere in this target hides *all* of its
-                // probes (measured: a crashed oracle source stayed marked and
-                // the five oracle probes were skipped silently). Count them so
-                // the blind spot is visible; hand the key back to check again.
-                out.skipped += 1;
-                tracing::debug!(block = at, probe = %probe.name, target = ?probe.to,
-                    "probe skipped: target is devnet-owned");
-                continue;
+        // The reads ride one batch per side — the two sides run concurrently
+        // (different endpoints; each keeps the client's one-body-at-a-time
+        // discipline), and a batch carries per-item errors, so one probe's
+        // read failure still counts only itself. The per-probe form cost two
+        // round trips each, serialized.
+        let (runnable, skipped) = self.runnable(at)?;
+        out.skipped = skipped;
+        if runnable.is_empty() {
+            return Ok(out);
+        }
+        let reads: Vec<(Address, Bytes)> = runnable
+            .iter()
+            .map(|probe| (probe.to, probe.data.clone()))
+            .collect();
+        let source_calls = Rpc::call_calls(&reads, Some(at))?;
+        let target_calls = Rpc::call_calls(&reads, None)?;
+        let (source_answers, target_answers) = match tokio::try_join!(
+            source.batch(&source_calls),
+            target.batch(&target_calls)
+        ) {
+            Ok(pair) => pair,
+            Err(e) => {
+                // A transport-level failure (after the client's own retries):
+                // every runnable probe counts failed — the per-probe form's
+                // own outcome, one line instead of one per probe.
+                out.failed += runnable.len();
+                tracing::warn!(block = at, probes = runnable.len(), error = %e, "probe batch read failed");
+                return Ok(out);
             }
-            if compare_probe(source, target, probe, at).await {
+        };
+        for ((probe, source_answer), target_answer) in
+            runnable.iter().zip(source_answers).zip(target_answers)
+        {
+            if count_probe(probe, at, source_answer, target_answer) {
                 out.ok += 1;
             } else {
                 out.failed += 1;
@@ -147,25 +168,65 @@ impl<'a> ProbeRunner<'a> {
     fn owned_addresses(&self) -> Result<HashSet<Address>> {
         Ok(self.shadow.lock()?.owned_addresses().into_iter().collect())
     }
+
+    /// The runnable probes and the skipped count: a devnet write anywhere in
+    /// a target hides *all* of its probes (measured: a crashed oracle source
+    /// stayed marked and the five oracle probes were skipped silently) —
+    /// counted so the blind spot is visible; hand the key back to check
+    /// again.
+    fn runnable(&self, at: u64) -> Result<(Vec<&Probe>, usize)> {
+        let shadowed = self.owned_addresses()?;
+        let mut runnable: Vec<&Probe> = Vec::with_capacity(self.probes.len());
+        let mut skipped = 0usize;
+        for probe in self.probes {
+            if shadowed.contains(&probe.to) {
+                skipped += 1;
+                tracing::debug!(block = at, probe = %probe.name, target = ?probe.to,
+                    "probe skipped: target is devnet-owned");
+            } else {
+                runnable.push(probe);
+            }
+        }
+        Ok((runnable, skipped))
+    }
 }
 
 /// Compare one probe: the source at `at` vs the target's latest. A read fault
 /// counts as a mismatch (the fault is logged here with its cause). One
 /// function per probe — the loop above is the tally.
-async fn compare_probe(source: &Rpc, target: &Rpc, probe: &Probe, at: u64) -> bool {
-    let r = source.call_at(probe.to, &probe.data, at).await;
-    let t = target.call_latest(probe.to, &probe.data).await;
-    match (r, t) {
-        (Ok(a), Ok(b)) if a == b => true,
-        (Ok(a), Ok(b)) => {
-            log_mismatch(probe, at, &a, &b);
-            false
-        }
+/// One probe's pair of batch answers, counted: a decoded match is ok, a
+/// decoded mismatch logs the drift, a failed side (or an undecodable answer)
+/// counts failed — never a silent skip.
+fn count_probe<E: std::fmt::Display>(
+    probe: &Probe,
+    at: u64,
+    source_answer: std::result::Result<Box<serde_json::value::RawValue>, E>,
+    target_answer: std::result::Result<Box<serde_json::value::RawValue>, E>,
+) -> bool {
+    match (source_answer, target_answer) {
+        (Ok(a), Ok(b)) => match (decode_call(&a), decode_call(&b)) {
+            (Some(a), Some(b)) if a == b => true,
+            (Some(a), Some(b)) => {
+                log_mismatch(probe, at, &a, &b);
+                false
+            }
+            _ => {
+                tracing::debug!(block = at, probe = %probe.name,
+                    "probe read failed: an answer did not decode");
+                false
+            }
+        },
         (Err(e), _) | (_, Err(e)) => {
             tracing::debug!(block = at, probe = %probe.name, error = %e, "probe read failed");
             false
         }
     }
+}
+
+/// One `eth_call` answer, decoded: a value that is not a hex byte string (or
+/// a null) is a read failure, never a mismatch.
+fn decode_call(raw: &serde_json::value::RawValue) -> Option<Bytes> {
+    serde_json::from_str(raw.get()).ok()
 }
 
 /// A probe mismatch: both sides hex-encoded and truncated (the log's shape).

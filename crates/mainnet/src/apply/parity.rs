@@ -31,34 +31,82 @@ pub(super) async fn parity_step(
 /// `verifier.sweep = "full"` every applied storage key is checked, not just
 /// the sample. Returns `(sampled, sampled_ok)`.
 async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> (usize, usize) {
-    let full = ctx.engine.verifier.sweep == mirror_config::Sweep::Full;
+    let full = full_sweep(ctx);
     let mut sample: Vec<Key> = filtered.iter().filter_map(Write::storage_key).collect();
     if !full {
         sample.truncate(ctx.engine.verifier.drift_sample_keys);
     }
+    if sample.is_empty() {
+        return (0, 0);
+    }
+    // Both sides' reads ride one batch each (≤20 keys per body — the client
+    // chunks transparently), concurrently: different endpoints, one body in
+    // flight each. A full sweep's sample is every applied storage key; the
+    // per-key form cost two round trips per key, serialized.
+    let Some((t_calls, r_calls)) = sample_calls(n, t_latest, &sample) else {
+        return (sample.len(), 0);
+    };
+    let (t_answers, r_answers) = match tokio::try_join!(
+        ctx.anvil_t.batch(&t_calls),
+        ctx.reth.batch(&r_calls)
+    ) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(block = n, keys = sample.len(), error = %e, "drift sample read failed (the batch body)");
+            return (sample.len(), 0);
+        }
+    };
     let mut sampled_ok = 0usize;
-    for key in &sample {
-        if sample_key(ctx, n, t_latest, key, full).await {
+    for ((key, t), r) in sample.iter().zip(t_answers).zip(r_answers) {
+        if sample_verdict(ctx, n, key, &t, &r) {
             sampled_ok += 1;
         }
     }
     (sample.len(), sampled_ok)
 }
 
-/// Compare one storage key at the two chains' own anchors: T's latest block
-/// against reth at n. Equal reads are the reading; a mismatch (or a fault on
-/// either side) is the drift lens's warn — and, under `sweep = "full"`, a
-/// counted mismatch.
-async fn sample_key(ctx: &Ctx, n: u64, t_latest: u64, key: &Key, full: bool) -> bool {
+/// Both sides' call plans for the sample: `None` when a plan cannot encode
+/// (already warned; every sampled key then counts not-ok).
+fn sample_calls(
+    n: u64,
+    t_latest: u64,
+    sample: &[Key],
+) -> Option<(Vec<mirror_anvil::Call>, Vec<mirror_anvil::Call>)> {
+    let plan = |at: u64| match mirror_anvil::Rpc::key_calls(sample, at) {
+        Ok(calls) => Some(calls),
+        Err(e) => {
+            tracing::warn!(block = n, keys = sample.len(), error = %e, "drift sample: the call plan failed");
+            None
+        }
+    };
+    Some((plan(t_latest)?, plan(n)?))
+}
+
+/// Whether the profile verifies every applied key (the full sweep) or the
+/// configured sample — the one spelling of the switch.
+fn full_sweep(ctx: &Ctx) -> bool {
+    ctx.engine.verifier.sweep == mirror_config::Sweep::Full
+}
+
+/// One sampled key's verdict: `true` = the two chains' words match; a drift
+/// warns (and, under a full sweep, counts); a read failure warns as itself —
+/// never as drift.
+fn sample_verdict<E: std::fmt::Display>(
+    ctx: &Ctx,
+    n: u64,
+    key: &Key,
+    t: &std::result::Result<Box<serde_json::value::RawValue>, E>,
+    r: &std::result::Result<Box<serde_json::value::RawValue>, E>,
+) -> bool {
+    let full = full_sweep(ctx);
     let Key::Storage { address, slot } = key else {
+        // The sample is storage-only by construction; keep the old counting
+        // shape if that ever changes.
         return true;
     };
-    match (
-        ctx.anvil_t.storage_at(*address, *slot, t_latest).await,
-        ctx.reth.storage_at(*address, *slot, n).await,
-    ) {
+    match (word_of(t), word_of(r)) {
         (Ok(a), Ok(b)) if a == b => true,
-        (a, b) => {
+        (Ok(a), Ok(b)) => {
             if full {
                 ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.full_sweep_mismatches);
             }
@@ -66,10 +114,29 @@ async fn sample_key(ctx: &Ctx, n: u64, t_latest: u64, key: &Key, full: bool) -> 
                 block = n,
                 address = %address,
                 slot = %slot,
-                "drift sample mismatch: t={a:?} reth={b:?}"
+                "drift sample mismatch: t={a} reth={b}"
             );
             false
         }
+        (a, b) => {
+            // A read failure is counted (never `sampled_ok`), never confused
+            // with drift: the old form logged it as a mismatch and sent
+            // operators to drift.jsonl for an RPC hiccup.
+            let cause = a.err().or_else(|| b.err()).unwrap_or_default();
+            tracing::warn!(block = n, address = %address, slot = %slot, error = %cause, "drift sample read failed");
+            false
+        }
+    }
+}
+
+/// One `eth_getStorageAt` answer, decoded: a null or a non-word answer is a
+/// read failure, never a zero word.
+fn word_of<E: std::fmt::Display>(
+    answer: &std::result::Result<Box<serde_json::value::RawValue>, E>,
+) -> std::result::Result<alloy_primitives::B256, String> {
+    match answer {
+        Ok(raw) => serde_json::from_str(raw.get()).map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
     }
 }
 

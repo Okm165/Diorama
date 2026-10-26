@@ -251,14 +251,33 @@ impl AdminSurface<'_> {
                 value: self.source.nonce_at(req.address, anchor).await?,
             });
         }
-        for slot in slots {
-            writes.push(mirror_anvil::Write::Storage {
-                address: req.address,
-                slot: *slot,
-                value: U256::from_be_bytes(
-                    self.source.storage_at(req.address, *slot, anchor).await?.0,
-                ),
-            });
+        if !slots.is_empty() {
+            // The slots ride the source's own batches (≤20 keys per body —
+            // the same read plan the composer uses) instead of a round trip
+            // per slot: `all: true` on a busy account covers its whole set.
+            let keys: Vec<mirror_anvil::Key> = slots
+                .iter()
+                .map(|slot| mirror_anvil::Key::Storage {
+                    address: req.address,
+                    slot: *slot,
+                })
+                .collect();
+            for (slot, value) in slots.iter().zip(self.source.read_keys(&keys, anchor).await?) {
+                let mirror_anvil::Value::Storage(word) = value else {
+                    // The kinds are by construction (a storage key decodes to
+                    // a storage word); a different kind is a contract fault.
+                    return Err(mirror_anvil::Error::Corrupt {
+                        what: "hand-back read",
+                        detail: "a storage key read back as another kind".to_string(),
+                    }
+                    .into());
+                };
+                writes.push(mirror_anvil::Write::Storage {
+                    address: req.address,
+                    slot: *slot,
+                    value: word,
+                });
+            }
         }
         Ok(writes)
     }

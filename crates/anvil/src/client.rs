@@ -794,22 +794,7 @@ impl Rpc {
     /// (measured live: a 300-block catch-up window ground for minutes). A
     /// null answer for a key is a fault, never a silent zero.
     pub async fn read_keys(&self, keys: &[Key], block: u64) -> Result<Vec<Value>> {
-        let mut calls = Vec::with_capacity(keys.len());
-        for key in keys {
-            let call = match key {
-                Key::Storage { address, slot } => {
-                    call("eth_getStorageAt", (*address, *slot, U64::from(block)))?
-                }
-                Key::Balance(address) => {
-                    call(crate::ETH_GET_BALANCE, (*address, U64::from(block)))?
-                }
-                Key::Nonce(address) => {
-                    call("eth_getTransactionCount", (*address, U64::from(block)))?
-                }
-                Key::Code(address) => call("eth_getCode", (*address, U64::from(block)))?,
-            };
-            calls.push(call);
-        }
+        let calls = Self::key_calls(keys, block)?;
         let raws = self.batch_raw(&calls).await?;
         let mut out = Vec::with_capacity(keys.len());
         for (key, raw) in keys.iter().zip(raws) {
@@ -817,6 +802,40 @@ impl Rpc {
             out.push(self.decode_key(key, &raw)?);
         }
         Ok(out)
+    }
+
+    /// The wire calls for a set of key reads — the mapping [`Self::read_keys`]
+    /// rides, public so a caller that needs per-item tolerance composes its
+    /// own [`Self::batch`] instead of duplicating it.
+    pub fn key_calls(keys: &[Key], block: u64) -> Result<Vec<Call>> {
+        keys.iter()
+            .map(|key| match key {
+                Key::Storage { address, slot } => {
+                    call("eth_getStorageAt", (*address, *slot, U64::from(block)))
+                }
+                Key::Balance(address) => call(crate::ETH_GET_BALANCE, (*address, U64::from(block))),
+                Key::Nonce(address) => {
+                    call("eth_getTransactionCount", (*address, U64::from(block)))
+                }
+                Key::Code(address) => call("eth_getCode", (*address, U64::from(block))),
+            })
+            .collect()
+    }
+
+    /// The wire calls for a set of `eth_call`s — `Some(block)` pins the
+    /// number, `None` reads latest (the probes' two shapes) — the same
+    /// encoding [`Self::call_at`] and [`Self::call_latest`] send.
+    pub fn call_calls(calls: &[(Address, Bytes)], block: Option<u64>) -> Result<Vec<Call>> {
+        calls
+            .iter()
+            .map(|(to, data)| {
+                let at = match block {
+                    Some(n) => BlockNumberOrTag::Number(n),
+                    None => BlockNumberOrTag::Latest,
+                };
+                call(ETH_CALL, (Self::call_tx(*to, data), at))
+            })
+            .collect()
     }
 
     /// One key's answer, decoded to its value kind.

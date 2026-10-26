@@ -528,50 +528,45 @@ pub fn absorb_system_txs(touched: &mut TouchedSet, system_txs: &[Transaction]) {
 /// The fact's pair `(sampled, sampled_ok)`: the count and how many passed —
 /// the one place the pair is built (the profiles publish it verbatim).
 pub async fn verify(target: &dyn Source, bal: &BlockAccessList) -> Result<(usize, usize)> {
-    let mut ok = 0usize;
-    let mut failed = 0usize;
     let at = target.head().await?;
+    // Every changed key's post-state, in one plan: the reads ride the
+    // source's own batches (the same `read_keys` seam the composer uses — one
+    // body per ≤20 keys) instead of a round trip per key.
+    let mut expected: Vec<(Key, Value)> = Vec::new();
     for acct in bal {
         for (slot, value) in acct.storage_post_states() {
-            let key = Key::Storage {
-                address: acct.address,
-                slot,
-            };
-            let (o, f) = check(target, at, key, Value::Storage(value)).await?;
-            ok += o;
-            failed += f;
+            expected.push((
+                Key::Storage {
+                    address: acct.address,
+                    slot,
+                },
+                Value::Storage(value),
+            ));
         }
         if let Some(value) = acct.balance_post_state() {
-            let (o, f) = check(target, at, Key::Balance(acct.address), Value::Balance(value)).await?;
-            ok += o;
-            failed += f;
+            expected.push((Key::Balance(acct.address), Value::Balance(value)));
         }
         if let Some(value) = acct.nonce_post_state() {
-            let (o, f) = check(target, at, Key::Nonce(acct.address), Value::Nonce(value)).await?;
-            ok += o;
-            failed += f;
+            expected.push((Key::Nonce(acct.address), Value::Nonce(value)));
         }
         if let Some(value) = acct.code_post_state() {
-            let (o, f) = check(target, at, Key::Code(acct.address), Value::Code(value.clone())).await?;
-            ok += o;
-            failed += f;
+            expected.push((Key::Code(acct.address), Value::Code(value.clone())));
+        }
+    }
+    let keys: Vec<Key> = expected.iter().map(|(key, _)| *key).collect();
+    let got = target.read_keys(&keys, at).await?;
+    let mut ok = 0usize;
+    for ((key, want), got) in expected.iter().zip(got) {
+        if &got == want {
+            ok += 1;
+        } else {
+            tracing::warn!(key = ?key, expected = ?want, found = ?got, "live parity: an applied key did not read back");
         }
     }
     // The fact's pair `(sampled, sampled_ok)`: the count and how many
     // passed — the inversion (passed first) once read every clean window as
     // a failure.
-    Ok((ok + failed, ok))
-}
-
-/// One change's post-condition: the target must read back the expected value.
-async fn check(target: &dyn Source, at: u64, key: Key, expected: Value) -> Result<(usize, usize)> {
-    let got = target.read_key(key, at).await?;
-    if got == expected {
-        Ok((1, 0))
-    } else {
-        tracing::warn!(key = ?key, expected = ?expected, found = ?got, "live parity: an applied key did not read back");
-        Ok((0, 1))
-    }
+    Ok((keys.len(), ok))
 }
 
 #[cfg(test)]
@@ -861,6 +856,43 @@ mod tests {
         let writes = mirror_anvil::flatten_bal(&window.bal);
         assert_eq!(writes.len(), 1);
         assert!(matches!(writes[0], Write::Balance { address, value } if address == watched && value == U256::from(500)));
+    }
+
+    /// The batched verify: every changed key's post-state rides one plan
+    /// (`read_keys`), a matched key counts as passed, a drifted one warns and
+    /// counts failed — the pair is `(keys, ok)`, the order the fact carries.
+    #[test]
+    fn verify_reads_the_whole_plan_and_counts_the_pair() {
+        let a = address!("00000000000000000000000000000000000000ab");
+        let b = address!("00000000000000000000000000000000000000cd");
+        let bal = mirror_anvil::bal_from_writes(&[
+            Write::Balance {
+                address: a,
+                value: U256::from(500),
+            },
+            Write::Balance {
+                address: b,
+                value: U256::from(700),
+            },
+        ]);
+        let mut reads = HashMap::new();
+        reads.insert(Key::Balance(a), Value::Balance(U256::from(500)));
+        reads.insert(Key::Balance(b), Value::Balance(U256::from(701)));
+        let target = Fake {
+            caps: caps(NativeBal::Refused),
+            bal: None,
+            touched: TouchedSet::default(),
+            reads,
+            read_keys: std::sync::Mutex::new(Vec::new()),
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (sampled, ok) = rt.block_on(verify(&target, &bal)).unwrap();
+        assert_eq!((sampled, ok), (2, 1), "the pair is (keys, passed)");
+        assert_eq!(
+            target.read_keys.lock().unwrap().len(),
+            2,
+            "every changed key rode the plan"
+        );
     }
 
     /// The trace rung's values are not re-read: the plan skips valued keys.
