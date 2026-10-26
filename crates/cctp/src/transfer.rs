@@ -268,10 +268,16 @@ fn word_at(raw: &[u8], at: usize) -> B256 {
 /// threshold 1000, standard is free; `19→0` is free on both thresholds
 /// (HyperEVM has no fast lane — its standard attestation is already fast).
 /// `None` = the pair is not served (the Iris 404 arm).
-pub(crate) fn measured_fees(source: u32, destination: u32) -> Option<[(u32, u64); 2]> {
+pub(crate) fn measured_fees(source: u32, destination: u32) -> Option<[crate::iris::FeeEntry; 2]> {
     match (source, destination) {
-        (0, 19) => Some([(1000, 1), (2000, 0)]),
-        (19, 0) => Some([(1000, 0), (2000, 0)]),
+        (0, 19) => Some([
+            crate::iris::FeeEntry { finality_threshold: 1000, minimum_fee: 1 },
+            crate::iris::FeeEntry { finality_threshold: 2000, minimum_fee: 0 },
+        ]),
+        (19, 0) => Some([
+            crate::iris::FeeEntry { finality_threshold: 1000, minimum_fee: 0 },
+            crate::iris::FeeEntry { finality_threshold: 2000, minimum_fee: 0 },
+        ]),
         _ => None,
     }
 }
@@ -843,8 +849,20 @@ mod tests {
     /// The measured fee table (§16.2).
     #[test]
     fn fee_table_is_the_measured_one() {
-        assert_eq!(measured_fees(0, 19), Some([(1000, 1), (2000, 0)]));
-        assert_eq!(measured_fees(19, 0), Some([(1000, 0), (2000, 0)]));
+        assert_eq!(
+            measured_fees(0, 19),
+            Some([
+                crate::iris::FeeEntry { finality_threshold: 1000, minimum_fee: 1 },
+                crate::iris::FeeEntry { finality_threshold: 2000, minimum_fee: 0 },
+            ])
+        );
+        assert_eq!(
+            measured_fees(19, 0),
+            Some([
+                crate::iris::FeeEntry { finality_threshold: 1000, minimum_fee: 0 },
+                crate::iris::FeeEntry { finality_threshold: 2000, minimum_fee: 0 },
+            ])
+        );
         assert_eq!(measured_fees(0, 0), None);
         assert_eq!(measured_fees(19, 19), None);
     }

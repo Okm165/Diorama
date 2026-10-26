@@ -148,7 +148,8 @@ fn unsupported(sub: &Subscription, feed: &MarketFeed) -> Result<(), String> {
 }
 
 /// The frame one subscription pushes, from the composed cache. `None` = the
-/// coin has no ctx yet (the feed is warming; the tick retries).
+/// coin has no ctx yet (the feed is warming; the tick retries) — a
+/// serialization fault on these plain shapes is a bug, named here.
 fn push_frame(sub: &Subscription, feed: &MarketFeed) -> Option<String> {
     let push = match sub {
         Subscription::AllMids => WsPush::AllMids { data: AllMidsData { mids: feed.all_mids() } },
@@ -156,7 +157,13 @@ fn push_frame(sub: &Subscription, feed: &MarketFeed) -> Option<String> {
             data: CtxData { coin: coin.clone(), ctx: crate::sim::account::ctx_of(feed, coin)? },
         },
     };
-    serde_json::to_string(&push).ok()
+    match serde_json::to_string(&push) {
+        Ok(frame) => Some(frame),
+        Err(e) => {
+            tracing::warn!(error = %e, "ws push serialization failed");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -261,17 +268,18 @@ mod tests {
         let client_feed = Arc::new(MarketFeed::memory(vec!["BTC".into()]));
         let client = crate::feed::ws::WsClient::new(client_feed.clone(), format!("ws://{addr}/ws"));
         let task = tokio::spawn(client.run());
-        let mut filled = false;
         // 20 s: the server pushes on a 1 Hz tick; the budget only has to
         // outlast a loaded parallel test run (the same flake class as the
         // bridge's deadlock guard).
-        for _ in 0..200 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            if client_feed.mark("BTC") == Some(rust_decimal::Decimal::from(100)) {
-                filled = true;
-                break;
+        let filled = 'wait: {
+            for _ in 0..200 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if client_feed.mark("BTC") == Some(rust_decimal::Decimal::from(100)) {
+                    break 'wait true;
+                }
             }
-        }
+            false
+        };
         assert!(filled, "the client's cache must fill from the server's pushes");
         task.abort();
         server.abort();

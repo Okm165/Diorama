@@ -157,6 +157,13 @@ pub struct Sim {
     pub(crate) metrics: SimMetrics,
 }
 
+/// Whether the flush wrote (the state was dirty) or found it already clean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flushed {
+    Written,
+    Clean,
+}
+
 impl Sim {
     /// Load the registry from its state file (absent = first boot, empty).
     pub fn load(path: PathBuf) -> Result<Self> {
@@ -638,12 +645,12 @@ impl Sim {
         })
     }
 
-    pub fn save_if_dirty(&self) -> Result<bool> {
+    pub fn save_if_dirty(&self) -> Result<Flushed> {
         if !self.dirty.swap(false, Ordering::Relaxed) {
-            return Ok(false);
+            return Ok(Flushed::Clean);
         }
         self.save()?;
-        Ok(true)
+        Ok(Flushed::Written)
     }
 
     pub fn save(&self) -> Result<()> {
@@ -1057,10 +1064,10 @@ mod tests {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         sim.note_agent(a, Address::repeat_byte(0xbb), "bot").unwrap();
-        assert!(sim.save_if_dirty().unwrap()); // the batched tail left it dirty
+        assert_eq!(sim.save_if_dirty().unwrap(), Flushed::Written); // the batched tail left it dirty
         let now = crate::now_ms();
         sim.use_nonce(a, now, now).unwrap();
-        assert!(!sim.save_if_dirty().unwrap()); // the durable tail already saved
+        assert_eq!(sim.save_if_dirty().unwrap(), Flushed::Clean); // the durable tail already saved
     }
 
     /// The account verbs' shared tail: a plain mutation marks the sim dirty
@@ -1068,13 +1075,13 @@ mod tests {
     #[test]
     fn the_account_verbs_mark_the_sim_dirty() {
         let sim = Sim::memory();
-        assert!(!sim.save_if_dirty().unwrap());
+        assert_eq!(sim.save_if_dirty().unwrap(), Flushed::Clean);
         sim.note_agent(
             Address::repeat_byte(0xaa),
             Address::repeat_byte(0xbb),
             "bot",
         )
         .unwrap();
-        assert!(sim.save_if_dirty().unwrap());
+        assert_eq!(sim.save_if_dirty().unwrap(), Flushed::Written);
     }
 }

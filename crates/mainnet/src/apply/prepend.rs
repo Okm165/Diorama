@@ -49,8 +49,8 @@ async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()>
             tracing::debug!(block = n, error = %e, "prepend timestamp not set");
         }
         let pending = match anvil_t.mine_pending().await {
-            Ok(Some(pending)) => pending,
-            Ok(None) => return Ok(()),
+            Ok(mirror_anvil::Mined::Block { pending }) => pending,
+            Ok(mirror_anvil::Mined::Empty) => return Ok(()),
             Err(e) => {
                 // The prepend is a gas-estimate safeguard; a txpool fault skips
                 // it (named here, bounded: the next apply tries again).

@@ -170,6 +170,14 @@ pub struct ForkConfig {
     pub block: u64,
 }
 
+/// The pool drain's outcome: the depth the mined block carried, or an empty
+/// pool (V's producer rule: an idle chain stays static; T's prepend runs the
+/// same check with its timestamp step around it).
+pub enum Mined {
+    Block { pending: u64 },
+    Empty,
+}
+
 impl Rpc {
     /// Build a client for `url`. Fallible: the TLS backend's initialization can
     /// fail, and a boundary that cannot be built is a boot error naming itself,
@@ -979,14 +987,14 @@ impl Rpc {
     /// pool's depth when a block was mined, `None` when it was empty (V's
     /// producer rule: an idle chain stays static; T's prepend runs the same
     /// check with its timestamp step around it).
-    pub async fn mine_pending(&self) -> Result<Option<u64>> {
+    pub async fn mine_pending(&self) -> Result<Mined> {
         let status = self.txpool_status().await?;
         let pending = status.pending;
         if pending == 0 {
-            return Ok(None);
+            return Ok(Mined::Empty);
         }
         self.anvil_mine(1).await?;
-        Ok(Some(pending))
+        Ok(Mined::Block { pending })
     }
 
     /// Set the next block's timestamp alone (the devnet prepend block: the

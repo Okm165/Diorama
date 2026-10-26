@@ -32,6 +32,9 @@
 #                            the deal and its claim across a rewind; V
 #                            (journaled) restores the deal's slot and hands
 #                            the claim back (unshadowed)
+#   K. the rewind's reach (V)  - the journal's, not the registry's: a
+#                            *scanned* mark (a mined transfer) survives a
+#                            rewind untouched (nothing handed back)
 #
 # Run from the repo root:
 #   make shadow-audit
@@ -444,12 +447,55 @@ rewind_hand_back() {
   check "V (journaled): the slot's mark dropped (${v_slots_after} = ${v_slots_before})" "$( [ "$v_slots_after" = "$v_slots_before" ] && echo 1 || echo 0 )"
 }
 
+# --- K. the rewind's reach is the journal's (V): scanned marks survive ---
+# V's journal holds the engine's *own* writes (the deal); the scan's marks
+# (the bridge's relays, a mined transfer) live in the registry, not the
+# journal. A rewind restores the journal's range and hands back exactly its
+# marked keys — a scanned mark outside the journal must survive both the
+# restore and the hand-back.
+rewind_scan_reach() {
+  local ns="$NS_V" anvil="http://anvil-v:8545"
+  local holder="0x00000000000000000000000000000000000000e5" amount="1000000"
+  local head to
+  head=$(eget "$ns" /status | json "d.get('head')")
+  to=$(printf '0x%040x' "$head")
+  echo
+  echo "== the rewind's reach is the journal's (V): a scanned mark survives =="
+  local held_usdc; held_usdc=$(balance_of "$ns" "$anvil" "$USDC_V" "$holder")
+  if [ "${held_usdc:-0}" -lt "$amount" ]; then
+    epost "$ns" /admin/deal "{\"token\":\"$USDC_V\",\"to\":\"$holder\",\"amount\":\"$((amount * 2))\"}" > /dev/null
+  fi
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setBalance\",\"params\":[\"$holder\",\"0xDE0B6B3A7640000\"]}" > /dev/null
+  local slots_before; slots_before=$(eget "$ns" /status | json "d.get('shadowed_slots')")
+  local data="0xa9059cbb000000000000000000000000${to:2}$(printf '%064x' "$amount")"
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_impersonateAccount\",\"params\":[\"$holder\"]}" > /dev/null
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_sendTransaction\",\"params\":[{\"from\":\"$holder\",\"to\":\"$USDC_V\",\"data\":\"$data\"}]}" > /dev/null
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_stopImpersonatingAccount\",\"params\":[\"$holder\"]}" > /dev/null
+  echo "  waiting ${WINDOW_WAIT}s for the producer to mine and the scan to mark..."
+  sleep "$WINDOW_WAIT"
+  local slots_marked; slots_marked=$(eget "$ns" /status | json "d.get('shadowed_slots')")
+  local bal_marked; bal_marked=$(balance_of "$ns" "$anvil" "$USDC_V" "$to")
+  check "the scanned transfer is marked (slots ${slots_before} -> ${slots_marked}, balance ${bal_marked})" "$( [ "$slots_marked" -gt "$slots_before" ] && [ "$bal_marked" = "$amount" ] && echo 1 || echo 0 )"
+  local rw unshadowed
+  rw=$(epost "$ns" /admin/rewind "{\"blocks\":1}")
+  unshadowed=$(echo "$rw" | json "d.get('unshadowed')")
+  local bal_after; bal_after=$(balance_of "$ns" "$anvil" "$USDC_V" "$to")
+  local slots_after; slots_after=$(eget "$ns" /status | json "d.get('shadowed_slots')")
+  # The hand-backs are exactly the journal's marked keys: the drop in the
+  # mark count equals `unshadowed` (K's own top-up deal may ride the rewound
+  # block — its claim then correctly drops with it; the scanned transfer's
+  # write is not in the journal, so it survives — that is the reach).
+  check "the hand-backs are the journal's (unshadowed=${unshadowed}, marks ${slots_marked} -> ${slots_after})" "$( [ "$((slots_marked - slots_after))" = "${unshadowed:-0}" ] && echo 1 || echo 0 )"
+  check "the scanned transfer survived the rewind (${bal_after} = ${bal_marked})" "$( [ "$bal_after" = "$bal_marked" ] && echo 1 || echo 0 )"
+}
+
 audit_mirror "$NS_V" "venue (V)" "http://anvil-v:8545" "$SRC_V" "$USDC_V"
 audit_mirror "$NS_T" "l1 (T)" "http://anvil-t:8545" "$SRC_T" "$USDC_T"
 field_shadow_pair
 hand_back_scoping
 scanned_write
 rewind_hand_back
+rewind_scan_reach
 
 echo
 echo "  shadowing audit: ${pass} ok, ${fail} failed"

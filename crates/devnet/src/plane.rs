@@ -80,6 +80,14 @@ pub struct ReapplyRange {
     pub upto: u64,
 }
 
+/// Whether a reset signal was witnessable (a steady signal publishes
+/// nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Witnessed {
+    Published,
+    Steady,
+}
+
 impl Plane {
     /// Clear the journal-rewind marker once `block` is at or past the range's
     /// end; returns the cleared range so the caller logs its own wording.
@@ -150,14 +158,18 @@ impl Plane {
 
     /// Publish the reset fact for a witnessable signal (a steady signal
     /// publishes nothing): the witness mapping is the spine's, the fact shape
-    /// here. Returns whether it published.
-    pub fn witness_reset(&self, chain: &'static str, signal: crate::spine::ResetSignal) -> bool {
+    /// here.
+    pub fn witness_reset(
+        &self,
+        chain: &'static str,
+        signal: crate::spine::ResetSignal,
+    ) -> Witnessed {
         let Some(witness) = crate::spine::witness_for(signal) else {
-            return false;
+            return Witnessed::Steady;
         };
         self.facts
             .publish(crate::facts::Fact::ResetDetected { chain, witness });
-        true
+        Witnessed::Published
     }
 
     /// Publish the epoch-change fact: the pin the rule moved to (`None` =

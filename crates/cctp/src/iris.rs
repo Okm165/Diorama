@@ -101,7 +101,7 @@ pub(crate) struct PublicKeyEntry {
     pub cctp_version: u8,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct FeeEntry {
     #[serde(rename = "finalityThreshold")]
     pub finality_threshold: u32,
@@ -205,15 +205,7 @@ async fn fees(
             "no fee data for sourceDomain {source}, destinationDomain {destination}"
         )));
     };
-    Ok(Json(
-        entries
-            .into_iter()
-            .map(|(finality_threshold, minimum_fee)| FeeEntry {
-                finality_threshold,
-                minimum_fee,
-            })
-            .collect(),
-    ))
+    Ok(Json(entries.into_iter().collect()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,14 +422,7 @@ mod tests {
             r#"{"publicKeys":[{"publicKey":"0x04aa","cctpVersion":2}]}"#
         );
 
-        let fees: Vec<FeeEntry> = measured_fees(0, 19)
-            .unwrap()
-            .into_iter()
-            .map(|(finality_threshold, minimum_fee)| FeeEntry {
-                finality_threshold,
-                minimum_fee,
-            })
-            .collect();
+        let fees: Vec<FeeEntry> = measured_fees(0, 19).unwrap().into_iter().collect();
         assert_eq!(
             serde_json::to_string(&fees).unwrap(),
             r#"[{"finalityThreshold":1000,"minimumFee":1},{"finalityThreshold":2000,"minimumFee":0}]"#

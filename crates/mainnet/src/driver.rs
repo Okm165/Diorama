@@ -46,12 +46,20 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
+/// The pass's next move: the parent block to apply, or idle (the reason is
+/// logged at its own site: at the follow head, gap-paused, or the head read
+/// failing).
+enum Next {
+    Apply(u64),
+    Idle,
+}
+
 /// The next parent block to apply, or `None`. Applies the cursor, rebase,
 /// gap, and reorg rules.
-async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
+async fn next_block(ctx: &Ctx) -> Result<Next> {
     let Some(follow) = ctx.follow_head().await? else {
         tracing::debug!("follow head unavailable");
-        return Ok(None);
+        return Ok(Next::Idle);
     };
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.reth_follow_head, follow);
     // Schedule a small margin behind the head: the applier mines one T block
@@ -84,7 +92,7 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
     }
     if start > follow {
         tracing::debug!(head, follow, start, "chain is at the follow head");
-        return Ok(None);
+        return Ok(Next::Idle);
     }
     let gap = follow.saturating_sub(start);
     if !gap_within_limit(gap, ctx.mirror.policies().gap, start_kind) {
@@ -96,13 +104,13 @@ async fn next_block(ctx: &Ctx) -> Result<Option<u64>> {
                 "sync gap too large - paused; run the re-pin drill (make repin)"
             );
         }
-        return Ok(None);
+        return Ok(Next::Idle);
     }
     if ctx.plane.gap_pause_cleared() {
         tracing::info!(gap, "sync gap cleared; the applier resumes");
     }
     reorg_continuity(ctx, start).await?;
-    Ok(Some(start))
+    Ok(Next::Apply(start))
 }
 
 /// The cursor's gauges: the cursor height and the pin-age reading (blocks
@@ -137,7 +145,10 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
 /// A witnessed reset: say what was seen, publish the witness, and rebase.
 /// All three witnesses converge here (the detector's answer decides the fact).
 async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<ChainCursor>> {
-    if !ctx.plane.witness_reset(ctx.mirror.label(), signal) {
+    if matches!(
+        ctx.plane.witness_reset(ctx.mirror.label(), signal),
+        mirror_devnet::plane::Witnessed::Steady
+    ) {
         return Ok(None);
     }
     rebase(ctx, head).await?;
@@ -264,13 +275,13 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
             continue;
         }
         match next_block(&ctx).await {
-            Ok(Some(n)) => {
+            Ok(Next::Apply(n)) => {
                 if let Err(e) = step(&ctx, n).await {
                     tracing::error!(block = n, error = %e, "diff apply failed (will retry)");
                     tokio::time::sleep(poll * 5).await;
                 }
             }
-            Ok(None) => tokio::time::sleep(poll).await,
+            Ok(Next::Idle) => tokio::time::sleep(poll).await,
             Err(e) => {
                 tracing::warn!(error = %e, "apply loop poll failed");
                 tokio::time::sleep(poll * 5).await;
