@@ -276,6 +276,15 @@ order) and the return leg closing exactly. In cluster mode the script derives
 the bridge's wallet from the venue secret (`cctp-relay-key`), so the actor is
 always the wallet the burn sends from — never the local harness's.
 
+### The benchmark session — `make benchmark`
+
+The four portfolio studies in sequence against the deployed mirrors — the one
+command a benchmark session starts with. Each study hands its scenario back
+(the overrides cleared, the books returned, the trader flat), so they compose:
+the basis book's carry and shock, the crosschain margin book's costs and
+served unrealized PnL, the capital frontier's liquidation distances, and the
+hedged book's risk-based efficiency. `CAST=` must point at a cast binary.
+
 ### The cross-mirror capital-efficiency read (measured)
 
 Per $1,000 of collateral, the venues' buying power, measured on the mirrors:

@@ -289,6 +289,14 @@ capital-frontier: ## The capital-efficiency frontier: the liquidation distance m
 hedged-book: ## The hedged book: same collateral and gross exposure as the unhedged, flat through a 60% crash
 	NS=venue-mirror ./scripts/hedged-book.sh
 
+benchmark: ## The prime-brokerage benchmark session: the four portfolio studies in sequence
+	@echo "== benchmark session: the four portfolio studies =="
+	@$(MAKE) --no-print-directory portfolio-sim
+	@$(MAKE) --no-print-directory crosschain-margin
+	@$(MAKE) --no-print-directory capital-frontier
+	@$(MAKE) --no-print-directory hedged-book
+	@echo "== benchmark session: all four studies green ==" 
+
 cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locally (both chains forked from the real ones: the round trip + the unified-margin cycle)
 	./scripts/cctp-local.sh
 
