@@ -21,6 +21,7 @@ pub(crate) mod parity;
 
 use crate::ctx::Ctx;
 use crate::error::Result;
+use alloy_rpc_types_eth::Block;
 use mirror_devnet::facts::Fact;
 use mirror_devnet::metrics::Registry as _;
 use std::time::Instant;
@@ -83,13 +84,23 @@ struct SourceReorgEntry {
 /// not journaled (a rewind restores devnet writes, never source history), and
 /// a key the devnet owns is skipped until it is handed back.
 pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
-    let source_head = ctx.source_rpc.block_number().await?;
-    ctx.venue_metrics
-        .set(&ctx.venue_metrics.source_head, source_head);
     let Some(followed) = ctx.plane.state.source_last_block()? else {
         // Not anchored yet (reconcile anchors at the pin); nothing to do.
         return Ok(None);
     };
+    // The opening reads in one body: the head, and — when a stored hash
+    // makes the continuity check meaningful — the first window block
+    // (`followed + 1`). One body, not two: the follow's binding constraint
+    // is the public endpoint's request budget.
+    let (source_head, next_block) = match ctx.plane.state.source_last_hash()? {
+        Some(_) => {
+            let (head, block) = ctx.source_rpc.head_and_block(followed + 1).await?;
+            (head, Some(block))
+        }
+        None => (ctx.source_rpc.block_number().await?, None),
+    };
+    ctx.venue_metrics
+        .set(&ctx.venue_metrics.source_head, source_head);
     ctx.venue_metrics
         .set(&ctx.venue_metrics.source_followed, followed);
     if source_head <= followed {
@@ -112,7 +123,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     note_gap(ctx, followed, source_head, to, limit)?;
 
     let started = Instant::now();
-    continuity_check(ctx, followed).await?;
+    continuity_check(ctx, followed, next_block.as_ref())?;
     let plan = plan_window(ctx, followed, to).await?;
     let applied = apply_window(ctx, &plan).await?;
     let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
@@ -222,11 +233,13 @@ fn catchup_window(followed: u64, source_head: u64, limit: Option<u64>) -> u64 {
 /// the orphaned blocks touched may be stale until a later window touches them:
 /// count it, say so, and let the operator re-pin (HL finality is BFT; a
 /// visible alarm is the honest guard).
-async fn continuity_check(ctx: &Ctx, followed: u64) -> Result<()> {
+fn continuity_check(ctx: &Ctx, followed: u64, next: Option<&Block>) -> Result<()> {
     let Some(last_hash) = ctx.plane.state.source_last_hash()? else {
         return Ok(());
     };
-    let next = ctx.source_rpc.block_by_number(followed + 1, mirror_anvil::Txs::Hashes).await?;
+    let Some(next) = next else {
+        return Ok(());
+    };
     if next.header.parent_hash != last_hash {
         ctx.venue_metrics
             .inc(&ctx.venue_metrics.source_reorg_total);

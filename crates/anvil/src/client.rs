@@ -39,8 +39,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// Positional params for methods that take none: the spec's `[]` (the
-/// discouraged alternative is `null`, which not every node accepts).
-const NO_PARAMS: [u8; 0] = [];
+/// discouraged alternative is `null`, which not every node accepts). Public
+/// so a batched caller can stage a no-param call beside typed ones.
+pub const NO_PARAMS: [u8; 0] = [];
 
 /// The JSON-RPC code a node answers when it does not implement a method
 /// (measured: drpc answers `-32601` on HTTP 400 — see the module docs).
@@ -656,6 +657,41 @@ impl Rpc {
     pub async fn block_by_number_opt(&self, n: u64, txs: Txs) -> Result<Option<Block>> {
         self.call_opt(BLOCK_BY_NUMBER, (U64::from(n), txs.full()))
             .await
+    }
+
+    /// The head plus one block in a single body: two reads a follow needs
+    /// together (its binding constraint is the endpoint's request budget) —
+    /// the same decodes and the same missing-block fault as the single-call
+    /// forms.
+    pub async fn head_and_block(&self, n: u64) -> Result<(u64, Block)> {
+        let calls = [
+            call("eth_blockNumber", NO_PARAMS)?,
+            call(BLOCK_BY_NUMBER, (U64::from(n), false))?,
+        ];
+        let mut answers = self.batch_raw(&calls).await?.into_iter();
+        let head: U64 = self.decode_item("head_and_block", answers.next().flatten())?;
+        let block: Block = answers
+            .next()
+            .flatten()
+            .ok_or_else(|| Error::BlockMissing {
+                endpoint: self.url.clone(),
+                n,
+            })
+            .and_then(|raw| self.decode_item("head_and_block", Some(raw)))?;
+        Ok((head.to::<u64>(), block))
+    }
+
+    /// One batch item decoded, a missing item named as a fault (the strict
+    /// shape the single-call helpers give).
+    fn decode_item<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        raw: Option<Box<RawValue>>,
+    ) -> Result<T> {
+        let raw = raw.ok_or_else(|| {
+            self.decode(method, serde_json::Error::custom("a null answer"))
+        })?;
+        serde_json::from_str(raw.get()).map_err(|source| self.decode(method, source))
     }
 
     /// `tag` is the protocol's own block-parameter string: `latest`,

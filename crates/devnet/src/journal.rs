@@ -9,7 +9,7 @@
 //! leaving part of the rolled-back range un-restored.
 use crate::error::{Error, Result};
 use alloy_primitives::{Address, Bytes, U256};
-use mirror_anvil::{Rpc, Write};
+use mirror_anvil::{Key, Value, Rpc, Write};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -276,23 +276,29 @@ pub async fn read_before_values(
     writes: &[Write],
     at: u64,
 ) -> Result<Vec<JournalEntry>> {
+    // The before-values ride one read plan (≤20 keys per body — the client
+    // chunks transparently, order-preserving): the per-write form cost a
+    // round trip per write, and this runs on every applied block, for every
+    // write in it.
+    let keys: Vec<Key> = writes.iter().map(Write::key).collect();
+    let values = target.read_keys(&keys, at).await?;
     let mut entries = Vec::with_capacity(writes.len());
-    for w in writes {
-        let before = match w {
-            Write::Storage { address, slot, .. } => BeforeValue::Storage(U256::from_be_bytes(
-                target.storage_at(*address, *slot, at).await?.0,
-            )),
-            Write::Balance { address, .. } => {
-                BeforeValue::Balance(target.balance_at(*address, at).await?)
-            }
-            Write::Nonce { address, .. } => {
-                BeforeValue::Nonce(target.nonce_at(*address, at).await?)
-            }
-            Write::Code { address, .. } => BeforeValue::Code(target.code_at(*address, at).await?),
-        };
-        entries.push(entry_for_write(w, before)?);
+    for (w, value) in writes.iter().zip(values) {
+        entries.push(entry_for_write(w, before_of(value))?);
     }
     Ok(entries)
+}
+
+/// A read value in the journal's vocabulary: the kinds match by construction
+/// (`Write::key`'s read answers the write's own kind; a mismatched pair is
+/// caught by [`entry_for_write`]).
+fn before_of(value: Value) -> BeforeValue {
+    match value {
+        Value::Storage(word) => BeforeValue::Storage(word),
+        Value::Balance(v) => BeforeValue::Balance(v),
+        Value::Nonce(v) => BeforeValue::Nonce(v),
+        Value::Code(v) => BeforeValue::Code(v),
+    }
 }
 
 /// Journal before-values for a batch of writes (read from T first).
