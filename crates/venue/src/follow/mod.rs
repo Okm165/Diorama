@@ -127,7 +127,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
         sampled_ok,
         duration_ms: started.elapsed().as_millis() as u64,
     };
-    report_applied(ctx, followed, to, &stats);
+    report_applied(ctx, followed, to, source_head, &stats);
     Ok(Some(stats))
 }
 
@@ -162,7 +162,7 @@ fn note_gap(ctx: &Ctx, followed: u64, source_head: u64, to: u64, limit: Option<u
 }
 
 /// One place for the window's gauges, fact, and log.
-fn report_applied(ctx: &Ctx, from: u64, to: u64, window: &FollowOutcome) {
+fn report_applied(ctx: &Ctx, from: u64, to: u64, source_head: u64, window: &FollowOutcome) {
     ctx.venue_metrics
         .inc(&ctx.venue_metrics.follow_windows_total);
     ctx.venue_metrics
@@ -189,6 +189,8 @@ fn report_applied(ctx: &Ctx, from: u64, to: u64, window: &FollowOutcome) {
     tracing::info!(
         from,
         to,
+        source_head,
+        lag = source_head.saturating_sub(to),
         writes = window.writes,
         applied = window.applied,
         skipped_shadowed = window.skipped_shadowed,

@@ -75,6 +75,7 @@ pub(crate) async fn mine_loop(ctx: Arc<Ctx>) {
 /// of the applier's `apply_loop`.
 pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
+    let mut last_status = 0u64;
     // The pass's own backoff: a failed pass — the public source throttling,
     // a transient transport fault — doubles the pause up to the cap, and a
     // pass that serves resets it. The fixed cadence alone hammered a
@@ -84,6 +85,22 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     // only wastes the good windows between them.
     let mut backoff = mirror_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(60));
     loop {
+        // The follow's heartbeat (a minute apart, the same shape on both
+        // mirrors): the steady DEBUG line only speaks for an idle chain, and
+        // the live source is never at the followed height.
+        mirror_devnet::engine::FollowStatus {
+            source_head: ctx.venue_metrics.source_head.load(std::sync::atomic::Ordering::Relaxed),
+            followed: ctx
+                .venue_metrics
+                .source_followed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            applied: ctx
+                .venue_metrics
+                .follow_windows_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            paused: ctx.plane.gap_paused.load(std::sync::atomic::Ordering::Relaxed),
+        }
+        .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);
         if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }

@@ -39,6 +39,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     )?);
 
     spawn_market_plane(&feed, api_client, &chain.ws_url, &sim_section);
+    spawn_plane_heartbeat(&feed);
     spawn_bridge(&sim_section, &sim, &feed, &bridge_metrics)?;
     spawn_tick(&sim, &feed);
     let (info, control) = serve(&sim_section, &state);
@@ -94,6 +95,33 @@ fn spawn_market_plane(
     let ws = crate::feed::ws::WsClient::new(feed.clone(), ws_url.to_string());
     tokio::spawn(poller.run());
     tokio::spawn(ws.run());
+}
+
+/// The market plane's heartbeat: one INFO line a minute naming the live
+/// market — each coin's mark and its age (the live-following visibility the
+/// WS connect line alone never gives; a scripted coin's mark reads
+/// `scripted`).
+fn spawn_plane_heartbeat(feed: &Arc<crate::feed::MarketFeed>) {
+    let feed = feed.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let now = crate::now_ms();
+            let coins: Vec<String> = feed
+                .markets
+                .iter()
+                .map(|c| match (feed.mark(c), feed.stale_ms(c, now)) {
+                    (Some(m), age) => format!(
+                        "{c}={m}@{}",
+                        age.map(|a| format!("{a}ms"))
+                            .unwrap_or_else(|| "scripted".to_string())
+                    ),
+                    _ => format!("{c}=-"),
+                })
+                .collect();
+            tracing::info!(coins = %coins.join(" "), "market plane live");
+        }
+    });
 }
 
 /// The Core↔EVM bridge (when V is configured): system-address credits and

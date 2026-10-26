@@ -242,7 +242,20 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
 
 pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
+    let mut last_status = 0u64;
     loop {
+        // The follow's heartbeat (a minute apart, the same shape on both
+        // mirrors): the steady DEBUG line only speaks for an idle chain.
+        mirror_devnet::engine::FollowStatus {
+            source_head: ctx.mainnet_metrics.reth_head.load(std::sync::atomic::Ordering::Relaxed),
+            followed: ctx.mainnet_metrics.cursor.load(std::sync::atomic::Ordering::Relaxed),
+            applied: ctx
+                .mainnet_metrics
+                .blocks_applied
+                .load(std::sync::atomic::Ordering::Relaxed),
+            paused: ctx.plane.gap_paused.load(std::sync::atomic::Ordering::Relaxed),
+        }
+        .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);
         if mirror_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }

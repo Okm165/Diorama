@@ -289,6 +289,9 @@ portfolio-reaction: ## A held portfolio vs another account's impact: both direct
 crosschain-margin: ## The crosschain margin book: bridged collateral, funding costs, served unrealized PnL, the loop closed
 	NS=venue-mirror ./scripts/crosschain-margin.sh
 
+crosschain-recovery: ## The deeper crosschain reads: the funding sign flip + the collateral's way back after a forced close
+	NS=venue-mirror ./scripts/crosschain-recovery.sh
+
 capital-frontier: ## The capital-efficiency frontier: the liquidation distance measured at each leverage
 	NS=venue-mirror ./scripts/capital-frontier.sh
 

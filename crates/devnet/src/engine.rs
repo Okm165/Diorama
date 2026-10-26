@@ -264,6 +264,51 @@ pub fn build_clients(
 
 /// The profile loops' halt gate: while `/admin/pause` holds the loops, sleep
 /// one cadence and hold where you are. `true` means the caller continues.
+/// The follow's heartbeat: one INFO line per interval, the same fields on
+/// both mirrors. The steady DEBUG line only speaks for an *idle* chain — the
+/// venue's live source is never at the followed height, so its following was
+/// invisible in the logs (measured: 7 DEBUG lines in 20 minutes against the
+/// mainnet's 1697). `applied` counts the mirror's own unit: parent blocks
+/// (T), composed windows (V).
+pub struct FollowStatus {
+    pub source_head: u64,
+    pub followed: u64,
+    pub applied: u64,
+    /// The gap guard's latch, read from the plane (the same state the pause
+    /// edges write).
+    pub paused: bool,
+}
+
+impl FollowStatus {
+    /// One line when `interval_ms` has passed since `last` (a ms stamp the
+    /// caller owns); returns whether it logged.
+    pub fn log_if_due(&self, mirror: &str, last: &mut u64, interval_ms: u64) -> bool {
+        let now = mirror_config::boot::now_ms();
+        if now.saturating_sub(*last) < interval_ms {
+            return false;
+        }
+        *last = now;
+        let lag = self.source_head.saturating_sub(self.followed);
+        let guard = if self.paused {
+            "paused"
+        } else if lag == 0 {
+            "idle"
+        } else {
+            "following"
+        };
+        tracing::info!(
+            mirror,
+            source_head = self.source_head,
+            followed = self.followed,
+            lag_blocks = lag,
+            applied = self.applied,
+            guard,
+            "follow status"
+        );
+        true
+    }
+}
+
 pub async fn halt_gate<E: Engine>(ctx: &E, poll: std::time::Duration) -> bool {
     if ctx.plane().is_halted() {
         tokio::time::sleep(poll).await;
