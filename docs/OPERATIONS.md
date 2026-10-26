@@ -286,7 +286,9 @@ delta and the served `cumFunding.sinceOpen`), a mark move read as served
 economics (effective leverage, funding in bps of notional, unrealized on the
 collateral) and the loop closed — the CoreWriter perp→spot *reverse* plus the
 CCTP return landing exactly. The bridge leg's fee is zero on the devnet and
-the deltas are exact, so the cost line is the funding itself. The faucet sets
+the deltas are exact, so the cost line is the funding itself. The scripted
+`advance` jumps the sim's clock (monotonic by design): the offset accumulates
+across runs and `/control/reset` (or an epoch) restores it. The faucet sets
 a balance (a slot write), never adds; the reverse transfer moves the whole
 perp balance at 8-dec (the measured costs leave less than the original).
 

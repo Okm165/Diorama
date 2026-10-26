@@ -175,7 +175,10 @@ alarm. The gap guard pauses a too-wide window (see 4.1).
 V's clock is Anvil's own — the engine never re-aligns it, and `/admin/time` is
 absent by design: the harness calls `anvil_setNextBlockTimestamp` /
 `evm_mine` directly. The simulator serves the venue's time: an account the
-sim has touched follows V's head; untouched accounts keep the venue's own
+sim has touched is served `max(wall, the sim's clock, V's head time)` — never
+behind any of the three, so a scripted `advance` jump dominates until
+`/control/reset` (which blanks the scenario *and* the clock offset; an epoch
+re-pin restores the chain's side); untouched accounts keep the venue's own
 clock.
 
 ### 5.7 Faucet
