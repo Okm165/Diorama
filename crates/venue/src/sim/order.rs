@@ -111,7 +111,34 @@ pub(crate) enum Tpsl {
 #[derive(Clone, Copy)]
 struct CancelMode {
     status: TerminalStatus,
-    fast: bool,
+    speed: CancelSpeed,
+}
+
+/// The wire's `fast` flag, named (docs: a fast cancel must not refer to a
+/// trigger order).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelSpeed {
+    Normal,
+    Fast,
+}
+
+impl CancelSpeed {
+    /// The wire's `fast` flag (the venue's own shape), converted once here.
+    pub(crate) fn of(fast: bool) -> Self {
+        if fast {
+            CancelSpeed::Fast
+        } else {
+            CancelSpeed::Normal
+        }
+    }
+}
+
+/// Whether an order may only reduce the position (the wire's `reduce_only`,
+/// named): a reduce-only order frees margin instead of using it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reduce {
+    Only,
+    Any,
 }
 
 /// Move a finished order into the bounded terminal history (`orderStatus`
@@ -154,7 +181,7 @@ fn terminalize(
 fn switch_position_mode(
     balance: &mut Decimal,
     p: &mut super::account::Position,
-    is_cross: bool,
+    mode: crate::wire::LeverageType,
     leverage: u32,
 ) -> Result<()> {
     let was_isolated = p.leverage == crate::wire::LeverageType::Isolated;
@@ -163,14 +190,10 @@ fn switch_position_mode(
         Decimal::from(leverage),
         "margin notional",
     )?;
-    p.leverage = if is_cross {
-        crate::wire::LeverageType::Cross
-    } else {
-        crate::wire::LeverageType::Isolated
-    };
+    p.leverage = mode;
     p.leverage_value = leverage;
     p.margin_used = initial;
-    if is_cross {
+    if matches!(mode, crate::wire::LeverageType::Cross) {
         *balance = super::account::add(
             *balance,
             std::mem::take(&mut p.isolated_margin),
@@ -185,7 +208,7 @@ fn switch_position_mode(
 
 fn validate_leverage(
     coin: &str,
-    is_cross: bool,
+    mode: crate::wire::LeverageType,
     leverage: u32,
     meta: Option<&crate::wire::Meta>,
 ) -> Result<()> {
@@ -199,7 +222,9 @@ fn validate_leverage(
             )));
         }
     }
-    if is_cross && super::account::isolated_only(coin, meta) {
+    if matches!(mode, crate::wire::LeverageType::Cross)
+        && super::account::isolated_only(coin, meta)
+    {
         return Err(Error::bad_request(format!(
             "{coin} does not allow cross margin (docs: margin modes)"
         )));
@@ -213,8 +238,8 @@ fn validate_leverage(
 /// robust price indices: mark "is used for margining, liquidations,
 /// triggering TP/SL, and computing unrealized pnl"). Reduce-only orders free
 /// margin instead of using it.
-pub(crate) fn order_requirement(sz: Decimal, px: Decimal, leverage: u32, reduce_only: bool) -> Result<Decimal> {
-    if reduce_only {
+pub(crate) fn order_requirement(sz: Decimal, px: Decimal, leverage: u32, reduce: Reduce) -> Result<Decimal> {
+    if matches!(reduce, Reduce::Only) {
         return Ok(Decimal::ZERO);
     }
     Ok(super::account::mul(sz, px, "order notional")? / Decimal::from(leverage.max(1)))
@@ -397,7 +422,11 @@ impl Sim {
             r.sz,
             feed.mark_or(&r.coin, r.px),
             leverage,
-            r.reduce_only,
+            if r.reduce_only {
+                Reduce::Only
+            } else {
+                Reduce::Any
+            },
         )?;
         let Some(available) = self.available_for(feed, r.account, Some(r.oid), meta.as_ref())?
         else {
@@ -442,7 +471,12 @@ impl Sim {
         let (px, sz) = resting_at;
         let meta = feed.meta();
         let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
-        let requirement = order_requirement(sz, feed.mark_or(&req.coin, px), leverage, false)?;
+        let requirement = order_requirement(
+            sz,
+            feed.mark_or(&req.coin, px),
+            leverage,
+            Reduce::Any,
+        )?;
         let Some(available) = self.available_for(feed, address, None, meta.as_ref())? else {
             return Ok(());
         };
@@ -500,7 +534,7 @@ impl Sim {
             let px = feed.mark_or(&r.coin, r.px);
             total = super::account::add(
                 total,
-                order_requirement(r.sz, px, leverage, false)?,
+                order_requirement(r.sz, px, leverage, Reduce::Any)?,
                 "reserved margin",
             )?;
         }
@@ -739,7 +773,7 @@ impl Sim {
             if crosses {
                 let _ = feed; // (the feed is the caller's context; no read needed)
                 tracing::info!(account = %account, oid = r.oid, "self-crossing resting order expired (expire-maker)");
-                self.cancel(account, &r.coin, r.oid, false)?;
+                self.cancel(account, &r.coin, r.oid, CancelSpeed::Normal)?;
             }
         }
         Ok(())
@@ -766,15 +800,15 @@ impl Sim {
         setting: super::account::LeverageSetting,
         meta: Option<&crate::wire::Meta>,
     ) -> Result<()> {
-        let super::account::LeverageSetting { is_cross, leverage } = setting;
-        validate_leverage(coin, is_cross, leverage, meta)?;
+        let super::account::LeverageSetting { mode, leverage } = setting;
+        validate_leverage(coin, mode, leverage, meta)?;
         self.with_account(address, |account| {
             account.leverage_settings.insert(
                 coin.to_string(),
-                super::account::LeverageSetting { is_cross, leverage },
+                super::account::LeverageSetting { mode, leverage },
             );
             if let Some(p) = account.positions.get_mut(coin) {
-                switch_position_mode(&mut account.perp_balance, p, is_cross, leverage)?;
+                switch_position_mode(&mut account.perp_balance, p, mode, leverage)?;
             }
             Ok(())
         })
@@ -920,14 +954,14 @@ impl Sim {
     /// A cancel; `fast` is the wire flag — the venue rejects a fast cancel
     /// that refers to a trigger order (docs), so the flag is checked where
     /// the order is known.
-    pub(crate) fn cancel(&self, account: Address, coin: &str, oid: u64, fast: bool) -> Result<()> {
+    pub(crate) fn cancel(&self, account: Address, coin: &str, oid: u64, speed: CancelSpeed) -> Result<()> {
         self.cancel_with(
             account,
             coin,
             oid,
             CancelMode {
                 status: TerminalStatus::Canceled,
-                fast,
+                speed,
             },
         )
     }
@@ -940,7 +974,7 @@ impl Sim {
             oid,
             CancelMode {
                 status: TerminalStatus::MarginCanceled,
-                fast: false,
+                speed: CancelSpeed::Normal,
             },
         )
     }
@@ -954,11 +988,11 @@ impl Sim {
         oid: u64,
         mode: CancelMode,
     ) -> Result<()> {
-        let CancelMode { status, fast } = mode;
+        let CancelMode { status, speed } = mode;
         self.with_state(|st| {
             match st.resting.get(&oid) {
                 Some(r) if r.account == account && r.coin == coin => {
-                    if fast && r.trigger.is_some() {
+                    if matches!(speed, CancelSpeed::Fast) && r.trigger.is_some() {
                         return Err(Error::bad_request(
                             "Fast cancel cannot cancel a trigger order.",
                         ));
@@ -993,7 +1027,7 @@ impl Sim {
         account: Address,
         coin: &str,
         cloid: alloy_primitives::B128,
-        fast: bool,
+        speed: CancelSpeed,
     ) -> Result<()> {
         let oid = self.with_state(|st| {
             Ok(st
@@ -1003,7 +1037,7 @@ impl Sim {
                 .map(|r| r.oid))
         })?;
         match oid {
-            Some(oid) => self.cancel(account, coin, oid, fast),
+            Some(oid) => self.cancel(account, coin, oid, speed),
             None => Err(Error::bad_request(
                 "Order was never placed, already canceled, or filled.",
             )),
@@ -1931,18 +1965,32 @@ mod tests {
         meta.universe[0].margin_mode = Some(MarginMode::StrictIsolated);
         let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta);
         let (sim, a) = funded_sim(&feed, "1000");
-        let setting =
-            |is_cross, leverage| crate::sim::account::LeverageSetting { is_cross, leverage };
+        let setting = |mode, leverage| crate::sim::account::LeverageSetting { mode, leverage };
         let meta = feed.meta();
         let err = sim
-            .set_leverage(a, "ETH", setting(true, 10), meta.as_ref())
+            .set_leverage(
+                a,
+                "ETH",
+                setting(crate::wire::LeverageType::Cross, 10),
+                meta.as_ref(),
+            )
             .unwrap_err();
         assert!(format!("{err}").contains("does not allow cross"), "{err}");
         assert!(sim
-            .set_leverage(a, "ETH", setting(false, 10), meta.as_ref())
+            .set_leverage(
+                a,
+                "ETH",
+                setting(crate::wire::LeverageType::Isolated, 10),
+                meta.as_ref(),
+            )
             .is_ok());
         let err = sim
-            .set_leverage(a, "ETH", setting(false, 999), meta.as_ref())
+            .set_leverage(
+                a,
+                "ETH",
+                setting(crate::wire::LeverageType::Isolated, 999),
+                meta.as_ref(),
+            )
             .unwrap_err();
         assert!(format!("{err}").contains("max leverage"), "{err}");
     }
@@ -2080,10 +2128,10 @@ mod tests {
             tpsl: Tpsl::Sl,
         });
         let oid = sim.place(&feed, a, &t).unwrap().resting.expect("the trigger armed");
-        let refused = sim.cancel(a, "ETH", oid, true);
+        let refused = sim.cancel(a, "ETH", oid, CancelSpeed::Fast);
         assert!(refused.is_err(), "a fast cancel refuses the trigger");
         assert!(refused.unwrap_err().to_string().contains("trigger"));
-        sim.cancel(a, "ETH", oid, false).unwrap();
+        sim.cancel(a, "ETH", oid, CancelSpeed::Normal).unwrap();
     }
 
     /// The trigger direction rule (docs, stated for the stop/take market

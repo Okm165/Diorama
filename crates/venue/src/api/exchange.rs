@@ -260,7 +260,14 @@ fn leverage_action(
         state.sim.set_leverage(
             owner,
             coin,
-            crate::sim::account::LeverageSetting { is_cross, leverage },
+            crate::sim::account::LeverageSetting {
+                mode: if is_cross {
+                    crate::wire::LeverageType::Cross
+                } else {
+                    crate::wire::LeverageType::Isolated
+                },
+                leverage,
+            },
             meta.as_ref(),
         )
     })
@@ -339,7 +346,12 @@ fn cancel_action(
     let statuses = cancels
         .iter()
         .map(|c| match coin_of(meta.as_ref(), c.a) {
-            Some(coin) => match state.sim.cancel(owner, &coin, c.o, fast) {
+            Some(coin) => match state.sim.cancel(
+                owner,
+                &coin,
+                c.o,
+                crate::sim::order::CancelSpeed::of(fast),
+            ) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
                 Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
             },
@@ -368,7 +380,12 @@ fn cancel_by_cloid_action(
     let statuses = cancels
         .iter()
         .map(|c| match coin_of(meta.as_ref(), c.asset) {
-            Some(coin) => match state.sim.cancel_by_cloid(owner, &coin, c.cloid, fast) {
+            Some(coin) => match state.sim.cancel_by_cloid(
+                owner,
+                &coin,
+                c.cloid,
+                crate::sim::order::CancelSpeed::of(fast),
+            ) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
                 Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
             },
@@ -419,13 +436,13 @@ fn modify_one(
             let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
                 Error::bad_request(format!("unknown asset index {}", order.a))
             })?;
-            state.sim.cancel(owner, &coin, *o, false)
+            state.sim.cancel(owner, &coin, *o, crate::sim::order::CancelSpeed::Normal)
         }
         crate::wire::OidOrCloid::Cloid(c) => {
             let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
                 Error::bad_request(format!("unknown asset index {}", order.a))
             })?;
-            state.sim.cancel_by_cloid(owner, &coin, *c, false)
+            state.sim.cancel_by_cloid(owner, &coin, *c, crate::sim::order::CancelSpeed::Normal)
         }
     };
     if !always_place {

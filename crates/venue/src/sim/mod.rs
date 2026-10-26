@@ -46,6 +46,22 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+/// Which wallet a USD-class transfer moves funds to (CoreWriter action 7's
+/// `toPerp` flag, named).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Direction {
+    ToPerp,
+    ToSpot,
+}
+
+/// Whether an action applied: a transfer's source side must hold the funds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Applied {
+    Applied,
+    Refused,
+}
+
 /// The persisted simulator state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct SimState {
@@ -394,56 +410,71 @@ impl Sim {
     }
 
     /// USD class transfer (CoreWriter action 7): spot USDC ↔ perp wallet.
-    /// `false` when the source side is short.
-    pub(crate) fn usd_class_transfer(&self, address: Address, token: TokenRef<'_>, amount: Decimal, to_perp: bool) -> Result<bool> {
+    /// `Refused` when the source side is short.
+    pub(crate) fn usd_class_transfer(
+        &self,
+        address: Address,
+        token: TokenRef<'_>,
+        amount: Decimal,
+        direction: Direction,
+    ) -> Result<Applied> {
         let clock = self.clock(crate::now_ms())?;
         let applied = self.with_account(address, |account| {
             stamp_funding_baseline(account, clock);
-            if to_perp {
-                let entry = account::spot_entry(account, token);
-                if entry.total < amount {
-                    return Ok(false);
+            match direction {
+                Direction::ToPerp => {
+                    let entry = account::spot_entry(account, token);
+                    if entry.total < amount {
+                        return Ok(Applied::Refused);
+                    }
+                    entry.total = account::sub(entry.total, amount, "usd class transfer")?;
+                    account.perp_balance =
+                        account::add(account.perp_balance, amount, "usd class transfer")?;
                 }
-                entry.total = account::sub(entry.total, amount, "usd class transfer")?;
-                account.perp_balance =
-                    account::add(account.perp_balance, amount, "usd class transfer")?;
-            } else {
-                if account.perp_balance < amount {
-                    return Ok(false);
+                Direction::ToSpot => {
+                    if account.perp_balance < amount {
+                        return Ok(Applied::Refused);
+                    }
+                    account.perp_balance =
+                        account::sub(account.perp_balance, amount, "usd class transfer")?;
+                    account::credit_entry(account, token, amount, "usd class transfer")?;
                 }
-                account.perp_balance =
-                    account::sub(account.perp_balance, amount, "usd class transfer")?;
-                account::credit_entry(account, token, amount, "usd class transfer")?;
             }
-            Ok(true)
+            Ok(Applied::Applied)
         })?;
-        if applied {
+        if matches!(applied, Applied::Applied) {
             self.touch();
         }
         Ok(applied)
     }
 
-    /// Core spot send: debit the sender, credit the recipient. `false` when
+    /// Core spot send: debit the sender, credit the recipient. `Refused` when
     /// the sender is short.
-    pub(crate) fn spot_send(&self, from: Address, to: Address, token: TokenRef<'_>, amount: Decimal) -> Result<bool> {
+    pub(crate) fn spot_send(
+        &self,
+        from: Address,
+        to: Address,
+        token: TokenRef<'_>,
+        amount: Decimal,
+    ) -> Result<Applied> {
         let debited = self.with_state(|state| {
             let Some(sender) = state.accounts.get_mut(&from) else {
-                return Ok(false);
+                return Ok(Applied::Refused);
             };
             let Some(entry) = sender.spot.get_mut(&token.index) else {
-                return Ok(false);
+                return Ok(Applied::Refused);
             };
             if entry.total < amount {
-                return Ok(false);
+                return Ok(Applied::Refused);
             }
             entry.total = account::sub(entry.total, amount, "spot send")?;
-            Ok(true)
+            Ok(Applied::Applied)
         })?;
-        if !debited {
-            return Ok(false);
+        if matches!(debited, Applied::Refused) {
+            return Ok(Applied::Refused);
         }
         self.credit_spot(to, token, amount)?;
-        Ok(true)
+        Ok(Applied::Applied)
     }
 
     /// Record an API wallet (CoreWriter action 9).
@@ -759,7 +790,13 @@ mod tests {
         std::thread::spawn(move || {
             let sim = sim;
             sim.credit_spot(a, TokenRef { index: 0, coin: "USDC" }, Decimal::from(5)).unwrap();
-            sim.usd_class_transfer(a, TokenRef { index: 0, coin: "USDC" }, Decimal::ONE, true).unwrap();
+            sim.usd_class_transfer(
+                a,
+                TokenRef { index: 0, coin: "USDC" },
+                Decimal::ONE,
+                Direction::ToPerp,
+            )
+            .unwrap();
             sim.spot_send(a, Address::repeat_byte(0xbb), TokenRef { index: 0, coin: "USDC" }, Decimal::ONE).unwrap();
             let _ = &feed;
             tx.send(()).unwrap();

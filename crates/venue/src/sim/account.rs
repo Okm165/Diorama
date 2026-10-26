@@ -89,7 +89,8 @@ fn default_mode() -> UserAbstraction {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LeverageSetting {
-    pub is_cross: bool,
+    /// The margin mode (the wire's `isCross`, named).
+    pub mode: crate::wire::LeverageType,
     pub leverage: u32,
 }
 

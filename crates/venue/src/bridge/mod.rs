@@ -26,6 +26,8 @@ pub(crate) mod system;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
+use crate::sim::order::CancelSpeed;
+use crate::sim::{Applied, Direction};
 use crate::sim::{Sim, TokenRef};
 use crate::wire::UserAbstraction;
 use alloy_consensus::Transaction as _;
@@ -270,8 +272,8 @@ impl Bridge {
     async fn apply_action(&self, caller: Address, action: CoreAction, tokens: &[TokenInfo]) -> Result<()> {
         self.metrics.count_action(action.id());
         match action {
-            CoreAction::UsdClassTransfer { ntl, to_perp } => {
-                self.usd_class_transfer(caller, ntl, to_perp, tokens)?;
+            CoreAction::UsdClassTransfer { ntl, direction } => {
+                self.usd_class_transfer(caller, ntl, direction, tokens)?;
             }
             CoreAction::SpotSend {
                 destination,
@@ -324,7 +326,15 @@ impl Bridge {
                     tracing::warn!(account = %caller, asset, "bridge: cancel for an unknown asset refused");
                     return;
                 };
-                (coin, self.sim.cancel(caller, &self.coin_of(*asset).unwrap_or_default(), *oid, false))
+                (
+                    coin,
+                    self.sim.cancel(
+                        caller,
+                        &self.coin_of(*asset).unwrap_or_default(),
+                        *oid,
+                        CancelSpeed::Normal,
+                    ),
+                )
             }
             CoreAction::CancelByCloid { asset, cloid } => {
                 let Some(coin) = self.coin_of(*asset) else {
@@ -334,7 +344,12 @@ impl Bridge {
                 };
                 (
                     coin,
-                    self.sim.cancel_by_cloid(caller, &self.coin_of(*asset).unwrap_or_default(), alloy_primitives::B128::from(*cloid), false),
+                    self.sim.cancel_by_cloid(
+                    caller,
+                    &self.coin_of(*asset).unwrap_or_default(),
+                    alloy_primitives::B128::from(*cloid),
+                    CancelSpeed::Normal,
+                ),
                 )
             }
             _ => return,
@@ -395,7 +410,7 @@ impl Bridge {
         &self,
         caller: Address,
         ntl: u64,
-        to_perp: bool,
+        direction: Direction,
         tokens: &[TokenInfo],
     ) -> Result<()> {
         let Some(usdc) = system::by_name(tokens, "USDC") else {
@@ -410,13 +425,16 @@ impl Bridge {
             caller,
             TokenRef { index: usdc.index, coin: &usdc.name },
             amount,
-            to_perp,
+            direction,
         )?;
-        if applied {
-            tracing::info!(account = %caller, amount = %amount, to_perp, "bridge: USD class transfer");
-        } else {
-            self.metrics.inc_refusals();
-            tracing::warn!(account = %caller, amount = %amount, to_perp, "bridge: USD class transfer refused (insufficient balance)");
+        match applied {
+            Applied::Applied => {
+                tracing::info!(account = %caller, amount = %amount, ?direction, "bridge: USD class transfer");
+            }
+            Applied::Refused => {
+                self.metrics.inc_refusals();
+                tracing::warn!(account = %caller, amount = %amount, ?direction, "bridge: USD class transfer refused (insufficient balance)");
+            }
         }
         Ok(())
     }
@@ -468,7 +486,7 @@ impl Bridge {
             TokenRef { index: info.index, coin: &info.name },
             amount,
         )?;
-        if !applied {
+        if matches!(applied, Applied::Refused) {
             self.metrics.inc_refusals();
             tracing::warn!(account = %caller, amount = %amount, "bridge: spot send refused (insufficient balance)");
         }
@@ -534,7 +552,7 @@ impl Bridge {
                 TokenRef { index: info.index, coin: &info.name },
                 amount,
             )?;
-            if !applied {
+            if matches!(applied, Applied::Refused) {
                 self.metrics.inc_refusals();
                 tracing::warn!(account = %caller, amount = %amount, "bridge: sendAsset refused (insufficient balance)");
             }
@@ -798,7 +816,10 @@ mod tests {
         let mut calls = [
             order(2, 1),
             cancel(1),
-            CoreAction::UsdClassTransfer { ntl: 1, to_perp: true },
+            CoreAction::UsdClassTransfer {
+                ntl: 1,
+                direction: Direction::ToPerp,
+            },
             order(1, 2),
             order(3, 3),
             cancel(2),

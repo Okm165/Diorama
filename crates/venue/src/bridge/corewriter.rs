@@ -8,6 +8,7 @@
 //!
 //! Amounts are in *Core wei* (`weiDecimals` of the token, 8 for USDC); the
 //! bridge converts to the human decimal the sim keeps when it applies one.
+use crate::sim::Direction;
 use alloy_primitives::Address;
 use alloy_sol_types::{sol, SolCall, SolValue};
 use serde::{Deserialize, Serialize};
@@ -96,7 +97,7 @@ pub(crate) enum CoreAction {
         wei: u64,
     },
     /// 7: `(uint64 ntl, bool toPerp)` — USD class transfer.
-    UsdClassTransfer { ntl: u64, to_perp: bool },
+    UsdClassTransfer { ntl: u64, direction: Direction },
     /// 9: `(address apiWallet, string name)`.
     AddApiWallet { wallet: Address, name: String },
     /// 10: `(uint32 asset, uint64 oid)`.
@@ -209,7 +210,11 @@ fn decode_usd_class_transfer(payload: &[u8]) -> CoreAction {
     match UsdClassTransferPayload::abi_decode_params(payload) {
         Ok(v) => CoreAction::UsdClassTransfer {
             ntl: v.ntl,
-            to_perp: v.toPerp,
+            direction: if v.toPerp {
+                Direction::ToPerp
+            } else {
+                Direction::ToSpot
+            },
         },
         Err(_) => CoreAction::Malformed,
     }
@@ -289,7 +294,7 @@ mod tests {
             action,
             CoreAction::UsdClassTransfer {
                 ntl: 5_000_000,
-                to_perp: true
+                direction: Direction::ToPerp
             }
         );
         assert_eq!(action.id(), 7);
@@ -356,7 +361,7 @@ mod tests {
             decode_calldata(&input),
             CoreAction::UsdClassTransfer {
                 ntl: 500_000_000,
-                to_perp: true
+                direction: Direction::ToPerp
             }
         );
         // A truncated wrapper is malformed, never a guess.

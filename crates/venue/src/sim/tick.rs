@@ -46,7 +46,7 @@ impl Sim {
     fn cancel_market_orders(&self, coin: &str) -> Result<()> {
         for r in self.resting_orders(None)? {
             if r.coin == coin {
-                self.cancel(r.account, coin, r.oid, false)?;
+                self.cancel(r.account, coin, r.oid, crate::sim::order::CancelSpeed::Normal)?;
             }
         }
         Ok(())
@@ -132,7 +132,7 @@ impl Sim {
             let mine = self.resting_orders(Some(account))?;
             let n = mine.len();
             for r in mine {
-                let _ = self.cancel(account, &r.coin, r.oid, false);
+                let _ = self.cancel(account, &r.coin, r.oid, crate::sim::order::CancelSpeed::Normal);
             }
             self.with_state(|st| {
                 st.scheduled_cancels.remove(&account);
@@ -169,7 +169,7 @@ impl Sim {
             if !fires {
                 continue;
             }
-            let _ = self.cancel(r.account, &r.coin, r.oid, false);
+            let _ = self.cancel(r.account, &r.coin, r.oid, crate::sim::order::CancelSpeed::Normal);
             let order = crate::sim::order::Order {
                 coin: r.coin.clone(),
                 is_buy: r.is_buy,

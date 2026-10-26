@@ -187,14 +187,18 @@ impl Sim {
         let cooldown = self.with_state(|state| {
             Ok(state.liq_cooldown_until.get(&pass.address).copied().unwrap_or(0))
         })?;
-        let in_cooldown = pass.now_ms < cooldown;
+        let cooldown = if pass.now_ms < cooldown {
+            PartialCooldown::Active
+        } else {
+            PartialCooldown::Elapsed
+        };
         let mut closed = Vec::new();
         let mut partial = false;
         for (coin, p) in &pass.account.positions {
             if !leg.holds(coin, p) {
                 continue;
             }
-            let (did_close, was_partial) = self.liquidate_one(pass, (coin, p), in_cooldown)?;
+            let (did_close, was_partial) = self.liquidate_one(pass, (coin, p), cooldown)?;
             partial |= was_partial;
             if did_close {
                 closed.push(coin.clone());
@@ -219,14 +223,17 @@ impl Sim {
         &self,
         pass: &Pass<'_>,
         position: (&str, &account::Position),
-        in_cooldown: bool,
+        cooldown: PartialCooldown,
     ) -> Result<(bool, bool)> {
         let (coin, p) = position;
         let Some(mark) = pass.feed.mark(coin) else {
             return Ok((false, false));
         };
         let notional = account::mul(p.szi.abs(), mark, "liquidation notional")?;
-        let (size, was_partial) = attempt_size(p.szi.abs(), notional, in_cooldown)?;
+        let (size, was_partial) = match attempt_size(p.szi.abs(), notional, cooldown)? {
+            Attempt::Full(size) => (size, false),
+            Attempt::Partial(size) => (size, true),
+        };
         if size.is_zero() {
             return Ok((false, was_partial));
         }
@@ -524,15 +531,37 @@ impl Leg<'_> {
     }
 }
 
+/// Whether the 30 s cooldown after a partial liquidation has elapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PartialCooldown {
+    Active,
+    Elapsed,
+}
+
+/// The liquidation attempt's size: the full position, or the partial share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Attempt {
+    Full(Decimal),
+    Partial(Decimal),
+}
+
 /// The liquidation attempt's size (docs): above the $100k partial threshold
 /// only 20 % goes per attempt; during the 30 s cooldown after a partial, the
-/// full size. Returns (size, was_partial).
-pub(super) fn attempt_size(full: Decimal, notional: Decimal, in_cooldown: bool) -> Result<(Decimal, bool)> {
+/// full size.
+pub(super) fn attempt_size(
+    full: Decimal,
+    notional: Decimal,
+    cooldown: PartialCooldown,
+) -> Result<Attempt> {
     const PARTIAL_THRESHOLD: Decimal = Decimal::from_parts(100_000, 0, 0, false, 0);
-    if notional > PARTIAL_THRESHOLD && !in_cooldown {
-        return Ok((account::mul(full, Decimal::new(2, 1), "partial size")?, true));
+    if notional > PARTIAL_THRESHOLD && matches!(cooldown, PartialCooldown::Elapsed) {
+        return Ok(Attempt::Partial(account::mul(
+            full,
+            Decimal::new(2, 1),
+            "partial size",
+        )?));
     }
-    Ok((full, false))
+    Ok(Attempt::Full(full))
 }
 
 #[cfg(test)]
@@ -545,14 +574,23 @@ mod tests {
     #[test]
     fn liquidation_attempts_follow_the_partial_rules() {
         let full = Decimal::from(10);
-        let (sz, partial) = attempt_size(full, Decimal::from(120_000), false).unwrap();
-        assert!(partial, "above the threshold the attempt is partial");
+        let Attempt::Partial(sz) =
+            attempt_size(full, Decimal::from(120_000), PartialCooldown::Elapsed).unwrap()
+        else {
+            panic!("above the threshold the attempt is partial");
+        };
         assert_eq!(sz, Decimal::from(2));
-        let (sz, partial) = attempt_size(full, Decimal::from(120_000), true).unwrap();
-        assert!(!partial, "the cooldown switches to the full size");
+        let Attempt::Full(sz) =
+            attempt_size(full, Decimal::from(120_000), PartialCooldown::Active).unwrap()
+        else {
+            panic!("the cooldown switches to the full size");
+        };
         assert_eq!(sz, full);
-        let (sz, partial) = attempt_size(full, Decimal::from(50_000), false).unwrap();
-        assert!(!partial, "below the threshold the attempt is full");
+        let Attempt::Full(sz) =
+            attempt_size(full, Decimal::from(50_000), PartialCooldown::Elapsed).unwrap()
+        else {
+            panic!("below the threshold the attempt is full");
+        };
         assert_eq!(sz, full);
     }
 
@@ -862,7 +900,15 @@ mod tests {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         put_account(&sim, a, (Decimal::from(50), Decimal::from(100), Decimal::ONE, 10));
-        sim.set_leverage(a, "ETH", account::LeverageSetting { is_cross: false, leverage: 10 }, None)
+        sim.set_leverage(
+            a,
+            "ETH",
+            account::LeverageSetting {
+                mode: crate::wire::LeverageType::Isolated,
+                leverage: 10,
+            },
+            None,
+        )
             .unwrap();
         let acc = sim.account(a).unwrap().unwrap();
         assert_eq!(
@@ -871,7 +917,15 @@ mod tests {
             "the initial margin is parked on the position"
         );
         assert_eq!(acc.perp_balance, Decimal::from(40));
-        sim.set_leverage(a, "ETH", account::LeverageSetting { is_cross: true, leverage: 10 }, None)
+        sim.set_leverage(
+            a,
+            "ETH",
+            account::LeverageSetting {
+                mode: crate::wire::LeverageType::Cross,
+                leverage: 10,
+            },
+            None,
+        )
             .unwrap();
         let acc = sim.account(a).unwrap().unwrap();
         assert_eq!(
