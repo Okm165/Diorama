@@ -154,12 +154,14 @@ impl Engine for Ctx {
     }
 }
 
-/// The top-up loop's authrpc client. A configured boundary that cannot be
-/// built is a boot error naming itself: silently disabling it would stop the
-/// top-up loop while every dashboard still says "enabled".
+/// The top-up loop's authrpc client: the sync runs when the instance
+/// supplies both the endpoint and the JWT path (presence is the switch). A
+/// configured boundary that cannot be built is a boot error naming itself:
+/// silently disabling it would stop the top-up loop while every dashboard
+/// still says "enabled".
 fn build_engine_api(engine: &EngineSection) -> Result<Option<crate::source_sync::engine_api::EngineClient>> {
     match (&engine.source_sync.engine_url, &engine.source_sync.jwt_path) {
-        (Some(url), Some(jwt)) if engine.source_sync.enabled => {
+        (Some(url), Some(jwt)) => {
             Ok(Some(crate::source_sync::engine_api::EngineClient::new(url, jwt)?))
         }
         _ => Ok(None),

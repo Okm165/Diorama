@@ -48,8 +48,8 @@ ok "destination balance before: $dst_before"
 
 burn_resp=$(burn "$SOURCE" "$DESTINATION" "$RELAY")
 burn_tx=$(echo "$burn_resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('burn_tx',''))")
-mined=$(echo "$burn_resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('mined'))")
-[ -n "$burn_tx" ] && ok "burn submitted ($burn_tx, mined=$mined)" || bad "no burn_tx in the response: $burn_resp"
+receipt=$(echo "$burn_resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('receipt'))")
+[ -n "$burn_tx" ] && ok "burn submitted ($burn_tx, receipt=$receipt)" || bad "no burn_tx in the response: $burn_resp"
 
 # An empty store entry is the normal pending case (the watcher absorbs the
 # burn only after the finality window), not a terminal one — the wait keeps

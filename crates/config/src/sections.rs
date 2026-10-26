@@ -217,17 +217,27 @@ impl LoopsSection {
     }
 }
 
+/// The parity sweep's reach: a sample of the applied keys, or every one.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Sweep {
+    /// The steady-state sample (`drift_sample_keys`).
+    #[default]
+    Sampled,
+    /// Every applied key, re-read from the source (expensive; audits and
+    /// re-pin validation).
+    Full,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct VerifierSection {
-    pub enabled: bool,
     pub drift_sample_keys: usize,
-    /// Re-read every applied key from the source after the apply (not just
-    /// `drift_sample_keys`): the conformance-grade check. The BAL's
+    /// The parity sweep's reach: the conformance-grade check. The BAL's
     /// correctness is upstream (reth rejects a mismatched BAL); this checks
-    /// our application of it. Expensive; off by default.
+    /// our application of it.
     #[serde(default)]
-    pub full_sweep: bool,
+    pub sweep: Sweep,
     /// State probes: re-run against T after every apply (the mainnet profile), and at
     /// the pin against the fork source (venue) — devnet-owned targets are
     /// skipped and counted (COW means that state is the devnet's, not the
@@ -250,7 +260,6 @@ pub struct Probe {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSyncSection {
-    pub enabled: bool,
     pub interval_ms: u64,
     /// Payloads delivered per pass (each is a full block execution).
     pub max_per_pass: u64,

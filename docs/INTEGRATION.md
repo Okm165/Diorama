@@ -22,7 +22,7 @@ acceptance).
 **The engine exposes one chain: T, the devnet.** There is no internal replay
 chain to expose: the applier reconstructs state from the parent's BAL and the
 engine checks it in place (sampled parity, the convergence probes,
-`verifier.full_sweep`). The removal's rationale is in ARCHITECTURE, "One
+`verifier.sweep = "full"`). The removal's rationale is in ARCHITECTURE, "One
 Anvil, one source".
 
 ## 2. The venue side — venue-sim (info :8090, control :8091)

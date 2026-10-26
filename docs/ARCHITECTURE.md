@@ -84,7 +84,7 @@ after are shared code.
 | **mirror the parent chain** | reth local full node; the native BAL rung (`eth_getBlockAccessList`, prestateTracer fallback); one T block per applied parent block | HL public API; the synthesized BAL rung (envelopes → touches → declared closures → reads) applied to V's latest state | `Source` (both rungs), `bal::plan` (compose → COW → flatten), the applier/follow sequences, the journal, the cursor state |
 | **modify market state** | `/admin/deal` (mint balances), the feed bridge (live prices → mock aggregators), fixture deploys (`anvil_setCode`) | `/admin/deal` on V's tokens, the venue simulator's control API (orders, positions, accounts, prices) | `deal`, the shadow registry (COW), `anvil_setStorageAt`/`setCode` |
 | **minted liquidity** | `deal` mints ERC20 balances at the discovered slot; the CCTP bridge mints USDC via relay | `deal` mints on V; the sim mints perp/spot balances through its account plane | the same deal path — the mint is the devnet's own write, never the parent's |
-| **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `full_sweep`), configured probes per block, the applier's drift entries | live parity (applied keys re-read vs the composed BAL), at-pin probes, the uncovered-emitter audit, the follow's drift entries | `ProbeRunner`, `bal::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`); both write the shared `drift.jsonl` (`mirror_devnet::drift` — one home, each producer's entry schema) |
+| **measure against the parent 1:1** | sampled parity (applied keys vs reth at N, `sweep = "full"`), configured probes per block, the applier's drift entries | live parity (applied keys re-read vs the composed BAL), at-pin probes, the uncovered-emitter audit, the follow's drift entries | `ProbeRunner`, `bal::verify`, facts (`BlockApplied`, `ProbesRun`, `ShadowScanned`); both write the shared `drift.jsonl` (`mirror_devnet::drift` — one home, each producer's entry schema) |
 | **reset / epoch** | cursor hash + below-base witness | chain-instance canary (pin witness) | `ResetDetector`, `mirror_devnet::epoch` |
 | **time travel** | `/admin/time` clock offset (persists across parent blocks) + `evm_increaseTime` | none on V's chain by design (V's clock is native; the harness drives `evm_increaseTime`/`anvil_mine` directly and an engine offset nobody re-aligns would be a no-op route) — the *product's* clock is the sim's served time | the plane's `time_offset` (mainnet only) |
 
@@ -113,7 +113,7 @@ Per applied block on T the engine does, in order:
 4. **Scan**: T's own blocks into the shadow registry, so the next filter sees
    the devnet's writes.
 5. **Parity + cursor**: sampled storage keys vs reth at N (every applied key
-   with `verifier.full_sweep`), the state probes, `drift.jsonl` on anomalies,
+   with `verifier.sweep = "full"`), the state probes, `drift.jsonl` on anomalies,
    and the cursor (keyed to the parent height).
 
 ### Devnet transactions: the prepend rule
@@ -286,7 +286,7 @@ spec's own "executionless state updates" use case (EIP-7928). A separate
 replay chain (the removed M) bought execution evidence at the cost of a second
 chain, a blob pipeline and a convergence repair; reth itself serves traces and state
 within its 10,064-block window, and the apply path is checked by sampled
-parity, the probes, and `verifier.full_sweep`.
+parity, the probes, and `verifier.sweep = "full"`.
 
 **Blob sidecars leave the engine's path.** Blob data is not executed — blob
 txs execute by versioned hash — so the applier never needs sidecars; the CL
@@ -300,7 +300,7 @@ mismatch on such blocks; every anomaly is written to `drift.jsonl` +
 metrics, and the next parent block's absolute writes re-converge the state.
 The alarm that matters is `mirror_t_convergence_failures_total`: probes
 compare T against reth at the applied parent block, devnet-owned targets
-skipped. With `verifier.full_sweep` enabled, every applied key is re-read
+skipped. With `verifier.sweep = "full"` enabled, every applied key is re-read
 from the source after the apply (`mirror_full_sweep_mismatches_total`).
 
 **Follow `latest`** (`reth.follow: latest|safe|finalized`). This is a devnet
@@ -607,10 +607,10 @@ instance file (CI + boot gate).
 [services.engine.anvil] { target_url = "${ANVIL_T_URL}" }
               # (the venue profile's instance points it at "${ANVIL_V_URL}")
 [services.engine.reth] { request_timeout_secs }
-[services.engine.source_sync] { enabled, interval_ms, max_per_pass,
+[services.engine.source_sync] { interval_ms, max_per_pass,
               engine_url = "${ENGINE_API_URL}", jwt_path = "${JWT_PATH}" }
 [services.engine.loops] { poll_interval_ms, max_gap_blocks, chunk_size }
-[services.engine.verifier] { enabled, drift_sample_keys, full_sweep, probes[] }
+[services.engine.verifier] { drift_sample_keys, sweep, probes[] }
 [services.engine.journal] { dir = "${STATE_DIR}/journal", blocks }
 [services.engine.beacon] { urls = ["${BEACON_URL}"] }
 [services.engine.http] { addr, port }

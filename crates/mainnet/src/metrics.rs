@@ -41,9 +41,9 @@ mirror_devnet::registry! {
         counter t_probe_skipped = "mirror_t_probe_skipped_total", "probes skipped because their target is devnet-owned (a devnet write to a shared contract hides that contract's probes until it is handed back)";
         gauge bal_filtered_out = "mirror_bal_filtered_out_last_block", "BAL writes in the last parent block filtered out (not watched)";
         gauge bal_skipped_shadowed = "mirror_bal_skipped_shadowed_last_block", "BAL writes in the last parent block skipped (shadowed by devnet)";
-        /// Full-sweep parity mismatches (`verifier.full_sweep`): every applied key
+        /// Full-sweep parity mismatches (`verifier.sweep = "full"`): every applied key
         /// is re-read from the source after the apply. Non-zero is a real finding.
-        counter full_sweep_mismatches = "mirror_full_sweep_mismatches_total", "full-sweep parity mismatches (verifier.full_sweep)";
+        counter full_sweep_mismatches = "mirror_full_sweep_mismatches_total", "full-sweep parity mismatches (verifier.sweep = \"full\")";
     }
     computed {
         gauge "mirror_lag_blocks", "follow head - applied cursor", |m: &MainnetMetrics| m

@@ -32,20 +32,19 @@ max_gap_blocks = 300
 chunk_size = 500
 
 [services.engine.verifier]
-enabled = true
 # Each applied block is verified against the source: the BAL carries the
 # source's authoritative post-state (reth rejects a block whose BAL mismatches
-# execution), and the applier re-checks its own application — sampled keys
-# every block, every key when `full_sweep` is set (conformance runs).
-# `drift_sample_keys` is the steady-state sample size; full_sweep = true
-# re-reads every applied key from the source after the apply.
+# execution), and the applier re-checks its own application — `sweep =
+# "sampled"` re-reads `drift_sample_keys` every block, `sweep = "full"`
+# re-reads every applied key (conformance-grade: expensive; audits and re-pin
+# validation).
 drift_sample_keys = 8
-# Conformance-grade: re-read every applied key, not just the sample. Off by
-# default (expensive); on for audits and re-pin validation.
-full_sweep = false
+sweep = "sampled"
 
 [services.engine.source_sync]
-enabled = true
+# The sync runs when the instance supplies both the engine API endpoint and
+# the JWT path below (presence is the switch; the section without them is
+# inert).
 interval_ms = 1000
 # Payloads delivered per pass (each is a full block execution).
 max_per_pass = 256

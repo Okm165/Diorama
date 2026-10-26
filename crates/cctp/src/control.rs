@@ -237,19 +237,39 @@ pub(crate) struct HookSpec {
     pub calldata: Bytes,
 }
 
+/// The burn receipt's own state (a test may also poll the tx; the watcher
+/// absorbs it either way — a reverted burn is an error, never this state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BurnReceipt {
+    /// The receipt arrived within the window.
+    Observed,
+    /// The window elapsed first: the tx is still in flight.
+    Pending,
+}
+
+/// Whether the burn carried a hook: the relay then goes through the wrapper
+/// (the credit-carrying lane).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum HookCarriage {
+    /// A hook rode the burn: the relay mints and calls through the wrapper.
+    Carried,
+    /// A plain burn: the relay mints directly.
+    Plain,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct TransferResponse {
     pub burn_tx: B256,
-    /// Whether the burn was mined within the receipt window (a test may also
-    /// poll the tx; the watcher absorbs it either way).
-    pub mined: bool,
+    /// The receipt's own state.
+    pub receipt: BurnReceipt,
     pub source_domain: Domain,
     pub destination_domain: Domain,
     pub amount: U256,
     pub mint_recipient: Address,
-    /// Whether the burn carried a hook (the relay then goes through the
-    /// wrapper).
-    pub hook: bool,
+    /// The burn's carriage.
+    pub hook: HookCarriage,
 }
 
 /// The destination-side pin a burn carries: the hook wrapper for
@@ -335,19 +355,23 @@ pub(crate) async fn transfer(
 
     let calldata = burn_calldata(chain, &request, mint_recipient, destination_caller, hook_data.as_ref());
     let hash = submit_burn(&state, chain, &calldata).await?;
-    let mined = match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
-        Some(receipt) if receipt.status() => true,
+    let receipt = match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
+        Some(receipt) if receipt.status() => BurnReceipt::Observed,
         Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
-        None => false,
+        None => BurnReceipt::Pending,
     };
     Ok(Json(TransferResponse {
         burn_tx: hash,
-        mined,
+        receipt,
         source_domain: request.source,
         destination_domain: request.destination,
         amount: request.amount,
         mint_recipient,
-        hook: hook_data.is_some(),
+        hook: if hook_data.is_some() {
+            HookCarriage::Carried
+        } else {
+            HookCarriage::Plain
+        },
     }))
 }
 

@@ -110,7 +110,7 @@ re-forks.
 8. **Scan** T's own blocks into the shadow registry (the prepend's txs
    included), so the next filter sees your writes.
 9. **Parity.** 8 sampled storage keys vs reth at `n` (every applied key with
-   `verifier.full_sweep`), then the 11 probes: T@latest vs reth at `n`.
+   `verifier.sweep = "full"`), then the 11 probes: T@latest vs reth at `n`.
    Devnet-owned targets are skipped (counted in `mirror_t_probe_skipped_total`
    - a devnet write to a shared contract hides all of that contract's probes
    until it is handed back), and the applier scans its own prepend blocks
@@ -219,7 +219,7 @@ engine resumes from its cursor; T restores its devnet state from the registry.
 |---|---|
 | `mirror_lag_blocks` > 60 (steady 2–3) | the applier is behind (reth/CL unhealthy, or a stalled apply) |
 | `mirror_t_convergence_failures_total` > 0 | T drifted on a key you do not own |
-| `mirror_full_sweep_mismatches_total` > 0 | a full-sweep apply mismatch (`verifier.full_sweep`) |
+| `mirror_full_sweep_mismatches_total` > 0 | a full-sweep apply mismatch (`verifier.sweep = "full"`) |
 | `mirror_reorgs_detected_total` rising | upstream reorg — the applier continues on the new branch |
 
 Full reference and playbook: [OPERATIONS](OPERATIONS.md).

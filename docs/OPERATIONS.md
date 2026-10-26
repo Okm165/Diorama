@@ -10,7 +10,7 @@
 | `mirror_lag_blocks` | > 60 | `follow_head - cursor_t`. A steady 2-3 is the scheduling margin (`reth.follow_margin_blocks`); a *growing* value means the applier is behind - check reth/CL health and the engine log |
 | `mirror_lag_blocks` | > `max_gap_blocks` (300) | engine pauses itself (the plan's "> 300 → pause and re-sync"); re-pin drill or restore reth. A cursor that was just rebased to a fresh pin is exempt and may re-apply its whole pin window (bounded by reth's 10,064-block state window) |
 | `mirror_t_convergence_failures_total` | increase | T's state ≠ mainnet at the parent block just applied, on a probe whose target the devnet does *not* own (shadowed targets are skipped by design). A missing BAL entry, a watchlist gap, or a clock offset left set (`/admin/time`). A deliberate manipulation whose target is shadowed does *not* fire it; one that is read *through* an unowned contract (e.g. crashing a Chainlink aggregator behind its proxy) does, until restored - the counter is cumulative, `mirror_t_convergence_last_failed` shows the current state |
-| `mirror_full_sweep_mismatches_total` | increase | a full-sweep apply mismatch (`verifier.full_sweep`): T's value ≠ reth's at the applied block for a key that was applied. Inspect `drift.jsonl` and re-run with the sweep for a conformance window |
+| `mirror_full_sweep_mismatches_total` | increase | a full-sweep apply mismatch (`verifier.sweep = "full"`): T's value ≠ reth's at the applied block for a key that was applied. Inspect `drift.jsonl` and re-run with the sweep for a conformance window |
 | `mirror_reorgs_detected_total` | any increase | upstream reorg: the applier continues on the new branch (absolute writes self-heal); re-pin only if it keeps recurring |
 | `mirror_t_fork_age_blocks` | > ~8000 | T's fork base is nearing reth's 10,064-block state window: below the fork block every read is served by reth, so once it falls out of the window T can no longer read slots it has not written. Re-pin (`make mainnet-repin`) - the fresh pin starts a new epoch: the devnet's writes are gone with the old base (re-create positions from your journal) |
 | `mirror_pin_age_blocks` | informational | blocks since this epoch's first parent block (the journal/cursor marker) |
@@ -87,7 +87,7 @@ harness still mining T is the way to fall behind.
 | `mirror_t_convergence_ok_total` / `mirror_t_convergence_failures_total` | the same probes against T at the applied parent block (the plan's "probe parity on T after context alignment"); devnet-owned targets are skipped, and the check is suspended while a `/admin/time` offset is set |
 | `mirror_t_probe_skipped_total` | informational | probes skipped because their target is devnet-owned - a devnet write to a shared contract (e.g. the Aave oracle) hides *all* of that contract's probes until it is handed back. If it grows while you are not writing, inspect `/status` `shadowed` and unshadow the venue |
 | `mirror_t_convergence_last_failed` | how many T probes diverged in the last applied block (0 in steady state) |
-| `mirror_full_sweep_mismatches_total` | full-sweep parity mismatches (`verifier.full_sweep`); should stay 0 |
+| `mirror_full_sweep_mismatches_total` | full-sweep parity mismatches (`verifier.sweep = "full"`); should stay 0 |
 | `mirror_reorgs_detected_total` | parent-hash discontinuities seen by the applier |
 
 ## Day-to-day

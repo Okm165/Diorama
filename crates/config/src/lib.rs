@@ -31,7 +31,8 @@ pub use instance::{
 pub use sections::{
     BeaconSection, CctpSection, ClosuresSection, EngineAnvil, EngineReth, EngineSection,
     FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection, LoopsSection,
-    MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, VenueSimSection, VerifierSection,
+    MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, Sweep, VenueSimSection,
+    VerifierSection,
 };
 
 use std::path::Path;

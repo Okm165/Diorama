@@ -184,7 +184,7 @@ applier's sampled parity can legitimately mismatch on such blocks. Every
 anomaly is written to `drift.jsonl` and counted in metrics; the next parent
 block's absolute writes re-converge the state. The alarm that matters is
 `mirror_t_convergence_failures_total` (probes vs reth at the applied parent
-block); `verifier.full_sweep` re-reads every applied key for conformance runs.
+block); `verifier.sweep = "full"` re-reads every applied key for conformance runs.
 
 ## Repository layout
 

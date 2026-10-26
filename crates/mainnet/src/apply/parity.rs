@@ -28,10 +28,10 @@ pub(super) async fn parity_step(
 /// drifts ahead of the parent height (devnet prepend blocks), so compare T's
 /// latest block against reth at n - reading T by height compared unrelated
 /// blocks and produced ~200 false mismatches per 30 min. With
-/// `verifier.full_sweep` every applied storage key is checked, not just the
-/// sample. Returns `(sampled, sampled_ok)`.
+/// `verifier.sweep = "full"` every applied storage key is checked, not just
+/// the sample. Returns `(sampled, sampled_ok)`.
 async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> (usize, usize) {
-    let full = ctx.engine.verifier.full_sweep;
+    let full = ctx.engine.verifier.sweep == mirror_config::Sweep::Full;
     let mut sample: Vec<Key> = filtered.iter().filter_map(Write::storage_key).collect();
     if !full {
         sample.truncate(ctx.engine.verifier.drift_sample_keys);
@@ -47,7 +47,7 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
 
 /// Compare one storage key at the two chains' own anchors: T's latest block
 /// against reth at n. Equal reads are the reading; a mismatch (or a fault on
-/// either side) is the drift lens's warn — and, under `full_sweep`, a
+/// either side) is the drift lens's warn — and, under `sweep = "full"`, a
 /// counted mismatch.
 async fn sample_key(ctx: &Ctx, n: u64, t_latest: u64, key: &Key, full: bool) -> bool {
     let Key::Storage { address, slot } = key else {
