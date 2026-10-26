@@ -66,6 +66,45 @@ struct RegistrySet {
     computed: usize,
 }
 
+/// Where an item lives: the production source the gate guards, or the test
+/// suite's fixtures (a `#[cfg(test)]` subtree or `#[test]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Source,
+    Tests,
+}
+
+impl Scope {
+    /// Descend into a module: a test attribute makes the subtree tests.
+    fn descend(self, attrs: &[syn::Attribute]) -> Self {
+        if has_test_attr(attrs) {
+            Scope::Tests
+        } else {
+            self
+        }
+    }
+}
+
+/// How a function uses its `Ctx` parameter: passed on whole (the function
+/// needs the context itself) or read narrowly (a field or two — it should
+/// take the field instead).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum CtxUse {
+    Whole,
+    /// The default before the body is walked: nothing passed on yet.
+    #[default]
+    Narrow,
+}
+
+/// How a type's members are read: by a member-driving derive
+/// (`Serialize`/`Deserialize`, clap's `Parser`, …) or by `.field` accesses
+/// in the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberReads {
+    DeriveDriven,
+    FieldAccess,
+}
+
 /// One production item's shape.
 struct Item {
     file: String,
@@ -79,9 +118,9 @@ struct Item {
     lines: usize,
     depth: usize,
     size: usize,
-    /// `#[cfg(test)]` subtree or `#[test]`: the suite's fixtures, out of the
-    /// gate's scope.
-    test: bool,
+    /// The suite's fixtures (`#[cfg(test)]` subtree or `#[test]`) live out
+    /// of the gate's scope.
+    scope: Scope,
     /// The body's operations in order (callee names and method names): the
     /// reuse analysis's input.
     ops: Vec<String>,
@@ -98,9 +137,9 @@ struct Item {
     ctx_fields: Vec<String>,
     /// How many `Ctx` parameters the signature has (0 = not a context taker).
     ctx_params: usize,
-    /// Whether a `Ctx` parameter is used bare (passed to another call): then
-    /// the function genuinely needs the whole context, not a field of it.
-    ctx_passed_on: bool,
+    /// How the `Ctx` parameter is used: passed on whole (the function
+    /// genuinely needs the context) or read narrowly.
+    ctx_use: CtxUse,
     /// Every bare identifier the body references (path last segments): the
     /// uncalled reading's input (a handler passed as a value is referenced,
     /// not called).
@@ -115,11 +154,11 @@ struct Item {
     /// Every typed parameter's name (receivers excluded): the plumbing
     /// reading's input.
     params: Vec<String>,
-    /// The type derives a member-driving trait (`Serialize`/`Deserialize`,
-    /// clap's `Parser`/`Subcommand`/`Args`/`ValueEnum`): its members are read
-    /// by the derive rather than by `.field` accesses, so the dead-members
+    /// The type's members are read by a member-driving derive
+    /// (`Serialize`/`Deserialize`, clap's `Parser`/`Subcommand`/`Args`/
+    /// `ValueEnum`) rather than by `.field` accesses, so the dead-members
     /// reading exempts it.
-    derived: bool,
+    members: MemberReads,
     /// An enum's variants carrying `#[from]`: constructed by `thiserror`'s
     /// generated `From`, invisible to the expression visitor.
     from: Vec<String>,
@@ -152,7 +191,7 @@ impl Item {
     }
 
     fn is_test(&self) -> bool {
-        self.test
+        self.scope == Scope::Tests
     }
 }
 
@@ -206,18 +245,18 @@ fn parse_into(
         }
     };
     let file = path.to_string_lossy().to_string();
-    walk(&file, &parsed.items, false, items);
-    walk_fields(&file, &parsed.items, false, fields);
+    walk(&file, &parsed.items, Scope::Source, items);
+    walk_fields(&file, &parsed.items, Scope::Source, fields);
     registry_sets(&file, &parsed.items, registries);
     uses.visit_file(&parsed);
 }
 
 /// The `self.<field>` accesses per type per file: where a type's behavior
 /// lives, against where the type is defined.
-fn walk_fields(file: &str, items: &[syn::Item], test: bool, out: &mut FieldAccesses) {
+fn walk_fields(file: &str, items: &[syn::Item], scope: Scope, out: &mut FieldAccesses) {
     for item in items {
         match item {
-            syn::Item::Impl(i) if !test => {
+            syn::Item::Impl(i) if scope == Scope::Source => {
                 let Some(name) = self_type(i) else { continue };
                 let mut access = FieldVisit::default();
                 access.visit_item_impl(i);
@@ -229,7 +268,7 @@ fn walk_fields(file: &str, items: &[syn::Item], test: bool, out: &mut FieldAcces
             }
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
-                    walk_fields(file, inner, test || has_test_attr(&m.attrs), out);
+                    walk_fields(file, inner, scope.descend(&m.attrs), out);
                 }
             }
             _ => {}
@@ -271,19 +310,19 @@ impl<'ast> Visit<'ast> for FieldVisit {
 /// Walk items, descending into modules and impl blocks. `test` marks the
 /// `#[cfg(test)]` subtree: its items are the suite's fixtures, not the
 /// production shape the gate guards.
-fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
+fn walk(file: &str, items: &[syn::Item], scope: Scope, out: &mut Vec<Item>) {
     for item in items {
         match item {
-            syn::Item::Fn(f) => out.push(fn_item(file, &f.sig, &f.block, &f.attrs, test)),
-            syn::Item::Struct(s) => out.push(struct_item(file, s, test)),
-            syn::Item::Enum(e) => out.push(enum_item(file, e, test)),
+            syn::Item::Fn(f) => out.push(fn_item(file, &f.sig, &f.block, &f.attrs, scope)),
+            syn::Item::Struct(s) => out.push(struct_item(file, s, scope)),
+            syn::Item::Enum(e) => out.push(enum_item(file, e, scope)),
             syn::Item::Mod(m) => {
                 if let Some((_, inner)) = &m.content {
-                    walk(file, inner, test || has_test_attr(&m.attrs), out);
+                    walk(file, inner, scope.descend(&m.attrs), out);
                 }
             }
-            syn::Item::Impl(i) => walk_impl(file, i, test, out),
-            syn::Item::Trait(t) => walk_trait(file, t, test, out),
+            syn::Item::Impl(i) => walk_impl(file, i, scope, out),
+            syn::Item::Trait(t) => walk_trait(file, t, scope, out),
             _ => {}
         }
     }
@@ -291,7 +330,7 @@ fn walk(file: &str, items: &[syn::Item], test: bool, out: &mut Vec<Item>) {
 
 /// The methods of one impl block, named `Type.method` so the report says
 /// where the shape lives.
-fn walk_impl(file: &str, i: &syn::ItemImpl, test: bool, out: &mut Vec<Item>) {
+fn walk_impl(file: &str, i: &syn::ItemImpl, scope: Scope, out: &mut Vec<Item>) {
     let type_name = match &*i.self_ty {
         syn::Type::Path(p) => p
             .path
@@ -303,7 +342,7 @@ fn walk_impl(file: &str, i: &syn::ItemImpl, test: bool, out: &mut Vec<Item>) {
     };
     for item in &i.items {
         if let syn::ImplItem::Fn(f) = item {
-            let mut item = fn_item(file, &f.sig, &f.block, &f.attrs, test);
+            let mut item = fn_item(file, &f.sig, &f.block, &f.attrs, scope);
             item.name = format!("{type_name}.{}", f.sig.ident);
             item.trait_name = i
                 .trait_
@@ -317,12 +356,12 @@ fn walk_impl(file: &str, i: &syn::ItemImpl, test: bool, out: &mut Vec<Item>) {
 /// The provided methods of one trait, named `Trait.method` — a trait
 /// default's body is production shape (the shell's accessors and shared
 /// helpers live there), so the readings must see it.
-fn walk_trait(file: &str, t: &syn::ItemTrait, test: bool, out: &mut Vec<Item>) {
+fn walk_trait(file: &str, t: &syn::ItemTrait, scope: Scope, out: &mut Vec<Item>) {
     let name = t.ident.to_string();
     for item in &t.items {
         if let syn::TraitItem::Fn(f) = item {
             if let Some(block) = &f.default {
-                let mut item = fn_item(file, &f.sig, block, &f.attrs, test);
+                let mut item = fn_item(file, &f.sig, block, &f.attrs, scope);
                 item.name = format!("{name}.{}", f.sig.ident);
                 item.trait_name = Some(name.clone());
                 out.push(item);
@@ -333,11 +372,12 @@ fn walk_trait(file: &str, t: &syn::ItemTrait, test: bool, out: &mut Vec<Item>) {
 
 /// One function's shape: span lines (docs included), nesting depth, and
 /// whether it is a test.
-/// Whether a type's attributes derive a trait that reads its members: serde's
+/// How a type's members are read: a member-driving derive — serde's
 /// `Serialize`/`Deserialize` and clap's `Parser`/`Subcommand`/`Args`/
-/// `ValueEnum` (the CLI types are constructed by clap, never by our code).
-/// Matched by the derive path's last segment.
-fn derived_members(attrs: &[syn::Attribute]) -> bool {
+/// `ValueEnum` (the CLI types are constructed by clap, never by our code) —
+/// or the code's own `.field` accesses. Matched by the derive path's last
+/// segment.
+fn member_reads(attrs: &[syn::Attribute]) -> MemberReads {
     const DRIVING: [&str; 6] = [
         "Serialize",
         "Deserialize",
@@ -346,7 +386,7 @@ fn derived_members(attrs: &[syn::Attribute]) -> bool {
         "Args",
         "ValueEnum",
     ];
-    attrs.iter().any(|attr| {
+    let driven = attrs.iter().any(|attr| {
         attr.path().is_ident("derive")
             && attr
                 .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
@@ -358,7 +398,12 @@ fn derived_members(attrs: &[syn::Attribute]) -> bool {
                     })
                 })
                 .unwrap_or(false)
-    })
+    });
+    if driven {
+        MemberReads::DeriveDriven
+    } else {
+        MemberReads::FieldAccess
+    }
 }
 
 /// Every member name the workspace *touches*: `x.field` reads and writes,
@@ -431,7 +476,7 @@ impl<'ast> syn::visit::Visit<'ast> for MemberUses {
 /// (constructed by `thiserror`'s generated `From`, invisible to the
 /// expression visitor). `#[from]` rides the variant itself or its field
 /// (`Devnet(#[from] mirror_devnet::Error)`).
-fn enum_item(file: &str, e: &syn::ItemEnum, test: bool) -> Item {
+fn enum_item(file: &str, e: &syn::ItemEnum, scope: Scope) -> Item {
     let from = e
         .variants
         .iter()
@@ -460,25 +505,25 @@ fn enum_item(file: &str, e: &syn::ItemEnum, test: bool) -> Item {
         lines: span_lines(e.span()),
         depth: 0,
         size: e.variants.len(),
-        test,
+        scope,
         ops: Vec::new(),
         body: String::new(),
         sites: Sites::default(),
         ctx_fields: Vec::new(),
         ctx_params: 0,
-        ctx_passed_on: false,
+        ctx_use: CtxUse::Narrow,
         refs: Vec::new(),
         shape: String::new(),
         declared: e.variants.iter().map(|v| v.ident.to_string()).collect(),
         params: Vec::new(),
-        derived: derived_members(&e.attrs),
+        members: member_reads(&e.attrs),
         from,
     }
 }
 
 /// One struct's shape: the field count (the gate) and the declared names
 /// (the similar-records reading).
-fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
+fn struct_item(file: &str, s: &syn::ItemStruct, scope: Scope) -> Item {
     Item {
         file: file.into(),
         kind: "struct",
@@ -487,13 +532,13 @@ fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
         lines: span_lines(s.span()),
         depth: 0,
         size: s.fields.len(),
-        test,
+        scope,
         ops: Vec::new(),
         body: String::new(),
         sites: Sites::default(),
         ctx_fields: Vec::new(),
         ctx_params: 0,
-        ctx_passed_on: false,
+        ctx_use: CtxUse::Narrow,
         refs: Vec::new(),
         shape: String::new(),
         declared: s
@@ -502,7 +547,7 @@ fn struct_item(file: &str, s: &syn::ItemStruct, test: bool) -> Item {
             .filter_map(|f| f.ident.as_ref().map(ToString::to_string))
             .collect(),
         params: Vec::new(),
-        derived: derived_members(&s.attrs),
+        members: member_reads(&s.attrs),
         from: Vec::new(),
     }
 }
@@ -512,7 +557,7 @@ fn fn_item(
     sig: &syn::Signature,
     block: &syn::Block,
     attrs: &[syn::Attribute],
-    test: bool,
+    scope: Scope,
 ) -> Item {
     let params = ctx_params(sig);
     let mut body = Body {
@@ -528,13 +573,13 @@ fn fn_item(
         lines: span_lines(block.span()),
         depth: body.max_depth,
         size: sig.inputs.len(),
-        test: test || has_test_attr(attrs),
+        scope: scope.descend(attrs),
         ops: body.ops,
         body: normalize(block),
         shape: normalize_literals(block),
         declared: Vec::new(),
         params: param_names(sig),
-        derived: false,
+        members: MemberReads::FieldAccess,
         from: Vec::new(),
         sites: Sites {
             divisions: body.divisions,
@@ -543,7 +588,7 @@ fn fn_item(
         },
         ctx_fields: body.ctx_fields.into_iter().collect(),
         ctx_params: params.len(),
-        ctx_passed_on: body.ctx_passed_on,
+        ctx_use: body.ctx_use,
         refs: body.refs,
     }
 }
@@ -646,7 +691,7 @@ struct Body {
     ctx_fields: HashSet<String>,
     /// A ctx param appeared as a bare path: it is passed on (or used as a
     /// value), so the function needs the context itself.
-    ctx_passed_on: bool,
+    ctx_use: CtxUse,
     /// Every bare identifier the body references.
     refs: Vec<String>,
 }
@@ -714,7 +759,7 @@ impl<'ast> Visit<'ast> for Body {
         // context on, so it needs the whole thing, not a field.
         if let Some(name) = n.path.get_ident() {
             if self.ctx_params.contains(&name.to_string()) {
-                self.ctx_passed_on = true;
+                self.ctx_use = CtxUse::Whole;
             }
         }
         if let Some(seg) = n.path.segments.last() {
@@ -858,7 +903,7 @@ fn plumbing(prod: &[&Item]) {
 fn dead_members(prod: &[&Item], uses: &MemberUses) {
     let mut dead: Vec<(&str, &str, &str)> = Vec::new();
     for item in prod {
-        if item.derived || item.declared.is_empty() {
+        if item.members == MemberReads::DeriveDriven || item.declared.is_empty() {
             continue;
         }
         let touched = if item.kind == "enum" {
@@ -1307,7 +1352,7 @@ fn wrappers(prod: &[&Item]) {
 fn narrow_context(prod: &[&Item]) {
     let mut rows: Vec<&&Item> = prod
         .iter()
-        .filter(|i| i.kind == "fn" && i.ctx_params > 0 && !i.ctx_passed_on && i.ctx_fields.len() <= 1)
+        .filter(|i| i.kind == "fn" && i.ctx_params > 0 && i.ctx_use == CtxUse::Narrow && i.ctx_fields.len() <= 1)
         .collect();
     rows.sort_by_key(|i| i.ctx_fields.len());
     println!("\nnarrow context: functions taking `Ctx` that touch <= 1 field:");
