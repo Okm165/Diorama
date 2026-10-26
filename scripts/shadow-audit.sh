@@ -14,6 +14,14 @@
 #   E. the fixture freeze  - the fixture-owned token (the source's contract
 #                            overlaid by the devnet's mock) never gets
 #                            overwritten by the follow
+#   F. the BAL accounting  - applied <= filtered <= bal_writes per block, and
+#                            the fixture's skips are live (skipped_shadowed)
+#   G. the field pair (V)  - a watched account's *fields* are planned every
+#                            window: an unshadowed divergence is written back
+#                            to the source's truth (the control), the same
+#                            divergence survives once the fields are shadowed
+#                            (the COW) — deterministic, unlike the deal's
+#                            slot, which the parent rarely touches
 #
 # Run from the repo root:
 #   make shadow-audit
@@ -26,6 +34,22 @@ NS_T="${NS_T:-mainnet-mirror}"
 PROBE_ACCOUNT="${PROBE_ACCOUNT:-0x0000000000000000000000000000000000000a11}"
 DEAL_AMOUNT="${DEAL_AMOUNT:-12345678}"
 COW_WAIT="${COW_WAIT:-50}"
+WINDOW_WAIT="${WINDOW_WAIT:-15}"
+# The watched accounts that are *not* fixtures (the CCTP contracts + the
+# CoreWriter): their fields are planned every window, so the pair below is
+# deterministic. The pair rotates through them — a hand-back cannot clear a
+# mark while V's source is pinned-latest (the guard, by design), so each
+# fresh run takes the next unshadowed account; once all five are shadowed the
+# pair runs its COW branch only (the marks are inert; a re-pin clears them).
+WATCHED_POOL=(
+  "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d" # CCTP V2 TokenMessenger
+  "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64" # CCTP V2 MessageTransmitter
+  "0xfd78EE919681417d192449715b2594ab58f5D002" # CCTP V2 TokenMinter
+  "0xec546b6B005471ECf012e5aF77FBeC07e0FD8f78" # CCTP V2 Message
+  "0x3333333333333333333333333333333333333333" # CoreWriter
+)
+FIELD_STAGE="${FIELD_STAGE:-0xDE0B6B3A7640000}"
+FIELD_STAGE_DEC=$(python3 -c "print(int('${FIELD_STAGE}', 16))")
 
 USDC_T="0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 USDC_V="0xb88339CB7199b77E23DB6E890353E22632Ba630f"
@@ -146,11 +170,112 @@ print(json.loads(s).get('cleared', 'cleared') if s.startswith('{') else '(refuse
     conv=$(metric "$ns" mirror_t_convergence_ok_total)
     echo "  BAL: t_convergence_ok=${conv} (the applier's applied-block parity)"
   fi
+
+  # --- F. the BAL accounting: the counts cohere, the skips are live ---
+  if [ "$ns" = "$NS_T" ]; then
+    local lines res coh tot cnt
+    lines=$(kubectl -n "$NS_T" logs deploy/engine --since=5m 2>/dev/null | grep "parent diffs applied" | tail -8 || true)
+    res=$(echo "$lines" | python3 -c "
+import json, sys
+ok = True; total = 0; n = 0
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    f = json.loads(line)['fields']
+    n += 1
+    if not (f['applied'] <= f['filtered'] <= f['bal_writes']):
+        ok = False
+    total += f.get('skipped_shadowed', 0)
+print(f'{1 if ok else 0} {total} {n}')")
+    read -r coh tot cnt <<< "$res"
+    echo "  BAL: ${cnt} blocks: applied <= filtered <= bal_writes; skipped_shadowed sum=${tot}"
+    check "${label}: every block's accounting coheres (applied <= filtered <= bal_writes)" "$( [ "${coh:-0}" = "1" ] && [ "${cnt:-0}" -ge 3 ] && echo 1 || echo 0 )"
+    check "${label}: the fixture's skips are live (skipped_shadowed sum ${tot} > 0)" "$( [ "${tot:-0}" -gt 0 ] && echo 1 || echo 0 )"
+  else
+    local lines res coh cnt
+    lines=$(kubectl -n "$NS_V" logs deploy/engine --since=5m 2>/dev/null | grep "composed onto V" | tail -8 || true)
+    res=$(echo "$lines" | python3 -c "
+import json, sys
+ok = True; n = 0
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    f = json.loads(line)['fields']
+    n += 1
+    if not (f['applied'] <= f['writes']):
+        ok = False
+print(f'{1 if ok else 0} {n}')")
+    read -r coh cnt <<< "$res"
+    echo "  BAL: ${cnt} windows: applied <= writes"
+    check "${label}: every window's accounting coheres (applied <= writes)" "$( [ "${coh:-0}" = "1" ] && [ "${cnt:-0}" -ge 3 ] && echo 1 || echo 0 )"
+  fi
 }
 
-echo "== the shadowing audit (state + BAL, both mirrors) =="
+# --- G. the watched-field pair (V): control, then COW ---
+# The watched accounts' fields (balance/nonce/code) are planned every window,
+# so both branches are deterministic. The deal's slot above is not: the
+# parent rarely touches it, so its hold check is a regression guard, not a
+# live skip. This pair is the live one: the unshadowed divergence is written
+# back to the source's truth within a window; the same divergence survives
+# once the fields are shadowed. The pair rotates through the non-fixture
+# watched accounts (a mark cannot be cleared while V's source is
+# pinned-latest) and re-stages the field to the source's own value at the
+# end, so the marks stay inert.
+field_shadow_pair() {
+  local ns="$NS_V" anvil="http://anvil-v:8545" src="$SRC_V"
+  echo
+  local shadowed_list; shadowed_list=$(eget "$ns" /status | json "','.join(a.lower() for a in d.get('shadowed', []))")
+  local watched="" a
+  for a in "${WATCHED_POOL[@]}"; do
+    if ! echo ",$shadowed_list," | grep -q ",${a,,},"; then watched="$a"; break; fi
+  done
+  local control=1
+  if [ -z "$watched" ]; then
+    watched="${WATCHED_POOL[0]}"
+    control=0
+    echo "== the watched-field pair (V): ${watched} (all pool accounts already shadowed; the COW branch only) =="
+  else
+    echo "== the watched-field pair (V): ${watched} =="
+  fi
+  local src_bal; src_bal=$(rpc_anvil "$ns" "$src" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"$watched\",\"latest\"]}" | json "int(d['result'],16)")
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setBalance\",\"params\":[\"$watched\",\"$FIELD_STAGE\"]}" > /dev/null
+  local staged; staged=$(rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"$watched\",\"latest\"]}" | json "int(d['result'],16)")
+  check "the field divergence staged (${src_bal} -> ${staged})" "$( [ "$staged" != "$src_bal" ] && echo 1 || echo 0 )"
+  if [ "$control" = "1" ]; then
+    echo "  waiting ${WINDOW_WAIT}s for a window to compose the watched fields..."
+    sleep "$WINDOW_WAIT"
+    local restored; restored=$(rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"$watched\",\"latest\"]}" | json "int(d['result'],16)")
+    check "the control: the unshadowed divergence is written back to the source's truth (${staged} -> ${restored} = ${src_bal})" "$( [ "$restored" = "$src_bal" ] && echo 1 || echo 0 )"
+  fi
+  local accounts_before; accounts_before=$(eget "$ns" /status | json "d.get('shadowed_accounts')")
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setBalance\",\"params\":[\"$watched\",\"$FIELD_STAGE\"]}" > /dev/null
+  epost "$ns" /admin/shadow "{\"address\":\"$watched\",\"account_fields\":true}" > /dev/null
+  local accounts_after; accounts_after=$(eget "$ns" /status | json "d.get('shadowed_accounts')")
+  if [ "$control" = "1" ]; then
+    check "the field shadow registered (accounts ${accounts_before} -> ${accounts_after})" "$( [ "$accounts_after" -gt "$accounts_before" ] && echo 1 || echo 0 )"
+  fi
+  echo "  waiting ${WINDOW_WAIT}s for the windows with the shadowed fields..."
+  sleep "$WINDOW_WAIT"
+  local held; held=$(rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"$watched\",\"latest\"]}" | json "int(d['result'],16)")
+  check "the COW: the same divergence survives the windows while shadowed (${held} = ${FIELD_STAGE_DEC})" "$( [ "$held" = "$FIELD_STAGE_DEC" ] && echo 1 || echo 0 )"
+  local back; back=$(epost "$ns" /admin/shadow "{\"address\":\"$watched\",\"account_fields\":true,\"clear\":true}" || true)
+  local after_back; after_back=$(rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"$watched\",\"latest\"]}" | json "int(d['result'],16)")
+  if echo "$back" | grep -q "advanced past the pin"; then
+    echo "  field hand-back refused: $(echo "$back" | head -c 120)"
+    ok "the pinned-latest guard refuses the field hand-back (never poisons)"
+    check "the refusal left the field untouched (${after_back} = ${FIELD_STAGE_DEC})" "$( [ "$after_back" = "$FIELD_STAGE_DEC" ] && echo 1 || echo 0 )"
+  else
+    check "the field hand-back restored the source's truth (${after_back} = ${src_bal})" "$( [ "$after_back" = "$src_bal" ] && echo 1 || echo 0 )"
+  fi
+  # The mark stays (the guard's documented state); re-stage the value to the
+  # source's own so the deviation itself is gone — the mark stays inert.
+  rpc_anvil "$ns" "$anvil" "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"anvil_setBalance\",\"params\":[\"$watched\",\"0x$(printf '%x' "$src_bal")\"]}" > /dev/null
+  echo "  the field re-staged to the source's own value (${src_bal}); the mark stays inert"
+}
+
 audit_mirror "$NS_V" "venue (V)" "http://anvil-v:8545" "$SRC_V" "$USDC_V"
 audit_mirror "$NS_T" "l1 (T)" "http://anvil-t:8545" "$SRC_T" "$USDC_T"
+field_shadow_pair
 
 echo
 echo "  shadowing audit: ${pass} ok, ${fail} failed"
