@@ -427,6 +427,11 @@ mainnet-repin: ## Re-pin drill: wipe the pin, restart the anvil (engine auto-reb
 	kubectl -n $(NS) rollout status deploy/anvil-t --timeout=600s
 	@echo "re-pinned. engine will rebase automatically on its next poll."
 
+##@ Repository
+
+sign-history: ## Re-sign every commit in the history (root -> HEAD, all branches + tags; needs a signing key)
+	./scripts/sign-history.sh
+
 ##@ Help
 
 help: ## Show this help
