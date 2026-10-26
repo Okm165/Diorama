@@ -86,7 +86,12 @@ impl Bridge {
     pub async fn pass(&self) -> Result<()> {
         let head = self.anvil_v.block_number().await?;
         self.observe_head_time(head).await?;
-        let pin = self.anvil_v.fork_config().await?.map(|(_, block)| block).unwrap_or(0);
+        let pin = self
+            .anvil_v
+            .fork_config()
+            .await?
+            .map(|fork| fork.block)
+            .unwrap_or(0);
         let mut from = self.cursor.load(Ordering::Relaxed);
         if from == 0 || from < pin || from > head {
             // First pass, a re-pin, or a chain reset under us: anchor at the
@@ -564,10 +569,10 @@ impl Bridge {
     /// the system address (auto-impersonate). It lands with the devnet's next
     /// mined block, like the real chain's system tx.
     async fn complete_core_to_evm(&self, recipient: &Address, info: &TokenInfo, amount: Decimal) -> Result<()> {
-        let Some((erc20, extra)) = info.evm else {
+        let Some(evm) = info.evm else {
             return Err(system::no_evm_link(info));
         };
-        let evm_decimals = info.wei_decimals as i32 + extra;
+        let evm_decimals = info.wei_decimals as i32 + evm.extra_decimals;
         let Some(value) = system::human_to_evm(amount, evm_decimals) else {
             self.metrics.inc_refusals();
             tracing::warn!(amount = %amount, "bridge: Core→EVM amount is not representable in EVM wei; refused");
@@ -583,7 +588,7 @@ impl Bridge {
         }
         let tx = TransactionRequest::default()
             .from(from)
-            .to(erc20)
+            .to(evm.address)
             .input(system::transfer_calldata(*recipient, value).into());
         let hash = self.anvil_v.send_transaction(tx).await?;
         self.metrics.inc_completions();

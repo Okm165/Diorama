@@ -62,6 +62,13 @@ pub(crate) fn token_index_of(address: Address) -> Option<u64> {
     Some(u64::from_be_bytes(idx))
 }
 
+/// One spot token's EVM link: the linked ERC20 and its extra wei decimals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct EvmToken {
+    pub address: Address,
+    pub extra_decimals: i32,
+}
+
 /// One spot token as the bridge needs it: the Core wei scale and the EVM link.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TokenInfo {
@@ -69,13 +76,14 @@ pub(crate) struct TokenInfo {
     pub name: String,
     pub wei_decimals: u32,
     /// The linked ERC20 + its extra wei decimals (`None` = no EVM link).
-    pub evm: Option<(Address, i32)>,
+    pub evm: Option<EvmToken>,
 }
 
 impl TokenInfo {
     /// The EVM-side decimals (`weiDecimals + evmExtraWeiDecimals`).
     pub fn evm_decimals(&self) -> Option<i32> {
-        self.evm.map(|(_, extra)| self.wei_decimals as i32 + extra)
+        self.evm
+            .map(|evm| self.wei_decimals as i32 + evm.extra_decimals)
     }
 }
 
@@ -87,10 +95,10 @@ pub(crate) fn token_registry(spot: &SpotMeta) -> Vec<TokenInfo> {
             index: t.index,
             name: t.name.clone(),
             wei_decimals: t.wei_decimals as u32,
-            evm: t
-                .evm_contract
-                .as_ref()
-                .map(|c| (c.address, c.evm_extra_wei_decimals)),
+            evm: t.evm_contract.as_ref().map(|c| EvmToken {
+                address: c.address,
+                extra_decimals: c.evm_extra_wei_decimals,
+            }),
         })
         .collect()
 }
@@ -183,7 +191,9 @@ pub(crate) fn credit_of<'a>(
     }
     let index = token_index_of(transfer.to)?;
     let token = by_index(tokens, u32::try_from(index).ok()?)?;
-    let (linked, _extra) = token.evm?;
+    let EvmToken {
+        address: linked, ..
+    } = token.evm?;
     if emitter != linked {
         return None;
     }
@@ -245,7 +255,10 @@ mod tests {
             index: 0,
             name: "USDC".into(),
             wei_decimals: 8,
-            evm: Some((Address::repeat_byte(0x88), -2)),
+            evm: Some(EvmToken {
+                address: Address::repeat_byte(0x88),
+                extra_decimals: -2,
+            }),
         };
         assert_eq!(usdc.evm_decimals(), Some(6));
         // 1.0 USDC EVM (1e6) → 1 human.
@@ -319,7 +332,10 @@ mod tests {
             index: 0,
             name: "USDC".into(),
             wei_decimals: 8,
-            evm: Some((Address::repeat_byte(0x88), -2)),
+            evm: Some(EvmToken {
+                address: Address::repeat_byte(0x88),
+                extra_decimals: -2,
+            }),
         };
         let tokens = vec![usdc];
         let from = Address::repeat_byte(0xdd);

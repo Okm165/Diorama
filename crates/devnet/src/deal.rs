@@ -7,7 +7,7 @@
 //! devnet-owned so parent diffs can never overwrite it.
 use crate::admin::AdminSurface;
 use crate::error::Result;
-use crate::journal::{Journal, JournalEntry};
+use crate::journal::{JournalEntry, JournalSink};
 use crate::plane::Plane;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
@@ -56,34 +56,38 @@ pub(crate) struct ProbeRecord {
 /// matches, the fault is reported instead of a layout verdict.
 ///
 /// `journal` records the write's before-value so `/admin/rewind` can undo it:
-/// `Some((journal, block))` on a deployment whose journal is its *own* writes
+/// `Some(JournalSink)` on a deployment whose journal is its *own* writes
 /// (the venue — its follow windows are source state, not journaled devnet
 /// writes), `None` on the mainnet
 /// (its journal is the applier's parent before-values; mixing engine writes in
 /// would change what a rewind means).
 pub async fn deal(
     surface: &AdminSurface<'_>,
-    journal: Option<(&Journal, u64)>,
+    journal: Option<JournalSink<'_>>,
     req: &DealRequest,
 ) -> Result<DealOutcome> {
     let data = balance_of_calldata(req.to);
-    let (found, probes, fault) =
-        discover_balance_slot(surface.target, req, &data, deal_sentinel()).await;
-    let Some((slot, slot_hex)) = found else {
-        return Ok(no_slot(fault, probes));
+    let discovery = discover_balance_slot(surface.target, req, &data, deal_sentinel()).await;
+    let Some(slot) = discovery.found else {
+        return Ok(no_slot(discovery.fault, discovery.probes));
     };
     let write = mirror_anvil::Write::Storage {
         address: req.token,
-        slot,
+        slot: slot.idx,
         value: req.amount,
     };
     // The undo entry's before-value must be read *before* the write; a fault
     // here refuses the deal with nothing written (fail-closed: an unjournaled
     // write on a journaling deployment is an undo that later writes a wrong
     // value).
-    let before = read_before(surface.target, Journaling::of(journal.is_some()), req.token, slot)
+    let before = read_before(
+        surface.target,
+        Journaling::of(journal.is_some()),
+        req.token,
+        slot.idx,
+    )
         .await?;
-    if let Err(refused) = write_slot(surface.target, surface.chunk_size, &write, &slot_hex).await {
+    if let Err(refused) = write_slot(surface.target, surface.chunk_size, &write, &slot.hex).await {
         return Ok(refused);
     }
     // Read back *before* marking: only a verified write becomes devnet-owned.
@@ -93,18 +97,18 @@ pub async fn deal(
     let ok = after.as_ref() == Some(&req.amount.to_be_bytes::<32>().into());
     if ok {
         mark_owned(surface.plane, &write)?;
-        record_undo(journal, req.token, slot, before)?;
+        record_undo(journal, req.token, slot.idx, before)?;
     }
     tracing::info!(
         token = %req.token,
         to = %req.to,
-        slot = %slot_hex,
+        slot = %slot.hex,
         ok,
         "devnet ERC20 deal (silent storage write, marked devnet-owned)"
     );
     Ok(DealOutcome {
         ok,
-        slot: Some(slot_hex),
+        slot: Some(slot.hex),
         balance: after,
         error: None,
         probes: Vec::new(),
@@ -193,14 +197,14 @@ async fn write_slot(
 /// Journal the undo entry (the before-value) when the deployment journals its
 /// own writes.
 fn record_undo(
-    journal: Option<(&Journal, u64)>,
+    journal: Option<JournalSink<'_>>,
     token: Address,
     slot: U256,
     before: Option<U256>,
 ) -> Result<()> {
-    if let (Some((journal, block)), Some(before)) = (journal, before) {
-        journal.record(
-            block,
+    if let (Some(sink), Some(before)) = (journal, before) {
+        sink.journal.record(
+            sink.at,
             &[JournalEntry::Storage {
                 address: token,
                 slot,
@@ -282,16 +286,27 @@ async fn probe_candidate(
     }
 }
 
+/// A discovered ERC-20 balance slot: its mapping index and its hex form.
+struct DiscoveredSlot {
+    idx: U256,
+    hex: String,
+}
+
+/// The deal's slot discovery: the found slot (when one matched), the probes
+/// the caller reports, and the first fault seen (a fault keeps the probes;
+/// the slot stays `None`).
+struct SlotDiscovery {
+    found: Option<DiscoveredSlot>,
+    probes: Vec<ProbeRecord>,
+    fault: Option<mirror_anvil::Error>,
+}
+
 async fn discover_balance_slot(
     target: &Rpc,
     req: &DealRequest,
     data: &Bytes,
     sentinel: U256,
-) -> (
-    Option<(U256, String)>,
-    Vec<ProbeRecord>,
-    Option<mirror_anvil::Error>,
-) {
+) -> SlotDiscovery {
     let (token, to) = (req.token, req.to);
     let sentinel_hex = format!("0x{sentinel:064x}");
     let sentinel_bytes = sentinel.to_be_bytes::<32>();
@@ -316,8 +331,16 @@ async fn discover_balance_slot(
             .as_ref()
             .is_some_and(|p| p.as_ref() == sentinel_bytes.as_slice())
         {
-            return (Some((idx, idx_hex)), probes, fault);
+            return SlotDiscovery {
+                found: Some(DiscoveredSlot { idx, hex: idx_hex }),
+                probes,
+                fault,
+            };
         }
     }
-    (None, probes, fault)
+    SlotDiscovery {
+        found: None,
+        probes,
+        fault,
+    }
 }

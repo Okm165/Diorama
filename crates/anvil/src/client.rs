@@ -163,6 +163,13 @@ const BLOCK_BY_NUMBER: &str = "eth_getBlockByNumber";
 /// The one method name the three call helpers share.
 const ETH_CALL: &str = "eth_call";
 
+/// A chain's fork source and block: the pin a forked node started at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkConfig {
+    pub url: String,
+    pub block: u64,
+}
+
 impl Rpc {
     /// Build a client for `url`. Fallible: the TLS backend's initialization can
     /// fail, and a boundary that cannot be built is a boot error naming itself,
@@ -1037,12 +1044,13 @@ impl Rpc {
 
     /// The chain's fork source + block from `anvil_nodeInfo` (None when the
     /// chain was not forked).
-    pub async fn fork_config(&self) -> Result<Option<(String, u64)>> {
+    pub async fn fork_config(&self) -> Result<Option<ForkConfig>> {
         let info = self.anvil_node_info().await?;
         Ok(info
             .fork_config
             .fork_url
-            .zip(info.fork_config.fork_block_number))
+            .zip(info.fork_config.fork_block_number)
+            .map(|(url, block)| ForkConfig { url, block }))
     }
 
     /// The fork base block (`anvil_nodeInfo.forkConfig.forkBlockNumber`).

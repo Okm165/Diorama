@@ -313,11 +313,11 @@ impl GapGuard {
 
 impl<'a> FollowStatus<'a> {
     /// One line when `interval_ms` has passed since `last` (a ms stamp the
-    /// caller owns); returns whether it logged.
-    pub fn log_if_due(&self, mirror: &str, last: &mut u64, interval_ms: u64) -> bool {
+    /// caller owns).
+    pub fn log_if_due(&self, mirror: &str, last: &mut u64, interval_ms: u64) {
         let now = mirror_config::boot::now_ms();
         if now.saturating_sub(*last) < interval_ms {
-            return false;
+            return;
         }
         *last = now;
         let lag = self.source_head.saturating_sub(self.followed);
@@ -336,7 +336,6 @@ impl<'a> FollowStatus<'a> {
             guard,
             "follow status"
         );
-        true
     }
 }
 

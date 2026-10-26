@@ -7,7 +7,7 @@
 //! a profile runs one devnet chain, so the venue profile reuses it for V).
 use crate::deal;
 use crate::error::{Error, Result};
-use crate::journal::Journal;
+use crate::journal::JournalSink;
 use crate::metrics::Registry;
 use crate::plane::Plane;
 use crate::source::Source;
@@ -86,7 +86,7 @@ impl AdminSurface<'_> {
     /// cursor, or the head before the first scan — so the write always falls
     /// inside the range `/admin/rewind` walks (a head-anchored key could land
     /// *above* the cursor and be missed by the range).
-    async fn journal_sink(&self) -> Result<Option<(&Journal, u64)>> {
+    async fn journal_sink(&self) -> Result<Option<JournalSink<'_>>> {
         if self.journal_scope != crate::engine::JournalScope::OwnWrites {
             return Ok(None);
         }
@@ -95,7 +95,10 @@ impl AdminSurface<'_> {
             Some(block) => block,
             None => self.target.block_number().await?,
         };
-        Ok(Some((&self.plane.journal, block)))
+        Ok(Some(JournalSink {
+            journal: &self.plane.journal,
+            at: block,
+        }))
     }
 
     /// `POST /admin/shadow` — register devnet-owned keys, or hand them back
@@ -444,7 +447,7 @@ impl AdminSurface<'_> {
 
 /// The chain's fork base, when it is a fork (the re-pin's before/after probe).
 async fn fork_base(target: &Rpc) -> Result<Option<u64>> {
-    Ok(target.fork_config().await?.map(|(_, block)| block))
+    Ok(target.fork_config().await?.map(|fork| fork.block))
 }
 
 /// An applied-but-unanswered reset is a success, not a failure (the

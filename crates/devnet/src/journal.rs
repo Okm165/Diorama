@@ -267,6 +267,15 @@ fn remove_logged(path: &std::path::Path, what: &'static str) {
     }
 }
 
+/// The journal a devnet write is recorded in, and the block coordinate the
+/// entry lands at (the devnet's own clock — the scan cursor, or the head
+/// before the first scan).
+#[derive(Clone, Copy)]
+pub struct JournalSink<'a> {
+    pub journal: &'a Journal,
+    pub at: u64,
+}
+
 /// The journal's read side: before-values for a batch of writes, read at the
 /// target's block `at` (the applied parent's head). A read that fails fails
 /// the apply — a journal with a missing before-value would let a later rewind
