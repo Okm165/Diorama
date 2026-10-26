@@ -42,6 +42,35 @@ PVC (measured: 3 dirs, 41 GB). State is rebuilt instead - a fresh pin re-applies
 the pin window, and T re-applies its parent diffs from its own pin. If tmp dirs
 ever reappear: `kubectl -n mainnet-mirror exec deploy/anvil-t -- rm -rf /state/.foundry/anvil/tmp/*`.
 
+## The symmetric log surface
+
+Both mirrors log the same *shapes* at the same levels; the steady-state
+evidence beats every minute on both sides (all measured live):
+
+| Line | Level | Cadence | Where |
+|---|---|---|---|
+| `parent diffs applied to T` | INFO | per applied block | mainnet engine |
+| `source window composed onto V` (carries `source_head` + `lag`) | INFO | per composed window (~4 s) | venue engine |
+| `probes complete {block, ok, failed, skipped}` | INFO | per applied block (T) / per re-pin (V) | both engines (one `probes::report`) |
+| `follow status {mirror, source_head, followed, lag_blocks, applied, guard}` | INFO | 60 s | both engines (one `FollowStatus`) |
+| `market plane live {coins, accounts, owned_levels, identity_violations}` | INFO | 60 s | venue sim |
+| `bridge status {pending, signed, relayed, parked}` | INFO | 60 s | cctp-bridge |
+
+The DEBUG tier is per-pass diagnostics: `chain is at the follow head` (the
+steady line - it only fires for an *idle* source, which the venue's live
+HyperEVM never is), `probe skipped: target is devnet-owned` (one per skipped
+probe), the mined-tx lines (INFO on both - the same event).
+
+Why the heartbeats exist: the audit that motivated them measured 1697 DEBUG +
+155 INFO lines on the mainnet engine against **7 DEBUG** on the venue engine
+over the same 20 minutes - the venue *was* following live (source head within
+3-5 blocks of the public HyperEVM head, windows every ~4 s, 0 catch-ups) but
+no line said so, because the only steady line is DEBUG and only speaks for an
+idle chain. When the live following is ever in doubt, read `follow status`
+(identical fields on both mirrors) and `market plane live` (each coin's mark
+and its age in ms; `owned_levels` are the order lane's consumed book levels -
+the COW analogue, pruned as the live book moves past them).
+
 ## Metrics reference (complete)
 
 Every metric the engine emits, so nothing is silent. The action table above
