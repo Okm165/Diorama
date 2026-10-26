@@ -1,0 +1,26 @@
+# The gates, exactly as they run locally: the workspace tests, then
+# `make fitness` (clippy, the design assertions, the config check, ast-scope).
+name: gates
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: workspace tests
+        run: cargo test --workspace --locked
+      - name: the structural gates
+        run: make fitness

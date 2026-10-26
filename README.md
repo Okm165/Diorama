@@ -224,3 +224,8 @@ docs/                        HOW-IT-WORKS.md, HOW-IT-WORKS-VENUE.md, ARCHITECTUR
   known limitations.
 - **[docs/adr/](docs/adr/README.md)** — the architecture decision records (one
   page each: context, decision, consequences).
+
+## License
+
+MIT OR Apache-2.0 — see [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE).
