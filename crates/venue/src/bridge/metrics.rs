@@ -48,6 +48,12 @@ impl BridgeMetrics {
         self.trace_faults.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// V head minus the processed cursor: `0` = the sim's chain side is
+    /// caught up (the market-plane heartbeat's own chain fact).
+    pub(crate) fn lag_blocks(&self) -> u64 {
+        self.lag_blocks.load(Ordering::Relaxed)
+    }
+
     pub fn set_lag_blocks(&self, lag: u64) {
         self.lag_blocks.store(lag, Ordering::Relaxed);
     }

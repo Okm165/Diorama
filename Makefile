@@ -324,6 +324,11 @@ engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fit
 log-surface: ## The symmetric log contract, attested against the running services (fitness function)
 	./scripts/log-surface.sh
 
+attest: ## The behavioral attestation: the pass over both mirrors, then the asserting suites
+	./scripts/attest.sh
+	./scripts/log-surface.sh
+	./scripts/engine-symmetry.sh
+
 mainnet-feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
 	./scripts/mainnet-feed-bridge.sh $(ARGS)
 

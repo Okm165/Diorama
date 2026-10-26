@@ -39,7 +39,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     )?);
 
     spawn_market_plane(&feed, api_client, &chain.ws_url, &sim_section);
-    spawn_plane_heartbeat(&feed, &sim, &chain.api_url);
+    spawn_plane_heartbeat(&feed, &sim, &chain.api_url, &bridge_metrics);
     spawn_bridge(&sim_section, &sim, &feed, &bridge_metrics)?;
     spawn_tick(&sim, &feed);
     let (info, control) = serve(&sim_section, &state);
@@ -105,9 +105,11 @@ fn spawn_plane_heartbeat(
     feed: &Arc<crate::feed::MarketFeed>,
     sim: &Arc<crate::sim::Sim>,
     api_url: &str,
+    bridge: &Arc<crate::bridge::metrics::BridgeMetrics>,
 ) {
     let feed = feed.clone();
     let sim = sim.clone();
+    let bridge = bridge.clone();
     let via = mirror_devnet::engine::source_host(api_url).to_string();
     tokio::spawn(async move {
         loop {
@@ -131,6 +133,10 @@ fn spawn_plane_heartbeat(
             tracing::info!(
                 coins = %coins.join(" "),
                 via = %via,
+                // The chain side beside the market: 0 = the sim's own
+                // Core<->EVM bridge has consumed V's head (the market and
+                // the blocks in one line).
+                v_bridge_lag = bridge.lag_blocks(),
                 accounts = sim.metrics.accounts.load(std::sync::atomic::Ordering::Relaxed),
                 owned_levels = feed.owned_levels(),
                 identity_violations = sim

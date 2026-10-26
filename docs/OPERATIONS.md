@@ -53,7 +53,7 @@ evidence beats every minute on both sides (all measured live):
 | `source window composed onto V` (carries `source` + `source_head` + `lag` + `watched`) | INFO | per composed window (~4 s) | venue engine |
 | `probes complete {block, ok, failed, skipped}` | INFO | per applied block (T) / per re-pin (V) | both engines (one `probes::report`) |
 | `follow status {mirror, via, source_head, followed, lag_blocks, applied, guard}` | INFO | 60 s | both engines (one `FollowStatus`) |
-| `market plane live {coins, via, accounts, owned_levels, identity_violations}` | INFO | 60 s | venue sim |
+| `market plane live {coins, via, v_bridge_lag, accounts, owned_levels, identity_violations}` | INFO | 60 s | venue sim |
 | `bridge status {pending, signed, relayed, parked}` | INFO | 60 s | cctp-bridge |
 | `sim order filled` (carries `levels` + `book`) | INFO | per fill | venue sim |
 
@@ -78,6 +78,11 @@ venue's windows advancing, the mainnet's probe summary fresh, the sim naming
 every configured coin with zero identity violations, the bridge's counts, and
 every heartbeat at INFO. State suites cannot catch a silent surface, so the
 surface has its own suite.
+
+`make attest` is the routine that runs it: one pass over both mirrors (every
+pod once, the key live facts per service, the recent WARN/ERROR catalogue)
+followed by the asserting suites (`log-surface`, `engine-symmetry`) - the
+standing "monitor all services" command.
 
 The order lane's fills are self-explaining too: `sim order filled` carries
 `levels` (the consumed book levels, `price x size`) and `book`

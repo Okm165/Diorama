@@ -163,6 +163,15 @@ print(" ".join(sorted(set(re.findall(r"venue_sim_stale_ms\{coin=\"([^\"]+)\"\}",
       bad "sim market plane stale or missing coins:${missing:- none} (${a}s)"
     fi
   fi
+  missing=""
+  for f in via accounts owned_levels identity_violations v_bridge_lag; do
+    grep -qF "\"$f\":" <<< "$sim_hb" || missing="$missing $f"
+  done
+  if [ -z "$missing" ]; then
+    ok "sim: the heartbeat carries via/accounts/owned_levels/identity_violations/v_bridge_lag"
+  else
+    bad "sim: the heartbeat is missing:$missing"
+  fi
   viol=$(field "$sim_hb" identity_violations)
   if [ "$viol" = "0" ]; then
     ok "sim identity_violations = 0"
