@@ -321,6 +321,9 @@ cctp-local: mainnet-build venue-build cctp-build ## The cross-mirror lane locall
 engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (fitness function)
 	./scripts/engine-symmetry.sh
 
+log-surface: ## The symmetric log contract, attested against the running services (fitness function)
+	./scripts/log-surface.sh
+
 mainnet-feed-bridge: ## Feed-bridge helpers (list/pause/resume/override); ARGS="list"
 	./scripts/mainnet-feed-bridge.sh $(ARGS)
 

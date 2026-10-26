@@ -189,6 +189,9 @@ fn report_applied(ctx: &Ctx, from: u64, to: u64, source_head: u64, window: &Foll
     tracing::info!(
         from,
         to,
+        // The compose rung, named as the mainnet's per-block line names its
+        // diff rung (`source = facts.source`): the two lines are mirrors.
+        source = window.source,
         source_head,
         lag = source_head.saturating_sub(to),
         writes = window.writes,

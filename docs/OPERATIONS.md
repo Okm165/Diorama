@@ -50,11 +50,12 @@ evidence beats every minute on both sides (all measured live):
 | Line | Level | Cadence | Where |
 |---|---|---|---|
 | `parent diffs applied to T` | INFO | per applied block | mainnet engine |
-| `source window composed onto V` (carries `source_head` + `lag`) | INFO | per composed window (~4 s) | venue engine |
+| `source window composed onto V` (carries `source` + `source_head` + `lag`) | INFO | per composed window (~4 s) | venue engine |
 | `probes complete {block, ok, failed, skipped}` | INFO | per applied block (T) / per re-pin (V) | both engines (one `probes::report`) |
 | `follow status {mirror, source_head, followed, lag_blocks, applied, guard}` | INFO | 60 s | both engines (one `FollowStatus`) |
 | `market plane live {coins, accounts, owned_levels, identity_violations}` | INFO | 60 s | venue sim |
 | `bridge status {pending, signed, relayed, parked}` | INFO | 60 s | cctp-bridge |
+| `sim order filled` (carries `levels` + `book`) | INFO | per fill | venue sim |
 
 The DEBUG tier is per-pass diagnostics: `chain is at the follow head` (the
 steady line - it only fires for an *idle* source, which the venue's live
@@ -70,6 +71,19 @@ idle chain. When the live following is ever in doubt, read `follow status`
 (identical fields on both mirrors) and `market plane live` (each coin's mark
 and its age in ms; `owned_levels` are the order lane's consumed book levels -
 the COW analogue, pruned as the live book moves past them).
+
+The surface is itself a tested invariant: `make log-surface` attests it
+against the running services - both heartbeats fresh and field-identical, the
+venue's windows advancing, the mainnet's probe summary fresh, the sim naming
+every configured coin with zero identity violations, the bridge's counts, and
+every heartbeat at INFO. State suites cannot catch a silent surface, so the
+surface has its own suite.
+
+The order lane's fills are self-explaining too: `sim order filled` carries
+`levels` (the consumed book levels, `price x size`) and `book`
+(`live@<age>ms` for the live venue's depth, `scripted+live@...` for a
+scenario-owned base with its live remainder) - a fill can never be mistaken
+for an invented price.
 
 ## Metrics reference (complete)
 

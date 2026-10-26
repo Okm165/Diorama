@@ -159,6 +159,31 @@ pub(crate) async fn order(State(state): State<Arc<ApiState>>, Json(req): Json<Or
     let address = req.address;
     let order: crate::sim::order::Order = req.into();
     let fill = state.sim.order(&state.feed, address, &order)?;
+    // The fill's provenance, so every fill is self-explaining: the levels it
+    // walked (the consumed sizes — the COW analogue) and the served book's
+    // own source — `live@<age>` proves the depth was the live venue's,
+    // `scripted+...` names a scenario-owned base with its live remainder.
+    let mut levels: Vec<String> = fill
+        .consumed
+        .iter()
+        .take(8)
+        .map(|c| format!("{}x{}", c.price, c.size))
+        .collect();
+    let more = fill.consumed.len().saturating_sub(levels.len());
+    if more > 0 {
+        levels.push(format!("+{more}"));
+    }
+    let book = {
+        let live = match state.feed.stale_ms(&order.coin, crate::now_ms()) {
+            Some(age) => format!("live@{age}ms"),
+            None => "live@warming".to_string(),
+        };
+        if state.feed.scripted_book(&order.coin) {
+            format!("scripted+{live}")
+        } else {
+            live
+        }
+    };
     tracing::info!(
         address = %address,
         coin = %order.coin,
@@ -166,6 +191,8 @@ pub(crate) async fn order(State(state): State<Arc<ApiState>>, Json(req): Json<Or
         sz = %fill.total_sz,
         avg_px = %fill.avg_px,
         consumed = fill.consumed.len(),
+        levels = %levels.join(" "),
+        book = %book,
         "sim order filled"
     );
     Ok(Json(OrderResponse { address, fill }))

@@ -172,6 +172,12 @@ impl MarketFeed {
         self.stale_ms(coin, now_ms).filter(|age| *age > max_ms)
     }
 
+    /// Whether the served book has a scenario-owned base (the fills then walk
+    /// the scripted depth plus the live remainder — the COW composition).
+    pub fn scripted_book(&self, coin: &str) -> bool {
+        self.read_overrides().books.contains_key(coin)
+    }
+
     // ---- writes (the poller / WS client / control plane) ------------------
 
     pub(crate) fn put_meta(&self, meta: Meta, now_ms: u64) {
