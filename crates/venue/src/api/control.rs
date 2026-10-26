@@ -103,12 +103,49 @@ pub(crate) async fn deal(State(state): State<Arc<ApiState>>, Json(req): Json<Dea
 // ---- order ---------------------------------------------------------------
 
 /// The `order` route's body: the account plus the order's own fields (the
-/// matching lane fills against the real book; plan §4.5).
+/// matching lane fills against the real book; plan §4.5). The order's fields
+/// are spelled out rather than flattened: a typo'd key must refuse by name —
+/// this is the one verb where a silently ignored field would execute the
+/// wrong order (the venue's own wire order stays tolerant on `/exchange`).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct OrderRequest {
     pub address: Address,
-    #[serde(flatten)]
-    pub order: crate::sim::order::Order,
+    pub coin: String,
+    pub is_buy: bool,
+    pub size: Decimal,
+    /// The limit price (absent = market: fill whatever the book gives).
+    #[serde(default)]
+    pub limit_px: Option<Decimal>,
+    #[serde(default)]
+    pub tif: crate::sim::order::Tif,
+    #[serde(default)]
+    pub reduce_only: bool,
+    /// The client order id (echoed; it also addresses cancels/modifies and
+    /// resting orders, as the venue's does).
+    #[serde(default)]
+    pub cloid: Option<alloy_primitives::B128>,
+    /// A trigger order: armed instead of walked, fired by the tick when the
+    /// mark crosses.
+    #[serde(default)]
+    pub trigger: Option<crate::sim::order::Trigger>,
+}
+
+impl From<OrderRequest> for crate::sim::order::Order {
+    fn from(req: OrderRequest) -> Self {
+        // Exhaustive: a new order field breaks this build rather than
+        // silently dropping the control route's copy of it.
+        Self {
+            coin: req.coin,
+            is_buy: req.is_buy,
+            size: req.size,
+            limit_px: req.limit_px,
+            tif: req.tif,
+            reduce_only: req.reduce_only,
+            cloid: req.cloid,
+            trigger: req.trigger,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -119,17 +156,19 @@ pub(crate) struct OrderResponse {
 }
 
 pub(crate) async fn order(State(state): State<Arc<ApiState>>, Json(req): Json<OrderRequest>) -> Result<Json<OrderResponse>> {
-    let fill = state.sim.order(&state.feed, req.address, &req.order)?;
+    let address = req.address;
+    let order: crate::sim::order::Order = req.into();
+    let fill = state.sim.order(&state.feed, address, &order)?;
     tracing::info!(
-        address = %req.address,
-        coin = %req.order.coin,
-        is_buy = req.order.side().is_buy(),
+        address = %address,
+        coin = %order.coin,
+        is_buy = order.side().is_buy(),
         sz = %fill.total_sz,
         avg_px = %fill.avg_px,
         consumed = fill.consumed.len(),
         "sim order filled"
     );
-    Ok(Json(OrderResponse { address: req.address, fill }))
+    Ok(Json(OrderResponse { address, fill }))
 }
 
 // ---- advance -------------------------------------------------------------
