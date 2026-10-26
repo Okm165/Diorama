@@ -98,6 +98,9 @@ pub struct MarketFeed {
     pub markets: Vec<String>,
     /// The overrides' state file; `None` keeps them in memory only.
     path: Option<PathBuf>,
+    /// Serializes persists (snapshot + write): a concurrent pair must not let
+    /// an older snapshot's rename land last.
+    persist_lock: std::sync::Mutex<()>,
     /// The staleness drill: live writes are dropped until this deadline
     /// (0 = not stalled). The scripted plane is never gated.
     stalled_until_ms: AtomicU64,
@@ -114,6 +117,7 @@ impl MarketFeed {
             metrics: FeedMetrics::new(&markets),
             markets,
             path: Some(path),
+            persist_lock: std::sync::Mutex::new(()),
             stalled_until_ms: AtomicU64::new(0),
         })
     }
@@ -128,6 +132,7 @@ impl MarketFeed {
             metrics: FeedMetrics::new(&markets),
             markets,
             path: None,
+            persist_lock: std::sync::Mutex::new(()),
             stalled_until_ms: AtomicU64::new(0),
         }
     }
@@ -506,6 +511,13 @@ impl MarketFeed {
         let Some(path) = &self.path else {
             return Ok(());
         };
+        // The snapshot and the write under one lock: concurrent persists must
+        // not let an older snapshot's rename land last (a restart would then
+        // reload the staler overrides).
+        let _serial = self
+            .persist_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let overrides = self.read_overrides().clone();
         store::save(path, &overrides, "feed overrides")?;
         Ok(())
