@@ -66,5 +66,43 @@ dst_after=$(balance "$DST_USDC" "$RELAY" "$DST_URL")
   && ok "destination minted exactly the amount ($dst_before -> $dst_after)" \
   || bad "destination delta is not the amount ($dst_before -> $dst_after, wanted +$AMOUNT)"
 
+# The hook lane (§15.4): the burn carries `hookData = target(20) ‖ calldata`
+# and pins the destinationCaller to the wrapper, so one relay tx mints *and*
+# calls the target. The mint goes to the wrapper; the hook (a USDC transfer)
+# forwards it to the trader — the credit-carrying lane's own end-to-end read.
+if [ "$SOURCE" = "0" ]; then
+  if [ -z "${WRAPPER:-}" ] && command -v kubectl >/dev/null 2>&1; then
+    WRAPPER=$(timeout 20 kubectl -n "$NS" logs deploy/cctp-bridge --since=24h 2>/dev/null \
+      | grep -o '"wrapper":"0x[0-9a-fA-F]*"' | tail -1 | cut -d'"' -f4)
+  fi
+  HOOK_TO="${HOOK_TO:-0x00000000000000000000000000000000000000e5}"
+  if [ -n "${WRAPPER:-}" ]; then
+    echo "-- the hook lane (one relay tx mints and calls)"
+    hook_cd="0xa9059cbb000000000000000000000000${HOOK_TO:2}00000000000000000000000000000000000000000000000000000000000f4240"
+    hb_before=$(balance "$USDC_V" "$WRAPPER" "$DST_URL")
+    ht_before=$(balance "$USDC_V" "$HOOK_TO" "$DST_URL")
+    hresp=$(bpost /control/transfer "{\"source\":0,\"destination\":19,\"amount\":\"1000000\",\"mint_recipient\":\"$WRAPPER\",\"hook\":{\"target\":\"$USDC_V\",\"calldata\":\"$hook_cd\"}}")
+    hcarriage=$(echo "$hresp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('hook',''))")
+    htx=$(echo "$hresp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('burn_tx',''))")
+    [ "$hcarriage" = "carried" ] && ok "the hook burned (carriage=$hcarriage)" || bad "the hook carriage: $hresp"
+    hstate=$(await_relay "$htx" || true)
+    case "$hstate" in
+      relayed) ok "the hook record relayed (one tx minted and called)" ;;
+      *) bad "the hook record: $hstate" ;;
+    esac
+    sleep 2
+    hb_after=$(balance "$USDC_V" "$WRAPPER" "$DST_URL")
+    ht_after=$(balance "$USDC_V" "$HOOK_TO" "$DST_URL")
+    [ "$hb_after" = "$hb_before" ] \
+      && ok "the wrapper forwarded exactly the mint (back to $hb_after)" \
+      || bad "the wrapper kept $((hb_after - hb_before))"
+    [ "$((ht_after - ht_before))" = "1000000" ] \
+      && ok "the hook credit landed (+$((ht_after - ht_before)) base units to the target)" \
+      || bad "the hook delta: $((ht_after - ht_before))"
+  else
+    bad "no wrapper address resolved (set WRAPPER= to run the hook lane)"
+  fi
+fi
+
 echo "== cctp roundtrip: $pass passed, $fail failed"
 [ "$fail" = "0" ]
