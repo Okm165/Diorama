@@ -92,6 +92,37 @@ pub(crate) fn relay_calldata(message: &[u8], attestation: &[u8]) -> Bytes {
     .into()
 }
 
+/// Simulate the wrapper's `relay` against the destination's current state.
+///
+/// The wrapper is **non-atomic by design**: `receiveMessage` consumes the nonce even
+/// when the hook reverts, and the minted USDC then sits in the wrapper with no
+/// per-position owner. A preflight `eth_call` observes both outcomes before the real
+/// send, so a deterministic hook failure never consumes the nonce. `(relaySuccess,
+/// hookSuccess, hookReturnData)` is the wrapper's own report.
+pub async fn simulate_relay(
+    rpc: &diorama_anvil::Rpc,
+    wrapper: Address,
+    message: &[u8],
+    attestation: &[u8],
+) -> Result<(bool, bool, Bytes)> {
+    rpc.call_decode(
+        wrapper,
+        &ICCTPHookWrapper::relayCall {
+            message: Bytes::copy_from_slice(message),
+            attestation: Bytes::copy_from_slice(attestation),
+        },
+    )
+    .await
+    .map(|answer| {
+        (
+            answer.relaySuccess,
+            answer.hookSuccess,
+            answer.hookReturnData,
+        )
+    })
+    .map_err(Error::from)
+}
+
 /// Deploy the wrapper on `chain` with `owner = sender`; returns the tx hash.
 /// The caller waits for the receipt and records `contractAddress` (the bin's
 /// boot step, [`verify`] then confirms the wiring).

@@ -389,6 +389,7 @@ impl Relayer {
     /// Submit `receiveMessage` (plain) or the wrapper's `relay` (hook), record
     /// the attempt, and settle it or keep it in flight. A send refused after
     /// `MAX_SEND_ATTEMPTS` transport faults is parked, never retried forever.
+    #[allow(clippy::too_many_lines)] // one submit flow: preflight → send → receipt → settle
     async fn submit(
         &self,
         chain: &Chain,
@@ -405,6 +406,37 @@ impl Relayer {
         let calldata = if decoded.body.hook_data.is_empty() {
             receive_message_calldata(&record.message, &attestation)
         } else {
+            // **A hook failure must not consume the nonce.** The wrapper mints first and
+            // calls the hook second; a revert in the hook leaves the USDC in the wrapper
+            // with no owner while `usedNonces` says the burn is spent. Simulate the whole
+            // call first: only a message whose mint and hook both succeed is submitted.
+            // A deterministic hook failure parks the record (the burn is still unspent,
+            // so an operator can fix the hook and `/v2/reattest`); a transport failure
+            // retries without parking.
+            match crate::hook::simulate_relay(&chain.rpc, target, &record.message, &attestation)
+                .await
+            {
+                Ok((true, true, _)) => {}
+                Ok((relay_success, hook_success, data)) => {
+                    self.park(
+                        record.nonce,
+                        format!(
+                            "hook preflight refused: relaySuccess={relay_success}, hookSuccess={hook_success}, returnData=0x{} — the nonce was not consumed",
+                            alloy_primitives::hex::encode(&data)
+                        ),
+                    )?;
+                    return Ok(Relayed::No);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        nonce = %record.nonce,
+                        chain = chain.name,
+                        %error,
+                        "hook preflight failed — keeping the message for a later pass"
+                    );
+                    return Ok(Relayed::No);
+                }
+            }
             crate::hook::relay_calldata(&record.message, &attestation)
         };
         match self
