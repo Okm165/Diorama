@@ -27,7 +27,11 @@ const HOUR_MS: u64 = 3_600_000;
 /// position's boundaries settle before its size moves; the rate served at
 /// the accrual prices every boundary crossed since the last one (the sim
 /// keeps no per-boundary rate history — the gaps table names it).
-pub(crate) fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u64) -> Result<usize> {
+pub(crate) fn accrue_funding(
+    account: &mut Account,
+    feed: &MarketFeed,
+    to_ms: u64,
+) -> Result<usize> {
     if account.funded_at_ms == 0 {
         account.funded_at_ms = to_ms;
         return Ok(0);
@@ -56,7 +60,15 @@ pub(crate) fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u6
         let Some(rate) = feed.funding(coin) else {
             continue;
         };
-        let payment = mul(mul(mul(-p.szi, oracle, "funding notional")?, rate, "funding payment")?, Decimal::from(hours), "funding payment")?;
+        let payment = mul(
+            mul(
+                mul(-p.szi, oracle, "funding notional")?,
+                rate,
+                "funding payment",
+            )?,
+            Decimal::from(hours),
+            "funding payment",
+        )?;
         if payment.is_zero() {
             continue;
         }
@@ -72,8 +84,8 @@ pub(crate) fn accrue_funding(account: &mut Account, feed: &MarketFeed, to_ms: u6
 
 #[cfg(test)]
 mod tests {
-    use crate::sim::account::Position;
     use super::*;
+    use crate::sim::account::Position;
     use crate::sim::feed_with_funding;
     use crate::wire::LeverageType;
 

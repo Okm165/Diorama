@@ -31,13 +31,15 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-venue-engine:v1
+          image: localhost/diorama-venue-engine:v3
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
-          # The wiring the instance TOML references as ${...} (HL_RPC_URL,
+          # The wiring the instance TOML references as ${...} (HL_RPC_URLS,
           # ANVIL_V_URL, STATE_DIR) — the same `envFrom` mechanism as the
           # mainnet engine: the ConfigMap carries every key, the pod reads the
           # ones its instance names, and a new wiring var needs no edit here.
+          # `HL_RPC_URLS` is the engine's read pool; `HL_RPC_URL` is anvil V's
+          # single fork source.
           envFrom:
             - configMapRef: { name: diorama-config }
           ports:

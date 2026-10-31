@@ -33,7 +33,9 @@ const _: () = assert!(WORKER_STACK_SIZE >= 8 * 1024 * 1024);
 pub fn init_logging() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let json = std::env::var("DIORAMA_LOG_JSON").map(|v| v != "0").unwrap_or(false);
+    let json = std::env::var("DIORAMA_LOG_JSON")
+        .map(|v| v != "0")
+        .unwrap_or(false);
     if json {
         fmt().with_env_filter(filter).json().init();
     } else {
@@ -76,7 +78,11 @@ pub(crate) fn service_config(args: &[String]) -> Result<std::path::PathBuf, Stri
                 Some(path) => config = std::path::PathBuf::from(path),
                 None => return Err("usage: run [--config <path>] (--config needs a path)".into()),
             },
-            other => return Err(format!("usage: run [--config <path>] (unexpected {other:?})")),
+            other => {
+                return Err(format!(
+                    "usage: run [--config <path>] (unexpected {other:?})"
+                ))
+            }
         }
     }
     Ok(config)
@@ -200,7 +206,9 @@ mod tests {
         }
         impl StdError for Layer {
             fn source(&self) -> Option<&(dyn StdError + 'static)> {
-                self.0.as_ref().map(|b| b.as_ref() as &(dyn StdError + 'static))
+                self.0
+                    .as_ref()
+                    .map(|b| b.as_ref() as &(dyn StdError + 'static))
             }
         }
         // The chain walks without panicking; the print goes to stderr.

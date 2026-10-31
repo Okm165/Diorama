@@ -36,8 +36,8 @@ pub(crate) use http::admin_routes;
 use crate::feed::chainlink::{
     publish, read_answer, read_decimals, read_target_decimals, target_decimals,
 };
-use crate::feed::policy::{step, Step, ValueState};
 pub(crate) use crate::feed::metrics::FeedBridgeMetrics;
+use crate::feed::policy::{step, Step, ValueState};
 
 /// Who owns a feed's value: the bridge writes it from the source; a scenario
 /// owns it (the pause) until the hand-back.
@@ -187,13 +187,14 @@ impl FeedBridge {
     /// an unreachable *source* is a boot fault naming it (a silently
     /// mis-scaled price would poison every scenario).
     async fn feed_runtime(ctx: &Ctx, feed: &FeedSection) -> Result<FeedRuntime> {
-        let source = read_decimals(&ctx.reth, feed.source).await.map_err(|e| {
-            Error::FeedBridgeFeed {
-                feed: feed.name.clone(),
-                what: "source decimals",
-                source: Box::new(e),
-            }
-        })?;
+        let source =
+            read_decimals(&ctx.reth, feed.source)
+                .await
+                .map_err(|e| Error::FeedBridgeFeed {
+                    feed: feed.name.clone(),
+                    what: "source decimals",
+                    source: Box::new(e),
+                })?;
         let decimals = target_decimals(&ctx.anvil_t, feed, source).await?;
         Ok(FeedRuntime {
             section: feed.clone(),
@@ -211,11 +212,16 @@ impl FeedBridge {
             for feed in &self.feeds {
                 if let Err(e) = self.pass_one(&ctx, feed).await {
                     self.metrics.inc_pass_errors();
-                    *feed.last_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        Some(e.to_string());
+                    *feed
+                        .last_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(e.to_string());
                     tracing::warn!(feed = %feed.section.name, error = %e, "feed bridge pass failed; will retry");
                 } else {
-                    *feed.last_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    *feed
+                        .last_error
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 }
             }
             tokio::time::sleep(self.poll).await;
@@ -267,7 +273,10 @@ impl FeedBridge {
         self.feeds
             .iter()
             .map(|f| {
-                let values = *f.values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let values = *f
+                    .values
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 FeedStatus {
                     name: f.section.name.clone(),
                     target: format!("{:?}", f.section.target).to_lowercase(),
@@ -445,4 +454,3 @@ pub(crate) struct FeedStatus {
     /// The target's decimals; `None` while the target is not installed yet.
     pub decimals: Option<u8>,
 }
-

@@ -29,6 +29,9 @@ use std::time::Duration;
 pub struct ControlState {
     pub store: Arc<Store>,
     pub chains: Vec<Chain>,
+    /// The configured directed lanes. The control surface refuses a burn on a
+    /// pair no watcher serves: the burn would otherwise be unmintable.
+    pub(crate) lanes: Vec<crate::service::Lane>,
     pub sender: Arc<TxSender>,
     pub metrics: Arc<CctpMetrics>,
     /// The one relayer: the manual trigger drives it, the auto tick shares it
@@ -36,7 +39,7 @@ pub struct ControlState {
     pub relayer: Arc<Relayer>,
     /// The boot-probed min-fee surface per source domain (§15.2: absent on
     /// Ethereum, `0` on HyperEVM).
-    pub min_fees: BTreeMap<Domain, Option<U256>>,
+    pub min_fees: BTreeMap<(Domain, Domain), Option<U256>>,
     pub receipt_timeout: Duration,
 }
 
@@ -125,6 +128,7 @@ pub(crate) struct MessageSummary {
     pub source_domain: Domain,
     pub destination_domain: Domain,
     pub burn_tx: B256,
+    pub burn_log_index: u64,
     pub burn_block: u64,
     pub nonce: B256,
     pub state: RelayState,
@@ -141,6 +145,7 @@ impl MessageSummary {
             source_domain: record.source_domain,
             destination_domain: record.destination_domain,
             burn_tx: record.burn_tx,
+            burn_log_index: record.burn_log_index,
             burn_block: record.burn_block,
             nonce: record.nonce,
             state: record.state,
@@ -213,9 +218,9 @@ pub(crate) async fn relay(
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct TransferRequest {
-    /// The source CCTP domain (0 = T, 19 = V).
+    /// The source CCTP domain.
     pub source: Domain,
-    /// The destination CCTP domain (must be the other mirror).
+    /// The destination CCTP domain; the pair must be a configured lane.
     pub destination: Domain,
     /// Base units (100 USDC = 100_000_000).
     pub amount: U256,
@@ -367,7 +372,7 @@ pub(crate) async fn transfer(
         hook_data.as_ref(),
     );
     let hash = submit_burn(&state, chain, &calldata).await?;
-    let receipt = match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
+    let receipt = match wait_for_receipt(&chain.write_rpc, hash, state.receipt_timeout).await? {
         Some(receipt) if receipt.status() => BurnReceipt::Observed,
         Some(_) => {
             return Err(Error::TxReverted {
@@ -402,12 +407,33 @@ fn validate_request(state: &ControlState, request: &TransferRequest) -> Result<(
             "source and destination are the same domain",
         ));
     }
+    by_domain(&state.chains, request.source)?;
     by_domain(&state.chains, request.destination)?;
+    if !state
+        .lanes
+        .iter()
+        .any(|lane| lane.source == request.source && lane.destination == request.destination)
+    {
+        let configured = state
+            .lanes
+            .iter()
+            .map(|lane| format!("{}->{}", lane.source, lane.destination))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(Error::bad_request(format!(
+            "lane {}->{} is not configured; this bridge serves: {configured}",
+            request.source, request.destination
+        )));
+    }
     if request.amount.is_zero() {
         return Err(Error::bad_request("amount must be nonzero"));
     }
     validate_max_fee(
-        state.min_fees.get(&request.source).copied().flatten(),
+        state
+            .min_fees
+            .get(&(request.source, request.destination))
+            .copied()
+            .flatten(),
         request.amount,
         U256::ZERO,
     )
@@ -438,9 +464,9 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
     .abi_encode();
     let hash = state
         .sender
-        .send(&chain.rpc, chain.usdc, &approve, U256::ZERO)
+        .send(&chain.write_rpc, chain.usdc, &approve, U256::ZERO)
         .await?;
-    match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
+    match wait_for_receipt(&chain.write_rpc, hash, state.receipt_timeout).await? {
         Some(receipt) if receipt.status() => {}
         Some(_) => {
             return Err(Error::TxReverted {
@@ -463,7 +489,12 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
 async fn submit_burn(state: &ControlState, chain: &Chain, calldata: &Bytes) -> Result<B256> {
     let hash = state
         .sender
-        .send(&chain.rpc, chain.token_messenger, calldata, U256::ZERO)
+        .send(
+            &chain.write_rpc,
+            chain.token_messenger,
+            calldata,
+            U256::ZERO,
+        )
         .await?;
     tracing::info!(
         chain = chain.name,
@@ -487,6 +518,7 @@ mod tests {
             destination_domain: Domain(19),
             nonce: B256::repeat_byte(0xab),
             burn_tx: B256::repeat_byte(0xab),
+            burn_log_index: 0,
             burn_block: 5,
             raw_message: sample_raw_message(),
             message_hash: message.keccak(),

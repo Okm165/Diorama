@@ -17,7 +17,7 @@ metadata:
   name: cctp-bridge
   labels:
     app.kubernetes.io/name: cctp-bridge
-    app.kubernetes.io/part-of: devnet
+    app.kubernetes.io/part-of: diorama-cctp
 spec:
   replicas: 1
   strategy:
@@ -29,7 +29,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: cctp-bridge
-        app.kubernetes.io/part-of: devnet
+        app.kubernetes.io/part-of: diorama-cctp
     spec:
       terminationGracePeriodSeconds: 30
       containers:
@@ -37,13 +37,12 @@ spec:
           image: localhost/diorama-cctp-bridge:v1
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
-          # The same `envFrom` mechanism as the engines: the ConfigMap carries
-          # every wiring key (CCTP_STATE_DIR, ANVIL_V_URL, and T_RPC_URL — the
-          # Ethereum fork the bridge burns on: anvil-t lives in the
-          # diorama-mainnet namespace, so the bridge reaches it over
-          # cross-namespace service DNS).
+          # The bridge's own wiring ConfigMap (cctp-config), not the venue's:
+          # CCTP_STATE_DIR, T_RPC_URL and ANVIL_V_URL are all this process
+          # reads. T lives in the diorama-mainnet namespace, so the bridge
+          # reaches it over cross-namespace service DNS.
           envFrom:
-            - configMapRef: { name: diorama-config }
+            - configMapRef: { name: cctp-config }
           env:
             # The funded relay wallet's hex key: a Secret, never a manifest
             # literal (the instance reads it as ${CCTP_RELAY_KEY}); create it
@@ -94,7 +93,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: cctp-bridge
-  labels: { app.kubernetes.io/name: cctp-bridge, app.kubernetes.io/part-of: devnet }
+  labels: { app.kubernetes.io/name: cctp-bridge, app.kubernetes.io/part-of: diorama-cctp }
 spec:
   selector: { app.kubernetes.io/name: cctp-bridge }
   ports:

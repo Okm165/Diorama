@@ -11,7 +11,7 @@
 //! answered with the venue's `error` frame — never silence.
 use super::ApiState;
 use crate::feed::MarketFeed;
-use crate::wire::{AssetCtx, AllMids};
+use crate::wire::{AllMids, AssetCtx};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -76,7 +76,10 @@ pub(crate) struct SubscriptionAck {
 }
 
 /// `GET /ws` (upgrade): one session per subscriber.
-pub async fn ws(State(state): State<Arc<ApiState>>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
+pub async fn ws(
+    State(state): State<Arc<ApiState>>,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
     upgrade.on_upgrade(move |socket| session(state, socket))
 }
 
@@ -116,7 +119,11 @@ async fn session(state: Arc<ApiState>, mut socket: WebSocket) {
 fn request_reply(text: &str, subs: &mut Vec<Subscription>, feed: &MarketFeed) -> WsPush {
     let request = match serde_json::from_str::<WsRequest>(text) {
         Ok(request) => request,
-        Err(e) => return WsPush::Error { data: format!("unparsable request: {e}") },
+        Err(e) => {
+            return WsPush::Error {
+                data: format!("unparsable request: {e}"),
+            }
+        }
     };
     match request {
         WsRequest::Ping => WsPush::Pong,
@@ -127,11 +134,21 @@ fn request_reply(text: &str, subs: &mut Vec<Subscription>, feed: &MarketFeed) ->
             if !subs.contains(&subscription) {
                 subs.push(subscription.clone());
             }
-            WsPush::SubscriptionResponse { data: SubscriptionAck { method: "subscribe", subscription } }
+            WsPush::SubscriptionResponse {
+                data: SubscriptionAck {
+                    method: "subscribe",
+                    subscription,
+                },
+            }
         }
         WsRequest::Unsubscribe { subscription } => {
             subs.retain(|s| s != &subscription);
-            WsPush::SubscriptionResponse { data: SubscriptionAck { method: "unsubscribe", subscription } }
+            WsPush::SubscriptionResponse {
+                data: SubscriptionAck {
+                    method: "unsubscribe",
+                    subscription,
+                },
+            }
         }
     }
 }
@@ -152,9 +169,16 @@ fn unsupported(sub: &Subscription, feed: &MarketFeed) -> Result<(), String> {
 /// serialization fault on these plain shapes is a bug, named here.
 fn push_frame(sub: &Subscription, feed: &MarketFeed) -> Option<String> {
     let push = match sub {
-        Subscription::AllMids => WsPush::AllMids { data: AllMidsData { mids: feed.all_mids() } },
+        Subscription::AllMids => WsPush::AllMids {
+            data: AllMidsData {
+                mids: feed.all_mids(),
+            },
+        },
         Subscription::ActiveAssetCtx { coin } => WsPush::ActiveAssetCtx {
-            data: CtxData { coin: coin.clone(), ctx: crate::sim::account::ctx_of(feed, coin)? },
+            data: CtxData {
+                coin: coin.clone(),
+                ctx: crate::sim::account::ctx_of(feed, coin)?,
+            },
         },
     };
     match serde_json::to_string(&push) {
@@ -181,8 +205,17 @@ mod tests {
         feed.put_ctx("BTC".into(), test_ctx("100", "101"), 1);
         let ctx = crate::sim::account::ctx_of(&feed, "BTC").unwrap();
         let frames = vec![
-            WsPush::AllMids { data: AllMidsData { mids: feed.all_mids() } },
-            WsPush::ActiveAssetCtx { data: CtxData { coin: "BTC".into(), ctx } },
+            WsPush::AllMids {
+                data: AllMidsData {
+                    mids: feed.all_mids(),
+                },
+            },
+            WsPush::ActiveAssetCtx {
+                data: CtxData {
+                    coin: "BTC".into(),
+                    ctx,
+                },
+            },
             WsPush::Pong,
             WsPush::Error { data: "x".into() },
         ];
@@ -229,7 +262,10 @@ mod tests {
             &mut subs,
             &feed,
         );
-        assert!(matches!(error, WsPush::Error { .. }), "an unknown coin is refused");
+        assert!(
+            matches!(error, WsPush::Error { .. }),
+            "an unknown coin is refused"
+        );
 
         request_reply(
             r#"{"method":"unsubscribe","subscription":{"type":"allMids"}}"#,
@@ -237,7 +273,10 @@ mod tests {
             &feed,
         );
         assert!(subs.is_empty());
-        assert!(matches!(request_reply(r#"{"method":"ping"}"#, &mut subs, &feed), WsPush::Pong));
+        assert!(matches!(
+            request_reply(r#"{"method":"ping"}"#, &mut subs, &feed),
+            WsPush::Pong
+        ));
         assert!(matches!(
             request_reply("not json", &mut subs, &feed),
             WsPush::Error { .. }
@@ -252,10 +291,16 @@ mod tests {
     async fn ws_client_fills_its_cache_from_the_server() {
         let server_feed = Arc::new(MarketFeed::memory(vec!["BTC".into()]));
         server_feed.put_ctx("BTC".into(), test_ctx("100", "101"), 1);
-        let api = crate::feed::rest::RestClient::new("http://127.0.0.1:1").unwrap();
+        let api = crate::feed::rest::RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap();
         let state = Arc::new(
-            ApiState::new(server_feed, Arc::new(crate::sim::Sim::memory()), api, None, None)
-                .unwrap(),
+            ApiState::new(
+                server_feed,
+                Arc::new(crate::sim::Sim::memory()),
+                api,
+                None,
+                None,
+            )
+            .unwrap(),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -266,7 +311,13 @@ mod tests {
         });
 
         let client_feed = Arc::new(MarketFeed::memory(vec!["BTC".into()]));
-        let client = crate::feed::ws::WsClient::new(client_feed.clone(), format!("ws://{addr}/ws"));
+        let ws_pool = diorama_anvil::EndpointPool::new(
+            &[format!("ws://{addr}/ws")],
+            diorama_anvil::Scheme::Ws,
+            diorama_anvil::PoolPolicy::default(),
+        )
+        .unwrap();
+        let client = crate::feed::ws::WsClient::new(client_feed.clone(), ws_pool);
         let task = tokio::spawn(client.run());
         // 20 s: the server pushes on a 1 Hz tick; the budget only has to
         // outlast a loaded parallel test run (the same flake class as the
@@ -280,7 +331,10 @@ mod tests {
             }
             false
         };
-        assert!(filled, "the client's cache must fill from the server's pushes");
+        assert!(
+            filled,
+            "the client's cache must fill from the server's pushes"
+        );
         task.abort();
         server.abort();
     }

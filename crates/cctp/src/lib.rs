@@ -41,12 +41,12 @@ pub mod store;
 pub mod transfer;
 pub mod watcher;
 
-pub use error::{Error, Result};
-pub use service::main_entry;
 /// The alloy primitives the bridge's public surface exposes (addresses,
 /// amounts, hashes): the bin reads them from here, never from a second alloy
 /// dependency.
 use alloy_primitives::{Address, B256, U256};
+pub use error::{Error, Result};
+pub use service::main_entry;
 
 /// Wall-clock milliseconds: the PENDING window (`attest_after_ms`), receipt
 /// timestamps, and the Iris `lastUpdated` field all read one clock — the

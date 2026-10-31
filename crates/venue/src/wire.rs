@@ -18,11 +18,25 @@
 //! it may grow, so a consumer outside this crate must carry a default arm. Our
 //! own taxonomies (errors, config, persisted state) stay exhaustive — a new
 //! variant there *should* break every match at compile time.
-use alloy_primitives::Address;
 use crate::error::{Error, Result};
+use alloy_primitives::Address;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Serialize a [`Decimal`] the way the real venue does: at most 9 fractional
+/// digits (nano granularity), trailing zeros trimmed. The sim's `Decimal`
+/// arithmetic keeps wide scales (e.g. `45.9053659690`), and DALOC's
+/// `nanos_from_decimal_str` refuses any string with more than nine fraction
+/// digits — a formatting artifact must not read as a malformed venue response.
+pub(crate) mod decimal_nano {
+    use rust_decimal::Decimal;
+    use serde::Serializer;
+
+    pub fn serialize<S: Serializer>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.round_dp(9).normalize().to_string())
+    }
+}
 
 /// One `POST /info` request. Unknown types parse to [`InfoRequest::Unrouted`]
 /// (hl_mock answered them as unrouted; the handler keeps that contract).
@@ -158,9 +172,13 @@ impl InfoRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MarginSummary {
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub account_value: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub total_ntl_pos: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub total_raw_usd: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub total_margin_used: Decimal,
 }
 
@@ -176,16 +194,21 @@ pub(crate) struct Position {
     pub leverage: Leverage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liquidation_px: Option<Decimal>,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub margin_used: Decimal,
     /// `Option` on the *parse* side only: hl_mock's control patches omit it
     /// (`VenuePositionState.maxLeverage` is optional); the sim always serves it.
     #[serde(default)]
     pub max_leverage: u32,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub position_value: Decimal,
     /// Same: the control patch shape has no `returnOnEquity`; the sim serves it.
     #[serde(default)]
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub return_on_equity: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub szi: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub unrealized_pnl: Decimal,
     pub cum_funding: CumFunding,
 }
@@ -251,8 +274,11 @@ impl<'de> Deserialize<'de> for LeverageType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CumFunding {
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub all_time: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub since_open: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub since_change: Decimal,
 }
 
@@ -277,11 +303,19 @@ pub(crate) enum PositionKind {
 pub(crate) struct ClearinghouseState {
     pub margin_summary: MarginSummary,
     pub cross_margin_summary: MarginSummary,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub cross_maintenance_margin_used: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub withdrawable: Decimal,
     pub asset_positions: Vec<AssetPosition>,
     /// Milliseconds; the client's staleness gate is ≤6 s against this field.
     pub time: u64,
+    /// Whether **any** mark this account's figures were computed from is owned by the
+    /// scenario control plane (`crash`/`rally`/`set_price`). A control mark is a
+    /// simulation input, not a market observation: the consumer must not use it for a
+    /// verdict. The real venue never sends this field; the mirror does.
+    #[serde(default)]
+    pub control_owned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -302,11 +336,13 @@ pub(crate) struct SpotClearinghouseState {
 pub(crate) struct SpotBalance {
     pub coin: String,
     pub token: u32,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub hold: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub total: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub entry_ntl: Decimal,
 }
-
 
 /// `meta`: the perp universe + margin tables. daloc's operator reads
 /// `universe[].szDecimals` for the wire `sz` of unwind orders.
@@ -383,6 +419,7 @@ pub(crate) struct MarginTable {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MarginTier {
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub lower_bound: Decimal,
     pub max_leverage: u32,
 }
@@ -392,20 +429,35 @@ pub(crate) struct MarginTier {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssetCtx {
     /// The published hourly rate (⅛ of the 8 h rate).
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub funding: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub open_interest: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub prev_day_px: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub day_ntl_vlm: Decimal,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub premium: Option<Decimal>,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub oracle_px: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub mark_px: Decimal,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mid_px: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub impact_pxs: Option<[Decimal; 2]>,
     #[serde(default)]
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub day_base_vlm: Decimal,
+    /// Whether any input this ctx serves is scenario-owned: the mark/oracle
+    /// (`crash`/`rally`), the funding rate (`set_funding`), the book
+    /// (`set_book`) or the whole live plane (`stall`). The real venue has no
+    /// such field; it is a mirror extension so a consumer can refuse a
+    /// scenario as a market fact instead of inferring ownership from a price
+    /// divergence. Serialized only when true, so the live shape is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub control_owned: bool,
 }
 
 /// The tests' `AssetCtx` fixture (marks/oracle from the args; rate-free):
@@ -425,6 +477,7 @@ pub(crate) fn test_ctx(mark: &str, oracle: &str) -> AssetCtx {
         mid_px: None,
         impact_pxs: None,
         day_base_vlm: Decimal::ZERO,
+        control_owned: false,
     }
 }
 
@@ -484,7 +537,9 @@ pub(crate) struct L2Book {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Level {
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub px: Decimal,
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub sz: Decimal,
     pub n: u64,
 }
@@ -498,6 +553,7 @@ pub(crate) struct ActiveAssetData {
     pub leverage: Leverage,
     pub max_trade_szs: [Decimal; 2],
     pub available_to_trade: [Decimal; 2],
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub mark_px: Decimal,
 }
 
@@ -553,6 +609,7 @@ pub(crate) struct SpotToken {
     /// The deployer's trading-fee share (HIP-1 tokens); a decimal string on
     /// the wire (`"0.0"` on the live sample).
     #[serde(default)]
+    #[serde(serialize_with = "decimal_nano::serialize")]
     pub deployer_trading_fee_share: Decimal,
 }
 
@@ -666,7 +723,10 @@ mod tests {
         };
         let v = serde_json::to_value(&pair).unwrap();
         assert_eq!(v["isCanonical"], serde_json::json!(true));
-        assert!(v.get("is_canonical").is_none(), "the venue's key is camelCase");
+        assert!(
+            v.get("is_canonical").is_none(),
+            "the venue's key is camelCase"
+        );
         let back: SpotPair = serde_json::from_value(serde_json::json!({
             "tokens": [1, 0], "name": "PURR/USDC", "index": 0, "isCanonical": true
         }))
@@ -716,15 +776,26 @@ mod tests {
 
     #[test]
     fn requests_parse_by_tag() {
-        let r: InfoRequest =
-            serde_json::from_str(r#"{"type":"clearinghouseState","user":"0x0000000000000000000000000000000000000001"}"#)
-                .unwrap();
+        let r: InfoRequest = serde_json::from_str(
+            r#"{"type":"clearinghouseState","user":"0x0000000000000000000000000000000000000001"}"#,
+        )
+        .unwrap();
         assert!(matches!(r, InfoRequest::ClearinghouseState { .. }));
         assert_eq!(r.kind(), "clearinghouseState");
         assert_eq!(r.dex(), "");
-        let r: InfoRequest = serde_json::from_str(r#"{"type":"l2Book","coin":"BTC","nSigFigs":5}"#).unwrap();
-        assert!(matches!(r, InfoRequest::L2Book { n_sig_figs: Some(5), .. }));
-        let r: InfoRequest = serde_json::from_str(r#"{"type":"userFills","user":"0x0000000000000000000000000000000000000001"}"#).unwrap();
+        let r: InfoRequest =
+            serde_json::from_str(r#"{"type":"l2Book","coin":"BTC","nSigFigs":5}"#).unwrap();
+        assert!(matches!(
+            r,
+            InfoRequest::L2Book {
+                n_sig_figs: Some(5),
+                ..
+            }
+        ));
+        let r: InfoRequest = serde_json::from_str(
+            r#"{"type":"userFills","user":"0x0000000000000000000000000000000000000001"}"#,
+        )
+        .unwrap();
         assert_eq!(r, InfoRequest::Unrouted);
     }
 
@@ -779,7 +850,10 @@ mod tests {
         } else {
             p.position_value
         };
-        assert_eq!(s.margin_summary.account_value, s.margin_summary.total_raw_usd + signed);
+        assert_eq!(
+            s.margin_summary.account_value,
+            s.margin_summary.total_raw_usd + signed
+        );
         // and equivalently via the derived mark: szi·mark = signed value.
         let mark = p.position_value / p.szi.abs();
         assert_eq!(p.szi * mark, signed);
@@ -791,7 +865,10 @@ mod tests {
         );
         assert_eq!(s.withdrawable, s.cross_margin_summary.account_value);
         // rawUsd = marginUsed − positionValue (measured).
-        assert_eq!(p.leverage.raw_usd.unwrap(), p.margin_used - p.position_value);
+        assert_eq!(
+            p.leverage.raw_usd.unwrap(),
+            p.margin_used - p.position_value
+        );
         // Decimals round-trip as strings, never as JSON floats.
         let out = serde_json::to_string(&s).unwrap();
         assert!(out.contains("\"accountValue\":\"13109.482328\""), "{out}");
@@ -812,7 +889,14 @@ mod tests {
         }"#;
         let spot: SpotMeta = serde_json::from_str(raw).unwrap();
         assert_eq!(spot.tokens.len(), 2);
-        assert_eq!(spot.tokens[0].evm_contract.as_ref().unwrap().evm_extra_wei_decimals, -2);
+        assert_eq!(
+            spot.tokens[0]
+                .evm_contract
+                .as_ref()
+                .unwrap()
+                .evm_extra_wei_decimals,
+            -2
+        );
         assert!(spot.tokens[1].evm_contract.is_none());
         assert_eq!(spot.tokens[1].index, 1273);
         assert_eq!(spot.universe[0].tokens, [1, 0]);
@@ -823,11 +907,26 @@ mod tests {
     #[test]
     fn requests_omit_null_optionals() {
         let req = InfoRequest::MetaAndAssetCtxs { dex: None };
-        assert_eq!(serde_json::to_string(&req).unwrap(), r#"{"type":"metaAndAssetCtxs"}"#);
-        let req = InfoRequest::L2Book { coin: "BTC".into(), n_sig_figs: None, mantissa: None };
-        assert_eq!(serde_json::to_string(&req).unwrap(), r#"{"type":"l2Book","coin":"BTC"}"#);
-        let req = InfoRequest::Meta { dex: Some("xyz".into()) };
-        assert_eq!(serde_json::to_string(&req).unwrap(), r#"{"type":"meta","dex":"xyz"}"#);
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"type":"metaAndAssetCtxs"}"#
+        );
+        let req = InfoRequest::L2Book {
+            coin: "BTC".into(),
+            n_sig_figs: None,
+            mantissa: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"type":"l2Book","coin":"BTC"}"#
+        );
+        let req = InfoRequest::Meta {
+            dex: Some("xyz".into()),
+        };
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"type":"meta","dex":"xyz"}"#
+        );
     }
 }
 
@@ -1051,14 +1150,19 @@ impl OrderAction {
     /// through the live meta (unknown = a named refusal), size and limit are
     /// decimal strings; the tif decides what rests (the sim's `place` owns
     /// the semantics).
-    pub(crate) fn to_order(&self, meta: Option<&crate::wire::Meta>) -> Result<crate::sim::order::Order> {
+    pub(crate) fn to_order(
+        &self,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<crate::sim::order::Order> {
         let coin = meta
             .and_then(|m| m.universe.get(self.a as usize))
             .map(|a| a.name.clone())
-            .ok_or_else(|| Error::bad_request(format!(
+            .ok_or_else(|| {
+                Error::bad_request(format!(
                     "unknown asset index {} (the live meta has not landed, or is shorter)",
                     self.a
-                ),))?;
+                ))
+            })?;
         let size: Decimal = decimal_or_refuse("size", &self.s)?;
         let limit_px = match &self.p {
             Some(p) => Some(decimal_or_refuse("limit price", p)?),
@@ -1078,7 +1182,9 @@ impl OrderAction {
     }
 
     /// The order type: the venue's own shapes (`t.limit.tif` or `t.trigger`).
-    pub(crate) fn type_of(&self) -> Result<(crate::sim::order::Tif, Option<crate::sim::order::Trigger>)> {
+    pub(crate) fn type_of(
+        &self,
+    ) -> Result<(crate::sim::order::Tif, Option<crate::sim::order::Trigger>)> {
         let mut trigger = None;
         let tif = match &self.t {
             None => crate::sim::order::Tif::Ioc,
@@ -1106,9 +1212,8 @@ impl OrderAction {
                 // execution uses the order's limit price, or a market IOC).
                 crate::sim::order::Tif::Ioc
             }
-            Some(OrderType::Limit { tif }) => {
-                crate::sim::order::Tif::from_wire(tif).ok_or_else(|| Error::bad_request(format!("unknown tif `{tif}`"),))?
-            }
+            Some(OrderType::Limit { tif }) => crate::sim::order::Tif::from_wire(tif)
+                .ok_or_else(|| Error::bad_request(format!("unknown tif `{tif}`")))?,
         };
         Ok((tif, trigger))
     }
@@ -1180,7 +1285,10 @@ pub(crate) enum CancelStatus {
 pub(crate) struct SuccessStatus;
 
 impl serde::Serialize for SuccessStatus {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str("success")
     }
 }

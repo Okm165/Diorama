@@ -49,6 +49,12 @@ pub enum Error {
     #[error("the venue api answered {status}: {body}")]
     ApiStatus { status: u16, body: String },
 
+    /// The venue understood the request and refused it (a method-level 4xx).
+    /// Every endpoint would answer the same way, so this is the venue's
+    /// answer, never an endpoint fault to fail over.
+    #[error("the venue refused the request ({status}): {body}")]
+    ApiMethodRefusal { status: u16, body: String },
+
     /// Every venue API endpoint refused across every round. The last fault
     /// is kept as text so the error stays small; a throttled/gateway body is
     /// never surfaced as a successful read.

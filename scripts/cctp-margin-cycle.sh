@@ -30,7 +30,7 @@
 #   ./scripts/cctp-margin-cycle.sh
 set -euo pipefail
 
-NS="${NS:-diorama-venue}"
+NS="${NS:-diorama-cctp}"
 RELAY="${RELAY:-}"                                             # the bridge's wallet (the cycle's actor)
 TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}" # the V-side trader
 UNIFIED="${UNIFIED:-0x00000000000000000000000000000000000000ea}" # a unified-mode account

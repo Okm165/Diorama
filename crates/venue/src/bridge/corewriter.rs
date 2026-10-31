@@ -6,15 +6,19 @@
 //! contracts send (their paths: deposit/transfer/recall/addApiWallet/orders/
 //! cancels) into a typed enum; everything else is counted, never guessed at.
 //!
-//! Amounts are in *Core wei* (`weiDecimals` of the token, 8 for USDC); the
-//! bridge converts to the human decimal the sim keeps when it applies one.
+//! Amounts are in *Core wei* (`weiDecimals` of the token, 8 for USDC) — the
+//! `wei`-named fields (spot send, sendAsset). The one exception is action 7
+//! (`usdClassTransfer`), whose `ntl` is the *perp class's* USD (1e6 — see
+//! `system::PERP_USD_DECIMALS`); the bridge converts to the human decimal
+//! the sim keeps when it applies one.
 use crate::sim::Direction;
 use alloy_primitives::Address;
 use alloy_sol_types::{sol, SolCall, SolValue};
 use serde::{Deserialize, Serialize};
 
 /// The CoreWriter system contract.
-pub(crate) const CORE_WRITER: Address = alloy_primitives::address!("3333333333333333333333333333333333333333");
+pub(crate) const CORE_WRITER: Address =
+    alloy_primitives::address!("3333333333333333333333333333333333333333");
 
 sol! {
     /// The call wrapper (the docs' own example): a CoreWriter call's calldata
@@ -330,7 +334,9 @@ mod tests {
     #[test]
     fn add_api_wallet_decodes_the_dynamic_string() {
         let mut input = vec![0x01, 0x00, 0x00, 0x09];
-        input.extend_from_slice(&U256::from_be_bytes(Address::repeat_byte(0xbb).into_word().0).to_be_bytes::<32>());
+        input.extend_from_slice(
+            &U256::from_be_bytes(Address::repeat_byte(0xbb).into_word().0).to_be_bytes::<32>(),
+        );
         input.extend_from_slice(&U256::from(64u64).to_be_bytes::<32>()); // offset
         input.extend_from_slice(&U256::from(5u64).to_be_bytes::<32>()); // len
         let mut name = b"agent".to_vec();
@@ -373,6 +379,9 @@ mod tests {
         assert_eq!(decode(&[]), CoreAction::Malformed);
         assert_eq!(decode(&[0x02, 0, 0, 7]), CoreAction::Malformed);
         assert_eq!(decode(&[0x01, 0, 0, 7, 0, 0]), CoreAction::Malformed);
-        assert_eq!(decode(&[0x01, 0, 0, 0x11]), CoreAction::Unmodeled { id: 17 });
+        assert_eq!(
+            decode(&[0x01, 0, 0, 0x11]),
+            CoreAction::Unmodeled { id: 17 }
+        );
     }
 }

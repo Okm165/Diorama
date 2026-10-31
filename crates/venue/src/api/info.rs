@@ -32,7 +32,11 @@ const TRIGGER: &str = "Trigger";
 
 /// The wire's order-type name: a trigger rests as `Trigger`.
 fn order_type(r: &crate::sim::order::RestingOrder) -> &'static str {
-    if r.trigger.is_some() { TRIGGER } else { LIMIT }
+    if r.trigger.is_some() {
+        TRIGGER
+    } else {
+        LIMIT
+    }
 }
 
 pub async fn healthz(State(state): State<Arc<ApiState>>) -> Response {
@@ -57,12 +61,15 @@ pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> Response {
 pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
     // A malformed body is the caller's fault (400), not a server fault: the
     // verifier measured a 500 here, which reads as "the sim is broken".
-    let req: InfoRequest = serde_json::from_slice(&body).map_err(|source| Error::bad_request(format!("invalid info request: {source}"),))?;
+    let req: InfoRequest = serde_json::from_slice(&body)
+        .map_err(|source| Error::bad_request(format!("invalid info request: {source}")))?;
     match req {
         // hl_mock's contract for types it does not route.
         InfoRequest::Unrouted => Ok(Json("unrouted").into_response()),
         // ---- account-scoped: the sim's, or the venue's -------------------
-        InfoRequest::ClearinghouseState { user, dex } => clearinghouse(&state, body, user, dex).await,
+        InfoRequest::ClearinghouseState { user, dex } => {
+            clearinghouse(&state, body, user, dex).await
+        }
         InfoRequest::SpotClearinghouseState { user } => spot_state(&state, body, user).await,
         InfoRequest::UserAbstraction { user } => abstraction(&state, body, user).await,
         InfoRequest::OpenOrders { user, .. } => open_orders(&state, body, user).await,
@@ -85,7 +92,9 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         } => l2_book(&coin, n_sig_figs, mantissa, &state),
         InfoRequest::MarginTable { id } => margin_table(id, &state),
         InfoRequest::ExchangeStatus => exchange_status(&state),
-        InfoRequest::SpotMeta => Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response()),
+        InfoRequest::SpotMeta => {
+            Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response())
+        }
         InfoRequest::AllMids { .. } => Ok(Json(state.feed.all_mids()).into_response()),
     }
 }
@@ -100,7 +109,9 @@ async fn clearinghouse(
 ) -> Result<Response> {
     if !dex.as_deref().unwrap_or("").is_empty() {
         // The sim serves the first perp dex only (perpDexs = [null]).
-        return Ok(Json(empty_clearinghouse(state.sim.served_time(crate::now_ms())?)).into_response());
+        return Ok(
+            Json(empty_clearinghouse(state.sim.served_time(crate::now_ms())?)).into_response(),
+        );
     }
     match clearinghouse_of(state, user)? {
         Some(served) => Ok(Json(served).into_response()),
@@ -111,7 +122,7 @@ async fn clearinghouse(
 /// `spotClearinghouseState`: the unified reconciliation
 /// (`available + maintenance == balance`), or the venue's verbatim.
 async fn spot_state(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
-    state.sim.evaluate(&state.feed)?;
+    // Pure observation; the 1 Hz tick owns accrual and liquidation.
     simulated(state, &body, user, |account| {
         let meta = state.feed.meta();
         Ok(Json(crate::wire::SpotClearinghouseState {
@@ -189,7 +200,11 @@ fn trigger_condition(order: &crate::sim::order::RestingOrder) -> String {
                 crate::sim::order::Side::Buy => MARKET,
                 crate::sim::order::Side::Sell => LIMIT,
             };
-            format!("{kind} {dir} {}({})", if t.is_market { MARKET } else { LIMIT }, t.trigger_px)
+            format!(
+                "{kind} {dir} {}({})",
+                if t.is_market { MARKET } else { LIMIT },
+                t.trigger_px
+            )
         }
     }
 }
@@ -275,7 +290,9 @@ pub(crate) struct StatusOrder {
 pub(crate) enum OrderStatusResponse {
     /// Boxed: the order row dwarfs the unknown marker (clippy's large-variant
     /// rule; the enum rides every orderStatus response).
-    Order { order: Box<StatusOrder> },
+    Order {
+        order: Box<StatusOrder>,
+    },
     UnknownOid,
 }
 
@@ -354,17 +371,18 @@ fn terminal_status_label(status: crate::sim::order::TerminalStatus) -> &'static 
 
 /// `orderStatus`: open from the book, terminal from the history, else the
 /// docs' `unknownOid`.
-async fn order_status(state: &ApiState, body: Bytes, user: Address, oid: crate::wire::OidOrCloid) -> Result<Response> {
+async fn order_status(
+    state: &ApiState,
+    body: Bytes,
+    user: Address,
+    oid: crate::wire::OidOrCloid,
+) -> Result<Response> {
     if state.sim.account(user)?.is_none() {
         return pass_through(state, &body).await;
     }
     let found = match oid {
         crate::wire::OidOrCloid::Oid(o) => match state.sim.resting_by_oid(user, o)? {
-            Some(r) => Some((
-                status_inner(&r, r.sz.to_string()),
-                "open",
-                r.placed_ms,
-            )),
+            Some(r) => Some((status_inner(&r, r.sz.to_string()), "open", r.placed_ms)),
             None => state.sim.terminal_by_oid(user, o)?.map(|t| {
                 (
                     status_inner(&t.order, t.order.sz.to_string()),
@@ -458,15 +476,13 @@ fn book_params_ok(n_sig_figs: Option<u8>, mantissa: Option<u8>) -> Result<()> {
         }
     }
     match (n_sig_figs, mantissa) {
-        (None, Some(_)) => Err(Error::bad_request(
-            "mantissa requires nSigFigs = 5 (docs)",
-        )),
+        (None, Some(_)) => Err(Error::bad_request("mantissa requires nSigFigs = 5 (docs)")),
         (Some(5), Some(m)) if !matches!(m, 1 | 2 | 5) => Err(Error::bad_request(format!(
             "mantissa {m} is not in {{1,2,5}}"
         ))),
-        (Some(n), Some(_)) if n != 5 => Err(Error::bad_request(
-            "mantissa requires nSigFigs = 5 (docs)",
-        )),
+        (Some(n), Some(_)) if n != 5 => {
+            Err(Error::bad_request("mantissa requires nSigFigs = 5 (docs)"))
+        }
         _ => Ok(()),
     }
 }
@@ -475,7 +491,11 @@ fn book_params_ok(n_sig_figs: Option<u8>, mantissa: Option<u8>) -> Result<()> {
 /// is `mantissa × 10^(integer digits − n)`), levels at the same rounded price
 /// merge (sizes and counts sum, saturating — a merge never panics), and each
 /// side keeps its order (bids descending, asks ascending).
-fn aggregate_book(book: crate::wire::L2Book, n_sig_figs: Option<u8>, mantissa: u8) -> crate::wire::L2Book {
+fn aggregate_book(
+    book: crate::wire::L2Book,
+    n_sig_figs: Option<u8>,
+    mantissa: u8,
+) -> crate::wire::L2Book {
     let Some(n) = n_sig_figs else {
         return book;
     };
@@ -572,15 +592,33 @@ fn exchange_status(state: &ApiState) -> Result<Response> {
 /// The served `clearinghouseState` for a touched account: accrual *first*,
 /// then the read (the verifier caught the reverse order: the served figures
 /// lagged one accrual window behind the stored state).
-pub(crate) fn clearinghouse_of(state: &ApiState, address: Address) -> Result<Option<ClearinghouseState>> {
+pub(crate) fn clearinghouse_of(
+    state: &ApiState,
+    address: Address,
+) -> Result<Option<ClearinghouseState>> {
     let now = crate::now_ms();
     let served_time = state.sim.served_time(now)?;
-    state.sim.evaluate(&state.feed)?;
+    // A read is an observation, not a step: the 1 Hz account tick owns
+    // funding/liquidation. Running the automaton here made a read of an
+    // underwater account liquidate it, so two pollers could change the
+    // state they were sent to observe.
     let Some(account) = state.sim.account(address)? else {
         return Ok(None);
     };
     let meta = state.feed.meta();
-    let served = account::clearinghouse(&account, &state.feed, meta.as_ref(), served_time)?;
+    // The served `time` is the **oldest live mark** the account is priced
+    // from, not the read's clock. A stalled feed keeps its old mark; stamping
+    // the read's clock made that stale mark look fresh and passed the
+    // client's age gate. Scenario-owned coins are exempt (their stamp is the
+    // scenario's present, not a market observation).
+    let observation_time = account
+        .positions
+        .keys()
+        .filter(|coin| !state.feed.market_is_owned(coin))
+        .filter_map(|coin| state.feed.last_ctx_at(coin))
+        .min()
+        .map_or(served_time, |oldest| served_time.min(oldest));
+    let served = account::clearinghouse(&account, &state.feed, meta.as_ref(), observation_time)?;
     if !account::identity_holds(&served) {
         state
             .sim
@@ -618,7 +656,10 @@ async fn pass_through(state: &ApiState, body: &Bytes) -> Result<Response> {
     // 20; clearinghouseState/l2Book/allMids weigh 2) — the poller backs off
     // when test reads and its own polls add up. Not gated: refusing a caller's
     // read would look like a venue outage.
-    state.feed.budget.try_spend(crate::feed::budget::weight::HEAVY);
+    state
+        .feed
+        .budget
+        .try_spend(crate::feed::budget::weight::HEAVY);
     let resp = state.api.raw_info(body.to_vec()).await?;
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let bytes = resp.bytes().await?;
@@ -644,6 +685,7 @@ fn empty_clearinghouse(time: u64) -> ClearinghouseState {
         withdrawable: Decimal::ZERO,
         asset_positions: Vec::new(),
         time,
+        control_owned: false,
     }
 }
 
@@ -765,8 +807,10 @@ mod tests {
         assert_eq!(
             body,
             serde_json::json!({
+                // The wire serializer trims trailing zeros (nano
+                // granularity), so the measured "0.0" is served as "0".
                 "description": "",
-                "marginTiers": [{"lowerBound": "0.0", "maxLeverage": 1}]
+                "marginTiers": [{"lowerBound": "0", "maxLeverage": 1}]
             })
         );
     }

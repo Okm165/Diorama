@@ -11,11 +11,11 @@
 //! native BAL on reth, a synthesized one on the venue's polled state. The
 //! round trip is lossless and passes the spec crate's own structural
 //! validator (tested below).
+use crate::Write;
 use alloy_eips::eip7928::{
     AccountChanges, BalanceChange, BlockAccessIndex, BlockAccessList, CodeChange, NonceChange,
     SlotChanges, StorageChange,
 };
-use crate::Write;
 use std::collections::BTreeMap;
 
 /// Flatten a BAL into post-state writes (last change per key).
@@ -72,8 +72,7 @@ pub fn bal_from_writes(writes: &[Write]) -> BlockAccessList {
                 slot,
                 value,
             } => AccountChanges::with_capacity(*address, 1).with_storage_change(
-                SlotChanges::with_capacity(*slot, 1)
-                    .with_change(StorageChange::new(index, *value)),
+                SlotChanges::with_capacity(*slot, 1).with_change(StorageChange::new(index, *value)),
             ),
             Write::Balance { address, value } => AccountChanges::with_capacity(*address, 1)
                 .with_balance_change(BalanceChange::new(index, *value)),

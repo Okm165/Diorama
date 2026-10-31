@@ -191,6 +191,29 @@ change (the old image needs the old ConfigMap). `make mainnet-smoke` + `make mai
 are the gate; the anvil pods pick the offset up from the mounted instance file
 (`fork_offset` in `[chains.l1]`), so no env var carries it any more.
 
+### Endpoints and the project specialization
+
+Two files are mounted together at `/etc/mirror`: the generic `instance.toml`
+(deployment facts) and the gitignored `<project>.toml` named by
+`[instance].project` (the product's watchlist, fixture ownership, probes,
+closures, markets and endpoint groups). The tracked `<project>.example.toml`
+is the template; a fresh clone's `make config-check` falls back to it loudly,
+while a deployment mounts the real file. Moving product data into that overlay
+is what lets the same mirror code serve another project without a fork.
+
+Every URL list is a named `[endpoints.<name>]` group (`http` and `ws`), and a
+field references it as `@name`. The loader expands the reference before
+validation; the engine, simulator, bridge and `export-env` client block all
+read the same list. The shared `diorama-anvil::EndpointPool` rotates over it:
+a random healthy start per round, next-on-fault, exponential cooldown
+(1 s → 60 s), retry in a later round, and an all-cooling pool still tried.
+The venue REST client and websocket client use the same pool; writes use a
+single-endpoint client and a pooled client refuses them.
+
+The anvil pods still take one `--fork-url`; their entrypoints derive the
+primary as the first entry of the one `HL_RPC_URLS` list, so there is no
+second `HL_RPC_URL` definition to drift.
+
 ### Standing maintenance item: the Lighthouse pin
 
 The running pin is **Lighthouse v8.3.0**. The current patch is **v8.3.2**
@@ -801,7 +824,7 @@ chain stays static, and the harness's own `anvil_mine` calls are just extra
 
 ### The sim reset runbook
 
-`POST {sim_control}/control/reset` blanks **every simulated account** and bumps
+`POST {sim_control}/control/reset` with `{"confirm":"reset"}` blanks **every simulated account** and bumps
 the scenario epoch (the sim's own `venue_sim_epoch`). The chains keep their
 history, so a reset silently desyncs the pairing: a CCTP deposit already
 relayed into the sim is missing here while the bridge's cursor sits past it,
@@ -995,7 +1018,7 @@ this is the delta for the real lane only.
 **Revert to blank - `epoch_new` (one call, both halves).**
 
 ```bash
-curl -s -X POST localhost:31091/control/epoch_new
+curl -s -X POST localhost:31091/control/epoch_new -H 'content-type: application/json' -d '{"confirm":"epoch_new"}'
 ```
 
 The simulator resets (accounts + overrides, epoch +1) and the engine re-pins V

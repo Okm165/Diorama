@@ -166,7 +166,7 @@ spec:
             # are the dominant term). The request covers the measured peak;
             # the limit keeps a ~2.4x margin for fork materialization spikes.
             requests: { cpu: "100m", memory: 768Mi }
-            limits: { memory: 4Gi }
+            limits: { memory: 8Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-t-state }

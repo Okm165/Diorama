@@ -19,9 +19,9 @@ use diorama_devnet::cow::FilterStats;
 use diorama_devnet::drift::Drift;
 use diorama_devnet::facts::Fact;
 use diorama_devnet::journal::JournalEntry;
-use diorama_devnet::plane::ReapplyRange;
 use diorama_devnet::metrics::Registry as _;
 use diorama_devnet::plane::Plane;
+use diorama_devnet::plane::ReapplyRange;
 use diorama_devnet::spine::{ClockPolicy, MinePolicy};
 use parity::parity_step;
 use prepend::{prepend_and_mark, scan_own_blocks};
@@ -85,12 +85,7 @@ async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[Write]) -> Resul
 /// venue interaction. A scan that cannot complete keeps the marks already in
 /// memory and the walk retries from the last clean block: a named, bounded
 /// degradation.
-async fn journal_and_scan(
-    ctx: &Ctx,
-    n: u64,
-    entries: &[JournalEntry],
-    t_head: u64,
-) -> Result<()> {
+async fn journal_and_scan(ctx: &Ctx, n: u64, entries: &[JournalEntry], t_head: u64) -> Result<()> {
     ctx.plane.journal.record(n, entries)?;
     ctx.plane.journal.prune(n);
     if let Err(e) = scan_own_blocks(ctx, t_head).await {
@@ -144,7 +139,9 @@ async fn apply_entry(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result
     };
     let journaled = ctx.plane.journal.has_entry(n)?;
     if t_head >= n && journaled && reapply == Reapply::Forward {
-        return Ok(ApplyEntry::Late(late_completion(ctx, n, t_head, started).await?));
+        return Ok(ApplyEntry::Late(
+            late_completion(ctx, n, t_head, started).await?,
+        ));
     }
     if t_head + 1 < n {
         return Err(Error::ApplierBehind { t_head, n });
@@ -310,7 +307,10 @@ fn report_applied(plane: &Plane, n: u64, facts: &ApplyFacts, outcome: &ApplyOutc
 /// path's shared step: the block's hash is read from the chain and the
 /// cursor written through the spine's one cursor step.
 async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
-    let block = ctx.anvil_t.block_by_number(n, diorama_anvil::Txs::Hashes).await?;
+    let block = ctx
+        .anvil_t
+        .block_by_number(n, diorama_anvil::Txs::Hashes)
+        .await?;
     diorama_devnet::state::advance_cursor(&ctx.plane.state, &block, n)?;
     Ok(())
 }
@@ -320,15 +320,20 @@ async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
 fn record_apply_metrics(ctx: &Ctx, n: u64, facts: &ApplyFacts, duration_ms: u64) {
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.cursor, n);
     ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.blocks_applied);
-    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.bal_writes, facts.applied as u64);
-    ctx.plane
-        .metrics
-        .set(&ctx.mainnet_metrics.bal_filtered_out, facts.stats.not_watched as u64);
-    ctx.plane
-        .metrics
-        .set(&ctx.mainnet_metrics.bal_skipped_shadowed, facts.stats.skipped_shadowed as u64);
-    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.last_apply_ms, duration_ms);
-    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, facts.t_latest);
+    ctx.mainnet_metrics
+        .set(&ctx.mainnet_metrics.bal_writes, facts.applied as u64);
+    ctx.plane.metrics.set(
+        &ctx.mainnet_metrics.bal_filtered_out,
+        facts.stats.not_watched as u64,
+    );
+    ctx.plane.metrics.set(
+        &ctx.mainnet_metrics.bal_skipped_shadowed,
+        facts.stats.skipped_shadowed as u64,
+    );
+    ctx.mainnet_metrics
+        .set(&ctx.mainnet_metrics.last_apply_ms, duration_ms);
+    ctx.mainnet_metrics
+        .set(&ctx.mainnet_metrics.head, facts.t_latest);
 }
 
 /// Whether the apply is a drift-log candidate: a re-apply of a rewound
@@ -370,7 +375,11 @@ fn log_drift_if_anomalous(
 /// Late completion after a timeout: the writes are already in (the journal
 /// has the block). Cursor + metrics only.
 async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Result<ApplyOutcome> {
-    tracing::warn!(block = n, head = t_head, "diffs already applied; finalizing late completion");
+    tracing::warn!(
+        block = n,
+        head = t_head,
+        "diffs already applied; finalizing late completion"
+    );
     advance_cursor(ctx, n).await?;
     ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.blocks_applied);
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, t_head);
@@ -407,7 +416,10 @@ async fn align_context(ctx: &Ctx, header: &Header) -> Result<()> {
     let offset = ctx.plane.time_offset.load(Ordering::Relaxed);
     let last_ts = ctx
         .anvil_t
-        .block_by_number(ctx.anvil_t.block_number().await?, diorama_anvil::Txs::Hashes)
+        .block_by_number(
+            ctx.anvil_t.block_number().await?,
+            diorama_anvil::Txs::Hashes,
+        )
         .await?
         .header
         .timestamp;

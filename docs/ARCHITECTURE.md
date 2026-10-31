@@ -612,9 +612,9 @@ instance file (CI + boot gate).
 
 ```toml
 [instance] { name, namespace, profile }        # profile selects the shape
-[chains.l1] { kind = "ethereum", source_url = "${RETH_URL}", follow,
+[chains.l1] { kind = "ethereum", source_urls = "${RETH_URL}", follow,
               follow_margin_blocks, fork_offset }   # the offset's single home
-[chains.venue] { kind = "hyperliquid", source_url = "${HL_RPC_URL}",
+[chains.venue] { kind = "hyperliquid", source_urls = "${HL_RPC_URLS}",
               api_url, ws_url }                    # the venue profile's chain
 [services.engine] { state_dir = "${STATE_DIR}", fixture_addresses[] }
 [services.engine.anvil] { target_url = "${ANVIL_T_URL}" }
@@ -635,6 +635,30 @@ instance file (CI + boot gate).
               balance_low_wei, balance_critical_wei }   # + .iris/.control
 [watchlist] [ { address, note } ]   # all slots of a watched account sync to T
 ```
+
+### Source read pools
+
+`chains.l1.source_urls` and `chains.venue.source_urls` are **lists** of HTTP(S)
+JSON-RPC endpoints. The grammar accepts a single string, a TOML array, or one
+comma-separated `${VAR}` (the easy env form):
+
+```toml
+source_urls = "${RETH_URL}"                         # one endpoint
+source_urls = "${HL_RPC_URLS}"                      # one env var, comma-separated
+source_urls = ["${HL_RPC_1}", "${HL_RPC_2}"]        # explicit list
+```
+
+The first endpoint is the **primary**: anvil forks from it and `/admin/epoch`
+re-pins against it. The engine's source client is a **read pool**: every
+request starts at a random endpoint and, on a transport fault, a retryable
+JSON-RPC refusal (`-32005`/`-32603`), HTTP 429, or a 5xx non-answer, moves to
+the next endpoint in the rotated order; the first success wins. Writes never
+fan out: the target Anvil is built from one URL by the spine's
+`build_clients`. The shared implementation is `diorama_anvil::Rpc::with_urls`;
+both engines reach it through the same spine function, so the pool's policy
+cannot drift between them. The endpoint list is validated at the config
+boundary; an unresolved `${VAR}` is kept for the owning service's
+`require_resolved` pass, exactly like every other wiring value.
 
 **Watch list** (the declared closure): Chainlink feeds (WETH/WBTC/
 STETH/USDC/USDT-USD) **and their aggregators**, assets (USDC/USDT/WETH/WBTC/
@@ -932,22 +956,28 @@ one block per applied parent block, V's driver mines a non-empty pool
 | `venue_poll_uncovered_logs_total` | logs from contracts no closure covers (declare a closure to follow them) |
 | `venue_probe_ok_total` / `venue_probe_failures_total` / `venue_probe_skipped_total` / `venue_probe_last_failed` | the at-pin probes (skipped = a devnet-owned target, or a pin the source cannot serve) |
 
-**Profile-coherent config.** The instance file is the deployment's single home
-(`config/instances/{diorama-mainnet,diorama-venue}/instance.toml`, layered over
-`config/defaults.toml`). `[services.engine]` is the same key for both profiles -
-what differs is the profile's shape: `[services.engine.anvil]` carries
-`target_url` for both profiles (the check requires
-exactly the profile's set), and the venue's driver reads the shared
-`loops`/`journal`/`verifier` sub-sections, so the cadence, write chunk and
-journal ring live there once for both profiles. `profile = "mainnet"` requires
-`[chains.l1]` + `[services.engine]` and forbids `[chains.venue]` /
-`[services.venue_sim]`; `profile = "venue"` requires `[chains.venue]` +
-`[services.engine]` and forbids `[chains.l1]` - the loader prunes the other
-profile's chain and the venue's simulator from the defaults before merging
-(without that, a venue instance would inherit the ethereum stub and fail
-deserialization), and prunes optional services (the simulator, the bridge) when
-the instance file does not carry the section. Unknown keys are errors at every
-level (`deny_unknown_fields`).
+**Profile-coherent config.** One instance file is one process's deployment
+home (`config/instances/{diorama-mainnet,diorama-venue,diorama-cctp}/instance.toml`,
+layered over `config/defaults.toml` and the gitignored project overlay).
+`[services.engine]` is the same key for both mirror profiles - what differs is
+the profile's shape: `[services.engine.anvil]` carries `target_url` for both
+(the check requires exactly the profile's set), and the venue's driver reads
+the shared `loops`/`journal`/`verifier` sub-sections, so the cadence, write
+chunk and journal ring live there once for both. `profile = "mainnet"` requires
+`[chains.l1]` + `[services.engine]`; `profile = "venue"` requires
+`[chains.venue]` + `[services.engine]`; `profile = "cctp"` requires
+`[services.cctp_bridge]` and carries no chain, engine or simulator. Each
+profile forbids the other profiles' sections - the loader prunes the other
+profiles' defaults before merging (without that, a venue instance would
+inherit the ethereum stub and fail deserialization), and prunes the optional
+simulator when the instance file does not carry it. Unknown keys are errors at
+every level (`deny_unknown_fields`).
+
+**Composition is across instances, not inside one file.** A deployment that
+wants two venues, one mainnet and two bridges runs five processes, each with
+its own `instance.toml` (and optional project overlay), sharing the same spine
+crates. Nothing in the config assumes one mainnet or one venue; the overlay
+directory is the unit of deployment.
 
 ## The venue simulator
 
@@ -1058,8 +1088,8 @@ own clock — the COW overlay's split, by design.
 | `POST /control/set_funding` | `{coin, rate?}` | own the hourly rate (absent = hand back) |
 | `POST /control/set_account` | `{address, state}` | hl_mock-compatible seeding (`totalRawUsd` + positions); a **patch** in their shape's field names (`userAbstraction`, `spotBalances`; unnamed fields keep their value) |
 | `GET /control/state/{address}` | - | the account's control (fixture) view — the hl_mock-compatible patch shape; an untouched address answers hl_mock's default (mode `disabled`), never a 404 |
-| `POST /control/reset` | `{}` | blank the scenario (accounts + overrides), bump the epoch |
-| `POST /control/epoch_new` | `{}` | reset + re-pin V through the engine's `/admin/epoch` |
+| `POST /control/reset` | `{"confirm":"reset"}` | blank the scenario (accounts + overrides), bump the epoch; a bare `{}` is refused |
+| `POST /control/epoch_new` | `{"confirm":"epoch_new"}` | reset + re-pin V through the engine's `/admin/epoch`; a bare `{}` is refused |
 
 `epoch_new` is the one-call revert-to-blank: the engine call goes **first** (if
 the re-pin fails nothing has changed - a 502 means "retry the whole thing"), a

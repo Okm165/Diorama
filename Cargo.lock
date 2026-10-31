@@ -1537,6 +1537,7 @@ dependencies = [
  "alloy-sol-types",
  "axum",
  "chrono",
+ "clap",
  "diorama-anvil",
  "diorama-config",
  "k256",

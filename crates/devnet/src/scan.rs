@@ -171,7 +171,13 @@ pub fn publish(plane: &Plane, chain: &'static str, walk: &ScanWalk) {
 /// A fresh mark is *set*, never left at 0: the policy is the watermark's
 /// starting value, and leaving it unset would let the next scan re-run the
 /// policy against a moved head and skip blocks written in between.
-pub async fn scan_to(plane: &Plane, target: &Rpc, pin: u64, head: u64, first: u64) -> Result<ScanWalk> {
+pub async fn scan_to(
+    plane: &Plane,
+    target: &Rpc,
+    pin: u64,
+    head: u64,
+    first: u64,
+) -> Result<ScanWalk> {
     let mark = plane.shadow_scanned_upto.load(Ordering::Relaxed);
     let from = if mark == 0 {
         let from = scan_anchor(first, pin);
@@ -278,7 +284,9 @@ async fn mark_block(
 
 /// Read a block's hash (for cursor validation).
 pub async fn block_hash(rpc: &Rpc, n: u64) -> Result<Option<B256>> {
-    let b = rpc.block_by_number_opt(n, diorama_anvil::Txs::Hashes).await?;
+    let b = rpc
+        .block_by_number_opt(n, diorama_anvil::Txs::Hashes)
+        .await?;
     Ok(b.map(|b| b.header.hash))
 }
 
@@ -292,8 +300,16 @@ mod tests {
     /// own state, not this devnet's).
     #[test]
     fn scan_anchor_clamps_at_the_pin() {
-        assert_eq!(scan_anchor(0, 100), 100, "a fresh watermark starts at the pin");
-        assert_eq!(scan_anchor(90, 100), 100, "a cursor below the pin is lifted");
+        assert_eq!(
+            scan_anchor(0, 100),
+            100,
+            "a fresh watermark starts at the pin"
+        );
+        assert_eq!(
+            scan_anchor(90, 100),
+            100,
+            "a cursor below the pin is lifted"
+        );
         assert_eq!(scan_anchor(120, 100), 120, "a cursor above the pin is kept");
         assert_eq!(scan_anchor(7, 0), 7, "no pin: the watermark is the anchor");
     }

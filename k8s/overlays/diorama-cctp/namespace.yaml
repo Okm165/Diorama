@@ -1,0 +1,9 @@
+# The bridge's own namespace. A CCTP bridge is a first-class instance, not a
+# section of a mirror: it can run without the venue, the venue can run without
+# it, and a deployment may run several bridges in separate namespaces.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: diorama-cctp
+  labels:
+    app.kubernetes.io/part-of: diorama-cctp

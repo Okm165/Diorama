@@ -44,7 +44,8 @@ pub fn load<T: DeserializeOwned>(path: &Path, what: &'static str) -> Result<Opti
 /// Save a JSON state file atomically: [`save_bytes`] over the pretty-printed
 /// value. `what` names the state in the errors.
 pub fn save<T: Serialize>(path: &Path, value: &T, what: &'static str) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(value).map_err(|source| Error::Encode { what, source })?;
+    let bytes =
+        serde_json::to_vec_pretty(value).map_err(|source| Error::Encode { what, source })?;
     save_bytes(path, &bytes, what)
 }
 

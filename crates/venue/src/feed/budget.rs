@@ -42,7 +42,10 @@ impl Budget {
     }
 
     fn try_spend_at(&self, now: Instant, weight: u64) -> bool {
-        let mut spends = self.spends.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut spends = self
+            .spends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::evict(&mut spends, now);
         let used: u64 = spends.iter().map(|(_, w)| w).sum();
         if used + weight > CAPACITY {
@@ -53,7 +56,10 @@ impl Budget {
     }
 
     fn used_at(&self, now: Instant) -> u64 {
-        let mut spends = self.spends.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut spends = self
+            .spends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::evict(&mut spends, now);
         spends.iter().map(|(_, w)| w).sum()
     }

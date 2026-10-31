@@ -12,12 +12,7 @@
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::feed::FeedBridge;
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::post,
-    Json, Router,
-};
+use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use diorama_devnet::admin::TimeRequest;
 use diorama_devnet::engine::{Engine as _, SharedStatus};
 use serde::Serialize;
@@ -40,6 +35,10 @@ pub struct StatusResponse {
     lag: u64,
     watchlist: usize,
     time_offset_seconds: u64,
+    /// Every source endpoint the engine's read pool may use.
+    sources: Vec<String>,
+    /// The source pool's per-endpoint health at scrape time.
+    source_pool: Vec<diorama_anvil::EndpointSnapshot>,
 }
 
 /// The document's gathering: the shared fields from the shell, the rest from
@@ -58,6 +57,8 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
         lag: follow.saturating_sub(shared.cursor.unwrap_or(follow)),
         watchlist: ctx.mirror.scope().watch().accounts.len(),
         time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
+        sources: ctx.reth.urls().to_vec(),
+        source_pool: ctx.reth.pool().snapshot(),
         shared,
     })
 }

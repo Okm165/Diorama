@@ -69,7 +69,9 @@ pub enum Error {
     #[error("rewind {blocks} outside the applied range 1..={cursor}")]
     InvalidRewind { blocks: u64, cursor: u64 },
 
-    #[error("rewind {blocks} exceeds the journal ring ({keep} blocks): older before-values are pruned")]
+    #[error(
+        "rewind {blocks} exceeds the journal ring ({keep} blocks): older before-values are pruned"
+    )]
     RewindBeyondRing { blocks: u64, keep: u64 },
 
     #[error("invalid shadow request: {reason}")]
@@ -128,9 +130,15 @@ mod tests {
 
     #[test]
     fn shadow_scan_is_unavailable_not_a_bug() {
-        let e = Error::ShadowScan { block: 7, failed: 1 };
+        let e = Error::ShadowScan {
+            block: 7,
+            failed: 1,
+        };
         assert!(e.is_unavailable(), "a stuck scan is a retryable state");
-        assert!(!e.is_request_refusal(), "nothing about the request is wrong");
+        assert!(
+            !e.is_request_refusal(),
+            "nothing about the request is wrong"
+        );
         assert!(e.to_string().contains('7'), "{e}");
     }
 
@@ -141,7 +149,10 @@ mod tests {
             cursor: 10,
         };
         let rendered = e.to_string();
-        assert!(rendered.contains("50") && rendered.contains("10"), "{rendered}");
+        assert!(
+            rendered.contains("50") && rendered.contains("10"),
+            "{rendered}"
+        );
         assert!(Error::NoCursor.to_string().contains("cursor"));
         let rendered = Error::InvalidShadow {
             reason: "`all` requires `clear`",

@@ -10,8 +10,8 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_eth::Header;
 use diorama_devnet::bal::DiffKind;
 use diorama_devnet::closure::TouchedSet;
-use futures_util::future::BoxFuture;
 use diorama_devnet::source::{Capabilities, Capability, RawSource, Source};
+use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// What reth serves (measured): the native BAL rung, traces, a 10,064-block
@@ -53,7 +53,10 @@ impl RethSource {
     /// without block-level tracing).
     async fn trace_block_per_tx(&self, n: u64) -> diorama_anvil::Result<Vec<diorama_anvil::Write>> {
         use alloy_network_primitives::TransactionResponse as _;
-        let block = self.reth.block_by_number(n, diorama_anvil::Txs::Full).await?;
+        let block = self
+            .reth
+            .block_by_number(n, diorama_anvil::Txs::Full)
+            .await?;
         let mut out = Vec::new();
         for tx in diorama_devnet::scan::block_txs(&block) {
             let trace = self.reth.trace_tx_prestate(tx.tx_hash()).await?;
@@ -78,7 +81,11 @@ impl Source for RethSource {
         self.inner.header(n)
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
+    fn balance_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
         self.inner.balance_at(address, block)
     }
 
@@ -128,9 +135,9 @@ impl Source for RethSource {
             let header = self.header(n).await?;
             diorama_devnet::bal::verify_bal_commitment(header.inner.block_access_list_hash, &bal)
                 .map_err(|detail| diorama_anvil::Error::Corrupt {
-                    what: "block access list",
-                    detail: format!("block {n}: {detail}"),
-                })?;
+                what: "block access list",
+                detail: format!("block {n}: {detail}"),
+            })?;
             Ok(Some(bal))
         })
     }
@@ -179,7 +186,8 @@ mod tests {
     #[test]
     fn the_reth_source_declares_the_measured_capabilities() {
         let rpc = Arc::new(
-            diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
+            diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
+                .unwrap(),
         );
         let source = RethSource::new(rpc);
         assert_eq!(source.capabilities(), declared());

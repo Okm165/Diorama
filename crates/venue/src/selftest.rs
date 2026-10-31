@@ -9,7 +9,7 @@
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::follow;
-use diorama_config::Instance;
+use diorama_config::{ConfigError, Endpoints, Instance};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +26,9 @@ const MOVE_WAIT: Duration = Duration::from_secs(120);
 
 pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<Verdict> {
     let Targets { rpc, anvil } = targets;
+    let rpc = Endpoints::parse([rpc]).map_err(|detail| ConfigError::Invalid {
+        issues: vec![detail],
+    })?;
     let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil)?);
 
     // The engine's own boot: the chain assert, the capability audit, the
@@ -36,7 +39,7 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<Verdic
 
     diorama_devnet::engine::selftest_banner(
         "venue engine selftest",
-        &rpc,
+        rpc.primary(),
         &anvil,
         pin,
         &format!(

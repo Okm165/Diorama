@@ -131,9 +131,8 @@ pub(crate) struct BeaconClient {
 }
 
 impl BeaconClient {
-    /// Build the client. Fallible: the TLS backend's initialization can fail,
-    /// and a boundary that cannot be built is a boot error naming itself.
-    pub fn new(urls: &[String]) -> Result<Self, BeaconError> {
+    /// Build the client under the deployment's shared endpoint policy.
+    pub fn with_policy(urls: &[String], policy: PoolPolicy) -> Result<Self, BeaconError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             // Some public beacon APIs reject unknown user agents.
@@ -144,7 +143,7 @@ impl BeaconClient {
             None
         } else {
             Some(
-                EndpointPool::new(urls, Scheme::Http, PoolPolicy::default())
+                EndpointPool::new(urls, Scheme::Http, policy)
                     .map_err(|_| BeaconError::NotConfigured)?,
             )
         };

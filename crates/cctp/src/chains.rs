@@ -14,7 +14,7 @@ use crate::transfer::{probe_min_fee, IMessageTransmitterV2, ITokenMessengerV2, I
 use alloy_chains::Chain as ChainId;
 use alloy_primitives::{address, Address, B256, U256};
 use alloy_sol_types::SolCall;
-use diorama_anvil::Rpc;
+use diorama_anvil::{EndpointPool, EndpointSpec, PoolPolicy, Rpc, Scheme};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -89,7 +89,12 @@ pub struct Chain {
     pub domain: Domain,
     /// The chain id the boot assert pins (alloy's official newtype).
     pub chain_id: ChainId,
+    /// The read pool: random healthy start, failover, cooldown.
     pub rpc: Rpc,
+    /// The single writer. Every nonce/gas/estimate/send for this chain goes
+    /// here, so a write can never be replayed on a second provider and a
+    /// lagging pool member cannot hand a stale nonce to the signer.
+    pub write_rpc: Rpc,
     /// The burn/mint token on this domain.
     pub(crate) usdc: Address,
     /// The chain's TokenMessengerV2 (config fact, not a global constant).
@@ -116,12 +121,13 @@ impl std::fmt::Debug for Chain {
 
 impl Chain {
     /// T — Ethereum, domain 0 (the legacy two-chain spelling).
-    pub fn ethereum(url: &str, timeout: Duration) -> Result<Self> {
+    pub fn ethereum(url: &str, timeout: Duration, policy: PoolPolicy) -> Result<Self> {
         Ok(Self {
             name: "ethereum",
             domain: DOMAIN_ETHEREUM,
             chain_id: ChainId::from_id(CHAIN_ID_ETHEREUM),
-            rpc: Rpc::new(url, timeout)?,
+            rpc: Rpc::with_urls_and_policy(&[url.to_string()], timeout, policy)?,
+            write_rpc: Rpc::new(url, timeout)?,
             usdc: USDC_ETHEREUM,
             token_messenger: TOKEN_MESSENGER_V2,
             message_transmitter: MESSAGE_TRANSMITTER_V2,
@@ -131,12 +137,13 @@ impl Chain {
     }
 
     /// V — HyperEVM, domain 19 (the legacy two-chain spelling).
-    pub fn hyper_evm(url: &str, timeout: Duration) -> Result<Self> {
+    pub fn hyper_evm(url: &str, timeout: Duration, policy: PoolPolicy) -> Result<Self> {
         Ok(Self {
             name: "hyper_evm",
             domain: DOMAIN_HYPER_EVM,
             chain_id: ChainId::from_id(CHAIN_ID_HYPER_EVM),
-            rpc: Rpc::new(url, timeout)?,
+            rpc: Rpc::with_urls_and_policy(&[url.to_string()], timeout, policy)?,
+            write_rpc: Rpc::new(url, timeout)?,
             usdc: USDC_HYPER_EVM,
             token_messenger: TOKEN_MESSENGER_V2,
             message_transmitter: MESSAGE_TRANSMITTER_V2,
@@ -147,13 +154,30 @@ impl Chain {
 
     /// One chain from the composable `[[services.cctp_bridge.chains]]` entry.
     /// The RPC list is a pool: a slow or wrong-chain provider fails over at
-    /// boot (the wiring assert) instead of stalling the watcher.
-    pub fn from_config(chain: &diorama_config::CctpChain, timeout: Duration) -> Result<Self> {
+    /// boot (the wiring assert) instead of stalling the watcher. The pool's
+    /// round/cooldown budget is the instance's `[endpoint_defaults]`, the same
+    /// one both mirrors use.
+    pub fn from_config(
+        chain: &diorama_config::CctpChain,
+        timeout: Duration,
+        policy: PoolPolicy,
+        specs: Vec<EndpointSpec>,
+    ) -> Result<Self> {
+        // The endpoint group carries roles/chain id/weight; preserve them when
+        // the loader recovered the attribution, and fall back to a plain URL
+        // pool for an inline one-URL deployment.
+        let pool = if specs.is_empty() {
+            EndpointPool::new(chain.rpc_urls.as_slice(), Scheme::Http, policy)?
+        } else {
+            EndpointPool::from_specs(specs, Scheme::Http, policy)?
+        };
+        let writer_url = pool.primary().to_string();
         Ok(Self {
             name: Box::leak(chain.id.clone().into_boxed_str()),
             domain: Domain(chain.domain),
             chain_id: ChainId::from_id(chain.chain_id),
-            rpc: Rpc::with_urls(chain.rpc_urls.as_slice(), timeout)?,
+            rpc: Rpc::with_pool(pool, timeout)?,
+            write_rpc: Rpc::new(&writer_url, timeout)?,
             usdc: chain.usdc,
             token_messenger: chain.token_messenger,
             message_transmitter: chain.message_transmitter,
@@ -168,6 +192,11 @@ impl Chain {
     /// before the bridge will move value. The min-fee surface is probed, not
     /// assumed (it is revision-dependent, §15.2).
     pub async fn verify_wiring(&self, peer: &Chain) -> Result<Wiring> {
+        // Verify **every** read endpoint and the writer, not one random pool
+        // pick: a wrong-chain provider in a multi-URL list must fail boot by
+        // name, never serve a later read or write.
+        self.rpc.verify_chain(self.chain_id.id()).await?;
+        self.write_rpc.verify_chain(self.chain_id.id()).await?;
         let chain_id = ChainId::from_id(self.rpc.chain_id().await?);
         if chain_id != self.chain_id {
             return Err(self.wiring("chain id", chain_id, self.chain_id));
@@ -315,7 +344,7 @@ impl Chain {
     /// engine already runs on cheatcodes). The deployment's block producer
     /// mines nothing here; the balance is chain state, not a transaction.
     pub async fn fund_native(&self, who: Address, amount: U256) -> Result<()> {
-        self.rpc.anvil_set_balance(who, amount).await?;
+        self.write_rpc.anvil_set_balance(who, amount).await?;
         Ok(())
     }
 }
@@ -391,6 +420,7 @@ mod tests {
                 domain: DOMAIN_ETHEREUM,
                 chain_id: ChainId::from_id(CHAIN_ID_ETHEREUM),
                 rpc: Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+                write_rpc: Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
                 usdc: USDC_ETHEREUM,
                 token_messenger: TOKEN_MESSENGER_V2,
                 message_transmitter: MESSAGE_TRANSMITTER_V2,
@@ -402,6 +432,7 @@ mod tests {
                 domain: DOMAIN_HYPER_EVM,
                 chain_id: ChainId::from_id(CHAIN_ID_HYPER_EVM),
                 rpc: Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+                write_rpc: Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
                 usdc: USDC_HYPER_EVM,
                 token_messenger: TOKEN_MESSENGER_V2,
                 message_transmitter: MESSAGE_TRANSMITTER_V2,

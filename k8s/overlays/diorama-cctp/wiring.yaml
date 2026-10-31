@@ -1,0 +1,17 @@
+# The bridge's own wiring. It carries only what the bridge's instance names —
+# never the venue's keys. The two chain RPCs are deployment facts: a bridge
+# reaches the mirror Services cross-namespace, so a standalone bridge needs
+# both mirror namespaces reachable (or its own RPC providers).
+#
+# The endpoint lists themselves live in the instance file's [endpoints]
+# groups; these variables are the deployment values those groups reference.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cctp-config
+  labels:
+    app.kubernetes.io/part-of: diorama-cctp
+data:
+  CCTP_STATE_DIR: "/state"
+  T_RPC_URL: "http://anvil-t.diorama-mainnet.svc.cluster.local:8545"
+  ANVIL_V_URL: "http://anvil-v.diorama-venue.svc.cluster.local:8545"

@@ -14,3 +14,17 @@ spec:
     # control API.
     - { name: iris, port: 8095, targetPort: 8095, nodePort: 31095 }
     - { name: control, port: 8096, targetPort: 8096, nodePort: 31096 }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cctp-test-endpoints
+  labels:
+    app.kubernetes.io/part-of: diorama-cctp
+data:
+  # The bridge owns this URL: a venue without a bridge publishes no Iris
+  # endpoint. A client in another namespace reaches it by this in-cluster
+  # service DNS name (or the NodePort above from the host).
+  test-endpoints.env: |
+    IRIS_API_URL=http://cctp-bridge.diorama-cctp.svc.cluster.local:8095
+    CCTP_CONTROL_URL=http://localhost:31096

@@ -27,9 +27,9 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{keccak256, Address, Bytes, TxKind, B256, U256, U64};
 use alloy_rpc_types_eth::{Transaction, TransactionReceipt, TransactionRequest};
 use alloy_sol_types::{sol, SolCall};
+use diorama_anvil::Rpc;
 use k256::ecdsa::signature::hazmat::PrehashSigner;
 use k256::ecdsa::{RecoveryId, SigningKey};
-use diorama_anvil::Rpc;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -271,12 +271,24 @@ fn word_at(raw: &[u8], at: usize) -> B256 {
 pub(crate) fn measured_fees(source: u32, destination: u32) -> Option<[crate::iris::FeeEntry; 2]> {
     match (source, destination) {
         (0, 19) => Some([
-            crate::iris::FeeEntry { finality_threshold: 1000, minimum_fee: 1 },
-            crate::iris::FeeEntry { finality_threshold: 2000, minimum_fee: 0 },
+            crate::iris::FeeEntry {
+                finality_threshold: 1000,
+                minimum_fee: 1,
+            },
+            crate::iris::FeeEntry {
+                finality_threshold: 2000,
+                minimum_fee: 0,
+            },
         ]),
         (19, 0) => Some([
-            crate::iris::FeeEntry { finality_threshold: 1000, minimum_fee: 0 },
-            crate::iris::FeeEntry { finality_threshold: 2000, minimum_fee: 0 },
+            crate::iris::FeeEntry {
+                finality_threshold: 1000,
+                minimum_fee: 0,
+            },
+            crate::iris::FeeEntry {
+                finality_threshold: 2000,
+                minimum_fee: 0,
+            },
         ]),
         _ => None,
     }
@@ -303,7 +315,9 @@ pub(crate) fn receive_message_calldata(message: &Bytes, attestation: &Bytes) -> 
 /// relay path must check this rather than trust a status (measured
 /// 2026-10-23: a stale wrapper made a hook relay land as a no-op).
 pub(crate) async fn has_code(rpc: &Rpc, address: Address) -> Result<bool> {
-    let code: Bytes = rpc.call("eth_getCode", (address, diorama_anvil::LATEST)).await?;
+    let code: Bytes = rpc
+        .call("eth_getCode", (address, diorama_anvil::LATEST))
+        .await?;
     Ok(!code.is_empty())
 }
 
@@ -361,7 +375,9 @@ pub(crate) fn validate_max_fee(min_fee: Option<U256>, amount: U256, max_fee: U25
 /// defined for `amount > 1` (its `getMinFeeAmount` guard).
 pub(crate) fn required_min_fee(amount: U256, min_fee: U256) -> Result<U256> {
     if amount <= U256::ONE {
-        return Err(Error::bad_request(format!("amount {amount} must be greater than 1 when minFee {min_fee} is nonzero"),));
+        return Err(Error::bad_request(format!(
+            "amount {amount} must be greater than 1 when minFee {min_fee} is nonzero"
+        )));
     }
     let fee = amount.saturating_mul(min_fee) / U256::from(MIN_FEE_MULTIPLIER);
     Ok(if fee.is_zero() { U256::ONE } else { fee })
@@ -494,7 +510,10 @@ impl TxSender {
         let _submitting = self.send_lock.lock().await;
         let chain_id = rpc.chain_id().await?;
         let nonce: U64 = rpc
-            .call("eth_getTransactionCount", (self.wallet.address(), "pending"))
+            .call(
+                "eth_getTransactionCount",
+                (self.wallet.address(), "pending"),
+            )
             .await?;
         let gas_limit = self.estimate_gas(rpc, to, input, value).await?;
         let gas_price: U256 = rpc.call("eth_gasPrice", NO_PARAMS).await?;
@@ -634,7 +653,10 @@ mod tests {
             IMessageTransmitterV2::receiveMessageCall::SELECTOR,
             [0x57, 0xec, 0xfd, 0x28]
         );
-        assert_eq!(ITokenMessengerV2::minFeeCall::SELECTOR, [0x24, 0xec, 0x75, 0x90]);
+        assert_eq!(
+            ITokenMessengerV2::minFeeCall::SELECTOR,
+            [0x24, 0xec, 0x75, 0x90]
+        );
         assert_eq!(
             ITokenMessengerV2::getMinFeeAmountCall::SELECTOR,
             [0x51, 0x69, 0x90, 0xe3]
@@ -669,6 +691,7 @@ mod tests {
 
     /// The header and body fields land on the contract's own indices.
     #[test]
+    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     fn encode_decode_round_trip_lands_on_the_contracts_index_table() {
         let raw = sample_raw_message();
         assert_eq!(raw.len(), HEADER_LEN + BURN_BODY_LEN, "376 bytes, measured");
@@ -683,18 +706,48 @@ mod tests {
         assert_eq!(message.body.amount, U256::from(100_000_000u64));
         assert_eq!(message.body.hook_data.len(), 0);
         // The raw offsets, byte for byte.
-        assert_eq!(&raw[HEADER_VERSION_AT..HEADER_VERSION_AT + 4], &[0, 0, 0, 1]);
-        assert_eq!(&raw[HEADER_SOURCE_DOMAIN_AT..HEADER_SOURCE_DOMAIN_AT + 4], &[0, 0, 0, 0]);
-        assert_eq!(&raw[HEADER_DESTINATION_DOMAIN_AT..HEADER_DESTINATION_DOMAIN_AT + 4], &[0, 0, 0, 19]);
+        assert_eq!(
+            &raw[HEADER_VERSION_AT..HEADER_VERSION_AT + 4],
+            &[0, 0, 0, 1]
+        );
+        assert_eq!(
+            &raw[HEADER_SOURCE_DOMAIN_AT..HEADER_SOURCE_DOMAIN_AT + 4],
+            &[0, 0, 0, 0]
+        );
+        assert_eq!(
+            &raw[HEADER_DESTINATION_DOMAIN_AT..HEADER_DESTINATION_DOMAIN_AT + 4],
+            &[0, 0, 0, 19]
+        );
         assert_eq!(word_at(&raw, HEADER_NONCE_AT), B256::ZERO);
-        assert_eq!(word_at(&raw, HEADER_SENDER_AT), Address::repeat_byte(0x11).into_word());
+        assert_eq!(
+            word_at(&raw, HEADER_SENDER_AT),
+            Address::repeat_byte(0x11).into_word()
+        );
         assert_eq!(word_at(&raw, HEADER_DESTINATION_CALLER_AT), B256::ZERO);
-        assert_eq!(&raw[HEADER_MIN_FINALITY_THRESHOLD_AT..HEADER_MIN_FINALITY_THRESHOLD_AT + 4], &[0, 0, 0x07, 0xd0]);
-        assert_eq!(word_at(&raw[HEADER_LEN..], BODY_BURN_TOKEN_AT), USDC_ETHEREUM.into_word());
-        assert_eq!(word_at(&raw[HEADER_LEN..], BODY_MINT_RECIPIENT_AT), Address::repeat_byte(0x22).into_word());
-        assert_eq!(word_at(&raw[HEADER_LEN..], BODY_MESSAGE_SENDER_AT), Address::repeat_byte(0x11).into_word());
-        assert_eq!(word_at(&raw[HEADER_LEN..], BODY_FEE_EXECUTED_AT), B256::ZERO);
-        assert_eq!(word_at(&raw[HEADER_LEN..], BODY_EXPIRATION_BLOCK_AT), B256::ZERO);
+        assert_eq!(
+            &raw[HEADER_MIN_FINALITY_THRESHOLD_AT..HEADER_MIN_FINALITY_THRESHOLD_AT + 4],
+            &[0, 0, 0x07, 0xd0]
+        );
+        assert_eq!(
+            word_at(&raw[HEADER_LEN..], BODY_BURN_TOKEN_AT),
+            USDC_ETHEREUM.into_word()
+        );
+        assert_eq!(
+            word_at(&raw[HEADER_LEN..], BODY_MINT_RECIPIENT_AT),
+            Address::repeat_byte(0x22).into_word()
+        );
+        assert_eq!(
+            word_at(&raw[HEADER_LEN..], BODY_MESSAGE_SENDER_AT),
+            Address::repeat_byte(0x11).into_word()
+        );
+        assert_eq!(
+            word_at(&raw[HEADER_LEN..], BODY_FEE_EXECUTED_AT),
+            B256::ZERO
+        );
+        assert_eq!(
+            word_at(&raw[HEADER_LEN..], BODY_EXPIRATION_BLOCK_AT),
+            B256::ZERO
+        );
     }
 
     /// The reverse direction's body carries the HyperEVM burn token.
@@ -718,7 +771,11 @@ mod tests {
         assert_ne!(served.encode(), raw);
         let bytes = served.encode();
         assert_eq!(word_at(&bytes, HEADER_NONCE_AT), nonce);
-        assert_eq!(&bytes[HEADER_FINALITY_THRESHOLD_EXECUTED_AT..HEADER_FINALITY_THRESHOLD_EXECUTED_AT + 4], &[0, 0, 0x07, 0xd0]);
+        assert_eq!(
+            &bytes
+                [HEADER_FINALITY_THRESHOLD_EXECUTED_AT..HEADER_FINALITY_THRESHOLD_EXECUTED_AT + 4],
+            &[0, 0, 0x07, 0xd0]
+        );
         assert_eq!(
             word_at(&bytes[HEADER_LEN..], BODY_EXPIRATION_BLOCK_AT),
             B256::from(U256::from(123u64))
@@ -783,7 +840,10 @@ mod tests {
             required_min_fee(U256::from(2u64), U256::from(1u64)).unwrap(),
             U256::ONE
         );
-        assert!(required_min_fee(U256::ONE, U256::ONE).is_err(), "amount > 1 required");
+        assert!(
+            required_min_fee(U256::ONE, U256::ONE).is_err(),
+            "amount > 1 required"
+        );
     }
 
     /// The decode guard names the numbers instead of misreading fields.
@@ -835,7 +895,10 @@ mod tests {
         let decoded = ITokenMessengerV2::depositForBurnCall::abi_decode(&calldata).unwrap();
         assert_eq!(decoded.amount, U256::from(100_000_000u64));
         assert_eq!(decoded.destinationDomain, 19);
-        assert_eq!(decoded.mintRecipient, Address::repeat_byte(0x22).into_word());
+        assert_eq!(
+            decoded.mintRecipient,
+            Address::repeat_byte(0x22).into_word()
+        );
         assert_eq!(decoded.burnToken, USDC_ETHEREUM);
         assert_eq!(decoded.maxFee, U256::ZERO);
         assert_eq!(decoded.minFinalityThreshold, 2000);
@@ -852,15 +915,27 @@ mod tests {
         assert_eq!(
             measured_fees(0, 19),
             Some([
-                crate::iris::FeeEntry { finality_threshold: 1000, minimum_fee: 1 },
-                crate::iris::FeeEntry { finality_threshold: 2000, minimum_fee: 0 },
+                crate::iris::FeeEntry {
+                    finality_threshold: 1000,
+                    minimum_fee: 1
+                },
+                crate::iris::FeeEntry {
+                    finality_threshold: 2000,
+                    minimum_fee: 0
+                },
             ])
         );
         assert_eq!(
             measured_fees(19, 0),
             Some([
-                crate::iris::FeeEntry { finality_threshold: 1000, minimum_fee: 0 },
-                crate::iris::FeeEntry { finality_threshold: 2000, minimum_fee: 0 },
+                crate::iris::FeeEntry {
+                    finality_threshold: 1000,
+                    minimum_fee: 0
+                },
+                crate::iris::FeeEntry {
+                    finality_threshold: 2000,
+                    minimum_fee: 0
+                },
             ])
         );
         assert_eq!(measured_fees(0, 0), None);

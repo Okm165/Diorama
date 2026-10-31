@@ -86,7 +86,7 @@ pub async fn deal(
         req.token,
         slot.idx,
     )
-        .await?;
+    .await?;
     if let Err(refused) = write_slot(surface.target, surface.chunk_size, &write, &slot.hex).await {
         return Ok(refused);
     }

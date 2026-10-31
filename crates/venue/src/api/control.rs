@@ -10,7 +10,7 @@ use crate::feed::PriceOverride;
 use crate::sim::account::Account;
 use crate::sim::seed::{control_view, AccountSeed};
 use crate::sim::DealClass;
-use crate::wire::{ClearinghouseState, Level, L2Book, SpotBalance, UserAbstraction};
+use crate::wire::{ClearinghouseState, L2Book, Level, SpotBalance, UserAbstraction};
 use alloy_primitives::Address;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
@@ -43,6 +43,13 @@ fn require_tracked(feed: &crate::feed::MarketFeed, coin: &str) -> Result<()> {
 pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
     let mut out = state.sim.metrics.render();
     out.push_str(&state.feed.metrics.render());
+    // The endpoint pools' own health, one series per configured endpoint.
+    // Without this a pool can be cooling every endpoint while the aggregate
+    // feed counters still look plausible; the label names the URL that failed.
+    render_pool(&mut out, "venue_rest", state.api.pool());
+    if let Some(pool) = &state.ws_pool {
+        render_pool(&mut out, "venue_ws", pool);
+    }
     // Computed at scrape time from the overrides themselves: an owned-count
     // gauge maintained by hand would drift the first time a mutation site
     // forgot it (`venue_feed_overrides`).
@@ -57,6 +64,42 @@ pub async fn metrics(State(state): State<Arc<ApiState>>) -> String {
         out.push_str(&bridge.render());
     }
     out
+}
+
+/// One pool's per-endpoint health. `healthy` is the pool's own admission
+/// decision at scrape time; `failures` is the current exponential-backoff
+/// level; `last_ok_ms` is the last success (0 = never).
+fn render_pool(out: &mut String, prefix: &str, pool: &diorama_anvil::EndpointPool) {
+    let now = diorama_anvil::now_ms();
+    for (index, endpoint) in pool.snapshot().iter().enumerate() {
+        let url = pool.url(index);
+        let labels = &[("endpoint", url)][..];
+        let healthy = u64::from(endpoint.down_until_ms <= now);
+        let healthy_name = format!("{prefix}_endpoint_healthy");
+        let failures_name = format!("{prefix}_endpoint_failures");
+        let last_ok_name = format!("{prefix}_endpoint_last_ok_ms");
+        diorama_devnet::metrics::push_gauge(
+            out,
+            &healthy_name,
+            "endpoint is currently admitted by the pool",
+            labels,
+            healthy,
+        );
+        diorama_devnet::metrics::push_gauge(
+            out,
+            &failures_name,
+            "current consecutive failure level (exponential backoff)",
+            labels,
+            u64::from(endpoint.failures),
+        );
+        diorama_devnet::metrics::push_gauge(
+            out,
+            &last_ok_name,
+            "unix milliseconds of the last successful answer (0 = never)",
+            labels,
+            endpoint.last_ok_ms,
+        );
+    }
 }
 
 // ---- deal ----------------------------------------------------------------
@@ -90,7 +133,10 @@ pub(crate) struct DealResponse {
     pub balance_after: Decimal,
 }
 
-pub(crate) async fn deal(State(state): State<Arc<ApiState>>, Json(req): Json<DealRequest>) -> Result<Json<DealResponse>> {
+pub(crate) async fn deal(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<DealRequest>,
+) -> Result<Json<DealResponse>> {
     let after = state.sim.deal(&state.feed, &req.clone().into())?;
     tracing::info!(address = %req.address, class = ?req.class, amount = %req.amount, after = %after, "sim deal");
     Ok(Json(DealResponse {
@@ -155,7 +201,10 @@ pub(crate) struct OrderResponse {
     pub fill: crate::sim::order::Fill,
 }
 
-pub(crate) async fn order(State(state): State<Arc<ApiState>>, Json(req): Json<OrderRequest>) -> Result<Json<OrderResponse>> {
+pub(crate) async fn order(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<OrderRequest>,
+) -> Result<Json<OrderResponse>> {
     let address = req.address;
     let order: crate::sim::order::Order = req.into();
     let fill = state.sim.order(&state.feed, address, &order)?;
@@ -313,9 +362,16 @@ pub(crate) struct StallResponse {
     pub stalled_until_ms: u64,
 }
 
-pub(crate) async fn stall(State(state): State<Arc<ApiState>>, Json(req): Json<StallRequest>) -> Result<Json<StallResponse>> {
+pub(crate) async fn stall(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<StallRequest>,
+) -> Result<Json<StallResponse>> {
     let until = state.feed.stall(req.seconds);
-    tracing::info!(seconds = req.seconds, stalled_until_ms = until, "live market plane stall set");
+    tracing::info!(
+        seconds = req.seconds,
+        stalled_until_ms = until,
+        "live market plane stall set"
+    );
     Ok(Json(StallResponse {
         stalled_until_ms: until,
     }))
@@ -371,7 +427,25 @@ fn move_price(
                 oracle: moved,
             };
             feed.own_price(&req.coin, price)?;
-            tracing::warn!(coin = %req.coin, pct = %pct, mark = %moved, move = dir.verb(), "sim price move: mark and oracle owned");
+            // A price move owns the **whole perp market**, not only the
+            // mark/oracle. The liquidation lane closes a position against the
+            // book, so leaving the book at the old price let a 55% rally
+            // liquidate a short at the pre-shock price: the account value was
+            // unchanged and the product saw a vanished hedge with intact cash
+            // (measured 2026-10-29, the `0xde2c` 55% rally). Shift every level
+            // by the same mark ratio, preserving the book's own basis to the
+            // mark; `basis-widen`/`basis-tighten` remain the book-only moves.
+            if let Some(mut book) = feed.book(&req.coin, crate::now_ms()) {
+                let ratio = moved / mark;
+                for side in &mut book.levels {
+                    for level in side {
+                        level.px *= ratio;
+                    }
+                }
+                book.time = crate::now_ms();
+                feed.own_book(&book)?;
+            }
+            tracing::warn!(coin = %req.coin, pct = %pct, mark = %moved, move = dir.verb(), "sim price move: mark, oracle and book owned");
             Ok(PriceMoveResponse {
                 coin: req.coin,
                 owned: true,
@@ -414,7 +488,18 @@ pub(crate) async fn set_funding(
         }
         Some(rate) => {
             require_tracked(&state.feed, &req.coin)?;
+            // The venue's published rate is clamped to ±4 %/h. A scenario
+            // outside that band is not a market state the real venue can
+            // produce; admitting it would let a stress test price a risk the
+            // venue itself cannot reach.
+            let cap = Decimal::new(4, 2);
+            if rate.abs() > cap {
+                return Err(Error::bad_request(format!(
+                    "funding rate {rate} is outside the venue's ±4 %/h band"
+                )));
+            }
             state.feed.own_funding(&req.coin, rate)?;
+            tracing::info!(coin = %req.coin, rate = %rate, "control: funding override");
             Ok(Json(SetFundingResponse {
                 coin: req.coin,
                 owned: true,
@@ -458,7 +543,10 @@ pub(crate) async fn set_book(
             require_tracked(&state.feed, &req.coin)?;
             for side in &levels {
                 if side.len() > 20 {
-                    return Err(Error::bad_request(format!("l2Book serves ≤20 levels per side (got {})", side.len()),));
+                    return Err(Error::bad_request(format!(
+                        "l2Book serves ≤20 levels per side (got {})",
+                        side.len()
+                    )));
                 }
             }
             let book = L2Book {
@@ -499,16 +587,13 @@ pub struct StateResponse {
 
 impl StateResponse {
     fn of(state: &ApiState, address: Address) -> Result<Self> {
-        let clearinghouse = super::info::clearinghouse_of(state, address)?
-            .ok_or_else(|| Error::NotFound {
+        let clearinghouse =
+            super::info::clearinghouse_of(state, address)?.ok_or_else(|| Error::NotFound {
                 what: format!("{address} is not a simulated account"),
             })?;
-        let account = state
-            .sim
-            .account(address)?
-            .ok_or_else(|| Error::NotFound {
-                what: format!("{address} is not a simulated account"),
-            })?;
+        let account = state.sim.account(address)?.ok_or_else(|| Error::NotFound {
+            what: format!("{address} is not a simulated account"),
+        })?;
         Ok(Self {
             clearinghouse,
             balances: crate::sim::account::spot_balances(&account),
@@ -523,6 +608,65 @@ pub(crate) async fn set_account(
 ) -> Result<Json<StateResponse>> {
     state.sim.set_account(req.address, req.state)?;
     Ok(Json(StateResponse::of(&state, req.address)?))
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ClearAccountResponse {
+    pub address: String,
+    /// Whether an account existed and was removed.
+    pub removed: bool,
+    /// True when the request was a `dry_run`: nothing was removed.
+    pub dry_run: bool,
+}
+
+/// `POST /control/clear_account/{address}`: remove one account entirely —
+/// fixture, balances and positions. The explicit recovery door for a control
+/// patch that must not survive into the next measurement. Destructive, so it
+/// requires `{"confirm":"clear_account"}`; a bare probe is refused.
+pub(crate) async fn clear_account(
+    State(state): State<Arc<ApiState>>,
+    Path(address): Path<Address>,
+    Json(request): Json<ConfirmRequest>,
+) -> Result<Json<ClearAccountResponse>> {
+    require_confirm(&request, "clear_account")?;
+    if request.dry_run {
+        return Ok(Json(ClearAccountResponse {
+            address: format!("{address:#x}"),
+            removed: false,
+            dry_run: true,
+        }));
+    }
+    let removed = state.sim.clear_account(address)?;
+    Ok(Json(ClearAccountResponse {
+        address: format!("{address:#x}"),
+        removed,
+        dry_run: false,
+    }))
+}
+
+/// `POST /control/clear_fixture/{address}`: drop the control-fixture
+/// provenance while keeping the account's balances and positions. Use this
+/// after a **setup** patch whose state is the intended live state; a balance
+/// patch is cleared with `clear_account` and re-funded.
+pub(crate) async fn clear_fixture(
+    State(state): State<Arc<ApiState>>,
+    Path(address): Path<Address>,
+    Json(request): Json<ConfirmRequest>,
+) -> Result<Json<ClearAccountResponse>> {
+    require_confirm(&request, "clear_fixture")?;
+    if request.dry_run {
+        return Ok(Json(ClearAccountResponse {
+            address: format!("{address:#x}"),
+            removed: false,
+            dry_run: true,
+        }));
+    }
+    let removed = state.sim.clear_control_fixture(address)?;
+    Ok(Json(ClearAccountResponse {
+        address: format!("{address:#x}"),
+        removed,
+        dry_run: false,
+    }))
 }
 
 /// hl_mock's `POST /control/state/{address}`: the body is the state patch; the
@@ -573,13 +717,52 @@ fn control_state(state: &ApiState, address: Address) -> Result<AccountSeed> {
 
 // ---- reset / epoch_new ---------------------------------------------------
 
+/// The explicit confirmation every destructive control route requires.
+///
+/// A route-existence probe is a POST, and a POST to a handler with no body
+/// extractor is the action. The measured incident (2026-10-28 03:18:40Z): a
+/// read-only sweep POSTed `{}` to every `/control/*` route, and `reset` +
+/// `epoch_new` blanked every simulated account and re-pinned V. The control
+/// plane must therefore refuse a request that did not name the action it
+/// intends. `dry_run` answers the same question without mutating anything.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ConfirmRequest {
+    /// Must equal the route's action (`"reset"` or `"epoch_new"`).
+    pub confirm: String,
+    /// Report the current epoch without resetting or re-pinning.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+fn require_confirm(request: &ConfirmRequest, action: &str) -> Result<()> {
+    if request.confirm != action {
+        return Err(Error::bad_request(format!(
+            "refusing {action}: send {{\"confirm\":\"{action}\"}}; a bare POST must not mutate the scenario"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct ResetResponse {
     pub epoch: u64,
     pub accounts: usize,
+    /// True when the request was a `dry_run`: nothing was blanked.
+    pub dry_run: bool,
 }
 
-pub(crate) async fn reset(State(state): State<Arc<ApiState>>) -> Result<Json<ResetResponse>> {
+pub(crate) async fn reset(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<ConfirmRequest>,
+) -> Result<Json<ResetResponse>> {
+    require_confirm(&request, "reset")?;
+    if request.dry_run {
+        return Ok(Json(ResetResponse {
+            epoch: state.sim.epoch()?,
+            accounts: 0,
+            dry_run: true,
+        }));
+    }
     let epoch = state.sim.reset()?;
     state.feed.clear_overrides()?;
     // The reset blanks every simulated account while the chains keep their
@@ -594,7 +777,11 @@ pub(crate) async fn reset(State(state): State<Arc<ApiState>>) -> Result<Json<Res
          Restart the bridge and re-pin V to restore the pairing (docs/OPERATIONS.md, \
          the reset runbook)"
     );
-    Ok(Json(ResetResponse { epoch, accounts: 0 }))
+    Ok(Json(ResetResponse {
+        epoch,
+        accounts: 0,
+        dry_run: false,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -604,6 +791,8 @@ pub(crate) struct EpochNewResponse {
     pub engine_repinned: bool,
     /// The fork source the engine re-pinned to (the engine's answer).
     pub engine_source: String,
+    /// True when the request was a `dry_run`: nothing was blanked or re-pinned.
+    pub dry_run: bool,
 }
 
 /// `epoch_new`: blank the scenario and re-pin V through the engine's
@@ -615,7 +804,19 @@ pub(crate) struct EpochNewResponse {
 /// (a 502 means "retry the whole thing"), and a retry after a success is
 /// idempotent on both sides (reset blanks an already-blank scenario; the
 /// engine re-pins to the then-current latest).
-pub(crate) async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json<EpochNewResponse>> {
+pub(crate) async fn epoch_new(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<ConfirmRequest>,
+) -> Result<Json<EpochNewResponse>> {
+    require_confirm(&request, "epoch_new")?;
+    if request.dry_run {
+        return Ok(Json(EpochNewResponse {
+            epoch: state.sim.epoch()?,
+            engine_repinned: false,
+            engine_source: "dry-run".into(),
+            dry_run: true,
+        }));
+    }
     let Some(base) = &state.engine_admin else {
         return Err(Error::NotConfigured {
             what: "services.sim.engine_admin_url (needed to re-pin V)",
@@ -645,5 +846,36 @@ pub(crate) async fn epoch_new(State(state): State<Arc<ApiState>>) -> Result<Json
         epoch,
         engine_repinned: engine.reset,
         engine_source: engine.source,
+        dry_run: false,
     }))
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::*;
+
+    /// The measured incident: a route probe POSTed `{}` to every control route
+    /// and `reset`/`epoch_new` executed. A request that does not name the
+    /// action must be refused before any state is touched.
+    #[test]
+    fn a_bare_probe_cannot_confirm_a_destructive_action() {
+        let bare = ConfirmRequest {
+            confirm: String::new(),
+            dry_run: false,
+        };
+        assert!(require_confirm(&bare, "reset").is_err());
+        assert!(require_confirm(&bare, "epoch_new").is_err());
+
+        let wrong = ConfirmRequest {
+            confirm: "reset".into(),
+            dry_run: false,
+        };
+        assert!(require_confirm(&wrong, "epoch_new").is_err());
+
+        let right = ConfirmRequest {
+            confirm: "reset".into(),
+            dry_run: false,
+        };
+        assert!(require_confirm(&right, "reset").is_ok());
+    }
 }

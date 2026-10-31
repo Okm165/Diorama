@@ -32,7 +32,9 @@ impl FeedBridgeMetrics {
     }
 
     fn count(field: &Mutex<Vec<(String, u64)>>, name: &str) {
-        let mut v = field.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut v = field
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match v.iter_mut().find(|(n, _)| n == name) {
             Some((_, c)) => *c += 1,
             None => v.push((name.to_string(), 1)),
@@ -41,14 +43,33 @@ impl FeedBridgeMetrics {
 
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
-        let series = |out: &mut String, name: &str, help: &str, values: &Mutex<Vec<(String, u64)>>| {
-            let values = values.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            for (feed, v) in values.iter() {
-                diorama_devnet::metrics::push_counter(out, name, help, &[("feed", feed.as_str())], *v);
-            }
-        };
-        series(&mut out, "feed_bridge_updates_total", "answers published to mock aggregators", &self.updates);
-        series(&mut out, "feed_bridge_pauses_total", "feeds paused on a scenario's write", &self.pauses);
+        let series =
+            |out: &mut String, name: &str, help: &str, values: &Mutex<Vec<(String, u64)>>| {
+                let values = values
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for (feed, v) in values.iter() {
+                    diorama_devnet::metrics::push_counter(
+                        out,
+                        name,
+                        help,
+                        &[("feed", feed.as_str())],
+                        *v,
+                    );
+                }
+            };
+        series(
+            &mut out,
+            "feed_bridge_updates_total",
+            "answers published to mock aggregators",
+            &self.updates,
+        );
+        series(
+            &mut out,
+            "feed_bridge_pauses_total",
+            "feeds paused on a scenario's write",
+            &self.pauses,
+        );
         diorama_devnet::metrics::push_counter(
             &mut out,
             "feed_bridge_pass_errors_total",
@@ -74,8 +95,14 @@ mod tests {
         m.record_pause("BTC/USD");
         m.inc_pass_errors();
         let out = m.render();
-        assert!(out.contains("feed_bridge_updates_total{feed=\"ETH/USD\"} 2"), "{out}");
-        assert!(out.contains("feed_bridge_pauses_total{feed=\"BTC/USD\"} 1"), "{out}");
+        assert!(
+            out.contains("feed_bridge_updates_total{feed=\"ETH/USD\"} 2"),
+            "{out}"
+        );
+        assert!(
+            out.contains("feed_bridge_pauses_total{feed=\"BTC/USD\"} 1"),
+            "{out}"
+        );
         assert!(out.contains("feed_bridge_pass_errors_total 1"), "{out}");
     }
 }

@@ -114,8 +114,21 @@ Venue Mirror (a second namespace in the same cluster):
 
 ```bash
 kubectl apply -k k8s/overlays/diorama-venue   # V + the venue engine + the simulator (namespace diorama-venue)
-make venue-smoke                              # V, engine, sim and bridge checks
+make venue-smoke                              # V, engine and sim checks
 ```
+
+CCTP bridge (its own instance, namespace, ConfigMap, Secret and PVC):
+
+```bash
+make cctp-bootstrap   # namespace + StorageClass + relay Secret + images + overlay
+make cctp-status
+make cctp-smoke
+```
+
+A venue can run without a bridge, a bridge can run without the venue, and a
+deployment can compose any number of either. See
+[`docs/CCTP-COMPOSITION.md`](docs/CCTP-COMPOSITION.md) for the 2-mainnet /
+2-venue / 3-bridge recipe.
 
 The mainnet bootstrap is ordered on purpose: the reth snapshot lands in the
 PVC first, then reth starts, Lighthouse checkpoint-syncs to the CL head, and
@@ -179,10 +192,11 @@ bins/diorama-venue-sim       the venue simulator (market + account planes; info 
 bins/diorama-cctp-bridge     the CCTP bridge service (Iris 8095 / control 8096)
 k8s/base/diorama-mainnet/    the mainnet base: reth, lighthouse, anvil-t, engine
 k8s/base/diorama-venue/      the venue base: anvil-v, engine, sim
-k8s/base/cctp-bridge/        the cross-mirror bridge (deploys beside the venue stack; reaches T cross-namespace)
+k8s/base/cctp-bridge/        the CCTP bridge base (its own Deployment/Service/PVC)
 k8s/base/shared/             the diorama-retain StorageClass
 k8s/overlays/diorama-mainnet/  single-node k3s overlay (mainnet mirror)
-k8s/overlays/diorama-venue/    the venue stack overlay (V, engine, sim, bridge, NodePorts)
+k8s/overlays/diorama-venue/    the venue stack overlay (V, engine, sim, NodePorts)
+k8s/overlays/diorama-cctp/     the standalone CCTP bridge overlay (namespace, wiring, NodePorts)
 k8s/bootstrap/               one-shot Jobs: reth snapshot, CL blob prune, engine selftest, re-pin wipe
 scripts/                     lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the shared plumbing), the
                              mainnet suites (mainnet-smoke, mainnet-scenario, mainnet-proof,

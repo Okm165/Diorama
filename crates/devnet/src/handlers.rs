@@ -252,7 +252,10 @@ mod tests {
             Some(StatusCode::BAD_REQUEST)
         );
         assert_eq!(
-            devnet_status(&crate::Error::ShadowScan { block: 7, failed: 1 }),
+            devnet_status(&crate::Error::ShadowScan {
+                block: 7,
+                failed: 1
+            }),
             Some(StatusCode::SERVICE_UNAVAILABLE)
         );
         assert_eq!(

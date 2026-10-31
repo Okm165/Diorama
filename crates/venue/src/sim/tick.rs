@@ -46,7 +46,12 @@ impl Sim {
     fn cancel_market_orders(&self, coin: &str) -> Result<()> {
         for r in self.resting_orders(None)? {
             if r.coin == coin {
-                self.cancel(r.account, coin, r.oid, crate::sim::order::CancelSpeed::Normal)?;
+                self.cancel(
+                    r.account,
+                    coin,
+                    r.oid,
+                    crate::sim::order::CancelSpeed::Normal,
+                )?;
             }
         }
         Ok(())
@@ -136,7 +141,12 @@ impl Sim {
             let mine = self.resting_orders(Some(account))?;
             let n = mine.len();
             for r in mine {
-                let _ = self.cancel(account, &r.coin, r.oid, crate::sim::order::CancelSpeed::Normal);
+                let _ = self.cancel(
+                    account,
+                    &r.coin,
+                    r.oid,
+                    crate::sim::order::CancelSpeed::Normal,
+                );
             }
             self.with_state(|st| {
                 st.scheduled_cancels.remove(&account);
@@ -165,15 +175,24 @@ impl Sim {
                 continue;
             };
             let fires = match (r.side, t.tpsl) {
-                (crate::sim::order::Side::Sell, crate::sim::order::Tpsl::Tp) => mark >= t.trigger_px,
-                (crate::sim::order::Side::Sell, crate::sim::order::Tpsl::Sl) => mark <= t.trigger_px,
+                (crate::sim::order::Side::Sell, crate::sim::order::Tpsl::Tp) => {
+                    mark >= t.trigger_px
+                }
+                (crate::sim::order::Side::Sell, crate::sim::order::Tpsl::Sl) => {
+                    mark <= t.trigger_px
+                }
                 (crate::sim::order::Side::Buy, crate::sim::order::Tpsl::Tp) => mark <= t.trigger_px,
                 (crate::sim::order::Side::Buy, crate::sim::order::Tpsl::Sl) => mark >= t.trigger_px,
             };
             if !fires {
                 continue;
             }
-            let _ = self.cancel(r.account, &r.coin, r.oid, crate::sim::order::CancelSpeed::Normal);
+            let _ = self.cancel(
+                r.account,
+                &r.coin,
+                r.oid,
+                crate::sim::order::CancelSpeed::Normal,
+            );
             let order = crate::sim::order::Order {
                 coin: r.coin.clone(),
                 is_buy: r.side.is_buy(),
@@ -186,7 +205,9 @@ impl Sim {
             };
             match self.place(feed, r.account, &order) {
                 Ok(placed) => {
-                    self.metrics.triggers_fired_total.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .triggers_fired_total
+                        .fetch_add(1, Ordering::Relaxed);
                     tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid, filled = placed.fill.as_ref().map(|f| f.total_sz.to_string()).unwrap_or_default(), "trigger fired");
                 }
                 Err(e) => {
@@ -291,7 +312,9 @@ impl Sim {
             Ok(())
         })?;
         if payments > 0 {
-            self.metrics.funding_payments_total.fetch_add(payments, Ordering::Relaxed);
+            self.metrics
+                .funding_payments_total
+                .fetch_add(payments, Ordering::Relaxed);
             self.dirty.store(true, Ordering::Relaxed);
         }
         Ok(())

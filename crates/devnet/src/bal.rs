@@ -27,8 +27,8 @@ use crate::source::{Capability, Source};
 // The BAL is the official alloy type (EIP-7928): re-exported, so a caller
 // that must name it (the venue's parity step) names the official one, never a
 // mirror-owned alias.
-pub use alloy_eips::eip7928::BlockAccessList;
 use alloy_eips::eip7928::AccountChanges;
+pub use alloy_eips::eip7928::BlockAccessList;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, Transaction};
 use diorama_anvil::{Key, Rpc, Value, Write};
@@ -207,7 +207,15 @@ impl<'a> Composer<'a> {
             }
         }
         let bal: BlockAccessList = acc.into_values().collect();
-        Ok((WindowBal { from, to, kind, bal }, stats))
+        Ok((
+            WindowBal {
+                from,
+                to,
+                kind,
+                bal,
+            },
+            stats,
+        ))
     }
 
     /// Rung 2: the source reports the window's touches; the declared scope
@@ -319,7 +327,6 @@ impl<'a> Composer<'a> {
         };
         Ok((diorama_anvil::bal_from_writes(&writes), stats))
     }
-
 }
 
 /// EIP-7928's commitment check: the header's `block_access_list_hash` is
@@ -658,7 +665,10 @@ mod tests {
         assert_eq!(log.address, token);
         assert_eq!(log.topics()[0], TRANSFER_TOPIC);
         assert_eq!(log.topics()[1], B256::left_padding_from(system.as_slice()));
-        assert_eq!(log.topics()[2], B256::left_padding_from(recipient.as_slice()));
+        assert_eq!(
+            log.topics()[2],
+            B256::left_padding_from(recipient.as_slice())
+        );
     }
 
     /// The whole pure chain: system transfer → touched set → declared
@@ -713,8 +723,14 @@ mod tests {
         fn header(
             &self,
             _n: u64,
-        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<alloy_rpc_types_eth::Header>> {
-            Box::pin(async { Err(diorama_anvil::Error::Corrupt { what: "fake", detail: "header not used".into() }) })
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<alloy_rpc_types_eth::Header>>
+        {
+            Box::pin(async {
+                Err(diorama_anvil::Error::Corrupt {
+                    what: "fake",
+                    detail: "header not used".into(),
+                })
+            })
         }
         fn balance_at(
             &self,
@@ -757,7 +773,8 @@ mod tests {
         fn bal(
             &self,
             _n: u64,
-        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<Option<BlockAccessList>>> {
+        ) -> futures_util::future::BoxFuture<'_, diorama_anvil::Result<Option<BlockAccessList>>>
+        {
             let bal = self.bal.clone();
             Box::pin(async move { Ok(bal) })
         }
@@ -851,11 +868,16 @@ mod tests {
             .unwrap();
         assert_eq!(window.kind, DiffKind::Poll);
         assert_eq!(stats.touched, 1);
-        assert_eq!(stats.planned, 3, "balance + nonce + code for the watched account");
+        assert_eq!(
+            stats.planned, 3,
+            "balance + nonce + code for the watched account"
+        );
         assert_eq!(stats.changed, 1, "only the balance differs");
         let writes = diorama_anvil::flatten_bal(&window.bal);
         assert_eq!(writes.len(), 1);
-        assert!(matches!(writes[0], Write::Balance { address, value } if address == watched && value == U256::from(500)));
+        assert!(
+            matches!(writes[0], Write::Balance { address, value } if address == watched && value == U256::from(500))
+        );
     }
 
     /// The batched verify: every changed key's post-state rides one plan
@@ -938,7 +960,10 @@ mod tests {
         // address is a touch), but the zero-equals-zero answers emitted
         // nothing.
         let reads = source.read_keys.lock().unwrap();
-        assert!(!reads.contains(&Key::Balance(watched)), "valued keys are not re-read");
+        assert!(
+            !reads.contains(&Key::Balance(watched)),
+            "valued keys are not re-read"
+        );
     }
 
     /// One balance change, framed the way the composer frames them.
@@ -977,7 +1002,10 @@ mod tests {
         let owned = address!("00000000000000000000000000000000000000b1");
         let free = address!("00000000000000000000000000000000000000b2");
         let (source, target) = bal_pair(vec![balance_change(owned, 1), balance_change(free, 2)]);
-        let scope = Scope::new(WatchSet::new([owned, free].into_iter().collect()), Vec::new());
+        let scope = Scope::new(
+            WatchSet::new([owned, free].into_iter().collect()),
+            Vec::new(),
+        );
         let shadow = crate::shared::Shared::new("test shadow", {
             let mut s = crate::shadow::Shadow::default();
             s.mark_account_fields(owned);
@@ -996,7 +1024,10 @@ mod tests {
             .unwrap();
         assert_eq!(plan.kind, DiffKind::Bal);
         assert_eq!(plan.total, 2, "the pre-COW change count");
-        assert_eq!(plan.filter.skipped_shadowed, 1, "the owned account's fields");
+        assert_eq!(
+            plan.filter.skipped_shadowed, 1,
+            "the owned account's fields"
+        );
         assert_eq!(plan.writes.len(), 1);
         assert!(
             matches!(plan.writes[0], Write::Balance { address, .. } if address == free),
@@ -1050,10 +1081,9 @@ mod tests {
     #[test]
     fn bal_commitment_matches_the_eips_vector_and_refuses_a_lie() {
         let empty: BlockAccessList = Vec::new();
-        let spec_empty: B256 =
-            "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
-                .parse()
-                .unwrap();
+        let spec_empty: B256 = "0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347"
+            .parse()
+            .unwrap();
         assert!(verify_bal_commitment(Some(spec_empty), &empty).is_ok());
         let bal = diorama_anvil::bal_from_writes(&[Write::Balance {
             address: address!("00000000000000000000000000000000000000aa"),

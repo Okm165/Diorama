@@ -71,7 +71,10 @@ pub enum Fact {
     /// The top-up loop delivered payloads to reth (mainnet-only).
     TopUpDelivered { delivered: usize },
     /// The faucet wrote a key and marked it devnet-owned.
-    DealApplied { chain: &'static str, address: Address },
+    DealApplied {
+        chain: &'static str,
+        address: Address,
+    },
     /// The journal rewind undid applied blocks (`/admin/rewind`): the chain
     /// and the cursor moved backwards together.
     RewindApplied {

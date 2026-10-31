@@ -11,8 +11,8 @@ use super::account::{
 use crate::error::Result;
 use crate::feed::MarketFeed;
 use crate::wire::{AssetPosition, LeverageType, MarginSummary, SpotBalance, UserAbstraction};
-use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 /// The seeding shape — and the **control fixture**: hl_mock serves the venue's
 /// own state, so a seed is a (possibly partial) `clearinghouseState` in the
@@ -62,6 +62,17 @@ pub(crate) struct AccountSeed {
 }
 
 impl AccountSeed {
+    /// Whether this patch changes the account's **balances or positions** (as
+    /// opposed to a mode-only setup). A value-changing patch is a scenario
+    /// input: the venue waterfall must not liquidate it and the served account
+    /// must carry `controlOwned` until the fixture is cleared. A mode-only
+    /// patch is ordinary account setup and keeps market provenance.
+    pub fn changes_account_state(&self) -> bool {
+        self.margin_summary.is_some()
+            || self.asset_positions.is_some()
+            || self.spot_balances.is_some()
+    }
+
     /// Nothing named at all: an all-empty patch would silently register a zero
     /// account (a named-but-empty field, `Some([])`, is a legitimate clear).
     pub fn is_empty(&self) -> bool {
@@ -103,36 +114,154 @@ impl AccountSeed {
     }
 
     /// Fold the seed into the account as a **patch**: named fields replace,
-    /// unnamed fields keep their previous value. `totalRawUsd` is preserved
-    /// exactly: `perp_balance = totalRawUsd + Σ szi·entryPx`, so the served
-    /// totalRawUsd round-trips byte-for-byte (the operator's recall amount).
-    /// Fallible: absurd seeds must refuse, not panic (the overflow-poison
-    /// lesson).
+    /// unnamed fields keep their previous value.
+    ///
+    /// # `totalRawUsd` is the whole-account raw, not the perp leg
+    ///
+    /// The venue's `marginSummary.totalRawUsd` is the whole-account cash
+    /// figure: the unified collateral token's spot side is part of it, and the
+    /// perp wallet's raw is what remains after the spot side and isolated
+    /// margins. The old fold treated it as the perp-side raw and then replaced
+    /// `spotBalances` separately, so a patch naming both counted the cash twice
+    /// (4a/5195: `totalRawUsd=1.25` plus `spot=1.25` served 2.5; 0.5 plus 0.5
+    /// served 1.0). The fold now derives the perp leg from the whole figure:
+    ///
+    /// `perp_balance = totalRawUsd − spotCollateral − isolatedMargin + Σ szi·entryPx`
+    ///
+    /// A patch that names a position set must also carry an `accountValue`
+    /// consistent with its own rows (`accountValue == totalRawUsd + Σ sign(szi)·positionValue`);
+    /// an inconsistent fixture is refused rather than silently resolved in
+    /// either direction. The measured 4a patch (`accountValue=1.25`,
+    /// `totalRawUsd=1.25`, short worth 6.99632) is exactly that inconsistency.
+    ///
+    /// A **summary-only** patch is checked before it touches the account: on an
+    /// account with open positions it cannot be verified against the book
+    /// (the account's positions were last marked at a different instant), so
+    /// it must name `assetPositions` too. On a flat book its `accountValue`
+    /// must equal its `totalRawUsd`. This is the guard against the measured
+    /// recovery patch `totalRawUsd=0, accountValue=0.08` on a book holding a
+    /// short and spot cash: the old fold accepted it and drove the account to
+    /// `-14.894333`, stranding the residual and blocking the recall forever.
+    ///
+    /// Fallible: absurd or internally inconsistent seeds must refuse, not
+    /// panic (the overflow-poison lesson).
+    #[allow(clippy::too_many_lines)]
     pub fn apply_to(&self, account: &mut Account, clock: u64) -> Result<()> {
-        let perp_changed = self.margin_summary.is_some() || self.asset_positions.is_some();
-        // The raw USDC base: the named summary's totalRawUsd, else the
-        // existing one (reverse the current cost-basis fold).
-        let raw = if let Some(summary) = &self.margin_summary {
-            summary.total_raw_usd
-        } else {
-            sub(account.perp_balance, cost_basis_total(account)?, "raw usdc")?
-        };
-        if let Some(positions) = &self.asset_positions {
-            apply_positions(account, positions)?;
+        // A summary-only patch cannot be checked against an open book: the
+        // summary's `accountValue` is the whole-book value at the caller's
+        // mark, while the account's existing positions are at a different
+        // mark. Refuse it rather than silently rewriting cash from an
+        // unverified value. A flat book has no such ambiguity.
+        if let Some(summary) = &self.margin_summary {
+            let has_open_positions = account
+                .positions
+                .values()
+                .any(|position| !position.szi.is_zero());
+            if self.asset_positions.is_none() && has_open_positions {
+                return Err(crate::error::Error::bad_request(
+                    "a marginSummary patch on an account with open positions must also name assetPositions: the summary's accountValue cannot be checked against an unnamed book",
+                ));
+            }
+            if self.asset_positions.is_none() && summary.account_value != summary.total_raw_usd {
+                return Err(crate::error::Error::bad_request(format!(
+                    "inconsistent flat-book account patch: accountValue {} != totalRawUsd {} with no positions named",
+                    summary.account_value, summary.total_raw_usd
+                )));
+            }
         }
-        if perp_changed {
-            account.perp_balance = add(raw, cost_basis_total(account)?, "seed balance")?;
-            account.funded_at_ms = clock;
+
+        // A fixture that names its positions is checked against its own
+        // identity before it touches the account. The venue's wire contract is
+        // `accountValue = totalRawUsd + Σ sign(szi)·positionValue`; a patch
+        // that violates it has no single correct reading, so it is refused.
+        if let (Some(summary), Some(positions)) = (&self.margin_summary, &self.asset_positions) {
+            let signed = signed_seed_value(positions)?;
+            let expected = add(summary.total_raw_usd, signed, "seed account value")?;
+            if summary.account_value != expected {
+                return Err(crate::error::Error::bad_request(format!(
+                    "inconsistent account patch: accountValue {} != totalRawUsd {} + signed positionValue {} = {}",
+                    summary.account_value, summary.total_raw_usd, signed, expected
+                )));
+            }
         }
-        if let Some(balances) = &self.spot_balances {
-            apply_spot_balances(account, balances);
-        }
+
         if let Some(mode) = self.user_abstraction {
             refuse_unmodeled_mode(mode)?;
             account.mode = mode;
         }
+        if let Some(positions) = &self.asset_positions {
+            apply_positions(account, positions)?;
+        }
+        if let Some(balances) = &self.spot_balances {
+            apply_spot_balances(account, balances);
+        }
+
+        // A named summary sets the whole-account raw. A positions-only or
+        // spot-only patch leaves the perp wallet's cash untouched: replacing
+        // positions changes the cost basis (and therefore `totalRawUsd`), but
+        // it must never move cash. The old fold preserved `totalRawUsd`
+        // across a positions-only patch, which silently debited the new cost
+        // basis from the perp wallet; on a standard→unified switch it also
+        // subtracted the newly-visible spot collateral. The measured 22f
+        // patch moved `7.82` to `-7.074333` and was liquidated on the
+        // resulting fake deficit.
+        if let Some(summary) = &self.margin_summary {
+            let collateral = collateral_total(account);
+            let isolated = isolated_margin_total(account);
+            let cost = cost_basis_total(account)?;
+            let perp = add(
+                sub(
+                    summary.total_raw_usd,
+                    add(collateral, isolated, "seed collateral")?,
+                    "seed perp raw",
+                )?,
+                cost,
+                "seed balance",
+            )?;
+            account.perp_balance = perp;
+            account.funded_at_ms = clock;
+        }
         Ok(())
     }
+}
+
+/// The collateral token's spot balance when the account is unified; zero for
+/// the standard split, whose spot side is not part of the perp raw.
+fn collateral_total(account: &Account) -> Decimal {
+    if account.mode == UserAbstraction::UnifiedAccount {
+        account
+            .spot
+            .get(&COLLATERAL_TOKEN)
+            .map(|entry| entry.total)
+            .unwrap_or(Decimal::ZERO)
+    } else {
+        Decimal::ZERO
+    }
+}
+
+/// The isolated legs' margin, which the venue's whole-account raw carries as
+/// cash parked on the positions.
+fn isolated_margin_total(account: &Account) -> Decimal {
+    account
+        .positions
+        .values()
+        .map(|position| position.isolated_margin)
+        .fold(Decimal::ZERO, |sum, margin| sum + margin)
+}
+
+/// The signed notional of a seed's position rows: `Σ sign(szi)·positionValue`.
+fn signed_seed_value(positions: &[AssetPosition]) -> Result<Decimal> {
+    let mut signed = Decimal::ZERO;
+    for asset in positions {
+        let position = &asset.position;
+        let value = if position.szi.is_sign_negative() {
+            -position.position_value
+        } else {
+            position.position_value
+        };
+        signed = add(signed, value, "seed signed position value")?;
+    }
+    Ok(signed)
 }
 
 /// The `/control/state` view: the fixture's fields where the scenario owns
@@ -154,7 +283,10 @@ pub(crate) fn control_view(
     Ok(AccountSeed {
         user_abstraction: f.user_abstraction.or(Some(account.mode)),
         margin_summary: f.margin_summary.or(Some(v.margin_summary)),
-        cross_margin_summary: f.cross_margin_summary.or(mirror).or(Some(v.cross_margin_summary)),
+        cross_margin_summary: f
+            .cross_margin_summary
+            .or(mirror)
+            .or(Some(v.cross_margin_summary)),
         cross_maintenance_margin_used: f
             .cross_maintenance_margin_used
             .or(Some(v.cross_maintenance_margin_used)),
@@ -179,7 +311,9 @@ fn cost_basis_total(account: &Account) -> Result<Decimal> {
     account
         .positions
         .values()
-        .try_fold(Decimal::ZERO, |acc, p| add(acc, p.cost_basis()?, COST_BASIS))
+        .try_fold(Decimal::ZERO, |acc, p| {
+            add(acc, p.cost_basis()?, COST_BASIS)
+        })
 }
 
 /// Replace the spot balances (the patch's `spotBalances`: a replace, never a
@@ -209,9 +343,9 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
             None if p.szi.is_zero() => Decimal::ZERO,
             None => {
                 return Err(crate::error::Error::bad_request(format!(
-                        "position {} has size {} but no entryPx (the raw base needs it)",
-                        p.coin, p.szi
-                    ),))
+                    "position {} has size {} but no entryPx (the raw base needs it)",
+                    p.coin, p.szi
+                )))
             }
         };
         account.positions.insert(
@@ -227,9 +361,12 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
                 } else {
                     Decimal::ZERO
                 },
-                funding_all_time: p.cum_funding.all_time,
-                funding_since_open: p.cum_funding.since_open,
-                funding_since_change: p.cum_funding.since_change,
+                // The wire's `cumFunding` is a cost accumulator; the internal
+                // figure is the balance delta. A seed is a wire snapshot, so
+                // the sign flips back on the way in.
+                funding_all_time: -p.cum_funding.all_time,
+                funding_since_open: -p.cum_funding.since_open,
+                funding_since_change: -p.cum_funding.since_change,
             },
         );
     }
@@ -238,13 +375,14 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
 
 #[cfg(test)]
 mod tests {
-    use crate::sim::account::clearinghouse;
-    use crate::sim::meta_with_table;
     use super::*;
+    use crate::sim::account::clearinghouse;
     use crate::sim::feed_with;
+    use crate::sim::meta_with_table;
 
     /// The served identity holds exactly for a seeded position.
     #[test]
+    #[allow(clippy::too_many_lines)] // one transition table: splitting it would hide the rule
     fn identity_holds_for_seeded_positions() {
         let feed = feed_with(&[("ETH", "2985.9", "2986.0")]);
         let meta = meta_with_table("ETH", 50);
@@ -268,16 +406,29 @@ mod tests {
         );
         let s = clearinghouse(&account, &feed, Some(&meta), 1_000).unwrap();
         let p = &s.asset_positions[0].position;
-        let signed = if p.szi.is_sign_negative() { -p.position_value } else { p.position_value };
-        assert_eq!(s.margin_summary.account_value, s.margin_summary.total_raw_usd + signed);
-        assert_eq!(p.position_value, Decimal::new(335, 4) * Decimal::new(29859, 1));
+        let signed = if p.szi.is_sign_negative() {
+            -p.position_value
+        } else {
+            p.position_value
+        };
+        assert_eq!(
+            s.margin_summary.account_value,
+            s.margin_summary.total_raw_usd + signed
+        );
+        assert_eq!(
+            p.position_value,
+            Decimal::new(335, 4) * Decimal::new(29859, 1)
+        );
         // totalRawUsd = balance − szi·entry (exactly).
         assert_eq!(
             s.margin_summary.total_raw_usd,
             account.perp_balance - p.szi * p.entry_px.unwrap()
         );
         // Cross view with no isolated positions equals the summary.
-        assert_eq!(s.cross_margin_summary.account_value, s.margin_summary.account_value);
+        assert_eq!(
+            s.cross_margin_summary.account_value,
+            s.margin_summary.account_value
+        );
         // The docs' transfer rule bounds `withdrawable` by
         // max(initial_margin_required, 0.1 * total_position_value). The seed
         // here is a *cross* position (the endpoint's own example is an
@@ -299,7 +450,7 @@ mod tests {
     fn seed_preserves_total_raw_usd() {
         let seed: AccountSeed = serde_json::from_str(
             r#"{
-                "marginSummary": {"accountValue": "100.5", "totalNtlPos": "10.0", "totalRawUsd": "100.0", "totalMarginUsed": "5.0"},
+                "marginSummary": {"accountValue": "110.5", "totalNtlPos": "10.0", "totalRawUsd": "100.0", "totalMarginUsed": "5.0"},
                 "assetPositions": [{
                     "type": "oneWay",
                     "position": {
@@ -314,10 +465,217 @@ mod tests {
         .unwrap();
         let mut account = Account::default();
         seed.apply_to(&mut account, 0).unwrap();
-        assert_eq!(account.perp_balance, Decimal::from(100) + Decimal::new(105, 2) * Decimal::from(10));
+        assert_eq!(
+            account.perp_balance,
+            Decimal::from(100) + Decimal::new(105, 2) * Decimal::from(10)
+        );
         let feed = feed_with(&[("BTC", "10.0", "10.0")]);
         let s = clearinghouse(&account, &feed, None, 1).unwrap();
         assert_eq!(s.margin_summary.total_raw_usd, Decimal::from(100));
+    }
+
+    /// **The whole-account seed, measured on 5195.** A unified patch that names
+    /// `totalRawUsd=0.5` and `spotBalances=0.5` is one account holding 0.5, not
+    /// a perp leg of 0.5 beside a spot leg of 0.5. The old fold served 1.0 and
+    /// the harness read a residual twice its size.
+    #[test]
+    fn a_unified_seed_counts_spot_once() {
+        let seed: AccountSeed = serde_json::from_str(
+            r#"{
+                "marginSummary": {"accountValue": "0.5", "totalNtlPos": "0", "totalRawUsd": "0.5", "totalMarginUsed": "0"},
+                "spotBalances": [{"coin": "USDC", "token": 0, "hold": "0", "total": "0.5", "entryNtl": "0"}],
+                "userAbstraction": "unifiedAccount"
+            }"#,
+        )
+        .unwrap();
+        let mut account = Account::default();
+        seed.apply_to(&mut account, 0).unwrap();
+        assert_eq!(
+            account.perp_balance,
+            Decimal::ZERO,
+            "the spot side is the whole raw"
+        );
+        let feed = feed_with(&[("HYPE", "87.0", "87.0")]);
+        let live = view(&account, &feed, None).unwrap();
+        assert_eq!(live.margin_summary.total_raw_usd, "0.5".parse().unwrap());
+        assert_eq!(live.margin_summary.account_value, "0.5".parse().unwrap());
+    }
+
+    /// **The measured 4a fixture is internally inconsistent and is refused.**
+    /// It claims `accountValue=1.25` while naming a short whose `positionValue`
+    /// is 6.99632 and `totalRawUsd=1.25`: the identity requires -5.74632. The
+    /// old fold silently picked one reading and served 2.5; the patch now has
+    /// no correct reading and is rejected before it touches the account.
+    #[test]
+    fn an_inconsistent_account_patch_is_refused() {
+        let seed: AccountSeed = serde_json::from_str(
+            r#"{
+                "marginSummary": {"accountValue": "1.25", "totalNtlPos": "6.99632", "totalRawUsd": "1.25", "totalMarginUsed": "0.699632"},
+                "assetPositions": [{
+                    "type": "oneWay",
+                    "position": {
+                        "coin": "HYPE", "entryPx": "87.454", "leverage": {"type": "cross", "value": 10},
+                        "marginUsed": "0.699632", "maxLeverage": 10, "positionValue": "6.99632",
+                        "returnOnEquity": "0", "szi": "-0.08", "unrealizedPnl": "0",
+                        "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
+                    }
+                }],
+                "spotBalances": [{"coin": "USDC", "token": 0, "hold": "0", "total": "1.25", "entryNtl": "0"}],
+                "userAbstraction": "unifiedAccount"
+            }"#,
+        )
+        .unwrap();
+        let mut account = Account::default();
+        let error = seed.apply_to(&mut account, 0).unwrap_err();
+        assert!(
+            error.to_string().contains("inconsistent account patch"),
+            "the refusal names the inconsistency: {error}"
+        );
+    }
+
+    /// The same 4a book with a coherent `accountValue` applies as one account:
+    /// 1.25 total raw, 1.25 spot, and the short's 6.99632 liability, so the
+    /// served account value is -5.74632.
+    #[test]
+    fn a_coherent_non_flat_unified_seed_keeps_the_identity() {
+        let seed: AccountSeed = serde_json::from_str(
+            r#"{
+                "marginSummary": {"accountValue": "-5.74632", "totalNtlPos": "6.99632", "totalRawUsd": "1.25", "totalMarginUsed": "0.699632"},
+                "assetPositions": [{
+                    "type": "oneWay",
+                    "position": {
+                        "coin": "HYPE", "entryPx": "87.454", "leverage": {"type": "cross", "value": 10},
+                        "marginUsed": "0.699632", "maxLeverage": 10, "positionValue": "6.99632",
+                        "returnOnEquity": "0", "szi": "-0.08", "unrealizedPnl": "0",
+                        "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
+                    }
+                }],
+                "spotBalances": [{"coin": "USDC", "token": 0, "hold": "0", "total": "1.25", "entryNtl": "0"}],
+                "userAbstraction": "unifiedAccount"
+            }"#,
+        )
+        .unwrap();
+        let mut account = Account::default();
+        seed.apply_to(&mut account, 0).unwrap();
+        let feed = feed_with(&[("HYPE", "87.454", "87.454")]);
+        let live = view(&account, &feed, None).unwrap();
+        assert_eq!(live.margin_summary.total_raw_usd, "1.25".parse().unwrap());
+        assert_eq!(
+            live.margin_summary.account_value,
+            "-5.74632".parse().unwrap()
+        );
+    }
+
+    /// **The measured 22f regression.** A positions-only patch that switches a
+    /// standard account to unified must preserve the perp wallet's cash. The
+    /// old fold preserved `totalRawUsd`, then subtracted the newly-visible spot
+    /// collateral and the short's cost basis from the perp leg: `7.82` became
+    /// `-7.074333`, the served account value fell from `15.677973` to `0.78`,
+    /// and the position was liquidated on a fake deficit two minutes after
+    /// creation.
+    #[test]
+    fn a_positions_only_patch_preserves_cash_across_a_mode_switch() {
+        let mut account = Account {
+            perp_balance: "7.82".parse().unwrap(),
+            ..Account::default()
+        };
+        account.spot.insert(
+            0,
+            SpotEntry {
+                coin: "USDC".into(),
+                total: "7.857973".parse().unwrap(),
+                hold: Decimal::ZERO,
+                entry_ntl: Decimal::ZERO,
+            },
+        );
+        let seed: AccountSeed = serde_json::from_str(
+            r#"{
+                "userAbstraction": "unifiedAccount",
+                "assetPositions": [{
+                    "type": "oneWay",
+                    "position": {
+                        "coin": "HYPE", "entryPx": "87.9545", "leverage": {"type": "cross", "value": 10},
+                        "marginUsed": "0.703636", "maxLeverage": 10, "positionValue": "7.03636",
+                        "returnOnEquity": "0", "szi": "-0.08", "unrealizedPnl": "0",
+                        "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        seed.apply_to(&mut account, 0).unwrap();
+        assert_eq!(
+            account.perp_balance,
+            "7.82".parse().unwrap(),
+            "positions do not move cash"
+        );
+        let feed = feed_with(&[("HYPE", "87.9545", "87.9545")]);
+        let live = view(&account, &feed, None).unwrap();
+        assert_eq!(
+            live.margin_summary.total_raw_usd,
+            "22.714333".parse().unwrap()
+        );
+        assert_eq!(
+            live.margin_summary.account_value,
+            "15.677973".parse().unwrap()
+        );
+    }
+
+    /// **The measured recovery zeroing.** A summary-only patch cannot rewrite
+    /// a book whose positions it does not name. The old fold accepted
+    /// `totalRawUsd=0, accountValue=0.08` on a book holding a short and spot
+    /// cash, drove the account to `-14.894333`, and left the recall with
+    /// `withdrawable=0` forever.
+    #[test]
+    fn a_summary_only_patch_cannot_rewrite_an_open_book() {
+        let mut account = Account {
+            perp_balance: "7.82".parse().unwrap(),
+            ..Account::default()
+        };
+        account.spot.insert(
+            0,
+            SpotEntry {
+                coin: "USDC".into(),
+                total: "7.857973".parse().unwrap(),
+                hold: Decimal::ZERO,
+                entry_ntl: Decimal::ZERO,
+            },
+        );
+        account.positions.insert(
+            "HYPE".into(),
+            Position {
+                szi: "-0.08".parse().unwrap(),
+                entry_px: "87.9545".parse().unwrap(),
+                leverage: LeverageType::Cross,
+                leverage_value: 10,
+                margin_used: "0.703636".parse().unwrap(),
+                isolated_margin: Decimal::ZERO,
+                funding_all_time: Decimal::ZERO,
+                funding_since_open: Decimal::ZERO,
+                funding_since_change: Decimal::ZERO,
+            },
+        );
+        let seed: AccountSeed = serde_json::from_str(
+            r#"{
+                "marginSummary": {"accountValue": "0.08", "totalNtlPos": "7.03636", "totalRawUsd": "0", "totalMarginUsed": "0.07"}
+            }"#,
+        )
+        .unwrap();
+        let error = seed.apply_to(&mut account, 0).unwrap_err();
+        assert!(
+            error.to_string().contains("must also name assetPositions"),
+            "the refusal names the missing book: {error}"
+        );
+        assert_eq!(
+            account.perp_balance,
+            "7.82".parse().unwrap(),
+            "the refused patch did not move cash"
+        );
+        assert!(
+            account.positions.contains_key("HYPE"),
+            "the refused patch did not clear positions"
+        );
+        assert_eq!(account.spot[&0].total, "7.857973".parse().unwrap());
     }
 
     /// The seed is a patch: an unnamed field keeps its previous value — the
@@ -342,19 +700,38 @@ mod tests {
             serde_json::from_str(r#"{"marginSummary": {"accountValue": "100", "totalNtlPos": "0", "totalRawUsd": "100", "totalMarginUsed": "0"}}"#)
                 .unwrap();
         seed.apply_to(&mut account, 7).unwrap();
-        assert_eq!(account.perp_balance, Decimal::from(100), "the named summary replaces the raw base");
-        assert_eq!(account.spot[&0].total, Decimal::from(250), "unnamed balances keep their value");
+        assert_eq!(
+            account.perp_balance,
+            Decimal::from(100),
+            "the named summary replaces the raw base"
+        );
+        assert_eq!(
+            account.spot[&0].total,
+            Decimal::from(250),
+            "unnamed balances keep their value"
+        );
         assert_eq!(account.funded_at_ms, 7);
 
         let clear: AccountSeed = serde_json::from_str(r#"{"spotBalances": []}"#).unwrap();
         clear.apply_to(&mut account, 8).unwrap();
-        assert!(account.spot.is_empty(), "a named empty spotBalances list clears");
-        assert_eq!(account.perp_balance, Decimal::from(100), "a spotBalances-only patch keeps the perp side");
-        assert_eq!(account.funded_at_ms, 7, "a spotBalances-only patch does not re-stamp the funding baseline");
+        assert!(
+            account.spot.is_empty(),
+            "a named empty spotBalances list clears"
+        );
+        assert_eq!(
+            account.perp_balance,
+            Decimal::from(100),
+            "a spotBalances-only patch keeps the perp side"
+        );
+        assert_eq!(
+            account.funded_at_ms, 7,
+            "a spotBalances-only patch does not re-stamp the funding baseline"
+        );
 
         // The patch shape's own field names land (measured: the served names
         // were silently ignored).
-        let mode: AccountSeed = serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap();
+        let mode: AccountSeed =
+            serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap();
         mode.apply_to(&mut account, 9).unwrap();
         assert_eq!(account.mode, UserAbstraction::UnifiedAccount);
     }
@@ -387,13 +764,24 @@ mod tests {
         .unwrap();
         let mut account = Account::default();
         seed.apply_to(&mut account, 0).unwrap();
-        assert_eq!(account.perp_balance, Decimal::from(80_000), "entryPx 0.0: raw == perp balance");
+        assert_eq!(
+            account.perp_balance,
+            Decimal::from(80_000),
+            "entryPx 0.0: raw == perp balance"
+        );
 
         let feed = feed_with(&[("HYPE", "300", "300")]);
         let before = control_view(Some(&seed), &account, &feed, None).unwrap();
-        assert_eq!(before.margin_summary.unwrap().account_value, Decimal::from(50_000));
+        assert_eq!(
+            before.margin_summary.unwrap().account_value,
+            Decimal::from(50_000)
+        );
         let live = view(&account, &feed, None).unwrap();
-        assert_eq!(live.margin_summary.account_value, Decimal::from(50_000), "the live view agrees at the setup mark");
+        assert_eq!(
+            live.margin_summary.account_value,
+            Decimal::from(50_000),
+            "the live view agrees at the setup mark"
+        );
 
         feed.put_ctx("HYPE".into(), crate::wire::test_ctx("310", "310"), 2);
         let after = control_view(Some(&seed), &account, &feed, None).unwrap();
@@ -403,7 +791,11 @@ mod tests {
             "the fixture read must not move with the mark"
         );
         let live = view(&account, &feed, None).unwrap();
-        assert_eq!(live.margin_summary.account_value, Decimal::from(49_000), "the live view follows the mark");
+        assert_eq!(
+            live.margin_summary.account_value,
+            Decimal::from(49_000),
+            "the live view follows the mark"
+        );
     }
 
     /// hl_mock's patch merge: a mode-only patch must not erase the book (the
@@ -418,12 +810,22 @@ mod tests {
         let second: AccountSeed =
             serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap();
         let merged = second.merged_with(Some(first));
-        assert!(merged.margin_summary.is_some(), "the unnamed summary keeps its value");
-        assert_eq!(merged.user_abstraction, Some(UserAbstraction::UnifiedAccount));
+        assert!(
+            merged.margin_summary.is_some(),
+            "the unnamed summary keeps its value"
+        );
+        assert_eq!(
+            merged.user_abstraction,
+            Some(UserAbstraction::UnifiedAccount)
+        );
 
         let clear: AccountSeed = serde_json::from_str(r#"{"spotBalances": []}"#).unwrap();
         let merged = clear.merged_with(Some(merged));
-        assert_eq!(merged.spot_balances, Some(Vec::new()), "a named empty field clears in the fixture too");
+        assert_eq!(
+            merged.spot_balances,
+            Some(Vec::new()),
+            "a named empty field clears in the fixture too"
+        );
         assert!(merged.margin_summary.is_some(), "and the other fields keep");
     }
 
@@ -440,7 +842,11 @@ mod tests {
         let mut account = Account::default();
         let refused = seed.apply_to(&mut account, 0);
         assert!(refused.is_err(), "portfolio margin is not modeled");
-        assert_eq!(account.mode, UserAbstraction::Default, "the mode is untouched");
+        assert_eq!(
+            account.mode,
+            UserAbstraction::Default,
+            "the mode is untouched"
+        );
         let seed: AccountSeed =
             serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap();
         seed.apply_to(&mut account, 0).unwrap();

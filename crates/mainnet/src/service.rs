@@ -4,9 +4,9 @@
 //! venue crate's engine and simulator entries and the bridge's entry live the
 //! same way.
 
+use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::{driver, feed, http, selftest};
-use crate::ctx::Ctx;
 use clap::{Parser, Subcommand};
 use diorama_config::Instance;
 use diorama_devnet::engine::Engine as _;
@@ -78,7 +78,10 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             blocks,
             timeout_secs,
         } => {
-            let targets = selftest::Targets { rpc, anvil: anvil_t };
+            let targets = selftest::Targets {
+                rpc,
+                anvil: anvil_t,
+            };
             selftest_cmd(config, targets, blocks, timeout_secs).await
         }
         Cmd::Rewind { config, blocks } => rewind_cmd(config, blocks).await,
@@ -109,9 +112,7 @@ async fn selftest_cmd(
                     .as_mut()
                     .ok_or_else(|| {
                         Error::Config(diorama_config::ConfigError::Invalid {
-                            issues: vec![
-                                "profile \"mainnet\" requires [services.engine]".into(),
-                            ],
+                            issues: vec!["profile \"mainnet\" requires [services.engine]".into()],
                         })
                     })?
                     .reth
@@ -127,7 +128,9 @@ async fn selftest_cmd(
 async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
     let (cfg, unresolved) = Instance::inspect(&config)?;
     let (reth, t) = cfg.mainnet_urls()?;
-    require_wiring(&cfg, &unresolved, "mainnet engine wiring", &[&reth, &t])?;
+    let mut endpoints: Vec<&str> = reth.iter().collect();
+    endpoints.push(&t);
+    require_wiring(&cfg, &unresolved, "mainnet engine wiring", &endpoints)?;
     let ctx = Ctx::new(cfg, &reth, &t)?;
     let out = ctx.admin().rewind(blocks).await?;
     println!(
@@ -152,12 +155,16 @@ impl diorama_devnet::engine::EngineService for Ctx {
         self::wiring_extra(cfg)
     }
 
-    fn urls(cfg: &Instance) -> Result<(String, String)> {
+    fn urls(cfg: &Instance) -> Result<(diorama_config::Endpoints, String)> {
         Ok(cfg.mainnet_urls()?)
     }
 
-    fn context(cfg: Instance, source_url: &str, target_url: &str) -> Result<Self> {
-        Ctx::new(cfg, source_url, target_url)
+    fn context(
+        cfg: Instance,
+        source_urls: &diorama_config::Endpoints,
+        target_url: &str,
+    ) -> Result<Self> {
+        Ctx::new(cfg, source_urls, target_url)
     }
 
     fn boot(ctx: &Self) -> futures_util::future::BoxFuture<'_, Result<()>> {
@@ -240,4 +247,3 @@ async fn build_bridge(ctx: &Arc<Ctx>) -> Result<Option<Arc<feed::FeedBridge>>> {
     tracing::info!(feeds = bridge.list().len(), "feed bridge active");
     Ok(Some(bridge))
 }
-

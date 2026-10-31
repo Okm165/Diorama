@@ -17,8 +17,8 @@
 use crate::cow::Scope;
 use crate::error::Result;
 use crate::source::Source;
-use futures_util::future::BoxFuture;
 use diorama_anvil::Rpc;
+use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// What a profile's `build` needs (the context assembles it): the shared
@@ -264,9 +264,8 @@ mod tests {
     /// divergence row: it drives `/admin/rewind`).
     #[test]
     fn a_bundle_reports_what_it_was_built_with() {
-        let rpc = Arc::new(
-            Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
-        );
+        let rpc =
+            Arc::new(Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap());
         let source: Arc<dyn Source> = Arc::new(RawSource::target(rpc));
         let bundle = Bundle {
             label: "t",

@@ -7,7 +7,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "diorama-config", version, about = "The mirrors' configuration CLI")]
+#[command(
+    name = "diorama-config",
+    version,
+    about = "The mirrors' configuration CLI"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

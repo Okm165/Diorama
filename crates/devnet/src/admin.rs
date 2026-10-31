@@ -146,7 +146,10 @@ impl AdminSurface<'_> {
     /// that predates the devnet's own writes and re-mark the stale value.
     /// Returns the outcome and the blocks the pre-step scan walked (0 when
     /// there was nothing to flush); the profile records the count.
-    pub async fn shadow_hand_back(&self, req: &ShadowRequest) -> Result<(ShadowOutcome, crate::scan::ScanWalk)> {
+    pub async fn shadow_hand_back(
+        &self,
+        req: &ShadowRequest,
+    ) -> Result<(ShadowOutcome, crate::scan::ScanWalk)> {
         let walk = if req.clear {
             self.scan_to_head().await?
         } else {
@@ -265,7 +268,10 @@ impl AdminSurface<'_> {
                     slot: *slot,
                 })
                 .collect();
-            for (slot, value) in slots.iter().zip(self.source.read_keys(&keys, anchor).await?) {
+            for (slot, value) in slots
+                .iter()
+                .zip(self.source.read_keys(&keys, anchor).await?)
+            {
                 let diorama_anvil::Value::Storage(word) = value else {
                     // The kinds are by construction (a storage key decodes to
                     // a storage word); a different kind is a contract fault.
@@ -425,7 +431,11 @@ impl AdminSurface<'_> {
     /// at the chain head + 1 and skip parent blocks); only a *missing* block
     /// means "reset under us".
     async fn reset_cursor_to(&self, target: u64) -> Result<()> {
-        if let Some(b) = self.target.block_by_number_opt(target, diorama_anvil::Txs::Hashes).await? {
+        if let Some(b) = self
+            .target
+            .block_by_number_opt(target, diorama_anvil::Txs::Hashes)
+            .await?
+        {
             crate::state::advance_cursor(&self.plane.state, &b, target)?;
         } else {
             self.plane.state.clear_cursor()?;

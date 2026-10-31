@@ -29,9 +29,9 @@
 pub(crate) mod beacon;
 pub(crate) mod engine_api;
 
-use crate::source_sync::beacon::BeaconClient;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::source_sync::beacon::BeaconClient;
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadStatusEnum};
 use diorama_devnet::metrics::Registry as _;
@@ -120,7 +120,10 @@ async fn cl_head_el_block(beacon: &BeaconClient, cache: &mut Option<HeadCache>) 
         .payload_inner
         .payload_inner
         .block_number;
-    *cache = Some(HeadCache { at: Instant::now(), block: n });
+    *cache = Some(HeadCache {
+        at: Instant::now(),
+        block: n,
+    });
     Some(n)
 }
 
@@ -132,7 +135,10 @@ async fn top_up(ctx: &Ctx, engine: &crate::source_sync::engine_api::EngineClient
         return Ok(0);
     }
     let el_head = ctx.reth.block_number().await?;
-    let el = ctx.reth.block_by_number(el_head, diorama_anvil::Txs::Hashes).await?;
+    let el = ctx
+        .reth
+        .block_by_number(el_head, diorama_anvil::Txs::Hashes)
+        .await?;
     let cl_head = ctx.beacon.head_slot().await?;
     // First slot whose payload can follow the EL head.
     let mut slot = first_payload_slot(el.header.timestamp);

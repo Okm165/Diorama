@@ -9,8 +9,18 @@ metadata:
   labels:
     app.kubernetes.io/part-of: diorama-venue
 data:
-  # The fork source V pins at (its latest block; the source is archive-deep).
-  HL_RPC_URL: "https://rpc.hyperliquid.xyz/evm"
+  # The one HyperEVM URL list. The engine's read pool starts at a random
+  # healthy entry, fails over on a transport/throttle/5xx fault, and cools a
+  # failed entry down for a later round. Anvil takes one `--fork-url`, so its
+  # entrypoint derives the primary as the first list entry — there is no
+  # second `HL_RPC_URL` definition to drift.
+  HL_RPC_URLS: "https://rpc.hyperliquid.xyz/evm,https://rpc.purroofgroup.com,https://hyperliquid.drpc.org,https://rpc.hypurrscan.io,https://hyperliquid-json-rpc.stakely.io,https://hyperliquid.api.onfinality.io/evm/public"
+
+  # The venue's market plane. Both are URL lists in the instance's
+  # [endpoints] groups; the env carries the deployment values, never a second
+  # literal in the TOML.
+  HL_INFO_API_URL: "https://api.hyperliquid.xyz"
+  HL_WS_API_URL: "wss://api.hyperliquid.xyz/ws"
 
   # The devnet chain and the engine's admin base, by in-namespace service DNS.
   ANVIL_V_URL: "http://anvil-v:8545"

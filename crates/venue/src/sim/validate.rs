@@ -57,7 +57,8 @@ pub(crate) fn validate_order(
     // than the shared window is not tradable — the fill would price off a
     // snapshot the venue has already left. A scripted book is the scenario's
     // present and never stale.
-    if let BookAge::Stale(age) = feed.book_age(&req.coin, crate::now_ms(), MarketFeed::MAX_STALE_MS) {
+    if let BookAge::Stale(age) = feed.book_age(&req.coin, crate::now_ms(), MarketFeed::MAX_STALE_MS)
+    {
         tracing::warn!(coin = %req.coin, age_ms = age, "order refused: stale book");
         return Err(Error::bad_request(format!(
             "the {} book is stale ({age} ms since the last live update); trading on stale data is refused",
@@ -168,7 +169,11 @@ pub(crate) fn validate_tick_lot(meta: Option<&crate::wire::Meta>, req: &Order) -
 /// *take*'s below; for a sell, the reverse — a mis-sided trigger would fire
 /// immediately. The mid is the served book's `(best bid + best ask) / 2`; a
 /// missing or one-sided book skips the check (the feed is warming).
-pub(crate) fn validate_trigger_side(feed: &MarketFeed, req: &Order, trigger: &Trigger) -> Result<()> {
+pub(crate) fn validate_trigger_side(
+    feed: &MarketFeed,
+    req: &Order,
+    trigger: &Trigger,
+) -> Result<()> {
     let (Some(bid), Some(ask)) = (
         bbo(feed, &req.coin, crate::sim::order::Side::Buy),
         bbo(feed, &req.coin, crate::sim::order::Side::Sell),

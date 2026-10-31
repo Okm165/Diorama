@@ -36,7 +36,10 @@ pub(crate) struct FeedMetrics {
 impl FeedMetrics {
     pub fn new(markets: &[String]) -> Self {
         Self {
-            stale_ms: markets.iter().map(|m| (m.clone(), AtomicU64::new(0))).collect(),
+            stale_ms: markets
+                .iter()
+                .map(|m| (m.clone(), AtomicU64::new(0)))
+                .collect(),
             ..Self::default()
         }
     }
@@ -85,20 +88,71 @@ impl FeedMetrics {
         self.owned_pruned.fetch_add(n, Ordering::Relaxed);
     }
 
+    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
-        push_gauge(&mut out, "venue_sim_ws_connected", "market websocket connected (1/0)", &[], self.ws_connected.load(Ordering::Relaxed) as u64);
-        push_counter(&mut out, "venue_sim_rest_errors_total", "market REST poller faults", &[], self.rest_errors.load(Ordering::Relaxed));
-        push_counter(&mut out, "venue_sim_ws_reconnects_total", "market websocket reconnects", &[], self.ws_reconnects.load(Ordering::Relaxed));
-        push_counter(&mut out, "venue_sim_budget_skips_total", "REST calls skipped at the rate budget", &[], self.budget_skips.load(Ordering::Relaxed));
-        push_gauge(&mut out, "venue_sim_budget_weight_used", "REST weight spent in the rolling minute", &[], self.budget_used.load(Ordering::Relaxed));
-        push_gauge(&mut out, "venue_sim_owned_levels", "book levels the devnet has consumed (live updates keep the consumed delta)", &[], self.owned_levels.load(Ordering::Relaxed));
-        push_counter(&mut out, "venue_sim_owned_skips_total", "live book updates that met a devnet-owned level", &[], self.owned_skips.load(Ordering::Relaxed));
-        push_counter(&mut out, "venue_sim_owned_pruned_total", "owned levels pruned because the live book moved past them", &[], self.owned_pruned.load(Ordering::Relaxed));
+        push_gauge(
+            &mut out,
+            "venue_sim_ws_connected",
+            "market websocket connected (1/0)",
+            &[],
+            self.ws_connected.load(Ordering::Relaxed) as u64,
+        );
+        push_counter(
+            &mut out,
+            "venue_sim_rest_errors_total",
+            "market REST poller faults",
+            &[],
+            self.rest_errors.load(Ordering::Relaxed),
+        );
+        push_counter(
+            &mut out,
+            "venue_sim_ws_reconnects_total",
+            "market websocket reconnects",
+            &[],
+            self.ws_reconnects.load(Ordering::Relaxed),
+        );
+        push_counter(
+            &mut out,
+            "venue_sim_budget_skips_total",
+            "REST calls skipped at the rate budget",
+            &[],
+            self.budget_skips.load(Ordering::Relaxed),
+        );
+        push_gauge(
+            &mut out,
+            "venue_sim_budget_weight_used",
+            "REST weight spent in the rolling minute",
+            &[],
+            self.budget_used.load(Ordering::Relaxed),
+        );
+        push_gauge(
+            &mut out,
+            "venue_sim_owned_levels",
+            "book levels the devnet has consumed (live updates keep the consumed delta)",
+            &[],
+            self.owned_levels.load(Ordering::Relaxed),
+        );
+        push_counter(
+            &mut out,
+            "venue_sim_owned_skips_total",
+            "live book updates that met a devnet-owned level",
+            &[],
+            self.owned_skips.load(Ordering::Relaxed),
+        );
+        push_counter(
+            &mut out,
+            "venue_sim_owned_pruned_total",
+            "owned levels pruned because the live book moved past them",
+            &[],
+            self.owned_pruned.load(Ordering::Relaxed),
+        );
         // One family, one HELP/TYPE, then every series (strict scrapers
         // reject a repeated header — the verifier caught it).
         if !self.stale_ms.is_empty() {
-            out.push_str("# HELP venue_sim_stale_ms ms since the coin's last live context update\n");
+            out.push_str(
+                "# HELP venue_sim_stale_ms ms since the coin's last live context update\n",
+            );
             out.push_str("# TYPE venue_sim_stale_ms gauge\n");
         }
         for (coin, ms) in &self.stale_ms {
@@ -121,7 +175,10 @@ mod tests {
         m.set_stale("BTC", 1500);
         m.mark_ws_up();
         let out = m.render();
-        assert!(out.contains("venue_sim_stale_ms{coin=\"BTC\"} 1500"), "{out}");
+        assert!(
+            out.contains("venue_sim_stale_ms{coin=\"BTC\"} 1500"),
+            "{out}"
+        );
         assert!(out.contains("venue_sim_ws_connected 1"), "{out}");
     }
 }

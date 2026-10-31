@@ -16,7 +16,7 @@
 //!   `slot = keccak256(pad32(key) ‖ pad32(base))`. Live-verified against
 //!   WETH (slot 3): holder `0x28C6…1d60` ⇒ slot `0xdca77c…a94e`, and the
 //!   storage word equals `balanceOf` exactly.
-use alloy_primitives::{Address, B256, Bytes, Log, U256};
+use alloy_primitives::{Address, Bytes, Log, B256, U256};
 use diorama_anvil::{Key, Write};
 use std::collections::{HashMap, HashSet};
 
@@ -273,7 +273,9 @@ mod tests {
         touched.log(
             weth,
             vec![
-                B256::from(alloy_primitives::keccak256(b"Transfer(address,address,uint256)")),
+                B256::from(alloy_primitives::keccak256(
+                    b"Transfer(address,address,uint256)",
+                )),
                 B256::left_padding_from(holder.as_slice()),
                 B256::left_padding_from(holder.as_slice()),
             ],

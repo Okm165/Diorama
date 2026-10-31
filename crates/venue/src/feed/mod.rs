@@ -25,14 +25,14 @@ pub(crate) mod ws;
 use crate::error::Result;
 use crate::wire::{AllMids, AssetCtx, L2Book, Meta};
 use budget::Budget;
-use metrics::FeedMetrics;
 use diorama_devnet::store;
+use metrics::FeedMetrics;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::RwLock;
 
 /// The scenario's owned market values (persisted).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -188,10 +188,19 @@ impl MarketFeed {
         if self.read_overrides().books.contains_key(coin) {
             return BookAge::Scripted;
         }
-        match self.stale_ms(coin, now_ms) {
+        // The book's own stamp, not the context's: a REST-only book stall
+        // leaves `ctx_at` advancing on the WS lane while `l2Book` freezes.
+        // Gating on the context is what let a stale book pass readiness.
+        match self.read().book_at.get(coin).copied() {
             None => BookAge::Warming,
-            Some(age) if age > max_ms => BookAge::Stale(age),
-            Some(_) => BookAge::Fresh,
+            Some(at) => {
+                let age = now_ms.saturating_sub(at);
+                if age > max_ms {
+                    BookAge::Stale(age)
+                } else {
+                    BookAge::Fresh
+                }
+            }
         }
     }
 
@@ -199,6 +208,27 @@ impl MarketFeed {
     /// the scripted depth plus the live remainder — the COW composition).
     pub fn scripted_book(&self, coin: &str) -> bool {
         self.read_overrides().books.contains_key(coin)
+    }
+
+    /// Whether any input the account plane prices this coin from is
+    /// scenario-owned: the mark/oracle (`crash`/`rally`), the funding rate
+    /// (`set_funding`), the book (`set_book`), or the whole live plane
+    /// (`stall`). A `controlOwned` account is a simulation, not an
+    /// observation; the operator's HF fold and the gateway's draw capacity
+    /// must refuse it, and the PM advisory must not be built on it.
+    pub fn market_is_owned(&self, coin: &str) -> bool {
+        let o = self.read_overrides();
+        o.prices.contains_key(coin)
+            || o.funding.contains_key(coin)
+            || o.books.contains_key(coin)
+            || self.stalled()
+    }
+
+    /// The instant of the coin's last **live** context update. The account
+    /// plane stamps its served `time` with the oldest position coin's stamp,
+    /// so a stalled feed cannot serve a fresh `time` over stale marks.
+    pub fn last_ctx_at(&self, coin: &str) -> Option<u64> {
+        self.read().ctx_at.get(coin).copied()
     }
 
     // ---- writes (the poller / WS client / control plane) ------------------
@@ -306,7 +336,9 @@ impl MarketFeed {
     /// `crash`: own this coin's mark and oracle (live updates stop mattering
     /// until [`Self::clear_price`]).
     pub(crate) fn own_price(&self, coin: &str, price: PriceOverride) -> Result<()> {
-        self.write_overrides().prices.insert(coin.to_string(), price);
+        self.write_overrides()
+            .prices
+            .insert(coin.to_string(), price);
         self.persist()
     }
 
@@ -316,7 +348,9 @@ impl MarketFeed {
     }
 
     pub fn own_funding(&self, coin: &str, rate: Decimal) -> Result<()> {
-        self.write_overrides().funding.insert(coin.to_string(), rate);
+        self.write_overrides()
+            .funding
+            .insert(coin.to_string(), rate);
         self.persist()
     }
 
@@ -424,6 +458,9 @@ impl MarketFeed {
         self.read().ctxs.get(coin).map(|c| c.oracle_px)
     }
 
+    /// Whether the scenario control plane owns this coin's mark/oracle. A control mark is
+    /// a simulation input, not a market observation; consumers must not use it for a
+    /// verdict (the `controlOwned` field on the account read carries this to DALOC).
     /// The coin's published hourly funding rate (overridable).
     pub fn funding(&self, coin: &str) -> Option<Decimal> {
         if let Some(rate) = self.read_overrides().funding.get(coin) {
@@ -436,13 +473,22 @@ impl MarketFeed {
     /// `now` at serve time (it is the scenario's present, not a snapshot).
     pub(crate) fn book(&self, coin: &str, now_ms: u64) -> Option<L2Book> {
         let overrides = self.read_overrides();
-        let base = match overrides.books.get(coin) {
-            Some(b) => {
-                let mut b = b.clone();
-                b.time = now_ms;
-                b
+        let base = if let Some(b) = overrides.books.get(coin) {
+            let mut b = b.clone();
+            b.time = now_ms;
+            b
+        } else {
+            let c = self.read();
+            let mut b = c.books.get(coin)?.clone();
+            // The live book's served instant is its **last update**, not
+            // the read's clock. A stalled book that stamped `now` on every
+            // read looked fresh to every consumer's age gate; the indexer's
+            // `venue_observed_at` can only bound what the venue honestly
+            // stamps.
+            if let Some(at) = c.book_at.get(coin) {
+                b.time = *at;
             }
-            None => self.read().books.get(coin).cloned()?,
+            b
         };
         Some(apply_consumptions(base, &overrides.consumptions))
     }
@@ -481,12 +527,17 @@ impl MarketFeed {
     pub(crate) fn meta_and_ctxs(&self) -> Option<crate::wire::MetaAndAssetCtxs> {
         let meta = self.meta()?;
         let overrides = self.read_overrides().clone();
+        let stalled = self.stalled();
         let c = self.read();
         let ctxs = meta
             .universe
             .iter()
             .filter_map(|asset| {
                 let mut ctx = c.ctxs.get(&asset.name)?.clone();
+                let owned = overrides.prices.contains_key(&asset.name)
+                    || overrides.funding.contains_key(&asset.name)
+                    || overrides.books.contains_key(&asset.name)
+                    || stalled;
                 if let Some(p) = overrides.prices.get(&asset.name) {
                     ctx.mark_px = p.mark;
                     ctx.oracle_px = p.oracle;
@@ -494,6 +545,7 @@ impl MarketFeed {
                 if let Some(rate) = overrides.funding.get(&asset.name) {
                     ctx.funding = *rate;
                 }
+                ctx.control_owned = owned;
                 Some(ctx)
             })
             .collect();
@@ -556,19 +608,27 @@ impl MarketFeed {
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Cache> {
-        self.cache.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, Cache> {
-        self.cache.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn read_overrides(&self) -> std::sync::RwLockReadGuard<'_, Overrides> {
-        self.overrides.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.overrides
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn write_overrides(&self) -> std::sync::RwLockWriteGuard<'_, Overrides> {
-        self.overrides.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.overrides
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -582,7 +642,9 @@ fn apply_consumptions(mut book: L2Book, consumptions: &[Consumption]) -> L2Book 
         for level in book.levels[side].iter_mut() {
             let taken: Decimal = consumptions
                 .iter()
-                .filter(|c| c.coin == book.coin && usize::from(c.side) == side && c.price == level.px)
+                .filter(|c| {
+                    c.coin == book.coin && usize::from(c.side) == side && c.price == level.px
+                })
                 .map(|c| c.size)
                 .sum();
             if taken > Decimal::ZERO {
@@ -628,7 +690,11 @@ mod tests {
             time: 1,
             levels: [
                 vec![],
-                vec![Level { px: px.parse().unwrap(), sz: Decimal::ONE, n: 1 }],
+                vec![Level {
+                    px: px.parse().unwrap(),
+                    sz: Decimal::ONE,
+                    n: 1,
+                }],
             ],
             spread: None,
         };
@@ -689,24 +755,39 @@ mod tests {
             coin: "BTC".into(),
             time: 1,
             levels: [
-                vec![Level { px: px.parse().unwrap(), sz: Decimal::ONE, n: 1 }],
+                vec![Level {
+                    px: px.parse().unwrap(),
+                    sz: Decimal::ONE,
+                    n: 1,
+                }],
                 vec![],
             ],
             spread: None,
         };
         feed.put_book(book("100"), 1_000);
-        assert_eq!(feed.book("BTC", 5_000).unwrap().time, 1, "live book keeps its stamp");
+        assert_eq!(
+            feed.book("BTC", 5_000).unwrap().time,
+            1_000,
+            "live book keeps its stamp"
+        );
         feed.own_book(&book("99")).unwrap();
         let served = feed.book("BTC", 5_000).unwrap();
-        assert_eq!(served.time, 5_000, "scripted book is the scenario's present");
+        assert_eq!(
+            served.time, 5_000,
+            "scripted book is the scenario's present"
+        );
         assert_eq!(served.levels[0][0].px, Decimal::from(99));
         feed.clear_book("BTC").unwrap();
-        assert_eq!(feed.book("BTC", 6_000).unwrap().levels[0][0].px, Decimal::from(100));
+        assert_eq!(
+            feed.book("BTC", 6_000).unwrap().levels[0][0].px,
+            Decimal::from(100)
+        );
     }
 
     /// The stall holds the live plane (scripted writes still land) and the
     /// served-book freshness is live-only: a scripted book is never stale.
     #[test]
+    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     fn a_stall_drops_live_updates_and_book_freshness_is_live_only() {
         let feed = MarketFeed::memory(vec!["BTC".into()]);
         let now = crate::now_ms();
@@ -714,16 +795,27 @@ mod tests {
             coin: "BTC".into(),
             time: 1,
             levels: [
-                vec![Level { px: px.parse().unwrap(), sz: Decimal::ONE, n: 1 }],
+                vec![Level {
+                    px: px.parse().unwrap(),
+                    sz: Decimal::ONE,
+                    n: 1,
+                }],
                 vec![],
             ],
             spread: None,
         };
         feed.put_ctx("BTC".into(), test_ctx("100", "101"), now);
         feed.put_book(book("100"), now);
-        assert_eq!(feed.book_age("BTC", now, MarketFeed::MAX_STALE_MS), BookAge::Fresh);
         assert_eq!(
-            feed.book_age("BTC", now + MarketFeed::MAX_STALE_MS + 1, MarketFeed::MAX_STALE_MS),
+            feed.book_age("BTC", now, MarketFeed::MAX_STALE_MS),
+            BookAge::Fresh
+        );
+        assert_eq!(
+            feed.book_age(
+                "BTC",
+                now + MarketFeed::MAX_STALE_MS + 1,
+                MarketFeed::MAX_STALE_MS
+            ),
             BookAge::Stale(MarketFeed::MAX_STALE_MS + 1),
             "an aged live book is stale"
         );
@@ -738,15 +830,25 @@ mod tests {
         assert!(feed.stalled());
         feed.put_ctx("BTC".into(), test_ctx("999", "999"), now);
         feed.put_book(book("999"), now);
-        assert_eq!(feed.mark("BTC"), Some(Decimal::from(100)), "the live ctx was dropped");
-        assert_eq!(feed.book("BTC", now).unwrap().levels[0][0].px, Decimal::from(100));
+        assert_eq!(
+            feed.mark("BTC"),
+            Some(Decimal::from(100)),
+            "the live ctx was dropped"
+        );
+        assert_eq!(
+            feed.book("BTC", now).unwrap().levels[0][0].px,
+            Decimal::from(100)
+        );
         feed.own_book(&book("77")).unwrap();
         assert_eq!(
             feed.book("BTC", now).unwrap().levels[0][0].px,
             Decimal::from(77),
             "the scripted plane is never gated"
         );
-        assert_eq!(feed.book_age("BTC", now + 60_000, MarketFeed::MAX_STALE_MS), BookAge::Scripted);
+        assert_eq!(
+            feed.book_age("BTC", now + 60_000, MarketFeed::MAX_STALE_MS),
+            BookAge::Scripted
+        );
         // Clearing the stall lets the live plane back in.
         feed.stall(0);
         assert!(!feed.stalled());

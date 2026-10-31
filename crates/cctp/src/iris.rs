@@ -45,6 +45,9 @@ pub struct IrisState {
     /// Both served chains: the reattest route anchors the fresh expiration at
     /// the *destination's* head (the field is checked there, §15.1).
     pub chains: Vec<crate::chains::Chain>,
+    /// The configured directed lanes. The fee route is served only for a
+    /// configured lane, never for an arbitrary domain pair.
+    pub(crate) lanes: Vec<crate::service::Lane>,
     /// The configured expiration window (0 = no expiry; the same value the
     /// watcher signs with).
     pub expiration_blocks: u64,
@@ -128,6 +131,11 @@ pub(crate) struct MessageEntry {
     pub message: String,
     /// `null` while pending; the 65-byte hex once signed.
     pub attestation: Option<String>,
+    /// The source log's index inside its transaction. Circle's live Iris does
+    /// not need it (its nonces are unique); the mirror adds it so a client can
+    /// select the right message when one transaction emitted several burns.
+    #[serde(rename = "burnLogIndex")]
+    pub burn_log_index: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,13 +202,31 @@ async fn public_keys(State(state): State<Arc<IrisState>>) -> Json<PublicKeysResp
 }
 
 async fn fees(
+    State(state): State<Arc<IrisState>>,
     Path((source, destination)): Path<(u32, u32)>,
 ) -> Result<Json<Vec<FeeEntry>>, IrisError> {
-    let Some(entries) = measured_fees(source, destination) else {
+    let configured = state
+        .lanes
+        .iter()
+        .any(|lane| lane.source == Domain(source) && lane.destination == Domain(destination));
+    if !configured {
         return Err(IrisError::not_found_what(format!(
             "no fee data for sourceDomain {source}, destinationDomain {destination}"
         )));
-    };
+    }
+    // Keep the measured 0→19 Fast fee; every other configured devnet lane is
+    // free at both thresholds. The table is served only for a lane this bridge
+    // actually watches.
+    let entries = measured_fees(source, destination).unwrap_or([
+        FeeEntry {
+            finality_threshold: 1000,
+            minimum_fee: 0,
+        },
+        FeeEntry {
+            finality_threshold: 2000,
+            minimum_fee: 0,
+        },
+    ]);
     Ok(Json(entries.into_iter().collect()))
 }
 
@@ -247,15 +273,33 @@ async fn messages(
             "transactionHash `{raw_hash}` is not a 32-byte hex hash"
         ))
     })?;
-    let record = state
+    // A transaction can emit more than one `MessageSent`; serve every message
+    // it produced. Returning only the first made the second burn look already
+    // relayed (its message selected the first nonce, the retry hit
+    // `NonceAlreadyUsed`, and the burn was dropped).
+    let records = state
         .store
-        .find_message(|m| m.source_domain == source_domain && m.burn_tx == hash)
+        .with(|s| {
+            Ok(s.messages
+                .iter()
+                .filter(|m| {
+                    m.source_domain == source_domain
+                        && m.burn_tx == hash
+                        // A parked record is not a served attestation: it may be
+                        // a re-orged burn or one this bridge proved unreceivable.
+                        // Serving it let a second relayer mint a burn the bridge
+                        // deliberately refused. `/v2/reattest` is the way back.
+                        && m.state != RelayState::Parked
+                })
+                .cloned()
+                .collect::<Vec<_>>())
+        })
         .map_err(|e| IrisError::internal(&e))?;
-    let Some(record) = record else {
+    if records.is_empty() {
         return Err(IrisError::not_found());
-    };
+    }
     Ok(Json(MessagesResponse {
-        messages: vec![entry(&record)],
+        messages: records.iter().map(entry).collect(),
     }))
 }
 
@@ -355,6 +399,7 @@ fn entry(record: &MessageRecord) -> MessageEntry {
     MessageEntry {
         message: record.message_hex(),
         attestation: record.attestation_hex(),
+        burn_log_index: record.burn_log_index,
     }
 }
 
@@ -392,6 +437,7 @@ mod tests {
             destination_domain: Domain(19),
             nonce: B256::repeat_byte(0xab),
             burn_tx: B256::repeat_byte(0xab),
+            burn_log_index: 0,
             burn_block: 1,
             raw_message: sample_raw_message(),
             message_hash: message.keccak(),
@@ -439,6 +485,7 @@ mod tests {
             parsed["messages"][0]["attestation"],
             serde_json::Value::Null
         );
+        assert_eq!(parsed["messages"][0]["burnLogIndex"], 0);
         let signed = MessagesResponse {
             messages: vec![entry(&record(true))],
         };
@@ -456,6 +503,35 @@ mod tests {
             serde_json::to_string(&allowance).unwrap(),
             r#"{"allowance":42.5,"lastUpdated":"1970-01-01T00:00:00.000Z"}"#
         );
+    }
+
+    /// The fee route is lane-scoped: a configured pair is served (the measured
+    /// 0→19 table or the generic free devnet table), an unconfigured pair is
+    /// the exact Iris 404. This closes the "burn on a lane no watcher serves"
+    /// path.
+    #[tokio::test]
+    async fn fees_are_served_only_for_configured_lanes() {
+        let (state, _, dir) = iris_state("fees");
+        let state = Arc::new(IrisState {
+            store: state.store.clone(),
+            attester: state.attester.clone(),
+            chains: Vec::new(),
+            lanes: vec![crate::service::Lane {
+                source: Domain(0),
+                destination: Domain(19),
+            }],
+            expiration_blocks: 0,
+        });
+        let served = fees(State(state.clone()), Path((0, 19)))
+            .await
+            .expect("the configured lane is served");
+        assert_eq!(served.0.len(), 2);
+        assert_eq!(served.0[0].minimum_fee, 1, "the measured 0→19 fast fee");
+        let refused = fees(State(state), Path((19, 0)))
+            .await
+            .expect_err("an unconfigured lane is a 404");
+        assert_eq!(refused.status, axum::http::StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The 404 body daloc's client keys on, byte for byte.
@@ -486,6 +562,7 @@ mod tests {
             store: store.clone(),
             attester: Arc::new(crate::attester::Attester::from_seed("iris-test").unwrap()),
             chains: Vec::new(),
+            lanes: Vec::new(),
             expiration_blocks: 0,
         });
         (state, store, dir)
@@ -541,6 +618,62 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One transaction can emit two burns. Iris must serve both, and a parked
+    /// record must not be served (it may be a re-orged burn the bridge
+    /// deliberately refused).
+    #[tokio::test]
+    async fn messages_serves_every_burn_in_a_transaction_and_hides_parked_records() {
+        let (state, store, dir) = iris_state("multi");
+        let tx = B256::repeat_byte(0xab);
+        store
+            .with(|s| {
+                let mut first = record(false);
+                first.burn_tx = tx;
+                first.nonce = B256::repeat_byte(0x01);
+                first.burn_log_index = 0;
+                let mut second = record(false);
+                second.burn_tx = tx;
+                second.nonce = B256::repeat_byte(0x02);
+                second.burn_log_index = 1;
+                s.messages.push(first);
+                s.messages.push(second);
+                Ok(())
+            })
+            .unwrap();
+        let served = messages(
+            State(state.clone()),
+            Path(Domain(0)),
+            Query(MessageQuery {
+                transaction_hash: Some(tx.to_string()),
+            }),
+        )
+        .await
+        .expect("both burns are served");
+        assert_eq!(served.0.messages.len(), 2);
+        assert_eq!(served.0.messages[0].burn_log_index, 0);
+        assert_eq!(served.0.messages[1].burn_log_index, 1);
+
+        store
+            .with(|s| {
+                s.messages[0].state = RelayState::Parked;
+                s.messages[0].park_reason = Some("re-orged".into());
+                Ok(())
+            })
+            .unwrap();
+        let served = messages(
+            State(state),
+            Path(Domain(0)),
+            Query(MessageQuery {
+                transaction_hash: Some(tx.to_string()),
+            }),
+        )
+        .await
+        .expect("the live burn is still served");
+        assert_eq!(served.0.messages.len(), 1);
+        assert_eq!(served.0.messages[0].burn_log_index, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

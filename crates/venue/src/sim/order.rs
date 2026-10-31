@@ -13,8 +13,8 @@
 //! verified (the devnet has no keys — the anvil-impersonation analogue), and
 //! the depth is the served book's (the live book minus what the devnet
 //! already consumed, so a second order sees the first one's impact).
-use super::Sim;
 use super::validate::{validate_order, validate_trigger_side};
+use super::Sim;
 use crate::error::{Error, Result};
 use crate::feed::{Consumption, MarketFeed};
 use crate::wire::L2Book;
@@ -216,7 +216,9 @@ impl<'de> Deserialize<'de> for Reduce {
             Wire::Named(name) => match name.as_str() {
                 "only" => Ok(Reduce::Only),
                 "any" => Ok(Reduce::Any),
-                other => Err(serde::de::Error::custom(format!("unknown reduce {other:?}"))),
+                other => Err(serde::de::Error::custom(format!(
+                    "unknown reduce {other:?}"
+                ))),
             },
         }
     }
@@ -380,8 +382,7 @@ fn validate_leverage(
             )));
         }
     }
-    if matches!(mode, crate::wire::LeverageType::Cross)
-        && super::account::isolated_only(coin, meta)
+    if matches!(mode, crate::wire::LeverageType::Cross) && super::account::isolated_only(coin, meta)
     {
         return Err(Error::bad_request(format!(
             "{coin} does not allow cross margin (docs: margin modes)"
@@ -396,7 +397,12 @@ fn validate_leverage(
 /// robust price indices: mark "is used for margining, liquidations,
 /// triggering TP/SL, and computing unrealized pnl"). Reduce-only orders free
 /// margin instead of using it.
-pub(crate) fn order_requirement(sz: Decimal, px: Decimal, leverage: u32, reduce: Reduce) -> Result<Decimal> {
+pub(crate) fn order_requirement(
+    sz: Decimal,
+    px: Decimal,
+    leverage: u32,
+    reduce: Reduce,
+) -> Result<Decimal> {
     if matches!(reduce, Reduce::Only) {
         return Ok(Decimal::ZERO);
     }
@@ -626,12 +632,8 @@ impl Sim {
         let (px, sz) = resting_at;
         let meta = feed.meta();
         let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
-        let requirement = order_requirement(
-            sz,
-            feed.mark_or(&req.coin, px),
-            leverage,
-            Reduce::Any,
-        )?;
+        let requirement =
+            order_requirement(sz, feed.mark_or(&req.coin, px), leverage, Reduce::Any)?;
         let Some(available) = self.available_for(feed, address, None, meta.as_ref())? else {
             return Ok(());
         };
@@ -709,7 +711,11 @@ impl Sim {
         let meta = feed.meta();
         let direction = self
             .account(address)?
-            .and_then(|a| a.positions.get(coin).map(super::account::Position::direction))
+            .and_then(|a| {
+                a.positions
+                    .get(coin)
+                    .map(super::account::Position::direction)
+            })
             .unwrap_or(super::account::Direction::Long);
         let req = Order {
             coin: coin.to_string(),
@@ -1031,8 +1037,7 @@ impl Sim {
             .and_then(|a| a.positions.get(&req.coin).map(|p| p.szi))
             .unwrap_or(Decimal::ZERO);
         let signed = req.size * req.side().sign();
-        let increases =
-            super::account::same_direction(old, signed);
+        let increases = super::account::same_direction(old, signed);
         if !increases {
             return Ok(None);
         }
@@ -1100,7 +1105,13 @@ impl Sim {
     /// A cancel; `fast` is the wire flag — the venue rejects a fast cancel
     /// that refers to a trigger order (docs), so the flag is checked where
     /// the order is known.
-    pub(crate) fn cancel(&self, account: Address, coin: &str, oid: u64, speed: CancelSpeed) -> Result<()> {
+    pub(crate) fn cancel(
+        &self,
+        account: Address,
+        coin: &str,
+        oid: u64,
+        speed: CancelSpeed,
+    ) -> Result<()> {
         self.cancel_with(
             account,
             coin,
@@ -1127,41 +1138,33 @@ impl Sim {
 
     /// The cancel's one home: move the resting order to the terminal history
     /// under the given status.
-    fn cancel_with(
-        &self,
-        account: Address,
-        coin: &str,
-        oid: u64,
-        mode: CancelMode,
-    ) -> Result<()> {
+    fn cancel_with(&self, account: Address, coin: &str, oid: u64, mode: CancelMode) -> Result<()> {
         let CancelMode { status, speed } = mode;
-        self.with_state(|st| {
-            match st.resting.get(&oid) {
-                Some(r) if r.account == account && r.coin == coin => {
-                    if matches!(speed, CancelSpeed::Fast) && r.trigger.is_some() {
-                        return Err(Error::bad_request(
-                            "Fast cancel cannot cancel a trigger order.",
-                        ));
-                    }
-                    let Some(done) = st.resting.remove(&oid) else {
-                        return Ok(());
-                    };
-                    st.terminal.insert(
-                        oid,
-                        TerminalOrder {
-                            order: done,
-                            status,
-                            filled_sz: Decimal::ZERO,
-                            avg_px: Decimal::ZERO,
-                            status_ms: crate::now_ms(),
-                        },
-                    );
-                    Ok(())
+        self.with_state(|st| match st.resting.get(&oid) {
+            Some(r) if r.account == account && r.coin == coin => {
+                if matches!(speed, CancelSpeed::Fast) && r.trigger.is_some() {
+                    return Err(Error::bad_request(
+                        "Fast cancel cannot cancel a trigger order.",
+                    ));
                 }
-                _ => Err(Error::bad_request(
-                    "Order was never placed, already canceled, or filled.",
-                )),
+                let Some(done) = st.resting.remove(&oid) else {
+                    return Ok(());
+                };
+                st.terminal.insert(
+                    oid,
+                    TerminalOrder {
+                        order: done,
+                        status,
+                        filled_sz: Decimal::ZERO,
+                        avg_px: Decimal::ZERO,
+                        status_ms: crate::now_ms(),
+                    },
+                );
+                Ok(())
             }
+            _ => Err(Error::bad_request(
+                "Order was never placed, already canceled, or filled.",
+            )),
         })?;
         self.mark_dirty()?;
         Ok(())
@@ -1192,7 +1195,11 @@ impl Sim {
 
     /// The resting order a status read may find (open), or its terminal
     /// record (filled/canceled).
-    pub(crate) fn resting_by_oid(&self, account: Address, oid: u64) -> Result<Option<RestingOrder>> {
+    pub(crate) fn resting_by_oid(
+        &self,
+        account: Address,
+        oid: u64,
+    ) -> Result<Option<RestingOrder>> {
         self.with_state(|st| {
             Ok(st
                 .resting
@@ -1202,7 +1209,11 @@ impl Sim {
         })
     }
 
-    pub(crate) fn terminal_by_oid(&self, account: Address, oid: u64) -> Result<Option<TerminalOrder>> {
+    pub(crate) fn terminal_by_oid(
+        &self,
+        account: Address,
+        oid: u64,
+    ) -> Result<Option<TerminalOrder>> {
         self.with_state(|st| {
             Ok(st
                 .terminal
@@ -1263,7 +1274,13 @@ impl Sim {
                 let fires = st
                     .accounts
                     .get(&account)
-                    .map(|a| if a.schedule_fire_day == day { a.schedule_fires } else { 0 })
+                    .map(|a| {
+                        if a.schedule_fire_day == day {
+                            a.schedule_fires
+                        } else {
+                            0
+                        }
+                    })
                     .unwrap_or(0);
                 if fires >= 10 {
                     return Err(Error::bad_request(
@@ -1362,7 +1379,12 @@ impl Sim {
 #[derive(Debug, Clone)]
 pub(crate) enum Candidate {
     Live(Consumption),
-    Maker { oid: u64, maker: Address, px: Decimal, sz: Decimal },
+    Maker {
+        oid: u64,
+        maker: Address,
+        px: Decimal,
+        sz: Decimal,
+    },
 }
 
 /// The best opposite price the served book shows (the `bbo` in the venue's
@@ -1374,11 +1396,7 @@ pub(crate) fn bbo(feed: &MarketFeed, coin: &str, side: Side) -> Option<Decimal> 
 
 /// Whether `req` would cross anything the served book (live levels *and*
 /// devnet resting orders) currently offers.
-pub(crate) fn crosses(
-    feed: &MarketFeed,
-    req: &Order,
-    resting: &[RestingOrder],
-) -> bool {
+pub(crate) fn crosses(feed: &MarketFeed, req: &Order, resting: &[RestingOrder]) -> bool {
     let Some(limit) = req.limit_px else {
         return true; // a market order always crosses
     };
@@ -1467,7 +1485,11 @@ fn merge_candidates(
 /// Walk a book in price order: asks ascending for a buy, bids descending for
 /// a sell; the limit stops the walk. Returns (the consumed candidates, the
 /// filled size, the size-weighted average).
-fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Candidate>, Decimal, Decimal)> {
+fn walk(
+    book: &L2Book,
+    req: &Order,
+    resting: &[RestingOrder],
+) -> Result<(Vec<Candidate>, Decimal, Decimal)> {
     let candidates = merge_candidates(book, req, resting);
     let mut remaining = req.size;
     let mut notional = Decimal::ZERO;
@@ -1496,7 +1518,12 @@ fn walk(book: &L2Book, req: &Order, resting: &[RestingOrder]) -> Result<(Vec<Can
             "fill total",
         )?;
         if origin == Origin::Resting {
-            legs.push(Candidate::Maker { oid, maker, px, sz: take });
+            legs.push(Candidate::Maker {
+                oid,
+                maker,
+                px,
+                sz: take,
+            });
         } else {
             legs.push(Candidate::Live(Consumption {
                 coin: book.coin.clone(),
@@ -1543,10 +1570,7 @@ mod tests {
         // fixture stamped at the epoch would read as permanently stale.
         let now = crate::now_ms();
         feed.put_meta(meta, now);
-        let mark = book.levels[1]
-            .first()
-            .map(|l| l.px)
-            .unwrap_or(Decimal::ONE);
+        let mark = book.levels[1].first().map(|l| l.px).unwrap_or(Decimal::ONE);
         feed.put_ctx(
             "ETH".into(),
             crate::wire::test_ctx(&mark.to_string(), &mark.to_string()),
@@ -1609,12 +1633,26 @@ mod tests {
         let (sim, a) = funded_sim(&feed, "1000");
 
         let err = sim
-            .order(&feed, a, &Order { coin: "NOPE".into(), ..ioc(Side::Buy, "1") })
+            .order(
+                &feed,
+                a,
+                &Order {
+                    coin: "NOPE".into(),
+                    ..ioc(Side::Buy, "1")
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, Error::NotFound { .. }), "{err:?}");
 
         let err = sim
-            .order(&feed, a, &Order { coin: "SOL".into(), ..ioc(Side::Buy, "1") })
+            .order(
+                &feed,
+                a,
+                &Order {
+                    coin: "SOL".into(),
+                    ..ioc(Side::Buy, "1")
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, Error::Warming), "{err:?}");
     }
@@ -1622,7 +1660,10 @@ mod tests {
     /// I3: the fill moves the book and the position, never the mark.
     #[test]
     fn a_fill_moves_the_book_never_the_mark() {
-        let feed = feed_with_book(book("ETH", &[("100", "2")], &[("101", "2")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "2")], &[("101", "2")]),
+            meta_with("ETH", 10),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         let mark_before = feed.mark("ETH").unwrap();
 
@@ -1660,7 +1701,11 @@ mod tests {
         let served = feed.book("ETH", 0).unwrap();
         assert_eq!(served.levels[1].len(), 1, "the consumed ask left the book");
         assert_eq!(served.levels[1][0].px, "102".parse().unwrap());
-        assert_eq!(served.levels[0][0].sz, "5".parse().unwrap(), "the bid is live");
+        assert_eq!(
+            served.levels[0][0].sz,
+            "5".parse().unwrap(),
+            "the bid is live"
+        );
         assert_eq!(feed.owned_levels(), 1);
         // A second order walks into the next level.
         let fill = sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
@@ -1672,14 +1717,21 @@ mod tests {
     /// delta, and prunes the records the market moved past.
     #[test]
     fn live_updates_keep_the_delta_and_prune_stale_records() {
-        let feed = feed_with_book(book("ETH", &[], &[("101", "1"), ("102", "1")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[], &[("101", "1"), ("102", "1")]),
+            meta_with("ETH", 10),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
         // The live book refreshes 101 with a bigger size: the delta persists
         // (served = live − consumed) and the untouched 102 refreshes verbatim.
         feed.put_book(book("ETH", &[], &[("101", "3"), ("102", "7")]), 10);
         let served = feed.book("ETH", 0).unwrap();
-        assert_eq!(served.levels[1][0].sz, "2".parse().unwrap(), "3 live − 1 consumed");
+        assert_eq!(
+            served.levels[1][0].sz,
+            "2".parse().unwrap(),
+            "3 live − 1 consumed"
+        );
         assert_eq!(served.levels[1][1].sz, "7".parse().unwrap());
         assert_eq!(feed.owned_levels(), 1);
         // The market moves past 101: the record is pruned, never re-owned.
@@ -1695,16 +1747,25 @@ mod tests {
         let feed = feed_with_book(book("ETH", &[], &[("101", "2")]), meta_with("ETH", 10));
         let (sim, a) = funded_sim(&feed, "1000");
         sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
-        assert_eq!(feed.book("ETH", 0).unwrap().levels[1][0].sz, "1".parse().unwrap());
+        assert_eq!(
+            feed.book("ETH", 0).unwrap().levels[1][0].sz,
+            "1".parse().unwrap()
+        );
         feed.clear_book("ETH").unwrap();
-        assert_eq!(feed.book("ETH", 0).unwrap().levels[1][0].sz, "2".parse().unwrap());
+        assert_eq!(
+            feed.book("ETH", 0).unwrap().levels[1][0].sz,
+            "2".parse().unwrap()
+        );
         assert_eq!(feed.owned_levels(), 0);
     }
 
     /// A reducing fill realizes its PnL into the perp balance.
     #[test]
     fn a_reduce_realizes_pnl() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
         // The test is the PnL identity, not funding: the fills settle funding
         // (a sub-nano term with the fixture's tiny rate) — pin it to zero so
         // the assertion is exact.
@@ -1717,7 +1778,11 @@ mod tests {
         let after = sim.account(a).unwrap().unwrap().perp_balance;
         // Realized −1, minus the reduce's own taker fee (100 notional × 4.5 bps).
         let fee = Decimal::from(100) * taker_fee();
-        assert_eq!(after, before - Decimal::ONE - fee, "realized −1 net of the fee");
+        assert_eq!(
+            after,
+            before - Decimal::ONE - fee,
+            "realized −1 net of the fee"
+        );
         // The position is 1 long at 101, still.
         let account = sim.account(a).unwrap().unwrap();
         let p = account.positions.get("ETH").unwrap();
@@ -1729,35 +1794,47 @@ mod tests {
     /// name.
     #[test]
     fn the_limit_stops_the_walk() {
-        let feed = feed_with_book(book("ETH", &[("100", "1")], &[("101", "1")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "1")], &[("101", "1")]),
+            meta_with("ETH", 10),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         let mut o = ioc(Side::Buy, "1");
         o.limit_px = Some("100.5".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
-        assert!(format!("{err}").contains("could not immediately match"), "{err}");
+        assert!(
+            format!("{err}").contains("could not immediately match"),
+            "{err}"
+        );
         let mut o = ioc(Side::Sell, "1");
         o.limit_px = Some("100.5".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
-        assert!(format!("{err}").contains("could not immediately match"), "{err}");
+        assert!(
+            format!("{err}").contains("could not immediately match"),
+            "{err}"
+        );
     }
 
     /// A stale live book refuses by name; a scripted book for the same coin
     /// is the scenario's present and fills.
     #[test]
     fn a_stale_live_book_refuses_but_a_scripted_one_fills() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
-        let (sim, a) = funded_sim(&feed, "1000");
-        // Age the live ctx past the shared window.
-        let old = crate::now_ms() - MarketFeed::MAX_STALE_MS - 1_000;
-        feed.put_ctx(
-            "ETH".into(),
-            crate::wire::test_ctx("100", "100"),
-            old,
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
         );
+        let (sim, a) = funded_sim(&feed, "1000");
+        // Age the live book (and its ctx) past the shared window. The book's
+        // own stamp is the gate: a REST-only book stall leaves the ctx lane
+        // advancing, so a ctx-only age would not refuse the stale book.
+        let old = crate::now_ms() - MarketFeed::MAX_STALE_MS - 1_000;
+        feed.put_ctx("ETH".into(), crate::wire::test_ctx("100", "100"), old);
+        feed.put_book(book("ETH", &[("100", "5")], &[("101", "5")]), old);
         let err = sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap_err();
         assert!(format!("{err}").contains("stale"), "{err}");
         // The scenario scripts the coin: its present is never stale.
-        feed.own_book(&book("ETH", &[("100", "5")], &[("101", "5")])).unwrap();
+        feed.own_book(&book("ETH", &[("100", "5")], &[("101", "5")]))
+            .unwrap();
         let fill = sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
         assert_eq!(fill.total_sz, "0.1".parse().unwrap());
     }
@@ -1766,31 +1843,51 @@ mod tests {
     /// *pre-fill* size and restarts `cumFunding.sinceChange`.
     #[test]
     fn a_fill_settles_funding_and_restarts_since_change() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
         // The shared fixture is rate-free (see `test_ctx`); this test is
         // about funding, so its ctx carries the published hourly rate.
-        feed.put_ctx("ETH".into(), crate::wire::funding_ctx("101", "101"), crate::now_ms());
+        feed.put_ctx(
+            "ETH".into(),
+            crate::wire::funding_ctx("101", "101"),
+            crate::now_ms(),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
         // An hour passes, then a second fill: the pre-fill size pays the
         // hour, and the change restarts since-change.
         sim.advance(&feed, 3600, 1).unwrap();
         sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
-        let p = sim.account(a).unwrap().unwrap().positions.remove("ETH").unwrap();
+        let p = sim
+            .account(a)
+            .unwrap()
+            .unwrap()
+            .positions
+            .remove("ETH")
+            .unwrap();
         assert_ne!(p.funding_all_time, Decimal::ZERO, "the hour was paid");
         assert_eq!(
             p.funding_since_change,
             Decimal::ZERO,
             "the size change restarts since-change"
         );
-        assert_ne!(p.funding_since_open, Decimal::ZERO, "since-open keeps accruing");
+        assert_ne!(
+            p.funding_since_open,
+            Decimal::ZERO,
+            "since-open keeps accruing"
+        );
     }
 
     /// The venue's tick/lot rules and the $10 minimum refuse by name; an
     /// integer price of any width is always valid.
     #[test]
     fn tick_lot_and_minimum_refuse_by_name() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 4));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 4),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         // 5 decimals > szDecimals 4.
         let err = sim.order(&feed, a, &ioc(Side::Buy, "0.00001")).unwrap_err();
@@ -1799,10 +1896,7 @@ mod tests {
         let mut o = ioc(Side::Buy, "1");
         o.limit_px = Some("100.123".parse().unwrap());
         let err = sim.order(&feed, a, &o).unwrap_err();
-        assert!(
-            format!("{err}").contains("divisible by tick size"),
-            "{err}"
-        );
+        assert!(format!("{err}").contains("divisible by tick size"), "{err}");
         // 6 significant figures.
         let mut o = ioc(Side::Buy, "1");
         o.limit_px = Some("12345.6".parse().unwrap());
@@ -1823,7 +1917,10 @@ mod tests {
     /// reduce, and an opening the account cannot margin.
     #[test]
     fn refusals_are_named() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         // Gtc below the market: nothing crosses, so the order rests (the
         // venue's own behavior; the remainder shows in openOrders).
@@ -1861,7 +1958,10 @@ mod tests {
     /// refused with the venue's own string.
     #[test]
     fn a_resting_order_reserves_its_margin() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
         let (sim, a) = funded_sim(&feed, "5");
         // $500 notional at 10× needs $50: the thin account cannot rest it.
         let mut rest = ioc(Side::Buy, "5");
@@ -1876,7 +1976,10 @@ mod tests {
         let mut close = reduce(Side::Sell, "0.2");
         close.tif = Tif::Gtc;
         close.limit_px = Some("105".parse().unwrap());
-        assert!(sim.place(&feed, a, &close).is_ok(), "reduce-only rests free");
+        assert!(
+            sim.place(&feed, a, &close).is_ok(),
+            "reduce-only rests free"
+        );
     }
 
     /// The plan's rule: a resting order is re-margined at match time — a maker
@@ -1924,9 +2027,15 @@ mod tests {
         let mut cross = ioc(Side::Sell, "1");
         cross.limit_px = Some("100".parse().unwrap());
         let err = sim.place(&feed, taker, &cross).unwrap_err();
-        assert!(format!("{err}").contains("could not immediately match"), "{err}");
         assert!(
-            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            format!("{err}").contains("could not immediately match"),
+            "{err}"
+        );
+        assert!(
+            sim.resting_orders(None)
+                .unwrap()
+                .iter()
+                .all(|r| r.oid != oid),
             "the breaching maker is off the book"
         );
         let st = sim.state.lock().unwrap();
@@ -1952,7 +2061,11 @@ mod tests {
         let mut rest = ioc(Side::Buy, "1");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("100".parse().unwrap());
-        let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
+        let oid = sim
+            .place(&feed, a, &rest)
+            .unwrap()
+            .resting
+            .expect("a Gtc rests");
         // The same address sells through its own bid: expired, not filled;
         // the served bid behind it takes the fill.
         let sell = ioc(Side::Sell, "1");
@@ -1962,9 +2075,16 @@ mod tests {
             .fill
             .expect("the served bid fills");
         assert_eq!(fill.total_sz, "1".parse().unwrap());
-        assert_eq!(fill.avg_px, "98".parse().unwrap(), "behind the expired order");
+        assert_eq!(
+            fill.avg_px,
+            "98".parse().unwrap(),
+            "behind the expired order"
+        );
         assert!(
-            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            sim.resting_orders(None)
+                .unwrap()
+                .iter()
+                .all(|r| r.oid != oid),
             "the user's own order is off the book"
         );
         // Expired, not filled: the terminal history says canceled.
@@ -1992,15 +2112,26 @@ mod tests {
         let mut rest = ioc(Side::Buy, "1");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("100".parse().unwrap());
-        let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
+        let oid = sim
+            .place(&feed, a, &rest)
+            .unwrap()
+            .resting
+            .expect("a Gtc rests");
         // The close: the account's own bid must be expired; the served bid
         // behind it takes the fill.
         let fill = sim
             .liquidate_position(&feed, a, "ETH", "1".parse().unwrap())
             .unwrap();
-        assert_eq!(fill.avg_px, "98".parse().unwrap(), "behind the expired order");
+        assert_eq!(
+            fill.avg_px,
+            "98".parse().unwrap(),
+            "behind the expired order"
+        );
         assert!(
-            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            sim.resting_orders(None)
+                .unwrap()
+                .iter()
+                .all(|r| r.oid != oid),
             "the account's own order is off the book"
         );
     }
@@ -2027,7 +2158,10 @@ mod tests {
         let mut ok = ioc(Side::Buy, "5");
         ok.tif = Tif::Gtc;
         ok.limit_px = Some("50".parse().unwrap());
-        assert!(sim.place(&feed, a, &ok).is_ok(), "5 × 101 / 10 = 50.5 ≤ 100");
+        assert!(
+            sim.place(&feed, a, &ok).is_ok(),
+            "5 × 101 / 10 = 50.5 ≤ 100"
+        );
     }
 
     /// The docs' transfer rule reaches the isolated margin transfer:
@@ -2041,7 +2175,8 @@ mod tests {
         );
         let (sim, a) = funded_sim(&feed, "1000");
         sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
-        sim.update_isolated_margin(a, "ETH", 200_000_000, &feed).unwrap();
+        sim.update_isolated_margin(a, "ETH", 200_000_000, &feed)
+            .unwrap();
         // 1 ETH at the mark 101: initial = 10.1, the 10 % floor = 10.1 →
         // leaving 5 must refuse; leaving 11 may.
         let err = sim
@@ -2076,7 +2211,11 @@ mod tests {
         let mut rest = ioc(Side::Sell, "1");
         rest.tif = Tif::Gtc;
         rest.limit_px = Some("120".parse().unwrap());
-        let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("a Gtc rests");
+        let oid = sim
+            .place(&feed, a, &rest)
+            .unwrap()
+            .resting
+            .expect("a Gtc rests");
         let before = sim.account(a).unwrap().unwrap().perp_balance;
         // The meta flips to delisted (the operator's act; the feed carries it
         // live) — the next tick settles.
@@ -2085,7 +2224,10 @@ mod tests {
         feed.put_meta(meta, crate::now_ms());
         sim.evaluate(&feed).unwrap();
         assert!(
-            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            sim.resting_orders(None)
+                .unwrap()
+                .iter()
+                .all(|r| r.oid != oid),
             "the open order is cancelled"
         );
         let account = sim.account(a).unwrap().unwrap();
@@ -2101,7 +2243,10 @@ mod tests {
     /// modeled — the named simplification above the rule).
     #[test]
     fn the_open_order_limit_refuses_by_name() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
         let (sim, a) = funded_sim(&feed, "100000");
         let mut rest = ioc(Side::Sell, "0.1");
         rest.tif = Tif::Gtc;
@@ -2158,7 +2303,10 @@ mod tests {
     /// their own string.
     #[test]
     fn the_oracle_band_refuses_by_the_docs_string() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         // 300 is ~197 % above the oracle (101): outside the band.
         let mut far = ioc(Side::Buy, "0.2");
@@ -2177,7 +2325,10 @@ mod tests {
     /// The docs' max order value: $30M at ≥25× (a limit may be 10× that).
     #[test]
     fn the_order_value_cap_refuses() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 25));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 25),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         // 4M ETH at $100 = $400M > 10 × $30M.
         let mut huge = ioc(Side::Buy, "4000000");
@@ -2227,12 +2378,16 @@ mod tests {
     /// position's margin; the isolated margin is the position's margin.
     #[test]
     fn isolated_margin_moves_onto_the_position() {
-        let feed = feed_with_book(book("ETH", &[("100", "5")], &[("101", "5")]), meta_with("ETH", 10));
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
         let (sim, a) = funded_sim(&feed, "1000");
         sim.order(&feed, a, &ioc(Side::Buy, "1")).unwrap();
         let before = sim.account(a).unwrap().unwrap().perp_balance;
         // $100 = 100_000_000 at the docs' 6 decimals.
-        sim.update_isolated_margin(a, "ETH", 100_000_000, &feed).unwrap();
+        sim.update_isolated_margin(a, "ETH", 100_000_000, &feed)
+            .unwrap();
         let account = sim.account(a).unwrap().unwrap();
         let p = account.positions.get("ETH").unwrap();
         assert_eq!(p.isolated_margin, Decimal::from(100));
@@ -2240,9 +2395,13 @@ mod tests {
         assert_eq!(p.leverage, crate::wire::LeverageType::Isolated);
         assert_eq!(account.perp_balance, before - Decimal::from(100));
         // And back off the position.
-        sim.update_isolated_margin(a, "ETH", -40_000_000, &feed).unwrap();
+        sim.update_isolated_margin(a, "ETH", -40_000_000, &feed)
+            .unwrap();
         let account = sim.account(a).unwrap().unwrap();
-        assert_eq!(account.positions.get("ETH").unwrap().isolated_margin, Decimal::from(60));
+        assert_eq!(
+            account.positions.get("ETH").unwrap().isolated_margin,
+            Decimal::from(60)
+        );
         assert_eq!(account.perp_balance, before - Decimal::from(60));
     }
     /// The nonce floor (docs): "the 100 highest nonces are stored per address.
@@ -2259,7 +2418,10 @@ mod tests {
         }
         // Only the 100 highest are kept: the first is below the floor now.
         let refused = sim.use_nonce(signer, now, now);
-        assert!(refused.is_err(), "a nonce below the retained set is refused");
+        assert!(
+            refused.is_err(),
+            "a nonce below the retained set is refused"
+        );
         assert!(refused.unwrap_err().to_string().contains("too low"));
         // The most recent is still "already used", not "too low".
         let used = sim.use_nonce(signer, now + 100, now);
@@ -2286,7 +2448,11 @@ mod tests {
             trigger_px: "110".parse().unwrap(),
             tpsl: Tpsl::Sl,
         });
-        let oid = sim.place(&feed, a, &t).unwrap().resting.expect("the trigger armed");
+        let oid = sim
+            .place(&feed, a, &t)
+            .unwrap()
+            .resting
+            .expect("the trigger armed");
         let refused = sim.cancel(a, "ETH", oid, CancelSpeed::Fast);
         assert!(refused.is_err(), "a fast cancel refuses the trigger");
         assert!(refused.unwrap_err().to_string().contains("trigger"));
@@ -2319,10 +2485,12 @@ mod tests {
         let refused = sim.place(&feed, a, &trigger(Side::Buy, Tpsl::Sl, "99"));
         assert!(refused.is_err(), "a stop buy below the mid is refused");
         assert!(refused.unwrap_err().to_string().contains("wrong side"));
-        sim.place(&feed, a, &trigger(Side::Buy, Tpsl::Sl, "110")).unwrap();
+        sim.place(&feed, a, &trigger(Side::Buy, Tpsl::Sl, "110"))
+            .unwrap();
         let refused = sim.place(&feed, a, &trigger(Side::Sell, Tpsl::Tp, "99"));
         assert!(refused.is_err(), "a take sell below the mid is refused");
-        sim.place(&feed, a, &trigger(Side::Sell, Tpsl::Tp, "110")).unwrap();
+        sim.place(&feed, a, &trigger(Side::Sell, Tpsl::Tp, "110"))
+            .unwrap();
     }
 
     /// The scheduled-cancel cap (docs): "The max number of triggers per day is

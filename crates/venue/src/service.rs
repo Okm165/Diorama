@@ -14,6 +14,7 @@ use diorama_config::boot;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
 pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     boot::init_logging();
     let config = boot::service_config_or_exit(&args);
@@ -29,7 +30,10 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     let sim = Arc::new(crate::sim::Sim::load(
         sim_section.state_dir.join("sim.json"),
     )?);
-    let api_client = crate::feed::rest::RestClient::with_policy(chain.api_urls.as_slice(), policy)?;
+    let api_client = crate::feed::rest::RestClient::with_specs(
+        cfg.endpoint_specs(chain.api_urls.as_slice()),
+        policy,
+    )?;
     let ws_pool = diorama_anvil::EndpointPool::from_specs(
         cfg.endpoint_specs(chain.ws_urls.as_slice()),
         diorama_anvil::Scheme::Ws,
@@ -75,7 +79,12 @@ fn load_wiring(config: &std::path::Path) -> crate::Result<diorama_config::Instan
     let (cfg, unresolved) = diorama_config::Instance::inspect(config)?;
     if let (Some(chain), Some(sim)) = (cfg.chains.venue.as_ref(), cfg.services.venue_sim.as_ref()) {
         let state_dir = sim.state_dir.to_string_lossy().to_string();
+        // The simulator owns the market plane: its REST and WS pools are this
+        // pod's wiring too. Omitting them let an unresolved `${HL_INFO_API_URL}`
+        // reach the client as a literal.
         let mut values: Vec<&str> = chain.source_urls.iter().collect();
+        values.extend(chain.api_urls.iter());
+        values.extend(chain.ws_urls.iter());
         values.push(&state_dir);
         values.push(sim.engine_admin_url.as_deref().unwrap_or_default());
         values.push(sim.anvil_url.as_deref().unwrap_or_default());

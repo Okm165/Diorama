@@ -262,6 +262,7 @@ shape, without a cluster:
 #    engine owns block production), auto-impersonate (the bridge's Core->EVM
 #    completion sends from the system address).
 export HL_RPC_URL=https://rpc.hyperliquid.xyz/evm
+export HL_RPC_URLS=$HL_RPC_URL
 PIN=$(cast block-number --rpc-url $HL_RPC_URL)
 anvil --host 0.0.0.0 --port 8545 \
   --fork-url $HL_RPC_URL --fork-block-number $PIN \
@@ -315,7 +316,7 @@ curl -s -X POST localhost:8091/control/deal \
   failed `… was not mined within 120s` on a chain nobody mined). An idle chain
   stays static; the harness's own `anvil_mine` calls are just extra (empty)
   blocks.
-- The epoch drill: `curl -s -X POST localhost:8091/control/epoch_new`, then
+- The epoch drill: `curl -s -X POST localhost:8091/control/epoch_new -H 'content-type: application/json' -d '{"confirm":"epoch_new"}'`, then
   watch `fork_pin` advance and `venue_epochs_total` increment.
 - In-cluster: `kubectl apply -k k8s/overlays/diorama-venue` (namespace
   `diorama-venue`; NodePorts 31545/31880/31090/31091), then `make venue-smoke`

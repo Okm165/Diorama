@@ -253,7 +253,8 @@ mod tests {
     #[tokio::test]
     async fn an_offset_clock_skips_every_probe() {
         let rpc = Arc::new(
-            diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1)).unwrap(),
+            diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
+                .unwrap(),
         );
         let probes = vec![Probe {
             name: "p".into(),

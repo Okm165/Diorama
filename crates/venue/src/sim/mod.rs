@@ -35,13 +35,14 @@ pub(crate) mod waterfall;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
+use crate::wire::UserAbstraction;
 use account::{Account, Accounts, Liquidation};
-use seed::AccountSeed;
-use metrics::SimMetrics;
 use alloy_primitives::Address;
 use diorama_devnet::store;
 use diorama_devnet::Shared;
+use metrics::SimMetrics;
 use rust_decimal::Decimal;
+use seed::AccountSeed;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -60,6 +61,15 @@ pub(crate) enum Direction {
 pub(crate) enum Applied {
     Applied,
     Refused,
+}
+
+/// One USD-class transfer's inputs (CoreWriter action 7 applied): the token
+/// moved, the amount, and the direction. One struct keeps the applied
+/// signature inside the repo's five-argument scope.
+pub(crate) struct ClassTransfer<'a> {
+    pub token: TokenRef<'a>,
+    pub amount: Decimal,
+    pub direction: Direction,
 }
 
 /// The persisted simulator state.
@@ -98,6 +108,12 @@ pub(crate) struct SimState {
     /// liquidation orders are for the entire position).
     #[serde(default)]
     pub liq_cooldown_until: std::collections::BTreeMap<Address, u64>,
+    /// The next instant the waterfall may retry an account whose rescue found
+    /// no executable action (a refused book close with an empty ADL). Without
+    /// this the thin venue retries at the tick cadence forever — measured at
+    /// 1 Hz for 63 minutes — and floods the log with the same refusal.
+    #[serde(default)]
+    pub waterfall_retry_after: std::collections::BTreeMap<Address, u64>,
     /// The previous tick's mark per coin (ADL closes at the previous mark).
     #[serde(default)]
     pub prev_marks: std::collections::BTreeMap<String, Decimal>,
@@ -106,8 +122,10 @@ pub(crate) struct SimState {
 /// One `deal`: mint funds into the account (perp wallet or spot token).
 /// Absolute-additive: it raises the balance by `amount` (the harness's
 /// `add_erc20` semantics; draining is `amount` negative or a `set_account`
-/// seed). The control route's request body is this type — one shape for the
-/// wire and the call.
+/// seed). A **spot** drain may not take the balance below zero: a spot balance
+/// is a holding, not a signed equity, and the venue cannot owe the trader a
+/// negative token balance. The control route's request body is this type — one
+/// shape for the wire and the call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Deal {
@@ -141,8 +159,8 @@ pub(crate) enum DealClass {
 /// The liquidator vault (docs' HLP address): the backstop that takes
 /// positions over below ⅔ of the maintenance requirement.
 pub const BACKSTOP: Address = Address::new([
-    0xdf, 0xc2, 0x4b, 0x07, 0x7b, 0xc1, 0x42, 0x5a, 0xd1, 0xde, 0xa7, 0x5b, 0xcb, 0x6f, 0x81, 0x58, 0xe1, 0x0d,
-    0xf3, 0x03,
+    0xdf, 0xc2, 0x4b, 0x07, 0x7b, 0xc1, 0x42, 0x5a, 0xd1, 0xde, 0xa7, 0x5b, 0xcb, 0x6f, 0x81, 0x58,
+    0xe1, 0x0d, 0xf3, 0x03,
 ]);
 
 pub struct Sim {
@@ -219,8 +237,8 @@ impl Sim {
             .max(self.chain_time_ms.load(Ordering::Relaxed)))
     }
 
-    /// The scenario epoch counter (tests: `reset` returns it to callers).
-    #[cfg(test)]
+    /// The scenario epoch counter (`reset` returns it to callers; `dry_run`
+    /// reads it without mutating).
     pub fn epoch(&self) -> Result<u64> {
         self.with_state(|state| Ok(state.epoch))
     }
@@ -335,7 +353,21 @@ impl Sim {
                     let index = feed.token_of(coin).ok_or_else(|| Error::bad_request(format!(
                             "spot coin `{coin}` is not in the venue's token registry yet"
                         ),))?;
-                    account::credit_entry(account, TokenRef { index, coin }, deal.amount, "spot deal")
+                    let entry = account::spot_entry(account, TokenRef { index, coin });
+                    let after = account::add(entry.total, deal.amount, "spot deal")?;
+                    // A spot balance is a **holding**: the venue's own spot state cannot carry a
+                    // negative token balance, and a negative row makes the indexer's series reject
+                    // the tick (`hold <= total`) — the measured 2026-10-27 `2dbf72` hole. The
+                    // primitive is the one place every caller reaches, so the refusal lives here
+                    // rather than only on the control route.
+                    if after < Decimal::ZERO {
+                        return Err(Error::bad_request(format!(
+                            "spot deal would overdraw {coin}: balance {}, amount {}, after {after}; a spot balance is a holding and cannot go negative",
+                            entry.total, deal.amount
+                        )));
+                    }
+                    entry.total = after;
+                    Ok(after)
                 }
             }
         })?;
@@ -352,20 +384,71 @@ impl Sim {
     /// register a zero account.
     pub(crate) fn set_account(&self, address: Address, seed: AccountSeed) -> Result<()> {
         if seed.is_empty() {
-            return Err(Error::bad_request("the patch is empty (no field named)",));
+            return Err(Error::bad_request("the patch is empty (no field named)"));
         }
         let now = crate::now_ms();
         let clock = self.clock(now)?;
         self.with_account(address, |account| {
+            let before_perp = account.perp_balance;
+            let before_spot = account.spot.clone();
+            let before_positions = account.positions.len();
+            let patch = seed.clone();
             seed.apply_to(account, clock)?;
             // Remember the patch as the control fixture, merged over the
             // previous one (hl_mock's rule: a named field replaces, an
             // unnamed one keeps).
             let merged = seed.merged_with(account.control.take());
             account.control = Some(merged);
+            // The control plane is a test surface, and a balance patch is a
+            // scenario input, not a market observation. Log it with the exact
+            // before/after figures and the patch id so an operator can
+            // attribute the state change even when the caller's identity is
+            // not authenticated.
+            tracing::warn!(
+                account = %address,
+                patch_id = now,
+                before_perp_balance = %before_perp,
+                after_perp_balance = %account.perp_balance,
+                before_spot = ?before_spot,
+                after_spot = ?account.spot,
+                before_positions,
+                after_positions = account.positions.len(),
+                patch = ?patch,
+                "control: set_account patch applied"
+            );
             Ok(())
         })?;
         self.mark_dirty()
+    }
+
+    /// Clear one account entirely: the control fixture, its balances and its
+    /// positions. This is the explicit recovery door for a scenario write that
+    /// must not survive into the next measurement; it is destructive by design
+    /// and the route requires `{"confirm":"clear_account"}`.
+    pub(crate) fn clear_account(&self, address: Address) -> Result<bool> {
+        let removed = self.with_state(|state| Ok(state.accounts.remove(&address).is_some()))?;
+        if removed {
+            tracing::warn!(account = %address, "control: account cleared (fixture and balances removed)");
+            self.mark_dirty()?;
+        }
+        Ok(removed)
+    }
+
+    /// Clear only the control-fixture provenance, keeping the account's
+    /// balances and positions. This is the acknowledgement for a **setup**
+    /// patch (a mode or a deliberate fixture) whose state is the intended live
+    /// state; it must never be used to launder a balance mutation. A destructive
+    /// balance patch is cleared with [`Self::clear_account`] and re-funded.
+    pub(crate) fn clear_control_fixture(&self, address: Address) -> Result<bool> {
+        let cleared = self.with_account(address, |account| Ok(account.control.take().is_some()))?;
+        if cleared {
+            tracing::warn!(
+                account = %address,
+                "control: fixture provenance cleared (balances and positions kept)"
+            );
+            self.mark_dirty()?;
+        }
+        Ok(cleared)
     }
 
     /// The account's control fixture (the merged patch), when set.
@@ -381,7 +464,12 @@ impl Sim {
     // ---- the Core↔EVM bridge's effects -----------------------------------
 
     /// EVM→Core: credit a spot token (creates the account on first touch).
-    pub(crate) fn credit_spot(&self, address: Address, token: TokenRef<'_>, amount: Decimal) -> Result<()> {
+    pub(crate) fn credit_spot(
+        &self,
+        address: Address,
+        token: TokenRef<'_>,
+        amount: Decimal,
+    ) -> Result<()> {
         // Read the clock *before* taking the state lock: `clock()` locks the
         // same mutex, and a std Mutex is not reentrant.
         let clock = self.clock(crate::now_ms())?;
@@ -395,7 +483,12 @@ impl Sim {
     /// Core→EVM / spot send: debit the spot balance; `None` when the account
     /// or the balance is short (the bridge counts the refusal — a system
     /// transfer never goes negative).
-    pub fn try_debit_spot(&self, address: Address, token: u32, amount: Decimal) -> Result<Option<Decimal>> {
+    pub fn try_debit_spot(
+        &self,
+        address: Address,
+        token: u32,
+        amount: Decimal,
+    ) -> Result<Option<Decimal>> {
         let debited = self.with_state(|state| {
             let Some(account) = state.accounts.get_mut(&address) else {
                 return Ok(None);
@@ -417,34 +510,65 @@ impl Sim {
     }
 
     /// USD class transfer (CoreWriter action 7): spot USDC ↔ perp wallet.
-    /// `Refused` when the source side is short.
+    /// `Refused` when the move exceeds the mode's bound.
+    ///
+    /// The bound depends on the mode. A **standard** account has two ledgers:
+    /// the perp view's cash bounds the draw. A **unified** account's USDC is
+    /// ONE pool (the docs: "USDC unifies perps + spot"; the fold treats the
+    /// collateral spot side as part of the raw balance), so a perp→spot class
+    /// transfer re-splits the pool's views — the pool's cash and every served
+    /// figure (`accountValue`, `withdrawable`, the identity) are
+    /// view-invariant by construction — and the docs' transfer rule (the
+    /// margin floor: "transferring includes ... transfer to spot wallet")
+    /// bounds it. The perp view may go negative: the pool still holds the
+    /// value, exactly as the venue's cross ledger runs a negative balance
+    /// under water. The perp view's cash alone is not the unified bound — the
+    /// product's recall lands its note on the spot side, so the perp view
+    /// routinely holds a fraction of the pool, and a perp-cash bound would
+    /// refuse a withdrawal the venue's own rule allows.
     pub(crate) fn usd_class_transfer(
         &self,
         address: Address,
-        token: TokenRef<'_>,
-        amount: Decimal,
-        direction: Direction,
+        transfer: &ClassTransfer<'_>,
+        feed: &MarketFeed,
     ) -> Result<Applied> {
         let clock = self.clock(crate::now_ms())?;
         let applied = self.with_account(address, |account| {
             stamp_funding_baseline(account, clock);
-            match direction {
+            match transfer.direction {
                 Direction::ToPerp => {
-                    let entry = account::spot_entry(account, token);
-                    if entry.total < amount {
+                    let entry = account::spot_entry(account, transfer.token);
+                    if entry.total < transfer.amount {
                         return Ok(Applied::Refused);
                     }
-                    entry.total = account::sub(entry.total, amount, "usd class transfer")?;
+                    entry.total = account::sub(entry.total, transfer.amount, "usd class transfer")?;
                     account.perp_balance =
-                        account::add(account.perp_balance, amount, "usd class transfer")?;
+                        account::add(account.perp_balance, transfer.amount, "usd class transfer")?;
                 }
                 Direction::ToSpot => {
-                    if account.perp_balance < amount {
+                    if account.mode == UserAbstraction::UnifiedAccount {
+                        let meta = feed.meta();
+                        // A mark not yet served (`view` faults) is a refusal,
+                        // never a guess — the caller re-sends.
+                        let Some(bound) =
+                            account::unified_transfer_bound(account, feed, meta.as_ref())
+                        else {
+                            tracing::warn!(account = %address, amount = %transfer.amount,
+                                "usd class transfer refused: the unified account's marks are not served yet");
+                            return Ok(Applied::Refused);
+                        };
+                        if transfer.amount > bound {
+                            tracing::warn!(account = %address, amount = %transfer.amount, withdrawable = %bound,
+                                "usd class transfer refused: the amount exceeds the unified account's withdrawable (the docs' transfer floor)");
+                            return Ok(Applied::Refused);
+                        }
+                    } else if account.perp_balance < transfer.amount {
                         return Ok(Applied::Refused);
                     }
+                    // The unified pool re-splits: the perp view may go negative.
                     account.perp_balance =
-                        account::sub(account.perp_balance, amount, "usd class transfer")?;
-                    account::credit_entry(account, token, amount, "usd class transfer")?;
+                        account::sub(account.perp_balance, transfer.amount, "usd class transfer")?;
+                    account::credit_entry(account, transfer.token, transfer.amount, "usd class transfer")?;
                 }
             }
             Ok(Applied::Applied)
@@ -499,7 +623,11 @@ impl Sim {
 
     /// Set the account's abstraction mode (CoreWriter action 16). Portfolio
     /// margin is refused by name (see `account::refuse_unmodeled_mode`).
-    pub(crate) fn set_mode(&self, address: Address, mode: crate::wire::UserAbstraction) -> Result<()> {
+    pub(crate) fn set_mode(
+        &self,
+        address: Address,
+        mode: crate::wire::UserAbstraction,
+    ) -> Result<()> {
         account::refuse_unmodeled_mode(mode)?;
         self.mutate_account(address, |account| {
             account.mode = mode;
@@ -507,12 +635,36 @@ impl Sim {
         })
     }
 
-    /// `reset`: blank the scenario (accounts + clock offset), bump the epoch.
+    /// `reset`: blank the scenario, bump the epoch.
+    ///
+    /// A reset is an **epoch boundary**, not just an account wipe. Leaving the
+    /// resting book, terminal history, nonces, cooldowns or previous marks
+    /// behind makes the new epoch inherit orders and replay fences from the
+    /// old one. The bridge cursor is the exception: it is a V-block anchor,
+    /// not scenario state, and clearing it would re-scan (and potentially
+    /// re-credit) the bridge's history. It is retained and named in the log.
     pub fn reset(&self) -> Result<u64> {
         let epoch = self.with_state(|state| {
+            let accounts = state.accounts.len();
+            let resting = state.resting.len();
             state.accounts.clear();
+            state.resting.clear();
+            state.terminal.clear();
+            state.nonces.clear();
+            state.scheduled_cancels.clear();
+            state.liq_cooldown_until.clear();
+            state.waterfall_retry_after.clear();
+            state.prev_marks.clear();
+            state.next_oid = 0;
             state.clock_offset_ms = 0;
             state.epoch += 1;
+            tracing::info!(
+                epoch = state.epoch,
+                accounts,
+                resting,
+                bridge_cursor = state.bridge_cursor,
+                "control: reset blanked the scenario (bridge cursor retained)"
+            );
             Ok(state.epoch)
         })?;
         self.save()?;
@@ -521,7 +673,12 @@ impl Sim {
 
     /// `advance`: script a clock jump (`seconds`) with `blocks` liquidation
     /// checks inside it — the deterministic complement to self-advance.
-    pub(crate) fn advance(&self, feed: &MarketFeed, seconds: u64, blocks: u64) -> Result<AdvanceOutcome> {
+    pub(crate) fn advance(
+        &self,
+        feed: &MarketFeed,
+        seconds: u64,
+        blocks: u64,
+    ) -> Result<AdvanceOutcome> {
         let jump_ms = seconds.saturating_mul(1_000);
         self.with_state(|state| {
             state.clock_offset_ms = state.clock_offset_ms.saturating_add(jump_ms as i64);
@@ -785,6 +942,147 @@ pub(crate) fn meta_with_table(coin: &str, max_leverage: u32) -> crate::wire::Met
 mod tests {
     use super::*;
 
+    /// The unified account's USD-class transfer is bounded by the docs'
+    /// transfer rule (the margin floor — `withdrawable`), not by the perp
+    /// view's cash: the unified USDC is ONE pool and the class transfer
+    /// re-splits its views, so the pool's cash, `accountValue` and
+    /// `withdrawable` must be unchanged by the move. This is the R5 recall
+    /// shape (run 2026-10-31 11:40Z): the note lands on the spot side, the
+    /// perp view holds only the trading cash, and the venue's own rule allows
+    /// withdrawing up to `withdrawable` — the old perp-cash bound refused a
+    /// legal recall and stranded the recovery sweep.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn unified_class_transfer_is_bounded_by_the_transfer_rule_not_the_perp_view() {
+        let feed = feed_with(&[("HYPE", "87.87", "87.87")]);
+        let meta = meta_with_table("HYPE", 10);
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xb0);
+        // The R5 fixture shape: a unified account short −0.08 HYPE @ 87.87
+        // (cross 10×, margin 0.1×positionValue), the note (7.865) on the spot
+        // side, the perp view funded by the deal (7.82 − 7.0296 = 0.7904).
+        let seed: AccountSeed = serde_json::from_str(
+            r#"{"userAbstraction": "unifiedAccount",
+                "marginSummary": {"accountValue": "-7.0296", "totalNtlPos": "7.0296", "totalRawUsd": "0", "totalMarginUsed": "0.70296"},
+                "assetPositions": [{"type": "oneWay", "position": {"coin": "HYPE", "entryPx": "87.87",
+                    "leverage": {"type": "cross", "value": 10}, "marginUsed": "0.70296", "maxLeverage": 10,
+                    "positionValue": "7.0296", "returnOnEquity": "0", "szi": "-0.08", "unrealizedPnl": "0",
+                    "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}}}]}"#,
+        )
+        .unwrap();
+        sim.set_account(a, seed).unwrap();
+        sim.deal(
+            &feed,
+            &Deal {
+                address: a,
+                class: DealClass::Perp,
+                coin: None,
+                amount: "7.82".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        sim.credit_spot(
+            a,
+            TokenRef {
+                index: account::COLLATERAL_TOKEN,
+                coin: "USDC",
+            },
+            "7.865".parse().unwrap(),
+        )
+        .unwrap();
+
+        let acct = sim
+            .account(a)
+            .unwrap()
+            .expect("the seed registers the account");
+        let before = account::clearinghouse(&acct, &feed, Some(&meta), 1).unwrap();
+        // cash 0.7904 + 7.865 = 8.6554; raw = cash + |cost basis| = 15.685;
+        // accountValue = raw − positionValue = 8.6554.
+        assert_eq!(
+            before.margin_summary.account_value,
+            "8.6554".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            before.margin_summary.total_raw_usd,
+            "15.685".parse::<Decimal>().unwrap()
+        );
+        let withdrawable = before.withdrawable;
+        let transfer = |amount: Decimal| ClassTransfer {
+            token: TokenRef {
+                index: account::COLLATERAL_TOKEN,
+                coin: "USDC",
+            },
+            amount,
+            direction: Direction::ToSpot,
+        };
+
+        // The recall's clamped figure (the venue's own withdrawable) moves —
+        // the perp view goes negative while the pool's cash is unchanged.
+        let applied = sim
+            .usd_class_transfer(a, &transfer(withdrawable), &feed)
+            .unwrap();
+        assert!(
+            matches!(applied, Applied::Applied),
+            "the venue's own rule allows the move"
+        );
+        let acct = sim.account(a).unwrap().unwrap();
+        let after = account::clearinghouse(&acct, &feed, Some(&meta), 1).unwrap();
+        assert_eq!(
+            after.margin_summary.account_value, before.margin_summary.account_value,
+            "the pool is view-invariant"
+        );
+        assert_eq!(after.withdrawable, withdrawable, "the floor did not move");
+        assert_eq!(
+            after.margin_summary.total_raw_usd, before.margin_summary.total_raw_usd,
+            "raw is view-invariant"
+        );
+        assert!(
+            account::identity_holds(&after),
+            "the identity survives the re-split"
+        );
+
+        // More than the rule allows is refused — the venue never pays out
+        // past its transfer floor.
+        let refused = sim
+            .usd_class_transfer(a, &transfer(withdrawable + Decimal::ONE), &feed)
+            .unwrap();
+        assert!(matches!(refused, Applied::Refused));
+    }
+
+    /// A *standard* account keeps its two ledgers: the perp side's cash bounds
+    /// the class transfer, exactly as before.
+    #[test]
+    fn standard_class_transfer_still_bounded_by_the_perp_view() {
+        let feed = feed_with(&[("HYPE", "87.87", "87.87")]);
+        let meta = meta_with_table("HYPE", 10);
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xb1);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: a,
+                class: DealClass::Perp,
+                coin: None,
+                amount: "0.79".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        let transfer = ClassTransfer {
+            token: TokenRef {
+                index: account::COLLATERAL_TOKEN,
+                coin: "USDC",
+            },
+            amount: "7.95".parse().unwrap(),
+            direction: Direction::ToSpot,
+        };
+        let applied = sim.usd_class_transfer(a, &transfer, &feed).unwrap();
+        assert!(
+            matches!(applied, Applied::Refused),
+            "the perp view's cash still bounds a standard account"
+        );
+        let _ = &meta;
+    }
+
     /// The bridge's effects take the state lock; a re-entrant lock (calling
     /// `clock()` while holding it) deadlocks the whole service. Guarded with
     /// a timeout so a regression fails the test instead of hanging CI.
@@ -796,15 +1094,38 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let sim = sim;
-            sim.credit_spot(a, TokenRef { index: 0, coin: "USDC" }, Decimal::from(5)).unwrap();
-            sim.usd_class_transfer(
+            sim.credit_spot(
                 a,
-                TokenRef { index: 0, coin: "USDC" },
-                Decimal::ONE,
-                Direction::ToPerp,
+                TokenRef {
+                    index: 0,
+                    coin: "USDC",
+                },
+                Decimal::from(5),
             )
             .unwrap();
-            sim.spot_send(a, Address::repeat_byte(0xbb), TokenRef { index: 0, coin: "USDC" }, Decimal::ONE).unwrap();
+            sim.usd_class_transfer(
+                a,
+                &ClassTransfer {
+                    token: TokenRef {
+                        index: 0,
+                        coin: "USDC",
+                    },
+                    amount: Decimal::ONE,
+                    direction: Direction::ToPerp,
+                },
+                &feed,
+            )
+            .unwrap();
+            sim.spot_send(
+                a,
+                Address::repeat_byte(0xbb),
+                TokenRef {
+                    index: 0,
+                    coin: "USDC",
+                },
+                Decimal::ONE,
+            )
+            .unwrap();
             let _ = &feed;
             tx.send(()).unwrap();
         });
@@ -822,11 +1143,27 @@ mod tests {
         let a = Address::repeat_byte(0xaa);
         assert!(sim.account(a).unwrap().is_none());
         let after = sim
-            .deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: "100.5".parse().unwrap() })
+            .deal(
+                &feed,
+                &Deal {
+                    address: a,
+                    class: DealClass::Perp,
+                    coin: None,
+                    amount: "100.5".parse().unwrap(),
+                },
+            )
             .unwrap();
         assert_eq!(after, "100.5".parse::<Decimal>().unwrap());
         let after = sim
-            .deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: "0.5".parse().unwrap() })
+            .deal(
+                &feed,
+                &Deal {
+                    address: a,
+                    class: DealClass::Perp,
+                    coin: None,
+                    amount: "0.5".parse().unwrap(),
+                },
+            )
             .unwrap();
         assert_eq!(after, "101".parse::<Decimal>().unwrap());
     }
@@ -834,6 +1171,7 @@ mod tests {
     /// The verifier's critical find: an amount that overflows must be refused
     /// cleanly (a panic under the state lock poisons every account path).
     #[test]
+    #[allow(clippy::too_many_lines)] // one transition table: splitting it would hide the rule
     fn overflow_is_refused_not_panicked() {
         let feed = feed_with(&[("USDC", "1", "1")]);
         feed.put_spot_meta(crate::wire::SpotMeta {
@@ -853,20 +1191,100 @@ mod tests {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
         let max = Decimal::MAX;
-        sim.deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: max }).unwrap();
-        let err = sim.deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: Decimal::ONE }).unwrap_err();
+        sim.deal(
+            &feed,
+            &Deal {
+                address: a,
+                class: DealClass::Perp,
+                coin: None,
+                amount: max,
+            },
+        )
+        .unwrap();
+        let err = sim
+            .deal(
+                &feed,
+                &Deal {
+                    address: a,
+                    class: DealClass::Perp,
+                    coin: None,
+                    amount: Decimal::ONE,
+                },
+            )
+            .unwrap_err();
         assert!(matches!(err, Error::Overflow { .. }), "{err}");
         // The state is intact and readable (no poison).
         assert!(!sim.is_poisoned());
         assert_eq!(sim.account(a).unwrap().unwrap().perp_balance, max);
         let err = sim
-            .deal(&feed, &Deal { address: a, class: DealClass::Spot, coin: Some("USDC".into()), amount: max })
+            .deal(
+                &feed,
+                &Deal {
+                    address: a,
+                    class: DealClass::Spot,
+                    coin: Some("USDC".into()),
+                    amount: max,
+                },
+            )
             .unwrap();
         assert_eq!(err, max);
         let err = sim
-            .deal(&feed, &Deal { address: a, class: DealClass::Spot, coin: Some("USDC".into()), amount: Decimal::ONE })
+            .deal(
+                &feed,
+                &Deal {
+                    address: a,
+                    class: DealClass::Spot,
+                    coin: Some("USDC".into()),
+                    amount: Decimal::ONE,
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, Error::Overflow { .. }), "{err}");
+    }
+
+    /// A spot drain may not take the holding below zero — the measured
+    /// 2026-10-27 `2dbf72` artifact (42.646688 − 48.9 = −6.253312). The
+    /// negative row made the indexer's `hold <= total` `CHECK` reject the
+    /// tick and left the series with an unrecorded hole.
+    #[test]
+    fn a_spot_deal_cannot_overdraw_the_balance() {
+        let feed = feed_with(&[("USDC", "1", "1")]);
+        feed.put_spot_meta(crate::wire::SpotMeta {
+            tokens: vec![crate::wire::SpotToken {
+                name: "USDC".into(),
+                sz_decimals: 8,
+                wei_decimals: 8,
+                index: 0,
+                is_canonical: true,
+                evm_contract: None,
+                token_id: None,
+                full_name: None,
+                deployer_trading_fee_share: Decimal::ZERO,
+            }],
+            universe: vec![],
+        });
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        let deal = |amount: &str| Deal {
+            address: a,
+            class: DealClass::Spot,
+            coin: Some("USDC".into()),
+            amount: amount.parse().unwrap(),
+        };
+
+        assert_eq!(sim.deal(&feed, &deal("10")).unwrap(), Decimal::from(10));
+        let err = sim.deal(&feed, &deal("-11")).unwrap_err();
+        assert!(matches!(err, Error::BadRequest { .. }), "{err}");
+        assert_eq!(
+            sim.account(a).unwrap().unwrap().spot.get(&0).unwrap().total,
+            Decimal::from(10),
+            "the refused drain must not move the balance"
+        );
+        assert_eq!(
+            sim.deal(&feed, &deal("-10")).unwrap(),
+            Decimal::ZERO,
+            "an exact drain to zero is allowed"
+        );
     }
 
     /// The arithmetic family's division half: a zero divisor is a named fault
@@ -923,6 +1341,7 @@ mod tests {
     /// divergence fixed 2026-10-23 — the deal-spot-then-seed sequence used to
     /// lose the deal).
     #[test]
+    #[allow(clippy::too_many_lines)] // one transition table: splitting it would hide the rule
     fn set_account_is_a_patch_not_a_replace() {
         let feed = feed_with(&[("USDC", "1", "1")]);
         feed.put_spot_meta(crate::wire::SpotMeta {
@@ -941,8 +1360,16 @@ mod tests {
         });
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
-        sim.deal(&feed, &Deal { address: a, class: DealClass::Spot, coin: Some("USDC".into()), amount: Decimal::from(250) })
-            .unwrap();
+        sim.deal(
+            &feed,
+            &Deal {
+                address: a,
+                class: DealClass::Spot,
+                coin: Some("USDC".into()),
+                amount: Decimal::from(250),
+            },
+        )
+        .unwrap();
         sim.set_account(
             a,
             serde_json::from_str(
@@ -954,7 +1381,11 @@ mod tests {
         )
         .unwrap();
         let account = sim.account(a).unwrap().unwrap();
-        assert_eq!(account.perp_balance, Decimal::from(100), "the named summary landed");
+        assert_eq!(
+            account.perp_balance,
+            Decimal::from(100),
+            "the named summary landed"
+        );
         assert_eq!(
             account.spot.get(&0).map(|s| s.total),
             Some(Decimal::from(250)),
@@ -962,12 +1393,113 @@ mod tests {
         );
 
         // A named balances list replaces the spot side (and a named empty one clears).
+        sim.set_account(a, serde_json::from_str(r#"{"spotBalances": []}"#).unwrap())
+            .unwrap();
+        assert!(sim.account(a).unwrap().unwrap().spot.is_empty());
+    }
+
+    /// A control write is durable provenance: the served `controlOwned` stays
+    /// true after the mark clears, and only an explicit fixture/account clear
+    /// removes it. The measured 5195/4a ticks were served as ordinary market
+    /// observations because the flag was derived from marks alone.
+    #[test]
+    fn a_control_write_marks_the_account_and_clears_explicitly() {
+        let feed = feed_with(&[("USDC", "1", "1")]);
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xcc);
         sim.set_account(
             a,
-            serde_json::from_str(r#"{"spotBalances": []}"#).unwrap(),
+            serde_json::from_str(
+                r#"{
+                    "marginSummary": {"accountValue": "0.5", "totalNtlPos": "0", "totalRawUsd": "0.5", "totalMarginUsed": "0"},
+                    "spotBalances": [{"coin": "USDC", "token": 0, "hold": "0", "total": "0.5", "entryNtl": "0"}],
+                    "userAbstraction": "unifiedAccount"
+                }"#,
+            )
+            .unwrap(),
         )
         .unwrap();
-        assert!(sim.account(a).unwrap().unwrap().spot.is_empty());
+        let account = sim.account(a).unwrap().unwrap();
+        let served = super::account::clearinghouse(&account, &feed, None, 1).unwrap();
+        assert!(served.control_owned, "a balance patch is a control write");
+        assert_eq!(served.margin_summary.total_raw_usd, "0.5".parse().unwrap());
+
+        assert!(sim.clear_control_fixture(a).unwrap());
+        let account = sim.account(a).unwrap().unwrap();
+        let served = super::account::clearinghouse(&account, &feed, None, 1).unwrap();
+        assert!(
+            !served.control_owned,
+            "an explicit fixture clear restores market provenance"
+        );
+        assert_eq!(
+            served.margin_summary.total_raw_usd,
+            "0.5".parse().unwrap(),
+            "balances survive the fixture clear"
+        );
+
+        assert!(sim.clear_account(a).unwrap());
+        assert!(
+            sim.account(a).unwrap().is_none(),
+            "the destructive clear removes the account"
+        );
+        assert!(!sim.clear_account(a).unwrap(), "a second clear is a no-op");
+
+        // A mode-only setup patch is not a balance write: it must not poison
+        // the account's market provenance.
+        sim.set_account(
+            a,
+            serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap(),
+        )
+        .unwrap();
+        let account = sim.account(a).unwrap().unwrap();
+        let served = super::account::clearinghouse(&account, &feed, None, 1).unwrap();
+        assert!(
+            !served.control_owned,
+            "a mode-only patch keeps market provenance"
+        );
+    }
+
+    /// The waterfall must not turn a control-plane balance patch into a venue
+    /// liquidation. The measured 2026-10-31 10:53 patch on `0x6807…` drove an
+    /// active account below maintenance; the backstop took the position and the
+    /// operator enforced it. The fixture is the provenance: skip the account
+    /// while it is set, and let the ordinary waterfall act once it is cleared.
+    #[test]
+    fn the_waterfall_skips_a_control_patched_account() {
+        let feed = feed_with(&[("HYPE", "100", "100")]);
+        feed.put_meta(meta_with_table("HYPE", 10), 1);
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xdd);
+        sim.set_account(
+            a,
+            serde_json::from_str(
+                r#"{
+                    "marginSummary": {"accountValue": "0.1", "totalNtlPos": "8", "totalRawUsd": "8.1", "totalMarginUsed": "0.8"},
+                    "assetPositions": [{
+                        "type": "oneWay",
+                        "position": {
+                            "coin": "HYPE", "entryPx": "100", "leverage": {"type": "cross", "value": 10},
+                            "marginUsed": "0.8", "maxLeverage": 10, "positionValue": "8",
+                            "returnOnEquity": "0", "szi": "-0.08", "unrealizedPnl": "0",
+                            "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
+                        }
+                    }],
+                    "spotBalances": [{"coin": "USDC", "token": 0, "hold": "0", "total": "0.1", "entryNtl": "0"}],
+                    "userAbstraction": "unifiedAccount"
+                }"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            sim.check_all(&feed, 1_000).unwrap().is_empty(),
+            "a control-patched account is a scenario input, not a liquidation candidate"
+        );
+        sim.clear_control_fixture(a).unwrap();
+        assert!(
+            !sim.check_all(&feed, 1_000).unwrap().is_empty(),
+            "once the fixture is cleared, the ordinary waterfall acts on the same book"
+        );
     }
 
     #[test]
@@ -975,7 +1507,16 @@ mod tests {
         let feed = feed_with(&[("USDC", "1", "1")]);
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
-        sim.deal(&feed, &Deal { address: a, class: DealClass::Perp, coin: None, amount: Decimal::ONE }).unwrap();
+        sim.deal(
+            &feed,
+            &Deal {
+                address: a,
+                class: DealClass::Perp,
+                coin: None,
+                amount: Decimal::ONE,
+            },
+        )
+        .unwrap();
         assert_eq!(sim.epoch().unwrap(), 0);
         let epoch = sim.reset().unwrap();
         assert_eq!(epoch, 1);
@@ -1023,9 +1564,17 @@ mod tests {
         let a = Address::repeat_byte(0xaa);
         let refused = sim.set_mode(a, crate::wire::UserAbstraction::PortfolioMargin);
         assert!(refused.is_err(), "portfolio margin is not modeled");
-        assert!(refused.unwrap_err().to_string().contains("portfolio margin"));
-        assert_eq!(sim.account(a).unwrap().map(|acc| acc.mode), None, "nothing entered the state");
-        sim.set_mode(a, crate::wire::UserAbstraction::UnifiedAccount).unwrap();
+        assert!(refused
+            .unwrap_err()
+            .to_string()
+            .contains("portfolio margin"));
+        assert_eq!(
+            sim.account(a).unwrap().map(|acc| acc.mode),
+            None,
+            "nothing entered the state"
+        );
+        sim.set_mode(a, crate::wire::UserAbstraction::UnifiedAccount)
+            .unwrap();
         assert_eq!(
             sim.account(a).unwrap().unwrap().mode,
             crate::wire::UserAbstraction::UnifiedAccount
@@ -1041,8 +1590,15 @@ mod tests {
         let path = dir.join("sim.json");
         let a = Address::repeat_byte(0xaa);
         let sim = Sim::load(path.clone()).unwrap();
-        sim.credit_spot(a, TokenRef { index: 0, coin: "USDC" }, Decimal::from(250))
-            .unwrap();
+        sim.credit_spot(
+            a,
+            TokenRef {
+                index: 0,
+                coin: "USDC",
+            },
+            Decimal::from(250),
+        )
+        .unwrap();
         sim.save().unwrap();
         let reloaded = Sim::load(path).unwrap();
         let total = reloaded
@@ -1063,7 +1619,8 @@ mod tests {
     fn the_durable_writer_saves_and_the_batched_one_defers() {
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xaa);
-        sim.note_agent(a, Address::repeat_byte(0xbb), "bot").unwrap();
+        sim.note_agent(a, Address::repeat_byte(0xbb), "bot")
+            .unwrap();
         assert_eq!(sim.save_if_dirty().unwrap(), Flushed::Written); // the batched tail left it dirty
         let now = crate::now_ms();
         sim.use_nonce(a, now, now).unwrap();

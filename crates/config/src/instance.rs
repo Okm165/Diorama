@@ -299,6 +299,7 @@ impl Instance {
         let mut issues = Vec::new();
         self.check_profile_coherence(&mut issues);
         self.check_chains(&mut issues);
+        self.check_endpoint_policy(&mut issues);
         self.check_services(&mut issues);
         if issues.is_empty() {
             Ok(())
@@ -381,13 +382,37 @@ impl Instance {
                     l1.fork_offset, RETH_STATE_WINDOW_BLOCKS
                 ));
             }
+            check_http_urls("chains.l1.source_urls", &l1.source_urls, issues);
         }
         if let Some(venue) = &self.chains.venue {
             if venue.kind != ChainKind::Hyperliquid {
                 issues.push("chains.venue.kind must be \"hyperliquid\"".into());
             }
+            check_http_urls("chains.venue.source_urls", &venue.source_urls, issues);
             check_http_urls("chains.venue.api_urls", &venue.api_urls, issues);
             check_ws_urls("chains.venue.ws_urls", &venue.ws_urls, issues);
+        }
+    }
+
+    /// The shared pool policy is a config table, so a value that would make a
+    /// call return without an attempt or spin hot is a config error here, not
+    /// a runtime surprise in a lane.
+    fn check_endpoint_policy(&self, issues: &mut Vec<String>) {
+        let policy = &self.endpoint_defaults;
+        if policy.rounds == 0 {
+            issues.push("endpoint_defaults.rounds must be >= 1".into());
+        }
+        if policy.max_attempts == 0 {
+            issues.push("endpoint_defaults.max_attempts must be >= 1".into());
+        }
+        if policy.cooldown_base_ms == 0 {
+            issues.push("endpoint_defaults.cooldown_base_ms must be > 0".into());
+        }
+        if policy.cooldown_max_ms < policy.cooldown_base_ms {
+            issues.push("endpoint_defaults.cooldown_max_ms must be >= cooldown_base_ms".into());
+        }
+        if policy.emergency_probe_ms == 0 {
+            issues.push("endpoint_defaults.emergency_probe_ms must be > 0".into());
         }
     }
 
@@ -684,6 +709,16 @@ fn mismatch(what: &str) -> ConfigError {
 /// state their lanes so the direction is never guessed.
 fn check_cctp_chains(cctp: &CctpSection, issues: &mut Vec<String>) {
     let ids = check_cctp_chain_list(cctp, issues);
+    // A bridge needs two ends. A one-chain topology parses and passes a naive
+    // check but cannot boot (`build_lanes` refuses it); reject it here, where
+    // the operator reads the error.
+    if !cctp.chains.is_empty() && cctp.chains.len() < 2 {
+        issues.push(
+            "services.cctp_bridge.chains must declare at least two chains (a bridge \
+             needs a source and a destination)"
+                .into(),
+        );
+    }
     if cctp.chains.len() > 2 && cctp.lanes.is_empty() {
         issues.push(
             "services.cctp_bridge.lanes must state the directed lanes when more than \
@@ -725,6 +760,7 @@ fn check_cctp_chain_list(
         if chain.rpc_urls.is_empty() {
             issues.push(format!("{key}.rpc_urls must not be empty"));
         }
+        check_http_urls(&format!("{key}.rpc_urls"), &chain.rpc_urls, issues);
         for (field, address) in [
             ("usdc", chain.usdc),
             ("token_messenger", chain.token_messenger),
@@ -733,6 +769,11 @@ fn check_cctp_chain_list(
             if address == Address::ZERO {
                 issues.push(format!("{key}.{field} must not be the zero address"));
             }
+        }
+        if chain.token_minter == Some(Address::ZERO) {
+            issues.push(format!(
+                "{key}.token_minter must not be the zero address when present"
+            ));
         }
     }
     ids
@@ -856,11 +897,34 @@ fn expand_http(
     issues: &mut Vec<String>,
 ) {
     let Some(name) = value.strip_prefix('@') else {
+        // A singular field (a write/control target) cannot be a comma list:
+        // silently taking the first entry would look like failover but is not.
+        if value.contains(',') {
+            issues.push(format!(
+                "{key}: a single endpoint is required, but the value is a comma-separated list"
+            ));
+        }
         return;
     };
-    match groups.get(name).and_then(|group| group.http.first()) {
-        Some(url) => *value = url.clone(),
-        None => issues.push(format!("{key}: unknown or empty endpoint group @{name}")),
+    let Some(group) = groups.get(name) else {
+        issues.push(format!("{key}: unknown endpoint group @{name}"));
+        return;
+    };
+    let mut urls = Vec::new();
+    for url in &group.http {
+        for part in url.split(',') {
+            push_url(&mut urls, part);
+        }
+    }
+    match urls.as_slice() {
+        [url] => *value = url.clone(),
+        [] => issues.push(format!(
+            "{key}: endpoint group @{name} has no http endpoints"
+        )),
+        _ => issues.push(format!(
+            "{key}: endpoint group @{name} resolves to {} endpoints; a single endpoint is required",
+            urls.len()
+        )),
     }
 }
 
@@ -891,7 +955,13 @@ fn expand_http_list(
     let mut out = Vec::new();
     for value in values.drain(..) {
         match value.strip_prefix('@') {
-            None => push_url(&mut out, &value),
+            // The one-env-var form is a comma-separated list for every URL
+            // field, not only for the `Endpoints` newtype.
+            None => {
+                for part in value.split(',') {
+                    push_url(&mut out, part);
+                }
+            }
             Some(name) => match groups.get(name) {
                 Some(group) if !group.http.is_empty() => append_group_http(&mut out, group),
                 _ => issues.push(format!("{key}: unknown or empty endpoint group @{name}")),
@@ -938,8 +1008,14 @@ fn check_url(key: &str, value: &str, schemes: [&str; 2], what: &str, issues: &mu
     if value.contains("${") {
         return;
     }
+    if value.contains(',') {
+        issues.push(format!(
+            "{key} \"{value}\" is a comma-separated list; a single {what} URL is required here"
+        ));
+        return;
+    }
     let host = schemes.iter().find_map(|s| value.strip_prefix(s));
-    let ok = matches!(host, Some(h) if !h.is_empty() && !h.starts_with('/'));
+    let ok = matches!(host, Some(h) if !h.is_empty() && !h.starts_with('/') && !h.contains(char::is_whitespace));
     if !ok {
         issues.push(format!("{key} \"{value}\" is not a {what} URL with a host"));
     }

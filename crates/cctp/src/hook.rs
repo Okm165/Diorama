@@ -113,7 +113,9 @@ pub async fn verify(
     expected_owner: Address,
     expected_transmitter: Address,
 ) -> Result<()> {
-    let owner = rpc.call_decode(wrapper, &ICCTPHookWrapper::ownerCall {}).await?;
+    let owner = rpc
+        .call_decode(wrapper, &ICCTPHookWrapper::ownerCall {})
+        .await?;
     let transmitter = rpc
         .call_decode(wrapper, &ICCTPHookWrapper::messageTransmitterCall {})
         .await?;

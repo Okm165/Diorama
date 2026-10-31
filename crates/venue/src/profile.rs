@@ -24,8 +24,8 @@
 use crate::reset::PinCanary;
 use diorama_config::{EngineSection, LoopsSection};
 use diorama_devnet::cow::Scope;
-use diorama_devnet::source::Source;
 use diorama_devnet::engine::JournalScope;
+use diorama_devnet::source::Source;
 use diorama_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
@@ -100,7 +100,11 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
     let scope = Scope::from_config(watch, &engine.closures);
     let target: Arc<dyn Source> = diorama_devnet::source::target(target_rpc);
     let mirror = bundle(engine, source, follow, reset, scope);
-    Wiring { mirror, pin, target }
+    Wiring {
+        mirror,
+        pin,
+        target,
+    }
 }
 
 #[cfg(test)]
@@ -152,7 +156,13 @@ mod tests {
         let watched = alloy_primitives::Address::repeat_byte(0xaa);
         let scope =
             Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
-        let mirror = bundle(&engine, source, follow, Arc::new(diorama_devnet::spine::NoReset), scope);
+        let mirror = bundle(
+            &engine,
+            source,
+            follow,
+            Arc::new(diorama_devnet::spine::NoReset),
+            scope,
+        );
         assert_eq!(mirror.label(), "v");
         assert_eq!(
             mirror.journal_scope(),

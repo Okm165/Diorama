@@ -125,7 +125,18 @@ const INTERNAL_ERROR_CODE: i64 = -32603;
 fn is_retryable(text: &str) -> bool {
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
-        return trimmed.contains("\"code\":-32005") || trimmed.contains("\"code\":-32603");
+        // Parse the batch rather than string-searching a compact spelling: a
+        // pretty-printed `"code": -32005` is the same refusal.
+        return serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
+            .map(|items| {
+                items.iter().any(|item| {
+                    item.get("error")
+                        .and_then(|error| error.get("code"))
+                        .and_then(serde_json::Value::as_i64)
+                        .is_some_and(|code| code == RATE_LIMIT_CODE || code == INTERNAL_ERROR_CODE)
+                })
+            })
+            .unwrap_or(false);
     }
     if !trimmed.starts_with('{') {
         return false;
@@ -366,6 +377,19 @@ impl Rpc {
     /// the spine for the source client only.
     pub fn with_urls(urls: &[String], timeout: Duration) -> Result<Self> {
         let pool = EndpointPool::new(urls, Scheme::Http, PoolPolicy::default())?;
+        Self::with_pool_inner(pool, timeout, false)
+    }
+
+    /// Build a read client over a URL list under the deployment's shared pool
+    /// policy. The configured path (CCTP chains, the beacon lane) uses this so
+    /// a per-deployment round/cooldown budget is not silently replaced by the
+    /// crate default.
+    pub fn with_urls_and_policy(
+        urls: &[String],
+        timeout: Duration,
+        policy: PoolPolicy,
+    ) -> Result<Self> {
+        let pool = EndpointPool::new(urls, Scheme::Http, policy)?;
         Self::with_pool_inner(pool, timeout, false)
     }
 
@@ -1041,9 +1065,18 @@ impl Rpc {
         let endpoint = self.pool.url(index);
         let request = self.request(endpoint, "eth_chainId", NO_PARAMS)?;
         self.pool.record_attempt(index);
-        let (status, text) = self
+        let (status, text) = match self
             .post_raw_at(endpoint, "eth_chainId", &request.take_request())
-            .await?;
+            .await
+        {
+            Ok(answer) => answer,
+            Err(fault) => {
+                // A transport failure is this endpoint's fault: cool it so the
+                // boot assert does not keep selecting it on every later read.
+                self.pool.record_failure(index, now_ms());
+                return Err(fault);
+            }
+        };
         match Self::answer(endpoint, "eth_chainId", status, &text) {
             Ok(value) => {
                 let quantity: U64 = serde_json::from_str(value.get())
@@ -1903,5 +1936,26 @@ mod tests {
         )
         .expect_err("a batch is not a single answer");
         assert!(matches!(err, Error::Decode { .. }), "{err}");
+    }
+
+    /// The configured read client carries the instance's pool policy, not the
+    /// crate default: the CCTP chains and the beacon lane must share the same
+    /// round/cooldown budget as both mirrors.
+    #[test]
+    fn a_configured_policy_is_preserved_by_the_read_client() {
+        let policy = PoolPolicy {
+            rounds: 7,
+            max_attempts: 9,
+            cooldown_base_ms: 250,
+            cooldown_max_ms: 5_000,
+            ..PoolPolicy::default()
+        };
+        let rpc = Rpc::with_urls_and_policy(
+            &["http://127.0.0.1:1".to_string()],
+            std::time::Duration::from_secs(1),
+            policy,
+        )
+        .expect("a valid URL builds");
+        assert_eq!(rpc.pool().policy(), policy);
     }
 }

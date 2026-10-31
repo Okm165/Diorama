@@ -59,20 +59,48 @@ impl BridgeMetrics {
     }
 
     pub fn count_action(&self, id: u32) {
-        let slot = usize::try_from(id).unwrap_or(usize::MAX).min(self.actions.len() - 1);
+        let slot = usize::try_from(id)
+            .unwrap_or(usize::MAX)
+            .min(self.actions.len() - 1);
         self.actions[slot].fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
         let c = |out: &mut String, name: &str, help: &str, v: u64| {
             push_counter(out, name, help, &[], v);
         };
-        c(&mut out, "venue_bridge_credits_total", "EVM→Core credits applied", self.credits.load(Ordering::Relaxed));
-        c(&mut out, "venue_bridge_completions_total", "Core→EVM completions submitted", self.completions.load(Ordering::Relaxed));
-        c(&mut out, "venue_bridge_refusals_total", "bridge effects refused", self.refusals.load(Ordering::Relaxed));
-        c(&mut out, "venue_bridge_malformed_total", "undecodable CoreWriter action streams", self.malformed.load(Ordering::Relaxed));
-        c(&mut out, "venue_bridge_trace_faults_total", "blocks whose callTracer failed", self.trace_faults.load(Ordering::Relaxed));
+        c(
+            &mut out,
+            "venue_bridge_credits_total",
+            "EVM→Core credits applied",
+            self.credits.load(Ordering::Relaxed),
+        );
+        c(
+            &mut out,
+            "venue_bridge_completions_total",
+            "Core→EVM completions submitted",
+            self.completions.load(Ordering::Relaxed),
+        );
+        c(
+            &mut out,
+            "venue_bridge_refusals_total",
+            "bridge effects refused",
+            self.refusals.load(Ordering::Relaxed),
+        );
+        c(
+            &mut out,
+            "venue_bridge_malformed_total",
+            "undecodable CoreWriter action streams",
+            self.malformed.load(Ordering::Relaxed),
+        );
+        c(
+            &mut out,
+            "venue_bridge_trace_faults_total",
+            "blocks whose callTracer failed",
+            self.trace_faults.load(Ordering::Relaxed),
+        );
         diorama_devnet::metrics::push_metric(
             &mut out,
             diorama_devnet::metrics::GAUGE,
@@ -108,7 +136,10 @@ mod tests {
         m.count_action(7);
         m.inc_credits();
         let out = m.render();
-        assert!(out.contains("venue_bridge_actions_total{id=\"7\"} 2"), "{out}");
+        assert!(
+            out.contains("venue_bridge_actions_total{id=\"7\"} 2"),
+            "{out}"
+        );
         assert!(out.contains("venue_bridge_credits_total 1"), "{out}");
     }
 }

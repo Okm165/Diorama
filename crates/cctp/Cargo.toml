@@ -19,6 +19,7 @@ alloy-primitives = { workspace = true, features = ["k256"] }
 alloy-rpc-types-eth = { workspace = true }
 alloy-sol-types = { workspace = true }
 axum = { workspace = true }
+clap = { workspace = true }
 # The devnet attester signs real ECDSA: RFC6979 + low-s, byte-compatible with
 # the OZ ECDSA.recover the on-chain Attestable verifies (measured, §15.3).
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }

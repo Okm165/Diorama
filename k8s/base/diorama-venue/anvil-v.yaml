@@ -39,6 +39,9 @@ spec:
           args:
             - |
               set -eu
+              # One URL list is the single source; anvil takes one fork URL,
+              # so the first entry is the primary the pool also declares.
+              HL_RPC_URL="${HL_RPC_URLS%%,*}"
               # Wait for the fork source first: anvil forks at start-up, so a
               # restart while the source is unreachable would crash-loop.
               i=0; HEAD=""
@@ -60,8 +63,8 @@ spec:
               chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (source head=$HEAD)"
           env:
-            - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
+            - name: HL_RPC_URLS
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URLS } }
           volumeMounts:
             - { name: state, mountPath: /state }
       containers:
@@ -72,6 +75,8 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
+              # The primary is the first entry of the one URL list.
+              HL_RPC_URL="${HL_RPC_URLS%%,*}"
               # Re-resolve the pin on *every container start*, not just every
               # pod start (k8s restarts only the container on OOM): a fresh
               # base is an epoch, and the driver reconciles it from the shadow
@@ -120,8 +125,8 @@ spec:
                 --no-request-size-limit \
                 --no-fork-node-info
           env:
-            - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
+            - name: HL_RPC_URLS
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URLS } }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }
@@ -147,7 +152,7 @@ spec:
             # ~50 MiB). The request covers the measured state; the limit
             # keeps a wide margin for the live follow's write volume.
             requests: { cpu: "50m", memory: 192Mi }
-            limits: { memory: 1Gi }
+            limits: { memory: 2Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-v-state }

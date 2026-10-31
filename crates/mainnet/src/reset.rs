@@ -8,11 +8,11 @@
 //! to the source, so cursor hashes are unsound there). The divergence is
 //! declared in `crates/mainnet/src/profile.rs` and this module holds its
 //! mechanics.
-use futures_util::future::BoxFuture;
 use diorama_anvil::Rpc;
 use diorama_devnet::shared::Shared;
 use diorama_devnet::spine::{ResetDetector, ResetSignal};
 use diorama_devnet::state::StateFile;
+use futures_util::future::BoxFuture;
 
 /// The cursor-hash detector: the cursor's block must carry its recorded hash,
 /// and a cursor below the chain's fork base is stale by position.
@@ -75,8 +75,14 @@ mod tests {
     /// rebase and must not fire.
     #[test]
     fn the_fork_base_rule_is_strict() {
-        assert!(below_fork_base(99, Some(100)), "a re-pin moved the base past the cursor");
-        assert!(!below_fork_base(100, Some(100)), "cursor at the base: the rest state");
+        assert!(
+            below_fork_base(99, Some(100)),
+            "a re-pin moved the base past the cursor"
+        );
+        assert!(
+            !below_fork_base(100, Some(100)),
+            "cursor at the base: the rest state"
+        );
         assert!(!below_fork_base(101, Some(100)), "cursor above the base");
         assert!(!below_fork_base(99, None), "a real chain has no base");
     }

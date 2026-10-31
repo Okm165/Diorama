@@ -7,5 +7,7 @@ use diorama_config::boot;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    boot::run_main(diorama_venue::main_entry(std::env::args().skip(1).collect()))
+    boot::run_main(diorama_venue::main_entry(
+        std::env::args().skip(1).collect(),
+    ))
 }

@@ -27,7 +27,7 @@ pub(crate) mod system;
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
 use crate::sim::order::CancelSpeed;
-use crate::sim::{Applied, Direction};
+use crate::sim::{Applied, ClassTransfer, Direction};
 use crate::sim::{Sim, TokenRef};
 use crate::wire::UserAbstraction;
 use alloy_consensus::Transaction as _;
@@ -35,8 +35,8 @@ use alloy_primitives::{Address, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_rpc_types_trace::geth::{CallFrame, GethTrace, TraceResult};
 use corewriter::{CoreAction, CORE_WRITER};
-use metrics::BridgeMetrics;
 use diorama_anvil::Rpc;
+use metrics::BridgeMetrics;
 use rust_decimal::Decimal;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -60,7 +60,12 @@ pub struct Bridge {
 }
 
 impl Bridge {
-    pub fn new(anvil_v: Rpc, sim: Arc<Sim>, feed: Arc<MarketFeed>, metrics: Arc<BridgeMetrics>) -> Self {
+    pub fn new(
+        anvil_v: Rpc,
+        sim: Arc<Sim>,
+        feed: Arc<MarketFeed>,
+        metrics: Arc<BridgeMetrics>,
+    ) -> Self {
         let cursor = sim.bridge_cursor().unwrap_or(0);
         Self {
             anvil_v,
@@ -111,7 +116,8 @@ impl Bridge {
             // half-applying (a duplicate credit is a silent balance lie).
             self.sim.save_if_dirty()?;
         }
-        self.metrics.set_lag_blocks(head.saturating_sub(self.cursor.load(Ordering::Relaxed)));
+        self.metrics
+            .set_lag_blocks(head.saturating_sub(self.cursor.load(Ordering::Relaxed)));
         Ok(())
     }
 
@@ -123,20 +129,30 @@ impl Bridge {
         if self.observed_head.load(Ordering::Relaxed) == head {
             return Ok(());
         }
-        let block = self.anvil_v.block_by_number(head, diorama_anvil::Txs::Hashes).await?;
-        self.sim.observe_chain_time(block.header.timestamp.saturating_mul(1_000));
+        let block = self
+            .anvil_v
+            .block_by_number(head, diorama_anvil::Txs::Hashes)
+            .await?;
+        self.sim
+            .observe_chain_time(block.header.timestamp.saturating_mul(1_000));
         self.observed_head.store(head, Ordering::Relaxed);
         Ok(())
     }
 
     /// Decode one block's boundary activity and apply it.
     async fn scan_block(&self, n: u64) -> Result<()> {
-        let block = self.anvil_v.block_by_number(n, diorama_anvil::Txs::Full).await?;
+        let block = self
+            .anvil_v
+            .block_by_number(n, diorama_anvil::Txs::Full)
+            .await?;
         if block.transactions.is_empty() {
             return Ok(());
         }
         let Some(spot) = self.feed.spot_meta() else {
-            tracing::warn!(block = n, "bridge has no spotMeta yet; the block is re-scanned");
+            tracing::warn!(
+                block = n,
+                "bridge has no spotMeta yet; the block is re-scanned"
+            );
             return Err(Error::Warming);
         };
         let tokens = system::token_registry(&spot);
@@ -231,7 +247,12 @@ impl Bridge {
     // Core amount is the log's exact value converted by the pinned decimals.
     /// EVM→Core credit from one transfer log (the emitting contract must be
     /// the token's linked EVM contract).
-    async fn apply_credit(&self, transfer: &Transfer, emitter: Address, tokens: &[TokenInfo]) -> Result<()> {
+    async fn apply_credit(
+        &self,
+        transfer: &Transfer,
+        emitter: Address,
+        tokens: &[TokenInfo],
+    ) -> Result<()> {
         // A spot-token contract transferring **from itself** is the bridge's
         // internal hop, not the depositor. `credit_of` refuses it; name the gap
         // here because the refusal is otherwise silent and the deposit has no
@@ -252,7 +273,10 @@ impl Bridge {
         };
         self.sim.credit_spot(
             credit.sender,
-            TokenRef { index: credit.token.index, coin: &credit.token.name },
+            TokenRef {
+                index: credit.token.index,
+                coin: &credit.token.name,
+            },
             credit.amount,
         )?;
         self.metrics.inc_credits();
@@ -268,7 +292,11 @@ impl Bridge {
     /// The EVM→Core HYPE credit (the system contract's `Received` event).
     /// The emitter check is the address itself: only the real system contract
     /// can emit a credit, never a look-alike.
-    fn apply_hype_credit(&self, data: &alloy_primitives::LogData, tokens: &[TokenInfo]) -> Result<()> {
+    fn apply_hype_credit(
+        &self,
+        data: &alloy_primitives::LogData,
+        tokens: &[TokenInfo],
+    ) -> Result<()> {
         let Some(token) = tokens.iter().find(|t| t.name == "HYPE") else {
             return Ok(());
         };
@@ -289,7 +317,12 @@ impl Bridge {
     }
 
     /// Apply one decoded action to the sim.
-    async fn apply_action(&self, caller: Address, action: CoreAction, tokens: &[TokenInfo]) -> Result<()> {
+    async fn apply_action(
+        &self,
+        caller: Address,
+        action: CoreAction,
+        tokens: &[TokenInfo],
+    ) -> Result<()> {
         self.metrics.count_action(action.id());
         match action {
             CoreAction::UsdClassTransfer { ntl, direction } => {
@@ -335,7 +368,6 @@ impl Bridge {
         Ok(())
     }
 
-
     /// The CoreWriter cancels (ids 10/11): resolve the asset, then the sim's
     /// own cancel — the venue's refusal string rides the log.
     fn core_cancel(&self, caller: Address, action: &CoreAction) {
@@ -365,17 +397,19 @@ impl Bridge {
                 (
                     coin,
                     self.sim.cancel_by_cloid(
-                    caller,
-                    &self.coin_of(*asset).unwrap_or_default(),
-                    alloy_primitives::B128::from(*cloid),
-                    CancelSpeed::Normal,
-                ),
+                        caller,
+                        &self.coin_of(*asset).unwrap_or_default(),
+                        alloy_primitives::B128::from(*cloid),
+                        CancelSpeed::Normal,
+                    ),
                 )
             }
             _ => return,
         };
         match outcome {
-            Ok(()) => tracing::info!(account = %caller, coin = %coin, "bridge: CoreWriter cancel executed"),
+            Ok(()) => {
+                tracing::info!(account = %caller, coin = %coin, "bridge: CoreWriter cancel executed");
+            }
             Err(e) => {
                 self.metrics.inc_refusals();
                 tracing::warn!(account = %caller, coin = %coin, error = %e, "bridge: CoreWriter cancel refused");
@@ -386,7 +420,11 @@ impl Bridge {
     /// The asset index -> coin map the CoreWriter actions address (`None` =
     /// an index the live meta does not carry: a named refusal upstream).
     fn coin_of(&self, asset: u32) -> Option<String> {
-        self.feed.meta()?.universe.get(asset as usize).map(|a| a.name.clone())
+        self.feed
+            .meta()?
+            .universe
+            .get(asset as usize)
+            .map(|a| a.name.clone())
     }
 
     /// The CoreWriter limit order (id 1): prices and sizes arrive as 10^8 ×
@@ -436,16 +474,31 @@ impl Bridge {
         let Some(usdc) = system::by_name(tokens, "USDC") else {
             return Err(Error::Warming);
         };
-        let Some(amount) = system::core_to_human(ntl, usdc.wei_decimals) else {
+        // Action 7 carries the *perp class's* USD (1e6), not the spot token's
+        // core wei: the margin agent's recall reads the perp class's
+        // withdrawable precompile (1e6) and converts ×100 only for the
+        // spot-class bridge leg (`HLConversions.perpToWei`). Decoding at the
+        // spot scale read the recall 1/100 small — the measured
+        // 0.15-of-15.0 leg that stranded the recovery sweep.
+        let Some(amount) = usd_class_amount(ntl) else {
             self.metrics.inc_refusals();
-            tracing::warn!(wei = ntl, "bridge: usdClassTransfer amount is not representable; refused");
+            tracing::warn!(
+                wei = ntl,
+                "bridge: usdClassTransfer amount is not representable; refused"
+            );
             return Ok(());
         };
         let applied = self.sim.usd_class_transfer(
             caller,
-            TokenRef { index: usdc.index, coin: &usdc.name },
-            amount,
-            direction,
+            &ClassTransfer {
+                token: TokenRef {
+                    index: usdc.index,
+                    coin: &usdc.name,
+                },
+                amount,
+                direction,
+            },
+            &self.feed,
         )?;
         match applied {
             Applied::Applied => {
@@ -463,7 +516,12 @@ impl Bridge {
     /// move (multi-dex is deferred — docs/INTEGRATION.md) is refused by name
     /// and counted — never applied as a spot send. `true` when the action was
     /// refused.
-    fn refuse_off_spot_send_asset(&self, caller: Address, source_dex: u32, destination_dex: u32) -> bool {
+    fn refuse_off_spot_send_asset(
+        &self,
+        caller: Address,
+        source_dex: u32,
+        destination_dex: u32,
+    ) -> bool {
         if source_dex == corewriter::SPOT_DEX && destination_dex == corewriter::SPOT_DEX {
             return false;
         }
@@ -503,7 +561,10 @@ impl Bridge {
         let applied = self.sim.spot_send(
             caller,
             destination,
-            TokenRef { index: info.index, coin: &info.name },
+            TokenRef {
+                index: info.index,
+                coin: &info.name,
+            },
             amount,
         )?;
         if matches!(applied, Applied::Refused) {
@@ -545,6 +606,7 @@ impl Bridge {
 
     /// `sendAsset`: spot→spot inside Core, or Core→EVM when the destination
     /// is the token's system address (completed by a system-address transfer).
+    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     async fn send_asset(
         &self,
         caller: Address,
@@ -554,10 +616,41 @@ impl Bridge {
     ) -> Result<()> {
         let Some(amount) = system::core_to_human(wei, info.wei_decimals) else {
             self.metrics.inc_refusals();
-            tracing::warn!(wei, "bridge: sendAsset amount is not representable; refused");
+            tracing::warn!(
+                wei,
+                "bridge: sendAsset amount is not representable; refused"
+            );
             return Ok(());
         };
         if destination == system::system_address(u64::from(info.index)) {
+            // Core→EVM: the venue's transfer rule bounds the move by the
+            // account's **live withdrawable**, not merely by the spot balance.
+            // A control-patched or insolvent account can still hold spot cash
+            // while its equity is below the transfer floor; 4a withdrew 0.55
+            // with `withdrawable=0` one block before its deficit deposit. The
+            // gate is the collateral token's margin rule; other spot tokens are
+            // holdings and are bounded by the balance alone.
+            if info.index == crate::sim::account::COLLATERAL_TOKEN {
+                let Some(account) = self.sim.account(caller)? else {
+                    self.metrics.inc_refusals();
+                    tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
+                    return Ok(());
+                };
+                if account.mode == UserAbstraction::UnifiedAccount {
+                    let meta = self.feed.meta();
+                    let live = crate::sim::account::view(&account, &self.feed, meta.as_ref())?;
+                    if amount > live.withdrawable {
+                        self.metrics.inc_refusals();
+                        tracing::warn!(
+                            account = %caller,
+                            amount = %amount,
+                            withdrawable = %live.withdrawable,
+                            "bridge: Core→EVM refused (amount exceeds live withdrawable)"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
             // Core→EVM: debit the caller, then complete on the EVM side.
             let Some(_after) = self.sim.try_debit_spot(caller, info.index, amount)? else {
                 self.metrics.inc_refusals();
@@ -569,7 +662,10 @@ impl Bridge {
             let applied = self.sim.spot_send(
                 caller,
                 destination,
-                TokenRef { index: info.index, coin: &info.name },
+                TokenRef {
+                    index: info.index,
+                    coin: &info.name,
+                },
                 amount,
             )?;
             if matches!(applied, Applied::Refused) {
@@ -583,7 +679,12 @@ impl Bridge {
     /// The completion tx: `transfer(caller, amount)` on the linked ERC20 from
     /// the system address (auto-impersonate). It lands with the devnet's next
     /// mined block, like the real chain's system tx.
-    async fn complete_core_to_evm(&self, recipient: &Address, info: &TokenInfo, amount: Decimal) -> Result<()> {
+    async fn complete_core_to_evm(
+        &self,
+        recipient: &Address,
+        info: &TokenInfo,
+        amount: Decimal,
+    ) -> Result<()> {
         let Some(evm) = info.evm else {
             return Err(system::no_evm_link(info));
         };
@@ -596,7 +697,13 @@ impl Bridge {
         let from = system::system_address(u64::from(info.index));
         // The system address pays gas on V (the real chain's system txs do
         // not); fund it once so the pool's balance check passes.
-        if self.anvil_v.balance_at(from, 0).await.unwrap_or(U256::ZERO).is_zero() {
+        if self
+            .anvil_v
+            .balance_at(from, 0)
+            .await
+            .unwrap_or(U256::ZERO)
+            .is_zero()
+        {
             self.anvil_v
                 .anvil_set_balance(from, U256::from(1_000_000_000_000_000_000u64))
                 .await?;
@@ -616,6 +723,13 @@ impl Bridge {
         );
         Ok(())
     }
+}
+
+/// Action 7's `ntl` as the human decimal the sim keeps: the *perp class's*
+/// USD (1e6) — `system::PERP_USD_DECIMALS`, not the spot token's core wei.
+/// Pure, so the unit rule is testable without a chain.
+fn usd_class_amount(ntl: u64) -> Option<Decimal> {
+    system::core_to_human(ntl, system::PERP_USD_DECIMALS)
 }
 
 /// The Core's intra-block action order (docs: "Within a block, actions are
@@ -746,8 +860,8 @@ mod tests {
             tif: 3,
             cloid: 0,
         };
-        let order = core_order(Some(&meta), &action, crate::sim::order::Tif::Ioc)
-            .expect("a modeled order");
+        let order =
+            core_order(Some(&meta), &action, crate::sim::order::Tif::Ioc).expect("a modeled order");
         assert_eq!(order.coin, "ETH");
         assert!(order.is_buy);
         assert_eq!(order.size, "2.5".parse().unwrap());
@@ -765,6 +879,31 @@ mod tests {
         };
         assert!(core_order(Some(&meta), &oob, crate::sim::order::Tif::Ioc).is_none());
         assert!(core_order(None, &action, crate::sim::order::Tif::Ioc).is_none());
+    }
+
+    /// Action 7's unit rule: `ntl` is the *perp class's* USD (1e6), not the
+    /// spot token's core wei (8). The margin agent's recall sends the clamped
+    /// perp-class figure (the `0x0803` withdrawable precompile's own unit) and
+    /// converts ×100 only for the spot-class bridge leg — so a 15.0 USDC
+    /// recall arrives as `ntl = 15_000_000` and must apply as 15.0. The old
+    /// spot-wei reading produced the measured 0.15-of-15.0 leg (R5-02) that
+    /// stranded the recovery sweep.
+    #[test]
+    fn usd_class_amount_is_perp_class_usd_not_spot_wei() {
+        assert_eq!(usd_class_amount(15_000_000), Some("15.0".parse().unwrap()));
+        assert_eq!(
+            usd_class_amount(7_950_068),
+            Some("7.950068".parse().unwrap())
+        );
+        // The defect's reading, pinned as the contrast: the same raw at the
+        // spot token's 8-dec scale is 1/100 of the request.
+        assert_eq!(
+            system::core_to_human(15_000_000, 8),
+            Some("0.15".parse().unwrap())
+        );
+        // Sub-wei dust still converts (the venue floors nothing here — the
+        // amount is the caller's exact perp-class figure).
+        assert_eq!(usd_class_amount(1), Some("0.000001".parse().unwrap()));
     }
 
     /// The pre-existence rule is pure: a caller outside the pre-block set is
@@ -814,7 +953,11 @@ mod tests {
         let mut out = Vec::new();
         walk_frame(&outer, &mut out);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].0, Address::repeat_byte(0x02), "attributed to the caller");
+        assert_eq!(
+            out[0].0,
+            Address::repeat_byte(0x02),
+            "attributed to the caller"
+        );
         assert_eq!(out[0].1.id(), 7);
         assert_eq!(out[1].1.id(), 7);
     }
@@ -854,7 +997,10 @@ mod tests {
             "the Alo is post-only: it sorts with the non-orders"
         );
         assert!(matches!(calls[2], CoreAction::CancelByOid { oid: 1, .. }));
-        assert!(matches!(calls[3], CoreAction::CancelByOid { oid: 2, .. }), "cancels keep the proposed order");
+        assert!(
+            matches!(calls[3], CoreAction::CancelByOid { oid: 2, .. }),
+            "cancels keep the proposed order"
+        );
         assert!(matches!(calls[4], CoreAction::LimitOrder { tif: 2, .. }));
         assert!(
             matches!(calls[5], CoreAction::LimitOrder { tif: 3, .. }),

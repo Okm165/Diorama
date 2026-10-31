@@ -6,8 +6,8 @@
 //! scanner, the source-sync supervisor, and the on-demand probe run. The
 //! cursor/rebase/gap/reorg rules live here; the epoch rule itself is shared
 //! (`diorama_devnet::epoch`).
-use crate::ctx::Ctx;
 use crate::apply::step;
+use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::source_sync;
 use diorama_anvil::Rpc;
@@ -61,14 +61,16 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
         tracing::debug!("follow head unavailable");
         return Ok(Next::Idle);
     };
-    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.reth_follow_head, follow);
+    ctx.mainnet_metrics
+        .set(&ctx.mainnet_metrics.reth_follow_head, follow);
     // Schedule a small margin behind the head: the applier mines one T block
     // per applied parent block, so the follow head *is* the devnet's cadence.
     let follow = follow.saturating_sub(ctx.l1.follow_margin_blocks);
     // Metrics-only read: a reth blip must not fail the poll (the gauge reads 0
     // until reth answers again; the next pass overwrites it).
     let reth_head = ctx.reth.block_number().await.unwrap_or(0);
-    ctx.mainnet_metrics.set(&ctx.mainnet_metrics.reth_head, reth_head);
+    ctx.mainnet_metrics
+        .set(&ctx.mainnet_metrics.reth_head, reth_head);
 
     let head = ctx.anvil_t.block_number().await?;
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, head);
@@ -78,11 +80,16 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
     // restart and the computed `diorama_lag_blocks` would read the whole
     // follow head (measured: 26,264,761 after a restart with the applier
     // paused, with reth's real lag ~3k).
-    record_cursor_metrics(&ctx.mainnet_metrics, ctx.plane.state.cursor()?.as_ref(), head);
+    record_cursor_metrics(
+        &ctx.mainnet_metrics,
+        ctx.plane.state.cursor()?.as_ref(),
+        head,
+    );
     if let Ok(Some(fork)) = ctx.anvil_t.fork_block().await {
-        ctx.plane
-            .metrics
-            .set(&ctx.mainnet_metrics.t_fork_age_blocks, head.saturating_sub(fork));
+        ctx.plane.metrics.set(
+            &ctx.mainnet_metrics.t_fork_age_blocks,
+            head.saturating_sub(fork),
+        );
     }
 
     let cursor = validate_cursor(ctx, head).await?;
@@ -232,13 +239,17 @@ fn gap_within_limit(gap: u64, limit: Option<u64>, start_kind: state::Start) -> b
 /// (the tradeoff a single-Anvil mirror accepts, and the reason
 /// `diorama_reorgs_detected_total` is an alarm).
 async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
-    let (Some(last_hash), Some(last_block)) = (ctx.plane.state.source_last_hash()?, ctx.plane.state.source_last_block()?) else {
+    let (Some(last_hash), Some(last_block)) = (
+        ctx.plane.state.source_last_hash()?,
+        ctx.plane.state.source_last_block()?,
+    ) else {
         return Ok(());
     };
     if start > 1 && start - 1 == last_block {
         if let Some(prev) = diorama_devnet::scan::block_hash(&ctx.reth, start - 1).await? {
             if prev != last_hash {
-                ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.reorgs_detected);
+                ctx.mainnet_metrics
+                    .inc(&ctx.mainnet_metrics.reorgs_detected);
                 tracing::warn!(
                     block = start - 1,
                     "reth reorg detected; applied diffs self-heal on the new branch"
@@ -260,14 +271,22 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
         // mirrors): the steady DEBUG line only speaks for an idle chain.
         diorama_devnet::engine::FollowStatus {
             via,
-            source_head: ctx.mainnet_metrics.reth_head.load(std::sync::atomic::Ordering::Relaxed),
-            followed: ctx.mainnet_metrics.cursor.load(std::sync::atomic::Ordering::Relaxed),
+            source_head: ctx
+                .mainnet_metrics
+                .reth_head
+                .load(std::sync::atomic::Ordering::Relaxed),
+            followed: ctx
+                .mainnet_metrics
+                .cursor
+                .load(std::sync::atomic::Ordering::Relaxed),
             applied: ctx
                 .mainnet_metrics
                 .blocks_applied
                 .load(std::sync::atomic::Ordering::Relaxed),
             guard: diorama_devnet::engine::GapGuard::of(
-                ctx.plane.gap_paused.load(std::sync::atomic::Ordering::Relaxed),
+                ctx.plane
+                    .gap_paused
+                    .load(std::sync::atomic::Ordering::Relaxed),
             ),
         }
         .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);

@@ -48,7 +48,8 @@ const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
 pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
-    diorama_devnet::engine::boot_prefix(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT, "hl public api").await?;
+    diorama_devnet::engine::boot_prefix(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT, "hl public api")
+        .await?;
     let pin = reconcile(ctx).await?;
     probes_at_pin(ctx, pin).await?;
     Ok(())
@@ -91,7 +92,10 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
         // the live source is never at the followed height.
         diorama_devnet::engine::FollowStatus {
             via,
-            source_head: ctx.venue_metrics.source_head.load(std::sync::atomic::Ordering::Relaxed),
+            source_head: ctx
+                .venue_metrics
+                .source_head
+                .load(std::sync::atomic::Ordering::Relaxed),
             followed: ctx
                 .venue_metrics
                 .source_followed
@@ -101,7 +105,9 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
                 .follow_windows_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             guard: diorama_devnet::engine::GapGuard::of(
-                ctx.plane.gap_paused.load(std::sync::atomic::Ordering::Relaxed),
+                ctx.plane
+                    .gap_paused
+                    .load(std::sync::atomic::Ordering::Relaxed),
             ),
         }
         .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);
@@ -201,7 +207,11 @@ async fn mine_pending_best_effort(ctx: &Ctx) {
 
 /// The cursor's gauges: the cursor height and the pin-age reading (blocks
 /// since the epoch's first).
-fn record_cursor_metrics(metrics: &crate::metrics::VenueMetrics, cursor: Option<&ChainCursor>, head: u64) {
+fn record_cursor_metrics(
+    metrics: &crate::metrics::VenueMetrics,
+    cursor: Option<&ChainCursor>,
+    head: u64,
+) {
     let Some(c) = cursor else { return };
     metrics.set(&metrics.cursor, c.block);
     metrics.set(
@@ -240,7 +250,10 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     // same 1024 blocks on both mirrors (files older than head - keep are
     // pruned; the venue's journal holds its own writes — the deal).
     ctx.plane.journal.prune(head);
-    let block = ctx.anvil_v.block_by_number(head, diorama_anvil::Txs::Hashes).await?;
+    let block = ctx
+        .anvil_v
+        .block_by_number(head, diorama_anvil::Txs::Hashes)
+        .await?;
     diorama_devnet::state::advance_cursor(&ctx.plane.state, &block, head)?;
     ctx.venue_metrics.set(&ctx.venue_metrics.cursor, head);
     ctx.plane.facts.publish(Fact::CursorAdvanced {
@@ -341,7 +354,10 @@ async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// the base the registry was just rebuilt against.
 async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     let watermark = if let Some(p) = pin {
-        let block = ctx.anvil_v.block_by_number(p, diorama_anvil::Txs::Hashes).await?;
+        let block = ctx
+            .anvil_v
+            .block_by_number(p, diorama_anvil::Txs::Hashes)
+            .await?;
         // Not the shared advance step: a new epoch's `first_block` *is* the
         // pin (the shared step keeps the current cursor's first block).
         ctx.plane.state.set_cursor(cursor_from(&block, p))?;
@@ -349,8 +365,13 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
         // state at the pin, so the next window composes pin+1 onward. The
         // hash is the source's own block hash (the continuity check compares
         // it to the next block's parent).
-        let source_block = ctx.source_rpc.block_by_number(p, diorama_anvil::Txs::Hashes).await?;
-        ctx.plane.state.set_source_last(p, source_block.header.hash)?;
+        let source_block = ctx
+            .source_rpc
+            .block_by_number(p, diorama_anvil::Txs::Hashes)
+            .await?;
+        ctx.plane
+            .state
+            .set_source_last(p, source_block.header.hash)?;
         p
     } else {
         tracing::warn!("anvil-v has no fork pin: epoch decisions are pin-based and cannot run");
@@ -395,8 +416,10 @@ pub(crate) async fn probes_at_pin(ctx: &Ctx, pin: Option<u64>) -> Result<ProbeOu
     };
     let source_head = ctx.source_rpc.block_number().await?;
     if pin != source_head {
-        ctx.venue_metrics
-            .add(&ctx.venue_metrics.probe_skipped, ctx.engine.verifier.probes.len() as u64);
+        ctx.venue_metrics.add(
+            &ctx.venue_metrics.probe_skipped,
+            ctx.engine.verifier.probes.len() as u64,
+        );
         tracing::info!(
             pin,
             source_head,
@@ -425,8 +448,10 @@ async fn count_probes(
         if head_now != source_head {
             ctx.venue_metrics
                 .add(&ctx.venue_metrics.probe_ok, probes.ok as u64);
-            ctx.venue_metrics
-                .add(&ctx.venue_metrics.probe_skipped, (probes.failed + probes.skipped) as u64);
+            ctx.venue_metrics.add(
+                &ctx.venue_metrics.probe_skipped,
+                (probes.failed + probes.skipped) as u64,
+            );
             tracing::info!(
                 pin,
                 source_head,
@@ -457,4 +482,3 @@ async fn count_probes(
     );
     Ok(probes)
 }
-

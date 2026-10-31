@@ -84,7 +84,11 @@ pub enum Error {
         "top-up gap: reth head {el_head}, next CL payload {number} at slot {slot} \
          (missing ancestors are outside the CL's retained history)"
     )]
-    TopUpGap { el_head: u64, number: u64, slot: u64 },
+    TopUpGap {
+        el_head: u64,
+        number: u64,
+        slot: u64,
+    },
 
     #[error("reth answered {status} for payload {number}: {message}")]
     PayloadRejected {
@@ -168,7 +172,6 @@ mod tests {
         let source = std::error::Error::source(&wrapped).expect("source is preserved");
         assert!(source.to_string().contains("feed bridge"), "{source}");
     }
-
 }
 
 #[cfg(test)]
@@ -197,7 +200,17 @@ mod size_guard {
             want: 1,
         }
         .into();
-        assert!(matches!(e, Error::WrongChain { got: 999, want: 1, .. }), "{e}");
+        assert!(
+            matches!(
+                e,
+                Error::WrongChain {
+                    got: 999,
+                    want: 1,
+                    ..
+                }
+            ),
+            "{e}"
+        );
         assert!(e.to_string().contains("is not the mainnet chain"), "{e}");
     }
 
@@ -207,16 +220,21 @@ mod size_guard {
     /// by design — its own `Io`/API faults are pinned in its `error.rs`).
     #[test]
     fn an_abi_fault_becomes_the_feed_bridges_own() {
-        let abi =
-            <alloy_sol_types::sol_data::Bool as alloy_sol_types::SolType>::abi_decode(&[2u8])
-                .expect_err("2 is not a bool");
+        let abi = <alloy_sol_types::sol_data::Bool as alloy_sol_types::SolType>::abi_decode(&[2u8])
+            .expect_err("2 is not a bool");
         let e: Error = diorama_anvil::Error::Abi {
             what: "decimals",
             source: abi,
         }
         .into();
         assert!(
-            matches!(e, Error::FeedBridgeAbi { what: "decimals", .. }),
+            matches!(
+                e,
+                Error::FeedBridgeAbi {
+                    what: "decimals",
+                    ..
+                }
+            ),
             "{e}"
         );
     }

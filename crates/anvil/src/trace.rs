@@ -10,7 +10,7 @@
 //! a JSON number, and storage keys/values as **full-width** 32-byte hex —
 //! exactly what alloy's `AccountState` models, so the parse is the official
 //! type's, not ours.
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_trace::geth::{AccountState, GethTrace, PreStateFrame, TraceResult};
 use std::collections::BTreeMap;
 
@@ -113,13 +113,11 @@ impl Write {
     /// writes a mistyped word.
     pub fn new(key: Key, value: Value) -> Option<Write> {
         match (key, value) {
-            (Key::Storage { address, slot }, Value::Storage(value)) => {
-                Some(Write::Storage {
-                    address,
-                    slot,
-                    value,
-                })
-            }
+            (Key::Storage { address, slot }, Value::Storage(value)) => Some(Write::Storage {
+                address,
+                slot,
+                value,
+            }),
             (Key::Balance(address), Value::Balance(value)) => {
                 Some(Write::Balance { address, value })
             }
@@ -147,8 +145,7 @@ pub(crate) fn flatten_trace_diff(frame: &PreStateFrame) -> Vec<Write> {
     // omits an unchanged-zero pre-state's storage, so a 0→v write lives in
     // `post.storage` alone) and in `pre` only (a v→0 write, which `post`
     // omits — both measured).
-    let mut addresses: std::collections::BTreeSet<Address> =
-        diff.pre.keys().copied().collect();
+    let mut addresses: std::collections::BTreeSet<Address> = diff.pre.keys().copied().collect();
     addresses.extend(diff.post.keys().copied());
     for address in addresses {
         let pre = diff.pre.get(&address);
@@ -163,7 +160,12 @@ pub(crate) fn flatten_trace_diff(frame: &PreStateFrame) -> Vec<Write> {
     out
 }
 
-fn push_balance(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>, post: &AccountState) {
+fn push_balance(
+    out: &mut Vec<Write>,
+    address: Address,
+    pre: Option<&AccountState>,
+    post: &AccountState,
+) {
     if let Some(value) = post.balance {
         if pre.and_then(|p| p.balance) != Some(value) {
             out.push(Write::Balance { address, value });
@@ -171,7 +173,12 @@ fn push_balance(out: &mut Vec<Write>, address: Address, pre: Option<&AccountStat
     }
 }
 
-fn push_nonce(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>, post: &AccountState) {
+fn push_nonce(
+    out: &mut Vec<Write>,
+    address: Address,
+    pre: Option<&AccountState>,
+    post: &AccountState,
+) {
     if let Some(value) = post.nonce {
         if pre.and_then(|p| p.nonce) != Some(value) {
             out.push(Write::Nonce { address, value });
@@ -179,7 +186,12 @@ fn push_nonce(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>
     }
 }
 
-fn push_code(out: &mut Vec<Write>, address: Address, pre: Option<&AccountState>, post: &AccountState) {
+fn push_code(
+    out: &mut Vec<Write>,
+    address: Address,
+    pre: Option<&AccountState>,
+    post: &AccountState,
+) {
     if let Some(value) = &post.code {
         if pre.and_then(|p| p.code.as_ref()) != Some(value) {
             out.push(Write::Code {
@@ -286,7 +298,9 @@ mod tests {
             writes,
             vec![
                 Write::Storage {
-                    address: "0x0000000aa232009084bd71a5797d089aa4edfad4".parse().unwrap(),
+                    address: "0x0000000aa232009084bd71a5797d089aa4edfad4"
+                        .parse()
+                        .unwrap(),
                     slot: U256::from(3u64),
                     value: U256::from_str_radix(
                         "4be6a279be925c8183c6ab0b5b60554bc7adbacf0000000001908b7a",
@@ -295,7 +309,9 @@ mod tests {
                     .unwrap(),
                 },
                 Write::Storage {
-                    address: "0x0000000aa232009084bd71a5797d089aa4edfad4".parse().unwrap(),
+                    address: "0x0000000aa232009084bd71a5797d089aa4edfad4"
+                        .parse()
+                        .unwrap(),
                     slot: U256::from_str_radix(
                         "c00849b9357c3b9274369e6c5b3b60d0742a7ddad7c3c48b10e9b9109914640a",
                         16
@@ -304,11 +320,15 @@ mod tests {
                     value: U256::from_str_radix("1cfc5bd1cb", 16).unwrap(),
                 },
                 Write::Balance {
-                    address: "0x5875db54cd9ae2b2a875e09bb731772297ae9d92".parse().unwrap(),
+                    address: "0x5875db54cd9ae2b2a875e09bb731772297ae9d92"
+                        .parse()
+                        .unwrap(),
                     value: U256::from(0x0bdc_6020_38b4_10e5_u64),
                 },
                 Write::Nonce {
-                    address: "0x5875db54cd9ae2b2a875e09bb731772297ae9d92".parse().unwrap(),
+                    address: "0x5875db54cd9ae2b2a875e09bb731772297ae9d92"
+                        .parse()
+                        .unwrap(),
                     value: 172_449,
                 },
             ]
@@ -381,7 +401,9 @@ mod tests {
         assert_eq!(
             writes[0],
             Write::Storage {
-                address: "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e".parse().unwrap(),
+                address: "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e"
+                    .parse()
+                    .unwrap(),
                 slot: U256::from_str_radix(
                     "4c9e99a9b0f9f4f7d2b6cf12a3b7e6c1a1e5b7d9e3f2a4c6b8d0e2f4a6c8e0f2",
                     16
@@ -394,7 +416,9 @@ mod tests {
         assert_eq!(
             writes[1],
             Write::Storage {
-                address: "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e".parse().unwrap(),
+                address: "0x9b498c3c8a0b8cd8ba1d9851d40d186f1872b44e"
+                    .parse()
+                    .unwrap(),
                 slot: U256::from_str_radix(
                     "986d56fe2954bacde776e5a83b13aa605cf4db18d945bbea664eb3dc8135d4c1",
                     16

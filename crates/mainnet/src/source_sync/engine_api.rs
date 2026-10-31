@@ -118,8 +118,14 @@ impl EngineClient {
         let resp = self
             .http
             .post(&self.url)
-            .header(reqwest::header::CONTENT_TYPE, diorama_anvil::JSON_CONTENT_TYPE)
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", request.token))
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                diorama_anvil::JSON_CONTENT_TYPE,
+            )
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", request.token),
+            )
             .body(request.json)
             .send()
             .await
@@ -209,10 +215,7 @@ impl EngineClient {
         state: &ForkchoiceState,
     ) -> Result<PayloadStatus, EngineApiError> {
         let result = self
-            .call(
-                "engine_forkchoiceUpdatedV3",
-                &(state, Option::<()>::None),
-            )
+            .call("engine_forkchoiceUpdatedV3", &(state, Option::<()>::None))
             .await?;
         let updated: ForkchoiceUpdated = Self::parse("engine_forkchoiceUpdatedV3", &result)?;
         Ok(updated.payload_status)

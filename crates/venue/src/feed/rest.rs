@@ -58,8 +58,24 @@ impl RestClient {
 
     /// Build the client with the project's pool policy (rounds, cooldown,
     /// attempt budget). The policy is one type across every lane.
+    #[cfg(test)]
     pub fn with_policy(api_urls: &[String], policy: diorama_anvil::PoolPolicy) -> Result<Self> {
         let pool = EndpointPool::new(api_urls, Scheme::Http, policy)?;
+        Self::from_pool(pool)
+    }
+
+    /// Build the client from the instance's attributed endpoints: the group's
+    /// roles/chain id/weight survive into the pool, exactly as they do for the
+    /// JSON-RPC source lanes.
+    pub fn with_specs(
+        specs: Vec<diorama_anvil::EndpointSpec>,
+        policy: diorama_anvil::PoolPolicy,
+    ) -> Result<Self> {
+        let pool = EndpointPool::from_specs(specs, Scheme::Http, policy)?;
+        Self::from_pool(pool)
+    }
+
+    fn from_pool(pool: EndpointPool) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()?;
@@ -71,9 +87,9 @@ impl RestClient {
         &self.pool
     }
 
-    /// One typed info call over the pool. A non-2xx answer is a typed refusal
-    /// carrying the body (the venue's error strings are the diagnostics); it
-    /// is an endpoint fault, so the next endpoint is tried before the call
+    /// One typed info call over the pool. A method-level non-2xx answer is the
+    /// venue's typed refusal and is returned immediately; an endpoint-level
+    /// refusal is a fault, so the next endpoint is tried before the call
     /// fails.
     pub(crate) async fn info<T: DeserializeOwned>(&self, req: &InfoRequest) -> Result<T> {
         let attempt = InfoAttempt::<T> {
@@ -82,7 +98,9 @@ impl RestClient {
             marker: std::marker::PhantomData,
         };
         match self.pool.execute(&attempt, &[]).await {
-            Ok(served) => Ok(served.value),
+            // A method-level refusal is returned by the attempt as `Served`:
+            // it is the venue's answer, not an endpoint to fail over.
+            Ok(served) => served.value,
             Err(PoolError::Exhausted { attempts, last }) => Err(Error::ApiExhausted {
                 attempts,
                 last: last.map(|error| error.to_string()).unwrap_or_default(),
@@ -123,9 +141,18 @@ impl RestClient {
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
-            return Err(Error::ApiStatus {
-                status: status.as_u16(),
-                body: text,
+            // A method-level refusal is the venue's answer; every endpoint
+            // would repeat it. Only endpoint-level faults fail over.
+            return Err(if venue_method_refusal(status) {
+                Error::ApiMethodRefusal {
+                    status: status.as_u16(),
+                    body: text,
+                }
+            } else {
+                Error::ApiStatus {
+                    status: status.as_u16(),
+                    body: text,
+                }
             });
         }
         serde_json::from_str(&text).map_err(|source| Error::Decode {
@@ -156,13 +183,14 @@ struct InfoAttempt<'a, T> {
 }
 
 impl<T: DeserializeOwned> Attempt for InfoAttempt<'_, T> {
-    type Output = T;
+    type Output = Result<T, Error>;
     type Fault = Error;
 
-    async fn attempt(&self, index: usize) -> AttemptOutcome<T, Error> {
+    async fn attempt(&self, index: usize) -> AttemptOutcome<Result<T, Error>, Error> {
         let base = self.api.pool.url(index);
         match self.api.info_at(base, self.req).await {
-            Ok(value) => AttemptOutcome::Served(value),
+            Ok(value) => AttemptOutcome::Served(Ok(value)),
+            Err(fault @ Error::ApiMethodRefusal { .. }) => AttemptOutcome::Served(Err(fault)),
             Err(fault) => AttemptOutcome::Fault(fault),
         }
     }

@@ -10,10 +10,10 @@ namespace: diorama-venue
 resources:
   - namespace.yaml
   - ../../base/diorama-venue
-  # The cross-mirror bridge: its own base (it belongs to neither mirror); it
-  # deploys beside the venue stack and reaches T cross-namespace.
-  - ../../base/cctp-bridge
   # This instance's unit (config/instances/diorama-venue): the file every pod
   # of this instance mounts at /etc/mirror/instance.toml, and its generator.
   - ../../../config/instances/diorama-venue
   - nodeports.yaml
+  # The CCTP bridge is its own instance/overlay
+  # (k8s/overlays/diorama-cctp), so a venue can run without a bridge and a
+  # bridge can run without this venue.

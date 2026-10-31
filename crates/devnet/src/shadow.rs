@@ -8,12 +8,12 @@
 //!
 //! Writes are discovered by watching T's own blocks (traces + tx semantics) and
 //! can be added explicitly through the admin API.
-use diorama_anvil::{Rpc, Write};
-use alloy_primitives::{Address, Bytes, U256};
 use crate::error::{Error, Result};
 use crate::metrics::{Metrics, Registry};
 use crate::shared::Shared;
 use crate::store;
+use alloy_primitives::{Address, Bytes, U256};
+use diorama_anvil::{Rpc, Write};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -146,10 +146,17 @@ impl Shadow {
     /// Mark a single write as shadowed.
     pub fn mark(&mut self, w: &Write) {
         match w {
-            Write::Storage { address, slot, value } => {
+            Write::Storage {
+                address,
+                slot,
+                value,
+            } => {
                 self.slots.entry(*address).or_default().insert(*slot);
                 // Keep the latest value: it is what a re-fork has to restore.
-                self.values.entry(*address).or_default().insert(*slot, *value);
+                self.values
+                    .entry(*address)
+                    .or_default()
+                    .insert(*slot, *value);
             }
             Write::Balance { address, value } => {
                 self.accounts.insert(*address);
@@ -283,7 +290,10 @@ impl Shadow {
     }
 
     pub fn slot_count(&self) -> usize {
-        self.slots.values().map(std::collections::BTreeSet::len).sum()
+        self.slots
+            .values()
+            .map(std::collections::BTreeSet::len)
+            .sum()
     }
 
     /// Any recorded state at all (marks, before-values, account values): the
@@ -488,8 +498,18 @@ mod tests {
         assert_eq!(out.len(), 3, "one entry per address: {out:?}");
         assert_eq!(out[0], format!("{a:?}").to_lowercase());
         assert_eq!(out[1], format!("{b:?}").to_lowercase());
-        assert_eq!(out[2], format!("{f:?}").to_lowercase(), "fixtures are owned");
-        assert_eq!(out, s.owned_addresses().iter().map(|a| format!("{a:?}").to_lowercase()).collect::<Vec<_>>());
+        assert_eq!(
+            out[2],
+            format!("{f:?}").to_lowercase(),
+            "fixtures are owned"
+        );
+        assert_eq!(
+            out,
+            s.owned_addresses()
+                .iter()
+                .map(|a| format!("{a:?}").to_lowercase())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -524,7 +544,10 @@ mod tests {
         let b = Address::repeat_byte(0xbb); // orphan: value, no mark
         let c = Address::repeat_byte(0xcc); // marked, no recorded value
         s.mark_slot(a, U256::from(1u64));
-        s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
+        s.values
+            .entry(a)
+            .or_default()
+            .insert(U256::from(1u64), U256::from(7u64));
         s.mark_account_fields(a);
         s.account_values.insert(
             a,
@@ -534,7 +557,10 @@ mod tests {
                 code: None,
             },
         );
-        s.values.entry(b).or_default().insert(U256::from(2u64), U256::from(9u64));
+        s.values
+            .entry(b)
+            .or_default()
+            .insert(U256::from(2u64), U256::from(9u64));
         s.account_values.insert(
             b,
             AccountValues {
@@ -549,7 +575,7 @@ mod tests {
         assert_eq!((slots, accounts), (1, 1)); // b's slot + b's fields dropped
         assert!(!s.values.contains_key(&b) && !s.account_values.contains_key(&b));
         assert!(s.values.contains_key(&a) && s.account_values.contains_key(&a)); // a kept
-        // c is marked without a value: `unrecorded` hands it back.
+                                                                                 // c is marked without a value: `unrecorded` hands it back.
         let (unknown_slots, unknown_accounts) = s.unrecorded();
         assert_eq!((unknown_slots, unknown_accounts), (1, 0));
     }
@@ -560,7 +586,10 @@ mod tests {
         let a = Address::repeat_byte(0xee);
         s.mark_slot(a, U256::from(1u64));
         s.mark_account_fields(a);
-        s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
+        s.values
+            .entry(a)
+            .or_default()
+            .insert(U256::from(1u64), U256::from(7u64));
         s.account_values.insert(
             a,
             AccountValues {
@@ -581,7 +610,10 @@ mod tests {
         let mut s = Shadow::default();
         let a = Address::repeat_byte(0xdd);
         s.mark_slot(a, U256::from(1u64));
-        s.values.entry(a).or_default().insert(U256::from(1u64), U256::from(7u64));
+        s.values
+            .entry(a)
+            .or_default()
+            .insert(U256::from(1u64), U256::from(7u64));
         s.mark_account_fields(a);
         s.account_values.insert(
             a,
@@ -603,9 +635,7 @@ mod tests {
     #[test]
     fn legacy_account_values_parse() {
         let a = Address::repeat_byte(0xab);
-        let json = format!(
-            r#"{{"accounts":["{a:?}"],"account_values":{{"{a:?}":[5,3]}}}}"#
-        );
+        let json = format!(r#"{{"accounts":["{a:?}"],"account_values":{{"{a:?}":[5,3]}}}}"#);
         let s: Shadow = serde_json::from_str(&json).unwrap();
         let v = s.account_values.get(&a).expect("legacy tuple loaded");
         assert_eq!(v.balance, Some(U256::from(5u64)));
@@ -618,13 +648,12 @@ mod tests {
     #[test]
     fn recorded_zero_is_a_value() {
         let a = Address::repeat_byte(0xcd);
-        let json = format!(
-            r#"{{"accounts":["{a:?}"],"account_values":{{"{a:?}":{{"balance":"0x0"}}}}}}"#
-        );
+        let json =
+            format!(r#"{{"accounts":["{a:?}"],"account_values":{{"{a:?}":{{"balance":"0x0"}}}}}}"#);
         let mut s: Shadow = serde_json::from_str(&json).unwrap();
         assert!(s.account_values.get(&a).unwrap().any());
         assert_eq!(s.unrecorded(), (0, 0)); // kept: a recorded zero is a value
-        // round-trips as a map, not as a legacy tuple
+                                            // round-trips as a map, not as a legacy tuple
         let text = serde_json::to_string(&s).unwrap();
         assert!(text.contains("\"balance\":\"0x0\""), "{text}");
         s.unmark_account_fields(a);

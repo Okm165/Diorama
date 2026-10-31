@@ -9,7 +9,7 @@
 //! leaving part of the rolled-back range un-restored.
 use crate::error::{Error, Result};
 use alloy_primitives::{Address, Bytes, U256};
-use diorama_anvil::{Key, Value, Rpc, Write};
+use diorama_anvil::{Key, Rpc, Value, Write};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -249,7 +249,10 @@ fn prune_entry(entry: &std::fs::DirEntry, floor: u64) {
         return;
     };
     if stem.ends_with(".tmp") {
-        remove_logged(&entry.path(), "journal prune: temp file could not be removed");
+        remove_logged(
+            &entry.path(),
+            "journal prune: temp file could not be removed",
+        );
         return;
     }
     let Some(stem) = stem.strip_suffix(".jsonl") else {
@@ -321,11 +324,13 @@ fn before_of(value: Value) -> BeforeValue {
 /// is a library — a caller bug must not abort the engine mid-apply).
 pub fn entry_for_write(w: &Write, before: BeforeValue) -> Result<JournalEntry> {
     match (w, before) {
-        (Write::Storage { address, slot, .. }, BeforeValue::Storage(v)) => Ok(JournalEntry::Storage {
-            address: *address,
-            slot: *slot,
-            before: v,
-        }),
+        (Write::Storage { address, slot, .. }, BeforeValue::Storage(v)) => {
+            Ok(JournalEntry::Storage {
+                address: *address,
+                slot: *slot,
+                before: v,
+            })
+        }
         (Write::Balance { address, .. }, BeforeValue::Balance(v)) => Ok(JournalEntry::Balance {
             address: *address,
             before: v,
@@ -457,7 +462,10 @@ mod tests {
         let address = Address::repeat_byte(3);
         j.record(
             9,
-            std::slice::from_ref(&JournalEntry::Nonce { address, before: 0x1f }),
+            std::slice::from_ref(&JournalEntry::Nonce {
+                address,
+                before: 0x1f,
+            }),
         )
         .unwrap();
         j.record(
@@ -466,9 +474,15 @@ mod tests {
         )
         .unwrap();
         let text = std::fs::read_to_string(dir.join("9.jsonl")).unwrap();
-        assert!(text.contains(r#""before":"0x1f""#), "unexpected text: {text}");
+        assert!(
+            text.contains(r#""before":"0x1f""#),
+            "unexpected text: {text}"
+        );
         let text = std::fs::read_to_string(dir.join("10.jsonl")).unwrap();
-        assert!(text.contains(r#""before":"0x0""#), "unexpected text: {text}");
+        assert!(
+            text.contains(r#""before":"0x0""#),
+            "unexpected text: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

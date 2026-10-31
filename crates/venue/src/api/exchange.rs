@@ -32,7 +32,8 @@ use std::sync::Arc;
 /// `vaultAddress`, which routes the action to that vault or subaccount
 /// (see `acting_owner`).
 pub(crate) async fn exchange(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
-    let req: ExchangeBody = serde_json::from_slice(&body).map_err(|source| Error::bad_request(format!("invalid exchange request: {source}"),))?;
+    let req: ExchangeBody = serde_json::from_slice(&body)
+        .map_err(|source| Error::bad_request(format!("invalid exchange request: {source}")))?;
     // The docs' `expiresAfter` (the exchange page): a millisecond timestamp
     // after which the action is rejected — the venue's own string is "Action
     // already expired" (the FAQ's 15 s protection is the client-side default).
@@ -133,14 +134,12 @@ fn always_mode(always_place: Option<bool>) -> crate::sim::order::AlwaysPlace {
 fn dispatch(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeBody) -> Response {
     match &req.action {
         ExchangeAction::Order { .. } => order_action(state, owner, body, req),
-        ExchangeAction::Cancel { cancels, fast } => {
-            flagged("f", *fast, || cancel_action(state, owner, cancels, cancel_speed(*fast)))
-        }
-        ExchangeAction::CancelByCloid { cancels, fast } => {
-            flagged("f", *fast, || {
-                cancel_by_cloid_action(state, owner, cancels, cancel_speed(*fast))
-            })
-        }
+        ExchangeAction::Cancel { cancels, fast } => flagged("f", *fast, || {
+            cancel_action(state, owner, cancels, cancel_speed(*fast))
+        }),
+        ExchangeAction::CancelByCloid { cancels, fast } => flagged("f", *fast, || {
+            cancel_by_cloid_action(state, owner, cancels, cancel_speed(*fast))
+        }),
         ExchangeAction::Modify {
             oid,
             order,
@@ -152,18 +151,26 @@ fn dispatch(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeB
         } => batch_modify(state, owner, modifies, always_mode(*always_place)),
         ExchangeAction::UpdateIsolatedMargin { asset, ntli, .. } => {
             asset_action(state, *asset, |coin| {
-                state.sim.update_isolated_margin(owner, coin, *ntli, &state.feed)
+                state
+                    .sim
+                    .update_isolated_margin(owner, coin, *ntli, &state.feed)
             })
         }
         ExchangeAction::UpdateLeverage {
             asset,
             is_cross,
             leverage,
-        } => leverage_action(state, owner, *asset, crate::wire::LeverageType::of(*is_cross), *leverage),
-        ExchangeAction::ScheduleCancel { time } => match state.sim.schedule_cancel(
+        } => leverage_action(
+            state,
             owner,
-            crate::sim::order::ScheduleCancel::of(*time),
-        ) {
+            *asset,
+            crate::wire::LeverageType::of(*is_cross),
+            *leverage,
+        ),
+        ExchangeAction::ScheduleCancel { time } => match state
+            .sim
+            .schedule_cancel(owner, crate::sim::order::ScheduleCancel::of(*time))
+        {
             Ok(_) => default_ok(),
             Err(e) => err_envelope(e.to_string()),
         },
@@ -194,13 +201,11 @@ fn acting_user(
     req: &ExchangeBody,
 ) -> std::result::Result<(Address, Address), Box<Response>> {
     let Some(user) = req.user else {
-        return Err(Box::new(
-            err_envelope(
-                "venue-sim: an action must name the acting account in `user` — the devnet has \
+        return Err(Box::new(err_envelope(
+            "venue-sim: an action must name the acting account in `user` — the devnet has \
                  no keys to derive it from the signature. See docs/INTEGRATION.md."
-                    .to_string(),
-            ),
-        ));
+                .to_string(),
+        )));
     };
     if let Some(nonce) = req.nonce {
         if let Err(e) = state.sim.use_nonce(user, nonce, crate::now_ms()) {
@@ -284,7 +289,12 @@ fn leverage_action(
 }
 
 /// The `order` action (its own fn so the dispatcher stays small).
-fn order_action(state: &Arc<ApiState>, owner: Address, body: &Bytes, req: &ExchangeBody) -> Response {
+fn order_action(
+    state: &Arc<ApiState>,
+    owner: Address,
+    body: &Bytes,
+    req: &ExchangeBody,
+) -> Response {
     let (orders, grouping) = match order_parts(body, &req.action) {
         Ok(parts) => parts,
         Err(reason) => return err_envelope(reason),
@@ -350,7 +360,9 @@ fn cancel_action(
     if cancels.is_empty() {
         // The venue's batched actions answer an error for an empty payload
         // (the order action's pre-validation carries the same rule).
-        return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string());
+        return err_envelope(
+            "venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string(),
+        );
     }
     let meta = state.feed.meta();
     let statuses = cancels
@@ -358,7 +370,9 @@ fn cancel_action(
         .map(|c| match coin_of(meta.as_ref(), c.a) {
             Some(coin) => match state.sim.cancel(owner, &coin, c.o, speed) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
-                Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
+                Err(e) => CancelStatus::Error(Box::new(ErrorStatus {
+                    error: e.to_string(),
+                })),
             },
             None => CancelStatus::Error(Box::new(ErrorStatus {
                 error: format!("unknown asset index {}", c.a),
@@ -379,7 +393,9 @@ fn cancel_by_cloid_action(
     speed: crate::sim::order::CancelSpeed,
 ) -> Response {
     if cancels.is_empty() {
-        return err_envelope("venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string());
+        return err_envelope(
+            "venue-sim: an empty cancel batch is rejected (docs: pre-validation)".to_string(),
+        );
     }
     let meta = state.feed.meta();
     let statuses = cancels
@@ -387,7 +403,9 @@ fn cancel_by_cloid_action(
         .map(|c| match coin_of(meta.as_ref(), c.asset) {
             Some(coin) => match state.sim.cancel_by_cloid(owner, &coin, c.cloid, speed) {
                 Ok(()) => CancelStatus::Success(SuccessStatus),
-                Err(e) => CancelStatus::Error(Box::new(ErrorStatus { error: e.to_string() })),
+                Err(e) => CancelStatus::Error(Box::new(ErrorStatus {
+                    error: e.to_string(),
+                })),
             },
             None => CancelStatus::Error(Box::new(ErrorStatus {
                 error: format!("unknown asset index {}", c.asset),
@@ -433,16 +451,18 @@ fn modify_one(
     let canceled = match oid {
         crate::wire::OidOrCloid::Oid(o) => {
             // The oid's coin is the order's own asset (the docs' `a`).
-            let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
-                Error::bad_request(format!("unknown asset index {}", order.a))
-            })?;
-            state.sim.cancel(owner, &coin, *o, crate::sim::order::CancelSpeed::Normal)
+            let coin = coin_of(meta.as_ref(), order.a)
+                .ok_or_else(|| Error::bad_request(format!("unknown asset index {}", order.a)))?;
+            state
+                .sim
+                .cancel(owner, &coin, *o, crate::sim::order::CancelSpeed::Normal)
         }
         crate::wire::OidOrCloid::Cloid(c) => {
-            let coin = coin_of(meta.as_ref(), order.a).ok_or_else(|| {
-                Error::bad_request(format!("unknown asset index {}", order.a))
-            })?;
-            state.sim.cancel_by_cloid(owner, &coin, *c, crate::sim::order::CancelSpeed::Normal)
+            let coin = coin_of(meta.as_ref(), order.a)
+                .ok_or_else(|| Error::bad_request(format!("unknown asset index {}", order.a)))?;
+            state
+                .sim
+                .cancel_by_cloid(owner, &coin, *c, crate::sim::order::CancelSpeed::Normal)
         }
     };
     if matches!(mode, crate::sim::order::AlwaysPlace::RequiresCancel) {
@@ -493,7 +513,9 @@ fn order_parts<'a>(
         let tag = serde_json::from_slice::<ActionTag>(body)
             .map(|t| t.action.r#type)
             .unwrap_or_else(|_| "unknown".into());
-        return Err(format!("venue-sim: `{tag}` is not an order action; {MODELED_ACTIONS}"));
+        return Err(format!(
+            "venue-sim: `{tag}` is not an order action; {MODELED_ACTIONS}"
+        ));
     };
     if let Some(builder) = builder {
         return Err(format!(
@@ -592,18 +614,30 @@ mod tests {
     /// vault." — the owner is the vault when present, the signer otherwise.
     #[test]
     fn acting_owner_routes_vault_and_subaccount_actions() {
-        let master = "0x00000000000000000000000000000000000000e1".parse().unwrap();
-        let vault = "0x00000000000000000000000000000000000000e2".parse().unwrap();
+        let master = "0x00000000000000000000000000000000000000e1"
+            .parse()
+            .unwrap();
+        let vault = "0x00000000000000000000000000000000000000e2"
+            .parse()
+            .unwrap();
         let plain: ExchangeBody = serde_json::from_str(
             r#"{"action":{"type":"order","orders":[]},"user":"0x00000000000000000000000000000000000000e1"}"#,
         )
         .unwrap();
-        assert_eq!(acting_owner(&plain), Some(master), "no vault: the signer acts");
+        assert_eq!(
+            acting_owner(&plain),
+            Some(master),
+            "no vault: the signer acts"
+        );
         let routed: ExchangeBody = serde_json::from_str(
             r#"{"action":{"type":"order","orders":[]},"user":"0x00000000000000000000000000000000000000e1","vaultAddress":"0x00000000000000000000000000000000000000e2"}"#,
         )
         .unwrap();
-        assert_eq!(acting_owner(&routed), Some(vault), "the vault's state is touched");
+        assert_eq!(
+            acting_owner(&routed),
+            Some(vault),
+            "the vault's state is touched"
+        );
     }
 
     /// The compact order maps onto the lane's order: the asset index resolves
@@ -612,9 +646,10 @@ mod tests {
     #[test]
     fn compact_orders_map_onto_the_lane() {
         let meta = eth_meta();
-        let action: OrderAction =
-            serde_json::from_str(r#"{"a":0,"b":true,"p":"101.5","s":"2","t":{"limit":{"tif":"Ioc"}}}"#)
-                .unwrap();
+        let action: OrderAction = serde_json::from_str(
+            r#"{"a":0,"b":true,"p":"101.5","s":"2","t":{"limit":{"tif":"Ioc"}}}"#,
+        )
+        .unwrap();
         let order = action.to_order(Some(&meta)).unwrap();
         assert_eq!(order.coin, "ETH");
         assert!(order.is_buy);
@@ -625,14 +660,26 @@ mod tests {
         // the resting shape the lane refuses by name; an unknown tif is
         // refused here.
         let market: OrderAction = serde_json::from_str(r#"{"a":0,"b":false,"s":"1"}"#).unwrap();
-        assert_eq!(market.to_order(Some(&meta)).unwrap().tif, crate::sim::order::Tif::Ioc);
-        let gtc: OrderAction = serde_json::from_str(r#"{"a":0,"b":false,"s":"1","t":{"limit":{"tif":"Gtc"}}}"#).unwrap();
-        assert_eq!(gtc.to_order(Some(&meta)).unwrap().tif, crate::sim::order::Tif::Gtc);
-        let bad: OrderAction = serde_json::from_str(r#"{"a":0,"b":false,"s":"1","t":{"limit":{"tif":"Fok"}}}"#).unwrap();
+        assert_eq!(
+            market.to_order(Some(&meta)).unwrap().tif,
+            crate::sim::order::Tif::Ioc
+        );
+        let gtc: OrderAction =
+            serde_json::from_str(r#"{"a":0,"b":false,"s":"1","t":{"limit":{"tif":"Gtc"}}}"#)
+                .unwrap();
+        assert_eq!(
+            gtc.to_order(Some(&meta)).unwrap().tif,
+            crate::sim::order::Tif::Gtc
+        );
+        let bad: OrderAction =
+            serde_json::from_str(r#"{"a":0,"b":false,"s":"1","t":{"limit":{"tif":"Fok"}}}"#)
+                .unwrap();
         assert!(format!("{}", bad.to_order(Some(&meta)).unwrap_err()).contains("unknown tif"));
         // An index past the meta is a named refusal.
         let oob: OrderAction = serde_json::from_str(r#"{"a":7,"b":false,"s":"1"}"#).unwrap();
-        assert!(format!("{}", oob.to_order(Some(&meta)).unwrap_err()).contains("unknown asset index"));
+        assert!(
+            format!("{}", oob.to_order(Some(&meta)).unwrap_err()).contains("unknown asset index")
+        );
     }
 
     /// The docs' `expiresAfter` (the exchange page + the FAQ's "Action already
@@ -686,7 +733,10 @@ mod tests {
             r#"{"action":{"type":"order","orders":[],"grouping":"na"},"user":"0x00000000000000000000000000000000000000e1"}"#,
         );
         let req: ExchangeBody = serde_json::from_slice(&body).unwrap();
-        assert!(order_parts(&body, &req.action).is_ok(), "\"na\" is the plain path");
+        assert!(
+            order_parts(&body, &req.action).is_ok(),
+            "\"na\" is the plain path"
+        );
         // A trigger order maps into its typed shape (armed, not walked).
         let action: OrderAction = serde_json::from_str(
             r#"{"a":0,"b":true,"s":"1","t":{"trigger":{"isMarket":true,"triggerPx":"100","tpsl":"sl"}}}"#,
@@ -725,7 +775,10 @@ mod tests {
             response: DefaultBody { r#type: "default" },
         })
         .unwrap();
-        assert_eq!(out, serde_json::json!({"status": "ok", "response": {"type": "default"}}));
+        assert_eq!(
+            out,
+            serde_json::json!({"status": "ok", "response": {"type": "default"}})
+        );
         // An order without `user`: parsed (the field is optional) but refused
         // by name on the way in — the devnet cannot derive it.
         let order: ExchangeBody = serde_json::from_str(
@@ -762,7 +815,10 @@ mod tests {
         .unwrap();
         assert_eq!(ok["status"], "ok");
         assert_eq!(ok["response"]["type"], "order");
-        assert_eq!(ok["response"]["data"]["statuses"][0]["filled"]["totalSz"], "1.5");
+        assert_eq!(
+            ok["response"]["data"]["statuses"][0]["filled"]["totalSz"],
+            "1.5"
+        );
         assert_eq!(ok["response"]["data"]["statuses"][0]["filled"]["oid"], 3);
         // The err envelope keeps the venue's shape (HTTP 200 in the handler).
         let err = serde_json::to_value(ExchangeResponse {

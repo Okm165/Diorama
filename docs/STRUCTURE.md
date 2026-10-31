@@ -14,9 +14,9 @@ symmetry sweeps — regenerate the readings with
 | engine bin | `bins/diorama-mainnet-engine` | `bins/diorama-venue-engine` | |
 | profile-only bin | — | `bins/diorama-venue-sim` | the simulator has no mainnet twin |
 | cross-mirror bins | `bins/diorama-cctp-bridge`, `bins/diorama-ast-scope` | (shared) | the bridge and the fitness gate span both |
-| instance | `config/instances/diorama-mainnet/` | `config/instances/diorama-venue/` | TOML + kustomization, section-for-section alike |
+| instance | `config/instances/diorama-mainnet/` | `config/instances/diorama-venue/` | one file per process; the bridge has its own `config/instances/diorama-cctp/` |
 | k8s base | `k8s/base/diorama-mainnet/` | `k8s/base/diorama-venue/` | + the shared and cctp-bridge bases |
-| k8s overlay | `k8s/overlays/diorama-mainnet/` | `k8s/overlays/diorama-venue/` | |
+| k8s overlay | `k8s/overlays/diorama-mainnet/` | `k8s/overlays/diorama-venue/` | the bridge is its own base/instance; a deployment may host it beside the venue or in its own namespace |
 | cluster suites | `mainnet-{smoke,scenario,proof,product-sim,closure-check}` | `venue-{smoke,scenario,proof,order-proof}` | one-sided rows say why (docs/TESTING.md) |
 | cross-mirror | `engine-symmetry`, `cctp-*`, `log-surface`, `attest`, `shadow-audit` | (shared) | |
 | explainer | `docs/HOW-IT-WORKS.md` | `docs/HOW-IT-WORKS-VENUE.md` | the same §-numbered walk-through |
@@ -102,7 +102,7 @@ in `SPINE.md` and the profiles' own tables are the full list):
 | `api/`, `sim/`, `wire.rs` (venue) | the simulator's served surface has no mainnet counterpart |
 | `service.rs` carries `sim_entry` | one home per service: the venue crate serves two binaries (`venue-engine`, `venue-sim`) |
 | metric namespaces (`diorama_*` / `venue_*`) | breaking to rename; the docs pin them |
-| the `EngineCore` construction (both `core()`s) | the two literals are field-for-field identical in order (`plane`, `mirror`, `target`, `source`, `source_url`, `engine`) — the shape is already shared, and the trait reading shows it; an `EngineCore::new` would take six arguments (the 5-arg ratchet) or a params struct that repeats the same literal under another name, so the literal is the minimal shared form |
+| the `EngineCore` construction (both `core()`s) | the two literals are field-for-field identical in order (`plane`, `mirror`, `target`, `source`, `engine`) — the shape is already shared, and the trait reading shows it; an `EngineCore::new` would take six arguments (the 5-arg ratchet) or a params struct that repeats the same literal under another name, so the literal is the minimal shared form |
 | the four oldest deployed-stack suites (`mainnet-{proof,scenario,product-sim,closure-check}`) run leniently (no `set -euo pipefail`) | coherent, not drift: every check counts and the verdict is the final count, so one failed stack read cannot mask the sweep; the newer suites (the venue trio, the smokes, the cctps) fail fast instead — a failed read aborts with its status. Both reach a verdict; changing the four is unverifiable outside the cluster |
 
 ## The AST readings (and what each one found)

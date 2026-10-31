@@ -4,23 +4,21 @@
 //! One pass: scan each chain from the configured start block to head
 //! (`eth_getLogs`, chunked — the emitter is the pinned MessageTransmitterV2,
 //! topic0 the measured `MessageSent(bytes)` hash), decode each log into a
-//! [`MessageRecord`], patch the attester fields (`nonce = burn-tx hash`,
-//! `finalityThresholdExecuted = 2000`, `feeExecuted = 0`,
+//! [`MessageRecord`], patch the attester fields (`nonce = keccak256(burn-tx
+//! ‖ log-index)`, `finalityThresholdExecuted = 2000`, `feeExecuted = 0`,
 //! `expirationBlock = configured`, §15.3), and sign every record whose
 //! emulated PENDING window has elapsed.
 //!
 //! **Restart backfill**: the first scan of every run starts at
 //! `start_block` — a burn awaiting attestation across a restart is re-read
 //! and re-signed — and later passes continue from the scanned head. Dedupe is
-//! by `(sourceDomain, nonce)`; the nonce is the burn tx hash, so a re-scan is
-//! idempotent by construction.
+//! by `(sourceDomain, nonce)`, and the nonce is unique per `(tx, log index)`,
+//! so a re-scan is idempotent and a transaction that emits two burns keeps
+//! both records.
 //!
 //! Known boundary: a source-chain **re-fork** (T's epoch reset) invalidates
 //! watched burns. The records survive; an operator clears the state dir (or
-//! sets a fresh start block) when a reset should drop history. The nonce
-//! policy is the plan's deterministic one (burn tx hash, §15.3), so a
-//! transaction emitting **two** burns collides on the nonce: the second is
-//! refused with a warning (the devnet lanes burn once per tx).
+//! sets a fresh start block) when a reset should drop history.
 use crate::attester::Attester;
 use crate::chains::{Chain, Domain, FINALITY_THRESHOLD_FINALIZED};
 use crate::error::{Error, Result};
@@ -323,13 +321,15 @@ impl Watcher {
         Ok(Some(self.record_of(sent, &parsed, expiration)))
     }
 
-    /// The record one in-lane message makes: the deterministic nonce is the
-    /// burn tx hash; the raw event message carries `EMPTY_NONCE` and
-    /// the served artifact fills it.
+    /// The record one in-lane message makes: the deterministic nonce is
+    /// `keccak256(burn_tx ‖ log_index)`, unique per burn even when one
+    /// transaction emits several messages; the raw event message carries
+    /// `EMPTY_NONCE` and the served artifact fills it.
     fn record_of(&self, sent: MessageSent, parsed: &Message, expiration: U256) -> MessageRecord {
         let burn_tx = sent.burn_tx;
+        let nonce = burn_nonce(burn_tx, sent.log_index);
         let served = parsed.with_attester_fields(
-            burn_tx,
+            nonce,
             FINALITY_THRESHOLD_FINALIZED,
             U256::ZERO,
             expiration,
@@ -338,8 +338,9 @@ impl Watcher {
         MessageRecord {
             source_domain: parsed.header.source_domain,
             destination_domain: parsed.header.destination_domain,
-            nonce: burn_tx,
+            nonce,
             burn_tx,
+            burn_log_index: sent.log_index,
             burn_block: sent.burn_block,
             raw_message: sent.raw_message,
             message_hash: served.keccak(),
@@ -390,11 +391,27 @@ impl Watcher {
         }
     }
 
-    /// Decode one `MessageSent` log into a record.
+    /// Decode one `MessageSent` log into a record. A malformed log is a
+    /// permissionless event, not a chain fault: skip it with a named warning.
+    /// Propagating the error would stop the scan at that block and the loop
+    /// would retry the same block forever (a one-event DoS on the watcher).
     fn absorb(&self, log: &Log, expiration: U256) -> Result<usize> {
-        match self.decode_record(log, expiration)? {
-            Some(record) => self.insert(record),
-            None => Ok(0),
+        match self.decode_record(log, expiration) {
+            Ok(Some(record)) => self.insert(record),
+            Ok(None) => Ok(0),
+            Err(error) => {
+                tracing::warn!(
+                    chain = self.chain.name,
+                    tx = ?log.transaction_hash,
+                    log_index = ?log.log_index,
+                    %error,
+                    "malformed MessageSent log skipped; the scan continues"
+                );
+                self.metrics
+                    .scan_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(0)
+            }
         }
     }
 
@@ -428,10 +445,10 @@ impl Watcher {
     }
 }
 
-/// The `MessageSent` log's parts: its transaction hash (the deterministic
-/// nonce), its block, and the raw message bytes. Both the hash and the block
-/// are required — a log without them cannot be turned into a relayable
-/// record, and skipping it silently would drop a burn.
+/// The `MessageSent` log's parts: its transaction hash, log index, block and
+/// the raw message bytes. The hash, index and block are required — a log
+/// without them cannot be turned into a uniquely relayable record, and
+/// skipping it silently would drop a burn.
 fn decode_message_sent(log: &Log) -> Result<MessageSent> {
     let decoded = IMessageTransmitterV2::MessageSent::decode_log(&log.inner).map_err(|source| {
         Error::Abi {
@@ -442,20 +459,36 @@ fn decode_message_sent(log: &Log) -> Result<MessageSent> {
     let burn_tx = log
         .transaction_hash
         .ok_or_else(|| Error::bad_request("MessageSent log without a transaction hash"))?;
+    let log_index = log
+        .log_index
+        .ok_or_else(|| Error::bad_request("MessageSent log without a log index"))?;
     let burn_block = log
         .block_number
         .ok_or_else(|| Error::bad_request("MessageSent log without a block number"))?;
     Ok(MessageSent {
         burn_tx,
+        log_index,
         burn_block,
         raw_message: decoded.data.message,
     })
 }
 
-/// The `MessageSent` log's decoded parts (named, not a tuple: the three travel
+/// The unique attester nonce for one burn. A transaction may emit several
+/// `MessageSent` logs; the transaction hash alone is not unique, so the log
+/// index is folded in. The destination's `usedNonces` table is keyed by this
+/// value, which is what makes each burn independently relayable.
+fn burn_nonce(burn_tx: B256, log_index: u64) -> B256 {
+    let mut preimage = [0u8; 40];
+    preimage[..32].copy_from_slice(burn_tx.as_slice());
+    preimage[32..].copy_from_slice(&log_index.to_be_bytes());
+    alloy_primitives::keccak256(preimage)
+}
+
+/// The `MessageSent` log's decoded parts (named, not a tuple: the four travel
 /// together into the record).
 struct MessageSent {
     burn_tx: B256,
+    log_index: u64,
     burn_block: u64,
     raw_message: Bytes,
 }
@@ -517,11 +550,21 @@ mod tests {
         finality_delay: Duration,
     ) -> Watcher {
         Watcher {
-            chain: Chain::ethereum("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+            chain: Chain::ethereum(
+                "http://127.0.0.1:1",
+                Duration::from_secs(1),
+                diorama_anvil::PoolPolicy::default(),
+            )
+            .unwrap(),
             destination_domain,
             // Never read with `expiration_blocks = 0` (the tests' window): the
             // dummy URL would fault, which is the point of keeping it unused.
-            destination: Chain::hyper_evm("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+            destination: Chain::hyper_evm(
+                "http://127.0.0.1:1",
+                Duration::from_secs(1),
+                diorama_anvil::PoolPolicy::default(),
+            )
+            .unwrap(),
             store: Arc::new(Store::load(dir.join("cctp.json")).unwrap()),
             attester: Arc::new(Attester::from_seed("watcher-test").unwrap()),
             start_block: 0,
@@ -535,8 +578,8 @@ mod tests {
     }
 
     /// A synthetic `MessageSent` log carrying the sample raw message with the
-    /// given lane.
-    fn log(tx: B256, source: u32, destination: u32) -> Log {
+    /// given lane and log index.
+    fn log_at(tx: B256, log_index: u64, source: u32, destination: u32) -> Log {
         let mut message = Message::decode(&sample_raw_message()).unwrap();
         message.header.source_domain = Domain(source);
         message.header.destination_domain = Domain(destination);
@@ -554,14 +597,19 @@ mod tests {
             block_timestamp: None,
             transaction_hash: Some(tx),
             transaction_index: Some(0),
-            log_index: Some(0),
+            log_index: Some(log_index),
             removed: false,
         }
     }
 
-    /// One absorb: the nonce is the burn tx hash, the served message fills the
-    /// attester fields, the state starts PENDING; a re-scan (the restart
-    /// backfill) is idempotent.
+    /// The common one-log case: index 0.
+    fn log(tx: B256, source: u32, destination: u32) -> Log {
+        log_at(tx, 0, source, destination)
+    }
+
+    /// One absorb: the nonce is `keccak256(tx ‖ log index)`, the served
+    /// message fills the attester fields, the state starts PENDING; a re-scan
+    /// (the restart backfill) is idempotent.
     #[test]
     fn absorb_patches_dedupes_and_signs() {
         let dir = crate::test_dir("watcher");
@@ -580,12 +628,17 @@ mod tests {
             "re-scan is idempotent"
         );
         let record = watcher.store.with(|s| Ok(s.messages[0].clone())).unwrap();
-        assert_eq!(record.nonce, tx, "the nonce is the burn tx hash");
+        assert_eq!(
+            record.nonce,
+            burn_nonce(tx, 0),
+            "the nonce is derived from the burn tx and log index"
+        );
+        assert_eq!(record.burn_log_index, 0);
         assert_eq!(record.burn_block, 7);
         assert_eq!(record.state, RelayState::Pending);
         assert!(record.attestation.is_none());
         let served = record.decoded().unwrap();
-        assert_eq!(served.header.nonce, tx);
+        assert_eq!(served.header.nonce, record.nonce);
         assert_eq!(served.header.finality_threshold_executed, 2000);
         assert_ne!(
             record.raw_message, record.message,
@@ -603,6 +656,45 @@ mod tests {
                 .recover_address_from_prehash(&record.message_hash)
                 .unwrap(),
             watcher.attester.address()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two burns in one transaction are two records with distinct nonces.
+    /// Keying the store on the transaction hash silently dropped the second
+    /// burn and left its USDC unminted.
+    #[test]
+    fn two_burns_in_one_transaction_are_both_watched() {
+        let dir = crate::test_dir("multi-burn");
+        let _ = std::fs::remove_dir_all(&dir);
+        let watcher = watcher(&dir, Domain(19), Duration::ZERO);
+        let tx = B256::repeat_byte(0xcd);
+
+        assert_eq!(
+            watcher.absorb(&log_at(tx, 0, 0, 19), U256::ZERO).unwrap(),
+            1
+        );
+        assert_eq!(
+            watcher.absorb(&log_at(tx, 1, 0, 19), U256::ZERO).unwrap(),
+            1,
+            "the second burn in the same transaction must not collide"
+        );
+        let records = watcher.store.with(|s| Ok(s.messages.clone())).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].burn_tx, tx);
+        assert_eq!(records[1].burn_tx, tx);
+        assert_ne!(records[0].nonce, records[1].nonce);
+        assert_eq!(records[0].burn_log_index, 0);
+        assert_eq!(records[1].burn_log_index, 1);
+
+        // A re-scan of both logs is still idempotent.
+        assert_eq!(
+            watcher.absorb(&log_at(tx, 0, 0, 19), U256::ZERO).unwrap(),
+            0
+        );
+        assert_eq!(
+            watcher.absorb(&log_at(tx, 1, 0, 19), U256::ZERO).unwrap(),
+            0
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

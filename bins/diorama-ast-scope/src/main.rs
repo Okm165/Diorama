@@ -177,9 +177,15 @@ impl Item {
         match self.kind {
             "fn" => {
                 if self.lines > MAX_LINES {
-                    Some(Violation { metric: "lines", limit: MAX_LINES })
+                    Some(Violation {
+                        metric: "lines",
+                        limit: MAX_LINES,
+                    })
                 } else if self.depth > MAX_DEPTH {
-                    Some(Violation { metric: "depth", limit: MAX_DEPTH })
+                    Some(Violation {
+                        metric: "depth",
+                        limit: MAX_DEPTH,
+                    })
                 } else {
                     None
                 }
@@ -402,7 +408,9 @@ fn member_reads(attrs: &[syn::Attribute]) -> MemberReads {
     let driven = attrs.iter().any(|attr| {
         attr.path().is_ident("derive")
             && attr
-                .parse_args_with(syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated,
+                )
                 .map(|paths| {
                     paths.iter().any(|p| {
                         p.segments
@@ -613,8 +621,12 @@ fn param_names(sig: &syn::Signature) -> Vec<String> {
     sig.inputs
         .iter()
         .filter_map(|arg| {
-            let syn::FnArg::Typed(pat) = arg else { return None };
-            let syn::Pat::Ident(name) = &*pat.pat else { return None };
+            let syn::FnArg::Typed(pat) = arg else {
+                return None;
+            };
+            let syn::Pat::Ident(name) = &*pat.pat else {
+                return None;
+            };
             Some(name.ident.to_string())
         })
         .collect()
@@ -623,8 +635,12 @@ fn param_names(sig: &syn::Signature) -> Vec<String> {
 fn ctx_params(sig: &syn::Signature) -> HashSet<String> {
     let mut out = HashSet::new();
     for arg in &sig.inputs {
-        let syn::FnArg::Typed(pat) = arg else { continue };
-        let syn::Pat::Ident(name) = &*pat.pat else { continue };
+        let syn::FnArg::Typed(pat) = arg else {
+            continue;
+        };
+        let syn::Pat::Ident(name) = &*pat.pat else {
+            continue;
+        };
         if type_is_ctx(&pat.ty) {
             out.insert(name.ident.to_string());
         }
@@ -634,11 +650,7 @@ fn ctx_params(sig: &syn::Signature) -> HashSet<String> {
 
 fn type_is_ctx(ty: &syn::Type) -> bool {
     match ty {
-        syn::Type::Path(p) => p
-            .path
-            .segments
-            .last()
-            .is_some_and(|s| s.ident == "Ctx"),
+        syn::Type::Path(p) => p.path.segments.last().is_some_and(|s| s.ident == "Ctx"),
         syn::Type::Reference(r) => type_is_ctx(&r.elem),
         _ => false,
     }
@@ -784,7 +796,8 @@ impl<'ast> Visit<'ast> for Body {
         if matches!(n.op, syn::BinOp::Div(_)) && !is_literal(&n.right) {
             let sketch = n.right.to_token_stream().to_string().replace(' ', "");
             let sketch: String = sketch.chars().take(40).collect();
-            self.divisions.push(format!("{}: {}", n.span().start().line, sketch));
+            self.divisions
+                .push(format!("{}: {}", n.span().start().line, sketch));
         }
         visit::visit_expr_binary(self, n);
     }
@@ -837,7 +850,11 @@ const NARROW_TARGETS: [&str; 7] = ["u8", "u16", "u32", "i8", "i16", "i32", "f32"
 fn is_literal(e: &syn::Expr) -> bool {
     matches!(
         e,
-        syn::Expr::Lit(_) | syn::Expr::Unary(syn::ExprUnary { op: syn::UnOp::Neg(_), .. })
+        syn::Expr::Lit(_)
+            | syn::Expr::Unary(syn::ExprUnary {
+                op: syn::UnOp::Neg(_),
+                ..
+            })
     )
 }
 
@@ -1238,8 +1255,10 @@ fn compositions(prod: &[&Item]) {
             }
         }
     }
-    let mut shared: Vec<(&String, &Vec<&str>)> =
-        grams.iter().filter(|(_, fns)| fns.len() >= SHARED_BY).collect();
+    let mut shared: Vec<(&String, &Vec<&str>)> = grams
+        .iter()
+        .filter(|(_, fns)| fns.len() >= SHARED_BY)
+        .collect();
     shared.sort_by_key(|(_, fns)| std::cmp::Reverse(fns.len()));
     println!("\ncompositions: own-fn sequences shared by >= {SHARED_BY} functions (the domain pipelines):");
     for (key, fns) in shared.iter().take(REPORT_TOP) {
@@ -1270,7 +1289,9 @@ fn twin_shapes(prod: &[&Item]) {
         }
     }
     rows.sort_by(|a, b| b.0.total_cmp(&a.0));
-    println!("\ntwins: same-named fns across the mirrors (shared 3-op sequences over the smaller side):");
+    println!(
+        "\ntwins: same-named fns across the mirrors (shared 3-op sequences over the smaller side):"
+    );
     for (overlap, m, v) in rows.iter() {
         println!(
             "  {:>3.0}%  {} ({} <-> {})",
@@ -1284,9 +1305,8 @@ fn twin_shapes(prod: &[&Item]) {
 
 /// The share of the smaller op-sequence's 3-grams the other side carries.
 fn gram_overlap(a: &[String], b: &[String]) -> f64 {
-    let grams = |ops: &[String]| -> HashSet<String> {
-        ops.windows(3).map(|w| w.join(" -> ")).collect()
-    };
+    let grams =
+        |ops: &[String]| -> HashSet<String> { ops.windows(3).map(|w| w.join(" -> ")).collect() };
     let (ga, gb) = (grams(a), grams(b));
     let smaller = ga.len().min(gb.len());
     if smaller == 0 {
@@ -1365,7 +1385,12 @@ fn wrappers(prod: &[&Item]) {
 fn narrow_context(prod: &[&Item]) {
     let mut rows: Vec<&&Item> = prod
         .iter()
-        .filter(|i| i.kind == "fn" && i.ctx_params > 0 && i.ctx_use == CtxUse::Narrow && i.ctx_fields.len() <= 1)
+        .filter(|i| {
+            i.kind == "fn"
+                && i.ctx_params > 0
+                && i.ctx_use == CtxUse::Narrow
+                && i.ctx_fields.len() <= 1
+        })
         .collect();
     rows.sort_by_key(|i| i.ctx_fields.len());
     println!("\nnarrow context: functions taking `Ctx` that touch <= 1 field:");
@@ -1390,7 +1415,10 @@ fn divisions(prod: &[&Item]) {
             rows.push((item, site));
         }
     }
-    println!("\ndivisions: non-literal divisors ({} sites; each needs a zero guard):", rows.len());
+    println!(
+        "\ndivisions: non-literal divisors ({} sites; each needs a zero guard):",
+        rows.len()
+    );
     for (item, site) in rows.iter().take(REPORT_TOP * 2) {
         println!("  {}:{}  {site}", item.file, item.name);
     }
@@ -1451,7 +1479,10 @@ fn casts(prod: &[&Item]) {
         println!("\ncasts: none (no production cast targets a narrow type)");
         return;
     }
-    println!("\ncasts: narrowing `as` targets ({} sites; judge each):", rows.len());
+    println!(
+        "\ncasts: narrowing `as` targets ({} sites; judge each):",
+        rows.len()
+    );
     for (item, site) in rows.iter().take(REPORT_TOP * 2) {
         println!("  {}:{}  {site}", item.file, item.name);
     }
@@ -1475,7 +1506,10 @@ fn fan_in(prod: &[&Item]) {
         }
         for op in &item.ops {
             if !op.starts_with('.') && defined.contains(op.as_str()) {
-                callers.entry(op.as_str()).or_default().insert(item.name.as_str());
+                callers
+                    .entry(op.as_str())
+                    .or_default()
+                    .insert(item.name.as_str());
             }
         }
     }
@@ -1496,7 +1530,10 @@ fn fan_in(prod: &[&Item]) {
         }
         for op in &item.ops {
             if let Some(method) = op.strip_prefix('.') {
-                methods.entry(method).or_default().insert(item.name.as_str());
+                methods
+                    .entry(method)
+                    .or_default()
+                    .insert(item.name.as_str());
             }
         }
     }

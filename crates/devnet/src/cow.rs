@@ -130,7 +130,11 @@ pub struct FilterStats {
 /// output is a change document — storage reads and per-tx indices are not part
 /// of what the pipeline writes, so the kept changes are re-framed at index 1
 /// (the same framing [`diorama_anvil::bal_from_writes`] uses).
-pub fn filter_bal(watch: &WatchSet, shadow: &Shadow, bal: BlockAccessList) -> (BlockAccessList, FilterStats) {
+pub fn filter_bal(
+    watch: &WatchSet,
+    shadow: &Shadow,
+    bal: BlockAccessList,
+) -> (BlockAccessList, FilterStats) {
     let mut out: BlockAccessList = Vec::new();
     let mut stats = FilterStats::default();
     for acct in bal {
@@ -299,9 +303,9 @@ mod tests {
         let mut shadow = Shadow::default();
         shadow.slots.entry(token).or_default().insert(U256::from(1));
         let bal: BlockAccessList = vec![
-            storage(token, 1, 42),  // declared but devnet-owned -> skipped
-            storage(token, 2, 43),  // not declared -> not watched
-            storage(other, 1, 44),  // account not watched -> not watched
+            storage(token, 1, 42), // declared but devnet-owned -> skipped
+            storage(token, 2, 43), // not declared -> not watched
+            storage(other, 1, 44), // account not watched -> not watched
         ];
         let (filtered, stats) = filter_bal(&watch, &shadow, bal);
         assert!(filtered.is_empty());

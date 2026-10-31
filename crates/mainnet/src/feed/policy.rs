@@ -27,7 +27,9 @@ pub(crate) enum Step {
     WaitPending,
     SkipUnchanged,
     Publish(i128),
-    Pause { found: i128 },
+    Pause {
+        found: i128,
+    },
 }
 
 /// The rules, in order:
@@ -38,7 +40,13 @@ pub(crate) enum Step {
 ///    it did not land in time, skip when nothing moved;
 /// 3. anything else on the target → a scenario wrote it: pause, never
 ///    overwrite a scenario's value.
-pub(crate) fn step(state: ValueState, target_now: i128, source_now: i128, now_ms: u64, window_ms: u64) -> Step {
+pub(crate) fn step(
+    state: ValueState,
+    target_now: i128,
+    source_now: i128,
+    now_ms: u64,
+    window_ms: u64,
+) -> Step {
     if state.pending == Some(target_now) {
         return Step::Confirm;
     }
@@ -82,13 +90,25 @@ mod tests {
     fn the_pause_rule_never_overwrites_a_scenario() {
         let now = 1_000;
         // The bridge confirmed 2000; the target now holds 1500 (a crash): pause.
-        assert_eq!(step(state(Some(2000), None), 1500, 2000, now, WINDOW), Step::Pause { found: 1500 });
+        assert_eq!(
+            step(state(Some(2000), None), 1500, 2000, now, WINDOW),
+            Step::Pause { found: 1500 }
+        );
         // The target still holds the bridge's value; the source moved: publish.
-        assert_eq!(step(state(Some(2000), None), 2000, 2100, now, WINDOW), Step::Publish(2100));
+        assert_eq!(
+            step(state(Some(2000), None), 2000, 2100, now, WINDOW),
+            Step::Publish(2100)
+        );
         // Nothing moved: no tx.
-        assert_eq!(step(state(Some(2000), None), 2000, 2000, now, WINDOW), Step::SkipUnchanged);
+        assert_eq!(
+            step(state(Some(2000), None), 2000, 2000, now, WINDOW),
+            Step::SkipUnchanged
+        );
         // First pass (never wrote): publish the source value, no pause.
-        assert_eq!(step(ValueState::default(), 999, 2000, now, WINDOW), Step::Publish(2000));
+        assert_eq!(
+            step(ValueState::default(), 999, 2000, now, WINDOW),
+            Step::Publish(2000)
+        );
     }
 
     /// Between the publish and its mining the target holds the *previous*
@@ -96,13 +116,25 @@ mod tests {
     #[test]
     fn a_publish_in_flight_is_not_a_scenario_write() {
         let now = 1_000;
-        assert_eq!(step(state(Some(2000), Some(2100)), 2000, 2100, now, WINDOW), Step::WaitPending);
+        assert_eq!(
+            step(state(Some(2000), Some(2100)), 2000, 2100, now, WINDOW),
+            Step::WaitPending
+        );
         // Mined: confirmed.
-        assert_eq!(step(state(Some(2000), Some(2100)), 2100, 2100, now, WINDOW), Step::Confirm);
+        assert_eq!(
+            step(state(Some(2000), Some(2100)), 2100, 2100, now, WINDOW),
+            Step::Confirm
+        );
         // After Confirm the next pass sees the source unchanged: skip.
-        assert_eq!(step(state(Some(2100), None), 2100, 2100, now, WINDOW), Step::SkipUnchanged);
+        assert_eq!(
+            step(state(Some(2100), None), 2100, 2100, now, WINDOW),
+            Step::SkipUnchanged
+        );
         // A crash during the flight is still caught (neither value).
-        assert_eq!(step(state(Some(2000), Some(2100)), 1500, 2100, now, WINDOW), Step::Pause { found: 1500 });
+        assert_eq!(
+            step(state(Some(2000), Some(2100)), 1500, 2100, now, WINDOW),
+            Step::Pause { found: 1500 }
+        );
     }
 
     /// A publish that never lands is re-sent once the confirmation window
@@ -113,11 +145,20 @@ mod tests {
     fn a_stale_pending_publish_is_re_sent() {
         let in_flight = state(Some(2000), Some(2100));
         // Within the window: wait.
-        assert_eq!(step(in_flight, 2000, 2100, 1_000, WINDOW), Step::WaitPending);
+        assert_eq!(
+            step(in_flight, 2000, 2100, 1_000, WINDOW),
+            Step::WaitPending
+        );
         // Past the window, target still not holding it: re-publish the
         // *current* source value.
-        assert_eq!(step(in_flight, 2000, 2200, 1_000 + WINDOW, WINDOW), Step::Publish(2200));
+        assert_eq!(
+            step(in_flight, 2000, 2200, 1_000 + WINDOW, WINDOW),
+            Step::Publish(2200)
+        );
         // Past the window but the target does hold it: confirm wins.
-        assert_eq!(step(in_flight, 2100, 2200, 1_000 + WINDOW, WINDOW), Step::Confirm);
+        assert_eq!(
+            step(in_flight, 2100, 2200, 1_000 + WINDOW, WINDOW),
+            Step::Confirm
+        );
     }
 }

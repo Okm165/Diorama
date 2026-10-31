@@ -371,10 +371,10 @@ impl Relayer {
         let Some(hash) = record.relay_tx else {
             return Ok(Resume::ReSend);
         };
-        if let Some(receipt) = receipt(&chain.rpc, hash).await? {
+        if let Some(receipt) = receipt(&chain.write_rpc, hash).await? {
             return Ok(Resume::Settled(self.settle(chain, record, &receipt).await?));
         }
-        if self.sender.in_pool(&chain.rpc, hash).await? {
+        if self.sender.in_pool(&chain.write_rpc, hash).await? {
             return Ok(Resume::InFlight);
         }
         tracing::warn!(
@@ -409,7 +409,7 @@ impl Relayer {
         };
         match self
             .sender
-            .send(&chain.rpc, target, &calldata, U256::ZERO)
+            .send(&chain.write_rpc, target, &calldata, U256::ZERO)
             .await
         {
             Ok(hash) => {
@@ -427,14 +427,18 @@ impl Relayer {
                     consumer = if decoded.body.hook_data.is_empty() { "transmitter" } else { "hook wrapper" },
                     "cctp relay submitted"
                 );
-                match wait_for_receipt(&chain.rpc, hash, self.receipt_timeout).await? {
+                match wait_for_receipt(&chain.write_rpc, hash, self.receipt_timeout).await? {
                     Some(receipt) => self.settle(chain, record, &receipt).await,
                     None => Ok(Relayed::InFlight),
                 }
             }
             Err(e) => {
                 let attempts = self.bump_attempts(record.nonce)?;
-                if matches!(e, Error::Rpc(_)) && attempts >= MAX_SEND_ATTEMPTS {
+                // Only a **node-side JSON-RPC refusal** is a candidate for
+                // parking. A transport fault, a cooling pool or a gateway
+                // status is an outage: the burned message must keep retrying.
+                let node_refusal = matches!(&e, Error::Rpc(diorama_anvil::Error::Rpc { .. }));
+                if node_refusal && attempts >= MAX_SEND_ATTEMPTS {
                     self.park(record.nonce, format!("send refused {attempts} times: {e}"))?;
                 } else {
                     tracing::warn!(nonce = %record.nonce, attempts, error = %e, "cctp receiveMessage submission failed; will retry");

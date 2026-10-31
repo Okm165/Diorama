@@ -2,6 +2,9 @@
 # (Retain) as the mainnet mirror's pvcs.yaml - one file per mirror's claims,
 # because a kustomize overlay composes whole files and the venue overlay must
 # not declare the mainnet claims (reth-data is 400Gi, lighthouse-data 1500Gi).
+#
+# LOCAL (workshop): re-bound to the volumes a previous run left behind
+# (Released PVs from the pre-rename namespaces); see the mainnet pvcs.yaml.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -10,7 +13,8 @@ metadata:
   labels: { app.kubernetes.io/part-of: diorama-venue, app: anvil-v }
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: diorama-retain
+  storageClassName: mirror-retain
+  volumeName: pvc-1be79fd4-d9d1-4df2-aca0-cdd156541e01
   resources:
     requests:
       # V forks the source on demand and carries only the devnet's own writes
@@ -25,23 +29,11 @@ metadata:
   labels: { app.kubernetes.io/part-of: diorama-venue, app: venue-sim }
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: diorama-retain
+  storageClassName: mirror-retain
+  volumeName: pvc-2eecf992-8ee7-4fc8-9083-2f5aca31d221
   resources:
     requests:
       # sim.json + feed.json: small JSON state, 5Gi is plenty.
-      storage: 5Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: cctp-state
-  labels: { app.kubernetes.io/part-of: diorama-venue, app: cctp-bridge }
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: diorama-retain
-  resources:
-    requests:
-      # Watcher cursors + the in-flight message ledger.
       storage: 5Gi
 ---
 # Shared by profiles: PVCs are namespaced, so the venue instance
@@ -53,7 +45,8 @@ metadata:
   labels: { app.kubernetes.io/part-of: diorama-venue, app: engine }
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: diorama-retain
+  storageClassName: mirror-retain
+  volumeName: pvc-729524d3-a3fb-412e-a7c0-36954a26f3af
   resources:
     requests:
       storage: 10Gi

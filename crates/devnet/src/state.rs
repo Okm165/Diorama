@@ -165,7 +165,10 @@ pub fn advance_cursor(
     block: &alloy_rpc_types_eth::Block,
     first_fallback: u64,
 ) -> Result<ChainCursor> {
-    let first_block = state.cursor()?.map(|c| c.first_block).unwrap_or(first_fallback);
+    let first_block = state
+        .cursor()?
+        .map(|c| c.first_block)
+        .unwrap_or(first_fallback);
     let cursor = cursor_from(block, first_block);
     state.set_cursor(cursor.clone())?;
     state.lock()?.save()?;

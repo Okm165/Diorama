@@ -44,6 +44,20 @@ pub(crate) const HYPE_SYSTEM: Address = address!("222222222222222222222222222222
 /// `evm_decimals` cannot answer for it).
 pub(crate) const HYPE_EVM_DECIMALS: i32 = 18;
 
+/// The perp class's USD scale (CoreWriter action 7 `usdClassTransfer`'s
+/// `ntl`): the perp wallet's USDC is 1e6-scaled — the venue's raw USD
+/// convention, shared with the vault-transfer `usd` field and the `0x0803`
+/// withdrawable precompile (the served strings carry ≤6 decimals, e.g. the
+/// live sample `13104.514502`). The *spot* class carries USDC at the token's
+/// `wei_decimals` (8). The ×100 between the two classes is pinned by the
+/// ecosystem's own conversion helpers (`HLConversions.perpToWei`/
+/// `weiToPerp`, "for USDC between spot and perp"), which is exactly the
+/// shape the margin agent's recall sends: the class transfer in perp-class
+/// USD (6-dec), the bridge leg in spot core wei (8-dec). The docs' action
+/// table names the field `ntl` (notional USD) — the `wei`-named fields
+/// (spot send, sendAsset) are the token-wei ones.
+pub(crate) const PERP_USD_DECIMALS: u32 = 6;
+
 /// The system address for a token index.
 pub(crate) fn system_address(token_index: u64) -> Address {
     let mut bytes = [0u8; 20];
@@ -225,8 +239,10 @@ pub(crate) fn credit_of<'a>(
         return None;
     }
     let evm_decimals = token.evm_decimals()?;
-    let credited =
-        floor_to_core_wei(evm_to_human(transfer.value, evm_decimals)?, token.wei_decimals)?;
+    let credited = floor_to_core_wei(
+        evm_to_human(transfer.value, evm_decimals)?,
+        token.wei_decimals,
+    )?;
     Some(EvmCredit {
         sender: transfer.from,
         token,
@@ -253,9 +269,9 @@ fn pow10(decimals: i32) -> Option<Decimal> {
 /// bridge counts rather than a silent drop.
 pub(crate) fn no_evm_link(token: &TokenInfo) -> Error {
     Error::bad_request(format!(
-            "token `{}` (index {}) has no EVM link; cannot complete Core→EVM",
-            token.name, token.index
-        ),)
+        "token `{}` (index {}) has no EVM link; cannot complete Core→EVM",
+        token.name, token.index
+    ))
 }
 
 #[cfg(test)]
@@ -293,12 +309,21 @@ mod tests {
         };
         assert_eq!(usdc.evm_decimals(), Some(6));
         // 1.0 USDC EVM (1e6) → 1 human.
-        assert_eq!(evm_to_human(U256::from(1_000_000u64), 6), Some(Decimal::ONE));
+        assert_eq!(
+            evm_to_human(U256::from(1_000_000u64), 6),
+            Some(Decimal::ONE)
+        );
         // 1.0 USDC Core wei (1e8) → 1 human.
         assert_eq!(core_to_human(100_000_000, 8), Some(Decimal::ONE));
         // 1 human → 1e6 EVM units.
-        assert_eq!(human_to_evm(Decimal::ONE, 6), Some(U256::from(1_000_000u64)));
-        assert_eq!(human_to_evm(Decimal::new(15, 1), 6), Some(U256::from(1_500_000u64)));
+        assert_eq!(
+            human_to_evm(Decimal::ONE, 6),
+            Some(U256::from(1_000_000u64))
+        );
+        assert_eq!(
+            human_to_evm(Decimal::new(15, 1), 6),
+            Some(U256::from(1_500_000u64))
+        );
         // A sub-wei fraction floors at the EVM wei (the real chain burns it).
         assert_eq!(human_to_evm(Decimal::new(1, 7), 6), Some(U256::ZERO));
     }
@@ -351,7 +376,11 @@ mod tests {
         let log = received_log(user, U256::from(1_500_000_000_000_000_001u128));
         let credit = hype_received_of(&log, &hype).expect("decodes");
         assert_eq!(credit.sender, user);
-        assert_eq!(credit.amount, Decimal::from_str("1.50000000").unwrap(), "18 decimals floored to Core wei");
+        assert_eq!(
+            credit.amount,
+            Decimal::from_str("1.50000000").unwrap(),
+            "18 decimals floored to Core wei"
+        );
         // A malformed look-alike is not a credit.
         let malformed = LogData::new_unchecked(vec![Received::SIGNATURE_HASH], Bytes::new());
         assert!(hype_received_of(&malformed, &hype).is_none());
@@ -371,29 +400,45 @@ mod tests {
         let tokens = vec![usdc];
         let from = Address::repeat_byte(0xdd);
         let linked = Address::repeat_byte(0x88);
-        let t = transfer_of(&transfer_log(from, system_address(0), U256::from(5_000_000u64)))
-            .unwrap();
+        let t = transfer_of(&transfer_log(
+            from,
+            system_address(0),
+            U256::from(5_000_000u64),
+        ))
+        .unwrap();
         let credit = credit_of(&t, &tokens, linked).unwrap();
         assert_eq!(credit.sender, from);
         assert_eq!(credit.token.name, "USDC");
         assert_eq!(credit.amount, Decimal::from(5));
         // The completion direction (from the system) is never a credit.
-        let t = transfer_of(&transfer_log(system_address(0), from, U256::from(5_000_000u64)))
-            .unwrap();
+        let t = transfer_of(&transfer_log(
+            system_address(0),
+            from,
+            U256::from(5_000_000u64),
+        ))
+        .unwrap();
         assert!(credit_of(&t, &tokens, linked).is_none());
         // A Transfer log from any other emitter is not a credit (a
         // look-alike event must not mint Core balances).
         let impostor = Address::repeat_byte(0x77);
         assert!(credit_of(&t, &tokens, impostor).is_none());
         // An unlinked token's transfer is not ours to credit.
-        let t = transfer_of(&transfer_log(from, system_address(5), U256::from(5_000_000u64)))
-            .unwrap();
+        let t = transfer_of(&transfer_log(
+            from,
+            system_address(5),
+            U256::from(5_000_000u64),
+        ))
+        .unwrap();
         assert!(credit_of(&t, &tokens, linked).is_none());
         // The token contract transferring **from itself** is a mint/self-move,
         // not a depositor: the measured 2026-10-31 deposit credited the USDC
         // contract instead of the agent. It must never become a Core credit.
-        let t = transfer_of(&transfer_log(linked, system_address(0), U256::from(10_000_000u64)))
-            .unwrap();
+        let t = transfer_of(&transfer_log(
+            linked,
+            system_address(0),
+            U256::from(10_000_000u64),
+        ))
+        .unwrap();
         assert!(
             credit_of(&t, &tokens, linked).is_none(),
             "a self-transfer by the token contract is not an EVM→Core deposit"

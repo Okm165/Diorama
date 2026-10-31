@@ -40,6 +40,12 @@ pub(crate) struct MessageRecord {
     /// attester fills `nonce = burn-tx hash`, stable across re-attestation).
     pub nonce: B256,
     pub burn_tx: B256,
+    /// The source log's index inside its transaction. A transaction can emit
+    /// more than one `MessageSent`; the pair `(burn_tx, burn_log_index)` is
+    /// the burn's identity, while `nonce` is the attester-filled value the
+    /// destination consumes.
+    #[serde(default)]
+    pub burn_log_index: u64,
     pub burn_block: u64,
     /// The raw `MessageSent` payload: `EMPTY_NONCE` and
     /// `EMPTY_FINALITY_THRESHOLD_EXECUTED` (both 0), `feeExecuted` and
@@ -212,16 +218,30 @@ impl Store {
     /// Insert the record unless a burn with the same nonce is already known.
     /// The record is pushed under the lock, so two scanners cannot both
     /// insert.
+    ///
+    /// The key is the **attester-filled nonce**, not the burn transaction:
+    /// one transaction can emit several `MessageSent` logs, and the watcher
+    /// derives a distinct nonce for each from `(tx, log_index)`. Keying on the
+    /// transaction silently dropped every burn after the first in a batch.
     pub(crate) fn insert_message(&self, record: MessageRecord) -> Result<Inserted> {
-        let nonce = record.burn_tx;
+        let nonce = record.nonce;
         let source_domain = record.source_domain;
+        let (burn_tx, burn_log_index) = (record.burn_tx, record.burn_log_index);
         self.with(move |state| {
-            if let Some(existing) = state
+            // Match the new identity first. Legacy records (written before
+            // `burn_log_index` existed) deserialize with index 0 and a nonce
+            // equal to the burn transaction; matching by `(tx, log index)`
+            // keeps a restart's re-scan idempotent across the nonce change.
+            let by_log = state
                 .messages
                 .iter()
-                .find(|m| m.nonce == nonce && m.source_domain == source_domain)
-            {
-                return Ok(if existing.raw_message == record.raw_message {
+                .position(|m| m.burn_tx == burn_tx && m.burn_log_index == burn_log_index);
+            let by_nonce = state
+                .messages
+                .iter()
+                .position(|m| m.nonce == nonce && m.source_domain == source_domain);
+            if let Some(index) = by_log.or(by_nonce) {
+                return Ok(if state.messages[index].raw_message == record.raw_message {
                     Inserted::Rescanned
                 } else {
                     Inserted::NonceCollision
@@ -240,13 +260,7 @@ impl Store {
         pred: impl Fn(&MessageRecord) -> bool,
         f: impl FnOnce(&mut MessageRecord) -> T,
     ) -> Result<Option<T>> {
-        let out = self.with(|state| {
-            Ok(state
-                .messages
-                .iter_mut()
-                .find(|m| pred(m))
-                .map(f))
-        })?;
+        let out = self.with(|state| Ok(state.messages.iter_mut().find(|m| pred(m)).map(f)))?;
         self.save()?;
         Ok(out)
     }
@@ -288,7 +302,12 @@ mod tests {
     fn sample_message() -> Message {
         let raw = Message::decode(&crate::transfer::tests_support::sample_raw_message())
             .expect("sample decodes");
-        raw.with_attester_fields(B256::repeat_byte(0xab), 2000, Default::default(), Default::default())
+        raw.with_attester_fields(
+            B256::repeat_byte(0xab),
+            2000,
+            Default::default(),
+            Default::default(),
+        )
     }
 
     fn sample_record() -> MessageRecord {
@@ -298,6 +317,7 @@ mod tests {
             destination_domain: Domain(19),
             nonce: B256::repeat_byte(0xab),
             burn_tx: B256::repeat_byte(0xab),
+            burn_log_index: 0,
             burn_block: 7,
             raw_message: crate::transfer::tests_support::sample_raw_message(),
             message: message.encode(),

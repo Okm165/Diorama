@@ -31,6 +31,10 @@ pub struct ApiState {
     /// The bridge's counters (rendered with the sim's metrics), when the
     /// bridge is configured.
     pub bridge: Option<Arc<crate::bridge::metrics::BridgeMetrics>>,
+    /// The market websocket lane's shared pool, when the service runs one.
+    /// Kept optional so the API can be built without a live plane in tests;
+    /// `/metrics` renders it when present.
+    pub ws_pool: Option<diorama_anvil::EndpointPool>,
 }
 
 impl ApiState {
@@ -53,7 +57,16 @@ impl ApiState {
                 .timeout(std::time::Duration::from_secs(45))
                 .build()?,
             bridge,
+            ws_pool: None,
         })
+    }
+
+    /// Attach the market websocket lane's pool so `/metrics` can expose its
+    /// per-endpoint health. One pool per lane, not a second policy.
+    #[must_use]
+    pub fn with_ws_pool(mut self, pool: diorama_anvil::EndpointPool) -> Self {
+        self.ws_pool = Some(pool);
+        self
     }
 
     /// Readiness: the market plane has a meta and every configured market's
@@ -114,7 +127,10 @@ pub(crate) fn sim_gate(state: &ApiState) -> Result<(), SimPoisoned> {
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.
 pub fn info_router(state: Arc<ApiState>) -> Router {
     Router::new()
-        .route(diorama_devnet::handlers::HEALTHZ, axum::routing::get(info::healthz))
+        .route(
+            diorama_devnet::handlers::HEALTHZ,
+            axum::routing::get(info::healthz),
+        )
         .route("/readyz", axum::routing::get(info::readyz))
         .route("/info", axum::routing::post(info::info))
         // The matching lane's named refusal: their client posts
@@ -140,6 +156,14 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
         .route("/control/set_book", post(control::set_book))
         .route("/control/set_funding", post(control::set_funding))
         .route("/control/set_account", post(control::set_account))
+        .route(
+            "/control/clear_account/{address}",
+            post(control::clear_account),
+        )
+        .route(
+            "/control/clear_fixture/{address}",
+            post(control::clear_fixture),
+        )
         .route(
             "/control/state/{address}",
             get(control::get_state).post(control::post_state),

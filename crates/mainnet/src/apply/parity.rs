@@ -118,7 +118,8 @@ fn sample_verdict<E: std::fmt::Display>(
         (Ok(a), Ok(b)) if a == b => true,
         (Ok(a), Ok(b)) => {
             if full {
-                ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.full_sweep_mismatches);
+                ctx.mainnet_metrics
+                    .inc(&ctx.mainnet_metrics.full_sweep_mismatches);
             }
             tracing::warn!(
                 block = n,
@@ -167,11 +168,16 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
     // The same summary line the venue's at-pin run reports (one shape for
     // both profiles): the per-probe skips stay DEBUG diagnostics.
     diorama_devnet::probes::report(&ctx.plane, ctx.mirror.label(), n, &probes);
-    ctx.mainnet_metrics.add(&ctx.mainnet_metrics.t_convergence_ok, probes.ok as u64);
     ctx.mainnet_metrics
-        .add(&ctx.mainnet_metrics.t_convergence_failed, probes.failed as u64);
-    ctx.mainnet_metrics
-        .set(&ctx.mainnet_metrics.t_convergence_last_failed, probes.failed as u64);
+        .add(&ctx.mainnet_metrics.t_convergence_ok, probes.ok as u64);
+    ctx.mainnet_metrics.add(
+        &ctx.mainnet_metrics.t_convergence_failed,
+        probes.failed as u64,
+    );
+    ctx.mainnet_metrics.set(
+        &ctx.mainnet_metrics.t_convergence_last_failed,
+        probes.failed as u64,
+    );
     ctx.mainnet_metrics
         .add(&ctx.mainnet_metrics.t_probe_skipped, probes.skipped as u64);
     Ok(())

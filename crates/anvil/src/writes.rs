@@ -52,9 +52,7 @@ fn write_call(write: &Write) -> Result<Call> {
             ),
         ),
         Write::Balance { address, value } => call("anvil_setBalance", (*address, *value)),
-        Write::Nonce { address, value } => {
-            call("anvil_setNonce", (*address, U64::from(*value)))
-        }
+        Write::Nonce { address, value } => call("anvil_setNonce", (*address, U64::from(*value))),
         Write::Code { address, value } => call("anvil_setCode", (*address, value.clone())),
     }
 }

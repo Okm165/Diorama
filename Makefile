@@ -42,8 +42,17 @@ mainnet-secrets: ## Create the reth<->lighthouse JWT secret if missing (mainnet 
 	  echo "created secret reth-jwt in $$NS"; \
 	fi
 
-venue-secrets: ## Create the CCTP relay-wallet secret (CCTP_RELAY_KEY=0x…; venue namespace)
+CCTP_NS      ?= diorama-cctp
+CCTP_OVERLAY := k8s/overlays/diorama-cctp
+
+venue-secrets: ## Create the venue-side secrets (no CCTP key: the bridge owns its own)
 	@NS=diorama-venue; \
+	if kubectl -n $$NS get secret cctp-relay-key >/dev/null 2>&1; then \
+	  echo "legacy cctp-relay-key still exists in $$NS (the standalone bridge uses $(CCTP_NS))"; \
+	fi
+
+cctp-secrets: ## Create the bridge's relay-wallet secret (CCTP_RELAY_KEY=0x…; CCTP_NS)
+	@NS=$(CCTP_NS); \
 	if kubectl -n $$NS get secret cctp-relay-key >/dev/null 2>&1; then \
 	  echo "secret cctp-relay-key already exists in $$NS (left untouched)"; \
 	else \
@@ -215,6 +224,27 @@ venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace,
 	$(MAKE) INSTANCE=diorama-venue apply
 	@echo "venue bootstrap complete. watch: make INSTANCE=diorama-venue status"
 
+cctp-ns: ## Create the bridge namespace + StorageClass
+	kubectl apply -f $(CCTP_OVERLAY)/namespace.yaml
+	kubectl apply -f k8s/base/shared/storageclass.yaml
+
+cctp-apply: ## Apply the standalone CCTP bridge instance
+	kubectl apply -k $(CCTP_OVERLAY)
+
+cctp-diff: ## Show what `make cctp-apply` would change
+	kubectl diff -k $(CCTP_OVERLAY) || true
+
+cctp-status: ## Pods, PVC and health of the standalone bridge
+	@kubectl -n $(CCTP_NS) get pods,pvc
+	@kubectl -n $(CCTP_NS) exec deploy/cctp-bridge -- curl -sf localhost:8096/health | jq . 2>/dev/null || echo "(bridge not ready)"
+
+cctp-logs: ## Tail the standalone bridge's logs
+	kubectl -n $(CCTP_NS) logs -f deploy/cctp-bridge --tail=100
+
+cctp-bootstrap: cctp-ns cctp-secrets images ## First-time setup: namespace, secret, images, bridge
+	$(MAKE) cctp-apply
+	@echo "cctp bootstrap complete. watch: make cctp-status"
+
 venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/epoch)
 	kubectl -n diorama-venue exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
 
@@ -228,13 +258,13 @@ venue-order-proof: ## The venue order-lane proof (fills vs the real book, the ma
 	NS=diorama-venue ./scripts/venue-order-proof.sh
 
 cctp-smoke: ## The CCTP bridge smoke (health, store coherence, metric set)
-	NS=diorama-venue ./scripts/cctp-smoke.sh
+	NS=$(CCTP_NS) ./scripts/cctp-smoke.sh
 
 cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTINATION/AMOUNT env)
-	NS=diorama-venue ./scripts/cctp-roundtrip.sh
+	NS=$(CCTP_NS) ./scripts/cctp-roundtrip.sh
 
 cctp-margin-cycle: ## The crosschain unified-margin cycle (T mint -> CCTP -> venue collateral -> trade -> CCTP back)
-	NS=diorama-venue ./scripts/cctp-margin-cycle.sh
+	NS=$(CCTP_NS) ./scripts/cctp-margin-cycle.sh
 
 portfolio-sim: ## The portfolio simulation: a delta-neutral basis book across both mirrors (carry + shock + capital efficiency)
 	NS=diorama-venue ./scripts/portfolio-sim.sh

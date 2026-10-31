@@ -185,10 +185,15 @@ mod tests {
 
     #[test]
     fn require_resolved_names_every_reference() {
-        let err = require_resolved("test wiring", &["http://x", "${A}/b", "${B}", "${A}"]).unwrap_err();
+        let err =
+            require_resolved("test wiring", &["http://x", "${A}/b", "${B}", "${A}"]).unwrap_err();
         let text = err.to_string();
         assert!(text.contains("${A}") && text.contains("${B}"), "{text}");
-        assert_eq!(text.matches("${A}").count(), 1, "one report per name: {text}");
+        assert_eq!(
+            text.matches("${A}").count(),
+            1,
+            "one report per name: {text}"
+        );
         // `${}` is not a reference (the loader keeps it literal); a clean set
         // passes.
         require_resolved("test wiring", &["${}", "plain", "http://x:1"]).unwrap();

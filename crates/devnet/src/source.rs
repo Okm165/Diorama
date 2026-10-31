@@ -92,7 +92,11 @@ pub trait Source: Send + Sync {
     /// fee). The official type — no mirror-owned block shape.
     fn header(&self, n: u64) -> BoxFuture<'_, diorama_anvil::Result<alloy_rpc_types_eth::Header>>;
 
-    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<U256>>;
+    fn balance_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> BoxFuture<'_, diorama_anvil::Result<U256>>;
 
     fn nonce_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<u64>>;
 
@@ -104,12 +108,20 @@ pub trait Source: Send + Sync {
         block: u64,
     ) -> BoxFuture<'_, diorama_anvil::Result<B256>>;
 
-    fn code_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<alloy_primitives::Bytes>>;
+    fn code_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> BoxFuture<'_, diorama_anvil::Result<alloy_primitives::Bytes>>;
 
     /// Read one key. The default composes the four typed reads, so a source
     /// implements only the primitives it can serve; the composer reads its
     /// plan through this seam (one call shape for every key kind).
-    fn read_key(&self, key: diorama_anvil::Key, block: u64) -> BoxFuture<'_, diorama_anvil::Result<diorama_anvil::Value>> {
+    fn read_key(
+        &self,
+        key: diorama_anvil::Key,
+        block: u64,
+    ) -> BoxFuture<'_, diorama_anvil::Result<diorama_anvil::Value>> {
         Box::pin(async move {
             Ok(match key {
                 diorama_anvil::Key::Storage { address, slot } => {
@@ -154,7 +166,10 @@ pub trait Source: Send + Sync {
     /// Default: none — the composer falls to the synthesized rung (the
     /// capability flag selects the rung; this answers per block, because a
     /// node can serve some blocks and not others).
-    fn bal(&self, n: u64) -> BoxFuture<'_, diorama_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
+    fn bal(
+        &self,
+        n: u64,
+    ) -> BoxFuture<'_, diorama_anvil::Result<Option<alloy_eips::eip7928::BlockAccessList>>> {
         let _ = n;
         Box::pin(async move { Ok(None) })
     }
@@ -163,7 +178,11 @@ pub trait Source: Send + Sync {
     /// plan from, plus any changed keys the source already carries values for
     /// (the trace rung). Every source implements this — it is the synthesized
     /// rung's data side.
-    fn touched(&self, from: u64, to: u64) -> BoxFuture<'_, diorama_anvil::Result<crate::closure::TouchedSet>>;
+    fn touched(
+        &self,
+        from: u64,
+        to: u64,
+    ) -> BoxFuture<'_, diorama_anvil::Result<crate::closure::TouchedSet>>;
 
     /// What this source's touched rung is (`Trace` for a trace-based source,
     /// `Poll` for the envelope rung): the window BAL's `kind` label.
@@ -187,11 +206,7 @@ impl Capabilities {
     /// value did not change" by a read. They stay declarations with their
     /// measurements, enforced at the read path (the venue source refuses a
     /// non-latest read rather than silently answering a newer value).
-    pub async fn verify_methods(
-        &self,
-        rpc: &diorama_anvil::Rpc,
-        future: u64,
-    ) -> Vec<&'static str> {
+    pub async fn verify_methods(&self, rpc: &diorama_anvil::Rpc, future: u64) -> Vec<&'static str> {
         use alloy_primitives::U64;
         let mut disagree = Vec::new();
 
@@ -302,10 +317,20 @@ impl Source for RawSource {
     }
 
     fn header(&self, n: u64) -> BoxFuture<'_, diorama_anvil::Result<alloy_rpc_types_eth::Header>> {
-        Box::pin(async move { Ok(self.rpc.block_by_number(n, diorama_anvil::Txs::Hashes).await?.header) })
+        Box::pin(async move {
+            Ok(self
+                .rpc
+                .block_by_number(n, diorama_anvil::Txs::Hashes)
+                .await?
+                .header)
+        })
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
+    fn balance_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
         Box::pin(self.rpc.balance_at(address, block))
     }
 
@@ -350,7 +375,9 @@ impl Source for RawSource {
         to: u64,
     ) -> BoxFuture<'_, diorama_anvil::Result<crate::closure::TouchedSet>> {
         let system_txs = crate::bal::SystemTxs::of(self.capabilities.has(Capability::SystemTxs));
-        Box::pin(crate::bal::envelope_touches(&self.rpc, from, to, system_txs))
+        Box::pin(crate::bal::envelope_touches(
+            &self.rpc, from, to, system_txs,
+        ))
     }
 
     fn touched_kind(&self) -> crate::bal::DiffKind {
@@ -440,7 +467,11 @@ impl Source for PinnedSource {
         self.inner.header(n)
     }
 
-    fn balance_at(&self, address: Address, block: u64) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
+    fn balance_at(
+        &self,
+        address: Address,
+        block: u64,
+    ) -> BoxFuture<'_, diorama_anvil::Result<U256>> {
         Box::pin(async move {
             self.guard().await?;
             self.inner.balance_at(address, block).await
@@ -529,7 +560,9 @@ mod tests {
         // The endpoint is never reached by the declaration and unresolved-pin
         // branches: both decide before any read.
         PinnedSource::new(
-            Arc::new(diorama_anvil::Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap()),
+            Arc::new(
+                diorama_anvil::Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+            ),
             Arc::new(AtomicU64::new(pin)),
             capabilities,
         )
@@ -539,7 +572,10 @@ mod tests {
     /// window, an archive): the pin never refuses a historical read.
     #[tokio::test]
     async fn a_historical_source_is_never_guarded() {
-        assert!(pinned(caps(History::Served), crate::pin::PIN_UNRESOLVED).guard().await.is_ok());
+        assert!(pinned(caps(History::Served), crate::pin::PIN_UNRESOLVED)
+            .guard()
+            .await
+            .is_ok());
         assert!(pinned(caps(History::Served), 7).guard().await.is_ok());
     }
 
@@ -554,7 +590,10 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("pin is not resolved"), "{err}");
         let err = pinned(caps(History::Refused), 7).guard().await.unwrap_err();
-        assert!(matches!(err, diorama_anvil::Error::Transport { .. }), "{err}");
+        assert!(
+            matches!(err, diorama_anvil::Error::Transport { .. }),
+            "{err}"
+        );
     }
 
     /// The pinned head is the pin, not the source's (the guard's premise): a
@@ -567,6 +606,9 @@ mod tests {
             .head()
             .await
             .unwrap_err();
-        assert!(matches!(err, diorama_anvil::Error::Transport { .. }), "{err}");
+        assert!(
+            matches!(err, diorama_anvil::Error::Transport { .. }),
+            "{err}"
+        );
     }
 }

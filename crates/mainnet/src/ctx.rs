@@ -60,6 +60,9 @@ impl Ctx {
     /// correct is fallible here (clients, state files, the drift log): a
     /// missing boundary is a boot error naming it, never a degraded start.
     pub fn new(mut cfg: Instance, reth_urls: &Endpoints, anvil_t_url: &str) -> Result<Self> {
+        // Capture the shared endpoint policy before the sections are taken out
+        // of the instance; the beacon lane uses the same budget as the source.
+        let endpoint_policy = cfg.endpoint_policy();
         let (l1, engine) = cfg.take_mainnet()?;
         let plane = Plane::from_engine(&engine)?;
         let drift = Drift::from_engine(&engine)?;
@@ -80,7 +83,7 @@ impl Ctx {
                 watch: cfg.watch_set(),
             },
         );
-        let beacon = BeaconClient::new(&engine.beacon.urls)?;
+        let beacon = BeaconClient::with_policy(&engine.beacon.urls, endpoint_policy)?;
         let engine_api = build_engine_api(&engine)?;
         Ok(Self {
             l1,

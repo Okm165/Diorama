@@ -19,11 +19,11 @@
 //! The composer itself is generic (`diorama_devnet::bal::compose`): it picks the
 //! native rung from `Capabilities::native_bal` and synthesizes otherwise, so
 //! the two mirrors differ in *data* (source, scope), not in algorithm.
+use crate::reset::CursorHash;
 use diorama_config::{EngineSection, LoopsSection};
 use diorama_devnet::cow::Scope;
-use diorama_devnet::source::Source;
-use crate::reset::CursorHash;
 use diorama_devnet::engine::JournalScope;
+use diorama_devnet::source::Source;
 use diorama_devnet::spine::{
     Bundle, ClockPolicy, MinePolicy, Mirror, Policies, ProbeSchedule, ResetDetector,
 };
@@ -145,7 +145,13 @@ mod tests {
         let watched = alloy_primitives::Address::repeat_byte(0xaa);
         let scope =
             Scope::from_config(std::collections::HashSet::from([watched]), &engine.closures);
-        let mirror = bundle(&engine, Arc::clone(&source), source, Arc::new(diorama_devnet::spine::NoReset), scope);
+        let mirror = bundle(
+            &engine,
+            Arc::clone(&source),
+            source,
+            Arc::new(diorama_devnet::spine::NoReset),
+            scope,
+        );
         assert_eq!(mirror.label(), "t");
         assert_eq!(
             mirror.journal_scope(),

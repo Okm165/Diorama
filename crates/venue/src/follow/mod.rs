@@ -27,7 +27,6 @@ use diorama_devnet::facts::Fact;
 use diorama_devnet::metrics::Registry as _;
 use std::time::Instant;
 
-
 /// One follow window's outcome (what the fact and the gauges report) — the
 /// venue's counterpart of the applier's `ApplyOutcome`, returned by [`step`]
 /// so a caller that reports per-window lines (the selftest) reads the same
@@ -203,7 +202,11 @@ fn note_gap(ctx: &Ctx, followed: u64, source_head: u64, to: u64, limit: Option<u
             );
         }
     } else if ctx.plane.gap_pause_cleared() {
-        tracing::info!(followed, source_head, "follow caught up; the source is live");
+        tracing::info!(
+            followed,
+            source_head,
+            "follow caught up; the source is live"
+        );
     }
     Ok(())
 }
@@ -212,12 +215,18 @@ fn note_gap(ctx: &Ctx, followed: u64, source_head: u64, to: u64, limit: Option<u
 fn report_applied(ctx: &Ctx, from: u64, to: u64, source_head: u64, window: &FollowOutcome) {
     ctx.venue_metrics
         .inc(&ctx.venue_metrics.follow_windows_total);
-    ctx.venue_metrics
-        .add(&ctx.venue_metrics.follow_applied_total, window.applied as u64);
-    ctx.venue_metrics
-        .add(&ctx.venue_metrics.follow_sampled_total, window.sampled as u64);
-    ctx.venue_metrics
-        .add(&ctx.venue_metrics.follow_sampled_ok_total, window.sampled_ok as u64);
+    ctx.venue_metrics.add(
+        &ctx.venue_metrics.follow_applied_total,
+        window.applied as u64,
+    );
+    ctx.venue_metrics.add(
+        &ctx.venue_metrics.follow_sampled_total,
+        window.sampled as u64,
+    );
+    ctx.venue_metrics.add(
+        &ctx.venue_metrics.follow_sampled_ok_total,
+        window.sampled_ok as u64,
+    );
     ctx.venue_metrics.add(
         &ctx.venue_metrics.follow_skipped_shadowed_total,
         window.skipped_shadowed as u64,
@@ -277,8 +286,7 @@ fn continuity_check(ctx: &Ctx, followed: u64, next: Option<&Block>) -> Result<()
         return Ok(());
     };
     if next.header.parent_hash != last_hash {
-        ctx.venue_metrics
-            .inc(&ctx.venue_metrics.source_reorg_total);
+        ctx.venue_metrics.inc(&ctx.venue_metrics.source_reorg_total);
         ctx.drift.append(&SourceReorgEntry {
             chain: ctx.mirror.label(),
             kind: "source_reorg",
@@ -308,7 +316,10 @@ async fn plan_window(ctx: &Ctx, from: u64, to: u64) -> Result<diorama_devnet::ba
         target: ctx.target.as_ref(),
         scope: ctx.mirror.scope(),
     }
-    .plan(&ctx.plane.shadow, diorama_devnet::bal::Window::new(from, to))
+    .plan(
+        &ctx.plane.shadow,
+        diorama_devnet::bal::Window::new(from, to),
+    )
     .await?;
     record_window_metrics(&ctx.venue_metrics, &plan.compose);
     audit::record(ctx, &plan.compose.uncovered)?;
@@ -321,12 +332,18 @@ async fn apply_window(ctx: &Ctx, plan: &diorama_devnet::bal::WindowPlan) -> Resu
     if plan.writes.is_empty() {
         return Ok(0);
     }
-    Ok(diorama_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size).await?)
+    Ok(
+        diorama_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size)
+            .await?,
+    )
 }
 
 /// The poll's gauges: what the window's composition touched, planned and
 /// changed (the uncovered-log trail is [`audit`]'s).
-fn record_window_metrics(metrics: &crate::metrics::VenueMetrics, stats: &diorama_devnet::bal::ComposeStats) {
+fn record_window_metrics(
+    metrics: &crate::metrics::VenueMetrics,
+    stats: &diorama_devnet::bal::ComposeStats,
+) {
     metrics.set(&metrics.poll_touched, stats.touched as u64);
     metrics.set(&metrics.poll_planned_keys, stats.planned as u64);
     metrics.set(&metrics.poll_changed_keys, stats.changed as u64);
@@ -336,8 +353,13 @@ fn record_window_metrics(metrics: &crate::metrics::VenueMetrics, stats: &diorama
 /// block hash — the continuity check's anchor) and persist the state. The
 /// name says which cursor: the devnet cursor is the spine's `advance_cursor`.
 async fn advance_source_cursor(ctx: &Ctx, source_head: u64) -> Result<()> {
-    let head_block = ctx.source_rpc.block_by_number(source_head, diorama_anvil::Txs::Hashes).await?;
-    ctx.plane.state.set_source_last(source_head, head_block.header.hash)?;
+    let head_block = ctx
+        .source_rpc
+        .block_by_number(source_head, diorama_anvil::Txs::Hashes)
+        .await?;
+    ctx.plane
+        .state
+        .set_source_last(source_head, head_block.header.hash)?;
     ctx.plane.save_state()?;
     Ok(())
 }

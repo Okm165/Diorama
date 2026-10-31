@@ -16,9 +16,9 @@
 use alloy_primitives::{Address, B256, U256};
 use diorama_anvil::Rpc;
 use diorama_devnet::shared::Shared;
-use futures_util::future::BoxFuture;
 use diorama_devnet::spine::{ResetDetector, ResetSignal};
 use diorama_devnet::state::StateFile;
+use futures_util::future::BoxFuture;
 
 /// The canary word's address (a scratch address with no code) and slot.
 pub(crate) const CANARY_ADDRESS: Address =

@@ -15,11 +15,11 @@ http = ["${HL_RPC_URLS}"]
 chain_id = 999
 
 [endpoints.hyperliquid_api]
-http = ["https://api.hyperliquid.xyz"]
+http = ["${HL_INFO_API_URL}"]
 roles = ["market_rest"]
 
 [endpoints.hyperliquid_ws]
-ws = ["wss://api.hyperliquid.xyz/ws"]
+ws = ["${HL_WS_API_URL}"]
 roles = ["market_ws"]
 
 [endpoints.engine_admin]

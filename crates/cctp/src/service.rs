@@ -9,9 +9,11 @@
 use crate::chains::{Chain, Domain};
 use crate::transfer::{TxSender, Wallet};
 use crate::{Address, B256, U256};
+use clap::{Parser, Subcommand};
 use diorama_config::boot;
 use diorama_config::CctpSection;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,28 +31,100 @@ struct Bridge {
     poll: Duration,
 }
 
-/// One directed lane, resolved to domains at boot.
+/// One directed lane, resolved to domains at boot. The control and Iris
+/// surfaces read it too: a bridge must never burn on a lane its watcher will
+/// not serve, nor advertise a fee for one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Lane {
-    source: Domain,
-    destination: Domain,
+pub(crate) struct Lane {
+    pub(crate) source: Domain,
+    pub(crate) destination: Domain,
+}
+
+/// The bridge's CLI: `run` (the service) and `check`/`--dry-run` (topology
+/// preflight without touching a chain). One process = one bridge; the config
+/// is the instance, never a mirror's file.
+#[derive(Parser)]
+#[command(name = "diorama-cctp-bridge", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the bridge: watchers, relayer, Iris API and control API.
+    Run {
+        #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
+        config: PathBuf,
+        /// Validate and print the topology, then exit without any RPC call.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Validate and print the topology without booting or touching a chain.
+    Check {
+        #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
+        config: PathBuf,
+    },
 }
 
 pub async fn main_entry(args: Vec<String>) -> crate::Result<()> {
     boot::init_logging();
-    let config = boot::service_config_or_exit(&args);
-    let section = load_wiring(&config)?;
-    let (bridge, min_fees) = boot_bridge(section).await?;
+    let cli: Cli = boot::parse_cli("diorama-cctp-bridge", args);
+    match cli.cmd {
+        Cmd::Run { config, dry_run } => {
+            let (section, policy, endpoint_specs) = load_wiring(&config)?;
+            if dry_run {
+                print_topology(&section, policy, &endpoint_specs)?;
+                return Ok(());
+            }
+            let (bridge, min_fees) = boot_bridge(section, policy, endpoint_specs).await?;
 
-    bridge.spawn_watchers()?;
-    let relayer = bridge.spawn_relayer();
-    let (iris, control) = bridge.spawn_apis(min_fees, relayer);
+            bridge.spawn_watchers()?;
+            let relayer = bridge.spawn_relayer();
+            let (iris, control) = bridge.spawn_apis(min_fees, relayer);
 
-    boot::shutdown_signal().await;
-    tracing::info!("shutdown signal received");
-    iris.abort();
-    control.abort();
-    bridge.store.save()?;
+            boot::shutdown_signal().await;
+            tracing::info!("shutdown signal received");
+            iris.abort();
+            control.abort();
+            bridge.store.save()?;
+            Ok(())
+        }
+        Cmd::Check { config } => {
+            let (section, policy, endpoint_specs) = load_wiring(&config)?;
+            print_topology(&section, policy, &endpoint_specs)
+        }
+    }
+}
+
+/// Print the resolved chains and lanes without any RPC call. This is the
+/// preflight that lets a composed deployment (N chains, directed lanes) be
+/// reviewed before it reaches a cluster.
+fn print_topology(
+    section: &CctpSection,
+    policy: diorama_anvil::PoolPolicy,
+    endpoint_specs: &BTreeMap<String, Vec<diorama_anvil::EndpointSpec>>,
+) -> crate::Result<()> {
+    let chains = build_chains(section, Duration::from_secs(30), policy, endpoint_specs)?;
+    let lanes = build_lanes(section, &chains)?;
+    println!(
+        "bridge: {} ({} chain(s), {} lane(s))",
+        section.state_dir.display(),
+        chains.len(),
+        lanes.len()
+    );
+    for chain in &chains {
+        println!(
+            "  chain {:<16} id={:<10} domain={:<4} rpc={}",
+            chain.name,
+            chain.chain_id,
+            chain.domain,
+            chain.rpc.urls().join(",")
+        );
+    }
+    for lane in &lanes {
+        println!("  lane  {} -> {}", lane.source, lane.destination);
+    }
     Ok(())
 }
 
@@ -59,8 +133,37 @@ pub async fn main_entry(args: Vec<String>) -> crate::Result<()> {
 /// simulator's `${VAR}` wiring is not this pod's to provide (`inspect` reports
 /// unresolved references instead of failing on them; the cctp section's own
 /// wiring is then required here, by name).
-fn load_wiring(config: &std::path::Path) -> crate::Result<CctpSection> {
+fn load_wiring(
+    config: &std::path::Path,
+) -> crate::Result<(
+    CctpSection,
+    diorama_anvil::PoolPolicy,
+    BTreeMap<String, Vec<diorama_anvil::EndpointSpec>>,
+)> {
     let (mut cfg, unresolved) = diorama_config::Instance::inspect(config)?;
+    // The bridge is a first-class instance: it reads the same shared endpoint
+    // policy as both mirrors, not a crate default. Capture it before the
+    // section is taken out of the instance.
+    let policy = cfg.endpoint_policy();
+    // Preserve each chain's endpoint attribution (roles, chain id, weight) for
+    // its pool; the URL-only constructor would silently drop them.
+    let endpoint_specs: BTreeMap<String, Vec<diorama_anvil::EndpointSpec>> = cfg
+        .services
+        .cctp_bridge
+        .as_ref()
+        .map(|section| {
+            section
+                .chains
+                .iter()
+                .map(|chain| {
+                    (
+                        chain.id.clone(),
+                        cfg.endpoint_specs(chain.rpc_urls.as_slice()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let section = cfg.take_cctp()?;
     let state_dir = section.state_dir.to_string_lossy().to_string();
     let mut values: Vec<&str> = vec![&state_dir, &section.relay_key, &section.attester_seed];
@@ -74,7 +177,7 @@ fn load_wiring(config: &std::path::Path) -> crate::Result<CctpSection> {
         values.extend(chain.rpc_urls.iter());
     }
     diorama_config::require_resolved_logged("cctp wiring", &values, &unresolved)?;
-    Ok(section)
+    Ok((section, policy, endpoint_specs))
 }
 
 /// Boot the bridge's boundary: wait (bounded) for each chain — the same boot
@@ -86,9 +189,11 @@ fn load_wiring(config: &std::path::Path) -> crate::Result<CctpSection> {
 /// Returns the bridge and the measured per-domain minimum fees the APIs serve.
 async fn boot_bridge(
     section: CctpSection,
-) -> crate::Result<(Bridge, BTreeMap<Domain, Option<U256>>)> {
+    policy: diorama_anvil::PoolPolicy,
+    endpoint_specs: BTreeMap<String, Vec<diorama_anvil::EndpointSpec>>,
+) -> crate::Result<(Bridge, BTreeMap<(Domain, Domain), Option<U256>>)> {
     let receipt_timeout = Duration::from_secs(section.receipt_timeout_secs);
-    let chains = build_chains(&section, Duration::from_secs(30))?;
+    let chains = build_chains(&section, Duration::from_secs(30), policy, &endpoint_specs)?;
     for chain in &chains {
         chain
             .rpc
@@ -197,7 +302,7 @@ impl Bridge {
     /// API tests drive (8096).
     fn spawn_apis(
         &self,
-        min_fees: BTreeMap<Domain, Option<U256>>,
+        min_fees: BTreeMap<(Domain, Domain), Option<U256>>,
         relayer: Arc<crate::relayer::Relayer>,
     ) -> (
         tokio::task::JoinHandle<crate::Result<()>>,
@@ -212,11 +317,13 @@ impl Bridge {
             store: self.store.clone(),
             attester: self.attester.clone(),
             chains: self.chains.clone(),
+            lanes: self.lanes.clone(),
             expiration_blocks: self.section.expiration_blocks,
         });
         let control_state = Arc::new(crate::control::ControlState {
             store: self.store.clone(),
             chains: self.chains.clone(),
+            lanes: self.lanes.clone(),
             sender: self.sender.clone(),
             metrics: self.metrics.clone(),
             relayer,
@@ -244,12 +351,24 @@ impl Bridge {
 /// The bridge's chains: the composable list when present, else the legacy
 /// T/V pair. A configured chain carries its own id/domain/contracts; nothing
 /// here assumes Ethereum or HyperEVM.
-fn build_chains(section: &CctpSection, timeout: Duration) -> crate::Result<Vec<Chain>> {
+fn build_chains(
+    section: &CctpSection,
+    timeout: Duration,
+    policy: diorama_anvil::PoolPolicy,
+    endpoint_specs: &BTreeMap<String, Vec<diorama_anvil::EndpointSpec>>,
+) -> crate::Result<Vec<Chain>> {
     if !section.chains.is_empty() {
         return section
             .chains
             .iter()
-            .map(|chain| Chain::from_config(chain, timeout))
+            .map(|chain| {
+                Chain::from_config(
+                    chain,
+                    timeout,
+                    policy,
+                    endpoint_specs.get(&chain.id).cloned().unwrap_or_default(),
+                )
+            })
             .collect();
     }
     let t_url = section
@@ -270,9 +389,9 @@ fn build_chains(section: &CctpSection, timeout: Duration) -> crate::Result<Vec<C
             got: "absent".into(),
             want: "a legacy two-chain URL".into(),
         })?;
-    let mut t = Chain::ethereum(t_url, timeout)?;
+    let mut t = Chain::ethereum(t_url, timeout, policy)?;
     t.start_block = section.t_start_block.unwrap_or(0);
-    let mut v = Chain::hyper_evm(v_url, timeout)?;
+    let mut v = Chain::hyper_evm(v_url, timeout, policy)?;
     v.start_block = section.v_start_block.unwrap_or(0);
     Ok(vec![t, v])
 }
@@ -331,7 +450,7 @@ fn build_lanes(section: &CctpSection, chains: &[Chain]) -> crate::Result<Vec<Lan
 async fn verify_wiring(
     chains: &[Chain],
     lanes: &[Lane],
-) -> crate::Result<BTreeMap<Domain, Option<U256>>> {
+) -> crate::Result<BTreeMap<(Domain, Domain), Option<U256>>> {
     let mut min_fees = BTreeMap::new();
     for lane in lanes {
         let chain =
@@ -359,7 +478,7 @@ async fn verify_wiring(
             min_fee = ?wiring.min_fee,
             "cctp wiring verified"
         );
-        min_fees.insert(chain.domain, wiring.min_fee);
+        min_fees.insert((lane.source, lane.destination), wiring.min_fee);
     }
     Ok(min_fees)
 }
@@ -419,7 +538,8 @@ async fn deploy_wrapper(
     sender: &TxSender,
     receipt_timeout: Duration,
 ) {
-    let hash = match crate::hook::deploy(&chain.rpc, sender, chain.message_transmitter).await {
+    let hash = match crate::hook::deploy(&chain.write_rpc, sender, chain.message_transmitter).await
+    {
         Ok(hash) => hash,
         Err(e) => {
             tracing::warn!(
@@ -442,7 +562,7 @@ async fn handle_deploy_receipt(
     hash: B256,
     receipt_timeout: Duration,
 ) {
-    match crate::transfer::wait_for_receipt(&chain.rpc, hash, receipt_timeout).await {
+    match crate::transfer::wait_for_receipt(&chain.write_rpc, hash, receipt_timeout).await {
         Ok(Some(receipt)) if receipt.status() => {
             if let Some(wrapper) = receipt.contract_address {
                 record_wrapper(chain, store, sender, wrapper).await;
@@ -532,7 +652,7 @@ async fn install_attester(
 ) -> crate::Result<()> {
     for chain in chains {
         let outcome = crate::attester::install(
-            &chain.rpc,
+            &chain.write_rpc,
             chain.name,
             chain.message_transmitter,
             attester.address(),

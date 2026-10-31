@@ -746,7 +746,9 @@ port = 8096
             vec![
                 "ANVIL_V_URL",
                 "ENGINE_ADMIN_URL",
+                "HL_INFO_API_URL",
                 "HL_RPC_URLS",
+                "HL_WS_API_URL",
                 "SIM_STATE_DIR",
                 "STATE_DIR"
             ],
@@ -758,6 +760,124 @@ port = 8096
     /// `[services.cctp_bridge]`, never a chain, engine or simulator. That is
     /// what lets a deployment run one venue, two venues, four mainnets and
     /// several bridges as independent instances sharing the same spine.
+    /// A singular target (the anvil write endpoint, the engine API, the sim
+    /// admin URL) must resolve to exactly one endpoint. Silently taking the
+    /// first entry of a two-endpoint group looked like failover but wrote to
+    /// whichever endpoint the group happened to list first.
+    #[test]
+    fn a_group_target_must_resolve_to_one_endpoint() {
+        let src = minimal_venue_instance().replace(
+            "target_url = \"http://anvil-v:8545\"",
+            "target_url = \"@anvil\"",
+        ) + r#"
+[endpoints.anvil]
+http = ["http://a:8545", "http://b:8545"]
+"#;
+        let err = load_str(&src, &[]).expect_err("a two-endpoint target is a config error");
+        assert!(
+            err.to_string().contains("a single endpoint is required"),
+            "{err}"
+        );
+    }
+
+    /// The source list is a URL list too; a malformed member must fail at the
+    /// config boundary, not at the first pool call.
+    #[test]
+    fn every_source_url_list_is_validated() {
+        let src = minimal_venue_instance().replace(
+            "source_url = \"http://hl-rpc:8545\"",
+            "source_url = \"http://bad host\"",
+        );
+        let (inst, _) = load_str(&src, &[]).expect("the list parses at the schema boundary");
+        let err = inst
+            .check()
+            .expect_err("a malformed source host is refused");
+        assert!(
+            err.to_string().contains("not a http(s) URL with a host"),
+            "{err}"
+        );
+    }
+
+    /// A bridge with one chain cannot route anything; it used to pass `check`
+    /// and fail only at boot in `build_lanes`.
+    #[test]
+    fn a_one_chain_cctp_is_refused() {
+        let src = r#"
+watchlist = []
+[instance]
+name = "c"
+namespace = "c"
+profile = "cctp"
+[services.cctp_bridge]
+state_dir = "/cctp"
+relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
+attester_seed = "devnet"
+[[services.cctp_bridge.chains]]
+id = "ethereum"
+family = "ethereum"
+chain_id = 1
+domain = 0
+rpc_urls = ["http://t:8545"]
+usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+[services.cctp_bridge.iris]
+port = 8095
+[services.cctp_bridge.control]
+port = 8096
+"#;
+        let (inst, _) = load_str(src, &[]).expect("the schema parses");
+        let err = inst.check().expect_err("one chain is not a bridge");
+        assert!(err.to_string().contains("at least two chains"), "{err}");
+    }
+
+    /// A zero `token_minter` is a config error, not a boot-time contract
+    /// assertion.
+    #[test]
+    fn a_zero_token_minter_is_refused() {
+        let src = r#"
+watchlist = []
+[instance]
+name = "c"
+namespace = "c"
+profile = "cctp"
+[services.cctp_bridge]
+state_dir = "/cctp"
+relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
+attester_seed = "devnet"
+[[services.cctp_bridge.chains]]
+id = "ethereum"
+family = "ethereum"
+chain_id = 1
+domain = 0
+rpc_urls = ["http://t:8545"]
+usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+token_minter = "0x0000000000000000000000000000000000000000"
+[[services.cctp_bridge.chains]]
+id = "hyperevm"
+family = "hyperliquid"
+chain_id = 999
+domain = 19
+rpc_urls = ["http://v:8545"]
+usdc = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+[services.cctp_bridge.iris]
+port = 8095
+[services.cctp_bridge.control]
+port = 8096
+"#;
+        let (inst, _) = load_str(src, &[]).expect("the schema parses");
+        let err = inst.check().expect_err("a zero minter is refused");
+        assert!(
+            err.to_string()
+                .contains("token_minter must not be the zero address"),
+            "{err}"
+        );
+    }
+
     #[test]
     #[allow(clippy::too_many_lines)] // the fixture is the profile's section map
     fn the_cctp_profile_is_standalone() {

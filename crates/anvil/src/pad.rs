@@ -31,7 +31,9 @@ mod tests {
     /// = 0x0931201d1ec24ebc0aa88d6c15c762444e04b39af5da0d3c3f33b3aff236ac24
     #[test]
     fn mapping_slot_matches_cast_index() {
-        let key: Address = "0x00000000000000000000000000000000000F00d9".parse().unwrap();
+        let key: Address = "0x00000000000000000000000000000000000F00d9"
+            .parse()
+            .unwrap();
         assert_eq!(
             format!("{:064x}", mapping_slot(key, U256::from(3u64))),
             "0931201d1ec24ebc0aa88d6c15c762444e04b39af5da0d3c3f33b3aff236ac24"

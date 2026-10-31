@@ -19,10 +19,7 @@
 //! directly — an engine offset nobody re-aligns would be a no-op route.
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
-use axum::{
-    http::StatusCode,
-    Router,
-};
+use axum::{http::StatusCode, Router};
 use diorama_devnet::engine::SharedStatus;
 use serde::Serialize;
 use std::sync::Arc;
@@ -37,8 +34,14 @@ pub struct StatusResponse {
     fork_pin: Option<u64>,
     epoch_pin: Option<u64>,
     probes: usize,
-    /// The source URL the pin derives from (the unshadow truth's home).
+    /// The primary source URL the pin derives from (the unshadow truth's home).
     source: String,
+    /// Every source endpoint the engine's read pool may use.
+    sources: Vec<String>,
+    /// The source pool's per-endpoint health at scrape time. A caller can
+    /// distinguish "the source is degraded" from "the source is down" and
+    /// name the endpoint that is cooling.
+    source_pool: Vec<diorama_anvil::EndpointSnapshot>,
 }
 
 /// The document's gathering: the shared fields from the shell, the rest from
@@ -50,7 +53,9 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
         fork_pin: diorama_devnet::pin::resolved_pin(&ctx.pin),
         epoch_pin: ctx.plane.state.epoch_pin()?,
         probes: ctx.engine.verifier.probes.len(),
-        source: ctx.chain.source_url.clone(),
+        source: ctx.source_rpc.url().to_string(),
+        sources: ctx.source_rpc.urls().to_vec(),
+        source_pool: ctx.source_rpc.pool().snapshot(),
         shared,
     })
 }
@@ -64,7 +69,9 @@ diorama_devnet::http_status_map!(Error, "request failed" {
     Error::NotConfigured { .. } => StatusCode::CONFLICT,
     // The upstream boundaries (anvil, the venue API): a transport fault is a
     // bad gateway, not this service's fault.
-    Error::Rpc(_) | Error::ApiStatus { .. } | Error::Http(_) => StatusCode::BAD_GATEWAY,
+    Error::Rpc(_) | Error::ApiStatus { .. } | Error::ApiExhausted { .. } | Error::Http(_) => StatusCode::BAD_GATEWAY,
+    // A method-level venue refusal is the caller's request, not the upstream's.
+    Error::ApiMethodRefusal { status, .. } => StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_REQUEST),
     Error::Warming => StatusCode::SERVICE_UNAVAILABLE,
 });
 
@@ -102,10 +109,7 @@ mod tests {
             status(Error::Devnet(diorama_devnet::Error::NoCursor)),
             StatusCode::BAD_REQUEST
         );
-        assert_eq!(
-            status(Error::bad_request("no")),
-            StatusCode::BAD_REQUEST
-        );
+        assert_eq!(status(Error::bad_request("no")), StatusCode::BAD_REQUEST);
         assert_eq!(
             status(Error::NotFound {
                 what: "coin".into()
@@ -113,9 +117,7 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            status(Error::NoMarket {
-                coin: "BTC".into()
-            }),
+            status(Error::NoMarket { coin: "BTC".into() }),
             StatusCode::NOT_FOUND
         );
         assert_eq!(

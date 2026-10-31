@@ -82,7 +82,9 @@ pub fn push_metric_line(out: &mut String, m: &MetricLine<'_>) {
             .join(",");
         format!("{name}{{{l}}}")
     };
-    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} {kind}\n{series} {value}\n"));
+    out.push_str(&format!(
+        "# HELP {name} {help}\n# TYPE {name} {kind}\n{series} {value}\n"
+    ));
 }
 
 /// Declare a registry: one line per series, expanding to the atomic fields and
@@ -191,7 +193,12 @@ pub trait Registry {
     /// reports (the applier's inline scan, both drivers' loops, the
     /// hand-backs' pre-scans — five call sites across the two projects, one
     /// definition of what the pair means).
-    fn record_scan(&self, walk: &crate::scan::ScanWalk, scanned: &AtomicU64, skipped_empty: &AtomicU64) {
+    fn record_scan(
+        &self,
+        walk: &crate::scan::ScanWalk,
+        scanned: &AtomicU64,
+        skipped_empty: &AtomicU64,
+    ) {
         self.add(scanned, walk.walked);
         self.add(skipped_empty, walk.empty);
     }
@@ -223,11 +230,14 @@ mod tests {
     fn the_shared_set_is_exactly_the_admin_gauges() {
         let m = Metrics::default();
         let names = series(&m.render());
-        let want: BTreeSet<String> =
-            ["diorama_halted", "diorama_shadowed_slots", "diorama_shadowed_accounts"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let want: BTreeSet<String> = [
+            "diorama_halted",
+            "diorama_shadowed_slots",
+            "diorama_shadowed_accounts",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         assert_eq!(names, want);
     }
 
@@ -238,7 +248,10 @@ mod tests {
     fn labeled_metric_lines_render() {
         let mut out = String::new();
         push_metric(&mut out, "gauge", "x_total", "help", 7);
-        assert_eq!(out, "# HELP x_total help\n# TYPE x_total gauge\nx_total 7\n");
+        assert_eq!(
+            out,
+            "# HELP x_total help\n# TYPE x_total gauge\nx_total 7\n"
+        );
         out.clear();
         push_metric_line(
             &mut out,
