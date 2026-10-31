@@ -15,9 +15,11 @@ data:
   # entrypoint derives the primary as the first list entry — there is no
   # second `HL_RPC_URL` definition to drift.
   #
-  # dRPC is first: the official endpoint's boot audit disagrees on
-  # `system_txs`, and the venue follow needs the Core->EVM system txs.
-  HL_RPC_URLS: "https://hyperliquid.drpc.org,https://rpc.hyperliquid.xyz/evm,https://rpc.purroofgroup.com,https://rpc.hypurrscan.io,https://hyperliquid-json-rpc.stakely.io,https://hyperliquid.api.onfinality.io/evm/public"
+  # Only endpoints that answer `eth_getSystemTxsByBlockNumber` are listed:
+  # dRPC and purroofgroup return -32601 for it, so including them would make
+  # the venue source audit disagree on `system_txs`. The official HyperEVM RPC
+  # is first; hypurrscan, stakely and onfinality are the fallbacks.
+  HL_RPC_URLS: "https://rpc.hyperliquid.xyz/evm,https://rpc.hypurrscan.io,https://hyperliquid-json-rpc.stakely.io,https://hyperliquid.api.onfinality.io/evm/public"
 
   # The venue's market plane. Both are URL lists in the instance's
   # [endpoints] groups; the env carries the deployment values, never a second
