@@ -122,19 +122,34 @@ const INTERNAL_ERROR_CODE: i64 = -32603;
 /// The retryable refusals: the throttle and the node's internal error. A
 /// single error object is parsed; a batch array is scanned for the codes
 /// (distinctive strings — a full parse of a large answer is not worth it).
+///
+/// A `-32603` carrying `invalid block height` is not an internal fault: it is
+/// the node's answer about a height it does not serve (measured: every public
+/// HyperEVM endpoint answers the capability audit's future-block probe this
+/// way). Cooling endpoints for it turned one audit into an all-cooling pool
+/// and a spurious WARN; the caller's block-unavailable predicate owns the wait.
 fn is_retryable(text: &str) -> bool {
+    let retryable = |error: &serde_json::Value| {
+        let code = error
+            .get("code")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+        code == RATE_LIMIT_CODE
+            || (code == INTERNAL_ERROR_CODE
+                && !message
+                    .to_ascii_lowercase()
+                    .contains("invalid block height"))
+    };
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
         // Parse the batch rather than string-searching a compact spelling: a
         // pretty-printed `"code": -32005` is the same refusal.
         return serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
             .map(|items| {
-                items.iter().any(|item| {
-                    item.get("error")
-                        .and_then(|error| error.get("code"))
-                        .and_then(serde_json::Value::as_i64)
-                        .is_some_and(|code| code == RATE_LIMIT_CODE || code == INTERNAL_ERROR_CODE)
-                })
+                items
+                    .iter()
+                    .any(|item| item.get("error").is_some_and(retryable))
             })
             .unwrap_or(false);
     }
@@ -143,8 +158,7 @@ fn is_retryable(text: &str) -> bool {
     }
     serde_json::from_str::<serde_json::Value>(trimmed)
         .ok()
-        .and_then(|v| v.get("error")?.get("code")?.as_i64())
-        .map(|code| code == RATE_LIMIT_CODE || code == INTERNAL_ERROR_CODE)
+        .and_then(|v| v.get("error").map(retryable))
         .unwrap_or(false)
 }
 
@@ -1933,6 +1947,25 @@ mod tests {
                 .expect("write response");
         });
         (format!("http://{address}"), handle)
+    }
+
+    /// A node's `invalid block height` answer is not a retryable internal
+    /// fault: the capability audit's future-block probe must not cool every
+    /// endpoint (and log a pool-exhaustion WARN) just for asking.
+    #[test]
+    fn invalid_block_height_is_an_answer_not_a_retryable_fault() {
+        assert!(!is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"invalid block height: 50047695"}}"#
+        ));
+        assert!(is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}"#
+        ));
+        assert!(is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limited"}}"#
+        ));
+        assert!(!is_retryable(
+            r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"invalid block height: 50047695"}}]"#
+        ));
     }
 
     /// A batch body answering a single call is corrupt, not a transport fault.
