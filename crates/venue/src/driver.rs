@@ -114,17 +114,7 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
         if diorama_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
-        let progress = match pass(&ctx).await {
-            Ok(Pass::Steady) => diorama_anvil::Progress::Progressed,
-            Ok(Pass::Reset) => {
-                recover_from_reset(&ctx).await;
-                diorama_anvil::Progress::Progressed
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "venue driver pass failed; will retry");
-                diorama_anvil::Progress::Stalled
-            }
-        };
+        let progress = pass_progress(&ctx).await;
         backoff.record(progress);
         // A pass that served sleeps the plain cadence; a failed one sleeps
         // the grown delay.
@@ -133,6 +123,25 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
             diorama_anvil::Progress::Stalled => poll.max(backoff.delay()),
         };
         tokio::time::sleep(pause).await;
+    }
+}
+
+/// One pass's progress, with the source-lag wait split from a real failure.
+async fn pass_progress(ctx: &Ctx) -> diorama_anvil::Progress {
+    match pass(ctx).await {
+        Ok(Pass::Steady) => diorama_anvil::Progress::Progressed,
+        Ok(Pass::Reset) => {
+            recover_from_reset(ctx).await;
+            diorama_anvil::Progress::Progressed
+        }
+        Err(e) if crate::follow::is_source_lag(&e) => {
+            tracing::debug!(error = %e, "venue driver waiting for the source head");
+            diorama_anvil::Progress::Stalled
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "venue driver pass failed; will retry");
+            diorama_anvil::Progress::Stalled
+        }
     }
 }
 

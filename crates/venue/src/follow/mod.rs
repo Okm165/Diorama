@@ -82,11 +82,23 @@ fn source_block_unavailable(error: &diorama_anvil::Error) -> bool {
     match error {
         diorama_anvil::Error::BlockMissing { .. } => true,
         diorama_anvil::Error::Rpc { payload, .. } => {
-            payload.code == -32001
+            (payload.code == -32001
                 && (payload.message.contains("block not found")
-                    || payload.message.contains("not available"))
+                    || payload.message.contains("not available")))
+                || (payload.code == -32000 && payload.message.contains("unsupported block number"))
         }
         diorama_anvil::Error::EndpointsExhausted { last, .. } => source_block_unavailable(last),
+        _ => false,
+    }
+}
+
+/// Whether a follow pass failed only because the source has not served the
+/// next block yet. The loop treats this as a wait (DEBUG), not a pass failure
+/// (WARN); the source head/followed gauges still expose the lag.
+pub(crate) fn is_source_lag(error: &crate::Error) -> bool {
+    match error {
+        crate::Error::Rpc(error) => source_block_unavailable(error),
+        crate::Error::Devnet(diorama_devnet::Error::Rpc(error)) => source_block_unavailable(error),
         _ => false,
     }
 }
