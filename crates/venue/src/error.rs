@@ -49,6 +49,17 @@ pub enum Error {
     #[error("the venue api answered {status}: {body}")]
     ApiStatus { status: u16, body: String },
 
+    /// Every venue API endpoint refused across every round. The last fault
+    /// is kept as text so the error stays small; a throttled/gateway body is
+    /// never surfaced as a successful read.
+    #[error("all {attempts} venue api endpoint attempt(s) failed; last: {last}")]
+    ApiExhausted { attempts: u32, last: String },
+
+    /// Every venue API endpoint is cooling. A retry-later signal, distinct
+    /// from an exhaustion so the caller can honour the delay.
+    #[error("every venue api endpoint is cooling; retry in {retry_after_ms} ms")]
+    ApiCooling { retry_after_ms: u64 },
+
     #[error("decoding a venue api response as {what}")]
     Decode {
         what: &'static str,
@@ -165,8 +176,17 @@ mod size_guard {
             want: 999,
         }
         .into();
-        assert!(matches!(e, Error::WrongChain { got: 1, want: 999, .. }), "{e}");
+        assert!(
+            matches!(
+                e,
+                Error::WrongChain {
+                    got: 1,
+                    want: 999,
+                    ..
+                }
+            ),
+            "{e}"
+        );
         assert!(e.to_string().contains("is not the venue chain"), "{e}");
     }
-
 }

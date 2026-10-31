@@ -18,20 +18,22 @@
 //! and it lives here for exactly that reason).
 
 pub mod boot;
+mod endpoints;
 mod env;
 mod instance;
 mod sections;
 
+pub use endpoints::{EndpointGroup, Endpoints, WsEndpoints};
 pub use env::{require_resolved, require_resolved_logged};
 
 pub use instance::{
     ChainKind, ChainL1, ChainVenue, Chains, FollowHead, Instance, InstanceMeta, Profile, WatchEntry,
 };
 pub use sections::{
-    BeaconSection, CctpSection, ClosuresSection, EngineAnvil, EngineReth, EngineSection,
-    FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection, LoopsSection,
-    MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, Sweep, VenueSimSection,
-    VerifierSection,
+    BeaconSection, CctpChain, CctpLane, CctpSection, ClosuresSection, EngineAnvil, EngineReth,
+    EngineSection, FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection,
+    LoopsSection, MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, Sweep,
+    VenueSimSection, VerifierSection,
 };
 
 use std::path::Path;
@@ -70,14 +72,23 @@ impl Instance {
     /// instance file, many readers.
     pub fn inspect(path: &Path) -> Result<(Self, Vec<String>), ConfigError> {
         let vars: Vec<(String, String)> = std::env::vars().collect();
-        let (instance, unresolved) = load_merged(path, &vars)?;
+        let (mut instance, unresolved) = load_merged(path, &vars)?;
+        instance.resolve_endpoints()?;
         instance.check()?;
         Ok((instance, unresolved))
     }
 }
 
-/// The layered pipeline: parse both files, deep-merge, expand `${VAR}`,
-/// apply `DIORAMA__*` overrides, deserialize into the typed instance.
+/// The layered pipeline: parse the instance and its optional project
+/// specialization, deep-merge (`defaults <- project <- instance`), expand
+/// `${VAR}`, apply `DIORAMA__*` overrides, deserialize into the typed
+/// instance.
+///
+/// The project layer is the generic/project split: `instance.toml` carries
+/// deployment facts (identity, profile, paths, endpoint references), while
+/// `project = "daloc"` names a `daloc.toml` beside it (gitignored) that
+/// carries the product-specific watchlist, fixtures, probes and endpoint
+/// groups. A deployment without a project file is a generic mirror.
 fn load_merged(
     path: &Path,
     vars: &[(String, String)],
@@ -86,24 +97,35 @@ fn load_merged(
         path: path.to_path_buf(),
         source,
     })?;
-    let mut merged: toml::Value = toml::from_str(DEFAULTS).map_err(|source| ConfigError::Parse {
-        what: "config/defaults.toml".into(),
-        source,
-    })?;
+    let mut merged: toml::Value =
+        toml::from_str(DEFAULTS).map_err(|source| ConfigError::Parse {
+            what: "config/defaults.toml".into(),
+            source,
+        })?;
     let over: toml::Value = toml::from_str(&src).map_err(|source| ConfigError::Parse {
         what: path.display().to_string(),
         source,
     })?;
+    let project = load_project(path, &over, vars)?;
+    // Presence and profile checks see the effective overlay: a project may
+    // carry the simulator/CCTP sections, and the instance may override them.
+    let mut combined = project
+        .clone()
+        .unwrap_or(toml::Value::Table(Default::default()));
+    merge(&mut combined, over.clone());
     // The defaults carry every profile's section tree (the workspace
     // conventions of each service). A load sees only the sections its own
     // profile owns: without this, a venue instance would inherit the
     // mainnet engine's stub and fail deserialization on the missing fields
     // (and vice versa).
-    prune_other_profile(&mut merged, profile_of(&over));
+    prune_other_profile(&mut merged, profile_of(&combined));
     // Optional services: the defaults hold their shared numbers, but a
     // deployment that does not run the service must not inherit a
     // half-filled stub (the section would deserialize as present-but-broken).
-    prune_absent_services(&mut merged, &over);
+    prune_absent_services(&mut merged, &combined);
+    if let Some(project) = project {
+        merge(&mut merged, project);
+    }
     merge(&mut merged, over);
     let unresolved = env::expand(&mut merged, vars);
     env::apply_overrides(&mut merged, vars)?;
@@ -114,29 +136,111 @@ fn load_merged(
     Ok((instance, unresolved))
 }
 
+/// Load the optional project specialization named by `[instance].project`
+/// (or `DIORAMA_PROJECT_FILE`). The path is relative to the instance file;
+/// a bare name gains `.toml` (`project = "daloc"` -> `daloc.toml`). A named
+/// project that is missing is a boot error, never a silent fallback: the
+/// specialization carries addresses and watchlists the mirror must not
+/// invent.
+fn load_project(
+    instance_path: &Path,
+    over: &toml::Value,
+    vars: &[(String, String)],
+) -> Result<Option<toml::Value>, ConfigError> {
+    let Some(raw) = project_reference(over, vars) else {
+        return Ok(None);
+    };
+    let path = project_path(instance_path, &raw);
+    let src = std::fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let value: toml::Value = toml::from_str(&src).map_err(|source| ConfigError::Parse {
+        what: path.display().to_string(),
+        source,
+    })?;
+    Ok(Some(value))
+}
+
+/// The project reference: `DIORAMA_PROJECT_FILE` wins, else
+/// `[instance].project`. Empty is no project.
+fn project_reference(over: &toml::Value, vars: &[(String, String)]) -> Option<String> {
+    let from_env = vars
+        .iter()
+        .find(|(key, _)| key == "DIORAMA_PROJECT_FILE")
+        .map(|(_, value)| value.clone());
+    let declared = over
+        .get("instance")
+        .and_then(|instance| instance.get("project"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_string);
+    from_env.or(declared).filter(|raw| !raw.trim().is_empty())
+}
+
+/// Resolve the project file beside the instance. A bare name gains `.toml`
+/// (`project = "daloc"` -> `daloc.toml`); a relative path is relative to the
+/// instance file. A missing live file falls back to the tracked
+/// `<name>.example.toml` template (loudly) so a fresh clone's config check
+/// works; a deployment that mounts the real file never takes that branch.
+fn project_path(instance_path: &Path, raw: &str) -> std::path::PathBuf {
+    let raw = if raw.ends_with(".toml") || raw.contains('/') {
+        raw.to_string()
+    } else {
+        format!("{raw}.toml")
+    };
+    let candidate = Path::new(&raw);
+    let path = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        instance_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(candidate)
+    };
+    if path.exists() {
+        return path;
+    }
+    let example = path.with_file_name(format!(
+        "{}.example.toml",
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("project")
+    ));
+    if example.exists() && !candidate.is_absolute() {
+        tracing::warn!(
+            project = %path.display(),
+            example = %example.display(),
+            "project specialization is absent; loading the tracked example template"
+        );
+        example
+    } else {
+        path
+    }
+}
+
 /// The profile an instance file declares, if it declares one (a missing
 /// profile is left to the deserializer, which names it).
 fn profile_of(instance_value: &toml::Value) -> Option<&str> {
-    instance_value
-        .get("instance")?
-        .get("profile")?
-        .as_str()
+    instance_value.get("instance")?.get("profile")?.as_str()
 }
 
 /// Drop the sections the profile does not own from the defaults layer.
 fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
-    // The engine's section is shared (`[services.engine]` for both profiles);
-    // what is profile-specific is the other chain and the venue's simulator.
-    let (chain_section, service_sections): (&str, &[&str]) = match profile {
-        Some("mainnet") => ("venue", &["venue_sim"]),
-        Some("venue") => ("l1", &[]),
+    // The engine's section is shared by the two mirror profiles; the bridge
+    // profile owns no chain, engine or simulator. One process = one role.
+    let (chain_sections, service_sections): (&[&str], &[&str]) = match profile {
+        Some("mainnet") => (&["venue"], &["venue_sim"]),
+        Some("venue") => (&["l1"], &[]),
+        Some("cctp") => (&["l1", "venue"], &["engine", "venue_sim"]),
         _ => return,
     };
     let Some(root) = defaults.as_table_mut() else {
         return;
     };
     if let Some(chains) = root.get_mut("chains").and_then(|v| v.as_table_mut()) {
-        chains.remove(chain_section);
+        for section in chain_sections {
+            chains.remove(*section);
+        }
     }
     if let Some(services) = root.get_mut("services").and_then(|v| v.as_table_mut()) {
         for section in service_sections {
@@ -147,14 +251,11 @@ fn prune_other_profile(defaults: &mut toml::Value, profile: Option<&str>) {
 
 /// Optional services (not pinned by the profile): the defaults' stub is kept
 /// only when the instance file carries the section. The simulator is optional
-/// (a venue deployment may run only the engine); the CCTP bridge is optional
-/// under either profile (the third element is its own deployment, §15).
+/// (a venue deployment may run only the engine); the CCTP bridge is its own
+/// `cctp` profile and never rides a mirror instance.
 fn prune_absent_services(defaults: &mut toml::Value, over: &toml::Value) {
     for section in ["venue_sim", "cctp_bridge"] {
-        let present = over
-            .get("services")
-            .and_then(|s| s.get(section))
-            .is_some();
+        let present = over.get("services").and_then(|s| s.get(section)).is_some();
         if present {
             continue;
         }
@@ -245,7 +346,10 @@ port = 8080
 "#
     }
 
-    fn load_str(src: &str, vars: &[(String, String)]) -> Result<(Instance, Vec<String>), ConfigError> {
+    fn load_str(
+        src: &str,
+        vars: &[(String, String)],
+    ) -> Result<(Instance, Vec<String>), ConfigError> {
         let over: toml::Value = toml::from_str(src).unwrap();
         let mut merged: toml::Value = toml::from_str(DEFAULTS).unwrap();
         // Same pipeline as the real loader, pruning included.
@@ -254,10 +358,11 @@ port = 8080
         merge(&mut merged, over);
         let unresolved = env::expand(&mut merged, vars);
         env::apply_overrides(&mut merged, vars)?;
-        let instance = Instance::deserialize(merged).map_err(|source| ConfigError::Parse {
+        let mut instance = Instance::deserialize(merged).map_err(|source| ConfigError::Parse {
             what: "test".into(),
             source,
         })?;
+        instance.resolve_endpoints()?;
         Ok((instance, unresolved))
     }
 
@@ -268,6 +373,30 @@ port = 8080
 
     fn engine(inst: &Instance) -> &EngineSection {
         inst.services.engine.as_ref().expect("[services.engine]")
+    }
+
+    fn minimal_cctp_instance() -> &'static str {
+        r#"
+watchlist = []
+
+[instance]
+name = "c"
+namespace = "c"
+profile = "cctp"
+
+[services.cctp_bridge]
+state_dir = "/cctp"
+t_url = "http://t:8545"
+v_url = "http://v:8545"
+relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
+attester_seed = "devnet"
+
+[services.cctp_bridge.iris]
+port = 8095
+
+[services.cctp_bridge.control]
+port = 8096
+"#
     }
 
     fn minimal_venue_instance() -> &'static str {
@@ -313,9 +442,9 @@ port = 8080
         assert_eq!(
             inst.export_env("daloc").unwrap(),
             vec![
-                "CHAIN_RPC_URL=http://anvil-t:8545",
-                "CHAIN_WS_URL=ws://anvil-t:8545",
-                "DIORAMA_ADMIN_URL=http://engine:8080",
+                "CHAIN_RPC_URL=http://anvil-t.t.svc.cluster.local:8545",
+                "CHAIN_WS_URL=ws://anvil-t.t.svc.cluster.local:8545",
+                "DIORAMA_ADMIN_URL=http://engine.t.svc.cluster.local:8080",
             ]
         );
 
@@ -327,13 +456,11 @@ port = 8080
         assert_eq!(
             venue.export_env("daloc").unwrap(),
             vec![
-                "CHAIN_1_CHAIN_RPC_URL=http://anvil-v:8545",
-                "CHAIN_1_CHAIN_WS_URL=ws://anvil-v:8545",
-                "HL_INFO_API_URL=http://venue-sim:8090",
-                "VENUE_CONTROL_URL=http://venue-sim:8091",
-                "VENUE_ACCOUNT_FEEDS=http://venue-sim:8090",
-                "VENUE_RATE_FEEDS=http://venue-sim:8090",
-                "VENUE_ADMIN_URL=http://engine:8080",
+                "CHAIN_1_CHAIN_RPC_URL=http://anvil-v.v.svc.cluster.local:8545",
+                "CHAIN_1_CHAIN_WS_URL=ws://anvil-v.v.svc.cluster.local:8545",
+                "HL_INFO_API_URL=http://venue-sim.v.svc.cluster.local:8090",
+                "VENUE_CONTROL_URL=http://venue-sim.v.svc.cluster.local:8091",
+                "VENUE_ADMIN_URL=http://engine.v.svc.cluster.local:8080",
             ]
         );
     }
@@ -381,8 +508,16 @@ port = 8096
 [services.engine.http]"#,
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
-        let cctp = inst.services.cctp_bridge.as_ref().expect("[services.cctp_bridge]");
-        assert_eq!(cctp.relayer, RelayerMode::Auto, "defaults.toml drives the mode");
+        let cctp = inst
+            .services
+            .cctp_bridge
+            .as_ref()
+            .expect("[services.cctp_bridge]");
+        assert_eq!(
+            cctp.relayer,
+            RelayerMode::Auto,
+            "defaults.toml drives the mode"
+        );
         assert_eq!(cctp.poll_interval_ms, 1000, "shared defaults merge in");
 
         let src = src.replace(
@@ -404,10 +539,14 @@ port = 8096
         let src = minimal_instance().replace("http://reth:8545", "${RETH_URL}");
         let (inst, unresolved) = load_str(&src, &[]).unwrap();
         assert_eq!(unresolved, vec!["RETH_URL".to_string()]);
-        assert_eq!(l1(&inst).source_url, "${RETH_URL}", "raw ref kept");
+        assert_eq!(
+            l1(&inst).source_urls.primary(),
+            "${RETH_URL}",
+            "raw ref kept"
+        );
         let (inst2, unresolved2) = load_str(&src, &wiring()).unwrap();
         assert!(unresolved2.is_empty());
-        assert_eq!(l1(&inst2).source_url, "http://reth:8545");
+        assert_eq!(l1(&inst2).source_urls.primary(), "http://reth:8545");
     }
 
     #[test]
@@ -467,7 +606,11 @@ port = 8096
         // 2026-10-23). The codeless "facts registrar" was removed 2026-10-25
         // after a live re-check (eth_getCode `0x`, nonce 0). Update this
         // count deliberately when the audit changes.
-        assert_eq!(inst.watchlist.len(), 87, "the audited watchlist is complete");
+        assert_eq!(
+            inst.watchlist.len(),
+            87,
+            "the audited watchlist is complete"
+        );
         assert_eq!(l1(&inst).fork_offset, 128);
         assert_eq!(engine(&inst).verifier.probes.len(), 11);
         let mut names = unresolved.clone();
@@ -475,7 +618,11 @@ port = 8096
         assert_eq!(
             names,
             vec![
-                "ANVIL_T_URL", "BEACON_URL", "ENGINE_API_URL", "JWT_PATH", "RETH_URL",
+                "ANVIL_T_URL",
+                "BEACON_URL",
+                "ENGINE_API_URL",
+                "JWT_PATH",
+                "RETH_URL",
                 "STATE_DIR"
             ],
             "the wiring the instance references"
@@ -489,7 +636,12 @@ port = 8096
         // From defaults.toml (the shared engine conventions): the venue's
         // cadence and write chunk are the loops section's.
         assert_eq!(
-            inst.services.engine.as_ref().unwrap().loops.poll_interval_ms,
+            inst.services
+                .engine
+                .as_ref()
+                .unwrap()
+                .loops
+                .poll_interval_ms,
             1000
         );
         assert_eq!(inst.services.engine.as_ref().unwrap().loops.chunk_size, 500);
@@ -499,8 +651,11 @@ port = 8096
         assert!(inst.services.venue_sim.is_none());
         inst.check().unwrap();
         let (chain, engine) = inst.take_venue().unwrap();
-        assert_eq!(chain.source_url, "http://hl-rpc:8545");
-        assert_eq!(engine.anvil.target_url.as_deref(), Some("http://anvil-v:8545"));
+        assert_eq!(chain.source_urls.primary(), "http://hl-rpc:8545");
+        assert_eq!(
+            engine.anvil.target_url.as_deref(),
+            Some("http://anvil-v:8545")
+        );
         // And the sections are gone after the take (moved, not copied).
         assert!(inst.take_venue().is_err());
     }
@@ -514,7 +669,10 @@ port = 8096
         );
         let (inst, _) = load_str(&src, &[]).unwrap();
         let err = inst.check().unwrap_err();
-        assert!(format!("{err}").contains("must not carry [chains.l1]"), "{err}");
+        assert!(
+            format!("{err}").contains("must not carry [chains.l1]"),
+            "{err}"
+        );
 
         // A mainnet instance carrying venue sections:
         let src = format!(
@@ -535,7 +693,10 @@ port = 8096
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
         let err = inst.check().unwrap_err();
-        assert!(format!("{err}").contains("must not carry [services.venue_sim]"), "{err}");
+        assert!(
+            format!("{err}").contains("must not carry [services.venue_sim]"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -547,16 +708,22 @@ port = 8096
         let (mut inst, _) = load_str(&src, &[]).unwrap();
         inst.check().unwrap();
         let (chain, sim) = inst.take_venue_sim().unwrap();
-        assert_eq!(chain.api_url, "https://api.hyperliquid.xyz");
+        assert_eq!(chain.api_urls.primary(), "https://api.hyperliquid.xyz");
         assert_eq!(sim.markets, vec!["BTC", "ETH"]);
         assert_eq!(sim.info.port, 8090);
         assert_eq!(sim.control.port, 8091);
         assert!(sim.engine_admin_url.is_none());
-        assert!(inst.take_venue_sim().is_err(), "the sections are moved, not copied");
+        assert!(
+            inst.take_venue_sim().is_err(),
+            "the sections are moved, not copied"
+        );
         // The engine's take still works on an instance that also carries the sim.
         let (mut inst2, _) = load_str(&src, &[]).unwrap();
         let (_, engine2) = inst2.take_venue().unwrap();
-        assert_eq!(engine2.anvil.target_url.as_deref(), Some("http://anvil-v:8545"));
+        assert_eq!(
+            engine2.anvil.target_url.as_deref(),
+            Some("http://anvil-v:8545")
+        );
     }
 
     #[test]
@@ -568,36 +735,34 @@ port = 8096
         let (inst, unresolved) = Instance::inspect(path).unwrap();
         assert_eq!(inst.instance.name, "diorama-venue");
         assert_eq!(inst.instance.profile, Profile::Venue);
-        assert_eq!(inst.chains.venue.as_ref().unwrap().kind, ChainKind::Hyperliquid);
+        assert_eq!(
+            inst.chains.venue.as_ref().unwrap().kind,
+            ChainKind::Hyperliquid
+        );
         let mut names = unresolved.clone();
         names.sort();
         assert_eq!(
             names,
             vec![
                 "ANVIL_V_URL",
-                "CCTP_RELAY_KEY",
-                "CCTP_STATE_DIR",
                 "ENGINE_ADMIN_URL",
-                "HL_RPC_URL",
+                "HL_RPC_URLS",
                 "SIM_STATE_DIR",
-                "STATE_DIR",
-                "T_RPC_URL"
+                "STATE_DIR"
             ],
             "the wiring the venue instance references"
         );
     }
 
-    /// `[services.cctp_bridge]` is optional under both profiles and cross-cutting:
-    /// a venue instance may carry it (and take it), and a mainnet instance
-    /// may too — unlike the simulator, which the mainnet profile forbids.
+    /// The bridge is its own profile: it carries only
+    /// `[services.cctp_bridge]`, never a chain, engine or simulator. That is
+    /// what lets a deployment run one venue, two venues, four mainnets and
+    /// several bridges as independent instances sharing the same spine.
     #[test]
-    fn the_cctp_section_is_optional_and_cross_cutting() {
-        let src = format!(
-            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
-            minimal_venue_instance(),
-            "59".repeat(32)
-        );
-        let (mut inst, _) = load_str(&src, &[]).unwrap();
+    #[allow(clippy::too_many_lines)] // the fixture is the profile's section map
+    fn the_cctp_profile_is_standalone() {
+        let (mut inst, unresolved) = load_str(minimal_cctp_instance(), &[]).unwrap();
+        assert!(unresolved.is_empty());
         inst.check().unwrap();
         // The defaults filled the shared numbers.
         let cctp = inst.services.cctp_bridge.as_ref().unwrap();
@@ -611,35 +776,155 @@ port = 8096
         let section = inst.take_cctp().unwrap();
         assert_eq!(section.iris.port, 8095);
         assert_eq!(section.control.port, 8096);
-        assert!(inst.take_cctp().is_err(), "the section is moved, not copied");
+        assert!(
+            inst.take_cctp().is_err(),
+            "the section is moved, not copied"
+        );
 
-        // Absent on a deployment that does not run it (the defaults stub was
-        // pruned before the merge).
-        let (inst, _) = load_str(minimal_venue_instance(), &[]).unwrap();
-        assert!(inst.services.cctp_bridge.is_none());
-
-        // The mainnet profile may carry it (the bridge spans both mirrors).
+        // A mirror instance must not carry the bridge section: one process =
+        // one role, and several bridges compose as several instances.
         let src = format!(
-            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
-            minimal_instance(),
+            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://t:8545\"\nv_url = \"http://v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
+            minimal_venue_instance(),
             "59".repeat(32)
         );
-        let (inst, _) = load_str(&src, &wiring()).unwrap();
-        inst.check().unwrap();
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        let err = inst.check().unwrap_err();
+        assert!(
+            format!("{err}").contains("must not carry [services.cctp_bridge]"),
+            "{err}"
+        );
+
+        // And the bridge profile must not carry a mirror's sections.
+        let src = format!(
+            "{}\n[chains.l1]\nkind = \"ethereum\"\nsource_url = \"http://reth:8545\"\nfollow = \"latest\"\nfollow_margin_blocks = 2\nfork_offset = 128\n",
+            minimal_cctp_instance()
+        );
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        let err = inst.check().unwrap_err();
+        assert!(
+            format!("{err}").contains("must not carry [chains.l1]"),
+            "{err}"
+        );
 
         // The relay key must be a secret, never a path; the seed must be
         // non-empty; the gas thresholds must be ordered.
-        let src = format!(
-            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://anvil-t:8545\"\nv_url = \"http://anvil-v:8545\"\nrelay_key = \"/etc/mirror/relay.key\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
-            minimal_venue_instance()
+        let src = minimal_cctp_instance().replace(
+            "relay_key = \"0x5959595959595959595959595959595959595959595959595959595959595959\"",
+            "relay_key = \"/etc/mirror/relay.key\"",
         );
         let (inst, _) = load_str(&src, &[]).unwrap();
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("relay_key"), "{err}");
-        let src = src.replace("attester_seed = \"devnet\"", "attester_seed = \"\"");
+        let src =
+            minimal_cctp_instance().replace("attester_seed = \"devnet\"", "attester_seed = \"\"");
         let (inst, _) = load_str(&src, &[]).unwrap();
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("attester_seed"), "{err}");
+    }
+
+    /// The bridge's composable topology: N chains and directed lanes, with
+    /// the endpoint groups as the single URL home. This is the schema the
+    /// "two venues / four mainnets / several providers" deployments compose
+    /// from; the legacy t_url/v_url pair remains a two-chain shorthand.
+    #[test]
+    #[allow(clippy::too_many_lines)] // the fixture is the schema example
+    fn a_cctp_instance_composes_arbitrary_chains_and_lanes() {
+        let src = r#"
+watchlist = []
+
+[instance]
+name = "c"
+namespace = "c"
+profile = "cctp"
+
+[endpoints.t]
+http = ["http://t:8545", "http://t2:8545"]
+
+[endpoints.v]
+http = ["http://v:8545"]
+
+[endpoints.arb]
+http = ["http://arb:8545"]
+
+[services.cctp_bridge]
+state_dir = "/cctp"
+relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
+attester_seed = "devnet"
+
+[[services.cctp_bridge.chains]]
+id = "ethereum"
+family = "ethereum"
+chain_id = 1
+domain = 0
+rpc_urls = "@t"
+usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+
+[[services.cctp_bridge.chains]]
+id = "hyperevm"
+family = "hyperliquid"
+chain_id = 999
+domain = 19
+rpc_urls = "@v"
+usdc = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+
+[[services.cctp_bridge.chains]]
+id = "arbitrum"
+family = "ethereum"
+chain_id = 42161
+domain = 3
+rpc_urls = "@arb"
+usdc = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+
+[[services.cctp_bridge.lanes]]
+source = "ethereum"
+destination = "hyperevm"
+
+[[services.cctp_bridge.lanes]]
+source = "hyperevm"
+destination = "ethereum"
+
+[[services.cctp_bridge.lanes]]
+source = "arbitrum"
+destination = "ethereum"
+
+[services.cctp_bridge.iris]
+port = 8095
+
+[services.cctp_bridge.control]
+port = 8096
+"#;
+        let (inst, _) = load_str(src, &[]).unwrap();
+        inst.check().expect("the composed topology is coherent");
+        let cctp = inst.services.cctp_bridge.as_ref().unwrap();
+        assert_eq!(cctp.chains.len(), 3);
+        assert_eq!(cctp.lanes.len(), 3);
+        assert_eq!(
+            cctp.chains[0].rpc_urls.as_slice(),
+            ["http://t:8545", "http://t2:8545"]
+        );
+
+        // A lane naming an undeclared chain is a load error, not a guessed
+        // direction.
+        let broken = src.replace("destination = \"hyperevm\"", "destination = \"missing\"");
+        let (inst, _) = load_str(&broken, &[]).unwrap();
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("missing"), "{err}");
+    }
+
+    #[test]
+    fn the_cctp_client_export_is_its_iris_base() {
+        let (inst, _) = load_str(minimal_cctp_instance(), &[]).unwrap();
+        assert_eq!(
+            inst.export_env("client").unwrap(),
+            vec!["IRIS_API_URL=http://cctp-bridge.c.svc.cluster.local:8095"]
+        );
     }
 
     #[test]

@@ -13,7 +13,9 @@ use alloy_rpc_types_beacon::{
     block::BlockResponse, header::HeaderResponse, requests::ExecutionRequestsV4,
 };
 use alloy_rpc_types_engine::ExecutionPayloadV3;
-use diorama_anvil::truncate;
+use diorama_anvil::{
+    truncate, Attempt, AttemptOutcome, EndpointPool, PoolError, PoolPolicy, Scheme,
+};
 use serde::Deserialize;
 
 /// The beacon-API boundary's error taxonomy (boundary-discipline).
@@ -54,6 +56,9 @@ pub enum BeaconError {
 
     #[error("no beacon sources are configured")]
     NotConfigured,
+
+    #[error("every beacon source is cooling; retry in {retry_after_ms} ms")]
+    Cooling { retry_after_ms: u64 },
 }
 
 /// The beacon block fields the top-up loop needs. Everything else a fork
@@ -122,24 +127,36 @@ pub(crate) type BeaconBlock = BlockResponse<TopUpBody>;
 
 pub(crate) struct BeaconClient {
     http: reqwest::Client,
-    urls: Vec<String>,
+    pool: Option<EndpointPool>,
 }
 
 impl BeaconClient {
     /// Build the client. Fallible: the TLS backend's initialization can fail,
     /// and a boundary that cannot be built is a boot error naming itself.
-    pub fn new(urls: Vec<String>) -> Result<Self, BeaconError> {
+    pub fn new(urls: &[String]) -> Result<Self, BeaconError> {
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             // Some public beacon APIs reject unknown user agents.
             .user_agent("curl/8.5.0")
             .build()
             .map_err(|source| BeaconError::ClientBuild { source })?;
-        Ok(Self { http, urls })
+        let pool = if urls.is_empty() {
+            None
+        } else {
+            Some(
+                EndpointPool::new(urls, Scheme::Http, PoolPolicy::default())
+                    .map_err(|_| BeaconError::NotConfigured)?,
+            )
+        };
+        Ok(Self { http, pool })
     }
 
     pub fn enabled(&self) -> bool {
-        !self.urls.is_empty()
+        self.pool.is_some()
+    }
+
+    fn pool(&self) -> Result<&EndpointPool, BeaconError> {
+        self.pool.as_ref().ok_or(BeaconError::NotConfigured)
     }
 
     /// Consensus head slot (`/eth/v1/beacon/headers/head`).
@@ -149,20 +166,20 @@ impl BeaconClient {
     /// at debug). The top-up loop must not read "the beacon is down" as "there
     /// is nothing to top up".
     pub async fn head_slot(&self) -> Result<u64, BeaconError> {
-        let mut last: Option<BeaconError> = None;
-        for base in &self.urls {
-            match self.head_slot_from(base).await {
-                Ok(slot) => return Ok(slot),
-                Err(e) => {
-                    tracing::debug!(source = %base, error = %e, "head slot unavailable");
-                    last = Some(e);
-                }
+        let attempt = HeadAttempt { client: self };
+        match self.pool()?.execute(&attempt, &[]).await {
+            Ok(served) => Ok(served.value),
+            Err(PoolError::Exhausted { last, .. }) => {
+                Err(last.unwrap_or(BeaconError::NotConfigured))
+            }
+            Err(PoolError::Cooling { retry_after_ms }) => {
+                Err(BeaconError::Cooling { retry_after_ms })
             }
         }
-        Err(last.unwrap_or(BeaconError::NotConfigured))
     }
 
-    async fn head_slot_from(&self, base: &str) -> Result<u64, BeaconError> {
+    async fn head_slot_from(&self, index: usize) -> Result<u64, BeaconError> {
+        let base = self.pool()?.url(index);
         let url = format!("{}/eth/v1/beacon/headers/head", base.trim_end_matches('/'));
         let text = self.get_text(&url).await?;
         // The official response type: `data.header.message.slot` is a u64 with
@@ -177,24 +194,24 @@ impl BeaconClient {
     /// all fail, is returned — never collapsed into "missed slot", which would
     /// make the top-up walk skip a live slot during an outage.
     pub async fn block_by_slot(&self, slot: u64) -> Result<Option<BeaconBlock>, BeaconError> {
-        let mut last: Option<BeaconError> = None;
-        for base in &self.urls {
-            match self.block_by_slot_from(base, slot).await {
-                Ok(found) => return Ok(found),
-                Err(e) => {
-                    tracing::debug!(slot, source = %base, error = %e, "beacon block unavailable");
-                    last = Some(e);
-                }
+        let attempt = BlockAttempt { client: self, slot };
+        match self.pool()?.execute(&attempt, &[]).await {
+            Ok(served) => Ok(served.value),
+            Err(PoolError::Exhausted { last, .. }) => {
+                Err(last.unwrap_or(BeaconError::NotConfigured))
+            }
+            Err(PoolError::Cooling { retry_after_ms }) => {
+                Err(BeaconError::Cooling { retry_after_ms })
             }
         }
-        Err(last.unwrap_or(BeaconError::NotConfigured))
     }
 
     async fn block_by_slot_from(
         &self,
-        base: &str,
+        index: usize,
         slot: u64,
     ) -> Result<Option<BeaconBlock>, BeaconError> {
+        let base = self.pool()?.url(index);
         let url = format!(
             "{}/eth/v2/beacon/blocks/{}",
             base.trim_end_matches('/'),
@@ -233,11 +250,7 @@ impl BeaconClient {
 
     /// The body of a successful answer; a non-2xx is a status fault with the
     /// first bytes of the body (the operator sees what the source said).
-    async fn body_text(
-        &self,
-        url: &str,
-        resp: reqwest::Response,
-    ) -> Result<String, BeaconError> {
+    async fn body_text(&self, url: &str, resp: reqwest::Response) -> Result<String, BeaconError> {
         let status = resp.status();
         let text = resp.text().await.map_err(|source| BeaconError::Transport {
             url: url.to_string(),
@@ -251,6 +264,42 @@ impl BeaconClient {
             });
         }
         Ok(text)
+    }
+}
+
+/// One head-slot read against one beacon endpoint.
+struct HeadAttempt<'a> {
+    client: &'a BeaconClient,
+}
+
+impl Attempt for HeadAttempt<'_> {
+    type Output = u64;
+    type Fault = BeaconError;
+
+    async fn attempt(&self, index: usize) -> AttemptOutcome<u64, BeaconError> {
+        match self.client.head_slot_from(index).await {
+            Ok(slot) => AttemptOutcome::Served(slot),
+            Err(fault) => AttemptOutcome::Fault(fault),
+        }
+    }
+}
+
+/// One block read against one beacon endpoint. A 404 is the endpoint's
+/// answer (a missed slot), not a fault.
+struct BlockAttempt<'a> {
+    client: &'a BeaconClient,
+    slot: u64,
+}
+
+impl Attempt for BlockAttempt<'_> {
+    type Output = Option<BeaconBlock>;
+    type Fault = BeaconError;
+
+    async fn attempt(&self, index: usize) -> AttemptOutcome<Option<BeaconBlock>, BeaconError> {
+        match self.client.block_by_slot_from(index, self.slot).await {
+            Ok(found) => AttemptOutcome::Served(found),
+            Err(fault) => AttemptOutcome::Fault(fault),
+        }
     }
 }
 

@@ -10,9 +10,8 @@
 //! the composer's target and the driver all reference the same objects.
 use crate::error::{Error, Result};
 use crate::metrics::VenueMetrics;
-use futures_util::future::BoxFuture;
 use diorama_anvil::Rpc;
-use diorama_config::{ChainVenue, EngineSection};
+use diorama_config::{Endpoints, EngineSection};
 use diorama_devnet::drift::Drift;
 use diorama_devnet::engine::{Engine, EngineCore};
 use diorama_devnet::metrics::Registry as _;
@@ -21,13 +20,12 @@ use diorama_devnet::probes::ProbeOutcome;
 use diorama_devnet::scan::ScanWalk;
 use diorama_devnet::source::Source;
 use diorama_devnet::spine::Mirror;
+use futures_util::future::BoxFuture;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub struct Ctx {
-    /// The venue chain's section (the fork source).
-    pub(crate) chain: ChainVenue,
     /// The engine's section (cadence, chunk size, probes, http) — the same
     /// `[services.engine]` section the mainnet engine carries, read for this
     /// profile's fields.
@@ -70,16 +68,19 @@ impl Ctx {
     /// Build the context. Every boundary that must exist for the driver to be
     /// correct is fallible here (clients, state files): a missing boundary is
     /// a boot error naming it, never a degraded start.
-    pub fn new(mut cfg: diorama_config::Instance, source_url: &str, v_url: &str) -> Result<Self> {
-        let (chain, engine) = cfg.take_venue()?;
+    pub fn new(
+        mut cfg: diorama_config::Instance,
+        source_urls: &Endpoints,
+        v_url: &str,
+    ) -> Result<Self> {
+        let (_chain, engine) = cfg.take_venue()?;
         let plane = Plane::from_engine(&engine)?;
         let drift = Drift::from_engine(&engine)?;
-        // A fixed, generous budget: V's chain is a local anvil.
-        let (source_rpc, anvil_v) = diorama_devnet::engine::build_clients(
-            source_url,
-            v_url,
-            Duration::from_secs(30),
-        )?;
+        // A fixed, generous budget: V's chain is a local anvil. The source
+        // pool carries the instance's endpoint attributes and shared policy.
+        let pool = diorama_devnet::engine::source_pool(&cfg, source_urls)?;
+        let (source_rpc, anvil_v) =
+            diorama_devnet::engine::build_clients(pool, v_url, Duration::from_secs(30))?;
         let uncovered_seen = std::sync::Mutex::new(std::collections::HashSet::new());
         let venue_metrics = VenueMetrics::default();
         let wiring = crate::profile::build(
@@ -92,7 +93,6 @@ impl Ctx {
             },
         );
         Ok(Self {
-            chain,
             engine,
             anvil_v,
             source_rpc,
@@ -123,7 +123,6 @@ impl Engine for Ctx {
             mirror: &self.mirror,
             target: &self.anvil_v,
             source: &self.source_rpc,
-            source_url: &self.chain.source_url,
             engine: &self.engine,
         }
     }

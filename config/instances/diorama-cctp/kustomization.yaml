@@ -1,0 +1,11 @@
+# The CCTP bridge instance unit: one configmap, mounted at /etc/mirror by the
+# bridge deployment. One instance per bridge; a second provider is a second
+# directory + deployment, not a new code path.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+configMapGenerator:
+  - name: cctp-instance
+    files:
+      - instance.toml=instance.toml
+      - daloc.toml=daloc.toml

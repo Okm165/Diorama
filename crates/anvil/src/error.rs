@@ -48,6 +48,61 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    /// A client was built with no endpoint: the source's read pool must name
+    /// at least one node.
+    #[error("at least one RPC endpoint is required")]
+    NoEndpoints,
+
+    /// An endpoint that does not carry the pool's scheme. The config boundary
+    /// validates the list, but the transport keeps its own guard so a
+    /// hand-built client cannot smuggle a non-HTTP scheme into an HTTP pool
+    /// (or a non-WS scheme into the venue's websocket pool).
+    #[error("{endpoint:?} is not a valid endpoint for this transport")]
+    InvalidEndpoint { endpoint: String },
+
+    /// A source endpoint answered a different chain id. A wrong-chain
+    /// provider is a silent correctness fault if it is allowed to serve, so
+    /// the boot assert names it and refuses the pool.
+    #[error("{endpoint} is chain {got}, expected {want}")]
+    WrongChain {
+        endpoint: String,
+        got: u64,
+        want: u64,
+    },
+
+    /// One endpoint answered with a transport/throttle/plan refusal rather
+    /// than the node's answer. The pool moves to the next endpoint; the
+    /// caller sees this only when every round is exhausted.
+    #[error("{endpoint}: {method}: endpoint fault: {detail}")]
+    EndpointFault {
+        endpoint: String,
+        method: String,
+        detail: String,
+    },
+
+    /// Every endpoint in the pool refused across every round. The last fault
+    /// is kept so the caller can diagnose the pool, and a throttled body is
+    /// **never** surfaced as a successful answer (the old `last_answer`
+    /// path did exactly that).
+    #[error("{attempts} endpoint attempt(s) failed; last: {last}")]
+    EndpointsExhausted {
+        attempts: u32,
+        #[source]
+        last: Box<Error>,
+    },
+
+    /// Every endpoint is inside its cooldown window and no emergency probe is
+    /// due. This is a retry-later signal, not a node refusal: the caller can
+    /// honour `Retry-After` instead of treating it as an answer.
+    #[error("every endpoint is cooling; retry in {retry_after_ms} ms")]
+    PoolCooling { retry_after_ms: u64 },
+
+    /// A write was attempted through a multi-endpoint read pool. A post-send
+    /// timeout is ambiguous (the bytes may have landed); failing over would
+    /// duplicate a non-idempotent write. Writes use a single-endpoint client.
+    #[error("a pooled read client cannot submit writes; build a single-endpoint write client")]
+    PooledWrite,
+
     #[error("{endpoint}: {method}: transport")]
     Transport {
         endpoint: String,
@@ -186,11 +241,18 @@ impl Error {
     pub fn endpoint(&self) -> &str {
         match self {
             Error::ClientBuild { .. }
+            | Error::NoEndpoints
+            | Error::InvalidEndpoint { .. }
+            | Error::WrongChain { .. }
             | Error::Abi { .. }
             | Error::Corrupt { .. }
-            | Error::Encode { .. } => "<local>",
+            | Error::Encode { .. }
+            | Error::EndpointsExhausted { .. }
+            | Error::PoolCooling { .. }
+            | Error::PooledWrite => "<local>",
             Error::NotReady { what, .. } => what,
             Error::Transport { endpoint, .. }
+            | Error::EndpointFault { endpoint, .. }
             | Error::Status { endpoint, .. }
             | Error::Rpc { endpoint, .. }
             | Error::Decode { endpoint, .. }

@@ -16,14 +16,13 @@
 //! is `alloy_json_rpc`'s; the results and params are alloy's per-namespace
 //! types (`alloy_rpc_types_eth`, `…-anvil`, `…-trace`, `…-txpool`). A wire
 //! change upstream lands as a compile error here, never as a silent mismatch.
-use crate::backoff::{Backoff, Progress};
 use crate::error::{missing_from_batch, Error, Result, RpcError};
 use crate::trace::{Key, Value};
 use alloy_eips::eip7928::BlockAccessList;
 use alloy_json_rpc::{
     Id, Request, RequestPacket, Response, ResponsePacket, ResponsePayload, SerializedRequest,
 };
-use alloy_primitives::{Address, Bytes, B256, TxKind, U256, U64};
+use alloy_primitives::{Address, Bytes, TxKind, B256, U256, U64};
 use alloy_rpc_types_anvil::{Forking, NodeInfo};
 use alloy_rpc_types_eth::{
     state::StateOverride, Block, BlockNumberOrTag, Filter, Header, Log, Transaction,
@@ -36,7 +35,10 @@ use alloy_rpc_types_txpool::TxpoolStatus;
 use serde::{de::DeserializeOwned, de::Error as _, Serialize};
 use serde_json::value::RawValue;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+
+use crate::pool::{now_ms, Attempt, AttemptOutcome, EndpointPool, PoolError, PoolPolicy, Scheme};
 
 /// Positional params for methods that take none: the spec's `[]` (the
 /// discouraged alternative is `null`, which not every node accepts). Public
@@ -117,9 +119,6 @@ const RATE_LIMIT_CODE: i64 = -32005;
 /// the one node code worth retrying (measured live: the system-tx read
 /// answers it transiently under load).
 const INTERNAL_ERROR_CODE: i64 = -32603;
-/// The throttle's retry bound (the shared backoff rides between the tries).
-const RATE_LIMIT_TRIES: u32 = 4;
-
 /// The retryable refusals: the throttle and the node's internal error. A
 /// single error object is parsed; a batch array is scanned for the codes
 /// (distinctive strings — a full parse of a large answer is not worth it).
@@ -138,21 +137,187 @@ fn is_retryable(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// One HTTP client + URL, cloned cheaply (reqwest's client is `Arc`-backed).
-/// A clone starts a fresh request-id counter; ids only need to correlate a
-/// request with its own response.
+/// An endpoint's **plan/capability refusal** — not the method's answer.
+///
+/// Measured live 2026-10-29: drpc's free plan answers a batch of more than
+/// three requests with `code 31` / “Batch of more than 3 requests are not
+/// allowed on free plan”. The same batch is answered by the official RPC (20
+/// items) and the other endpoints, so the pool must fail over rather than
+/// surface one endpoint's plan limit as the call's result. A method-level
+/// refusal (`-32601`, a revert) is still the node's answer and is not failed
+/// over.
+///
+/// The message arms keep the failover working if an endpoint re-codes its
+/// plan limit; the code arm is drpc's measured code.
+fn endpoint_policy_refusal(text: &str) -> bool {
+    let policy = |code: i64, message: &str| {
+        code == 31
+            || message.contains("free plan")
+            || message.contains("Batch of more than")
+            || message.contains("batch limit")
+    };
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('[') {
+        // A batch: any item carrying a plan refusal means this endpoint cannot
+        // serve the body; another endpoint can.
+        return serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
+            .map(|items| {
+                items.iter().any(|item| {
+                    let Some(error) = item.get("error") else {
+                        return false;
+                    };
+                    let code = error
+                        .get("code")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                    policy(code, message)
+                })
+            })
+            .unwrap_or(false);
+    }
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return false;
+    };
+    let Some(error) = value.get("error") else {
+        return false;
+    };
+    let code = error
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    policy(code, message)
+}
+
+/// An endpoint's **capability refusal** — it cannot serve this request, but
+/// another provider may.
+///
+/// Measured live: drpc answers `-32000` / “unsupported block number” for a
+/// block its free plan does not retain, while the archive endpoint serves the
+/// same request. The error is a method-level JSON-RPC error by shape, so the
+/// old classifier returned it as the node's answer and never tried the next
+/// endpoint. These messages are provider capability, not a deterministic
+/// revert: a revert (`execution reverted`) stays the node's answer and is
+/// never failed over.
+fn endpoint_capability_refusal(text: &str) -> bool {
+    let capability = |message: &str| {
+        let message = message.to_ascii_lowercase();
+        [
+            "unsupported block number",
+            "pruned history unavailable",
+            "missing trie node",
+            "header not found",
+            "block not found",
+            "requested block is not available",
+            "historical state",
+            "archive",
+            "state is not available",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+    };
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('[') {
+        return serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
+            .map(|items| {
+                items.iter().any(|item| {
+                    let Some(error) = item.get("error") else {
+                        return false;
+                    };
+                    let code = error
+                        .get("code")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+                    code == -32000 && capability(message)
+                })
+            })
+            .unwrap_or(false);
+    }
+    if !trimmed.starts_with('{') {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return false;
+    };
+    let Some(error) = value.get("error") else {
+        return false;
+    };
+    let code = error
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
+    code == -32000 && capability(message)
+}
+
+/// Whether an HTTP answer is an endpoint fault rather than the node's own
+/// answer: the retryable JSON-RPC refusals, an endpoint plan or capability
+/// refusal (a provider that cannot retain/serve the requested block), HTTP
+/// 429, or a 5xx body that is not a JSON-RPC answer (a gateway page). A
+/// method-level JSON-RPC error on any status — a revert, an unknown method —
+/// is the node's answer and is never failed over.
+fn endpoint_fault(status: reqwest::StatusCode, text: &str) -> bool {
+    // An auth wall, a wrong path, a body-size refusal or a timeout is the
+    // endpoint's refusal, not the method's answer: another endpoint may serve
+    // the same request. A JSON-RPC error on any status stays the node's
+    // answer (the measured drpc `-32601`/HTTP 400 case).
+    let endpoint_status = matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::FORBIDDEN
+            | reqwest::StatusCode::NOT_FOUND
+            | reqwest::StatusCode::REQUEST_TIMEOUT
+            | reqwest::StatusCode::PAYLOAD_TOO_LARGE
+            | reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    // A 2xx body that is not JSON is a gateway page, not a JSON-RPC answer.
+    // (A valid JSON-RPC body is always an object or an array.)
+    let not_json = status.is_success() && serde_json::from_str::<serde_json::Value>(text).is_err();
+    is_retryable(text)
+        || endpoint_policy_refusal(text)
+        || endpoint_capability_refusal(text)
+        || endpoint_status
+        || not_json
+        || (status.is_server_error() && serde_json::from_str::<serde_json::Value>(text).is_err())
+}
+
+/// One HTTP client and a **read pool** of endpoints, cloned cheaply
+/// (reqwest's client and the pool are `Arc`-backed).
+///
+/// A single-endpoint client (`new`) is the write client: its methods are the
+/// same and every request goes to that one node. A pooled client
+/// (`with_urls`) is the engine's **source** read client: each request starts
+/// at a random healthy endpoint and, on a transport fault, a throttled
+/// answer, or an endpoint-level HTTP failure, moves to the next endpoint in
+/// the rotated order. A failed endpoint is cooled down by the shared
+/// [`EndpointPool`] and retried in a later round. The first success wins.
+///
+/// Writes must use a single-endpoint client — the spine's `build_clients`
+/// enforces that by construction (source pooled, target single). A pooled
+/// client is not a write surface: a post-send timeout would duplicate a
+/// non-idempotent write on the next endpoint.
 pub struct Rpc {
     http: reqwest::Client,
-    url: String,
+    pool: Arc<EndpointPool>,
     next_id: AtomicU64,
+    /// Whether this client may submit writes. A multi-endpoint read pool is
+    /// not a write surface: a post-send timeout would be ambiguous and a
+    /// failover would duplicate the write.
+    write: bool,
 }
 
 impl Clone for Rpc {
     fn clone(&self) -> Self {
         Self {
             http: self.http.clone(),
-            url: self.url.clone(),
+            pool: Arc::clone(&self.pool),
             next_id: AtomicU64::new(1),
+            write: self.write,
         }
     }
 }
@@ -179,23 +344,73 @@ pub enum Mined {
 }
 
 impl Rpc {
-    /// Build a client for `url`. Fallible: the TLS backend's initialization can
-    /// fail, and a boundary that cannot be built is a boot error naming itself,
-    /// not a panic.
+    /// Build a **single-endpoint** client for `url`. This is the write client
+    /// (the target anvil) and a one-endpoint source. It makes exactly one
+    /// attempt per call: a single endpoint has no failover, and a write must
+    /// never be silently retried.
     pub fn new(url: &str, timeout: Duration) -> Result<Self> {
+        let pool = EndpointPool::new(
+            &[url.to_string()],
+            Scheme::Http,
+            PoolPolicy {
+                rounds: 1,
+                ..PoolPolicy::default()
+            },
+        )?;
+        Self::with_pool_inner(pool, timeout, true)
+    }
+
+    /// Build a **read pool** over `urls`. Each request starts at a random
+    /// healthy endpoint and fails over to the next one; the first success
+    /// wins, and a failed endpoint is cooled down by the shared pool. Used by
+    /// the spine for the source client only.
+    pub fn with_urls(urls: &[String], timeout: Duration) -> Result<Self> {
+        let pool = EndpointPool::new(urls, Scheme::Http, PoolPolicy::default())?;
+        Self::with_pool_inner(pool, timeout, false)
+    }
+
+    /// Build a read client over an already-constructed pool. The REST and WS
+    /// lanes use the same pool type; this constructor is the JSON-RPC seam.
+    pub fn with_pool(pool: EndpointPool, timeout: Duration) -> Result<Self> {
+        Self::with_pool_inner(pool, timeout, false)
+    }
+
+    fn with_pool_inner(pool: EndpointPool, timeout: Duration, write: bool) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .build()
             .map_err(|source| Error::ClientBuild { source })?;
         Ok(Self {
             http,
-            url: url.trim_end_matches('/').to_string(),
+            pool: Arc::new(pool),
             next_id: AtomicU64::new(1),
+            write,
         })
     }
 
+    /// Refuse a write on a multi-endpoint read pool.
+    fn ensure_write(&self) -> Result<()> {
+        if self.write {
+            Ok(())
+        } else {
+            Err(Error::PooledWrite)
+        }
+    }
+
+    /// The primary endpoint (the first declared). `/admin/epoch` and the
+    /// status document read this one; the read pool may use any of them.
     pub fn url(&self) -> &str {
-        &self.url
+        self.pool.primary()
+    }
+
+    /// Every endpoint, in declaration order.
+    pub fn urls(&self) -> Vec<String> {
+        self.pool.urls().into_iter().map(str::to_string).collect()
+    }
+
+    /// The shared health/rotation pool (for status and diagnostics).
+    pub fn pool(&self) -> &EndpointPool {
+        &self.pool
     }
 
     fn id(&self) -> u64 {
@@ -204,117 +419,254 @@ impl Rpc {
 
     // ---- typed error constructors (one site per variant) ----------------
 
-    fn transport(&self, method: &str, source: reqwest::Error) -> Error {
+    fn transport(endpoint: &str, method: &str, source: reqwest::Error) -> Error {
         Error::Transport {
-            endpoint: self.url.clone(),
+            endpoint: endpoint.to_string(),
             method: method.to_string(),
             source,
         }
     }
 
-    fn status(&self, method: &str, status: u16, body: &str) -> Error {
+    fn status(endpoint: &str, method: &str, status: u16, body: &str) -> Error {
         Error::Status {
-            endpoint: self.url.clone(),
+            endpoint: endpoint.to_string(),
             method: method.to_string(),
             status,
             body: truncate(body, 300).to_string(),
         }
     }
 
-    fn rpc(&self, method: &str, payload: RpcError) -> Error {
+    fn rpc(endpoint: &str, method: &str, payload: RpcError) -> Error {
         Error::Rpc {
-            endpoint: self.url.clone(),
+            endpoint: endpoint.to_string(),
             method: method.to_string(),
             payload,
         }
     }
 
-    fn decode(&self, method: &str, source: serde_json::Error) -> Error {
+    fn decode(endpoint: &str, method: &str, source: serde_json::Error) -> Error {
         Error::Decode {
-            endpoint: self.url.clone(),
+            endpoint: endpoint.to_string(),
             method: method.to_string(),
             source,
         }
     }
 
-    fn encode(&self, method: &str, source: serde_json::Error) -> Error {
+    fn encode(endpoint: &str, method: &str, source: serde_json::Error) -> Error {
         Error::Encode {
-            method: format!("{method} ({})", self.url),
+            method: format!("{method} ({endpoint})"),
             source,
         }
     }
 
     // ---- transport ------------------------------------------------------
 
-    fn request(&self, method: &str, params: impl Serialize) -> Result<SerializedRequest> {
+    fn request(
+        &self,
+        endpoint: &str,
+        method: &str,
+        params: impl Serialize,
+    ) -> Result<SerializedRequest> {
         // Params are method-specific; erasing them to the official `RawValue`
         // is exactly what a request serializes to anyway.
         let params = serde_json::value::to_raw_value(&params)
-            .map_err(|source| self.encode(method, source))?;
+            .map_err(|source| Self::encode(endpoint, method, source))?;
         Request::new(method.to_string(), Id::Number(self.id()), params)
             .serialize()
-            .map_err(|source| self.encode(method, source))
+            .map_err(|source| Self::encode(endpoint, method, source))
     }
 
-    /// One HTTP round trip: the raw status and body. The boundary decision
-    /// belongs to [`Self::answer`] (single) / [`Self::classify`] (batch).
-    async fn post_raw(
+    /// One HTTP round trip to **one** endpoint: the raw status and body. The
+    /// boundary decision belongs to [`Self::answer`] (single) /
+    /// [`Self::classify`] (batch).
+    async fn post_raw_at(
         &self,
+        endpoint: &str,
         method: &str,
         body: &RawValue,
     ) -> Result<(reqwest::StatusCode, String)> {
         let resp = self
             .http
-            .post(&self.url)
+            .post(endpoint)
             .header(reqwest::header::CONTENT_TYPE, crate::JSON_CONTENT_TYPE)
             .body(body.get().to_string())
             .send()
             .await
-            .map_err(|source| self.transport(method, source))?;
+            .map_err(|source| Self::transport(endpoint, method, source))?;
         let status = resp.status();
         let text = resp
             .text()
             .await
-            .map_err(|source| self.transport(method, source))?;
+            .map_err(|source| Self::transport(endpoint, method, source))?;
         Ok((status, text))
     }
 
-    /// The retryable refusals — the public endpoint's throttle (`-32005`,
-    /// "rate limited") and the node's internal error (`-32603`) — ride a
-    /// bounded backoff before surfacing. A wide catch-up window issues many
-    /// bodies, and a transient refusal must not fail the pass (measured
-    /// live: bursts tripped the limiter and the internal error came and went
-    /// under load). Every other refusal is the node's answer.
+    /// The read path's one send: the shared [`EndpointPool::execute`] owns
+    /// admission, failover, cooldown and the per-call budget. A
+    /// single-endpoint client (the target) sees exactly one attempt.
+    ///
+    /// A fault is a transport error, a retryable JSON-RPC refusal (`-32005`
+    /// throttle / `-32603` internal), an endpoint-level HTTP refusal (auth,
+    /// wrong path, 413, 429, 5xx), or a 2xx body that is not JSON-RPC (a
+    /// gateway page). A valid JSON-RPC error on any status is the node's
+    /// answer and is **not** failed over: it is the same answer every
+    /// endpoint would give (a bad method, a revert).
+    ///
+    /// When every round is exhausted the call returns
+    /// [`Error::EndpointsExhausted`] or [`Error::PoolCooling`] — never a
+    /// throttled/plan-refusal body as a successful answer.
     async fn post_raw_throttled(
         &self,
         method: &str,
         body: &RawValue,
-    ) -> Result<(reqwest::StatusCode, String)> {
-        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(8));
-        // The retries ride a bounded backoff; the last attempt's answer
-        // surfaces whatever it is (the loop backs off only while another
-        // attempt remains).
-        for _ in 1..RATE_LIMIT_TRIES {
-            let (status, text) = self.post_raw(method, body).await?;
-            if !is_retryable(&text) {
-                return Ok((status, text));
-            }
-            tokio::time::sleep(backoff.delay()).await;
-            backoff.record(Progress::Stalled);
+    ) -> Result<(String, reqwest::StatusCode, String)> {
+        // A single endpoint has no failover: one attempt, and its body is the
+        // node's answer whatever it is (the caller's `answer` classifies a
+        // throttle/refusal). This preserves the write client's semantics and
+        // avoids turning one node's retryable refusal into a pool outage.
+        if self.pool.len() == 1 {
+            return self.post_raw_once(method, body).await;
         }
-        self.post_raw(method, body).await
+        let attempt = RpcAttempt {
+            rpc: self,
+            method,
+            body,
+        };
+        match self.pool.execute(&attempt, &[]).await {
+            Ok(served) => Ok((
+                self.pool.url(served.index).to_string(),
+                served.value.0,
+                served.value.1,
+            )),
+            Err(error) => {
+                tracing::warn!(
+                    method,
+                    endpoints = self.pool.len(),
+                    error = %error,
+                    "every endpoint in the pool refused; surfacing a typed exhaustion"
+                );
+                Err(pool_error(error))
+            }
+        }
     }
 
+    /// The single-endpoint path: one attempt, and the body is returned even
+    /// when it is a retryable refusal (the caller classifies it as the node's
+    /// answer). No failover, no retry — the write client's contract.
+    async fn post_raw_once(
+        &self,
+        method: &str,
+        body: &RawValue,
+    ) -> Result<(String, reqwest::StatusCode, String)> {
+        let endpoint = self.pool.url(0);
+        self.pool.record_attempt(0);
+        match self.post_raw_at(endpoint, method, body).await {
+            Ok((status, text)) => {
+                if endpoint_fault(status, &text) {
+                    self.pool.record_failure(0, now_ms());
+                } else {
+                    self.pool.record_success(0, now_ms());
+                }
+                Ok((endpoint.to_string(), status, text))
+            }
+            Err(fault) => {
+                self.pool.record_failure(0, now_ms());
+                Err(fault)
+            }
+        }
+    }
+
+    /// One endpoint's attempt for the shared executor: the pool records the
+    /// health and owns the rotation; this owns one try and its classification.
+    async fn attempt_endpoint(
+        &self,
+        index: usize,
+        method: &str,
+        body: &RawValue,
+    ) -> Result<(reqwest::StatusCode, String)> {
+        let endpoint = self.pool.url(index);
+        match self.post_raw_at(endpoint, method, body).await {
+            Ok((status, text)) if !endpoint_fault(status, &text) => Ok((status, text)),
+            Ok((status, text)) => {
+                tracing::debug!(
+                    endpoint = %endpoint,
+                    method,
+                    status = status.as_u16(),
+                    "endpoint fault; cooling it down and trying the next endpoint"
+                );
+                Err(Error::EndpointFault {
+                    endpoint: endpoint.to_string(),
+                    method: method.to_string(),
+                    detail: format!("HTTP {}: {}", status.as_u16(), truncate(&text, 300)),
+                })
+            }
+            Err(fault) => {
+                tracing::debug!(
+                    endpoint = %endpoint,
+                    method,
+                    error = %fault,
+                    "endpoint transport fault; cooling it down and trying the next endpoint"
+                );
+                Err(fault)
+            }
+        }
+    }
+}
+
+/// One JSON-RPC request against one endpoint, for the shared pool executor.
+struct RpcAttempt<'a> {
+    rpc: &'a Rpc,
+    method: &'a str,
+    body: &'a RawValue,
+}
+
+impl Attempt for RpcAttempt<'_> {
+    type Output = (reqwest::StatusCode, String);
+    type Fault = Error;
+
+    async fn attempt(&self, index: usize) -> AttemptOutcome<Self::Output, Self::Fault> {
+        match self
+            .rpc
+            .attempt_endpoint(index, self.method, self.body)
+            .await
+        {
+            Ok(answer) => AttemptOutcome::Served(answer),
+            Err(fault) => AttemptOutcome::Fault(fault),
+        }
+    }
+}
+
+/// The pool's typed exhaustion in the client's error taxonomy. A cooling
+/// pool is not an endpoint answer: it is a retry-later signal, kept distinct
+/// so a caller can honour `Retry-After` instead of treating it as a refusal.
+fn pool_error(error: PoolError<Error>) -> Error {
+    match error {
+        PoolError::Exhausted { attempts, last } => Error::EndpointsExhausted {
+            attempts,
+            last: Box::new(last.unwrap_or(Error::NoEndpoints)),
+        },
+        PoolError::Cooling { retry_after_ms } => Error::PoolCooling { retry_after_ms },
+    }
+}
+
+impl Rpc {
     /// The JSON-RPC-over-HTTP boundary rule: the body is the node's answer
     /// whenever it parses as one, whatever the HTTP status; the status only
     /// classifies bodies that are not answers (gateway pages, auth walls,
     /// empty bodies). A JSON-RPC error on a non-2xx status is the node's
     /// typed refusal, not a transport fault.
-    fn classify(&self, method: &str, status: reqwest::StatusCode, text: &str) -> Result<ResponsePacket> {
+    fn classify(
+        endpoint: &str,
+        method: &str,
+        status: reqwest::StatusCode,
+        text: &str,
+    ) -> Result<ResponsePacket> {
         match serde_json::from_str::<ResponsePacket>(text) {
             Ok(packet) => Ok(packet),
-            Err(_) if !status.is_success() => Err(self.status(method, status.as_u16(), text)),
-            Err(source) => Err(self.decode(method, source)),
+            Err(_) if !status.is_success() => {
+                Err(Self::status(endpoint, method, status.as_u16(), text))
+            }
+            Err(source) => Err(Self::decode(endpoint, method, source)),
         }
     }
 
@@ -328,29 +680,31 @@ impl Rpc {
 
     /// One call's answer: exactly one `Response` (a batch body here is corrupt).
     fn answer(
-        &self,
+        endpoint: &str,
         method: &str,
         status: reqwest::StatusCode,
         text: &str,
     ) -> Result<Box<RawValue>> {
-        match self.classify(method, status, text)? {
-            ResponsePacket::Single(response) => {
-                Self::response_result(response).map_err(|payload| self.rpc(method, payload))
-            }
-            ResponsePacket::Batch(_) => Err(self.decode(
+        match Self::classify(endpoint, method, status, text)? {
+            ResponsePacket::Single(response) => Self::response_result(response)
+                .map_err(|payload| Self::rpc(endpoint, method, payload)),
+            ResponsePacket::Batch(_) => Err(Self::decode(
+                endpoint,
                 method,
                 serde_json::Error::custom("a batch answer to a single call"),
             )),
         }
     }
 
-    /// Single call, raw result.
+    /// Single call, raw result. On a pooled client the call starts at a
+    /// random endpoint and fails over; the answer's own endpoint names any
+    /// JSON-RPC refusal.
     pub async fn call_raw(&self, method: &str, params: impl Serialize) -> Result<Box<RawValue>> {
-        let request = self.request(method, params)?;
-        let (status, text) = self
+        let request = self.request(self.url(), method, params)?;
+        let (endpoint, status, text) = self
             .post_raw_throttled(method, &request.take_request())
             .await?;
-        self.answer(method, status, &text)
+        Self::answer(&endpoint, method, status, &text)
     }
 
     pub async fn call<T: DeserializeOwned>(
@@ -359,7 +713,7 @@ impl Rpc {
         params: impl Serialize,
     ) -> Result<T> {
         let value = self.call_raw(method, params).await?;
-        serde_json::from_str(value.get()).map_err(|source| self.decode(method, source))
+        serde_json::from_str(value.get()).map_err(|source| Self::decode(self.url(), method, source))
     }
 
     /// Result may legitimately be null (e.g. `eth_getBlockByNumber` of a
@@ -426,9 +780,9 @@ impl Rpc {
             let chunk = match r {
                 Some(r) => r?,
                 None => {
-                    return Err(self.batch_task_error_text(format!(
-                        "batch chunk {idx} never completed"
-                    )))
+                    return Err(
+                        self.batch_task_error_text(format!("batch chunk {idx} never completed"))
+                    )
                 }
             };
             out.extend(chunk);
@@ -444,7 +798,7 @@ impl Rpc {
 
     fn batch_task_error_text(&self, message: String) -> Error {
         Error::Rpc {
-            endpoint: self.url.clone(),
+            endpoint: self.url().to_string(),
             method: "batch".to_string(),
             payload: RpcError {
                 code: -1,
@@ -482,7 +836,8 @@ impl Rpc {
         method: &'static str,
         params: &[P],
     ) -> Result<Vec<Option<T>>> {
-        self.batch_typed_limited(method, params, BATCH_MAX_ITEMS).await
+        self.batch_typed_limited(method, params, BATCH_MAX_ITEMS)
+            .await
     }
 
     /// [`Self::batch_typed`] with an explicit sub-batch item cap: receipt-
@@ -531,11 +886,11 @@ impl Rpc {
             match item {
                 Ok(raw) => out.push(
                     serde_json::from_str::<Option<Box<RawValue>>>(raw.get())
-                        .map_err(|source| self.decode("batch", source))?,
+                        .map_err(|source| Self::decode(self.url(), "batch", source))?,
                 ),
                 Err(payload) => {
                     return Err(Error::Rpc {
-                        endpoint: self.url.clone(),
+                        endpoint: self.url().to_string(),
                         method: "batch".to_string(),
                         payload,
                     })
@@ -554,9 +909,9 @@ impl Rpc {
     ) -> Result<Option<T>> {
         match item {
             Ok(raw) => serde_json::from_str::<Option<T>>(raw.get())
-                .map_err(|source| self.decode(method, source)),
+                .map_err(|source| Self::decode(self.url(), method, source)),
             Err(payload) => Err(Error::Rpc {
-                endpoint: self.url.clone(),
+                endpoint: self.url().to_string(),
                 method: method.to_string(),
                 payload,
             }),
@@ -576,10 +931,10 @@ impl Rpc {
                 call.serialize()
             })
             .collect::<serde_json::Result<Vec<SerializedRequest>>>()
-            .map_err(|source| self.encode("batch", source))?;
+            .map_err(|source| Self::encode(self.url(), "batch", source))?;
         let body = RequestPacket::Batch(requests)
             .serialize()
-            .map_err(|source| self.encode("batch", source))?;
+            .map_err(|source| Self::encode(self.url(), "batch", source))?;
         Ok((ids, body))
     }
 
@@ -588,12 +943,12 @@ impl Rpc {
     /// HTTP status); a body that does not is a `BatchDecode` naming the
     /// request text, and a single answer to a batch call is corrupt.
     async fn post_batch(&self, body: &RawValue) -> Result<Vec<Response>> {
-        let (status, text) = self.post_raw_throttled("batch", body).await?;
-        let packet = match self.classify("batch", status, &text) {
+        let (endpoint, status, text) = self.post_raw_throttled("batch", body).await?;
+        let packet = match Self::classify(&endpoint, "batch", status, &text) {
             Ok(packet) => packet,
             Err(Error::Decode { source, .. }) => {
                 return Err(Error::BatchDecode {
-                    endpoint: self.url.clone(),
+                    endpoint,
                     request: truncate(body.get(), 600).to_string(),
                     source,
                 })
@@ -607,8 +962,9 @@ impl Rpc {
             // surfaced as such, never as a decode fault; a single *success*
             // is a server that mishandled the batch.
             ResponsePacket::Single(response) => match Self::response_result(response) {
-                Err(payload) => Err(self.rpc("batch", payload)),
-                Ok(_) => Err(self.decode(
+                Err(payload) => Err(Self::rpc(&endpoint, "batch", payload)),
+                Ok(_) => Err(Self::decode(
+                    &endpoint,
                     "batch",
                     serde_json::Error::custom("a single answer to a batch call"),
                 )),
@@ -678,11 +1034,63 @@ impl Rpc {
         Ok(quantity.to::<u64>())
     }
 
+    /// `eth_chainId` against **one** endpoint, outside the pool's rotation:
+    /// the boot identity assert must name the provider that answered wrong,
+    /// not whichever endpoint the rotation picked.
+    pub async fn chain_id_at(&self, index: usize) -> Result<u64> {
+        let endpoint = self.pool.url(index);
+        let request = self.request(endpoint, "eth_chainId", NO_PARAMS)?;
+        self.pool.record_attempt(index);
+        let (status, text) = self
+            .post_raw_at(endpoint, "eth_chainId", &request.take_request())
+            .await?;
+        match Self::answer(endpoint, "eth_chainId", status, &text) {
+            Ok(value) => {
+                let quantity: U64 = serde_json::from_str(value.get())
+                    .map_err(|source| Self::decode(endpoint, "eth_chainId", source))?;
+                self.pool.record_success(index, now_ms());
+                Ok(quantity.to::<u64>())
+            }
+            Err(fault) => {
+                self.pool.record_failure(index, now_ms());
+                Err(fault)
+            }
+        }
+    }
+
+    /// Assert the pool's reachable endpoints are `expected`. A wrong-chain
+    /// provider must fail the boot, never poison a read. An unreachable
+    /// endpoint is a *fault*, not a wrong chain: it is cooled by
+    /// [`Self::chain_id_at`] and the pool boots on the remaining endpoints
+    /// (failover is the point), but a pool with no reachable endpoint is a
+    /// boot refusal.
+    pub async fn verify_chain(&self, expected: u64) -> Result<()> {
+        let mut verified = 0u32;
+        let mut last: Option<Error> = None;
+        for index in 0..self.pool.len() {
+            match self.chain_id_at(index).await {
+                Ok(got) if got == expected => verified += 1,
+                Ok(got) => {
+                    return Err(Error::WrongChain {
+                        endpoint: self.pool.url(index).to_string(),
+                        got,
+                        want: expected,
+                    });
+                }
+                Err(fault) => last = Some(fault),
+            }
+        }
+        if verified == 0 {
+            return Err(last.unwrap_or(Error::NoEndpoints));
+        }
+        Ok(())
+    }
+
     pub async fn block_by_number(&self, n: u64, txs: Txs) -> Result<Block> {
         self.call_opt(BLOCK_BY_NUMBER, (U64::from(n), txs.full()))
             .await?
             .ok_or_else(|| Error::BlockMissing {
-                endpoint: self.url.clone(),
+                endpoint: self.url().to_string(),
                 n,
             })
     }
@@ -707,7 +1115,7 @@ impl Rpc {
             .next()
             .flatten()
             .ok_or_else(|| Error::BlockMissing {
-                endpoint: self.url.clone(),
+                endpoint: self.url().to_string(),
                 n,
             })
             .and_then(|raw| self.decode_item("head_and_block", Some(raw)))?;
@@ -722,9 +1130,13 @@ impl Rpc {
         raw: Option<Box<RawValue>>,
     ) -> Result<T> {
         let raw = raw.ok_or_else(|| {
-            self.decode(method, serde_json::Error::custom("a null answer"))
+            Self::decode(
+                self.url(),
+                method,
+                serde_json::Error::custom("a null answer"),
+            )
         })?;
-        serde_json::from_str(raw.get()).map_err(|source| self.decode(method, source))
+        serde_json::from_str(raw.get()).map_err(|source| Self::decode(self.url(), method, source))
     }
 
     /// `tag` is the protocol's own block-parameter string: `latest`,
@@ -790,8 +1202,11 @@ impl Rpc {
     /// (the latest-state read: the probes and the composed-BAL parity compare
     /// the devnet chain against the parent).
     pub async fn call_latest(&self, to: Address, data: &Bytes) -> Result<Bytes> {
-        self.call(ETH_CALL, (Self::call_tx(to, data), BlockNumberOrTag::Latest))
-            .await
+        self.call(
+            ETH_CALL,
+            (Self::call_tx(to, data), BlockNumberOrTag::Latest),
+        )
+        .await
     }
 
     /// Encode a typed call, run it against the current state, and decode the
@@ -829,7 +1244,8 @@ impl Rpc {
     }
 
     pub async fn balance_at(&self, addr: Address, block: u64) -> Result<U256> {
-        self.call(crate::ETH_GET_BALANCE, (addr, U64::from(block))).await
+        self.call(crate::ETH_GET_BALANCE, (addr, U64::from(block)))
+            .await
     }
 
     pub async fn storage_at(&self, addr: Address, slot: U256, block: u64) -> Result<B256> {
@@ -917,19 +1333,21 @@ impl Rpc {
         Ok(match key {
             Key::Storage { .. } => {
                 let word: B256 = serde_json::from_str(raw.get())
-                    .map_err(|source| self.decode(method, source))?;
+                    .map_err(|source| Self::decode(self.url(), method, source))?;
                 Value::Storage(U256::from_be_bytes(word.0))
             }
             Key::Balance(_) => Value::Balance(
-                serde_json::from_str(raw.get()).map_err(|source| self.decode(method, source))?,
+                serde_json::from_str(raw.get())
+                    .map_err(|source| Self::decode(self.url(), method, source))?,
             ),
             Key::Nonce(_) => {
                 let quantity: U64 = serde_json::from_str(raw.get())
-                    .map_err(|source| self.decode(method, source))?;
+                    .map_err(|source| Self::decode(self.url(), method, source))?;
                 Value::Nonce(quantity.to::<u64>())
             }
             Key::Code(_) => Value::Code(
-                serde_json::from_str(raw.get()).map_err(|source| self.decode(method, source))?,
+                serde_json::from_str(raw.get())
+                    .map_err(|source| Self::decode(self.url(), method, source))?,
             ),
         })
     }
@@ -937,7 +1355,8 @@ impl Rpc {
     /// A null answer to a key read: the same refusal the single-key path's
     /// decode raises.
     fn null_key_read(&self) -> Error {
-        self.decode(
+        Self::decode(
+            self.url(),
             "batch",
             serde_json::Error::custom("a null answer to a key read"),
         )
@@ -954,11 +1373,8 @@ impl Rpc {
     }
 
     pub async fn trace_tx_prestate(&self, hash: B256) -> Result<GethTrace> {
-        self.call(
-            "debug_traceTransaction",
-            (hash, prestate_diff_options()),
-        )
-        .await
+        self.call("debug_traceTransaction", (hash, prestate_diff_options()))
+            .await
     }
 
     /// `debug_traceBlockByNumber` with the callTracer: one call-frame tree per
@@ -967,18 +1383,23 @@ impl Rpc {
     /// sender).
     pub async fn trace_block_calls(&self, n: u64) -> Result<Vec<TraceResult>> {
         let options = GethDebugTracingOptions::call_tracer(Default::default());
-        self.call(crate::TRACE_BLOCK_METHOD, (U64::from(n), options)).await
+        self.call(crate::TRACE_BLOCK_METHOD, (U64::from(n), options))
+            .await
     }
 
     // ---- anvil namespace -----------------------------------------------
 
     pub async fn anvil_set_automine(&self, mode: Automine) -> Result<()> {
+        self.ensure_write()?;
+
         self.call_raw("anvil_setAutomine", (matches!(mode, Automine::On),))
             .await?;
         Ok(())
     }
 
     pub async fn anvil_mine(&self, blocks: u64) -> Result<()> {
+        self.ensure_write()?;
+
         self.call_raw("anvil_mine", (U64::from(blocks),)).await?;
         Ok(())
     }
@@ -1000,6 +1421,8 @@ impl Rpc {
     /// Set the next block's timestamp alone (the devnet prepend block: the
     /// diffs' own context alignment follows separately).
     pub async fn anvil_set_next_block_timestamp(&self, timestamp: u64) -> Result<()> {
+        self.ensure_write()?;
+
         self.call_raw("anvil_setNextBlockTimestamp", (U64::from(timestamp),))
             .await?;
         Ok(())
@@ -1008,7 +1431,8 @@ impl Rpc {
     /// Align the next block's context fields T owns (timestamp/coinbase/
     /// prevRandao/baseFee); the gas limit stays the devnet's own.
     pub async fn set_next_block_context(&self, timestamp: u64, header: &Header) -> Result<()> {
-        self.apply_env_calls(Self::context_calls(timestamp, header)?).await
+        self.apply_env_calls(Self::context_calls(timestamp, header)?)
+            .await
     }
 
     /// The context fields shared by both chains (the parent header verbatim).
@@ -1030,10 +1454,12 @@ impl Rpc {
     /// Send the alignment batch and surface the first refusal with its method.
     /// Batched because single writes are 9.6-18 ms each (measured).
     async fn apply_env_calls(&self, calls: Vec<Call>) -> Result<()> {
+        self.ensure_write()?;
+
         let results = self.batch(&calls).await?;
         for (call, result) in calls.iter().zip(results) {
             if let Err(payload) = result {
-                return Err(self.rpc(&call.meta.method, payload));
+                return Err(Self::rpc(self.url(), &call.meta.method, payload));
             }
         }
         Ok(())
@@ -1075,11 +1501,14 @@ impl Rpc {
     /// the epoch rule — new base = new epoch, same base = restore). Always
     /// explicit: the measured no-params form drops the fork entirely.
     pub async fn anvil_reset_fork_latest(&self, url: &str) -> Result<()> {
+        self.ensure_write()?;
+
         let forking = Forking {
             json_rpc_url: Some(url.to_string()),
             block_number: None,
         };
-        self.call_raw("anvil_reset", (ResetParams { forking },)).await?;
+        self.call_raw("anvil_reset", (ResetParams { forking },))
+            .await?;
         Ok(())
     }
 
@@ -1093,19 +1522,26 @@ impl Rpc {
     /// `anvil_impersonateAccount` — the devnet's substitution path (the
     /// attester manager, the bridge's system-address senders).
     pub async fn anvil_impersonate_account(&self, addr: Address) -> Result<()> {
+        self.ensure_write()?;
+
         self.call_raw("anvil_impersonateAccount", (addr,)).await?;
         Ok(())
     }
 
     /// `anvil_stopImpersonatingAccount`.
     pub async fn anvil_stop_impersonating_account(&self, addr: Address) -> Result<()> {
-        self.call_raw("anvil_stopImpersonatingAccount", (addr,)).await?;
+        self.ensure_write()?;
+
+        self.call_raw("anvil_stopImpersonatingAccount", (addr,))
+            .await?;
         Ok(())
     }
 
     /// `anvil_setBalance` — the impersonated senders (the bridge's system
     /// addresses) need gas on V.
     pub async fn anvil_set_balance(&self, addr: Address, balance: U256) -> Result<()> {
+        self.ensure_write()?;
+
         self.call_raw("anvil_setBalance", (addr, balance)).await?;
         Ok(())
     }
@@ -1113,12 +1549,16 @@ impl Rpc {
     /// `eth_sendTransaction` from an arbitrary sender (V runs
     /// auto-impersonate): the bridge's system-address completion path.
     pub async fn send_transaction(&self, tx: TransactionRequest) -> Result<B256> {
+        self.ensure_write()?;
+
         self.call("eth_sendTransaction", (tx,)).await
     }
 
     /// One storage word, silently (the venue driver's chain-instance canary;
     /// the same measured wire rules as [`crate::apply_writes`]' storage form).
     pub async fn anvil_set_storage_at(&self, addr: Address, slot: U256, value: B256) -> Result<()> {
+        self.ensure_write()?;
+
         self.call_raw(
             "anvil_setStorageAt",
             (addr, B256::from(slot.to_be_bytes::<32>()), value),
@@ -1179,17 +1619,13 @@ mod tests {
     use super::*;
     use crate::error::Error;
 
-    fn client() -> Rpc {
-        Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).expect("client builds")
-    }
-
     /// Measured: drpc answers a JSON-RPC `-32601` on HTTP 400. The body is
     /// the node's answer, so the typed predicate must see it — otherwise the
     /// BAL→trace fallback never engages and the engine retries forever.
     #[test]
     fn jsonrpc_error_on_non_2xx_is_the_nodes_answer() {
-        let err = client()
-            .answer(
+        let err = Rpc::answer(
+                "http://127.0.0.1:1",
                 "eth_getBlockAccessList",
                 reqwest::StatusCode::BAD_REQUEST,
                 r#"{"id":7,"jsonrpc":"2.0","error":{"code":-32601,"message":"method is not available"}}"#,
@@ -1205,22 +1641,26 @@ mod tests {
     /// A gateway page on a 5xx is not an answer: the HTTP status classifies it.
     #[test]
     fn non_answer_body_on_non_2xx_keeps_the_status_class() {
-        let err = client()
-            .answer(
-                "eth_call",
-                reqwest::StatusCode::BAD_GATEWAY,
-                "<html>bad gateway</html>",
-            )
-            .expect_err("a page is not an answer");
+        let err = Rpc::answer(
+            "http://127.0.0.1:1",
+            "eth_call",
+            reqwest::StatusCode::BAD_GATEWAY,
+            "<html>bad gateway</html>",
+        )
+        .expect_err("a page is not an answer");
         assert!(matches!(err, Error::Status { status: 502, .. }), "{err}");
     }
 
     /// A 2xx body with neither `result` nor `error` is not a JSON-RPC answer.
     #[test]
     fn non_answer_body_on_2xx_is_corrupt() {
-        let err = client()
-            .answer("eth_call", reqwest::StatusCode::OK, r#"{"message":"hello"}"#)
-            .expect_err("not an answer");
+        let err = Rpc::answer(
+            "http://127.0.0.1:1",
+            "eth_call",
+            reqwest::StatusCode::OK,
+            r#"{"message":"hello"}"#,
+        )
+        .expect_err("not an answer");
         assert!(matches!(err, Error::Decode { .. }), "{err}");
     }
 
@@ -1228,27 +1668,240 @@ mod tests {
     /// null on success), not corruption and not a method-not-found.
     #[test]
     fn null_result_is_an_empty_answer() {
-        let value = client()
-            .answer(
-                "anvil_setAutomine",
-                reqwest::StatusCode::OK,
-                r#"{"id":1,"jsonrpc":"2.0","result":null}"#,
-            )
-            .expect("null result parses");
+        let value = Rpc::answer(
+            "http://127.0.0.1:1",
+            "anvil_setAutomine",
+            reqwest::StatusCode::OK,
+            r#"{"id":1,"jsonrpc":"2.0","result":null}"#,
+        )
+        .expect("null result parses");
         assert_eq!(value.get(), "null");
-        assert!(serde_json::from_str::<Option<()>>(value.get()).unwrap().is_none());
+        assert!(serde_json::from_str::<Option<()>>(value.get())
+            .unwrap()
+            .is_none());
+    }
+
+    /// The pool validates, trims, and deduplicates its endpoints.
+    #[test]
+    fn a_pool_is_validated_and_deduplicated() {
+        let pool = Rpc::with_urls(
+            &[
+                " http://a:8545/ ".to_string(),
+                "http://a:8545".to_string(),
+                "https://b:443".to_string(),
+            ],
+            Duration::from_secs(1),
+        )
+        .expect("a valid pool");
+        assert_eq!(pool.urls(), ["http://a:8545", "https://b:443"]);
+        assert_eq!(pool.url(), "http://a:8545");
+        assert!(Rpc::with_urls(&[], Duration::from_secs(1)).is_err());
+        assert!(Rpc::with_urls(&["ftp://a".to_string()], Duration::from_secs(1)).is_err());
+    }
+
+    /// A multi-endpoint read pool is not a write surface: a post-send timeout
+    /// is ambiguous, and failing over would duplicate a non-idempotent write.
+    #[tokio::test]
+    async fn a_pooled_read_client_refuses_writes() {
+        let pool = Rpc::with_urls(
+            &["http://a:8545".to_string(), "http://b:8545".to_string()],
+            Duration::from_secs(1),
+        )
+        .expect("a valid pool");
+        let error = pool
+            .anvil_set_balance(Address::ZERO, U256::ZERO)
+            .await
+            .expect_err("a pooled write is refused");
+        assert!(matches!(error, Error::PooledWrite), "{error}");
+    }
+
+    /// The boot identity assert: a wrong-chain endpoint refuses the pool even
+    /// when another endpoint is correct; an unreachable one is a fault the
+    /// pool can fail over from, but a pool with no reachable endpoint fails.
+    #[tokio::test]
+    async fn a_wrong_chain_endpoint_refuses_the_pool() {
+        let (wrong, wrong_server) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2b"}"#);
+        let (right, right_server) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2a"}"#);
+        let pool = Rpc::with_urls(&[wrong, right], Duration::from_secs(2)).expect("a valid pool");
+        let error = pool.verify_chain(42).await.expect_err("chain 43 is not 42");
+        assert!(
+            matches!(
+                error,
+                Error::WrongChain {
+                    got: 43,
+                    want: 42,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        wrong_server.join().expect("the wrong server exits");
+        right_server.join().expect("the right server exits");
+
+        let (right, right_server) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2a"}"#);
+        let pool = Rpc::with_urls(&[right], Duration::from_secs(2)).expect("a valid pool");
+        pool.verify_chain(42)
+            .await
+            .expect("the right chain is accepted");
+        right_server.join().expect("the right server exits");
+    }
+
+    /// A pool with a dead endpoint and a live one succeeds; the live answer is
+    /// the call's answer regardless of the random start.
+    #[tokio::test]
+    async fn a_pool_fails_over_past_a_dead_endpoint() {
+        let (live, server) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2a"}"#);
+        let pool = Rpc::with_urls(
+            &["http://127.0.0.1:1".to_string(), live],
+            Duration::from_secs(2),
+        )
+        .expect("a valid pool");
+        let value: U64 = pool
+            .call("eth_blockNumber", NO_PARAMS)
+            .await
+            .expect("the live endpoint answers");
+        assert_eq!(value.to::<u64>(), 42);
+        server.join().expect("the test server exits");
+    }
+
+    /// A retryable refusal is an endpoint fault, not the node's answer: the
+    /// pool moves to the next endpoint and returns its result.
+    #[tokio::test]
+    async fn a_pool_fails_over_past_a_throttled_endpoint() {
+        let (throttled, first) = serve_once(
+            r#"{"id":1,"jsonrpc":"2.0","error":{"code":-32005,"message":"rate limited"}}"#,
+        );
+        let (live, second) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2a"}"#);
+        let pool =
+            Rpc::with_urls(&[throttled, live], Duration::from_secs(2)).expect("a valid pool");
+        let value: U64 = pool
+            .call("eth_blockNumber", NO_PARAMS)
+            .await
+            .expect("the live endpoint answers");
+        assert_eq!(value.to::<u64>(), 42);
+        first.join().expect("the throttled server exits");
+        second.join().expect("the live server exits");
+    }
+
+    /// An endpoint's plan refusal is a fault (the next endpoint can answer
+    /// the same body), while a method-level error is the node's answer.
+    #[test]
+    fn a_plan_refusal_is_an_endpoint_fault_but_a_method_error_is_not() {
+        assert!(endpoint_policy_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":31,"message":"Batch of more than 3 requests are not allowed on free plan, to use this feature register paid account at drpc.org"}}"#
+        ));
+        assert!(endpoint_policy_refusal(
+            r#"[{"jsonrpc":"2.0","id":1,"error":{"code":31,"message":"free plan"}}]"#
+        ));
+        assert!(!endpoint_policy_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#
+        ));
+        assert!(!endpoint_policy_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"result":"0x2a"}"#
+        ));
+    }
+
+    /// A provider's archive/retention limit is a capability refusal, not the
+    /// method's answer: another endpoint can serve the same block. A
+    /// deterministic revert stays the node's answer.
+    #[test]
+    fn a_capability_refusal_fails_over_but_a_revert_does_not() {
+        assert!(endpoint_capability_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"unsupported block number"}}"#
+        ));
+        assert!(endpoint_capability_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"pruned history unavailable: requested 26293001, earliest 26295128"}}"#
+        ));
+        assert!(endpoint_capability_refusal(
+            r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"missing trie node"}}]"#
+        ));
+        assert!(!endpoint_capability_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}"#
+        ));
+        assert!(!endpoint_capability_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#
+        ));
+        assert!(endpoint_fault(
+            reqwest::StatusCode::OK,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"unsupported block number"}}"#
+        ));
+        assert!(!endpoint_fault(
+            reqwest::StatusCode::OK,
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}"#
+        ));
+    }
+
+    /// A pool fails over past a batch plan refusal: the same body is answered
+    /// by the next endpoint (measured live: drpc's free plan refuses a batch
+    /// of more than three, the official RPC answers twenty).
+    #[tokio::test]
+    async fn a_pool_fails_over_past_a_batch_plan_refusal() {
+        let (limited, first) = serve_once(
+            r#"{"id":1,"jsonrpc":"2.0","error":{"code":31,"message":"Batch of more than 3 requests are not allowed on free plan"}}"#,
+        );
+        let (live, second) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2a"}"#);
+        let pool = Rpc::with_urls(&[limited, live], Duration::from_secs(2)).expect("a valid pool");
+        // The pool's order contains both endpoints, so whichever it starts
+        // with, the refusal is skipped and the live endpoint answers.
+        let value: U64 = pool
+            .call("eth_blockNumber", NO_PARAMS)
+            .await
+            .expect("the live endpoint answers");
+        assert_eq!(value.to::<u64>(), 42);
+        first.join().expect("the refusing server exits");
+        second.join().expect("the live server exits");
+    }
+
+    /// One HTTP request's answer, on a std thread: the smallest server that
+    /// exercises the transport without a test-only dependency.
+    fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("local address");
+        let handle = std::thread::spawn(move || {
+            // A successful failover may never reach this endpoint (the live
+            // one answered first). Wait bounded, then exit: a leaked accept
+            // would hang the test's join, not the code under test.
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking listener");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+        (format!("http://{address}"), handle)
     }
 
     /// A batch body answering a single call is corrupt, not a transport fault.
     #[test]
     fn batch_body_for_single_call_is_corrupt() {
-        let err = client()
-            .answer(
-                "eth_call",
-                reqwest::StatusCode::OK,
-                r#"[{"id":1,"jsonrpc":"2.0","result":"0x"}]"#,
-            )
-            .expect_err("a batch is not a single answer");
+        let err = Rpc::answer(
+            "http://127.0.0.1:1",
+            "eth_call",
+            reqwest::StatusCode::OK,
+            r#"[{"id":1,"jsonrpc":"2.0","result":"0x"}]"#,
+        )
+        .expect_err("a batch is not a single answer");
         assert!(matches!(err, Error::Decode { .. }), "{err}");
     }
 }

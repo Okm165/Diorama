@@ -1,8 +1,9 @@
 //! The instance file's shape + cross-validation (`check`, §19.5).
 use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
+use crate::endpoints::{EndpointGroup, Endpoints, WsEndpoints, HTTPS_SCHEME, HTTP_SCHEME};
 use crate::sections::{
     CctpSection, EngineAnvil, EngineSection, FeedBridgeSection, Services, VenueSimSection,
 };
@@ -21,6 +22,14 @@ const MAINNET_ENGINE_REQUIRED: &str = "profile \"mainnet\" requires [services.en
 pub struct Instance {
     pub instance: InstanceMeta,
     pub chains: Chains,
+    /// The deployment's named endpoint groups: the single home of every URL
+    /// list. A field writes `@name`; the loader expands it before validation.
+    #[serde(default)]
+    pub endpoints: BTreeMap<String, EndpointGroup>,
+    /// The shared endpoint-pool policy (rounds, cooldown, attempt budget).
+    /// Every lane — JSON-RPC, REST, WS, beacon — reads this one table.
+    #[serde(default)]
+    pub endpoint_defaults: diorama_anvil::PoolPolicy,
     /// The watched addresses: the parent-diff scope on the mainnet profile,
     /// and the account-field scope of the venue's poll follow (both mirrors
     /// follow their parent; the mechanisms differ — see
@@ -36,6 +45,11 @@ pub struct InstanceMeta {
     pub name: String,
     pub namespace: String,
     pub profile: Profile,
+    /// The optional project specialization file (a path, or a name resolved
+    /// beside the instance as `project.toml`). Generic mirrors leave it
+    /// unset; a product deployment points at its ignored overlay.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -43,6 +57,10 @@ pub struct InstanceMeta {
 pub enum Profile {
     Mainnet,
     Venue,
+    /// A standalone CCTP bridge instance: no chain, engine or simulator
+    /// sections, only `[services.cctp_bridge]`. One process = one bridge;
+    /// several bridges compose as several instances.
+    Cctp,
 }
 
 /// `[chains]`: one entry per chain the mirror serves. Exactly one is present
@@ -60,7 +78,12 @@ pub struct Chains {
 #[serde(deny_unknown_fields)]
 pub struct ChainL1 {
     pub kind: ChainKind,
-    pub source_url: String,
+    /// The Ethereum source's read endpoints, in preference order. A single
+    /// string (`source_url = "${RETH_URL}"`) and a list are both accepted;
+    /// the primary (first) is the one anvil forks from and `/admin/epoch`
+    /// re-pins against.
+    #[serde(alias = "source_url")]
+    pub source_urls: Endpoints,
     pub follow: FollowHead,
     pub follow_margin_blocks: u64,
     /// Blocks between the follow head and the fork base; the single home of
@@ -77,12 +100,20 @@ pub struct ChainL1 {
 #[serde(deny_unknown_fields)]
 pub struct ChainVenue {
     pub kind: ChainKind,
-    /// The EVM RPC (V's fork source).
-    pub source_url: String,
-    /// The info REST API the simulator's market plane reads.
-    pub api_url: String,
-    /// The websocket API the simulator's market plane subscribes to.
-    pub ws_url: String,
+    /// The HyperEVM read endpoints, in preference order. The engine's source
+    /// client fans out over all of them (random start, next-on-failure); the
+    /// primary (first) is the one anvil V forks from and `/admin/epoch`
+    /// re-pins against.
+    #[serde(alias = "source_url")]
+    pub source_urls: Endpoints,
+    /// The info REST API pool the simulator's market plane reads. A single
+    /// `api_url` is the one-endpoint form.
+    #[serde(alias = "api_url")]
+    pub api_urls: Endpoints,
+    /// The websocket pool the simulator's market plane subscribes to. A
+    /// single `ws_url` is the one-endpoint form.
+    #[serde(alias = "ws_url")]
+    pub ws_urls: WsEndpoints,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -126,29 +157,141 @@ const RETH_STATE_WINDOW_BLOCKS: u64 = 10_064;
 /// The safe-head lag the pin must clear (~32-64 blocks, measured).
 const MIN_FORK_OFFSET_BLOCKS: u64 = 64;
 
-/// Whether a profile-gated section is present (the coherence check's own
-/// vocabulary: `needs` wants `Present`, `forbids` wants `Missing`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Presence {
-    Present,
-    Missing,
-}
-
-impl Presence {
-    /// The section's own answer.
-    fn of(present: bool) -> Self {
-        if present {
-            Presence::Present
-        } else {
-            Presence::Missing
-        }
-    }
-}
-
 impl Instance {
     /// The watched addresses, as the engine's COW scope.
     pub fn watch_set(&self) -> HashSet<Address> {
         self.watchlist.iter().map(|w| w.address).collect()
+    }
+
+    /// Expand every `@name` endpoint reference against `[endpoints]`. The
+    /// loader calls this once, after `${VAR}` expansion and before `check`,
+    /// so every consumer sees concrete URL lists and the group table stays
+    /// the single home of the deployment's endpoints.
+    pub fn resolve_endpoints(&mut self) -> Result<(), ConfigError> {
+        let groups = self.endpoints.clone();
+        let mut issues = Vec::new();
+        self.resolve_chain_endpoints(&groups, &mut issues);
+        self.resolve_service_endpoints(&groups, &mut issues);
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigError::Invalid { issues })
+        }
+    }
+
+    /// The pool policy every lane shares.
+    pub fn endpoint_policy(&self) -> diorama_anvil::PoolPolicy {
+        self.endpoint_defaults
+    }
+
+    /// Recover the attributes of `urls` from the named groups. Expansion
+    /// deliberately keeps the URL list as the single value; this map restores
+    /// the roles/chain id/weight for the consumer that builds the pool. A URL
+    /// not named by any group is an unqualified endpoint (no declared roles,
+    /// no chain assert).
+    pub fn endpoint_specs(&self, urls: &[String]) -> Vec<diorama_anvil::EndpointSpec> {
+        urls.iter()
+            .map(|url| {
+                let group = self.endpoints.values().find(|group| {
+                    group
+                        .http
+                        .iter()
+                        .chain(group.ws.iter())
+                        .flat_map(|value| value.split(','))
+                        .any(|value| value.trim().trim_end_matches('/') == url)
+                });
+                match group {
+                    Some(group) => diorama_anvil::EndpointSpec {
+                        url: url.clone(),
+                        roles: group.roles.iter().cloned().collect(),
+                        chain_id: group.chain_id,
+                        weight: group.weight,
+                    },
+                    None => diorama_anvil::EndpointSpec::url(url.clone()),
+                }
+            })
+            .collect()
+    }
+
+    /// The chain sections' endpoint references.
+    fn resolve_chain_endpoints(
+        &mut self,
+        groups: &BTreeMap<String, EndpointGroup>,
+        issues: &mut Vec<String>,
+    ) {
+        if let Some(l1) = &mut self.chains.l1 {
+            if let Err(error) = l1.source_urls.expand(groups) {
+                issues.push(format!("chains.l1.source_urls: {error}"));
+            }
+        }
+        if let Some(venue) = &mut self.chains.venue {
+            if let Err(error) = venue.source_urls.expand(groups) {
+                issues.push(format!("chains.venue.source_urls: {error}"));
+            }
+            if let Err(error) = venue.api_urls.expand(groups) {
+                issues.push(format!("chains.venue.api_urls: {error}"));
+            }
+            if let Err(error) = venue.ws_urls.expand(groups) {
+                issues.push(format!("chains.venue.ws_urls: {error}"));
+            }
+        }
+    }
+
+    /// The service sections' endpoint references.
+    fn resolve_service_endpoints(
+        &mut self,
+        groups: &BTreeMap<String, EndpointGroup>,
+        issues: &mut Vec<String>,
+    ) {
+        if let Some(engine) = &mut self.services.engine {
+            expand_optional_http(
+                "services.engine.anvil.target_url",
+                &mut engine.anvil.target_url,
+                groups,
+                issues,
+            );
+            expand_http_list(
+                "services.engine.beacon.urls",
+                &mut engine.beacon.urls,
+                groups,
+                issues,
+            );
+            expand_optional_http(
+                "services.engine.source_sync.engine_url",
+                &mut engine.source_sync.engine_url,
+                groups,
+                issues,
+            );
+        }
+        if let Some(sim) = &mut self.services.venue_sim {
+            expand_optional_http(
+                "services.venue_sim.engine_admin_url",
+                &mut sim.engine_admin_url,
+                groups,
+                issues,
+            );
+            expand_optional_http(
+                "services.venue_sim.anvil_url",
+                &mut sim.anvil_url,
+                groups,
+                issues,
+            );
+        }
+        if let Some(cctp) = &mut self.services.cctp_bridge {
+            if let Some(t_url) = &mut cctp.t_url {
+                expand_http("services.cctp_bridge.t_url", t_url, groups, issues);
+            }
+            if let Some(v_url) = &mut cctp.v_url {
+                expand_http("services.cctp_bridge.v_url", v_url, groups, issues);
+            }
+            for (index, chain) in cctp.chains.iter_mut().enumerate() {
+                if let Err(error) = chain.rpc_urls.expand(groups) {
+                    issues.push(format!(
+                        "services.cctp_bridge.chains[{index}].rpc_urls: {error}"
+                    ));
+                }
+            }
+        }
     }
 
     /// Cross-validation. Every failure names the key and the reason.
@@ -164,38 +307,59 @@ impl Instance {
         }
     }
 
-    /// Exactly one profile's sections are present.
+    /// Exactly one profile's sections are present. A mirror process carries
+    /// one chain + one engine; a bridge process carries only its CCTP
+    /// section. Composition happens across instances (two venues, four
+    /// mainnets, several bridges), never inside one file.
     fn check_profile_coherence(&self, issues: &mut Vec<String>) {
-        let mainnet = self.instance.profile == Profile::Mainnet;
-        let profile = if mainnet { "mainnet" } else { "venue" };
-        let needs: &[(&str, Presence)] = if mainnet {
-            &[
-                ("[chains.l1]", Presence::of(self.chains.l1.is_some())),
-                ("[services.engine]", Presence::of(self.services.engine.is_some())),
-            ]
-        } else {
-            &[
-                ("[chains.venue]", Presence::of(self.chains.venue.is_some())),
-                ("[services.engine]", Presence::of(self.services.engine.is_some())),
-            ]
+        let (name, needs, forbids): (&str, &[&str], &[&str]) = match self.instance.profile {
+            Profile::Mainnet => (
+                "mainnet",
+                &["[chains.l1]", "[services.engine]"],
+                &[
+                    "[chains.venue]",
+                    "[services.venue_sim]",
+                    "[services.cctp_bridge]",
+                ],
+            ),
+            Profile::Venue => (
+                "venue",
+                &["[chains.venue]", "[services.engine]"],
+                &["[chains.l1]", "[services.cctp_bridge]"],
+            ),
+            Profile::Cctp => (
+                "cctp",
+                &["[services.cctp_bridge]"],
+                &[
+                    "[chains.l1]",
+                    "[chains.venue]",
+                    "[services.engine]",
+                    "[services.venue_sim]",
+                ],
+            ),
         };
-        for (section, presence) in needs {
-            if *presence == Presence::Missing {
-                issues.push(format!("profile \"{profile}\" requires {section}"));
+        for section in needs {
+            if !self.section_present(section) {
+                issues.push(format!("profile \"{name}\" requires {section}"));
             }
         }
-        let forbids: &[(&str, Presence)] = if mainnet {
-            &[
-                ("[chains.venue]", Presence::of(self.chains.venue.is_some())),
-                ("[services.venue_sim]", Presence::of(self.services.venue_sim.is_some())),
-            ]
-        } else {
-            &[("[chains.l1]", Presence::of(self.chains.l1.is_some()))]
-        };
-        for (section, presence) in forbids {
-            if *presence == Presence::Present {
-                issues.push(format!("profile \"{profile}\" must not carry {section}"));
+        for section in forbids {
+            if self.section_present(section) {
+                issues.push(format!("profile \"{name}\" must not carry {section}"));
             }
+        }
+    }
+
+    /// Whether a named section is present. One mapping for the profile
+    /// coherence rules, so a new section is added in one place.
+    fn section_present(&self, section: &str) -> bool {
+        match section {
+            "[chains.l1]" => self.chains.l1.is_some(),
+            "[chains.venue]" => self.chains.venue.is_some(),
+            "[services.engine]" => self.services.engine.is_some(),
+            "[services.venue_sim]" => self.services.venue_sim.is_some(),
+            "[services.cctp_bridge]" => self.services.cctp_bridge.is_some(),
+            _ => false,
         }
     }
 
@@ -217,15 +381,13 @@ impl Instance {
                     l1.fork_offset, RETH_STATE_WINDOW_BLOCKS
                 ));
             }
-            check_http_url("chains.l1.source_url", &l1.source_url, issues);
         }
         if let Some(venue) = &self.chains.venue {
             if venue.kind != ChainKind::Hyperliquid {
                 issues.push("chains.venue.kind must be \"hyperliquid\"".into());
             }
-            check_http_url("chains.venue.source_url", &venue.source_url, issues);
-            check_http_url("chains.venue.api_url", &venue.api_url, issues);
-            check_ws_url("chains.venue.ws_url", &venue.ws_url, issues);
+            check_http_urls("chains.venue.api_urls", &venue.api_urls, issues);
+            check_ws_urls("chains.venue.ws_urls", &venue.ws_urls, issues);
         }
     }
 
@@ -284,7 +446,7 @@ impl Instance {
 
     /// The mainnet profile's endpoints: the pre-context reads the run path
     /// needs (`Ctx::new` takes the sections itself).
-    pub fn mainnet_urls(&self) -> Result<(String, String), ConfigError> {
+    pub fn mainnet_urls(&self) -> Result<(Endpoints, String), ConfigError> {
         let (l1, engine) = take_pair(
             self.chains.l1.as_ref(),
             MAINNET_CHAIN_REQUIRED,
@@ -292,7 +454,7 @@ impl Instance {
             MAINNET_ENGINE_REQUIRED,
         )?;
         Ok((
-            l1.source_url.clone(),
+            l1.source_urls.clone(),
             required(
                 engine.anvil.target_url.clone(),
                 "profile \"mainnet\" requires [services.engine.anvil].target_url",
@@ -301,7 +463,7 @@ impl Instance {
     }
 
     /// The venue profile's endpoints (the fork source and anvil V).
-    pub fn venue_urls(&self) -> Result<(String, String), ConfigError> {
+    pub fn venue_urls(&self) -> Result<(Endpoints, String), ConfigError> {
         let (chain, engine) = take_pair(
             self.chains.venue.as_ref(),
             VENUE_CHAIN_REQUIRED,
@@ -312,7 +474,7 @@ impl Instance {
             engine.anvil.target_url.clone(),
             "profile \"venue\" requires [services.engine.anvil].target_url",
         )?;
-        Ok((chain.source_url.clone(), target_url))
+        Ok((chain.source_urls.clone(), target_url))
     }
 
     /// The instance as a TOML value (the shape the loader produced).
@@ -363,17 +525,28 @@ impl Instance {
     /// instance's own ports, under the manifests' Service names (`engine`,
     /// `venue-sim`, `cctp-bridge` — `k8s/base/engine.yaml`, `base/venue/`).
     fn client_env(&self) -> Result<Vec<String>, ConfigError> {
-        let mut out = match self.instance.profile {
-            Profile::Mainnet => self.client_env_mainnet()?,
-            Profile::Venue => self.client_env_venue()?,
-        };
-        // The bridge spans both mirrors: its Iris base is part of the block
-        // whichever profile the instance carries (the base, their
-        // client appends /v2/messages/... itself).
-        if let Some(cctp) = &self.services.cctp_bridge {
-            out.push(format!("IRIS_API_URL=http://cctp-bridge:{}", cctp.iris.port));
+        match self.instance.profile {
+            Profile::Mainnet => self.client_env_mainnet(),
+            Profile::Venue => self.client_env_venue(),
+            Profile::Cctp => self.client_env_cctp(),
         }
-        Ok(out)
+    }
+
+    /// The bridge's client block: the Iris base the DALOC relay points at
+    /// (the relay appends `/v2/messages/...` itself). The export is consumed
+    /// from the *client's* namespace, so the short service DNS name is
+    /// qualified with this instance's namespace.
+    fn client_env_cctp(&self) -> Result<Vec<String>, ConfigError> {
+        let cctp = self.services.cctp_bridge.as_ref().ok_or_else(|| {
+            mismatch("export-env client (cctp profile) requires [services.cctp_bridge]")
+        })?;
+        Ok(vec![format!(
+            "IRIS_API_URL={}",
+            cluster_url(
+                &format!("http://cctp-bridge:{}", cctp.iris.port),
+                &self.instance.namespace
+            )
+        )])
     }
 
     /// The mainnet profile's client block: the first chain's keys.
@@ -387,10 +560,15 @@ impl Instance {
             )
         })?;
         let t = resolved("ANVIL_T_URL", t_url)?;
+        let t = cluster_url(&t, &self.instance.namespace);
+        let admin = cluster_url(
+            &format!("http://engine:{}", engine.http.port),
+            &self.instance.namespace,
+        );
         Ok(vec![
             format!("CHAIN_RPC_URL={t}"),
             format!("CHAIN_WS_URL={}", ws_of(&t)),
-            format!("DIORAMA_ADMIN_URL=http://engine:{}", engine.http.port),
+            format!("DIORAMA_ADMIN_URL={admin}"),
         ])
     }
 
@@ -401,20 +579,36 @@ impl Instance {
             mismatch("export-env client (venue profile) requires [services.engine]")
         })?;
         let v_url = engine.anvil.target_url.as_deref().ok_or_else(|| {
-            mismatch("export-env client (venue profile) requires [services.engine.anvil].target_url")
+            mismatch(
+                "export-env client (venue profile) requires [services.engine.anvil].target_url",
+            )
         })?;
         let v = resolved("ANVIL_V_URL", v_url)?;
+        let v = cluster_url(&v, &self.instance.namespace);
         let sim = self.services.venue_sim.as_ref().ok_or_else(|| {
             mismatch("export-env client (venue profile) requires [services.venue_sim]")
         })?;
+        let info = cluster_url(
+            &format!("http://venue-sim:{}", sim.info.port),
+            &self.instance.namespace,
+        );
+        let control = cluster_url(
+            &format!("http://venue-sim:{}", sim.control.port),
+            &self.instance.namespace,
+        );
+        let admin = cluster_url(
+            &format!("http://engine:{}", engine.http.port),
+            &self.instance.namespace,
+        );
         Ok(vec![
             format!("CHAIN_1_CHAIN_RPC_URL={v}"),
             format!("CHAIN_1_CHAIN_WS_URL={}", ws_of(&v)),
-            format!("HL_INFO_API_URL=http://venue-sim:{}", sim.info.port),
-            format!("VENUE_CONTROL_URL=http://venue-sim:{}", sim.control.port),
-            format!("VENUE_ACCOUNT_FEEDS=http://venue-sim:{}", sim.info.port),
-            format!("VENUE_RATE_FEEDS=http://venue-sim:{}", sim.info.port),
-            format!("VENUE_ADMIN_URL=http://engine:{}", engine.http.port),
+            format!("HL_INFO_API_URL={info}"),
+            format!("VENUE_CONTROL_URL={control}"),
+            // DALOC's `VENUE_ACCOUNT_FEEDS` / `VENUE_RATE_FEEDS` are JSON
+            // arrays, not URLs. Emitting URLs under those names poisoned a
+            // consumer that sourced this block; the base URL has its own key.
+            format!("VENUE_ADMIN_URL={admin}"),
         ])
     }
 }
@@ -431,6 +625,26 @@ fn resolved(name: &str, value: &str) -> Result<String, ConfigError> {
         });
     }
     Ok(value.to_string())
+}
+
+/// Qualify a short Kubernetes service DNS name with the instance's namespace:
+/// `http://engine:8080` becomes
+/// `http://engine.diorama-venue.svc.cluster.local:8080` for a consumer in
+/// another namespace. A host that already carries a dot (a FQDN, an IP, a
+/// public endpoint) is left alone, so the export never rewrites a real URL.
+fn cluster_url(url: &str, namespace: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_string();
+    };
+    let host_end = rest.find(['/', ':', '?', '#']).unwrap_or(rest.len());
+    let host = &rest[..host_end];
+    if host.is_empty() || host.contains('.') || host.parse::<std::net::IpAddr>().is_ok() {
+        return url.to_string();
+    }
+    format!(
+        "{scheme}://{host}.{namespace}.svc.cluster.local{}",
+        &rest[host_end..]
+    )
 }
 
 /// The websocket form of an http URL — anvil serves WS on its HTTP port.
@@ -464,12 +678,129 @@ fn mismatch(what: &str) -> ConfigError {
     }
 }
 
+/// The composable CCTP topology: unique chain ids/domains, concrete
+/// addresses, and lanes that name declared chains. A two-chain topology may
+/// omit lanes (the legacy pair is the single lane); three or more chains must
+/// state their lanes so the direction is never guessed.
+fn check_cctp_chains(cctp: &CctpSection, issues: &mut Vec<String>) {
+    let ids = check_cctp_chain_list(cctp, issues);
+    if cctp.chains.len() > 2 && cctp.lanes.is_empty() {
+        issues.push(
+            "services.cctp_bridge.lanes must state the directed lanes when more than \
+             two chains are configured"
+                .into(),
+        );
+    }
+    check_cctp_lanes(cctp, &ids, issues);
+}
+
+/// The chain list: unique ids/domains/chain ids, a non-empty RPC pool and
+/// concrete contract addresses. Returns the declared ids for the lane check.
+fn check_cctp_chain_list(
+    cctp: &CctpSection,
+    issues: &mut Vec<String>,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+
+    let mut ids = HashSet::new();
+    let mut domains = HashSet::new();
+    let mut chain_ids = HashSet::new();
+    for (index, chain) in cctp.chains.iter().enumerate() {
+        let key = format!("services.cctp_bridge.chains[{index}]");
+        if chain.id.trim().is_empty() {
+            issues.push(format!("{key}.id must not be empty"));
+        }
+        if !ids.insert(chain.id.clone()) {
+            issues.push(format!("{key}.id `{}` is duplicated", chain.id));
+        }
+        if !domains.insert(chain.domain) {
+            issues.push(format!(
+                "{key}.domain {} is duplicated (a CCTP domain is unique)",
+                chain.domain
+            ));
+        }
+        if !chain_ids.insert(chain.chain_id) {
+            issues.push(format!("{key}.chain_id {} is duplicated", chain.chain_id));
+        }
+        if chain.rpc_urls.is_empty() {
+            issues.push(format!("{key}.rpc_urls must not be empty"));
+        }
+        for (field, address) in [
+            ("usdc", chain.usdc),
+            ("token_messenger", chain.token_messenger),
+            ("message_transmitter", chain.message_transmitter),
+        ] {
+            if address == Address::ZERO {
+                issues.push(format!("{key}.{field} must not be the zero address"));
+            }
+        }
+    }
+    ids
+}
+
+/// The directed lanes: both endpoints declared, no self-lane, no duplicate.
+fn check_cctp_lanes(
+    cctp: &CctpSection,
+    ids: &std::collections::HashSet<String>,
+    issues: &mut Vec<String>,
+) {
+    let mut lanes = std::collections::HashSet::new();
+    for (index, lane) in cctp.lanes.iter().enumerate() {
+        let key = format!("services.cctp_bridge.lanes[{index}]");
+        if !ids.contains(&lane.source) {
+            issues.push(format!(
+                "{key}.source `{}` is not a declared chain",
+                lane.source
+            ));
+        }
+        if !ids.contains(&lane.destination) {
+            issues.push(format!(
+                "{key}.destination `{}` is not a declared chain",
+                lane.destination
+            ));
+        }
+        if lane.source == lane.destination {
+            issues.push(format!("{key} must not burn and mint on the same chain"));
+        }
+        if !lanes.insert((lane.source.clone(), lane.destination.clone())) {
+            issues.push(format!(
+                "{key} duplicates the lane {} -> {}",
+                lane.source, lane.destination
+            ));
+        }
+    }
+}
+
 /// The CCTP bridge's coherence: endpoints, the secret-shaped relay key (never
 /// a path), the deterministic attester seed, and ordered gas thresholds.
 fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
     require_path(&cctp.state_dir, "services.cctp_bridge.state_dir", issues);
-    check_http_url("services.cctp_bridge.t_url", &cctp.t_url, issues);
-    check_http_url("services.cctp_bridge.v_url", &cctp.v_url, issues);
+    match (&cctp.t_url, &cctp.v_url, cctp.chains.is_empty()) {
+        (Some(t_url), Some(v_url), true) => {
+            check_http_url("services.cctp_bridge.t_url", t_url, issues);
+            check_http_url("services.cctp_bridge.v_url", v_url, issues);
+            if !cctp.lanes.is_empty() {
+                issues.push(
+                    "services.cctp_bridge.lanes require [[services.cctp_bridge.chains]]; \
+                     the legacy t_url/v_url pair already names the single lane"
+                        .into(),
+                );
+            }
+        }
+        (None, None, false) => {
+            check_cctp_chains(cctp, issues);
+        }
+        (None, None, true) => issues.push(
+            "services.cctp_bridge requires either t_url + v_url or at least one \
+             [[services.cctp_bridge.chains]] entry"
+                .into(),
+        ),
+        _ => issues.push(
+            "services.cctp_bridge must use either the legacy t_url/v_url pair or \
+             [[services.cctp_bridge.chains]], never both"
+                .into(),
+        ),
+    }
     // After `${VAR}` expansion the value must be the 32-byte hex key; a raw
     // reference is checked once the deployment expands it.
     if !cctp.relay_key.contains("${") && !looks_like_secret(&cctp.relay_key) {
@@ -492,7 +823,8 @@ fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
         issues.push("services.cctp_bridge.receipt_timeout_secs must be > 0".into());
     }
     if cctp.balance_critical_wei >= cctp.balance_low_wei {
-        issues.push("services.cctp_bridge.balance_critical_wei must be below balance_low_wei".into());
+        issues
+            .push("services.cctp_bridge.balance_critical_wei must be below balance_low_wei".into());
     }
 }
 
@@ -504,24 +836,105 @@ fn require_path(path: &std::path::Path, field: &str, issues: &mut Vec<String>) {
     }
 }
 
-fn check_http_url(key: &str, value: &str, issues: &mut Vec<String>) {
-    check_url(key, value, ["http://", "https://"], "http(s)", issues);
+/// Expand one optional `@name` reference to the group's primary HTTP URL.
+fn expand_optional_http(
+    key: &str,
+    value: &mut Option<String>,
+    groups: &BTreeMap<String, EndpointGroup>,
+    issues: &mut Vec<String>,
+) {
+    if let Some(url) = value {
+        expand_http(key, url, groups, issues);
+    }
 }
 
-fn check_ws_url(key: &str, value: &str, issues: &mut Vec<String>) {
-    check_url(key, value, ["ws://", "wss://"], "ws(s)", issues);
+/// Expand one `@name` reference to the group's primary HTTP URL.
+fn expand_http(
+    key: &str,
+    value: &mut String,
+    groups: &BTreeMap<String, EndpointGroup>,
+    issues: &mut Vec<String>,
+) {
+    let Some(name) = value.strip_prefix('@') else {
+        return;
+    };
+    match groups.get(name).and_then(|group| group.http.first()) {
+        Some(url) => *value = url.clone(),
+        None => issues.push(format!("{key}: unknown or empty endpoint group @{name}")),
+    }
+}
+
+/// Append one URL unless it is already present (the list's dedup rule).
+fn push_url(out: &mut Vec<String>, value: &str) {
+    let value = value.trim().trim_end_matches('/');
+    if !value.is_empty() && !out.iter().any(|known| known == value) {
+        out.push(value.to_string());
+    }
+}
+
+/// Append a group's HTTP entries (each may itself be comma-separated).
+fn append_group_http(out: &mut Vec<String>, group: &EndpointGroup) {
+    for url in &group.http {
+        for part in url.split(',') {
+            push_url(out, part);
+        }
+    }
+}
+
+/// Expand `@name` entries in a list to the group's HTTP URLs.
+fn expand_http_list(
+    key: &str,
+    values: &mut Vec<String>,
+    groups: &BTreeMap<String, EndpointGroup>,
+    issues: &mut Vec<String>,
+) {
+    let mut out = Vec::new();
+    for value in values.drain(..) {
+        match value.strip_prefix('@') {
+            None => push_url(&mut out, &value),
+            Some(name) => match groups.get(name) {
+                Some(group) if !group.http.is_empty() => append_group_http(&mut out, group),
+                _ => issues.push(format!("{key}: unknown or empty endpoint group @{name}")),
+            },
+        }
+    }
+    *values = out;
+}
+
+fn check_http_url(key: &str, value: &str, issues: &mut Vec<String>) {
+    check_url(key, value, [HTTP_SCHEME, HTTPS_SCHEME], "http(s)", issues);
+}
+
+/// A list check: every entry is a concrete HTTP URL (or an unresolved
+/// `${VAR}`, which `require_resolved` reports at the owning service).
+fn check_http_urls(key: &str, values: &Endpoints, issues: &mut Vec<String>) {
+    for (index, value) in values.iter().enumerate() {
+        check_url(
+            &format!("{key}[{index}]"),
+            value,
+            [HTTP_SCHEME, HTTPS_SCHEME],
+            "http(s)",
+            issues,
+        );
+    }
+}
+
+fn check_ws_urls(key: &str, values: &WsEndpoints, issues: &mut Vec<String>) {
+    for (index, value) in values.iter().enumerate() {
+        check_url(
+            &format!("{key}[{index}]"),
+            value,
+            [crate::endpoints::WS_SCHEME, crate::endpoints::WSS_SCHEME],
+            "ws(s)",
+            issues,
+        );
+    }
 }
 
 /// One URL check: the value carries one of `schemes` and a host — or it is a
 /// deploy-time `${VAR}` reference, validated after expansion (`inspect`
 /// reports the unresolved names separately).
-fn check_url(
-    key: &str,
-    value: &str,
-    schemes: [&str; 2],
-    what: &str,
-    issues: &mut Vec<String>,
-) {
+fn check_url(key: &str, value: &str, schemes: [&str; 2], what: &str, issues: &mut Vec<String>) {
     if value.contains("${") {
         return;
     }
@@ -552,11 +965,7 @@ fn check_engine_anvil(anvil: &EngineAnvil, issues: &mut Vec<String>) {
 fn check_engine(eng: &EngineSection, issues: &mut Vec<String>) {
     check_engine_anvil(&eng.anvil, issues);
     for (i, url) in eng.beacon.urls.iter().enumerate() {
-        check_http_url(
-            &format!("services.engine.beacon.urls[{i}]"),
-            url,
-            issues,
-        );
+        check_http_url(&format!("services.engine.beacon.urls[{i}]"), url, issues);
     }
     if let Some(url) = &eng.source_sync.engine_url {
         check_http_url("services.engine.source_sync.engine_url", url, issues);

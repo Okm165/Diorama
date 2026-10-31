@@ -1,8 +1,10 @@
-# The cross-mirror bridge's base: one resource, included by the venue overlay
-# (the bridge deploys beside its peers and reaches T cross-namespace). Kept
-# out of either mirror's base: it belongs to neither.
+# The CCTP bridge's base: its deployment, service and own PVC. Included by
+# the bridge's own overlay (`k8s/overlays/diorama-cctp`), never by a mirror's:
+# a venue can run without a bridge, a bridge can run without the venue, and a
+# deployment may run several bridges.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - cctp-bridge.yaml
+  - pvcs.yaml

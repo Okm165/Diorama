@@ -6,7 +6,7 @@
 //! install the devnet attester through the contracts' own setters on both
 //! chains, then spawn the two watchers, the relayer and the two listeners
 //! (8095 Iris-compatible, 8096 control).
-use crate::chains::{Chain, Domain, DOMAIN_ETHEREUM, DOMAIN_HYPER_EVM};
+use crate::chains::{Chain, Domain};
 use crate::transfer::{TxSender, Wallet};
 use crate::{Address, B256, U256};
 use diorama_config::boot;
@@ -18,6 +18,8 @@ use std::time::Duration;
 /// The shared runtime every spawned plane reads.
 struct Bridge {
     chains: Vec<Chain>,
+    /// The directed lanes. One watcher per lane; the relayer serves all.
+    lanes: Vec<Lane>,
     section: CctpSection,
     store: Arc<crate::store::Store>,
     attester: Arc<crate::attester::Attester>,
@@ -25,6 +27,13 @@ struct Bridge {
     metrics: Arc<crate::metrics::CctpMetrics>,
     receipt_timeout: Duration,
     poll: Duration,
+}
+
+/// One directed lane, resolved to domains at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Lane {
+    source: Domain,
+    destination: Domain,
 }
 
 pub async fn main_entry(args: Vec<String>) -> crate::Result<()> {
@@ -54,17 +63,17 @@ fn load_wiring(config: &std::path::Path) -> crate::Result<CctpSection> {
     let (mut cfg, unresolved) = diorama_config::Instance::inspect(config)?;
     let section = cfg.take_cctp()?;
     let state_dir = section.state_dir.to_string_lossy().to_string();
-    diorama_config::require_resolved_logged(
-        "cctp wiring",
-        &[
-            &state_dir,
-            &section.t_url,
-            &section.v_url,
-            &section.relay_key,
-            &section.attester_seed,
-        ],
-        &unresolved,
-    )?;
+    let mut values: Vec<&str> = vec![&state_dir, &section.relay_key, &section.attester_seed];
+    if let Some(t_url) = &section.t_url {
+        values.push(t_url);
+    }
+    if let Some(v_url) = &section.v_url {
+        values.push(v_url);
+    }
+    for chain in &section.chains {
+        values.extend(chain.rpc_urls.iter());
+    }
+    diorama_config::require_resolved_logged("cctp wiring", &values, &unresolved)?;
     Ok(section)
 }
 
@@ -86,7 +95,8 @@ async fn boot_bridge(
             .wait_until_up(chain.name, Duration::from_secs(300))
             .await?;
     }
-    let min_fees = verify_wiring(&chains).await?;
+    let lanes = build_lanes(&section, &chains)?;
+    let min_fees = verify_wiring(&chains, &lanes).await?;
     let attester = Arc::new(crate::attester::Attester::from_seed(
         &section.attester_seed,
     )?);
@@ -104,6 +114,7 @@ async fn boot_bridge(
     install_hooks(&chains, &store, &sender, receipt_timeout).await;
     let bridge = Bridge {
         chains,
+        lanes,
         store,
         attester,
         sender,
@@ -120,29 +131,34 @@ impl Bridge {
     /// wiring asserts both chains — a missing peer here is a refusal, never a
     /// panic (data paths refuse or degrade).
     fn spawn_watchers(&self) -> crate::Result<()> {
-        for chain in &self.chains {
-            let (destination_domain, start_block) = if chain.domain == DOMAIN_ETHEREUM {
-                (DOMAIN_HYPER_EVM, self.section.t_start_block.unwrap_or(0))
-            } else {
-                (DOMAIN_ETHEREUM, self.section.v_start_block.unwrap_or(0))
+        for lane in &self.lanes {
+            let Some(source) = self
+                .chains
+                .iter()
+                .find(|c| c.domain == lane.source)
+                .cloned()
+            else {
+                return Err(crate::Error::UnknownDomain {
+                    domain: lane.source,
+                });
             };
             let Some(destination) = self
                 .chains
                 .iter()
-                .find(|c| c.domain == destination_domain)
+                .find(|c| c.domain == lane.destination)
                 .cloned()
             else {
                 return Err(crate::Error::UnknownDomain {
-                    domain: destination_domain,
+                    domain: lane.destination,
                 });
             };
             let watcher = crate::watcher::Watcher {
-                chain: chain.clone(),
-                destination_domain,
+                chain: source.clone(),
+                destination_domain: lane.destination,
                 destination,
                 store: self.store.clone(),
                 attester: self.attester.clone(),
-                start_block,
+                start_block: source.start_block,
                 scanned_upto: std::sync::atomic::AtomicU64::new(0),
                 chunk_blocks: self.section.scan_chunk_blocks,
                 finality_delay: Duration::from_secs(self.section.finality_delay_secs),
@@ -225,23 +241,111 @@ impl Bridge {
     }
 }
 
-/// T (domain 0) and V (domain 19), from the instance's endpoints.
+/// The bridge's chains: the composable list when present, else the legacy
+/// T/V pair. A configured chain carries its own id/domain/contracts; nothing
+/// here assumes Ethereum or HyperEVM.
 fn build_chains(section: &CctpSection, timeout: Duration) -> crate::Result<Vec<Chain>> {
-    Ok(vec![
-        Chain::ethereum(&section.t_url, timeout)?,
-        Chain::hyper_evm(&section.v_url, timeout)?,
-    ])
+    if !section.chains.is_empty() {
+        return section
+            .chains
+            .iter()
+            .map(|chain| Chain::from_config(chain, timeout))
+            .collect();
+    }
+    let t_url = section
+        .t_url
+        .as_deref()
+        .ok_or_else(|| crate::Error::Wiring {
+            chain: "ethereum",
+            what: "t_url",
+            got: "absent".into(),
+            want: "a legacy two-chain URL".into(),
+        })?;
+    let v_url = section
+        .v_url
+        .as_deref()
+        .ok_or_else(|| crate::Error::Wiring {
+            chain: "hyper_evm",
+            what: "v_url",
+            got: "absent".into(),
+            want: "a legacy two-chain URL".into(),
+        })?;
+    let mut t = Chain::ethereum(t_url, timeout)?;
+    t.start_block = section.t_start_block.unwrap_or(0);
+    let mut v = Chain::hyper_evm(v_url, timeout)?;
+    v.start_block = section.v_start_block.unwrap_or(0);
+    Ok(vec![t, v])
+}
+
+/// The directed lanes: explicit when configured, otherwise the legacy
+/// two-chain pair in both directions (the old per-chain watcher behaviour).
+fn build_lanes(section: &CctpSection, chains: &[Chain]) -> crate::Result<Vec<Lane>> {
+    if !section.lanes.is_empty() {
+        return section
+            .lanes
+            .iter()
+            .map(|lane| {
+                let source = section
+                    .chains
+                    .iter()
+                    .find(|chain| chain.id == lane.source)
+                    .ok_or_else(|| crate::Error::UnknownChain {
+                        id: lane.source.clone(),
+                    })?;
+                let destination = section
+                    .chains
+                    .iter()
+                    .find(|chain| chain.id == lane.destination)
+                    .ok_or_else(|| crate::Error::UnknownChain {
+                        id: lane.destination.clone(),
+                    })?;
+                Ok(Lane {
+                    source: Domain(source.domain),
+                    destination: Domain(destination.domain),
+                })
+            })
+            .collect();
+    }
+    if chains.len() == 2 {
+        return Ok(vec![
+            Lane {
+                source: chains[0].domain,
+                destination: chains[1].domain,
+            },
+            Lane {
+                source: chains[1].domain,
+                destination: chains[0].domain,
+            },
+        ]);
+    }
+    Err(crate::Error::Wiring {
+        chain: "cctp",
+        what: "lanes",
+        got: "absent".into(),
+        want: "at least one [[services.cctp_bridge.lanes]] entry for a multi-chain topology".into(),
+    })
 }
 
 /// The wiring asserts + the per-domain min-fee probe (§15.2: absent on
 /// Ethereum, `0` on HyperEVM). A mismatch is a boot refusal.
-async fn verify_wiring(chains: &[Chain]) -> crate::Result<BTreeMap<Domain, Option<U256>>> {
+async fn verify_wiring(
+    chains: &[Chain],
+    lanes: &[Lane],
+) -> crate::Result<BTreeMap<Domain, Option<U256>>> {
     let mut min_fees = BTreeMap::new();
-    for chain in chains {
-        let peer = chains
-            .iter()
-            .find(|c| c.domain != chain.domain)
-            .ok_or(crate::Error::UnknownDomain { domain: chain.domain })?;
+    for lane in lanes {
+        let chain =
+            chains
+                .iter()
+                .find(|c| c.domain == lane.source)
+                .ok_or(crate::Error::UnknownDomain {
+                    domain: lane.source,
+                })?;
+        let peer = chains.iter().find(|c| c.domain == lane.destination).ok_or(
+            crate::Error::UnknownDomain {
+                domain: lane.destination,
+            },
+        )?;
         let wiring = chain.verify_wiring(peer).await?;
         tracing::info!(
             chain = chain.name,
@@ -290,7 +394,7 @@ async fn existing_wrapper(
         &chain.rpc,
         wrapper,
         sender.address(),
-        crate::chains::MESSAGE_TRANSMITTER_V2,
+        chain.message_transmitter,
     )
     .await
     {
@@ -315,13 +419,7 @@ async fn deploy_wrapper(
     sender: &TxSender,
     receipt_timeout: Duration,
 ) {
-    let hash = match crate::hook::deploy(
-        &chain.rpc,
-        sender,
-        crate::chains::MESSAGE_TRANSMITTER_V2,
-    )
-    .await
-    {
+    let hash = match crate::hook::deploy(&chain.rpc, sender, chain.message_transmitter).await {
         Ok(hash) => hash,
         Err(e) => {
             tracing::warn!(
@@ -356,7 +454,9 @@ async fn handle_deploy_receipt(
                 );
             }
         }
-        Ok(Some(_)) => tracing::warn!(chain = chain.name, tx = %hash, "hook wrapper deploy reverted"),
+        Ok(Some(_)) => {
+            tracing::warn!(chain = chain.name, tx = %hash, "hook wrapper deploy reverted");
+        }
         Ok(None) => tracing::warn!(
             chain = chain.name,
             tx = %hash,
@@ -385,7 +485,7 @@ async fn record_wrapper(
         &chain.rpc,
         wrapper,
         sender.address(),
-        crate::chains::MESSAGE_TRANSMITTER_V2,
+        chain.message_transmitter,
     )
     .await
     {
@@ -434,6 +534,7 @@ async fn install_attester(
         let outcome = crate::attester::install(
             &chain.rpc,
             chain.name,
+            chain.message_transmitter,
             attester.address(),
             receipt_timeout.max(Duration::from_secs(120)),
         )
@@ -460,7 +561,9 @@ pub(crate) async fn fund_relayer(
     for chain in chains {
         let balance = chain.native_balance(wallet).await?;
         if balance < low {
-            chain.fund_native(wallet, U256::from(RELAY_GAS_STIPEND)).await?;
+            chain
+                .fund_native(wallet, U256::from(RELAY_GAS_STIPEND))
+                .await?;
             tracing::warn!(
                 chain = chain.name,
                 relayer = %wallet,
@@ -471,5 +574,3 @@ pub(crate) async fn fund_relayer(
     }
     Ok(())
 }
-
-

@@ -17,7 +17,7 @@
 //! - **Gas alerts** (daloc's defaults: 0.1 ETH low / 0.01 ETH critical):
 //!   per-chain balance logs + gauges (the bin's boot top-up is the devnet
 //!   funding step; the alerts guard later drops).
-use crate::chains::{by_domain, Chain, MESSAGE_TRANSMITTER_V2};
+use crate::chains::{by_domain, Chain};
 use crate::error::{Error, Result};
 use crate::metrics::CctpMetrics;
 use crate::store::{MessageRecord, RelayState, Store};
@@ -143,7 +143,8 @@ impl Relayer {
         // critical until the next boot) — funding again keeps the alerts
         // honest, and the funding itself is idempotent.
         if let Err(e) =
-            crate::service::fund_relayer(&self.chains, self.sender.address(), self.balance_low).await
+            crate::service::fund_relayer(&self.chains, self.sender.address(), self.balance_low)
+                .await
         {
             tracing::warn!(error = %e, "cctp relayer stipend check failed");
         }
@@ -283,7 +284,7 @@ impl Relayer {
     async fn relay(&self, record: &MessageRecord) -> Result<Relayed> {
         let chain = by_domain(&self.chains, record.destination_domain)?;
         let decoded = record.decoded()?;
-        let (target, consumer) = self.consumer(record, &decoded)?;
+        let (target, consumer) = self.consumer(chain, record, &decoded)?;
         if caller_mismatch(decoded.header.destination_caller, consumer) {
             return self.refuse(
                 record.nonce,
@@ -334,9 +335,14 @@ impl Relayer {
     /// plain message, the hook wrapper for a hook-carrying one (§15.4 pins the
     /// wrapper as `destinationCaller`). A hook without a deployed wrapper is a
     /// named refusal — the boot step deploys one.
-    fn consumer(&self, record: &MessageRecord, decoded: &Message) -> Result<(Address, Address)> {
+    fn consumer(
+        &self,
+        chain: &Chain,
+        record: &MessageRecord,
+        decoded: &Message,
+    ) -> Result<(Address, Address)> {
         if decoded.body.hook_data.is_empty() {
-            return Ok((MESSAGE_TRANSMITTER_V2, self.sender.address()));
+            return Ok((chain.message_transmitter, self.sender.address()));
         }
         let wrapper = self
             .store
@@ -390,7 +396,12 @@ impl Relayer {
         target: Address,
         decoded: &Message,
     ) -> Result<Relayed> {
-        let attestation = record.attestation.clone().ok_or_else(|| Error::bad_request(format!("message {} is signed without an attestation", record.nonce),))?;
+        let attestation = record.attestation.clone().ok_or_else(|| {
+            Error::bad_request(format!(
+                "message {} is signed without an attestation",
+                record.nonce
+            ))
+        })?;
         let calldata = if decoded.body.hook_data.is_empty() {
             receive_message_calldata(&record.message, &attestation)
         } else {
@@ -478,7 +489,7 @@ impl Relayer {
         chain
             .rpc
             .call_decode(
-                MESSAGE_TRANSMITTER_V2,
+                chain.message_transmitter,
                 &IMessageTransmitterV2::usedNoncesCall { nonce },
             )
             .await
@@ -505,7 +516,9 @@ impl Relayer {
         )?;
         // Counted only after the state is persisted: a confirm that failed to
         // persist must not be counted.
-        self.metrics.relays_confirmed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .relays_confirmed
+            .fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 

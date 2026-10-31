@@ -5,37 +5,118 @@
 //! configured market, `allMids`) every `poll_interval_ms`; the WS client keeps
 //! marks/mids fresher between passes. The same client serves the passthrough
 //! reads (untouched accounts are the real venue's answers).
+//!
+//! Failover is the shared [`EndpointPool::execute`]: admission, cooldown,
+//! bounded retry and the attempt budget live in the common spine. This module
+//! implements only one request against one endpoint and the venue's own
+//! answer-vs-endpoint-fault boundary.
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
 use crate::wire::{InfoRequest, L2Book, MetaAndAssetCtxs};
+use diorama_anvil::{Attempt, AttemptOutcome, EndpointPool, PoolError, Scheme};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The venue API client (typed requests in, typed responses out).
+/// Whether a non-2xx `/info` answer is the venue's own refusal rather than an
+/// endpoint fault. A client error means the request itself is bad (an unknown
+/// user, an unsupported info type); every endpoint answers it the same way.
+/// Auth walls, wrong paths, timeouts, rate limits and server errors are the
+/// endpoint's refusal, so another endpoint may serve the same body.
+fn venue_method_refusal(status: reqwest::StatusCode) -> bool {
+    status.is_client_error()
+        && !matches!(
+            status,
+            reqwest::StatusCode::UNAUTHORIZED
+                | reqwest::StatusCode::FORBIDDEN
+                | reqwest::StatusCode::NOT_FOUND
+                | reqwest::StatusCode::REQUEST_TIMEOUT
+                | reqwest::StatusCode::PAYLOAD_TOO_LARGE
+                | reqwest::StatusCode::TOO_MANY_REQUESTS
+        )
+}
+
+/// The venue API client (typed requests in, typed responses out) over the
+/// shared endpoint pool. The market API is a read surface: every request
+/// starts at a random healthy endpoint, fails over on a transport/throttle/
+/// gateway fault, and a failed endpoint is cooled down for a later round —
+/// the same policy the JSON-RPC source clients use.
 #[derive(Clone)]
 pub struct RestClient {
     http: reqwest::Client,
-    api_url: String,
+    pool: EndpointPool,
 }
 
 impl RestClient {
-    pub fn new(api_url: &str) -> Result<Self> {
+    /// The one-argument form used by tests and one-off tools: the shared
+    /// default policy. Deployments pass their instance's policy through
+    /// [`Self::with_policy`].
+    #[cfg(test)]
+    pub fn new(api_urls: &[String]) -> Result<Self> {
+        Self::with_policy(api_urls, diorama_anvil::PoolPolicy::default())
+    }
+
+    /// Build the client with the project's pool policy (rounds, cooldown,
+    /// attempt budget). The policy is one type across every lane.
+    pub fn with_policy(api_urls: &[String], policy: diorama_anvil::PoolPolicy) -> Result<Self> {
+        let pool = EndpointPool::new(api_urls, Scheme::Http, policy)?;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()?;
-        Ok(Self {
-            http,
-            api_url: api_url.trim_end_matches('/').to_string(),
-        })
+        Ok(Self { http, pool })
     }
 
-    /// One typed info call. A non-2xx answer is a typed refusal carrying the
-    /// body (the venue's error strings are the diagnostics).
+    /// The shared health/rotation pool, for `/metrics` and diagnostics.
+    pub fn pool(&self) -> &EndpointPool {
+        &self.pool
+    }
+
+    /// One typed info call over the pool. A non-2xx answer is a typed refusal
+    /// carrying the body (the venue's error strings are the diagnostics); it
+    /// is an endpoint fault, so the next endpoint is tried before the call
+    /// fails.
     pub(crate) async fn info<T: DeserializeOwned>(&self, req: &InfoRequest) -> Result<T> {
+        let attempt = InfoAttempt::<T> {
+            api: self,
+            req,
+            marker: std::marker::PhantomData,
+        };
+        match self.pool.execute(&attempt, &[]).await {
+            Ok(served) => Ok(served.value),
+            Err(PoolError::Exhausted { attempts, last }) => Err(Error::ApiExhausted {
+                attempts,
+                last: last.map(|error| error.to_string()).unwrap_or_default(),
+            }),
+            Err(PoolError::Cooling { retry_after_ms }) => Err(Error::ApiCooling { retry_after_ms }),
+        }
+    }
+
+    /// Forward a raw info body verbatim (the untouched-account passthrough:
+    /// the venue's own answer, unparsed). A **method-level** refusal (400/422
+    /// and the rest of the client-error class) is the venue's answer and is
+    /// returned immediately: every endpoint would answer it the same way. An
+    /// **endpoint-level** refusal (auth wall, wrong path, timeout, 429, 5xx)
+    /// is failed over; if every endpoint refuses, the call returns a typed
+    /// [`Error::ApiExhausted`], never the last non-2xx body as a success.
+    pub async fn raw_info(&self, body: Vec<u8>) -> Result<reqwest::Response> {
+        let attempt = RawAttempt {
+            api: self,
+            body: &body,
+        };
+        match self.pool.execute(&attempt, &[]).await {
+            Ok(served) => Ok(served.value),
+            Err(PoolError::Exhausted { attempts, last }) => Err(Error::ApiExhausted {
+                attempts,
+                last: last.map(|error| error.to_string()).unwrap_or_default(),
+            }),
+            Err(PoolError::Cooling { retry_after_ms }) => Err(Error::ApiCooling { retry_after_ms }),
+        }
+    }
+
+    async fn info_at<T: DeserializeOwned>(&self, base: &str, req: &InfoRequest) -> Result<T> {
         let resp = self
             .http
-            .post(format!("{}/info", self.api_url))
+            .post(format!("{base}/info"))
             .json(req)
             .send()
             .await?;
@@ -53,17 +134,71 @@ impl RestClient {
         })
     }
 
-    /// Forward a raw info body verbatim (the untouched-account passthrough:
-    /// the venue's own answer, unparsed).
-    pub async fn raw_info(&self, body: Vec<u8>) -> Result<reqwest::Response> {
-        let resp = self
+    async fn raw_at(&self, base: &str, body: &[u8]) -> Result<reqwest::Response> {
+        Ok(self
             .http
-            .post(format!("{}/info", self.api_url))
-            .header(reqwest::header::CONTENT_TYPE, diorama_anvil::JSON_CONTENT_TYPE)
-            .body(body)
+            .post(format!("{base}/info"))
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                diorama_anvil::JSON_CONTENT_TYPE,
+            )
+            .body(body.to_vec())
             .send()
-            .await?;
-        Ok(resp)
+            .await?)
+    }
+}
+
+/// One typed info call against one endpoint.
+struct InfoAttempt<'a, T> {
+    api: &'a RestClient,
+    req: &'a InfoRequest,
+    marker: std::marker::PhantomData<T>,
+}
+
+impl<T: DeserializeOwned> Attempt for InfoAttempt<'_, T> {
+    type Output = T;
+    type Fault = Error;
+
+    async fn attempt(&self, index: usize) -> AttemptOutcome<T, Error> {
+        let base = self.api.pool.url(index);
+        match self.api.info_at(base, self.req).await {
+            Ok(value) => AttemptOutcome::Served(value),
+            Err(fault) => AttemptOutcome::Fault(fault),
+        }
+    }
+}
+
+/// One raw info body against one endpoint. A method-level client refusal is
+/// the venue's answer (served); every other non-2xx status is a fault.
+struct RawAttempt<'a> {
+    api: &'a RestClient,
+    body: &'a [u8],
+}
+
+impl Attempt for RawAttempt<'_> {
+    type Output = reqwest::Response;
+    type Fault = Error;
+
+    async fn attempt(&self, index: usize) -> AttemptOutcome<reqwest::Response, Error> {
+        let base = self.api.pool.url(index);
+        match self.api.raw_at(base, self.body).await {
+            Ok(resp) if resp.status().is_success() => AttemptOutcome::Served(resp),
+            Ok(resp) if venue_method_refusal(resp.status()) => {
+                // The venue understood the request and refused it. That is an
+                // answer, not an endpoint fault: failing over would repeat it
+                // at every endpoint.
+                AttemptOutcome::Served(resp)
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                AttemptOutcome::Fault(Error::ApiStatus {
+                    status: status.as_u16(),
+                    body: text,
+                })
+            }
+            Err(error) => AttemptOutcome::Fault(error),
+        }
     }
 }
 
@@ -76,7 +211,11 @@ pub struct Poller {
 
 impl Poller {
     pub fn new(feed: Arc<MarketFeed>, api: RestClient, interval: Duration) -> Self {
-        Self { feed, api, interval }
+        Self {
+            feed,
+            api,
+            interval,
+        }
     }
 
     /// Run the poller forever (the sim's market-plane task).
@@ -119,7 +258,11 @@ impl Poller {
         if !self.gated(crate::feed::budget::weight::HEAVY) {
             return;
         }
-        match self.api.info::<crate::wire::SpotMeta>(&InfoRequest::SpotMeta).await {
+        match self
+            .api
+            .info::<crate::wire::SpotMeta>(&InfoRequest::SpotMeta)
+            .await
+        {
             Ok(spot) => self.feed.put_spot_meta(spot),
             Err(e) => self.rest_fault("spotMeta", &e),
         }
@@ -129,7 +272,11 @@ impl Poller {
         if !self.gated(crate::feed::budget::weight::HEAVY) {
             return;
         }
-        match self.api.info::<MetaAndAssetCtxs>(&InfoRequest::MetaAndAssetCtxs { dex: None }).await {
+        match self
+            .api
+            .info::<MetaAndAssetCtxs>(&InfoRequest::MetaAndAssetCtxs { dex: None })
+            .await
+        {
             Ok(MetaAndAssetCtxs(meta, ctxs)) => {
                 let now = crate::now_ms();
                 // The ctxs array is positionally aligned with the universe.
@@ -163,7 +310,11 @@ impl Poller {
         if !self.gated(crate::feed::budget::weight::LIGHT) {
             return;
         }
-        match self.api.info::<crate::wire::AllMids>(&InfoRequest::AllMids { dex: None }).await {
+        match self
+            .api
+            .info::<crate::wire::AllMids>(&InfoRequest::AllMids { dex: None })
+            .await
+        {
             Ok(mids) => self.feed.put_mids(mids.0, crate::now_ms()),
             Err(e) => self.rest_fault("allMids", &e),
         }
@@ -181,5 +332,29 @@ impl Poller {
     fn rest_fault(&self, what: &'static str, e: &Error) {
         self.feed.metrics.inc_rest_errors();
         tracing::warn!(call = what, error = %e, "market REST poll failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::venue_method_refusal;
+    use reqwest::StatusCode;
+
+    /// A bad request is the venue's answer; an endpoint wall is a failover.
+    /// This is the boundary the old `raw_info` collapsed: it retried every
+    /// non-2xx and then returned the last body as `Ok`, so an outage could
+    /// masquerade as a valid venue answer.
+    #[test]
+    fn a_method_refusal_is_not_an_endpoint_fault() {
+        assert!(venue_method_refusal(StatusCode::BAD_REQUEST));
+        assert!(venue_method_refusal(StatusCode::UNPROCESSABLE_ENTITY));
+        assert!(!venue_method_refusal(StatusCode::UNAUTHORIZED));
+        assert!(!venue_method_refusal(StatusCode::FORBIDDEN));
+        assert!(!venue_method_refusal(StatusCode::NOT_FOUND));
+        assert!(!venue_method_refusal(StatusCode::REQUEST_TIMEOUT));
+        assert!(!venue_method_refusal(StatusCode::PAYLOAD_TOO_LARGE));
+        assert!(!venue_method_refusal(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!venue_method_refusal(StatusCode::BAD_GATEWAY));
+        assert!(!venue_method_refusal(StatusCode::OK));
     }
 }

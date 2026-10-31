@@ -80,7 +80,10 @@ pub(crate) const USDC_HYPER_EVM: Address = address!("b88339CB7199b77E23DB6E89035
 /// One served chain: its protocol identity plus the RPC the bridge talks to.
 #[derive(Clone)]
 pub struct Chain {
-    /// The human name (`ethereum`, `hyper_evm`) for logs and metrics.
+    /// The configured name (`ethereum`, `hyperevm`, `arbitrum`, …) for logs
+    /// and metrics. Config strings are interned once at boot: the name is a
+    /// process-lifetime label, and keeping it `&'static str` keeps every
+    /// metric/error/log field allocation-free.
     pub name: &'static str,
     /// The CCTP domain this chain serves.
     pub domain: Domain,
@@ -89,6 +92,15 @@ pub struct Chain {
     pub rpc: Rpc,
     /// The burn/mint token on this domain.
     pub(crate) usdc: Address,
+    /// The chain's TokenMessengerV2 (config fact, not a global constant).
+    pub(crate) token_messenger: Address,
+    /// The chain's MessageTransmitterV2.
+    pub(crate) message_transmitter: Address,
+    /// The chain's TokenMinterV2, when the deployment exposes one.
+    pub(crate) token_minter: Option<Address>,
+    /// First block the watcher scans on this chain (0 = genesis; a deep fork
+    /// should pin the deployment block).
+    pub start_block: u64,
 }
 
 impl std::fmt::Debug for Chain {
@@ -103,7 +115,7 @@ impl std::fmt::Debug for Chain {
 }
 
 impl Chain {
-    /// T — Ethereum, domain 0.
+    /// T — Ethereum, domain 0 (the legacy two-chain spelling).
     pub fn ethereum(url: &str, timeout: Duration) -> Result<Self> {
         Ok(Self {
             name: "ethereum",
@@ -111,10 +123,14 @@ impl Chain {
             chain_id: ChainId::from_id(CHAIN_ID_ETHEREUM),
             rpc: Rpc::new(url, timeout)?,
             usdc: USDC_ETHEREUM,
+            token_messenger: TOKEN_MESSENGER_V2,
+            message_transmitter: MESSAGE_TRANSMITTER_V2,
+            token_minter: Some(TOKEN_MINTER_V2),
+            start_block: 0,
         })
     }
 
-    /// V — HyperEVM, domain 19.
+    /// V — HyperEVM, domain 19 (the legacy two-chain spelling).
     pub fn hyper_evm(url: &str, timeout: Duration) -> Result<Self> {
         Ok(Self {
             name: "hyper_evm",
@@ -122,6 +138,27 @@ impl Chain {
             chain_id: ChainId::from_id(CHAIN_ID_HYPER_EVM),
             rpc: Rpc::new(url, timeout)?,
             usdc: USDC_HYPER_EVM,
+            token_messenger: TOKEN_MESSENGER_V2,
+            message_transmitter: MESSAGE_TRANSMITTER_V2,
+            token_minter: Some(TOKEN_MINTER_V2),
+            start_block: 0,
+        })
+    }
+
+    /// One chain from the composable `[[services.cctp_bridge.chains]]` entry.
+    /// The RPC list is a pool: a slow or wrong-chain provider fails over at
+    /// boot (the wiring assert) instead of stalling the watcher.
+    pub fn from_config(chain: &diorama_config::CctpChain, timeout: Duration) -> Result<Self> {
+        Ok(Self {
+            name: Box::leak(chain.id.clone().into_boxed_str()),
+            domain: Domain(chain.domain),
+            chain_id: ChainId::from_id(chain.chain_id),
+            rpc: Rpc::with_urls(chain.rpc_urls.as_slice(), timeout)?,
+            usdc: chain.usdc,
+            token_messenger: chain.token_messenger,
+            message_transmitter: chain.message_transmitter,
+            token_minter: chain.token_minter,
+            start_block: chain.start_block.unwrap_or(0),
         })
     }
 
@@ -137,7 +174,7 @@ impl Chain {
         }
         let (local_domain, version, body_version) = self.verify_versions().await?;
         let (local_transmitter, peer_messenger) = self.verify_messengers(peer).await?;
-        let min_fee = probe_min_fee(&self.rpc, TOKEN_MESSENGER_V2).await?;
+        let min_fee = probe_min_fee(&self.rpc, self.token_messenger).await?;
         Ok(Wiring {
             chain_id,
             local_domain,
@@ -155,7 +192,7 @@ impl Chain {
     async fn verify_versions(&self) -> Result<(Domain, u32, u32)> {
         let local_domain = self
             .assert_getter(
-                MESSAGE_TRANSMITTER_V2,
+                self.message_transmitter,
                 &IMessageTransmitterV2::localDomainCall {},
                 self.domain.0,
                 "localDomain",
@@ -163,7 +200,7 @@ impl Chain {
             .await?;
         let version = self
             .assert_getter(
-                MESSAGE_TRANSMITTER_V2,
+                self.message_transmitter,
                 &IMessageTransmitterV2::versionCall {},
                 MESSAGE_VERSION,
                 "message version",
@@ -171,7 +208,7 @@ impl Chain {
             .await?;
         let body_version = self
             .assert_getter(
-                TOKEN_MESSENGER_V2,
+                self.token_messenger,
                 &ITokenMessengerV2::messageBodyVersionCall {},
                 MESSAGE_VERSION,
                 "messageBodyVersion",
@@ -186,31 +223,33 @@ impl Chain {
     async fn verify_messengers(&self, peer: &Chain) -> Result<(Address, B256)> {
         let local_transmitter = self
             .assert_getter(
-                TOKEN_MESSENGER_V2,
+                self.token_messenger,
                 &ITokenMessengerV2::localMessageTransmitterCall {},
-                MESSAGE_TRANSMITTER_V2,
+                self.message_transmitter,
                 "TM.localMessageTransmitter()",
             )
             .await?;
         let peer_messenger = self
             .assert_getter(
-                TOKEN_MESSENGER_V2,
+                self.token_messenger,
                 &ITokenMessengerV2::remoteTokenMessengersCall {
                     domain: peer.domain.0,
                 },
-                TOKEN_MESSENGER_V2.into_word(),
+                peer.token_messenger.into_word(),
                 "TM.remoteTokenMessengers(peer)",
             )
             .await?;
-        // §15.1's fifth address: the messenger's minter (the value is the
-        // check; a mismatch is the assert's error).
-        self.assert_getter(
-            TOKEN_MESSENGER_V2,
-            &ITokenMessengerV2::localMinterCall {},
-            TOKEN_MINTER_V2,
-            "TM.localMinter()",
-        )
-        .await?;
+        // The messenger's minter, when the deployment exposes one: a value
+        // mismatch is the assert's error.
+        if let Some(token_minter) = self.token_minter {
+            self.assert_getter(
+                self.token_messenger,
+                &ITokenMessengerV2::localMinterCall {},
+                token_minter,
+                "TM.localMinter()",
+            )
+            .await?;
+        }
         Ok((local_transmitter, peer_messenger))
     }
 
@@ -233,7 +272,12 @@ impl Chain {
         Ok(got)
     }
 
-    fn wiring(&self, what: &'static str, got: impl std::fmt::Display, want: impl std::fmt::Display) -> Error {
+    fn wiring(
+        &self,
+        what: &'static str,
+        got: impl std::fmt::Display,
+        want: impl std::fmt::Display,
+    ) -> Error {
         Error::Wiring {
             chain: self.name,
             what,
@@ -348,6 +392,10 @@ mod tests {
                 chain_id: ChainId::from_id(CHAIN_ID_ETHEREUM),
                 rpc: Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
                 usdc: USDC_ETHEREUM,
+                token_messenger: TOKEN_MESSENGER_V2,
+                message_transmitter: MESSAGE_TRANSMITTER_V2,
+                token_minter: Some(TOKEN_MINTER_V2),
+                start_block: 0,
             },
             Chain {
                 name: "hyper_evm",
@@ -355,11 +403,18 @@ mod tests {
                 chain_id: ChainId::from_id(CHAIN_ID_HYPER_EVM),
                 rpc: Rpc::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
                 usdc: USDC_HYPER_EVM,
+                token_messenger: TOKEN_MESSENGER_V2,
+                message_transmitter: MESSAGE_TRANSMITTER_V2,
+                token_minter: Some(TOKEN_MINTER_V2),
+                start_block: 0,
             },
         ];
         assert_eq!(by_domain(&chains, Domain(0)).unwrap().name, "ethereum");
         assert_eq!(by_domain(&chains, Domain(19)).unwrap().name, "hyper_evm");
         let err = by_domain(&chains, Domain(7)).unwrap_err();
-        assert!(matches!(err, Error::UnknownDomain { domain: Domain(7) }), "{err}");
+        assert!(
+            matches!(err, Error::UnknownDomain { domain: Domain(7) }),
+            "{err}"
+        );
     }
 }

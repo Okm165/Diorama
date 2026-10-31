@@ -22,11 +22,11 @@
 //! transaction emitting **two** burns collides on the nonce: the second is
 //! refused with a warning (the devnet lanes burn once per tx).
 use crate::attester::Attester;
-use crate::chains::{Chain, Domain, FINALITY_THRESHOLD_FINALIZED, MESSAGE_TRANSMITTER_V2};
+use crate::chains::{Chain, Domain, FINALITY_THRESHOLD_FINALIZED};
 use crate::error::{Error, Result};
 use crate::metrics::CctpMetrics;
 use crate::store::{MessageRecord, RelayState, Store};
-use crate::transfer::{Message, IMessageTransmitterV2};
+use crate::transfer::{IMessageTransmitterV2, Message};
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::SolEvent;
@@ -93,7 +93,9 @@ impl Watcher {
         loop {
             ticker.tick().await;
             if let Err(e) = self.tick().await {
-                self.metrics.scan_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.metrics
+                    .scan_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!(chain = self.chain.name, error = %e, "cctp watcher pass failed; will retry");
             }
         }
@@ -190,7 +192,11 @@ impl Watcher {
         let floor = pin.map(|pin| pin.saturating_add(1));
         Ok(match floor {
             Some(floor) if self.start_block < floor => {
-                if self.clamp_warned.swap(floor, std::sync::atomic::Ordering::Relaxed) != floor {
+                if self
+                    .clamp_warned
+                    .swap(floor, std::sync::atomic::Ordering::Relaxed)
+                    != floor
+                {
                     tracing::warn!(
                         chain = self.chain.name,
                         configured_start = self.start_block,
@@ -207,7 +213,7 @@ impl Watcher {
     /// The `MessageSent` logs of one block range.
     async fn message_logs(&self, from: u64, to: u64) -> Result<Vec<Log>> {
         let filter = Filter::new()
-            .address(MESSAGE_TRANSMITTER_V2)
+            .address(self.chain.message_transmitter)
             .event_signature(IMessageTransmitterV2::MessageSent::SIGNATURE_HASH)
             .from_block(from)
             .to_block(to);
@@ -222,11 +228,8 @@ impl Watcher {
         let candidates = self.stale_candidates()?;
         let mut parked = 0usize;
         for burn_tx in candidates {
-            let exists: Option<alloy_rpc_types_eth::Transaction> = self
-                .chain
-                .rpc
-                .call(crate::TX_BY_HASH, (burn_tx,))
-                .await?;
+            let exists: Option<alloy_rpc_types_eth::Transaction> =
+                self.chain.rpc.call(crate::TX_BY_HASH, (burn_tx,)).await?;
             if exists.is_some() {
                 continue;
             }
@@ -430,13 +433,18 @@ impl Watcher {
 /// are required — a log without them cannot be turned into a relayable
 /// record, and skipping it silently would drop a burn.
 fn decode_message_sent(log: &Log) -> Result<MessageSent> {
-    let decoded =
-        IMessageTransmitterV2::MessageSent::decode_log(&log.inner).map_err(|source| Error::Abi {
+    let decoded = IMessageTransmitterV2::MessageSent::decode_log(&log.inner).map_err(|source| {
+        Error::Abi {
             what: "MessageSent event",
             source,
-        })?;
-    let burn_tx = log.transaction_hash.ok_or_else(|| Error::bad_request("MessageSent log without a transaction hash",))?;
-    let burn_block = log.block_number.ok_or_else(|| Error::bad_request("MessageSent log without a block number",))?;
+        }
+    })?;
+    let burn_tx = log
+        .transaction_hash
+        .ok_or_else(|| Error::bad_request("MessageSent log without a transaction hash"))?;
+    let burn_block = log
+        .block_number
+        .ok_or_else(|| Error::bad_request("MessageSent log without a block number"))?;
     Ok(MessageSent {
         burn_tx,
         burn_block,
@@ -479,16 +487,35 @@ mod tests {
     /// stack after the sim's epoch drill).
     #[test]
     fn cursor_off_base_keeps_the_pin_as_the_rest_state() {
-        assert!(!cursor_off_base(0, 100, Some(100)), "never scanned: the boot path handles it");
-        assert!(!cursor_off_base(100, 100, Some(100)), "cursor at the pin: the rest state");
+        assert!(
+            !cursor_off_base(0, 100, Some(100)),
+            "never scanned: the boot path handles it"
+        );
+        assert!(
+            !cursor_off_base(100, 100, Some(100)),
+            "cursor at the pin: the rest state"
+        );
         assert!(!cursor_off_base(101, 101, Some(100)), "cursor past the pin");
         assert!(!cursor_off_base(150, 200, None), "a real chain has no pin");
-        assert!(cursor_off_base(50, 100, Some(100)), "cursor below the base: a forward re-pin");
-        assert!(cursor_off_base(150, 100, Some(100)), "cursor above the head: a rewind");
-        assert!(cursor_off_base(150, 100, None), "a rewind on a real chain still parks");
+        assert!(
+            cursor_off_base(50, 100, Some(100)),
+            "cursor below the base: a forward re-pin"
+        );
+        assert!(
+            cursor_off_base(150, 100, Some(100)),
+            "cursor above the head: a rewind"
+        );
+        assert!(
+            cursor_off_base(150, 100, None),
+            "a rewind on a real chain still parks"
+        );
     }
 
-    fn watcher(dir: &std::path::Path, destination_domain: Domain, finality_delay: Duration) -> Watcher {
+    fn watcher(
+        dir: &std::path::Path,
+        destination_domain: Domain,
+        finality_delay: Duration,
+    ) -> Watcher {
         Watcher {
             chain: Chain::ethereum("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
             destination_domain,
@@ -517,7 +544,7 @@ mod tests {
             message: message.encode(),
         };
         let inner = alloy_primitives::Log {
-            address: MESSAGE_TRANSMITTER_V2,
+            address: crate::chains::MESSAGE_TRANSMITTER_V2,
             data: event.encode_log_data(),
         };
         Log {
@@ -552,10 +579,7 @@ mod tests {
             0,
             "re-scan is idempotent"
         );
-        let record = watcher
-            .store
-            .with(|s| Ok(s.messages[0].clone()))
-            .unwrap();
+        let record = watcher.store.with(|s| Ok(s.messages[0].clone())).unwrap();
         assert_eq!(record.nonce, tx, "the nonce is the burn tx hash");
         assert_eq!(record.burn_block, 7);
         assert_eq!(record.state, RelayState::Pending);
@@ -563,7 +587,10 @@ mod tests {
         let served = record.decoded().unwrap();
         assert_eq!(served.header.nonce, tx);
         assert_eq!(served.header.finality_threshold_executed, 2000);
-        assert_ne!(record.raw_message, record.message, "the raw event message is not the served one");
+        assert_ne!(
+            record.raw_message, record.message,
+            "the raw event message is not the served one"
+        );
 
         assert_eq!(watcher.sign_due().unwrap(), 1);
         let record = watcher.store.with(|s| Ok(s.messages[0].clone())).unwrap();
@@ -587,8 +614,18 @@ mod tests {
         let dir = crate::test_dir("lanes");
         let _ = std::fs::remove_dir_all(&dir);
         let watcher = watcher(&dir, Domain(19), Duration::ZERO);
-        assert_eq!(watcher.absorb(&log(B256::repeat_byte(1), 0, 3), U256::ZERO).unwrap(), 0);
-        assert_eq!(watcher.absorb(&log(B256::repeat_byte(2), 7, 19), U256::ZERO).unwrap(), 0);
+        assert_eq!(
+            watcher
+                .absorb(&log(B256::repeat_byte(1), 0, 3), U256::ZERO)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            watcher
+                .absorb(&log(B256::repeat_byte(2), 7, 19), U256::ZERO)
+                .unwrap(),
+            0
+        );
         assert_eq!(watcher.store.counts().unwrap().pending, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -599,7 +636,9 @@ mod tests {
         let dir = crate::test_dir("pending");
         let _ = std::fs::remove_dir_all(&dir);
         let watcher = watcher(&dir, Domain(19), Duration::from_secs(3600));
-        watcher.absorb(&log(B256::repeat_byte(3), 0, 19), U256::ZERO).unwrap();
+        watcher
+            .absorb(&log(B256::repeat_byte(3), 0, 19), U256::ZERO)
+            .unwrap();
         assert_eq!(watcher.sign_due().unwrap(), 0, "window still open");
         assert_eq!(
             watcher.store.with(|s| Ok(s.messages[0].state)).unwrap(),
@@ -620,5 +659,4 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

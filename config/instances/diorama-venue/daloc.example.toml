@@ -1,0 +1,100 @@
+# DALOC project specialization — gitignored.
+#
+# The generic `instance.toml` carries deployment facts (identity,
+# profile, state paths, ports). This file carries the product's
+# endpoint groups, watch scope, fixture ownership, probes and
+# closures. `daloc.example.toml` is the tracked, complete template;
+# copy it to `daloc.toml` for a deployment.
+
+[endpoints.anvil_v]
+http = ["${ANVIL_V_URL}"]
+chain_id = 999
+
+[endpoints.hyperevm]
+http = ["${HL_RPC_URLS}"]
+chain_id = 999
+
+[endpoints.hyperliquid_api]
+http = ["https://api.hyperliquid.xyz"]
+roles = ["market_rest"]
+
+[endpoints.hyperliquid_ws]
+ws = ["wss://api.hyperliquid.xyz/ws"]
+roles = ["market_ws"]
+
+[endpoints.engine_admin]
+http = ["${ENGINE_ADMIN_URL}"]
+
+
+[services.engine]
+fixture_addresses = ["0xb88339CB7199b77E23DB6E890353E22632Ba630f", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", "0x6B175474E89094C44Da98b954EedeAC495271d0F", "0x5555555555555555555555555555555555555555", "0x94e8396e0869c9F2200760aF0621aFd240E1CF38"]
+
+[services.engine.verifier]
+probes = [
+  { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
+]
+
+[services.engine.closures]
+
+[[services.engine.closures.mappings]]
+contract = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+base_slot = "0x9"
+topic_index = 1
+
+[[services.engine.closures.mappings]]
+contract = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+base_slot = "0x9"
+topic_index = 2
+
+[[services.engine.closures.mappings]]
+contract = "0x5555555555555555555555555555555555555555"
+base_slot = "0x3"
+topic_index = 1
+
+[[services.engine.closures.mappings]]
+contract = "0x5555555555555555555555555555555555555555"
+base_slot = "0x3"
+topic_index = 2
+
+[[services.engine.closures.fixed]]
+contract = "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
+slots = ["0x3e54e5ae16d7bdb0bade122edbe34ab784fcd78c6d535e29aff3bc7d357e7586"]
+
+[services.venue_sim]
+markets = ["BTC", "ETH", "HYPE", "SOL"]
+
+[[watchlist]]
+address = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+note = "USDC (999): the CCTP burn/mint token and the at-pin probe's contract"
+
+[[watchlist]]
+address = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+note = "CCTP V2 TokenMessenger (999): the bridge's burn/mint door"
+
+[[watchlist]]
+address = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+note = "CCTP V2 MessageTransmitter (999)"
+
+[[watchlist]]
+address = "0xfd78EE919681417d192449715b2594ab58f5D002"
+note = "CCTP V2 TokenMinter (999)"
+
+[[watchlist]]
+address = "0xec546b6B005471ECf012e5aF77FBeC07e0FD8f78"
+note = "CCTP V2 Message (999)"
+
+[[watchlist]]
+address = "0x3333333333333333333333333333333333333333"
+note = "CoreWriter: the Core's door into the EVM (the bridge's other side)"
+
+[[watchlist]]
+address = "0x5555555555555555555555555555555555555555"
+note = "WHYPE: the wrapped gas token"
+
+[[watchlist]]
+address = "0x94e8396e0869c9F2200760aF0621aFd240E1CF38"
+note = "wstHYPE: the staked gas token"
+
+[[watchlist]]
+address = "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
+note = "RedStone multi-feed adapter: the HYPE/wstHYPE price words (see the fixed closure above)"

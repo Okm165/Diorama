@@ -6,10 +6,15 @@ mod bal;
 mod client;
 mod error;
 mod pad;
+mod pool;
 mod trace;
 mod writes;
 
 pub use backoff::{Backoff, Progress};
+pub use pool::{
+    now_ms, Admission, Attempt, AttemptOutcome, EndpointPool, EndpointSnapshot, EndpointSpec,
+    PoolError, PoolPolicy, Scheme, Served,
+};
 
 /// The JSON content type every transport in the workspace sends (and the
 /// venue's HTTP surface answers): one home — a typo here would break a

@@ -16,9 +16,9 @@ use crate::probes::ProbeOutcome;
 use crate::scan::ScanWalk;
 use crate::spine::Mirror;
 use axum::response::IntoResponse;
-use futures_util::future::BoxFuture;
 use diorama_anvil::Rpc;
-use diorama_config::EngineSection;
+use diorama_config::{Endpoints, EngineSection};
+use futures_util::future::BoxFuture;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,10 +33,9 @@ pub struct EngineCore<'a> {
     pub plane: &'a Plane,
     pub mirror: &'a Arc<dyn Mirror>,
     pub target: &'a Arc<Rpc>,
-    /// The source endpoint (the follow source's RPC): the boot audit and the
-    /// probes read it.
+    /// The source endpoint set (the follow source's RPC pool): the boot audit
+    /// and the probes read it.
     pub source: &'a Arc<Rpc>,
-    pub source_url: &'a str,
     pub engine: &'a EngineSection,
 }
 
@@ -85,9 +84,10 @@ pub trait Engine: Send + Sync + Sized + 'static {
             .await?)
         })
     }
-    /// The source URL `/admin/epoch` re-pins from.
+    /// The primary source URL `/admin/epoch` re-pins from. The read pool may
+    /// use any endpoint; the first is the deployment's declared fork source.
     fn source_url(&self) -> &str {
-        self.core().source_url
+        self.source_rpc().url()
     }
     /// The engine's section: loops, HTTP, verifier.
     fn engine(&self) -> &EngineSection {
@@ -122,9 +122,9 @@ pub trait Engine: Send + Sync + Sized + 'static {
 
     /// Re-pin the chain to the source's latest block (`/admin/epoch`).
     fn epoch_repin(&self) -> BoxFuture<'_, crate::Result<EpochResponse, Self::Error>> {
-        Box::pin(async move {
-            Ok(AdminSurface::epoch_repin(self.target(), self.source_url()).await?)
-        })
+        Box::pin(
+            async move { Ok(AdminSurface::epoch_repin(self.target(), self.source_url()).await?) },
+        )
     }
 }
 
@@ -186,11 +186,7 @@ macro_rules! shell_fault_conversion {
                     $crate::engine::ShellFault::Bind { addr, source } => {
                         Self::Bind { addr, source }
                     }
-                    $crate::engine::ShellFault::Io {
-                        what,
-                        path,
-                        source,
-                    } => Self::Io {
+                    $crate::engine::ShellFault::Io { what, path, source } => Self::Io {
                         what,
                         path: path.into(),
                         source,
@@ -252,14 +248,29 @@ pub fn selftest_verdict(verdict: Verdict) {
 /// One client per endpoint, shared (`Arc`): the context, the source objects
 /// and the composer's target all reference the same handle.
 pub fn build_clients(
-    source_url: &str,
+    source_pool: diorama_anvil::EndpointPool,
     target_url: &str,
     timeout: std::time::Duration,
 ) -> diorama_anvil::Result<(std::sync::Arc<Rpc>, std::sync::Arc<Rpc>)> {
     Ok((
-        std::sync::Arc::new(Rpc::new(source_url, timeout)?),
+        std::sync::Arc::new(Rpc::with_pool(source_pool, timeout)?),
+        // The target is a **single** endpoint: writes must never fan out.
         std::sync::Arc::new(Rpc::new(target_url, timeout)?),
     ))
+}
+
+/// Build the source pool from the instance's attributed endpoints and shared
+/// policy. One constructor for both mirrors: the roles/chain ids/cooldowns are
+/// the config's, never a per-profile default.
+pub fn source_pool(
+    cfg: &diorama_config::Instance,
+    urls: &Endpoints,
+) -> diorama_anvil::Result<diorama_anvil::EndpointPool> {
+    diorama_anvil::EndpointPool::from_specs(
+        cfg.endpoint_specs(urls.as_slice()),
+        diorama_anvil::Scheme::Http,
+        cfg.endpoint_policy(),
+    )
 }
 
 /// The profile loops' halt gate: while `/admin/pause` holds the loops, sleep
@@ -356,6 +367,10 @@ pub async fn boot_prefix<E: Engine>(
     source_what: &str,
 ) -> crate::Result<(), E::Error> {
     assert_chain(ctx, anvil, chain_id, wait).await?;
+    // The target assert above is not enough: a wrong-chain *source* endpoint
+    // would answer every read with the wrong state. Assert the whole pool
+    // before the first window is composed.
+    ctx.source_rpc().verify_chain(chain_id).await?;
     crate::source::audit_capabilities(
         source_what,
         ctx.mirror().follow_source().capabilities(),
@@ -377,17 +392,19 @@ pub trait EngineService: Engine {
     fn require_wiring(
         cfg: &diorama_config::Instance,
         unresolved: &[String],
-        source_url: &str,
+        source_urls: &Endpoints,
         target_url: &str,
     ) -> Result<(), Self::Error> {
         let extra = Self::wiring_extra(cfg);
-        let refs: Vec<&str> = extra.iter().map(String::as_str).collect();
+        let mut endpoints: Vec<&str> = source_urls.iter().collect();
+        endpoints.push(target_url);
+        let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
         require_engine_wiring(
             cfg,
             unresolved,
             Self::wiring_label(),
-            &[source_url, target_url],
-            &refs,
+            &endpoints,
+            &extra_refs,
         )
         .map_err(Self::Error::from)
     }
@@ -403,12 +420,12 @@ pub trait EngineService: Engine {
         let _ = cfg;
         Vec::new()
     }
-    /// The instance's endpoints for this engine (source, target).
-    fn urls(cfg: &diorama_config::Instance) -> Result<(String, String), Self::Error>;
+    /// The instance's endpoints for this engine (source pool, target).
+    fn urls(cfg: &diorama_config::Instance) -> Result<(Endpoints, String), Self::Error>;
     /// The context assembly.
     fn context(
         cfg: diorama_config::Instance,
-        source_url: &str,
+        source_urls: &Endpoints,
         target_url: &str,
     ) -> Result<Self, Self::Error>;
     /// The profile's boot (the shared prefix + its own tail).
@@ -428,9 +445,9 @@ pub trait EngineService: Engine {
 /// required by name (via the profile's [`EngineService::require_wiring`]).
 pub async fn run_engine<S: EngineService>(config: std::path::PathBuf) -> Result<(), S::Error> {
     let (cfg, unresolved) = diorama_config::Instance::inspect(&config)?;
-    let (source_url, target_url) = S::urls(&cfg)?;
-    S::require_wiring(&cfg, &unresolved, &source_url, &target_url)?;
-    let ctx = Arc::new(S::context(cfg, &source_url, &target_url)?);
+    let (source_urls, target_url) = S::urls(&cfg)?;
+    S::require_wiring(&cfg, &unresolved, &source_urls, &target_url)?;
+    let ctx = Arc::new(S::context(cfg, &source_urls, &target_url)?);
     S::boot(&ctx).await?;
     S::log_start(&ctx);
     let tasks = S::spawn_loops(&ctx).await?;
@@ -555,7 +572,9 @@ pub async fn assert_chain<E: Engine>(
             want: chain_id,
         }));
     }
-    ctx.target().anvil_set_automine(diorama_anvil::Automine::Off).await?;
+    ctx.target()
+        .anvil_set_automine(diorama_anvil::Automine::Off)
+        .await?;
     Ok(())
 }
 
@@ -570,17 +589,30 @@ pub async fn serve<E: Engine>(ctx: &E, router: axum::Router) -> crate::Result<()
 /// the serve fault in one place — every listener (the engines' HTTP api, the
 /// simulator's two ports, the bridge's) crosses the same boundary, and the
 /// label names the service in the log and in the fault.
-pub async fn serve_router<E>(what: &'static str, addr: String, router: axum::Router) -> Result<(), E>
+pub async fn serve_router<E>(
+    what: &'static str,
+    addr: String,
+    router: axum::Router,
+) -> Result<(), E>
 where
     E: From<ShellFault>,
 {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .map_err(|source| E::from(ShellFault::Bind { addr: addr.clone(), source }))?;
+        .map_err(|source| {
+            E::from(ShellFault::Bind {
+                addr: addr.clone(),
+                source,
+            })
+        })?;
     tracing::info!(addr, "{} listening", what);
-    axum::serve(listener, router)
-        .await
-        .map_err(|source| E::from(ShellFault::Io { what, path: addr, source }))
+    axum::serve(listener, router).await.map_err(|source| {
+        E::from(ShellFault::Io {
+            what,
+            path: addr,
+            source,
+        })
+    })
 }
 
 /// Spawn the HTTP surface as a task: a serve fault is logged, never fatal —
@@ -666,6 +698,13 @@ mod tests {
             got: 1,
             want: 2,
         });
-        assert!(matches!(chain, TestErr::WrongChain { got: 1, want: 2, .. }));
+        assert!(matches!(
+            chain,
+            TestErr::WrongChain {
+                got: 1,
+                want: 2,
+                ..
+            }
+        ));
     }
 }

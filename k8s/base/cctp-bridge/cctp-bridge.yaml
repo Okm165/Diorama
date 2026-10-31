@@ -83,7 +83,10 @@ spec:
             limits: { memory: 384Mi }
       volumes:
         - name: instance
-          configMap: { name: venue-instance }
+          # The bridge's own instance, not the venue's: one process = one
+          # profile. A second bridge provider is a second configmap and
+          # deployment with the same shape.
+          configMap: { name: cctp-instance }
         - name: state
           persistentVolumeClaim: { claimName: cctp-state }
 ---

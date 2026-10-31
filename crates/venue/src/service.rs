@@ -6,9 +6,9 @@
 //! the daloc-facing info API (8090) and the control API (8091) beside the
 //! self-advance tick (1 Hz: accrue funding, check liquidations, persist when
 //! something moved).
+use crate::ctx::Ctx;
 use crate::Result;
 use crate::{driver, http};
-use crate::ctx::Ctx;
 use clap::{Parser, Subcommand};
 use diorama_config::boot;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     boot::init_logging();
     let config = boot::service_config_or_exit(&args);
     let mut cfg = load_wiring(&config)?;
+    let policy = cfg.endpoint_policy();
     let (chain, sim_section) = cfg.take_venue_sim()?;
 
     // The planes: the market feed's cache and the persisted account registry.
@@ -28,18 +29,26 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     let sim = Arc::new(crate::sim::Sim::load(
         sim_section.state_dir.join("sim.json"),
     )?);
-    let api_client = crate::feed::rest::RestClient::new(&chain.api_url)?;
+    let api_client = crate::feed::rest::RestClient::with_policy(chain.api_urls.as_slice(), policy)?;
+    let ws_pool = diorama_anvil::EndpointPool::from_specs(
+        cfg.endpoint_specs(chain.ws_urls.as_slice()),
+        diorama_anvil::Scheme::Ws,
+        policy,
+    )?;
     let bridge_metrics = Arc::new(crate::bridge::metrics::BridgeMetrics::default());
-    let state = Arc::new(crate::api::ApiState::new(
-        feed.clone(),
-        sim.clone(),
-        api_client.clone(),
-        sim_section.engine_admin_url.clone(),
-        Some(bridge_metrics.clone()),
-    )?);
+    let state = Arc::new(
+        crate::api::ApiState::new(
+            feed.clone(),
+            sim.clone(),
+            api_client.clone(),
+            sim_section.engine_admin_url.clone(),
+            Some(bridge_metrics.clone()),
+        )?
+        .with_ws_pool(ws_pool.clone()),
+    );
 
-    spawn_market_plane(&feed, api_client, &chain.ws_url, &sim_section);
-    spawn_plane_heartbeat(&feed, &sim, &chain.api_url, &bridge_metrics);
+    spawn_market_plane(&feed, api_client, ws_pool, &sim_section);
+    spawn_plane_heartbeat(&feed, &sim, chain.api_urls.primary(), &bridge_metrics);
     spawn_bridge(&sim_section, &sim, &feed, &bridge_metrics)?;
     spawn_tick(&sim, &feed);
     let (info, control) = serve(&sim_section, &state);
@@ -47,7 +56,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
         info = %format!("{}:{}", sim_section.info.addr, sim_section.info.port),
         control = %format!("{}:{}", sim_section.control.addr, sim_section.control.port),
         markets = sim_section.markets.len(),
-        api = %chain.api_url,
+        api = %chain.api_urls,
         "venue simulator listening"
     );
 
@@ -66,16 +75,11 @@ fn load_wiring(config: &std::path::Path) -> crate::Result<diorama_config::Instan
     let (cfg, unresolved) = diorama_config::Instance::inspect(config)?;
     if let (Some(chain), Some(sim)) = (cfg.chains.venue.as_ref(), cfg.services.venue_sim.as_ref()) {
         let state_dir = sim.state_dir.to_string_lossy().to_string();
-        diorama_config::require_resolved_logged(
-            "venue simulator wiring",
-            &[
-                &chain.source_url,
-                &state_dir,
-                sim.engine_admin_url.as_deref().unwrap_or_default(),
-                sim.anvil_url.as_deref().unwrap_or_default(),
-            ],
-            &unresolved,
-        )?;
+        let mut values: Vec<&str> = chain.source_urls.iter().collect();
+        values.push(&state_dir);
+        values.push(sim.engine_admin_url.as_deref().unwrap_or_default());
+        values.push(sim.anvil_url.as_deref().unwrap_or_default());
+        diorama_config::require_resolved_logged("venue simulator wiring", &values, &unresolved)?;
     }
     Ok(cfg)
 }
@@ -84,7 +88,7 @@ fn load_wiring(config: &std::path::Path) -> crate::Result<diorama_config::Instan
 fn spawn_market_plane(
     feed: &Arc<crate::feed::MarketFeed>,
     api_client: crate::feed::rest::RestClient,
-    ws_url: &str,
+    ws_pool: diorama_anvil::EndpointPool,
     sim_section: &diorama_config::VenueSimSection,
 ) {
     let poller = crate::feed::rest::Poller::new(
@@ -92,7 +96,7 @@ fn spawn_market_plane(
         api_client,
         Duration::from_millis(sim_section.poll_interval_ms),
     );
-    let ws = crate::feed::ws::WsClient::new(feed.clone(), ws_url.to_string());
+    let ws = crate::feed::ws::WsClient::new(feed.clone(), ws_pool);
     tokio::spawn(poller.run());
     tokio::spawn(ws.run());
 }
@@ -160,12 +164,7 @@ fn spawn_bridge(
     match &sim_section.anvil_url {
         Some(v_url) => {
             let v = diorama_anvil::Rpc::new(v_url, Duration::from_secs(30))?;
-            let bridge = crate::bridge::Bridge::new(
-                v,
-                sim.clone(),
-                feed.clone(),
-                metrics.clone(),
-            );
+            let bridge = crate::bridge::Bridge::new(v, sim.clone(), feed.clone(), metrics.clone());
             tokio::spawn(bridge.run());
         }
         None => {
@@ -176,10 +175,7 @@ fn spawn_bridge(
 }
 
 /// The account plane's self-advance tick: funding + liquidations + persist.
-fn spawn_tick(
-    sim: &Arc<crate::sim::Sim>,
-    feed: &Arc<crate::feed::MarketFeed>,
-) {
+fn spawn_tick(sim: &Arc<crate::sim::Sim>, feed: &Arc<crate::feed::MarketFeed>) {
     let tick_feed = feed.clone();
     let tick_sim = sim.clone();
     tokio::spawn(async move {
@@ -273,7 +269,8 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             anvil_v,
             config,
             windows,
-        } => selftest_cmd(
+        } => {
+            selftest_cmd(
                 config,
                 crate::selftest::Targets {
                     rpc,
@@ -281,7 +278,8 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
                 },
                 windows,
             )
-            .await,
+            .await
+        }
     }
 }
 
@@ -331,12 +329,16 @@ impl diorama_devnet::engine::EngineService for Ctx {
         "venue engine wiring"
     }
 
-    fn urls(cfg: &diorama_config::Instance) -> Result<(String, String)> {
+    fn urls(cfg: &diorama_config::Instance) -> Result<(diorama_config::Endpoints, String)> {
         Ok(cfg.venue_urls()?)
     }
 
-    fn context(cfg: diorama_config::Instance, source_url: &str, target_url: &str) -> Result<Self> {
-        Ctx::new(cfg, source_url, target_url)
+    fn context(
+        cfg: diorama_config::Instance,
+        source_urls: &diorama_config::Endpoints,
+        target_url: &str,
+    ) -> Result<Self> {
+        Ctx::new(cfg, source_urls, target_url)
     }
 
     fn boot(ctx: &Self) -> futures_util::future::BoxFuture<'_, Result<()>> {
@@ -366,4 +368,3 @@ impl diorama_devnet::engine::EngineService for Ctx {
         })
     }
 }
-

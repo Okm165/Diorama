@@ -165,6 +165,12 @@ cctp-build: ## Build the CCTP bridge on the host (cargo: diorama-cctp-bridge)
 test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
+config-bootstrap: ## Copy each tracked project template to the gitignored live file when absent
+	@for f in config/instances/*/daloc.example.toml; do \
+	  d=$${f%/*}; \
+	  if [ ! -f "$$d/daloc.toml" ]; then cp "$$f" "$$d/daloc.toml"; echo "created $$d/daloc.toml from template"; fi; \
+	done
+
 config-check: ## Validate every instance file through the layered loader
 	@for f in config/instances/*/instance.toml; do \
 	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p diorama-config -- check "$$f" || exit 1; \
@@ -359,7 +365,7 @@ help: ## Show this help
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: fitness lint design-assertions config-check ast-scope
+.PHONY: fitness lint design-assertions config-check config-bootstrap ast-scope
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \

@@ -1,0 +1,61 @@
+# The generic CCTP bridge instance: deployment facts only.
+#
+# The bridge is its own process/profile, never a section of a mirror
+# instance. One instance = one bridge; several bridges (or several venues and
+# mainnets) compose as independent instances sharing the same spine.
+#
+# The topology is data: `[[chains]]` names each chain, its CCTP domain and
+# its contracts; `[[lanes]]` names the directed burns. Add a chain or a lane
+# here, not in code. The legacy `t_url`/`v_url` pair remains accepted as a
+# two-chain shorthand, but a composed deployment should state its lanes.
+[instance]
+name = "diorama-cctp"
+# Deployed beside the venue peers for now (the bridge reaches T
+# cross-namespace and V in this namespace). A fully isolated deployment can
+# give it its own namespace and wiring without changing this file's shape.
+namespace = "diorama-venue"
+profile = "cctp"
+project = "daloc"
+
+[services.cctp_bridge]
+state_dir = "${CCTP_STATE_DIR}"
+relay_key = "${CCTP_RELAY_KEY}"
+attester_seed = "diorama-cctp-devnet-attester"
+
+[[services.cctp_bridge.chains]]
+id = "ethereum"
+family = "ethereum"
+chain_id = 1
+domain = 0
+rpc_urls = "@t_rpc"
+usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+token_minter = "0xfd78EE919681417d192449715b2594ab58f5D002"
+
+[[services.cctp_bridge.chains]]
+id = "hyperevm"
+family = "hyperliquid"
+chain_id = 999
+domain = 19
+rpc_urls = "@anvil_v"
+usdc = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+token_minter = "0xfd78EE919681417d192449715b2594ab58f5D002"
+
+[[services.cctp_bridge.lanes]]
+source = "ethereum"
+destination = "hyperevm"
+
+[[services.cctp_bridge.lanes]]
+source = "hyperevm"
+destination = "ethereum"
+
+[services.cctp_bridge.iris]
+addr = "0.0.0.0"
+port = 8095
+
+[services.cctp_bridge.control]
+addr = "0.0.0.0"
+port = 8096

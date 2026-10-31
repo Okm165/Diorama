@@ -4,6 +4,7 @@
 //! `config/defaults.toml` (shared) or the instance file (deployment-specific).
 //! Fields carry no serde defaults: a key missing from both layers is a load
 //! error naming it.
+use crate::endpoints::Endpoints;
 use alloy_primitives::{Address, Bytes, U256};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -39,10 +40,22 @@ pub enum RelayerMode {
 pub struct CctpSection {
     /// Bridge state root (`cctp.json`: watched messages + lifecycle).
     pub state_dir: PathBuf,
-    /// T's RPC (Ethereum, CCTP domain 0).
-    pub t_url: String,
-    /// V's RPC (HyperEVM, CCTP domain 19).
-    pub v_url: String,
+    /// The legacy two-chain spelling: T's RPC (Ethereum, CCTP domain 0).
+    /// Absent when `[[services.cctp_bridge.chains]]` carries the topology.
+    #[serde(default)]
+    pub t_url: Option<String>,
+    /// The legacy two-chain spelling: V's RPC (HyperEVM, CCTP domain 19).
+    #[serde(default)]
+    pub v_url: Option<String>,
+    /// The composable topology: one entry per chain the bridge speaks to.
+    /// Empty falls back to the legacy `t_url`/`v_url` pair.
+    #[serde(default)]
+    pub chains: Vec<CctpChain>,
+    /// The directed lanes. One watcher per lane; the relayer serves all of
+    /// them. Empty with a two-chain topology means the legacy pair in both
+    /// directions (the old per-chain watcher behaviour).
+    #[serde(default)]
+    pub lanes: Vec<CctpLane>,
     /// The daloc-facing Iris API (8095).
     pub iris: HttpSection,
     /// The bridge's control API (8096).
@@ -77,9 +90,50 @@ pub struct CctpSection {
     pub balance_critical_wei: U256,
     /// First block the watcher scans on T / V. Absent = 0 (genesis: correct
     /// but thousands of chunked calls on a deep fork — pin the deployment
-    /// block).
+    /// block). The composable form puts the start block on each chain.
     pub t_start_block: Option<u64>,
     pub v_start_block: Option<u64>,
+}
+
+/// One chain the CCTP bridge serves. The chain id, domain and contract
+/// addresses are **deployment facts** here (not code constants): a second
+/// venue, a fourth mainnet or a non-Circle provider is a config entry, not a
+/// fork of the bridge. The protocol constants that are genuinely invariant
+/// (message version, finality thresholds) stay in the crate.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CctpChain {
+    /// Stable name used by the lanes (`ethereum`, `hyperevm`, `arbitrum`, …).
+    pub id: String,
+    /// The chain family (`ethereum`, `hyperliquid`, or any project string).
+    /// The bridge treats it as a label; the wiring asserts the numeric facts.
+    pub family: String,
+    pub chain_id: u64,
+    /// The Circle CCTP domain this chain serves.
+    pub domain: u32,
+    /// The chain's RPC endpoints, in preference order. A single string and a
+    /// list are both accepted; `@name` expands from `[endpoints]`.
+    #[serde(alias = "rpc")]
+    pub rpc_urls: Endpoints,
+    /// The burn/mint token on this domain (USDC for the Circle provider).
+    pub usdc: Address,
+    pub token_messenger: Address,
+    pub message_transmitter: Address,
+    #[serde(default)]
+    pub token_minter: Option<Address>,
+    /// First block the watcher scans on this chain (absent = 0).
+    #[serde(default)]
+    pub start_block: Option<u64>,
+}
+
+/// One directed CCTP lane: a burn on `source` is attested and minted on
+/// `destination`. The pair is data; the relayer and watcher iterate lanes, so
+/// N chains compose without a second code path.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CctpLane {
+    pub source: String,
+    pub destination: String,
 }
 
 /// `[services.venue_sim]`: the venue simulator (info + control API).
@@ -90,7 +144,9 @@ pub struct VenueSimSection {
     pub state_dir: PathBuf,
     /// The markets whose books are cached and whose contexts are tracked; the
     /// account plane prices every position from these (a position in an
-    /// untracked coin is a config error at the read that needs it).
+    /// untracked coin is a config error at the read that needs it). Empty is
+    /// the generic mirror; a project specialization supplies its set.
+    #[serde(default)]
     pub markets: Vec<String>,
     /// REST cache cadence (WS pushes are the primary freshness source; the
     /// budget meter gates this poller).
@@ -241,7 +297,9 @@ pub struct VerifierSection {
     /// State probes: re-run against T after every apply (the mainnet profile), and at
     /// the pin against the fork source (venue) — devnet-owned targets are
     /// skipped and counted (COW means that state is the devnet's, not the
-    /// fork base's).
+    /// fork base's). Empty is the generic mirror; a project specialization
+    /// supplies its own.
+    #[serde(default)]
     pub probes: Vec<Probe>,
 }
 

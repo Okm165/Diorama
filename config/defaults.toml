@@ -9,6 +9,19 @@
 # Merge semantics: deep merge, defaults <- instance <- env; arrays replace,
 # never concatenate; unknown keys are errors at every level.
 
+# The shared endpoint pool policy: every lane (JSON-RPC, REST, WS, beacon)
+# reads this table. A failed endpoint cools for an exponentially growing
+# window; one jittered emergency probe is allowed while every endpoint cools;
+# the per-call attempt budget bounds the whole rotation.
+[endpoint_defaults]
+rounds = 4
+max_attempts = 12
+cooldown_base_ms = 1000
+cooldown_max_ms = 60000
+jitter_ms = 250
+emergency_probe = true
+emergency_probe_ms = 1000
+
 [chains.l1]
 # Replay this many blocks behind the follow head. Blob sidecars for the
 # newest block are not in the beacon yet (measured: >15 s of retries on

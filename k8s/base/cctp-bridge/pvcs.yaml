@@ -1,0 +1,16 @@
+# The bridge's own state: watcher cursors + the in-flight message ledger.
+# Owned by the bridge base, not by either mirror: a bridge can run beside a
+# venue or in its own namespace, and a second bridge gets its own claim.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cctp-state
+  labels: { app.kubernetes.io/part-of: diorama-cctp, app: cctp-bridge }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: mirror-retain
+  volumeName: pvc-869c11d2-c939-4feb-9853-1cc4bd16dca9
+  resources:
+    requests:
+      storage: 5Gi

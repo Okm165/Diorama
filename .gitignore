@@ -6,6 +6,10 @@
 *.tar
 *.log
 
+# Per-deployment project specialization. The tracked template is
+# `config/instances/*/daloc.example.toml`; the live file is deployment data.
+config/instances/*/daloc.toml
+
 # Never commit secret material (JWT is created by scripts/gen-secret.sh)
 k8s/**/secret-*.yaml
 

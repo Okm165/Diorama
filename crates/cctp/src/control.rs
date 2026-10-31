@@ -8,14 +8,12 @@
 //! self-bridge). The watcher picks the `MessageSent` event up from the chain —
 //! the control route never inserts records itself (the chain stays the source
 //! of truth).
-use crate::chains::{by_domain, Chain, Domain, FINALITY_THRESHOLD_FINALIZED, TOKEN_MESSENGER_V2};
+use crate::chains::{by_domain, Chain, Domain, FINALITY_THRESHOLD_FINALIZED};
 use crate::error::{Error, Result};
 use crate::metrics::{render_counts, CctpMetrics};
 use crate::relayer::{RelayNow, Relayer};
 use crate::store::{MessageRecord, RelayState, Store};
-use crate::transfer::{
-    validate_max_fee, wait_for_receipt, IERC20, ITokenMessengerV2, TxSender,
-};
+use crate::transfer::{validate_max_fee, wait_for_receipt, ITokenMessengerV2, TxSender, IERC20};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
 use axum::extract::State;
@@ -160,10 +158,15 @@ pub struct StateResponse {
     pub(crate) messages: Vec<MessageSummary>,
 }
 
-pub(crate) async fn state_listing(State(state): State<Arc<ControlState>>) -> Result<Json<StateResponse>> {
-    let messages = state
-        .store
-        .with(|s| Ok(s.messages.iter().map(MessageSummary::of).collect::<Vec<_>>()))?;
+pub(crate) async fn state_listing(
+    State(state): State<Arc<ControlState>>,
+) -> Result<Json<StateResponse>> {
+    let messages = state.store.with(|s| {
+        Ok(s.messages
+            .iter()
+            .map(MessageSummary::of)
+            .collect::<Vec<_>>())
+    })?;
     Ok(Json(StateResponse { messages }))
 }
 
@@ -194,7 +197,7 @@ pub(crate) async fn relay(
         let record = state
             .store
             .find_message(|m| m.nonce == nonce)?
-            .ok_or_else(|| Error::bad_request(format!("no watched message with nonce {nonce}"),))?;
+            .ok_or_else(|| Error::bad_request(format!("no watched message with nonce {nonce}")))?;
         if record.state != RelayState::Signed {
             return Err(Error::bad_request(format!(
                     "message {nonce} is {:?}; only SIGNED messages relay (reattest an expired one first)",
@@ -276,7 +279,10 @@ pub(crate) struct TransferResponse {
 /// hook-carrying transfers (their `destinationCaller`, §15.4), zero for plain
 /// ones. A hook without a deployed wrapper is refused by name — never sent
 /// as a plain burn that would drop the credit.
-async fn hook_pin(state: &ControlState, request: &TransferRequest) -> Result<(B256, Option<Bytes>)> {
+async fn hook_pin(
+    state: &ControlState,
+    request: &TransferRequest,
+) -> Result<(B256, Option<Bytes>)> {
     match &request.hook {
         Some(hook) => {
             let wrapper = state
@@ -353,11 +359,22 @@ pub(crate) async fn transfer(
     let (destination_caller, hook_data) = hook_pin(&state, &request).await?;
     ensure_allowance(&state, chain, request.amount).await?;
 
-    let calldata = burn_calldata(chain, &request, mint_recipient, destination_caller, hook_data.as_ref());
+    let calldata = burn_calldata(
+        chain,
+        &request,
+        mint_recipient,
+        destination_caller,
+        hook_data.as_ref(),
+    );
     let hash = submit_burn(&state, chain, &calldata).await?;
     let receipt = match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
         Some(receipt) if receipt.status() => BurnReceipt::Observed,
-        Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
+        Some(_) => {
+            return Err(Error::TxReverted {
+                chain: chain.name,
+                tx: hash,
+            })
+        }
         None => BurnReceipt::Pending,
     };
     Ok(Json(TransferResponse {
@@ -381,11 +398,13 @@ pub(crate) async fn transfer(
 /// paying for a revert (devnet maxFee is 0).
 fn validate_request(state: &ControlState, request: &TransferRequest) -> Result<()> {
     if request.destination == request.source {
-        return Err(Error::bad_request("source and destination are the same domain",));
+        return Err(Error::bad_request(
+            "source and destination are the same domain",
+        ));
     }
     by_domain(&state.chains, request.destination)?;
     if request.amount.is_zero() {
-        return Err(Error::bad_request("amount must be nonzero",));
+        return Err(Error::bad_request("amount must be nonzero"));
     }
     validate_max_fee(
         state.min_fees.get(&request.source).copied().flatten(),
@@ -407,13 +426,13 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
             ),));
     }
     let allowance = chain
-        .usdc_allowance(state.sender.address(), TOKEN_MESSENGER_V2)
+        .usdc_allowance(state.sender.address(), chain.token_messenger)
         .await?;
     if allowance >= amount {
         return Ok(());
     }
     let approve = IERC20::approveCall {
-        spender: TOKEN_MESSENGER_V2,
+        spender: chain.token_messenger,
         amount: U256::MAX,
     }
     .abi_encode();
@@ -423,12 +442,17 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
         .await?;
     match wait_for_receipt(&chain.rpc, hash, state.receipt_timeout).await? {
         Some(receipt) if receipt.status() => {}
-        Some(_) => return Err(Error::TxReverted { chain: chain.name, tx: hash }),
+        Some(_) => {
+            return Err(Error::TxReverted {
+                chain: chain.name,
+                tx: hash,
+            })
+        }
         None => {
             return Err(Error::bad_request(format!(
-                    "approve tx {hash} was not mined within {}s; retry the transfer",
-                    state.receipt_timeout.as_secs()
-                ),))
+                "approve tx {hash} was not mined within {}s; retry the transfer",
+                state.receipt_timeout.as_secs()
+            )))
         }
     }
     tracing::info!(chain = chain.name, tx = %hash, "cctp approve submitted");
@@ -439,7 +463,7 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
 async fn submit_burn(state: &ControlState, chain: &Chain, calldata: &Bytes) -> Result<B256> {
     let hash = state
         .sender
-        .send(&chain.rpc, TOKEN_MESSENGER_V2, calldata, U256::ZERO)
+        .send(&chain.rpc, chain.token_messenger, calldata, U256::ZERO)
         .await?;
     tracing::info!(
         chain = chain.name,
@@ -492,10 +516,7 @@ mod tests {
     fn the_http_status_mapping_follows_the_shared_convention() {
         use axum::http::StatusCode;
         let status = |e: Error| e.into_response().status();
-        assert_eq!(
-            status(Error::bad_request("no")),
-            StatusCode::BAD_REQUEST
-        );
+        assert_eq!(status(Error::bad_request("no")), StatusCode::BAD_REQUEST);
         assert_eq!(
             status(Error::UnknownDomain { domain: Domain(5) }),
             StatusCode::NOT_FOUND
@@ -510,9 +531,7 @@ mod tests {
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(
-            status(Error::Poisoned {
-                what: "cctp store"
-            }),
+            status(Error::Poisoned { what: "cctp store" }),
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(

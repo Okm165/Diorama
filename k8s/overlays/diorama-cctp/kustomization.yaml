@@ -1,0 +1,16 @@
+# The CCTP bridge instance overlay: its own base + its own instance unit.
+#
+# It is deliberately not part of the venue overlay: a venue can run without a
+# bridge, a bridge can run without the venue, and a deployment may run several
+# bridges. This overlay reuses the venue namespace's wiring for now; a fully
+# isolated deployment copies the small `diorama-config`/`cctp-relay-key`
+# objects into its own namespace and changes `namespace:` here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: diorama-venue
+
+resources:
+  - ../../base/cctp-bridge
+  - ../../../config/instances/diorama-cctp
+  - nodeports.yaml

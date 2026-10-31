@@ -1,0 +1,12 @@
+# DALOC project specialization for the CCTP bridge — gitignored.
+#
+# The generic `instance.toml` carries the bridge's deployment facts; this file
+# carries the endpoint groups. `daloc.example.toml` is the tracked template.
+
+[endpoints.t_rpc]
+http = ["${T_RPC_URL}"]
+chain_id = 1
+
+[endpoints.anvil_v]
+http = ["${ANVIL_V_URL}"]
+chain_id = 999

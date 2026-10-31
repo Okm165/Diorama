@@ -86,6 +86,10 @@ pub enum Error {
     #[error("domain {domain} is not one this bridge serves")]
     UnknownDomain { domain: Domain },
 
+    /// A lane names a chain id that is not in the bridge's `[[chains]]`.
+    #[error("lane names unknown chain `{id}`")]
+    UnknownChain { id: String },
+
     /// Fewer bytes than a V2 message's fixed part: decoding further would
     /// misread fields (the contracts' own `_validateMessageFormat` guard).
     #[error("message is {len} bytes; a V2 burn message needs at least {want}")]

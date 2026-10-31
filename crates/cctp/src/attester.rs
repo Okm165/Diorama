@@ -19,11 +19,8 @@
 //! §15.3's storage-write fallback (if impersonation were ever blocked) is
 //! deliberately not implemented: `--auto-impersonate` is a boot flag both
 //! chains carry, and the real setters are the measured, working path.
-use crate::chains::MESSAGE_TRANSMITTER_V2;
 use crate::error::{Error, Result};
-use crate::transfer::{
-    wait_for_receipt, Wallet, IMessageTransmitterV2,
-};
+use crate::transfer::{wait_for_receipt, IMessageTransmitterV2, Wallet};
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
@@ -101,10 +98,11 @@ pub enum InstallOutcome {
 pub async fn install(
     rpc: &Rpc,
     chain: &'static str,
+    transmitter: Address,
     attester: Address,
     timeout: Duration,
 ) -> Result<InstallOutcome> {
-    let (manager, state, threshold) = read_state(rpc, attester).await?;
+    let (manager, state, threshold) = read_state(rpc, transmitter, attester).await?;
     if state == AttesterState::Enabled && threshold == U256::ONE {
         tracing::info!(
             chain,
@@ -123,23 +121,28 @@ pub async fn install(
     let sender = Impersonated {
         rpc,
         chain,
+        transmitter,
         from: manager,
         timeout,
     };
     if state == AttesterState::Disabled {
-        let input = IMessageTransmitterV2::enableAttesterCall { newAttester: attester }.abi_encode();
+        let input = IMessageTransmitterV2::enableAttesterCall {
+            newAttester: attester,
+        }
+        .abi_encode();
         sender.send(input).await?;
     }
     if threshold != U256::ONE {
-        let input =
-            IMessageTransmitterV2::setSignatureThresholdCall { newSignatureThreshold: U256::ONE }
-                .abi_encode();
+        let input = IMessageTransmitterV2::setSignatureThresholdCall {
+            newSignatureThreshold: U256::ONE,
+        }
+        .abi_encode();
         sender.send(input).await?;
     }
     rpc.anvil_stop_impersonating_account(manager).await?;
 
     // Verify what the setters claim: a failed installation must not serve.
-    verify_installed(rpc, chain, attester).await?;
+    verify_installed(rpc, chain, transmitter, attester).await?;
     tracing::info!(chain, %attester, %manager, "devnet attester installed (threshold 1)");
     Ok(InstallOutcome::Installed)
 }
@@ -147,8 +150,13 @@ pub async fn install(
 /// The post-state check: serving attestations the destination would reject is
 /// worse than not serving, so the installation refuses unless the setters
 /// verifiably took.
-async fn verify_installed(rpc: &Rpc, chain: &'static str, attester: Address) -> Result<()> {
-    let (_, state, threshold) = read_state(rpc, attester).await?;
+async fn verify_installed(
+    rpc: &Rpc,
+    chain: &'static str,
+    transmitter: Address,
+    attester: Address,
+) -> Result<()> {
+    let (_, state, threshold) = read_state(rpc, transmitter, attester).await?;
     if state != AttesterState::Enabled || threshold != U256::ONE {
         return Err(Error::AttesterInstall {
             chain,
@@ -190,19 +198,23 @@ impl AttesterState {
 
 /// The transmitter's attester state: the manager, whether `attester` is
 /// enabled, and the signature threshold (read before and after the install).
-async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, AttesterState, U256)> {
+async fn read_state(
+    rpc: &Rpc,
+    transmitter: Address,
+    attester: Address,
+) -> Result<(Address, AttesterState, U256)> {
     let manager = rpc
-        .call_decode(MESSAGE_TRANSMITTER_V2, &IMessageTransmitterV2::attesterManagerCall {})
+        .call_decode(transmitter, &IMessageTransmitterV2::attesterManagerCall {})
         .await?;
     let enabled = rpc
         .call_decode(
-            MESSAGE_TRANSMITTER_V2,
+            transmitter,
             &IMessageTransmitterV2::isEnabledAttesterCall { attester },
         )
         .await?;
     let threshold = rpc
         .call_decode(
-            MESSAGE_TRANSMITTER_V2,
+            transmitter,
             &IMessageTransmitterV2::signatureThresholdCall {},
         )
         .await?;
@@ -213,7 +225,10 @@ async fn read_state(rpc: &Rpc, attester: Address) -> Result<(Address, AttesterSt
 /// unfunded senders).
 async fn ensure_manager_gas(rpc: &Rpc, chain: &'static str, manager: Address) -> Result<()> {
     let balance = rpc
-        .call::<U256>(diorama_anvil::ETH_GET_BALANCE, (manager, diorama_anvil::LATEST))
+        .call::<U256>(
+            diorama_anvil::ETH_GET_BALANCE,
+            (manager, diorama_anvil::LATEST),
+        )
         .await?;
     if balance.is_zero() {
         tracing::warn!(chain, %manager, "attester manager has no gas on the fork; setting a devnet stipend");
@@ -229,6 +244,7 @@ async fn ensure_manager_gas(rpc: &Rpc, chain: &'static str, manager: Address) ->
 struct Impersonated<'a> {
     rpc: &'a Rpc,
     chain: &'static str,
+    transmitter: Address,
     from: Address,
     timeout: Duration,
 }
@@ -238,7 +254,7 @@ impl Impersonated<'_> {
     async fn send(&self, input: Vec<u8>) -> Result<()> {
         let tx = TransactionRequest::default()
             .from(self.from)
-            .to(MESSAGE_TRANSMITTER_V2)
+            .to(self.transmitter)
             .input(input.into());
         let hash = self.rpc.send_transaction(tx).await?;
         match wait_for_receipt(self.rpc, hash, self.timeout).await? {
@@ -273,7 +289,10 @@ mod tests {
 
         let hex_seed = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
         let wallet = Wallet::from_secret(hex_seed).unwrap();
-        assert_eq!(Attester::from_seed(hex_seed).unwrap().address(), wallet.address());
+        assert_eq!(
+            Attester::from_seed(hex_seed).unwrap().address(),
+            wallet.address()
+        );
         assert!(Attester::from_seed("  ").is_err());
     }
 

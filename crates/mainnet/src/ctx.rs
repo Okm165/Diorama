@@ -6,12 +6,11 @@
 //! chosen at boot: the source ([`RethSource`] — native BALs with the trace
 //! rung), the reset detector (cursor hash), and the scope (whole accounts).
 //! The composer itself is the spine's generic one (`diorama_devnet::bal`).
-use crate::source_sync::beacon::BeaconClient;
 use crate::error::{Error, Result};
 use crate::metrics::MainnetMetrics;
-use futures_util::future::BoxFuture;
+use crate::source_sync::beacon::BeaconClient;
 use diorama_anvil::Rpc;
-use diorama_config::{ChainL1, EngineSection, Instance};
+use diorama_config::{ChainL1, Endpoints, EngineSection, Instance};
 use diorama_devnet::drift::Drift;
 use diorama_devnet::engine::{Engine, EngineCore};
 use diorama_devnet::metrics::Registry as _;
@@ -20,6 +19,7 @@ use diorama_devnet::probes::ProbeOutcome;
 use diorama_devnet::scan::ScanWalk;
 use diorama_devnet::source::Source;
 use diorama_devnet::spine::Mirror;
+use futures_util::future::BoxFuture;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,13 +59,15 @@ impl Ctx {
     /// Build the context. Every boundary that must exist for the engine to be
     /// correct is fallible here (clients, state files, the drift log): a
     /// missing boundary is a boot error naming it, never a degraded start.
-    pub fn new(mut cfg: Instance, reth_url: &str, anvil_t_url: &str) -> Result<Self> {
+    pub fn new(mut cfg: Instance, reth_urls: &Endpoints, anvil_t_url: &str) -> Result<Self> {
         let (l1, engine) = cfg.take_mainnet()?;
         let plane = Plane::from_engine(&engine)?;
         let drift = Drift::from_engine(&engine)?;
-        // The timeout is the config's: reth queries race the sync.
+        // The timeout is the config's: reth queries race the sync. The source
+        // pool carries the instance's endpoint attributes and shared policy.
+        let pool = diorama_devnet::engine::source_pool(&cfg, reth_urls)?;
         let (reth, anvil_t) = diorama_devnet::engine::build_clients(
-            reth_url,
+            pool,
             anvil_t_url,
             Duration::from_secs(engine.reth.request_timeout_secs),
         )?;
@@ -78,7 +80,7 @@ impl Ctx {
                 watch: cfg.watch_set(),
             },
         );
-        let beacon = BeaconClient::new(engine.beacon.urls.clone())?;
+        let beacon = BeaconClient::new(&engine.beacon.urls)?;
         let engine_api = build_engine_api(&engine)?;
         Ok(Self {
             l1,
@@ -99,7 +101,10 @@ impl Ctx {
     /// reth follow head (safe/latest/finalized per config).
     pub async fn follow_head(&self) -> Result<Option<u64>> {
         let tag = self.l1.follow.tag();
-        let block = self.reth.block_by_tag(tag, diorama_anvil::Txs::Hashes).await?;
+        let block = self
+            .reth
+            .block_by_tag(tag, diorama_anvil::Txs::Hashes)
+            .await?;
         Ok(block.map(|b| b.header.number))
     }
 
@@ -126,7 +131,6 @@ impl Engine for Ctx {
             mirror: &self.mirror,
             target: &self.anvil_t,
             source: &self.reth,
-            source_url: &self.l1.source_url,
             engine: &self.engine,
         }
     }
@@ -159,11 +163,13 @@ impl Engine for Ctx {
 /// configured boundary that cannot be built is a boot error naming itself:
 /// silently disabling it would stop the top-up loop while every dashboard
 /// still says "enabled".
-fn build_engine_api(engine: &EngineSection) -> Result<Option<crate::source_sync::engine_api::EngineClient>> {
+fn build_engine_api(
+    engine: &EngineSection,
+) -> Result<Option<crate::source_sync::engine_api::EngineClient>> {
     match (&engine.source_sync.engine_url, &engine.source_sync.jwt_path) {
-        (Some(url), Some(jwt)) => {
-            Ok(Some(crate::source_sync::engine_api::EngineClient::new(url, jwt)?))
-        }
+        (Some(url), Some(jwt)) => Ok(Some(crate::source_sync::engine_api::EngineClient::new(
+            url, jwt,
+        )?)),
         _ => Ok(None),
     }
 }

@@ -78,11 +78,13 @@ pub async fn serve(addr: String, router: Router) -> Result<()> {
             source,
         })?;
     tracing::info!(addr, "cctp http api listening");
-    axum::serve(listener, router).await.map_err(|source| Error::Io {
-        what: "cctp http api",
-        path: addr.into(),
-        source,
-    })
+    axum::serve(listener, router)
+        .await
+        .map_err(|source| Error::Io {
+            what: "cctp http api",
+            path: addr.into(),
+            source,
+        })
 }
 
 // ---- response shapes (the measured wire forms, §16.2) ----------------------
@@ -176,13 +178,7 @@ impl IrisError {
 
 impl IntoResponse for IrisError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(IrisErrorBody {
-                error: self.error,
-            }),
-        )
-            .into_response()
+        (self.status, Json(IrisErrorBody { error: self.error })).into_response()
     }
 }
 
@@ -214,16 +210,14 @@ pub(crate) struct AllowanceQuery {
     pub source_domain: Option<Domain>,
 }
 
-async fn allowance(Query(query): Query<AllowanceQuery>) -> Result<Json<AllowanceResponse>, IrisError> {
+async fn allowance(
+    State(state): State<Arc<IrisState>>,
+    Query(query): Query<AllowanceQuery>,
+) -> Result<Json<AllowanceResponse>, IrisError> {
     let Some(source) = query.source_domain else {
-        return Err(IrisError::bad_request(
-            "sourceDomain is required",
-        ));
+        return Err(IrisError::bad_request("sourceDomain is required"));
     };
-    if !matches!(
-        source,
-        crate::chains::DOMAIN_ETHEREUM | crate::chains::DOMAIN_HYPER_EVM
-    ) {
+    if !state.chains.iter().any(|chain| chain.domain == source) {
         return Err(IrisError::not_found_what(format!(
             "no allowance for sourceDomain {source}"
         )));
@@ -248,9 +242,11 @@ async fn messages(
     let Some(raw_hash) = query.transaction_hash else {
         return Err(IrisError::bad_request("transactionHash is required"));
     };
-    let hash = raw_hash
-        .parse::<alloy_primitives::B256>()
-        .map_err(|_| IrisError::bad_request(format!("transactionHash `{raw_hash}` is not a 32-byte hex hash")))?;
+    let hash = raw_hash.parse::<alloy_primitives::B256>().map_err(|_| {
+        IrisError::bad_request(format!(
+            "transactionHash `{raw_hash}` is not a 32-byte hex hash"
+        ))
+    })?;
     let record = state
         .store
         .find_message(|m| m.source_domain == source_domain && m.burn_tx == hash)
@@ -319,9 +315,7 @@ async fn fresh_expiration(state: &IrisState, record: &MessageRecord) -> Result<U
         .chains
         .iter()
         .find(|c| c.domain == record.destination_domain)
-        .ok_or_else(|| {
-            IrisError::bad_request("no served chain for the message's destination")
-        })?;
+        .ok_or_else(|| IrisError::bad_request("no served chain for the message's destination"))?;
     let head = destination
         .rpc
         .block_number()
@@ -387,7 +381,12 @@ mod tests {
     fn record(signed: bool) -> MessageRecord {
         let message = Message::decode(&sample_raw_message())
             .unwrap()
-            .with_attester_fields(B256::repeat_byte(0xab), 2000, Default::default(), Default::default());
+            .with_attester_fields(
+                B256::repeat_byte(0xab),
+                2000,
+                Default::default(),
+                Default::default(),
+            );
         MessageRecord {
             source_domain: Domain(0),
             destination_domain: Domain(19),
@@ -398,7 +397,11 @@ mod tests {
             message_hash: message.keccak(),
             message: message.encode(),
             attestation: signed.then(|| Bytes::from(vec![7u8; 65])),
-            state: if signed { RelayState::Signed } else { RelayState::Pending },
+            state: if signed {
+                RelayState::Signed
+            } else {
+                RelayState::Pending
+            },
             created_ms: 0,
             attest_after_ms: 0,
             relay_tx: None,
@@ -432,7 +435,10 @@ mod tests {
             messages: vec![entry(&record(false))],
         };
         let parsed: serde_json::Value = serde_json::to_value(&pending).unwrap();
-        assert_eq!(parsed["messages"][0]["attestation"], serde_json::Value::Null);
+        assert_eq!(
+            parsed["messages"][0]["attestation"],
+            serde_json::Value::Null
+        );
         let signed = MessagesResponse {
             messages: vec![entry(&record(true))],
         };
@@ -511,7 +517,10 @@ mod tests {
         let served = messages(State(state.clone()), Path(Domain(0)), Query(query()))
             .await
             .unwrap();
-        assert!(served.0.messages[0].attestation.is_none(), "pending serves null");
+        assert!(
+            served.0.messages[0].attestation.is_none(),
+            "pending serves null"
+        );
 
         store
             .with(|s| {
