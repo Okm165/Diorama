@@ -224,6 +224,26 @@ impl Error {
                     && payload.message.contains("BlockOutOfRangeError")))
     }
 
+    /// The node does not have the requested block yet: its head moved past the
+    /// number but the block is not served (or the endpoint is behind the
+    /// requested height). A follow treats this as "wait", never as a pass
+    /// failure; the head/followed gauges still expose the lag.
+    pub fn is_block_unavailable(&self) -> bool {
+        match self {
+            Error::BlockMissing { .. } => true,
+            Error::Rpc { payload, .. } => {
+                (payload.code == -32001
+                    && (payload.message.contains("block not found")
+                        || payload.message.contains("not available")))
+                    || (payload.code == -32000
+                        && payload.message.contains("unsupported block number"))
+                    || (payload.code == -32603 && payload.message.contains("invalid block height"))
+            }
+            Error::EndpointsExhausted { last, .. } => last.is_block_unavailable(),
+            _ => false,
+        }
+    }
+
     /// The contract's dispatcher refused the selector: a revert carrying no
     /// data (measured 2026-10-25: mainnet's older TokenMessenger revision
     /// answers code 3 with `data: "0x"` for a fee surface it does not have).

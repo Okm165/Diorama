@@ -563,13 +563,23 @@ impl Rpc {
                 served.value.1,
             )),
             Err(error) => {
-                tracing::warn!(
-                    method,
-                    endpoints = self.pool.len(),
-                    error = %error,
-                    "every endpoint in the pool refused; surfacing a typed exhaustion"
-                );
-                Err(pool_error(error))
+                let typed = pool_error(error);
+                if typed.is_block_unavailable() {
+                    tracing::debug!(
+                        method,
+                        endpoints = self.pool.len(),
+                        error = %typed,
+                        "every endpoint is behind the requested block; waiting"
+                    );
+                } else {
+                    tracing::warn!(
+                        method,
+                        endpoints = self.pool.len(),
+                        error = %typed,
+                        "every endpoint in the pool refused; surfacing a typed exhaustion"
+                    );
+                }
+                Err(typed)
             }
         }
     }

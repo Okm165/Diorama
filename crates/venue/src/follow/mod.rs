@@ -79,17 +79,7 @@ struct SourceReorgEntry {
 /// `BlockMissing` for a null result) while its head has already moved. The
 /// follow loop treats that as "wait", never as a pass failure.
 fn source_block_unavailable(error: &diorama_anvil::Error) -> bool {
-    match error {
-        diorama_anvil::Error::BlockMissing { .. } => true,
-        diorama_anvil::Error::Rpc { payload, .. } => {
-            (payload.code == -32001
-                && (payload.message.contains("block not found")
-                    || payload.message.contains("not available")))
-                || (payload.code == -32000 && payload.message.contains("unsupported block number"))
-        }
-        diorama_anvil::Error::EndpointsExhausted { last, .. } => source_block_unavailable(last),
-        _ => false,
-    }
+    error.is_block_unavailable()
 }
 
 /// Whether a follow pass failed only because the source has not served the
