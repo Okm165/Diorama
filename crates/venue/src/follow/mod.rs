@@ -92,13 +92,11 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     // makes the continuity check meaningful — the first window block
     // (`followed + 1`). One body, not two: the follow's binding constraint
     // is the public endpoint's request budget.
-    let (source_head, next_block) = match ctx.plane.state.source_last_hash()? {
-        Some(_) => {
-            let (head, block) = ctx.source_rpc.head_and_block(followed + 1).await?;
-            (head, Some(block))
-        }
-        None => (ctx.source_rpc.block_number().await?, None),
-    };
+    // Read the head first: a source that has not reached `followed + 1` is
+    // simply behind, not a fault. Asking for the next block first (the old
+    // `head_and_block` shape) made a lagging source return "block not
+    // available" and the follow loop logged a WARN every pass.
+    let source_head = ctx.source_rpc.block_number().await?;
     ctx.venue_metrics
         .set(&ctx.venue_metrics.source_head, source_head);
     ctx.venue_metrics
@@ -113,6 +111,16 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
         );
         return Ok(None);
     }
+    // The continuity check needs the first window block; read it only when
+    // the source has one to serve.
+    let next_block = match ctx.plane.state.source_last_hash()? {
+        Some(_) => Some(
+            ctx.source_rpc
+                .block_by_number(followed + 1, diorama_anvil::Txs::Hashes)
+                .await?,
+        ),
+        None => None,
+    };
     // One bounded window per pass: the policy's limit caps the window's
     // *width*, never the following itself — a gap past it composes the
     // oldest chunk and continues next pass (the chunked catch-up). Sequential
