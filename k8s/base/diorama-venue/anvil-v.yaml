@@ -148,11 +148,14 @@ spec:
             periodSeconds: 30
           resources:
             # Like T, V never executes source txs: it materializes the fork
-            # state on demand and carries the devnet's own writes (measured
-            # ~50 MiB). The request covers the measured state; the limit
-            # keeps a wide margin for the live follow's write volume.
-            requests: { cpu: "50m", memory: 192Mi }
-            limits: { memory: 2Gi }
+            # state on demand and carries the devnet's own writes. The 2 GiB
+            # limit was measured too small: on 2026-10-31 the container was
+            # cgroup-OOM-killed at anon-rss 2.08 GiB, and the restart re-pinned
+            # the chain and lost the epoch's contract state. The request covers
+            # the steady state; the limit matches T's 8 GiB margin for fork
+            # materialization and the deploy/lifecycle write volume.
+            requests: { cpu: "50m", memory: 768Mi }
+            limits: { memory: 8Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-v-state }
