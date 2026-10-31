@@ -74,6 +74,53 @@ struct SourceReorgEntry {
     found: String,
 }
 
+/// A source that does not have the next block yet is behind, not broken: the
+/// public HyperEVM RPC answers `-32001 block not found` (and the typed
+/// `BlockMissing` for a null result) while its head has already moved. The
+/// follow loop treats that as "wait", never as a pass failure.
+fn source_block_unavailable(error: &diorama_anvil::Error) -> bool {
+    match error {
+        diorama_anvil::Error::BlockMissing { .. } => true,
+        diorama_anvil::Error::Rpc { payload, .. } => {
+            payload.code == -32001
+                && (payload.message.contains("block not found")
+                    || payload.message.contains("not available"))
+        }
+        diorama_anvil::Error::EndpointsExhausted { last, .. } => source_block_unavailable(last),
+        _ => false,
+    }
+}
+
+/// The next window block, or the fact that the source has not served it yet.
+enum NextWindowBlock {
+    Ready(Box<Option<Block>>),
+    SourceBehind,
+}
+
+/// Read the continuity block only when the source has a stored hash to check
+/// against; a lagging source's missing block is a wait, never a pass failure.
+async fn next_window_block(ctx: &Ctx, followed: u64) -> Result<NextWindowBlock> {
+    let Some(_) = ctx.plane.state.source_last_hash()? else {
+        return Ok(NextWindowBlock::Ready(Box::new(None)));
+    };
+    match ctx
+        .source_rpc
+        .block_by_number(followed + 1, diorama_anvil::Txs::Hashes)
+        .await
+    {
+        Ok(block) => Ok(NextWindowBlock::Ready(Box::new(Some(block)))),
+        Err(error) if source_block_unavailable(&error) => {
+            tracing::debug!(
+                error = %error,
+                follow = followed,
+                "source block not available yet; waiting for the source head"
+            );
+            Ok(NextWindowBlock::SourceBehind)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Follow the source: compose the window since the last composed source
 /// block, land the changed keys on V (COW: devnet-owned keys are skipped),
 /// and record the live parity of the applied keys. One window per pass; the
@@ -113,13 +160,9 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     }
     // The continuity check needs the first window block; read it only when
     // the source has one to serve.
-    let next_block = match ctx.plane.state.source_last_hash()? {
-        Some(_) => Some(
-            ctx.source_rpc
-                .block_by_number(followed + 1, diorama_anvil::Txs::Hashes)
-                .await?,
-        ),
-        None => None,
+    let next_block = match next_window_block(ctx, followed).await? {
+        NextWindowBlock::Ready(block) => *block,
+        NextWindowBlock::SourceBehind => return Ok(None),
     };
     // One bounded window per pass: the policy's limit caps the window's
     // *width*, never the following itself — a gap past it composes the
