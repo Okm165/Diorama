@@ -232,6 +232,21 @@ impl Bridge {
     /// EVM→Core credit from one transfer log (the emitting contract must be
     /// the token's linked EVM contract).
     async fn apply_credit(&self, transfer: &Transfer, emitter: Address, tokens: &[TokenInfo]) -> Result<()> {
+        // A spot-token contract transferring **from itself** is the bridge's
+        // internal hop, not the depositor. `credit_of` refuses it; name the gap
+        // here because the refusal is otherwise silent and the deposit has no
+        // Core account. The measured 2026-10-31 USDC deposit credited the token
+        // contract itself; resolving the original depositor from the tx is the
+        // remaining piece (see `credit_of`'s self-transfer guard).
+        if transfer.from == emitter {
+            tracing::warn!(
+                from = %transfer.from,
+                to = %transfer.to,
+                value = %transfer.value,
+                "bridge: EVM→Core transfer originates at the linked token contract itself — refusing to credit the contract; the depositor is not resolvable from this log"
+            );
+            return Ok(());
+        }
         let Some(credit) = system::credit_of(transfer, tokens, emitter) else {
             return Ok(());
         };

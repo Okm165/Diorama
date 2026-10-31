@@ -214,6 +214,16 @@ pub(crate) fn credit_of<'a>(
     if emitter != linked {
         return None;
     }
+    // A token contract transferring **from itself** is not a depositor. The
+    // measured 2026-10-31 10 USDC EVM→Core deposit was credited to the USDC
+    // token contract because the observed `Transfer` carried the emitter as
+    // `from`; the depositor's agent was never funded and the balance was
+    // stranded on the token contract. The linked emitter check above already
+    // proves the log is the token's own; this second guard rejects the
+    // self-transfer shape so a mint/self-move can never mint Core balances.
+    if transfer.from == linked {
+        return None;
+    }
     let evm_decimals = token.evm_decimals()?;
     let credited =
         floor_to_core_wei(evm_to_human(transfer.value, evm_decimals)?, token.wei_decimals)?;
@@ -379,6 +389,15 @@ mod tests {
         let t = transfer_of(&transfer_log(from, system_address(5), U256::from(5_000_000u64)))
             .unwrap();
         assert!(credit_of(&t, &tokens, linked).is_none());
+        // The token contract transferring **from itself** is a mint/self-move,
+        // not a depositor: the measured 2026-10-31 deposit credited the USDC
+        // contract instead of the agent. It must never become a Core credit.
+        let t = transfer_of(&transfer_log(linked, system_address(0), U256::from(10_000_000u64)))
+            .unwrap();
+        assert!(
+            credit_of(&t, &tokens, linked).is_none(),
+            "a self-transfer by the token contract is not an EVM→Core deposit"
+        );
     }
 
     #[test]
