@@ -612,7 +612,10 @@ port = 8096
             "the audited watchlist is complete"
         );
         assert_eq!(l1(&inst).fork_offset, 128);
-        assert_eq!(engine(&inst).verifier.probes.len(), 11);
+        // 10 probes: the Aave USDT price probe was removed after the
+        // stable-feed pulse pinned USDT to 1.0 and the probe had no tolerance
+        // (measured 2026-10-31; the mainnet engine now reports `failed:0`).
+        assert_eq!(engine(&inst).verifier.probes.len(), 10);
         let mut names = unresolved.clone();
         names.sort();
         assert_eq!(
