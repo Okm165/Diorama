@@ -76,9 +76,13 @@ mainnet-snapshot: ## Download the reth snapshot into the reth PVC (scales reth d
 	kubectl -n diorama-mainnet scale deploy/reth --replicas=0 2>/dev/null || true
 	kubectl -n diorama-mainnet delete job reth-snapshot --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/snapshot-job.yaml
-	@echo "waiting for snapshot to finish (up to 2h; resumable)..."
-	kubectl -n diorama-mainnet wait --for=condition=complete job/reth-snapshot --timeout=7200s || \
-		{ echo "still running - check: make mainnet-snapshot-status"; exit 1; }
+	@# The wait bound is the Job's own spec.activeDeadlineSeconds, not a second
+	@# hardcoded number: the manifest already owns how long the download may run.
+	@deadline=$$(kubectl -n diorama-mainnet get job reth-snapshot -o jsonpath='{.spec.activeDeadlineSeconds}'); \
+	 test -n "$$deadline" || { echo "reth-snapshot Job declares no activeDeadlineSeconds" >&2; exit 1; }; \
+	 echo "waiting for snapshot to finish (Job deadline $${deadline}s; resumable)..."; \
+	 kubectl -n diorama-mainnet wait --for=condition=complete job/reth-snapshot --timeout="$${deadline}s" || \
+		{ echo "not complete within the Job's own deadline ($${deadline}s) - check: make mainnet-snapshot-status"; exit 1; }
 
 mainnet-snapshot-status: ## Show snapshot job status + progress
 	@$(KUBECTL) get job reth-snapshot 2>/dev/null || echo "no snapshot job"
@@ -160,7 +164,10 @@ import: build ## Import the engine image into the k3s containerd store
 
 deploy-engine: import ## Rebuild + redeploy the selected instance's engine
 	$(KUBECTL) rollout restart deploy/engine
-	$(KUBECTL) rollout status deploy/engine --timeout=120s
+	@# Bound the wait by the Deployment's own progressDeadlineSeconds (the
+	@# Kubernetes default is 600s when unset), not a second hardcoded timeout.
+	@deadline=$$(kubectl -n $(NS) get deploy/engine -o jsonpath='{.spec.progressDeadlineSeconds}' 2>/dev/null); \
+	 $(KUBECTL) rollout status deploy/engine --timeout="$${deadline:-600}s"
 
 venue-build: ## Build the venue binaries on the host (cargo: diorama-venue-engine + diorama-venue-sim)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p diorama-venue-engine -p diorama-venue-sim
@@ -332,14 +339,32 @@ mainnet-closure-check: ## Audit the watchlist closure: every storage dep of ever
 mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
 	kubectl -n diorama-mainnet delete job mainnet-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/mainnet-selftest-job.yaml
-	kubectl -n diorama-mainnet wait --for=condition=complete job/mainnet-selftest --timeout=900s || true
-	$(KUBECTL) logs job/mainnet-selftest
+	@# The Job never reaches Complete: its anvil sidecar is a long-running
+	@# server. The engine container prints the verdict, so poll that container
+	@# and gate on `== selftest PASSED ==` instead of waiting on the Job.
+	@for _ in $$(seq 1 450); do \
+	  out=$$(kubectl -n diorama-mainnet logs job/mainnet-selftest -c engine 2>/dev/null || true); \
+	  case "$$out" in \
+	    *"== selftest PASSED =="*) printf '%s\n' "$$out"; exit 0 ;; \
+	    *"== selftest FAILED =="*) printf '%s\n' "$$out"; exit 1 ;; \
+	  esac; \
+	  sleep 2; \
+	done; \
+	echo "mainnet-selftest produced no verdict within 900s" >&2; exit 1
 
 venue-selftest: ## Run the venue selftest Job (public RPC + scratch anvil; no cluster stack needed)
 	kubectl -n diorama-venue delete job venue-selftest --ignore-not-found
 	kubectl apply -f $(BOOTSTRAP)/venue-selftest-job.yaml
-	kubectl -n diorama-venue wait --for=condition=complete job/venue-selftest --timeout=900s || true
-	kubectl -n diorama-venue logs job/venue-selftest
+	@# Same shape as mainnet-selftest: poll the engine container's verdict.
+	@for _ in $$(seq 1 450); do \
+	  out=$$(kubectl -n diorama-venue logs job/venue-selftest -c engine 2>/dev/null || true); \
+	  case "$$out" in \
+	    *"== selftest PASSED =="*) printf '%s\n' "$$out"; exit 0 ;; \
+	    *"== selftest FAILED =="*) printf '%s\n' "$$out"; exit 1 ;; \
+	  esac; \
+	  sleep 2; \
+	done; \
+	echo "venue-selftest produced no verdict within 900s" >&2; exit 1
 
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
 	@for c in reth lighthouse anvil-t engine; do \

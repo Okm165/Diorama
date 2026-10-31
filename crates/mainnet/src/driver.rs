@@ -221,7 +221,7 @@ async fn on_rebase(rpc: &diorama_anvil::Rpc, head: u64, follow: u64, start: u64)
 /// own limit.
 fn gap_within_limit(gap: u64, limit: Option<u64>, start_kind: state::Start) -> bool {
     let limit = if start_kind == state::Start::Rebased {
-        10_064
+        diorama_config::RETH_STATE_WINDOW_BLOCKS
     } else {
         match limit {
             Some(limit) => limit,

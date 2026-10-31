@@ -27,7 +27,8 @@ pub use endpoints::{EndpointGroup, Endpoints, WsEndpoints};
 pub use env::{require_resolved, require_resolved_logged};
 
 pub use instance::{
-    ChainKind, ChainL1, ChainVenue, Chains, FollowHead, Instance, InstanceMeta, Profile, WatchEntry,
+    ChainKind, ChainL1, ChainVenue, Chains, FollowHead, Instance, InstanceMeta, Profile,
+    WatchEntry, RETH_STATE_WINDOW_BLOCKS,
 };
 pub use sections::{
     BeaconSection, CctpChain, CctpLane, CctpSection, ClosuresSection, EngineAnvil, EngineReth,

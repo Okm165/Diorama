@@ -238,6 +238,11 @@ impl Error {
                     || (payload.code == -32000
                         && payload.message.contains("unsupported block number"))
                     || (payload.code == -32603 && payload.message.contains("invalid block height"))
+                    // Measured onfinality shape for a log range whose head moved
+                    // past the requested window while the request was in flight.
+                    || (payload.code == -32602
+                        && (payload.message.contains("block range extends beyond current head")
+                            || payload.message.contains("beyond current head")))
             }
             Error::EndpointsExhausted { last, .. } => last.is_block_unavailable(),
             _ => false,
@@ -358,6 +363,28 @@ mod tests {
         )
         .is_history_unavailable());
         assert!(!rpc(-32000, "some other node fault").is_history_unavailable());
+    }
+
+    /// Every measured source-lag shape classifies as a wait; an unrelated
+    /// `-32602` invalid-params answer does not.
+    #[test]
+    fn block_unavailable_matches_the_source_lag_shapes() {
+        let rpc = |code: i64, message: &'static str| Error::Rpc {
+            endpoint: "https://hyperliquid.api.onfinality.io/evm/public".into(),
+            method: "eth_getLogs".into(),
+            payload: RpcError {
+                code,
+                message: message.into(),
+                data: None,
+            },
+        };
+        assert!(rpc(-32001, "block not found: 0x2fba3bd").is_block_unavailable());
+        assert!(rpc(-32000, "unsupported block number").is_block_unavailable());
+        assert!(rpc(-32603, "invalid block height: 50047695").is_block_unavailable());
+        assert!(rpc(-32602, "block range extends beyond current head block").is_block_unavailable());
+        assert!(
+            !rpc(-32602, "invalid argument 0: hex string has odd length").is_block_unavailable()
+        );
     }
 
     /// This error is wrapped by the engine's, which must stay under clippy's

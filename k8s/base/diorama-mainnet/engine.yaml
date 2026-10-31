@@ -71,10 +71,11 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:
-            # No CPU limit (the applier's passes are latency-sensitive);
-            # measured steady state ~25 MiB, the limit leaves a wide margin
-            # for a wide window's composition state.
-            requests: { cpu: "50m", memory: 192Mi }
+            # No CPU limit (the applier's passes are latency-sensitive).
+            # Measured 2026-10-31 (60 s sample): ~3-4m CPU, 22-24 MiB RSS. The
+            # request tracks the measured steady state; the limit stays the OOM
+            # ceiling for a wide window's composition state.
+            requests: { cpu: "5m", memory: 32Mi }
             limits: { memory: 512Mi }
       volumes:
         - name: instance

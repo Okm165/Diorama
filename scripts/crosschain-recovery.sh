@@ -18,6 +18,7 @@ COIN="${COIN:-ETH}"
 COLLATERAL="${COLLATERAL:-1000}"
 LEVERAGE="${LEVERAGE:-10}"
 RATE="${RATE:--0.0005}"               # negative: the long collects
+SCAN_STEP="${SCAN_STEP:-0.25}"        # the measurement grid, percent
 CAST="${CAST:-cast}"
 USDC_V="${USDC_V:-0xb88339CB7199b77E23DB6E890353E22632Ba630f}"
 USDC_T="${USDC_T:-0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48}"
@@ -117,12 +118,15 @@ d = json.load(sys.stdin)
 v = float(d['marginSummary']['accountValue']); m = float(d.get('crossMaintenanceMarginUsed') or 0)
 p = d['assetPositions'][0]['position']; s = abs(float(p['szi'])); px = float(p['positionValue']) / s
 print(f'{(v - m) / (s * px) * 100:.2f}')")
-pct=$(python3 -c "print(f'{max(0.2, float('$buf') - 2):.2f}')")
+pct="$SCAN_STEP"
+# A crash cannot exceed 100% of the mark: derive the scan's extent from the
+# starting point and the measurement grid instead of a fixed step count.
+max_steps=$(python3 -c "import math; print(max(1, math.ceil((100.0 - float('$pct')) / float('$SCAN_STEP'))))")
 n=0
-while [ "$n" -lt 80 ]; do
+while [ "$n" -lt "$max_steps" ]; do
   move_and_tick crash "$pct"
   [ "$(liq_state)" = "liquidated" ] && break
-  pct=$(python3 -c "print(f'{float('$pct') + 0.25:.2f}')"); n=$((n+1))
+  pct=$(python3 -c "print(f'{float('$pct') + float('$SCAN_STEP'):.2f}')"); n=$((n+1))
 done
 [ "$(liq_state)" = "liquidated" ] \
   && ok "the levered position was liquidated by the crash (at $pct%, the served buffer was $buf%)" \

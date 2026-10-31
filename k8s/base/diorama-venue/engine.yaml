@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-venue-engine:v8
+          image: localhost/diorama-venue-engine:v9
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (HL_RPC_URLS,
@@ -69,10 +69,11 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:
-            # No CPU limit (the follow's passes are latency-sensitive);
-            # measured steady state ~25 MiB, the limit leaves a wide margin
-            # for a wide catch-up window's composition state.
-            requests: { cpu: "50m", memory: 192Mi }
+            # No CPU limit (the follow's passes are latency-sensitive).
+            # Measured 2026-10-31 (60 s sample): ~1-2m CPU, 8-10 MiB RSS. The
+            # request tracks the measured steady state; the limit stays the OOM
+            # ceiling for a wide catch-up window's composition state.
+            requests: { cpu: "5m", memory: 16Mi }
             limits: { memory: 512Mi }
       volumes:
         - name: instance

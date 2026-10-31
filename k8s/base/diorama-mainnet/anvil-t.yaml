@@ -162,10 +162,12 @@ spec:
             periodSeconds: 30
           resources:
             # T never executes mainnet txs (BAL diffs only), so its state stays
-            # small (measured ~2.5 GB with --prune-history 32; the snapshots
-            # are the dominant term). The request covers the measured peak;
-            # the limit keeps a ~2.4x margin for fork materialization spikes.
-            requests: { cpu: "100m", memory: 768Mi }
+            # small (measured ~2.5 GB on disk with --prune-history 32; the
+            # snapshots are the dominant term). Measured 2026-10-31 (60 s
+            # sample): ~14-15m CPU, 1.64 GiB RSS. The request covers the
+            # measured steady state; the limit stays the OOM ceiling for fork
+            # materialization spikes.
+            requests: { cpu: "25m", memory: 2Gi }
             limits: { memory: 8Gi }
       volumes:
         - name: state

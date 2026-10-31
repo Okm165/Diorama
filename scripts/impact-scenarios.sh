@@ -146,7 +146,9 @@ flatten_coin "$PORTFOLIO" "$COIN"; flatten_coin "$RIVAL" "$COIN"
 echo
 echo "== D. the liquidation ladder (the measured threshold per size) =="
 declare -a sizes=(1 2 4 6)
+declare -a ladder=(2 5 10 15 20 25 30 40 50)
 declare -a thresholds=()
+ladder_last=${ladder[${#ladder[@]}-1]}
 for sz in "${sizes[@]}"; do
   flatten_coin "$PORTFOLIO" "$COIN"
   o=$(order "$PORTFOLIO" true "$sz"); entry=$(echo "$o" | json "d['avgPx']")
@@ -160,7 +162,7 @@ mmr = mm / n
 p = (eq - n * mmr) / (n * (1 - mmr))
 print(f'{p*100:.2f}')")
   before=$(liqs); measured=""
-  for step in 2 5 10 15 20 25 30 40 50; do
+  for step in "${ladder[@]}"; do
     spost /control/crash "{\"coin\":\"$COIN\",\"pct\":\"$step\"}" > /dev/null
     spost /control/advance '{"seconds":1}' > /dev/null
     if [ "$(liqs)" -gt "$before" ]; then measured=$step; break; fi
@@ -170,13 +172,28 @@ print(f'{p*100:.2f}')")
   clear_crash
   if [ -n "$measured" ]; then
     thresholds+=("$measured")
-    ok "size ${sz} ${COIN} (notional ${notional}) liquidated at ~${measured}% adverse; predicted ${predicted}% from the buffer"
-    check "the measured threshold brackets the prediction (step granularity)" \
-      "$(python3 -c "import sys; m=float('$measured'); p=float('$predicted'); sys.exit(0 if p - 2 <= m <= p + 12 else 1)" && echo 1 || echo 0)"
-  elif python3 -c "import sys; sys.exit(0 if float('$predicted') >= 50 else 1)"; then
-    ok "size ${sz} ${COIN} (notional ${notional}) cannot liquidate within the 50% ladder (predicted ${predicted}%: under-leveraged - sound)"
+    # The crash is applied at each ladder step, so the true crossing lies in the
+    # rung bracketing the analytic prediction. That rung is derived from the
+    # ladder itself — no tolerance band invented around the prediction.
+    bracket=$(python3 -c "
+steps=[${ladder[*]}]
+p=float('$predicted')
+lo=max((s for s in steps if s <= p), default=steps[0])
+hi=min((s for s in steps if s >= p), default=steps[-1])
+print(f'{lo} {hi}')
+")
+    case " $bracket " in
+      *" $measured "*)
+        ok "size ${sz} ${COIN} (notional ${notional}) liquidated within the ladder rung bracketing the prediction (measured ${measured}%, predicted ${predicted}%, rung ${bracket}%)"
+        ;;
+      *)
+        bad "size ${sz} ${COIN} measured ${measured}% is outside the ladder rung bracketing the prediction ${predicted}% (rung ${bracket}%)"
+        ;;
+    esac
+  elif python3 -c "import sys; sys.exit(0 if float('$predicted') >= $ladder_last else 1)"; then
+    ok "size ${sz} ${COIN} (notional ${notional}) cannot liquidate within the ${ladder_last}% ladder (predicted ${predicted}%: under-leveraged - sound)"
   else
-    bad "size ${sz} ${COIN} never liquidated within the 50% ladder (predicted ${predicted}%)"
+    bad "size ${sz} ${COIN} never liquidated within the ${ladder_last}% ladder (predicted ${predicted}%)"
   fi
   flatten_coin "$PORTFOLIO" "$COIN"
 done

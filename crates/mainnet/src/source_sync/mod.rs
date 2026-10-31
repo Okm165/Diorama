@@ -53,7 +53,7 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
     let Some(engine) = ctx.engine_api.clone() else {
         return;
     };
-    let interval = Duration::from_millis(ctx.engine.source_sync.interval_ms.max(250));
+    let interval = Duration::from_millis(ctx.engine.source_sync.interval_ms);
     let mut last_report = Instant::now();
     // CL head execution block, cached for a minute (one beacon call per minute).
     let mut head_cache: Option<HeadCache> = None;
@@ -145,7 +145,7 @@ async fn top_up(ctx: &Ctx, engine: &crate::source_sync::engine_api::EngineClient
     if slot > cl_head {
         return Ok(0);
     }
-    let budget = ctx.engine.source_sync.max_per_pass.max(1) as usize;
+    let budget = ctx.engine.source_sync.max_per_pass as usize;
     let mut delivered = 0usize;
     while slot <= cl_head && delivered < budget {
         match deliver_slot(&ctx.beacon, engine, slot, el_head, delivered).await? {

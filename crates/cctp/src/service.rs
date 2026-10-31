@@ -205,7 +205,7 @@ async fn boot_bridge(
     let attester = Arc::new(crate::attester::Attester::from_seed(
         &section.attester_seed,
     )?);
-    install_attester(&chains, &attester, receipt_timeout).await?;
+    install_attester(&chains, &attester, receipt_timeout, section.balance_low_wei).await?;
 
     let wallet = Wallet::from_secret(&section.relay_key)?;
     tracing::info!(relayer = %wallet.address(), "cctp relay wallet loaded");
@@ -319,6 +319,7 @@ impl Bridge {
             chains: self.chains.clone(),
             lanes: self.lanes.clone(),
             expiration_blocks: self.section.expiration_blocks,
+            fast_burn_allowance: self.section.fast_burn_allowance,
         });
         let control_state = Arc::new(crate::control::ControlState {
             store: self.store.clone(),
@@ -649,6 +650,7 @@ async fn install_attester(
     chains: &[Chain],
     attester: &crate::attester::Attester,
     receipt_timeout: Duration,
+    stipend: U256,
 ) -> crate::Result<()> {
     for chain in chains {
         let outcome = crate::attester::install(
@@ -656,7 +658,8 @@ async fn install_attester(
             chain.name,
             chain.message_transmitter,
             attester.address(),
-            receipt_timeout.max(Duration::from_secs(120)),
+            receipt_timeout,
+            stipend,
         )
         .await?;
         tracing::info!(
@@ -669,10 +672,10 @@ async fn install_attester(
     Ok(())
 }
 
-/// One ETH of devnet gas when the relay wallet starts below the low threshold
-/// (§15.4's boot funding; `anvil_setBalance` on both chains).
-const RELAY_GAS_STIPEND: u64 = 1_000_000_000_000_000_000;
-
+/// Top the relay wallet up to the configured low threshold when it falls
+/// below it (§15.4's boot funding; `anvil_setBalance` on both chains). The
+/// threshold is the deployment's own value — the same one the gas alert
+/// reads — so the top-up has no second, hardcoded amount to drift from.
 pub(crate) async fn fund_relayer(
     chains: &[Chain],
     wallet: crate::Address,
@@ -681,9 +684,7 @@ pub(crate) async fn fund_relayer(
     for chain in chains {
         let balance = chain.native_balance(wallet).await?;
         if balance < low {
-            chain
-                .fund_native(wallet, U256::from(RELAY_GAS_STIPEND))
-                .await?;
+            chain.fund_native(wallet, low).await?;
             tracing::warn!(
                 chain = chain.name,
                 relayer = %wallet,

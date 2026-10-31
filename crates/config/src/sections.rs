@@ -67,6 +67,10 @@ pub struct CctpSection {
     /// The devnet attester's deterministic seed (a 32-byte hex key is used
     /// verbatim; any other string is hashed, §15.3).
     pub attester_seed: String,
+    /// The Iris fast-burn allowance served for a configured source domain
+    /// (USDC). Circle's live service publishes a rolling figure; a deployment
+    /// pins its own (the default is the measured 2026-10-31 value).
+    pub fast_burn_allowance: f64,
     /// One watcher pass per interval.
     pub poll_interval_ms: u64,
     /// The emulated PENDING window (0 = attest immediately).
@@ -264,12 +268,11 @@ pub struct LoopsSection {
 }
 
 impl LoopsSection {
-    /// The poll cadence, floored at 200 ms: both mirrors poll a *local* anvil
-    /// (sub-millisecond round trips), so a faster interval buys no freshness
-    /// and only spins the loop — the floor lives here, so every driver reads
-    /// the same cadence.
+    /// The configured poll cadence. A zero interval is a config error
+    /// (`check_engine` refuses it), so the driver uses the deployment's
+    /// number rather than a second, code-side floor.
     pub fn poll(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.poll_interval_ms.max(200))
+        std::time::Duration::from_millis(self.poll_interval_ms)
     }
 }
 

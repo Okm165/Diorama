@@ -101,6 +101,11 @@ addr = "0.0.0.0"
 # and live in the instance file.
 
 [services.cctp_bridge]
+# The Iris fast-burn allowance the devnet serves (USDC). Circle's live service
+# publishes a rolling figure (measured 2026-10-31: 56,854,459.08); a
+# deployment may pin its own. The endpoint's shape, not the number, is the
+# contract with clients.
+fast_burn_allowance = 56854459.08
 # One watcher pass per second on each chain: new MessageSent logs + due
 # attestations.
 poll_interval_ms = 1000

@@ -28,7 +28,7 @@ TRADER="${TRADER:-0x00000000000000000000000000000000000000e5}"
 COIN="${COIN:-ETH}"
 COLLATERAL="${COLLATERAL:-1000}"      # the perp wallet, USDC
 LEVERAGES="${LEVERAGES:-2 5 10 20 25}" # the frontier's leverages
-STEPS="${STEPS:-7}"                    # the bisection's steps per leverage
+SCAN_STEP="${SCAN_STEP:-0.25}"          # the measurement grid, percent
 CAST="${CAST:-cast}"
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib-cctp.sh"
@@ -59,6 +59,7 @@ idx=$(echo "$meta" | python3 -c "import json,sys; print([a['name'] for a in json
 echo "-- the frontier (collateral \$$COLLATERAL per leverage; the sim's own liquidation decides)"
 printf "  %-4s %-10s %-12s %-10s %-12s %-14s %-10s\n" "L" "size" "notional" "margin" "liq at" "theory" "left after"
 rows=""
+unmeasured=0
 for L in $LEVERAGES; do
   spost /control/crash "{\"coin\":\"$COIN\"}" > /dev/null 2>&1 || true
   spost /control/set_book "{\"coin\":\"$COIN\"}" > /dev/null 2>&1 || true
@@ -86,32 +87,38 @@ for L in $LEVERAGES; do
   # The classic bound: the maintenance is half the initial margin at max
   # leverage 25 *of the crashed value*, so d = (1/L - 0.02)/0.98 (percent).
   # The measured frontier shows where the real book's costs pull it in.
-  d0=$(python3 -c "print(f'{max(0.2, (1 / $L - 0.02) / 0.98 * 100):.2f}')")
-  # The scan: from just below the theory upward in 0.25% steps; the first
-  # liquidating step is the measured distance (once liquidated the position is
-  # gone — no re-opening mid-scan).
-  pct=$(python3 -c "print(f'{max(0.2, float('$d0') - 3):.2f}')")
+  d0=$(python3 -c "print(f'{(1 / $L - 0.02) / 0.98 * 100:.2f}')")
+  # The scan: from the first grid step upward; the first liquidating step is the
+  # measured distance (once liquidated the position is gone — no re-opening).
+  pct="$SCAN_STEP"
   measured=""
+  # A crash cannot exceed 100% of the mark, so the scan's extent is derived from
+  # the starting point and the measurement grid — not a fixed step count.
+  max_steps=$(python3 -c "import math; print(max(1, math.ceil((100.0 - float('$pct')) / float('$SCAN_STEP'))))")
   n=0
-  while [ "$n" -lt 80 ]; do
+  while [ "$n" -lt "$max_steps" ]; do
     crash_and_tick "$pct"
     if [ "$(liq_state)" = "liquidated" ]; then measured=$pct; break; fi
-    pct=$(python3 -c "print(f'{float('$pct') + 0.25:.2f}')")
+    pct=$(python3 -c "print(f'{float('$pct') + float('$SCAN_STEP'):.2f}')")
     n=$((n + 1))
   done
-  [ -n "$measured" ] || measured=">$pct"
+  [ -n "$measured" ] || { measured=">$pct"; unmeasured=$((unmeasured + 1)); }
   left=$(acct | jq -r '.marginSummary.accountValue')
   printf "  %-4s %-10s %-12s %-10s %-12s %-14s %-10s\n" "$L" "$fsz" "\$$notional" "\$$margin" "$measured%" "$d0%" "\$$left"
   rows="$rows$L $measured $left\n"
 done
 spost /control/crash "{\"coin\":\"$COIN\"}" > /dev/null
-ok "the frontier is above (the sim's own liquidations decided each row)"
+if [ "$unmeasured" -eq 0 ]; then
+  ok "the frontier is above (the sim's own liquidations decided every row)"
+else
+  bad "$unmeasured row(s) did not liquidate within the full 0-to-100% crash range"
+fi
 
 echo "-- the read"
-python3 - "$COLLATERAL" <<'PY' | while IFS= read -r line; do info "$line"; done
+python3 - "$COLLATERAL" "$SCAN_STEP" <<'PY' | while IFS= read -r line; do info "$line"; done
 import sys
 print(f"collateral ${float(sys.argv[1]):,.0f} per row; the distance is the adverse move that ended the position")
-print("the measured distances match the (1/L - 0.02)/0.98 bound within the 0.25% scan grid")
+print(f"the {float(sys.argv[2]):.2f}% scan grid is the measurement resolution; the (1/L - 0.02)/0.98 column is the analytic bound")
 print("the max-leverage row refuses at the fill's margin check — the edge is real, not fudged")
 PY
 

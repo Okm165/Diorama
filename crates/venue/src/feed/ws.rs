@@ -115,6 +115,12 @@ enum SessionOutcome {
     Failed(WsError),
 }
 
+/// The sleep before retrying an all-cooling pool: the pool's own earliest
+/// cooldown, floored at 1 ms so a zero can never spin the loop.
+fn cooling_wait_ms(retry_after_ms: u64) -> u64 {
+    retry_after_ms.max(1)
+}
+
 impl WsClient {
     pub fn new(feed: Arc<MarketFeed>, pool: EndpointPool) -> Self {
         Self { feed, pool }
@@ -132,8 +138,13 @@ impl WsClient {
                 if let Some(index) = self.pool.emergency_probe(now, &[]) {
                     vec![index]
                 } else {
-                    let wait = admission.retry_after_ms.clamp(1, 30_000);
-                    tokio::time::sleep(Duration::from_millis(wait)).await;
+                    // The pool already names the earliest cooldown; only a
+                    // zero wait is floored (it would spin). No ceiling: the
+                    // configured `cooldown_max_ms` is the policy's own bound.
+                    tokio::time::sleep(Duration::from_millis(cooling_wait_ms(
+                        admission.retry_after_ms,
+                    )))
+                    .await;
                     continue;
                 }
             } else {
@@ -360,6 +371,16 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(ack, WsMessage::Other));
+    }
+
+    #[test]
+    fn a_cooling_wait_is_the_pools_own_cooldown_not_a_shorter_ceiling() {
+        assert_eq!(cooling_wait_ms(0), 1, "a zero wait must not spin");
+        assert_eq!(
+            cooling_wait_ms(60_000),
+            60_000,
+            "a configured minute cooldown is not truncated to 30 s"
+        );
     }
 
     #[test]

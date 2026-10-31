@@ -312,9 +312,14 @@ impl MarketFeed {
             if c.coin != book.coin {
                 return true;
             }
-            let live = book.levels[usize::from(c.side.min(1))]
-                .iter()
-                .any(|l| l.px == c.price);
+            // Only 0 and 1 are wire sides. A persisted record outside them is
+            // corrupt: it cannot match a level, so it is pruned (fail closed)
+            // rather than clamped onto the ask side.
+            let Some(levels) = book.levels.get(usize::from(c.side)) else {
+                tracing::warn!(coin = %c.coin, side = c.side, "consumption has an invalid side; pruning it");
+                return false;
+            };
+            let live = levels.iter().any(|l| l.px == c.price);
             if live {
                 met += 1;
             }
@@ -680,6 +685,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(feed.mark_or("BTC", Decimal::from(42)), Decimal::from(7));
+    }
+
+    #[test]
+    fn a_consumption_with_an_invalid_side_is_pruned_not_clamped() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        let book = L2Book {
+            coin: "BTC".into(),
+            time: 1,
+            levels: [
+                vec![Level {
+                    px: Decimal::from(100),
+                    sz: Decimal::ONE,
+                    n: 1,
+                }],
+                vec![],
+            ],
+            spread: None,
+        };
+        feed.consume(Consumption {
+            coin: "BTC".into(),
+            side: 2,
+            price: Decimal::from(100),
+            size: Decimal::ONE,
+        })
+        .unwrap();
+        assert_eq!(feed.owned_levels(), 1);
+        // The live book carries the price on the bid side only; an invalid
+        // side must not be clamped onto the ask side and kept.
+        feed.put_book(book, 2_000);
+        assert_eq!(feed.owned_levels(), 0, "the corrupt record was pruned");
     }
 
     #[test]

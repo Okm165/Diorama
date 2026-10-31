@@ -423,9 +423,10 @@ impl SystemTxs {
 /// ride one `eth_getLogs` range call per chunk — far fewer and lighter
 /// requests than per-block receipts, whose batches the endpoint's limiter
 /// throttles (measured live) — and the composer's watchlist sweep covers
-/// plain value transfers, which emit no log. A chain without
-/// `eth_getSystemTxsByBlockNumber` answers an empty list (the client's
-/// contract), so the system-tx fold is safe everywhere.
+/// plain value transfers, which emit no log. The system-tx call is made only
+/// when the source *declares* the capability; a declared-but-absent method is
+/// a fault (the boot audit already names the disagreement), never an empty
+/// list that would silently drop Core→EVM effects.
 pub async fn envelope_touches(
     rpc: &Rpc,
     from: u64,
@@ -471,16 +472,12 @@ pub async fn envelope_touches(
         let ns: Vec<(alloy_primitives::U64,)> = ((from + 1)..=to)
             .map(|n| (alloy_primitives::U64::from(n),))
             .collect();
-        let system = match rpc
+        // The source declared the capability, so a missing method is a
+        // declaration/endpoint disagreement: fail closed rather than compose
+        // a window that silently omits the system transactions.
+        let system = rpc
             .batch_typed::<Vec<Transaction>, _>("eth_getSystemTxsByBlockNumber", &ns)
-            .await
-        {
-            Ok(v) => v,
-            // A chain without the method answers an empty list (the
-            // sequential form's tolerance, kept).
-            Err(e) if e.is_method_not_found() => return Ok(touched),
-            Err(e) => return Err(e),
-        };
+            .await?;
         for txs in system.into_iter().flatten() {
             absorb_system_txs(&mut touched, &txs);
         }

@@ -148,13 +148,13 @@ spec:
             periodSeconds: 30
           resources:
             # Like T, V never executes source txs: it materializes the fork
-            # state on demand and carries the devnet's own writes. The 2 GiB
-            # limit was measured too small: on 2026-10-31 the container was
-            # cgroup-OOM-killed at anon-rss 2.08 GiB, and the restart re-pinned
-            # the chain and lost the epoch's contract state. The request covers
-            # the steady state; the limit matches T's 8 GiB margin for fork
-            # materialization and the deploy/lifecycle write volume.
-            requests: { cpu: "50m", memory: 768Mi }
+            # state on demand and carries the devnet's own writes. Measured
+            # 2026-10-31 (60 s sample): ~11-12m CPU, 619-625 MiB RSS. The
+            # request covers that measured steady state; the limit matches T's
+            # 8 GiB ceiling for fork materialization and the deploy/lifecycle
+            # write volume (the old 2 GiB limit was cgroup-OOM-killed at
+            # anon-rss 2.08 GiB on 2026-10-31).
+            requests: { cpu: "25m", memory: 768Mi }
             limits: { memory: 8Gi }
       volumes:
         - name: state

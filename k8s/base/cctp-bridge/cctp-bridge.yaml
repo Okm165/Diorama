@@ -77,8 +77,10 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
           resources:
-            # No CPU limit; measured steady state ~6 MiB.
-            requests: { cpu: "25m", memory: 96Mi }
+            # No CPU limit. Measured 2026-10-31 (60 s sample): ~2m CPU,
+            # 10-11 MiB RSS. The request tracks the measured steady state; the
+            # limit stays the OOM ceiling for a boot/reconnect spike.
+            requests: { cpu: "5m", memory: 16Mi }
             limits: { memory: 384Mi }
       volumes:
         - name: instance

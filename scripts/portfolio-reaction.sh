@@ -41,6 +41,7 @@ WHALE_COLLATERAL="${WHALE_COLLATERAL:-50000}"
 WHALE_SIZE="${WHALE_SIZE:-300}"
 CRASH_PCT="${CRASH_PCT:-5}"
 HEDGE_SIZE="${HEDGE_SIZE:-4}"
+SCAN_STEP="${SCAN_STEP:-0.25}"        # the measurement grid, percent
 SHOCK="${SHOCK:-15}"               # the flatness phase's move (inside the buffer)
 SHOCK_HARD="${SHOCK_HARD:-40}"        # the beyond-the-buffer liquidation probe
 WETH="${WETH:-0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2}"
@@ -86,12 +87,16 @@ move_and_tick() { # move_and_tick <verb> <pct>: the move is relative to the
   spost /control/$1 "{\"coin\":\"$COIN\",\"pct\":\"$2\"}" > /dev/null
   spost /control/advance '{"seconds":1}' > /dev/null
 }
-scan() { # scan <verb> <from_pct>: 0.25% steps until the sim liquidates
-  local pct="$2" n=0
-  while [ "$n" -lt 80 ]; do
+scan() { # scan <verb> <from_pct>: grid steps until the sim liquidates
+  local pct="$2" n=0 max_steps
+  # A 100% adverse move is the physical end of the crash ladder (price 0) and a
+  # 100% rally is the symmetric bound used for the short side. Derive the step
+  # count from that range and the measurement grid, not a fixed 80.
+  max_steps=$(python3 -c "import math; print(max(1, math.ceil((100.0 - float('$pct')) / float('$SCAN_STEP'))))")
+  while [ "$n" -lt "$max_steps" ]; do
     move_and_tick "$1" "$pct"
     if [ "$(liq_state)" = "liquidated" ]; then echo "$pct"; return; fi
-    pct=$(python3 -c "print(f'{float('$pct') + 0.25:.2f}')"); n=$((n+1))
+    pct=$(python3 -c "print(f'{float('$pct') + float('$SCAN_STEP'):.2f}')"); n=$((n+1))
   done
   echo ">$pct"
 }
@@ -120,10 +125,10 @@ fsz=$(echo "$fill" | jq -r '.totalSz // "0"')
 st=$(acct)
 eq_open=$(echo "$st" | jq -r '.marginSummary.accountValue')
 buf=$(buffer_pct)
-theory=$(python3 -c "print(f'{max(0.2, (1 / $LEVERAGE - 0.02) / 0.98 * 100):.2f}')")
+theory=$(python3 -c "print(f'{(1 / $LEVERAGE - 0.02) / 0.98 * 100:.2f}')")
 info "the short filled: $fsz $COIN at mark \$$m0 | equity \$$eq_open | the served buffer $buf% vs the analytic $theory%"
-python3 -c "exit(0 if abs(float('$buf') - float('$theory')) <= 0.5 else 1)" \
-  && ok "the served buffer matches the analytic bound (within 0.5%)" \
+python3 -c "import sys; sys.exit(0 if abs(float('$buf') - float('$theory')) <= 2*float('$SCAN_STEP') else 1)" \
+  && ok "the served buffer matches the analytic bound (within two scan steps)" \
   || bad "served buffer $buf vs analytic $theory"
 id=$(acct | identity_ok)
 [ "$id" = "ok" ] && ok "the served identity holds at the open" || bad "identity: $id"
@@ -173,12 +178,19 @@ id=$(acct | identity_ok)
 
 echo "-- D. the thresholds (the sim's own liquidation per direction)"
 buf=$(buffer_pct)
-start=$(python3 -c "print(f'{max(0.2, float('$buf') - 2):.2f}')")
+start="$SCAN_STEP"
 liq_up=$(scan rally "$start")
 info "the short: the served buffer $buf% | the measured liquidation at the rally of $liq_up%"
-python3 -c "exit(0 if abs(float('${liq_up#>}') - float('$buf')) <= 0.5 else 1)" \
-  && ok "the short liquidates where the served buffer says (up)" \
-  || bad "the short's measured threshold $liq_up vs the served buffer $buf"
+case "$liq_up" in
+  \>*)
+    bad "the short did not liquidate within the full rally range (last $liq_up, served buffer $buf%)"
+    ;;
+  *)
+    python3 -c "import sys; sys.exit(0 if abs(float('$liq_up') - float('$buf')) <= 2*float('$SCAN_STEP') else 1)" \
+      && ok "the short liquidates where the served buffer says (up)" \
+      || bad "the short's measured threshold $liq_up vs the served buffer $buf"
+    ;;
+esac
 left_up=$(acct | jq -r '.marginSummary.accountValue')
 clear_move
 # The mirror: a fresh long, the crash scan.
@@ -189,12 +201,19 @@ m0=$(mark)
 size=$(python3 -c "print(f'{$LEVERAGE * $COLLATERAL / float('$m0'):.4f}')")
 spost /control/order "{\"address\":\"$TRADER\",\"coin\":\"$COIN\",\"is_buy\":true,\"size\":\"$size\"}" > /dev/null
 buf=$(buffer_pct)
-start=$(python3 -c "print(f'{max(0.2, float('$buf') - 2):.2f}')")
+start="$SCAN_STEP"
 liq_down=$(scan crash "$start")
 info "the long:  the served buffer $buf% | the measured liquidation at the crash of $liq_down%"
-python3 -c "exit(0 if abs(float('${liq_down#>}') - float('$buf')) <= 0.5 else 1)" \
-  && ok "the long liquidates where the served buffer says (down) — the mirror holds" \
-  || bad "the long's measured threshold $liq_down vs the served buffer $buf"
+case "$liq_down" in
+  \>*)
+    bad "the long did not liquidate within the full crash range (last $liq_down, served buffer $buf%)"
+    ;;
+  *)
+    python3 -c "import sys; sys.exit(0 if abs(float('$liq_down') - float('$buf')) <= 2*float('$SCAN_STEP') else 1)" \
+      && ok "the long liquidates where the served buffer says (down) — the mirror holds" \
+      || bad "the long's measured threshold $liq_down vs the served buffer $buf"
+    ;;
+esac
 left_down=$(acct | jq -r '.marginSummary.accountValue')
 clear_move
 info "the collateral left after the liquidations: up \$$(python3 -c "print(f'{float('$left_up'):,.2f}')") | down \$$(python3 -c "print(f'{float('$left_down'):,.2f}')")"
@@ -295,11 +314,11 @@ id=$(acct | identity_ok)
 [ "$id" = "ok" ] && ok "the served identity holds through the sequence" || bad "identity: $id"
 
 echo "-- F. the reads"
-python3 - "$LEVERAGE" "$theory" "$buf" <<'PY' | while IFS= read -r line; do info "$line"; done
+python3 - "$LEVERAGE" "$theory" "$buf" "$SCAN_STEP" <<'PY' | while IFS= read -r line; do info "$line"; done
 import sys
 print(f"a held portfolio's reaction to another account's impact is two-channel: the book moves the execution cost, the mark moves the equity")
 print(f"the crash and the rally reactions mirror on the same short; each matches -size x delta-mark within fees")
-print(f"the served buffer and the sim's own liquidation agree within the 0.25% scan grid, per direction; the hedge is flat both ways")
+print(f"the served buffer and the sim's own liquidation agree within two {float(sys.argv[4]):.2f}% scan steps, per direction; the hedge is flat both ways")
 PY
 ok "the reaction reads are above"
 

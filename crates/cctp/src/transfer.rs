@@ -465,8 +465,6 @@ impl Wallet {
 
 const NO_PARAMS: [u8; 0] = [];
 const RECEIPT_POLL: Duration = Duration::from_millis(500);
-const GAS_MARGIN_NUM: u64 = 12;
-const GAS_MARGIN_DEN: u64 = 10;
 
 /// Builds, signs (EIP-1559) and submits calls. The devnet's block production
 /// belongs to the deployment (T is mined by the engine's applier; V by the
@@ -521,8 +519,10 @@ impl TxSender {
             chain_id,
             nonce: nonce.to::<u64>(),
             gas_limit,
+            // A fee ceiling with headroom for the next base-fee step; the
+            // priority is the node's own gas price, not a fixed gwei cap.
             max_fee_per_gas: gas_price.saturating_mul(U256::from(2)).to::<u128>(),
-            max_priority_fee_per_gas: gas_price.min(U256::from(1_000_000_000u64)).to::<u128>(),
+            max_priority_fee_per_gas: gas_price.to::<u128>(),
             to,
             value,
             input: Bytes::copy_from_slice(input),
@@ -545,8 +545,10 @@ impl TxSender {
             request = request.to(to);
         }
         let estimate: U64 = rpc.call("eth_estimateGas", (request,)).await?;
-        let gas = estimate.to::<u64>();
-        Ok(gas.saturating_mul(GAS_MARGIN_NUM) / GAS_MARGIN_DEN + 21_000)
+        // The node's estimate is the full transaction limit: it already
+        // includes the intrinsic gas and the call's own execution. A margin
+        // or an added 21,000 would be a number the node did not measure.
+        Ok(estimate.to::<u64>())
     }
 
     /// Whether the tx is still in the pool. `false` + no receipt = the tx was

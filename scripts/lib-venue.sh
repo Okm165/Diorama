@@ -75,7 +75,8 @@ flatten_coin() { # flatten_coin <account> <coin>
     [ "$szi" = "0" ] && return 0
     abs_szi=$(python3 -c "from decimal import Decimal; print(abs(Decimal('$szi')))")
   done
-  return 0
+  echo "flatten_coin: $account still holds $coin szi=$szi after 5 reduce-only orders" >&2
+  return 1
 }
 
 if [ -n "${ENGINE_URL:-}" ]; then

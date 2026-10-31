@@ -201,14 +201,19 @@ income_before=$(castT call $POOL "getReserveNormalizedIncome(address)(uint256)" 
 J=2592000 # 30 days
 $ENGINE curl -sf -m 20 -X POST localhost:8080/admin/time -H 'Content-Type: application/json' \
   -d "{\"offset_seconds\":$J}" | jq -r '.offset_seconds' >/dev/null 2>&1
-# let T apply a couple of parent blocks with the offset
-sleep 30
-t_ts_after=$($ANVIL_T cast block latest --field timestamp 2>/dev/null | tr -d '\r')
+# Let T apply parent blocks with the offset, polling for the clock to carry it
+# instead of sleeping a guessed duration.
 parent_ts=$($ANVIL_T cast block $($ENGINE curl -sf localhost:8080/status | jq -r .cursor_t) --field timestamp --rpc-url http://reth:8545 2>/dev/null | tr -d '\r')
+t_ts_after=""
+for _ in $(seq 1 30); do
+  t_ts_after=$($ANVIL_T cast block latest --field timestamp 2>/dev/null | tr -d '\r')
+  [ -n "$t_ts_after" ] && [ -n "$parent_ts" ] && [ "$((t_ts_after - parent_ts))" -ge "$J" ] 2>/dev/null && break
+  sleep 2
+done
 debt_after=$(castT call $POOL "getUserAccountData(address)(uint256,uint256,uint256,uint256,uint256,uint256)" $TT | awk '{print $1}' | tr '\n' ' ')
 debt_after_ts=$(echo "$debt_after" | awk '{print $2}')
 income_after=$(castT call $POOL "getReserveNormalizedIncome(address)(uint256)" $USDC | awk '{print $1}')
-[ -n "$t_ts_after" ] && [ -n "$parent_ts" ] && [ "$((t_ts_after - parent_ts))" -gt 2000000 ] 2>/dev/null \
+[ -n "$t_ts_after" ] && [ -n "$parent_ts" ] && [ "$((t_ts_after - parent_ts))" -ge "$J" ] 2>/dev/null \
   && ok "devnet clock is $(( (t_ts_after - parent_ts) / 86400 )) days ahead of mainnet (and still following it)" \
   || bad "clock offset did not stick: T=$t_ts_after parent=$parent_ts"
 # The indexes are 27-digit: bash arithmetic overflows, awk does not.

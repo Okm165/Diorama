@@ -141,7 +141,7 @@ are errors at every level.
 | `[chains.venue]` | the venue engine, the simulator, the CCTP bridge | the venue source (`@hyperevm`), API/WS pools (`@hyperliquid_api`, `@hyperliquid_ws`) |
 | `[services.engine.*]` | the engine (both profiles — the same key, the profile's shape) | reth / anvil (`target_url`; each instance points it at `ANVIL_T_URL` or `ANVIL_V_URL`) / source_sync / verifier / journal / beacon / http / feed_bridge (optional: absent = the devnet's own price writers own the mock aggregators; keys: `poll_interval_ms`, `confirm_window_ms` (default 60 s — a publish that does not land is re-sent), `writer` (give it a dedicated account), `feeds`) |
 | `[services.venue_sim.*]` | the simulator | info/control ports, markets, rate budget, persistence |
-| `[services.cctp_bridge.*]` | the CCTP bridge (its own `cctp` profile) | the `[[chains]]` list (id/family/chain id/domain/RPC/contracts), the directed `[[lanes]]`, relay key, attester seed, iris/control ports, the relayer mode (`auto`/`manual`) |
+| `[services.cctp_bridge.*]` | the CCTP bridge (its own `cctp` profile) | the `[[chains]]` list (id/family/chain id/domain/RPC/contracts), the directed `[[lanes]]`, relay key, attester seed, the Iris `fast_burn_allowance`, iris/control ports, the relayer mode (`auto`/`manual`) |
 | `[endpoint_defaults]` | every lane | rounds, per-call attempt budget, cooldown base/cap, jitter, emergency probe |
 | `[watchlist]` | the mainnet engine | the closure scope; one watchlist, two readers (`check` + `closure-check`) |
 

@@ -10,7 +10,7 @@
 #                       V's real books, the cross maintenance (the sum)
 #   B. the shocks     - both legs crashed together: the account value flat,
 #                       the legs' PnL offsetting, the maintenance shrinking
-#   C. the read       - hedged vs unhedged (the capital-frontier's measured
+#   C. the read       - hedged vs unhedged (the capital-frontier's analytic
 #                       48.98% at the same gross/collateral ratio)
 #   D. the hand-back  - the crashes cleared, the books handed back
 #
@@ -108,8 +108,9 @@ python3 - "$LEG_NOTIONAL" "$COLLATERAL" "$value0" <<'PY' | while IFS= read -r li
 import sys
 leg, coll, v0 = map(float, sys.argv[1:4])
 gross = 2 * leg
+unhedged = (1 / 2 - 0.02) / 0.98 * 100
 print(f"collateral ${coll:,.0f} | gross ${gross:,.0f} ({gross/coll:.1f}x) | the book survived the 60% market-wide shock flat")
-print(f"the unhedged equivalent (same ratio, `make capital-frontier` L=2) liquidates at 48.98% — measured")
+print(f"the unhedged equivalent (same ratio, `make capital-frontier` L=2) has the analytic bound {unhedged:.2f}% — the frontier measures the real book against it")
 print("the maintenance table gives the hedge no credit; the equity the waterfall reads does")
 PY
 ok "the read is above"

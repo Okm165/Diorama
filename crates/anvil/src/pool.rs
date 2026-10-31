@@ -512,10 +512,14 @@ impl EndpointPool {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         health.faults.fetch_add(1, Ordering::Relaxed);
-        let exponent = failures.min(16);
+        // The exponent is bounded by the type, not by a guessed failure
+        // count: a shift past u64's width saturates to the cap, exactly as a
+        // large-but-representable exponent does.
+        let exponent = failures.saturating_sub(1);
         let base = self.policy.cooldown_base_ms;
         let cap = self.policy.cooldown_max_ms;
-        let cooldown = base.saturating_mul(1u64 << (exponent - 1)).min(cap);
+        let factor = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
+        let cooldown = base.saturating_mul(factor).min(cap);
         let jitter = self.jitter(now_ms, index);
         health.down_until_ms.store(
             now_ms.saturating_add(cooldown).saturating_add(jitter),
@@ -825,6 +829,20 @@ mod tests {
         assert_eq!(snapshot[0].failures, 0);
         assert_eq!(snapshot[0].down_until_ms, 0);
         assert_eq!(snapshot[0].last_ok_ms, 10_000);
+    }
+
+    #[test]
+    fn a_very_large_failure_count_still_caps_without_overflowing_the_shift() {
+        let pool = http(&["http://a", "http://b"]);
+        let cap = pool.policy().cooldown_max_ms;
+        for _ in 0..100 {
+            pool.record_failure(0, 0);
+        }
+        let down = pool.snapshot()[0].down_until_ms;
+        assert!(
+            down >= cap,
+            "a failure count past the u64 shift width saturates at the cap"
+        );
     }
 
     #[test]

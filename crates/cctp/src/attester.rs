@@ -27,10 +27,6 @@ use alloy_sol_types::SolCall;
 use diorama_anvil::Rpc;
 use std::time::Duration;
 
-/// One gas stipend for an impersonated attester-manager tx (a devnet
-/// convenience; the real managers carry their own gas).
-const MANAGER_GAS_STIPEND: u64 = 1_000_000_000_000_000_000;
-
 // TRUST: the devnet attester is the one substituted authority (Circle's
 // off-chain signer). The guards: it is installed through the contracts' own
 // setters (enableAttester/setSignatureThreshold, impersonating the live
@@ -95,12 +91,18 @@ pub enum InstallOutcome {
 /// Install the devnet attester on one chain through the real setters,
 /// idempotently. Refuses loudly if the post-state does not verify: serving
 /// attestations the destination would reject is worse than not serving.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the installer's inputs are the deployment's own facts; grouping them would hide \
+              which caller supplied each"
+)]
 pub async fn install(
     rpc: &Rpc,
     chain: &'static str,
     transmitter: Address,
     attester: Address,
     timeout: Duration,
+    stipend: U256,
 ) -> Result<InstallOutcome> {
     let (manager, state, threshold) = read_state(rpc, transmitter, attester).await?;
     if state == AttesterState::Enabled && threshold == U256::ONE {
@@ -116,7 +118,7 @@ pub async fn install(
     // Impersonate the live attester manager: the same substitution §15.3
     // proved through the real setters. A manager with no gas on the fork gets
     // a devnet stipend (the pool refuses unfunded senders).
-    ensure_manager_gas(rpc, chain, manager).await?;
+    ensure_manager_gas(rpc, chain, manager, stipend).await?;
     rpc.anvil_impersonate_account(manager).await?;
     let sender = Impersonated {
         rpc,
@@ -221,9 +223,15 @@ async fn read_state(
     Ok((manager, AttesterState::of(enabled), threshold))
 }
 
-/// A manager with no gas on the fork gets a devnet stipend (the pool refuses
-/// unfunded senders).
-async fn ensure_manager_gas(rpc: &Rpc, chain: &'static str, manager: Address) -> Result<()> {
+/// A manager with no gas on the fork gets the deployment's configured gas
+/// threshold (the pool refuses unfunded senders); the amount is not a second,
+/// code-side constant.
+async fn ensure_manager_gas(
+    rpc: &Rpc,
+    chain: &'static str,
+    manager: Address,
+    stipend: U256,
+) -> Result<()> {
     let balance = rpc
         .call::<U256>(
             diorama_anvil::ETH_GET_BALANCE,
@@ -231,9 +239,8 @@ async fn ensure_manager_gas(rpc: &Rpc, chain: &'static str, manager: Address) ->
         )
         .await?;
     if balance.is_zero() {
-        tracing::warn!(chain, %manager, "attester manager has no gas on the fork; setting a devnet stipend");
-        rpc.anvil_set_balance(manager, U256::from(MANAGER_GAS_STIPEND))
-            .await?;
+        tracing::warn!(chain, %manager, "attester manager has no gas on the fork; setting the configured devnet stipend");
+        rpc.anvil_set_balance(manager, stipend).await?;
     }
     Ok(())
 }

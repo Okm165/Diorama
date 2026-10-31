@@ -152,8 +152,9 @@ pub struct WatchEntry {
 }
 
 /// reth's state window: a pin deeper than this cannot be replayed (measured:
-/// the BAL/state serve window is 10,064 blocks).
-const RETH_STATE_WINDOW_BLOCKS: u64 = 10_064;
+/// the BAL/state serve window is 10,064 blocks). Public because the applier's
+/// rebased-cursor gap bound is the same measured window, not a second copy.
+pub const RETH_STATE_WINDOW_BLOCKS: u64 = 10_064;
 /// The safe-head lag the pin must clear (~32-64 blocks, measured).
 const MIN_FORK_OFFSET_BLOCKS: u64 = 64;
 
@@ -1040,6 +1041,18 @@ fn check_engine_anvil(anvil: &EngineAnvil, issues: &mut Vec<String>) {
 /// boundary, the state dirs, and the feed bridge.
 fn check_engine(eng: &EngineSection, issues: &mut Vec<String>) {
     check_engine_anvil(&eng.anvil, issues);
+    if eng.loops.poll_interval_ms == 0 {
+        issues.push("services.engine.loops.poll_interval_ms must be > 0".into());
+    }
+    if eng.loops.chunk_size == 0 {
+        issues.push("services.engine.loops.chunk_size must be > 0".into());
+    }
+    if eng.source_sync.interval_ms == 0 {
+        issues.push("services.engine.source_sync.interval_ms must be > 0".into());
+    }
+    if eng.source_sync.max_per_pass == 0 {
+        issues.push("services.engine.source_sync.max_per_pass must be > 0".into());
+    }
     for (i, url) in eng.beacon.urls.iter().enumerate() {
         check_http_url(&format!("services.engine.beacon.urls[{i}]"), url, issues);
     }

@@ -262,7 +262,10 @@ pub async fn audit_capabilities(
     rpc: &diorama_anvil::Rpc,
 ) -> diorama_anvil::Result<()> {
     let head = rpc.block_number().await?;
-    let disagree = caps.verify_methods(rpc, head.saturating_add(1_000)).await;
+    // The next block is the first one that cannot exist yet; a larger offset
+    // would be an arbitrary guess, and any future height answers the same
+    // method-presence question.
+    let disagree = caps.verify_methods(rpc, head.saturating_add(1)).await;
     if !disagree.is_empty() {
         tracing::warn!(
             source = what,

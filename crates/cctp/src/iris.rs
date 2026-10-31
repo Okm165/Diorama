@@ -33,11 +33,6 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// The devnet stand-in for Circle's fast-burn allowance (the live value was
-/// 56 854 459.08 USDC when measured, §16.2 — the shape, not the number, is
-/// the contract with clients).
-const FAST_BURN_ALLOWANCE: f64 = 1_000_000_000.0;
-
 /// Everything the Iris routes read.
 pub struct IrisState {
     pub store: Arc<Store>,
@@ -51,6 +46,9 @@ pub struct IrisState {
     /// The configured expiration window (0 = no expiry; the same value the
     /// watcher signs with).
     pub expiration_blocks: u64,
+    /// The fast-burn allowance served for a configured source domain: a
+    /// deployment fact, not a code constant (Circle's live figure rolls).
+    pub fast_burn_allowance: f64,
 }
 
 /// The Iris router (8095).
@@ -249,7 +247,7 @@ async fn allowance(
         )));
     }
     Ok(Json(AllowanceResponse {
-        allowance: FAST_BURN_ALLOWANCE,
+        allowance: state.fast_burn_allowance,
         last_updated: iso8601_ms(crate::now_ms()),
     }))
 }
@@ -521,6 +519,7 @@ mod tests {
                 destination: Domain(19),
             }],
             expiration_blocks: 0,
+            fast_burn_allowance: 1_000_000_000.0,
         });
         let served = fees(State(state.clone()), Path((0, 19)))
             .await
@@ -531,6 +530,37 @@ mod tests {
             .await
             .expect_err("an unconfigured lane is a 404");
         assert_eq!(refused.status, axum::http::StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The allowance is the deployment's configured figure, not a code
+    /// constant: the same route serves whatever the instance pinned.
+    #[tokio::test]
+    async fn the_allowance_is_the_configured_value() {
+        let (state, _, dir) = iris_state("allowance");
+        let chain = crate::chains::Chain::ethereum(
+            "http://127.0.0.1:1",
+            std::time::Duration::from_secs(1),
+            diorama_anvil::PoolPolicy::default(),
+        )
+        .unwrap();
+        let state = Arc::new(IrisState {
+            store: state.store.clone(),
+            attester: state.attester.clone(),
+            chains: vec![chain],
+            lanes: Vec::new(),
+            expiration_blocks: 0,
+            fast_burn_allowance: 42.5,
+        });
+        let served = allowance(
+            State(state),
+            Query(AllowanceQuery {
+                source_domain: Some(Domain(0)),
+            }),
+        )
+        .await
+        .expect("a configured source domain is served");
+        assert_eq!(served.0.allowance, 42.5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -564,6 +594,7 @@ mod tests {
             chains: Vec::new(),
             lanes: Vec::new(),
             expiration_blocks: 0,
+            fast_burn_allowance: 1_000_000_000.0,
         });
         (state, store, dir)
     }
