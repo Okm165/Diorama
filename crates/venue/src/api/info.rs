@@ -195,7 +195,7 @@ pub(crate) struct FrontendOpenOrder {
     pub trigger_px: String,
 }
 
-fn side_letter(side: crate::sim::order::Side) -> &'static str {
+pub(crate) fn side_letter(side: crate::sim::order::Side) -> &'static str {
     match side {
         crate::sim::order::Side::Buy => "B",
         crate::sim::order::Side::Sell => "A",

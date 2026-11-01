@@ -43,6 +43,17 @@ pub(crate) enum Subscription {
     L2Book { coin: String },
     #[serde(rename = "webData2")]
     WebData2 { user: Address },
+    /// The real venue's per-dex account state channel (`{dex, user,
+    /// clearinghouseState}`), the current vocabulary beside the legacy
+    /// `webData2` alias.
+    #[serde(rename = "clearinghouseState")]
+    ClearinghouseState { user: Address },
+    /// The real venue's open-orders channel (`{dex, user, orders}`).
+    #[serde(rename = "openOrders")]
+    OpenOrders { user: Address },
+    /// The real venue's spot-state channel (`{user, spotState}`).
+    #[serde(rename = "spotState")]
+    SpotState { user: Address },
 }
 
 /// One client request (the client's `Subscribe`/`Ping` shapes, plus
@@ -68,6 +79,12 @@ pub(crate) enum WsPush {
     L2Book { data: L2Book },
     #[serde(rename = "webData2")]
     WebData2 { data: WebData2Data },
+    #[serde(rename = "clearinghouseState")]
+    ClearinghouseState { data: ClearinghouseStateData },
+    #[serde(rename = "openOrders")]
+    OpenOrders { data: OpenOrdersData },
+    #[serde(rename = "spotState")]
+    SpotState { data: SpotStateData },
     #[serde(rename = "subscriptionResponse")]
     SubscriptionResponse { data: SubscriptionAck },
     #[serde(rename = "pong")]
@@ -99,6 +116,40 @@ pub(crate) struct WebData2Data {
     spot_state: SpotClearinghouseState,
     #[serde(skip_serializing_if = "Option::is_none")]
     asset_ctxs: Option<Vec<AssetCtx>>,
+}
+
+/// The real venue's `clearinghouseState` channel payload.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClearinghouseStateData {
+    /// The perp dex; the empty string is the first (default) dex.
+    dex: String,
+    user: Address,
+    clearinghouse_state: ClearinghouseState,
+}
+
+/// The real venue's `openOrders` channel payload.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OpenOrdersData {
+    dex: String,
+    user: Address,
+    orders: Vec<super::info::OpenOrder>,
+}
+
+/// The real venue's `spotState` channel payload.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SpotStateData {
+    user: Address,
+    spot_state: SpotState,
+}
+
+/// The real venue's `spotState` body: balances only (the WS shape omits the
+/// REST read's `tokenToAvailableAfterMaintenance`).
+#[derive(Debug, Serialize)]
+pub(crate) struct SpotState {
+    balances: Vec<crate::wire::SpotBalance>,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,7 +258,10 @@ fn unsupported(sub: &Subscription, state: &ApiState) -> Result<(), String> {
         // is computed from the sim, an untouched one is served the venue's empty
         // shape (the same contract `/info`'s passthrough holds). Only a state
         // read fault refuses the subscription.
-        Subscription::WebData2 { user } => match state.sim.account(*user) {
+        Subscription::WebData2 { user }
+        | Subscription::ClearinghouseState { user }
+        | Subscription::OpenOrders { user }
+        | Subscription::SpotState { user } => match state.sim.account(*user) {
             Ok(_) => Ok(()),
             Err(e) => Err(format!("account state for `{user}` is unavailable: {e}")),
         },
@@ -241,12 +295,9 @@ fn push_frame(sub: &Subscription, state: &ApiState, now_ms: u64) -> Option<Strin
                 data: format!("coin `{coin}` has no book in the venue's feed"),
             },
         },
-        Subscription::WebData2 { user } => match web_data2(state, *user) {
-            Ok(data) => WsPush::WebData2 { data },
-            Err(e) => WsPush::Error {
-                data: format!("webData2 for `{user}` is unavailable: {e}"),
-            },
-        },
+        // The account plane's four channels share one body; the channel name
+        // only selects the frame shape.
+        _ => account_push(sub, state)?,
     };
     match serde_json::to_string(&push) {
         Ok(frame) => Some(frame),
@@ -257,16 +308,109 @@ fn push_frame(sub: &Subscription, state: &ApiState, now_ms: u64) -> Option<Strin
     }
 }
 
+/// The account-plane frame for one subscription. `None` only for a non-account
+/// variant (the caller's match has already handled the market channels).
+fn account_push(sub: &Subscription, state: &ApiState) -> Option<WsPush> {
+    let push = match sub {
+        Subscription::WebData2 { user } => match web_data2(state, *user) {
+            Ok(data) => WsPush::WebData2 { data },
+            Err(e) => WsPush::Error {
+                data: format!("webData2 for `{user}` is unavailable: {e}"),
+            },
+        },
+        Subscription::ClearinghouseState { user } => match account_states(state, *user) {
+            Ok((clearinghouse_state, _)) => WsPush::ClearinghouseState {
+                data: ClearinghouseStateData {
+                    dex: String::new(),
+                    user: *user,
+                    clearinghouse_state,
+                },
+            },
+            Err(e) => WsPush::Error {
+                data: format!("clearinghouseState for `{user}` is unavailable: {e}"),
+            },
+        },
+        Subscription::OpenOrders { user } => open_orders_push(*user, state),
+        Subscription::SpotState { user } => spot_state_push(*user, state),
+        Subscription::AllMids
+        | Subscription::ActiveAssetCtx { .. }
+        | Subscription::L2Book { .. } => return None,
+    };
+    Some(push)
+}
+
+/// The `openOrders` channel's frame: the sim's resting rows in the venue's
+/// `{dex, user, orders}` shape.
+fn open_orders_push(user: Address, state: &ApiState) -> WsPush {
+    match state.sim.resting_orders(Some(user)) {
+        Ok(rows) => WsPush::OpenOrders {
+            data: OpenOrdersData {
+                dex: String::new(),
+                user,
+                orders: rows
+                    .into_iter()
+                    .map(|r| super::info::OpenOrder {
+                        coin: r.coin.clone(),
+                        limit_px: r.px.to_string(),
+                        oid: r.oid,
+                        side: super::info::side_letter(r.side),
+                        sz: r.sz.to_string(),
+                        timestamp: r.placed_ms,
+                    })
+                    .collect(),
+            },
+        },
+        Err(e) => WsPush::Error {
+            data: format!("openOrders for `{user}` is unavailable: {e}"),
+        },
+    }
+}
+
+/// The `spotState` channel's frame: the same balances `/info` serves, in the
+/// WS shape (which carries no `tokenToAvailableAfterMaintenance`).
+fn spot_state_push(user: Address, state: &ApiState) -> WsPush {
+    match account_states(state, user) {
+        Ok((_, spot_state)) => WsPush::SpotState {
+            data: SpotStateData {
+                user,
+                spot_state: SpotState {
+                    balances: spot_state.balances,
+                },
+            },
+        },
+        Err(e) => WsPush::Error {
+            data: format!("spotState for `{user}` is unavailable: {e}"),
+        },
+    }
+}
+
 /// The account's served `webData2` payload: the same clearinghouse read
 /// `/info` serves (the observation-time rule included), the spot state, and
 /// the market contexts when the meta has landed.
 fn web_data2(state: &ApiState, user: Address) -> crate::error::Result<WebData2Data> {
-    // The real venue's per-user read answers an **empty shape** for an address it
-    // has never seen (the `/info` passthrough's documented contract). The WS lane
-    // cannot pass through, so it serves that same empty shape rather than refusing:
-    // a refusal would make every configured-but-idle account unsubscribe and hide
-    // the account lane behind an error frame.
-    let (clearinghouse_state, spot_state) = match state.sim.account(user)? {
+    let (clearinghouse_state, spot_state) = account_states(state, user)?;
+    let asset_ctxs = state
+        .feed
+        .meta_and_ctxs()
+        .map(|crate::wire::MetaAndAssetCtxs(_, ctxs)| ctxs);
+    Ok(WebData2Data {
+        user,
+        clearinghouse_state,
+        spot_state,
+        asset_ctxs,
+    })
+}
+
+/// The account's served clearinghouse/spot states — the one body both the legacy
+/// `webData2` payload and the current `clearinghouseState`/`spotState` channels
+/// publish. An untouched address is served the venue's empty shape (the `/info`
+/// passthrough's documented contract); the WS lane cannot pass through, so it
+/// serves that same shape rather than refusing.
+fn account_states(
+    state: &ApiState,
+    user: Address,
+) -> crate::error::Result<(ClearinghouseState, SpotClearinghouseState)> {
+    match state.sim.account(user)? {
         Some(account) => {
             let clearinghouse_state =
                 super::info::clearinghouse_of(state, user)?.ok_or_else(|| {
@@ -284,26 +428,16 @@ fn web_data2(state: &ApiState, user: Address) -> crate::error::Result<WebData2Da
                         meta.as_ref(),
                     )?,
             };
-            (clearinghouse_state, spot_state)
+            Ok((clearinghouse_state, spot_state))
         }
-        None => (
+        None => Ok((
             empty_clearinghouse(state.sim.served_time(crate::now_ms())?),
             SpotClearinghouseState {
                 balances: Vec::new(),
                 token_to_available_after_maintenance: Vec::new(),
             },
-        ),
-    };
-    let asset_ctxs = state
-        .feed
-        .meta_and_ctxs()
-        .map(|crate::wire::MetaAndAssetCtxs(_, ctxs)| ctxs);
-    Ok(WebData2Data {
-        user,
-        clearinghouse_state,
-        spot_state,
-        asset_ctxs,
-    })
+        )),
+    }
 }
 
 /// The venue's empty `clearinghouseState`: zero summaries, no positions, the
@@ -446,6 +580,9 @@ mod tests {
             .unwrap(),
             push_frame(&Subscription::L2Book { coin: "BTC".into() }, &state, 2_000).unwrap(),
             push_frame(&Subscription::WebData2 { user }, &state, 2_000).unwrap(),
+            push_frame(&Subscription::ClearinghouseState { user }, &state, 2_000).unwrap(),
+            push_frame(&Subscription::OpenOrders { user }, &state, 2_000).unwrap(),
+            push_frame(&Subscription::SpotState { user }, &state, 2_000).unwrap(),
             serde_json::to_string(&WsPush::Pong).unwrap(),
             serde_json::to_string(&WsPush::Error { data: "x".into() }).unwrap(),
         ];
@@ -465,6 +602,24 @@ mod tests {
                     let data: L2Book = serde_json::from_value(value["data"].clone()).unwrap();
                     assert_eq!(data.coin, "BTC");
                     assert_eq!(data.time, 1_000, "the live book keeps its update stamp");
+                }
+                "clearinghouseState" => {
+                    let data = &value["data"];
+                    assert_eq!(data["user"], serde_json::json!(user));
+                    let clearinghouse: ClearinghouseState =
+                        serde_json::from_value(data["clearinghouseState"].clone()).unwrap();
+                    assert_eq!(
+                        clearinghouse.margin_summary.account_value,
+                        Decimal::from(1_000)
+                    );
+                }
+                "openOrders" => {
+                    assert_eq!(value["data"]["orders"], serde_json::json!([]));
+                }
+                "spotState" => {
+                    let spot: SpotClearinghouseState =
+                        serde_json::from_value(value["data"]["spotState"].clone()).unwrap();
+                    assert!(spot.balances.iter().any(|b| b.coin == "USDC"));
                 }
                 "webData2" => {
                     assert!(
