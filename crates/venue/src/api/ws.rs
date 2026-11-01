@@ -18,11 +18,14 @@
 //! (omitted while the meta is warming — never an invented empty list), and
 //! `user`.
 use super::ApiState;
-use crate::wire::{AllMids, AssetCtx, ClearinghouseState, L2Book, SpotClearinghouseState};
+use crate::wire::{
+    AllMids, AssetCtx, ClearinghouseState, L2Book, MarginSummary, SpotClearinghouseState,
+};
 use alloy_primitives::Address;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -200,12 +203,12 @@ fn unsupported(sub: &Subscription, state: &ApiState) -> Result<(), String> {
         Subscription::L2Book { coin } => {
             Err(format!("coin `{coin}` has no book in the venue's feed"))
         }
-        // The account plane is addressable from the API state: only an account
-        // the sim has touched can be served (an untouched one is the real
-        // venue's, and a websocket push cannot pass through to it).
+        // The account plane is addressable from the API state: a touched account
+        // is computed from the sim, an untouched one is served the venue's empty
+        // shape (the same contract `/info`'s passthrough holds). Only a state
+        // read fault refuses the subscription.
         Subscription::WebData2 { user } => match state.sim.account(*user) {
-            Ok(Some(_)) => Ok(()),
-            Ok(None) => Err(format!("user `{user}` is not a simulated account")),
+            Ok(_) => Ok(()),
             Err(e) => Err(format!("account state for `{user}` is unavailable: {e}")),
         },
     }
@@ -258,25 +261,38 @@ fn push_frame(sub: &Subscription, state: &ApiState, now_ms: u64) -> Option<Strin
 /// `/info` serves (the observation-time rule included), the spot state, and
 /// the market contexts when the meta has landed.
 fn web_data2(state: &ApiState, user: Address) -> crate::error::Result<WebData2Data> {
-    let clearinghouse_state = super::info::clearinghouse_of(state, user)?.ok_or_else(|| {
-        crate::error::Error::NotFound {
-            what: format!("simulated account `{user}`"),
+    // The real venue's per-user read answers an **empty shape** for an address it
+    // has never seen (the `/info` passthrough's documented contract). The WS lane
+    // cannot pass through, so it serves that same empty shape rather than refusing:
+    // a refusal would make every configured-but-idle account unsubscribe and hide
+    // the account lane behind an error frame.
+    let (clearinghouse_state, spot_state) = match state.sim.account(user)? {
+        Some(account) => {
+            let clearinghouse_state =
+                super::info::clearinghouse_of(state, user)?.ok_or_else(|| {
+                    crate::error::Error::NotFound {
+                        what: format!("simulated account `{user}`"),
+                    }
+                })?;
+            let meta = state.feed.meta();
+            let spot_state = SpotClearinghouseState {
+                balances: crate::sim::account::spot_balances(&account),
+                token_to_available_after_maintenance:
+                    crate::sim::account::available_after_maintenance(
+                        &account,
+                        &state.feed,
+                        meta.as_ref(),
+                    )?,
+            };
+            (clearinghouse_state, spot_state)
         }
-    })?;
-    let account = state
-        .sim
-        .account(user)?
-        .ok_or_else(|| crate::error::Error::NotFound {
-            what: format!("simulated account `{user}`"),
-        })?;
-    let meta = state.feed.meta();
-    let spot_state = SpotClearinghouseState {
-        balances: crate::sim::account::spot_balances(&account),
-        token_to_available_after_maintenance: crate::sim::account::available_after_maintenance(
-            &account,
-            &state.feed,
-            meta.as_ref(),
-        )?,
+        None => (
+            empty_clearinghouse(state.sim.served_time(crate::now_ms())?),
+            SpotClearinghouseState {
+                balances: Vec::new(),
+                token_to_available_after_maintenance: Vec::new(),
+            },
+        ),
     };
     let asset_ctxs = state
         .feed
@@ -288,6 +304,27 @@ fn web_data2(state: &ApiState, user: Address) -> crate::error::Result<WebData2Da
         spot_state,
         asset_ctxs,
     })
+}
+
+/// The venue's empty `clearinghouseState`: zero summaries, no positions, the
+/// served clock. This is the shape the live venue returns for an untouched
+/// address — not a fabricated position, and not a refusal.
+fn empty_clearinghouse(time: u64) -> ClearinghouseState {
+    let zero = MarginSummary {
+        account_value: Decimal::ZERO,
+        total_ntl_pos: Decimal::ZERO,
+        total_raw_usd: Decimal::ZERO,
+        total_margin_used: Decimal::ZERO,
+    };
+    ClearinghouseState {
+        margin_summary: zero.clone(),
+        cross_margin_summary: zero,
+        cross_maintenance_margin_used: Decimal::ZERO,
+        withdrawable: Decimal::ZERO,
+        asset_positions: Vec::new(),
+        time,
+        control_owned: false,
+    }
 }
 
 #[cfg(test)]
@@ -512,15 +549,25 @@ mod tests {
         );
         assert!(matches!(ack, WsPush::SubscriptionResponse { .. }));
         assert_eq!(subs.len(), 3, "webData2 is a served channel");
-        let error = request_reply(
-            r#"{"method":"subscribe","subscription":{"type":"webData2","user":"0x00000000000000000000000000000000000000ff"}}"#,
+        let unknown = Address::repeat_byte(0xff);
+        let ack = request_reply(
+            &format!(
+                r#"{{"method":"subscribe","subscription":{{"type":"webData2","user":"{unknown}"}}}}"#
+            ),
             &mut subs,
             &state,
         );
         assert!(
-            matches!(error, WsPush::Error { .. }),
-            "an unsimulated user is refused"
+            matches!(ack, WsPush::SubscriptionResponse { .. }),
+            "an untouched account is served the venue's empty shape, not refused"
         );
+        let frame = push_frame(&Subscription::WebData2 { user: unknown }, &state, 2_000).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(value["channel"], "webData2");
+        let clearinghouse: ClearinghouseState =
+            serde_json::from_value(value["data"]["clearinghouseState"].clone()).unwrap();
+        assert_eq!(clearinghouse.margin_summary.account_value, Decimal::ZERO);
+        assert!(clearinghouse.asset_positions.is_empty());
 
         let error = request_reply(
             r#"{"method":"subscribe","subscription":{"type":"activeAssetCtx","coin":"NOPE"}}"#,
@@ -537,7 +584,7 @@ mod tests {
             &mut subs,
             &state,
         );
-        assert_eq!(subs.len(), 2);
+        assert_eq!(subs.len(), 3);
         // Unsubscribing something that is not live is still acked.
         let ack = request_reply(
             r#"{"method":"unsubscribe","subscription":{"type":"l2Book","coin":"BTC"}}"#,
@@ -550,7 +597,7 @@ mod tests {
             &mut subs,
             &state,
         );
-        assert_eq!(subs.len(), 1);
+        assert_eq!(subs.len(), 2);
         assert!(matches!(
             request_reply(r#"{"method":"ping"}"#, &mut subs, &state),
             WsPush::Pong
