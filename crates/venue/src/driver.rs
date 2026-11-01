@@ -39,17 +39,18 @@ const VENUE_CHAIN_ID: u64 = 999;
 /// `anvil-t`).
 const ANVIL: &str = "anvil-v";
 
-/// The boot wait (see `boot`): a fork-mode anvil comes up in seconds; the
-/// only normal delay is a coordinated restart, and a crash-loop is worse
-/// than a bounded wait.
-const BOOT_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// Boot: wait for V, assert the chain, reconcile the registry, run the at-pin
 /// probes. A boot fault is fatal (the bin exits): a driver over the wrong
 /// chain or a broken registry must not serve.
 pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
-    diorama_devnet::engine::boot_prefix(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT, "hl public api")
-        .await?;
+    diorama_devnet::engine::boot_prefix(
+        ctx,
+        ANVIL,
+        VENUE_CHAIN_ID,
+        Duration::from_secs(ctx.engine.boot_timeout_secs),
+        "hl public api",
+    )
+    .await?;
     let pin = reconcile(ctx).await?;
     probes_at_pin(ctx, pin).await?;
     Ok(())
@@ -80,13 +81,13 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     let mut last_status = 0u64;
     let via = diorama_devnet::engine::source_host(ctx.source_rpc.url());
     // The pass's own backoff: a failed pass — the public source throttling,
-    // a transient transport fault — doubles the pause up to the cap, and a
-    // pass that serves resets it. The fixed cadence alone hammered a
-    // throttled endpoint (measured live: a burst tripped the public RPC's
-    // limiter and the retry loop kept it hot). The cap stays at a minute:
-    // the refusals measured live are transient bursts, and a longer pause
-    // only wastes the good windows between them.
-    let mut backoff = diorama_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(60));
+    // a transient transport fault — doubles the pause up to the endpoint
+    // policy's own cooldown cap, and a pass that serves resets it. The fixed
+    // cadence alone hammered a throttled endpoint (measured live: a burst
+    // tripped the public RPC's limiter and the retry loop kept it hot). The
+    // bounds are the deployment's `[endpoint_defaults]`, not a second copy.
+    let policy = ctx.source_rpc.pool().policy();
+    let mut backoff = diorama_anvil::Backoff::new(policy.cooldown_base(), policy.cooldown_max());
     loop {
         // The follow's heartbeat (the configured cadence, the same shape on
         // both mirrors): the steady DEBUG line only speaks for an idle chain,
@@ -152,8 +153,13 @@ async fn pass_progress(ctx: &Ctx) -> diorama_anvil::Progress {
 /// succeeds).
 async fn recover_from_reset(ctx: &Ctx) {
     tracing::warn!("V was reset under the driver - reconciling (epoch rule)");
-    if let Err(e) =
-        diorama_devnet::engine::assert_chain(ctx, ANVIL, VENUE_CHAIN_ID, BOOT_TIMEOUT).await
+    if let Err(e) = diorama_devnet::engine::assert_chain(
+        ctx,
+        ANVIL,
+        VENUE_CHAIN_ID,
+        Duration::from_secs(ctx.engine.boot_timeout_secs),
+    )
+    .await
     {
         tracing::warn!(error = %e, "venue chain assert failed after a reset");
     }

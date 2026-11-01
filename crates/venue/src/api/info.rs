@@ -733,7 +733,9 @@ fn active_asset_data(
     let available = state
         .sim
         .available_for(&state.feed, user, None, meta.as_ref())?
-        .unwrap_or(Decimal::ZERO)
+        .ok_or_else(|| Error::NotFound {
+            what: format!("{user} is not a simulated account"),
+        })?
         .max(Decimal::ZERO);
     let max_sz = account::ratio_or(
         account::mul(available, Decimal::from(leverage.value), "max size")?,
@@ -814,5 +816,29 @@ mod tests {
                 "marginTiers": [{"lowerBound": "0", "maxLeverage": 1}]
             })
         );
+    }
+
+    /// `activeAssetData` for an account the sim never saw is refused by name:
+    /// the old zero available balance fabricated a tradable row for an
+    /// unknown user.
+    #[test]
+    fn active_asset_data_refuses_an_unsimulated_account() {
+        let feed = crate::sim::feed_with(&[("ETH", "100", "101")]);
+        feed.put_meta(crate::sim::meta_with("ETH", 10), crate::now_ms());
+        let api = crate::feed::rest::RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap();
+        let state = ApiState::new(
+            Arc::new(feed),
+            Arc::new(crate::sim::Sim::memory()),
+            api,
+            None,
+            None,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let user = Address::repeat_byte(0xaa);
+        let err = active_asset_data(&state, user, &account::Account::default(), "ETH").unwrap_err();
+        assert!(matches!(err, Error::NotFound { .. }), "{err}");
+        assert!(err.to_string().contains("not a simulated account"), "{err}");
     }
 }

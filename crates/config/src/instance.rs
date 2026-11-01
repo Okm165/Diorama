@@ -1077,10 +1077,22 @@ fn check_engine_anvil(anvil: &EngineAnvil, issues: &mut Vec<String>) {
     }
 }
 
+/// The engine's declared bounds: a zero boot budget or rotation threshold
+/// would disable the wait or grow the log without limit.
+fn check_engine_bounds(eng: &EngineSection, issues: &mut Vec<String>) {
+    if eng.boot_timeout_secs == 0 {
+        issues.push("services.engine.boot_timeout_secs must be > 0".into());
+    }
+    if eng.drift_rotate_bytes == 0 {
+        issues.push("services.engine.drift_rotate_bytes must be > 0".into());
+    }
+}
+
 /// The engine's section: the anvil shape, the beacon list, the source-sync
 /// boundary, the state dirs, and the feed bridge.
 fn check_engine(eng: &EngineSection, issues: &mut Vec<String>) {
     check_engine_anvil(&eng.anvil, issues);
+    check_engine_bounds(eng, issues);
     if eng.loops.poll_interval_ms == 0 {
         issues.push("services.engine.loops.poll_interval_ms must be > 0".into());
     }
@@ -1165,6 +1177,15 @@ fn check_venue_sim(sim: &VenueSimSection, issues: &mut Vec<String>) {
     require_path(&sim.state_dir, "services.venue_sim.state_dir", issues);
     if sim.markets.is_empty() {
         issues.push("services.venue_sim.markets must name at least one market".into());
+    }
+    if sim.terminal_orders == 0 {
+        issues.push("services.venue_sim.terminal_orders must be > 0".into());
+    }
+    if sim.bridge_poll_interval_ms == 0 {
+        issues.push("services.venue_sim.bridge_poll_interval_ms must be > 0".into());
+    }
+    if sim.system_gas_stipend_wei.is_zero() {
+        issues.push("services.venue_sim.system_gas_stipend_wei must be > 0".into());
     }
     if sim.poll_interval_ms == 0 {
         issues.push("services.venue_sim.poll_interval_ms must be > 0".into());

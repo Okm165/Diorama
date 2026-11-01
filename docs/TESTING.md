@@ -767,7 +767,8 @@ aggregator deployed for the test):
   (an epoch re-pin, then a fixture re-deploy at the same addresses):
   all five feeds went to waiting with **one warn each and zero pass errors**,
   then republished and confirmed on first contact;
-- a publish that does not land within `confirm_window_ms` (default 60 s) is
+- a publish that does not land within `confirm_window_ms` (a required
+  deployment value) is
   **re-sent** — the outcome-unknown reconciliation. An anvil pool is not
   durable and a same-nonce sender can displace ours: measured, the client's deploy
   shares anvil account 0 with the writer, a publish racing the deploy's last

@@ -6,7 +6,7 @@
 //! Protocol (`feed::ws`'s vocabulary, the client's own): the client subscribes
 //! with `{"method":"subscribe","subscription":{"type":…}}`, the server acks
 //! with a `subscriptionResponse` frame and pushes `{"channel":…,"data":…}` on
-//! each 1 Hz tick while the subscription is live; `{"method":"ping"}` answers
+//! each configured account-tick while the subscription is live; `{"method":"ping"}` answers
 //! `{"channel":"pong"}`. An unsupported channel (or an unknown coin) is
 //! answered with the venue's `error` frame — never silence.
 use super::ApiState;
@@ -17,7 +17,6 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
 
 /// One subscription the sim serves. `l2Book` is REST-only: the book is
 /// scripted/polled, and a push lane would need a change detector the market
@@ -87,7 +86,7 @@ pub async fn ws(
 /// tick (the automaton's own cadence).
 async fn session(state: Arc<ApiState>, mut socket: WebSocket) {
     let mut subs: Vec<Subscription> = Vec::new();
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(state.push_interval);
     loop {
         tokio::select! {
             _ = tick.tick() => {
@@ -195,6 +194,7 @@ mod tests {
     use super::*;
     use crate::feed::ws::WsMessage;
     use crate::wire::test_ctx;
+    use std::time::Duration;
 
     /// Every frame the server emits parses through the *client's own* parser:
     /// the two sides of the venue's websocket vocabulary in one test — a shape
@@ -300,6 +300,7 @@ mod tests {
                 None,
                 None,
                 Duration::from_secs(45),
+                Duration::from_secs(1),
             )
             .unwrap(),
         );

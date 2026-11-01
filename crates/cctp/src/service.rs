@@ -232,7 +232,7 @@ async fn boot_bridge(
     let store = Arc::new(crate::store::Store::load(
         section.state_dir.join("cctp.json"),
     )?);
-    install_hooks(&chains, &store, &sender, receipt_timeout, receipt_poll).await;
+    install_hooks(&chains, &store, &sender, receipt_timeout, receipt_poll).await?;
     let bridge = Bridge {
         chains,
         lanes,
@@ -520,29 +520,25 @@ async fn verify_wiring(
 
 /// The recorded wrapper, reused only when its code is present and its wiring
 /// verifies — a re-pin drops deployments, and a stale record must not serve.
+/// A store or chain read fault propagates: treating it as "no wrapper" would
+/// deploy a second wrapper while messages still pin the first.
 async fn existing_wrapper(
     chain: &Chain,
     store: &Arc<crate::store::Store>,
     sender: &TxSender,
-) -> Option<Address> {
-    let wrapper = store
-        .with(|state| Ok(state.hooks.get(&chain.domain).copied()))
-        .ok()
-        .flatten()?;
-    let present = match chain.rpc.block_number().await {
-        Ok(head) => matches!(
-            chain.rpc.code_at(wrapper, head).await,
-            Ok(code) if !code.is_empty()
-        ),
-        Err(_) => false,
+) -> crate::Result<Option<Address>> {
+    let Some(wrapper) = store.with(|state| Ok(state.hooks.get(&chain.domain).copied()))? else {
+        return Ok(None);
     };
+    let head = chain.rpc.block_number().await?;
+    let present = !chain.rpc.code_at(wrapper, head).await?.is_empty();
     if !present {
         tracing::warn!(
             chain = chain.name,
             wrapper = %wrapper,
             "recorded hook wrapper is not deployed (a re-pin?); redeploying"
         );
-        return None;
+        return Ok(None);
     }
     match crate::hook::verify(
         &chain.rpc,
@@ -552,7 +548,7 @@ async fn existing_wrapper(
     )
     .await
     {
-        Ok(()) => Some(wrapper),
+        Ok(()) => Ok(Some(wrapper)),
         Err(e) => {
             tracing::warn!(
                 chain = chain.name,
@@ -560,7 +556,7 @@ async fn existing_wrapper(
                 error = %e,
                 "recorded hook wrapper failed verification; redeploying"
             );
-            None
+            Ok(None)
         }
     }
 }
@@ -679,14 +675,15 @@ async fn install_hooks(
     sender: &TxSender,
     receipt_timeout: Duration,
     receipt_poll: Duration,
-) {
+) -> crate::Result<()> {
     for chain in chains {
-        if let Some(wrapper) = existing_wrapper(chain, store, sender).await {
+        if let Some(wrapper) = existing_wrapper(chain, store, sender).await? {
             tracing::info!(chain = chain.name, wrapper = %wrapper, "cctp hook wrapper present");
             continue;
         }
         deploy_wrapper(chain, store, sender, receipt_timeout, receipt_poll).await;
     }
+    Ok(())
 }
 
 /// The devnet attester, installed through the real setters (idempotent).
@@ -740,4 +737,46 @@ pub(crate) async fn fund_relayer(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chains::DOMAIN_ETHEREUM;
+    use crate::transfer::tests_support::sample_wallet;
+
+    /// A recorded wrapper is reused only after the chain answers: a read fault
+    /// must not read as "no wrapper" and deploy a second one while messages
+    /// still pin the first.
+    #[tokio::test]
+    async fn a_wrapper_probe_fault_propagates() {
+        let dir = std::env::temp_dir().join(format!("diorama-cctp-wrapper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(crate::store::Store::load(dir.join("cctp.json")).unwrap());
+        store
+            .with(|state| {
+                state
+                    .hooks
+                    .insert(DOMAIN_ETHEREUM, Address::repeat_byte(0xaa));
+                Ok(())
+            })
+            .unwrap();
+        let policy = diorama_anvil::PoolPolicy {
+            rounds: 1,
+            max_attempts: 1,
+            cooldown_base_ms: 1,
+            cooldown_max_ms: 1,
+            jitter_ms: 0,
+            emergency_probe: false,
+            emergency_probe_ms: 1,
+        };
+        let chain = Chain::ethereum("http://127.0.0.1:1", Duration::from_secs(1), policy)
+            .expect("a valid client");
+        let sender = TxSender::new(sample_wallet());
+        let err = existing_wrapper(&chain, &store, &sender)
+            .await
+            .expect_err("a dead chain is not an absent wrapper");
+        assert!(matches!(err, crate::Error::Rpc(_)), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

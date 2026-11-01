@@ -278,7 +278,7 @@ pub(crate) async fn advance(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<AdvanceRequest>,
 ) -> Result<Json<AdvanceResponse>> {
-    let blocks = req.n.unwrap_or(1).max(1);
+    let blocks = req.n.unwrap_or(1);
     let seconds = req.seconds.unwrap_or(blocks);
     let outcome = state.sim.advance(&state.feed, seconds, blocks)?;
     Ok(Json(AdvanceResponse {

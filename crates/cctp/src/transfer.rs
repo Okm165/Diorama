@@ -468,11 +468,22 @@ const NO_PARAMS: [u8; 0] = [];
 /// The EIP-1559 fee cap from the node's own numbers: the tip is the node's
 /// gas price minus the latest base fee (the priority component it is actually
 /// paying), and the cap is the next block's base fee plus that tip. No
-/// invented multiplier: `eth_feeHistory` supplies both base fees.
-fn fee_cap(gas_price: U256, latest_base: u128, next_base: u128) -> (u128, u128) {
+/// invented multiplier: `eth_feeHistory` supplies both base fees. A value the
+/// EIP-1559 fields cannot carry is a named refusal, never a saturated cap.
+fn fee_cap(gas_price: U256, latest_base: u128, next_base: u128) -> Result<(u128, u128)> {
     let tip = gas_price.saturating_sub(U256::from(latest_base));
     let cap = U256::from(next_base).saturating_add(tip);
-    (cap.saturating_to::<u128>(), tip.saturating_to::<u128>())
+    let cap = u128::try_from(cap).map_err(|_| {
+        Error::bad_request(format!(
+            "the node's fee cap {cap} does not fit an EIP-1559 maxFeePerGas (u128)"
+        ))
+    })?;
+    let tip = u128::try_from(tip).map_err(|_| {
+        Error::bad_request(format!(
+            "the node's priority fee {tip} does not fit an EIP-1559 maxPriorityFeePerGas (u128)"
+        ))
+    })?;
+    Ok((cap, tip))
 }
 
 /// Builds, signs (EIP-1559) and submits calls. The devnet's block production
@@ -538,7 +549,7 @@ impl TxSender {
         let next_base = fee_history.next_block_base_fee().ok_or(Error::NoFeeData {
             what: "eth_feeHistory next base fee",
         })?;
-        let (max_fee, priority_fee) = fee_cap(gas_price, latest_base, next_base);
+        let (max_fee, priority_fee) = fee_cap(gas_price, latest_base, next_base)?;
         let tx = TxEip1559 {
             chain_id,
             nonce: nonce.to::<u64>(),
@@ -977,14 +988,18 @@ mod tests {
         // gas price 3 gwei, latest base 2 gwei -> tip 1 gwei; next base 2.5
         // gwei -> cap 3.5 gwei.
         let gas_price = U256::from(3_000_000_000u64);
-        let (cap, tip) = fee_cap(gas_price, 2_000_000_000, 2_500_000_000);
+        let (cap, tip) = fee_cap(gas_price, 2_000_000_000, 2_500_000_000).unwrap();
         assert_eq!(tip, 1_000_000_000);
         assert_eq!(cap, 3_500_000_000);
 
         // A gas price below the base fee has no priority component; the cap
         // is exactly the next base fee.
-        let (cap, tip) = fee_cap(U256::from(1u64), 2_000_000_000, 2_500_000_000);
+        let (cap, tip) = fee_cap(U256::from(1u64), 2_000_000_000, 2_500_000_000).unwrap();
         assert_eq!(tip, 0);
         assert_eq!(cap, 2_500_000_000);
+
+        // A value the EIP-1559 field cannot carry is refused, not saturated.
+        let err = fee_cap(U256::MAX, 0, 0).unwrap_err();
+        assert!(matches!(err, Error::BadRequest { .. }), "{err}");
     }
 }

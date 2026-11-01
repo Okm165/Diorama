@@ -616,7 +616,8 @@ instance file (CI + boot gate).
               follow_margin_blocks, fork_offset }   # the offset's single home
 [chains.venue] { kind = "hyperliquid", source_urls = "${HL_RPC_URLS}",
               api_url, ws_url }                    # the venue profile's chain
-[services.engine] { state_dir = "${STATE_DIR}", fixture_addresses[] }
+[services.engine] { state_dir = "${STATE_DIR}", fixture_addresses[],
+              boot_timeout_secs, drift_rotate_bytes }
 [services.engine.anvil] { target_url = "${ANVIL_T_URL}" }
               # (the venue profile's instance points it at "${ANVIL_V_URL}")
 [services.engine.reth] { request_timeout_secs }
@@ -630,9 +631,10 @@ instance file (CI + boot gate).
 [services.engine.beacon] { urls = ["${BEACON_URL}"], request_timeout_secs }
 [services.engine.http] { addr, port }
 [services.venue_sim] { state_dir, markets, poll_interval_ms, tick_interval_ms,
-              heartbeat_interval_secs, rest_timeout_secs, rpc_timeout_secs,
-              admin_timeout_secs, engine_admin_url,
-              anvil_url }                # + .info/.control listener sections
+              terminal_orders, bridge_poll_interval_ms,
+              system_gas_stipend_wei, heartbeat_interval_secs,
+              rest_timeout_secs, rpc_timeout_secs, admin_timeout_secs,
+              engine_admin_url, anvil_url }  # + .info/.control listener sections
 [services.cctp_bridge] { state_dir, t_url, v_url, relay_key, attester_seed,
               fast_burn_allowance, poll_interval_ms, rpc_timeout_secs,
               boot_timeout_secs, finality_delay_secs,
@@ -699,7 +701,7 @@ Anvil cannot do. This is the mapping, so nothing is ambiguous:
 | Storage / code | anvil: `anvil_setStorageAt`, `anvil_setCode`; engine: `POST /admin/shadow` hands keys back to mainnet sync (immediate: reth's values at the cursor are pushed to T; the engine scans T up to its head first so a just-mined devnet write cannot re-mark the key) | |
 | Snapshots | anvil: `evm_snapshot`/`evm_revert`; engine: `POST /admin/rewind` = the sync-revert control (rolls T back per parent block through the journal) | |
 | Time travel | engine: `POST /admin/time` (persistent clock offset, survives parent blocks) *and* anvil's `evm_increaseTime` (which the next alignment would overwrite - use the offset) | the capability a margin product needs; a static fork's `evm_increaseTime` alone is not enough on a live mirror |
-| Mirror sync control | engine: `POST /admin/pause` = the stop-sync, `POST /admin/resume` = start-sync, `GET /status` = sync status (`halted` = active, `lag`, `cursor`/`cursor_t` = latest synced block, `follow_head` = parent latest block, `time_offset_seconds` = the `/admin/time` offset) | a sync-next has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume |
+| Mirror sync control | engine: `POST /admin/pause` = the stop-sync, `POST /admin/resume` = start-sync, `GET /status` = sync status (`halted` = active, `lag`, `cursor`/`cursor_t` = latest synced block, `follow_head` = parent latest block, `time_offset_seconds` = the `/admin/time` offset) | a sync-next has no counterpart: the loops are continuous, and after a pause the next parent block is applied as soon as you resume. A reading the engine could not take (`reth_head`, `follow_head`, `head`, `lag`) is `null`, never a fabricated 0 |
 
 **Scope vs the plan's fork engine (M1-M5).** This repo implements the plan's
 *minimal viable mirror* path - stock Anvil + BAL diff

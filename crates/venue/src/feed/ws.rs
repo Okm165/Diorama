@@ -130,7 +130,10 @@ impl WsClient {
     /// one rate-limited emergency probe is tried, then the loop waits for the
     /// earliest cooldown instead of hammering the whole pool.
     pub async fn run(self) {
-        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+        // The reconnect shape is the deployment's endpoint policy: the same
+        // cooldown base/cap a failed HTTP endpoint gets, not a second copy.
+        let policy = self.pool.policy();
+        let mut backoff = Backoff::new(policy.cooldown_base(), policy.cooldown_max());
         loop {
             let now = now_ms();
             let admission = self.pool.admit(now, &[]);

@@ -30,6 +30,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     )?);
     let sim = Arc::new(crate::sim::Sim::load(
         sim_section.state_dir.join("sim.json"),
+        sim_section.terminal_orders,
     )?);
     let api_client = crate::feed::rest::RestClient::with_specs(
         cfg.endpoint_specs(chain.api_urls.as_slice()),
@@ -50,6 +51,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
             sim_section.engine_admin_url.clone(),
             Some(bridge_metrics.clone()),
             Duration::from_secs(sim_section.admin_timeout_secs),
+            Duration::from_millis(sim_section.tick_interval_ms),
         )?
         .with_ws_pool(ws_pool.clone()),
     );
@@ -189,7 +191,16 @@ fn spawn_bridge(
         Some(v_url) => {
             let v =
                 diorama_anvil::Rpc::new(v_url, Duration::from_secs(sim_section.rpc_timeout_secs))?;
-            let bridge = crate::bridge::Bridge::new(v, sim.clone(), feed.clone(), metrics.clone());
+            let bridge = crate::bridge::Bridge::new(
+                v,
+                sim.clone(),
+                feed.clone(),
+                metrics.clone(),
+                crate::bridge::BridgePolicy {
+                    poll: Duration::from_millis(sim_section.bridge_poll_interval_ms),
+                    system_gas_stipend: sim_section.system_gas_stipend_wei,
+                },
+            )?;
             tokio::spawn(bridge.run());
         }
         None => {

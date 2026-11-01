@@ -60,7 +60,9 @@ struct GapCatchupEntry {
     source_head: u64,
     window_to: u64,
     gap: u64,
-    limit: u64,
+    /// `null` when the policy is unbounded; a zero would read as "no gap
+    /// allowed", which is a different statement.
+    limit: Option<u64>,
 }
 
 /// A source continuity mismatch's drift line: the block after the last
@@ -244,7 +246,7 @@ fn note_gap(ctx: &Ctx, followed: u64, source_head: u64, to: u64, limit: Option<u
                 source_head,
                 window_to: to,
                 gap: source_head - followed,
-                limit: limit.unwrap_or(0),
+                limit,
             })?;
             tracing::warn!(
                 followed,

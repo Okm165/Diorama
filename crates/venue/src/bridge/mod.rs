@@ -43,12 +43,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use system::{TokenInfo, Transfer};
 
+/// The bridge's declared deployment policy: the scan cadence and the devnet
+/// gas stipend for the Core↔EVM system address.
+#[derive(Debug, Clone, Copy)]
+pub struct BridgePolicy {
+    pub poll: Duration,
+    pub system_gas_stipend: U256,
+}
+
 /// The bridge's own cursor and the persisted state it needs. The cursor lives
 /// in the sim's state file (one state root per service).
 pub struct Bridge {
     anvil_v: Rpc,
     sim: Arc<Sim>,
     feed: Arc<MarketFeed>,
+    /// The scan cadence (the deployment's `bridge_poll_interval_ms`).
+    poll: Duration,
+    /// The devnet gas stipend for the Core↔EVM system address.
+    system_gas_stipend: U256,
     /// The last head whose timestamp was observed (one header read per new
     /// block; the sim's served `time` follows the venue chain's clock).
     observed_head: std::sync::atomic::AtomicU64,
@@ -65,25 +77,31 @@ impl Bridge {
         sim: Arc<Sim>,
         feed: Arc<MarketFeed>,
         metrics: Arc<BridgeMetrics>,
-    ) -> Self {
-        let cursor = sim.bridge_cursor().unwrap_or(0);
-        Self {
+        policy: BridgePolicy,
+    ) -> Result<Self> {
+        // A poisoned sim state must not read as "not anchored": that would
+        // re-anchor at the head and skip the boundary activity mined while
+        // the service was down.
+        let cursor = sim.bridge_cursor()?;
+        Ok(Self {
             anvil_v,
             sim,
             feed,
+            poll: policy.poll,
+            system_gas_stipend: policy.system_gas_stipend,
             observed_head: std::sync::atomic::AtomicU64::new(0),
             cursor: std::sync::atomic::AtomicU64::new(cursor),
             metrics,
-        }
+        })
     }
 
-    /// Run forever: one scan pass per second.
+    /// Run forever: one scan pass per configured interval.
     pub async fn run(self) {
         loop {
             if let Err(e) = self.pass().await {
                 tracing::warn!(error = %e, "venue bridge pass failed; will retry");
             }
-            tokio::time::sleep(Duration::from_millis(1_000)).await;
+            tokio::time::sleep(self.poll).await;
         }
     }
 
@@ -379,13 +397,8 @@ impl Bridge {
                     return;
                 };
                 (
-                    coin,
-                    self.sim.cancel(
-                        caller,
-                        &self.coin_of(*asset).unwrap_or_default(),
-                        *oid,
-                        CancelSpeed::Normal,
-                    ),
+                    coin.clone(),
+                    self.sim.cancel(caller, &coin, *oid, CancelSpeed::Normal),
                 )
             }
             CoreAction::CancelByCloid { asset, cloid } => {
@@ -395,10 +408,10 @@ impl Bridge {
                     return;
                 };
                 (
-                    coin,
+                    coin.clone(),
                     self.sim.cancel_by_cloid(
                         caller,
-                        &self.coin_of(*asset).unwrap_or_default(),
+                        &coin,
                         alloy_primitives::B128::from(*cloid),
                         CancelSpeed::Normal,
                     ),
@@ -538,7 +551,7 @@ impl Bridge {
     /// The registry entry for a wire token index; an unknown index is counted
     /// and refused (the bridge never guesses a token).
     fn token_info<'a>(&self, tokens: &'a [TokenInfo], token: u64) -> Option<&'a TokenInfo> {
-        if let Some(info) = system::by_index(tokens, u32::try_from(token).unwrap_or(u32::MAX)) {
+        if let Some(info) = system::by_index(tokens, u32::try_from(token).ok()?) {
             return Some(info);
         }
         self.metrics.inc_refusals();
@@ -696,16 +709,12 @@ impl Bridge {
         };
         let from = system::system_address(u64::from(info.index));
         // The system address pays gas on V (the real chain's system txs do
-        // not); fund it once so the pool's balance check passes.
-        if self
-            .anvil_v
-            .balance_at(from, 0)
-            .await
-            .unwrap_or(U256::ZERO)
-            .is_zero()
-        {
+        // not); fund it once, at the deployment's declared stipend, so the
+        // pool's balance check passes. A balance-read fault propagates: it
+        // must not be read as "empty" and funded over a broken RPC.
+        if self.anvil_v.balance_at(from, 0).await?.is_zero() {
             self.anvil_v
-                .anvil_set_balance(from, U256::from(1_000_000_000_000_000_000u64))
+                .anvil_set_balance(from, self.system_gas_stipend)
                 .await?;
         }
         let tx = TransactionRequest::default()

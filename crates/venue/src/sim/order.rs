@@ -308,6 +308,7 @@ fn terminalize(
     order: RestingOrder,
     status: TerminalStatus,
     filled_sz: Decimal,
+    limit: usize,
 ) {
     let avg = super::account::ratio_or(order.filled_ntl, order.filled_sz, Decimal::ZERO);
     let oid = order.oid;
@@ -321,7 +322,7 @@ fn terminalize(
             status_ms: crate::now_ms(),
         },
     );
-    while terminal.len() > 1024 {
+    while terminal.len() > limit {
         let Some(first) = terminal.keys().next().copied() else {
             break;
         };
@@ -591,7 +592,9 @@ impl Sim {
         let requirement = order_requirement(r.sz, feed.mark_or(&r.coin, r.px), leverage, r.reduce)?;
         let Some(available) = self.available_for(feed, r.account, Some(r.oid), meta.as_ref())?
         else {
-            return Ok(true); // no account state: nothing to re-margin against
+            // A resting order whose account vanished has nothing to re-margin
+            // against: cancel it at match time, never fill it unmargined.
+            return Ok(false);
         };
         Ok(available >= requirement)
     }
@@ -635,7 +638,9 @@ impl Sim {
         let requirement =
             order_requirement(sz, feed.mark_or(&req.coin, px), leverage, Reduce::Any)?;
         let Some(available) = self.available_for(feed, address, None, meta.as_ref())? else {
-            return Ok(());
+            return Err(Error::bad_request(format!(
+                "account {address} is not simulated (deal or seed it before placing orders)"
+            )));
         };
         if available < requirement {
             return Err(Error::bad_request("Insufficient margin to place order."));
@@ -716,7 +721,9 @@ impl Sim {
                     .get(coin)
                     .map(super::account::Position::direction)
             })
-            .unwrap_or(super::account::Direction::Long);
+            .ok_or_else(|| Error::NotFound {
+                what: format!("position {coin} for {address} (liquidation)"),
+            })?;
         let req = Order {
             coin: coin.to_string(),
             is_buy: direction.entry_side().flip().is_buy(), // close the position
@@ -905,7 +912,13 @@ impl Sim {
             let Some(done) = st.resting.remove(&oid) else {
                 return Ok(());
             };
-            terminalize(&mut st.terminal, done, TerminalStatus::Filled, sz);
+            terminalize(
+                &mut st.terminal,
+                done,
+                TerminalStatus::Filled,
+                sz,
+                self.terminal_orders,
+            );
             Ok(())
         })
     }
@@ -1158,15 +1171,12 @@ impl Sim {
                 let Some(done) = st.resting.remove(&oid) else {
                     return Ok(());
                 };
-                st.terminal.insert(
-                    oid,
-                    TerminalOrder {
-                        order: done,
-                        status,
-                        filled_sz: Decimal::ZERO,
-                        avg_px: Decimal::ZERO,
-                        status_ms: crate::now_ms(),
-                    },
+                terminalize(
+                    &mut st.terminal,
+                    done,
+                    status,
+                    Decimal::ZERO,
+                    self.terminal_orders,
                 );
                 Ok(())
             }
@@ -1336,10 +1346,12 @@ impl Sim {
         })
     }
 
-    /// The leverage a fill uses: the position's own, else the asset's max
-    /// leverage (the venue's default for a new position), else 20 — the
-    /// measured no-position default the venue itself serves (`activeAssetData`
-    /// for a flat account; §16.5's probe).
+    /// The leverage a fill uses: the position's own, else the account's
+    /// per-coin setting, else the asset's max leverage (the venue's default
+    /// for a new position on a known coin). A missing live meta is warming
+    /// and an unknown asset (or a zero max leverage) is a named refusal: the
+    /// old 20× fallback fabricated a margin bound for a coin the venue never
+    /// described.
     pub(crate) fn leverage_for(
         &self,
         address: Address,
@@ -1364,11 +1376,18 @@ impl Sim {
         {
             return Ok(s.leverage.max(1));
         }
-        Ok(meta
-            .and_then(|m| m.asset(coin))
-            .map(|a| a.max_leverage)
-            .filter(|l| *l > 0)
-            .unwrap_or(20))
+        let meta = meta.ok_or(crate::error::Error::Warming)?;
+        let asset = meta
+            .asset(coin)
+            .ok_or_else(|| crate::error::Error::NotFound {
+                what: format!("asset `{coin}` in the live meta (leverage)"),
+            })?;
+        if asset.max_leverage == 0 {
+            return Err(crate::error::Error::NotFound {
+                what: format!("a positive max leverage for `{coin}` in the live meta"),
+            });
+        }
+        Ok(asset.max_leverage)
     }
 
     /// The next order id (the venue's own numbering; monotonic across the
@@ -1634,6 +1653,79 @@ mod tests {
             reduce_only: true,
             ..ioc(side, sz)
         }
+    }
+
+    /// A fill's leverage is the position's, the account's setting, or the
+    /// live asset's max — never a fabricated 20× when the meta is missing or
+    /// the coin is unknown.
+    #[test]
+    fn leverage_requires_the_live_meta_for_a_flat_account() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "2")], &[("101", "2")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        assert_eq!(
+            sim.leverage_for(a, "ETH", feed.meta().as_ref()).unwrap(),
+            10
+        );
+        let err = sim
+            .leverage_for(a, "NOPE", feed.meta().as_ref())
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound { .. }), "{err}");
+        let err = sim.leverage_for(a, "ETH", None).unwrap_err();
+        assert!(matches!(err, Error::Warming), "{err}");
+    }
+
+    /// An order for an account the sim has never seen is refused by name: a
+    /// resting order with no margin check would later fill unmargined.
+    #[test]
+    fn an_order_for_an_unsimulated_account_is_refused() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "2")], &[("101", "2")]),
+            meta_with("ETH", 10),
+        );
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        let order = Order {
+            limit_px: Some("100".parse().unwrap()),
+            tif: Tif::Gtc,
+            ..ioc(Side::Buy, "1")
+        };
+        let err = sim.place(&feed, a, &order).unwrap_err();
+        assert!(matches!(err, Error::BadRequest { .. }), "{err}");
+        assert!(
+            err.to_string().contains("not simulated"),
+            "the refusal names the missing account: {err}"
+        );
+    }
+
+    /// A resting order whose account vanished is never re-margined as if it
+    /// had margin: the match-time check cancels it instead.
+    #[test]
+    fn a_resting_order_without_an_account_is_not_remargined() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "2")], &[("101", "2")]),
+            meta_with("ETH", 10),
+        );
+        let sim = Sim::memory();
+        let resting = RestingOrder {
+            oid: 1,
+            account: Address::repeat_byte(0xaa),
+            coin: "ETH".into(),
+            side: Side::Buy,
+            px: "100".parse().unwrap(),
+            sz: "1".parse().unwrap(),
+            orig_sz: "1".parse().unwrap(),
+            reduce: Reduce::Any,
+            tif: Tif::Gtc,
+            cloid: None,
+            trigger: None,
+            placed_ms: 0,
+            filled_sz: Decimal::ZERO,
+            filled_ntl: Decimal::ZERO,
+        };
+        assert!(!sim.remargin_ok(&feed, &resting).unwrap());
     }
 
     /// An unknown coin refuses by name (404), never the warming shape: a

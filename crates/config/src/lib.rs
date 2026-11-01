@@ -475,6 +475,8 @@ port = 8080
         assert_eq!(engine(&inst).loops.prepend_rounds, 3);
         assert_eq!(engine(&inst).loops.status_log_interval_ms, 60_000);
         assert_eq!(engine(&inst).beacon.request_timeout_secs, 30);
+        assert_eq!(engine(&inst).boot_timeout_secs, 900);
+        assert_eq!(engine(&inst).drift_rotate_bytes, 16 * 1024 * 1024);
         assert_eq!(engine(&inst).source_sync.error_backoff_ms, 5_000);
         assert_eq!(engine(&inst).source_sync.report_interval_ms, 5_000);
         assert_eq!(engine(&inst).source_sync.request_timeout_secs, 180);
@@ -502,6 +504,48 @@ port = 8080
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
         assert_eq!(engine(&inst).beacon.urls.len(), 2);
+    }
+
+    /// The shared endpoint policy is declared once in `config/defaults.toml`;
+    /// the crate's `PoolPolicy::default` is the test/tool fallback. Pinning
+    /// them equal keeps the second home from drifting from the first.
+    #[test]
+    fn the_endpoint_policy_defaults_match_the_declared_table() {
+        let (inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
+        assert_eq!(inst.endpoint_defaults, diorama_anvil::PoolPolicy::default());
+    }
+
+    /// A feed bridge has no honest confirmation window unless the deployment
+    /// declares one: the old 60 s serde default was an invented freshness
+    /// bound. Omitting it is a load error naming the key.
+    #[test]
+    fn a_feed_bridge_requires_its_confirmation_window() {
+        let src = format!(
+            "{}\n[services.engine.feed_bridge]\npoll_interval_ms = 1000\nwriter = \"0x00000000000000000000000000000000000000a1\"\nfeeds = [{{ name = \"ETH/USD\", target = \"0x00000000000000000000000000000000000000a2\", source = \"0x00000000000000000000000000000000000000a3\" }}]\n",
+            minimal_instance()
+        );
+        let err = load_str(&src, &wiring()).expect_err("no confirmation window declared");
+        let mut text = err.to_string();
+        let mut source = std::error::Error::source(&err);
+        while let Some(cause) = source {
+            text.push_str(&format!("\n{cause}"));
+            source = cause.source();
+        }
+        assert!(text.contains("confirm_window_ms"), "{text}");
+
+        let declared = src.replace(
+            "poll_interval_ms = 1000",
+            "poll_interval_ms = 1000\nconfirm_window_ms = 60000",
+        );
+        let (inst, _) = load_str(&declared, &wiring()).expect("the declared window loads");
+        assert_eq!(
+            engine(&inst)
+                .feed_bridge
+                .as_ref()
+                .expect("[services.engine.feed_bridge]")
+                .confirm_window_ms,
+            60_000
+        );
     }
 
     #[test]
@@ -586,6 +630,23 @@ port = 8096
         assert!(format!("{err}").contains("POL_INTERVAL_MS"), "{err}");
     }
 
+    /// A zero boot budget or drift rotation threshold is refused by name: the
+    /// former would disable the wait, the latter grow the log without bound.
+    #[test]
+    fn check_flags_zero_engine_bounds() {
+        let (mut inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
+        inst.check().unwrap();
+        let engine = inst.services.engine.as_mut().unwrap();
+        engine.boot_timeout_secs = 0;
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("boot_timeout_secs"), "{err}");
+        let engine = inst.services.engine.as_mut().unwrap();
+        engine.boot_timeout_secs = 900;
+        engine.drift_rotate_bytes = 0;
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("drift_rotate_bytes"), "{err}");
+    }
+
     #[test]
     fn check_flags_fork_offset_bounds() {
         let (mut inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
@@ -595,6 +656,36 @@ port = 8096
         inst.chains.l1.as_mut().unwrap().fork_offset = 20_000;
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("state window"), "{err}");
+    }
+
+    /// The simulator's declared memory/cadence facts are required: a zero
+    /// terminal bound, bridge cadence or gas stipend is a config error, not a
+    /// silent code-side floor.
+    #[test]
+    fn check_flags_zero_simulator_bounds() {
+        let src = format!(
+            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\n\n[services.venue_sim.info]\nport = 8090\n\n[services.venue_sim.control]\nport = 8091\n",
+            minimal_venue_instance()
+        );
+        let (mut inst, _) = load_str(&src, &[]).unwrap();
+        inst.check().unwrap();
+        let sim = inst.services.venue_sim.as_mut().unwrap();
+        sim.terminal_orders = 0;
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("terminal_orders"), "{err}");
+        let sim = inst.services.venue_sim.as_mut().unwrap();
+        sim.terminal_orders = 1024;
+        sim.bridge_poll_interval_ms = 0;
+        let err = inst.check().unwrap_err();
+        assert!(
+            format!("{err}").contains("bridge_poll_interval_ms"),
+            "{err}"
+        );
+        let sim = inst.services.venue_sim.as_mut().unwrap();
+        sim.bridge_poll_interval_ms = 1000;
+        sim.system_gas_stipend_wei = U256::ZERO;
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("system_gas_stipend_wei"), "{err}");
     }
 
     #[test]
@@ -712,7 +803,7 @@ port = 8096
 
         // A mainnet instance carrying the simulator's section:
         let src = format!(
-            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\npoll_interval_ms = 5000\ntick_interval_ms = 1000\nheartbeat_interval_secs = 60\nrest_timeout_secs = 10\nrpc_timeout_secs = 30\nadmin_timeout_secs = 45\n[services.venue_sim.info]\naddr = \"0.0.0.0\"\nport = 8090\n[services.venue_sim.control]\naddr = \"0.0.0.0\"\nport = 8091\n",
+            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\nterminal_orders = 1024\nbridge_poll_interval_ms = 1000\nsystem_gas_stipend_wei = \"1000000000000000000\"\npoll_interval_ms = 5000\ntick_interval_ms = 1000\nheartbeat_interval_secs = 60\nrest_timeout_secs = 10\nrpc_timeout_secs = 30\nadmin_timeout_secs = 45\n[services.venue_sim.info]\naddr = \"0.0.0.0\"\nport = 8090\n[services.venue_sim.control]\naddr = \"0.0.0.0\"\nport = 8091\n",
             minimal_instance()
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
@@ -737,6 +828,12 @@ port = 8096
         assert_eq!(sim.info.port, 8090);
         assert_eq!(sim.control.port, 8091);
         assert_eq!(sim.tick_interval_ms, 1000);
+        assert_eq!(sim.terminal_orders, 1024);
+        assert_eq!(sim.bridge_poll_interval_ms, 1000);
+        assert_eq!(
+            sim.system_gas_stipend_wei,
+            U256::from(1_000_000_000_000_000_000u64)
+        );
         assert_eq!(sim.heartbeat_interval_secs, 60);
         assert_eq!(sim.rest_timeout_secs, 10);
         assert_eq!(sim.rpc_timeout_secs, 30);

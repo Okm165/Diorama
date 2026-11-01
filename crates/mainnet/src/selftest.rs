@@ -19,9 +19,14 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict
     })?;
     let ctx = Arc::new(Ctx::new(cfg, &rpc, &anvil)?);
 
-    // Wait for the scratch anvil (same pod, it starts in parallel).
-    let boot = std::time::Duration::from_secs(120);
-    ctx.anvil_t.wait_until_up("anvil-t", boot).await?;
+    // Wait for the scratch anvil (same pod, it starts in parallel): the
+    // instance's own boot budget.
+    ctx.anvil_t
+        .wait_until_up(
+            "anvil-t",
+            std::time::Duration::from_secs(ctx.engine.boot_timeout_secs),
+        )
+        .await?;
     ctx.anvil_t
         .anvil_set_automine(diorama_anvil::Automine::Off)
         .await?;

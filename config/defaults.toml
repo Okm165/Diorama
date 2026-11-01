@@ -29,6 +29,15 @@ emergency_probe_ms = 1000
 # block. A 2-block margin costs ~24 s of lag and removes the stall.
 follow_margin_blocks = 2
 
+[services.engine]
+# The boot wait for the devnet chain (reth unwinding and an anvil re-forking
+# both take minutes on a bad source day; a crash-loop is worse than a slow
+# boot). The venue instance pins its own, shorter budget.
+boot_timeout_secs = 900
+# The drift log's rotation threshold (one retained generation beside the live
+# file). A deployment's forensic-retention policy, not a protocol constant.
+drift_rotate_bytes = 16777216
+
 [services.engine.reth]
 request_timeout_secs = 30
 
@@ -102,6 +111,13 @@ addr = "0.0.0.0"
 poll_interval_ms = 5000
 # The account plane's self-advance tick (funding, liquidations, persist).
 tick_interval_ms = 1000
+# The `orderStatus` terminal-history bound (a deployment memory policy).
+terminal_orders = 1024
+# The Core↔EVM bridge's scan cadence (one pass per interval).
+bridge_poll_interval_ms = 1000
+# The devnet gas stipend written to the Core↔EVM system address when it has
+# no native balance (the fork's system txs pay gas; the real chain's do not).
+system_gas_stipend_wei = "1000000000000000000"
 # The market-plane heartbeat log cadence.
 heartbeat_interval_secs = 60
 # HTTP timeouts: the venue `/info` lane, the simulator's RPC reads, and the

@@ -17,10 +17,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-const ROTATE_BYTES: u64 = 16 * 1024 * 1024;
-
 pub struct Drift {
     path: PathBuf,
+    /// The deployment's rotation threshold (bytes); one retained generation.
+    rotate_bytes: u64,
     /// Serializes whole-line writes. It protects nothing but ordering, so a
     /// poisoned lock is recovered by construction (there is no value a panic
     /// could have left mid-update).
@@ -31,12 +31,16 @@ impl Drift {
     /// Create the log's directory. A drift log that cannot exist is a boot
     /// fault, not a silent no-op: it is the forensic trail an alarm points at.
     /// Open the log from an engine section: the state dir's `drift.jsonl` —
-    /// the one spelling both profiles use.
+    /// the one spelling both profiles use — with the deployment's rotation
+    /// threshold.
     pub fn from_engine(engine: &diorama_config::EngineSection) -> Result<Self> {
-        Self::new(engine.state_dir.join("drift.jsonl"))
+        Self::new(
+            engine.state_dir.join("drift.jsonl"),
+            engine.drift_rotate_bytes,
+        )
     }
 
-    pub fn new(path: PathBuf) -> Result<Self> {
+    pub fn new(path: PathBuf, rotate_bytes: u64) -> Result<Self> {
         if let Some(parent) = path.parent() {
             crate::store::ensure_dir(parent).map_err(|(path, source)| Error::Io {
                 what: "drift log directory",
@@ -46,6 +50,7 @@ impl Drift {
         }
         Ok(Self {
             path,
+            rotate_bytes,
             lock: Mutex::new(()),
         })
     }
@@ -94,7 +99,7 @@ impl Drift {
                 })
             }
         };
-        if meta.len() < ROTATE_BYTES {
+        if meta.len() < self.rotate_bytes {
             return Ok(());
         }
         let rotated = self.path.with_extension("jsonl.1");
@@ -103,5 +108,28 @@ impl Drift {
             path: rotated,
             source,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rotation threshold is the deployment's: a log at the declared size
+    /// is rotated before the next append, one generation retained.
+    #[test]
+    fn the_configured_threshold_rotates_the_log() {
+        let dir = std::env::temp_dir().join(format!("diorama-drift-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("drift.jsonl");
+        let drift = Drift::new(path.clone(), 8).expect("the log's directory is created");
+        drift.append(&"first").unwrap();
+        assert!(path.exists(), "the first append creates the live file");
+        drift.append(&"second").unwrap();
+        assert!(
+            path.with_extension("jsonl.1").exists(),
+            "a full generation is retained beside the live file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

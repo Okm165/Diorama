@@ -258,7 +258,7 @@ async fn allowance(
     }
     Ok(Json(AllowanceResponse {
         allowance: state.fast_burn_allowance,
-        last_updated: iso8601_ms(crate::now_ms()),
+        last_updated: iso8601_ms(crate::now_ms())?,
     }))
 }
 
@@ -414,13 +414,15 @@ fn entry(record: &MessageRecord) -> MessageEntry {
 // ---- ISO 8601 (the `lastUpdated` shape) ------------------------------------
 
 /// UTC `YYYY-MM-DDTHH:MM:SS.mmmZ` from epoch milliseconds (chrono: a calendar
-/// is a library's job — this replaced a hand-rolled civil-from-days). An
-/// out-of-range value degrades to the epoch, never a panic.
-pub(crate) fn iso8601_ms(ms: u64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms as i64)
-        .unwrap_or_default()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
+/// is a library's job — this replaced a hand-rolled civil-from-days). A value
+/// outside the representable range is refused by name, never served as the
+/// epoch (a time this process did not observe).
+pub(crate) fn iso8601_ms(ms: u64) -> std::result::Result<String, IrisError> {
+    let out_of_range =
+        || IrisError::bad_request(format!("timestamp {ms} is outside the ISO 8601 range"));
+    let ms = i64::try_from(ms).map_err(|_| out_of_range())?;
+    let time = chrono::DateTime::from_timestamp_millis(ms).ok_or_else(out_of_range)?;
+    Ok(time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
 }
 
 #[cfg(test)]
@@ -505,7 +507,7 @@ mod tests {
 
         let allowance = AllowanceResponse {
             allowance: 42.5,
-            last_updated: iso8601_ms(0),
+            last_updated: iso8601_ms(0).unwrap(),
         };
         assert_eq!(
             serde_json::to_string(&allowance).unwrap(),
@@ -642,12 +644,25 @@ mod tests {
 
     #[test]
     fn iso8601_round_trips_known_instants() {
-        assert_eq!(iso8601_ms(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(iso8601_ms(0).unwrap(), "1970-01-01T00:00:00.000Z");
         // 2026-10-22T00:00:00Z = 1792627200000 ms (checked with `date -u`).
-        assert_eq!(iso8601_ms(1_792_627_200_000), "2026-10-22T00:00:00.000Z");
-        assert_eq!(iso8601_ms(1_792_627_200_123), "2026-10-22T00:00:00.123Z");
+        assert_eq!(
+            iso8601_ms(1_792_627_200_000).unwrap(),
+            "2026-10-22T00:00:00.000Z"
+        );
+        assert_eq!(
+            iso8601_ms(1_792_627_200_123).unwrap(),
+            "2026-10-22T00:00:00.123Z"
+        );
         // A leap day.
-        assert_eq!(iso8601_ms(1_709_164_800_000), "2024-02-29T00:00:00.000Z");
+        assert_eq!(
+            iso8601_ms(1_709_164_800_000).unwrap(),
+            "2024-02-29T00:00:00.000Z"
+        );
+        // An out-of-range value is refused by name, not served as the epoch.
+        let err = iso8601_ms(u64::MAX).unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(err.error.contains("outside the ISO 8601 range"), "{err:?}");
     }
 
     /// A scratch Iris state on a fresh per-test temp dir (the tests may run

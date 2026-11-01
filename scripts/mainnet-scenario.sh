@@ -98,15 +98,27 @@ echo "-- 2. live parity"
 # `t_head`: T's height is its own — the applier's target is `follow_head`).
 for _ in $(seq 1 30); do
   st=$(engine_api /status)
-  c=$(num "$(echo "$st" | jq -r '.cursor_t')")
-  f=$(num "$(echo "$st" | jq -r '.follow_head')")
+  c_raw=$(echo "$st" | jq -r '.cursor_t // empty')
+  f_raw=$(echo "$st" | jq -r '.follow_head // empty')
+  # A failed read is `null`, not a height: keep waiting rather than compare
+  # against a fabricated 0.
+  [ -z "$c_raw" ] || [ -z "$f_raw" ] && { sleep 2; continue; }
+  c=$(num "$c_raw")
+  f=$(num "$f_raw")
   [ "$c" -ge "$((f - 2))" ] && break
   sleep 2
 done
 reth_head=$(num "$(rpc http://reth:8545 eth_blockNumber | jq -r '.result')")
-follow=$(num "$(engine_api /status | jq -r '.follow_head')")
-cursor_t=$(num "$(engine_api /status | jq -r '.cursor_t')")
-t_head=$(num "$(engine_api /status | jq -r '.head')")
+st=$(engine_api /status)
+follow_raw=$(echo "$st" | jq -r '.follow_head // empty')
+cursor_raw=$(echo "$st" | jq -r '.cursor_t // empty')
+t_raw=$(echo "$st" | jq -r '.head // empty')
+if [ -z "$follow_raw" ] || [ -z "$cursor_raw" ] || [ -z "$t_raw" ]; then
+  bad "the engine /status did not report follow_head/cursor_t/head (a failed read is null)"
+fi
+follow=$(num "$follow_raw")
+cursor_t=$(num "$cursor_raw")
+t_head=$(num "$t_raw")
 info "reth=$reth_head follow=$follow cursor_t=$cursor_t T=$t_head"
 [ "$reth_head" -ge "$follow" ] && ok "reth is at/above the follow head" || bad "reth behind follow head"
 if [ "$cursor_t" -lt "$((follow - 2))" ]; then

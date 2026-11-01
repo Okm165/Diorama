@@ -35,6 +35,9 @@ pub struct ApiState {
     /// Kept optional so the API can be built without a live plane in tests;
     /// `/metrics` renders it when present.
     pub ws_pool: Option<diorama_anvil::EndpointPool>,
+    /// The venue websocket's push cadence (the account automaton's configured
+    /// tick, not a second hardcoded second).
+    pub push_interval: std::time::Duration,
 }
 
 impl ApiState {
@@ -50,6 +53,7 @@ impl ApiState {
         engine_admin: Option<String>,
         bridge: Option<Arc<crate::bridge::metrics::BridgeMetrics>>,
         admin_timeout: std::time::Duration,
+        push_interval: std::time::Duration,
     ) -> Result<Self> {
         Ok(Self {
             feed,
@@ -61,6 +65,7 @@ impl ApiState {
             http: reqwest::Client::builder().timeout(admin_timeout).build()?,
             bridge,
             ws_pool: None,
+            push_interval,
         })
     }
 

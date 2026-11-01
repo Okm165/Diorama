@@ -21,6 +21,8 @@ ws_urls = "@hyperliquid_ws"
 
 [services.engine]
 state_dir = "${STATE_DIR}"
+# A fork-mode anvil comes up in seconds; only a coordinated restart delays it.
+boot_timeout_secs = 120
 
 [services.engine.anvil]
 target_url = "@anvil_v"

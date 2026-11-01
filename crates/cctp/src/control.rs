@@ -467,7 +467,9 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
     }
     let approve = IERC20::approveCall {
         spender: chain.token_messenger,
-        amount: U256::MAX,
+        // Approve exactly the burn's amount: an unbounded approval is a
+        // standing allowance no caller asked for.
+        amount,
     }
     .abi_encode();
     let hash = state

@@ -1230,7 +1230,14 @@ impl Rpc {
             .call_opt::<Vec<Transaction>>("eth_getSystemTxsByBlockNumber", (U64::from(n),))
             .await
         {
-            Ok(v) => Ok(v.unwrap_or_default()),
+            Ok(Some(v)) => Ok(v),
+            // A method that exists answers a list; `null` is not an empty
+            // list. Reading it as empty would silently drop a block's
+            // system transactions.
+            Ok(None) => Err(Error::Corrupt {
+                what: "eth_getSystemTxsByBlockNumber",
+                detail: format!("block {n} answered null, not a list"),
+            }),
             Err(e) if e.is_method_not_found() => Ok(Vec::new()),
             Err(e) => Err(e),
         }
@@ -1801,6 +1808,20 @@ mod tests {
             .await
             .expect("the right chain is accepted");
         right_server.join().expect("the right server exits");
+    }
+
+    /// A null system-tx answer is a fault, not an empty list: a block's
+    /// system transactions must not be silently dropped.
+    #[tokio::test]
+    async fn a_null_system_txs_answer_is_a_fault() {
+        let (url, server) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":null}"#);
+        let rpc = Rpc::new(&url, Duration::from_secs(2)).expect("a valid client");
+        let error = rpc
+            .system_txs(1)
+            .await
+            .expect_err("null is not a list of system txs");
+        assert!(matches!(error, Error::Corrupt { .. }), "{error}");
+        server.join().expect("the test server exits");
     }
 
     /// A pool with a dead endpoint and a live one succeeds; the live answer is

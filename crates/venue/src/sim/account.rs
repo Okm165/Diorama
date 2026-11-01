@@ -764,7 +764,9 @@ pub(crate) fn liquidation_px(
         "liquidation denominator",
     )?;
     if denominator.is_zero() {
-        return Ok(mark);
+        return Err(Error::DivideByZero {
+            what: "liquidation denominator",
+        });
     }
     let maintenance = mul(
         mul(position_size, mark, "liquidation maintenance notional")?,
@@ -1250,6 +1252,25 @@ mod tests {
             Decimal::new(5, 2),
             "1 / (2 * 10x)"
         );
+    }
+
+    /// A liquidation denominator of zero has no price: refused by name, never
+    /// answered with the mark (which would look like a valid liquidation).
+    #[test]
+    fn a_zero_liquidation_denominator_is_refused() {
+        let p = Position {
+            szi: Decimal::ONE,
+            entry_px: Decimal::from(100),
+            leverage: LeverageType::Isolated,
+            leverage_value: 1,
+            margin_used: Decimal::ONE,
+            isolated_margin: Decimal::ONE,
+            funding_all_time: Decimal::ZERO,
+            funding_since_open: Decimal::ZERO,
+            funding_since_change: Decimal::ZERO,
+        };
+        let err = liquidation_px(&p, Decimal::from(100), Decimal::ONE).unwrap_err();
+        assert!(matches!(err, Error::DivideByZero { .. }), "{err}");
     }
 
     /// A zero-size position is a closed one: the served state drops the row

@@ -27,12 +27,16 @@ use std::sync::Arc;
 pub struct StatusResponse {
     #[serde(flatten)]
     shared: SharedStatus,
-    reth_head: u64,
-    follow_head: u64,
+    /// `None` when reth did not answer: a diagnostic must not report a
+    /// fabricated height.
+    reth_head: Option<u64>,
+    /// `None` when the follow tag could not be resolved.
+    follow_head: Option<u64>,
     follow: &'static str,
     /// T's cursor by its profile name (the scripts' established spelling).
     cursor_t: Option<u64>,
-    lag: u64,
+    /// The follow head minus the cursor, only when both are known.
+    lag: Option<u64>,
     watchlist: usize,
     time_offset_seconds: u64,
     /// Every source endpoint the engine's read pool may use.
@@ -41,20 +45,26 @@ pub struct StatusResponse {
     source_pool: Vec<diorama_anvil::EndpointSnapshot>,
 }
 
+/// The follow lag: known only when both readings are. A missing side is
+/// `None`, never a zero that would read as "caught up".
+fn lag_between(follow: Option<u64>, cursor: Option<u64>) -> Option<u64> {
+    Some(follow?.saturating_sub(cursor?))
+}
+
 /// The document's gathering: the shared fields from the shell, the rest from
-/// this engine's own endpoints. A read that cannot answer degrades to 0 —
-/// `/status` is a diagnostic, not a fact source.
+/// this engine's own endpoints. A read that cannot answer is `null`, never a
+/// plausible zero: `/status` is a diagnostic, not a fact source.
 pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
     let shared =
         SharedStatus::gather(ctx.anvil_t.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
-    let reth_head = ctx.reth.block_number().await.unwrap_or(0);
-    let follow = ctx.follow_head().await.ok().flatten().unwrap_or(0);
+    let reth_head = ctx.reth.block_number().await.ok();
+    let follow = ctx.follow_head().await.ok().flatten();
     Ok(StatusResponse {
         reth_head,
         follow_head: follow,
         follow: ctx.follow_tag(),
         cursor_t: shared.cursor,
-        lag: follow.saturating_sub(shared.cursor.unwrap_or(follow)),
+        lag: lag_between(follow, shared.cursor),
         watchlist: ctx.mirror.scope().watch().accounts.len(),
         time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
         sources: ctx.reth.urls().to_vec(),
@@ -108,6 +118,16 @@ async fn admin_time(
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
+
+    /// The lag is a subtraction of two measurements: a missing side is
+    /// `null`, never a zero that reads as "caught up".
+    #[test]
+    fn the_lag_needs_both_readings() {
+        assert_eq!(lag_between(Some(100), Some(97)), Some(3));
+        assert_eq!(lag_between(Some(97), Some(100)), Some(0));
+        assert_eq!(lag_between(None, Some(97)), None);
+        assert_eq!(lag_between(Some(100), None), None);
+    }
 
     /// The shared taxonomy, pinned per service (the same test name lives in
     /// the venue engine and the CCTP bridge): a request refusal is 400, a

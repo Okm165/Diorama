@@ -24,11 +24,6 @@ const MAINNET_CHAIN_ID: u64 = 1;
 /// T's name in every fault it raises (one spelling; the venue's is `anvil-v`).
 const ANVIL: &str = "anvil-t";
 
-/// The boot wait (see `boot`): reth unwinding and the anvils re-forking both
-/// take minutes on a bad source day, and a crash-loop is worse than a slow
-/// boot.
-const BOOT_TIMEOUT: Duration = Duration::from_secs(900);
-
 /// Boot: wait for T, assert the chain, anchor the epoch pin, audit the
 /// declared capabilities. A boot fault is fatal (the bin exits): an applier
 /// over the wrong chain or an unanchored epoch must not serve.
@@ -36,7 +31,14 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
     // The shared prefix (the same call the venue's boot reads): the chain
     // assert, then the capability audit — read-only, so the epoch anchor
     // below is still the first *write*.
-    diorama_devnet::engine::boot_prefix(ctx, ANVIL, MAINNET_CHAIN_ID, BOOT_TIMEOUT, "reth").await?;
+    diorama_devnet::engine::boot_prefix(
+        ctx,
+        ANVIL,
+        MAINNET_CHAIN_ID,
+        Duration::from_secs(ctx.engine.boot_timeout_secs),
+        "reth",
+    )
+    .await?;
     // The epoch pin is anchored before any writes exist (a fresh registry's
     // epoch *is* the current fork base; without the record a later same-pin
     // restart would be an unprovable epoch and the rule would have to fail
@@ -66,11 +68,7 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
     // Schedule a small margin behind the head: the applier mines one T block
     // per applied parent block, so the follow head *is* the devnet's cadence.
     let follow = follow.saturating_sub(ctx.l1.follow_margin_blocks);
-    // Metrics-only read: a reth blip must not fail the poll (the gauge reads 0
-    // until reth answers again; the next pass overwrites it).
-    let reth_head = ctx.reth.block_number().await.unwrap_or(0);
-    ctx.mainnet_metrics
-        .set(&ctx.mainnet_metrics.reth_head, reth_head);
+    observe_reth_head(ctx).await;
 
     let head = ctx.anvil_t.block_number().await?;
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, head);
@@ -118,6 +116,16 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
     }
     reorg_continuity(ctx, start).await?;
     Ok(Next::Apply(start))
+}
+
+/// Metrics-only read: a reth blip must not fail the poll. A failed read
+/// leaves the gauge at its last observation — writing 0 would claim the
+/// source's head fell to genesis.
+async fn observe_reth_head(ctx: &Ctx) {
+    if let Ok(reth_head) = ctx.reth.block_number().await {
+        ctx.mainnet_metrics
+            .set(&ctx.mainnet_metrics.reth_head, reth_head);
+    }
 }
 
 /// The cursor's gauges: the cursor height and the pin-age reading (blocks

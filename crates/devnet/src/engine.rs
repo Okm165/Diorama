@@ -514,8 +514,10 @@ pub trait ShellError:
 /// fields.
 #[derive(Debug, serde::Serialize)]
 pub struct SharedStatus {
-    /// The devnet chain's head.
-    pub head: u64,
+    /// The devnet chain's head, when the chain answered. `None` is a fault,
+    /// never a height: a diagnostic must not report genesis for an unreachable
+    /// node.
+    pub head: Option<u64>,
     /// The cursor: the last processed chain block.
     pub cursor: Option<u64>,
     /// Whether `/admin/pause` is holding the loops.
@@ -532,10 +534,11 @@ pub struct SharedStatus {
 }
 
 impl SharedStatus {
-    /// Gather the shared fields: the head read degrades to 0 (a diagnostic
-    /// must not fail), the registry read is typed.
+    /// Gather the shared fields: a head read that fails is `None` (a
+    /// diagnostic must not fail, and must not claim height 0 either); the
+    /// registry read is typed.
     pub async fn gather(target: &Rpc, plane: &Plane, mirror: &dyn Mirror) -> crate::Result<Self> {
-        let head = target.block_number().await.unwrap_or(0);
+        let head = target.block_number().await.ok();
         let cursor = plane.state.cursor()?;
         let shadow = plane.shadow.lock()?;
         Ok(Self {

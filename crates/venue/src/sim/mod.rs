@@ -166,6 +166,8 @@ pub const BACKSTOP: Address = Address::new([
 pub struct Sim {
     state: Shared<SimState>,
     path: Option<PathBuf>,
+    /// The `orderStatus` terminal-history bound (the deployment's policy).
+    terminal_orders: usize,
     dirty: AtomicBool,
     /// The venue chain's head timestamp (ms), observed by the bridge when V is
     /// configured. Their time policy jumps *every* chain's clock forward and
@@ -184,21 +186,23 @@ pub(crate) enum Flushed {
 
 impl Sim {
     /// Load the registry from its state file (absent = first boot, empty).
-    pub fn load(path: PathBuf) -> Result<Self> {
+    /// `terminal_orders` is the deployment's `orderStatus` history bound.
+    pub fn load(path: PathBuf, terminal_orders: usize) -> Result<Self> {
         let state = store::load::<SimState>(&path, ARTIFACT)?.unwrap_or_default();
-        Ok(Self::from_state(state, Some(path)))
+        Ok(Self::from_state(state, Some(path), terminal_orders))
     }
 
     /// An in-memory registry (tests only: no production path builds one).
     #[cfg(test)]
     pub fn memory() -> Self {
-        Self::from_state(SimState::default(), None)
+        Self::from_state(SimState::default(), None, 1024)
     }
 
-    fn from_state(state: SimState, path: Option<PathBuf>) -> Self {
+    fn from_state(state: SimState, path: Option<PathBuf>, terminal_orders: usize) -> Self {
         let sim = Self {
             state: Shared::new(ARTIFACT, state),
             path,
+            terminal_orders,
             dirty: AtomicBool::new(false),
             chain_time_ms: AtomicU64::new(0),
             metrics: SimMetrics::default(),
@@ -672,13 +676,20 @@ impl Sim {
     }
 
     /// `advance`: script a clock jump (`seconds`) with `blocks` liquidation
-    /// checks inside it — the deterministic complement to self-advance.
+    /// checks inside it — the deterministic complement to self-advance. A
+    /// zero check count is refused: silently running one would change the
+    /// scenario's cadence behind the caller's back.
     pub(crate) fn advance(
         &self,
         feed: &MarketFeed,
         seconds: u64,
         blocks: u64,
     ) -> Result<AdvanceOutcome> {
+        if blocks == 0 {
+            return Err(Error::bad_request(
+                "advance n must be at least 1 (it names the liquidation checks)",
+            ));
+        }
         let jump_ms = seconds.saturating_mul(1_000);
         self.with_state(|state| {
             state.clock_offset_ms = state.clock_offset_ms.saturating_add(jump_ms as i64);
@@ -686,7 +697,6 @@ impl Sim {
         })?;
         let now = crate::now_ms();
         let mut liquidations = Vec::new();
-        let blocks = blocks.max(1);
         for _ in 0..blocks {
             self.accrue_all(feed, now)?;
             liquidations.extend(self.check_all(feed, now)?);
@@ -1171,6 +1181,16 @@ mod tests {
         assert_eq!(after, "101".parse::<Decimal>().unwrap());
     }
 
+    /// A zero check count is a caller error, not one liquidation check: the
+    /// old `max(1)` silently changed the scenario's cadence.
+    #[test]
+    fn advance_refuses_a_zero_check_count() {
+        let feed = feed_with(&[("USDC", "1", "1")]);
+        let sim = Sim::memory();
+        let err = sim.advance(&feed, 60, 0).unwrap_err();
+        assert!(matches!(err, Error::BadRequest { .. }), "{err}");
+    }
+
     /// The verifier's critical find: an amount that overflows must be refused
     /// cleanly (a panic under the state lock poisons every account path).
     #[test]
@@ -1592,7 +1612,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("sim.json");
         let a = Address::repeat_byte(0xaa);
-        let sim = Sim::load(path.clone()).unwrap();
+        let sim = Sim::load(path.clone(), 1024).unwrap();
         sim.credit_spot(
             a,
             TokenRef {
@@ -1603,7 +1623,7 @@ mod tests {
         )
         .unwrap();
         sim.save().unwrap();
-        let reloaded = Sim::load(path).unwrap();
+        let reloaded = Sim::load(path, 1024).unwrap();
         let total = reloaded
             .account(a)
             .unwrap()

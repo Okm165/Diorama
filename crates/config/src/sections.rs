@@ -172,6 +172,17 @@ pub struct LaneFee {
 pub struct VenueSimSection {
     /// Simulator state root: accounts + market overrides (`sim.json`).
     pub state_dir: PathBuf,
+    /// The `orderStatus` history's bound: how many terminal (filled/canceled)
+    /// orders the sim keeps. A declared deployment policy, not a protocol
+    /// constant: the venue does not publish its own history window, so a
+    /// deployment pins the memory it is willing to spend.
+    pub terminal_orders: usize,
+    /// The Core↔EVM bridge's scan cadence (one pass per interval).
+    pub bridge_poll_interval_ms: u64,
+    /// The devnet gas stipend written to the Core↔EVM system address when it
+    /// has no native balance (the real chain's system txs pay no gas; the
+    /// fork's do). A deployment fact, in wei.
+    pub system_gas_stipend_wei: U256,
     /// The markets whose books are cached and whose contexts are tracked; the
     /// account plane prices every position from these (a position in an
     /// untracked coin is a config error at the read that needs it). Empty is
@@ -215,6 +226,13 @@ pub struct VenueSimSection {
 pub struct EngineSection {
     /// Devnet state root: cursors, shadow registry, journal.
     pub state_dir: PathBuf,
+    /// How long boot waits for the devnet chain to answer before failing
+    /// (a coordinated restart is the normal cause of a slow boot).
+    pub boot_timeout_secs: u64,
+    /// The forensic drift log's rotation threshold: one retained generation
+    /// beside the live file. A declared deployment policy, not a protocol
+    /// constant.
+    pub drift_rotate_bytes: u64,
     pub anvil: EngineAnvil,
     pub reth: EngineReth,
     pub loops: LoopsSection,
@@ -250,9 +268,8 @@ pub struct FeedBridgeSection {
     /// re-publishes it (the outcome-unknown reconciliation: an anvil pool is
     /// not durable and a same-nonce sender can displace ours — measured: a
     /// deploy sharing the writer account wedged a feed in `pending` forever).
-    /// Defaults to 60 s: comfortably beyond a parent block (~12 s) and a pool
-    /// wait, and the re-send is idempotent (a new round with the same answer).
-    #[serde(default = "default_confirm_window_ms")]
+    /// The deployment declares the window: it must exceed the parent block
+    /// cadence and the pool wait, and the re-send is idempotent.
     pub confirm_window_ms: u64,
     /// The account that submits `updateAnswer` on T (auto-impersonate makes
     /// any address usable; the mock's own access control decides who may).
@@ -261,11 +278,6 @@ pub struct FeedBridgeSection {
     pub writer: Address,
     /// The feeds to bridge (one row per mock aggregator).
     pub feeds: Vec<FeedSection>,
-}
-
-/// 60 s: the confirmation window's default (see [`FeedBridgeSection`]).
-const fn default_confirm_window_ms() -> u64 {
-    60_000
 }
 
 /// One bridged feed: the parent chain's aggregator is the source, the

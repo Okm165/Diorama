@@ -84,6 +84,9 @@ for _ in $(seq 1 15); do
   s=$(status_now)
   cur=$(echo "$s" | json 'd["cursor"]')
   h=$(echo "$s" | json 'd["head"]')
+  # The status serves `None` for a failed read: two missing readings are not
+  # evidence that the driver reached the head.
+  [ "$cur" = "None" ] || [ "$h" = "None" ] && continue
   [ "$cur" = "$h" ] && live=1 && break
 done
 [ "$live" = "1" ] && ok "the driver scanned to the head after the scenario (cursor=head=$h)" \
