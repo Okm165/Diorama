@@ -1540,12 +1540,14 @@ dependencies = [
  "clap",
  "diorama-anvil",
  "diorama-config",
+ "futures-util",
  "k256",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
  "tokio",
+ "tokio-tungstenite 0.30.0",
  "tracing",
 ]
 

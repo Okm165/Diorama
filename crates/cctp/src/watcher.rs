@@ -1,20 +1,35 @@
 //! The watcher: both chains' `MessageSent` events → the persisted attestation
 //! store.
 //!
-//! One pass: scan each chain from the configured start block to head
-//! (`eth_getLogs`, chunked — the emitter is the pinned MessageTransmitterV2,
-//! topic0 the measured `MessageSent(bytes)` hash), decode each log into a
-//! [`MessageRecord`], patch the attester fields (`nonce = keccak256(burn-tx
-//! ‖ log-index)`, `finalityThresholdExecuted = 2000`, `feeExecuted = 0`,
-//! `expirationBlock = configured`, §15.3), and sign every record whose
-//! emulated PENDING window has elapsed.
+//! **Two lanes, two watermarks** (the DALOC `log_scanner` contract):
 //!
-//! **Restart backfill**: the first scan of every run starts at
+//! - **WSS is primary.** `eth_subscribe("logs")` delivers a burn sub-second
+//!   after inclusion; [`crate::ws_logs`] decodes it into the same
+//!   [`Log`] the HTTP lane returns. WSS advances only the *health* watermark.
+//! - **HTTP is reconciliation.** `eth_getLogs` runs at the configured cadence
+//!   from the cursor to head, chunked (the emitter is the pinned
+//!   MessageTransmitterV2, topic0 the measured `MessageSent(bytes)` hash).
+//!   This is the only lane that advances `scanned_upto`, the cursor a restart
+//!   or the next reconciliation resumes from. A WSS batch must never move it
+//!   past blocks the HTTP arm never scanned, or a log WSS dropped inside that
+//!   span would be lost forever.
+//!
+//! Every log is deduplicated by `(chain_id, tx_hash, log_index)` before it is
+//! decoded, so a burn delivered by both lanes is processed once. Each log is
+//! decoded into a [`MessageRecord`], the attester fields are patched (`nonce =
+//! keccak256(burn-tx ‖ log-index)`, `finalityThresholdExecuted = 2000`,
+//! `feeExecuted = 0`, `expirationBlock = configured`, §15.3), and every record
+//! whose emulated PENDING window has elapsed is signed.
+//!
+//! **Restart backfill**: the first HTTP scan of every run starts at
 //! `start_block` — a burn awaiting attestation across a restart is re-read
 //! and re-signed — and later passes continue from the scanned head. Dedupe is
 //! by `(sourceDomain, nonce)`, and the nonce is unique per `(tx, log index)`,
 //! so a re-scan is idempotent and a transaction that emits two burns keeps
 //! both records.
+//!
+//! **Health**: WSS disconnected while HTTP is fresh is `degraded`; only when
+//! both lanes are stale is the watcher `unhealthy`.
 //!
 //! Known boundary: a source-chain **re-fork** (T's epoch reset) invalidates
 //! watched burns. The records survive; an operator clears the state dir (or
@@ -25,10 +40,14 @@ use crate::error::{Error, Result};
 use crate::metrics::CctpMetrics;
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{IMessageTransmitterV2, Message};
+use crate::ws_logs::{WsHealth, WsLogs, WsLogsConfig};
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::SolEvent;
-use std::sync::Arc;
+use serde::Serialize;
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// One chain's watcher. The bin spawns one per served chain.
@@ -47,11 +66,13 @@ pub struct Watcher {
     /// First block scanned every boot (the deploy block of the CCTP contracts
     /// on that chain; 0 = genesis, correct but slow on a deep fork).
     pub start_block: u64,
-    /// Where the *next* scan resumes inside this run (0 = not scanned yet, so
-    /// the first pass backfills from `start_block`; later passes continue from
-    /// the last scanned head). Not persisted: every boot re-reads from
-    /// `start_block` by design (§15.4's restart self-heal) — the dedupe by
-    /// `(sourceDomain, nonce)` makes the re-read idempotent.
+    /// Where the *next* HTTP reconciliation resumes inside this run (0 = not
+    /// scanned yet, so the first pass backfills from `start_block`; later
+    /// passes continue from the last scanned head). **Only the HTTP arm writes
+    /// it**; a WSS batch advances its own health watermark instead. Not
+    /// persisted: every boot re-reads from `start_block` by design (§15.4's
+    /// restart self-heal) — the dedupe by `(sourceDomain, nonce)` makes the
+    /// re-read idempotent.
     pub scanned_upto: std::sync::atomic::AtomicU64,
     /// `eth_getLogs` range per call.
     pub chunk_blocks: u64,
@@ -84,19 +105,112 @@ enum Park {
 }
 
 impl Watcher {
-    /// The steady loop: one pass per interval; failures are logged and
+    /// The steady loop: WSS events are processed as they arrive; the HTTP
+    /// reconciliation runs on the configured cadence. Failures are logged and
     /// counted, never fatal (a chain that is down must not stop the other).
+    ///
+    /// The two watermarks are deliberately separate: `scanned_upto` moves only
+    /// after a successful HTTP pass, while the WSS batch advances only the
+    /// health watermark. A WSS batch therefore can never make the next HTTP
+    /// reconciliation skip a block WSS did not actually deliver.
+    #[allow(clippy::too_many_lines)] // one select loop: the two lanes and their shared dedupe
     pub async fn run(self, poll: Duration) {
+        let ws_url = self.ws_url();
+        let ws_health = ws_url.as_ref().map(|_| Arc::new(WsHealth::default()));
+        let health = Arc::new(WatcherHealth::new(self.chain.name, poll, ws_health.clone()));
+        register_watcher_health(health.clone());
+
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::channel::<Log>(512);
+        // Without a WSS URL the sender is kept alive so the select branch
+        // stays pending instead of spinning on a closed channel.
+        let _ws_tx_guard = match (ws_url, ws_health) {
+            (Some(url), Some(ws_health)) => {
+                let client = WsLogs::new(
+                    WsLogsConfig {
+                        url,
+                        address: self.chain.message_transmitter,
+                        topics: vec![IMessageTransmitterV2::MessageSent::SIGNATURE_HASH],
+                        chain: self.chain.name,
+                    },
+                    ws_tx,
+                    ws_health,
+                );
+                tokio::spawn(client.run());
+                None
+            }
+            _ => Some(ws_tx),
+        };
+
         let mut ticker = tokio::time::interval(poll);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut dedup = LogDedup::new();
         loop {
-            ticker.tick().await;
-            if let Err(e) = self.tick().await {
-                self.metrics
-                    .scan_errors
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!(chain = self.chain.name, error = %e, "cctp watcher pass failed; will retry");
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Err(e) = self.reconcile(&mut dedup, &health).await {
+                        self.metrics.scan_errors.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(chain = self.chain.name, error = %e, "cctp HTTP reconciliation failed; will retry");
+                    }
+                }
+                Some(log) = ws_rx.recv() => {
+                    let mut logs = vec![log];
+                    while let Ok(log) = ws_rx.try_recv() {
+                        logs.push(log);
+                    }
+                    if let Err(e) = self.apply_wss(&logs, &mut dedup, &health).await {
+                        self.metrics.scan_errors.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(chain = self.chain.name, error = %e, "cctp WSS batch failed; the HTTP reconciliation will re-read it");
+                    }
+                }
             }
         }
+    }
+
+    /// One HTTP reconciliation pass: scan, move the HTTP watermark, sign what
+    /// is due, persist if anything moved.
+    async fn reconcile(&self, dedup: &mut LogDedup, health: &WatcherHealth) -> Result<usize> {
+        let seen = self.scan_with(dedup).await?;
+        health.record_http_scan(self.scanned_upto.load(Ordering::Relaxed), crate::now_ms());
+        let signed = self.sign_due()?;
+        if seen > 0 || signed > 0 {
+            self.store.save()?;
+        }
+        Ok(seen)
+    }
+
+    /// One WSS batch: decode/insert promptly, advance only the WSS health
+    /// watermark, sign what is due, persist if anything moved.
+    ///
+    /// `scanned_upto` is deliberately untouched — it is the HTTP
+    /// reconciliation's cursor, and this arm has not proven those blocks were
+    /// scanned by the arm a restart resumes from.
+    async fn apply_wss(
+        &self,
+        logs: &[Log],
+        dedup: &mut LogDedup,
+        health: &WatcherHealth,
+    ) -> Result<usize> {
+        let expiration = self.expiration_block().await?;
+        let seen = self.absorb_wss_logs(logs, expiration, dedup)?;
+        if let Some(max_block) = logs.iter().filter_map(|log| log.block_number).max() {
+            health.observe_wss(max_block);
+        }
+        let signed = self.sign_due()?;
+        if seen > 0 || signed > 0 {
+            self.store.save()?;
+        }
+        Ok(seen)
+    }
+
+    /// The WSS URL: anvil serves WebSocket on its HTTP port, and a configured
+    /// `ws(s)://` endpoint is used verbatim. The first endpoint is the primary,
+    /// matching the read pool's preference order.
+    fn ws_url(&self) -> Option<String> {
+        self.chain
+            .rpc
+            .urls()
+            .into_iter()
+            .find_map(|url| ws_url_of(&url))
     }
 
     /// One pass: absorb new logs, sign everything due, persist if anything
@@ -121,10 +235,21 @@ impl Watcher {
     /// head below it (a snapshot revert) means the blocks the cursor points
     /// at are gone: their records are parked (stale derivations, I6 — never
     /// relayed) and the scan restarts from the base.
+    ///
+    /// A standalone pass owns a fresh dedupe set (the store's
+    /// `(sourceDomain, nonce)` key is the durable idempotence); the event loop
+    /// uses [`Self::scan_with`] so the WSS and HTTP lanes share one set.
     pub async fn scan(&self) -> Result<usize> {
+        let mut dedup = LogDedup::new();
+        self.scan_with(&mut dedup).await
+    }
+
+    /// The HTTP reconciliation scan, sharing the caller's cross-lane dedupe
+    /// set. This is the only arm that advances `scanned_upto`.
+    async fn scan_with(&self, dedup: &mut LogDedup) -> Result<usize> {
         let head = self.chain.rpc.block_number().await?;
         let pin = self.chain.rpc.fork_block().await?;
-        let last = self.scanned_upto.load(std::sync::atomic::Ordering::Relaxed);
+        let last = self.scanned_upto.load(Ordering::Relaxed);
         let mut from = self.resume_from(last, head, pin).await?;
         let mut seen = 0usize;
         while from <= head {
@@ -134,18 +259,15 @@ impl Watcher {
             // destination's block coordinate, §15.1).
             let expiration = self.expiration_block().await?;
             for log in &logs {
-                seen += self.absorb(log, expiration)?;
+                seen += self.absorb_once(log, expiration, dedup)?;
             }
             from = to + 1;
         }
         // The cursor is the highest scanned block of the *current* chain:
         // a re-pin or a rewind resets it to the new base (the rescan above),
-        // so it never skips a block.
-        self.scanned_upto
-            .store(head, std::sync::atomic::Ordering::Relaxed);
-        self.metrics
-            .last_scan_block
-            .store(head, std::sync::atomic::Ordering::Relaxed);
+        // so it never skips a block. Only this HTTP arm writes it.
+        self.scanned_upto.store(head, Ordering::Relaxed);
+        self.metrics.last_scan_block.store(head, Ordering::Relaxed);
         Ok(seen)
     }
 
@@ -215,8 +337,10 @@ impl Watcher {
             .event_signature(IMessageTransmitterV2::MessageSent::SIGNATURE_HASH)
             .from_block(from)
             .to_block(to);
-        let logs: Vec<Log> = self.chain.rpc.call("eth_getLogs", (filter,)).await?;
-        Ok(logs)
+        // The watcher's configured chunk may be wider than the endpoint's
+        // declared cap (the public HyperEVM source is 900); the client splits
+        // it again rather than forwarding an over-cap range.
+        Ok(self.chain.rpc.logs_range(&filter, from, to).await?)
     }
 
     /// Park the non-relayed records this chain's history no longer backs: a
@@ -415,6 +539,43 @@ impl Watcher {
         }
     }
 
+    /// Absorb one log unless the same `(chain_id, tx_hash, log_index)` was
+    /// already processed by either lane. The key is remembered only after the
+    /// absorb succeeds, so a transient store fault is retried instead of
+    /// silently dropping the burn.
+    fn absorb_once(&self, log: &Log, expiration: U256, dedup: &mut LogDedup) -> Result<usize> {
+        let Some(key) = LogKey::of(self.chain.chain_id.id(), log) else {
+            // A log without a tx hash/index cannot be deduplicated; `absorb`
+            // names it and skips it.
+            return self.absorb(log, expiration);
+        };
+        if dedup.contains(key) {
+            return Ok(0);
+        }
+        let seen = self.absorb(log, expiration)?;
+        dedup.remember(key);
+        Ok(seen)
+    }
+
+    /// Absorb one WSS batch. Removed (reorged-out) logs are skipped: their
+    /// effect was never canonical, and the HTTP arm will re-read the block if
+    /// a replacement log lands there.
+    fn absorb_wss_logs(
+        &self,
+        logs: &[Log],
+        expiration: U256,
+        dedup: &mut LogDedup,
+    ) -> Result<usize> {
+        let mut seen = 0usize;
+        for log in logs {
+            if log.removed {
+                continue;
+            }
+            seen += self.absorb_once(log, expiration, dedup)?;
+        }
+        Ok(seen)
+    }
+
     /// Sign every PENDING record whose window elapsed (the PENDING → SIGNED
     /// transition); returns how many moved.
     fn sign_due(&self) -> Result<usize> {
@@ -443,6 +604,240 @@ impl Watcher {
         }
         Ok(signed)
     }
+}
+
+/// The WSS URL for an HTTP RPC endpoint (anvil serves WebSocket on its HTTP
+/// port). A `ws(s)://` URL is used verbatim; an unsupported scheme has no WSS
+/// lane and the watcher runs HTTP-only.
+fn ws_url_of(url: &str) -> Option<String> {
+    if url.starts_with("ws://") || url.starts_with("wss://") {
+        return Some(url.to_string());
+    }
+    if let Some(rest) = url.strip_prefix("https://") {
+        return Some(format!("wss://{rest}"));
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        return Some(format!("ws://{rest}"));
+    }
+    None
+}
+
+/// One log's cross-lane identity: the same burn delivered by WSS and HTTP is
+/// the same `(chain, tx, log index)` even though the two lanes build separate
+/// `Log` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LogKey {
+    chain_id: u64,
+    tx_hash: B256,
+    log_index: u64,
+}
+
+impl LogKey {
+    fn of(chain_id: u64, log: &Log) -> Option<Self> {
+        Some(Self {
+            chain_id,
+            tx_hash: log.transaction_hash?,
+            log_index: log.log_index?,
+        })
+    }
+}
+
+/// The in-run dedupe set shared by the WSS and HTTP lanes. Bounded FIFO: the
+/// store's `(sourceDomain, nonce)` key is the durable idempotence, so the
+/// in-memory set only has to cover the overlap window between the lanes (and
+/// a replay burst), never the bridge's whole history.
+const DEDUP_CAPACITY: usize = 65_536;
+
+struct LogDedup {
+    seen: HashSet<LogKey>,
+    order: VecDeque<LogKey>,
+    capacity: usize,
+}
+
+impl LogDedup {
+    fn new() -> Self {
+        Self::with_capacity(DEDUP_CAPACITY)
+    }
+
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            seen: HashSet::with_capacity(capacity.min(4_096)),
+            order: VecDeque::with_capacity(capacity.min(4_096)),
+            capacity,
+        }
+    }
+
+    fn contains(&self, key: LogKey) -> bool {
+        self.seen.contains(&key)
+    }
+
+    fn remember(&mut self, key: LogKey) {
+        if !self.seen.insert(key) {
+            return;
+        }
+        self.order.push_back(key);
+        while self.order.len() > self.capacity {
+            if let Some(old) = self.order.pop_front() {
+                self.seen.remove(&old);
+            }
+        }
+    }
+}
+
+/// The watcher's health verdict. `degraded` is the honest middle: one lane is
+/// stale, the other is still serving (or reconciling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum HealthStatus {
+    Ok,
+    Degraded,
+    Unhealthy,
+}
+
+impl HealthStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Degraded => "degraded",
+            Self::Unhealthy => "unhealthy",
+        }
+    }
+
+    pub(crate) fn worst(self, other: Self) -> Self {
+        self.max(other)
+    }
+
+    /// The required truth table: a WSS disconnect while HTTP is fresh is
+    /// `degraded`; only both lanes stale is `unhealthy`. Without a WSS lane
+    /// the verdict is HTTP's alone.
+    fn verdict(http_fresh: bool, ws_fresh: bool, ws_enabled: bool) -> Self {
+        if !ws_enabled {
+            return if http_fresh {
+                Self::Ok
+            } else {
+                Self::Unhealthy
+            };
+        }
+        match (http_fresh, ws_fresh) {
+            (true, true) => Self::Ok,
+            (false, false) => Self::Unhealthy,
+            _ => Self::Degraded,
+        }
+    }
+}
+
+/// How many reconciliation intervals may pass without a successful HTTP pass
+/// before the HTTP arm counts as stale (the DALOC scanner's five-interval
+/// grace).
+const STALE_SCAN_INTERVALS: u64 = 5;
+
+/// The two-watermark health state. `http_watermark` is the only value a
+/// restart may resume from; `wss_watermark` is an observation, never a cursor.
+pub(crate) struct WatcherHealth {
+    chain: &'static str,
+    poll: Duration,
+    http_watermark: std::sync::atomic::AtomicU64,
+    wss_watermark: std::sync::atomic::AtomicU64,
+    http_last_ok_ms: std::sync::atomic::AtomicU64,
+    ws: Option<Arc<WsHealth>>,
+}
+
+impl WatcherHealth {
+    pub(crate) fn new(chain: &'static str, poll: Duration, ws: Option<Arc<WsHealth>>) -> Self {
+        Self {
+            chain,
+            poll,
+            http_watermark: std::sync::atomic::AtomicU64::new(0),
+            wss_watermark: std::sync::atomic::AtomicU64::new(0),
+            // A watcher that just registered is not stale yet: it gets the
+            // same grace as a successful pass before its first HTTP scan.
+            http_last_ok_ms: std::sync::atomic::AtomicU64::new(crate::now_ms()),
+            ws,
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> WatcherHealthSnapshot {
+        self.snapshot_at(crate::now_ms())
+    }
+
+    fn snapshot_at(&self, now_ms: u64) -> WatcherHealthSnapshot {
+        let http_fresh = self.http_fresh_at(now_ms);
+        let ws = self.ws.as_ref().map(|health| health.snapshot_at(now_ms));
+        let ws_fresh = ws.as_ref().is_some_and(|health| health.connected);
+        let status = HealthStatus::verdict(http_fresh, ws_fresh, self.ws.is_some());
+        WatcherHealthSnapshot {
+            chain: self.chain,
+            status,
+            http_fresh,
+            http_watermark: self.persistable_watermark(),
+            wss_watermark: self.wss_watermark.load(Ordering::Relaxed),
+            ws,
+        }
+    }
+
+    fn http_fresh_at(&self, now_ms: u64) -> bool {
+        let last = self.http_last_ok_ms.load(Ordering::Relaxed);
+        let grace_ms = (self.poll.as_millis() as u64).saturating_mul(STALE_SCAN_INTERVALS);
+        last != 0 && now_ms.saturating_sub(last) < grace_ms
+    }
+
+    /// The HTTP arm's successful pass: the only watermark that may be
+    /// persisted (the watcher's `scanned_upto` is this value).
+    pub(crate) fn record_http_scan(&self, watermark: u64, now_ms: u64) {
+        self.http_watermark.store(watermark, Ordering::Relaxed);
+        self.http_last_ok_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// The WSS arm's observation. Deliberately does not touch
+    /// `http_watermark` or the watcher's cursor.
+    pub(crate) fn observe_wss(&self, watermark: u64) {
+        self.wss_watermark.fetch_max(watermark, Ordering::Relaxed);
+    }
+
+    /// The watermark a restart/next reconciliation may resume from.
+    pub(crate) fn persistable_watermark(&self) -> u64 {
+        self.http_watermark.load(Ordering::Relaxed)
+    }
+}
+
+/// The health fields `/health` serves for one watcher.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct WatcherHealthSnapshot {
+    pub chain: &'static str,
+    pub status: HealthStatus,
+    pub http_fresh: bool,
+    /// The last block the HTTP reconciliation completed (the persistable one).
+    pub http_watermark: u64,
+    /// The last block a WSS batch observed (health only, never a cursor).
+    pub wss_watermark: u64,
+    pub ws: Option<crate::ws_logs::WsHealthSnapshot>,
+}
+
+type HealthRegistry = Mutex<BTreeMap<&'static str, Arc<WatcherHealth>>>;
+
+static WATCHER_HEALTH: OnceLock<HealthRegistry> = OnceLock::new();
+
+fn watcher_health_registry() -> &'static HealthRegistry {
+    WATCHER_HEALTH.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn register_watcher_health(health: Arc<WatcherHealth>) {
+    watcher_health_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(health.chain, health);
+}
+
+/// Every running watcher's snapshot, for `/health`. An empty list means no
+/// watcher has registered yet (the HTTP status then falls back to the store's
+/// parked count).
+pub(crate) fn watcher_health_snapshots() -> Vec<WatcherHealthSnapshot> {
+    watcher_health_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .map(|health| health.snapshot())
+        .collect()
 }
 
 /// The `MessageSent` log's parts: its transaction hash, log index, block and
@@ -605,6 +1000,189 @@ mod tests {
     /// The common one-log case: index 0.
     fn log(tx: B256, source: u32, destination: u32) -> Log {
         log_at(tx, 0, source, destination)
+    }
+
+    /// Anvil serves WS on its HTTP port; a configured WS URL is used
+    /// verbatim, and an unsupported scheme has no WSS lane.
+    #[test]
+    fn ws_urls_follow_the_http_endpoint() {
+        assert_eq!(
+            ws_url_of("http://127.0.0.1:8545"),
+            Some("ws://127.0.0.1:8545".into())
+        );
+        assert_eq!(
+            ws_url_of("https://rpc.example/path"),
+            Some("wss://rpc.example/path".into())
+        );
+        assert_eq!(ws_url_of("ws://a/ws"), Some("ws://a/ws".into()));
+        assert_eq!(ws_url_of("wss://a/ws"), Some("wss://a/ws".into()));
+        assert_eq!(ws_url_of("ftp://a"), None);
+    }
+
+    /// Dedupe is the full log identity: the same transaction/log index on a
+    /// different chain is a different message, and a second log in the same
+    /// transaction is too.
+    #[test]
+    fn dedup_is_keyed_by_chain_tx_and_log_index() {
+        let tx = B256::repeat_byte(0xaa);
+        let log = log_at(tx, 0, 0, 19);
+        let key = LogKey::of(1, &log).unwrap();
+        let mut dedup = LogDedup::with_capacity(8);
+        assert!(!dedup.contains(key));
+        dedup.remember(key);
+        assert!(dedup.contains(key));
+        assert_ne!(
+            key,
+            LogKey::of(2, &log).unwrap(),
+            "chain id is part of the key"
+        );
+        assert_ne!(
+            key,
+            LogKey::of(1, &log_at(tx, 1, 0, 19)).unwrap(),
+            "log index is part of the key"
+        );
+
+        // The set is bounded: the oldest key is evicted first (the durable
+        // store key is still the final idempotence).
+        let mut small = LogDedup::with_capacity(1);
+        small.remember(key);
+        let next = LogKey::of(1, &log_at(tx, 1, 0, 19)).unwrap();
+        small.remember(next);
+        assert!(!small.contains(key));
+        assert!(small.contains(next));
+    }
+
+    /// A log delivered by both lanes is processed once: the second absorb is
+    /// a dedupe hit, not a second record.
+    #[test]
+    fn dedup_prevents_a_second_lane_from_reprocessing() {
+        let dir = crate::test_dir("dedup");
+        let _ = std::fs::remove_dir_all(&dir);
+        let watcher = watcher(&dir, Domain(19), Duration::ZERO);
+        let mut dedup = LogDedup::new();
+        let log = log_at(B256::repeat_byte(0xbb), 0, 0, 19);
+
+        assert_eq!(
+            watcher.absorb_once(&log, U256::ZERO, &mut dedup).unwrap(),
+            1
+        );
+        assert_eq!(
+            watcher.absorb_once(&log, U256::ZERO, &mut dedup).unwrap(),
+            0,
+            "the HTTP lane's re-read of the WSS log is a dedupe hit"
+        );
+        assert_eq!(watcher.store.counts().unwrap().pending, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two-watermark rule: a WSS batch at block 200 never moves the HTTP
+    /// cursor (still 100); only the next successful HTTP pass may advance the
+    /// persistable watermark.
+    #[tokio::test]
+    async fn wss_never_moves_the_http_cursor() {
+        let dir = crate::test_dir("watermarks");
+        let _ = std::fs::remove_dir_all(&dir);
+        let watcher = watcher(&dir, Domain(19), Duration::ZERO);
+        watcher.scanned_upto.store(100, Ordering::Relaxed);
+
+        let health = WatcherHealth::new("ethereum", Duration::from_secs(1), None);
+        health.record_http_scan(100, 1_000);
+
+        let mut log = log_at(B256::repeat_byte(0xcc), 0, 0, 19);
+        log.block_number = Some(200);
+        let mut dedup = LogDedup::new();
+        assert_eq!(
+            watcher
+                .apply_wss(&[log], &mut dedup, &health)
+                .await
+                .unwrap(),
+            1
+        );
+
+        assert_eq!(
+            watcher.scanned_upto.load(Ordering::Relaxed),
+            100,
+            "WSS must not advance the HTTP reconciliation cursor"
+        );
+        assert_eq!(
+            health.persistable_watermark(),
+            100,
+            "the persisted watermark is the HTTP arm's, never WSS's"
+        );
+        let snapshot = health.snapshot_at(1_000);
+        assert_eq!(snapshot.http_watermark, 100);
+        assert_eq!(snapshot.wss_watermark, 200);
+
+        health.record_http_scan(150, 2_000);
+        assert_eq!(
+            health.persistable_watermark(),
+            150,
+            "only the HTTP reconciliation advances the persistable watermark"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The required verdict: WSS down while HTTP is fresh is `degraded`;
+    /// only both stale is `unhealthy`; no WSS lane is HTTP's verdict alone.
+    #[test]
+    fn health_verdict_is_degraded_only_when_one_lane_is_stale() {
+        assert_eq!(HealthStatus::verdict(true, true, true), HealthStatus::Ok);
+        assert_eq!(
+            HealthStatus::verdict(true, false, true),
+            HealthStatus::Degraded,
+            "WSS disconnected while HTTP is fresh"
+        );
+        assert_eq!(
+            HealthStatus::verdict(false, true, true),
+            HealthStatus::Degraded,
+            "HTTP stale while WSS is live"
+        );
+        assert_eq!(
+            HealthStatus::verdict(false, false, true),
+            HealthStatus::Unhealthy,
+            "both lanes stale"
+        );
+        assert_eq!(
+            HealthStatus::verdict(true, false, false),
+            HealthStatus::Ok,
+            "HTTP-only: the absent WSS lane is not a failure"
+        );
+        assert_eq!(
+            HealthStatus::verdict(false, false, false),
+            HealthStatus::Unhealthy
+        );
+        assert_eq!(
+            HealthStatus::Ok.worst(HealthStatus::Degraded),
+            HealthStatus::Degraded
+        );
+        assert_eq!(
+            HealthStatus::Degraded.worst(HealthStatus::Unhealthy),
+            HealthStatus::Unhealthy
+        );
+    }
+
+    /// The snapshot tracks the same verdict as the lanes move: fresh HTTP +
+    /// connected WSS is ok; WSS down is degraded; both stale is unhealthy.
+    #[test]
+    fn health_snapshot_tracks_the_lanes() {
+        let ws = Arc::new(WsHealth::default());
+        let health = WatcherHealth::new("ethereum", Duration::from_secs(1), Some(ws.clone()));
+        health.record_http_scan(100, 1_000);
+
+        assert_eq!(
+            health.snapshot_at(1_000).status,
+            HealthStatus::Degraded,
+            "WSS has not connected yet"
+        );
+        ws.mark_connected();
+        assert_eq!(health.snapshot_at(1_000).status, HealthStatus::Ok);
+        assert_eq!(
+            health.snapshot_at(7_000).status,
+            HealthStatus::Degraded,
+            "HTTP is stale but WSS is still live"
+        );
+        ws.mark_disconnected();
+        assert_eq!(health.snapshot_at(7_000).status, HealthStatus::Unhealthy);
     }
 
     /// One absorb: the nonce is `keccak256(tx ‖ log index)`, the served

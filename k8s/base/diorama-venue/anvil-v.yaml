@@ -42,6 +42,19 @@ spec:
               # One URL list is the single source; anvil takes one fork URL,
               # so the first entry is the primary the pool also declares.
               HL_RPC_URL="${HL_RPC_URLS%%,*}"
+              # An explicit pin preserves the epoch across a source change. A
+              # re-pin to the source's current head is a *new base*: the driver
+              # clears the shadow registry (measured 2026-11-01, a restart moved
+              # 50,042,205 -> 50,086,498 and cleared 1,974 slots / 109 accounts).
+              # A deployment that must keep its writes pins the block here.
+              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
+                PIN="$ANVIL_FORK_PIN"
+                echo "$PIN" > /state/pin
+                echo "using explicit fork pin=$PIN (source head not re-resolved)"
+                chmod 0777 /state 2>/dev/null || true
+                chmod 0666 /state/pin 2>/dev/null || true
+                exit 0
+              fi
               # Wait for the fork source first: anvil forks at start-up, so a
               # restart while the source is unreachable would crash-loop.
               i=0; HEAD=""
@@ -65,6 +78,10 @@ spec:
           env:
             - name: HL_RPC_URLS
               valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URLS } }
+            # Optional explicit epoch pin. Empty = resolve the source head as
+            # before. A deployment that changes its fork source sets this to the
+            # persisted /state/pin so the epoch (and the shadow registry) is kept.
+            - { name: ANVIL_FORK_PIN, value: "" }
           volumeMounts:
             - { name: state, mountPath: /state }
       containers:
@@ -77,17 +94,21 @@ spec:
             - |
               # The primary is the first entry of the one URL list.
               HL_RPC_URL="${HL_RPC_URLS%%,*}"
-              # Re-resolve the pin on *every container start*, not just every
-              # pod start (k8s restarts only the container on OOM): a fresh
-              # base is an epoch, and the driver reconciles it from the shadow
-              # registry (same base -> restore, new base -> clear). `cast` is
-              # in the image.
-              PIN=$(cast block-number --rpc-url "$HL_RPC_URL" 2>/dev/null || echo 0)
-              if [ "${PIN:-0}" -gt 0 ]; then
-                echo "$PIN" > /state/pin
+              # An explicit pin keeps the epoch across a source change. Without
+              # it, re-resolve on *every container start* (k8s restarts only the
+              # container on OOM): a fresh base is an epoch, and the driver
+              # reconciles it from the shadow registry (same base -> restore,
+              # new base -> clear). `cast` is in the image.
+              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
+                PIN="$ANVIL_FORK_PIN"
               else
-                PIN=$(cat /state/pin 2>/dev/null || echo 0)
-                echo "fork source unreachable; keeping persisted pin $PIN" >&2
+                PIN=$(cast block-number --rpc-url "$HL_RPC_URL" 2>/dev/null || echo 0)
+                if [ "${PIN:-0}" -gt 0 ]; then
+                  echo "$PIN" > /state/pin
+                else
+                  PIN=$(cat /state/pin 2>/dev/null || echo 0)
+                  echo "fork source unreachable; keeping persisted pin $PIN" >&2
+                fi
               fi
               echo "anvil-v: fork-url=$HL_RPC_URL pin=$PIN"
               # Why these flags (the parity list):
@@ -127,6 +148,8 @@ spec:
           env:
             - name: HL_RPC_URLS
               valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URLS } }
+            # Optional explicit epoch pin (see the init container's comment).
+            - { name: ANVIL_FORK_PIN, value: "" }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

@@ -20,6 +20,10 @@ alloy-rpc-types-eth = { workspace = true }
 alloy-sol-types = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
+# The WSS log lane: the workspace's existing websocket stack (the venue feed
+# uses the same pair). `futures-util` is the `futures` split traits
+# (`SinkExt`/`StreamExt`) without pulling the umbrella crate.
+futures-util = { workspace = true }
 # The devnet attester signs real ECDSA: RFC6979 + low-s, byte-compatible with
 # the OZ ECDSA.recover the on-chain Attestable verifies (measured, §15.3).
 k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
@@ -29,6 +33,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 
 [lints]

@@ -46,6 +46,19 @@ pub async fn healthz(State(state): State<Arc<ApiState>>) -> Response {
     (StatusCode::OK, "ok").into_response()
 }
 
+/// `GET /health`: the inter-service health contract on the info port.
+///
+/// The shared `DalocHttpClient::health_verdict` reads a JSON `status`; the
+/// text liveness body (`/healthz`) is for humans and orchestrators, while a
+/// DALOC service probing this port needs the same shape every other service
+/// serves. Both answer the sim-poisoned gate identically.
+pub async fn health(State(state): State<Arc<ApiState>>) -> Response {
+    if let Err(refusal) = super::sim_gate(&state) {
+        return refusal.into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status":"ok"}))).into_response()
+}
+
 pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> Response {
     if let Err(refusal) = super::sim_gate(&state) {
         return refusal.into_response();

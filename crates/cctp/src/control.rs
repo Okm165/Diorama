@@ -14,6 +14,7 @@ use crate::metrics::{render_counts, CctpMetrics};
 use crate::relayer::{RelayNow, Relayer};
 use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{validate_max_fee, wait_for_receipt, ITokenMessengerV2, TxSender, IERC20};
+use crate::watcher::{watcher_health_snapshots, HealthStatus, WatcherHealthSnapshot};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_sol_types::SolCall;
 use axum::extract::State;
@@ -87,7 +88,12 @@ pub(crate) struct HealthResponse {
     pub signed: usize,
     pub relayed: usize,
     pub parked: usize,
+    /// Parked records in the durable archives (outside the live store).
+    pub archived_parked: u64,
     pub chains: Vec<ChainHealth>,
+    /// One snapshot per running watcher: WSS health, the two watermarks, and
+    /// the lane verdict (`ok` / `degraded` / `unhealthy`).
+    pub watchers: Vec<WatcherHealthSnapshot>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,12 +104,27 @@ pub(crate) struct ChainHealth {
 
 pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Json<HealthResponse>> {
     let counts = state.store.counts()?;
+    let watchers = watcher_health_snapshots();
+    // The worst lane wins: a disconnected WSS lane is degraded while HTTP is
+    // fresh, but two stale lanes are unhealthy. A parked message can only
+    // degrade an otherwise-ok bridge; it never hides an unhealthy watcher.
+    let mut status = HealthStatus::Ok;
+    for watcher in &watchers {
+        status = status.worst(watcher.status);
+    }
+    if counts.parked > 0 {
+        status = status.worst(HealthStatus::Degraded);
+    }
     Ok(Json(HealthResponse {
-        status: if counts.parked == 0 { "ok" } else { "degraded" },
+        status: status.as_str(),
         pending: counts.pending,
         signed: counts.signed,
         relayed: counts.relayed,
         parked: counts.parked,
+        archived_parked: state
+            .metrics
+            .archived_parked
+            .load(std::sync::atomic::Ordering::Relaxed),
         chains: state
             .chains
             .iter()
@@ -112,6 +133,7 @@ pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Jso
                 domain: chain.domain,
             })
             .collect(),
+        watchers,
     }))
 }
 

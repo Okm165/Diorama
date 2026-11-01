@@ -19,7 +19,11 @@ data:
   # dRPC and purroofgroup return -32601 for it, so including them would make
   # the venue source audit disagree on `system_txs`. The official HyperEVM RPC
   # is first; hypurrscan, stakely and onfinality are the fallbacks.
-  HL_RPC_URLS: "https://rpc.hyperliquid.xyz/evm,https://rpc.hypurrscan.io,https://hyperliquid-json-rpc.stakely.io,https://hyperliquid.api.onfinality.io/evm/public"
+  # The archive endpoint is first because anvil-v's fork source must serve
+  # historical storage, not only the head: the public free-plan endpoints
+  # rate-limit a storage read at the pin (measured 2026-11-01, CCTP wiring
+  # boot). The engine's read pool uses the rest as failover.
+  HL_RPC_URLS: "https://rpc.hyperlend.finance/archive,https://rpc.hyperliquid.xyz/evm,https://rpc.hypurrscan.io,https://hyperliquid-json-rpc.stakely.io,https://hyperliquid.api.onfinality.io/evm/public"
 
   # The venue's market plane. Both are URL lists in the instance's
   # [endpoints] groups; the env carries the deployment values, never a second

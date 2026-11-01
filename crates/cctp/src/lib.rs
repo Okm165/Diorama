@@ -28,6 +28,8 @@
 /// The method the burn watchers share (the relayer, the sender's pool check,
 /// the watcher's vanished-tx check): one home.
 pub(crate) const TX_BY_HASH: &str = "eth_getTransactionByHash";
+pub mod archive;
+mod atomic;
 pub mod attester;
 pub mod chains;
 pub mod control;
@@ -40,6 +42,7 @@ pub mod service;
 pub mod store;
 pub mod transfer;
 pub mod watcher;
+mod ws_logs;
 
 /// The alloy primitives the bridge's public surface exposes (addresses,
 /// amounts, hashes): the bin reads them from here, never from a second alloy

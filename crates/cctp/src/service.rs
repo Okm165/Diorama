@@ -232,6 +232,8 @@ async fn boot_bridge(
     let store = Arc::new(crate::store::Store::load(
         section.state_dir.join("cctp.json"),
     )?);
+    let metrics = Arc::new(crate::metrics::CctpMetrics::default());
+    load_archives(&metrics, &section.state_dir);
     install_hooks(&chains, &store, &sender, receipt_timeout, receipt_poll).await?;
     let bridge = Bridge {
         chains,
@@ -239,13 +241,42 @@ async fn boot_bridge(
         store,
         attester,
         sender,
-        metrics: Arc::new(crate::metrics::CctpMetrics::default()),
+        metrics,
         receipt_timeout,
         receipt_poll,
         poll: Duration::from_millis(section.poll_interval_ms),
         section,
     };
     Ok((bridge, min_fees))
+}
+
+/// Read the durable parked archives beside the live store. Archived records
+/// are still facts: their count feeds the metrics gauge, and every unreadable
+/// file is logged by path instead of vanishing from the operator's view.
+fn load_archives(metrics: &crate::metrics::CctpMetrics, state_dir: &std::path::Path) {
+    let archives = crate::archive::load_all(state_dir);
+    metrics
+        .archived_parked
+        .store(archives.parked as u64, std::sync::atomic::Ordering::Relaxed);
+    metrics.archives_corrupt.store(
+        archives.corrupt.len() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    for corrupt in &archives.corrupt {
+        tracing::error!(
+            path = %corrupt.path.display(),
+            error = %corrupt.error,
+            "cctp parked archive is unreadable; it is reported, not dropped"
+        );
+    }
+    if archives.parked > 0 || !archives.corrupt.is_empty() {
+        tracing::info!(
+            archives = archives.archives,
+            archived_parked = archives.parked,
+            corrupt = archives.corrupt.len(),
+            "cctp parked archives loaded"
+        );
+    }
 }
 
 /// Wait (bounded) for every chain to answer. A coordinated restart (the anvil
@@ -480,6 +511,20 @@ fn build_lanes(section: &CctpSection, chains: &[Chain]) -> crate::Result<Vec<Lan
     })
 }
 
+/// A transient RPC refusal at boot is a **wait**, not a crash.
+///
+/// The mirror's fork source is a public RPC with a rate budget; measured
+/// 2026-11-01, a storage read during the wiring assert answered
+/// `-32005 rate limited` and the bridge exited, then crash-looped while the
+/// budget recovered. The wiring assert is a read of immutable deployment
+/// facts: retrying it cannot change the answer, and a genuinely wrong wiring
+/// still fails after the bound. The bound is ten attempts with a 1 s→30 s
+/// exponential delay (~2 minutes), which is the window the measured rate
+/// limit needed to clear.
+const WIRING_RETRY_ATTEMPTS: u32 = 10;
+const WIRING_RETRY_BASE: Duration = Duration::from_secs(1);
+const WIRING_RETRY_MAX: Duration = Duration::from_secs(30);
+
 /// The wiring asserts + the per-domain min-fee probe (§15.2: absent on
 /// Ethereum, `0` on HyperEVM). A mismatch is a boot refusal.
 async fn verify_wiring(
@@ -500,7 +545,7 @@ async fn verify_wiring(
                 domain: lane.destination,
             },
         )?;
-        let wiring = chain.verify_wiring(peer).await?;
+        let wiring = verify_wiring_with_retry(chain, peer).await?;
         tracing::info!(
             chain = chain.name,
             domain = %chain.domain,
@@ -516,6 +561,37 @@ async fn verify_wiring(
         min_fees.insert((lane.source, lane.destination), wiring.min_fee);
     }
     Ok(min_fees)
+}
+
+/// Read one chain's wiring, retrying a transient RPC refusal with bounded
+/// exponential backoff. A wiring *mismatch* is not retried: the read answered,
+/// and the answer is wrong. Only the transport/rate-limit arm waits.
+async fn verify_wiring_with_retry(
+    chain: &Chain,
+    peer: &Chain,
+) -> crate::Result<crate::chains::Wiring> {
+    let mut attempt = 0u32;
+    loop {
+        match chain.verify_wiring(peer).await {
+            Ok(wiring) => return Ok(wiring),
+            Err(error) if attempt + 1 >= WIRING_RETRY_ATTEMPTS => return Err(error),
+            Err(error) => {
+                let delay = WIRING_RETRY_BASE
+                    .saturating_mul(1u32 << attempt.min(5))
+                    .min(WIRING_RETRY_MAX);
+                tracing::warn!(
+                    chain = chain.name,
+                    attempt = attempt + 1,
+                    attempts = WIRING_RETRY_ATTEMPTS,
+                    delay_s = delay.as_secs(),
+                    error = %error,
+                    "cctp wiring read refused — retrying before boot"
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+        }
+    }
 }
 
 /// The recorded wrapper, reused only when its code is present and its wiring

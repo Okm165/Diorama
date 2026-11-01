@@ -139,6 +139,10 @@ pub fn info_router(state: Arc<ApiState>) -> Router {
             diorama_devnet::handlers::HEALTHZ,
             axum::routing::get(info::healthz),
         )
+        // The info port's liveness alias. The shared inter-service health probe
+        // (`DalocHttpClient::health_verdict`) reads a JSON `status`; the control
+        // port's text body is for humans and orchestrators.
+        .route("/health", axum::routing::get(info::health))
         .route("/readyz", axum::routing::get(info::readyz))
         .route("/info", axum::routing::post(info::info))
         // The matching lane's named refusal: their client posts
