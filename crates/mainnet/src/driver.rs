@@ -264,11 +264,12 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
 
 pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
+    let status_interval = ctx.engine.loops.status_log_interval_ms;
     let mut last_status = 0u64;
     let via = diorama_devnet::engine::source_host(ctx.reth.url());
     loop {
-        // The follow's heartbeat (a minute apart, the same shape on both
-        // mirrors): the steady DEBUG line only speaks for an idle chain.
+        // The follow's heartbeat (the configured cadence, the same shape on
+        // both mirrors): the steady DEBUG line only speaks for an idle chain.
         diorama_devnet::engine::FollowStatus {
             via,
             source_head: ctx
@@ -289,7 +290,7 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
         }
-        .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);
+        .log_if_due(ctx.mirror.label(), &mut last_status, status_interval);
         if diorama_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }
@@ -297,13 +298,13 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
             Ok(Next::Apply(n)) => {
                 if let Err(e) = step(&ctx, n).await {
                     tracing::error!(block = n, error = %e, "diff apply failed (will retry)");
-                    tokio::time::sleep(poll * 5).await;
+                    tokio::time::sleep(poll).await;
                 }
             }
             Ok(Next::Idle) => tokio::time::sleep(poll).await,
             Err(e) => {
                 tracing::warn!(error = %e, "apply loop poll failed");
-                tokio::time::sleep(poll * 5).await;
+                tokio::time::sleep(poll).await;
             }
         }
     }
@@ -315,12 +316,13 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
 /// No halt gate on purpose: the top-up is read-only catch-up for reth — a
 /// paused mirror must not let the source's head fall behind the applier.
 pub(crate) async fn source_sync_supervisor(ctx: Arc<Ctx>) {
+    let restart_delay = Duration::from_millis(ctx.engine.source_sync.error_backoff_ms);
     loop {
         match tokio::spawn(source_sync::source_sync_loop(ctx.clone())).await {
             Ok(()) => tracing::warn!("top-up loop exited; restarting"),
             Err(e) => tracing::error!(error = %e, "top-up loop panicked; restarting"),
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        tokio::time::sleep(restart_delay).await;
     }
 }
 
@@ -334,7 +336,7 @@ pub(crate) async fn source_sync_supervisor(ctx: Arc<Ctx>) {
 pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
     loop {
-        tokio::time::sleep(poll * 2).await;
+        tokio::time::sleep(poll).await;
         if let Err(e) = scan_once(&ctx).await {
             tracing::warn!(error = %e, "shadow scan failed; will retry from the last clean block");
         }

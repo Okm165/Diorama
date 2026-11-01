@@ -61,7 +61,7 @@ impl RestClient {
     #[cfg(test)]
     pub fn with_policy(api_urls: &[String], policy: diorama_anvil::PoolPolicy) -> Result<Self> {
         let pool = EndpointPool::new(api_urls, Scheme::Http, policy)?;
-        Self::from_pool(pool)
+        Self::from_pool(pool, Duration::from_secs(10))
     }
 
     /// Build the client from the instance's attributed endpoints: the group's
@@ -70,15 +70,14 @@ impl RestClient {
     pub fn with_specs(
         specs: Vec<diorama_anvil::EndpointSpec>,
         policy: diorama_anvil::PoolPolicy,
+        timeout: Duration,
     ) -> Result<Self> {
         let pool = EndpointPool::from_specs(specs, Scheme::Http, policy)?;
-        Self::from_pool(pool)
+        Self::from_pool(pool, timeout)
     }
 
-    fn from_pool(pool: EndpointPool) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?;
+    fn from_pool(pool: EndpointPool, timeout: Duration) -> Result<Self> {
+        let http = reqwest::Client::builder().timeout(timeout).build()?;
         Ok(Self { http, pool })
     }
 

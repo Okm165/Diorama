@@ -36,7 +36,18 @@ token_minter = "0xfd78EE919681417d192449715b2594ab58f5D002"
 [[services.cctp_bridge.lanes]]
 source = "ethereum"
 destination = "hyperevm"
+# The measured Iris table for this lane: fast burns cost 1 unit at
+# threshold 1000; standard is free.
+fees = [
+  { finalityThreshold = 1000, minimumFee = 1 },
+  { finalityThreshold = 2000, minimumFee = 0 },
+]
 
 [[services.cctp_bridge.lanes]]
 source = "hyperevm"
 destination = "ethereum"
+# HyperEVM has no fast lane; both thresholds are free (measured).
+fees = [
+  { finalityThreshold = 1000, minimumFee = 0 },
+  { finalityThreshold = 2000, minimumFee = 0 },
+]

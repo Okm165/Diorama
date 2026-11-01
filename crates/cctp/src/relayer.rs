@@ -34,8 +34,7 @@ use std::time::Duration;
 /// Node-side send refusals before a message is parked. A JSON-RPC error is
 /// the node's answer (a deterministic refusal, e.g. an estimate revert); a
 /// transport fault is an outage and must never park a message — it retries.
-const MAX_SEND_ATTEMPTS: u32 = 5;
-
+/// The budget is the deployment's (`max_send_attempts`).
 pub struct Relayer {
     pub chains: Vec<Chain>,
     pub store: Arc<Store>,
@@ -51,6 +50,12 @@ pub struct Relayer {
     /// How long one tick waits for a submitted tx's receipt before leaving it
     /// for the next tick.
     pub receipt_timeout: Duration,
+    /// Receipt poll cadence while a submitted tx is pending.
+    pub receipt_poll: Duration,
+    /// Node-side send refusals before the record is parked.
+    pub max_send_attempts: u32,
+    /// The bridge status log's cadence.
+    pub status_log_interval: Duration,
     /// Last head seen per chain (parallel to `chains`): a head below the
     /// watermark is a rewind (a snapshot revert), a fork base above it a
     /// forward re-pin (the epoch model) — either un-minted relayed messages,
@@ -114,11 +119,11 @@ impl Relayer {
             if let Err(e) = self.tick().await {
                 tracing::warn!(error = %e, "cctp relayer pass failed; will retry");
             }
-            // The bridge's heartbeat (the mirrors' 60 s cadence): the store's
-            // own counts, so the queue's state is visible in the logs, not
-            // only through /health.
+            // The bridge's heartbeat (the deployment's configured cadence):
+            // the store's own counts, so the queue's state is visible in the
+            // logs, not only through /health.
             let now = diorama_config::boot::now_ms();
-            if now.saturating_sub(last_status) >= 60_000 {
+            if now.saturating_sub(last_status) >= self.status_log_interval.as_millis() as u64 {
                 last_status = now;
                 match self.store.counts() {
                     Ok(c) => tracing::info!(
@@ -388,7 +393,7 @@ impl Relayer {
 
     /// Submit `receiveMessage` (plain) or the wrapper's `relay` (hook), record
     /// the attempt, and settle it or keep it in flight. A send refused after
-    /// `MAX_SEND_ATTEMPTS` transport faults is parked, never retried forever.
+    /// `max_send_attempts` transport faults is parked, never retried forever.
     #[allow(clippy::too_many_lines)] // one submit flow: preflight → send → receipt → settle
     async fn submit(
         &self,
@@ -459,7 +464,14 @@ impl Relayer {
                     consumer = if decoded.body.hook_data.is_empty() { "transmitter" } else { "hook wrapper" },
                     "cctp relay submitted"
                 );
-                match wait_for_receipt(&chain.write_rpc, hash, self.receipt_timeout).await? {
+                match wait_for_receipt(
+                    &chain.write_rpc,
+                    hash,
+                    self.receipt_timeout,
+                    self.receipt_poll,
+                )
+                .await?
+                {
                     Some(receipt) => self.settle(chain, record, &receipt).await,
                     None => Ok(Relayed::InFlight),
                 }
@@ -470,7 +482,7 @@ impl Relayer {
                 // parking. A transport fault, a cooling pool or a gateway
                 // status is an outage: the burned message must keep retrying.
                 let node_refusal = matches!(&e, Error::Rpc(diorama_anvil::Error::Rpc { .. }));
-                if node_refusal && attempts >= MAX_SEND_ATTEMPTS {
+                if node_refusal && attempts >= self.max_send_attempts {
                     self.park(record.nonce, format!("send refused {attempts} times: {e}"))?;
                 } else {
                     tracing::warn!(nonce = %record.nonce, attempts, error = %e, "cctp receiveMessage submission failed; will retry");

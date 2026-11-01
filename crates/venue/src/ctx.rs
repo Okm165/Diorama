@@ -76,11 +76,11 @@ impl Ctx {
         let (_chain, engine) = cfg.take_venue()?;
         let plane = Plane::from_engine(&engine)?;
         let drift = Drift::from_engine(&engine)?;
-        // A fixed, generous budget: V's chain is a local anvil. The source
-        // pool carries the instance's endpoint attributes and shared policy.
+        // The engine's configured RPC budget, the same one the source reads
+        // use: V is a local anvil and the public source is the slow side.
         let pool = diorama_devnet::engine::source_pool(&cfg, source_urls)?;
-        let (source_rpc, anvil_v) =
-            diorama_devnet::engine::build_clients(pool, v_url, Duration::from_secs(30))?;
+        let timeout = Duration::from_secs(engine.reth.request_timeout_secs);
+        let (source_rpc, anvil_v) = diorama_devnet::engine::build_clients(pool, v_url, timeout)?;
         let uncovered_seen = std::sync::Mutex::new(std::collections::HashSet::new());
         let venue_metrics = VenueMetrics::default();
         let wiring = crate::profile::build(

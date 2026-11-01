@@ -810,6 +810,20 @@ fn check_cctp_lanes(
                 lane.source, lane.destination
             ));
         }
+        let mut thresholds = std::collections::HashSet::new();
+        for (fee_index, fee) in lane.fees.iter().enumerate() {
+            if fee.finality_threshold == 0 {
+                issues.push(format!(
+                    "{key}.fees[{fee_index}].finalityThreshold must be > 0"
+                ));
+            }
+            if !thresholds.insert(fee.finality_threshold) {
+                issues.push(format!(
+                    "{key}.fees[{fee_index}] duplicates finalityThreshold {}",
+                    fee.finality_threshold
+                ));
+            }
+        }
     }
 }
 
@@ -855,18 +869,44 @@ fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
     if cctp.attester_seed.trim().is_empty() {
         issues.push("services.cctp_bridge.attester_seed must not be empty".into());
     }
+    if cctp.scan_chunk_blocks == 0 {
+        issues.push("services.cctp_bridge.scan_chunk_blocks must be > 0".into());
+    }
+    check_cctp_timing(cctp, issues);
+    if cctp.balance_critical_wei >= cctp.balance_low_wei {
+        issues
+            .push("services.cctp_bridge.balance_critical_wei must be below balance_low_wei".into());
+    }
+}
+
+/// The bridge's receipt/retry cadence: every value positive, and the poll no
+/// longer than the timeout it sits inside.
+fn check_cctp_timing(cctp: &CctpSection, issues: &mut Vec<String>) {
     if cctp.poll_interval_ms == 0 {
         issues.push("services.cctp_bridge.poll_interval_ms must be > 0".into());
     }
-    if cctp.scan_chunk_blocks == 0 {
-        issues.push("services.cctp_bridge.scan_chunk_blocks must be > 0".into());
+    if cctp.rpc_timeout_secs == 0 {
+        issues.push("services.cctp_bridge.rpc_timeout_secs must be > 0".into());
+    }
+    if cctp.boot_timeout_secs == 0 {
+        issues.push("services.cctp_bridge.boot_timeout_secs must be > 0".into());
     }
     if cctp.receipt_timeout_secs == 0 {
         issues.push("services.cctp_bridge.receipt_timeout_secs must be > 0".into());
     }
-    if cctp.balance_critical_wei >= cctp.balance_low_wei {
-        issues
-            .push("services.cctp_bridge.balance_critical_wei must be below balance_low_wei".into());
+    if cctp.receipt_poll_ms == 0 {
+        issues.push("services.cctp_bridge.receipt_poll_ms must be > 0".into());
+    }
+    if cctp.receipt_poll_ms > cctp.receipt_timeout_secs.saturating_mul(1_000) {
+        issues.push(
+            "services.cctp_bridge.receipt_poll_ms must not exceed receipt_timeout_secs".into(),
+        );
+    }
+    if cctp.max_send_attempts == 0 {
+        issues.push("services.cctp_bridge.max_send_attempts must be > 0".into());
+    }
+    if cctp.status_log_interval_ms == 0 {
+        issues.push("services.cctp_bridge.status_log_interval_ms must be > 0".into());
     }
 }
 
@@ -1047,11 +1087,26 @@ fn check_engine(eng: &EngineSection, issues: &mut Vec<String>) {
     if eng.loops.chunk_size == 0 {
         issues.push("services.engine.loops.chunk_size must be > 0".into());
     }
+    if eng.loops.status_log_interval_ms == 0 {
+        issues.push("services.engine.loops.status_log_interval_ms must be > 0".into());
+    }
     if eng.source_sync.interval_ms == 0 {
         issues.push("services.engine.source_sync.interval_ms must be > 0".into());
     }
     if eng.source_sync.max_per_pass == 0 {
         issues.push("services.engine.source_sync.max_per_pass must be > 0".into());
+    }
+    if eng.source_sync.error_backoff_ms == 0 {
+        issues.push("services.engine.source_sync.error_backoff_ms must be > 0".into());
+    }
+    if eng.source_sync.report_interval_ms == 0 {
+        issues.push("services.engine.source_sync.report_interval_ms must be > 0".into());
+    }
+    if eng.source_sync.request_timeout_secs == 0 {
+        issues.push("services.engine.source_sync.request_timeout_secs must be > 0".into());
+    }
+    if eng.beacon.request_timeout_secs == 0 {
+        issues.push("services.engine.beacon.request_timeout_secs must be > 0".into());
     }
     for (i, url) in eng.beacon.urls.iter().enumerate() {
         check_http_url(&format!("services.engine.beacon.urls[{i}]"), url, issues);
@@ -1113,6 +1168,21 @@ fn check_venue_sim(sim: &VenueSimSection, issues: &mut Vec<String>) {
     }
     if sim.poll_interval_ms == 0 {
         issues.push("services.venue_sim.poll_interval_ms must be > 0".into());
+    }
+    if sim.tick_interval_ms == 0 {
+        issues.push("services.venue_sim.tick_interval_ms must be > 0".into());
+    }
+    if sim.heartbeat_interval_secs == 0 {
+        issues.push("services.venue_sim.heartbeat_interval_secs must be > 0".into());
+    }
+    if sim.rest_timeout_secs == 0 {
+        issues.push("services.venue_sim.rest_timeout_secs must be > 0".into());
+    }
+    if sim.rpc_timeout_secs == 0 {
+        issues.push("services.venue_sim.rpc_timeout_secs must be > 0".into());
+    }
+    if sim.admin_timeout_secs == 0 {
+        issues.push("services.venue_sim.admin_timeout_secs must be > 0".into());
     }
     if let Some(url) = &sim.engine_admin_url {
         check_http_url("services.venue_sim.engine_admin_url", url, issues);

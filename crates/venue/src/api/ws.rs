@@ -122,7 +122,7 @@ fn request_reply(text: &str, subs: &mut Vec<Subscription>, feed: &MarketFeed) ->
         Err(e) => {
             return WsPush::Error {
                 data: format!("unparsable request: {e}"),
-            }
+            };
         }
     };
     match request {
@@ -299,6 +299,7 @@ mod tests {
                 api,
                 None,
                 None,
+                Duration::from_secs(45),
             )
             .unwrap(),
         );

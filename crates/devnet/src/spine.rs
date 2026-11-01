@@ -243,9 +243,9 @@ pub struct Policies {
     pub mine: MinePolicy,
     pub probes: ProbeSchedule,
     /// Rounds of prepend (devnet txs mined before the source's writes land):
-    /// `Some(3)` on T (a steady stream must not starve the parent block);
-    /// `None` on V, which never prepends — mining drains the pool every pass
-    /// (`MinePolicy::PoolDrain`).
+    /// the mainnet profile's configured round budget (a steady stream must
+    /// not starve the parent block); `None` on V, which never prepends —
+    /// mining drains the pool every pass (`MinePolicy::PoolDrain`).
     pub prepend_rounds: Option<u8>,
     /// Pause when the follow head runs this far ahead; `None` = no guard.
     pub gap: Option<u64>,

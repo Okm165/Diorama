@@ -345,7 +345,7 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
                 return Err(crate::error::Error::bad_request(format!(
                     "position {} has size {} but no entryPx (the raw base needs it)",
                     p.coin, p.szi
-                )))
+                )));
             }
         };
         account.positions.insert(
@@ -378,6 +378,7 @@ mod tests {
     use super::*;
     use crate::sim::account::clearinghouse;
     use crate::sim::feed_with;
+    use crate::sim::meta_with;
     use crate::sim::meta_with_table;
 
     /// The served identity holds exactly for a seeded position.
@@ -470,7 +471,8 @@ mod tests {
             Decimal::from(100) + Decimal::new(105, 2) * Decimal::from(10)
         );
         let feed = feed_with(&[("BTC", "10.0", "10.0")]);
-        let s = clearinghouse(&account, &feed, None, 1).unwrap();
+        let meta = meta_with("BTC", 20);
+        let s = clearinghouse(&account, &feed, Some(&meta), 1).unwrap();
         assert_eq!(s.margin_summary.total_raw_usd, Decimal::from(100));
     }
 
@@ -558,7 +560,8 @@ mod tests {
         let mut account = Account::default();
         seed.apply_to(&mut account, 0).unwrap();
         let feed = feed_with(&[("HYPE", "87.454", "87.454")]);
-        let live = view(&account, &feed, None).unwrap();
+        let meta = meta_with("HYPE", 10);
+        let live = view(&account, &feed, Some(&meta)).unwrap();
         assert_eq!(live.margin_summary.total_raw_usd, "1.25".parse().unwrap());
         assert_eq!(
             live.margin_summary.account_value,
@@ -610,7 +613,8 @@ mod tests {
             "positions do not move cash"
         );
         let feed = feed_with(&[("HYPE", "87.9545", "87.9545")]);
-        let live = view(&account, &feed, None).unwrap();
+        let meta = meta_with("HYPE", 10);
+        let live = view(&account, &feed, Some(&meta)).unwrap();
         assert_eq!(
             live.margin_summary.total_raw_usd,
             "22.714333".parse().unwrap()
@@ -743,6 +747,7 @@ mod tests {
     /// through `/control/state` *exactly as set* while the live view follows the
     /// mark — the two surfaces are deliberately different.
     #[test]
+    #[allow(clippy::too_many_lines)] // one fixture: splitting it would hide the round-trip
     fn hl_mock_patch_parses_and_reads_back_as_the_fixture() {
         let seed: AccountSeed = serde_json::from_str(
             r#"{
@@ -771,12 +776,13 @@ mod tests {
         );
 
         let feed = feed_with(&[("HYPE", "300", "300")]);
-        let before = control_view(Some(&seed), &account, &feed, None).unwrap();
+        let meta = meta_with("HYPE", 10);
+        let before = control_view(Some(&seed), &account, &feed, Some(&meta)).unwrap();
         assert_eq!(
             before.margin_summary.unwrap().account_value,
             Decimal::from(50_000)
         );
-        let live = view(&account, &feed, None).unwrap();
+        let live = view(&account, &feed, Some(&meta)).unwrap();
         assert_eq!(
             live.margin_summary.account_value,
             Decimal::from(50_000),
@@ -784,13 +790,13 @@ mod tests {
         );
 
         feed.put_ctx("HYPE".into(), crate::wire::test_ctx("310", "310"), 2);
-        let after = control_view(Some(&seed), &account, &feed, None).unwrap();
+        let after = control_view(Some(&seed), &account, &feed, Some(&meta)).unwrap();
         assert_eq!(
             after.margin_summary.unwrap().account_value,
             Decimal::from(50_000),
             "the fixture read must not move with the mark"
         );
-        let live = view(&account, &feed, None).unwrap();
+        let live = view(&account, &feed, Some(&meta)).unwrap();
         assert_eq!(
             live.margin_summary.account_value,
             Decimal::from(49_000),

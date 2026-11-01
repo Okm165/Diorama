@@ -103,7 +103,9 @@ struct Cache {
     mids: BTreeMap<String, Decimal>,
     mids_at: Option<u64>,
     /// `perpsAtOpenInterestCap`'s last answer (the venue's cap list).
-    pub(crate) oi_caps: Vec<String>,
+    /// `None` = the market plane has not answered yet: the order lane refuses
+    /// rather than treating an unknown cap set as "no caps".
+    pub(crate) oi_caps: Option<Vec<String>>,
 }
 
 pub struct MarketFeed {
@@ -254,13 +256,13 @@ impl MarketFeed {
             tracing::debug!("live OI caps dropped: the feed is stalled (the staleness drill)");
             return;
         }
-        self.write().oi_caps = caps;
+        self.write().oi_caps = Some(caps);
     }
 
-    /// The cached cap list (empty until the first poll lands: the refusal is
-    /// conservative — never a false cap, and the venue's own answer follows
-    /// within a poll interval).
-    pub fn open_interest_caps(&self) -> Vec<String> {
+    /// The cached cap list. `None` until the venue has answered: an unknown
+    /// cap set is refused by the order lane, never read as "nothing is
+    /// capped".
+    pub fn open_interest_caps(&self) -> Option<Vec<String>> {
         self.read().oi_caps.clone()
     }
 

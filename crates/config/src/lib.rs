@@ -33,7 +33,7 @@ pub use instance::{
 pub use sections::{
     BeaconSection, CctpChain, CctpLane, CctpSection, ClosuresSection, EngineAnvil, EngineReth,
     EngineSection, FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection,
-    LoopsSection, MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, Sweep,
+    LaneFee, LoopsSection, MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, Sweep,
     VenueSimSection, VerifierSection,
 };
 
@@ -472,11 +472,26 @@ port = 8080
         assert!(unresolved.is_empty());
         // From defaults.toml:
         assert_eq!(engine(&inst).loops.poll_interval_ms, 1000);
+        assert_eq!(engine(&inst).loops.prepend_rounds, 3);
+        assert_eq!(engine(&inst).loops.status_log_interval_ms, 60_000);
+        assert_eq!(engine(&inst).beacon.request_timeout_secs, 30);
+        assert_eq!(engine(&inst).source_sync.error_backoff_ms, 5_000);
+        assert_eq!(engine(&inst).source_sync.report_interval_ms, 5_000);
+        assert_eq!(engine(&inst).source_sync.request_timeout_secs, 180);
         assert_eq!(l1(&inst).follow_margin_blocks, 2);
         assert_eq!(engine(&inst).journal.blocks, 1024);
         // From the instance:
         assert_eq!(l1(&inst).fork_offset, 128);
         assert_eq!(engine(&inst).http.port, 8080);
+    }
+
+    /// The loop cadence is exactly the configured interval: no code-side
+    /// floor, and the retry/backoff sites reuse this one value.
+    #[test]
+    fn the_loop_cadence_is_exactly_the_configured_interval() {
+        let (inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
+        let loops = &engine(&inst).loops;
+        assert_eq!(loops.poll(), std::time::Duration::from_millis(1000));
     }
 
     #[test]
@@ -520,6 +535,11 @@ port = 8096
             "defaults.toml drives the mode"
         );
         assert_eq!(cctp.poll_interval_ms, 1000, "shared defaults merge in");
+        assert_eq!(cctp.rpc_timeout_secs, 30);
+        assert_eq!(cctp.boot_timeout_secs, 300);
+        assert_eq!(cctp.receipt_poll_ms, 500);
+        assert_eq!(cctp.max_send_attempts, 5);
+        assert_eq!(cctp.status_log_interval_ms, 60_000);
 
         let src = src.replace(
             "attester_seed = \"seed\"",
@@ -692,7 +712,7 @@ port = 8096
 
         // A mainnet instance carrying the simulator's section:
         let src = format!(
-            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\npoll_interval_ms = 5000\n[services.venue_sim.info]\naddr = \"0.0.0.0\"\nport = 8090\n[services.venue_sim.control]\naddr = \"0.0.0.0\"\nport = 8091\n",
+            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\npoll_interval_ms = 5000\ntick_interval_ms = 1000\nheartbeat_interval_secs = 60\nrest_timeout_secs = 10\nrpc_timeout_secs = 30\nadmin_timeout_secs = 45\n[services.venue_sim.info]\naddr = \"0.0.0.0\"\nport = 8090\n[services.venue_sim.control]\naddr = \"0.0.0.0\"\nport = 8091\n",
             minimal_instance()
         );
         let (inst, _) = load_str(&src, &wiring()).unwrap();
@@ -716,6 +736,11 @@ port = 8096
         assert_eq!(sim.markets, vec!["BTC", "ETH"]);
         assert_eq!(sim.info.port, 8090);
         assert_eq!(sim.control.port, 8091);
+        assert_eq!(sim.tick_interval_ms, 1000);
+        assert_eq!(sim.heartbeat_interval_secs, 60);
+        assert_eq!(sim.rest_timeout_secs, 10);
+        assert_eq!(sim.rpc_timeout_secs, 30);
+        assert_eq!(sim.admin_timeout_secs, 45);
         assert!(sim.engine_admin_url.is_none());
         assert!(
             inst.take_venue_sim().is_err(),

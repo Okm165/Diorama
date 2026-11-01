@@ -19,12 +19,13 @@ pub use diorama_devnet::engine::ScratchTargets as Targets;
 
 use diorama_devnet::engine::Verdict;
 
-/// The wait bound for one window's source movement: the public chain produces
-/// a block about every second, so the bound only fires on a stalled source
-/// (which must fail the run, not hang it).
-const MOVE_WAIT: Duration = Duration::from_secs(120);
-
-pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<Verdict> {
+pub async fn run(
+    cfg: Instance,
+    targets: Targets,
+    windows: u64,
+    move_wait: Duration,
+    max_windows: u64,
+) -> Result<Verdict> {
     let Targets { rpc, anvil } = targets;
     let rpc = Endpoints::parse([rpc]).map_err(|detail| ConfigError::Invalid {
         issues: vec![detail],
@@ -43,11 +44,16 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<Verdic
         &anvil,
         pin,
         &format!(
-            "windows:  {windows} at least; the run continues, bounded, until a window composes a change"
+            "windows:  {windows} at least; the run continues until a window composes a change{}",
+            if max_windows == 0 {
+                String::new()
+            } else {
+                format!(", bounded at {max_windows}")
+            }
         ),
     );
 
-    let (done, writes, mut verdict) = windows_loop(&ctx, windows).await?;
+    let (done, writes, mut verdict) = windows_loop(&ctx, windows, move_wait, max_windows).await?;
     println!();
     if writes == 0 {
         println!("   ✘ no window composed a change (the watchlist saw no activity)");
@@ -58,20 +64,36 @@ pub async fn run(cfg: Instance, targets: Targets, windows: u64) -> Result<Verdic
     Ok(verdict)
 }
 
-/// The window loop: `windows` windows at least, and up to 6x (never below 12)
-/// while nothing has composed — a run whose windows were all quiet proves
-/// nothing about the pipeline, and the cap keeps a quiet watchlist from
-/// running forever. Returns `(windows, composed keys, ok)`.
-async fn windows_loop(ctx: &Ctx, windows: u64) -> Result<(u64, usize, Verdict)> {
-    let cap = windows.saturating_mul(6).max(12);
+/// The window loop's bound: the operator's `max_windows` when supplied, and
+/// no code-side cap when it is zero. The minimum requested window count still
+/// applies, so a max below it cannot cut the run short.
+fn window_cap(windows: u64, max_windows: u64) -> u64 {
+    if max_windows == 0 {
+        u64::MAX
+    } else {
+        max_windows.max(windows)
+    }
+}
+
+/// The window loop: `windows` windows at least, continuing while nothing has
+/// composed. `max_windows = 0` means no code-side cap: the operator's
+/// process deadline (the Job's) is the only bound. Returns
+/// `(windows, composed keys, ok)`.
+async fn windows_loop(
+    ctx: &Ctx,
+    windows: u64,
+    move_wait: Duration,
+    max_windows: u64,
+) -> Result<(u64, usize, Verdict)> {
+    let cap = window_cap(windows, max_windows);
     let mut done = 0u64;
     let mut writes = 0usize;
     let mut verdict = Verdict::Passed;
     while done < cap {
-        if !wait_for_move(ctx).await? {
+        if !wait_for_move(ctx, move_wait).await? {
             println!(
                 "   ✘ the source did not move within {}s; stopping",
-                MOVE_WAIT.as_secs()
+                move_wait.as_secs()
             );
             verdict = Verdict::Failed;
             break;
@@ -104,9 +126,9 @@ async fn windows_loop(ctx: &Ctx, windows: u64) -> Result<(u64, usize, Verdict)> 
 
 /// Wait (bounded) for the source head to move past the follow cursor: a
 /// window needs a block to compose, and the follow is a no-op otherwise.
-async fn wait_for_move(ctx: &Ctx) -> Result<bool> {
+async fn wait_for_move(ctx: &Ctx, move_wait: Duration) -> Result<bool> {
     let followed = ctx.plane.state.source_last_block()?.unwrap_or(0);
-    let deadline = std::time::Instant::now() + MOVE_WAIT;
+    let deadline = std::time::Instant::now() + move_wait;
     loop {
         if ctx.source_rpc.block_number().await? > followed {
             return Ok(true);
@@ -114,6 +136,23 @@ async fn wait_for_move(ctx: &Ctx) -> Result<bool> {
         if std::time::Instant::now() >= deadline {
             return Ok(false);
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // The engine's configured cadence, not a second poll interval.
+        tokio::time::sleep(ctx.engine.loops.poll()).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_cap;
+
+    /// The loop's bound is the operator's, never an invented multiplier: zero
+    /// means the process deadline is the only cap, and a max below the
+    /// requested windows cannot cut the run short.
+    #[test]
+    fn the_window_cap_is_the_operators() {
+        assert_eq!(window_cap(5, 0), u64::MAX);
+        assert_eq!(window_cap(5, 30), 30);
+        assert_eq!(window_cap(5, 3), 5);
+        assert_eq!(window_cap(5, 5), 5);
     }
 }

@@ -89,13 +89,17 @@ pub(crate) struct EngineClient {
 }
 
 impl EngineClient {
-    pub fn new(url: &str, jwt_path: &Path) -> Result<Self, EngineApiError> {
+    pub fn new(
+        url: &str,
+        jwt_path: &Path,
+        request_timeout: std::time::Duration,
+    ) -> Result<Self, EngineApiError> {
         let secret = JwtSecret::from_file(jwt_path).map_err(|source| EngineApiError::JwtRead {
             path: jwt_path.to_path_buf(),
             source,
         })?;
         let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(180))
+            .timeout(request_timeout)
             .build()
             .map_err(|source| EngineApiError::ClientBuild { source })?;
         Ok(Self {

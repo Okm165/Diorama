@@ -38,24 +38,27 @@ pub struct ApiState {
 }
 
 impl ApiState {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the state's inputs are the deployment's own boundaries; grouping them would \
+                  hide which caller supplied each"
+    )]
     pub fn new(
         feed: Arc<MarketFeed>,
         sim: Arc<Sim>,
         api: RestClient,
         engine_admin: Option<String>,
         bridge: Option<Arc<crate::bridge::metrics::BridgeMetrics>>,
+        admin_timeout: std::time::Duration,
     ) -> Result<Self> {
         Ok(Self {
             feed,
             sim,
             api,
             engine_admin,
-            // The engine's re-pin forks from a public RPC: the reset itself
-            // can take a while, so the admin call gets a wider window than a
-            // plain read would.
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(45))
-                .build()?,
+            // The engine's re-pin forks from a public RPC: the deployment
+            // sets this call's own budget.
+            http: reqwest::Client::builder().timeout(admin_timeout).build()?,
             bridge,
             ws_pool: None,
         })

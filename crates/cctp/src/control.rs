@@ -41,6 +41,7 @@ pub struct ControlState {
     /// Ethereum, `0` on HyperEVM).
     pub min_fees: BTreeMap<(Domain, Domain), Option<U256>>,
     pub receipt_timeout: Duration,
+    pub receipt_poll: Duration,
 }
 
 /// The control router (8096).
@@ -205,9 +206,9 @@ pub(crate) async fn relay(
             .ok_or_else(|| Error::bad_request(format!("no watched message with nonce {nonce}")))?;
         if record.state != RelayState::Signed {
             return Err(Error::bad_request(format!(
-                    "message {nonce} is {:?}; only SIGNED messages relay (reattest an expired one first)",
-                    record.state
-                ),));
+                "message {nonce} is {:?}; only SIGNED messages relay (reattest an expired one first)",
+                record.state
+            )));
         }
     }
     let confirmed = state.relayer.relay_now(RelayNow::of(request.nonce)).await?;
@@ -303,9 +304,9 @@ async fn hook_pin(
             let chain = by_domain(&state.chains, request.destination)?;
             if !crate::transfer::has_code(&chain.rpc, wrapper).await? {
                 return Err(Error::bad_request(format!(
-                        "the hook wrapper {wrapper} has no code on {} (a re-pin?); restart the bridge to redeploy it",
-                        chain.name
-                    ),));
+                    "the hook wrapper {wrapper} has no code on {} (a re-pin?); restart the bridge to redeploy it",
+                    chain.name
+                )));
             }
             Ok((
                 wrapper.into_word(),
@@ -372,13 +373,20 @@ pub(crate) async fn transfer(
         hook_data.as_ref(),
     );
     let hash = submit_burn(&state, chain, &calldata).await?;
-    let receipt = match wait_for_receipt(&chain.write_rpc, hash, state.receipt_timeout).await? {
+    let receipt = match wait_for_receipt(
+        &chain.write_rpc,
+        hash,
+        state.receipt_timeout,
+        state.receipt_poll,
+    )
+    .await?
+    {
         Some(receipt) if receipt.status() => BurnReceipt::Observed,
         Some(_) => {
             return Err(Error::TxReverted {
                 chain: chain.name,
                 tx: hash,
-            })
+            });
         }
         None => BurnReceipt::Pending,
     };
@@ -446,10 +454,10 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
     let balance = chain.usdc_balance(state.sender.address()).await?;
     if balance < amount {
         return Err(Error::bad_request(format!(
-                "sender {} holds {balance} USDC on {}, needs {amount} (deal via the chain's admin surface)",
-                state.sender.address(),
-                chain.name,
-            ),));
+            "sender {} holds {balance} USDC on {}, needs {amount} (deal via the chain's admin surface)",
+            state.sender.address(),
+            chain.name,
+        )));
     }
     let allowance = chain
         .usdc_allowance(state.sender.address(), chain.token_messenger)
@@ -466,19 +474,26 @@ async fn ensure_allowance(state: &ControlState, chain: &Chain, amount: U256) -> 
         .sender
         .send(&chain.write_rpc, chain.usdc, &approve, U256::ZERO)
         .await?;
-    match wait_for_receipt(&chain.write_rpc, hash, state.receipt_timeout).await? {
+    match wait_for_receipt(
+        &chain.write_rpc,
+        hash,
+        state.receipt_timeout,
+        state.receipt_poll,
+    )
+    .await?
+    {
         Some(receipt) if receipt.status() => {}
         Some(_) => {
             return Err(Error::TxReverted {
                 chain: chain.name,
                 tx: hash,
-            })
+            });
         }
         None => {
             return Err(Error::bad_request(format!(
                 "approve tx {hash} was not mined within {}s; retry the transfer",
                 state.receipt_timeout.as_secs()
-            )))
+            )));
         }
     }
     tracing::info!(chain = chain.name, tx = %hash, "cctp approve submitted");

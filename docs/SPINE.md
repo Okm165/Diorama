@@ -115,7 +115,7 @@ field), never by a branch in shared code.
 | 3 | Reset signal | cursor hash + fork-base position | the pin canary (a recorded instance word) | `ResetDetector` | ADR-0002; measured (pre-pin hash reads forward to the fork source) |
 | 4 | Clock | `AlignToSource` (the applied block's timestamp + the plane's live offset, clamped monotonic) | `Native` (V's own clock; the *product's* clock is the sim's served time policy) | `ClockPolicy` | the venue's own time policy jumps every chain's clock forward; `chain_time = max(wall, head)` |
 | 5 | Mining | `PerAppliedBlock` (the parent stream is the devnet's cadence) | `PoolDrain` (an idle chain stays static) | `MinePolicy` | measured (the 2026-10 automine-reset incident) |
-| 6 | Prepend | `Some(3)` (a tx arriving mid-apply would be mined against a state its gas was never estimated on) | `None` | `Policies::prepend_rounds` | measured (~5 % short, reverted) |
+| 6 | Prepend | `Some(prepend_rounds)` (a tx arriving mid-apply would be mined against a state its gas was never estimated on) | `None` | `Policies::prepend_rounds` | measured (~5 % short, reverted); the round budget is explicit config |
 | 7 | Probes | `PerBlock` (reth can serve the applied block) | `LiveParity` (the source is latest-only; the composed BAL is the expected side) | `ProbeSchedule` | divergence #1 |
 | 8 | Gap guard | `Some(max_gap_blocks)` | `Some(max_gap_blocks)` | `Policies::gap` | shared policy, per-instance value |
 | 9 | Simulation | none — real EVM, real state | the Core (closed-source matching engine) simulated; the EVM side (V) real | `crates/venue/src/sim` (its own crate folder) | see the cross-reference table |

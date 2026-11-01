@@ -43,6 +43,12 @@ max_gap_blocks = 300
 # Max JSON-RPC batch size: source reads (a public endpoint may refuse more;
 # measured: drpc's free plan allows 3) and cheatcode writes to the local anvils.
 chunk_size = 500
+# Prepend rounds: devnet txs mined in their own block before the parent's
+# diffs land (T only; the venue sets 0). A steady stream must not starve the
+# parent block, so the drain is bounded by this explicit round budget.
+prepend_rounds = 3
+# The follow-status heartbeat (one line per interval).
+status_log_interval_ms = 60000
 
 [services.engine.verifier]
 # Each applied block is verified against the source: the BAL carries the
@@ -61,6 +67,12 @@ sweep = "sampled"
 interval_ms = 1000
 # Payloads delivered per pass (each is a full block execution).
 max_per_pass = 256
+# Backoff after a top-up fault.
+error_backoff_ms = 5000
+# The periodic report (gap gauge + log line) cadence.
+report_interval_ms = 5000
+# The Engine API request budget (one `newPayload` executes a block).
+request_timeout_secs = 180
 
 [services.engine.journal]
 blocks = 1024
@@ -69,6 +81,8 @@ blocks = 1024
 # Beacon-API base URLs, tried in order (local Lighthouse first). The top-up
 # loop is the only reader (EIP-8379); the instance supplies the URL.
 urls = []
+# The beacon REST request budget.
+request_timeout_secs = 30
 
 [services.engine.http]
 addr = "0.0.0.0"
@@ -86,6 +100,15 @@ addr = "0.0.0.0"
 # default four-market set (20+20+4x2+2 = 50 per pass, 12 passes/min).
 [services.venue_sim]
 poll_interval_ms = 5000
+# The account plane's self-advance tick (funding, liquidations, persist).
+tick_interval_ms = 1000
+# The market-plane heartbeat log cadence.
+heartbeat_interval_secs = 60
+# HTTP timeouts: the venue `/info` lane, the simulator's RPC reads, and the
+# engine's admin call.
+rest_timeout_secs = 10
+rpc_timeout_secs = 30
+admin_timeout_secs = 45
 
 [services.venue_sim.info]
 addr = "0.0.0.0"
@@ -109,6 +132,9 @@ fast_burn_allowance = 56854459.08
 # One watcher pass per second on each chain: new MessageSent logs + due
 # attestations.
 poll_interval_ms = 1000
+# The JSON-RPC request budget and the boot wait for each chain.
+rpc_timeout_secs = 30
+boot_timeout_secs = 300
 # The emulated PENDING window: the attestation is served this many
 # seconds after the burn (0 = immediately).
 finality_delay_secs = 0
@@ -123,6 +149,12 @@ expiration_blocks = 0
 scan_chunk_blocks = 2000
 # How long a submitted tx may wait for a receipt inside one tick.
 receipt_timeout_secs = 30
+# Receipt poll cadence while a submitted tx is pending.
+receipt_poll_ms = 500
+# Node-side send refusals before a message is parked.
+max_send_attempts = 5
+# Bridge status log cadence (the store's counts).
+status_log_interval_ms = 60000
 # Who drives relays: `auto` (the relayer's tick) or `manual` (only
 # `POST /control/relay` — deterministic expiry/reattest tests).
 relayer = "auto"

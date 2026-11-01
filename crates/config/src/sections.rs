@@ -73,6 +73,11 @@ pub struct CctpSection {
     pub fast_burn_allowance: f64,
     /// One watcher pass per interval.
     pub poll_interval_ms: u64,
+    /// The JSON-RPC request budget for the bridge's chain clients.
+    pub rpc_timeout_secs: u64,
+    /// How long boot waits for each chain to answer (a coordinated restart is
+    /// the normal cause of a slow boot).
+    pub boot_timeout_secs: u64,
     /// The emulated PENDING window (0 = attest immediately).
     pub finality_delay_secs: u64,
     /// The served `expirationBlock` window in destination blocks (0 = no
@@ -85,6 +90,12 @@ pub struct CctpSection {
     pub scan_chunk_blocks: u64,
     /// How long a submitted tx may wait for a receipt inside one tick.
     pub receipt_timeout_secs: u64,
+    /// Receipt poll cadence while a submitted tx is pending.
+    pub receipt_poll_ms: u64,
+    /// Node-side send refusals before a message is parked.
+    pub max_send_attempts: u32,
+    /// Bridge status log cadence (the store's counts).
+    pub status_log_interval_ms: u64,
     /// Who drives relays: the relayer's own tick (`auto`) or only
     /// `POST /control/relay` (`manual`) — the deterministic mode for
     /// expiry/reattest tests.
@@ -138,6 +149,21 @@ pub struct CctpChain {
 pub struct CctpLane {
     pub source: String,
     pub destination: String,
+    /// The Iris fee table this lane serves. Empty = no fee data is served
+    /// for the lane (the route 404s) unless the lane's domains match a
+    /// measured pair. A fabricated zero table is never served.
+    #[serde(default)]
+    pub fees: Vec<LaneFee>,
+}
+
+/// One `(finalityThreshold, minimumFee)` row of a lane's Iris fee table.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LaneFee {
+    #[serde(rename = "finalityThreshold")]
+    pub finality_threshold: u32,
+    #[serde(rename = "minimumFee")]
+    pub minimum_fee: u64,
 }
 
 /// `[services.venue_sim]`: the venue simulator (info + control API).
@@ -155,6 +181,17 @@ pub struct VenueSimSection {
     /// REST cache cadence (WS pushes are the primary freshness source; the
     /// budget meter gates this poller).
     pub poll_interval_ms: u64,
+    /// The account plane's self-advance tick (funding, liquidations, persist).
+    pub tick_interval_ms: u64,
+    /// The market-plane heartbeat log cadence.
+    pub heartbeat_interval_secs: u64,
+    /// HTTP timeout for the venue's `/info` lane (REST snapshots and the
+    /// untouched-account passthrough).
+    pub rest_timeout_secs: u64,
+    /// HTTP timeout for the simulator's own RPC reads (the Core<->EVM bridge).
+    pub rpc_timeout_secs: u64,
+    /// HTTP timeout for the engine's admin call (`/admin/epoch`).
+    pub admin_timeout_secs: u64,
     /// The daloc-facing info API (8090).
     pub info: HttpSection,
     /// The control API (8091).
@@ -265,6 +302,11 @@ pub struct LoopsSection {
     pub max_gap_blocks: u64,
     /// Max JSON-RPC batch size for raw-tx submissions and cheatcode writes.
     pub chunk_size: usize,
+    /// Prepend rounds: devnet txs mined in their own block before the
+    /// parent's diffs land. `0` disables prepending (the venue's mode).
+    pub prepend_rounds: u8,
+    /// Follow-status log cadence (the mirror's heartbeat).
+    pub status_log_interval_ms: u64,
 }
 
 impl LoopsSection {
@@ -324,6 +366,12 @@ pub struct SourceSyncSection {
     pub interval_ms: u64,
     /// Payloads delivered per pass (each is a full block execution).
     pub max_per_pass: u64,
+    /// Backoff after a top-up fault.
+    pub error_backoff_ms: u64,
+    /// The periodic report (gap gauge + log line) cadence.
+    pub report_interval_ms: u64,
+    /// The Engine API request budget (one `newPayload` executes a block).
+    pub request_timeout_secs: u64,
     /// reth's authenticated engine API endpoint.
     pub engine_url: Option<String>,
     /// JWT secret shared with the consensus client (a path, never the value).
@@ -381,6 +429,8 @@ pub struct JournalSection {
 pub struct BeaconSection {
     #[serde(default)]
     pub urls: Vec<String>,
+    /// The beacon REST request budget.
+    pub request_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

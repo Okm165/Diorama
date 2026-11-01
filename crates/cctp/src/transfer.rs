@@ -464,7 +464,16 @@ impl Wallet {
 }
 
 const NO_PARAMS: [u8; 0] = [];
-const RECEIPT_POLL: Duration = Duration::from_millis(500);
+
+/// The EIP-1559 fee cap from the node's own numbers: the tip is the node's
+/// gas price minus the latest base fee (the priority component it is actually
+/// paying), and the cap is the next block's base fee plus that tip. No
+/// invented multiplier: `eth_feeHistory` supplies both base fees.
+fn fee_cap(gas_price: U256, latest_base: u128, next_base: u128) -> (u128, u128) {
+    let tip = gas_price.saturating_sub(U256::from(latest_base));
+    let cap = U256::from(next_base).saturating_add(tip);
+    (cap.saturating_to::<u128>(), tip.saturating_to::<u128>())
+}
 
 /// Builds, signs (EIP-1559) and submits calls. The devnet's block production
 /// belongs to the deployment (T is mined by the engine's applier; V by the
@@ -515,14 +524,29 @@ impl TxSender {
             .await?;
         let gas_limit = self.estimate_gas(rpc, to, input, value).await?;
         let gas_price: U256 = rpc.call("eth_gasPrice", NO_PARAMS).await?;
+        let fee_history: alloy_rpc_types_eth::FeeHistory = rpc
+            .call(
+                "eth_feeHistory",
+                (U64::from(1), "latest", Vec::<f64>::new()),
+            )
+            .await?;
+        let latest_base = fee_history
+            .latest_block_base_fee()
+            .ok_or(Error::NoFeeData {
+                what: "eth_feeHistory latest base fee",
+            })?;
+        let next_base = fee_history.next_block_base_fee().ok_or(Error::NoFeeData {
+            what: "eth_feeHistory next base fee",
+        })?;
+        let (max_fee, priority_fee) = fee_cap(gas_price, latest_base, next_base);
         let tx = TxEip1559 {
             chain_id,
             nonce: nonce.to::<u64>(),
             gas_limit,
-            // A fee ceiling with headroom for the next base-fee step; the
-            // priority is the node's own gas price, not a fixed gwei cap.
-            max_fee_per_gas: gas_price.saturating_mul(U256::from(2)).to::<u128>(),
-            max_priority_fee_per_gas: gas_price.to::<u128>(),
+            // The cap and tip are derived from the node's fee history and
+            // gas price; there is no invented headroom multiplier.
+            max_fee_per_gas: max_fee,
+            max_priority_fee_per_gas: priority_fee,
             to,
             value,
             input: Bytes::copy_from_slice(input),
@@ -564,12 +588,13 @@ pub async fn receipt(rpc: &Rpc, tx: B256) -> Result<Option<TransactionReceipt>> 
     Ok(rpc.call("eth_getTransactionReceipt", (tx,)).await?)
 }
 
-/// Wait for a receipt up to `timeout`. `None` = not mined yet (the caller
-/// re-checks next tick; it never re-sends blindly).
+/// Wait for a receipt up to `timeout`, polling at `poll`. `None` = not mined
+/// yet (the caller re-checks next tick; it never re-sends blindly).
 pub async fn wait_for_receipt(
     rpc: &Rpc,
     tx: B256,
     timeout: Duration,
+    poll: Duration,
 ) -> Result<Option<TransactionReceipt>> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -579,7 +604,7 @@ pub async fn wait_for_receipt(
         if tokio::time::Instant::now() >= deadline {
             return Ok(None);
         }
-        tokio::time::sleep(RECEIPT_POLL).await;
+        tokio::time::sleep(poll).await;
     }
 }
 
@@ -942,5 +967,24 @@ mod tests {
         );
         assert_eq!(measured_fees(0, 0), None);
         assert_eq!(measured_fees(19, 19), None);
+    }
+
+    /// The EIP-1559 cap is derived from the node's own base fees and gas
+    /// price: the tip is the priority component, the cap is the next base fee
+    /// plus that tip — no invented multiplier.
+    #[test]
+    fn the_fee_cap_is_derived_not_multiplied() {
+        // gas price 3 gwei, latest base 2 gwei -> tip 1 gwei; next base 2.5
+        // gwei -> cap 3.5 gwei.
+        let gas_price = U256::from(3_000_000_000u64);
+        let (cap, tip) = fee_cap(gas_price, 2_000_000_000, 2_500_000_000);
+        assert_eq!(tip, 1_000_000_000);
+        assert_eq!(cap, 3_500_000_000);
+
+        // A gas price below the base fee has no priority component; the cap
+        // is exactly the next base fee.
+        let (cap, tip) = fee_cap(U256::from(1u64), 2_000_000_000, 2_500_000_000);
+        assert_eq!(tip, 0);
+        assert_eq!(cap, 2_500_000_000);
     }
 }

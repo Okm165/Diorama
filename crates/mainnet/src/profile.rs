@@ -14,7 +14,7 @@
 //! | clock | align to the parent block + live offset | native |
 //! | mining | one T block per applied parent block | pool drain |
 //! | probes | per applied block | live parity against the composed BAL |
-//! | prepend | 3 rounds (a steady stream must not starve the parent) | 1 |
+//! | prepend | `prepend_rounds` (a steady stream must not starve the parent) | 0 |
 //!
 //! The composer itself is generic (`diorama_devnet::bal::compose`): it picks the
 //! native rung from `Capabilities::native_bal` and synthesizes otherwise, so
@@ -64,9 +64,9 @@ pub fn policies(loops: &LoopsSection) -> Policies {
         probes: ProbeSchedule::PerBlock,
         // A tx arriving mid-apply would be mined against a state its gas was
         // never estimated on (measured: ~5% short, reverted), so the pool is
-        // drained first — bounded so a steady stream cannot starve the parent
-        // block.
-        prepend_rounds: Some(3),
+        // drained first — bounded by the configured round budget so a steady
+        // stream cannot starve the parent block.
+        prepend_rounds: (loops.prepend_rounds > 0).then_some(loops.prepend_rounds),
         gap: Some(loops.max_gap_blocks),
     }
 }
@@ -116,6 +116,8 @@ mod tests {
             poll_interval_ms: 1000,
             max_gap_blocks: 32,
             chunk_size: 100,
+            prepend_rounds: 3,
+            status_log_interval_ms: 60_000,
         };
         let p = policies(&loops);
         assert_eq!(p.clock, ClockPolicy::AlignToSource);
@@ -123,6 +125,11 @@ mod tests {
         assert_eq!(p.probes, ProbeSchedule::PerBlock);
         assert_eq!(p.prepend_rounds, Some(3));
         assert_eq!(p.gap, Some(32));
+        let disabled = LoopsSection {
+            prepend_rounds: 0,
+            ..loops
+        };
+        assert_eq!(policies(&disabled).prepend_rounds, None);
     }
 
     /// The bundle's own divergences, pinned: the label, the journal scope

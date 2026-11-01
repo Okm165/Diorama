@@ -42,8 +42,13 @@ use std::time::{Duration, Instant};
 const MAINNET_GENESIS_TIME: u64 = 1_606_824_023;
 const SECONDS_PER_SLOT: u64 = 12;
 
+/// The CL head advances at most once per slot, so caching it for one slot is
+/// the finest interval that cannot miss a head. A longer cache would be an
+/// invented freshness bound.
+const HEAD_CACHE_TTL: Duration = Duration::from_secs(SECONDS_PER_SLOT);
+
 /// The CL head's cache: when it was fetched and the execution block it named
-/// (one beacon call per minute).
+/// (one beacon call per slot).
 struct HeadCache {
     at: Instant,
     block: u64,
@@ -54,8 +59,10 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
         return;
     };
     let interval = Duration::from_millis(ctx.engine.source_sync.interval_ms);
+    let error_backoff = Duration::from_millis(ctx.engine.source_sync.error_backoff_ms);
+    let report_interval = Duration::from_millis(ctx.engine.source_sync.report_interval_ms);
     let mut last_report = Instant::now();
-    // CL head execution block, cached for a minute (one beacon call per minute).
+    // CL head execution block, cached for one slot (the head's own cadence).
     let mut head_cache: Option<HeadCache> = None;
     loop {
         match top_up(&ctx, &engine).await {
@@ -66,27 +73,30 @@ pub(crate) async fn source_sync_loop(ctx: Arc<Ctx>) {
                 ctx.plane
                     .facts
                     .publish(diorama_devnet::facts::Fact::TopUpDelivered { delivered: n });
-                report_top_up(&ctx, n, &mut last_report, &mut head_cache).await;
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                report_top_up(&ctx, n, &mut last_report, &mut head_cache, report_interval).await;
+                // The pass already did `max_per_pass` block executions; yield
+                // the scheduler without an invented sleep.
+                tokio::task::yield_now().await;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "top-up failed");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(error_backoff).await;
             }
         }
     }
 }
 
-/// The top-up's periodic report (at most one per 5 s): the CL-vs-reth gap
-/// gauge and the log line. A beacon fault degrades the gauge only — the
-/// delivery itself already succeeded.
+/// The top-up's periodic report (at most one per configured interval): the
+/// CL-vs-reth gap gauge and the log line. A beacon fault degrades the gauge
+/// only — the delivery itself already succeeded.
 async fn report_top_up(
     ctx: &Ctx,
     payloads: usize,
     last_report: &mut Instant,
     head_cache: &mut Option<HeadCache>,
+    report_interval: Duration,
 ) {
-    if last_report.elapsed() <= Duration::from_secs(5) {
+    if last_report.elapsed() <= report_interval {
         return;
     }
     if let (Some(cl_head), Ok(reth_head)) = (
@@ -102,11 +112,11 @@ async fn report_top_up(
     *last_report = Instant::now();
 }
 
-/// The CL head's execution block number, cached for a minute. Metrics-only:
+/// The CL head's execution block number, cached for one slot. Metrics-only:
 /// a beacon fault here degrades the gauge, not the top-up itself.
 async fn cl_head_el_block(beacon: &BeaconClient, cache: &mut Option<HeadCache>) -> Option<u64> {
     if let Some(cache) = cache {
-        if cache.at.elapsed() < Duration::from_secs(60) {
+        if cache.at.elapsed() < HEAD_CACHE_TTL {
             return Some(cache.block);
         }
     }
@@ -155,7 +165,7 @@ async fn top_up(ctx: &Ctx, engine: &crate::source_sync::engine_api::EngineClient
                     el_head,
                     number,
                     slot,
-                })
+                });
             }
             SlotOutcome::Delivered => {
                 delivered += 1;
@@ -255,7 +265,7 @@ async fn submit_payload(
                 number: next.number,
                 status: other.as_str().to_string(),
                 message: other.validation_error().unwrap_or_default().to_string(),
-            })
+            });
         }
     }
     engine
@@ -283,4 +293,23 @@ async fn deliver_slot(
     submit_payload(engine, &next).await?;
     tracing::debug!(block = next.number, slot, "top-up delivered");
     Ok(SlotOutcome::Delivered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The CL head cache is derived from the slot time: one slot is the
+    /// finest interval that cannot miss a head, not an invented minute.
+    #[test]
+    fn the_head_cache_is_one_slot() {
+        assert_eq!(HEAD_CACHE_TTL, Duration::from_secs(SECONDS_PER_SLOT));
+    }
+
+    /// The slot arithmetic is the protocol's: genesis-relative 12 s slots.
+    #[test]
+    fn the_first_payload_slot_follows_the_el_timestamp() {
+        let slot = first_payload_slot(MAINNET_GENESIS_TIME + SECONDS_PER_SLOT * 100);
+        assert_eq!(slot, 101);
+    }
 }

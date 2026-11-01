@@ -13,10 +13,12 @@
 //!   the client also tolerates `PENDING`/empty).
 //! - `GET /v2/publicKeys` — `{"publicKeys":[{"publicKey":"0x04…","cctpVersion":2}]}`
 //!   with the devnet attester's 66-byte uncompressed key.
-//! - `GET /v2/burn/USDC/fees/{source}/{destination}` — the measured fee table:
-//!   `0→19` = `[{1000,1},{2000,0}]`, `19→0` = `[{1000,0},{2000,0}]`.
+//! - `GET /v2/burn/USDC/fees/{source}/{destination}` — the lane's configured
+//!   fee table, else the measured pair (`0→19` = `[{1000,1},{2000,0}]`,
+//!   `19→0` = `[{1000,0},{2000,0}]`); a configured lane with neither 404s.
 //! - `GET /v2/fastBurn/USDC/allowance?sourceDomain=` — `{allowance,
-//!   lastUpdated}` (a devnet stand-in value; the shape is what clients read).
+//!   lastUpdated}` (the instance's configured figure; the shape is what
+//!   clients read).
 //!
 //! This module owns only the Iris vocabulary: the store's faults map to 500s
 //! here, and the exact 404 body lives in one place ([`IrisError::not_found`]).
@@ -104,7 +106,7 @@ pub(crate) struct PublicKeyEntry {
     pub cctp_version: u8,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, Clone)]
 pub(crate) struct FeeEntry {
     #[serde(rename = "finalityThreshold")]
     pub finality_threshold: u32,
@@ -206,26 +208,34 @@ async fn fees(
     let configured = state
         .lanes
         .iter()
-        .any(|lane| lane.source == Domain(source) && lane.destination == Domain(destination));
-    if !configured {
+        .find(|lane| lane.source == Domain(source) && lane.destination == Domain(destination));
+    let Some(lane) = configured else {
         return Err(IrisError::not_found_what(format!(
             "no fee data for sourceDomain {source}, destinationDomain {destination}"
         )));
-    }
-    // Keep the measured 0→19 Fast fee; every other configured devnet lane is
-    // free at both thresholds. The table is served only for a lane this bridge
-    // actually watches.
-    let entries = measured_fees(source, destination).unwrap_or([
-        FeeEntry {
-            finality_threshold: 1000,
-            minimum_fee: 0,
-        },
-        FeeEntry {
-            finality_threshold: 2000,
-            minimum_fee: 0,
-        },
-    ]);
-    Ok(Json(entries.into_iter().collect()))
+    };
+    // A lane's own configured table wins; otherwise only a measured pair is
+    // served. A configured lane with neither has no honest fee answer — the
+    // route 404s rather than inventing a zero table.
+    let entries: Vec<FeeEntry> = if lane.fees.is_empty() {
+        match measured_fees(source, destination) {
+            Some(measured) => measured.into_iter().collect(),
+            None => {
+                return Err(IrisError::not_found_what(format!(
+                    "no fee data for sourceDomain {source}, destinationDomain {destination}"
+                )));
+            }
+        }
+    } else {
+        lane.fees
+            .iter()
+            .map(|fee| FeeEntry {
+                finality_threshold: fee.finality_threshold,
+                minimum_fee: fee.minimum_fee,
+            })
+            .collect()
+    };
+    Ok(Json(entries))
 }
 
 #[derive(Debug, Deserialize)]
@@ -503,10 +513,9 @@ mod tests {
         );
     }
 
-    /// The fee route is lane-scoped: a configured pair is served (the measured
-    /// 0→19 table or the generic free devnet table), an unconfigured pair is
-    /// the exact Iris 404. This closes the "burn on a lane no watcher serves"
-    /// path.
+    /// The fee route is lane-scoped: a configured pair is served (the
+    /// measured 0→19 table), an unconfigured pair is the exact Iris 404. This
+    /// closes the "burn on a lane no watcher serves" path.
     #[tokio::test]
     async fn fees_are_served_only_for_configured_lanes() {
         let (state, _, dir) = iris_state("fees");
@@ -517,6 +526,7 @@ mod tests {
             lanes: vec![crate::service::Lane {
                 source: Domain(0),
                 destination: Domain(19),
+                fees: Vec::new(),
             }],
             expiration_blocks: 0,
             fast_burn_allowance: 1_000_000_000.0,
@@ -530,6 +540,64 @@ mod tests {
             .await
             .expect_err("an unconfigured lane is a 404");
         assert_eq!(refused.status, axum::http::StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A configured lane without a fee table and without a measured pair has
+    /// no honest answer: the route 404s instead of inventing a zero table.
+    #[tokio::test]
+    async fn a_configured_lane_without_fee_data_is_refused() {
+        let (state, _, dir) = iris_state("fees-unpriced");
+        let state = Arc::new(IrisState {
+            store: state.store.clone(),
+            attester: state.attester.clone(),
+            chains: Vec::new(),
+            lanes: vec![crate::service::Lane {
+                source: Domain(1),
+                destination: Domain(2),
+                fees: Vec::new(),
+            }],
+            expiration_blocks: 0,
+            fast_burn_allowance: 1_000_000_000.0,
+        });
+        let refused = fees(State(state), Path((1, 2)))
+            .await
+            .expect_err("no measured pair, no configured table: a 404");
+        assert_eq!(refused.status, axum::http::StatusCode::NOT_FOUND);
+        assert!(refused.error.contains("no fee data"), "{}", refused.error);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A lane's configured table is served verbatim, even for a pair the
+    /// measured table does not carry.
+    #[tokio::test]
+    async fn a_lane_serves_its_configured_fee_table() {
+        let (state, _, dir) = iris_state("fees-configured");
+        let state = Arc::new(IrisState {
+            store: state.store.clone(),
+            attester: state.attester.clone(),
+            chains: Vec::new(),
+            lanes: vec![crate::service::Lane {
+                source: Domain(1),
+                destination: Domain(2),
+                fees: vec![diorama_config::LaneFee {
+                    finality_threshold: 2000,
+                    minimum_fee: 7,
+                }],
+            }],
+            expiration_blocks: 0,
+            fast_burn_allowance: 1_000_000_000.0,
+        });
+        let served = fees(State(state), Path((1, 2)))
+            .await
+            .expect("the configured table is served");
+        assert_eq!(
+            served.0,
+            vec![FeeEntry {
+                finality_threshold: 2000,
+                minimum_fee: 7,
+            }]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

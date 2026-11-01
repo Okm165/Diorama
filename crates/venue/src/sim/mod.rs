@@ -956,6 +956,9 @@ mod tests {
     fn unified_class_transfer_is_bounded_by_the_transfer_rule_not_the_perp_view() {
         let feed = feed_with(&[("HYPE", "87.87", "87.87")]);
         let meta = meta_with_table("HYPE", 10);
+        // The account plane's maintenance reads the live meta; the fixture's
+        // feed carries it (a warming feed would fail closed by design).
+        feed.put_meta(meta.clone(), crate::now_ms());
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xb0);
         // The R5 fixture shape: a unified account short −0.08 HYPE @ 87.87

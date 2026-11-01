@@ -102,6 +102,7 @@ pub async fn install(
     transmitter: Address,
     attester: Address,
     timeout: Duration,
+    poll: Duration,
     stipend: U256,
 ) -> Result<InstallOutcome> {
     let (manager, state, threshold) = read_state(rpc, transmitter, attester).await?;
@@ -126,6 +127,7 @@ pub async fn install(
         transmitter,
         from: manager,
         timeout,
+        poll,
     };
     if state == AttesterState::Disabled {
         let input = IMessageTransmitterV2::enableAttesterCall {
@@ -254,6 +256,7 @@ struct Impersonated<'a> {
     transmitter: Address,
     from: Address,
     timeout: Duration,
+    poll: Duration,
 }
 
 impl Impersonated<'_> {
@@ -264,7 +267,7 @@ impl Impersonated<'_> {
             .to(self.transmitter)
             .input(input.into());
         let hash = self.rpc.send_transaction(tx).await?;
-        match wait_for_receipt(self.rpc, hash, self.timeout).await? {
+        match wait_for_receipt(self.rpc, hash, self.timeout, self.poll).await? {
             Some(receipt) if receipt.status() => Ok(()),
             Some(_) => Err(Error::TxReverted {
                 chain: self.chain,

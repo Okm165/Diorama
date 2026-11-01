@@ -117,6 +117,12 @@ pub enum Error {
     #[error("invalid request: {reason}")]
     BadRequest { reason: String },
 
+    /// The node did not supply the fee fields an EIP-1559 transaction needs.
+    /// Guessing a fee cap is not an option: the tx would either overpay an
+    /// invented multiplier or be rejected at the next base-fee step.
+    #[error("{what}: the node returned no fee data")]
+    NoFeeData { what: &'static str },
+
     /// The attester installation did not take: serving attestations the
     /// destination would reject is worse than not serving at all.
     #[error("{chain}: attester installation failed: {reason}")]

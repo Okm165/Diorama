@@ -131,10 +131,15 @@ pub(crate) struct BeaconClient {
 }
 
 impl BeaconClient {
-    /// Build the client under the deployment's shared endpoint policy.
-    pub fn with_policy(urls: &[String], policy: PoolPolicy) -> Result<Self, BeaconError> {
+    /// Build the client under the deployment's shared endpoint policy and
+    /// its configured request budget.
+    pub fn with_policy(
+        urls: &[String],
+        policy: PoolPolicy,
+        request_timeout: std::time::Duration,
+    ) -> Result<Self, BeaconError> {
         let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(request_timeout)
             // Some public beacon APIs reject unknown user agents.
             .user_agent("curl/8.5.0")
             .build()

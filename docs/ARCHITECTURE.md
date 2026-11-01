@@ -108,7 +108,7 @@ mirror, read by the shared sequences.
 
 Per applied block on T the engine does, in order:
 
-0. **Prepend** (bounded, ≤3 rounds): mine the devnet's pending txs in their own
+0. **Prepend** (bounded by the configured `prepend_rounds`): mine the devnet's pending txs in their own
    block first (see below).
 1. **Plan the window**: `bal::plan` — the one pipeline call both engines make
    — composes the window's block-level access list (the native rung
@@ -143,9 +143,9 @@ diffs and mines the parent's block. Two reasons, both measured:
    the estimate and the execution, the tx executes against a different state and
    can run out of gas (measured: an Aave `borrow` estimated at 257,560 used
    271,389 - reverted at 97% of its limit, succeeded with an explicit 1M limit).
-   The prepend therefore loops (at most 3 rounds): a tx that arrives *while* the
-   diffs are being written still gets its own block and still executes against
-   the state its gas was estimated on.
+   The prepend therefore loops (bounded by the configured `prepend_rounds`): a
+   tx that arrives *while* the diffs are being written still gets its own block
+   and still executes against the state its gas was estimated on.
 
 ```
    no prepend estimate on S -> diffs land -> execute on S'
@@ -620,19 +620,25 @@ instance file (CI + boot gate).
 [services.engine.anvil] { target_url = "${ANVIL_T_URL}" }
               # (the venue profile's instance points it at "${ANVIL_V_URL}")
 [services.engine.reth] { request_timeout_secs }
-[services.engine.source_sync] { interval_ms, max_per_pass,
+[services.engine.source_sync] { interval_ms, max_per_pass, error_backoff_ms,
+              report_interval_ms, request_timeout_secs,
               engine_url = "${ENGINE_API_URL}", jwt_path = "${JWT_PATH}" }
-[services.engine.loops] { poll_interval_ms, max_gap_blocks, chunk_size }
+[services.engine.loops] { poll_interval_ms, max_gap_blocks, chunk_size,
+              prepend_rounds, status_log_interval_ms }
 [services.engine.verifier] { drift_sample_keys, sweep, probes[] }
 [services.engine.journal] { dir = "${STATE_DIR}/journal", blocks }
-[services.engine.beacon] { urls = ["${BEACON_URL}"] }
+[services.engine.beacon] { urls = ["${BEACON_URL}"], request_timeout_secs }
 [services.engine.http] { addr, port }
-[services.venue_sim] { state_dir, markets, poll_interval_ms, engine_admin_url,
+[services.venue_sim] { state_dir, markets, poll_interval_ms, tick_interval_ms,
+              heartbeat_interval_secs, rest_timeout_secs, rpc_timeout_secs,
+              admin_timeout_secs, engine_admin_url,
               anvil_url }                # + .info/.control listener sections
 [services.cctp_bridge] { state_dir, t_url, v_url, relay_key, attester_seed,
-              poll_interval_ms, finality_delay_secs, expiration_blocks,
-              scan_chunk_blocks, receipt_timeout_secs, relayer,
-              balance_low_wei, balance_critical_wei }   # + .iris/.control
+              fast_burn_allowance, poll_interval_ms, rpc_timeout_secs,
+              boot_timeout_secs, finality_delay_secs,
+              expiration_blocks, scan_chunk_blocks, receipt_timeout_secs,
+              receipt_poll_ms, max_send_attempts, status_log_interval_ms,
+              relayer, balance_low_wei, balance_critical_wei }   # + .iris/.control
 [watchlist] [ { address, note } ]   # all slots of a watched account sync to T
 ```
 

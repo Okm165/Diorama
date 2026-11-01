@@ -28,16 +28,19 @@ struct Bridge {
     sender: Arc<TxSender>,
     metrics: Arc<crate::metrics::CctpMetrics>,
     receipt_timeout: Duration,
+    receipt_poll: Duration,
     poll: Duration,
 }
 
 /// One directed lane, resolved to domains at boot. The control and Iris
 /// surfaces read it too: a bridge must never burn on a lane its watcher will
 /// not serve, nor advertise a fee for one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Lane {
     pub(crate) source: Domain,
     pub(crate) destination: Domain,
+    /// The lane's configured Iris fee table (empty = no table configured).
+    pub(crate) fees: Vec<diorama_config::LaneFee>,
 }
 
 /// The bridge's CLI: `run` (the service) and `check`/`--dry-run` (topology
@@ -105,7 +108,12 @@ fn print_topology(
     policy: diorama_anvil::PoolPolicy,
     endpoint_specs: &BTreeMap<String, Vec<diorama_anvil::EndpointSpec>>,
 ) -> crate::Result<()> {
-    let chains = build_chains(section, Duration::from_secs(30), policy, endpoint_specs)?;
+    let chains = build_chains(
+        section,
+        Duration::from_secs(section.rpc_timeout_secs),
+        policy,
+        endpoint_specs,
+    )?;
     let lanes = build_lanes(section, &chains)?;
     println!(
         "bridge: {} ({} chain(s), {} lane(s))",
@@ -193,19 +201,27 @@ async fn boot_bridge(
     endpoint_specs: BTreeMap<String, Vec<diorama_anvil::EndpointSpec>>,
 ) -> crate::Result<(Bridge, BTreeMap<(Domain, Domain), Option<U256>>)> {
     let receipt_timeout = Duration::from_secs(section.receipt_timeout_secs);
-    let chains = build_chains(&section, Duration::from_secs(30), policy, &endpoint_specs)?;
-    for chain in &chains {
-        chain
-            .rpc
-            .wait_until_up(chain.name, Duration::from_secs(300))
-            .await?;
-    }
+    let receipt_poll = Duration::from_millis(section.receipt_poll_ms);
+    let chains = build_chains(
+        &section,
+        Duration::from_secs(section.rpc_timeout_secs),
+        policy,
+        &endpoint_specs,
+    )?;
+    wait_for_chains(&chains, Duration::from_secs(section.boot_timeout_secs)).await?;
     let lanes = build_lanes(&section, &chains)?;
     let min_fees = verify_wiring(&chains, &lanes).await?;
     let attester = Arc::new(crate::attester::Attester::from_seed(
         &section.attester_seed,
     )?);
-    install_attester(&chains, &attester, receipt_timeout, section.balance_low_wei).await?;
+    install_attester(
+        &chains,
+        &attester,
+        receipt_timeout,
+        receipt_poll,
+        section.balance_low_wei,
+    )
+    .await?;
 
     let wallet = Wallet::from_secret(&section.relay_key)?;
     tracing::info!(relayer = %wallet.address(), "cctp relay wallet loaded");
@@ -216,7 +232,7 @@ async fn boot_bridge(
     let store = Arc::new(crate::store::Store::load(
         section.state_dir.join("cctp.json"),
     )?);
-    install_hooks(&chains, &store, &sender, receipt_timeout).await;
+    install_hooks(&chains, &store, &sender, receipt_timeout, receipt_poll).await;
     let bridge = Bridge {
         chains,
         lanes,
@@ -225,10 +241,21 @@ async fn boot_bridge(
         sender,
         metrics: Arc::new(crate::metrics::CctpMetrics::default()),
         receipt_timeout,
+        receipt_poll,
         poll: Duration::from_millis(section.poll_interval_ms),
         section,
     };
     Ok((bridge, min_fees))
+}
+
+/// Wait (bounded) for every chain to answer. A coordinated restart (the anvil
+/// re-forking, the node unwinding) is the normal cause of a slow boot; the
+/// budget is the deployment's.
+async fn wait_for_chains(chains: &[Chain], timeout: Duration) -> crate::Result<()> {
+    for chain in chains {
+        chain.rpc.wait_until_up(chain.name, timeout).await?;
+    }
+    Ok(())
 }
 
 impl Bridge {
@@ -288,6 +315,9 @@ impl Bridge {
             balance_low: self.section.balance_low_wei,
             balance_critical: self.section.balance_critical_wei,
             receipt_timeout: self.receipt_timeout,
+            receipt_poll: self.receipt_poll,
+            max_send_attempts: self.section.max_send_attempts,
+            status_log_interval: Duration::from_millis(self.section.status_log_interval_ms),
             heads: self
                 .chains
                 .iter()
@@ -330,6 +360,7 @@ impl Bridge {
             relayer,
             min_fees,
             receipt_timeout: self.receipt_timeout,
+            receipt_poll: self.receipt_poll,
         });
         let iris = tokio::spawn(crate::iris::serve(
             iris_addr.clone(),
@@ -422,6 +453,7 @@ fn build_lanes(section: &CctpSection, chains: &[Chain]) -> crate::Result<Vec<Lan
                 Ok(Lane {
                     source: Domain(source.domain),
                     destination: Domain(destination.domain),
+                    fees: lane.fees.clone(),
                 })
             })
             .collect();
@@ -431,10 +463,12 @@ fn build_lanes(section: &CctpSection, chains: &[Chain]) -> crate::Result<Vec<Lan
             Lane {
                 source: chains[0].domain,
                 destination: chains[1].domain,
+                fees: Vec::new(),
             },
             Lane {
                 source: chains[1].domain,
                 destination: chains[0].domain,
+                fees: Vec::new(),
             },
         ]);
     }
@@ -538,6 +572,7 @@ async fn deploy_wrapper(
     store: &Arc<crate::store::Store>,
     sender: &TxSender,
     receipt_timeout: Duration,
+    receipt_poll: Duration,
 ) {
     let hash = match crate::hook::deploy(&chain.write_rpc, sender, chain.message_transmitter).await
     {
@@ -551,19 +586,27 @@ async fn deploy_wrapper(
             return;
         }
     };
-    handle_deploy_receipt(chain, store, sender, hash, receipt_timeout).await;
+    handle_deploy_receipt(chain, store, sender, hash, receipt_timeout, receipt_poll).await;
 }
 
 /// The deploy's receipt: a mined success with a contract address is verified
 /// and recorded; every other outcome is a named warn (the next boot retries).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the receipt's inputs are the deployment's own facts; grouping them would hide \
+              which caller supplied each"
+)]
 async fn handle_deploy_receipt(
     chain: &Chain,
     store: &Arc<crate::store::Store>,
     sender: &TxSender,
     hash: B256,
     receipt_timeout: Duration,
+    receipt_poll: Duration,
 ) {
-    match crate::transfer::wait_for_receipt(&chain.write_rpc, hash, receipt_timeout).await {
+    match crate::transfer::wait_for_receipt(&chain.write_rpc, hash, receipt_timeout, receipt_poll)
+        .await
+    {
         Ok(Some(receipt)) if receipt.status() => {
             if let Some(wrapper) = receipt.contract_address {
                 record_wrapper(chain, store, sender, wrapper).await;
@@ -635,13 +678,14 @@ async fn install_hooks(
     store: &Arc<crate::store::Store>,
     sender: &TxSender,
     receipt_timeout: Duration,
+    receipt_poll: Duration,
 ) {
     for chain in chains {
         if let Some(wrapper) = existing_wrapper(chain, store, sender).await {
             tracing::info!(chain = chain.name, wrapper = %wrapper, "cctp hook wrapper present");
             continue;
         }
-        deploy_wrapper(chain, store, sender, receipt_timeout).await;
+        deploy_wrapper(chain, store, sender, receipt_timeout, receipt_poll).await;
     }
 }
 
@@ -650,6 +694,7 @@ async fn install_attester(
     chains: &[Chain],
     attester: &crate::attester::Attester,
     receipt_timeout: Duration,
+    receipt_poll: Duration,
     stipend: U256,
 ) -> crate::Result<()> {
     for chain in chains {
@@ -659,6 +704,7 @@ async fn install_attester(
             chain.message_transmitter,
             attester.address(),
             receipt_timeout,
+            receipt_poll,
             stipend,
         )
         .await?;

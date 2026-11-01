@@ -1029,16 +1029,24 @@ impl Sim {
         address: Address,
         req: &Order,
     ) -> Result<Option<&'static str>> {
-        if !feed.open_interest_caps().iter().any(|c| c == &req.coin) {
-            return Ok(None);
-        }
         let old = self
             .account(address)?
             .and_then(|a| a.positions.get(&req.coin).map(|p| p.szi))
             .unwrap_or(Decimal::ZERO);
         let signed = req.size * req.side().sign();
         let increases = super::account::same_direction(old, signed);
-        if !increases {
+        let Some(caps) = feed.open_interest_caps() else {
+            // The cap set is unknown until the venue answers. Fail closed for
+            // orders that could increase open interest; a risk-reducing order
+            // cannot be the one the cap refuses.
+            if !increases {
+                return Ok(None);
+            }
+            return Ok(Some(
+                "venue-sim: open-interest caps are not known yet (the market plane is warming); refusing an order that could increase open interest. See docs/INTEGRATION.md.",
+            ));
+        };
+        if !caps.iter().any(|c| c == &req.coin) || !increases {
             return Ok(None);
         }
         // A price more aggressive than the oracle gets the docs' own string.
@@ -1565,6 +1573,15 @@ mod tests {
     /// A feed serving the book with a live mark (the best ask, else 1) — the
     /// margin check values positions against it.
     fn feed_with_book(book: L2Book, meta: Meta) -> MarketFeed {
+        let feed = live_feed(book, meta);
+        // The venue has answered with an empty cap set (known, nothing capped).
+        feed.put_oi_caps(Vec::new());
+        feed
+    }
+
+    /// The same feed before `perpsAtOpenInterestCap` has answered: the cap
+    /// set is unknown.
+    fn live_feed(book: L2Book, meta: Meta) -> MarketFeed {
         let feed = MarketFeed::memory(vec!["ETH".to_string()]);
         // Honest stamps: the lane's freshness gate reads the ctx age, and a
         // fixture stamped at the epoch would read as permanently stale.
@@ -2320,6 +2337,35 @@ mod tests {
         let mut ok = ioc(Side::Buy, "0.2");
         ok.limit_px = Some("101".parse().unwrap());
         assert!(sim.order(&feed, a, &ok).is_ok(), "inside the band fills");
+    }
+
+    /// An unknown cap set is not "nothing is capped": the order lane refuses
+    /// until the venue's `perpsAtOpenInterestCap` answer lands.
+    #[test]
+    fn an_unknown_open_interest_cap_set_refuses_orders() {
+        let feed = live_feed(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 25),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let err = sim.place(&feed, a, &ioc(Side::Buy, "1")).unwrap_err();
+        assert!(
+            format!("{err}").contains("open-interest caps are not known"),
+            "{err}"
+        );
+    }
+
+    /// A known empty cap set allows the order (the venue said nothing is
+    /// capped).
+    #[test]
+    fn a_known_empty_open_interest_cap_set_allows_orders() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 25),
+        );
+        assert_eq!(feed.open_interest_caps(), Some(Vec::new()));
+        let (sim, a) = funded_sim(&feed, "1000");
+        assert!(sim.place(&feed, a, &ioc(Side::Buy, "1")).is_ok());
     }
 
     /// The docs' max order value: $30M at ≥25× (a limit may be 10× that).

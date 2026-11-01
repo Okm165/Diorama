@@ -82,6 +82,11 @@ spec:
             - --anvil-v=http://127.0.0.1:8545
             - --config=/etc/mirror/instance.toml
             - --windows=5
+            # The operational bounds: the source's observed ~1 s block
+            # cadence plus headroom, and a hard window cap so a quiet
+            # watchlist fails the run instead of waiting for the Job deadline.
+            - --move-wait-secs=120
+            - --max-windows=30
           env:
             - { name: HL_RPC, value: "https://rpc.hyperliquid.xyz/evm" }
           # The instance references ${STATE_DIR} and the rest of the stack's

@@ -355,7 +355,7 @@ fn position_row(
         LeverageType::Isolated => Some(liquidation_px(
             p,
             facts.mark,
-            maintenance_rate(coin, facts.value, meta),
+            maintenance_rate(coin, facts.value, meta)?,
         )?),
         LeverageType::Cross => None,
     };
@@ -654,18 +654,21 @@ pub(crate) fn unified_transfer_bound(
 }
 
 /// The maintenance-margin rate for a notional: the margin tier's
-/// `1/(2·maxLeverage)` (maintenance = ½ initial).
+/// `1/(2·maxLeverage)` (maintenance = ½ initial). There is no honest rate
+/// without the live meta: a missing meta is warming, a missing asset (or a
+/// zero max leverage) is a named refusal. Returning zero would understate
+/// maintenance and let the liquidation check skip a real shortfall.
 pub(crate) fn maintenance_rate(
     coin: &str,
     notional: Decimal,
     meta: Option<&crate::wire::Meta>,
-) -> Decimal {
-    let Some(meta) = meta else {
-        return Decimal::ZERO;
-    };
-    let Some(asset) = meta.asset(coin) else {
-        return Decimal::ZERO;
-    };
+) -> Result<Decimal> {
+    let meta = meta.ok_or(crate::error::Error::Warming)?;
+    let asset = meta
+        .asset(coin)
+        .ok_or_else(|| crate::error::Error::NotFound {
+            what: format!("asset `{coin}` in the live meta (maintenance rate)"),
+        })?;
     let max_leverage = meta
         .margin_table(coin)
         .and_then(|t| {
@@ -677,9 +680,11 @@ pub(crate) fn maintenance_rate(
         })
         .unwrap_or(asset.max_leverage);
     if max_leverage == 0 {
-        return Decimal::ZERO;
+        return Err(crate::error::Error::NotFound {
+            what: format!("a positive max leverage for `{coin}` in the live meta"),
+        });
     }
-    Decimal::ONE / (Decimal::from(2 * max_leverage))
+    Ok(Decimal::ONE / (Decimal::from(2 * max_leverage)))
 }
 
 pub(crate) fn maintenance_margin(
@@ -689,7 +694,7 @@ pub(crate) fn maintenance_margin(
 ) -> Result<Decimal> {
     mul(
         notional,
-        maintenance_rate(coin, notional, meta),
+        maintenance_rate(coin, notional, meta)?,
         "maintenance margin",
     )
 }
@@ -1121,7 +1126,7 @@ pub(crate) type Accounts = BTreeMap<Address, Account>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::{feed_with, meta_with_table};
+    use crate::sim::{feed_with, meta_with, meta_with_table};
 
     /// The unified account's `tokenToAvailableAfterMaintenance` closes daloc's
     /// reconciliation identity: `available + maintenance == the collateral
@@ -1224,6 +1229,27 @@ mod tests {
         assert!(available_after_maintenance(&account, &feed, Some(&meta))
             .unwrap()
             .is_empty());
+    }
+
+    /// Maintenance is never fabricated: no meta is warming, an unknown asset
+    /// or a zero max leverage is a named refusal — not a zero rate that would
+    /// let the liquidation check skip a shortfall.
+    #[test]
+    fn maintenance_requires_the_live_meta() {
+        let err = maintenance_rate("BTC", Decimal::from(100), None).unwrap_err();
+        assert!(matches!(err, crate::error::Error::Warming), "{err}");
+        let meta = meta_with("ETH", 10);
+        let err = maintenance_rate("BTC", Decimal::from(100), Some(&meta)).unwrap_err();
+        assert!(matches!(err, crate::error::Error::NotFound { .. }), "{err}");
+        let zero = meta_with("BTC", 0);
+        let err = maintenance_rate("BTC", Decimal::from(100), Some(&zero)).unwrap_err();
+        assert!(matches!(err, crate::error::Error::NotFound { .. }), "{err}");
+        let meta = meta_with("BTC", 10);
+        assert_eq!(
+            maintenance_rate("BTC", Decimal::from(100), Some(&meta)).unwrap(),
+            Decimal::new(5, 2),
+            "1 / (2 * 10x)"
+        );
     }
 
     /// A zero-size position is a closed one: the served state drops the row

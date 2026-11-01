@@ -4,7 +4,8 @@
 //! Boot order: load the instance, build the market plane (REST
 //! poller + WS client) and the account plane (persisted registry), then serve
 //! the daloc-facing info API (8090) and the control API (8091) beside the
-//! self-advance tick (1 Hz: accrue funding, check liquidations, persist when
+//! self-advance tick (the configured cadence: accrue funding, check
+//! liquidations, persist when
 //! something moved).
 use crate::ctx::Ctx;
 use crate::Result;
@@ -33,6 +34,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     let api_client = crate::feed::rest::RestClient::with_specs(
         cfg.endpoint_specs(chain.api_urls.as_slice()),
         policy,
+        Duration::from_secs(sim_section.rest_timeout_secs),
     )?;
     let ws_pool = diorama_anvil::EndpointPool::from_specs(
         cfg.endpoint_specs(chain.ws_urls.as_slice()),
@@ -47,14 +49,25 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
             api_client.clone(),
             sim_section.engine_admin_url.clone(),
             Some(bridge_metrics.clone()),
+            Duration::from_secs(sim_section.admin_timeout_secs),
         )?
         .with_ws_pool(ws_pool.clone()),
     );
 
     spawn_market_plane(&feed, api_client, ws_pool, &sim_section);
-    spawn_plane_heartbeat(&feed, &sim, chain.api_urls.primary(), &bridge_metrics);
+    spawn_plane_heartbeat(
+        &feed,
+        &sim,
+        chain.api_urls.primary(),
+        &bridge_metrics,
+        Duration::from_secs(sim_section.heartbeat_interval_secs),
+    );
     spawn_bridge(&sim_section, &sim, &feed, &bridge_metrics)?;
-    spawn_tick(&sim, &feed);
+    spawn_tick(
+        &sim,
+        &feed,
+        Duration::from_millis(sim_section.tick_interval_ms),
+    );
     let (info, control) = serve(&sim_section, &state);
     tracing::info!(
         info = %format!("{}:{}", sim_section.info.addr, sim_section.info.port),
@@ -110,7 +123,8 @@ fn spawn_market_plane(
     tokio::spawn(ws.run());
 }
 
-/// The market plane's heartbeat: one INFO line a minute naming the live
+/// The market plane's heartbeat: one INFO line per configured interval naming
+/// the live
 /// market — each coin's mark and its age (the live-following visibility the
 /// WS connect line alone never gives; a scripted coin's mark reads
 /// `scripted`).
@@ -119,6 +133,7 @@ fn spawn_plane_heartbeat(
     sim: &Arc<crate::sim::Sim>,
     api_url: &str,
     bridge: &Arc<crate::bridge::metrics::BridgeMetrics>,
+    interval: Duration,
 ) {
     let feed = feed.clone();
     let sim = sim.clone();
@@ -126,7 +141,7 @@ fn spawn_plane_heartbeat(
     let via = diorama_devnet::engine::source_host(api_url).to_string();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(interval).await;
             let now = crate::now_ms();
             let coins: Vec<String> = feed
                 .markets
@@ -172,7 +187,8 @@ fn spawn_bridge(
 ) -> crate::Result<()> {
     match &sim_section.anvil_url {
         Some(v_url) => {
-            let v = diorama_anvil::Rpc::new(v_url, Duration::from_secs(30))?;
+            let v =
+                diorama_anvil::Rpc::new(v_url, Duration::from_secs(sim_section.rpc_timeout_secs))?;
             let bridge = crate::bridge::Bridge::new(v, sim.clone(), feed.clone(), metrics.clone());
             tokio::spawn(bridge.run());
         }
@@ -184,13 +200,13 @@ fn spawn_bridge(
 }
 
 /// The account plane's self-advance tick: funding + liquidations + persist.
-fn spawn_tick(sim: &Arc<crate::sim::Sim>, feed: &Arc<crate::feed::MarketFeed>) {
+fn spawn_tick(sim: &Arc<crate::sim::Sim>, feed: &Arc<crate::feed::MarketFeed>, tick: Duration) {
     let tick_feed = feed.clone();
     let tick_sim = sim.clone();
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut ticker = tokio::time::interval(tick);
         loop {
-            tick.tick().await;
+            ticker.tick().await;
             if let Err(e) = tick_sim.evaluate(&tick_feed) {
                 tracing::warn!(error = %e, "sim tick failed; will retry");
             }
@@ -248,10 +264,18 @@ enum Cmd {
         anvil_v: String,
         #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
         config: std::path::PathBuf,
-        /// Minimum windows to compose (the run continues, bounded, until a
-        /// window composes a change).
+        /// Minimum windows to compose (the run continues until a window
+        /// composes a change).
         #[arg(long, default_value_t = 5)]
         windows: u64,
+        /// The wait bound for one window's source movement (the operator's
+        /// observed source cadence, not a code constant).
+        #[arg(long)]
+        move_wait_secs: u64,
+        /// Stop after this many windows even if none composed a change.
+        /// `0` = no code-side cap (the process/Job deadline bounds the run).
+        #[arg(long, default_value_t = 0)]
+        max_windows: u64,
     },
 }
 
@@ -278,6 +302,8 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
             anvil_v,
             config,
             windows,
+            move_wait_secs,
+            max_windows,
         } => {
             selftest_cmd(
                 config,
@@ -286,6 +312,8 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
                     anvil: anvil_v,
                 },
                 windows,
+                std::time::Duration::from_secs(move_wait_secs),
+                max_windows,
             )
             .await
         }
@@ -298,6 +326,8 @@ async fn selftest_cmd(
     config: std::path::PathBuf,
     targets: crate::selftest::Targets,
     windows: u64,
+    move_wait: std::time::Duration,
+    max_windows: u64,
 ) -> Result<()> {
     diorama_devnet::engine::selftest_entry(
         &config,
@@ -308,7 +338,15 @@ async fn selftest_cmd(
             require_wiring(cfg, unresolved, "venue selftest wiring", &[])
                 .map_err(crate::error::Error::from)
         },
-        move |cfg| Box::pin(crate::selftest::run(cfg, targets, windows)),
+        move |cfg| {
+            Box::pin(crate::selftest::run(
+                cfg,
+                targets,
+                windows,
+                move_wait,
+                max_windows,
+            ))
+        },
     )
     .await
 }

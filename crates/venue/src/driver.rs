@@ -76,6 +76,7 @@ pub(crate) async fn mine_loop(ctx: Arc<Ctx>) {
 /// of the applier's `apply_loop`.
 pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
+    let status_interval = ctx.engine.loops.status_log_interval_ms;
     let mut last_status = 0u64;
     let via = diorama_devnet::engine::source_host(ctx.source_rpc.url());
     // The pass's own backoff: a failed pass — the public source throttling,
@@ -87,9 +88,9 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
     // only wastes the good windows between them.
     let mut backoff = diorama_anvil::Backoff::new(Duration::from_secs(1), Duration::from_secs(60));
     loop {
-        // The follow's heartbeat (a minute apart, the same shape on both
-        // mirrors): the steady DEBUG line only speaks for an idle chain, and
-        // the live source is never at the followed height.
+        // The follow's heartbeat (the configured cadence, the same shape on
+        // both mirrors): the steady DEBUG line only speaks for an idle chain,
+        // and the live source is never at the followed height.
         diorama_devnet::engine::FollowStatus {
             via,
             source_head: ctx
@@ -110,7 +111,7 @@ pub(crate) async fn follow_loop(ctx: Arc<Ctx>) {
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
         }
-        .log_if_due(ctx.mirror.label(), &mut last_status, 60_000);
+        .log_if_due(ctx.mirror.label(), &mut last_status, status_interval);
         if diorama_devnet::engine::halt_gate(&*ctx, poll).await {
             continue;
         }

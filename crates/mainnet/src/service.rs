@@ -40,8 +40,9 @@ enum Cmd {
         /// Number of consecutive blocks to test starting at the anvil pin + 1.
         #[arg(long, default_value_t = 3)]
         blocks: u64,
-        /// RPC timeout for the scratch run (remote-fork mining is 55-256 s/block).
-        #[arg(long, default_value_t = 300)]
+        /// RPC timeout for the scratch run (remote-fork mining is 55-256 s/block
+        /// measured; the operator supplies the bound).
+        #[arg(long)]
         timeout_secs: u64,
     },
     /// Rewind the last N applied parent blocks on T (journal-based).

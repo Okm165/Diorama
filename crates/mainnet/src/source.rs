@@ -50,20 +50,37 @@ impl RethSource {
     }
 
     /// The per-tx prestate traces of a block, merged (the fallback for nodes
-    /// without block-level tracing).
-    async fn trace_block_per_tx(&self, n: u64) -> diorama_anvil::Result<Vec<diorama_anvil::Write>> {
+    /// without block-level tracing). The transaction count rides along so the
+    /// caller can tell an empty block from a populated block whose trace
+    /// composed nothing.
+    async fn trace_block_per_tx(
+        &self,
+        n: u64,
+    ) -> diorama_anvil::Result<(usize, Vec<diorama_anvil::Write>)> {
         use alloy_network_primitives::TransactionResponse as _;
         let block = self
             .reth
             .block_by_number(n, diorama_anvil::Txs::Full)
             .await?;
+        let txs = diorama_devnet::scan::block_txs(&block);
+        let count = txs.len();
         let mut out = Vec::new();
-        for tx in diorama_devnet::scan::block_txs(&block) {
+        for tx in txs {
             let trace = self.reth.trace_tx_prestate(tx.tx_hash()).await?;
             out.extend(diorama_anvil::flatten_trace(&trace));
         }
-        Ok(out)
+        Ok((count, out))
     }
+}
+
+/// A populated block whose trace composed nothing is a fault, not an empty
+/// touched set: applying zero writes over a block that changed state would
+/// silently diverge. An empty block legitimately has no writes.
+fn empty_populated_trace(n: u64, txs: usize, writes_empty: bool) -> Option<diorama_anvil::Error> {
+    (txs > 0 && writes_empty).then(|| diorama_anvil::Error::Corrupt {
+        what: "block trace",
+        detail: format!("block {n} has {txs} transaction(s) but no prestate writes"),
+    })
 }
 
 impl Source for RethSource {
@@ -148,15 +165,20 @@ impl Source for RethSource {
     /// Nodes without block-level tracing answer an *empty list* rather than an
     /// error (measured: anvil returns `[]` for every tracer variant), so a
     /// block with transactions and an empty trace falls back to the tx-level
-    /// tracer — the scanner's own path — instead of silently composing
-    /// nothing.
+    /// tracer — the scanner's own path. A populated block whose per-tx trace
+    /// also composes nothing is a fault: returning an empty touched set would
+    /// silently apply zero writes over a block that changed state.
     fn touched(&self, from: u64, to: u64) -> BoxFuture<'_, diorama_anvil::Result<TouchedSet>> {
         Box::pin(async move {
             let mut touched = TouchedSet::default();
             for n in (from + 1)..=to {
                 let traces = self.reth.trace_block_prestate(n).await?;
                 if traces.is_empty() {
-                    for w in self.trace_block_per_tx(n).await? {
+                    let (txs, writes) = self.trace_block_per_tx(n).await?;
+                    if let Some(fault) = empty_populated_trace(n, txs, writes.is_empty()) {
+                        return Err(fault);
+                    }
+                    for w in writes {
                         touched.value(w);
                     }
                 } else {
@@ -202,5 +224,18 @@ mod tests {
             "the declaration the boot audit compares against"
         );
         assert_eq!(source.touched_kind(), DiffKind::Trace);
+    }
+
+    /// An empty block is honestly empty; a populated block whose trace
+    /// composed nothing is a fault, never a zero-write application.
+    #[test]
+    fn a_populated_block_with_no_trace_writes_is_a_fault() {
+        assert!(empty_populated_trace(7, 0, true).is_none());
+        let fault = empty_populated_trace(7, 3, true).expect("a populated empty trace faults");
+        assert!(
+            matches!(fault, diorama_anvil::Error::Corrupt { .. }),
+            "{fault}"
+        );
+        assert!(empty_populated_trace(7, 3, false).is_none());
     }
 }

@@ -83,7 +83,11 @@ impl Ctx {
                 watch: cfg.watch_set(),
             },
         );
-        let beacon = BeaconClient::with_policy(&engine.beacon.urls, endpoint_policy)?;
+        let beacon = BeaconClient::with_policy(
+            &engine.beacon.urls,
+            endpoint_policy,
+            Duration::from_secs(engine.beacon.request_timeout_secs),
+        )?;
         let engine_api = build_engine_api(&engine)?;
         Ok(Self {
             l1,
@@ -171,7 +175,9 @@ fn build_engine_api(
 ) -> Result<Option<crate::source_sync::engine_api::EngineClient>> {
     match (&engine.source_sync.engine_url, &engine.source_sync.jwt_path) {
         (Some(url), Some(jwt)) => Ok(Some(crate::source_sync::engine_api::EngineClient::new(
-            url, jwt,
+            url,
+            jwt,
+            std::time::Duration::from_secs(engine.source_sync.request_timeout_secs),
         )?)),
         _ => Ok(None),
     }

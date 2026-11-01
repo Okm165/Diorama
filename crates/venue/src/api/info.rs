@@ -78,7 +78,8 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         }
         InfoRequest::OrderStatus { user, oid } => order_status(&state, body, user, oid).await,
         InfoRequest::PerpsAtOpenInterestCap { .. } => {
-            Ok(Json(state.feed.open_interest_caps()).into_response())
+            let caps = state.feed.open_interest_caps().ok_or(Error::Warming)?;
+            Ok(Json(caps).into_response())
         }
         InfoRequest::ActiveAssetData { user, coin } => active_asset(&state, body, user, coin).await,
         // ---- market-scoped: the feed's -----------------------------------

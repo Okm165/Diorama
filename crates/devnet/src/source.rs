@@ -196,24 +196,30 @@ impl Capabilities {
     /// capability that the endpoint does not serve is a misconfiguration,
     /// named at the only moment it is cheap to see.
     ///
-    /// Each probe targets a block that does not exist yet: a method that
-    /// exists answers an error that is *not* `-32601` (or a null result), a
-    /// method that does not answers exactly that. No traces or BALs are
-    /// actually fetched — the probe never pays a full trace's cost.
+    /// Each probe targets the current head, a block that exists on every
+    /// honest node: a method that exists answers its value (or null), a
+    /// method that does not answers exactly `-32601`. Any other answer —
+    /// transport, HTTP, decode, or a node error with another code — is
+    /// **unknown**, and an unknown probe is a boot fault: treating it as
+    /// "present" would certify a capability the endpoint never demonstrated.
     ///
     /// Behavioral capabilities (`historical`, `heads_ws`) are not probed:
     /// "the block parameter is ignored" cannot be distinguished from "the
     /// value did not change" by a read. They stay declarations with their
     /// measurements, enforced at the read path (the venue source refuses a
     /// non-latest read rather than silently answering a newer value).
-    pub async fn verify_methods(&self, rpc: &diorama_anvil::Rpc, future: u64) -> Vec<&'static str> {
+    pub async fn verify_methods(
+        &self,
+        rpc: &diorama_anvil::Rpc,
+    ) -> diorama_anvil::Result<Vec<&'static str>> {
         use alloy_primitives::U64;
+        let head = rpc.block_number().await?;
         let mut disagree = Vec::new();
 
         let bal = rpc
-            .call::<serde_json::Value>("eth_getBlockAccessList", (U64::from(future),))
+            .call::<serde_json::Value>("eth_getBlockAccessList", (U64::from(head),))
             .await;
-        if self.has(Capability::NativeBal) != method_present(bal) {
+        if self.has(Capability::NativeBal) != method_present(bal)? {
             disagree.push("native_bal");
         }
 
@@ -221,32 +227,34 @@ impl Capabilities {
             .call::<serde_json::Value>(
                 diorama_anvil::TRACE_BLOCK_METHOD,
                 (
-                    U64::from(future),
+                    U64::from(head),
                     serde_json::json!({"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}),
                 ),
             )
             .await;
-        if self.has(Capability::Traces) != method_present(trace) {
+        if self.has(Capability::Traces) != method_present(trace)? {
             disagree.push("traces");
         }
 
         let system = rpc
-            .call::<serde_json::Value>("eth_getSystemTxsByBlockNumber", (U64::from(future),))
+            .call::<serde_json::Value>("eth_getSystemTxsByBlockNumber", (U64::from(head),))
             .await;
-        if self.has(Capability::SystemTxs) != method_present(system) {
+        if self.has(Capability::SystemTxs) != method_present(system)? {
             disagree.push("system_txs");
         }
 
-        disagree
+        Ok(disagree)
     }
 }
 
-/// Did the method exist? Anything but `-32601` means yes (a missing block is
-/// an answer from a method that exists).
-fn method_present<T>(r: diorama_anvil::Result<T>) -> bool {
+/// Did the method exist? Only two answers are definitive: a value (present)
+/// or `-32601` (absent). Every other fault is unknown and propagated — never
+/// read as presence.
+fn method_present<T>(r: diorama_anvil::Result<T>) -> diorama_anvil::Result<bool> {
     match r {
-        Ok(_) => true,
-        Err(e) => !e.is_method_not_found(),
+        Ok(_) => Ok(true),
+        Err(e) if e.is_method_not_found() => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -261,11 +269,9 @@ pub async fn audit_capabilities(
     caps: Capabilities,
     rpc: &diorama_anvil::Rpc,
 ) -> diorama_anvil::Result<()> {
-    let head = rpc.block_number().await?;
-    // The next block is the first one that cannot exist yet; a larger offset
-    // would be an arbitrary guess, and any future height answers the same
-    // method-presence question.
-    let disagree = caps.verify_methods(rpc, head.saturating_add(1)).await;
+    // The head is a block every honest node can answer at; a future height
+    // would let "block not found" masquerade as a capability answer.
+    let disagree = caps.verify_methods(rpc).await?;
     if !disagree.is_empty() {
         tracing::warn!(
             source = what,
@@ -613,5 +619,31 @@ mod tests {
             matches!(err, diorama_anvil::Error::Transport { .. }),
             "{err}"
         );
+    }
+
+    /// Capability probes are tri-state: a value is presence, `-32601` is
+    /// absence, and every other fault is unknown — never presence.
+    #[test]
+    fn a_capability_probe_never_reads_an_unknown_fault_as_presence() {
+        assert!(method_present::<()>(Ok(())).unwrap());
+        assert!(!method_present::<()>(Err(method_not_found())).unwrap());
+        let unknown = method_present::<()>(Err(diorama_anvil::Error::Corrupt {
+            what: "probe",
+            detail: "node answered something else".into(),
+        }))
+        .unwrap_err();
+        assert!(matches!(unknown, diorama_anvil::Error::Corrupt { .. }));
+    }
+
+    fn method_not_found() -> diorama_anvil::Error {
+        diorama_anvil::Error::Rpc {
+            endpoint: "http://127.0.0.1:1".into(),
+            method: "eth_getBlockAccessList".into(),
+            payload: alloy_json_rpc::ErrorPayload {
+                code: -32601,
+                message: "method not found".into(),
+                data: None,
+            },
+        }
     }
 }

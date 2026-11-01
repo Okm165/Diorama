@@ -91,7 +91,7 @@ re-forks.
 
 ## 4. The pipeline (per parent block `n`)
 
-0. **Prepend (bounded, ≤3 rounds).** Mine pending devnet transactions in their
+0. **Prepend (bounded by `prepend_rounds`).** Mine pending devnet transactions in their
    own block(s), timestamp `last + 1`, before the diffs — so the applied block
    carries only the parent's effects, and a transaction executes against the
    same state its gas was estimated on (measured: a borrow estimated pre-diff
