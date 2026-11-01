@@ -43,6 +43,12 @@ pub(crate) struct Overrides {
     /// `set_funding`: owned hourly funding rate per coin.
     #[serde(default)]
     pub funding: BTreeMap<String, Decimal>,
+    /// Absolute epoch-millisecond deadlines for the funding overrides. A
+    /// missing entry is a legacy override with no deadline; a present entry
+    /// past `now` is inert (the rate falls back to the live ctx) until the
+    /// next write clears it.
+    #[serde(default)]
+    pub funding_expires_ms: BTreeMap<String, u64>,
     /// `set_book`: scripted books per coin.
     #[serde(default)]
     pub books: BTreeMap<String, L2Book>,
@@ -212,18 +218,34 @@ impl MarketFeed {
         self.read_overrides().books.contains_key(coin)
     }
 
-    /// Whether any input the account plane prices this coin from is
-    /// scenario-owned: the mark/oracle (`crash`/`rally`), the funding rate
-    /// (`set_funding`), the book (`set_book`), or the whole live plane
-    /// (`stall`). A `controlOwned` account is a simulation, not an
-    /// observation; the operator's HF fold and the gateway's draw capacity
-    /// must refuse it, and the PM advisory must not be built on it.
+    /// Whether a **price input** the account plane prices this coin from is
+    /// scenario-owned: the mark/oracle (`crash`/`rally`), the book
+    /// (`set_book`), or the whole live plane (`stall`). A `controlOwned`
+    /// account is a simulation, not an observation; the operator's HF fold and
+    /// the gateway's draw capacity must refuse it, and the PM advisory must not
+    /// be built on it.
+    ///
+    /// Funding is deliberately excluded: `set_funding` moves the published
+    /// rate, not the mark/oracle, so a funding-only scenario is still a real
+    /// price observation. Treating it as price ownership froze the mirror's
+    /// WHYPE oracle: `oracle-liveness` refuses `controlOwned` contexts, and a
+    /// forgotten funding override therefore stopped every re-stamp until the
+    /// proof gate expired. Funding ownership is [`Self::funding_is_owned`].
     pub fn market_is_owned(&self, coin: &str) -> bool {
         let o = self.read_overrides();
-        o.prices.contains_key(coin)
-            || o.funding.contains_key(coin)
-            || o.books.contains_key(coin)
-            || self.stalled()
+        o.prices.contains_key(coin) || o.books.contains_key(coin) || self.stalled()
+    }
+
+    /// Whether this coin's hourly funding rate is scenario-owned and still
+    /// inside its declared deadline. The price inputs are unaffected.
+    pub fn funding_is_owned(&self, coin: &str) -> bool {
+        let o = self.read_overrides();
+        if !o.funding.contains_key(coin) {
+            return false;
+        }
+        o.funding_expires_ms
+            .get(coin)
+            .is_none_or(|deadline| *deadline > crate::now_ms())
     }
 
     /// The instant of the coin's last **live** context update. The account
@@ -231,6 +253,13 @@ impl MarketFeed {
     /// so a stalled feed cannot serve a fresh `time` over stale marks.
     pub fn last_ctx_at(&self, coin: &str) -> Option<u64> {
         self.read().ctx_at.get(coin).copied()
+    }
+
+    /// Milliseconds since the last live `allMids` update, or `None` before the
+    /// first one. The REST poller uses this to skip a mids read the socket has
+    /// already served within the poll interval.
+    pub(crate) fn mids_age_ms(&self, now_ms: u64) -> Option<u64> {
+        self.read().mids_at.map(|at| now_ms.saturating_sub(at))
     }
 
     // ---- writes (the poller / WS client / control plane) ------------------
@@ -354,15 +383,28 @@ impl MarketFeed {
         self.persist()
     }
 
-    pub fn own_funding(&self, coin: &str, rate: Decimal) -> Result<()> {
-        self.write_overrides()
-            .funding
-            .insert(coin.to_string(), rate);
+    pub fn own_funding(&self, coin: &str, rate: Decimal, expires_ms: Option<u64>) -> Result<()> {
+        {
+            let mut o = self.write_overrides();
+            o.funding.insert(coin.to_string(), rate);
+            match expires_ms {
+                Some(deadline) => {
+                    o.funding_expires_ms.insert(coin.to_string(), deadline);
+                }
+                None => {
+                    o.funding_expires_ms.remove(coin);
+                }
+            }
+        }
         self.persist()
     }
 
     pub fn clear_funding(&self, coin: &str) -> Result<()> {
-        self.write_overrides().funding.remove(coin);
+        {
+            let mut o = self.write_overrides();
+            o.funding.remove(coin);
+            o.funding_expires_ms.remove(coin);
+        }
         self.persist()
     }
 
@@ -438,7 +480,17 @@ impl MarketFeed {
     /// from the overrides themselves so it cannot drift.
     pub fn owned_count(&self) -> u64 {
         let o = self.read_overrides();
-        (o.prices.len() + o.funding.len() + o.books.len()) as u64
+        let now = crate::now_ms();
+        let active_funding = o
+            .funding
+            .keys()
+            .filter(|coin| {
+                o.funding_expires_ms
+                    .get(*coin)
+                    .is_none_or(|deadline| *deadline > now)
+            })
+            .count();
+        (o.prices.len() + active_funding + o.books.len()) as u64
     }
 
     // ---- composed reads ---------------------------------------------------
@@ -465,13 +517,14 @@ impl MarketFeed {
         self.read().ctxs.get(coin).map(|c| c.oracle_px)
     }
 
-    /// Whether the scenario control plane owns this coin's mark/oracle. A control mark is
-    /// a simulation input, not a market observation; consumers must not use it for a
-    /// verdict (the `controlOwned` field on the account read carries this to DALOC).
-    /// The coin's published hourly funding rate (overridable).
+    /// The coin's published hourly funding rate. A live, non-expired
+    /// `set_funding` override wins; an expired one is inert and the live ctx
+    /// answers (the override row stays until the next control write clears it).
     pub fn funding(&self, coin: &str) -> Option<Decimal> {
-        if let Some(rate) = self.read_overrides().funding.get(coin) {
-            return Some(*rate);
+        if self.funding_is_owned(coin) {
+            if let Some(rate) = self.read_overrides().funding.get(coin) {
+                return Some(*rate);
+            }
         }
         self.read().ctxs.get(coin).map(|c| c.funding)
     }
@@ -535,24 +588,37 @@ impl MarketFeed {
         let meta = self.meta()?;
         let overrides = self.read_overrides().clone();
         let stalled = self.stalled();
+        let now = crate::now_ms();
         let c = self.read();
         let ctxs = meta
             .universe
             .iter()
             .filter_map(|asset| {
                 let mut ctx = c.ctxs.get(&asset.name)?.clone();
-                let owned = overrides.prices.contains_key(&asset.name)
-                    || overrides.funding.contains_key(&asset.name)
+                // `control_owned` is the PRICE ownership bit: the mark/oracle
+                // (`crash`/`rally`), the book (`set_book`) or the whole live
+                // plane (`stall`). Funding moves no mark and is reported
+                // separately below; conflating the two froze the mirror's
+                // WHYPE oracle on a funding-only scenario.
+                let price_owned = overrides.prices.contains_key(&asset.name)
                     || overrides.books.contains_key(&asset.name)
                     || stalled;
+                let funding_owned = overrides.funding.contains_key(&asset.name)
+                    && overrides
+                        .funding_expires_ms
+                        .get(&asset.name)
+                        .is_none_or(|deadline| *deadline > now);
                 if let Some(p) = overrides.prices.get(&asset.name) {
                     ctx.mark_px = p.mark;
                     ctx.oracle_px = p.oracle;
                 }
-                if let Some(rate) = overrides.funding.get(&asset.name) {
-                    ctx.funding = *rate;
+                if funding_owned {
+                    if let Some(rate) = overrides.funding.get(&asset.name) {
+                        ctx.funding = *rate;
+                    }
                 }
-                ctx.control_owned = owned;
+                ctx.control_owned = price_owned;
+                ctx.funding_owned = funding_owned;
                 Some(ctx)
             })
             .collect();
@@ -900,5 +966,62 @@ mod tests {
         feed.put_ctx("BTC".into(), test_ctx("100", "101"), 8_000);
         assert_eq!(feed.stale_ms("BTC", 10_000), Some(2_000));
         assert_eq!(feed.stale_ms("ETH", 10_000), None);
+    }
+
+    /// A funding-only scenario owns the published rate, not the mark/oracle.
+    /// The mirror's `oracle-liveness` writer refuses a `controlOwned` context;
+    /// conflating funding with price ownership froze WHYPE for an hour and
+    /// expired its proof gate. The two bits must stay separate.
+    #[test]
+    fn funding_ownership_does_not_own_the_mark() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        feed.put_meta(
+            crate::wire::Meta {
+                universe: vec![crate::wire::AssetInfo {
+                    name: "BTC".into(),
+                    sz_decimals: 5,
+                    max_leverage: 20,
+                    margin_table_id: None,
+                    margin_mode: None,
+                    only_isolated: None,
+                    is_delisted: None,
+                }],
+                margin_tables: Vec::new(),
+                collateral_token: 0,
+            },
+            1_000,
+        );
+        feed.put_ctx("BTC".into(), test_ctx("100", "101"), 1_000);
+        feed.own_funding("BTC", Decimal::new(-4, 2), None).unwrap();
+        assert!(feed.funding_is_owned("BTC"));
+        assert!(
+            !feed.market_is_owned("BTC"),
+            "funding is not price ownership"
+        );
+        let served = feed.meta_and_ctxs().expect("ctx");
+        let btc = served
+            .1
+            .iter()
+            .find(|c| c.mark_px == Decimal::from(100))
+            .expect("BTC ctx");
+        assert!(!btc.control_owned);
+        assert!(btc.funding_owned);
+        assert_eq!(btc.funding, Decimal::new(-4, 2));
+        // The live oracle is still what a re-stamping consumer reads.
+        assert_eq!(feed.oracle("BTC"), Some(Decimal::from(101)));
+    }
+
+    /// A deadline bounds the override: past it the live rate answers and the
+    /// ownership bit clears, without a control write.
+    #[test]
+    fn an_expired_funding_override_is_inert() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        feed.put_ctx("BTC".into(), test_ctx("100", "101"), 1_000);
+        feed.own_funding("BTC", Decimal::new(5, 2), Some(1_000))
+            .unwrap();
+        // `now_ms()` is wall time; a deadline in the past is inert immediately.
+        assert!(!feed.funding_is_owned("BTC"));
+        assert_eq!(feed.owned_count(), 0);
+        assert_eq!(feed.funding("BTC"), Some(Decimal::ZERO));
     }
 }

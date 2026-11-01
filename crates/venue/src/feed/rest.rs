@@ -2,9 +2,10 @@
 //! rate budget meter.
 //!
 //! The poller refreshes the cache (`metaAndAssetCtxs`, one `l2Book` per
-//! configured market, `allMids`) every `poll_interval_ms`; the WS client keeps
-//! marks/mids fresher between passes. The same client serves the passthrough
-//! reads (untouched accounts are the real venue's answers).
+//! configured market, `allMids`) every `poll_interval_ms`; a book or mids the WS
+//! client updated within one interval is skipped, so the REST lane is the gap
+//! reconciliation rather than a duplicate read. The same client serves the
+//! passthrough reads (untouched accounts are the real venue's answers).
 //!
 //! Failover is the shared [`EndpointPool::execute`]: admission, cooldown,
 //! bounded retry and the attempt budget live in the common spine. This module
@@ -317,7 +318,18 @@ impl Poller {
     }
 
     async fn books(&self) {
+        let now = crate::now_ms();
+        let window = u64::try_from(self.interval.as_millis()).unwrap_or(u64::MAX);
         for coin in &self.feed.markets {
+            // WSS primary, REST gap reconciliation: a book the socket updated
+            // within one poll interval is not re-read. A scripted book owns the
+            // coin and is never polled; a warming or stale one is.
+            if matches!(
+                self.feed.book_age(coin, now, window),
+                crate::feed::BookAge::Fresh | crate::feed::BookAge::Scripted
+            ) {
+                continue;
+            }
             if !self.gated(crate::feed::budget::weight::LIGHT) {
                 return;
             }
@@ -334,6 +346,11 @@ impl Poller {
     }
 
     async fn mids(&self) {
+        let now = crate::now_ms();
+        let window = u64::try_from(self.interval.as_millis()).unwrap_or(u64::MAX);
+        if self.feed.mids_age_ms(now).is_some_and(|age| age <= window) {
+            return;
+        }
         if !self.gated(crate::feed::budget::weight::LIGHT) {
             return;
         }

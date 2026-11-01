@@ -1,5 +1,6 @@
-//! The WS lane of the market plane: `allMids` and `activeAssetCtx` pushes
-//! (the primary freshness source; the REST poller backfills).
+//! The WS lane of the market plane: `allMids`, `activeAssetCtx` and `l2Book`
+//! pushes (the primary freshness source; the REST poller backfills a coin the
+//! socket has not updated within one poll interval).
 //!
 //! Protocol facts (docs, §16.3): subscriptions are
 //! `{"method":"subscribe","subscription":{"type":…}}`; the server must send a
@@ -15,7 +16,7 @@
 //! and rotates to the next one. A long-lived session that delivered data and
 //! then dropped reconnects immediately; only a failed session sleeps.
 use crate::feed::MarketFeed;
-use crate::wire::AssetCtx;
+use crate::wire::{AssetCtx, L2Book};
 use diorama_anvil::{now_ms, Backoff, EndpointPool, Progress};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
@@ -31,14 +32,25 @@ use tokio_tungstenite::tungstenite::Message;
 /// returns. 30 s keeps a slow-but-valid accept and retries a hung one.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The data-idle deadline. The venue documents a message within 60 s and
-/// pushes on a ~1 Hz cadence; 45 s catches a half-open socket before the
-/// feed's own 30 s staleness gate can hide it.
-const DATA_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+/// The data-idle deadline. The venue protocol requires the server to send a
+/// message within **60 s** (docs §16.3; ADR 0006: "the server must send a
+/// message within 60 s, so the client pings every 30 s"). The old 45 s
+/// deadline was shorter than the protocol's own bound, so a compliant quiet
+/// feed was falsely rotated; 75 s leaves one full 15 s margin beyond the
+/// bound (and beyond the 30 s ping cadence).
+const DATA_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// The first-data budget after a successful handshake. A subscription that
-/// never starts pushing is a failed session, not a healthy idle one.
-const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(15);
+/// never starts pushing is a failed session, not a healthy idle one. It is
+/// deliberately below the 60 s server bound (a first push is expected at the
+/// feed's ~1 Hz cadence), but no longer the old 15 s race.
+const FIRST_DATA_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The floor between reconnect attempts, even after a session that served
+/// data and then dropped. Without it a server that accepts and immediately
+/// closes becomes a hot reconnect loop (the endpoint's own cooldown only
+/// applies to *failed* sessions).
+const MIN_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 /// One server push (or ack). `channel` tags the payload.
 #[derive(Debug, Deserialize)]
@@ -48,6 +60,8 @@ pub(crate) enum WsMessage {
     AllMids { data: WsAllMids },
     #[serde(rename = "activeAssetCtx")]
     ActiveAssetCtx { data: WsAssetCtx },
+    #[serde(rename = "l2Book")]
+    L2Book { data: L2Book },
     #[serde(rename = "pong")]
     Pong,
     #[serde(rename = "error")]
@@ -73,8 +87,22 @@ enum Frame {
     Data,
     /// A pong or an unknown channel: alive, but not data.
     Control,
-    /// The venue's subscription error: rotate, do not sit on a dead lane.
-    Error(String),
+    /// The venue's subscription error. A per-coin refusal is isolated (the
+    /// session keeps serving the other coins); a session-level refusal rotates.
+    Error(SubscriptionFailure),
+}
+
+/// The two classes of venue subscription error. One unknown coin must not
+/// take down the whole market lane (the old code failed the session on any
+/// `Frame::Error`), while a refused `allMids` or an unrecognized global
+/// refusal really does mean this socket cannot serve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubscriptionFailure {
+    /// The error names a configured coin: drop that subscription's data,
+    /// keep the session and the other coins alive.
+    Coin(String),
+    /// A session-wide refusal (allMids, rate limit, unknown protocol error).
+    Session(String),
 }
 
 /// One subscription request.
@@ -91,6 +119,8 @@ enum Subscription<'a> {
     AllMids,
     #[serde(rename = "activeAssetCtx")]
     ActiveAssetCtx { coin: &'a str },
+    #[serde(rename = "l2Book")]
+    L2Book { coin: &'a str },
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +149,11 @@ enum SessionOutcome {
 /// cooldown, floored at 1 ms so a zero can never spin the loop.
 fn cooling_wait_ms(retry_after_ms: u64) -> u64 {
     retry_after_ms.max(1)
+}
+
+/// The reconnect sleep: the endpoint policy's backoff, never below the floor.
+fn reconnect_delay(backoff: Duration) -> Duration {
+    backoff.max(MIN_RECONNECT_DELAY)
 }
 
 impl WsClient {
@@ -177,11 +212,13 @@ impl WsClient {
             self.feed.metrics.inc_ws_reconnects();
             if served {
                 // The endpoint was live; a later close is the network's, not
-                // the endpoint's. Reconnect now, reset the failure backoff.
+                // the endpoint's. Reset the failure backoff, but still wait
+                // the floor: an accept-then-close server must not spin.
                 backoff.record(Progress::Progressed);
+                tokio::time::sleep(reconnect_delay(backoff.delay())).await;
                 continue;
             }
-            let delay = backoff.delay();
+            let delay = reconnect_delay(backoff.delay());
             backoff.record(Progress::Stalled);
             tokio::time::sleep(delay).await;
         }
@@ -255,7 +292,20 @@ impl WsClient {
                             deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
                         }
                         Frame::Control => {}
-                        Frame::Error(error) => return SessionOutcome::Failed(WsError::Subscription(error)),
+                        Frame::Error(SubscriptionFailure::Coin(coin)) => {
+                            // One refused coin is not the lane's failure: the
+                            // allMids and every other coin subscription stay
+                            // live. The REST poller backfills the missing coin
+                            // behind the same staleness gate.
+                            tracing::warn!(
+                                url = %url,
+                                coin = %coin,
+                                "venue refused one coin subscription; keeping the session"
+                            );
+                        }
+                        Frame::Error(SubscriptionFailure::Session(error)) => {
+                            return SessionOutcome::Failed(WsError::Subscription(error));
+                        }
                     },
                     Some(Ok(Message::Close(_))) | None => {
                         return if delivered {
@@ -294,6 +344,12 @@ impl WsClient {
         for coin in &self.feed.markets {
             subs.push(encode(Subscription::ActiveAssetCtx { coin })?);
         }
+        // The book is the same WSS-primary shape: the venue pushes `l2Book` at
+        // its own cadence, and the REST poller backfills a coin the socket has
+        // not updated within one poll interval.
+        for coin in &self.feed.markets {
+            subs.push(encode(Subscription::L2Book { coin })?);
+        }
         Ok(subs)
     }
 
@@ -315,9 +371,35 @@ impl WsClient {
                 self.feed.put_ctx(data.coin, data.ctx, now);
                 Frame::Data
             }
-            WsMessage::Error { data } => Frame::Error(data),
+            WsMessage::L2Book { data } => {
+                self.feed.put_book(data, now);
+                Frame::Data
+            }
+            WsMessage::Error { data } => Frame::Error(self.classify_subscription_error(&data)),
             WsMessage::Pong | WsMessage::Other => Frame::Control,
         }
+    }
+
+    /// Classify the venue's error frame. A message that names a configured
+    /// coin (and is not an allMids refusal) is that coin's subscription
+    /// failing; anything else is session-level. Matching is by whole token,
+    /// so a coin like `ETH` does not match inside `METHOD`.
+    fn classify_subscription_error(&self, data: &str) -> SubscriptionFailure {
+        let lower = data.to_ascii_lowercase();
+        if lower.contains("allmids") {
+            return SubscriptionFailure::Session(data.to_string());
+        }
+        let tokens: Vec<&str> = lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .collect();
+        for coin in &self.feed.markets {
+            let coin_lower = coin.to_ascii_lowercase();
+            if tokens.iter().any(|token| *token == coin_lower) {
+                return SubscriptionFailure::Coin(coin.clone());
+            }
+        }
+        SubscriptionFailure::Session(data.to_string())
     }
 }
 
@@ -406,5 +488,87 @@ mod tests {
             subs[1],
             r#"{"method":"subscribe","subscription":{"type":"activeAssetCtx","coin":"BTC"}}"#
         );
+        assert_eq!(
+            subs[2],
+            r#"{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC"}}"#
+        );
+    }
+
+    fn client(markets: &[&str]) -> WsClient {
+        WsClient::new(
+            Arc::new(MarketFeed::memory(
+                markets.iter().map(|coin| (*coin).to_string()).collect(),
+            )),
+            EndpointPool::new(
+                &["wss://example.invalid/ws".to_string()],
+                diorama_anvil::Scheme::Ws,
+                diorama_anvil::PoolPolicy::default(),
+            )
+            .unwrap(),
+        )
+    }
+
+    /// A per-coin refusal is isolated; an allMids/global refusal rotates. This
+    /// is the classification the session's error arm branches on.
+    #[test]
+    fn subscription_errors_classify_per_coin_vs_session() {
+        let client = client(&["BTC", "ETH"]);
+        assert_eq!(
+            client.classify_subscription_error("activeAssetCtx BTC: unknown coin"),
+            SubscriptionFailure::Coin("BTC".into())
+        );
+        assert_eq!(
+            client.classify_subscription_error("ETH subscription refused: invalid coin"),
+            SubscriptionFailure::Coin("ETH".into())
+        );
+        assert_eq!(
+            client.classify_subscription_error("allMids subscription refused"),
+            SubscriptionFailure::Session("allMids subscription refused".into())
+        );
+        assert_eq!(
+            client.classify_subscription_error("rate limited; retry later"),
+            SubscriptionFailure::Session("rate limited; retry later".into())
+        );
+        // Whole-token matching: a coin name inside another word is not it.
+        assert!(matches!(
+            client.classify_subscription_error("METHOD unsupported"),
+            SubscriptionFailure::Session(_)
+        ));
+    }
+
+    #[test]
+    fn reconnect_never_spins_below_the_floor() {
+        assert_eq!(reconnect_delay(Duration::ZERO), MIN_RECONNECT_DELAY);
+        assert_eq!(
+            reconnect_delay(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+        assert!(DATA_IDLE_TIMEOUT > Duration::from_secs(60));
+        assert!(FIRST_DATA_TIMEOUT > Duration::from_secs(15));
+    }
+
+    /// The book is a WSS channel, not only a REST read: an `l2Book` push is
+    /// folded into the same cache the `/info` `l2Book` handler serves, and it
+    /// counts as live data (a session that only pushes books is healthy).
+    #[test]
+    fn an_l2_book_push_is_folded_as_a_live_book() {
+        let feed = Arc::new(MarketFeed::memory(vec!["BTC".into()]));
+        let client = WsClient::new(
+            Arc::clone(&feed),
+            EndpointPool::new(
+                &["wss://example.invalid/ws".to_string()],
+                diorama_anvil::Scheme::Ws,
+                diorama_anvil::PoolPolicy::default(),
+            )
+            .unwrap(),
+        );
+        let frame = r#"{"channel":"l2Book","data":{"coin":"BTC","time":1700000000000,"levels":[[{"px":"100.5","sz":"1.0","n":2}],[{"px":"101.0","sz":"2.0","n":1}]],"spread":"0.5"}}"#;
+        assert!(matches!(client.handle_text(frame), Frame::Data));
+        let book = feed
+            .book("BTC", crate::now_ms())
+            .expect("the pushed book is served");
+        assert_eq!(book.levels[0][0].px, Decimal::new(1005, 1));
+        assert_eq!(book.levels[0][0].n, 2);
+        assert_eq!(book.levels[1][0].px, Decimal::new(1010, 1));
     }
 }
