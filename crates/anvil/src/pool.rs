@@ -120,6 +120,12 @@ impl PoolPolicy {
     }
 }
 
+/// The client-side `eth_getLogs` range cap when an endpoint does not declare
+/// one. It is the public HyperEVM RPC's measured free-plan cap (a larger range
+/// is refused or stalls the provider); a deployment whose endpoint allows
+/// more can raise it per group, and the public HyperEVM source pins 900.
+pub const DEFAULT_MAX_LOG_RANGE_BLOCKS: u64 = 10_000;
+
 /// One endpoint: its URL plus the attributes that make a pool more than a
 /// blind URL list. `roles` empty means "serves every role"; a required role is
 /// an intersection, so an archive-only endpoint is never selected for a
@@ -135,15 +141,26 @@ pub struct EndpointSpec {
     /// silent correctness fault.
     #[serde(default)]
     pub chain_id: Option<u64>,
-    /// Relative preference. The executor still visits every healthy endpoint
-    /// once per round; weight is available to callers that build a
-    /// deterministic order (and to future admission policies).
+    /// Relative preference in admission. A healthy endpoint's chance of being
+    /// visited first is proportional to its weight; every healthy endpoint is
+    /// still visited once per round, so weight orders failover, it does not
+    /// hide a backup.
     #[serde(default = "one")]
     pub weight: u32,
+    /// The widest block range this endpoint accepts in one `eth_getLogs`
+    /// call. The client splits wider scans and refuses an over-cap raw call
+    /// locally; `None` is not allowed so a hand-built pool cannot omit the
+    /// bound.
+    #[serde(default = "default_max_log_range")]
+    pub max_log_range: u64,
 }
 
 const fn one() -> u32 {
     1
+}
+
+const fn default_max_log_range() -> u64 {
+    DEFAULT_MAX_LOG_RANGE_BLOCKS
 }
 
 impl EndpointSpec {
@@ -154,6 +171,7 @@ impl EndpointSpec {
             roles: BTreeSet::new(),
             chain_id: None,
             weight: 1,
+            max_log_range: DEFAULT_MAX_LOG_RANGE_BLOCKS,
         }
     }
 
@@ -195,6 +213,8 @@ pub struct EndpointSnapshot {
     pub url: String,
     pub chain_id: Option<u64>,
     pub roles: Vec<String>,
+    pub weight: u32,
+    pub max_log_range: u64,
     pub down_until_ms: u64,
     pub failures: u32,
     pub attempts: u64,
@@ -317,8 +337,28 @@ impl EndpointPool {
             if !scheme.accepts(&spec.url) {
                 return Err(Error::InvalidEndpoint { endpoint: spec.url });
             }
-            if !endpoints.iter().any(|known| known.url == spec.url) {
-                endpoints.push(spec);
+            if spec.weight == 0 {
+                return Err(Error::InvalidEndpointAttribute {
+                    endpoint: spec.url,
+                    detail: "weight must be >= 1".into(),
+                });
+            }
+            if spec.max_log_range == 0 {
+                return Err(Error::InvalidEndpointAttribute {
+                    endpoint: spec.url,
+                    detail: "max_log_range must be > 0".into(),
+                });
+            }
+            match endpoints.iter().find(|known| known.url == spec.url) {
+                None => endpoints.push(spec),
+                Some(known) if same_attributes(known, &spec) => {}
+                Some(_) => {
+                    return Err(Error::ConflictingEndpointAttributes {
+                        endpoint: spec.url,
+                        detail: "the same URL is declared with different roles/chain_id/weight/max_log_range"
+                            .into(),
+                    });
+                }
             }
         }
         if endpoints.is_empty() {
@@ -368,6 +408,37 @@ impl EndpointPool {
         self.endpoints[index].chain_id
     }
 
+    /// Refuse a pool whose *declared* chain identity disagrees with the chain
+    /// the caller is about to serve. This is the cheap half of the boot
+    /// assert (no request); [`crate::Rpc::verify_chain`] follows it with the
+    /// live `eth_chainId` check on every endpoint.
+    pub fn verify_declared_chain(&self, expected: u64) -> Result<()> {
+        for (index, spec) in self.endpoints.iter().enumerate() {
+            if let Some(declared) = spec.chain_id {
+                if declared != expected {
+                    return Err(Error::WrongChain {
+                        endpoint: self.url(index).to_string(),
+                        got: declared,
+                        want: expected,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The narrowest declared `eth_getLogs` range in the pool. A pooled call
+    /// may land on any endpoint, so splitting by the minimum is the only
+    /// bound that holds whichever endpoint serves each chunk.
+    pub fn log_range_cap(&self) -> u64 {
+        self.endpoints
+            .iter()
+            .map(|spec| spec.max_log_range)
+            .min()
+            .unwrap_or(1)
+            .max(1)
+    }
+
     pub fn len(&self) -> usize {
         self.endpoints.len()
     }
@@ -390,17 +461,17 @@ impl EndpointPool {
     /// caller gets the earliest retry instead of the whole cooling set.
     pub fn admit(&self, now_ms: u64, roles: &[&str]) -> Admission {
         let len = self.endpoints.len();
-        let mut indices: Vec<usize> = (0..len).collect();
-        shuffle(
+        let mut indices: Vec<usize> = (0..len)
+            .filter(|index| self.endpoints[*index].serves(roles))
+            .collect();
+        weighted_order(
             &mut indices,
+            &self.endpoints,
             splitmix64(self.start.fetch_add(1, Ordering::Relaxed) ^ self.seed),
         );
-        let mut healthy = Vec::with_capacity(len);
-        let mut cooling = Vec::with_capacity(len);
+        let mut healthy = Vec::with_capacity(indices.len());
+        let mut cooling = Vec::with_capacity(indices.len());
         for index in indices {
-            if !self.endpoints[index].serves(roles) {
-                continue;
-            }
             if self.health[index].down_until_ms.load(Ordering::Relaxed) <= now_ms {
                 healthy.push(index);
             } else {
@@ -440,8 +511,22 @@ impl EndpointPool {
             return None;
         }
         // The endpoint closest to its cooldown expiry is the least bad probe.
-        candidates.sort_by_key(|index| self.health[*index].down_until_ms.load(Ordering::Relaxed));
-        let pick = candidates[splitmix64(self.seed ^ now_ms) as usize % candidates.len()];
+        // The old code sorted and then ignored the order by picking randomly;
+        // now the earliest cohort is the candidate set, and weight (with the
+        // pool's seeded entropy) only breaks ties inside it.
+        let earliest = candidates
+            .iter()
+            .map(|index| self.health[*index].down_until_ms.load(Ordering::Relaxed))
+            .min()
+            .unwrap_or(0);
+        candidates
+            .retain(|index| self.health[*index].down_until_ms.load(Ordering::Relaxed) == earliest);
+        weighted_order(
+            &mut candidates,
+            &self.endpoints,
+            splitmix64(self.seed ^ now_ms),
+        );
+        let pick = candidates[0];
         let spacing = self
             .policy
             .emergency_probe_ms
@@ -653,6 +738,8 @@ impl EndpointPool {
                 url: self.endpoints[index].url.clone(),
                 chain_id: self.endpoints[index].chain_id,
                 roles: self.endpoints[index].roles.iter().cloned().collect(),
+                weight: self.endpoints[index].weight,
+                max_log_range: self.endpoints[index].max_log_range,
                 down_until_ms: health.down_until_ms.load(Ordering::Relaxed),
                 failures: health.failures.load(Ordering::Relaxed),
                 attempts: health.attempts.load(Ordering::Relaxed),
@@ -706,13 +793,32 @@ fn process_seed() -> u64 {
     splitmix64(nanos ^ u64::from(std::process::id()) ^ address)
 }
 
-/// Fisher-Yates, seeded by one splitmix64 step per swap.
-fn shuffle(indices: &mut [usize], mut seed: u64) {
-    for i in (1..indices.len()).rev() {
-        seed = splitmix64(seed);
-        let j = (seed as usize) % (i + 1);
-        indices.swap(i, j);
-    }
+/// Whether two declarations of the same URL carry the same attributes.
+fn same_attributes(a: &EndpointSpec, b: &EndpointSpec) -> bool {
+    a.roles == b.roles
+        && a.chain_id == b.chain_id
+        && a.weight == b.weight
+        && a.max_log_range == b.max_log_range
+}
+
+/// A weighted random permutation (Efraimidis–Spirakis): each endpoint draws
+/// `u^(1/weight)` and the largest keys come first. Every endpoint remains in
+/// the order exactly once (weight changes the expected position, not
+/// eligibility), and the keys are derived from the pool's seeded splitmix, so
+/// tests can pin a seed and two pods do not share a rotation.
+fn weighted_order(indices: &mut [usize], endpoints: &[EndpointSpec], seed: u64) {
+    let weight_of = |index: usize| endpoints[index].weight.max(1) as f64;
+    let key = |index: usize| {
+        let mixed = splitmix64(seed ^ (index as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        // A uniform draw in (0, 1): 53 random bits, the f64 mantissa's width.
+        let u = ((mixed >> 11) as f64 + 1.0) / ((1u64 << 53) as f64 + 1.0);
+        u.powf(1.0 / weight_of(index))
+    };
+    indices.sort_by(|a, b| {
+        key(*b)
+            .partial_cmp(&key(*a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 #[cfg(test)]
@@ -979,5 +1085,125 @@ mod tests {
         let pool = http(&["http://a"]);
         assert_eq!(pool.admit(0, &[]).indices, vec![0]);
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_urls_with_conflicting_attributes_are_refused() {
+        let mut first = EndpointSpec::url("http://a");
+        first.chain_id = Some(1);
+        let mut second = EndpointSpec::url("http://a/");
+        second.chain_id = Some(999);
+        let error = EndpointPool::from_specs([first, second], Scheme::Http, PoolPolicy::default())
+            .expect_err("one URL cannot be two chains");
+        assert!(
+            matches!(error, Error::ConflictingEndpointAttributes { .. }),
+            "{error}"
+        );
+
+        // Identical declarations are still one endpoint.
+        let pool = EndpointPool::from_specs(
+            [
+                EndpointSpec::url("http://a/"),
+                EndpointSpec::url("http://a"),
+            ],
+            Scheme::Http,
+            PoolPolicy::default(),
+        )
+        .expect("identical duplicates deduplicate");
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn a_zero_weight_or_log_cap_is_refused() {
+        let mut spec = EndpointSpec::url("http://a");
+        spec.weight = 0;
+        assert!(matches!(
+            EndpointPool::from_specs([spec], Scheme::Http, PoolPolicy::default()),
+            Err(Error::InvalidEndpointAttribute { .. })
+        ));
+        let mut spec = EndpointSpec::url("http://a");
+        spec.max_log_range = 0;
+        assert!(matches!(
+            EndpointPool::from_specs([spec], Scheme::Http, PoolPolicy::default()),
+            Err(Error::InvalidEndpointAttribute { .. })
+        ));
+    }
+
+    #[test]
+    fn weight_orders_admission_without_hiding_the_backup() {
+        let mut preferred = EndpointSpec::url("http://a");
+        preferred.weight = 9;
+        let pool = EndpointPool::from_specs(
+            [preferred, EndpointSpec::url("http://b")],
+            Scheme::Http,
+            PoolPolicy::default(),
+        )
+        .unwrap();
+        let mut first = [0usize; 2];
+        for _ in 0..256 {
+            let admission = pool.admit(0, &[]);
+            assert_eq!(
+                admission.indices.len(),
+                2,
+                "both healthy endpoints stay admitted"
+            );
+            first[admission.indices[0]] += 1;
+        }
+        assert!(
+            first[0] > first[1] * 3,
+            "the weight-9 endpoint should usually lead: {first:?}"
+        );
+    }
+
+    #[test]
+    fn weighted_order_is_a_permutation() {
+        let mut specs = vec![EndpointSpec::url("http://a"); 4];
+        for (index, spec) in specs.iter_mut().enumerate() {
+            spec.url = format!("http://{index}");
+            spec.weight = index as u32 + 1;
+        }
+        for seed in 0..32 {
+            let mut indices: Vec<usize> = (0..specs.len()).collect();
+            weighted_order(&mut indices, &specs, seed);
+            let mut sorted = indices.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, vec![0, 1, 2, 3], "seed {seed}: {indices:?}");
+        }
+    }
+
+    #[test]
+    fn declared_chain_ids_are_checked_before_a_request() {
+        let mut spec = EndpointSpec::url("http://a");
+        spec.chain_id = Some(999);
+        let pool = EndpointPool::from_specs([spec], Scheme::Http, PoolPolicy::default()).unwrap();
+        let error = pool
+            .verify_declared_chain(1)
+            .expect_err("declared 999 is not chain 1");
+        assert!(
+            matches!(
+                error,
+                Error::WrongChain {
+                    got: 999,
+                    want: 1,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        pool.verify_declared_chain(999)
+            .expect("the declared chain matches");
+    }
+
+    #[test]
+    fn the_emergency_probe_prefers_the_earliest_cooldown() {
+        let pool = http(&["http://a", "http://b"]);
+        pool.record_failure(0, 0);
+        pool.record_failure(1, 500);
+        // Both are cooling; the probe must pick the endpoint that became
+        // eligible first (b's cooldown starts 500 ms later).
+        let pick = pool
+            .emergency_probe(10_000, &[])
+            .expect("one probe is due after both cooldowns");
+        assert_eq!(pick, 0);
     }
 }

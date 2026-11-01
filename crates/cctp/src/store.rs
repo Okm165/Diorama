@@ -276,17 +276,11 @@ impl Store {
                 source,
             })?;
         }
-        let tmp = self.path.with_extension("tmp");
         let bytes = serde_json::to_vec_pretty(&snapshot).map_err(|source| Error::Encode {
             what: ARTIFACT,
             source,
         })?;
-        std::fs::write(&tmp, bytes).map_err(|source| Error::Io {
-            what: ARTIFACT,
-            path: tmp.clone(),
-            source,
-        })?;
-        std::fs::rename(&tmp, &self.path).map_err(|source| Error::Io {
+        crate::atomic::write_atomic(&self.path, &bytes).map_err(|source| Error::Io {
             what: ARTIFACT,
             path: self.path.clone(),
             source,

@@ -207,6 +207,9 @@ impl Instance {
                         roles: group.roles.iter().cloned().collect(),
                         chain_id: group.chain_id,
                         weight: group.weight,
+                        max_log_range: group
+                            .max_log_range
+                            .unwrap_or(diorama_anvil::DEFAULT_MAX_LOG_RANGE_BLOCKS),
                     },
                     None => diorama_anvil::EndpointSpec::url(url.clone()),
                 }
@@ -300,6 +303,7 @@ impl Instance {
         let mut issues = Vec::new();
         self.check_profile_coherence(&mut issues);
         self.check_chains(&mut issues);
+        self.check_endpoint_groups(&mut issues);
         self.check_endpoint_policy(&mut issues);
         self.check_services(&mut issues);
         if issues.is_empty() {
@@ -414,6 +418,53 @@ impl Instance {
         }
         if policy.emergency_probe_ms == 0 {
             issues.push("endpoint_defaults.emergency_probe_ms must be > 0".into());
+        }
+    }
+
+    /// Endpoint groups: attributes must be usable, and one URL must not be
+    /// declared twice with different roles/chain id/weight/log cap. The
+    /// loader expands a URL list before the pool sees it, so a conflicting
+    /// duplicate across groups would otherwise be resolved by group order.
+    fn check_endpoint_groups(&self, issues: &mut Vec<String>) {
+        type Attributes = (
+            std::collections::BTreeSet<String>,
+            Option<u64>,
+            u32,
+            Option<u64>,
+        );
+        let mut seen: BTreeMap<String, Attributes> = BTreeMap::new();
+        for (name, group) in &self.endpoints {
+            let key = format!("endpoints.{name}");
+            if group.weight == 0 {
+                issues.push(format!("{key}.weight must be >= 1"));
+            }
+            if group.max_log_range == Some(0) {
+                issues.push(format!("{key}.max_log_range must be > 0"));
+            }
+            let attributes = (
+                group.roles.iter().cloned().collect(),
+                group.chain_id,
+                group.weight,
+                group.max_log_range,
+            );
+            for url in group.http.iter().chain(group.ws.iter()) {
+                for part in url.split(',') {
+                    let part = part.trim().trim_end_matches('/');
+                    if part.is_empty() {
+                        continue;
+                    }
+                    match seen.get(part) {
+                        None => {
+                            seen.insert(part.to_string(), attributes.clone());
+                        }
+                        Some(known) if known == &attributes => {}
+                        Some(_) => issues.push(format!(
+                            "{key}: {part:?} is also declared in another endpoint group with \
+                             different roles/chain_id/weight/max_log_range"
+                        )),
+                    }
+                }
+            }
         }
     }
 

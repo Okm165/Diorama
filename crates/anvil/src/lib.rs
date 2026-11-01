@@ -13,7 +13,7 @@ mod writes;
 pub use backoff::{Backoff, Progress};
 pub use pool::{
     now_ms, Admission, Attempt, AttemptOutcome, EndpointPool, EndpointSnapshot, EndpointSpec,
-    PoolError, PoolPolicy, Scheme, Served,
+    PoolError, PoolPolicy, Scheme, Served, DEFAULT_MAX_LOG_RANGE_BLOCKS,
 };
 
 /// The JSON content type every transport in the workspace sends (and the

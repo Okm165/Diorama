@@ -1119,6 +1119,7 @@ pub(crate) fn ctx_of(feed: &MarketFeed, coin: &str) -> Option<AssetCtx> {
         impact_pxs: None,
         day_base_vlm: Decimal::ZERO,
         control_owned: feed.market_is_owned(coin),
+        funding_owned: feed.funding_is_owned(coin),
     })
 }
 
@@ -1393,7 +1394,7 @@ mod tests {
         assert!(ctx_of(&feed, "BTC").is_none());
         // With a funding source the ctx serves (the crash-lane shape: the
         // override wins over the absent cache).
-        feed.own_funding("BTC", Decimal::new(125, 7)).unwrap();
+        feed.own_funding("BTC", Decimal::new(125, 7), None).unwrap();
         let ctx = ctx_of(&feed, "BTC").unwrap();
         assert_eq!(ctx.funding, Decimal::new(125, 7));
         assert_eq!(ctx.mark_px, Decimal::from(100));

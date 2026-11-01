@@ -1878,7 +1878,7 @@ mod tests {
         // The test is the PnL identity, not funding: the fills settle funding
         // (a sub-nano term with the fixture's tiny rate) — pin it to zero so
         // the assertion is exact.
-        feed.own_funding("ETH", Decimal::ZERO).unwrap();
+        feed.own_funding("ETH", Decimal::ZERO, None).unwrap();
         let (sim, a) = funded_sim(&feed, "1000");
         sim.order(&feed, a, &ioc(Side::Buy, "2")).unwrap();
         let before = sim.account(a).unwrap().unwrap().perp_balance;

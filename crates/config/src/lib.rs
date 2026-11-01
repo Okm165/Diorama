@@ -329,6 +329,9 @@ state_dir = "/state"
 [services.engine.anvil]
 target_url = "http://anvil-t:8545"
 
+[services.engine.loops]
+chunk_size = 500
+
 [services.engine.source_sync]
 engine_url = "http://reth:8551"
 jwt_path = "/secrets/jwt.hex"
@@ -391,6 +394,8 @@ t_url = "http://t:8545"
 v_url = "http://v:8545"
 relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
 attester_seed = "devnet"
+fast_burn_allowance = 56854459.08
+scan_chunk_blocks = 2000
 
 [services.cctp_bridge.iris]
 port = 8095
@@ -420,6 +425,9 @@ state_dir = "/state"
 
 [services.engine.anvil]
 target_url = "http://anvil-v:8545"
+
+[services.engine.loops]
+chunk_size = 500
 
 [services.engine.journal]
 dir = "/state/journal"
@@ -558,6 +566,8 @@ t_url = "http://t:8545"
 v_url = "http://v:8545"
 relay_key = "0x11"
 attester_seed = "seed"
+fast_burn_allowance = 56854459.08
+scan_chunk_blocks = 2000
 
 [services.cctp_bridge.iris]
 port = 8095
@@ -906,6 +916,46 @@ http = ["http://a:8545", "http://b:8545"]
         );
     }
 
+    /// Endpoint attributes survive into the pool: chain id, weight and the
+    /// `eth_getLogs` cap. A URL declared twice with different attributes is
+    /// ambiguous and refused at the config boundary.
+    #[test]
+    fn endpoint_group_attributes_are_carried_and_conflicts_refused() {
+        let src = minimal_venue_instance().replace(
+            "source_url = \"http://hl-rpc:8545\"",
+            "source_url = \"@hyperevm\"",
+        ) + r#"
+[endpoints.hyperevm]
+http = ["http://a:8545", "http://b:8545"]
+chain_id = 999
+weight = 5
+max_log_range = 900
+"#;
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        inst.check().expect("the group attributes are valid");
+        let urls = inst.chains.venue.as_ref().unwrap().source_urls.as_slice();
+        let specs = inst.endpoint_specs(urls);
+        assert_eq!(specs.len(), 2);
+        for spec in &specs {
+            assert_eq!(spec.chain_id, Some(999));
+            assert_eq!(spec.weight, 5);
+            assert_eq!(spec.max_log_range, 900);
+        }
+
+        let conflict = src
+            + r#"
+[endpoints.conflicting]
+http = ["http://a:8545"]
+chain_id = 1
+"#;
+        let (inst, _) = load_str(&conflict, &[]).unwrap();
+        let err = inst.check().expect_err("one URL cannot be two chains");
+        assert!(
+            err.to_string().contains("different roles/chain_id/weight"),
+            "{err}"
+        );
+    }
+
     /// The source list is a URL list too; a malformed member must fail at the
     /// config boundary, not at the first pool call.
     #[test]
@@ -938,6 +988,8 @@ profile = "cctp"
 state_dir = "/cctp"
 relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
 attester_seed = "devnet"
+fast_burn_allowance = 56854459.08
+scan_chunk_blocks = 2000
 [[services.cctp_bridge.chains]]
 id = "ethereum"
 family = "ethereum"
@@ -971,6 +1023,8 @@ profile = "cctp"
 state_dir = "/cctp"
 relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
 attester_seed = "devnet"
+fast_burn_allowance = 56854459.08
+scan_chunk_blocks = 2000
 [[services.cctp_bridge.chains]]
 id = "ethereum"
 family = "ethereum"
@@ -1030,7 +1084,7 @@ port = 8096
         // A mirror instance must not carry the bridge section: one process =
         // one role, and several bridges compose as several instances.
         let src = format!(
-            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://t:8545\"\nv_url = \"http://v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
+            "{}\n[services.cctp_bridge]\nstate_dir = \"/cctp\"\nt_url = \"http://t:8545\"\nv_url = \"http://v:8545\"\nrelay_key = \"0x{}\"\nattester_seed = \"devnet\"\nfast_burn_allowance = 56854459.08\nscan_chunk_blocks = 2000\n[services.cctp_bridge.iris]\nport = 8095\n[services.cctp_bridge.control]\nport = 8096\n",
             minimal_venue_instance(),
             "59".repeat(32)
         );
@@ -1097,6 +1151,8 @@ http = ["http://arb:8545"]
 state_dir = "/cctp"
 relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
 attester_seed = "devnet"
+fast_burn_allowance = 56854459.08
+scan_chunk_blocks = 2000
 
 [[services.cctp_bridge.chains]]
 id = "ethereum"

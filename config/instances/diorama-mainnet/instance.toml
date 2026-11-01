@@ -27,6 +27,11 @@ state_dir = "${STATE_DIR}"
 [services.engine.anvil]
 target_url = "@anvil_t"
 
+[services.engine.loops]
+# JSON-RPC batch items for source reads and local cheatcode writes. This is
+# the deployment's endpoint contract (the live value), not a global default.
+chunk_size = 500
+
 [services.engine.source_sync]
 engine_url = "@reth_engine"
 jwt_path = "${JWT_PATH}"

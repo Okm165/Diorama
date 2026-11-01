@@ -22,6 +22,14 @@ project = "daloc"
 state_dir = "${CCTP_STATE_DIR}"
 relay_key = "${CCTP_RELAY_KEY}"
 attester_seed = "diorama-cctp-devnet-attester"
+# Circle's live fast-burn allowance is a rolling figure (measured
+# 2026-10-31: 56,854,459.08 USDC). This deployment pins the measured value;
+# there is no safe generic fallback.
+fast_burn_allowance = 56854459.08
+# The watcher scans the local anvils (T and V), whose per-call range is 2,000
+# blocks. The client still clamps any chunk to the endpoint group's
+# `max_log_range`, so a public source cannot receive a wider range.
+scan_chunk_blocks = 2000
 
 [services.cctp_bridge.iris]
 addr = "0.0.0.0"

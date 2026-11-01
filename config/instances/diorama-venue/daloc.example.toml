@@ -13,6 +13,9 @@ chain_id = 999
 [endpoints.hyperevm]
 http = ["${HL_RPC_URLS}"]
 chain_id = 999
+# The public HyperEVM source's measured free-plan cap: wider eth_getLogs
+# ranges stall or are refused. The client splits scans at this bound.
+max_log_range = 900
 
 [endpoints.hyperliquid_api]
 http = ["${HL_INFO_API_URL}"]

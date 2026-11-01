@@ -450,14 +450,23 @@ pub(crate) struct AssetCtx {
     #[serde(default)]
     #[serde(serialize_with = "decimal_nano::serialize")]
     pub day_base_vlm: Decimal,
-    /// Whether any input this ctx serves is scenario-owned: the mark/oracle
-    /// (`crash`/`rally`), the funding rate (`set_funding`), the book
-    /// (`set_book`) or the whole live plane (`stall`). The real venue has no
-    /// such field; it is a mirror extension so a consumer can refuse a
-    /// scenario as a market fact instead of inferring ownership from a price
-    /// divergence. Serialized only when true, so the live shape is unchanged.
+    /// Whether a **price input** this ctx serves is scenario-owned: the
+    /// mark/oracle (`crash`/`rally`), the book (`set_book`) or the whole live
+    /// plane (`stall`). Funding is a separate input and carries its own flag
+    /// below: a funding-only scenario leaves the mark/oracle a market
+    /// observation, and consumers that re-stamp an oracle must not refuse it.
+    /// The real venue has no such field; it is a mirror extension so a
+    /// consumer can refuse a scenario as a market fact instead of inferring
+    /// ownership from a price divergence. Serialized only when true, so the
+    /// live shape is unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub control_owned: bool,
+    /// Whether the hourly funding rate is scenario-owned (`set_funding`).
+    /// Separate from [`Self::control_owned`] because funding moves no mark:
+    /// a funding-only scenario is still a real price observation. Serialized
+    /// only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub funding_owned: bool,
 }
 
 /// The tests' `AssetCtx` fixture (marks/oracle from the args; rate-free):
@@ -478,6 +487,7 @@ pub(crate) fn test_ctx(mark: &str, oracle: &str) -> AssetCtx {
         impact_pxs: None,
         day_base_vlm: Decimal::ZERO,
         control_owned: false,
+        funding_owned: false,
     }
 }
 

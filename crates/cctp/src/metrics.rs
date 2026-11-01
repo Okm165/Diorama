@@ -27,6 +27,11 @@ pub struct CctpMetrics {
     pub gas_critical: AtomicU64,
     /// The last head the watcher scanned (a coarse liveness gauge).
     pub last_scan_block: AtomicU64,
+    /// Parked records read from the durable archives (outside the live store).
+    pub archived_parked: AtomicU64,
+    /// Archive files that exist but could not be parsed (reported, not
+    /// silently dropped).
+    pub archives_corrupt: AtomicU64,
     /// The relay key's native balance per chain (wei, full-width: a devnet
     /// balance can exceed `u64`, so the gauge carries the decimal string).
     balances: Mutex<Vec<(String, String)>>,
@@ -105,6 +110,14 @@ impl CctpMetrics {
             "# HELP cctp_last_scan_block last chain head scanned by the watcher\n# TYPE cctp_last_scan_block gauge\ncctp_last_scan_block {}\n",
             self.last_scan_block.load(Ordering::Relaxed)
         ));
+        out.push_str(&format!(
+            "# HELP cctp_messages_archived_parked parked records in the durable archives (outside the live store)\n# TYPE cctp_messages_archived_parked gauge\ncctp_messages_archived_parked {}\n",
+            self.archived_parked.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# HELP cctp_archives_corrupt archive files that could not be parsed\n# TYPE cctp_archives_corrupt gauge\ncctp_archives_corrupt {}\n",
+            self.archives_corrupt.load(Ordering::Relaxed)
+        ));
         let balances = self
             .balances
             .lock()
@@ -154,11 +167,18 @@ mod tests {
             U256::from(10_000) * U256::from(10).pow(U256::from(18)),
         );
         metrics.set_balance("hyper_evm", U256::from(7));
+        metrics.archived_parked.store(8, Ordering::Relaxed);
+        metrics.archives_corrupt.store(1, Ordering::Relaxed);
         let rendered = metrics.render();
         assert!(
             rendered.contains("cctp_messages_seen_total 3"),
             "{rendered}"
         );
+        assert!(
+            rendered.contains("cctp_messages_archived_parked 8"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("cctp_archives_corrupt 1"), "{rendered}");
         assert!(
             rendered.contains("cctp_relay_balance_wei{chain=\"ethereum\"} 10000000000000000000000"),
             "{rendered}"

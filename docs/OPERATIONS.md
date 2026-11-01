@@ -936,6 +936,7 @@ installs the devnet attester on both chains and deploys the hook wrapper
 | Check | Where |
 |---|---|
 | parked messages (never dropped) | `GET /health` (`parked` count), `GET /control/state` |
+| archived parked messages | `GET /health` (`archived_parked`), `/metrics` `cctp_messages_archived_parked` |
 | the relay's gas | `/metrics` `cctp_*`; the boot tops the key up to the low threshold |
 | the attester / wrapper wiring | the boot log lines (`devnet attester installed`, `hook wrapper present/deployed`) |
 | a transfer end-to-end | `POST /control/transfer {source, destination, amount}` |
@@ -947,6 +948,8 @@ The bridge's series (all `cctp_*`, on the control port):
 | `cctp_messages_seen_total` | `MessageSent` logs absorbed (new records) |
 | `cctp_messages_signed_total` | records transitioned PENDING → SIGNED |
 | `cctp_messages_pending` / `cctp_messages_signed` / `cctp_messages_parked` | the queue's current state counts (what `/health` reports) |
+| `cctp_messages_archived_parked` | parked records in the durable `cctp-parked-archive-*.json` files (outside the live store) |
+| `cctp_archives_corrupt` | archive files that exist but could not be parsed; boot logs each path and error (never silently dropped) |
 | `cctp_relays_confirmed_total` | `receiveMessage` landed (a consumed nonce reconciles as confirmed) |
 | `cctp_relays_parked_total` | definitive failures parked for an operator |
 | `cctp_relay_attempts_total` | signed records re-checked by the relayer (one per tick per record) |

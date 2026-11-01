@@ -4,7 +4,7 @@ One grammar, four layers (`defaults <- project <- instance <- env`):
 
 | Layer | Home | Nature |
 |---|---|---|
-| defaults | `defaults.toml` | global for every instance and service; the single home of shared numbers (cadences, ring sizes, chunk limits). Embedded into the binaries at build time. |
+| defaults | `defaults.toml` | global for every instance and service; the single home of shared numbers (cadences, ring sizes). Embedded into the binaries at build time. Deployment contracts (batch/log chunk sizes, the Iris fast-burn allowance) live in the instance. |
 | project | `instances/<name>/<project>.toml` | the product specialization: endpoint groups, watchlist, fixture ownership, probes, closures, markets. Named by `[instance].project`; **gitignored**, with a tracked `<project>.example.toml` template. Absent = a generic mirror. |
 | instance | `instances/<name>/instance.toml` | one deployment's facts: identity, profile, chain shape, state paths, ports. Mounted for every pod of the instance (one file per instance, many readers). |
 | env | `DIORAMA__*` | operator debug overrides, highest precedence, logged loudly at boot. |
@@ -25,6 +25,8 @@ http = ["${HL_RPC_1}", "${HL_RPC_2}"]
 ws   = ["wss://rpc.example/ws"]
 roles = ["archive"]          # optional; empty = no declared capability
 chain_id = 999               # optional; the boot assert still pins the engine
+weight = 1                   # optional; admission preference (>= 1)
+max_log_range = 900          # optional; eth_getLogs cap (default 10,000)
 
 [chains.venue]
 source_urls = "@hyperevm"
@@ -37,6 +39,14 @@ pool. The loader expands the reference before validation, so the same group
 feeds the engine, the simulator, the CCTP bridge and the `export-env` client
 block without a second spelling. A group reference that is unknown or empty
 is a boot error naming the group, never a silent single URL.
+
+`chain_id` is asserted before the live `eth_chainId` boot check; a declared
+mismatch is a config fault named by URL. `weight` orders admission (a
+weight-9 endpoint is usually visited before a weight-1 backup, but every
+healthy endpoint still serves once per round). `max_log_range` bounds one
+`eth_getLogs` call: wider scans are split into chunks, and a raw over-cap
+range is refused locally instead of stalling the provider. The default is
+10,000 blocks; the public HyperEVM source pins 900.
 
 The shared `diorama-anvil::EndpointPool` gives every lane the same policy:
 each round starts at a random healthy endpoint, a transport/throttle/plan/

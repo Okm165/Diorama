@@ -748,11 +748,82 @@ impl Rpc {
     /// random endpoint and fails over; the answer's own endpoint names any
     /// JSON-RPC refusal.
     pub async fn call_raw(&self, method: &str, params: impl Serialize) -> Result<Box<RawValue>> {
+        let value = serde_json::to_value(&params).map_err(|source| Error::Encode {
+            method: method.to_string(),
+            source,
+        })?;
+        self.check_log_range(method, &value)?;
         let request = self.request(self.url(), method, params)?;
         let (endpoint, status, text) = self
             .post_raw_throttled(method, &request.take_request())
             .await?;
         Self::answer(&endpoint, method, status, &text)
+    }
+
+    /// Refuse an over-cap `eth_getLogs` before it reaches an endpoint. A
+    /// wide range is the measured outage shape (a 57,100-block request stalled
+    /// the public HyperEVM RPC ~30 s and cascaded through the indexer, the
+    /// engine and the CCTP bridge); wide callers use [`Self::logs_range`],
+    /// which splits into these bounded chunks.
+    fn check_log_range(&self, method: &str, params: &serde_json::Value) -> Result<()> {
+        if method != "eth_getLogs" {
+            return Ok(());
+        }
+        let Some((from, to)) = log_range_of(params) else {
+            return Ok(());
+        };
+        if to < from {
+            return Ok(());
+        }
+        let cap = self.log_range_cap();
+        let blocks = to.saturating_sub(from).saturating_add(1);
+        if blocks > cap {
+            return Err(Error::LogRangeTooWide {
+                method: method.to_string(),
+                from,
+                to,
+                blocks,
+                cap,
+            });
+        }
+        Ok(())
+    }
+
+    /// A batch is another door to `eth_getLogs`; guard each item so an
+    /// over-cap range cannot ride a batch past the single-call check.
+    fn check_batch_log_ranges(&self, calls: &[Call]) -> Result<()> {
+        for call in calls {
+            let params: serde_json::Value =
+                serde_json::from_str(call.params.get()).map_err(|source| Error::Encode {
+                    method: call.meta.method.to_string(),
+                    source,
+                })?;
+            self.check_log_range(&call.meta.method, &params)?;
+        }
+        Ok(())
+    }
+
+    /// The narrowest declared `eth_getLogs` cap in this client's pool: a
+    /// pooled call may land on any endpoint, so a chunk is safe only under the
+    /// minimum.
+    pub fn log_range_cap(&self) -> u64 {
+        self.pool.log_range_cap()
+    }
+
+    /// `eth_getLogs` over an inclusive block range, split into chunks no wider
+    /// than the pool's narrowest declared cap. The filter's own block bounds
+    /// are replaced per chunk; every other predicate (addresses, topics) is
+    /// preserved. Logs are concatenated in range order.
+    pub async fn logs_range(&self, filter: &Filter, from: u64, to: u64) -> Result<Vec<Log>> {
+        let mut logs = Vec::new();
+        for (start, end) in log_chunks(from, to, self.log_range_cap()) {
+            let filter = filter
+                .clone()
+                .from_block(BlockNumberOrTag::Number(start))
+                .to_block(BlockNumberOrTag::Number(end));
+            logs.extend(self.call::<Vec<Log>>("eth_getLogs", (filter,)).await?);
+        }
+        Ok(logs)
     }
 
     pub async fn call<T: DeserializeOwned>(
@@ -793,6 +864,7 @@ impl Rpc {
         if calls.is_empty() {
             return Ok(Vec::new());
         }
+        self.check_batch_log_ranges(calls)?;
         // The chunks ride concurrently (bounded): each is an independent HTTP
         // body, and the join keeps the calls' order (chunk order, item
         // order). The sequential form made one wide window cost the sum of
@@ -1122,6 +1194,9 @@ impl Rpc {
     /// (failover is the point), but a pool with no reachable endpoint is a
     /// boot refusal.
     pub async fn verify_chain(&self, expected: u64) -> Result<()> {
+        // The cheap half first: a declared chain id that disagrees is a config
+        // fault attributable to one URL, before any request.
+        self.pool.verify_declared_chain(expected)?;
         let mut verified = 0u32;
         let mut last: Option<Error> = None;
         for index in 0..self.pool.len() {
@@ -1661,6 +1736,49 @@ pub fn truncate(s: &str, n: usize) -> &str {
     }
 }
 
+/// The inclusive `(fromBlock, toBlock)` of an `eth_getLogs` params value.
+/// JSON-RPC params are positional, so the filter is the first array element;
+/// a bare filter object is accepted too (some tooling stages it that way).
+/// Tags (`latest`, `safe`, …) and absent bounds have no fixed range and are
+/// left to the endpoint.
+fn log_range_of(params: &serde_json::Value) -> Option<(u64, u64)> {
+    let filter = params
+        .as_array()
+        .and_then(|items| items.first())
+        .unwrap_or(params);
+    let block = |value: Option<&serde_json::Value>| match value {
+        Some(serde_json::Value::Number(n)) => n.as_u64(),
+        Some(serde_json::Value::String(s)) => s
+            .strip_prefix("0x")
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok()),
+        _ => None,
+    };
+    Some((
+        block(filter.get("fromBlock"))?,
+        block(filter.get("toBlock"))?,
+    ))
+}
+
+/// Split an inclusive block range into chunks no wider than `cap` (floored at
+/// one so a zero can never spin). An empty range (`to < from`) yields no
+/// chunks; the last chunk is clamped to `to`.
+fn log_chunks(from: u64, to: u64, cap: u64) -> Vec<(u64, u64)> {
+    if to < from {
+        return Vec::new();
+    }
+    let cap = cap.max(1);
+    let mut chunks = Vec::new();
+    let mut start = from;
+    loop {
+        let end = start.saturating_add(cap - 1).min(to);
+        chunks.push((start, end));
+        if end >= to {
+            return chunks;
+        }
+        start = end + 1;
+    }
+}
+
 /// One chunk's end, from `start`: walk while the item count and the estimated
 /// body size allow. The params are already serialized JSON, so the size
 /// estimate is exact enough for the chunk decision.
@@ -2021,5 +2139,68 @@ mod tests {
         )
         .expect("a valid URL builds");
         assert_eq!(rpc.pool().policy(), policy);
+    }
+
+    fn rpc_with_log_cap(cap: u64) -> Rpc {
+        let spec = crate::EndpointSpec {
+            url: "http://127.0.0.1:1".into(),
+            roles: Default::default(),
+            chain_id: None,
+            weight: 1,
+            max_log_range: cap,
+        };
+        let pool = EndpointPool::from_specs([spec], Scheme::Http, PoolPolicy::default())
+            .expect("a valid pool");
+        Rpc::with_pool(pool, Duration::from_secs(1)).expect("a valid client")
+    }
+
+    /// A wide range is split at the declared cap, inclusive at both ends.
+    #[test]
+    fn log_ranges_split_into_bounded_chunks() {
+        assert_eq!(log_chunks(10, 10, 10), vec![(10, 10)]);
+        assert_eq!(log_chunks(10, 19, 10), vec![(10, 19)]);
+        assert_eq!(
+            log_chunks(10, 25, 10),
+            vec![(10, 19), (20, 25)],
+            "the last chunk is clamped to the requested end"
+        );
+        assert_eq!(log_chunks(10, 9, 10), Vec::<(u64, u64)>::new());
+        assert_eq!(
+            log_chunks(1, 3, 0),
+            vec![(1, 1), (2, 2), (3, 3)],
+            "a zero cap is floored at one, never an infinite loop"
+        );
+    }
+
+    /// An over-cap range is refused locally with the numbers in the error,
+    /// before any endpoint sees it; exactly the cap is allowed.
+    #[test]
+    fn an_over_cap_log_range_is_refused_locally() {
+        let rpc = rpc_with_log_cap(900);
+        let over = serde_json::to_value((Filter::new().from_block(100).to_block(1_000),))
+            .expect("filter serializes");
+        let err = rpc
+            .check_log_range("eth_getLogs", &over)
+            .expect_err("1,000 blocks is over the 900 cap");
+        match err {
+            Error::LogRangeTooWide {
+                from,
+                to,
+                blocks,
+                cap,
+                ..
+            } => {
+                assert_eq!((from, to, blocks, cap), (100, 1_000, 901, 900));
+            }
+            other => panic!("expected LogRangeTooWide, got {other}"),
+        }
+        let at_cap = serde_json::to_value((Filter::new().from_block(100).to_block(999),))
+            .expect("filter serializes");
+        rpc.check_log_range("eth_getLogs", &at_cap)
+            .expect("900 blocks is the declared cap");
+        let other_method = serde_json::to_value((Filter::new().from_block(1).to_block(1_000_000),))
+            .expect("filter serializes");
+        rpc.check_log_range("eth_getBlockByNumber", &other_method)
+            .expect("only eth_getLogs is range-bounded");
     }
 }

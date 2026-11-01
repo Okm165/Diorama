@@ -32,6 +32,9 @@ target_url = "@anvil_v"
 [services.engine.loops]
 poll_interval_ms = 2000
 max_gap_blocks = 100
+# JSON-RPC batch items for source reads and local cheatcode writes. This is
+# the deployment's endpoint contract (the live value), not a global default.
+chunk_size = 500
 
 [services.engine.journal]
 dir = "${STATE_DIR}/journal"

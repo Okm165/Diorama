@@ -69,9 +69,15 @@ pub struct EndpointGroup {
     /// the assert to the consumer (the engine's boot pins its own chain).
     #[serde(default)]
     pub chain_id: Option<u64>,
-    /// Relative preference (default 1).
+    /// Relative preference in pool admission (default 1).
     #[serde(default = "one")]
     pub weight: u32,
+    /// The widest `eth_getLogs` block range these endpoints accept in one
+    /// call. Absent keeps the client's conservative 10,000-block default; a
+    /// public provider with a smaller cap pins it here (the public HyperEVM
+    /// source uses 900).
+    #[serde(default)]
+    pub max_log_range: Option<u64>,
 }
 
 const fn one() -> u32 {
@@ -440,6 +446,7 @@ mod tests {
                 roles: Vec::new(),
                 chain_id: None,
                 weight: 1,
+                max_log_range: None,
             },
         );
         let mut endpoints = one("@hyperevm");

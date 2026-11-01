@@ -60,6 +60,35 @@ pub enum Error {
     #[error("{endpoint:?} is not a valid endpoint for this transport")]
     InvalidEndpoint { endpoint: String },
 
+    /// One endpoint attribute is unusable (a zero weight would make weighted
+    /// admission undefined; a zero log-range cap would make every chunk
+    /// empty). Refused at pool construction, where the config's typo is
+    /// still attributable to one URL.
+    #[error("{endpoint}: invalid endpoint attribute: {detail}")]
+    InvalidEndpointAttribute { endpoint: String, detail: String },
+
+    /// The same URL was declared twice with different attributes. Keeping
+    /// the first silently would make the deployment's actual chain/weight
+    /// depend on list order; the config is ambiguous, so the pool refuses it.
+    #[error("{endpoint}: duplicate URL with conflicting attributes: {detail}")]
+    ConflictingEndpointAttributes { endpoint: String, detail: String },
+
+    /// An `eth_getLogs` range exceeds the endpoint's declared cap. The client
+    /// refuses it locally instead of forwarding a request the provider will
+    /// stall or reject (measured: a 57,100-block range stalled the public
+    /// HyperEVM RPC for ~30 s). Callers that want a wide scan use
+    /// [`crate::Rpc::logs_range`], which splits into bounded chunks.
+    #[error(
+        "{method}: block range {from}..={to} is {blocks} blocks, above the endpoint cap of {cap}; split it with Rpc::logs_range"
+    )]
+    LogRangeTooWide {
+        method: String,
+        from: u64,
+        to: u64,
+        blocks: u64,
+        cap: u64,
+    },
+
     /// A source endpoint answered a different chain id. A wrong-chain
     /// provider is a silent correctness fault if it is allowed to serve, so
     /// the boot assert names it and refuses the pool.
@@ -268,13 +297,16 @@ impl Error {
             Error::ClientBuild { .. }
             | Error::NoEndpoints
             | Error::InvalidEndpoint { .. }
+            | Error::InvalidEndpointAttribute { .. }
+            | Error::ConflictingEndpointAttributes { .. }
             | Error::WrongChain { .. }
             | Error::Abi { .. }
             | Error::Corrupt { .. }
             | Error::Encode { .. }
             | Error::EndpointsExhausted { .. }
             | Error::PoolCooling { .. }
-            | Error::PooledWrite => "<local>",
+            | Error::PooledWrite
+            | Error::LogRangeTooWide { .. } => "<local>",
             Error::NotReady { what, .. } => what,
             Error::Transport { endpoint, .. }
             | Error::EndpointFault { endpoint, .. }

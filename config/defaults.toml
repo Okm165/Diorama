@@ -1,9 +1,10 @@
 # Global defaults for every mirror instance and service.
 #
 # A value lives here iff every deployment of that service carries the same
-# number (workspace conventions: cadences, ring sizes, chunk limits). Values
-# that describe one deployment (topology, chain sources, pins, watchlists,
-# budgets) live in config/instances/<name>/instance.toml. Protocol facts and measured
+# number (workspace conventions: cadences, ring sizes). Values that describe
+# one deployment (topology, chain sources, pins, watchlists, budgets, batch
+# and log-range chunk sizes, the Iris fast-burn allowance) live in
+# config/instances/<name>/instance.toml. Protocol facts and measured
 # conventions are code constants, not configuration.
 #
 # Merge semantics: deep merge, defaults <- instance <- env; arrays replace,
@@ -49,9 +50,8 @@ poll_interval_ms = 1000
 # replay its whole pin window, bounded by reth's 10,064-block state window -
 # otherwise a T restart could never warm up.
 max_gap_blocks = 300
-# Max JSON-RPC batch size: source reads (a public endpoint may refuse more;
-# measured: drpc's free plan allows 3) and cheatcode writes to the local anvils.
-chunk_size = 500
+# `chunk_size` (JSON-RPC batch items) is a deployment's endpoint contract, not
+# a global default: it lives in each instance's `[services.engine.loops]`.
 # Prepend rounds: devnet txs mined in their own block before the parent's
 # diffs land (T only; the venue sets 0). A steady stream must not starve the
 # parent block, so the drain is bounded by this explicit round budget.
@@ -140,11 +140,10 @@ addr = "0.0.0.0"
 # and live in the instance file.
 
 [services.cctp_bridge]
-# The Iris fast-burn allowance the devnet serves (USDC). Circle's live service
-# publishes a rolling figure (measured 2026-10-31: 56,854,459.08); a
-# deployment may pin its own. The endpoint's shape, not the number, is the
-# contract with clients.
-fast_burn_allowance = 56854459.08
+# `fast_burn_allowance` (Iris, USDC) and `scan_chunk_blocks` (the watcher's
+# endpoint contract) are deployment values: they live in the CCTP instance
+# file, not here. Circle publishes a rolling allowance, so there is no safe
+# generic number to fall back to.
 # One watcher pass per second on each chain: new MessageSent logs + due
 # attestations.
 poll_interval_ms = 1000
@@ -157,12 +156,9 @@ finality_delay_secs = 0
 # The served `expirationBlock`: 0 = the message never expires; short values
 # exercise the "must be re-signed" path.
 expiration_blocks = 0
-# `eth_getLogs` range per scan call. The watcher scans the *local* anvils (T and
-# V) — the public-endpoint cap (200 answers, 1000
-# rate-limits; chunk <= 50 against a public source) does not apply here, and T
-# runs `--no-rate-limit`. A public chain source would need the conservative
-# chunk.
-scan_chunk_blocks = 2000
+# `scan_chunk_blocks` is the watcher's endpoint contract and lives in the
+# CCTP instance file. The client further splits any chunk above the endpoint
+# group's `max_log_range` (the public HyperEVM source pins 900).
 # How long a submitted tx may wait for a receipt inside one tick.
 receipt_timeout_secs = 30
 # Receipt poll cadence while a submitted tx is pending.

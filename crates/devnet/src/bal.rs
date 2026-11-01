@@ -438,7 +438,9 @@ pub async fn envelope_touches(
         return Ok(touched);
     }
     let mut start = from + 1;
-    let mut range = LOGS_RANGE;
+    // The endpoint's declared cap is the ceiling; the response-size halving
+    // below may shrink further, never grow past it.
+    let mut range = LOGS_RANGE.min(rpc.log_range_cap());
     while start <= to {
         let end = (start + range - 1).min(to);
         let filter = Filter::new()

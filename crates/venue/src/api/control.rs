@@ -463,6 +463,12 @@ pub(crate) struct SetFundingRequest {
     /// The hourly rate to own; absent = hand back to live.
     #[serde(default)]
     pub rate: Option<Decimal>,
+    /// Absolute epoch-millisecond deadline for the override. A funding-only
+    /// scenario that is never handed back would otherwise persist across
+    /// restarts and keep paying a synthetic rate forever. Absent keeps the
+    /// legacy no-deadline behaviour; a deadline in the past is refused.
+    #[serde(default)]
+    pub expires_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -471,6 +477,8 @@ pub(crate) struct SetFundingResponse {
     pub owned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate: Option<Decimal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<u64>,
 }
 
 pub(crate) async fn set_funding(
@@ -484,6 +492,7 @@ pub(crate) async fn set_funding(
                 coin: req.coin,
                 owned: false,
                 rate: None,
+                expires_ms: None,
             }))
         }
         Some(rate) => {
@@ -498,12 +507,20 @@ pub(crate) async fn set_funding(
                     "funding rate {rate} is outside the venue's ±4 %/h band"
                 )));
             }
-            state.feed.own_funding(&req.coin, rate)?;
-            tracing::info!(coin = %req.coin, rate = %rate, "control: funding override");
+            if let Some(deadline) = req.expires_ms {
+                if deadline <= crate::now_ms() {
+                    return Err(Error::bad_request(format!(
+                        "funding override deadline {deadline} is not in the future"
+                    )));
+                }
+            }
+            state.feed.own_funding(&req.coin, rate, req.expires_ms)?;
+            tracing::info!(coin = %req.coin, rate = %rate, expires_ms = ?req.expires_ms, "control: funding override");
             Ok(Json(SetFundingResponse {
                 coin: req.coin,
                 owned: true,
                 rate: Some(rate),
+                expires_ms: req.expires_ms,
             }))
         }
     }
