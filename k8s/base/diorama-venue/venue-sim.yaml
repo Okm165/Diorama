@@ -72,7 +72,7 @@ spec:
             # 23-24 MiB RSS. The request tracks the measured steady state; the
             # limit stays the OOM ceiling for a market-plane catch-up spike.
             requests: { cpu: "5m", memory: 32Mi }
-            limits: { memory: 384Mi }
+            limits: { memory: 1Gi }
       volumes:
         - name: instance
           configMap: { name: venue-instance }
