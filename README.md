@@ -59,8 +59,8 @@ T ↔ V — the substrate for cross-mirror margin workflows.
 budgets), the standing pass `make attest` (8 pods clean · log-surface 11/11 ·
 engine-symmetry 21/21), the shadow audit 51/51 (eleven staged legs), the CCTP
 round trip 9/9, and the benchmark session's seven portfolio studies green
-(117 checks). `docs/TESTING.md` carries the full suite table;
-`docs/OPERATIONS.md` the runbooks (rewind, re-pin, the shadow audit's legs).
+(117 checks). The full suite table and runbooks are kept locally under the
+untracked `.context/docs/` directory.
 
 ## How a mirror works
 
@@ -86,14 +86,13 @@ API — including the snapshot→head gap, which the engine fills with an EIP-83
 top-up loop (`diorama_source_sync_gap_blocks` falls to 0, ~10-11 blocks/s
 measured). Blob custody is the CL's (blob data is not executed; the applier
 never needs sidecars). The only external dependencies are bootstrap-time: the
-reth snapshot download and Lighthouse's checkpoint sync (both documented in
-[ARCHITECTURE](docs/ARCHITECTURE.md#source-liveness-self-contained-by-construction)).
+reth snapshot download and Lighthouse's checkpoint sync (both documented in the
+local `.context/docs/ARCHITECTURE.md`).
 
 **Freshness check (mainnet).** `diorama_reth_head` must advance with the
 chain. While the top-up catches up, `diorama_source_sync_gap_blocks` counts
 down; once it is 0, run `make mainnet-repin` so T starts from a live, exact
-base. See
-[OPERATIONS → Source liveness](docs/OPERATIONS.md#source-liveness-self-contained).
+base. See the local `.context/docs/OPERATIONS.md` source-liveness section.
 
 ## Quickstart
 
@@ -126,9 +125,9 @@ make cctp-smoke
 ```
 
 A venue can run without a bridge, a bridge can run without the venue, and a
-deployment can compose any number of either. See
-[`docs/CCTP-COMPOSITION.md`](docs/CCTP-COMPOSITION.md) for the 2-mainnet /
-2-venue / 3-bridge recipe.
+deployment can compose any number of either. See the local
+`.context/docs/CCTP-COMPOSITION.md` for the 2-mainnet / 2-venue / 3-bridge
+recipe.
 
 The mainnet bootstrap is ordered on purpose: the reth snapshot lands in the
 PVC first, then reth starts, Lighthouse checkpoint-syncs to the CL head, and
@@ -208,36 +207,12 @@ scripts/                     lib-mainnet.sh + lib-venue.sh + lib-cctp.sh (the sh
                              basis-capture, portfolio-reaction, crosschain-margin,
                              crosschain-recovery, capital-frontier, hedged-book,
                              impact-scenarios)
-docs/                        HOW-IT-WORKS.md, HOW-IT-WORKS-VENUE.md, ARCHITECTURE.md, SPINE.md, STRUCTURE.md, OPERATIONS.md, TESTING.md, INTEGRATION.md, adr/
 ```
 
 ## Docs
 
-- **[docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md)** — the Mainnet Mirror
-  explainer: architecture, pipelines, information flow, algorithms; its
-  counterpart is
-  [docs/HOW-IT-WORKS-VENUE.md](docs/HOW-IT-WORKS-VENUE.md).
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — the components and data
-  flow of both mirrors, the measured lean profile, design decisions, the
-  config reference, source liveness, the simulator and the Core↔EVM bridge.
-- **[docs/STRUCTURE.md](docs/STRUCTURE.md)** — the file-by-file map of both
-  crates: which files pair, the judged asymmetries, and what the AST readings
-  found.
-- **[docs/SPINE.md](docs/SPINE.md)** — the spine: the information both mirrors
-  carry, the interfaces they share, the complete divergence list, the event
-  model, and the spec cross-references (EIP-7928/EIP-8379/reth for the
-  mainnet; the Hyperliquid docs and live probes for the venue).
-- **[docs/OPERATIONS.md](docs/OPERATIONS.md)** — signals/thresholds, day-to-day,
-  source-liveness playbook, drills, storage/PVC handling, failure playbook,
-  venue operations.
-- **[docs/INTEGRATION.md](docs/INTEGRATION.md)** — the integration surface index:
-  every endpoint, shape and named refusal both mirrors expose, plus the
-  deliberately deferred lanes.
-- **[docs/TESTING.md](docs/TESTING.md)** — test layers, per-block invariants and
-  their classes, the measured facts behind the verifier, the venue smoke,
-  known limitations.
-- **[docs/adr/](docs/adr/README.md)** — the architecture decision records (one
-  page each: context, decision, consequences).
+The design docs, ADRs, runbooks and test tables live locally under the
+untracked `.context/docs/` directory. They are not part of the repository.
 
 ## License
 
