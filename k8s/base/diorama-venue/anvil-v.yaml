@@ -125,9 +125,20 @@ spec:
               #   --code-size-limit    their entrypoint's deliberate 99999: an
               #                        oversize deploy must not surface at run
               #                        time.
-              #   --transaction-block-keeper 1e6  their failing-run forensics
-              #                        read the run's own chain; a shallow
-              #                        keeper makes it unreadable seconds later.
+              #   --prune-history 10000  the state window the proof path needs:
+              #                        the indexer/operator can lag a service
+              #                        restart by minutes, and a witness proof
+              #                        reads `eth_getStorageAt` at the indexed
+              #                        pin. 32 blocks (32 s at the mirror's
+              #                        1 s cadence) is shorter than a normal
+              #                        restart; 10 000 (~2.8 h) covers it.
+              #   --transaction-block-keeper 10000  the forensic tx window.
+              #                        The old 1e6 kept every tx/block forever
+              #                        and was the measured OOM source: the
+              #                        container hit its 16 GiB ceiling in ~1 h
+              #                        (2026-11-02 02:19Z). 10 000 blocks is
+              #                        ~2.8 h of the mirror's own history, which
+              #                        is what the driver's failing-run reads need.
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
                 --fork-url "$HL_RPC_URL" \
@@ -140,8 +151,8 @@ spec:
                 --order fifo \
                 --no-mining \
                 --auto-impersonate \
-                --prune-history 32 \
-                --transaction-block-keeper 1000000 \
+                --prune-history 10000 \
+                --transaction-block-keeper 10000 \
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info
@@ -173,10 +184,11 @@ spec:
             # Like T, V never executes source txs: it materializes the fork
             # state on demand and carries the devnet's own writes. Measured
             # 2026-10-31 (60 s sample): ~11-12m CPU, 619-625 MiB RSS. The
-            # request covers that measured steady state; the limit matches T's
-            # 8 GiB ceiling for fork materialization and the deploy/lifecycle
-            # write volume (the old 2 GiB limit was cgroup-OOM-killed at
-            # anon-rss 2.08 GiB on 2026-10-31).
+            # request covers that measured steady state; the 16 GiB ceiling is
+            # the fork-materialization + write-volume headroom. The 2026-11-02
+            # OOM at 16 GiB was not steady state: the 1e6 transaction keeper
+            # retained every block/tx and grew without bound (fixed above to
+            # 10k). Re-measure before changing either the keeper or the limit.
             requests: { cpu: "25m", memory: 768Mi }
             limits: { memory: 16Gi }
       volumes:

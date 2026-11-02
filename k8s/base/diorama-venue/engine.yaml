@@ -55,11 +55,12 @@ spec:
           # startupProbe suspends the liveness/readiness probes through it, so
           # a coordinated rollout never kills a booting container (measured:
           # exit 137 at ~2 minutes when anvil-t restarted under a rolling
-          # engine).
+          # engine). The 30 x 10 s window (5 min) was shorter than a reth
+          # restart; 90 x 10 s (15 min) covers the measured ~10 min outage.
           startupProbe:
             httpGet: { path: /livez, port: 8080 }
             periodSeconds: 10
-            failureThreshold: 30
+            failureThreshold: 90
           readinessProbe:
             httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5

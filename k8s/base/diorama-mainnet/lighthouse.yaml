@@ -120,10 +120,12 @@ spec:
             # No CPU limit (attestation and backfill work is latency-sensitive
             # and bursty). Measured 2026-10-31 (60 s sample): 122-214m CPU,
             # 5.96-5.97 GiB RSS; the request tracks that measured steady state.
-            # The 9Gi limit stays the OOM ceiling for prune/backfill peaks
-            # (6Gi OOM-looped during the initial sync).
-            requests: { cpu: "250m", memory: 6Gi }
-            limits: { memory: 9Gi }
+            # The 9 GiB limit was the OOM ceiling during the one-time backfill
+            # and OOM-looped 9 times (2026-11-02); the 16 GiB ceiling gives the
+            # prune/backfill peak the same headroom reth got (12 GiB) on the
+            # same 98 GiB node. The steady state is still ~6 GiB.
+            requests: { cpu: "250m", memory: 8Gi }
+            limits: { memory: 16Gi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: lighthouse-data }
