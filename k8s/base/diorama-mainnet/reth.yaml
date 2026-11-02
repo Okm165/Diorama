@@ -89,9 +89,12 @@ spec:
             # silently). Measured 2026-10-31 (60 s sample): 110-162m CPU,
             # 4.85-4.87 GiB RSS; the documented sync/prune steady state is
             # ~5.7 GiB. The request covers that measured steady state; the
-            # 8Gi limit stays the OOM ceiling for sync/prune peaks.
+            # 12Gi limit is the OOM ceiling for sync/prune/healing peaks. The
+            # 8Gi limit was measured OOM-killing the consistency heal on
+            # 2026-11-02 (9 restarts; the parent was unavailable to the
+            # mirror while it unwound).
             requests: { cpu: "200m", memory: 6Gi }
-            limits: { memory: 8Gi }
+            limits: { memory: 12Gi }
       volumes:
         - name: data
           persistentVolumeClaim: { claimName: reth-data }
