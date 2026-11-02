@@ -168,7 +168,7 @@ spec:
             # measured steady state; the limit stays the OOM ceiling for fork
             # materialization spikes.
             requests: { cpu: "25m", memory: 2Gi }
-            limits: { memory: 8Gi }
+            limits: { memory: 16Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-t-state }
