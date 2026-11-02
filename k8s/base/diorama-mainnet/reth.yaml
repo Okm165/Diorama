@@ -78,11 +78,16 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
+          # A consistency heal after an unclean shutdown can take minutes
+          # before the RPC opens; the old 120 s delay killed the heal and
+          # restarted it (measured 2026-11-02, 9 restarts). The readiness
+          # probe still gates traffic; liveness only catches a truly wedged
+          # process after 10 min + 20 failures.
           livenessProbe:
             tcpSocket: { port: 8545 }
-            initialDelaySeconds: 120
+            initialDelaySeconds: 600
             periodSeconds: 30
-            failureThreshold: 5
+            failureThreshold: 20
           resources:
             # The golden-rule shape: no CPU limit (reth bursts to several
             # cores while syncing/pruning, and a limit only throttles it
