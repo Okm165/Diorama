@@ -640,6 +640,33 @@ pub(crate) fn available_after_maintenance(
     )])
 }
 
+/// The Core→EVM spot bridge bound: the collateral token's
+/// `tokenToAvailableAfterMaintenance` for a unified account — the venue's own
+/// figure for what spot may leave after the perp book's maintenance is kept.
+/// `None` for a standard account: its spot holdings are not margin, so the
+/// balance alone bounds the move.
+///
+/// **Not `withdrawable`.** The served `withdrawable` is the *perp class's*
+/// transferable figure; a unified account can hold free spot while its perp
+/// wallet is empty (the live `cf16` recovery shape: 240.510247 spot against
+/// 0.000000455 perp). Gating a spot→EVM bridge on the perp figure refused the
+/// whole spot balance, which is exactly the recovery leg `recallAllFromCore`
+/// exists to move.
+pub(crate) fn spot_bridge_bound(
+    account: &Account,
+    feed: &MarketFeed,
+    meta: Option<&crate::wire::Meta>,
+    token: u32,
+) -> Result<Option<Decimal>> {
+    if account.mode != UserAbstraction::UnifiedAccount {
+        return Ok(None);
+    }
+    Ok(available_after_maintenance(account, feed, meta)?
+        .into_iter()
+        .find(|(t, _)| *t == token)
+        .map(|(_, available)| available))
+}
+
 /// The unified account's USD-class-transfer bound: the docs' transfer rule at
 /// the live marks — the served `withdrawable` (the margin floor; "transferring
 /// includes ... transfer to spot wallet"). `None` when a mark behind the
@@ -1139,6 +1166,46 @@ mod tests {
     /// identity stays exact.
     /// The direction predicate: flat is no direction, signs decide (the
     /// reduce-only, fill and cap checks' shared rule).
+    /// **The spot bridge's bound is the spot available, not the perp
+    /// `withdrawable`.** The live `cf16` recovery shape: 240.510247 free spot
+    /// with a 0.000000455 perp wallet. The perp figure bounds a USD-class
+    /// transfer, not a spot→EVM bridge; using it refused the whole recovery.
+    #[test]
+    fn the_spot_bridge_bound_is_the_spot_available_not_the_perp_withdrawable() {
+        let feed = feed_with(&[]);
+        let meta = meta_with_table("BTC", 10);
+        let mut account = Account {
+            // The `cf16` seed's shape: the perp wallet carries the 0.000000455
+            // residue, the spot class the 240.510247 principal.
+            perp_balance: "0.000000455".parse::<Decimal>().unwrap()
+                - "240.510247".parse::<Decimal>().unwrap(),
+            mode: UserAbstraction::UnifiedAccount,
+            ..Account::default()
+        };
+        spot_entry(
+            &mut account,
+            crate::sim::TokenRef {
+                index: COLLATERAL_TOKEN,
+                coin: "USDC",
+            },
+        )
+        .total = "240.510247".parse().unwrap();
+        let bound = spot_bridge_bound(&account, &feed, Some(&meta), COLLATERAL_TOKEN)
+            .expect("the bound resolves")
+            .expect("a unified account carries the spot bound");
+        assert_eq!(bound, "240.510247".parse::<Decimal>().unwrap());
+        assert!(
+            bound > view(&account, &feed, Some(&meta)).unwrap().withdrawable,
+            "the perp withdrawable must not bound the spot bridge"
+        );
+        // A standard account has no unified spot bound: the balance alone applies.
+        account.mode = UserAbstraction::Default;
+        assert_eq!(
+            spot_bridge_bound(&account, &feed, Some(&meta), COLLATERAL_TOKEN).unwrap(),
+            None
+        );
+    }
+
     #[test]
     fn same_direction_treats_flat_as_no_direction() {
         assert!(same_direction(Decimal::ZERO, Decimal::from(3)));

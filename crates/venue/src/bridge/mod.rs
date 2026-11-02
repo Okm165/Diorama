@@ -637,28 +637,37 @@ impl Bridge {
         };
         if destination == system::system_address(u64::from(info.index)) {
             // Core→EVM: the venue's transfer rule bounds the move by the
-            // account's **live withdrawable**, not merely by the spot balance.
-            // A control-patched or insolvent account can still hold spot cash
-            // while its equity is below the transfer floor; 4a withdrew 0.55
-            // with `withdrawable=0` one block before its deficit deposit. The
-            // gate is the collateral token's margin rule; other spot tokens are
-            // holdings and are bounded by the balance alone.
+            // account's **spot available after maintenance**, not by the spot
+            // balance and not by the perp class's `withdrawable`. A control-
+            // patched or insolvent account can still hold spot cash while its
+            // equity is below the transfer floor; 4a withdrew 0.55 with
+            // `withdrawable=0` one block before its deficit deposit. But a
+            // unified account's spot principal is a **separate ledger** from the
+            // perp wallet (the live `cf16` recovery: 240.510247 spot against
+            // 0.000000455 perp), so the perp figure is the wrong bound for a
+            // spot→EVM bridge — it refused the whole recovery leg. The
+            // collateral token is bounded by `tokenToAvailableAfterMaintenance`;
+            // other spot tokens are holdings, bounded by the balance alone.
             if info.index == crate::sim::account::COLLATERAL_TOKEN {
                 let Some(account) = self.sim.account(caller)? else {
                     self.metrics.inc_refusals();
                     tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
                     return Ok(());
                 };
-                if account.mode == UserAbstraction::UnifiedAccount {
-                    let meta = self.feed.meta();
-                    let live = crate::sim::account::view(&account, &self.feed, meta.as_ref())?;
-                    if amount > live.withdrawable {
+                let meta = self.feed.meta();
+                if let Some(bound) = crate::sim::account::spot_bridge_bound(
+                    &account,
+                    &self.feed,
+                    meta.as_ref(),
+                    info.index,
+                )? {
+                    if amount > bound {
                         self.metrics.inc_refusals();
                         tracing::warn!(
                             account = %caller,
                             amount = %amount,
-                            withdrawable = %live.withdrawable,
-                            "bridge: Core→EVM refused (amount exceeds live withdrawable)"
+                            available = %bound,
+                            "bridge: Core→EVM refused (amount exceeds spot available after maintenance)"
                         );
                         return Ok(());
                     }
