@@ -45,6 +45,17 @@ mainnet-secrets: ## Create the reth<->lighthouse JWT secret if missing (mainnet 
 CCTP_NS      ?= diorama-cctp
 CCTP_OVERLAY := k8s/overlays/diorama-cctp
 
+# The daloc-monorepo sibling owns the gateway stack and the end-to-end DOD
+# scripts. The portfolio DOD drives every user action through the gateway and
+# reads the deployed factories/registry directly; it needs the sibling checkout,
+# the deploy env, and a borrower key funded on chain 999.
+DALOC_REPO         ?= ../daloc-monorepo
+DALOC_OUT          ?= /tmp/opencode/daloc-out
+BORROWER_KEY_FILE  ?= /tmp/daloc-borrower.key
+DALOC_GATEWAY_URL  ?= http://127.0.0.1:32001
+DALOC_RPC_999      ?= http://127.0.0.1:31545
+ALLOW_TEST_POSTURE ?= 1
+
 venue-secrets: ## Create the venue-side secrets (no CCTP key: the bridge owns its own)
 	@NS=diorama-venue; \
 	if kubectl -n $$NS get secret cctp-relay-key >/dev/null 2>&1; then \
@@ -273,6 +284,15 @@ cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTIN
 cctp-margin-cycle: ## The crosschain unified-margin cycle (T mint -> CCTP -> venue collateral -> trade -> CCTP back)
 	NS=$(CCTP_NS) ./scripts/cctp-margin-cycle.sh
 
+daloc-portfolio-dod: ## The portfolio cardinality DOD on the live daloc stack (simple 1=1=1=1; unified 1 CM + 1 agent + N debts)
+	DALOC_REPO=$(abspath $(DALOC_REPO)) \
+	BORROWER_KEY_FILE=$(BORROWER_KEY_FILE) \
+	DALOC_OUT=$(DALOC_OUT) \
+	GATEWAY_URL=$(DALOC_GATEWAY_URL) \
+	RPC_999=$(DALOC_RPC_999) \
+	ALLOW_TEST_POSTURE=$(ALLOW_TEST_POSTURE) \
+	$(abspath $(DALOC_REPO))/tools/e2e/portfolio-dod.sh
+
 portfolio-sim: ## The portfolio simulation: a delta-neutral basis book across both mirrors (carry + shock + capital efficiency)
 	NS=diorama-venue ./scripts/portfolio-sim.sh
 
@@ -425,6 +445,6 @@ help: ## Show this help
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \
 	status logs logs-check check-pins mainnet-smoke venue-smoke venue-repin venue-scenario \
-	venue-proof venue-order-proof venue-selftest cctp-smoke cctp-roundtrip cctp-margin-cycle engine-symmetry \
+	venue-proof venue-order-proof venue-selftest cctp-smoke cctp-roundtrip cctp-margin-cycle daloc-portfolio-dod engine-symmetry \
 	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check \
 	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help
