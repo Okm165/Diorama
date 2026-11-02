@@ -1,0 +1,3 @@
+# Normalize line endings: LF everywhere (the repo is shell-script heavy).
+* text=auto eol=lf
+*.png binary
