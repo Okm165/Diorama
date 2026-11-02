@@ -955,12 +955,13 @@ mod tests {
     /// The unified account's USD-class transfer is bounded by the docs'
     /// transfer rule (the margin floor — `withdrawable`), not by the perp
     /// view's cash: the unified USDC is ONE pool and the class transfer
-    /// re-splits its views, so the pool's cash, `accountValue` and
-    /// `withdrawable` must be unchanged by the move. This is the R5 recall
-    /// shape (run 2026-10-31 11:40Z): the note lands on the spot side, the
-    /// perp view holds only the trading cash, and the venue's own rule allows
-    /// withdrawing up to `withdrawable` — the old perp-cash bound refused a
-    /// legal recall and stranded the recovery sweep.
+    /// re-splits its **views**, so the whole account (`accountValue + spot`)
+    /// is unchanged by the move while the perp view and its `withdrawable`
+    /// both fall. This is the R5 recall shape (run 2026-10-31 11:40Z): the
+    /// note lands on the spot side, the perp view holds only the trading cash,
+    /// and the venue's own rule allows withdrawing up to `withdrawable` — the
+    /// old perp-cash bound refused a legal recall and stranded the recovery
+    /// sweep.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn unified_class_transfer_is_bounded_by_the_transfer_rule_not_the_perp_view() {
@@ -1009,15 +1010,26 @@ mod tests {
             .unwrap()
             .expect("the seed registers the account");
         let before = account::clearinghouse(&acct, &feed, Some(&meta), 1).unwrap();
-        // cash 0.7904 + 7.865 = 8.6554; raw = cash + |cost basis| = 15.685;
-        // accountValue = raw − positionValue = 8.6554.
+        // The perp view: raw 7.82 (deal 7.82 − the short's cost basis),
+        // accountValue 0.7904 (raw − 7.0296 positionValue). The 7.865 note is
+        // a separate spot ledger; the whole account is 8.6554.
         assert_eq!(
             before.margin_summary.account_value,
-            "8.6554".parse::<Decimal>().unwrap()
+            "0.7904".parse::<Decimal>().unwrap()
         );
         assert_eq!(
             before.margin_summary.total_raw_usd,
-            "15.685".parse::<Decimal>().unwrap()
+            "7.82".parse::<Decimal>().unwrap()
+        );
+        let spot_before = acct
+            .spot
+            .get(&account::COLLATERAL_TOKEN)
+            .expect("the note is on spot")
+            .total;
+        assert_eq!(
+            before.margin_summary.account_value + spot_before,
+            "8.6554".parse::<Decimal>().unwrap(),
+            "the whole account is the perp view plus spot"
         );
         let withdrawable = before.withdrawable;
         let transfer = |amount: Decimal| ClassTransfer {
@@ -1040,14 +1052,30 @@ mod tests {
         );
         let acct = sim.account(a).unwrap().unwrap();
         let after = account::clearinghouse(&acct, &feed, Some(&meta), 1).unwrap();
+        let spot_after = acct
+            .spot
+            .get(&account::COLLATERAL_TOKEN)
+            .expect("the note is on spot")
+            .total;
         assert_eq!(
-            after.margin_summary.account_value, before.margin_summary.account_value,
-            "the pool is view-invariant"
+            after.margin_summary.account_value + spot_after,
+            before.margin_summary.account_value + spot_before,
+            "the whole account is view-invariant"
         );
-        assert_eq!(after.withdrawable, withdrawable, "the floor did not move");
         assert_eq!(
-            after.margin_summary.total_raw_usd, before.margin_summary.total_raw_usd,
-            "raw is view-invariant"
+            after.margin_summary.account_value,
+            before.margin_summary.account_value - withdrawable,
+            "the perp view fell by the moved amount"
+        );
+        assert_eq!(
+            after.withdrawable,
+            Decimal::ZERO,
+            "the floor consumed the perp view"
+        );
+        assert_eq!(
+            spot_after,
+            spot_before + withdrawable,
+            "the spot view rose by the moved amount"
         );
         assert!(
             account::identity_holds(&after),

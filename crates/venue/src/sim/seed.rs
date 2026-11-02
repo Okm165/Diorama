@@ -118,15 +118,17 @@ impl AccountSeed {
     ///
     /// # `totalRawUsd` is the whole-account raw, not the perp leg
     ///
-    /// The venue's `marginSummary.totalRawUsd` is the whole-account cash
-    /// figure: the unified collateral token's spot side is part of it, and the
-    /// perp wallet's raw is what remains after the spot side and isolated
-    /// margins. The old fold treated it as the perp-side raw and then replaced
-    /// `spotBalances` separately, so a patch naming both counted the cash twice
-    /// (4a/5195: `totalRawUsd=1.25` plus `spot=1.25` served 2.5; 0.5 plus 0.5
-    /// served 1.0). The fold now derives the perp leg from the whole figure:
+    /// The venue's `marginSummary.totalRawUsd` is the **perp sub-ledger's**
+    /// raw cash. The unified collateral token's spot side is a separate ledger
+    /// (the spot-only fixture serves `accountValue = 0` beside 2995.67 spot),
+    /// so a patch names both without one being derived from the other. The old
+    /// fold added spot to the perp raw at serve time and then subtracted it
+    /// here, which kept the served sum equal to the patch but made the perp
+    /// wallet carry a phantom negative balance; bridging the spot then drove
+    /// the served perp equity negative (the live `cf16` 240.510247 recovery).
+    /// The perp leg is now exactly the named raw:
     ///
-    /// `perp_balance = totalRawUsd − spotCollateral − isolatedMargin + Σ szi·entryPx`
+    /// `perp_balance = totalRawUsd − isolatedMargin + Σ szi·entryPx`
     ///
     /// A patch that names a position set must also carry an `accountValue`
     /// consistent with its own rows (`accountValue == totalRawUsd + Σ sign(szi)·positionValue`);
@@ -206,15 +208,10 @@ impl AccountSeed {
         // patch moved `7.82` to `-7.074333` and was liquidated on the
         // resulting fake deficit.
         if let Some(summary) = &self.margin_summary {
-            let collateral = collateral_total(account);
             let isolated = isolated_margin_total(account);
             let cost = cost_basis_total(account)?;
             let perp = add(
-                sub(
-                    summary.total_raw_usd,
-                    add(collateral, isolated, "seed collateral")?,
-                    "seed perp raw",
-                )?,
+                sub(summary.total_raw_usd, isolated, "seed perp raw")?,
                 cost,
                 "seed balance",
             )?;
@@ -222,20 +219,6 @@ impl AccountSeed {
             account.funded_at_ms = clock;
         }
         Ok(())
-    }
-}
-
-/// The collateral token's spot balance when the account is unified; zero for
-/// the standard split, whose spot side is not part of the perp raw.
-fn collateral_total(account: &Account) -> Decimal {
-    if account.mode == UserAbstraction::UnifiedAccount {
-        account
-            .spot
-            .get(&COLLATERAL_TOKEN)
-            .map(|entry| entry.total)
-            .unwrap_or(Decimal::ZERO)
-    } else {
-        Decimal::ZERO
     }
 }
 
@@ -476,12 +459,15 @@ mod tests {
         assert_eq!(s.margin_summary.total_raw_usd, Decimal::from(100));
     }
 
-    /// **The whole-account seed, measured on 5195.** A unified patch that names
-    /// `totalRawUsd=0.5` and `spotBalances=0.5` is one account holding 0.5, not
-    /// a perp leg of 0.5 beside a spot leg of 0.5. The old fold served 1.0 and
-    /// the harness read a residual twice its size.
+    /// **A unified seed names two ledgers, not one.** `totalRawUsd` is the
+    /// perp sub-ledger's raw and `spotBalances` the separate spot ledger (the
+    /// spot-only fixture serves `accountValue = 0` beside 2995.67 spot). A
+    /// patch naming 0.5 in each serves 0.5 in the perp summary and 0.5 in
+    /// spot; the old fold folded them into one 0.5 figure and then left the
+    /// perp wallet at zero, so a later spot bridge drove the served perp
+    /// equity negative.
     #[test]
-    fn a_unified_seed_counts_spot_once() {
+    fn a_unified_seed_keeps_the_perp_and_spot_ledgers_separate() {
         let seed: AccountSeed = serde_json::from_str(
             r#"{
                 "marginSummary": {"accountValue": "0.5", "totalNtlPos": "0", "totalRawUsd": "0.5", "totalMarginUsed": "0"},
@@ -494,8 +480,13 @@ mod tests {
         seed.apply_to(&mut account, 0).unwrap();
         assert_eq!(
             account.perp_balance,
-            Decimal::ZERO,
-            "the spot side is the whole raw"
+            "0.5".parse().unwrap(),
+            "the perp raw is the named figure, not the spot side"
+        );
+        assert_eq!(
+            account.spot.get(&COLLATERAL_TOKEN).map(|e| e.total),
+            Some("0.5".parse().unwrap()),
+            "the spot ledger is separate and preserved"
         );
         let feed = feed_with(&[("HYPE", "87.0", "87.0")]);
         let live = view(&account, &feed, None).unwrap();
@@ -617,11 +608,13 @@ mod tests {
         let live = view(&account, &feed, Some(&meta)).unwrap();
         assert_eq!(
             live.margin_summary.total_raw_usd,
-            "22.714333".parse().unwrap()
+            "14.856360".parse().unwrap(),
+            "the perp summary carries the perp wallet and the cost basis only"
         );
         assert_eq!(
             live.margin_summary.account_value,
-            "15.677973".parse().unwrap()
+            "7.82".parse().unwrap(),
+            "the 7.857973 spot balance is a separate ledger"
         );
     }
 

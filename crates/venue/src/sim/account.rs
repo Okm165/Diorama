@@ -403,19 +403,16 @@ fn assemble(
     rows: Vec<AssetPosition>,
     facts: BTreeMap<String, PositionFacts>,
 ) -> Result<AccountView> {
-    // The unified account's single balance per asset (docs: "USDC unifies
-    // perps + spot"): the collateral token's spot side is part of the raw
-    // balance, so the identity holds with it included — `totalRawUsd` is the
-    // same one USDC figure the spot state serves. A `usdClassTransfer` moves
-    // between the two sides (never both), so nothing double-counts.
-    let collateral = match account.mode {
-        UserAbstraction::UnifiedAccount => account
-            .spot
-            .get(&COLLATERAL_TOKEN)
-            .map(|e| e.total)
-            .unwrap_or(Decimal::ZERO),
-        _ => Decimal::ZERO,
-    };
+    // The venue's `marginSummary` is the **perp sub-ledger's** summary. A
+    // unified account's spot collateral is a separate ledger: the committed
+    // `clearinghouseState_unified_spot_only.json` carries `accountValue = 0`
+    // beside a 2995.67224054 USDC spot balance, and the unified reconciliation
+    // is `availableAfterMaintenance + maintenance == the spot balance`, not a
+    // term of the perp identity. Adding spot here double-counted it (and left
+    // a negative perp balance when the spot was later bridged: the live `cf16`
+    // recovery moved 240.510247 spot and the served perp equity went to
+    // −240.510247). The perp summary is the perp wallet alone.
+    //
     // The venue's totals, measured live (probe, two isolated accounts): the
     // *total* carries the isolated margins as cash — they are the trader's
     // equity, parked on their positions — so
@@ -423,7 +420,7 @@ fn assemble(
     // included; and the cross summary is the total minus the isolated legs'
     // contribution: value minus their margins, raw minus (margin − signed
     // value).
-    let cash = account.perp_balance + collateral + totals.isolated_margin;
+    let cash = account.perp_balance + totals.isolated_margin;
     let total_raw = cash - totals.cost_basis;
     let account_value = total_raw + totals.signed_value;
     let margin_summary = MarginSummary {
@@ -1214,8 +1211,15 @@ mod tests {
         assert!(!same_direction(Decimal::from(2), Decimal::from(-3)));
     }
 
+    /// **The unified spot collateral is a separate ledger from the perp
+    /// summary.** The committed `clearinghouseState_unified_spot_only.json`
+    /// serves `accountValue = 0` beside 2995.67224054 USDC in spot; the
+    /// reconciliation is `availableAfterMaintenance + maintenance == the spot
+    /// balance`, not a term of the perp identity. Adding spot to the perp
+    /// summary double-counted it and made a later spot bridge drive the served
+    /// perp equity negative (the live `cf16` recovery).
     #[test]
-    fn unified_spot_collateral_backs_the_perp_side() {
+    fn the_unified_spot_is_a_separate_ledger_from_the_perp_summary() {
         let feed = feed_with(&[("BTC", "100.0", "100.0")]);
         let meta = meta_with_table("BTC", 10);
         let mut account = Account {
@@ -1234,13 +1238,14 @@ mod tests {
         let v = view(&account, &feed, Some(&meta)).unwrap();
         assert_eq!(
             v.margin_summary.total_raw_usd,
-            "250".parse().unwrap(),
-            "the spot collateral is the raw balance"
+            Decimal::ZERO,
+            "the perp summary carries only the perp wallet"
         );
+        assert_eq!(v.margin_summary.account_value, Decimal::ZERO);
         assert_eq!(
-            v.margin_summary.account_value,
-            "250".parse().unwrap(),
-            "and the account value"
+            available_after_maintenance(&account, &feed, Some(&meta)).unwrap(),
+            vec![(COLLATERAL_TOKEN, "250".parse().unwrap())],
+            "the spot collateral is served as the spot available"
         );
         // The same account in standard mode: the spot side is not read.
         account.mode = UserAbstraction::Default;
