@@ -55,6 +55,22 @@ spec:
                 [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
               done
               [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
+              # An explicit pin preserves the Daloc deployment epoch. The
+              # chain-1 mirror carries the only Daloc contract deployment;
+              # re-resolving a fresh base on every restart makes the engine
+              # treat the restart as a new epoch and clear its shadow
+              # registry — the deployed CMs/Underwriter then vanish and the
+              # books become codeless (measured 2026-11-02: all chain-1
+              # Daloc addresses returned 0x after the 07:40Z re-fork).
+              # A deployment that must keep its writes pins the block here.
+              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
+                PIN="$ANVIL_FORK_PIN"
+                echo "$PIN" > /state/pin
+                echo "using explicit fork pin=$PIN (reth head not re-resolved)"
+                chmod 0777 /state 2>/dev/null || true
+                chmod 0666 /state/pin 2>/dev/null || true
+                exit 0
+              fi
               # The offset's single home is the instance TOML:
               # this is a read of the mounted file, not a second definition.
               FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
@@ -73,6 +89,10 @@ spec:
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
+            # Optional explicit epoch pin. Empty = resolve `reth head - offset`
+            # as before. A deployment that must preserve its Daloc contracts
+            # sets this to the persisted /state/pin.
+            - { name: ANVIL_FORK_PIN, value: "" }
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -89,18 +109,26 @@ spec:
               # cycle), so the init container's pin would age with the pod and
               # the post-restart replay would grow to the whole pin age (~1.5 h
               # measured). The engine restores the devnet's writes from the
-              # shadow registry after a re-fork, so a fresh pin loses nothing.
+              # shadow registry after a same-pin re-fork. An explicit pin is
+              # required once the chain carries a Daloc deployment: a fresh base
+              # is a new epoch, and the engine clears the shadow registry — the
+              # 2026-11-02 07:40Z re-fork left every chain-1 Daloc address
+              # codeless for exactly this reason.
               # The offset's single home is the instance TOML:
               # this is a read of the mounted file, not a second definition.
               FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
               [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
-              PIN=$(cast block-number --rpc-url "$RETH_URL" 2>/dev/null || echo 0)
-              if [ "${PIN:-0}" -gt 0 ]; then
-                PIN=$((PIN - FORK_OFFSET))
-                echo "$PIN" > /state/pin
+              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
+                PIN="$ANVIL_FORK_PIN"
               else
-                PIN=$(cat /state/pin 2>/dev/null || echo 0)
-                echo "reth unreachable; keeping persisted pin $PIN" >&2
+                PIN=$(cast block-number --rpc-url "$RETH_URL" 2>/dev/null || echo 0)
+                if [ "${PIN:-0}" -gt 0 ]; then
+                  PIN=$((PIN - FORK_OFFSET))
+                  echo "$PIN" > /state/pin
+                else
+                  PIN=$(cat /state/pin 2>/dev/null || echo 0)
+                  echo "reth unreachable; keeping persisted pin $PIN" >&2
+                fi
               fi
               echo "anvil-t: fork-url=$RETH_URL pin=$PIN"
               # The engine owns block production on both chains: without
@@ -138,6 +166,8 @@ spec:
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
+            # Optional explicit epoch pin (see the init container's comment).
+            - { name: ANVIL_FORK_PIN, value: "" }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }
