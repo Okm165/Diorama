@@ -665,12 +665,11 @@ impl Sim {
         };
         let v = super::account::view(&account, feed, meta)?;
         let reserved = self.reserved_margin(address, exclude_oid, feed, meta)?;
+        // A unified account's spot collateral is margin even though the served
+        // perp summary excludes it; `available_margin` is the one fold.
+        let available = super::account::available_margin(&account, &v)?;
         Ok(Some(super::account::sub(
-            super::account::sub(
-                v.margin_summary.account_value,
-                v.margin_summary.total_margin_used,
-                "available margin",
-            )?,
+            available,
             reserved,
             "available margin",
         )?))
@@ -1330,7 +1329,11 @@ impl Sim {
             let mut probe = account.clone();
             super::account::apply_fill(&mut probe, facts, meta)?;
             let view = super::account::view(&probe, feed, meta)?;
-            if view.margin_summary.account_value < view.margin_summary.total_margin_used {
+            // The post-fill check reads the same unified fold as placement:
+            // the perp summary alone is zero for a unified account whose
+            // collateral is entirely spot.
+            let available = super::account::available_margin(&probe, &view)?;
+            if available < Decimal::ZERO {
                 // The venue's own string; the numbers ride the log (a client
                 // matching on the vocabulary sees exactly the venue's).
                 tracing::warn!(
@@ -1338,6 +1341,7 @@ impl Sim {
                     coin,
                     needs = %view.margin_summary.total_margin_used,
                     worth = %view.margin_summary.account_value,
+                    spot = ?probe.spot,
                     "order refused: insufficient margin"
                 );
                 return Err(Error::bad_request("Insufficient margin to place order."));
@@ -2088,6 +2092,88 @@ mod tests {
         assert!(
             sim.place(&feed, a, &close).is_ok(),
             "reduce-only rests free"
+        );
+    }
+
+    /// **A unified account trades against its spot collateral.** The served
+    /// perp summary stays the perp sub-ledger alone (`accountValue = 0`), but
+    /// the order lane's placement and post-fill checks count the unified spot
+    /// USDC. Without this, the product's unified agent — whose note arrives in
+    /// the spot class — cannot open its perp hedge at all.
+    #[test]
+    #[allow(clippy::too_many_lines)] // the two ledgers and the standard arm in one test
+    fn a_unified_account_trades_against_its_spot_collateral() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        feed.put_spot_meta(crate::wire::SpotMeta {
+            tokens: vec![crate::wire::SpotToken {
+                name: "USDC".into(),
+                sz_decimals: 8,
+                wei_decimals: 8,
+                index: 0,
+                is_canonical: true,
+                evm_contract: None,
+                token_id: None,
+                full_name: None,
+                deployer_trading_fee_share: Decimal::ZERO,
+            }],
+            universe: vec![],
+        });
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: a,
+                class: DealClass::Spot,
+                coin: None,
+                amount: "1000".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        sim.set_account(
+            a,
+            serde_json::from_str(r#"{"userAbstraction": "unifiedAccount"}"#).unwrap(),
+        )
+        .unwrap();
+
+        // $50 notional at 10× needs $5; the spot collateral covers it.
+        let fill = sim.order(&feed, a, &ioc(Side::Buy, "0.5")).unwrap();
+        assert_eq!(fill.total_sz, "0.5".parse().unwrap());
+        let account = sim.account(a).unwrap().unwrap();
+        let meta = meta_with("ETH", 10);
+        let view = super::super::account::view(&account, &feed, Some(&meta)).unwrap();
+        assert!(
+            view.margin_summary.account_value < Decimal::ZERO,
+            "the served perp summary stays the perp ledger (the fee is its only move), got {}",
+            view.margin_summary.account_value
+        );
+        assert_eq!(
+            account.spot.get(&0).map(|e| e.total).unwrap_or_default(),
+            "1000".parse().unwrap(),
+            "the spot collateral was not consumed by the perp fill"
+        );
+
+        // A standard account's spot holdings are not margin: the same balance
+        // cannot open the same perp position.
+        let sim = Sim::memory();
+        let b = Address::repeat_byte(0xbb);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: b,
+                class: DealClass::Spot,
+                coin: None,
+                amount: "1000".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        let err = sim.order(&feed, b, &ioc(Side::Buy, "0.5")).unwrap_err();
+        assert!(
+            format!("{err}").contains("Insufficient margin to place order."),
+            "{err}"
         );
     }
 

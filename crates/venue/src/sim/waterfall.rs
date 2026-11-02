@@ -133,14 +133,18 @@ impl Sim {
         if closed.is_empty() {
             return Ok(None);
         }
-        self.liquidated(closed, v.margin_summary.account_value)
+        self.liquidated(closed, account::unified_equity(account, &v)?)
     }
 
     /// The cross leg: the venue's own cross figure (the total minus the
     /// isolated margins — the served identity, measured live) against the
     /// cross maintenance.
     fn check_cross_leg(&self, pass: &Pass<'_>, v: &account::AccountView) -> Result<Vec<String>> {
-        let equity = v.cross_margin_summary.account_value;
+        // A unified account's spot collateral is part of its cross equity even
+        // though the served `crossMarginSummary` excludes it. The order lane
+        // trades against it; the waterfall must not liquidate the position it
+        // just allowed.
+        let equity = account::unified_equity(pass.account, v)?;
         let maintenance = v.cross_maintenance_margin_used;
         self.rescue_leg(
             pass,
@@ -824,6 +828,61 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    /// **A unified account's spot collateral backs the cross leg.** The same
+    /// perp position that is liquidated in standard mode is solvent when the
+    /// account is unified and holds spot USDC — the order lane trades against
+    /// that balance, so the waterfall must not close it.
+    #[test]
+    fn a_unified_spot_balance_backs_the_cross_leg() {
+        let feed = feed_with(&[("ETH", "100", "100")]);
+        feed.put_meta(meta_with("ETH", 10), crate::now_ms());
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0xaa);
+        put_account(
+            &sim,
+            a,
+            (Decimal::ZERO, Decimal::from(100), -Decimal::ONE, 10),
+        );
+        sim.with_account(a, |acc| {
+            acc.mode = crate::wire::UserAbstraction::UnifiedAccount;
+            acc.spot.insert(
+                0,
+                account::SpotEntry {
+                    coin: "USDC".into(),
+                    total: Decimal::from(1000),
+                    hold: Decimal::ZERO,
+                    entry_ntl: Decimal::ZERO,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let out = sim.check_all(&feed, crate::now_ms()).unwrap();
+        assert!(
+            out.is_empty(),
+            "spot collateral covers the perp maintenance: {out:?}"
+        );
+        assert!(
+            sim.account(a)
+                .unwrap()
+                .unwrap()
+                .positions
+                .get("ETH")
+                .is_some_and(|p| !p.szi.is_zero()),
+            "the position survives"
+        );
+
+        // The same position in standard mode has no margin and is liquidated.
+        let b = Address::repeat_byte(0xbb);
+        put_account(
+            &sim,
+            b,
+            (Decimal::ZERO, Decimal::from(100), -Decimal::ONE, 10),
+        );
+        let out = sim.check_all(&feed, crate::now_ms()).unwrap();
+        assert!(!out.is_empty(), "standard spot is not margin");
     }
 
     /// A negative account value goes to ADL — after the book's attempt

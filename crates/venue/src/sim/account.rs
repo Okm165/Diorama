@@ -637,6 +637,49 @@ pub(crate) fn available_after_maintenance(
     )])
 }
 
+/// The account's free margin for an order: the perp sub-ledger's value, plus a
+/// **unified** account's spot collateral (the venue's single balance), less
+/// the positions' initial margin. A standard account's spot holdings are not
+/// margin and contribute nothing.
+///
+/// This is deliberately separate from [`view`]'s `marginSummary`: the venue
+/// serves the perp sub-ledger's summary alone (a unified account with only
+/// spot collateral serves `accountValue = 0` beside its spot balance), but the
+/// same account can still trade perps against that spot collateral. The order
+/// lane's placement and post-fill checks read this figure; the served summary
+/// does not change.
+pub(crate) fn available_margin(account: &Account, view: &AccountView) -> Result<Decimal> {
+    let mut value = view.margin_summary.account_value;
+    if account.mode == UserAbstraction::UnifiedAccount {
+        let spot = match account.spot.get(&COLLATERAL_TOKEN) {
+            Some(entry) => sub(entry.total, entry.hold, "spot hold")?,
+            None => Decimal::ZERO,
+        };
+        value = add(value, spot, "unified spot collateral")?;
+    }
+    sub(
+        value,
+        view.margin_summary.total_margin_used,
+        "available margin",
+    )
+}
+
+/// The account's cross equity for the liquidation waterfall: the perp
+/// sub-ledger's cross value plus a **unified** account's spot collateral. The
+/// waterfall must see the same unified balance the order lane trades against;
+/// a spot-only unified account with a small perp position is not insolvent.
+pub(crate) fn unified_equity(account: &Account, view: &AccountView) -> Result<Decimal> {
+    let mut equity = view.cross_margin_summary.account_value;
+    if account.mode == UserAbstraction::UnifiedAccount {
+        let spot = match account.spot.get(&COLLATERAL_TOKEN) {
+            Some(entry) => sub(entry.total, entry.hold, "spot hold")?,
+            None => Decimal::ZERO,
+        };
+        equity = add(equity, spot, "unified spot collateral")?;
+    }
+    Ok(equity)
+}
+
 /// The Core→EVM spot bridge bound: the collateral token's
 /// `tokenToAvailableAfterMaintenance` for a unified account — the venue's own
 /// figure for what spot may leave after the perp book's maintenance is kept.
