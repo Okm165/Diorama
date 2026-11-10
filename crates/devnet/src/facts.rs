@@ -68,6 +68,35 @@ pub enum Fact {
         empty: u64,
         shadowed: u64,
     },
+    /// The feed bridge published a source answer to the devnet aggregator.
+    ///
+    /// This is the fact a price consumer follows: the write is on T, the
+    /// answer and the source round's own stamp travel with it, and the target
+    /// names the mock aggregator the mirror's oracles read.
+    FeedPublished {
+        chain: &'static str,
+        feed: String,
+        target: Address,
+        answer: i128,
+        source_stamp: u64,
+    },
+    /// A publish landed and its confirmation window elapsed: the target now
+    /// holds the source's answer as the bridge's confirmed value.
+    FeedConfirmed {
+        chain: &'static str,
+        feed: String,
+        target: Address,
+        answer: i128,
+        source_stamp: u64,
+    },
+    /// The bridge paused a feed because a scenario (or an operator) owns its
+    /// value. The `found` answer is the diverging target value the bridge saw.
+    FeedPaused {
+        chain: &'static str,
+        feed: String,
+        target: Address,
+        found: i128,
+    },
     /// The top-up loop delivered payloads to reth (mainnet-only).
     TopUpDelivered { delivered: usize },
     /// The faucet wrote a key and marked it devnet-owned.

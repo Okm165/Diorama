@@ -307,6 +307,19 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
                 if let Err(e) = step(&ctx, n).await {
                     tracing::error!(block = n, error = %e, "diff apply failed (will retry)");
                     tokio::time::sleep(poll).await;
+                } else {
+                    // The source block landed on T: its feeds can have moved,
+                    // and the bridge must read them now rather than on a timer.
+                    // During catch-up (the cursor far behind the source head)
+                    // waking per block would turn a 100k-block replay into 900k
+                    // source reads; the bridge's interval remains the net there.
+                    let source_head = ctx
+                        .mainnet_metrics
+                        .reth_head
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if n.saturating_add(2) >= source_head {
+                        ctx.feed_wake.notify_one();
+                    }
                 }
             }
             Ok(Next::Idle) => tokio::time::sleep(poll).await,

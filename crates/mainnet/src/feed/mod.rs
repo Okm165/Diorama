@@ -27,6 +27,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::Address;
 use diorama_config::FeedSection;
+use diorama_devnet::facts::Fact;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,7 +35,8 @@ use std::time::Duration;
 pub(crate) use http::admin_routes;
 
 use crate::feed::chainlink::{
-    publish, read_answer, read_answer_with_stamp, read_decimals, read_target_decimals, target_decimals,
+    publish, read_answer, read_answer_with_stamp, read_decimals, read_target_decimals,
+    target_decimals,
 };
 pub(crate) use crate::feed::metrics::FeedBridgeMetrics;
 use crate::feed::policy::{step, Step, ValueState};
@@ -206,7 +208,14 @@ impl FeedBridge {
         })
     }
 
-    /// Run forever: one pass per `poll_interval_ms`.
+    /// Run forever: one pass per applied source block, with the configured
+    /// interval as the reconciliation net.
+    ///
+    /// A source feed answer can only move in a source block, and the applier
+    /// mirrors every one, so `ctx.feed_wake` is the primary cadence. The timer
+    /// remains for the cases the wake cannot cover (a heartbeat re-stamp the
+    /// applier did not surface, a bridge that started after the block, a
+    /// source read that failed transiently).
     pub async fn run(self: Arc<Self>, ctx: Arc<Ctx>) {
         loop {
             for feed in &self.feeds {
@@ -224,11 +233,16 @@ impl FeedBridge {
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 }
             }
-            tokio::time::sleep(self.poll).await;
+            tokio::select! {
+                biased;
+                _ = ctx.feed_wake.notified() => {}
+                _ = tokio::time::sleep(self.poll) => {}
+            }
         }
     }
 
     /// One feed, one pass.
+    #[allow(clippy::too_many_lines)] // one state machine: the step arms are the protocol
     async fn pass_one(&self, ctx: &Ctx, feed: &FeedRuntime) -> Result<()> {
         if feed.owner.load() == FeedOwner::Scenario {
             return Ok(());
@@ -238,7 +252,8 @@ impl FeedBridge {
             // pass and the feed starts publishing the moment it appears).
             return Ok(());
         };
-        let (source_now, source_stamp) = read_answer_with_stamp(&ctx.reth, feed.section.source).await?;
+        let (source_now, source_stamp) =
+            read_answer_with_stamp(&ctx.reth, feed.section.source).await?;
         let target_now = match read_answer(&ctx.anvil_t, feed.section.target).await {
             Ok(value) => value,
             Err(e @ Error::FeedBridgeAbi { .. }) => {
@@ -249,20 +264,48 @@ impl FeedBridge {
         };
         let state = feed_state(feed);
         let now = crate::now_ms();
-        match step(state, target_now, source_now, source_stamp, now, self.confirm_window_ms) {
+        match step(
+            state,
+            target_now,
+            source_now,
+            source_stamp,
+            now,
+            self.confirm_window_ms,
+        ) {
             Step::Confirm => {
-                confirm(feed);
+                if let Some((answer, source_stamp)) = confirm(feed) {
+                    ctx.plane.facts.publish(Fact::FeedConfirmed {
+                        chain: "t",
+                        feed: feed.section.name.clone(),
+                        target: feed.section.target,
+                        answer,
+                        source_stamp,
+                    });
+                }
                 Ok(())
             }
             Step::WaitPending | Step::SkipUnchanged => Ok(()),
             Step::Publish(answer) => {
                 publish(&ctx.anvil_t, feed.section.target, self.writer, answer).await?;
                 record_publish(feed, &self.metrics, answer, source_stamp, now);
+                ctx.plane.facts.publish(Fact::FeedPublished {
+                    chain: "t",
+                    feed: feed.section.name.clone(),
+                    target: feed.section.target,
+                    answer,
+                    source_stamp,
+                });
                 tracing::info!(feed = %feed.section.name, answer, source_stamp, decimals, "feed bridge published");
                 Ok(())
             }
             Step::Pause { found } => {
                 pause_feed(feed, &self.metrics, state, found);
+                ctx.plane.facts.publish(Fact::FeedPaused {
+                    chain: "t",
+                    feed: feed.section.name.clone(),
+                    target: feed.section.target,
+                    found,
+                });
                 Ok(())
             }
         }
@@ -371,17 +414,20 @@ fn feed_state(feed: &FeedRuntime) -> ValueState {
 }
 
 /// The confirmation window elapsed: the pending answer and its source stamp
-/// become confirmed.
-fn confirm(feed: &FeedRuntime) {
+/// become confirmed. Returns the confirmed pair when there was one, so the
+/// caller can publish the fact (a no-op confirm is not a fact).
+fn confirm(feed: &FeedRuntime) -> Option<(i128, u64)> {
     let mut state = feed
         .values
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let confirmed = state.pending.zip(state.pending_source_stamp);
     state.confirmed = state.pending;
     state.confirmed_source_stamp = state.pending_source_stamp;
     state.pending = None;
     state.pending_source_stamp = None;
     state.pending_since_ms = None;
+    confirmed
 }
 
 /// Record the published answer and the source stamp behind it; a pending

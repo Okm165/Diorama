@@ -93,14 +93,20 @@ pub(crate) async fn read_answer_with_stamp(
     let decoded = rpc
         .call_decode(aggregator, &AggregatorV3Interface::latestRoundDataCall {})
         .await?;
-    let answer = decoded.answer.try_into().map_err(|_| Error::FeedBridgeAbi {
-        what: "latestRoundData() answer",
-        detail: "does not fit i128".into(),
-    })?;
-    let stamp = decoded.updatedAt.try_into().map_err(|_| Error::FeedBridgeAbi {
-        what: "latestRoundData() updatedAt",
-        detail: "does not fit u64".into(),
-    })?;
+    let answer = decoded
+        .answer
+        .try_into()
+        .map_err(|_| Error::FeedBridgeAbi {
+            what: "latestRoundData() answer",
+            detail: "does not fit i128".into(),
+        })?;
+    let stamp = decoded
+        .updatedAt
+        .try_into()
+        .map_err(|_| Error::FeedBridgeAbi {
+            what: "latestRoundData() updatedAt",
+            detail: "does not fit u64".into(),
+        })?;
     Ok((answer, stamp))
 }
 

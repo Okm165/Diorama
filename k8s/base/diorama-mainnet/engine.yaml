@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-mainnet-engine:v10
+          image: localhost/diorama-mainnet-engine:v12
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (RETH_URL,
