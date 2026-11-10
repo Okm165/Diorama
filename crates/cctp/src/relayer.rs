@@ -288,6 +288,17 @@ impl Relayer {
     /// (refused/parked — the store keeps it for a later pass).
     async fn relay(&self, record: &MessageRecord) -> Result<Relayed> {
         let chain = by_domain(&self.chains, record.destination_domain)?;
+        // **The destination nonce is the authority on whether the mint
+        // landed.** Check it before the source burn, the hook wrapper, or the
+        // caller: a prior epoch or re-pin can remove the source burn while the
+        // destination mint is already on-chain. Parking that record makes a
+        // delivered transfer look stuck forever (the live 16-burn class). A
+        // consumed nonce is the chain's own statement; reconcile it.
+        if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
+            self.mark_relayed(record.nonce, None)?;
+            tracing::info!(nonce = %record.nonce, chain = chain.name, "cctp nonce already consumed on-chain; reconciled as relayed");
+            return Ok(Relayed::Yes);
+        }
         let decoded = record.decoded()?;
         let (target, consumer) = self.consumer(chain, record, &decoded)?;
         if caller_mismatch(decoded.header.destination_caller, consumer) {
@@ -322,11 +333,6 @@ impl Relayer {
                 record.nonce,
                 "the source burn no longer exists (a re-pin or rewind); re-run the transfer".into(),
             );
-        }
-        if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
-            self.mark_relayed(record.nonce, None)?;
-            tracing::info!(nonce = %record.nonce, chain = chain.name, "cctp nonce already consumed on-chain; reconciled as relayed");
-            return Ok(Relayed::Yes);
         }
         match self.resume_in_flight(chain, record).await? {
             Resume::ReSend => {}
