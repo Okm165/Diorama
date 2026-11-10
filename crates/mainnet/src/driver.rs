@@ -106,7 +106,7 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
             tracing::error!(
                 gap,
                 start = ?start_kind,
-                "sync gap too large - paused; run the re-pin drill (make repin)"
+                "sync gap too large - paused; if anvil-t has ANVIL_FORK_PIN set, patch/unset it first, then run make mainnet-repin"
             );
         }
         return Ok(Next::Idle);

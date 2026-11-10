@@ -28,6 +28,9 @@ state_dir = "${STATE_DIR}"
 target_url = "@anvil_t"
 
 [services.engine.loops]
+# Chain-1 catch-up: the live gap is ~3.3k blocks; 5k stays below the
+# 10,064-block rebase bound and leaves margin for source advance.
+max_gap_blocks = 5000
 # JSON-RPC batch items for source reads and local cheatcode writes. This is
 # the deployment's endpoint contract (the live value), not a global default.
 chunk_size = 500

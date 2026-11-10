@@ -3,11 +3,15 @@
 //! delegated to by the venue's own state files (`hyperliquid`'s sim and feed
 //! caches).
 //!
-//! A load has three answers (boundary-discipline): **absent** is a fact — the
-//! caller starts empty, never an error; an **IO fault** is named with its
-//! path; **corrupt** bytes die here, at the load point, with the path named —
-//! a corrupt state file must never silently become an empty one. A save never
-//! leaves a torn file: write a temp sibling, rename it over the target.
+//! A load has four answers (boundary-discipline): **absent** is a fact — the
+//! caller starts empty, never an error; a **zero-byte** file is a crash
+//! artifact (a sandbox kill between the rename metadata and the data fsync) and
+//! is treated as absent with a loud warning, because crash-looping on a file
+//! the process itself truncated is worse than rebasing; an **IO fault** is
+//! named with its path; **corrupt** bytes die here, at the load point, with the
+//! path named — a corrupt state file must never silently become an empty one.
+//! A save never leaves a torn file: write a temp sibling, fsync it, rename it
+//! over the target, and fsync the parent directory.
 use crate::error::{Error, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::path::Path;
@@ -33,6 +37,14 @@ pub fn load<T: DeserializeOwned>(path: &Path, what: &'static str) -> Result<Opti
             })
         }
     };
+    if text.trim().is_empty() {
+        tracing::warn!(
+            what,
+            path = %path.display(),
+            "state file is empty (a crash-truncated artifact) — treating it as absent; the caller rebases/rebuilds"
+        );
+        return Ok(None);
+    }
     let value = serde_json::from_str(&text).map_err(|source| Error::Corrupt {
         what,
         path: path.to_path_buf(),
@@ -72,16 +84,48 @@ pub fn save_bytes(path: &Path, bytes: &[u8], what: &'static str) -> Result<()> {
     }
     let seq = WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp.{seq}"));
-    std::fs::write(&tmp, bytes).map_err(|source| Error::Io {
+    let mut file = std::fs::File::create(&tmp).map_err(|source| Error::Io {
         what,
         path: tmp.clone(),
         source,
     })?;
+    use std::io::Write;
+    file.write_all(bytes).map_err(|source| Error::Io {
+        what,
+        path: tmp.clone(),
+        source,
+    })?;
+    // The rename is atomic in the namespace, but not durable: without this
+    // fsync a sandbox kill can leave a zero-byte target after the rename
+    // metadata commits. The measured 2026-11-09 diorama-mainnet engine crash
+    // loop was exactly this shape (`shadow.json` and `cursor.json` both 0 B).
+    file.sync_all().map_err(|source| Error::Io {
+        what,
+        path: tmp.clone(),
+        source,
+    })?;
+    drop(file);
     std::fs::rename(&tmp, path).map_err(|source| Error::Io {
         what,
         path: path.to_path_buf(),
         source,
-    })
+    })?;
+    // Persist the rename itself. A directory fsync failure is logged, not
+    // returned: the target is already complete and visible, so failing the
+    // caller after the save would be a false negative.
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            if let Err(source) = dir.sync_all() {
+                tracing::warn!(
+                    what,
+                    path = %parent.display(),
+                    error = %source,
+                    "state directory fsync failed — the file is visible but the rename may not survive a power loss"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -130,6 +174,23 @@ mod tests {
         std::fs::write(&path, b"{not json").unwrap();
         let err = load::<Sample>(&path, "test state").unwrap_err();
         assert!(matches!(err, Error::Corrupt { .. }), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sandbox kill can leave the target zero-byte after the rename metadata
+    /// commits but before the data is durable. That is not a corrupt state to
+    /// crash-loop on; it is an absent state, and the caller rebases/rebuilds.
+    /// Whitespace-only is the same artifact (a partial pretty-print).
+    #[test]
+    fn a_zero_byte_state_file_is_a_crash_artifact_and_reads_as_absent() {
+        let dir = crate::test_dir("store-empty-test");
+        let path = dir.join("state.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        assert_eq!(load::<Sample>(&path, "test state").unwrap(), None);
+        std::fs::write(&path, b"\n").unwrap();
+        assert_eq!(load::<Sample>(&path, "test state").unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

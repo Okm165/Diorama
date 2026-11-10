@@ -1,7 +1,16 @@
-# NodePort exposure for the daloc harness: the venue mirror's
-# services, reachable from the test host. The 31xxx range keeps the two
-# mirrors' exposures distinct on one node (diorama-mainnet uses 30xxx; see
-# k8s/overlays/diorama-mainnet/nodeports.yaml for the convention).
+# Host access for the daloc harness: the venue mirror's services, reachable
+# from the test host. These are **ClusterIP** twins, not NodePorts: a NodePort
+# binds every host interface and exposes the Anvil cheatcode set and the
+# venue's /admin/* controls to the LAN. The host uses loopback-only forwards:
+#
+#   kubectl -n diorama-venue port-forward --address 127.0.0.1 \
+#     svc/anvil-v 31545:8545
+#   kubectl -n diorama-venue port-forward --address 127.0.0.1 \
+#     svc/engine 31880:8080
+#   kubectl -n diorama-venue port-forward --address 127.0.0.1 \
+#     svc/venue-sim 31090:8090 31091:8091
+#
+# The env below keeps the loopback ports, so the harness is unchanged.
 ---
 apiVersion: v1
 kind: Service
@@ -9,12 +18,12 @@ metadata:
   name: anvil-v-nodeport
   labels: { app.kubernetes.io/name: anvil-v, app.kubernetes.io/part-of: diorama-venue }
 spec:
-  type: NodePort
+  type: ClusterIP
   selector: { app.kubernetes.io/name: anvil-v }
   ports:
     # daloc's CHAIN_RPC_URL / CHAIN_WS_URL for chain 999 point here; anvil
     # serves WebSocket upgrades on the same port.
-    - { name: http, port: 8545, targetPort: 8545, nodePort: 31545 }
+    - { name: http, port: 8545, targetPort: 8545 }
 ---
 apiVersion: v1
 kind: Service
@@ -22,11 +31,11 @@ metadata:
   name: engine-nodeport
   labels: { app.kubernetes.io/name: engine, app.kubernetes.io/part-of: diorama-venue }
 spec:
-  type: NodePort
+  type: ClusterIP
   selector: { app.kubernetes.io/name: engine }
   ports:
     # /status, /metrics, /admin/* (deal, shadow, epoch, pause, resume).
-    - { name: http, port: 8080, targetPort: 8080, nodePort: 31880 }
+    - { name: http, port: 8080, targetPort: 8080 }
 ---
 apiVersion: v1
 kind: Service
@@ -34,13 +43,13 @@ metadata:
   name: venue-sim-nodeport
   labels: { app.kubernetes.io/name: venue-sim, app.kubernetes.io/part-of: diorama-venue }
 spec:
-  type: NodePort
+  type: ClusterIP
   selector: { app.kubernetes.io/name: venue-sim }
   ports:
     # 8090 is the info API daloc reads (HL_INFO_API_URL); 8091 the control
-    # API the harness drives.
-    - { name: info, port: 8090, targetPort: 8090, nodePort: 31090 }
-    - { name: control, port: 8091, targetPort: 8091, nodePort: 31091 }
+    # API the harness drives. Loopback port-forward only.
+    - { name: info, port: 8090, targetPort: 8090 }
+    - { name: control, port: 8091, targetPort: 8091 }
 ---
 apiVersion: v1
 kind: ConfigMap

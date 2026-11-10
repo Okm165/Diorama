@@ -1,5 +1,12 @@
-# The bridge's external harness surface. Kept beside the bridge overlay, not
-# the venue's: a venue without a bridge publishes no Iris/control port.
+# The bridge's host harness surface. Kept beside the bridge overlay, not the
+# venue's: a venue without a bridge publishes no Iris/control port.
+#
+# These are **ClusterIP** twins, not NodePorts. The control API can burn the
+# relay wallet and re-arm parked messages; it must not be LAN-reachable. The
+# host uses a loopback forward:
+#
+#   kubectl -n diorama-cctp port-forward --address 127.0.0.1 \
+#     svc/cctp-bridge 31095:8095 31096:8096
 ---
 apiVersion: v1
 kind: Service
@@ -7,13 +14,13 @@ metadata:
   name: cctp-bridge-nodeport
   labels: { app.kubernetes.io/name: cctp-bridge, app.kubernetes.io/part-of: diorama-cctp }
 spec:
-  type: NodePort
+  type: ClusterIP
   selector: { app.kubernetes.io/name: cctp-bridge }
   ports:
     # 8095 is the Iris-compatible base daloc's cctp-relay points at; 8096 the
-    # control API.
-    - { name: iris, port: 8095, targetPort: 8095, nodePort: 31095 }
-    - { name: control, port: 8096, targetPort: 8096, nodePort: 31096 }
+    # control API. Loopback port-forward only; never a NodePort.
+    - { name: iris, port: 8095, targetPort: 8095 }
+    - { name: control, port: 8096, targetPort: 8096 }
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -24,7 +31,7 @@ metadata:
 data:
   # The bridge owns this URL: a venue without a bridge publishes no Iris
   # endpoint. A client in another namespace reaches it by this in-cluster
-  # service DNS name (or the NodePort above from the host).
+  # service DNS name; the host uses the loopback port-forward above.
   test-endpoints.env: |
     IRIS_API_URL=http://cctp-bridge.diorama-cctp.svc.cluster.local:8095
     CCTP_CONTROL_URL=http://localhost:31096

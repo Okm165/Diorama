@@ -90,11 +90,16 @@ pub fn shared_routes<E: Engine>() -> Router<Arc<E>> {
         .route("/admin/probes", post(admin_probes::<E>))
 }
 
-/// `/healthz` — 503 while the engine is paused (the orchestrator probes
-/// `/livez`, which is pause-agnostic).
+/// `/healthz` — 503 while the engine is paused. There are two pause latches:
+/// the admin halt and the gap guard. A gap-paused engine is alive and still
+/// serves reads/writes, but it is not composing source blocks, so it is not
+/// ready to be a fresh mirror. The orchestrator probes `/livez` for process
+/// liveness, which stays pause-agnostic.
 async fn healthz<E: Engine>(State(ctx): State<Arc<E>>) -> impl IntoResponse {
     if ctx.plane().is_halted() {
         (StatusCode::SERVICE_UNAVAILABLE, "halted")
+    } else if ctx.plane().is_gap_paused() {
+        (StatusCode::SERVICE_UNAVAILABLE, "gap-paused")
     } else {
         (StatusCode::OK, "ok")
     }

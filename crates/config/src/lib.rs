@@ -723,14 +723,15 @@ port = 8096
         ));
         let (inst, unresolved) = Instance::inspect(path).unwrap();
         assert_eq!(inst.instance.name, "diorama-mainnet");
-        // 46 market/protocol entries + the dapp's 41-address mainnet
+        // 44 market/protocol entries + the dapp's 41-address mainnet
         // deployment (contracts/deployments/ethereum.json; measured complete
         // 2026-10-23). The codeless "facts registrar" was removed 2026-10-25
-        // after a live re-check (eth_getCode `0x`, nonce 0). Update this
-        // count deliberately when the audit changes.
+        // after a live re-check (eth_getCode `0x`, nonce 0), and the two
+        // oracle-syncer entries were removed with the OracleSyncer cleanup.
+        // Update this count deliberately when the audit changes.
         assert_eq!(
             inst.watchlist.len(),
-            87,
+            85,
             "the audited watchlist is complete"
         );
         assert_eq!(l1(&inst).fork_offset, 128);

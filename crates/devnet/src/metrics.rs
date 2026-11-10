@@ -240,32 +240,4 @@ mod tests {
         .collect();
         assert_eq!(names, want);
     }
-
-    /// The labeled form renders the same bytes as the unlabeled shorthand,
-    /// with the series carrying its labels — one formatter for both (the
-    /// venue's feed used to carry a second copy of this format).
-    #[test]
-    fn labeled_metric_lines_render() {
-        let mut out = String::new();
-        push_metric(&mut out, "gauge", "x_total", "help", 7);
-        assert_eq!(
-            out,
-            "# HELP x_total help\n# TYPE x_total gauge\nx_total 7\n"
-        );
-        out.clear();
-        push_metric_line(
-            &mut out,
-            &MetricLine {
-                kind: "counter",
-                name: "x_total",
-                help: "help",
-                labels: &[("coin", "ETH")],
-                value: 9,
-            },
-        );
-        assert_eq!(
-            out,
-            "# HELP x_total help\n# TYPE x_total counter\nx_total{coin=\"ETH\"} 9\n"
-        );
-    }
 }

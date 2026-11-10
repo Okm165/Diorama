@@ -3,8 +3,9 @@
 # because a kustomize overlay composes whole files and the venue overlay must
 # not declare the mainnet claims (reth-data is 400Gi, lighthouse-data 1500Gi).
 #
-# LOCAL (workshop): re-bound to the volumes a previous run left behind
-# (Released PVs from the pre-rename namespaces); see the mainnet pvcs.yaml.
+# LOCAL (workshop): every claim here is disposable. Deleting a PVC+PV and
+# re-applying provisions a fresh volume through the same mirror-retain
+# StorageClass; see the mainnet pvcs.yaml for the retained claims.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -14,7 +15,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-1be79fd4-d9d1-4df2-aca0-cdd156541e01
   resources:
     requests:
       # V forks the source on demand and carries only the devnet's own writes
@@ -30,7 +30,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-2eecf992-8ee7-4fc8-9083-2f5aca31d221
   resources:
     requests:
       # sim.json + feed.json: small JSON state, 5Gi is plenty.
@@ -46,7 +45,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-729524d3-a3fb-412e-a7c0-36954a26f3af
   resources:
     requests:
       storage: 10Gi

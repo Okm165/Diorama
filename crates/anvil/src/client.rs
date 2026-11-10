@@ -140,6 +140,12 @@ fn is_retryable(text: &str) -> bool {
                 && !message
                     .to_ascii_lowercase()
                     .contains("invalid block height"))
+            // The public HyperEVM RPC's transient server-side execution
+            // timeout (`-32000 execution aborted (timeout = 5s)`). It is an
+            // endpoint fault: another endpoint may answer, and the composer
+            // narrows the range. A deterministic `-32000` (a revert) is not
+            // matched.
+            || (code == -32000 && message.to_ascii_lowercase().contains("timeout"))
     };
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
@@ -2105,6 +2111,42 @@ mod tests {
         assert!(!is_retryable(
             r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"invalid block height: 50047695"}}]"#
         ));
+    }
+
+    /// The public HyperEVM RPC's `-32000 execution aborted (timeout = 5s)`
+    /// is a transient endpoint fault: the pool must fail over instead of
+    /// surfacing the same endpoint's timeout on every pass. A deterministic
+    /// `-32000` remains the node's answer.
+    #[test]
+    fn an_execution_timeout_is_a_retryable_fault() {
+        assert!(is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution aborted (timeout = 5s)"}}"#
+        ));
+        assert!(is_retryable(
+            r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"request timeout"}}]"#
+        ));
+        assert!(!is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}"#
+        ));
+    }
+
+    /// A pool fails over past the transient execution timeout to the live
+    /// endpoint, so a loaded public RPC does not stall the follow.
+    #[tokio::test]
+    async fn a_pool_fails_over_past_an_execution_timeout() {
+        let (timed_out, first) = serve_once(
+            r#"{"id":1,"jsonrpc":"2.0","error":{"code":-32000,"message":"execution aborted (timeout = 5s)"}}"#,
+        );
+        let (live, second) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2a"}"#);
+        let pool =
+            Rpc::with_urls(&[timed_out, live], Duration::from_secs(2)).expect("a valid pool");
+        let value: U64 = pool
+            .call("eth_getLogs", NO_PARAMS)
+            .await
+            .expect("the live endpoint answers");
+        assert_eq!(value.to::<u64>(), 42);
+        first.join().expect("the timed-out server exits");
+        second.join().expect("the live server exits");
     }
 
     /// A batch body answering a single call is corrupt, not a transport fault.

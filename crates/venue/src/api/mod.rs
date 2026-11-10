@@ -99,10 +99,15 @@ impl ApiState {
                 .map(|stale| stale <= max_stale_ms)
                 .unwrap_or(false);
             // The served book is part of the same contract (daloc's l2Book
-            // read): the poller fetches it a call after the meta, so
-            // readiness that passed between the two left the book read
-            // hitting the gap (the same local-run finding, one call later).
-            fresh_mark && self.feed.book(coin, now).is_some()
+            // read). Presence is not enough: a live book older than the
+            // freshness window is stale and the order lane refuses it. A
+            // scripted book's present is never stale; a warming book is not
+            // ready.
+            let fresh_book = matches!(
+                self.feed.book_age(coin, now, max_stale_ms),
+                crate::feed::BookAge::Scripted | crate::feed::BookAge::Fresh
+            );
+            fresh_mark && fresh_book
         })
     }
 }

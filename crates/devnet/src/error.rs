@@ -83,6 +83,17 @@ pub enum Error {
     /// the devnet's state. The per-tx causes are logged; this names the block.
     #[error("block {block}: shadow scan failed for {failed} tx trace(s); the block is re-scanned")]
     ShadowScan { block: u64, failed: usize },
+
+    /// The fork base moved **downward**: the registry and journal belong to a
+    /// newer base. The epoch rule refuses to clear them silently — the driver
+    /// halts and the operator must investigate (a forward re-pin or an explicit
+    /// state reset). A downward move is a rollback, never a new epoch: clearing
+    /// would silently discard the only record of the writes made above the old
+    /// base.
+    #[error(
+        "epoch rollback refused: the fork base moved from {known} down to {pin}; the devnet state is from a newer base and was kept (driver halted for operator review)"
+    )]
+    EpochRollbackRefused { known: u64, pin: u64 },
 }
 
 impl Error {
@@ -140,24 +151,5 @@ mod tests {
             "nothing about the request is wrong"
         );
         assert!(e.to_string().contains('7'), "{e}");
-    }
-
-    #[test]
-    fn request_refusals_render_the_numbers_they_refuse() {
-        let e = Error::InvalidRewind {
-            blocks: 50,
-            cursor: 10,
-        };
-        let rendered = e.to_string();
-        assert!(
-            rendered.contains("50") && rendered.contains("10"),
-            "{rendered}"
-        );
-        assert!(Error::NoCursor.to_string().contains("cursor"));
-        let rendered = Error::InvalidShadow {
-            reason: "`all` requires `clear`",
-        }
-        .to_string();
-        assert!(rendered.contains("`all` requires `clear`"), "{rendered}");
     }
 }

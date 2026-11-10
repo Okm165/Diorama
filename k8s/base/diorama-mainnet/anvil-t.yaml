@@ -89,10 +89,11 @@ spec:
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
-            # Optional explicit epoch pin. Empty = resolve `reth head - offset`
-            # as before. A deployment that must preserve its Daloc contracts
-            # sets this to the persisted /state/pin.
-            - { name: ANVIL_FORK_PIN, value: "" }
+            # Explicit epoch pin. This is the live chain-1 epoch base; it
+            # preserves the Daloc deployment and the shadow registry across
+            # restarts. Changing it is an explicit re-pin: update both
+            # containers, snapshot state, and accept the epoch transition.
+            - { name: ANVIL_FORK_PIN, value: "26363898" }
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -166,8 +167,8 @@ spec:
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
-            # Optional explicit epoch pin (see the init container's comment).
-            - { name: ANVIL_FORK_PIN, value: "" }
+            # Explicit epoch pin (see the init container's comment).
+            - { name: ANVIL_FORK_PIN, value: "26363898" }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

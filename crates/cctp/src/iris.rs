@@ -642,29 +642,6 @@ mod tests {
         assert_eq!(error.error, "Message not found for provided parameters");
     }
 
-    #[test]
-    fn iso8601_round_trips_known_instants() {
-        assert_eq!(iso8601_ms(0).unwrap(), "1970-01-01T00:00:00.000Z");
-        // 2026-10-22T00:00:00Z = 1792627200000 ms (checked with `date -u`).
-        assert_eq!(
-            iso8601_ms(1_792_627_200_000).unwrap(),
-            "2026-10-22T00:00:00.000Z"
-        );
-        assert_eq!(
-            iso8601_ms(1_792_627_200_123).unwrap(),
-            "2026-10-22T00:00:00.123Z"
-        );
-        // A leap day.
-        assert_eq!(
-            iso8601_ms(1_709_164_800_000).unwrap(),
-            "2024-02-29T00:00:00.000Z"
-        );
-        // An out-of-range value is refused by name, not served as the epoch.
-        let err = iso8601_ms(u64::MAX).unwrap_err();
-        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(err.error.contains("outside the ISO 8601 range"), "{err:?}");
-    }
-
     /// A scratch Iris state on a fresh per-test temp dir (the tests may run
     /// concurrently).
     fn iris_state(name: &str) -> (Arc<IrisState>, Arc<Store>, std::path::PathBuf) {

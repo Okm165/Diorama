@@ -35,6 +35,10 @@ fixture_addresses = ["0xb88339CB7199b77E23DB6E890353E22632Ba630f", "0xC02aaA39b2
 [services.engine.verifier]
 probes = [
   { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
+  # Non-devnet-owned CCTP contracts: these give the venue mirror a real at-pin
+  # parity signal even while the USDC probe is skipped (devnet-owned).
+  { name = "cctp_message_transmitter_domain", to = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64", data = "0x8d3638f4" },
+  { name = "cctp_token_minter_messenger", to = "0xfd78EE919681417d192449715b2594ab58f5D002", data = "0x770fc1f0" },
 ]
 
 [services.engine.closures]

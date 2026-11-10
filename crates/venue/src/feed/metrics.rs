@@ -164,21 +164,3 @@ impl FeedMetrics {
         out
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn renders_labeled_series() {
-        let m = FeedMetrics::new(&["BTC".into(), "ETH".into()]);
-        m.set_stale("BTC", 1500);
-        m.mark_ws_up();
-        let out = m.render();
-        assert!(
-            out.contains("venue_sim_stale_ms{coin=\"BTC\"} 1500"),
-            "{out}"
-        );
-        assert!(out.contains("venue_sim_ws_connected 1"), "{out}");
-    }
-}

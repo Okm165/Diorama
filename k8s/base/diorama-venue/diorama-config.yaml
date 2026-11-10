@@ -9,21 +9,18 @@ metadata:
   labels:
     app.kubernetes.io/part-of: diorama-venue
 data:
-  # The one HyperEVM URL list. The engine's read pool starts at a random
-  # healthy entry, fails over on a transport/throttle/5xx fault, and cools a
-  # failed entry down for a later round. Anvil takes one `--fork-url`, so its
-  # entrypoint derives the primary as the first list entry — there is no
-  # second `HL_RPC_URL` definition to drift.
-  #
-  # Only endpoints that answer `eth_getSystemTxsByBlockNumber` are listed:
-  # dRPC and purroofgroup return -32601 for it, so including them would make
-  # the venue source audit disagree on `system_txs`. The official HyperEVM RPC
-  # is first; hypurrscan, stakely and onfinality are the fallbacks.
-  # The archive endpoint is first because anvil-v's fork source must serve
-  # historical storage, not only the head: the public free-plan endpoints
-  # rate-limit a storage read at the pin (measured 2026-11-01, CCTP wiring
-  # boot). The engine's read pool uses the rest as failover.
-  HL_RPC_URLS: "https://rpc.hyperlend.finance/archive,https://rpc.hyperliquid.xyz/evm,https://rpc.hypurrscan.io,https://hyperliquid-json-rpc.stakely.io,https://hyperliquid.api.onfinality.io/evm/public"
+  # Two HyperEVM planes, deliberately separate:
+  #   HL_RPC_URL  - anvil-v's fork source. It must serve historical storage at
+  #                 the pin; the archive endpoint is the one that does.
+  #   HL_RPC_URLS - the engine's read pool. Only endpoints that answer
+  #                 `eth_getSystemTxsByBlockNumber` are listed: the archive
+  #                 returns -32601 for it, so including it would block the
+  #                 follow driver. dRPC and purroofgroup also return -32601.
+  # The public source is the engine's own source and answered the deploy's
+  # account/log reads; the HyperLend archive endpoint timed out under the same
+  # load. Keep the multi-endpoint read pool below for the engine.
+  HL_RPC_URL: "https://rpc.hyperliquid.xyz/evm"
+  HL_RPC_URLS: "https://rpc.hyperliquid.xyz/evm,https://rpc.hypurrscan.io,https://hyperliquid-json-rpc.stakely.io"
 
   # The venue's market plane. Both are URL lists in the instance's
   # [endpoints] groups; the env carries the deployment values, never a second

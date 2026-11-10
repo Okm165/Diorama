@@ -37,6 +37,12 @@ pub struct StatusResponse {
     cursor_t: Option<u64>,
     /// The follow head minus the cursor, only when both are known.
     lag: Option<u64>,
+    /// The profile's configured gap guard, if any.
+    gap_limit: Option<u64>,
+    /// `ok`, `paused`, or `unknown` — the same classification the follow-status
+    /// log names. A paused applier is not `halted`: the process serves `/status`
+    /// while it refuses to apply the gap.
+    guard: &'static str,
     watchlist: usize,
     time_offset_seconds: u64,
     /// Every source endpoint the engine's read pool may use.
@@ -51,6 +57,17 @@ fn lag_between(follow: Option<u64>, cursor: Option<u64>) -> Option<u64> {
     Some(follow?.saturating_sub(cursor?))
 }
 
+/// The gap guard's state, named exactly as the follow-status log names it. A
+/// missing lag or limit is `unknown`, not `ok`: a diagnostic must not claim a
+/// caught-up applier it cannot prove.
+fn guard_state(lag: Option<u64>, gap_limit: Option<u64>) -> &'static str {
+    match (lag, gap_limit) {
+        (Some(lag), Some(limit)) if lag > limit => "paused",
+        (Some(_), Some(_)) => "ok",
+        _ => "unknown",
+    }
+}
+
 /// The document's gathering: the shared fields from the shell, the rest from
 /// this engine's own endpoints. A read that cannot answer is `null`, never a
 /// plausible zero: `/status` is a diagnostic, not a fact source.
@@ -59,12 +76,16 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
         SharedStatus::gather(ctx.anvil_t.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
     let reth_head = ctx.reth.block_number().await.ok();
     let follow = ctx.follow_head().await.ok().flatten();
+    let lag = lag_between(follow, shared.cursor);
+    let gap_limit = ctx.mirror.policies().gap;
     Ok(StatusResponse {
         reth_head,
         follow_head: follow,
         follow: ctx.follow_tag(),
         cursor_t: shared.cursor,
-        lag: lag_between(follow, shared.cursor),
+        lag,
+        gap_limit,
+        guard: guard_state(lag, gap_limit),
         watchlist: ctx.mirror.scope().watch().accounts.len(),
         time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
         sources: ctx.reth.urls().to_vec(),
@@ -127,6 +148,18 @@ mod tests {
         assert_eq!(lag_between(Some(97), Some(100)), Some(0));
         assert_eq!(lag_between(None, Some(97)), None);
         assert_eq!(lag_between(Some(100), None), None);
+    }
+
+    /// The guard is the follow-status log's classification, exposed on the
+    /// diagnostic surface: a lag above the configured limit is `paused`, a
+    /// missing side is `unknown`, and equality is still `ok`.
+    #[test]
+    fn the_guard_names_the_pause() {
+        assert_eq!(guard_state(Some(13_263), Some(9_000)), "paused");
+        assert_eq!(guard_state(Some(9_000), Some(9_000)), "ok");
+        assert_eq!(guard_state(Some(10), Some(9_000)), "ok");
+        assert_eq!(guard_state(None, Some(9_000)), "unknown");
+        assert_eq!(guard_state(Some(10), None), "unknown");
     }
 
     /// The shared taxonomy, pinned per service (the same test name lives in

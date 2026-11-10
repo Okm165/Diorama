@@ -39,9 +39,10 @@ spec:
           args:
             - |
               set -eu
-              # One URL list is the single source; anvil takes one fork URL,
-              # so the first entry is the primary the pool also declares.
-              HL_RPC_URL="${HL_RPC_URLS%%,*}"
+              # The fork source is the archive plane; the engine's read pool
+              # (`HL_RPC_URLS`) deliberately excludes it because it does not
+              # answer `eth_getSystemTxsByBlockNumber`.
+              : "${HL_RPC_URL:?HL_RPC_URL is required}"
               # An explicit pin preserves the epoch across a source change. A
               # re-pin to the source's current head is a *new base*: the driver
               # clears the shadow registry (measured 2026-11-01, a restart moved
@@ -76,14 +77,21 @@ spec:
               chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (source head=$HEAD)"
           env:
-            - name: HL_RPC_URLS
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URLS } }
-            # Optional explicit epoch pin. Empty = resolve the source head as
-            # before. A deployment that changes its fork source sets this to the
-            # persisted /state/pin so the epoch (and the shadow registry) is kept.
-            - { name: ANVIL_FORK_PIN, value: "" }
+            - name: HL_RPC_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
+            # Explicit epoch pin. This is the live chain-999 epoch base; it
+            # preserves the venue shadow registry across restarts. Changing it
+            # is an explicit re-pin: update both containers and the live
+            # deployment, snapshot state, and accept the epoch transition.
+            - { name: ANVIL_FORK_PIN, value: "50640497" }
           volumeMounts:
             - { name: state, mountPath: /state }
+          # The init is a short `wget`/shell loop. Without an explicit request, a
+          # limit (live: 24Gi) defaults the request to the same value and is the
+          # node-overcommit driver. Keep it tiny and bounded.
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {memory: 64Mi}
       containers:
         - name: anvil
           image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
@@ -92,8 +100,8 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              # The primary is the first entry of the one URL list.
-              HL_RPC_URL="${HL_RPC_URLS%%,*}"
+              # The fork source is the archive plane; the engine pool is separate.
+              : "${HL_RPC_URL:?HL_RPC_URL is required}"
               # An explicit pin keeps the epoch across a source change. Without
               # it, re-resolve on *every container start* (k8s restarts only the
               # container on OOM): a fresh base is an epoch, and the driver
@@ -145,7 +153,7 @@ spec:
                 --fork-block-number "$PIN" \
                 --chain-id 999 \
                 --hardfork cancun \
-                --gas-limit 100000000 \
+                --gas-limit 200000000 \
                 --code-size-limit 99999 \
                 --disable-pool-balance-checks \
                 --order fifo \
@@ -157,10 +165,10 @@ spec:
                 --no-request-size-limit \
                 --no-fork-node-info
           env:
-            - name: HL_RPC_URLS
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URLS } }
-            # Optional explicit epoch pin (see the init container's comment).
-            - { name: ANVIL_FORK_PIN, value: "" }
+            - name: HL_RPC_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
+            # Explicit epoch pin (see the init container's comment).
+            - { name: ANVIL_FORK_PIN, value: "50640497" }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

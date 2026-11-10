@@ -5,10 +5,10 @@
 # diorama-venue/pvcs.yaml - one file per mirror, because a kustomize overlay
 # composes whole files and must not declare the other mirror's claims.
 #
-# LOCAL (workshop): re-bound to the volumes a previous run left behind
-# (Released PVs from the pre-rename namespaces). volumeName pre-binds each
-# claim to its existing volume; the StorageClass name is the one those PVs
-# carry (mirror-retain is the same local-path/Retain definition).
+# LOCAL (workshop): the expensive reth/lighthouse claims stay pre-bound to the
+# volumes a previous run left behind. The disposable anvil/engine claims carry
+# no volumeName: deleting their PVC+PV and re-applying provisions a fresh
+# volume through the same mirror-retain StorageClass.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -47,7 +47,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-29d893f7-61dc-42c5-8e31-0bd2adebcf8d
   resources:
     requests:
       storage: 40Gi
@@ -60,7 +59,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-d7e4b239-b6ce-4824-977b-604f02c9321d
   resources:
     requests:
       storage: 10Gi

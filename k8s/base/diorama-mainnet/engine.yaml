@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-mainnet-engine:v1
+          image: localhost/diorama-mainnet-engine:v10
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (RETH_URL,
@@ -64,7 +64,9 @@ spec:
             periodSeconds: 10
             failureThreshold: 90
           readinessProbe:
-            httpGet: { path: /livez, port: 8080 }
+            # /healthz is 503 while the engine is halted; /livez stays the
+            # liveness/startup signal so a paused engine is not restarted.
+            httpGet: { path: /healthz, port: 8080 }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
@@ -77,7 +79,11 @@ spec:
             # request tracks the measured steady state; the limit stays the OOM
             # ceiling for a wide window's composition state.
             requests: { cpu: "5m", memory: 32Mi }
-            limits: { memory: 512Mi }
+            # 2026-11-06: the 512Mi ceiling OOMed during a wide-window
+            # composition (exit 137 at 13:50Z). The venue engine was already
+            # raised to 2Gi for the same reason; match it. The applier is
+            # stateless and resumes from the journal.
+            limits: { memory: 2Gi }
       volumes:
         - name: instance
           configMap: { name: mainnet-instance }
