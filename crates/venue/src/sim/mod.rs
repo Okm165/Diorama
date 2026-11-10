@@ -1367,8 +1367,16 @@ mod tests {
         let sim = Sim::memory();
         assert_eq!(sim.served_time(1_000).unwrap(), 1_000);
         sim.advance(&feed, 60, 1).unwrap();
-        assert_eq!(sim.served_time(1_000).unwrap(), 1_000, "advance must not future-stamp the observation");
-        assert_eq!(sim.clock(1_000).unwrap(), 61_000, "the internal scenario clock still advances");
+        assert_eq!(
+            sim.served_time(1_000).unwrap(),
+            1_000,
+            "advance must not future-stamp the observation"
+        );
+        assert_eq!(
+            sim.clock(1_000).unwrap(),
+            61_000,
+            "the internal scenario clock still advances"
+        );
         sim.observe_chain_time(700_000);
         assert_eq!(
             sim.served_time(500_000).unwrap(),

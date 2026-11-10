@@ -35,13 +35,20 @@ use diorama_anvil::{Key, Rpc, Value, Write};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-/// The logs' range chunk, in blocks: the window's logs ride one
-/// `eth_getLogs` call per chunk. The public endpoint answers bounded ranges
-/// (measured: a 1000-block range is refused) and caps a response at 1 MiB
-/// (measured: a busy 100-block range overflows), so the range starts here
-/// and *halves* on the size refusal — the last good size carries the rest of
-/// the window.
-const LOGS_RANGE: u64 = 25;
+/// The logs' range starts at the endpoint pool's declared cap. The cap is the
+/// deployment's own measured request budget (`max_log_range` on the endpoint,
+/// 900 for the public HyperEVM pool), so starting below it multiplies a
+/// catch-up window into dozens of round-trips for no safety gain: the
+/// response-size and transient-timeout refusals below still halve the chunk
+/// adaptively, and the last good size carries the rest of the window.
+///
+/// Measured 2026-11-10: the venue follow's 900-block windows took 50–120 s at
+/// the old hardcoded 25-block chunk (36 sequential `eth_getLogs` calls); the
+/// replay of the 148k-block post-restore gap therefore needed ~3 h, which is
+/// exactly the staleness the indexer reported as `Replaying`.
+fn initial_log_range(rpc: &Rpc) -> u64 {
+    rpc.log_range_cap().max(1)
+}
 
 /// The next chunk after an endpoint refuses the current one (a response-size
 /// cap or a transient execution timeout): halve it, never below one block.
@@ -448,7 +455,7 @@ async fn fetch_logs(rpc: &Rpc, from: u64, to: u64) -> diorama_anvil::Result<Touc
     let mut start = from + 1;
     // The endpoint's declared cap is the ceiling; the response-size/timeout
     // halving below may shrink further, never grow past it.
-    let mut range = LOGS_RANGE.min(rpc.log_range_cap());
+    let mut range = initial_log_range(rpc);
     while start <= to {
         let end = (start + range - 1).min(to);
         let filter = Filter::new()
@@ -1134,8 +1141,8 @@ mod tests {
     /// zero, which would make the retry an empty range).
     #[test]
     fn a_refused_log_range_halves_to_one() {
-        assert_eq!(halve_log_range(25), 12);
-        assert_eq!(halve_log_range(12), 6);
+        assert_eq!(halve_log_range(900), 450);
+        assert_eq!(halve_log_range(450), 225);
         assert_eq!(halve_log_range(2), 1);
         assert_eq!(halve_log_range(1), 1);
         assert_eq!(halve_log_range(0), 1);
