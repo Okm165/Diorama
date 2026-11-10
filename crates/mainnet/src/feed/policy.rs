@@ -14,7 +14,12 @@
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ValueState {
     pub(crate) confirmed: Option<i128>,
+    /// The source round's `updatedAt` behind the confirmed answer. It is the
+    /// heartbeat identity: the same answer with a newer stamp is a new
+    /// publication the bridge must forward.
+    pub(crate) confirmed_source_stamp: Option<u64>,
     pub(crate) pending: Option<i128>,
+    pub(crate) pending_source_stamp: Option<u64>,
     pub(crate) pending_since_ms: Option<u64>,
 }
 
@@ -35,15 +40,17 @@ pub(crate) enum Step {
 /// The rules, in order:
 /// 1. the target holds the pending publish → confirm it;
 /// 2. the target holds the confirmed value (or nothing was ever confirmed —
-///    first contact): publish the source's value when it moved, wait while a
-///    publish is in flight *within the confirmation window*, re-publish when
-///    it did not land in time, skip when nothing moved;
+///    first contact): publish the source's value when it moved **or its
+///    publication stamp advanced** (the heartbeat), wait while a publish is in
+///    flight *within the confirmation window*, re-publish when it did not land
+///    in time, skip when neither moved;
 /// 3. anything else on the target → a scenario wrote it: pause, never
 ///    overwrite a scenario's value.
 pub(crate) fn step(
     state: ValueState,
     target_now: i128,
     source_now: i128,
+    source_stamp: u64,
     now_ms: u64,
     window_ms: u64,
 ) -> Step {
@@ -64,7 +71,11 @@ pub(crate) fn step(
         // is exactly what a retry should leave behind.
         return Step::Publish(source_now);
     }
-    if state.confirmed == Some(source_now) {
+    // The answer and its publication stamp are one fact: Chainlink's heartbeat
+    // republishes the same answer with a new `updatedAt`, and the guard's
+    // max-age is measured from that stamp. Skipping on answer equality alone
+    // would let a live feed age out in a quiet market.
+    if state.confirmed == Some(source_now) && state.confirmed_source_stamp == Some(source_stamp) {
         return Step::SkipUnchanged;
     }
     Step::Publish(source_now)
@@ -76,10 +87,14 @@ mod tests {
 
     fn state(confirmed: Option<i128>, pending: Option<i128>) -> ValueState {
         // A pending state's send time defaults to 0 (fresh unless the test
-        // says otherwise by advancing `now`).
+        // says otherwise by advancing `now`). The stamps default to 0 so the
+        // pre-heartbeat assertions keep their meaning; the heartbeat test sets
+        // them explicitly.
         ValueState {
             confirmed,
+            confirmed_source_stamp: confirmed.map(|_| 0),
             pending,
+            pending_source_stamp: pending.map(|_| 0),
             pending_since_ms: pending.map(|_| 0),
         }
     }
@@ -91,22 +106,39 @@ mod tests {
         let now = 1_000;
         // The bridge confirmed 2000; the target now holds 1500 (a crash): pause.
         assert_eq!(
-            step(state(Some(2000), None), 1500, 2000, now, WINDOW),
+            step(state(Some(2000), None), 1500, 2000, 0, now, WINDOW),
             Step::Pause { found: 1500 }
         );
         // The target still holds the bridge's value; the source moved: publish.
         assert_eq!(
-            step(state(Some(2000), None), 2000, 2100, now, WINDOW),
+            step(state(Some(2000), None), 2000, 2100, 0, now, WINDOW),
             Step::Publish(2100)
         );
-        // Nothing moved: no tx.
+        // Nothing moved (answer and stamp): no tx.
         assert_eq!(
-            step(state(Some(2000), None), 2000, 2000, now, WINDOW),
+            step(state(Some(2000), None), 2000, 2000, 0, now, WINDOW),
             Step::SkipUnchanged
         );
         // First pass (never wrote): publish the source value, no pause.
         assert_eq!(
-            step(ValueState::default(), 999, 2000, now, WINDOW),
+            step(ValueState::default(), 999, 2000, 0, now, WINDOW),
+            Step::Publish(2000)
+        );
+    }
+
+    /// The source republished the same answer on its heartbeat. The answer did
+    /// not move, but the publication stamp did; the guard's max-age is measured
+    /// from that stamp, so the bridge must forward the publication.
+    #[test]
+    fn a_source_heartbeat_publishes_the_same_answer() {
+        let now = 1_000;
+        let confirmed = state(Some(2000), None);
+        assert_eq!(
+            step(confirmed, 2000, 2000, 0, now, WINDOW),
+            Step::SkipUnchanged
+        );
+        assert_eq!(
+            step(confirmed, 2000, 2000, 1, now, WINDOW),
             Step::Publish(2000)
         );
     }
@@ -117,22 +149,22 @@ mod tests {
     fn a_publish_in_flight_is_not_a_scenario_write() {
         let now = 1_000;
         assert_eq!(
-            step(state(Some(2000), Some(2100)), 2000, 2100, now, WINDOW),
+            step(state(Some(2000), Some(2100)), 2000, 2100, 0, now, WINDOW),
             Step::WaitPending
         );
         // Mined: confirmed.
         assert_eq!(
-            step(state(Some(2000), Some(2100)), 2100, 2100, now, WINDOW),
+            step(state(Some(2000), Some(2100)), 2100, 2100, 0, now, WINDOW),
             Step::Confirm
         );
         // After Confirm the next pass sees the source unchanged: skip.
         assert_eq!(
-            step(state(Some(2100), None), 2100, 2100, now, WINDOW),
+            step(state(Some(2100), None), 2100, 2100, 0, now, WINDOW),
             Step::SkipUnchanged
         );
         // A crash during the flight is still caught (neither value).
         assert_eq!(
-            step(state(Some(2000), Some(2100)), 1500, 2100, now, WINDOW),
+            step(state(Some(2000), Some(2100)), 1500, 2100, 0, now, WINDOW),
             Step::Pause { found: 1500 }
         );
     }
@@ -146,18 +178,18 @@ mod tests {
         let in_flight = state(Some(2000), Some(2100));
         // Within the window: wait.
         assert_eq!(
-            step(in_flight, 2000, 2100, 1_000, WINDOW),
+            step(in_flight, 2000, 2100, 0, 1_000, WINDOW),
             Step::WaitPending
         );
         // Past the window, target still not holding it: re-publish the
         // *current* source value.
         assert_eq!(
-            step(in_flight, 2000, 2200, 1_000 + WINDOW, WINDOW),
+            step(in_flight, 2000, 2200, 0, 1_000 + WINDOW, WINDOW),
             Step::Publish(2200)
         );
         // Past the window but the target does hold it: confirm wins.
         assert_eq!(
-            step(in_flight, 2100, 2200, 1_000 + WINDOW, WINDOW),
+            step(in_flight, 2100, 2200, 0, 1_000 + WINDOW, WINDOW),
             Step::Confirm
         );
     }

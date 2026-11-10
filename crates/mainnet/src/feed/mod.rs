@@ -34,7 +34,7 @@ use std::time::Duration;
 pub(crate) use http::admin_routes;
 
 use crate::feed::chainlink::{
-    publish, read_answer, read_decimals, read_target_decimals, target_decimals,
+    publish, read_answer, read_answer_with_stamp, read_decimals, read_target_decimals, target_decimals,
 };
 pub(crate) use crate::feed::metrics::FeedBridgeMetrics;
 use crate::feed::policy::{step, Step, ValueState};
@@ -238,7 +238,7 @@ impl FeedBridge {
             // pass and the feed starts publishing the moment it appears).
             return Ok(());
         };
-        let source_now = read_answer(&ctx.reth, feed.section.source).await?;
+        let (source_now, source_stamp) = read_answer_with_stamp(&ctx.reth, feed.section.source).await?;
         let target_now = match read_answer(&ctx.anvil_t, feed.section.target).await {
             Ok(value) => value,
             Err(e @ Error::FeedBridgeAbi { .. }) => {
@@ -249,7 +249,7 @@ impl FeedBridge {
         };
         let state = feed_state(feed);
         let now = crate::now_ms();
-        match step(state, target_now, source_now, now, self.confirm_window_ms) {
+        match step(state, target_now, source_now, source_stamp, now, self.confirm_window_ms) {
             Step::Confirm => {
                 confirm(feed);
                 Ok(())
@@ -257,8 +257,8 @@ impl FeedBridge {
             Step::WaitPending | Step::SkipUnchanged => Ok(()),
             Step::Publish(answer) => {
                 publish(&ctx.anvil_t, feed.section.target, self.writer, answer).await?;
-                record_publish(feed, &self.metrics, answer, now);
-                tracing::info!(feed = %feed.section.name, answer, decimals, "feed bridge published");
+                record_publish(feed, &self.metrics, answer, source_stamp, now);
+                tracing::info!(feed = %feed.section.name, answer, source_stamp, decimals, "feed bridge published");
                 Ok(())
             }
             Step::Pause { found } => {
@@ -283,7 +283,9 @@ impl FeedBridge {
                     source: format!("{:?}", f.section.source).to_lowercase(),
                     owner: f.owner.load(),
                     confirmed_answer: values.confirmed,
+                    confirmed_source_stamp: values.confirmed_source_stamp,
                     pending_answer: values.pending,
+                    pending_source_stamp: values.pending_source_stamp,
                     pending_since_ms: values.pending_since_ms,
                     last_error: f
                         .last_error
@@ -312,10 +314,12 @@ impl FeedBridge {
     pub fn resume(&self, name: &str) -> Result<()> {
         let feed = self.find(name)?;
         feed.owner.store(FeedOwner::Bridge);
-        feed.values
+        let mut state = feed
+            .values
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .confirmed = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.confirmed = None;
+        state.confirmed_source_stamp = None;
         Ok(())
     }
 
@@ -340,6 +344,7 @@ impl FeedBridge {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.pending = Some(answer);
+        state.pending_source_stamp = None;
         state.pending_since_ms = Some(crate::now_ms());
         drop(state);
         feed.owner.store(FeedOwner::Scenario);
@@ -365,20 +370,29 @@ fn feed_state(feed: &FeedRuntime) -> ValueState {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The confirmation window elapsed: the pending answer becomes confirmed.
+/// The confirmation window elapsed: the pending answer and its source stamp
+/// become confirmed.
 fn confirm(feed: &FeedRuntime) {
     let mut state = feed
         .values
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     state.confirmed = state.pending;
+    state.confirmed_source_stamp = state.pending_source_stamp;
     state.pending = None;
+    state.pending_source_stamp = None;
     state.pending_since_ms = None;
 }
 
-/// Record the published answer; a pending publish that did not land within the
-/// window is re-published (warned).
-fn record_publish(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, answer: i128, now: u64) {
+/// Record the published answer and the source stamp behind it; a pending
+/// publish that did not land within the window is re-published (warned).
+fn record_publish(
+    feed: &FeedRuntime,
+    metrics: &FeedBridgeMetrics,
+    answer: i128,
+    source_stamp: u64,
+    now: u64,
+) {
     let mut state = feed
         .values
         .lock()
@@ -388,10 +402,12 @@ fn record_publish(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, answer: i128,
             feed = %feed.section.name,
             age_ms = now.saturating_sub(state.pending_since_ms.unwrap_or(now)),
             answer,
+            source_stamp,
             "the pending publish did not land within the confirmation window; re-publishing"
         );
     }
     state.pending = Some(answer);
+    state.pending_source_stamp = Some(source_stamp);
     state.pending_since_ms = Some(now);
     metrics.record_update(&feed.section.name);
 }
@@ -442,8 +458,13 @@ pub(crate) struct FeedStatus {
     pub owner: FeedOwner,
     /// The last value the chain confirmed the bridge wrote.
     pub confirmed_answer: Option<i128>,
+    /// The source round's `updatedAt` behind `confirmed_answer` — the
+    /// heartbeat identity, so a quiet feed that republished is visible.
+    pub confirmed_source_stamp: Option<u64>,
     /// A publish awaiting its block, when one is in flight.
     pub pending_answer: Option<i128>,
+    /// The source stamp carried by the in-flight publish.
+    pub pending_source_stamp: Option<u64>,
     /// When that publish was sent (ms since the epoch): a pending older than
     /// `confirm_window_ms` means it is about to be re-sent (the outcome-unknown
     /// reconciliation) — the operator sees the wait, not a silent stall.
