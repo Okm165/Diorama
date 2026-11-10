@@ -196,6 +196,17 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     let cursor = ctx.plane.state.cursor()?;
     record_cursor_metrics(&ctx.venue_metrics, cursor.as_ref(), head);
     scan_and_advance(ctx, cursor.as_ref(), head).await?;
+    // The read precompiles are `anvil_setCode` installs: the tx scanner cannot
+    // see them, so capture their code once installed and let a same-pin re-fork
+    // restore them with their storage.
+    match ctx.plane.capture_fixtures_if_due(&ctx.anvil_v, 60).await {
+        Ok(0) => {}
+        Ok(captured) => {
+            tracing::info!(captured, "fixture runtime code captured for re-fork restore");
+            ctx.plane.save_shadow()?;
+        }
+        Err(e) => tracing::warn!(error = %e, "fixture code capture failed; will retry"),
+    }
 
     // Follow the source: compose the window since the last composed source
     // block and land the changed keys on V (COW). After the scan, so the

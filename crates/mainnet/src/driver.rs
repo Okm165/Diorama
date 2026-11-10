@@ -369,6 +369,20 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
         if let Err(e) = ctx.plane.save_shadow() {
             tracing::warn!(error = %e, "shadow registry save failed");
         }
+        // Fixture code arrives through `anvil_setCode`, invisible to the tx
+        // scanner. Capture it once installed so a same-pin re-fork restores the
+        // whole fixture, not just its recorded storage (the measured 2026-11-10
+        // chain-1 guard/price-target loss).
+        match ctx.plane.capture_fixtures_if_due(&ctx.anvil_t, 60).await {
+            Ok(0) => {}
+            Ok(captured) => {
+                tracing::info!(captured, "fixture runtime code captured for re-fork restore");
+                if let Err(e) = ctx.plane.save_shadow() {
+                    tracing::warn!(error = %e, "shadow registry save after fixture capture failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "fixture code capture failed; will retry"),
+        }
     }
 }
 

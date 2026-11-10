@@ -207,6 +207,7 @@ mod tests {
             time_offset: AtomicU64::new(0),
             shadow_scanned_upto: AtomicU64::new(0),
             reapply_from: Shared::new("reapply range", None),
+            fixture_capture_secs: AtomicU64::new(0),
         }
     }
 

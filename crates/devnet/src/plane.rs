@@ -67,6 +67,11 @@ pub struct Plane {
     /// (idempotent writes; re-journaling records the rolled-back values as the
     /// new before-values). Cleared once the whole range is re-applied.
     pub reapply_from: Shared<Option<ReapplyRange>>,
+    /// Epoch second of the last fixture-code capture. Fixture code is installed
+    /// by `anvil_setCode`, which the tx scanner cannot see; a periodic capture
+    /// is what makes a same-pin re-fork restore it (see
+    /// [`Shadow::record_fixture_code`]).
+    pub(crate) fixture_capture_secs: AtomicU64,
 }
 
 /// The journal-rewind re-apply range: the devnet-chain blocks whose writes
@@ -133,7 +138,46 @@ impl Plane {
             time_offset: AtomicU64::new(offset),
             shadow_scanned_upto: AtomicU64::new(0),
             reapply_from: Shared::new("reapply range", None),
+            fixture_capture_secs: AtomicU64::new(0),
         })
+    }
+
+    /// Capture the runtime code of every configured fixture, at most once per
+    /// `every_secs`. The install is an `anvil_setCode` RPC (the devnet deploy's
+    /// canonical token/feed mocks, the venue's read precompiles), invisible to
+    /// the tx scanner; without this capture a same-pin re-fork restores the
+    /// fixture's storage under pin-era code. Returns the number of fixture
+    /// codes recorded (zero when the interval has not elapsed).
+    pub async fn capture_fixtures_if_due(&self, rpc: &Rpc, every_secs: u64) -> Result<usize> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let last = self.fixture_capture_secs.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < every_secs {
+            return Ok(0);
+        }
+        self.fixture_capture_secs.store(now, Ordering::Relaxed);
+        let fixtures = self.shadow.lock()?.fixture_addresses();
+        if fixtures.is_empty() {
+            return Ok(0);
+        }
+        let head = rpc.block_number().await?;
+        let mut found = Vec::new();
+        for address in fixtures {
+            let code = rpc.code_at(address, head).await?;
+            if !code.is_empty() {
+                found.push((address, code));
+            }
+        }
+        let mut shadow = self.shadow.lock()?;
+        let mut captured = 0;
+        for (address, code) in found {
+            if shadow.record_fixture_code(address, code.as_ref()) {
+                captured += 1;
+            }
+        }
+        Ok(captured)
     }
 
     pub fn save_state(&self) -> Result<()> {
