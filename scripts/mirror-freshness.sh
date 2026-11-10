@@ -12,7 +12,7 @@
 set -euo pipefail
 MAINNET_NS="${MAINNET_NS:-diorama-mainnet}"
 VENUE_NS="${VENUE_NS:-diorama-venue}"
-DALOC_NS="${DALOC_NS:-daloc}"
+CONSUMER_NS="${CONSUMER_NS:-consumer}"
 CCTP_NS="${CCTP_NS:-diorama-cctp}"
 
 # The measured source state windows (blocks). The mainnet window is the reth
@@ -129,7 +129,7 @@ else
   kv "feed bridge" "UNCONFIGURED (the chain-1 mocks have no live writer)"
   degrade
 fi
-IDX=$(try kubectl -n "$DALOC_NS" exec deploy/indexer -- curl -s --max-time 5 http://127.0.0.1:8080/health)
+IDX=$(try kubectl -n "$CONSUMER_NS" exec deploy/indexer -- curl -s --max-time 5 http://127.0.0.1:8080/health)
 if [ -n "$IDX" ] && printf '%s' "$IDX" | jq -e . >/dev/null 2>&1; then
   printf '%s' "$IDX" | jq -r '.metrics | "  stale assets: \(.price_feed_stale_assets // "?"); oldest age: \(.price_feed_advisory_oldest_age_s // "?")s", "  venue account failures/10m: \(.venue_account_failures_10m // "?")"' 2>/dev/null || true
   OLDEST=$(printf '%s' "$IDX" | jq -r '.metrics.price_feed_advisory_oldest_age_s // empty' 2>/dev/null)
@@ -139,7 +139,7 @@ if [ -n "$IDX" ] && printf '%s' "$IDX" | jq -e . >/dev/null 2>&1; then
   fi
 fi
 
-JOB=$(try kubectl -n "$DALOC_NS" get jobs -o json)
+JOB=$(try kubectl -n "$CONSUMER_NS" get jobs -o json)
 if [ -n "$JOB" ]; then
   printf '%s' "$JOB" | jq -r '[.items[] | select(.metadata.name|startswith("precompile-mock-install"))] | sort_by(.status.completionTime // .metadata.creationTimestamp) | last | if . == null then "  precompile: no job" else "  precompile: \(.metadata.name) succeeded=\(.status.succeeded // 0) failed=\(.status.failed // 0)" end' 2>/dev/null || true
   PRECOMPILE_FAILED=$(printf '%s' "$JOB" | jq -r '[.items[] | select(.metadata.name|startswith("precompile-mock-install"))] | sort_by(.metadata.creationTimestamp) | last | .status.failed // 0' 2>/dev/null)

@@ -225,7 +225,7 @@ impl<'de> Deserialize<'de> for Reduce {
 }
 
 /// Which way an order goes: the sim's own vocabulary. The wire keeps the
-/// venue's `is_buy` boolean (what daloc sends); [`Side::of`] is the one
+/// venue's `is_buy` boolean (what the consumer sends); [`Side::of`] is the one
 /// conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1790,7 +1790,7 @@ mod tests {
         let p = account.positions.get("ETH").unwrap();
         assert_eq!(p.szi, "1.5".parse().unwrap());
         assert_eq!(p.entry_px, "101".parse().unwrap());
-        // The identity the client gates on stays exact.
+        // The identity the consumer gates on stays exact.
         let served =
             crate::sim::account::clearinghouse(&account, &feed, Some(&meta_with("ETH", 10)), 0)
                 .unwrap();
@@ -2242,7 +2242,7 @@ mod tests {
 
     /// The docs' self-trade rule: "Trades between the same address cancel
     /// the resting order instead of causing a fill. No fees are deducted,
-    /// nor does the the cancel show up in the trade feed." The taker's own
+    /// nor does the cancel show up in the trade feed." The taker's own
     /// crossed order is expired and the walk continues against the
     /// liquidity behind it.
     #[test]

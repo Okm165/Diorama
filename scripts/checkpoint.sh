@@ -5,7 +5,7 @@
 # but slow to load (measured: chain 999's 13,686-block dump did not answer RPC
 # after minutes). The restorable artifact is the **state-only** snapshot:
 # `block` + `accounts`, with `blocks`/`transactions` emptied. Both chains'
-# state-only snapshots load in seconds and reproduce the Daloc contracts.
+# state-only snapshots load in seconds and reproduce the deployment contracts.
 #
 # This script is read-only against the chains. It writes:
 #   <out>/anvil-t-state.hex        raw dump (forensics)

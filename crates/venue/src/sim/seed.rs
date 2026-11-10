@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// the fixture-only fields (`crossMarginSummary`, `crossMaintenanceMarginUsed`,
 /// `withdrawable`, `tokenToAvailableAfterMaintenance`, `spotToken`, `dex`) are
 /// kept verbatim and served back by `/control/state` — the control surface is
-/// "what the scenario set" (daloc's `resolved_equity` assertions read it; live
+/// "what the scenario set" (the consumer's `resolved_equity` assertions read it; live
 /// marks must not move a fixture read), while `/info` is the simulator's live
 /// view.
 ///
@@ -259,7 +259,7 @@ fn signed_seed_value(positions: &[AssetPosition]) -> Result<Decimal> {
 
 /// The `/control/state` view: the fixture's fields where the scenario owns
 /// them, the sim's derivation where it does not — so a patched account reads
-/// back exactly what the harness set (daloc's `resolved_equity` assertions
+/// back exactly what the harness set (the consumer's `resolved_equity` assertions
 /// read this; live marks must not move a fixture read), while a never-patched
 /// account still reads sensibly. `/info` is unaffected: it always serves the
 /// live view.
@@ -743,7 +743,7 @@ mod tests {
         assert_eq!(account.mode, UserAbstraction::UnifiedAccount);
     }
 
-    /// The hl_mock control patch shape — daloc's `standard_cross` output: no
+    /// The hl_mock control patch shape — the consumer's `standard_cross` output: no
     /// `maxLeverage`, no `returnOnEquity`, `entryPx: "0.0"`, a cross short, and
     /// the fixture-only fields the info surface never reads. It must parse (the
     /// parser is a superset), apply (the raw base round-trips), and read back

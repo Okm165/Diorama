@@ -17,7 +17,7 @@ spec:
   type: ClusterIP
   selector: { app.kubernetes.io/name: cctp-bridge }
   ports:
-    # 8095 is the Iris-compatible base daloc's cctp-relay points at; 8096 the
+    # 8095 is the Iris-compatible base the consumer relay points at; 8096 the
     # control API. Loopback port-forward only; never a NodePort.
     - { name: iris, port: 8095, targetPort: 8095 }
     - { name: control, port: 8096, targetPort: 8096 }

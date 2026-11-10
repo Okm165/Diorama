@@ -1,4 +1,4 @@
-# Host access for the client harness. The harness runs on the test host,
+# Host access for the consumer harness. The harness runs on the test host,
 # outside the cluster, so the mirror's RPC/WS/admin must be reachable there.
 #
 # These are **ClusterIP** twins, not NodePorts: a NodePort binds every host
@@ -22,7 +22,7 @@ spec:
   type: ClusterIP
   selector: { app.kubernetes.io/name: anvil-t }
   ports:
-    # daloc's CHAIN_RPC_URL / CHAIN_WS_URL for chain 1 point here; anvil
+    # the consumer's CHAIN_RPC_URL / CHAIN_WS_URL for chain 1 point here; anvil
     # serves WebSocket upgrades on the same port.
     - { name: http, port: 8545, targetPort: 8545 }
 ---
@@ -46,7 +46,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: diorama-mainnet
 data:
-  # The values the daloc harness sources (their external-mode env).
+  # The values the consumer harness sources (their external-mode env).
   # The single-node k3s node *is* the test host; a remote harness overrides
   # the host and keeps the ports. This is the *first* chain's block; the
   # venue's (the second chain) lives in overlays/diorama-venue/nodeports.yaml

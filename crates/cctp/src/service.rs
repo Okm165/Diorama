@@ -363,7 +363,7 @@ impl Bridge {
         relayer
     }
 
-    /// Two listeners: the Iris API daloc's relay reads (8095), the control
+    /// Two listeners: the Iris API the consumer relay reads (8095), the control
     /// API tests drive (8096).
     fn spawn_apis(
         &self,

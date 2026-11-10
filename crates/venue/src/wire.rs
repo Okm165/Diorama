@@ -1,9 +1,9 @@
 //! The Hyperliquid info API's wire model (measured live).
 //!
 //! One request enum (the endpoint is a single `POST /info` tagged by `type`)
-//! and the response structs daloc's services read — complete shapes, not
+//! and the response structs the consumer's services read — complete shapes, not
 //! projections: every field the venue sends has a typed home, and the ones
-//! daloc gates on (`positionValue` unsigned with the sign in `szi`,
+//! the consumer gates on (`positionValue` unsigned with the sign in `szi`,
 //! `cumFunding.sinceOpen`, `leverage.type`, `totalRawUsd`) are named in the
 //! rustdoc so a refactor cannot quietly drop them.
 //!
@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 /// Serialize a [`Decimal`] the way the real venue does: at most 9 fractional
 /// digits (nano granularity), trailing zeros trimmed. The sim's `Decimal`
-/// arithmetic keeps wide scales (e.g. `45.9053659690`), and DALOC's
+/// arithmetic keeps wide scales (e.g. `45.9053659690`), and the consumer's
 /// `nanos_from_decimal_str` refuses any string with more than nine fraction
 /// digits — a formatting artifact must not read as a malformed venue response.
 pub(crate) mod decimal_nano {
@@ -164,7 +164,7 @@ impl InfoRequest {
     }
 }
 
-/// `marginSummary` (and `crossMarginSummary`): the figures daloc reads.
+/// `marginSummary` (and `crossMarginSummary`): the figures the consumer reads.
 ///
 /// `totalRawUsd` is the operator's recall amount — the raw USDC balance with
 /// the positions' cost basis removed (`balance − Σ szi·entryPx`). The served
@@ -183,7 +183,7 @@ pub(crate) struct MarginSummary {
 }
 
 /// One position row. `positionValue` is unsigned on the wire; the side comes
-/// from the sign of `szi` (daloc's exact rule). `liquidationPx` is present
+/// from the sign of `szi` (the venue's exact rule). `liquidationPx` is present
 /// for isolated positions only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -297,7 +297,7 @@ pub(crate) enum PositionKind {
     OneWay,
 }
 
-/// `clearinghouseState`: the venue account read (daloc's equity + recall).
+/// `clearinghouseState`: the venue account read (the consumer's equity + recall).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClearinghouseState {
@@ -308,7 +308,7 @@ pub(crate) struct ClearinghouseState {
     #[serde(serialize_with = "decimal_nano::serialize")]
     pub withdrawable: Decimal,
     pub asset_positions: Vec<AssetPosition>,
-    /// Milliseconds; the client's staleness gate is ≤6 s against this field.
+    /// Milliseconds; the consumer's staleness gate is ≤6 s against this field.
     pub time: u64,
     /// Whether **any** mark this account's figures were computed from is owned by the
     /// scenario control plane (`crash`/`rally`/`set_price`). A control mark is a
@@ -323,7 +323,7 @@ pub(crate) struct ClearinghouseState {
 pub(crate) struct SpotClearinghouseState {
     pub balances: Vec<SpotBalance>,
     /// The venue's "available after maintenance", per token, as `[token, value]`
-    /// pairs. Served for **unified** accounts — it is the input daloc's client
+    /// pairs. Served for **unified** accounts — it is the input the consumer
     /// reconciles (`available + maintenance == the collateral token's balance`);
     /// empty (and omitted) for standard ones, whose spot side is not read for
     /// equity.
@@ -344,7 +344,7 @@ pub(crate) struct SpotBalance {
     pub entry_ntl: Decimal,
 }
 
-/// `meta`: the perp universe + margin tables. daloc's operator reads
+/// `meta`: the perp universe + margin tables. the operator reads
 /// `universe[].szDecimals` for the wire `sz` of unwind orders.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -533,7 +533,7 @@ pub(crate) struct PerpDex {
     pub sub_deployers: Vec<(String, Vec<Address>)>,
 }
 
-/// `l2Book`: exactly two sides, ≤20 levels each (daloc's gate). `n` is the
+/// `l2Book`: exactly two sides, ≤20 levels each (the consumer's gate). `n` is the
 /// order count per level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -645,7 +645,7 @@ pub(crate) struct SpotPair {
     pub is_canonical: bool,
 }
 
-/// `userAbstraction`: the account mode enum (daloc refuses
+/// `userAbstraction`: the account mode enum (the consumer refuses
 /// `portfolioMargin`/`dexAbstraction`; unknown users serve `default`).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -809,7 +809,7 @@ mod tests {
         assert_eq!(r, InfoRequest::Unrouted);
     }
 
-    /// The exact live sample (docs, measured): the identity daloc gates on
+    /// The exact live sample (docs, measured): the identity the consumer gates on
     /// holds numerically on the real wire shape.
     #[test]
     #[allow(
@@ -852,7 +852,7 @@ mod tests {
         }"#;
         let s: ClearinghouseState = serde_json::from_str(raw).unwrap();
         let p = &s.asset_positions[0].position;
-        // The identity daloc gates on: accountValue == totalRawUsd + Σ
+        // The identity the consumer gates on: accountValue == totalRawUsd + Σ
         // signed(positionValue), where the wire's positionValue is unsigned
         // and the sign comes from szi (`|szi|·mark` under the hood).
         let signed = if p.szi.is_sign_negative() {

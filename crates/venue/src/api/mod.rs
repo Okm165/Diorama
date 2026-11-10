@@ -1,4 +1,4 @@
-//! The simulator's HTTP surface: the daloc-facing info API (8090) and the
+//! The simulator's HTTP surface: the consumer-facing info API (8090) and the
 //! control API (8091).
 //!
 //! Two routers, one state ([`ApiState`]): the info router answers the venue's
@@ -87,7 +87,7 @@ impl ApiState {
         // `spotClearinghouseState`'s token mapping). The poller fetches it in
         // the same pass as the meta, one HEAVY call later — readiness that
         // passed between the two left the first spot deal hitting the gap
-        // (found by the local daloc run).
+        // (found by the local run).
         if !self.feed.spot_registry_loaded() {
             return false;
         }
@@ -98,7 +98,7 @@ impl ApiState {
                 .stale_ms(coin, now)
                 .map(|stale| stale <= max_stale_ms)
                 .unwrap_or(false);
-            // The served book is part of the same contract (daloc's l2Book
+            // The served book is part of the same contract (the consumer's l2Book
             // read). Presence is not enough: a live book older than the
             // freshness window is stale and the order lane refuses it. A
             // scripted book's present is never stale; a warming book is not
@@ -145,7 +145,7 @@ pub fn info_router(state: Arc<ApiState>) -> Router {
             axum::routing::get(info::healthz),
         )
         // The info port's liveness alias. The shared inter-service health probe
-        // (`DalocHttpClient::health_verdict`) reads a JSON `status`; the control
+        // (`the HTTP client::health_verdict`) reads a JSON `status`; the control
         // port's text body is for humans and orchestrators.
         .route("/health", axum::routing::get(info::health))
         .route("/readyz", axum::routing::get(info::readyz))

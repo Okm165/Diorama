@@ -1,7 +1,7 @@
 //! Prometheus-text metrics (hand-rolled, the workspace convention: a handful
 //! of counters needs no dependency). The counters are the bridge's lifecycle
 //! (watched → signed → relayed/parked), the per-chain gauges are the relay
-//! key's gas (the alerts daloc's relay also carries: 0.1 ETH low / 0.01 ETH
+//! key's gas (the alerts the consumer relay also carries: 0.1 ETH low / 0.01 ETH
 //! critical by default).
 use crate::store::Counts;
 use alloy_primitives::U256;

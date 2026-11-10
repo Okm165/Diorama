@@ -100,7 +100,7 @@ impl Sim {
     /// account-scoped read: accrue funding to now, settle delistings, run the
     /// resting book's passes, check every account against its maintenance
     /// requirement (the waterfall), record the marks and persist if anything
-    /// moved — so daloc's set-and-read tests see live liquidation behavior
+    /// moved — so the consumer's set-and-read tests see live liquidation behavior
     /// without ever calling `advance` (funding steps at the hour). A warming
     /// market plane (no meta yet) is a no-op, not a fault storm.
     pub fn evaluate(&self, feed: &MarketFeed) -> Result<Vec<Liquidation>> {

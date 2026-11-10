@@ -340,7 +340,7 @@ impl Chain {
     }
 
     /// A devnet stipend: write the native balance directly
-    /// (`anvil_setBalance` — the same substitution daloc's harness makes; T's
+    /// (`anvil_setBalance` — the same substitution the consumer harness makes; T's
     /// engine already runs on cheatcodes). The deployment's block producer
     /// mines nothing here; the balance is chain state, not a transaction.
     pub async fn fund_native(&self, who: Address, amount: U256) -> Result<()> {

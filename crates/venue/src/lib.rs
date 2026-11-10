@@ -21,7 +21,7 @@
 //! - the driver (this crate): boot asserts, reset detection, the epoch rule,
 //!   probes-at-pin, the steady-state scan, and the source follow.
 //!
-//! The simulator (market/account planes), the daloc-facing API and the
+//! The simulator (market/account planes), the consumer-facing API and the
 //! bridges are the venue's own half and land on top of this driver; the
 //! mainnet project is never compiled here (the closure matrix enforces it).
 //! Clocks: `block` = the **V height** (HyperEVM blocks; the venue profile has

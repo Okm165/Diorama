@@ -87,9 +87,9 @@ impl Instance {
 ///
 /// The project layer is the generic/project split: `instance.toml` carries
 /// deployment facts (identity, profile, paths, endpoint references), while
-/// `project = "daloc"` names a `daloc.toml` beside it (gitignored) that
-/// carries the product-specific watchlist, fixtures, probes and endpoint
-/// groups. A deployment without a project file is a generic mirror.
+/// `project = "specialization"` names a gitignored `specialization.toml`
+/// beside it that carries the product-specific watchlist, fixtures, probes and
+/// endpoint groups. A deployment without a project file is a generic mirror.
 fn load_merged(
     path: &Path,
     vars: &[(String, String)],
@@ -138,11 +138,11 @@ fn load_merged(
 }
 
 /// Load the optional project specialization named by `[instance].project`
-/// (or `DIORAMA_PROJECT_FILE`). The path is relative to the instance file;
-/// a bare name gains `.toml` (`project = "daloc"` -> `daloc.toml`). A named
-/// project that is missing is a boot error, never a silent fallback: the
-/// specialization carries addresses and watchlists the mirror must not
-/// invent.
+/// (or `DIORAMA_PROJECT_FILE`). The path is relative to the instance file; a
+/// bare name gains `.toml` (`project = "specialization"` ->
+/// `specialization.toml`). A named project that is missing is a boot error,
+/// never a silent fallback: the specialization carries addresses and
+/// watchlists the mirror must not invent.
 fn load_project(
     instance_path: &Path,
     over: &toml::Value,
@@ -179,10 +179,11 @@ fn project_reference(over: &toml::Value, vars: &[(String, String)]) -> Option<St
 }
 
 /// Resolve the project file beside the instance. A bare name gains `.toml`
-/// (`project = "daloc"` -> `daloc.toml`); a relative path is relative to the
-/// instance file. A missing live file falls back to the tracked
-/// `<name>.example.toml` template (loudly) so a fresh clone's config check
-/// works; a deployment that mounts the real file never takes that branch.
+/// (`project = "specialization"` -> `specialization.toml`); a relative path
+/// is relative to the instance file. A missing live file falls back to the
+/// tracked `<name>.example.toml` template (loudly) so a fresh clone's config
+/// check works; a deployment that mounts the real file never takes that
+/// branch.
 fn project_path(instance_path: &Path, raw: &str) -> std::path::PathBuf {
     let raw = if raw.ends_with(".toml") || raw.contains('/') {
         raw.to_string()
@@ -441,7 +442,7 @@ port = 8080
     }
 
     #[test]
-    fn daloc_export_uses_the_manifests_spellings() {
+    fn client_export_uses_the_manifests_spellings() {
         // The two `test-endpoints` ConfigMaps are the other surface of these
         // facts (`k8s/base/nodeports.yaml` + `overlays/diorama-venue/`): one
         // spelling on both sides, or the harness's env silently carries the
@@ -449,7 +450,7 @@ port = 8080
         // merge script's `CHAIN_1_` prefix).
         let (inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
         assert_eq!(
-            inst.export_env("daloc").unwrap(),
+            inst.export_env("client").unwrap(),
             vec![
                 "CHAIN_RPC_URL=http://anvil-t.t.svc.cluster.local:8545",
                 "CHAIN_WS_URL=ws://anvil-t.t.svc.cluster.local:8545",
@@ -463,7 +464,7 @@ port = 8080
         );
         let (venue, _) = load_str(&venue_src, &[]).unwrap();
         assert_eq!(
-            venue.export_env("daloc").unwrap(),
+            venue.export_env("client").unwrap(),
             vec![
                 "CHAIN_1_CHAIN_RPC_URL=http://anvil-v.v.svc.cluster.local:8545",
                 "CHAIN_1_CHAIN_WS_URL=ws://anvil-v.v.svc.cluster.local:8545",
@@ -716,9 +717,10 @@ port = 8096
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one fixture: the copy and its assertions are the test
     fn the_real_mainnet_diorama_instance_loads_and_checks() {
-        // The tracked instance names the gitignored live project (`daloc.toml`),
-        // which a deployment may specialize. This test is about the **tracked
+        // The tracked instance names the gitignored live specialization,
+        // which a deployment may supply. This test is about the **tracked
         // template**, so copy the instance with the project pointed at the
         // example and load that: a live specialization must not change the
         // audited count, and CI has no live file at all.
@@ -738,12 +740,15 @@ port = 8096
         let instance_src = std::fs::read_to_string(instance_path).unwrap();
         std::fs::write(
             dir.join("instance.toml"),
-            instance_src.replace("project = \"daloc\"", "project = \"daloc.example\""),
+            instance_src.replace(
+                "project = \"specialization\"",
+                "project = \"specialization.example\"",
+            ),
         )
         .unwrap();
         std::fs::copy(
-            instance_path.with_file_name("daloc.example.toml"),
-            dir.join("daloc.example.toml"),
+            instance_path.with_file_name("specialization.example.toml"),
+            dir.join("specialization.example.toml"),
         )
         .unwrap();
         let path = dir.join("instance.toml");
@@ -759,6 +764,7 @@ port = 8096
             "the audited example watchlist is complete"
         );
         assert_eq!(l1(&inst).fork_offset, 128);
+        assert_eq!(l1(&inst).fork_pin, Some(26_377_102));
         // 10 probes: the Aave USDT price probe was removed after the
         // stable-feed pulse pinned USDT to 1.0 and the probe had no tolerance
         // (measured 2026-10-31; the mainnet engine now reports `failed:0`).

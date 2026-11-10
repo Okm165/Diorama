@@ -690,7 +690,7 @@ pub(crate) async fn clear_fixture(
 /// answer is the resolved **control view** (the fixture where the scenario owns
 /// it, the sim's derivation where it does not). `/info` keeps serving the live
 /// view — the two are deliberately different: the control read is "what the
-/// scenario set" (daloc's `resolved_equity` assertions read it), the info read
+/// scenario set" (the consumer's `resolved_equity` assertions read it), the info read
 /// is the venue's live report.
 pub(crate) async fn post_state(
     State(state): State<Arc<ApiState>>,

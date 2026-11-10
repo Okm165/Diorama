@@ -54,7 +54,7 @@ pub struct CctpSection {
     /// directions (the old per-chain watcher behaviour).
     #[serde(default)]
     pub lanes: Vec<CctpLane>,
-    /// The daloc-facing Iris API (8095) and the fast-burn allowance it serves.
+    /// The client-facing Iris API (8095) and the fast-burn allowance it serves.
     #[serde(flatten)]
     pub iris: CctpIris,
     /// The bridge's control API (8096).
@@ -91,7 +91,7 @@ pub struct CctpSection {
     /// `POST /control/relay` (`manual`) — the deterministic mode for
     /// expiry/reattest tests.
     pub relayer: RelayerMode,
-    /// Gas alerts (daloc's defaults: 0.1 ETH low / 0.01 ETH critical, wei).
+    /// Gas alerts (the deployment defaults: 0.1 ETH low / 0.01 ETH critical, wei).
     #[serde(flatten)]
     pub gas: CctpGas,
     /// First block the watcher scans on T / V. Absent = 0 (genesis: correct
@@ -113,7 +113,7 @@ pub struct CctpLegacy {
 /// The Iris plane: its HTTP section and the fast-burn allowance.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct CctpIris {
-    /// The daloc-facing Iris API (8095).
+    /// The client-facing Iris API (8095).
     pub iris: HttpSection,
     /// The Iris fast-burn allowance served for a configured source domain
     /// (USDC). Circle's live service publishes a rolling figure; a deployment
@@ -243,7 +243,7 @@ pub struct VenueSimSection {
     pub rpc_timeout_secs: u64,
     /// HTTP timeout for the engine's admin call (`/admin/epoch`).
     pub admin_timeout_secs: u64,
-    /// The daloc-facing info API (8090).
+    /// The client-facing info API (8090).
     pub info: HttpSection,
     /// The control API (8091).
     pub control: HttpSection,
@@ -285,7 +285,7 @@ pub struct EngineSection {
     /// the mocks, the pre-mirror arrangement).
     pub feed_bridge: Option<FeedBridgeSection>,
     /// Canonical addresses the devnet's fixture deploy replaces via
-    /// `anvil_setCode` (daloc's mock tokens and seeded aTokens): whole-account
+    /// `anvil_setCode` (the consumer's mock tokens and seeded aTokens): whole-account
     /// owned, so the parent diffs never clobber them. The list is
     /// exactly what the deploy mutates — only watched addresses can be
     /// clobbered, and these are the watched ones it replaces.
@@ -314,7 +314,7 @@ pub struct FeedBridgeSection {
     /// The account that submits `updateAnswer` on T (auto-impersonate makes
     /// any address usable; the mock's own access control decides who may).
     /// Give it a *dedicated* account: sharing one with a concurrent sender
-    /// (e.g. daloc's deployer, which is anvil account 0) races nonces.
+    /// (e.g. the deployment's deployer, which is anvil account 0) races nonces.
     pub writer: Address,
     /// The feeds to bridge (one row per mock aggregator).
     pub feeds: Vec<FeedSection>,

@@ -188,7 +188,7 @@ else
     bad "bridge metrics missing (venue_bridge_*)"
   fi
 
-  echo "-- daloc-facing info shape"
+  echo "-- client-facing info shape"
   if [ "$ready" = "200" ]; then
     meta=$(run curl -sf -m 20 -X POST http://venue-sim:8090/info -H 'Content-Type: application/json' -d '{"type":"meta"}' || true)
     n=$(echo "$meta" | jq -r '.universe | length' 2>/dev/null || echo 0)

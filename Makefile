@@ -182,9 +182,9 @@ test-engine: ## Run workspace unit tests on the host (cargo)
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
 
 config-bootstrap: ## Copy each tracked project template to the gitignored live file when absent
-	@for f in config/instances/*/daloc.example.toml; do \
+	@for f in config/instances/*/specialization.example.toml; do \
 	  d=$${f%/*}; \
-	  if [ ! -f "$$d/daloc.toml" ]; then cp "$$f" "$$d/daloc.toml"; echo "created $$d/daloc.toml from template"; fi; \
+	  if [ ! -f "$$d/specialization.toml" ]; then cp "$$f" "$$d/specialization.toml"; echo "created $$d/specialization.toml from template"; fi; \
 	done
 
 config-check: ## Validate every instance file through the layered loader

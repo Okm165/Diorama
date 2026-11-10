@@ -1,7 +1,7 @@
 //! The feed bridge: the parent chain's live feed answers
 //! → `updateAnswer` on the devnet's mock aggregators.
 //!
-//! Why it exists: daloc's harness periodically re-publishes its own mock
+//! Why it exists: the consumer harness periodically re-publishes its own mock
 //! answers; in mirror mode **the bridge is the single price writer** for the
 //! mock aggregators (their refresher is off, §17.2). The value's source is the
 //! *parent chain's* aggregator for the same feed (the mirror is a mainnet

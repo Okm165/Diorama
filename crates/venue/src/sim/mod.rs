@@ -16,7 +16,7 @@
 //! `advance` scripts a jump). Funding steps at the hour on that clock (the
 //! docs' interval: whole hourly payments, nothing between — `accrue_funding`)
 //! and liquidations are checked against current marks — the §14.8 evaluation
-//! runs on every account-scoped read and on the 1 Hz tick — so daloc's
+//! runs on every account-scoped read and on the 1 Hz tick — so the consumer's
 //! set-and-read tests see live liquidation behavior without ever calling
 //! `advance`, and script a funding step by crossing the hour. The
 //! wire's `time` field stays *wall* now: it is the read's freshness, which the
@@ -171,7 +171,7 @@ pub struct Sim {
     dirty: AtomicBool,
     /// The venue chain's head timestamp (ms), observed by the bridge when V is
     /// configured. Their time policy jumps *every* chain's clock forward and
-    /// the client's own rule is `chain_time = max(wall, head)` — a served
+    /// the consumer's own rule is `chain_time = max(wall, head)` — a served
     /// `time` that stayed at wall would read as stale after a V jump.
     chain_time_ms: AtomicU64,
     pub(crate) metrics: SimMetrics,
@@ -235,7 +235,7 @@ impl Sim {
     ///
     /// Scenario time is [`Self::clock`] and stays internal (funding steps,
     /// liquidation evaluation, order matching). Leaking the scenario offset
-    /// into the wire's `time` future-stamps every observation; DALOC's ≤6 s
+    /// into the wire's `time` future-stamps every observation; the consumer's ≤6 s
     /// gate then correctly refuses it and the position goes blind (measured
     /// 2026-11-08: `advance 3600` blinded the unified HF for half an hour).
     /// A freshness field must describe when the read was observed, not when

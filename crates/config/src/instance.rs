@@ -89,6 +89,12 @@ pub struct ChainL1 {
     /// Blocks between the follow head and the fork base; the single home of
     /// the offset (anvil init containers read it via `diorama-config get`).
     pub fork_offset: u64,
+    /// The explicit fork base. `None` resolves a fresh pin at start-up; a
+    /// configured pin preserves the deployment epoch across restarts and is
+    /// the single home of the re-pin decision (the anvil init containers read
+    /// it from the mounted specialization).
+    #[serde(default)]
+    pub fork_pin: Option<u64>,
 }
 
 /// `[chains.venue]`: the venue's fork source and public API. `kind` only -
@@ -114,6 +120,12 @@ pub struct ChainVenue {
     /// single `ws_url` is the one-endpoint form.
     #[serde(alias = "ws_url")]
     pub ws_urls: WsEndpoints,
+    /// The explicit fork base. `None` resolves a fresh pin at start-up; a
+    /// configured pin preserves the deployment epoch across restarts and is
+    /// the single home of the re-pin decision (the anvil init containers read
+    /// it from the mounted specialization).
+    #[serde(default)]
+    pub fork_pin: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -387,11 +399,17 @@ impl Instance {
                     l1.fork_offset, RETH_STATE_WINDOW_BLOCKS
                 ));
             }
+            if l1.fork_pin == Some(0) {
+                issues.push("chains.l1.fork_pin must be a positive block number".into());
+            }
             check_http_urls("chains.l1.source_urls", &l1.source_urls, issues);
         }
         if let Some(venue) = &self.chains.venue {
             if venue.kind != ChainKind::Hyperliquid {
                 issues.push("chains.venue.kind must be \"hyperliquid\"".into());
+            }
+            if venue.fork_pin == Some(0) {
+                issues.push("chains.venue.fork_pin must be a positive block number".into());
             }
             check_http_urls("chains.venue.source_urls", &venue.source_urls, issues);
             check_http_urls("chains.venue.api_urls", &venue.api_urls, issues);
@@ -574,7 +592,7 @@ impl Instance {
     }
 
     /// Shell-ready `KEY=VALUE` lines for one section. The anvil pods' init
-    /// containers resolve their pin with `FORK_OFFSET` from here.
+    /// containers resolve their pin with `FORK_OFFSET`/`FORK_PIN` from here.
     pub fn export_env(&self, section: &str) -> Result<Vec<String>, ConfigError> {
         match section {
             "anvil" => {
@@ -582,9 +600,13 @@ impl Instance {
                     self.chains.l1.as_ref(),
                     "export-env anvil requires [chains.l1]",
                 )?;
-                Ok(vec![format!("FORK_OFFSET={}", l1.fork_offset)])
+                let mut vars = vec![format!("FORK_OFFSET={}", l1.fork_offset)];
+                if let Some(pin) = l1.fork_pin {
+                    vars.push(format!("FORK_PIN={pin}"));
+                }
+                Ok(vars)
             }
-            "client" | "daloc" => self.client_env(),
+            "client" => self.client_env(),
             other => Err(ConfigError::Invalid {
                 issues: vec![format!("unknown section `{other}` (known: anvil, client)")],
             }),
@@ -609,9 +631,9 @@ impl Instance {
         }
     }
 
-    /// The bridge's client block: the Iris base the DALOC relay points at
+    /// The bridge's client block: the Iris base the consumer relay points at
     /// (the relay appends `/v2/messages/...` itself). The export is consumed
-    /// from the *client's* namespace, so the short service DNS name is
+    /// from the *consumer's* namespace, so the short service DNS name is
     /// qualified with this instance's namespace.
     fn client_env_cctp(&self) -> Result<Vec<String>, ConfigError> {
         let cctp = self.services.cctp_bridge.as_ref().ok_or_else(|| {
@@ -682,9 +704,10 @@ impl Instance {
             format!("CHAIN_1_CHAIN_WS_URL={}", ws_of(&v)),
             format!("HL_INFO_API_URL={info}"),
             format!("VENUE_CONTROL_URL={control}"),
-            // DALOC's `VENUE_ACCOUNT_FEEDS` / `VENUE_RATE_FEEDS` are JSON
-            // arrays, not URLs. Emitting URLs under those names poisoned a
-            // consumer that sourced this block; the base URL has its own key.
+            // The consumer's `VENUE_ACCOUNT_FEEDS` / `VENUE_RATE_FEEDS` are
+            // JSON arrays, not URLs. Emitting URLs under those names poisoned
+            // a consumer that sourced this block; the base URL has its own
+            // key.
             format!("VENUE_ADMIN_URL={admin}"),
         ])
     }

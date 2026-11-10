@@ -47,11 +47,14 @@ spec:
               # re-pin to the source's current head is a *new base*: the driver
               # clears the shadow registry (measured 2026-11-01, a restart moved
               # 50,042,205 -> 50,086,498 and cleared 1,974 slots / 109 accounts).
-              # A deployment that must keep its writes pins the block here.
-              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
-                PIN="$ANVIL_FORK_PIN"
+              # A deployment that must keep its writes pins the block in the
+              # specialization TOML; the instance file is the fallback.
+              FORK_PIN=$(sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' \
+                /etc/mirror/specialization.toml /etc/mirror/instance.toml 2>/dev/null | head -n1 | tr -d '_')
+              if [ -n "$FORK_PIN" ]; then
+                PIN="$FORK_PIN"
                 echo "$PIN" > /state/pin
-                echo "using explicit fork pin=$PIN (source head not re-resolved)"
+                echo "using configured fork pin=$PIN (source head not re-resolved)"
                 chmod 0777 /state 2>/dev/null || true
                 chmod 0666 /state/pin 2>/dev/null || true
                 exit 0
@@ -79,13 +82,9 @@ spec:
           env:
             - name: HL_RPC_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
-            # Explicit epoch pin. This is the live chain-999 epoch base; it
-            # preserves the venue shadow registry across restarts. Changing it
-            # is an explicit re-pin: update both containers and the live
-            # deployment, snapshot state, and accept the epoch transition.
-            - { name: ANVIL_FORK_PIN, value: "50748852" }
           volumeMounts:
             - { name: state, mountPath: /state }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
           # The init is a short `wget`/shell loop. Without an explicit request, a
           # limit (live: 24Gi) defaults the request to the same value and is the
           # node-overcommit driver. Keep it tiny and bounded.
@@ -107,8 +106,10 @@ spec:
               # container on OOM): a fresh base is an epoch, and the driver
               # reconciles it from the shadow registry (same base -> restore,
               # new base -> clear). `cast` is in the image.
-              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
-                PIN="$ANVIL_FORK_PIN"
+              FORK_PIN=$(sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' \
+                /etc/mirror/specialization.toml /etc/mirror/instance.toml 2>/dev/null | head -n1 | tr -d '_')
+              if [ -n "$FORK_PIN" ]; then
+                PIN="$FORK_PIN"
               else
                 PIN=$(cast block-number --rpc-url "$HL_RPC_URL" 2>/dev/null || echo 0)
                 if [ "${PIN:-0}" -gt 0 ]; then
@@ -169,8 +170,6 @@ spec:
           env:
             - name: HL_RPC_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
-            # Explicit epoch pin (see the init container's comment).
-            - { name: ANVIL_FORK_PIN, value: "50748852" }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }
@@ -178,6 +177,7 @@ spec:
             - { name: http, containerPort: 8545 }
           volumeMounts:
             - { name: state, mountPath: /state }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
           # The state file is loaded at startup and dumped on SIGTERM plus every
           # 300 s. The 2026-11-10 restores (08:42, 10:38) were graceful pod
           # replacements that re-forked at the pin and lost every block since it;
@@ -211,6 +211,8 @@ spec:
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-v-state }
+        - name: instance
+          configMap: { name: venue-instance }
 ---
 apiVersion: v1
 kind: Service
@@ -220,6 +222,6 @@ metadata:
 spec:
   selector: { app.kubernetes.io/name: anvil-v }
   ports:
-    # anvil serves WebSocket upgrades on the same port as HTTP (daloc's
+    # anvil serves WebSocket upgrades on the same port as HTTP (the consumer's
     # eth_subscribe rides ws://anvil-v:8545).
     - { name: http, port: 8545, targetPort: 8545 }

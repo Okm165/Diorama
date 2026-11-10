@@ -55,18 +55,21 @@ spec:
                 [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
               done
               [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
-              # An explicit pin preserves the Daloc deployment epoch. The
-              # chain-1 mirror carries the only Daloc contract deployment;
+              # A configured fork_pin preserves the deployment epoch. The
+              # chain-1 mirror carries the only project contract deployment;
               # re-resolving a fresh base on every restart makes the engine
               # treat the restart as a new epoch and clear its shadow
               # registry — the deployed CMs/Underwriter then vanish and the
               # books become codeless (measured 2026-11-02: all chain-1
-              # Daloc addresses returned 0x after the 07:40Z re-fork).
-              # A deployment that must keep its writes pins the block here.
-              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
-                PIN="$ANVIL_FORK_PIN"
+              # project addresses returned 0x after the 07:40Z re-fork).
+              # A deployment that must keep its writes pins the block in the
+              # specialization TOML; the instance file is the fallback.
+              FORK_PIN=$(sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' \
+                /etc/mirror/specialization.toml /etc/mirror/instance.toml 2>/dev/null | head -n1 | tr -d '_')
+              if [ -n "$FORK_PIN" ]; then
+                PIN="$FORK_PIN"
                 echo "$PIN" > /state/pin
-                echo "using explicit fork pin=$PIN (reth head not re-resolved)"
+                echo "using configured fork pin=$PIN (reth head not re-resolved)"
                 chmod 0777 /state 2>/dev/null || true
                 chmod 0666 /state/pin 2>/dev/null || true
                 exit 0
@@ -89,11 +92,6 @@ spec:
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
-            # Explicit epoch pin. This is the live chain-1 epoch base; it
-            # preserves the Daloc deployment and the shadow registry across
-            # restarts. Changing it is an explicit re-pin: update both
-            # containers, snapshot state, and accept the epoch transition.
-            - { name: ANVIL_FORK_PIN, value: "26377102" }
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -111,16 +109,18 @@ spec:
               # the post-restart replay would grow to the whole pin age (~1.5 h
               # measured). The engine restores the devnet's writes from the
               # shadow registry after a same-pin re-fork. An explicit pin is
-              # required once the chain carries a Daloc deployment: a fresh base
-              # is a new epoch, and the engine clears the shadow registry — the
-              # 2026-11-02 07:40Z re-fork left every chain-1 Daloc address
-              # codeless for exactly this reason.
+              # required once the chain carries a project deployment: a fresh
+              # base is a new epoch, and the engine clears the shadow registry
+              # — the 2026-11-02 07:40Z re-fork left every chain-1 project
+              # address codeless for exactly this reason.
               # The offset's single home is the instance TOML:
               # this is a read of the mounted file, not a second definition.
               FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
               [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
-              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
-                PIN="$ANVIL_FORK_PIN"
+              FORK_PIN=$(sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' \
+                /etc/mirror/specialization.toml /etc/mirror/instance.toml 2>/dev/null | head -n1 | tr -d '_')
+              if [ -n "$FORK_PIN" ]; then
+                PIN="$FORK_PIN"
               else
                 PIN=$(cast block-number --rpc-url "$RETH_URL" 2>/dev/null || echo 0)
                 if [ "${PIN:-0}" -gt 0 ]; then
@@ -167,8 +167,6 @@ spec:
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
-            # Explicit epoch pin (see the init container's comment).
-            - { name: ANVIL_FORK_PIN, value: "26377102" }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

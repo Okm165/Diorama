@@ -13,8 +13,8 @@
 //!
 //! Measured caveat: the *real* HyperEVM USDC blacklists token 0's system
 //! address (`isBlacklisted(0x2000…0) == true` on the live chain), so
-//! EVM→Core USDC cannot be a plain transfer with the real token. Daloc's
-//! deploy replaces the canonical ERC20s with its own mocks (the fixture
+//! EVM→Core USDC cannot be a plain transfer with the real token. The
+//! deployment replaces the canonical ERC20s with its own mocks (the fixture
 //! set), whose transfers to system addresses succeed — that is the path the
 //! bridge credits.
 use crate::error::Error;
@@ -266,7 +266,7 @@ pub(crate) fn credit_of<'a>(
 ///   into the helper;
 /// - the **linked token's own bridge entry point** emits the self-transfer
 ///   after pulling a reserve token from the depositor (the 2026-11-07 simple
-///   `depositToCore`: the DALOC USDC fixture `0xb883…` funded the linked USDC
+///   `depositToCore`: the USDC fixture `0xb883…` funded the linked USDC
 ///   token `0x6b9e…`, which then emitted `0x6b9e… → system`); the funding leg
 ///   may be emitted by the reserve token, because the linked token is the one
 ///   performing the deposit.

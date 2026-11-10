@@ -3,8 +3,8 @@
 # attestation, and the mint on V - plus the control surface for the devnet
 # lanes. It belongs to neither mirror (it bridges them) and deploys beside the
 # venue stack, its peers; T is reached cross-namespace. Ports: 8095 serves the
-# Iris-compatible API (daloc's cctp-relay points its IRIS_API_URL at this
-# *base* - the client appends /v2/messages/...), 8096 the control API.
+# Iris-compatible API (the consumer relay points its IRIS_API_URL at this
+# *base* - the consumer appends /v2/messages/...), 8096 the control API.
 #
 # At boot the bridge verifies the wiring on both chains (fail closed), installs
 # the devnet attester through the contracts' own setters, and funds the relay

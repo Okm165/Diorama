@@ -5,7 +5,7 @@
 #
 #   1. both mirrors' follow cursors are within their observation bounds;
 #   2. the venue simulator's market plane is fresh;
-#   3. the chain-1 and chain-999 Daloc deployments have code at the
+#   3. the chain-1 and chain-999 consumer deployments have code at the
 #      configured addresses (a re-fork that moved the pin past the deployment
 #      epoch leaves every address codeless — the 2026-11-02 and 2026-11-07
 #      failure);
@@ -24,9 +24,10 @@ K="${KUBECTL:-kubectl}"
 NS_MAINNET="${NS_MAINNET:-diorama-mainnet}"
 NS_VENUE="${NS_VENUE:-diorama-venue}"
 NS_CCTP="${NS_CCTP:-diorama-cctp}"
-NS_DALOC="${NS_DALOC:-daloc}"
-PGUSER="${PGUSER:-daloc}"
-PGDATABASE="${PGDATABASE:-daloc}"
+NS_CONSUMER="${NS_CONSUMER:-consumer}"
+PGUSER="${PGUSER:-consumer}"
+PGDATABASE="${PGDATABASE:-consumer}"
+CONSUMER_REGISTRY_PATH="${CONSUMER_REGISTRY_PATH:-/etc/consumer/chain-registry.env}"
 # Conservative decision bounds. Override per deployment only with a recorded
 # reason: these are the values the research conclusions rely on.
 MAINNET_LAG_BOUND="${MAINNET_LAG_BOUND:-60}"
@@ -56,7 +57,7 @@ pods_ready() { # pods_ready <namespace>
 }
 
 echo "== pods =="
-for ns in "$NS_MAINNET" "$NS_VENUE" "$NS_CCTP" "$NS_DALOC"; do
+for ns in "$NS_MAINNET" "$NS_VENUE" "$NS_CCTP" "$NS_CONSUMER"; do
   if pods_ready "$ns"; then
     ok "$ns: all running pods ready"
   else
@@ -136,8 +137,8 @@ else
   bad "venue-sim /readyz ${sim_ready:-unreachable}"
 fi
 
-echo "== Daloc deployment code =="
-registry=$("$K" -n "$NS_DALOC" exec deploy/gateway -- cat /etc/daloc/chain-registry.env 2>/dev/null || true)
+echo "== consumer deployment code =="
+registry=$("$K" -n "$NS_CONSUMER" exec deploy/gateway -- cat "$CONSUMER_REGISTRY_PATH" 2>/dev/null || true)
 if [ -z "$registry" ]; then
   warning "chain registry unreadable from the gateway; contract-code checks skipped"
 else
@@ -238,10 +239,10 @@ for ns in "$NS_MAINNET" "$NS_VENUE" "$NS_CCTP"; do
 done
 
 echo "== database =="
-if "$K" -n "$NS_DALOC" exec deploy/postgres -- pg_isready -U "$PGUSER" >/dev/null 2>&1; then
+if "$K" -n "$NS_CONSUMER" exec deploy/postgres -- pg_isready -U "$PGUSER" >/dev/null 2>&1; then
   ok "postgres answers"
-  active=$("$K" -n "$NS_DALOC" exec deploy/postgres -- psql -U "$PGUSER" -d "$PGDATABASE" -Atc 'select count(*) from pg_stat_activity' 2>/dev/null | tr -d '[:space:]')
-  maxconn=$("$K" -n "$NS_DALOC" exec deploy/postgres -- psql -U "$PGUSER" -d "$PGDATABASE" -Atc 'show max_connections' 2>/dev/null | tr -d '[:space:]')
+  active=$("$K" -n "$NS_CONSUMER" exec deploy/postgres -- psql -U "$PGUSER" -d "$PGDATABASE" -Atc 'select count(*) from pg_stat_activity' 2>/dev/null | tr -d '[:space:]')
+  maxconn=$("$K" -n "$NS_CONSUMER" exec deploy/postgres -- psql -U "$PGUSER" -d "$PGDATABASE" -Atc 'show max_connections' 2>/dev/null | tr -d '[:space:]')
   if [ -n "$active" ] && [ -n "$maxconn" ]; then
     if [ "$active" -ge $((maxconn * 8 / 10)) ]; then
       bad "postgres connections ${active}/${maxconn} (>= 80%)"

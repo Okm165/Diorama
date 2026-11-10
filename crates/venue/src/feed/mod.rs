@@ -15,7 +15,7 @@
 //!
 //! Every read goes through the composed view ([`MarketFeed::mark`] and
 //! friends): a crash owns both mark and oracle, and `metaAndAssetCtxs` serves
-//! the same owned numbers the account plane computes with — daloc must never
+//! the same owned numbers the account plane computes with — the consumer must never
 //! read a different mark than the sim used for margin.
 pub(crate) mod budget;
 pub(crate) mod metrics;

@@ -3,7 +3,7 @@
 //!
 //! Boot order: load the instance, build the market plane (REST
 //! poller + WS client) and the account plane (persisted registry), then serve
-//! the daloc-facing info API (8090) and the control API (8091) beside the
+//! the consumer-facing info API (8090) and the control API (8091) beside the
 //! self-advance tick (the configured cadence: accrue funding, check
 //! liquidations, persist when
 //! something moved).
@@ -128,7 +128,7 @@ fn load_wiring(config: &std::path::Path) -> crate::Result<diorama_config::Instan
         let state_dir = sim.state_dir.to_string_lossy().to_string();
         // The simulator owns the market plane: its REST and WS pools are this
         // pod's wiring too. Omitting them let an unresolved `${HL_INFO_API_URL}`
-        // reach the client as a literal.
+        // reach the consumer as a literal.
         let mut values: Vec<&str> = chain.source_urls.iter().collect();
         values.extend(chain.api_urls.iter());
         values.extend(chain.ws_urls.iter());
@@ -257,7 +257,7 @@ fn spawn_tick(sim: &Arc<crate::sim::Sim>, feed: &Arc<crate::feed::MarketFeed>, t
     });
 }
 
-/// Serve the two listeners: the info API daloc reads, the control API the
+/// Serve the two listeners: the info API the consumer reads, the control API the
 /// harness drives. The handles are the shutdown tail's.
 fn serve(
     sim_section: &diorama_config::VenueSimSection,

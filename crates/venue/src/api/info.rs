@@ -1,9 +1,9 @@
-//! The daloc-facing info API (8090): one `POST /info` endpoint, dispatched by
+//! The client-facing info API (8090): one `POST /info` endpoint, dispatched by
 //! the request's `type`.
 //!
 //! COW rule: a **touched** account is answered from the sim; an **untouched**
 //! one is passed through to the real venue (which serves its own empty shapes
-//! for addresses it has never seen — daloc's "unconfigured accounts → empty
+//! for addresses it has never seen — the consumer's "unconfigured accounts → empty
 //! shape, 200 OK" contract holds either way). Market data is answered from
 //! the composed feed, so a crashed mark is the same number the sim priced
 //! with.
@@ -48,9 +48,9 @@ pub async fn healthz(State(state): State<Arc<ApiState>>) -> Response {
 
 /// `GET /health`: the inter-service health contract on the info port.
 ///
-/// The shared `DalocHttpClient::health_verdict` reads a JSON `status`; the
+/// The shared `the HTTP client::health_verdict` reads a JSON `status`; the
 /// text liveness body (`/healthz`) is for humans and orchestrators, while a
-/// DALOC service probing this port needs the same shape every other service
+/// the consumer's service probing this port needs the same shape every other service
 /// serves. Both answer the sim-poisoned gate identically.
 pub async fn health(State(state): State<Arc<ApiState>>) -> Response {
     if let Err(refusal) = super::sim_gate(&state) {
@@ -639,7 +639,7 @@ pub(crate) fn clearinghouse_of(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::error!(
             address = %address,
-            "served clearinghouseState failed the identity re-check; daloc's client gate would refuse it"
+            "served clearinghouseState failed the identity re-check; the consumer's gate would refuse it"
         );
     }
     Ok(Some(served))

@@ -1,10 +1,10 @@
-# DALOC project specialization — gitignored.
+# Project specialization — gitignored.
 #
 # The generic `instance.toml` carries deployment facts (identity,
 # profile, state paths, ports). This file carries the product's
 # endpoint groups, watch scope, fixture ownership, probes and
-# closures. `daloc.example.toml` is the tracked, complete template;
-# copy it to `daloc.toml` for a deployment.
+# closures. `specialization.example.toml` is the tracked, complete template;
+# copy it to `specialization.toml` for a deployment.
 
 [endpoints.anvil_v]
 http = ["${ANVIL_V_URL}"]
@@ -27,6 +27,11 @@ roles = ["market_ws"]
 
 [endpoints.engine_admin]
 http = ["${ENGINE_ADMIN_URL}"]
+
+# The explicit fork base. A configured pin preserves the deployment epoch
+# across restarts; omit it to resolve a fresh pin at start-up.
+[chains.venue]
+fork_pin = 50748852
 
 
 [services.engine]

@@ -14,7 +14,7 @@
 //! - **Parked, never dropped**: a mined revert (or repeated node-side send
 //!   refusals) parks the record with the reason; `/health` and `/metrics` keep
 //!   it visible for an operator. Transport faults never park — they retry.
-//! - **Gas alerts** (daloc's defaults: 0.1 ETH low / 0.01 ETH critical):
+//! - **Gas alerts** (the deployment defaults: 0.1 ETH low / 0.01 ETH critical):
 //!   per-chain balance logs + gauges (the bin's boot top-up is the devnet
 //!   funding step; the alerts guard later drops).
 use crate::chains::{by_domain, Chain};
@@ -44,7 +44,7 @@ pub struct Relayer {
     /// [`Relayer::relay_now`] (the control trigger) relays — expiry and
     /// reattestation tests then decide the exact block a message lands.
     pub mode: RelayerMode,
-    /// Gas-alert thresholds (daloc's defaults, wei).
+    /// Gas-alert thresholds (the deployment defaults, wei).
     pub balance_low: U256,
     pub balance_critical: U256,
     /// How long one tick waits for a submitted tx's receipt before leaving it

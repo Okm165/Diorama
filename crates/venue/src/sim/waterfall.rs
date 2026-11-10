@@ -415,7 +415,7 @@ impl Sim {
     /// One coin's ADL: rank the opposite side and close it against the
     /// underwater account at the previous mark. Answers whether anything was
     /// acted on — only an acted-on coin is a close: the report feeds the
-    /// control response, the metrics and the facts (found by the local daloc
+    /// control response, the metrics and the facts (found by the local run
     /// run: the unconditional push claimed a close that never happened).
     fn adl_coin(
         &self,
@@ -947,7 +947,7 @@ mod tests {
     /// book is attempted — a negative value included ("the positions are
     /// first attempted to be entirely closed by sending market orders to the
     /// book"). With liquidity the close lands at the book, the account ends
-    /// negative, and ADL is not reached (found by the local daloc run: the
+    /// negative, and ADL is not reached (found by the local run: the
     /// negative account skipped the book and stuck in ADL with no
     /// counterparties, while the docs' first step would have closed it).
     #[test]
@@ -1300,7 +1300,7 @@ mod tests {
         assert_eq!(
             v.margin_summary.total_raw_usd + Decimal::from(200),
             v.margin_summary.account_value,
-            "the client's identity holds with the isolated margin in the total"
+            "the consumer's identity holds with the isolated margin in the total"
         );
         // Cross: 56 − 6 = 50; raw −144 − 6 + 100 = −50.
         assert_eq!(v.cross_margin_summary.account_value, Decimal::from(50));

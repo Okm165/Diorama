@@ -15,7 +15,7 @@ pub(crate) struct SimMetrics {
     pub liquidations_total: AtomicU64,
     /// Funding payments applied (per position, per accrual).
     pub funding_payments_total: AtomicU64,
-    /// Served states that failed the identity re-check (the client's own
+    /// Served states that failed the identity re-check (the consumer's own
     /// gate): any nonzero value is a construction regression to page on.
     pub identity_violations: AtomicU64,
     /// The scenario's explicit `advance` steps (the 1 Hz tick is the

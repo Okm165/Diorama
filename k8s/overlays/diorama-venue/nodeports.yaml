@@ -1,4 +1,4 @@
-# Host access for the daloc harness: the venue mirror's services, reachable
+# Host access for the consumer harness: the venue mirror's services, reachable
 # from the test host. These are **ClusterIP** twins, not NodePorts: a NodePort
 # binds every host interface and exposes the Anvil cheatcode set and the
 # venue's /admin/* controls to the LAN. The host uses loopback-only forwards:
@@ -21,7 +21,7 @@ spec:
   type: ClusterIP
   selector: { app.kubernetes.io/name: anvil-v }
   ports:
-    # daloc's CHAIN_RPC_URL / CHAIN_WS_URL for chain 999 point here; anvil
+    # the consumer's CHAIN_RPC_URL / CHAIN_WS_URL for chain 999 point here; anvil
     # serves WebSocket upgrades on the same port.
     - { name: http, port: 8545, targetPort: 8545 }
 ---
@@ -46,7 +46,7 @@ spec:
   type: ClusterIP
   selector: { app.kubernetes.io/name: venue-sim }
   ports:
-    # 8090 is the info API daloc reads (HL_INFO_API_URL); 8091 the control
+    # 8090 is the info API the consumer reads (HL_INFO_API_URL); 8091 the control
     # API the harness drives. Loopback port-forward only.
     - { name: info, port: 8090, targetPort: 8090 }
     - { name: control, port: 8091, targetPort: 8091 }
@@ -58,7 +58,7 @@ metadata:
   labels:
     app.kubernetes.io/part-of: diorama-venue
 data:
-  # The values the daloc harness sources (their external-mode env).
+  # The values the consumer harness sources (their external-mode env).
   # The single-node k3s node *is* the test host; a remote harness overrides
   # the host and keeps the ports.
   #

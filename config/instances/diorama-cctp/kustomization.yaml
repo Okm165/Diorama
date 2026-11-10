@@ -8,4 +8,4 @@ configMapGenerator:
   - name: cctp-instance
     files:
       - instance.toml=instance.toml
-      - daloc.toml=daloc.toml
+      - specialization.toml=specialization.toml

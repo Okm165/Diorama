@@ -10,7 +10,7 @@ configMapGenerator:
   - name: venue-instance
     files:
       - instance.toml=instance.toml
-      # The DALOC project specialization (gitignored; the tracked template is
-      # `daloc.example.toml`). Both files land in the already-mounted
+      # The project specialization (gitignored; the tracked template is
+      # `specialization.example.toml`). Both files land in the already-mounted
       # `/etc/mirror` directory, so no new volume is needed.
-      - daloc.toml=daloc.toml
+      - specialization.toml=specialization.toml

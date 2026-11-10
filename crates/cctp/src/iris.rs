@@ -1,16 +1,16 @@
 //! The Iris-compatible API (8095, §15.4): the local substitution for Circle's
 //! attestation service, serving the **measured live shapes** so
-//! daloc's `cctp-relay` consumes it unchanged.
+//! the consumer relay consumes it unchanged.
 //!
 //! Served paths:
 //!
 //! - `GET /v2/messages/{sourceDomain}?transactionHash=0x…` — the only path
-//!   daloc's client reads. Unknown tx → **404**
+//!   the consumer reads. Unknown tx → **404**
 //!   `{"error":"Message not found for provided parameters"}` (their client
 //!   treats 404 as "keep polling"); otherwise
 //!   `{"messages":[{"message":"0x…","attestation":"0x…"|null}]}` — `null`
 //!   while the emulated PENDING window is open (§15.4's local-Iris shape;
-//!   the client also tolerates `PENDING`/empty).
+//!   the consumer also tolerates `PENDING`/empty).
 //! - `GET /v2/publicKeys` — `{"publicKeys":[{"publicKey":"0x04…","cctpVersion":2}]}`
 //!   with the devnet attester's 66-byte uncompressed key.
 //! - `GET /v2/burn/USDC/fees/{source}/{destination}` — the lane's configured
@@ -152,7 +152,7 @@ pub(crate) struct IrisError {
 }
 
 impl IrisError {
-    /// The exact live 404 body, byte for byte: daloc's client keys on
+    /// The exact live 404 body, byte for byte: the consumer keys on
     /// it ("keep polling").
     pub fn not_found() -> Self {
         Self {
@@ -634,7 +634,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The 404 body daloc's client keys on, byte for byte.
+    /// The 404 body the consumer keys on, byte for byte.
     #[test]
     fn not_found_is_the_live_body() {
         let error = IrisError::not_found();
@@ -659,7 +659,7 @@ mod tests {
         (state, store, dir)
     }
 
-    /// The messages handler's three answers: unknown → the exact 404 (daloc's
+    /// The messages handler's three answers: unknown → the exact 404 (the consumer's
     /// "keep polling"), pending → `attestation: null`, signed → the hex; a
     /// wrong domain is not the same lookup.
     #[tokio::test]

@@ -1,17 +1,19 @@
 # The generic Venue Mirror instance: deployment facts only.
 #
-# Product-specific scope (watchlist, fixture ownership, probes, closures,
-# markets, endpoint groups) lives in `daloc.toml`, which is gitignored;
-# `daloc.example.toml` is the tracked template. Endpoint references use
-# `@name` and are expanded from `[endpoints]` before validation.
+# Product-specific scope (markets, fixture ownership, probes, closures,
+# endpoint groups) lives in `specialization.toml`, which is gitignored;
+# `specialization.example.toml` is the tracked template. Endpoint references
+# use `@name` and are expanded from `[endpoints]` before validation.
 [instance]
 name = "diorama-venue"
 namespace = "diorama-venue"
 profile = "venue"
-project = "daloc"
+project = "specialization"
 
 [chains.venue]
 kind = "hyperliquid"
+# An explicit fork base, when the deployment pins one, lives in the
+# specialization's [chains.venue] as `fork_pin`.
 # The EVM read pool: random healthy start, fail over to the next endpoint,
 # cool a failed endpoint down, retry it in a later round.
 source_urls = "@hyperevm"

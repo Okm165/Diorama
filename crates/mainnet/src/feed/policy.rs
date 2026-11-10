@@ -8,8 +8,8 @@
 /// scenario's write and pause the bridge on itself.
 ///
 /// `pending_since_ms` is the publish's send time: an anvil pool is not
-/// durable (and a same-nonce sender can displace ours — measured: daloc's
-/// deploy sharing the writer account wedged a feed in `pending` forever), so
+/// durable (and a same-nonce sender can displace ours — measured: the
+/// deployment sharing the writer account wedged a feed in `pending` forever), so
 /// a publish that does not land within the confirmation window is re-sent.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct ValueState {
@@ -176,7 +176,7 @@ mod tests {
 
     /// A publish that never lands is re-sent once the confirmation window
     /// passes — an anvil pool is not durable, and a same-nonce sender can
-    /// displace the tx (measured: daloc's deploy sharing the writer account
+    /// displace the tx (measured: the deployment sharing the writer account
     /// wedged a feed in `pending` forever).
     #[test]
     fn a_stale_pending_publish_is_re_sent() {

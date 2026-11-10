@@ -170,7 +170,7 @@ status_log_interval_ms = 60000
 # Who drives relays: `auto` (the relayer's tick) or `manual` (only
 # `POST /control/relay` — deterministic expiry/reattest tests).
 relayer = "auto"
-# Gas alerts, daloc's defaults: warn below 0.1 ETH, error below 0.01 ETH.
+# Gas alerts, the deployment defaults: warn below 0.1 ETH, error below 0.01 ETH.
 balance_low_wei = "100000000000000000"
 balance_critical_wei = "10000000000000000"
 
