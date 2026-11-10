@@ -64,9 +64,12 @@ spec:
             periodSeconds: 10
             failureThreshold: 90
           readinessProbe:
-            # /healthz is 503 while the engine is halted; /livez stays the
-            # liveness/startup signal so a paused engine is not restarted.
-            httpGet: { path: /healthz, port: 8080 }
+            # `/livez`, not `/healthz`: a gap-paused engine is still serving
+            # reads/writes (it is catching up, not dead), so it must stay in
+            # the Service. `/healthz` is the diagnostic state report (200 ok,
+            # 503 halted/gap-paused); probing it here took the engine out of
+            # rotation for the whole catch-up and starved its admin consumers.
+            httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
