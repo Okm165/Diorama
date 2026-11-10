@@ -203,6 +203,15 @@ impl Capabilities {
     /// **unknown**, and an unknown probe is a boot fault: treating it as
     /// "present" would certify a capability the endpoint never demonstrated.
     ///
+    /// **One exception: HyperEVM's system-tx index lags the head.** The live
+    /// endpoint answers `eth_getSystemTxsByBlockNumber(head)` with
+    /// `-32603 invalid block height` for roughly the last 1 000 blocks, even
+    /// though the method exists and serves every settled block. Probing the
+    /// head therefore turned a healthy source into a boot fault (the measured
+    /// 2026-11-10 venue engine crash-loop). The probe uses a settled block
+    /// (`head - SYSTEM_TX_PROBE_LAG`) for that one method; a genuinely absent
+    /// method still answers `-32601` there.
+    ///
     /// Behavioral capabilities (`historical`, `heads_ws`) are not probed:
     /// "the block parameter is ignored" cannot be distinguished from "the
     /// value did not change" by a read. They stay declarations with their
@@ -237,7 +246,10 @@ impl Capabilities {
         }
 
         let system = rpc
-            .call::<serde_json::Value>("eth_getSystemTxsByBlockNumber", (U64::from(head),))
+            .call::<serde_json::Value>(
+                "eth_getSystemTxsByBlockNumber",
+                (U64::from(head.saturating_sub(SYSTEM_TX_PROBE_LAG)),),
+            )
             .await;
         if self.has(Capability::SystemTxs) != method_present(system)? {
             disagree.push("system_txs");
@@ -246,6 +258,14 @@ impl Capabilities {
         Ok(disagree)
     }
 }
+
+/// How far below the head the system-tx capability probe reads.
+///
+/// HyperEVM's `eth_getSystemTxsByBlockNumber` only indexes settled blocks; the
+/// live endpoint answered `-32603 invalid block height` at the head on
+/// 2026-11-10 while the same block answered normally ~1 000 blocks later. Two
+/// times the measured lag is the probe's safety window.
+const SYSTEM_TX_PROBE_LAG: u64 = 2_048;
 
 /// Did the method exist? Only two answers are definitive: a value (present)
 /// or `-32601` (absent). Every other fault is unknown and propagated — never
