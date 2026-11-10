@@ -16,6 +16,10 @@ const VENUE_ENGINE_REQUIRED: &str = "profile \"venue\" requires [services.engine
 const MAINNET_CHAIN_REQUIRED: &str = "profile \"mainnet\" requires [chains.l1]";
 const MAINNET_ENGINE_REQUIRED: &str = "profile \"mainnet\" requires [services.engine]";
 
+/// The two mirror chain ids: protocol facts, not deployment configuration.
+const CHAIN_ID_ETHEREUM: u64 = 1;
+const CHAIN_ID_HYPER_EVM: u64 = 999;
+
 /// One mirror deployment: identity, chains, watchlist, service sections.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +34,10 @@ pub struct Instance {
     /// Every lane — JSON-RPC, REST, WS, beacon — reads this one table.
     #[serde(default)]
     pub endpoint_defaults: diorama_anvil::PoolPolicy,
+    /// Extra client-facing environment values. The exporter renders these
+    /// after the generated endpoint block; a duplicate key is a config error.
+    #[serde(default)]
+    pub client: ClientSection,
     /// The watched addresses: the parent-diff scope on the mainnet profile,
     /// and the account-field scope of the venue's poll follow (both mirrors
     /// follow their parent; the mechanisms differ — see
@@ -37,6 +45,16 @@ pub struct Instance {
     #[serde(default)]
     pub watchlist: Vec<WatchEntry>,
     pub services: Services,
+}
+
+/// The client-facing export's extra values: a product specialization can add
+/// the env pairs its consumer needs without teaching the loader a new key.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ClientSection {
+    /// `KEY = "VALUE"` pairs rendered by `export-env --section client`.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -624,11 +642,16 @@ impl Instance {
     /// instance's own ports, under the manifests' Service names (`engine`,
     /// `venue-sim`, `cctp-bridge` — `k8s/base/engine.yaml`, `base/venue/`).
     fn client_env(&self) -> Result<Vec<String>, ConfigError> {
-        match self.instance.profile {
-            Profile::Mainnet => self.client_env_mainnet(),
-            Profile::Venue => self.client_env_venue(),
-            Profile::Cctp => self.client_env_cctp(),
+        let mut vars = match self.instance.profile {
+            Profile::Mainnet => self.client_env_mainnet()?,
+            Profile::Venue => self.client_env_venue()?,
+            Profile::Cctp => self.client_env_cctp()?,
+        };
+        for (key, value) in &self.client.env {
+            validate_client_env(key, value, &vars)?;
+            vars.push(format!("{key}={value}"));
         }
+        Ok(vars)
     }
 
     /// The bridge's client block: the Iris base the consumer relay points at
@@ -639,16 +662,25 @@ impl Instance {
         let cctp = self.services.cctp_bridge.as_ref().ok_or_else(|| {
             mismatch("export-env client (cctp profile) requires [services.cctp_bridge]")
         })?;
-        Ok(vec![format!(
-            "IRIS_API_URL={}",
-            cluster_url(
-                &format!("http://cctp-bridge:{}", cctp.iris.iris.port),
-                &self.instance.namespace
-            )
-        )])
+        Ok(vec![
+            format!(
+                "IRIS_API_URL={}",
+                cluster_url(
+                    &format!("http://cctp-bridge:{}", cctp.iris.iris.port),
+                    &self.instance.namespace
+                )
+            ),
+            format!(
+                "CCTP_BRIDGE_HEALTH_URL={}",
+                cluster_url(
+                    &format!("http://cctp-bridge:{}/health", cctp.control.port),
+                    &self.instance.namespace
+                )
+            ),
+        ])
     }
 
-    /// The mainnet profile's client block: the first chain's keys.
+    /// The mainnet profile's client block: chain 1's canonical keys.
     fn client_env_mainnet(&self) -> Result<Vec<String>, ConfigError> {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
             mismatch("export-env client (mainnet profile) requires [services.engine]")
@@ -665,14 +697,15 @@ impl Instance {
             &self.instance.namespace,
         );
         Ok(vec![
-            format!("CHAIN_RPC_URL={t}"),
-            format!("CHAIN_WS_URL={}", ws_of(&t)),
+            format!("CHAIN_1_CHAIN_ID={CHAIN_ID_ETHEREUM}"),
+            format!("CHAIN_1_RPC_URL={t}"),
+            format!("CHAIN_1_WS_URL={}", ws_of(&t)),
             format!("DIORAMA_ADMIN_URL={admin}"),
         ])
     }
 
-    /// The venue profile's client block: the `CHAIN_1_`-prefixed second-chain
-    /// keys and the simulator's URLs.
+    /// The venue profile's client block: chain 999's canonical keys and the
+    /// simulator's URLs.
     fn client_env_venue(&self) -> Result<Vec<String>, ConfigError> {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
             mismatch("export-env client (venue profile) requires [services.engine]")
@@ -700,17 +733,60 @@ impl Instance {
             &self.instance.namespace,
         );
         Ok(vec![
-            format!("CHAIN_1_CHAIN_RPC_URL={v}"),
-            format!("CHAIN_1_CHAIN_WS_URL={}", ws_of(&v)),
+            format!("CHAIN_999_CHAIN_ID={CHAIN_ID_HYPER_EVM}"),
+            format!("CHAIN_999_RPC_URL={v}"),
+            format!("CHAIN_999_WS_URL={}", ws_of(&v)),
             format!("HL_INFO_API_URL={info}"),
             format!("VENUE_CONTROL_URL={control}"),
-            // The consumer's `VENUE_ACCOUNT_FEEDS` / `VENUE_RATE_FEEDS` are
-            // JSON arrays, not URLs. Emitting URLs under those names poisoned
-            // a consumer that sourced this block; the base URL has its own
-            // key.
+            // Feed shapes (`VENUE_ACCOUNT_FEEDS`, `VENUE_RATE_FEEDS`, ...) are
+            // product values: the specialization adds them through
+            // `[client.env]`, never as a URL under those names.
             format!("VENUE_ADMIN_URL={admin}"),
         ])
     }
+}
+
+/// Validate one extra client env pair: an uppercase shell name, one concrete
+/// line, and no collision with the generated block.
+fn validate_client_env(key: &str, value: &str, generated: &[String]) -> Result<(), ConfigError> {
+    let valid_key = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase() || c == '_');
+    if !valid_key {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!(
+                "client.env key `{key}` must be an uppercase shell name"
+            )],
+        });
+    }
+    if value.contains("${") {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!(
+                "client.env `{key}` is not resolved (deployment wiring)"
+            )],
+        });
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!("client.env `{key}` must be one line")],
+        });
+    }
+    if generated
+        .iter()
+        .any(|line| line.starts_with(&format!("{key}=")))
+    {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!(
+                "client.env `{key}` duplicates a generated export key"
+            )],
+        });
+    }
+    Ok(())
 }
 
 /// A value that must be concrete for the export: a lingering `${VAR}`

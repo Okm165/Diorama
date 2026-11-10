@@ -110,3 +110,12 @@ note = "wstHYPE: the staked gas token"
 [[watchlist]]
 address = "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
 note = "RedStone multi-feed adapter: the HYPE/wstHYPE price words (see the fixed closure above)"
+
+# Extra client-facing env values rendered by
+# `diorama-config export-env --section client`. The generated endpoint block
+# stays authoritative; these are additive and duplicate keys are refused.
+# Feed shapes are product data, not URLs:
+# VENUE_ACCOUNT_FEEDS = '[{"venue":"hyperliquid","accounts":["0x..."]}]'
+# VENUE_BOOK_FEEDS = '[{"venue":"hyperliquid","coins":["BTC","ETH"]}]'
+# VENUE_RATE_FEEDS = '[{"chain_id":1,"tokens":["0x..."]}]'
+[client.env]

@@ -22,7 +22,7 @@ spec:
   type: ClusterIP
   selector: { app.kubernetes.io/name: anvil-t }
   ports:
-    # the consumer's CHAIN_RPC_URL / CHAIN_WS_URL for chain 1 point here; anvil
+    # the consumer's CHAIN_1_RPC_URL / CHAIN_1_WS_URL point here; anvil
     # serves WebSocket upgrades on the same port.
     - { name: http, port: 8545, targetPort: 8545 }
 ---
@@ -52,6 +52,7 @@ data:
   # venue's (the second chain) lives in overlays/diorama-venue/nodeports.yaml
   # with the `CHAIN_1_` prefix — source both for the complete env.
   test-endpoints.env: |
-    CHAIN_RPC_URL=http://localhost:30545
-    CHAIN_WS_URL=ws://localhost:30545
+    CHAIN_1_CHAIN_ID=1
+    CHAIN_1_RPC_URL=http://localhost:30545
+    CHAIN_1_WS_URL=ws://localhost:30545
     DIORAMA_ADMIN_URL=http://localhost:30880

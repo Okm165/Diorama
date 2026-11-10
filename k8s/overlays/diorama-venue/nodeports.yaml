@@ -21,7 +21,7 @@ spec:
   type: ClusterIP
   selector: { app.kubernetes.io/name: anvil-v }
   ports:
-    # the consumer's CHAIN_RPC_URL / CHAIN_WS_URL for chain 999 point here; anvil
+    # the consumer's CHAIN_999_RPC_URL / CHAIN_999_WS_URL point here; anvil
     # serves WebSocket upgrades on the same port.
     - { name: http, port: 8545, targetPort: 8545 }
 ---
@@ -62,14 +62,14 @@ data:
   # The single-node k3s node *is* the test host; a remote harness overrides
   # the host and keeps the ports.
   #
-  # The venue is the *second* chain: its keys carry the `CHAIN_1_` prefix of
-  # the merge script's convention, so sourcing this block beside the mainnet's
-  # (k8s/overlays/diorama-mainnet/nodeports.yaml) yields one collision-free env — unprefixed keys
-  # here would silently overwrite the L1 endpoints (their merge prefixes every
-  # chain after the first, §17.3).
+  # The venue is chain 999: its keys use the canonical `CHAIN_999_*` family,
+  # so sourcing this block beside the mainnet's `CHAIN_1_*` block
+  # (k8s/overlays/diorama-mainnet/nodeports.yaml) yields one collision-free
+  # env with the chain ids the services assert.
   test-endpoints.env: |
-    CHAIN_1_CHAIN_RPC_URL=http://localhost:31545
-    CHAIN_1_CHAIN_WS_URL=ws://localhost:31545
+    CHAIN_999_CHAIN_ID=999
+    CHAIN_999_RPC_URL=http://localhost:31545
+    CHAIN_999_WS_URL=ws://localhost:31545
     HL_INFO_API_URL=http://localhost:31090
     VENUE_CONTROL_URL=http://localhost:31091
     VENUE_ADMIN_URL=http://localhost:31880

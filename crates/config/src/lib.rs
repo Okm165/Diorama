@@ -444,16 +444,17 @@ port = 8080
     #[test]
     fn client_export_uses_the_manifests_spellings() {
         // The two `test-endpoints` ConfigMaps are the other surface of these
-        // facts (`k8s/base/nodeports.yaml` + `overlays/diorama-venue/`): one
-        // spelling on both sides, or the harness's env silently carries the
-        // wrong name (the venue is the second chain, so its keys carry the
-        // merge script's `CHAIN_1_` prefix).
+        // facts (`k8s/overlays/diorama-mainnet/` + `overlays/diorama-venue/`):
+        // one spelling on both sides, or the harness's env silently carries
+        // the wrong name. The keys are the chain-id family the consumer's
+        // loader reads: `CHAIN_1_*` and `CHAIN_999_*`.
         let (inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
         assert_eq!(
             inst.export_env("client").unwrap(),
             vec![
-                "CHAIN_RPC_URL=http://anvil-t.t.svc.cluster.local:8545",
-                "CHAIN_WS_URL=ws://anvil-t.t.svc.cluster.local:8545",
+                "CHAIN_1_CHAIN_ID=1",
+                "CHAIN_1_RPC_URL=http://anvil-t.t.svc.cluster.local:8545",
+                "CHAIN_1_WS_URL=ws://anvil-t.t.svc.cluster.local:8545",
                 "DIORAMA_ADMIN_URL=http://engine.t.svc.cluster.local:8080",
             ]
         );
@@ -466,13 +467,34 @@ port = 8080
         assert_eq!(
             venue.export_env("client").unwrap(),
             vec![
-                "CHAIN_1_CHAIN_RPC_URL=http://anvil-v.v.svc.cluster.local:8545",
-                "CHAIN_1_CHAIN_WS_URL=ws://anvil-v.v.svc.cluster.local:8545",
+                "CHAIN_999_CHAIN_ID=999",
+                "CHAIN_999_RPC_URL=http://anvil-v.v.svc.cluster.local:8545",
+                "CHAIN_999_WS_URL=ws://anvil-v.v.svc.cluster.local:8545",
                 "HL_INFO_API_URL=http://venue-sim.v.svc.cluster.local:8090",
                 "VENUE_CONTROL_URL=http://venue-sim.v.svc.cluster.local:8091",
                 "VENUE_ADMIN_URL=http://engine.v.svc.cluster.local:8080",
             ]
         );
+    }
+
+    #[test]
+    fn client_env_extends_the_generated_block() {
+        let venue = format!(
+            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\n\n[services.venue_sim.info]\nport = 8090\n\n[services.venue_sim.control]\nport = 8091\n",
+            minimal_venue_instance()
+        );
+        let feeds = r#"[{"venue":"hyperliquid","accounts":[]}]"#;
+        let src = format!("{venue}\n[client.env]\nVENUE_ACCOUNT_FEEDS = '{feeds}'\n");
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        assert!(inst
+            .export_env("client")
+            .unwrap()
+            .contains(&format!("VENUE_ACCOUNT_FEEDS={feeds}")));
+
+        let src = format!("{venue}\n[client.env]\nCHAIN_999_RPC_URL = \"http://elsewhere\"\n");
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        let err = inst.export_env("client").unwrap_err();
+        assert!(format!("{err}").contains("duplicates"), "{err}");
     }
 
     #[test]
@@ -771,7 +793,10 @@ port = 8096
         assert_eq!(l1(&inst).fork_pin, Some(26_377_102));
         assert_eq!(
             inst.export_env("anvil").unwrap(),
-            vec!["FORK_OFFSET=128".to_string(), "FORK_PIN=26377102".to_string()]
+            vec![
+                "FORK_OFFSET=128".to_string(),
+                "FORK_PIN=26377102".to_string()
+            ]
         );
         // 10 probes: the Aave USDT price probe was removed after the
         // stable-feed pulse pinned USDT to 1.0 and the probe had no tolerance
@@ -1267,7 +1292,10 @@ port = 8096
         let (inst, _) = load_str(minimal_cctp_instance(), &[]).unwrap();
         assert_eq!(
             inst.export_env("client").unwrap(),
-            vec!["IRIS_API_URL=http://cctp-bridge.c.svc.cluster.local:8095"]
+            vec![
+                "IRIS_API_URL=http://cctp-bridge.c.svc.cluster.local:8095",
+                "CCTP_BRIDGE_HEALTH_URL=http://cctp-bridge.c.svc.cluster.local:8096/health",
+            ]
         );
     }
 
