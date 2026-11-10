@@ -282,10 +282,10 @@ impl Instance {
             );
         }
         if let Some(cctp) = &mut self.services.cctp_bridge {
-            if let Some(t_url) = &mut cctp.t_url {
+            if let Some(t_url) = &mut cctp.legacy.t_url {
                 expand_http("services.cctp_bridge.t_url", t_url, groups, issues);
             }
-            if let Some(v_url) = &mut cctp.v_url {
+            if let Some(v_url) = &mut cctp.legacy.v_url {
                 expand_http("services.cctp_bridge.v_url", v_url, groups, issues);
             }
             for (index, chain) in cctp.chains.iter_mut().enumerate() {
@@ -620,7 +620,7 @@ impl Instance {
         Ok(vec![format!(
             "IRIS_API_URL={}",
             cluster_url(
-                &format!("http://cctp-bridge:{}", cctp.iris.port),
+                &format!("http://cctp-bridge:{}", cctp.iris.iris.port),
                 &self.instance.namespace
             )
         )])
@@ -882,7 +882,11 @@ fn check_cctp_lanes(
 /// a path), the deterministic attester seed, and ordered gas thresholds.
 fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
     require_path(&cctp.state_dir, "services.cctp_bridge.state_dir", issues);
-    match (&cctp.t_url, &cctp.v_url, cctp.chains.is_empty()) {
+    match (
+        &cctp.legacy.t_url,
+        &cctp.legacy.v_url,
+        cctp.chains.is_empty(),
+    ) {
         (Some(t_url), Some(v_url), true) => {
             check_http_url("services.cctp_bridge.t_url", t_url, issues);
             check_http_url("services.cctp_bridge.v_url", v_url, issues);
@@ -910,21 +914,21 @@ fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
     }
     // After `${VAR}` expansion the value must be the 32-byte hex key; a raw
     // reference is checked once the deployment expands it.
-    if !cctp.relay_key.contains("${") && !looks_like_secret(&cctp.relay_key) {
+    if !cctp.signer.relay_key.contains("${") && !looks_like_secret(&cctp.signer.relay_key) {
         issues.push(
             "services.cctp_bridge.relay_key must be a 32-byte hex key (or a ${VAR} reference), \
              never a path"
                 .into(),
         );
     }
-    if cctp.attester_seed.trim().is_empty() {
+    if cctp.signer.attester_seed.trim().is_empty() {
         issues.push("services.cctp_bridge.attester_seed must not be empty".into());
     }
     if cctp.scan_chunk_blocks == 0 {
         issues.push("services.cctp_bridge.scan_chunk_blocks must be > 0".into());
     }
     check_cctp_timing(cctp, issues);
-    if cctp.balance_critical_wei >= cctp.balance_low_wei {
+    if cctp.gas.balance_critical_wei >= cctp.gas.balance_low_wei {
         issues
             .push("services.cctp_bridge.balance_critical_wei must be below balance_low_wei".into());
     }

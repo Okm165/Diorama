@@ -240,8 +240,8 @@ impl Sim {
     /// 2026-11-08: `advance 3600` blinded the unified HF for half an hour).
     /// A freshness field must describe when the read was observed, not when
     /// the scenario says it happened.
-    pub fn served_time(&self, wall_ms: u64) -> Result<u64> {
-        Ok(wall_ms)
+    pub fn served_time(wall_ms: u64) -> u64 {
+        wall_ms
     }
 
     /// The scenario epoch counter (`reset` returns it to callers; `dry_run`
@@ -1365,10 +1365,10 @@ mod tests {
     fn served_time_is_wall_not_scenario_time() {
         let feed = MarketFeed::memory(vec![]);
         let sim = Sim::memory();
-        assert_eq!(sim.served_time(1_000).unwrap(), 1_000);
+        assert_eq!(Sim::served_time(1_000), 1_000);
         sim.advance(&feed, 60, 1).unwrap();
         assert_eq!(
-            sim.served_time(1_000).unwrap(),
+            Sim::served_time(1_000),
             1_000,
             "advance must not future-stamp the observation"
         );
@@ -1379,7 +1379,7 @@ mod tests {
         );
         sim.observe_chain_time(700_000);
         assert_eq!(
-            sim.served_time(500_000).unwrap(),
+            Sim::served_time(500_000),
             500_000,
             "the wire time is wall; the venue chain clock is a separate fact"
         );

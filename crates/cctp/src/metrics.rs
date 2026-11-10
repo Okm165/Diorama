@@ -50,62 +50,73 @@ impl CctpMetrics {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
+        self.render_counters(&mut out);
+        self.render_gauges(&mut out);
+        out
+    }
+
+    /// The lifecycle counters.
+    #[allow(clippy::too_many_lines)] // one counter table: splitting it would hide the field-to-line mapping
+    fn render_counters(&self, out: &mut String) {
         let counter = |out: &mut String, name: &str, help: &str, value: u64| {
             out.push_str(&format!(
                 "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
             ));
         };
         counter(
-            &mut out,
+            out,
             "cctp_messages_seen_total",
             "MessageSent logs absorbed",
             self.messages_seen.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_messages_signed_total",
             "messages transitioned PENDING -> SIGNED",
             self.messages_signed.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_relays_confirmed_total",
             "messages confirmed relayed (a consumed nonce reconciles as confirmed)",
             self.relays_confirmed.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_relays_parked_total",
             "messages parked on a definitive failure",
             self.relays_parked.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_relay_attempts_total",
             "signed messages re-checked by the relayer",
             self.relay_attempts.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_scan_errors_total",
             "watcher scan passes that failed",
             self.scan_errors.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_gas_low_total",
             "gas observations below the low threshold",
             self.gas_low.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_gas_critical_total",
             "gas observations below the critical threshold",
             self.gas_critical.load(Ordering::Relaxed),
         );
+    }
+
+    /// The liveness/archive gauges and the relay key's balances.
+    fn render_gauges(&self, out: &mut String) {
         out.push_str(&format!(
             "# HELP cctp_last_scan_block last chain head scanned by the watcher\n# TYPE cctp_last_scan_block gauge\ncctp_last_scan_block {}\n",
             self.last_scan_block.load(Ordering::Relaxed)
@@ -132,7 +143,6 @@ impl CctpMetrics {
                 ));
             }
         }
-        out
     }
 }
 

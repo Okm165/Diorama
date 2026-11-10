@@ -149,6 +149,48 @@ impl AccountSeed {
     /// panic (the overflow-poison lesson).
     #[allow(clippy::too_many_lines)]
     pub fn apply_to(&self, account: &mut Account, clock: u64) -> Result<()> {
+        self.validate(account)?;
+
+        if let Some(mode) = self.user_abstraction {
+            refuse_unmodeled_mode(mode)?;
+            account.mode = mode;
+        }
+        if let Some(positions) = &self.asset_positions {
+            apply_positions(account, positions)?;
+        }
+        if let Some(balances) = &self.spot_balances {
+            apply_spot_balances(account, balances);
+        }
+
+        // A named summary sets the whole-account raw. A positions-only or
+        // spot-only patch leaves the perp wallet's cash untouched: replacing
+        // positions changes the cost basis (and therefore `totalRawUsd`), but
+        // it must never move cash. The old fold preserved `totalRawUsd`
+        // across a positions-only patch, which silently debited the new cost
+        // basis from the perp wallet; on a standard→unified switch it also
+        // subtracted the newly-visible spot collateral. The measured 22f
+        // patch moved `7.82` to `-7.074333` and was liquidated on the
+        // resulting fake deficit.
+        if let Some(summary) = &self.margin_summary {
+            let isolated = isolated_margin_total(account);
+            let cost = cost_basis_total(account)?;
+            let perp = add(
+                sub(summary.total_raw_usd, isolated, "seed perp raw")?,
+                cost,
+                "seed balance",
+            )?;
+            account.perp_balance = perp;
+            account.funded_at_ms = clock;
+        }
+        Ok(())
+    }
+}
+
+impl AccountSeed {
+    /// The fixture's own identity checks: a summary-only patch on an open
+    /// book, or a patch whose `accountValue` disagrees with its positions, is
+    /// refused before it touches the account.
+    fn validate(&self, account: &Account) -> Result<()> {
         // A summary-only patch cannot be checked against an open book: the
         // summary's `accountValue` is the whole-book value at the caller's
         // mark, while the account's existing positions are at a different
@@ -185,38 +227,6 @@ impl AccountSeed {
                     summary.account_value, summary.total_raw_usd, signed, expected
                 )));
             }
-        }
-
-        if let Some(mode) = self.user_abstraction {
-            refuse_unmodeled_mode(mode)?;
-            account.mode = mode;
-        }
-        if let Some(positions) = &self.asset_positions {
-            apply_positions(account, positions)?;
-        }
-        if let Some(balances) = &self.spot_balances {
-            apply_spot_balances(account, balances);
-        }
-
-        // A named summary sets the whole-account raw. A positions-only or
-        // spot-only patch leaves the perp wallet's cash untouched: replacing
-        // positions changes the cost basis (and therefore `totalRawUsd`), but
-        // it must never move cash. The old fold preserved `totalRawUsd`
-        // across a positions-only patch, which silently debited the new cost
-        // basis from the perp wallet; on a standard→unified switch it also
-        // subtracted the newly-visible spot collateral. The measured 22f
-        // patch moved `7.82` to `-7.074333` and was liquidated on the
-        // resulting fake deficit.
-        if let Some(summary) = &self.margin_summary {
-            let isolated = isolated_margin_total(account);
-            let cost = cost_basis_total(account)?;
-            let perp = add(
-                sub(summary.total_raw_usd, isolated, "seed perp raw")?,
-                cost,
-                "seed balance",
-            )?;
-            account.perp_balance = perp;
-            account.funded_at_ms = clock;
         }
         Ok(())
     }

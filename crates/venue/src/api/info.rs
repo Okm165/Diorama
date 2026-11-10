@@ -9,7 +9,7 @@
 //! with.
 use super::ApiState;
 use crate::error::{Error, Result};
-use crate::sim::account;
+use crate::sim::{account, Sim};
 use crate::wire::{
     ActiveAssetData, ClearinghouseState, ExchangeStatus, InfoRequest, Leverage, LeverageType,
     MarginSummary, MetaAndAssetCtxs, UserAbstraction,
@@ -105,7 +105,7 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
             mantissa,
         } => l2_book(&coin, n_sig_figs, mantissa, &state),
         InfoRequest::MarginTable { id } => margin_table(id, &state),
-        InfoRequest::ExchangeStatus => exchange_status(&state),
+        InfoRequest::ExchangeStatus => Ok(exchange_status()),
         InfoRequest::SpotMeta => {
             Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response())
         }
@@ -123,9 +123,7 @@ async fn clearinghouse(
 ) -> Result<Response> {
     if !dex.as_deref().unwrap_or("").is_empty() {
         // The sim serves the first perp dex only (perpDexs = [null]).
-        return Ok(
-            Json(empty_clearinghouse(state.sim.served_time(crate::now_ms())?)).into_response(),
-        );
+        return Ok(Json(empty_clearinghouse(Sim::served_time(crate::now_ms()))).into_response());
     }
     match clearinghouse_of(state, user)? {
         Some(served) => Ok(Json(served).into_response()),
@@ -595,12 +593,12 @@ fn margin_table(id: u32, state: &ApiState) -> Result<Response> {
 }
 
 /// `exchangeStatus`: the served clock.
-fn exchange_status(state: &ApiState) -> Result<Response> {
-    Ok(Json(ExchangeStatus {
+fn exchange_status() -> Response {
+    Json(ExchangeStatus {
         special_statuses: None,
-        time: state.sim.served_time(crate::now_ms())?,
+        time: Sim::served_time(crate::now_ms()),
     })
-    .into_response())
+    .into_response()
 }
 
 /// The served `clearinghouseState` for a touched account: accrual *first*,
@@ -611,7 +609,7 @@ pub(crate) fn clearinghouse_of(
     address: Address,
 ) -> Result<Option<ClearinghouseState>> {
     let now = crate::now_ms();
-    let served_time = state.sim.served_time(now)?;
+    let served_time = Sim::served_time(now);
     // A read is an observation, not a step: the 1 Hz account tick owns
     // funding/liquidation. Running the automaton here made a read of an
     // underwater account liquidate it, so two pollers could change the

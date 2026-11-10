@@ -36,93 +36,102 @@ pub(crate) struct SimMetrics {
 }
 
 impl SimMetrics {
-    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
+        self.render_liquidations(&mut out);
+        self.render_activity(&mut out);
+        out
+    }
+
+    /// The account registry and the liquidation waterfall.
+    fn render_liquidations(&self, out: &mut String) {
         push_gauge(
-            &mut out,
+            out,
             "venue_sim_accounts",
             "simulated (touched) accounts",
             &[],
             self.accounts.load(Ordering::Relaxed),
         );
         push_gauge(
-            &mut out,
+            out,
             "venue_sim_epoch",
             "scenario epoch (reset bumps it)",
             &[],
             self.epoch.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_liquidations_total",
             "liquidations executed by the sim",
             &[],
             self.liquidations_total.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_partial_liquidations_total",
             "waterfall step 1: partial (20%) book liquidations",
             &[],
             self.partial_liquidations_total.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_backstop_liquidations_total",
             "waterfall step 2: backstop (the vault took the position)",
             &[],
             self.backstop_liquidations_total.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_adl_closes_total",
             "waterfall step 3: ADL closes at the previous mark",
             &[],
             self.adl_closes_total.load(Ordering::Relaxed),
         );
+    }
+
+    /// The account-plane activity counters.
+    fn render_activity(&self, out: &mut String) {
         push_counter(
-            &mut out,
+            out,
             "venue_sim_funding_payments_total",
             "funding payments applied",
             &[],
             self.funding_payments_total.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_identity_violations_total",
             "served states that failed the identity re-check (must stay 0)",
             &[],
             self.identity_violations.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_advances_total",
             "scenario advance() steps",
             &[],
             self.advances_total.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_orders_filled_total",
             "orders filled against the real book (the impact lane)",
             &[],
             self.orders_filled_total.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_fees_charged_total",
             "fills that charged a fee (taker and maker sides)",
             &[],
             self.fees_charged_total.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_triggers_armed_total",
             "trigger orders armed (tp/sl)",
             &[],
             self.triggers_armed_total.load(Ordering::Relaxed),
         );
-        out
     }
 }

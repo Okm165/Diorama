@@ -174,11 +174,15 @@ fn load_wiring(
         .unwrap_or_default();
     let section = cfg.take_cctp()?;
     let state_dir = section.state_dir.to_string_lossy().to_string();
-    let mut values: Vec<&str> = vec![&state_dir, &section.relay_key, &section.attester_seed];
-    if let Some(t_url) = &section.t_url {
+    let mut values: Vec<&str> = vec![
+        &state_dir,
+        &section.signer.relay_key,
+        &section.signer.attester_seed,
+    ];
+    if let Some(t_url) = &section.legacy.t_url {
         values.push(t_url);
     }
-    if let Some(v_url) = &section.v_url {
+    if let Some(v_url) = &section.legacy.v_url {
         values.push(v_url);
     }
     for chain in &section.chains {
@@ -212,20 +216,20 @@ async fn boot_bridge(
     let lanes = build_lanes(&section, &chains)?;
     let min_fees = verify_wiring(&chains, &lanes).await?;
     let attester = Arc::new(crate::attester::Attester::from_seed(
-        &section.attester_seed,
+        &section.signer.attester_seed,
     )?);
     install_attester(
         &chains,
         &attester,
         receipt_timeout,
         receipt_poll,
-        section.balance_low_wei,
+        section.gas.balance_low_wei,
     )
     .await?;
 
-    let wallet = Wallet::from_secret(&section.relay_key)?;
+    let wallet = Wallet::from_secret(&section.signer.relay_key)?;
     tracing::info!(relayer = %wallet.address(), "cctp relay wallet loaded");
-    if let Err(e) = fund_relayer(&chains, wallet.address(), section.balance_low_wei).await {
+    if let Err(e) = fund_relayer(&chains, wallet.address(), section.gas.balance_low_wei).await {
         tracing::error!(error = %e, "relay wallet top-up failed; the gas alerts stay on");
     }
     let sender = Arc::new(TxSender::new(wallet));
@@ -343,8 +347,8 @@ impl Bridge {
             sender: self.sender.clone(),
             metrics: self.metrics.clone(),
             mode: self.section.relayer,
-            balance_low: self.section.balance_low_wei,
-            balance_critical: self.section.balance_critical_wei,
+            balance_low: self.section.gas.balance_low_wei,
+            balance_critical: self.section.gas.balance_critical_wei,
             receipt_timeout: self.receipt_timeout,
             receipt_poll: self.receipt_poll,
             max_send_attempts: self.section.max_send_attempts,
@@ -369,7 +373,10 @@ impl Bridge {
         tokio::task::JoinHandle<crate::Result<()>>,
         tokio::task::JoinHandle<crate::Result<()>>,
     ) {
-        let iris_addr = format!("{}:{}", self.section.iris.addr, self.section.iris.port);
+        let iris_addr = format!(
+            "{}:{}",
+            self.section.iris.iris.addr, self.section.iris.iris.port
+        );
         let control_addr = format!(
             "{}:{}",
             self.section.control.addr, self.section.control.port
@@ -380,7 +387,7 @@ impl Bridge {
             chains: self.chains.clone(),
             lanes: self.lanes.clone(),
             expiration_blocks: self.section.expiration_blocks,
-            fast_burn_allowance: self.section.fast_burn_allowance,
+            fast_burn_allowance: self.section.iris.fast_burn_allowance,
         });
         let control_state = Arc::new(crate::control::ControlState {
             store: self.store.clone(),
@@ -435,6 +442,7 @@ fn build_chains(
             .collect();
     }
     let t_url = section
+        .legacy
         .t_url
         .as_deref()
         .ok_or_else(|| crate::Error::Wiring {
@@ -444,6 +452,7 @@ fn build_chains(
             want: "a legacy two-chain URL".into(),
         })?;
     let v_url = section
+        .legacy
         .v_url
         .as_deref()
         .ok_or_else(|| crate::Error::Wiring {
@@ -453,9 +462,9 @@ fn build_chains(
             want: "a legacy two-chain URL".into(),
         })?;
     let mut t = Chain::ethereum(t_url, timeout, policy)?;
-    t.start_block = section.t_start_block.unwrap_or(0);
+    t.start_block = section.start.t_start_block.unwrap_or(0);
     let mut v = Chain::hyper_evm(v_url, timeout, policy)?;
-    v.start_block = section.v_start_block.unwrap_or(0);
+    v.start_block = section.start.v_start_block.unwrap_or(0);
     Ok(vec![t, v])
 }
 

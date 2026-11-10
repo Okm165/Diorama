@@ -46,6 +46,11 @@ pub(crate) enum Step {
 ///    in time, skip when neither moved;
 /// 3. anything else on the target → a scenario wrote it: pause, never
 ///    overwrite a scenario's value.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the rule's inputs are one pass's chain reads and clock; grouping them would hide \
+              which side supplied each"
+)]
 pub(crate) fn step(
     state: ValueState,
     target_now: i128,

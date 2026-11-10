@@ -247,20 +247,10 @@ impl FeedBridge {
         if feed.owner.load() == FeedOwner::Scenario {
             return Ok(());
         }
-        let Some(decimals) = feed.decimals(&ctx.anvil_t).await? else {
-            // The target is not installed yet; wait (the read retries each
-            // pass and the feed starts publishing the moment it appears).
+        let Some((decimals, target_now, source_now, source_stamp)) =
+            self.read_state(ctx, feed).await?
+        else {
             return Ok(());
-        };
-        let (source_now, source_stamp) =
-            read_answer_with_stamp(&ctx.reth, feed.section.source).await?;
-        let target_now = match read_answer(&ctx.anvil_t, feed.section.target).await {
-            Ok(value) => value,
-            Err(e @ Error::FeedBridgeAbi { .. }) => {
-                forget_target(feed, &e);
-                return Ok(());
-            }
-            Err(e) => return Err(e),
         };
         let state = feed_state(feed);
         let now = crate::now_ms();
@@ -308,6 +298,40 @@ impl FeedBridge {
                 });
                 Ok(())
             }
+        }
+    }
+
+    /// One pass's chain reads: the target's installed decimals/answer and the
+    /// source's answer/stamp. `None` means wait (the target is absent or was
+    /// just forgotten).
+    async fn read_state(
+        &self,
+        ctx: &Ctx,
+        feed: &FeedRuntime,
+    ) -> Result<Option<(u8, i128, i128, u64)>> {
+        let Some(decimals) = feed.decimals(&ctx.anvil_t).await? else {
+            // The target is not installed yet; wait (the read retries each
+            // pass and the feed starts publishing the moment it appears).
+            return Ok(None);
+        };
+        let (source_now, source_stamp) =
+            read_answer_with_stamp(&ctx.reth, feed.section.source).await?;
+        let Some(target_now) = self.target_answer(ctx, feed).await? else {
+            return Ok(None);
+        };
+        Ok(Some((decimals, target_now, source_now, source_stamp)))
+    }
+
+    /// The target's answer; a bridge-ABI fault forgets the target so the next
+    /// pass re-installs it, and a missing target is a wait.
+    async fn target_answer(&self, ctx: &Ctx, feed: &FeedRuntime) -> Result<Option<i128>> {
+        match read_answer(&ctx.anvil_t, feed.section.target).await {
+            Ok(value) => Ok(Some(value)),
+            Err(e @ Error::FeedBridgeAbi { .. }) => {
+                forget_target(feed, &e);
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
     }
 

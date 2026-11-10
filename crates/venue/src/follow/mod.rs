@@ -184,18 +184,29 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     let applied = apply_window(ctx, &plan).await?;
     let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
     advance_source_cursor(ctx, to).await?;
-    let stats = FollowOutcome {
+    let stats = outcome(&plan, applied, (sampled, sampled_ok), started);
+    report_applied(ctx, followed, to, source_head, &stats);
+    Ok(Some(stats))
+}
+
+/// The pass's reported numbers (the fact and the per-window log read the
+/// same shape).
+fn outcome(
+    plan: &diorama_devnet::bal::WindowPlan,
+    applied: usize,
+    sampled: (usize, usize),
+    started: Instant,
+) -> FollowOutcome {
+    FollowOutcome {
         source: plan.kind.as_str(),
         writes: plan.total,
         applied,
         filtered: plan.writes.len(),
         skipped_shadowed: plan.filter.skipped_shadowed,
-        sampled,
-        sampled_ok,
+        sampled: sampled.0,
+        sampled_ok: sampled.1,
         duration_ms: started.elapsed().as_millis() as u64,
-    };
-    report_applied(ctx, followed, to, source_head, &stats);
-    Ok(Some(stats))
+    }
 }
 
 /// The compose's landing guard: scan V's chain up to its *current* head, so

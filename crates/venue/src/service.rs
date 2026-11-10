@@ -15,15 +15,69 @@ use diorama_config::boot;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
 pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     boot::init_logging();
     let config = boot::service_config_or_exit(&args);
     let mut cfg = load_wiring(&config)?;
-    let policy = cfg.endpoint_policy();
     let (chain, sim_section) = cfg.take_venue_sim()?;
+    let Planes {
+        feed,
+        sim,
+        api_client,
+        ws_pool,
+        bridge_metrics,
+        state,
+    } = build_planes(&cfg, &chain, &sim_section)?;
 
-    // The planes: the market feed's cache and the persisted account registry.
+    spawn_market_plane(&feed, api_client, ws_pool, &sim_section);
+    spawn_plane_heartbeat(
+        &feed,
+        &sim,
+        chain.api_urls.primary(),
+        &bridge_metrics,
+        Duration::from_secs(sim_section.heartbeat_interval_secs),
+    );
+    spawn_bridge(&sim_section, &sim, &feed, &bridge_metrics)?;
+    spawn_tick(
+        &sim,
+        &feed,
+        Duration::from_millis(sim_section.tick_interval_ms),
+    );
+    let (info, control) = serve(&sim_section, &state);
+    tracing::info!(
+        info = %format!("{}:{}", sim_section.info.addr, sim_section.info.port),
+        control = %format!("{}:{}", sim_section.control.addr, sim_section.control.port),
+        markets = sim_section.markets.len(),
+        api = %chain.api_urls,
+        "venue simulator listening"
+    );
+
+    boot::shutdown_signal().await;
+    tracing::info!("shutdown signal received");
+    info.abort();
+    control.abort();
+    sim.save()?;
+    Ok(())
+}
+
+/// The simulator's planes and the API state built over them.
+struct Planes {
+    feed: Arc<crate::feed::MarketFeed>,
+    sim: Arc<crate::sim::Sim>,
+    api_client: crate::feed::rest::RestClient,
+    ws_pool: diorama_anvil::EndpointPool,
+    bridge_metrics: Arc<crate::bridge::metrics::BridgeMetrics>,
+    state: Arc<crate::api::ApiState>,
+}
+
+/// Build the market/account planes and the API state from the instance's
+/// endpoint specs and the simulator section.
+fn build_planes(
+    cfg: &diorama_config::Instance,
+    chain: &diorama_config::ChainVenue,
+    sim_section: &diorama_config::VenueSimSection,
+) -> crate::Result<Planes> {
+    let policy = cfg.endpoint_policy();
     let feed = Arc::new(crate::feed::MarketFeed::load(
         sim_section.state_dir.join("feed.json"),
         sim_section.markets.clone(),
@@ -55,36 +109,14 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
         )?
         .with_ws_pool(ws_pool.clone()),
     );
-
-    spawn_market_plane(&feed, api_client, ws_pool, &sim_section);
-    spawn_plane_heartbeat(
-        &feed,
-        &sim,
-        chain.api_urls.primary(),
-        &bridge_metrics,
-        Duration::from_secs(sim_section.heartbeat_interval_secs),
-    );
-    spawn_bridge(&sim_section, &sim, &feed, &bridge_metrics)?;
-    spawn_tick(
-        &sim,
-        &feed,
-        Duration::from_millis(sim_section.tick_interval_ms),
-    );
-    let (info, control) = serve(&sim_section, &state);
-    tracing::info!(
-        info = %format!("{}:{}", sim_section.info.addr, sim_section.info.port),
-        control = %format!("{}:{}", sim_section.control.addr, sim_section.control.port),
-        markets = sim_section.markets.len(),
-        api = %chain.api_urls,
-        "venue simulator listening"
-    );
-
-    boot::shutdown_signal().await;
-    tracing::info!("shutdown signal received");
-    info.abort();
-    control.abort();
-    sim.save()?;
-    Ok(())
+    Ok(Planes {
+        feed,
+        sim,
+        api_client,
+        ws_pool,
+        bridge_metrics,
+        state,
+    })
 }
 
 /// Load the instance and require this pod's wiring to be resolved: one

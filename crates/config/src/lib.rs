@@ -1096,10 +1096,13 @@ port = 8096
         assert_eq!(cctp.expiration_blocks, 0);
         assert_eq!(cctp.scan_chunk_blocks, 2000);
         assert_eq!(cctp.receipt_timeout_secs, 30);
-        assert_eq!(cctp.balance_low_wei, U256::from(100_000_000_000_000_000u64));
-        assert!(cctp.t_start_block.is_none());
+        assert_eq!(
+            cctp.gas.balance_low_wei,
+            U256::from(100_000_000_000_000_000u64)
+        );
+        assert!(cctp.start.t_start_block.is_none());
         let section = inst.take_cctp().unwrap();
-        assert_eq!(section.iris.port, 8095);
+        assert_eq!(section.iris.iris.port, 8095);
         assert_eq!(section.control.port, 8096);
         assert!(
             inst.take_cctp().is_err(),

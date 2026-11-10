@@ -649,42 +649,8 @@ impl Bridge {
             return Ok(());
         };
         if destination == system::system_address(u64::from(info.index)) {
-            // Core→EVM: the venue's transfer rule bounds the move by the
-            // account's **spot available after maintenance**, not by the spot
-            // balance and not by the perp class's `withdrawable`. A control-
-            // patched or insolvent account can still hold spot cash while its
-            // equity is below the transfer floor; 4a withdrew 0.55 with
-            // `withdrawable=0` one block before its deficit deposit. But a
-            // unified account's spot principal is a **separate ledger** from the
-            // perp wallet (the live `cf16` recovery: 240.510247 spot against
-            // 0.000000455 perp), so the perp figure is the wrong bound for a
-            // spot→EVM bridge — it refused the whole recovery leg. The
-            // collateral token is bounded by `tokenToAvailableAfterMaintenance`;
-            // other spot tokens are holdings, bounded by the balance alone.
-            if info.index == crate::sim::account::COLLATERAL_TOKEN {
-                let Some(account) = self.sim.account(caller)? else {
-                    self.metrics.inc_refusals();
-                    tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
-                    return Ok(());
-                };
-                let meta = self.feed.meta();
-                if let Some(bound) = crate::sim::account::spot_bridge_bound(
-                    &account,
-                    &self.feed,
-                    meta.as_ref(),
-                    info.index,
-                )? {
-                    if amount > bound {
-                        self.metrics.inc_refusals();
-                        tracing::warn!(
-                            account = %caller,
-                            amount = %amount,
-                            available = %bound,
-                            "bridge: Core→EVM refused (amount exceeds spot available after maintenance)"
-                        );
-                        return Ok(());
-                    }
-                }
+            if !self.core_to_evm_allowed(caller, info, amount)? {
+                return Ok(());
             }
             // Core→EVM: debit the caller, then complete on the EVM side.
             let Some(_after) = self.sim.try_debit_spot(caller, info.index, amount)? else {
@@ -709,6 +675,49 @@ impl Bridge {
             }
         }
         Ok(())
+    }
+
+    /// The Core→EVM transfer bound: the venue's rule bounds the move by the
+    /// account's **spot available after maintenance**, not by the spot balance
+    /// and not by the perp class's `withdrawable`. A control-patched or
+    /// insolvent account can still hold spot cash while its equity is below
+    /// the transfer floor; 4a withdrew 0.55 with `withdrawable=0` one block
+    /// before its deficit deposit. But a unified account's spot principal is a
+    /// **separate ledger** from the perp wallet (the live `cf16` recovery:
+    /// 240.510247 spot against 0.000000455 perp), so the perp figure is the
+    /// wrong bound for a spot→EVM bridge — it refused the whole recovery leg.
+    /// The collateral token is bounded by `tokenToAvailableAfterMaintenance`;
+    /// other spot tokens are holdings, bounded by the balance alone.
+    fn core_to_evm_allowed(
+        &self,
+        caller: Address,
+        info: &TokenInfo,
+        amount: Decimal,
+    ) -> Result<bool> {
+        if info.index != crate::sim::account::COLLATERAL_TOKEN {
+            return Ok(true);
+        }
+        let Some(account) = self.sim.account(caller)? else {
+            self.metrics.inc_refusals();
+            tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
+            return Ok(false);
+        };
+        let meta = self.feed.meta();
+        if let Some(bound) =
+            crate::sim::account::spot_bridge_bound(&account, &self.feed, meta.as_ref(), info.index)?
+        {
+            if amount > bound {
+                self.metrics.inc_refusals();
+                tracing::warn!(
+                    account = %caller,
+                    amount = %amount,
+                    available = %bound,
+                    "bridge: Core→EVM refused (amount exceeds spot available after maintenance)"
+                );
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The completion tx: `transfer(caller, amount)` on the linked ERC20 from

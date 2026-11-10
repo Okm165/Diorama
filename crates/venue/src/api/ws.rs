@@ -18,6 +18,7 @@
 //! (omitted while the meta is warming — never an invented empty list), and
 //! `user`.
 use super::ApiState;
+use crate::sim::Sim;
 use crate::wire::{
     AllMids, AssetCtx, ClearinghouseState, L2Book, MarginSummary, SpotClearinghouseState,
 };
@@ -431,7 +432,7 @@ fn account_states(
             Ok((clearinghouse_state, spot_state))
         }
         None => Ok((
-            empty_clearinghouse(state.sim.served_time(crate::now_ms())?),
+            empty_clearinghouse(Sim::served_time(crate::now_ms())),
             SpotClearinghouseState {
                 balances: Vec::new(),
                 token_to_available_after_maintenance: Vec::new(),

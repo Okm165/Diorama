@@ -88,60 +88,70 @@ impl FeedMetrics {
         self.owned_pruned.fetch_add(n, Ordering::Relaxed);
     }
 
-    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(512);
+        self.render_link(&mut out);
+        self.render_owned(&mut out);
+        out
+    }
+
+    /// The link, budget and owned-level gauges.
+    fn render_link(&self, out: &mut String) {
         push_gauge(
-            &mut out,
+            out,
             "venue_sim_ws_connected",
             "market websocket connected (1/0)",
             &[],
             self.ws_connected.load(Ordering::Relaxed) as u64,
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_rest_errors_total",
             "market REST poller faults",
             &[],
             self.rest_errors.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_ws_reconnects_total",
             "market websocket reconnects",
             &[],
             self.ws_reconnects.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_budget_skips_total",
             "REST calls skipped at the rate budget",
             &[],
             self.budget_skips.load(Ordering::Relaxed),
         );
         push_gauge(
-            &mut out,
+            out,
             "venue_sim_budget_weight_used",
             "REST weight spent in the rolling minute",
             &[],
             self.budget_used.load(Ordering::Relaxed),
         );
         push_gauge(
-            &mut out,
+            out,
             "venue_sim_owned_levels",
             "book levels the devnet has consumed (live updates keep the consumed delta)",
             &[],
             self.owned_levels.load(Ordering::Relaxed),
         );
+    }
+
+    /// The COW counters and the per-coin staleness series.
+    fn render_owned(&self, out: &mut String) {
         push_counter(
-            &mut out,
+            out,
             "venue_sim_owned_skips_total",
             "live book updates that met a devnet-owned level",
             &[],
             self.owned_skips.load(Ordering::Relaxed),
         );
         push_counter(
-            &mut out,
+            out,
             "venue_sim_owned_pruned_total",
             "owned levels pruned because the live book moved past them",
             &[],
@@ -161,6 +171,5 @@ impl FeedMetrics {
                 ms.load(Ordering::Relaxed)
             ));
         }
-        out
     }
 }
