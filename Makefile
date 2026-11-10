@@ -194,6 +194,10 @@ config-check: ## Validate every instance file through the layered loader
 
 fitness: lint design-assertions config-check ast-scope ## Run the structural gates: lint, design assertions, config check, AST scope
 
+ci: ## Run the exact CI gates locally: workspace tests, then fitness
+	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace --locked
+	$(MAKE) fitness
+
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
 
@@ -321,7 +325,7 @@ help: ## Show this help
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: fitness lint design-assertions config-check config-bootstrap ast-scope
+.PHONY: ci fitness lint design-assertions config-check config-bootstrap ast-scope
 .PHONY: ns mainnet-secrets venue-secrets apply diff delete \
 	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
 	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \

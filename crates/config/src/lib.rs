@@ -667,6 +667,10 @@ port = 8096
         inst.chains.l1.as_mut().unwrap().fork_offset = 20_000;
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("state window"), "{err}");
+        inst.chains.l1.as_mut().unwrap().fork_offset = 128;
+        inst.chains.l1.as_mut().unwrap().fork_pin = Some(0);
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("fork_pin"), "{err}");
     }
 
     /// The simulator's declared memory/cadence facts are required: a zero
@@ -765,6 +769,10 @@ port = 8096
         );
         assert_eq!(l1(&inst).fork_offset, 128);
         assert_eq!(l1(&inst).fork_pin, Some(26_377_102));
+        assert_eq!(
+            inst.export_env("anvil").unwrap(),
+            vec!["FORK_OFFSET=128".to_string(), "FORK_PIN=26377102".to_string()]
+        );
         // 10 probes: the Aave USDT price probe was removed after the
         // stable-feed pulse pinned USDT to 1.0 and the probe had no tolerance
         // (measured 2026-10-31; the mainnet engine now reports `failed:0`).
