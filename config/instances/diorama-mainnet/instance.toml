@@ -28,7 +28,7 @@ state_dir = "${STATE_DIR}"
 target_url = "@anvil_t"
 
 [services.engine.loops]
-# Chain-1 catch-up: the live gap is ~3.3k blocks; 5k stays below the
+# Chain-1 catch-up: the live gap is ~3.3k blocks; 10k stays below the
 # 10,064-block rebase bound and leaves margin for source advance.
 max_gap_blocks = 10000
 # JSON-RPC batch items for source reads and local cheatcode writes. This is

@@ -93,7 +93,7 @@ spec:
             # preserves the Daloc deployment and the shadow registry across
             # restarts. Changing it is an explicit re-pin: update both
             # containers, snapshot state, and accept the epoch transition.
-            - { name: ANVIL_FORK_PIN, value: "26363898" }
+            - { name: ANVIL_FORK_PIN, value: "26377102" }
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -168,7 +168,7 @@ spec:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
             # Explicit epoch pin (see the init container's comment).
-            - { name: ANVIL_FORK_PIN, value: "26363898" }
+            - { name: ANVIL_FORK_PIN, value: "26377102" }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

@@ -717,22 +717,46 @@ port = 8096
 
     #[test]
     fn the_real_mainnet_diorama_instance_loads_and_checks() {
-        let path = std::path::Path::new(concat!(
+        // The tracked instance names the gitignored live project (`daloc.toml`),
+        // which a deployment may specialize. This test is about the **tracked
+        // template**, so copy the instance with the project pointed at the
+        // example and load that: a live specialization must not change the
+        // audited count, and CI has no live file at all.
+        let instance_path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/instances/diorama-mainnet/instance.toml"
         ));
-        let (inst, unresolved) = Instance::inspect(path).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "diorama-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let instance_src = std::fs::read_to_string(instance_path).unwrap();
+        std::fs::write(
+            dir.join("instance.toml"),
+            instance_src.replace("project = \"daloc\"", "project = \"daloc.example\""),
+        )
+        .unwrap();
+        std::fs::copy(
+            instance_path.with_file_name("daloc.example.toml"),
+            dir.join("daloc.example.toml"),
+        )
+        .unwrap();
+        let path = dir.join("instance.toml");
+        let (inst, unresolved) = Instance::inspect(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(inst.instance.name, "diorama-mainnet");
-        // 44 market/protocol entries + the dapp's 41-address mainnet
-        // deployment (contracts/deployments/ethereum.json; measured complete
-        // 2026-10-23). The codeless "facts registrar" was removed 2026-10-25
-        // after a live re-check (eth_getCode `0x`, nonce 0), and the two
-        // oracle-syncer entries were removed with the OracleSyncer cleanup.
-        // Update this count deliberately when the audit changes.
+        // 44 market/protocol entries + the dapp's 44-address mainnet
+        // deployment in the tracked template. Update this count deliberately
+        // when the audit changes.
         assert_eq!(
             inst.watchlist.len(),
-            85,
-            "the audited watchlist is complete"
+            88,
+            "the audited example watchlist is complete"
         );
         assert_eq!(l1(&inst).fork_offset, 128);
         // 10 probes: the Aave USDT price probe was removed after the

@@ -34,7 +34,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: cctp-bridge
-          image: localhost/diorama-cctp-bridge:sweep4evt
+          image: localhost/diorama-cctp-bridge:caps-20261110
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The bridge's own wiring ConfigMap (cctp-config), not the venue's:

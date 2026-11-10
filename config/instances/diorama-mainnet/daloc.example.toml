@@ -44,11 +44,11 @@ feeds = [
   { name = "WETH/USD", source = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419", target = "0x4575acc57E1FFA7CcccD5969898d1114c0792216" },
   { name = "WBTC/USD", source = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c", target = "0x5c4075FCC531b2227dd1E6Aef747BeEe3a0A7067" },
   { name = "STETH/USD", source = "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8", target = "0x8EdCC3340e082033D78F9C1ef177CA5c10963bcB" },
-  # wstETH is proxied 1:1 to stETH in the mirror: the parent-chain wstETH/USD
-  # feed is not deployed at the registry address, so the bridge writes the
-  # STETH/USD answer to the dedicated WSTETH mock. Production uses the composed
-  # wstETH/USD feed; the mirror keeps the WSTETH row fresh and never stale.
-  { name = "WSTETH/USD", source = "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8", target = "0x6359978c0dF49aBf6A163E3F526c29b2602645fb" },
+  # wstETH is **not** proxied to stETH. The mirror deploys the composed
+  # wstETH/USD feed at the registry address (`0xC3D8...`), which multiplies the
+  # mirrored STETH/USD answer by the on-chain `stEthPerToken()` rate. Writing
+  # the stETH answer into a 1:1 wstETH mock misprices every wstETH book while
+  # the rate is not exactly 1.0; the composed feed is the only correct source.
   { name = "USDC/USD", source = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6", target = "0xCd171B437d9329C2654128645944fbC05C9AA2BF" },
   { name = "USDT/USD", source = "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D", target = "0x797945E6995c60933E635623A5dD7F3822DD2AF5" },
   # The **proof oracle** is the guard's feed (`config/oracles`), not the writable
@@ -120,7 +120,7 @@ note = "Chainlink USDT/USD aggregator"
 
 [[watchlist]]
 address = "0x6359978c0dF49aBf6A163E3F526c29b2602645fb"
-note = "Chainlink WSTETH/USD aggregator (mirror 1:1 stETH proxy)"
+note = "Chainlink WSTETH/USD mock fixture (the live feed is the composed registry feed)"
 
 [[watchlist]]
 address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"

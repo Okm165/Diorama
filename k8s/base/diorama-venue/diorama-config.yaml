@@ -16,10 +16,11 @@ data:
   #                 `eth_getSystemTxsByBlockNumber` are listed: the archive
   #                 returns -32601 for it, so including it would block the
   #                 follow driver. dRPC and purroofgroup also return -32601.
-  # The public source is the engine's own source and answered the deploy's
-  # account/log reads; the HyperLend archive endpoint timed out under the same
-  # load. Keep the multi-endpoint read pool below for the engine.
-  HL_RPC_URL: "https://rpc.hyperliquid.xyz/evm"
+  # The explicit epoch pin is ~165k blocks behind the head, so only the archive
+  # plane can serve the fork's historical storage; the public plane prunes it.
+  # The engine never reads HL_RPC_URL (it uses the pool below), so the archive's
+  # timeout under scan load cannot stall the follow.
+  HL_RPC_URL: "https://rpc.hyperlend.finance/archive"
   HL_RPC_URLS: "https://rpc.hyperliquid.xyz/evm,https://rpc.hypurrscan.io,https://hyperliquid-json-rpc.stakely.io"
 
   # The venue's market plane. Both are URL lists in the instance's
