@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-venue-engine:v9
+          image: localhost/diorama-venue-engine:v13
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (HL_RPC_URLS,
@@ -62,6 +62,11 @@ spec:
             periodSeconds: 10
             failureThreshold: 90
           readinessProbe:
+            # `/livez`, not `/healthz`: a gap-paused engine is still serving
+            # reads/writes (it is catching up, not dead), so it must stay in
+            # the Service. `/healthz` is the diagnostic state report (200 ok,
+            # 503 halted/gap-paused); probing it here took the engine out of
+            # rotation for the whole catch-up and starved its admin consumers.
             httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -72,10 +77,13 @@ spec:
           resources:
             # No CPU limit (the follow's passes are latency-sensitive).
             # Measured 2026-10-31 (60 s sample): ~1-2m CPU, 8-10 MiB RSS. The
-            # request tracks the measured steady state; the limit stays the OOM
-            # ceiling for a wide catch-up window's composition state.
-            requests: { cpu: "5m", memory: 16Mi }
-            limits: { memory: 512Mi }
+            # request tracks the measured steady state. The 512Mi limit was
+            # measured OOM-killing the engine during the 2026-11-06 wide
+            # catch-up (the composition state grows with the window, and a
+            # restart resets the follow cursor to the pin). 2Gi is the OOM
+            # ceiling for a wide catch-up window; the steady state stays tiny.
+            requests: { cpu: "5m", memory: 64Mi }
+            limits: { memory: 2Gi }
       volumes:
         - name: instance
           configMap: { name: venue-instance }

@@ -40,13 +40,11 @@ pub enum RelayerMode {
 pub struct CctpSection {
     /// Bridge state root (`cctp.json`: watched messages + lifecycle).
     pub state_dir: PathBuf,
-    /// The legacy two-chain spelling: T's RPC (Ethereum, CCTP domain 0).
-    /// Absent when `[[services.cctp_bridge.chains]]` carries the topology.
-    #[serde(default)]
-    pub t_url: Option<String>,
-    /// The legacy two-chain spelling: V's RPC (HyperEVM, CCTP domain 19).
-    #[serde(default)]
-    pub v_url: Option<String>,
+    /// The legacy two-chain spelling: T's RPC (Ethereum, CCTP domain 0) and
+    /// V's RPC (HyperEVM, CCTP domain 19). Absent when
+    /// `[[services.cctp_bridge.chains]]` carries the topology.
+    #[serde(flatten)]
+    pub legacy: CctpLegacy,
     /// The composable topology: one entry per chain the bridge speaks to.
     /// Empty falls back to the legacy `t_url`/`v_url` pair.
     #[serde(default)]
@@ -56,21 +54,14 @@ pub struct CctpSection {
     /// directions (the old per-chain watcher behaviour).
     #[serde(default)]
     pub lanes: Vec<CctpLane>,
-    /// The daloc-facing Iris API (8095).
-    pub iris: HttpSection,
+    /// The client-facing Iris API (8095) and the fast-burn allowance it serves.
+    #[serde(flatten)]
+    pub iris: CctpIris,
     /// The bridge's control API (8096).
     pub control: HttpSection,
-    /// The relay wallet's 32-byte hex key: signs `receiveMessage` and the
-    /// control transfers, and pays gas on both chains. A `${VAR}` reference
-    /// keeps the secret out of the file; never a path.
-    pub relay_key: String,
-    /// The devnet attester's deterministic seed (a 32-byte hex key is used
-    /// verbatim; any other string is hashed, §15.3).
-    pub attester_seed: String,
-    /// The Iris fast-burn allowance served for a configured source domain
-    /// (USDC). Circle's live service publishes a rolling figure; a deployment
-    /// pins its own (the default is the measured 2026-10-31 value).
-    pub fast_burn_allowance: f64,
+    /// The relay wallet's key and the devnet attester's seed.
+    #[serde(flatten)]
+    pub signer: CctpSigner,
     /// One watcher pass per interval.
     pub poll_interval_ms: u64,
     /// The JSON-RPC request budget for the bridge's chain clients.
@@ -100,13 +91,62 @@ pub struct CctpSection {
     /// `POST /control/relay` (`manual`) — the deterministic mode for
     /// expiry/reattest tests.
     pub relayer: RelayerMode,
-    /// Gas alerts (daloc's defaults: 0.1 ETH low / 0.01 ETH critical, wei).
-    pub balance_low_wei: U256,
-    pub balance_critical_wei: U256,
+    /// Gas alerts (the deployment defaults: 0.1 ETH low / 0.01 ETH critical, wei).
+    #[serde(flatten)]
+    pub gas: CctpGas,
     /// First block the watcher scans on T / V. Absent = 0 (genesis: correct
     /// but thousands of chunked calls on a deep fork — pin the deployment
     /// block). The composable form puts the start block on each chain.
+    #[serde(flatten)]
+    pub start: CctpStart,
+}
+
+/// The legacy two-chain spelling of the bridge's endpoints.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct CctpLegacy {
+    #[serde(default)]
+    pub t_url: Option<String>,
+    #[serde(default)]
+    pub v_url: Option<String>,
+}
+
+/// The Iris plane: its HTTP section and the fast-burn allowance.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CctpIris {
+    /// The client-facing Iris API (8095).
+    pub iris: HttpSection,
+    /// The Iris fast-burn allowance served for a configured source domain
+    /// (USDC). Circle's live service publishes a rolling figure; a deployment
+    /// pins its own (the default is the measured 2026-10-31 value).
+    pub fast_burn_allowance: f64,
+}
+
+/// The bridge's signing facts: the relay wallet's key and the devnet
+/// attester's seed.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CctpSigner {
+    /// The relay wallet's 32-byte hex key: signs `receiveMessage` and the
+    /// control transfers, and pays gas on both chains. A `${VAR}` reference
+    /// keeps the secret out of the file; never a path.
+    pub relay_key: String,
+    /// The devnet attester's deterministic seed (a 32-byte hex key is used
+    /// verbatim; any other string is hashed, §15.3).
+    pub attester_seed: String,
+}
+
+/// The relay key's gas-alert thresholds (wei).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CctpGas {
+    pub balance_low_wei: U256,
+    pub balance_critical_wei: U256,
+}
+
+/// The legacy first-block pins for T and V.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct CctpStart {
+    #[serde(default)]
     pub t_start_block: Option<u64>,
+    #[serde(default)]
     pub v_start_block: Option<u64>,
 }
 
@@ -203,7 +243,7 @@ pub struct VenueSimSection {
     pub rpc_timeout_secs: u64,
     /// HTTP timeout for the engine's admin call (`/admin/epoch`).
     pub admin_timeout_secs: u64,
-    /// The daloc-facing info API (8090).
+    /// The client-facing info API (8090).
     pub info: HttpSection,
     /// The control API (8091).
     pub control: HttpSection,
@@ -245,7 +285,7 @@ pub struct EngineSection {
     /// the mocks, the pre-mirror arrangement).
     pub feed_bridge: Option<FeedBridgeSection>,
     /// Canonical addresses the devnet's fixture deploy replaces via
-    /// `anvil_setCode` (daloc's mock tokens and seeded aTokens): whole-account
+    /// `anvil_setCode` (the consumer's mock tokens and seeded aTokens): whole-account
     /// owned, so the parent diffs never clobber them. The list is
     /// exactly what the deploy mutates — only watched addresses can be
     /// clobbered, and these are the watched ones it replaces.
@@ -274,7 +314,7 @@ pub struct FeedBridgeSection {
     /// The account that submits `updateAnswer` on T (auto-impersonate makes
     /// any address usable; the mock's own access control decides who may).
     /// Give it a *dedicated* account: sharing one with a concurrent sender
-    /// (e.g. daloc's deployer, which is anvil account 0) races nonces.
+    /// (e.g. the deployment's deployer, which is anvil account 0) races nonces.
     pub writer: Address,
     /// The feeds to bridge (one row per mock aggregator).
     pub feeds: Vec<FeedSection>,

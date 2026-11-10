@@ -74,13 +74,40 @@ pub(crate) async fn target_decimals(
 }
 
 pub(crate) async fn read_answer(rpc: &diorama_anvil::Rpc, aggregator: Address) -> Result<i128> {
+    Ok(read_answer_with_stamp(rpc, aggregator).await?.0)
+}
+
+/// The answer and the source round's own `updatedAt`.
+///
+/// The stamp is the **heartbeat** signal: Chainlink republishes a round on its
+/// heartbeat even when the answer has not moved. The bridge must propagate that
+/// publication, not just answer changes, or a guard feed with a 2 h max-age goes
+/// stale in a quiet market even though its source is alive. The target mock's
+/// stamp is the block that mined the bridge's write; the source stamp is the
+/// parent-chain round's, so the two are compared only through the bridge's own
+/// last-published stamp, never against each other.
+pub(crate) async fn read_answer_with_stamp(
+    rpc: &diorama_anvil::Rpc,
+    aggregator: Address,
+) -> Result<(i128, u64)> {
     let decoded = rpc
         .call_decode(aggregator, &AggregatorV3Interface::latestRoundDataCall {})
         .await?;
-    decoded.answer.try_into().map_err(|_| Error::FeedBridgeAbi {
-        what: "latestRoundData() answer",
-        detail: "does not fit i128".into(),
-    })
+    let answer = decoded
+        .answer
+        .try_into()
+        .map_err(|_| Error::FeedBridgeAbi {
+            what: "latestRoundData() answer",
+            detail: "does not fit i128".into(),
+        })?;
+    let stamp = decoded
+        .updatedAt
+        .try_into()
+        .map_err(|_| Error::FeedBridgeAbi {
+            what: "latestRoundData() updatedAt",
+            detail: "does not fit u64".into(),
+        })?;
+    Ok((answer, stamp))
 }
 
 pub(crate) async fn publish(

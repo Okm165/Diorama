@@ -1,14 +1,14 @@
 # The generic Mainnet Mirror instance: deployment facts only.
 #
 # Product-specific scope (watchlist, fixture ownership, probes, endpoint
-# groups) lives in `daloc.toml`, which is gitignored; `daloc.example.toml` is
-# the tracked template. Endpoint references use `@name` and are expanded from
-# `[endpoints]` before validation.
+# groups) lives in `specialization.toml`, which is gitignored;
+# `specialization.example.toml` is the tracked template. Endpoint references
+# use `@name` and are expanded from `[endpoints]` before validation.
 [instance]
 name = "diorama-mainnet"
 namespace = "diorama-mainnet"
 profile = "mainnet"
-project = "daloc"
+project = "specialization"
 
 [chains.l1]
 kind = "ethereum"
@@ -18,7 +18,9 @@ source_urls = "@reth"
 follow = "latest"
 follow_margin_blocks = 2
 # Blocks between the follow head and T's fork base; the single home of the
-# offset (the anvil init container reads it from this file).
+# offset (the anvil init container reads it from this file). An explicit fork
+# base, when the deployment pins one, lives in the specialization's
+# [chains.l1] as `fork_pin`.
 fork_offset = 128
 
 [services.engine]
@@ -28,6 +30,9 @@ state_dir = "${STATE_DIR}"
 target_url = "@anvil_t"
 
 [services.engine.loops]
+# Chain-1 catch-up: the live gap is ~3.3k blocks; 10k stays below the
+# 10,064-block rebase bound and leaves margin for source advance.
+max_gap_blocks = 10000
 # JSON-RPC batch items for source reads and local cheatcode writes. This is
 # the deployment's endpoint contract (the live value), not a global default.
 chunk_size = 500

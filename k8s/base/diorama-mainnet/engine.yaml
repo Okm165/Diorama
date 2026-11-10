@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-mainnet-engine:v1
+          image: localhost/diorama-mainnet-engine:v12
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (RETH_URL,
@@ -64,6 +64,11 @@ spec:
             periodSeconds: 10
             failureThreshold: 90
           readinessProbe:
+            # `/livez`, not `/healthz`: a gap-paused engine is still serving
+            # reads/writes (it is catching up, not dead), so it must stay in
+            # the Service. `/healthz` is the diagnostic state report (200 ok,
+            # 503 halted/gap-paused); probing it here took the engine out of
+            # rotation for the whole catch-up and starved its admin consumers.
             httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -77,7 +82,11 @@ spec:
             # request tracks the measured steady state; the limit stays the OOM
             # ceiling for a wide window's composition state.
             requests: { cpu: "5m", memory: 32Mi }
-            limits: { memory: 512Mi }
+            # 2026-11-06: the 512Mi ceiling OOMed during a wide-window
+            # composition (exit 137 at 13:50Z). The venue engine was already
+            # raised to 2Gi for the same reason; match it. The applier is
+            # stateless and resumes from the journal.
+            limits: { memory: 2Gi }
       volumes:
         - name: instance
           configMap: { name: mainnet-instance }

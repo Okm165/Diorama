@@ -16,7 +16,7 @@
 //! `advance` scripts a jump). Funding steps at the hour on that clock (the
 //! docs' interval: whole hourly payments, nothing between — `accrue_funding`)
 //! and liquidations are checked against current marks — the §14.8 evaluation
-//! runs on every account-scoped read and on the 1 Hz tick — so daloc's
+//! runs on every account-scoped read and on the 1 Hz tick — so the consumer's
 //! set-and-read tests see live liquidation behavior without ever calling
 //! `advance`, and script a funding step by crossing the hour. The
 //! wire's `time` field stays *wall* now: it is the read's freshness, which the
@@ -171,7 +171,7 @@ pub struct Sim {
     dirty: AtomicBool,
     /// The venue chain's head timestamp (ms), observed by the bridge when V is
     /// configured. Their time policy jumps *every* chain's clock forward and
-    /// the client's own rule is `chain_time = max(wall, head)` — a served
+    /// the consumer's own rule is `chain_time = max(wall, head)` — a served
     /// `time` that stayed at wall would read as stale after a V jump.
     chain_time_ms: AtomicU64,
     pub(crate) metrics: SimMetrics,
@@ -231,14 +231,17 @@ impl Sim {
         self.chain_time_ms.store(ms, Ordering::Relaxed);
     }
 
-    /// The `time` a venue read serves: never behind wall, never behind the
-    /// sim's own clock (an `advance` jump), never behind the venue chain's
-    /// clock (their harness jumps every chain forward).
-    pub fn served_time(&self, wall_ms: u64) -> Result<u64> {
-        Ok(self
-            .clock(wall_ms)?
-            .max(wall_ms)
-            .max(self.chain_time_ms.load(Ordering::Relaxed)))
+    /// The `time` a venue read serves: **wall clock**, the read's freshness.
+    ///
+    /// Scenario time is [`Self::clock`] and stays internal (funding steps,
+    /// liquidation evaluation, order matching). Leaking the scenario offset
+    /// into the wire's `time` future-stamps every observation; the consumer's ≤6 s
+    /// gate then correctly refuses it and the position goes blind (measured
+    /// 2026-11-08: `advance 3600` blinded the unified HF for half an hour).
+    /// A freshness field must describe when the read was observed, not when
+    /// the scenario says it happened.
+    pub fn served_time(wall_ms: u64) -> u64 {
+        wall_ms
     }
 
     /// The scenario epoch counter (`reset` returns it to callers; `dry_run`
@@ -1355,25 +1358,30 @@ mod tests {
         );
     }
 
-    /// The served `time` never lags wall, the sim clock (`advance`), or the
-    /// venue chain's clock (their harness jumps every chain forward).
+    /// The served `time` is wall even after `advance` or a chain-clock jump:
+    /// it is the read's freshness, not the scenario's timeline. The internal
+    /// clock still advances for funding/liquidation.
     #[test]
-    fn served_time_never_lags() {
+    fn served_time_is_wall_not_scenario_time() {
         let feed = MarketFeed::memory(vec![]);
         let sim = Sim::memory();
-        assert_eq!(sim.served_time(1_000).unwrap(), 1_000);
+        assert_eq!(Sim::served_time(1_000), 1_000);
         sim.advance(&feed, 60, 1).unwrap();
-        assert_eq!(sim.served_time(1_000).unwrap(), 61_000, "advance wins");
         assert_eq!(
-            sim.served_time(500_000).unwrap(),
-            560_000,
-            "the sim clock tracks wall + offset"
+            Sim::served_time(1_000),
+            1_000,
+            "advance must not future-stamp the observation"
+        );
+        assert_eq!(
+            sim.clock(1_000).unwrap(),
+            61_000,
+            "the internal scenario clock still advances"
         );
         sim.observe_chain_time(700_000);
         assert_eq!(
-            sim.served_time(500_000).unwrap(),
-            700_000,
-            "the venue chain wins when it is ahead"
+            Sim::served_time(500_000),
+            500_000,
+            "the wire time is wall; the venue chain clock is a separate fact"
         );
     }
 

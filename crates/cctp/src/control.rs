@@ -260,7 +260,7 @@ pub(crate) struct TransferRequest {
 /// The hook a transfer carries — the credit-carrying lane.
 #[derive(Debug, Deserialize)]
 pub(crate) struct HookSpec {
-    /// The contract the wrapper calls after the mint (e.g. daloc's
+    /// The contract the wrapper calls after the mint (e.g. the consumer's
     /// `ProofExecutor.receiveRecovery(positionId, amount)`).
     pub target: Address,
     /// The call's calldata.

@@ -39,18 +39,22 @@ spec:
           args:
             - |
               set -eu
-              # One URL list is the single source; anvil takes one fork URL,
-              # so the first entry is the primary the pool also declares.
-              HL_RPC_URL="${HL_RPC_URLS%%,*}"
+              # The fork source is the archive plane; the engine's read pool
+              # (`HL_RPC_URLS`) deliberately excludes it because it does not
+              # answer `eth_getSystemTxsByBlockNumber`.
+              : "${HL_RPC_URL:?HL_RPC_URL is required}"
               # An explicit pin preserves the epoch across a source change. A
               # re-pin to the source's current head is a *new base*: the driver
               # clears the shadow registry (measured 2026-11-01, a restart moved
               # 50,042,205 -> 50,086,498 and cleared 1,974 slots / 109 accounts).
-              # A deployment that must keep its writes pins the block here.
-              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
-                PIN="$ANVIL_FORK_PIN"
+              # A deployment that must keep its writes pins the block in the
+              # specialization TOML; the instance file is the fallback.
+              FORK_PIN=$(sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' \
+                /etc/mirror/specialization.toml /etc/mirror/instance.toml 2>/dev/null | head -n1 | tr -d '_')
+              if [ -n "$FORK_PIN" ]; then
+                PIN="$FORK_PIN"
                 echo "$PIN" > /state/pin
-                echo "using explicit fork pin=$PIN (source head not re-resolved)"
+                echo "using configured fork pin=$PIN (source head not re-resolved)"
                 chmod 0777 /state 2>/dev/null || true
                 chmod 0666 /state/pin 2>/dev/null || true
                 exit 0
@@ -76,14 +80,17 @@ spec:
               chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (source head=$HEAD)"
           env:
-            - name: HL_RPC_URLS
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URLS } }
-            # Optional explicit epoch pin. Empty = resolve the source head as
-            # before. A deployment that changes its fork source sets this to the
-            # persisted /state/pin so the epoch (and the shadow registry) is kept.
-            - { name: ANVIL_FORK_PIN, value: "" }
+            - name: HL_RPC_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
           volumeMounts:
             - { name: state, mountPath: /state }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+          # The init is a short `wget`/shell loop. Without an explicit request, a
+          # limit (live: 24Gi) defaults the request to the same value and is the
+          # node-overcommit driver. Keep it tiny and bounded.
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {memory: 64Mi}
       containers:
         - name: anvil
           image: ghcr.io/foundry-rs/foundry:v1.8.6@sha256:4a16a86f41d30418fbdca47ce2868121bbb0aeaa0a34bde2dd1e2911c4be2464
@@ -92,15 +99,17 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              # The primary is the first entry of the one URL list.
-              HL_RPC_URL="${HL_RPC_URLS%%,*}"
+              # The fork source is the archive plane; the engine pool is separate.
+              : "${HL_RPC_URL:?HL_RPC_URL is required}"
               # An explicit pin keeps the epoch across a source change. Without
               # it, re-resolve on *every container start* (k8s restarts only the
               # container on OOM): a fresh base is an epoch, and the driver
               # reconciles it from the shadow registry (same base -> restore,
               # new base -> clear). `cast` is in the image.
-              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
-                PIN="$ANVIL_FORK_PIN"
+              FORK_PIN=$(sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' \
+                /etc/mirror/specialization.toml /etc/mirror/instance.toml 2>/dev/null | head -n1 | tr -d '_')
+              if [ -n "$FORK_PIN" ]; then
+                PIN="$FORK_PIN"
               else
                 PIN=$(cast block-number --rpc-url "$HL_RPC_URL" 2>/dev/null || echo 0)
                 if [ "${PIN:-0}" -gt 0 ]; then
@@ -153,14 +162,14 @@ spec:
                 --auto-impersonate \
                 --prune-history 10000 \
                 --transaction-block-keeper 10000 \
+                --state /state/anvil-state.json \
+                --state-interval 300 \
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info
           env:
-            - name: HL_RPC_URLS
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URLS } }
-            # Optional explicit epoch pin (see the init container's comment).
-            - { name: ANVIL_FORK_PIN, value: "" }
+            - name: HL_RPC_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }
@@ -168,6 +177,14 @@ spec:
             - { name: http, containerPort: 8545 }
           volumeMounts:
             - { name: state, mountPath: /state }
+            - { name: instance, mountPath: /etc/mirror, readOnly: true }
+          # The state file is loaded at startup and dumped on SIGTERM plus every
+          # 300 s. The 2026-11-10 restores (08:42, 10:38) were graceful pod
+          # replacements that re-forked at the pin and lost every block since it;
+          # the dump preserves the chain across a rollout. An OOM kill is still
+          # abrupt, so the limit is raised to 40 GiB and the periodic dump bounds
+          # the loss to one interval.
+          #
           # A restarted anvil forks before it can serve: gate readiness/liveness
           # behind a startup probe so k8s does not flap them during the fork.
           startupProbe:
@@ -190,10 +207,12 @@ spec:
             # retained every block/tx and grew without bound (fixed above to
             # 10k). Re-measure before changing either the keeper or the limit.
             requests: { cpu: "25m", memory: 768Mi }
-            limits: { memory: 16Gi }
+            limits: { memory: 40Gi }
       volumes:
         - name: state
           persistentVolumeClaim: { claimName: anvil-v-state }
+        - name: instance
+          configMap: { name: venue-instance }
 ---
 apiVersion: v1
 kind: Service
@@ -203,6 +222,6 @@ metadata:
 spec:
   selector: { app.kubernetes.io/name: anvil-v }
   ports:
-    # anvil serves WebSocket upgrades on the same port as HTTP (daloc's
+    # anvil serves WebSocket upgrades on the same port as HTTP (the consumer's
     # eth_subscribe rides ws://anvil-v:8545).
     - { name: http, port: 8545, targetPort: 8545 }

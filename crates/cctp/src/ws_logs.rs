@@ -340,74 +340,97 @@ impl WsLogs {
                     }
                 }
                 message = source.next() => match message {
-                    Some(Ok(message)) => match decode_frame(message) {
-                        Frame::Subscription(subscription) => {
-                            self.health.mark_connected();
-                            deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
-                            tracing::info!(
-                                chain = self.chain,
-                                url = %self.url,
-                                %subscription,
-                                "cctp websocket log subscription live"
-                            );
-                        }
-                        Frame::Log(log) => {
-                            delivered = true;
-                            self.health.mark_connected();
-                            self.health.record_event(now_ms());
-                            deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
-                            if self.tx.send(*log).await.is_err() {
-                                return SessionOutcome::ConsumerGone;
+                    Some(Ok(message)) => {
+                        deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
+                        match self.handle_frame(decode_frame(message), &mut delivered).await {
+                            FrameAction::Continue => {}
+                            FrameAction::ReplyPong(payload) => {
+                                if let Err(error) = sink.send(Message::Pong(payload.into())).await {
+                                    return SessionOutcome::Failed(WsError::Send(error));
+                                }
                             }
+                            FrameAction::Failed(error) => return SessionOutcome::Failed(error),
+                            FrameAction::ConsumerGone => return SessionOutcome::ConsumerGone,
                         }
-                        Frame::Ping(payload) => {
-                            deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
-                            if let Err(error) = sink.send(Message::Pong(payload.into())).await {
-                                return SessionOutcome::Failed(WsError::Send(error));
-                            }
-                        }
-                        Frame::Pong => {
-                            deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
-                        }
-                        Frame::RpcError(error) => {
-                            return SessionOutcome::Failed(WsError::Subscription(error));
-                        }
-                        Frame::Ignored => {
-                            deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
-                        }
-                        Frame::Malformed(error) => {
-                            tracing::debug!(
-                                chain = self.chain,
-                                url = %self.url,
-                                %error,
-                                "unparsable cctp websocket frame ignored"
-                            );
-                            deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
-                        }
-                    },
-                    Some(Err(error)) => {
-                        return if delivered {
-                            tracing::warn!(
-                                chain = self.chain,
-                                url = %self.url,
-                                %error,
-                                "cctp websocket read failed; reconnecting"
-                            );
-                            SessionOutcome::Served
-                        } else {
-                            SessionOutcome::Failed(WsError::Read(error))
-                        };
                     }
-                    None => {
-                        return if delivered {
-                            SessionOutcome::Served
-                        } else {
-                            SessionOutcome::Failed(WsError::ClosedBeforeData)
-                        };
-                    }
+                    Some(Err(error)) => return self.read_failed(delivered, error),
+                    None => return closed_outcome(delivered),
                 }
             }
         }
+    }
+
+    /// Fold one decoded frame into the lane's health/consumer state. The
+    /// pong reply is an action: the session's select loop owns the sink.
+    async fn handle_frame(&self, frame: Frame, delivered: &mut bool) -> FrameAction {
+        match frame {
+            Frame::Subscription(subscription) => {
+                self.health.mark_connected();
+                tracing::info!(
+                    chain = self.chain,
+                    url = %self.url,
+                    %subscription,
+                    "cctp websocket log subscription live"
+                );
+            }
+            Frame::Log(log) => {
+                *delivered = true;
+                self.health.mark_connected();
+                self.health.record_event(now_ms());
+                if self.tx.send(*log).await.is_err() {
+                    return FrameAction::ConsumerGone;
+                }
+            }
+            Frame::Ping(payload) => return FrameAction::ReplyPong(payload),
+            Frame::Pong | Frame::Ignored => {}
+            Frame::RpcError(error) => return FrameAction::Failed(WsError::Subscription(error)),
+            Frame::Malformed(error) => {
+                tracing::debug!(
+                    chain = self.chain,
+                    url = %self.url,
+                    %error,
+                    "unparsable cctp websocket frame ignored"
+                );
+            }
+        }
+        FrameAction::Continue
+    }
+
+    /// A read fault: after data the session was served (the drop is the
+    /// network's); before data it is a failed attempt.
+    fn read_failed(
+        &self,
+        delivered: bool,
+        error: tokio_tungstenite::tungstenite::Error,
+    ) -> SessionOutcome {
+        if delivered {
+            tracing::warn!(
+                chain = self.chain,
+                url = %self.url,
+                %error,
+                "cctp websocket read failed; reconnecting"
+            );
+            SessionOutcome::Served
+        } else {
+            SessionOutcome::Failed(WsError::Read(error))
+        }
+    }
+}
+
+/// What one decoded frame asks the session's select loop to do.
+enum FrameAction {
+    Continue,
+    ReplyPong(Vec<u8>),
+    Failed(WsError),
+    ConsumerGone,
+}
+
+/// A closed socket: served when it delivered data, a failed attempt otherwise.
+fn closed_outcome(delivered: bool) -> SessionOutcome {
+    if delivered {
+        SessionOutcome::Served
+    } else {
+        SessionOutcome::Failed(WsError::ClosedBeforeData)
     }
 }
 

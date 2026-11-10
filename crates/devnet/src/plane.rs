@@ -183,6 +183,14 @@ impl Plane {
         self.halted.load(Ordering::Relaxed)
     }
 
+    /// Whether the gap guard is holding the follow. This is a **different
+    /// latch** from the admin halt: the process is alive and still serves
+    /// reads/writes, but it is not composing source blocks, so a readiness
+    /// surface must not report it as ready.
+    pub fn is_gap_paused(&self) -> bool {
+        self.gap_paused.load(Ordering::Relaxed)
+    }
+
     /// `true` only on the edge into the gap pause (the record fires once per
     /// pause event, never once per pass).
     pub fn gap_pause_started(&self) -> bool {

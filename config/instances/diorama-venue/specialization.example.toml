@@ -1,10 +1,10 @@
-# DALOC project specialization — gitignored.
+# Project specialization — gitignored.
 #
 # The generic `instance.toml` carries deployment facts (identity,
 # profile, state paths, ports). This file carries the product's
 # endpoint groups, watch scope, fixture ownership, probes and
-# closures. `daloc.example.toml` is the tracked, complete template;
-# copy it to `daloc.toml` for a deployment.
+# closures. `specialization.example.toml` is the tracked, complete template;
+# copy it to `specialization.toml` for a deployment.
 
 [endpoints.anvil_v]
 http = ["${ANVIL_V_URL}"]
@@ -28,6 +28,11 @@ roles = ["market_ws"]
 [endpoints.engine_admin]
 http = ["${ENGINE_ADMIN_URL}"]
 
+# The explicit fork base. A configured pin preserves the deployment epoch
+# across restarts; omit it to resolve a fresh pin at start-up.
+[chains.venue]
+fork_pin = 50748852
+
 
 [services.engine]
 fixture_addresses = ["0xb88339CB7199b77E23DB6E890353E22632Ba630f", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", "0x6B175474E89094C44Da98b954EedeAC495271d0F", "0x5555555555555555555555555555555555555555", "0x94e8396e0869c9F2200760aF0621aFd240E1CF38"]
@@ -35,6 +40,10 @@ fixture_addresses = ["0xb88339CB7199b77E23DB6E890353E22632Ba630f", "0xC02aaA39b2
 [services.engine.verifier]
 probes = [
   { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
+  # Non-devnet-owned CCTP contracts: these give the venue mirror a real at-pin
+  # parity signal even while the USDC probe is skipped (devnet-owned).
+  { name = "cctp_message_transmitter_domain", to = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64", data = "0x8d3638f4" },
+  { name = "cctp_token_minter_messenger", to = "0xfd78EE919681417d192449715b2594ab58f5D002", data = "0x770fc1f0" },
 ]
 
 [services.engine.closures]
@@ -101,3 +110,12 @@ note = "wstHYPE: the staked gas token"
 [[watchlist]]
 address = "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
 note = "RedStone multi-feed adapter: the HYPE/wstHYPE price words (see the fixed closure above)"
+
+# Extra client-facing env values rendered by
+# `diorama-config export-env --section client`. The generated endpoint block
+# stays authoritative; these are additive and duplicate keys are refused.
+# Feed shapes are product data, not URLs:
+# VENUE_ACCOUNT_FEEDS = '[{"venue":"hyperliquid","accounts":["0x..."]}]'
+# VENUE_BOOK_FEEDS = '[{"venue":"hyperliquid","coins":["BTC","ETH"]}]'
+# VENUE_RATE_FEEDS = '[{"chain_id":1,"tokens":["0x..."]}]'
+[client.env]

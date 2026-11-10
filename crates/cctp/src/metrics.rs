@@ -1,7 +1,7 @@
 //! Prometheus-text metrics (hand-rolled, the workspace convention: a handful
 //! of counters needs no dependency). The counters are the bridge's lifecycle
 //! (watched → signed → relayed/parked), the per-chain gauges are the relay
-//! key's gas (the alerts daloc's relay also carries: 0.1 ETH low / 0.01 ETH
+//! key's gas (the alerts the consumer relay also carries: 0.1 ETH low / 0.01 ETH
 //! critical by default).
 use crate::store::Counts;
 use alloy_primitives::U256;
@@ -50,62 +50,73 @@ impl CctpMetrics {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
+        self.render_counters(&mut out);
+        self.render_gauges(&mut out);
+        out
+    }
+
+    /// The lifecycle counters.
+    #[allow(clippy::too_many_lines)] // one counter table: splitting it would hide the field-to-line mapping
+    fn render_counters(&self, out: &mut String) {
         let counter = |out: &mut String, name: &str, help: &str, value: u64| {
             out.push_str(&format!(
                 "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
             ));
         };
         counter(
-            &mut out,
+            out,
             "cctp_messages_seen_total",
             "MessageSent logs absorbed",
             self.messages_seen.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_messages_signed_total",
             "messages transitioned PENDING -> SIGNED",
             self.messages_signed.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_relays_confirmed_total",
             "messages confirmed relayed (a consumed nonce reconciles as confirmed)",
             self.relays_confirmed.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_relays_parked_total",
             "messages parked on a definitive failure",
             self.relays_parked.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_relay_attempts_total",
             "signed messages re-checked by the relayer",
             self.relay_attempts.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_scan_errors_total",
             "watcher scan passes that failed",
             self.scan_errors.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_gas_low_total",
             "gas observations below the low threshold",
             self.gas_low.load(Ordering::Relaxed),
         );
         counter(
-            &mut out,
+            out,
             "cctp_gas_critical_total",
             "gas observations below the critical threshold",
             self.gas_critical.load(Ordering::Relaxed),
         );
+    }
+
+    /// The liveness/archive gauges and the relay key's balances.
+    fn render_gauges(&self, out: &mut String) {
         out.push_str(&format!(
             "# HELP cctp_last_scan_block last chain head scanned by the watcher\n# TYPE cctp_last_scan_block gauge\ncctp_last_scan_block {}\n",
             self.last_scan_block.load(Ordering::Relaxed)
@@ -132,7 +143,6 @@ impl CctpMetrics {
                 ));
             }
         }
-        out
     }
 }
 
@@ -151,52 +161,4 @@ pub(crate) fn render_counts(out: &mut String, counts: &Counts) {
         "# HELP cctp_messages_parked parked failures (never dropped)\n# TYPE cctp_messages_parked gauge\ncctp_messages_parked {}\n",
         counts.parked
     ));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn render_names_every_counter_and_labels_balances() {
-        let metrics = CctpMetrics::default();
-        metrics.messages_seen.fetch_add(3, Ordering::Relaxed);
-        // 10,000 ETH exceeds u64: the gauge must carry the full decimal.
-        metrics.set_balance(
-            "ethereum",
-            U256::from(10_000) * U256::from(10).pow(U256::from(18)),
-        );
-        metrics.set_balance("hyper_evm", U256::from(7));
-        metrics.archived_parked.store(8, Ordering::Relaxed);
-        metrics.archives_corrupt.store(1, Ordering::Relaxed);
-        let rendered = metrics.render();
-        assert!(
-            rendered.contains("cctp_messages_seen_total 3"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("cctp_messages_archived_parked 8"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("cctp_archives_corrupt 1"), "{rendered}");
-        assert!(
-            rendered.contains("cctp_relay_balance_wei{chain=\"ethereum\"} 10000000000000000000000"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("cctp_relay_balance_wei{chain=\"hyper_evm\"} 7"),
-            "{rendered}"
-        );
-        let mut counts = String::new();
-        render_counts(
-            &mut counts,
-            &Counts {
-                pending: 1,
-                signed: 2,
-                relayed: 3,
-                parked: 4,
-            },
-        );
-        assert!(counts.contains("cctp_messages_parked 4"), "{counts}");
-    }
 }

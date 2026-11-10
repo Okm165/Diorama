@@ -3,7 +3,7 @@
 //!
 //! The internal truth is the *inputs* — the perp wallet's raw USDC balance,
 //! positions with entry prices, spot balances — and every served figure is
-//! computed from them against the live marks, so the identity daloc gates on
+//! computed from them against the live marks, so the identity the consumer gates on
 //! (`accountValue == totalRawUsd + Σ signed(positionValue)`) holds by
 //! construction:
 //!
@@ -33,7 +33,7 @@ pub(crate) const ISOLATED_MARGIN: &str = "isolated margin";
 pub(crate) const COST_BASIS: &str = "cost basis";
 pub(crate) const FILL_NOTIONAL: &str = "fill notional";
 
-/// One recorded API wallet (the agent identity daloc's cosigner registers).
+/// One recorded API wallet (the agent identity the consumer's cosigner registers).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct AgentWallet {
     pub wallet: Address,
@@ -74,7 +74,7 @@ pub(crate) struct Account {
     pub leverage_settings: BTreeMap<String, LeverageSetting>,
     /// The control fixture: the merged `/control/state` patch, when the
     /// harness has set one. The control surface serves it (what the scenario
-    /// set is what it reads back — daloc's `resolved_equity` assertions);
+    /// set is what it reads back — the consumer's `resolved_equity` assertions);
     /// `/info` never reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<AccountSeed>,
@@ -489,7 +489,7 @@ pub(crate) fn view(
     let mut rows = Vec::with_capacity(account.positions.len());
     let mut by_coin = BTreeMap::new();
     for (coin, p) in &account.positions {
-        // Flat rows are dropped from the served state (daloc's gate): a
+        // Flat rows are dropped from the served state (the consumer's gate): a
         // zero-size position is a closed one, not a row.
         if p.szi.is_zero() {
             continue;
@@ -602,12 +602,12 @@ pub(crate) fn refuse_unmodeled_mode(mode: UserAbstraction) -> Result<()> {
     Ok(())
 }
 
-/// USDC: the venue's collateral token for the default dex (daloc's client
+/// USDC: the venue's collateral token for the default dex (the consumer
 /// default, `collateral_token = 0`).
 pub(crate) const COLLATERAL_TOKEN: u32 = 0;
 
 /// The unified account's `tokenToAvailableAfterMaintenance`: the collateral
-/// token's balance minus the perp maintenance — the identity daloc's client
+/// token's balance minus the perp maintenance — the identity the consumer
 /// reconciles (`available + maintenance == the token's balance`, its hard
 /// gate, measured live against the venue). Standard accounts serve none: their
 /// spot side is not read for equity.
@@ -1198,7 +1198,7 @@ mod tests {
     use super::*;
     use crate::sim::{feed_with, meta_with, meta_with_table};
 
-    /// The unified account's `tokenToAvailableAfterMaintenance` closes daloc's
+    /// The unified account's `tokenToAvailableAfterMaintenance` closes the consumer's
     /// reconciliation identity: `available + maintenance == the collateral
     /// balance` (their hard gate). A standard account serves none.
     /// The unified account's spot collateral is part of the raw balance (the
@@ -1390,7 +1390,7 @@ mod tests {
     }
 
     /// A zero-size position is a closed one: the served state drops the row
-    /// (daloc's flat-rows-dropped gate), while the internal map may keep it
+    /// (the consumer's flat-rows-dropped gate), while the internal map may keep it
     /// until a mutation clears it.
     #[test]
     fn flat_rows_are_dropped_from_the_served_state() {

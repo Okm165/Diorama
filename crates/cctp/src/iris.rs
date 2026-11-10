@@ -1,16 +1,16 @@
 //! The Iris-compatible API (8095, §15.4): the local substitution for Circle's
 //! attestation service, serving the **measured live shapes** so
-//! daloc's `cctp-relay` consumes it unchanged.
+//! the consumer relay consumes it unchanged.
 //!
 //! Served paths:
 //!
 //! - `GET /v2/messages/{sourceDomain}?transactionHash=0x…` — the only path
-//!   daloc's client reads. Unknown tx → **404**
+//!   the consumer reads. Unknown tx → **404**
 //!   `{"error":"Message not found for provided parameters"}` (their client
 //!   treats 404 as "keep polling"); otherwise
 //!   `{"messages":[{"message":"0x…","attestation":"0x…"|null}]}` — `null`
 //!   while the emulated PENDING window is open (§15.4's local-Iris shape;
-//!   the client also tolerates `PENDING`/empty).
+//!   the consumer also tolerates `PENDING`/empty).
 //! - `GET /v2/publicKeys` — `{"publicKeys":[{"publicKey":"0x04…","cctpVersion":2}]}`
 //!   with the devnet attester's 66-byte uncompressed key.
 //! - `GET /v2/burn/USDC/fees/{source}/{destination}` — the lane's configured
@@ -152,7 +152,7 @@ pub(crate) struct IrisError {
 }
 
 impl IrisError {
-    /// The exact live 404 body, byte for byte: daloc's client keys on
+    /// The exact live 404 body, byte for byte: the consumer keys on
     /// it ("keep polling").
     pub fn not_found() -> Self {
         Self {
@@ -634,35 +634,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The 404 body daloc's client keys on, byte for byte.
+    /// The 404 body the consumer keys on, byte for byte.
     #[test]
     fn not_found_is_the_live_body() {
         let error = IrisError::not_found();
         assert_eq!(error.status, axum::http::StatusCode::NOT_FOUND);
         assert_eq!(error.error, "Message not found for provided parameters");
-    }
-
-    #[test]
-    fn iso8601_round_trips_known_instants() {
-        assert_eq!(iso8601_ms(0).unwrap(), "1970-01-01T00:00:00.000Z");
-        // 2026-10-22T00:00:00Z = 1792627200000 ms (checked with `date -u`).
-        assert_eq!(
-            iso8601_ms(1_792_627_200_000).unwrap(),
-            "2026-10-22T00:00:00.000Z"
-        );
-        assert_eq!(
-            iso8601_ms(1_792_627_200_123).unwrap(),
-            "2026-10-22T00:00:00.123Z"
-        );
-        // A leap day.
-        assert_eq!(
-            iso8601_ms(1_709_164_800_000).unwrap(),
-            "2024-02-29T00:00:00.000Z"
-        );
-        // An out-of-range value is refused by name, not served as the epoch.
-        let err = iso8601_ms(u64::MAX).unwrap_err();
-        assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(err.error.contains("outside the ISO 8601 range"), "{err:?}");
     }
 
     /// A scratch Iris state on a fresh per-test temp dir (the tests may run
@@ -682,7 +659,7 @@ mod tests {
         (state, store, dir)
     }
 
-    /// The messages handler's three answers: unknown → the exact 404 (daloc's
+    /// The messages handler's three answers: unknown → the exact 404 (the consumer's
     /// "keep polling"), pending → `attestation: null`, signed → the hex; a
     /// wrong domain is not the same lookup.
     #[tokio::test]

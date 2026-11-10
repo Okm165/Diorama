@@ -38,7 +38,7 @@ pub struct Shadow {
     #[serde(default)]
     pub(crate) account_values: BTreeMap<Address, AccountValues>,
     /// Whole-account ownership for the devnet's fixtures: the
-    /// canonical addresses daloc's deploy replaces via `anvil_setCode` write
+    /// canonical addresses the deployment replaces via `anvil_setCode` write
     /// through *cheatcodes*, which the tx scanner cannot see — without this,
     /// the next parent diff would clobber the mock. Config carries the list;
     /// it is runtime state, never persisted.

@@ -1,6 +1,6 @@
 # venue-sim - the simulator: the live market plane (REST snapshots + WS pushes
 # from the venue's public API) and the COW account plane, served as the
-# daloc-facing info API (8090, the `hl_mock`-compatible surface) beside the
+# client-facing info API (8090, the `hl_mock`-compatible surface) beside the
 # control API (8091: deal/advance/crash/set_account/reset/epoch_new).
 #
 # State (sim.json + feed.json) lives on the venue-sim-state PVC: a restart
@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: venue-sim
-          image: localhost/diorama-venue-sim:v19
+          image: localhost/diorama-venue-sim:mirrorfix-20261108
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The same `envFrom` mechanism as the engines: the ConfigMap carries

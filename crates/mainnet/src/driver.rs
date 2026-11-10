@@ -106,7 +106,7 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
             tracing::error!(
                 gap,
                 start = ?start_kind,
-                "sync gap too large - paused; run the re-pin drill (make repin)"
+                "sync gap too large - paused; if anvil-t has ANVIL_FORK_PIN set, patch/unset it first, then run make mainnet-repin"
             );
         }
         return Ok(Next::Idle);
@@ -307,6 +307,8 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
                 if let Err(e) = step(&ctx, n).await {
                     tracing::error!(block = n, error = %e, "diff apply failed (will retry)");
                     tokio::time::sleep(poll).await;
+                } else {
+                    wake_feed_if_near_head(&ctx, n);
                 }
             }
             Ok(Next::Idle) => tokio::time::sleep(poll).await,
@@ -315,6 +317,20 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
                 tokio::time::sleep(poll).await;
             }
         }
+    }
+}
+
+/// The source block landed on T: its feeds can have moved, and the bridge must
+/// read them now rather than on a timer. During catch-up (the cursor far behind
+/// the source head) waking per block would turn a 100k-block replay into 900k
+/// source reads; the bridge's interval remains the net there.
+fn wake_feed_if_near_head(ctx: &Ctx, applied: u64) {
+    let source_head = ctx
+        .mainnet_metrics
+        .reth_head
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if applied.saturating_add(2) >= source_head {
+        ctx.feed_wake.notify_one();
     }
 }
 

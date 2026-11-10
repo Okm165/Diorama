@@ -21,9 +21,11 @@
 //! is logged here — both engines report the same event in the same words; the
 //! counters stay the profile's (T counts resets *found*, V epoch transitions).
 use crate::error::Result;
+use crate::metrics::Registry as _;
 use crate::plane::Plane;
 use crate::shadow;
 use diorama_anvil::Rpc;
+use std::sync::atomic::Ordering;
 
 /// What the epoch rule did, for the caller's metrics.
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +86,25 @@ pub async fn reconcile(
     pin: Option<u64>,
 ) -> Result<Epoch> {
     let known = plane.state.epoch_pin()?;
+    // **A downward base move is a rollback, not a new epoch.** The registry and
+    // journal are the only record of the writes made above the old base; the
+    // automatic path must never clear them because an anvil restarted at a
+    // lower pin (measured: an OOM restart re-forked 50,131 blocks below the
+    // live base and the old rule cleared 676 slots / 141 accounts). Keep the
+    // state, halt the driver, and make the operator choose an explicit recovery
+    // (forward re-pin or state reset).
+    if let (Some(known), Some(pin)) = (known, pin) {
+        if pin < known {
+            plane.halted.store(true, Ordering::SeqCst);
+            plane.metrics.set(&plane.metrics.halted, 1);
+            tracing::error!(
+                known,
+                pin,
+                "epoch rollback refused: the fork base moved DOWN; keeping the shadow registry and journal and halting the driver for operator review"
+            );
+            return Err(crate::Error::EpochRollbackRefused { known, pin });
+        }
+    }
     let epoch = if known != pin {
         clear_for_new_pin(plane, known, pin)?
     } else if pin.is_some() && plane.shadow.lock()?.has_recorded() {
@@ -270,6 +291,37 @@ mod tests {
             reconcile(&moved, &rpc, 8, Some(100)).await.unwrap(),
             Epoch::Steady
         ));
+
+        // 4b. A **downward** pin is a rollback, never a new epoch: the registry
+        //     is kept, the epoch pin is not re-anchored, and the driver halts.
+        let rollback = test_plane("rollback");
+        rollback.state.set_epoch_pin(Some(100)).unwrap();
+        rollback
+            .shadow
+            .lock()
+            .unwrap()
+            .mark(&storage_write(addr, slot, U256::from(7)));
+        let refused = reconcile(&rollback, &rpc, 8, Some(50)).await;
+        assert!(matches!(
+            refused,
+            Err(crate::Error::EpochRollbackRefused {
+                known: 100,
+                pin: 50
+            })
+        ));
+        assert!(
+            rollback.shadow.lock().unwrap().has_recorded(),
+            "a rollback must keep the shadow registry"
+        );
+        assert_eq!(
+            rollback.state.epoch_pin().unwrap(),
+            Some(100),
+            "a rollback must not re-anchor the epoch pin to the lower base"
+        );
+        assert!(
+            rollback.is_halted(),
+            "a rollback must halt the driver for operator review"
+        );
 
         // 5. The journal is dropped on every reconcile (its before-values
         //    belong to the old chain).

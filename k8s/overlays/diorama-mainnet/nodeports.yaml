@@ -1,14 +1,17 @@
-# NodePort exposure for the client harness: the harness
-# runs on the test host, outside the cluster, so the mirror's RPC/WS/admin must
-# be reachable from there. The cluster-internal Services stay ClusterIP; these
-# are additive NodePort twins of anvil-t and engine.
+# Host access for the consumer harness. The harness runs on the test host,
+# outside the cluster, so the mirror's RPC/WS/admin must be reachable there.
 #
-# NodePort convention (one range per mirror, so both fit on one node):
-#   diorama-mainnet  30xxx  - 30545 anvil-t (HTTP+WS), 30880 engine
-#   diorama-venue    31xxx  - 31545 anvil-v, 31090/31091 venue-sim,
-#                            31095/31096 cctp-bridge, 31880 engine
-#                             (see overlays/diorama-venue/nodeports.yaml)
-# Each port keeps the service port's last three digits (8545 -> 30545).
+# These are **ClusterIP** twins, not NodePorts: a NodePort binds every host
+# interface and exposes the Anvil cheatcode set (`anvil_setBalance`,
+# `anvil_setCode`, `eth_sendTransaction` from unlocked accounts) to the LAN.
+# The host reaches these services through a loopback-only port-forward:
+#
+#   kubectl -n diorama-mainnet port-forward --address 127.0.0.1 \
+#     svc/anvil-t 30545:8545
+#   kubectl -n diorama-mainnet port-forward --address 127.0.0.1 \
+#     svc/engine 30880:8080
+#
+# The env below keeps the loopback ports, so the harness is unchanged.
 ---
 apiVersion: v1
 kind: Service
@@ -16,12 +19,12 @@ metadata:
   name: anvil-t-nodeport
   labels: { app.kubernetes.io/name: anvil-t, app.kubernetes.io/part-of: diorama-mainnet }
 spec:
-  type: NodePort
+  type: ClusterIP
   selector: { app.kubernetes.io/name: anvil-t }
   ports:
-    # daloc's CHAIN_RPC_URL / CHAIN_WS_URL for chain 1 point here; anvil
+    # the consumer's CHAIN_1_RPC_URL / CHAIN_1_WS_URL point here; anvil
     # serves WebSocket upgrades on the same port.
-    - { name: http, port: 8545, targetPort: 8545, nodePort: 30545 }
+    - { name: http, port: 8545, targetPort: 8545 }
 ---
 apiVersion: v1
 kind: Service
@@ -29,12 +32,12 @@ metadata:
   name: engine-nodeport
   labels: { app.kubernetes.io/name: engine, app.kubernetes.io/part-of: diorama-mainnet }
 spec:
-  type: NodePort
+  type: ClusterIP
   selector: { app.kubernetes.io/name: engine }
   ports:
     # /status, /metrics, /admin/* (deal, shadow, epoch, time, rewind) - the
-    # harness's reset/deal levers.
-    - { name: http, port: 8080, targetPort: 8080, nodePort: 30880 }
+    # harness's reset/deal levers. Loopback port-forward only; never a NodePort.
+    - { name: http, port: 8080, targetPort: 8080 }
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -43,12 +46,13 @@ metadata:
   labels:
     app.kubernetes.io/part-of: diorama-mainnet
 data:
-  # The values the daloc harness sources (their external-mode env).
+  # The values the consumer harness sources (their external-mode env).
   # The single-node k3s node *is* the test host; a remote harness overrides
   # the host and keeps the ports. This is the *first* chain's block; the
   # venue's (the second chain) lives in overlays/diorama-venue/nodeports.yaml
   # with the `CHAIN_1_` prefix — source both for the complete env.
   test-endpoints.env: |
-    CHAIN_RPC_URL=http://localhost:30545
-    CHAIN_WS_URL=ws://localhost:30545
+    CHAIN_1_CHAIN_ID=1
+    CHAIN_1_RPC_URL=http://localhost:30545
+    CHAIN_1_WS_URL=ws://localhost:30545
     DIORAMA_ADMIN_URL=http://localhost:30880

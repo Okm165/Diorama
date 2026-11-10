@@ -1,7 +1,7 @@
 //! The watcher: both chains' `MessageSent` events → the persisted attestation
 //! store.
 //!
-//! **Two lanes, two watermarks** (the DALOC `log_scanner` contract):
+//! **Two lanes, two watermarks** (the consumer `log_scanner` contract):
 //!
 //! - **WSS is primary.** `eth_subscribe("logs")` delivers a burn sub-second
 //!   after inclusion; [`crate::ws_logs`] decodes it into the same
@@ -338,7 +338,7 @@ impl Watcher {
             .from_block(from)
             .to_block(to);
         // The watcher's configured chunk may be wider than the endpoint's
-        // declared cap (the public HyperEVM source is 900); the client splits
+        // declared cap (the public HyperEVM source is 900); the consumer splits
         // it again rather than forwarding an over-cap range.
         Ok(self.chain.rpc.logs_range(&filter, from, to).await?)
     }
@@ -727,7 +727,7 @@ impl HealthStatus {
 }
 
 /// How many reconciliation intervals may pass without a successful HTTP pass
-/// before the HTTP arm counts as stale (the DALOC scanner's five-interval
+/// before the HTTP arm counts as stale (the consumer scanner's five-interval
 /// grace).
 const STALE_SCAN_INTERVALS: u64 = 5;
 

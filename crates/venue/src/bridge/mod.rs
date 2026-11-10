@@ -213,7 +213,14 @@ impl Bridge {
     async fn apply_credits(&self, n: u64, tokens: &[TokenInfo]) -> Result<()> {
         let receipts = self.anvil_v.receipts(n).await?;
         for receipt in &receipts {
-            for log in receipt.logs() {
+            // The logs decoded once, with their emitters, so a helper-hop
+            // credit can look back at the same transaction's funding leg.
+            let logs: Vec<(Address, &alloy_primitives::LogData)> = receipt
+                .logs()
+                .iter()
+                .map(|log| (log.address(), log.data()))
+                .collect();
+            for (index, log) in receipt.logs().iter().enumerate() {
                 // HYPE's boundary is the system contract's `Received` event
                 // (docs): a tx value sent to `0x2222…2` credits Core HYPE.
                 if log.address() == system::HYPE_SYSTEM {
@@ -223,7 +230,8 @@ impl Bridge {
                 let Some(transfer) = system::transfer_of(log.data()) else {
                     continue;
                 };
-                self.apply_credit(&transfer, log.address(), tokens).await?;
+                self.apply_credit(&transfer, log.address(), &logs[..index], tokens)
+                    .await?;
             }
         }
         Ok(())
@@ -261,32 +269,37 @@ impl Bridge {
     }
 
     // TRUST: value in = value recorded (token-admission-policy). The guards:
-    // only a Transfer log from the token's linked EVM contract counts, and the
-    // Core amount is the log's exact value converted by the pinned decimals.
-    /// EVM→Core credit from one transfer log (the emitting contract must be
-    /// the token's linked EVM contract).
+    // a Transfer log from the token's linked EVM contract credits its sender;
+    // an entry point's own self-transfer is credited to the same-transaction
+    // funding depositor; the Core amount is the log's exact value converted by
+    // the pinned decimals.
+    /// EVM→Core credit from one transfer log (the linked token's own transfer,
+    /// or an entry-point self-transfer with a same-transaction funding leg).
     async fn apply_credit(
         &self,
         transfer: &Transfer,
         emitter: Address,
+        prior: &[(Address, &alloy_primitives::LogData)],
         tokens: &[TokenInfo],
     ) -> Result<()> {
-        // A spot-token contract transferring **from itself** is the bridge's
-        // internal hop, not the depositor. `credit_of` refuses it; name the gap
-        // here because the refusal is otherwise silent and the deposit has no
-        // Core account. The measured 2026-10-31 USDC deposit credited the token
-        // contract itself; resolving the original depositor from the tx is the
-        // remaining piece (see `credit_of`'s self-transfer guard).
-        if transfer.from == emitter {
-            tracing::warn!(
-                from = %transfer.from,
-                to = %transfer.to,
-                value = %transfer.value,
-                "bridge: EVM→Core transfer originates at the linked token contract itself — refusing to credit the contract; the depositor is not resolvable from this log"
-            );
-            return Ok(());
-        }
-        let Some(credit) = system::credit_of(transfer, tokens, emitter) else {
+        // The linked token's own log is the ordinary deposit. When a bridge
+        // helper moves the tokens on, the helper's self-transfer is resolved
+        // back to the depositor that funded it earlier in the same
+        // transaction. Both rules refuse a self-transfer that no funding leg
+        // backs; the linked token's own self-transfer is never credited (the
+        // measured 2026-10-31 USDC deposit credited the token contract
+        // itself).
+        let credit = system::credit_of(transfer, tokens, emitter)
+            .or_else(|| system::hop_credit_of(transfer, prior, tokens, emitter));
+        let Some(credit) = credit else {
+            if transfer.from == emitter {
+                tracing::warn!(
+                    from = %transfer.from,
+                    to = %transfer.to,
+                    value = %transfer.value,
+                    "bridge: EVM→Core transfer originates at its emitter, and no earlier same-transaction transfer into the emitter funds it — refusing to credit"
+                );
+            }
             return Ok(());
         };
         self.sim.credit_spot(
@@ -636,42 +649,8 @@ impl Bridge {
             return Ok(());
         };
         if destination == system::system_address(u64::from(info.index)) {
-            // Core→EVM: the venue's transfer rule bounds the move by the
-            // account's **spot available after maintenance**, not by the spot
-            // balance and not by the perp class's `withdrawable`. A control-
-            // patched or insolvent account can still hold spot cash while its
-            // equity is below the transfer floor; 4a withdrew 0.55 with
-            // `withdrawable=0` one block before its deficit deposit. But a
-            // unified account's spot principal is a **separate ledger** from the
-            // perp wallet (the live `cf16` recovery: 240.510247 spot against
-            // 0.000000455 perp), so the perp figure is the wrong bound for a
-            // spot→EVM bridge — it refused the whole recovery leg. The
-            // collateral token is bounded by `tokenToAvailableAfterMaintenance`;
-            // other spot tokens are holdings, bounded by the balance alone.
-            if info.index == crate::sim::account::COLLATERAL_TOKEN {
-                let Some(account) = self.sim.account(caller)? else {
-                    self.metrics.inc_refusals();
-                    tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
-                    return Ok(());
-                };
-                let meta = self.feed.meta();
-                if let Some(bound) = crate::sim::account::spot_bridge_bound(
-                    &account,
-                    &self.feed,
-                    meta.as_ref(),
-                    info.index,
-                )? {
-                    if amount > bound {
-                        self.metrics.inc_refusals();
-                        tracing::warn!(
-                            account = %caller,
-                            amount = %amount,
-                            available = %bound,
-                            "bridge: Core→EVM refused (amount exceeds spot available after maintenance)"
-                        );
-                        return Ok(());
-                    }
-                }
+            if !self.core_to_evm_allowed(caller, info, amount)? {
+                return Ok(());
             }
             // Core→EVM: debit the caller, then complete on the EVM side.
             let Some(_after) = self.sim.try_debit_spot(caller, info.index, amount)? else {
@@ -696,6 +675,49 @@ impl Bridge {
             }
         }
         Ok(())
+    }
+
+    /// The Core→EVM transfer bound: the venue's rule bounds the move by the
+    /// account's **spot available after maintenance**, not by the spot balance
+    /// and not by the perp class's `withdrawable`. A control-patched or
+    /// insolvent account can still hold spot cash while its equity is below
+    /// the transfer floor; 4a withdrew 0.55 with `withdrawable=0` one block
+    /// before its deficit deposit. But a unified account's spot principal is a
+    /// **separate ledger** from the perp wallet (the live `cf16` recovery:
+    /// 240.510247 spot against 0.000000455 perp), so the perp figure is the
+    /// wrong bound for a spot→EVM bridge — it refused the whole recovery leg.
+    /// The collateral token is bounded by `tokenToAvailableAfterMaintenance`;
+    /// other spot tokens are holdings, bounded by the balance alone.
+    fn core_to_evm_allowed(
+        &self,
+        caller: Address,
+        info: &TokenInfo,
+        amount: Decimal,
+    ) -> Result<bool> {
+        if info.index != crate::sim::account::COLLATERAL_TOKEN {
+            return Ok(true);
+        }
+        let Some(account) = self.sim.account(caller)? else {
+            self.metrics.inc_refusals();
+            tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
+            return Ok(false);
+        };
+        let meta = self.feed.meta();
+        if let Some(bound) =
+            crate::sim::account::spot_bridge_bound(&account, &self.feed, meta.as_ref(), info.index)?
+        {
+            if amount > bound {
+                self.metrics.inc_refusals();
+                tracing::warn!(
+                    account = %caller,
+                    amount = %amount,
+                    available = %bound,
+                    "bridge: Core→EVM refused (amount exceeds spot available after maintenance)"
+                );
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The completion tx: `transfer(caller, amount)` on the linked ERC20 from

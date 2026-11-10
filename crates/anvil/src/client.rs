@@ -69,13 +69,19 @@ pub fn call(method: &'static str, params: impl Serialize) -> Result<Call> {
     Ok(Request::new(method, Id::None, params))
 }
 
-/// The batch's sub-chunk concurrency: one request in flight. The batching's
+/// The batch's sub-chunk concurrency: four bodies in flight. The batching's
 /// win is the request *count* (a wide window is a handful of bodies, not one
-/// per block), and the public HyperEVM RPC's burst limiter refused concurrent
-/// bodies while one-at-a-time traffic — the pre-batching era's own pattern —
-/// passed (measured live). Sequential sub-batches keep the follow inside that
-/// proven-safe shape.
-const BATCH_CONCURRENCY: usize = 1;
+/// per block), and the follow's 900-block window is dominated by the
+/// system-tx read (45 twenty-item bodies at the public endpoint's item cap).
+/// Sequential sub-batches made that window 35-65 s (measured live 2026-11-10),
+/// which is slower than the source's own cadence and is what kept the replay
+/// latch closed. Four concurrent bodies answer in the same per-body latency as
+/// one (measured against all three configured endpoints: 2, 4 and 8 concurrent
+/// bodies each completed in ~0.3-0.9 s), so the window's wall time falls by
+/// roughly the concurrency. The pool still owns throttling: a body the endpoint
+/// rate-limits cools that endpoint and is retried on another, so a burst cannot
+/// silently exceed the measured budget.
+const BATCH_CONCURRENCY: usize = 4;
 
 /// Whether a block read carries its transactions' bodies: the RPC's own
 /// `full` flag, named (a bare `true` at a call site says nothing).
@@ -140,6 +146,12 @@ fn is_retryable(text: &str) -> bool {
                 && !message
                     .to_ascii_lowercase()
                     .contains("invalid block height"))
+            // The public HyperEVM RPC's transient server-side execution
+            // timeout (`-32000 execution aborted (timeout = 5s)`). It is an
+            // endpoint fault: another endpoint may answer, and the composer
+            // narrows the range. A deterministic `-32000` (a revert) is not
+            // matched.
+            || (code == -32000 && message.to_ascii_lowercase().contains("timeout"))
     };
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
@@ -2105,6 +2117,42 @@ mod tests {
         assert!(!is_retryable(
             r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"invalid block height: 50047695"}}]"#
         ));
+    }
+
+    /// The public HyperEVM RPC's `-32000 execution aborted (timeout = 5s)`
+    /// is a transient endpoint fault: the pool must fail over instead of
+    /// surfacing the same endpoint's timeout on every pass. A deterministic
+    /// `-32000` remains the node's answer.
+    #[test]
+    fn an_execution_timeout_is_a_retryable_fault() {
+        assert!(is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution aborted (timeout = 5s)"}}"#
+        ));
+        assert!(is_retryable(
+            r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"request timeout"}}]"#
+        ));
+        assert!(!is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}"#
+        ));
+    }
+
+    /// A pool fails over past the transient execution timeout to the live
+    /// endpoint, so a loaded public RPC does not stall the follow.
+    #[tokio::test]
+    async fn a_pool_fails_over_past_an_execution_timeout() {
+        let (timed_out, first) = serve_once(
+            r#"{"id":1,"jsonrpc":"2.0","error":{"code":-32000,"message":"execution aborted (timeout = 5s)"}}"#,
+        );
+        let (live, second) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2a"}"#);
+        let pool =
+            Rpc::with_urls(&[timed_out, live], Duration::from_secs(2)).expect("a valid pool");
+        let value: U64 = pool
+            .call("eth_getLogs", NO_PARAMS)
+            .await
+            .expect("the live endpoint answers");
+        assert_eq!(value.to::<u64>(), 42);
+        first.join().expect("the timed-out server exits");
+        second.join().expect("the live server exits");
     }
 
     /// A batch body answering a single call is corrupt, not a transport fault.

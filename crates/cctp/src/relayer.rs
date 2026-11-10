@@ -14,7 +14,7 @@
 //! - **Parked, never dropped**: a mined revert (or repeated node-side send
 //!   refusals) parks the record with the reason; `/health` and `/metrics` keep
 //!   it visible for an operator. Transport faults never park — they retry.
-//! - **Gas alerts** (daloc's defaults: 0.1 ETH low / 0.01 ETH critical):
+//! - **Gas alerts** (the deployment defaults: 0.1 ETH low / 0.01 ETH critical):
 //!   per-chain balance logs + gauges (the bin's boot top-up is the devnet
 //!   funding step; the alerts guard later drops).
 use crate::chains::{by_domain, Chain};
@@ -24,7 +24,7 @@ use crate::store::{MessageRecord, RelayState, Store};
 use crate::transfer::{
     receipt, receive_message_calldata, wait_for_receipt, IMessageTransmitterV2, Message, TxSender,
 };
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::TransactionReceipt;
 use diorama_config::RelayerMode;
 use std::sync::atomic::Ordering;
@@ -44,7 +44,7 @@ pub struct Relayer {
     /// [`Relayer::relay_now`] (the control trigger) relays — expiry and
     /// reattestation tests then decide the exact block a message lands.
     pub mode: RelayerMode,
-    /// Gas-alert thresholds (daloc's defaults, wei).
+    /// Gas-alert thresholds (the deployment defaults, wei).
     pub balance_low: U256,
     pub balance_critical: U256,
     /// How long one tick waits for a submitted tx's receipt before leaving it
@@ -288,6 +288,17 @@ impl Relayer {
     /// (refused/parked — the store keeps it for a later pass).
     async fn relay(&self, record: &MessageRecord) -> Result<Relayed> {
         let chain = by_domain(&self.chains, record.destination_domain)?;
+        // **The destination nonce is the authority on whether the mint
+        // landed.** Check it before the source burn, the hook wrapper, or the
+        // caller: a prior epoch or re-pin can remove the source burn while the
+        // destination mint is already on-chain. Parking that record makes a
+        // delivered transfer look stuck forever (the live 16-burn class). A
+        // consumed nonce is the chain's own statement; reconcile it.
+        if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
+            self.mark_relayed(record.nonce, None)?;
+            tracing::info!(nonce = %record.nonce, chain = chain.name, "cctp nonce already consumed on-chain; reconciled as relayed");
+            return Ok(Relayed::Yes);
+        }
         let decoded = record.decoded()?;
         let (target, consumer) = self.consumer(chain, record, &decoded)?;
         if caller_mismatch(decoded.header.destination_caller, consumer) {
@@ -322,11 +333,6 @@ impl Relayer {
                 record.nonce,
                 "the source burn no longer exists (a re-pin or rewind); re-run the transfer".into(),
             );
-        }
-        if self.used_nonce(chain, record.nonce).await? != U256::ZERO {
-            self.mark_relayed(record.nonce, None)?;
-            tracing::info!(nonce = %record.nonce, chain = chain.name, "cctp nonce already consumed on-chain; reconciled as relayed");
-            return Ok(Relayed::Yes);
         }
         match self.resume_in_flight(chain, record).await? {
             Resume::ReSend => {}
@@ -408,41 +414,12 @@ impl Relayer {
                 record.nonce
             ))
         })?;
-        let calldata = if decoded.body.hook_data.is_empty() {
-            receive_message_calldata(&record.message, &attestation)
-        } else {
-            // **A hook failure must not consume the nonce.** The wrapper mints first and
-            // calls the hook second; a revert in the hook leaves the USDC in the wrapper
-            // with no owner while `usedNonces` says the burn is spent. Simulate the whole
-            // call first: only a message whose mint and hook both succeed is submitted.
-            // A deterministic hook failure parks the record (the burn is still unspent,
-            // so an operator can fix the hook and `/v2/reattest`); a transport failure
-            // retries without parking.
-            match crate::hook::simulate_relay(&chain.rpc, target, &record.message, &attestation)
-                .await
-            {
-                Ok((true, true, _)) => {}
-                Ok((relay_success, hook_success, data)) => {
-                    self.park(
-                        record.nonce,
-                        format!(
-                            "hook preflight refused: relaySuccess={relay_success}, hookSuccess={hook_success}, returnData=0x{} — the nonce was not consumed",
-                            alloy_primitives::hex::encode(&data)
-                        ),
-                    )?;
-                    return Ok(Relayed::No);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        nonce = %record.nonce,
-                        chain = chain.name,
-                        %error,
-                        "hook preflight failed — keeping the message for a later pass"
-                    );
-                    return Ok(Relayed::No);
-                }
-            }
-            crate::hook::relay_calldata(&record.message, &attestation)
+        let has_hook = !decoded.body.hook_data.is_empty();
+        let Some(calldata) = self
+            .preflight(chain, record, target, &attestation, has_hook)
+            .await?
+        else {
+            return Ok(Relayed::No);
         };
         match self
             .sender
@@ -450,20 +427,7 @@ impl Relayer {
             .await
         {
             Ok(hash) => {
-                self.store.update_message(
-                    |m| m.nonce == record.nonce,
-                    |m| {
-                        m.relay_tx = Some(hash);
-                        m.attempts += 1;
-                    },
-                )?;
-                tracing::info!(
-                    nonce = %record.nonce,
-                    chain = chain.name,
-                    tx = %hash,
-                    consumer = if decoded.body.hook_data.is_empty() { "transmitter" } else { "hook wrapper" },
-                    "cctp relay submitted"
-                );
+                self.record_submission(chain, record, hash, has_hook)?;
                 match wait_for_receipt(
                     &chain.write_rpc,
                     hash,
@@ -476,20 +440,103 @@ impl Relayer {
                     None => Ok(Relayed::InFlight),
                 }
             }
-            Err(e) => {
-                let attempts = self.bump_attempts(record.nonce)?;
-                // Only a **node-side JSON-RPC refusal** is a candidate for
-                // parking. A transport fault, a cooling pool or a gateway
-                // status is an outage: the burned message must keep retrying.
-                let node_refusal = matches!(&e, Error::Rpc(diorama_anvil::Error::Rpc { .. }));
-                if node_refusal && attempts >= self.max_send_attempts {
-                    self.park(record.nonce, format!("send refused {attempts} times: {e}"))?;
-                } else {
-                    tracing::warn!(nonce = %record.nonce, attempts, error = %e, "cctp receiveMessage submission failed; will retry");
-                }
-                Ok(Relayed::No)
+            Err(error) => self.send_failed(record, &error),
+        }
+    }
+
+    /// The `receiveMessage` calldata, preflighting a hook wrapper first. A
+    /// `None` means this pass must not submit: the record was parked, or a
+    /// transient fault left it for a later pass.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the preflight's inputs are one relay's own facts; grouping them would hide \
+                  which caller supplied each"
+    )]
+    async fn preflight(
+        &self,
+        chain: &Chain,
+        record: &MessageRecord,
+        target: Address,
+        attestation: &Bytes,
+        has_hook: bool,
+    ) -> Result<Option<Bytes>> {
+        if !has_hook {
+            return Ok(Some(receive_message_calldata(&record.message, attestation)));
+        }
+        // **A hook failure must not consume the nonce.** The wrapper mints first and
+        // calls the hook second; a revert in the hook leaves the USDC in the wrapper
+        // with no owner while `usedNonces` says the burn is spent. Simulate the whole
+        // call first: only a message whose mint and hook both succeed is submitted.
+        // A deterministic hook failure parks the record (the burn is still unspent,
+        // so an operator can fix the hook and `/v2/reattest`); a transport failure
+        // retries without parking.
+        match crate::hook::simulate_relay(&chain.rpc, target, &record.message, attestation).await {
+            Ok((true, true, _)) => Ok(Some(crate::hook::relay_calldata(
+                &record.message,
+                attestation,
+            ))),
+            Ok((relay_success, hook_success, data)) => {
+                self.park(
+                    record.nonce,
+                    format!(
+                        "hook preflight refused: relaySuccess={relay_success}, hookSuccess={hook_success}, returnData=0x{} — the nonce was not consumed",
+                        alloy_primitives::hex::encode(&data)
+                    ),
+                )?;
+                Ok(None)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    nonce = %record.nonce,
+                    chain = chain.name,
+                    %error,
+                    "hook preflight failed — keeping the message for a later pass"
+                );
+                Ok(None)
             }
         }
+    }
+
+    /// Record the submitted tx and its attempt before waiting for a receipt.
+    fn record_submission(
+        &self,
+        chain: &Chain,
+        record: &MessageRecord,
+        hash: B256,
+        has_hook: bool,
+    ) -> Result<()> {
+        self.store.update_message(
+            |m| m.nonce == record.nonce,
+            |m| {
+                m.relay_tx = Some(hash);
+                m.attempts += 1;
+            },
+        )?;
+        tracing::info!(
+            nonce = %record.nonce,
+            chain = chain.name,
+            tx = %hash,
+            consumer = if has_hook { "hook wrapper" } else { "transmitter" },
+            "cctp relay submitted"
+        );
+        Ok(())
+    }
+
+    /// A send refusal: only a node-side JSON-RPC answer is a candidate for
+    /// parking. A transport fault, a cooling pool or a gateway status is an
+    /// outage — the burned message must keep retrying.
+    fn send_failed(&self, record: &MessageRecord, error: &Error) -> Result<Relayed> {
+        let attempts = self.bump_attempts(record.nonce)?;
+        let node_refusal = matches!(error, Error::Rpc(diorama_anvil::Error::Rpc { .. }));
+        if node_refusal && attempts >= self.max_send_attempts {
+            self.park(
+                record.nonce,
+                format!("send refused {attempts} times: {error}"),
+            )?;
+        } else {
+            tracing::warn!(nonce = %record.nonce, attempts, error = %error, "cctp receiveMessage submission failed; will retry");
+        }
+        Ok(Relayed::No)
     }
 
     /// A mined receipt: success marks RELAYED; a revert is either the

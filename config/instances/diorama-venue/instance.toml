@@ -1,17 +1,19 @@
 # The generic Venue Mirror instance: deployment facts only.
 #
-# Product-specific scope (watchlist, fixture ownership, probes, closures,
-# markets, endpoint groups) lives in `daloc.toml`, which is gitignored;
-# `daloc.example.toml` is the tracked template. Endpoint references use
-# `@name` and are expanded from `[endpoints]` before validation.
+# Product-specific scope (markets, fixture ownership, probes, closures,
+# endpoint groups) lives in `specialization.toml`, which is gitignored;
+# `specialization.example.toml` is the tracked template. Endpoint references
+# use `@name` and are expanded from `[endpoints]` before validation.
 [instance]
 name = "diorama-venue"
 namespace = "diorama-venue"
 profile = "venue"
-project = "daloc"
+project = "specialization"
 
 [chains.venue]
 kind = "hyperliquid"
+# An explicit fork base, when the deployment pins one, lives in the
+# specialization's [chains.venue] as `fork_pin`.
 # The EVM read pool: random healthy start, fail over to the next endpoint,
 # cool a failed endpoint down, retry it in a later round.
 source_urls = "@hyperevm"
@@ -27,11 +29,15 @@ boot_timeout_secs = 120
 [services.engine.anvil]
 target_url = "@anvil_v"
 
-# The follow's cadence and window against the public source: 100-block
-# windows keep a pass inside the endpoint's request budget.
+# The follow's cadence and window against the public source. The window is
+# the **catch-up width**: a 100-block window advances slower than the source's
+# ~60 blocks/min, so a 35k-block gap never closes. 900 blocks per pass is the
+# live catch-up width that closed the measured 35k gap; the composer halves an
+# `eth_getLogs` chunk on a response-size refusal or a transient `-32000`
+# timeout, so the wider window still respects the endpoint's request budget.
 [services.engine.loops]
 poll_interval_ms = 2000
-max_gap_blocks = 100
+max_gap_blocks = 900
 # JSON-RPC batch items for source reads and local cheatcode writes. This is
 # the deployment's endpoint contract (the live value), not a global default.
 chunk_size = 500

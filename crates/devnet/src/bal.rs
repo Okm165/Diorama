@@ -35,13 +35,28 @@ use diorama_anvil::{Key, Rpc, Value, Write};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-/// The logs' range chunk, in blocks: the window's logs ride one
-/// `eth_getLogs` call per chunk. The public endpoint answers bounded ranges
-/// (measured: a 1000-block range is refused) and caps a response at 1 MiB
-/// (measured: a busy 100-block range overflows), so the range starts here
-/// and *halves* on the size refusal — the last good size carries the rest of
-/// the window.
-const LOGS_RANGE: u64 = 25;
+/// The logs' range starts at the endpoint pool's declared cap. The cap is the
+/// deployment's own measured request budget (`max_log_range` on the endpoint,
+/// 900 for the public HyperEVM pool), so starting below it multiplies a
+/// catch-up window into dozens of round-trips for no safety gain: the
+/// response-size and transient-timeout refusals below still halve the chunk
+/// adaptively, and the last good size carries the rest of the window.
+///
+/// Measured 2026-11-10: the venue follow's 900-block windows took 50–120 s at
+/// the old hardcoded 25-block chunk (36 sequential `eth_getLogs` calls); the
+/// replay of the 148k-block post-restore gap therefore needed ~3 h, which is
+/// exactly the staleness the indexer reported as `Replaying`.
+fn initial_log_range(rpc: &Rpc) -> u64 {
+    rpc.log_range_cap().max(1)
+}
+
+/// The next chunk after an endpoint refuses the current one (a response-size
+/// cap or a transient execution timeout): halve it, never below one block.
+/// A one-block chunk is the last retry; the error surfaces if even that
+/// cannot be served.
+fn halve_log_range(range: u64) -> u64 {
+    (range / 2).max(1)
+}
 
 /// ERC20 `Transfer(address,address,uint256)`.
 const TRANSFER_TOPIC: B256 =
@@ -427,20 +442,20 @@ impl SystemTxs {
 /// when the source *declares* the capability; a declared-but-absent method is
 /// a fault (the boot audit already names the disagreement), never an empty
 /// list that would silently drop Core→EVM effects.
-pub async fn envelope_touches(
-    rpc: &Rpc,
-    from: u64,
-    to: u64,
-    system_txs: SystemTxs,
-) -> diorama_anvil::Result<TouchedSet> {
+/// The window's logs, fetched in bounded chunks. The endpoint's declared cap
+/// is the ceiling; a response-size refusal or a transient execution timeout
+/// halves the chunk and retries the same start, so the last good size carries
+/// the rest of the window. The pool's classifier also marks the timeout
+/// retryable, so a healthy endpoint can answer first.
+async fn fetch_logs(rpc: &Rpc, from: u64, to: u64) -> diorama_anvil::Result<TouchedSet> {
     let mut touched = TouchedSet::default();
     if to <= from {
         return Ok(touched);
     }
     let mut start = from + 1;
-    // The endpoint's declared cap is the ceiling; the response-size halving
-    // below may shrink further, never grow past it.
-    let mut range = LOGS_RANGE.min(rpc.log_range_cap());
+    // The endpoint's declared cap is the ceiling; the response-size/timeout
+    // halving below may shrink further, never grow past it.
+    let mut range = initial_log_range(rpc);
     while start <= to {
         let end = (start + range - 1).min(to);
         let filter = Filter::new()
@@ -458,14 +473,39 @@ pub async fn envelope_touches(
                 }
                 start = end + 1;
             }
-            // The endpoint's 1 MiB cap: shrink the chunk and retry the same
-            // start — the last good size carries the rest of the window.
-            Err(e) if e.is_response_too_big() && range > 1 => {
-                range = (range / 2).max(1);
+            // A response-size refusal (the endpoint's 1 MiB cap) and the
+            // public HyperEVM RPC's transient server-side execution timeout
+            // (`-32000 execution aborted (timeout = 5s)`) both shrink the
+            // chunk and retry the same start: a narrower range is the same
+            // request with less work, and the last good size carries the rest
+            // of the window. The pool's classifier also marks the timeout
+            // retryable, so a healthy endpoint can answer first.
+            Err(e) if (e.is_response_too_big() || e.is_execution_timeout()) && range > 1 => {
+                let next = halve_log_range(range);
+                if e.is_execution_timeout() {
+                    tracing::warn!(
+                        from = start,
+                        to = end,
+                        range,
+                        next,
+                        "eth_getLogs execution timeout; shrinking the range"
+                    );
+                }
+                range = next;
             }
             Err(e) => return Err(e),
         }
     }
+    Ok(touched)
+}
+
+pub async fn envelope_touches(
+    rpc: &Rpc,
+    from: u64,
+    to: u64,
+    system_txs: SystemTxs,
+) -> diorama_anvil::Result<TouchedSet> {
+    let mut touched = fetch_logs(rpc, from, to).await?;
     if system_txs == SystemTxs::Fold {
         // One-element *tuples*: a JSON-RPC call's params are an array, and a
         // bare `U64` serializes as a scalar — the endpoint answers `-32602
@@ -1095,5 +1135,16 @@ mod tests {
             verify_bal_commitment(None, &bal).is_ok(),
             "pre-fork: no commitment, nothing to check"
         );
+    }
+
+    /// A refused log chunk halves until one block; one is the floor (never
+    /// zero, which would make the retry an empty range).
+    #[test]
+    fn a_refused_log_range_halves_to_one() {
+        assert_eq!(halve_log_range(900), 450);
+        assert_eq!(halve_log_range(450), 225);
+        assert_eq!(halve_log_range(2), 1);
+        assert_eq!(halve_log_range(1), 1);
+        assert_eq!(halve_log_range(0), 1);
     }
 }

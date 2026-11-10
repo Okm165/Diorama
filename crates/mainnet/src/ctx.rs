@@ -52,6 +52,11 @@ pub struct Ctx {
     /// The feed bridge's counters (shared with the bridge task; /metrics
     /// renders them whether or not the bridge is configured).
     pub(crate) feed_bridge_metrics: Arc<crate::feed::FeedBridgeMetrics>,
+    /// Wakes the feed bridge when the applier lands a source block. The
+    /// source's feeds can only move in a block, so this is the event that
+    /// makes marks follow the mirror instead of a timer. The bridge's own
+    /// interval remains the reconciliation net.
+    pub(crate) feed_wake: Arc<tokio::sync::Notify>,
     pub(crate) drift: Drift,
 }
 
@@ -101,6 +106,7 @@ impl Ctx {
             plane,
             mainnet_metrics: MainnetMetrics::default(),
             feed_bridge_metrics: Arc::new(crate::feed::FeedBridgeMetrics::default()),
+            feed_wake: Arc::new(tokio::sync::Notify::new()),
             drift,
         })
     }

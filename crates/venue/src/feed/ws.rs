@@ -145,6 +145,36 @@ enum SessionOutcome {
     Failed(WsError),
 }
 
+/// What one decoded frame asks the session's select loop to do.
+enum FrameAction {
+    Continue,
+    Failed(WsError),
+}
+
+/// A closed socket: served when it delivered data, a failed attempt otherwise.
+fn closed_outcome(delivered: bool) -> SessionOutcome {
+    if delivered {
+        SessionOutcome::Served
+    } else {
+        SessionOutcome::Failed(WsError::ClosedBeforeData)
+    }
+}
+
+/// A read fault: after data the session was served (the drop is the
+/// network's); before data it is a failed attempt.
+fn read_outcome(
+    url: &str,
+    delivered: bool,
+    error: tokio_tungstenite::tungstenite::Error,
+) -> SessionOutcome {
+    if delivered {
+        tracing::warn!(url = %url, error = %error, "market websocket read failed; reconnecting");
+        SessionOutcome::Served
+    } else {
+        SessionOutcome::Failed(WsError::Read(error))
+    }
+}
+
 /// The sleep before retrying an all-cooling pool: the pool's own earliest
 /// cooldown, floored at 1 ms so a zero can never spin the loop.
 fn cooling_wait_ms(retry_after_ms: u64) -> u64 {
@@ -251,7 +281,6 @@ impl WsClient {
                 return SessionOutcome::Failed(WsError::Send(error));
             }
         }
-
         let mut delivered = false;
         let mut deadline = tokio::time::Instant::now() + FIRST_DATA_TIMEOUT;
         let mut ping = tokio::time::interval(Duration::from_secs(30));
@@ -261,11 +290,11 @@ impl WsClient {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
-                    return if delivered {
-                        SessionOutcome::Failed(WsError::Idle)
+                    return SessionOutcome::Failed(if delivered {
+                        WsError::Idle
                     } else {
-                        SessionOutcome::Failed(WsError::NoData)
-                    };
+                        WsError::NoData
+                    });
                 }
                 _ = ping.tick() => {
                     let ping_msg = match serde_json::to_string(&Ping { method: "ping" }) {
@@ -277,55 +306,58 @@ impl WsClient {
                     }
                 }
                 msg = source.next() => match msg {
-                    Some(Ok(Message::Text(text))) => match self.handle_text(&text) {
-                        Frame::Data => {
-                            if !delivered {
-                                delivered = true;
-                                self.feed.metrics.mark_ws_up();
-                                self.pool.record_success(index, now_ms());
-                                tracing::info!(
-                                    url = %url,
-                                    markets = self.feed.markets.len(),
-                                    "market websocket live"
-                                );
-                            }
-                            deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
+                    Some(Ok(Message::Text(text))) => {
+                        deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
+                        match self.handle_frame(index, url, self.handle_text(&text), &mut delivered) {
+                            FrameAction::Continue => {}
+                            FrameAction::Failed(error) => return SessionOutcome::Failed(error),
                         }
-                        Frame::Control => {}
-                        Frame::Error(SubscriptionFailure::Coin(coin)) => {
-                            // One refused coin is not the lane's failure: the
-                            // allMids and every other coin subscription stay
-                            // live. The REST poller backfills the missing coin
-                            // behind the same staleness gate.
-                            tracing::warn!(
-                                url = %url,
-                                coin = %coin,
-                                "venue refused one coin subscription; keeping the session"
-                            );
-                        }
-                        Frame::Error(SubscriptionFailure::Session(error)) => {
-                            return SessionOutcome::Failed(WsError::Subscription(error));
-                        }
-                    },
-                    Some(Ok(Message::Close(_))) | None => {
-                        return if delivered {
-                            SessionOutcome::Served
-                        } else {
-                            SessionOutcome::Failed(WsError::ClosedBeforeData)
-                        };
                     }
+                    Some(Ok(Message::Close(_))) | None => return closed_outcome(delivered),
                     Some(Ok(_)) => {} // binary/ping/pong frames: nothing to fold
-                    Some(Err(error)) => {
-                        return if delivered {
-                            tracing::warn!(url = %url, error = %error, "market websocket read failed; reconnecting");
-                            SessionOutcome::Served
-                        } else {
-                            SessionOutcome::Failed(WsError::Read(error))
-                        };
-                    }
+                    Some(Err(error)) => return read_outcome(url, delivered, error),
                 },
             }
         }
+    }
+
+    /// Fold one decoded text frame into the cache and the lane's health.
+    fn handle_frame(
+        &self,
+        index: usize,
+        url: &str,
+        frame: Frame,
+        delivered: &mut bool,
+    ) -> FrameAction {
+        match frame {
+            Frame::Data => {
+                if !*delivered {
+                    *delivered = true;
+                    self.feed.metrics.mark_ws_up();
+                    self.pool.record_success(index, now_ms());
+                    tracing::info!(
+                        url = %url,
+                        markets = self.feed.markets.len(),
+                        "market websocket live"
+                    );
+                }
+            }
+            Frame::Control => {}
+            Frame::Error(SubscriptionFailure::Coin(coin)) => {
+                // One refused coin is not the lane's failure: the allMids and
+                // every other coin subscription stay live. The REST poller
+                // backfills the missing coin behind the same staleness gate.
+                tracing::warn!(
+                    url = %url,
+                    coin = %coin,
+                    "venue refused one coin subscription; keeping the session"
+                );
+            }
+            Frame::Error(SubscriptionFailure::Session(error)) => {
+                return FrameAction::Failed(WsError::Subscription(error));
+            }
+        }
+        FrameAction::Continue
     }
 
     /// The session's subscription messages. An encode fault is a session

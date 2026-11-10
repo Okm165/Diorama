@@ -239,6 +239,19 @@ impl Error {
         matches!(self, Error::Rpc { payload, .. } if payload.code == -32008)
     }
 
+    /// A **transient server-side execution timeout** (measured live: the
+    /// public HyperEVM RPC answers `-32000 execution aborted (timeout = 5s)`
+    /// under load). It is not the method's answer: another endpoint may serve
+    /// the same request, and the same endpoint may serve a narrower
+    /// `eth_getLogs` range. The pool fails over on it; the composer halves the
+    /// range. A deterministic `-32000` (a revert, an unsupported block) is
+    /// deliberately not matched.
+    pub fn is_execution_timeout(&self) -> bool {
+        matches!(self, Error::Rpc { payload, .. }
+            if payload.code == -32000
+                && payload.message.to_ascii_lowercase().contains("timeout"))
+    }
+
     /// Anvil's history-pruned refusals — two measured shapes for the same
     /// `--prune-history` window: a `debug_traceTransaction` answers `-32000`
     /// "historical state needed to replay block N is not available", while a
@@ -417,6 +430,28 @@ mod tests {
         assert!(
             !rpc(-32602, "invalid argument 0: hex string has odd length").is_block_unavailable()
         );
+    }
+
+    /// The public HyperEVM RPC's transient server timeout is an endpoint
+    /// fault, not the method's answer: the pool may fail over and the
+    /// composer may narrow the range. A deterministic `-32000` stays an
+    /// answer.
+    #[test]
+    fn execution_timeout_is_a_transient_fault() {
+        let rpc = |code: i64, message: &'static str| Error::Rpc {
+            endpoint: "https://rpc.hyperliquid.xyz/evm".into(),
+            method: "eth_getLogs".into(),
+            payload: RpcError {
+                code,
+                message: message.into(),
+                data: None,
+            },
+        };
+        assert!(rpc(-32000, "execution aborted (timeout = 5s)").is_execution_timeout());
+        assert!(rpc(-32000, "request timeout").is_execution_timeout());
+        assert!(!rpc(-32000, "execution reverted").is_execution_timeout());
+        assert!(!rpc(-32603, "internal error").is_execution_timeout());
+        assert!(!rpc(-32005, "rate limited").is_execution_timeout());
     }
 
     /// This error is wrapped by the engine's, which must stay under clippy's

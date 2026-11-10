@@ -16,6 +16,10 @@ const VENUE_ENGINE_REQUIRED: &str = "profile \"venue\" requires [services.engine
 const MAINNET_CHAIN_REQUIRED: &str = "profile \"mainnet\" requires [chains.l1]";
 const MAINNET_ENGINE_REQUIRED: &str = "profile \"mainnet\" requires [services.engine]";
 
+/// The two mirror chain ids: protocol facts, not deployment configuration.
+const CHAIN_ID_ETHEREUM: u64 = 1;
+const CHAIN_ID_HYPER_EVM: u64 = 999;
+
 /// One mirror deployment: identity, chains, watchlist, service sections.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +34,10 @@ pub struct Instance {
     /// Every lane — JSON-RPC, REST, WS, beacon — reads this one table.
     #[serde(default)]
     pub endpoint_defaults: diorama_anvil::PoolPolicy,
+    /// Extra client-facing environment values. The exporter renders these
+    /// after the generated endpoint block; a duplicate key is a config error.
+    #[serde(default)]
+    pub client: ClientSection,
     /// The watched addresses: the parent-diff scope on the mainnet profile,
     /// and the account-field scope of the venue's poll follow (both mirrors
     /// follow their parent; the mechanisms differ — see
@@ -37,6 +45,16 @@ pub struct Instance {
     #[serde(default)]
     pub watchlist: Vec<WatchEntry>,
     pub services: Services,
+}
+
+/// The client-facing export's extra values: a product specialization can add
+/// the env pairs its consumer needs without teaching the loader a new key.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ClientSection {
+    /// `KEY = "VALUE"` pairs rendered by `export-env --section client`.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -89,6 +107,12 @@ pub struct ChainL1 {
     /// Blocks between the follow head and the fork base; the single home of
     /// the offset (anvil init containers read it via `diorama-config get`).
     pub fork_offset: u64,
+    /// The explicit fork base. `None` resolves a fresh pin at start-up; a
+    /// configured pin preserves the deployment epoch across restarts and is
+    /// the single home of the re-pin decision (the anvil init containers read
+    /// it from the mounted specialization).
+    #[serde(default)]
+    pub fork_pin: Option<u64>,
 }
 
 /// `[chains.venue]`: the venue's fork source and public API. `kind` only -
@@ -114,6 +138,12 @@ pub struct ChainVenue {
     /// single `ws_url` is the one-endpoint form.
     #[serde(alias = "ws_url")]
     pub ws_urls: WsEndpoints,
+    /// The explicit fork base. `None` resolves a fresh pin at start-up; a
+    /// configured pin preserves the deployment epoch across restarts and is
+    /// the single home of the re-pin decision (the anvil init containers read
+    /// it from the mounted specialization).
+    #[serde(default)]
+    pub fork_pin: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -282,10 +312,10 @@ impl Instance {
             );
         }
         if let Some(cctp) = &mut self.services.cctp_bridge {
-            if let Some(t_url) = &mut cctp.t_url {
+            if let Some(t_url) = &mut cctp.legacy.t_url {
                 expand_http("services.cctp_bridge.t_url", t_url, groups, issues);
             }
-            if let Some(v_url) = &mut cctp.v_url {
+            if let Some(v_url) = &mut cctp.legacy.v_url {
                 expand_http("services.cctp_bridge.v_url", v_url, groups, issues);
             }
             for (index, chain) in cctp.chains.iter_mut().enumerate() {
@@ -387,11 +417,17 @@ impl Instance {
                     l1.fork_offset, RETH_STATE_WINDOW_BLOCKS
                 ));
             }
+            if l1.fork_pin == Some(0) {
+                issues.push("chains.l1.fork_pin must be a positive block number".into());
+            }
             check_http_urls("chains.l1.source_urls", &l1.source_urls, issues);
         }
         if let Some(venue) = &self.chains.venue {
             if venue.kind != ChainKind::Hyperliquid {
                 issues.push("chains.venue.kind must be \"hyperliquid\"".into());
+            }
+            if venue.fork_pin == Some(0) {
+                issues.push("chains.venue.fork_pin must be a positive block number".into());
             }
             check_http_urls("chains.venue.source_urls", &venue.source_urls, issues);
             check_http_urls("chains.venue.api_urls", &venue.api_urls, issues);
@@ -574,7 +610,7 @@ impl Instance {
     }
 
     /// Shell-ready `KEY=VALUE` lines for one section. The anvil pods' init
-    /// containers resolve their pin with `FORK_OFFSET` from here.
+    /// containers resolve their pin with `FORK_OFFSET`/`FORK_PIN` from here.
     pub fn export_env(&self, section: &str) -> Result<Vec<String>, ConfigError> {
         match section {
             "anvil" => {
@@ -582,9 +618,13 @@ impl Instance {
                     self.chains.l1.as_ref(),
                     "export-env anvil requires [chains.l1]",
                 )?;
-                Ok(vec![format!("FORK_OFFSET={}", l1.fork_offset)])
+                let mut vars = vec![format!("FORK_OFFSET={}", l1.fork_offset)];
+                if let Some(pin) = l1.fork_pin {
+                    vars.push(format!("FORK_PIN={pin}"));
+                }
+                Ok(vars)
             }
-            "client" | "daloc" => self.client_env(),
+            "client" => self.client_env(),
             other => Err(ConfigError::Invalid {
                 issues: vec![format!("unknown section `{other}` (known: anvil, client)")],
             }),
@@ -602,31 +642,45 @@ impl Instance {
     /// instance's own ports, under the manifests' Service names (`engine`,
     /// `venue-sim`, `cctp-bridge` — `k8s/base/engine.yaml`, `base/venue/`).
     fn client_env(&self) -> Result<Vec<String>, ConfigError> {
-        match self.instance.profile {
-            Profile::Mainnet => self.client_env_mainnet(),
-            Profile::Venue => self.client_env_venue(),
-            Profile::Cctp => self.client_env_cctp(),
+        let mut vars = match self.instance.profile {
+            Profile::Mainnet => self.client_env_mainnet()?,
+            Profile::Venue => self.client_env_venue()?,
+            Profile::Cctp => self.client_env_cctp()?,
+        };
+        for (key, value) in &self.client.env {
+            validate_client_env(key, value, &vars)?;
+            vars.push(format!("{key}={value}"));
         }
+        Ok(vars)
     }
 
-    /// The bridge's client block: the Iris base the DALOC relay points at
+    /// The bridge's client block: the Iris base the consumer relay points at
     /// (the relay appends `/v2/messages/...` itself). The export is consumed
-    /// from the *client's* namespace, so the short service DNS name is
+    /// from the *consumer's* namespace, so the short service DNS name is
     /// qualified with this instance's namespace.
     fn client_env_cctp(&self) -> Result<Vec<String>, ConfigError> {
         let cctp = self.services.cctp_bridge.as_ref().ok_or_else(|| {
             mismatch("export-env client (cctp profile) requires [services.cctp_bridge]")
         })?;
-        Ok(vec![format!(
-            "IRIS_API_URL={}",
-            cluster_url(
-                &format!("http://cctp-bridge:{}", cctp.iris.port),
-                &self.instance.namespace
-            )
-        )])
+        Ok(vec![
+            format!(
+                "IRIS_API_URL={}",
+                cluster_url(
+                    &format!("http://cctp-bridge:{}", cctp.iris.iris.port),
+                    &self.instance.namespace
+                )
+            ),
+            format!(
+                "CCTP_BRIDGE_HEALTH_URL={}",
+                cluster_url(
+                    &format!("http://cctp-bridge:{}/health", cctp.control.port),
+                    &self.instance.namespace
+                )
+            ),
+        ])
     }
 
-    /// The mainnet profile's client block: the first chain's keys.
+    /// The mainnet profile's client block: chain 1's canonical keys.
     fn client_env_mainnet(&self) -> Result<Vec<String>, ConfigError> {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
             mismatch("export-env client (mainnet profile) requires [services.engine]")
@@ -643,14 +697,15 @@ impl Instance {
             &self.instance.namespace,
         );
         Ok(vec![
-            format!("CHAIN_RPC_URL={t}"),
-            format!("CHAIN_WS_URL={}", ws_of(&t)),
+            format!("CHAIN_1_CHAIN_ID={CHAIN_ID_ETHEREUM}"),
+            format!("CHAIN_1_RPC_URL={t}"),
+            format!("CHAIN_1_WS_URL={}", ws_of(&t)),
             format!("DIORAMA_ADMIN_URL={admin}"),
         ])
     }
 
-    /// The venue profile's client block: the `CHAIN_1_`-prefixed second-chain
-    /// keys and the simulator's URLs.
+    /// The venue profile's client block: chain 999's canonical keys and the
+    /// simulator's URLs.
     fn client_env_venue(&self) -> Result<Vec<String>, ConfigError> {
         let engine = self.services.engine.as_ref().ok_or_else(|| {
             mismatch("export-env client (venue profile) requires [services.engine]")
@@ -678,16 +733,60 @@ impl Instance {
             &self.instance.namespace,
         );
         Ok(vec![
-            format!("CHAIN_1_CHAIN_RPC_URL={v}"),
-            format!("CHAIN_1_CHAIN_WS_URL={}", ws_of(&v)),
+            format!("CHAIN_999_CHAIN_ID={CHAIN_ID_HYPER_EVM}"),
+            format!("CHAIN_999_RPC_URL={v}"),
+            format!("CHAIN_999_WS_URL={}", ws_of(&v)),
             format!("HL_INFO_API_URL={info}"),
             format!("VENUE_CONTROL_URL={control}"),
-            // DALOC's `VENUE_ACCOUNT_FEEDS` / `VENUE_RATE_FEEDS` are JSON
-            // arrays, not URLs. Emitting URLs under those names poisoned a
-            // consumer that sourced this block; the base URL has its own key.
+            // Feed shapes (`VENUE_ACCOUNT_FEEDS`, `VENUE_RATE_FEEDS`, ...) are
+            // product values: the specialization adds them through
+            // `[client.env]`, never as a URL under those names.
             format!("VENUE_ADMIN_URL={admin}"),
         ])
     }
+}
+
+/// Validate one extra client env pair: an uppercase shell name, one concrete
+/// line, and no collision with the generated block.
+fn validate_client_env(key: &str, value: &str, generated: &[String]) -> Result<(), ConfigError> {
+    let valid_key = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && key
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase() || c == '_');
+    if !valid_key {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!(
+                "client.env key `{key}` must be an uppercase shell name"
+            )],
+        });
+    }
+    if value.contains("${") {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!(
+                "client.env `{key}` is not resolved (deployment wiring)"
+            )],
+        });
+    }
+    if value.contains('\n') || value.contains('\r') {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!("client.env `{key}` must be one line")],
+        });
+    }
+    if generated
+        .iter()
+        .any(|line| line.starts_with(&format!("{key}=")))
+    {
+        return Err(ConfigError::Invalid {
+            issues: vec![format!(
+                "client.env `{key}` duplicates a generated export key"
+            )],
+        });
+    }
+    Ok(())
 }
 
 /// A value that must be concrete for the export: a lingering `${VAR}`
@@ -882,7 +981,11 @@ fn check_cctp_lanes(
 /// a path), the deterministic attester seed, and ordered gas thresholds.
 fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
     require_path(&cctp.state_dir, "services.cctp_bridge.state_dir", issues);
-    match (&cctp.t_url, &cctp.v_url, cctp.chains.is_empty()) {
+    match (
+        &cctp.legacy.t_url,
+        &cctp.legacy.v_url,
+        cctp.chains.is_empty(),
+    ) {
         (Some(t_url), Some(v_url), true) => {
             check_http_url("services.cctp_bridge.t_url", t_url, issues);
             check_http_url("services.cctp_bridge.v_url", v_url, issues);
@@ -910,21 +1013,21 @@ fn check_cctp(cctp: &CctpSection, issues: &mut Vec<String>) {
     }
     // After `${VAR}` expansion the value must be the 32-byte hex key; a raw
     // reference is checked once the deployment expands it.
-    if !cctp.relay_key.contains("${") && !looks_like_secret(&cctp.relay_key) {
+    if !cctp.signer.relay_key.contains("${") && !looks_like_secret(&cctp.signer.relay_key) {
         issues.push(
             "services.cctp_bridge.relay_key must be a 32-byte hex key (or a ${VAR} reference), \
              never a path"
                 .into(),
         );
     }
-    if cctp.attester_seed.trim().is_empty() {
+    if cctp.signer.attester_seed.trim().is_empty() {
         issues.push("services.cctp_bridge.attester_seed must not be empty".into());
     }
     if cctp.scan_chunk_blocks == 0 {
         issues.push("services.cctp_bridge.scan_chunk_blocks must be > 0".into());
     }
     check_cctp_timing(cctp, issues);
-    if cctp.balance_critical_wei >= cctp.balance_low_wei {
+    if cctp.gas.balance_critical_wei >= cctp.gas.balance_low_wei {
         issues
             .push("services.cctp_bridge.balance_critical_wei must be below balance_low_wei".into());
     }
@@ -1261,20 +1364,5 @@ fn check_venue_sim(sim: &VenueSimSection, issues: &mut Vec<String>) {
     }
     if let Some(url) = &sim.anvil_url {
         check_http_url("services.venue_sim.anvil_url", url, issues);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::FollowHead;
-
-    /// The follow-head tags are the config's own spelling: the mainnet
-    /// engine's `follow_tag()` delegates to this mapping (one home; the test
-    /// moved here from the engine's ctx, where it pinned nothing of its own).
-    #[test]
-    fn the_follow_head_tags_are_the_configs_spelling() {
-        assert_eq!(FollowHead::Safe.tag(), "safe");
-        assert_eq!(FollowHead::Latest.tag(), "latest");
-        assert_eq!(FollowHead::Finalized.tag(), "finalized");
     }
 }

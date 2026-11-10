@@ -3,7 +3,7 @@
 //!
 //! Boot order: load the instance, build the market plane (REST
 //! poller + WS client) and the account plane (persisted registry), then serve
-//! the daloc-facing info API (8090) and the control API (8091) beside the
+//! the consumer-facing info API (8090) and the control API (8091) beside the
 //! self-advance tick (the configured cadence: accrue funding, check
 //! liquidations, persist when
 //! something moved).
@@ -15,46 +15,19 @@ use diorama_config::boot;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
 pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     boot::init_logging();
     let config = boot::service_config_or_exit(&args);
     let mut cfg = load_wiring(&config)?;
-    let policy = cfg.endpoint_policy();
     let (chain, sim_section) = cfg.take_venue_sim()?;
-
-    // The planes: the market feed's cache and the persisted account registry.
-    let feed = Arc::new(crate::feed::MarketFeed::load(
-        sim_section.state_dir.join("feed.json"),
-        sim_section.markets.clone(),
-    )?);
-    let sim = Arc::new(crate::sim::Sim::load(
-        sim_section.state_dir.join("sim.json"),
-        sim_section.terminal_orders,
-    )?);
-    let api_client = crate::feed::rest::RestClient::with_specs(
-        cfg.endpoint_specs(chain.api_urls.as_slice()),
-        policy,
-        Duration::from_secs(sim_section.rest_timeout_secs),
-    )?;
-    let ws_pool = diorama_anvil::EndpointPool::from_specs(
-        cfg.endpoint_specs(chain.ws_urls.as_slice()),
-        diorama_anvil::Scheme::Ws,
-        policy,
-    )?;
-    let bridge_metrics = Arc::new(crate::bridge::metrics::BridgeMetrics::default());
-    let state = Arc::new(
-        crate::api::ApiState::new(
-            feed.clone(),
-            sim.clone(),
-            api_client.clone(),
-            sim_section.engine_admin_url.clone(),
-            Some(bridge_metrics.clone()),
-            Duration::from_secs(sim_section.admin_timeout_secs),
-            Duration::from_millis(sim_section.tick_interval_ms),
-        )?
-        .with_ws_pool(ws_pool.clone()),
-    );
+    let Planes {
+        feed,
+        sim,
+        api_client,
+        ws_pool,
+        bridge_metrics,
+        state,
+    } = build_planes(&cfg, &chain, &sim_section)?;
 
     spawn_market_plane(&feed, api_client, ws_pool, &sim_section);
     spawn_plane_heartbeat(
@@ -87,6 +60,65 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
     Ok(())
 }
 
+/// The simulator's planes and the API state built over them.
+struct Planes {
+    feed: Arc<crate::feed::MarketFeed>,
+    sim: Arc<crate::sim::Sim>,
+    api_client: crate::feed::rest::RestClient,
+    ws_pool: diorama_anvil::EndpointPool,
+    bridge_metrics: Arc<crate::bridge::metrics::BridgeMetrics>,
+    state: Arc<crate::api::ApiState>,
+}
+
+/// Build the market/account planes and the API state from the instance's
+/// endpoint specs and the simulator section.
+fn build_planes(
+    cfg: &diorama_config::Instance,
+    chain: &diorama_config::ChainVenue,
+    sim_section: &diorama_config::VenueSimSection,
+) -> crate::Result<Planes> {
+    let policy = cfg.endpoint_policy();
+    let feed = Arc::new(crate::feed::MarketFeed::load(
+        sim_section.state_dir.join("feed.json"),
+        sim_section.markets.clone(),
+    )?);
+    let sim = Arc::new(crate::sim::Sim::load(
+        sim_section.state_dir.join("sim.json"),
+        sim_section.terminal_orders,
+    )?);
+    let api_client = crate::feed::rest::RestClient::with_specs(
+        cfg.endpoint_specs(chain.api_urls.as_slice()),
+        policy,
+        Duration::from_secs(sim_section.rest_timeout_secs),
+    )?;
+    let ws_pool = diorama_anvil::EndpointPool::from_specs(
+        cfg.endpoint_specs(chain.ws_urls.as_slice()),
+        diorama_anvil::Scheme::Ws,
+        policy,
+    )?;
+    let bridge_metrics = Arc::new(crate::bridge::metrics::BridgeMetrics::default());
+    let state = Arc::new(
+        crate::api::ApiState::new(
+            feed.clone(),
+            sim.clone(),
+            api_client.clone(),
+            sim_section.engine_admin_url.clone(),
+            Some(bridge_metrics.clone()),
+            Duration::from_secs(sim_section.admin_timeout_secs),
+            Duration::from_millis(sim_section.tick_interval_ms),
+        )?
+        .with_ws_pool(ws_pool.clone()),
+    );
+    Ok(Planes {
+        feed,
+        sim,
+        api_client,
+        ws_pool,
+        bridge_metrics,
+        state,
+    })
+}
+
 /// Load the instance and require this pod's wiring to be resolved: one
 /// instance file, many readers — the venue engine's and the bridge's
 /// references stay unresolved here, by design.
@@ -96,7 +128,7 @@ fn load_wiring(config: &std::path::Path) -> crate::Result<diorama_config::Instan
         let state_dir = sim.state_dir.to_string_lossy().to_string();
         // The simulator owns the market plane: its REST and WS pools are this
         // pod's wiring too. Omitting them let an unresolved `${HL_INFO_API_URL}`
-        // reach the client as a literal.
+        // reach the consumer as a literal.
         let mut values: Vec<&str> = chain.source_urls.iter().collect();
         values.extend(chain.api_urls.iter());
         values.extend(chain.ws_urls.iter());
@@ -225,7 +257,7 @@ fn spawn_tick(sim: &Arc<crate::sim::Sim>, feed: &Arc<crate::feed::MarketFeed>, t
     });
 }
 
-/// Serve the two listeners: the info API daloc reads, the control API the
+/// Serve the two listeners: the info API the consumer reads, the control API the
 /// harness drives. The handles are the shutdown tail's.
 fn serve(
     sim_section: &diorama_config::VenueSimSection,

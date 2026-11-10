@@ -33,12 +33,15 @@ spec:
           args:
             - |
               set -eu
-              for d in /state/anvil-t; do
+              # The anvil container mounts this PVC at /state, so the pin it
+              # reads is /state/pin. (The old /state/anvil-t path never matched
+              # the live mount and left the pin in place.)
+              for d in /state; do
                 echo "wiping $d: pin (+ legacy dump)"
                 rm -f "$d/pin" "$d/state.json"
                 ls -la "$d" || true
               done
           volumeMounts:
-            - { name: anvil-t-state, mountPath: /state/anvil-t }
+            - { name: anvil-t-state, mountPath: /state }
       volumes:
         - { name: anvil-t-state, persistentVolumeClaim: { claimName: anvil-t-state } }
