@@ -164,6 +164,8 @@ spec:
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info \
+                --state /state/anvil-state.json \
+                --state-interval 300 \
           env:
             - name: RETH_URL
               valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
