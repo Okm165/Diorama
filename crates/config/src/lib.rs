@@ -300,7 +300,7 @@ mod tests {
     /// The wiring the diorama-mainnet instance references (its deploy-time env).
     fn wiring() -> Vec<(String, String)> {
         vars(&[
-            ("RETH_URL", "http://reth:8545"),
+            ("EVM_URL", "http://reth:8545"),
             ("ANVIL_T_URL", "http://anvil-t:8545"),
             ("BEACON_URL", "http://lighthouse:5052"),
             ("ENGINE_API_URL", "http://reth:8551"),
@@ -634,12 +634,12 @@ port = 8096
     fn unresolved_env_is_reported_then_fatal_for_services() {
         let (_, unresolved) = load_str(minimal_instance(), &[]).unwrap();
         assert!(unresolved.is_empty(), "no refs in the minimal instance");
-        let src = minimal_instance().replace("http://reth:8545", "${RETH_URL}");
+        let src = minimal_instance().replace("http://reth:8545", "${EVM_URL}");
         let (inst, unresolved) = load_str(&src, &[]).unwrap();
-        assert_eq!(unresolved, vec!["RETH_URL".to_string()]);
+        assert_eq!(unresolved, vec!["EVM_URL".to_string()]);
         assert_eq!(
             l1(&inst).source_urls.primary(),
-            "${RETH_URL}",
+            "${EVM_URL}",
             "raw ref kept"
         );
         let (inst2, unresolved2) = load_str(&src, &wiring()).unwrap();
@@ -810,8 +810,8 @@ port = 8096
                 "ANVIL_T_URL",
                 "BEACON_URL",
                 "ENGINE_API_URL",
+                "EVM_URL",
                 "JWT_PATH",
-                "RETH_URL",
                 "STATE_DIR"
             ],
             "the wiring the instance references"

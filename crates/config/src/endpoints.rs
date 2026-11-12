@@ -148,19 +148,7 @@ pub struct EndpointEntry {
     pub chain_id: Option<u64>,
 }
 
-impl EndpointEntry {
-    /// The typed capabilities, with unknown names refused loudly at the call
-    /// site (a typo'd capability in config must never silently no-op).
-    pub fn parse_capabilities(&self) -> Result<Vec<Capability>, String> {
-        self.capabilities
-            .iter()
-            .map(|name| {
-                Capability::parse(name)
-                    .ok_or_else(|| format!("unknown capability {name:?} in endpoint {}", self.url))
-            })
-            .collect()
-    }
-}
+
 
 /// A named endpoint group: the single home of a deployment's URL lists.
 ///
