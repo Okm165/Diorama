@@ -53,6 +53,24 @@ impl Capability {
             Capability::SystemTxReceipts => "system_tx_receipts",
         }
     }
+
+    /// Bridge from the config vocabulary ([`diorama_config::Capability`]] —
+    /// the single place the two spellings meet. Config-only capabilities
+    /// (`batch`, the market planes) have no source-level meaning and map to
+    /// `None`: they gate admission, not the composer.
+    pub fn from_config(cap: diorama_config::Capability) -> Option<Self> {
+        Some(match cap {
+            diorama_config::Capability::Bal => Self::NativeBal,
+            diorama_config::Capability::Traces => Self::Traces,
+            diorama_config::Capability::Historical => Self::Historical,
+            diorama_config::Capability::HeadsWs => Self::HeadsWs,
+            diorama_config::Capability::SystemTxs => Self::SystemTxs,
+            diorama_config::Capability::SystemTxReceipts => Self::SystemTxReceipts,
+            diorama_config::Capability::Batch
+            | diorama_config::Capability::MarketRest
+            | diorama_config::Capability::MarketWs => return None,
+        })
+    }
 }
 
 /// The set a source declares.

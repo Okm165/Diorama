@@ -42,6 +42,126 @@ fn is_ref(value: &str) -> bool {
     value.len() > 1 && value.starts_with('@')
 }
 
+/// The canonical capability vocabulary — the one place where the differences
+/// between providers and endpoints are named.
+///
+/// Config files, the pool's endpoint specs and the boot capability audit all
+/// speak this language. The names match `diorama_devnet::source::Capability`
+/// one-to-one (which maps from these), plus the two market-plane roles and
+/// `batch` — the three provider differences that measurement keeps surfacing
+/// (see `scripts/probe-endpoint.sh`, the acceptance test that fills these in).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    /// Serves state at historical blocks (pinned `eth_call` past the fork age).
+    /// The legacy config spelling `archive` aliases into this.
+    #[serde(alias = "archive")]
+    Historical,
+    /// `debug_*`/`trace_*` namespace.
+    Traces,
+    /// `eth_getBlockAccessList` (EIP-7928).
+    Bal,
+    /// `eth_subscribe("newHeads")` over WebSocket.
+    HeadsWs,
+    /// `eth_getSystemTxsByBlockNumber` — the Diorama follow pool's gate.
+    SystemTxs,
+    /// Receipts for system transactions.
+    SystemTxReceipts,
+    /// Accepts JSON-RPC **batch** bodies (ZAN-class providers refuse them).
+    Batch,
+    /// Hyperliquid `/info` REST plane.
+    MarketRest,
+    /// Hyperliquid subscription-protocol WebSocket plane.
+    MarketWs,
+}
+
+impl Capability {
+    /// The canonical snake_case name (also the config spelling).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Historical => "historical",
+            Self::Traces => "traces",
+            Self::Bal => "bal",
+            Self::HeadsWs => "heads_ws",
+            Self::SystemTxs => "system_txs",
+            Self::SystemTxReceipts => "system_tx_receipts",
+            Self::Batch => "batch",
+            Self::MarketRest => "market_rest",
+            Self::MarketWs => "market_ws",
+        }
+    }
+
+    /// Parse a config spelling. Accepts the historical aliases (`archive`,
+    /// `trace`) the older flat `roles` lists used.
+    pub fn parse(name: &str) -> Option<Self> {
+        Some(match name {
+            "archive" | "historical" => Self::Historical,
+            "trace" | "traces" => Self::Traces,
+            "bal" => Self::Bal,
+            "heads_ws" => Self::HeadsWs,
+            "system_txs" => Self::SystemTxs,
+            "system_tx_receipts" => Self::SystemTxReceipts,
+            "batch" => Self::Batch,
+            "market_rest" => Self::MarketRest,
+            "market_ws" => Self::MarketWs,
+            _ => return None,
+        })
+    }
+}
+
+/// One declared endpoint inside a group — the nested, per-URL form.
+///
+/// ```toml
+/// [[endpoints.hyperevm.entries]]
+/// url = "https://rpc.hyperliquid.xyz/evm"
+/// capabilities = ["system_txs", "batch"]
+/// max_log_range = 900
+/// ```
+///
+/// `url` selects the scheme (http(s) for the JSON-RPC plane, ws(s) for the
+/// WebSocket plane); the plane the group is consumed from decides which list
+/// the entry lands in, so one group can carry an http/ws pair per provider.
+/// Every field except `url` is the provider's difference, surfaced: a missing
+/// capability is a *refusal to claim*, not an oversight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointEntry {
+    pub url: String,
+    /// The WebSocket spelling for ws-plane groups. A paired entry may carry
+    /// both (`url` + `ws`) — the provider's http/ws pair in one declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws: Option<String>,
+    /// What this endpoint is *measured* to serve. Empty claims nothing: the
+    /// endpoint serves unqualified calls but is filtered out of any
+    /// capability-gated admission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Relative preference in pool admission (default 1).
+    #[serde(default = "one")]
+    pub weight: u32,
+    /// The widest `eth_getLogs` range this endpoint accepts (default: the
+    /// client's 10,000-block conservative cap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_log_range: Option<u64>,
+    /// The chain id this endpoint must answer (default: the group's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<u64>,
+}
+
+impl EndpointEntry {
+    /// The typed capabilities, with unknown names refused loudly at the call
+    /// site (a typo'd capability in config must never silently no-op).
+    pub fn parse_capabilities(&self) -> Result<Vec<Capability>, String> {
+        self.capabilities
+            .iter()
+            .map(|name| {
+                Capability::parse(name)
+                    .ok_or_else(|| format!("unknown capability {name:?} in endpoint {}", self.url))
+            })
+            .collect()
+    }
+}
+
 /// A named endpoint group: the single home of a deployment's URL lists.
 ///
 /// ```toml
@@ -53,6 +173,12 @@ fn is_ref(value: &str) -> bool {
 /// A group may be referenced from any URL field as `@hyperevm`; the loader
 /// replaces the reference with the group's list. A group with no `http` (or
 /// no `ws`) is valid only if nothing asks for that side.
+///
+/// The flat `http`/`ws` lists and the nested `[[entries]]` compose: the flat
+/// lists keep the env-var forms (`${HL_RPC_URLS}`) and the nested entries add
+/// per-endpoint capabilities, weights and log-range caps. Entry URLs are
+/// appended after the flat lists (flat = deployment preference, entries =
+/// provider detail).
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointGroup {
@@ -60,9 +186,8 @@ pub struct EndpointGroup {
     pub http: Vec<String>,
     #[serde(default)]
     pub ws: Vec<String>,
-    /// Capabilities this group's endpoints declare (`archive`, `trace`,
-    /// `bal`, `market_ws`, …). Empty means "no restriction": the endpoints
-    /// serve unqualified calls but never claim a role they did not declare.
+    /// Group-level capabilities, applied to every flat-list URL. Nested
+    /// entries declare their own.
     #[serde(default)]
     pub roles: Vec<String>,
     /// The chain id every endpoint in this group must answer. `None` leaves
@@ -78,6 +203,57 @@ pub struct EndpointGroup {
     /// source uses 900).
     #[serde(default)]
     pub max_log_range: Option<u64>,
+    /// The nested per-endpoint declarations (capabilities, weights, log
+    /// caps, http/ws pairs). Flat lists and entries compose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<EndpointEntry>,
+}
+
+impl EndpointGroup {
+    /// Every HTTP URL of the group: the flat list first (the deployment's
+    /// preference order), then the nested entries' `url`s.
+    pub fn http_all(&self) -> Vec<String> {
+        let mut out = self.http.clone();
+        for entry in &self.entries {
+            if !out.contains(&entry.url) {
+                out.push(entry.url.clone());
+            }
+        }
+        out
+    }
+
+    /// Every WebSocket URL of the group: flat list, then entries' `ws`
+    /// spellings (an http/ws pair entry contributes its `ws` here).
+    pub fn ws_all(&self) -> Vec<String> {
+        let mut out = self.ws.clone();
+        for entry in &self.entries {
+            if let Some(ws) = &entry.ws {
+                if !out.contains(ws) {
+                    out.push(ws.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The capabilities a URL claims: its nested entry's list when the URL is
+    /// an entry, else the group-level `roles`. Every name is parsed through
+    /// the typed vocabulary — a typo in config is a load error here, never a
+    /// silently unclaimed capability.
+    pub fn capabilities_for(&self, url: &str) -> Result<Vec<Capability>, String> {
+        let names: &[String] = match self.entries.iter().find(|e| e.url == url || Some(&e.ws) == Some(&Some(url.to_owned()))) {
+            Some(entry) => &entry.capabilities,
+            None => &self.roles,
+        };
+        names.iter().map(|n| Capability::parse(n).ok_or_else(|| format!("unknown capability {n:?} on endpoint {url:?}"))).collect()
+    }
+
+    /// The effective per-URL attribute overrides (weight, log cap, chain)
+    /// for a URL that is a nested entry; `None` when the URL rides the
+    /// group-level attributes.
+    pub fn entry_attrs(&self, url: &str) -> Option<&EndpointEntry> {
+        self.entries.iter().find(|e| e.url == url || Some(&e.ws) == Some(&Some(url.to_owned())))
+    }
 }
 
 const fn one() -> u32 {
@@ -177,10 +353,10 @@ impl Endpoints {
             let group = groups
                 .get(name)
                 .ok_or_else(|| format!("unknown endpoint group @{name}"))?;
-            if group.http.is_empty() {
+            if group.http.is_empty() && group.entries.iter().all(|e| e.url.is_empty()) {
                 return Err(format!("endpoint group @{name} has no http endpoints"));
             }
-            for value in &group.http {
+            for value in group.http_all() {
                 for part in value.split(',') {
                     push_unique(&mut out, part);
                 }
@@ -289,10 +465,10 @@ impl WsEndpoints {
             let group = groups
                 .get(name)
                 .ok_or_else(|| format!("unknown endpoint group @{name}"))?;
-            if group.ws.is_empty() {
+            if group.ws.is_empty() && !group.entries.iter().any(|e| e.ws.is_some()) {
                 return Err(format!("endpoint group @{name} has no ws endpoints"));
             }
-            for value in &group.ws {
+            for value in group.ws_all() {
                 for part in value.split(',') {
                     push_unique(&mut out, part);
                 }
@@ -447,6 +623,7 @@ mod tests {
                 chain_id: None,
                 weight: 1,
                 max_log_range: None,
+                entries: Vec::new(),
             },
         );
         let mut endpoints = one("@hyperevm");
@@ -472,5 +649,97 @@ mod tests {
     #[derive(Deserialize)]
     struct Table {
         url: Endpoints,
+    }
+
+    #[test]
+    fn nested_entries_compose_with_flat_lists_and_carry_capabilities() {
+        let toml = r#"
+            http = ["https://flat.example/evm", "${FLAT_VAR}"]
+            roles = ["system_txs"]
+            chain_id = 999
+            max_log_range = 900
+
+            [[entries]]
+            url = "https://entry.example/evm"
+            ws = "wss://entry.example/ws"
+            capabilities = ["system_txs", "batch", "historical"]
+            weight = 2
+            max_log_range = 10_000
+
+            [[entries]]
+            url = "https://second.example/evm"
+        "#;
+        let group: EndpointGroup = toml::from_str(toml).expect("group parses");
+        assert_eq!(group.weight, 1, "group default");
+        // Composition: flat first (preference), then entries, dedup'd.
+        let http = group.http_all();
+        assert_eq!(http[0], "https://flat.example/evm");
+        assert!(http.contains(&"${FLAT_VAR}".to_string()));
+        assert!(http.contains(&"https://entry.example/evm".to_string()));
+        assert!(http.contains(&"https://second.example/evm".to_string()));
+        // The ws pair rides the same entry.
+        assert!(group.ws_all().contains(&"wss://entry.example/ws".to_string()));
+        // Entry capabilities are typed and complete; flat urls ride roles.
+        let entry_caps = group.capabilities_for("https://entry.example/evm").unwrap();
+        assert_eq!(entry_caps, vec![
+            Capability::SystemTxs, Capability::Batch, Capability::Historical]);
+        let flat_caps = group.capabilities_for("https://flat.example/evm").unwrap();
+        assert_eq!(flat_caps, vec![Capability::SystemTxs]);
+        // Per-entry overrides beat the group attributes.
+        let entry = group.entry_attrs("https://entry.example/evm").unwrap();
+        assert_eq!(entry.weight, 2);
+        assert_eq!(entry.max_log_range, Some(10_000));
+        assert!(group.entry_attrs("https://second.example/evm").is_some());
+        assert!(group.entry_attrs("https://flat.example/evm").is_none());
+    }
+
+    #[test]
+    fn capability_vocabulary_parses_and_aliases_the_legacy_spellings() {
+        assert_eq!(Capability::parse("system_txs"), Some(Capability::SystemTxs));
+        assert_eq!(Capability::parse("batch"), Some(Capability::Batch));
+        // The legacy flat-roles spellings alias into the typed vocabulary.
+        assert_eq!(Capability::parse("archive"), Some(Capability::Historical));
+        assert_eq!(Capability::parse("trace"), Some(Capability::Traces));
+        assert_eq!(Capability::parse("bal"), Some(Capability::Bal));
+        // Round-trip: the canonical spelling is stable.
+        for cap in [Capability::SystemTxs, Capability::MarketRest, Capability::Batch] {
+            assert_eq!(Capability::parse(cap.as_str()), Some(cap));
+        }
+        assert_eq!(Capability::parse("nope"), None);
+    }
+
+    #[test]
+    fn unknown_capability_names_are_a_parse_error_not_a_silent_noop() {
+        let toml = r#"
+            http = ["https://a.example/evm"]
+            [[entries]]
+            url = "https://a.example/evm"
+            capabilities = ["system_txs", "batchh"]
+        "#;
+        let group: EndpointGroup = toml::from_str(toml).expect("group parses");
+        let error = group.capabilities_for("https://a.example/evm").unwrap_err();
+        assert!(error.contains("batchh"), "error names the typo: {error}");
+    }
+
+    #[test]
+    fn a_group_of_pure_entries_expands_and_a_missing_plane_is_refused() {
+        let group: EndpointGroup = toml::from_str(
+            r#"
+            [[entries]]
+            url = "https://only.example/evm"
+            capabilities = ["batch"]
+            "#,
+        )
+        .unwrap();
+        // http expansion: entries count as the http plane.
+        let mut urls = Endpoints::parse(["@only".to_string()]).unwrap();
+        let mut groups = BTreeMap::new();
+        groups.insert("only".to_string(), group.clone());
+        urls.expand(&groups).unwrap();
+        assert_eq!(urls.as_slice(), &["https://only.example/evm"]);
+        // A group with entries but no ws spelling refuses the ws plane.
+        let mut ws = WsEndpoints::parse(["@only".to_string()]).unwrap();
+        let error = ws.expand(&groups).unwrap_err();
+        assert!(error.contains("no ws endpoints"), "{error}");
     }
 }

@@ -10,14 +10,35 @@
 http = ["${ANVIL_V_URL}"]
 chain_id = 999
 
+# The HyperEVM read pool — one nested declaration per endpoint, each carrying
+# the capabilities it is *measured* to serve (`scripts/probe-endpoint.sh` is
+# the acceptance test; run it 3× before claiming `historical`, the keyless
+# pools are load balancers whose composition moves). The pool admits by
+# capability, round-robins, cools failures down and fails over; `max_log_range`
+# and `weight` ride the entry, the group-level values are the fallback.
+# ENV override for the whole flat list remains `DIORAMA__ENDPOINTS__*`.
 [endpoints.hyperevm]
-http = ["${HL_RPC_URLS}"]
 chain_id = 999
-# The public HyperEVM source's measured free-plan cap: wider eth_getLogs
+# The public HyperEVM source pool's measured free-plan cap: wider eth_getLogs
 # ranges stall or are refused. The client splits scans at this bound.
 max_log_range = 900
 
+[[endpoints.hyperevm.entries]]
+url = "https://rpc.hyperliquid.xyz/evm"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.hyperevm.entries]]
+url = "https://rpc.hypurrscan.io"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.hyperevm.entries]]
+url = "https://hyperliquid-json-rpc.stakely.io"
+capabilities = ["system_txs", "batch"]
+
 [endpoints.hyperliquid_api]
+# The market REST plane. A keyed mirror (e.g. ZAN: `https://api.zan.top/node/
+# v1/hyperliquid/mainnet/<KEY>`) slots in as the first entry with
+# `capabilities = ["market_rest"]`; the official API stays as failover.
 http = ["${HL_INFO_API_URL}"]
 roles = ["market_rest"]
 

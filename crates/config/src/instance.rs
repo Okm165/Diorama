@@ -225,22 +225,37 @@ impl Instance {
             .map(|url| {
                 let group = self.endpoints.values().find(|group| {
                     group
-                        .http
+                        .http_all()
                         .iter()
-                        .chain(group.ws.iter())
+                        .chain(group.ws_all().iter())
                         .flat_map(|value| value.split(','))
                         .any(|value| value.trim().trim_end_matches('/') == url)
                 });
                 match group {
-                    Some(group) => diorama_anvil::EndpointSpec {
-                        url: url.clone(),
-                        roles: group.roles.iter().cloned().collect(),
-                        chain_id: group.chain_id,
-                        weight: group.weight,
-                        max_log_range: group
-                            .max_log_range
-                            .unwrap_or(diorama_anvil::DEFAULT_MAX_LOG_RANGE_BLOCKS),
-                    },
+                    Some(group) => {
+                        // Nested entries carry per-URL capabilities, weight
+                        // and log cap; flat-list URLs ride the group-level
+                        // attributes. The capability names are parsed here so
+                        // a config typo is a load error, not a silent
+                        // unclaimed capability at admission time.
+                        let capabilities = group
+                            .capabilities_for(url)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|cap| cap.as_str().to_string())
+                            .collect();
+                        let entry = group.entry_attrs(url);
+                        diorama_anvil::EndpointSpec {
+                            url: url.clone(),
+                            roles: capabilities,
+                            chain_id: entry.and_then(|e| e.chain_id).or(group.chain_id),
+                            weight: entry.map(|e| e.weight).unwrap_or(group.weight),
+                            max_log_range: entry
+                                .and_then(|e| e.max_log_range)
+                                .or(group.max_log_range)
+                                .unwrap_or(diorama_anvil::DEFAULT_MAX_LOG_RANGE_BLOCKS),
+                        }
+                    }
                     None => diorama_anvil::EndpointSpec::url(url.clone()),
                 }
             })
@@ -483,6 +498,43 @@ impl Instance {
                 group.weight,
                 group.max_log_range,
             );
+            // Nested entries: every capability name must parse through the
+            // typed vocabulary, every URL must carry a valid scheme, and an
+            // entry's (capability, chain, weight, log-cap) tuple participates
+            // in the same cross-group conflict check as flat URLs.
+            for entry in &group.entries {
+                if let Err(why) = group.capabilities_for(&entry.url) {
+                    issues.push(format!("{key}: {why}"));
+                }
+                for url in [Some(&entry.url), entry.ws.as_ref()] {
+                    let Some(url) = url else { continue };
+                    if !url.starts_with("http://") && !url.starts_with("https://") && !url.starts_with("ws://") && !url.starts_with("wss://") {
+                        issues.push(format!("{key}: entry {url:?} is not an http(s)/ws(s) URL"));
+                    }
+                    let entry_attributes = (
+                        entry.capabilities.iter().cloned().collect(),
+                        entry.chain_id,
+                        entry.weight,
+                        entry.max_log_range,
+                    );
+                    match seen.get(url.as_str()) {
+                        None => {
+                            seen.insert(url.clone(), entry_attributes);
+                        }
+                        Some(known) if known == &entry_attributes => {}
+                        Some(_) => issues.push(format!(
+                            "{key}: {url:?} is also declared in another endpoint group with \
+                             different capabilities/chain_id/weight/max_log_range"
+                        )),
+                    }
+                }
+                if entry.weight == 0 {
+                    issues.push(format!("{key}: entry {} weight must be >= 1", entry.url));
+                }
+                if entry.max_log_range == Some(0) {
+                    issues.push(format!("{key}: entry {} max_log_range must be > 0", entry.url));
+                }
+            }
             for url in group.http.iter().chain(group.ws.iter()) {
                 for part in url.split(',') {
                     let part = part.trim().trim_end_matches('/');
@@ -1106,7 +1158,7 @@ fn expand_http(
         return;
     };
     let mut urls = Vec::new();
-    for url in &group.http {
+    for url in group.http_all() {
         for part in url.split(',') {
             push_url(&mut urls, part);
         }
@@ -1133,7 +1185,7 @@ fn push_url(out: &mut Vec<String>, value: &str) {
 
 /// Append a group's HTTP entries (each may itself be comma-separated).
 fn append_group_http(out: &mut Vec<String>, group: &EndpointGroup) {
-    for url in &group.http {
+    for url in group.http_all() {
         for part in url.split(',') {
             push_url(out, part);
         }
@@ -1158,7 +1210,7 @@ fn expand_http_list(
                 }
             }
             Some(name) => match groups.get(name) {
-                Some(group) if !group.http.is_empty() => append_group_http(&mut out, group),
+                Some(group) if !group.http_all().is_empty() => append_group_http(&mut out, group),
                 _ => issues.push(format!("{key}: unknown or empty endpoint group @{name}")),
             },
         }

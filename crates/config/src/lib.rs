@@ -23,7 +23,7 @@ mod env;
 mod instance;
 mod sections;
 
-pub use endpoints::{EndpointGroup, Endpoints, WsEndpoints};
+pub use endpoints::{Capability, EndpointEntry, EndpointGroup, Endpoints, WsEndpoints};
 pub use env::{require_resolved, require_resolved_logged};
 
 pub use instance::{
