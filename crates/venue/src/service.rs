@@ -304,7 +304,7 @@ enum Cmd {
         #[arg(long)]
         rpc: String,
         #[arg(long)]
-        anvil_v: String,
+        target_rpc: String,
         #[arg(long, default_value = diorama_config::boot::DEFAULT_INSTANCE_PATH)]
         config: std::path::PathBuf,
         /// Minimum windows to compose (the run continues until a window
@@ -342,7 +342,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
         Cmd::Run { config } => run(config).await,
         Cmd::Selftest {
             rpc,
-            anvil_v,
+            target_rpc,
             config,
             windows,
             move_wait_secs,
@@ -352,7 +352,7 @@ pub async fn main_entry(args: Vec<String>) -> Result<()> {
                 config,
                 crate::selftest::Targets {
                     rpc,
-                    anvil: anvil_v,
+                    anvil: target_rpc,
                 },
                 windows,
                 std::time::Duration::from_secs(move_wait_secs),
@@ -438,7 +438,7 @@ impl diorama_devnet::engine::EngineService for Ctx {
     fn log_start(ctx: &Self) {
         tracing::info!(
             source = %ctx.source_rpc.url(),
-            anvil_v = %ctx.anvil_v.url(),
+            target_rpc = %ctx.target_rpc.url(),
             pin = ?diorama_devnet::pin::resolved_pin(&ctx.pin),
             watchlist = ctx.mirror.scope().watch().accounts.len(),
             "mirror engine starting"

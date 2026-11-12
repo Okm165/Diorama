@@ -112,7 +112,7 @@ impl FeedRuntime {
     /// The target's decimals, resolved the first time the target is readable
     /// and cached. `None` = not installed yet (the decode of an empty return
     /// is the *fact*; a transport fault still surfaces).
-    async fn decimals(&self, anvil_t: &diorama_anvil::Rpc) -> Result<Option<u8>> {
+    async fn decimals(&self, target_rpc: &diorama_anvil::Rpc) -> Result<Option<u8>> {
         if let Some(d) = *self
             .decimals
             .lock()
@@ -120,7 +120,7 @@ impl FeedRuntime {
         {
             return Ok(Some(d));
         }
-        let Some(decoded) = read_target_decimals(anvil_t, self.section.target).await? else {
+        let Some(decoded) = read_target_decimals(target_rpc, self.section.target).await? else {
             // An empty return does not decode: the *fact* is "no code yet".
             return Ok(None);
         };
@@ -189,15 +189,14 @@ impl FeedBridge {
     /// an unreachable *source* is a boot fault naming it (a silently
     /// mis-scaled price would poison every scenario).
     async fn feed_runtime(ctx: &Ctx, feed: &FeedSection) -> Result<FeedRuntime> {
-        let source =
-            read_decimals(&ctx.reth, feed.source)
-                .await
-                .map_err(|e| Error::FeedBridgeFeed {
-                    feed: feed.name.clone(),
-                    what: "source decimals",
-                    source: Box::new(e),
-                })?;
-        let decimals = target_decimals(&ctx.anvil_t, feed, source).await?;
+        let source = read_decimals(&ctx.source_rpc, feed.source)
+            .await
+            .map_err(|e| Error::FeedBridgeFeed {
+                feed: feed.name.clone(),
+                what: "source decimals",
+                source: Box::new(e),
+            })?;
+        let decimals = target_decimals(&ctx.target_rpc, feed, source).await?;
         Ok(FeedRuntime {
             section: feed.clone(),
             values: Mutex::new(ValueState::default()),
@@ -276,7 +275,7 @@ impl FeedBridge {
             }
             Step::WaitPending | Step::SkipUnchanged => Ok(()),
             Step::Publish(answer) => {
-                publish(&ctx.anvil_t, feed.section.target, self.writer, answer).await?;
+                publish(&ctx.target_rpc, feed.section.target, self.writer, answer).await?;
                 record_publish(feed, &self.metrics, answer, source_stamp, now);
                 ctx.plane.facts.publish(Fact::FeedPublished {
                     chain: "t",
@@ -309,13 +308,13 @@ impl FeedBridge {
         ctx: &Ctx,
         feed: &FeedRuntime,
     ) -> Result<Option<(u8, i128, i128, u64)>> {
-        let Some(decimals) = feed.decimals(&ctx.anvil_t).await? else {
+        let Some(decimals) = feed.decimals(&ctx.target_rpc).await? else {
             // The target is not installed yet; wait (the read retries each
             // pass and the feed starts publishing the moment it appears).
             return Ok(None);
         };
         let (source_now, source_stamp) =
-            read_answer_with_stamp(&ctx.reth, feed.section.source).await?;
+            read_answer_with_stamp(&ctx.source_rpc, feed.section.source).await?;
         let Some(target_now) = self.target_answer(ctx, feed).await? else {
             return Ok(None);
         };
@@ -325,7 +324,7 @@ impl FeedBridge {
     /// The target's answer; a bridge-ABI fault forgets the target so the next
     /// pass re-installs it, and a missing target is a wait.
     async fn target_answer(&self, ctx: &Ctx, feed: &FeedRuntime) -> Result<Option<i128>> {
-        match read_answer(&ctx.anvil_t, feed.section.target).await {
+        match read_answer(&ctx.target_rpc, feed.section.target).await {
             Ok(value) => Ok(Some(value)),
             Err(e @ Error::FeedBridgeAbi { .. }) => {
                 forget_target(feed, &e);
@@ -395,17 +394,17 @@ impl FeedBridge {
     /// empty address would report success and change nothing.
     pub async fn override_answer(
         &self,
-        anvil_t: &diorama_anvil::Rpc,
+        target_rpc: &diorama_anvil::Rpc,
         name: &str,
         answer: i128,
     ) -> Result<()> {
         let feed = self.find(name)?;
-        if feed.decimals(anvil_t).await?.is_none() {
+        if feed.decimals(target_rpc).await?.is_none() {
             return Err(Error::FeedBridgeWaiting {
                 feed: name.to_string(),
             });
         }
-        publish(anvil_t, feed.section.target, self.writer, answer).await?;
+        publish(target_rpc, feed.section.target, self.writer, answer).await?;
         let mut state = feed
             .values
             .lock()

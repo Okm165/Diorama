@@ -14,4 +14,4 @@ metadata:
 data:
   CCTP_STATE_DIR: "/state"
   T_RPC_URL: "http://anvil-t.diorama-mainnet.svc.cluster.local:8545"
-  ANVIL_V_URL: "http://anvil-v.diorama-venue.svc.cluster.local:8545"
+  TARGET_RPC_URL: "http://anvil-v.diorama-venue.svc.cluster.local:8545"

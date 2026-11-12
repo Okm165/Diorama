@@ -46,11 +46,11 @@ pub(crate) async fn read_decimals(rpc: &diorama_anvil::Rpc, aggregator: Address)
 /// on; a present-but-mismatched target or an unexpected fault is a boot error
 /// naming itself (a mis-scaled answer poisons consumers).
 pub(crate) async fn target_decimals(
-    anvil_t: &diorama_anvil::Rpc,
+    target_rpc: &diorama_anvil::Rpc,
     feed: &FeedSection,
     source: u8,
 ) -> Result<Option<u8>> {
-    match read_decimals(anvil_t, feed.target).await {
+    match read_decimals(target_rpc, feed.target).await {
         Ok(d) if d == source => Ok(Some(d)),
         Ok(d) => Err(Error::FeedBridgeDecimals {
             feed: feed.name.clone(),

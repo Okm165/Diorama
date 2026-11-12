@@ -282,7 +282,7 @@ pub fn source_pool(
 /// mainnet's 1697). `applied` counts the mirror's own unit: parent blocks
 /// (T), composed windows (V).
 /// The source's short identity for the steady lines: the URL's host without
-/// the scheme or port (`reth` for the mainnet's local node, the venue's live
+/// the scheme or port (the mainnet's local node, the venue's live
 /// RPC host) — a heartbeat's reader should never have to guess which chain
 /// the numbers describe.
 pub fn source_host(url: &str) -> &str {

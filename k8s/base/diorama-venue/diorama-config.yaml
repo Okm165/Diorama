@@ -9,9 +9,9 @@ metadata:
   labels:
     app.kubernetes.io/part-of: diorama-venue
 data:
-  # The HyperEVM planes moved into the instance TOML (gitignored
-  # specialization): the read pool is [endpoints.hyperevm] — seven keyless,
-  # sysTxs-capable entries with per-endpoint measured capabilities — and the
+  # The HyperEVM planes live in the instance TOML (gitignored
+  # specialization): the read pool is [endpoints.evm] — keyless, sysTxs- and
+  # batch-capable entries with per-endpoint measured capabilities — and the
   # fork source stays this archive (latest-only providers can never fork).
   # ENV overrides remain available via DIORAMA__ENDPOINTS__*.
   EVM_FORK_URL: "https://rpc.hyperlend.finance/archive"
@@ -23,7 +23,7 @@ data:
   HL_WS_API_URL: "wss://api.hyperliquid.xyz/ws"
 
   # The devnet chain and the engine's admin base, by in-namespace service DNS.
-  ANVIL_V_URL: "http://anvil-v:8545"
+  TARGET_RPC_URL: "http://anvil-v:8545"
   ENGINE_ADMIN_URL: "http://engine:8080"
 
   # The Ethereum fork the CCTP bridge burns on: anvil-t lives in the

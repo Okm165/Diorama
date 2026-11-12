@@ -181,13 +181,13 @@ enum Pass {
 }
 
 async fn pass(ctx: &Ctx) -> Result<Pass> {
-    let head = ctx.anvil_v.block_number().await?;
+    let head = ctx.target_rpc.block_number().await?;
     ctx.venue_metrics.set(&ctx.venue_metrics.head, head);
 
     // Reset detection: the bundle's detector (the pin canary — see
     // `crate::reset`): anything but Steady runs the epoch rule.
     if !matches!(
-        ctx.mirror.reset().detect(&ctx.anvil_v).await?,
+        ctx.mirror.reset().detect(&ctx.target_rpc).await?,
         ResetSignal::Steady
     ) {
         return Ok(Pass::Reset);
@@ -199,7 +199,7 @@ async fn pass(ctx: &Ctx) -> Result<Pass> {
     // The read precompiles are `anvil_setCode` installs: the tx scanner cannot
     // see them, so capture their code once installed and let a same-pin re-fork
     // restore them with their storage.
-    match ctx.plane.capture_fixtures_if_due(&ctx.anvil_v, 60).await {
+    match ctx.plane.capture_fixtures_if_due(&ctx.target_rpc, 60).await {
         Ok(0) => {}
         Ok(captured) => {
             tracing::info!(
@@ -264,7 +264,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     let first = cursor.map(|c| c.block).unwrap_or(head);
     let walk = scan::scan_to(
         &ctx.plane,
-        &ctx.anvil_v,
+        &ctx.target_rpc,
         diorama_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
         head,
         first,
@@ -281,7 +281,7 @@ async fn scan_and_advance(ctx: &Ctx, cursor: Option<&ChainCursor>, head: u64) ->
     // pruned; the venue's journal holds its own writes — the deal).
     ctx.plane.journal.prune(head);
     let block = ctx
-        .anvil_v
+        .target_rpc
         .block_by_number(head, diorama_anvil::Txs::Hashes)
         .await?;
     diorama_devnet::state::advance_cursor(&ctx.plane.state, &block, head)?;
@@ -305,7 +305,7 @@ async fn mine_pending(ctx: &Ctx) -> Result<()> {
     if ctx.mirror.policies().mine != MinePolicy::PoolDrain {
         return Ok(());
     }
-    let diorama_anvil::Mined::Block { pending } = ctx.anvil_v.mine_pending().await? else {
+    let diorama_anvil::Mined::Block { pending } = ctx.target_rpc.mine_pending().await? else {
         return Ok(());
     };
     ctx.venue_metrics.inc(&ctx.venue_metrics.mined_blocks_total);
@@ -322,7 +322,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
     // The canary tells whether this is still the chain instance the registry
     // was built against (see CANARY_ADDRESS): present and equal to the pin
     // means steady, nothing to reconcile.
-    if read_canary(&ctx.anvil_v).await? == pin {
+    if read_canary(&ctx.target_rpc).await? == pin {
         return Ok(pin);
     }
     // The witness comes first (the cause, then the effect), through the same
@@ -346,7 +346,7 @@ async fn reconcile(ctx: &Ctx) -> Result<Option<u64>> {
 /// without it the epoch decision would default to "same pin" and re-apply
 /// writes across a pin change.
 async fn pin_read(ctx: &Ctx) -> Result<Option<u64>> {
-    let pin = ctx.anvil_v.fork_block().await?;
+    let pin = ctx.target_rpc.fork_block().await?;
     ctx.venue_metrics
         .set(&ctx.venue_metrics.fork_pin, pin.unwrap_or(0));
     if let Some(p) = pin {
@@ -385,7 +385,7 @@ async fn run_epoch_rule(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
     let watermark = if let Some(p) = pin {
         let block = ctx
-            .anvil_v
+            .target_rpc
             .block_by_number(p, diorama_anvil::Txs::Hashes)
             .await?;
         // Not the shared advance step: a new epoch's `first_block` *is* the
@@ -405,14 +405,14 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
         p
     } else {
         tracing::warn!("anvil-v has no fork pin: epoch decisions are pin-based and cannot run");
-        ctx.anvil_v.block_number().await?
+        ctx.target_rpc.block_number().await?
     };
     ctx.plane
         .shadow_scanned_upto
         .store(watermark, Ordering::Relaxed);
     ctx.plane.save_state()?;
     if let Some(p) = pin {
-        write_canary(&ctx.anvil_v, p).await?;
+        write_canary(&ctx.target_rpc, p).await?;
     }
     Ok(())
 }
@@ -420,7 +420,7 @@ async fn anchor_cursor(ctx: &Ctx, pin: Option<u64>) -> Result<()> {
 /// Run the at-pin probes now (the admin route's entry: boot and re-pin run
 /// them automatically; this is the on-demand trigger, e.g. after a hand-back).
 pub(crate) async fn probes_now(ctx: &Ctx) -> Result<ProbeOutcome> {
-    let pin = ctx.anvil_v.fork_block().await?;
+    let pin = ctx.target_rpc.fork_block().await?;
     probes_at_pin(ctx, pin).await
 }
 

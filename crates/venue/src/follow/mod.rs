@@ -219,7 +219,7 @@ fn outcome(
 /// landing past an unscanned block is the exact COW failure the registry
 /// exists to prevent.
 async fn pre_land_scan(ctx: &Ctx) -> Result<()> {
-    let head = ctx.anvil_v.block_number().await?;
+    let head = ctx.target_rpc.block_number().await?;
     let first = ctx
         .plane
         .state
@@ -229,7 +229,7 @@ async fn pre_land_scan(ctx: &Ctx) -> Result<()> {
         .unwrap_or(head);
     let walk = diorama_devnet::scan::scan_to(
         &ctx.plane,
-        &ctx.anvil_v,
+        &ctx.target_rpc,
         diorama_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
         head,
         first,
@@ -399,7 +399,7 @@ async fn apply_window(ctx: &Ctx, plan: &diorama_devnet::bal::WindowPlan) -> Resu
         return Ok(0);
     }
     Ok(
-        diorama_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size)
+        diorama_anvil::apply_writes(&ctx.target_rpc, &plan.writes, ctx.engine.loops.chunk_size)
             .await?,
     )
 }

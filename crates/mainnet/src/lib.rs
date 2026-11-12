@@ -72,7 +72,7 @@ mod design_assertions {
         is_normal::<crate::source_sync::beacon::TopUpBody>();
         is_normal::<crate::source_sync::beacon::BeaconBlock>();
         is_normal::<crate::source_sync::engine_api::EngineClient>();
-        is_normal::<crate::source::RethSource>();
+        is_normal::<crate::source::NativeSource>();
         is_normal::<crate::reset::CursorHash>();
         is_normal::<crate::profile::Wiring>();
         is_normal::<crate::profile::Deps>();

@@ -8,12 +8,12 @@ use std::sync::atomic::Ordering;
 
 diorama_devnet::registry! {
     pub struct MainnetMetrics {
-        gauge reth_head = "diorama_reth_head", "reth chain head";
-        gauge reth_follow_head = "diorama_reth_follow_head", "reth follow head (safe/latest/finalized)";
-        gauge source_sync_gap_blocks = "diorama_source_sync_gap_blocks", "CL head execution block - reth head (top-up catch-up progress)";
+        gauge source_head = "diorama_source_head", "source chain head";
+        gauge source_follow_head = "diorama_source_follow_head", "source follow head (safe/latest/finalized)";
+        gauge source_sync_gap_blocks = "diorama_source_sync_gap_blocks", "CL head execution block - source head (top-up catch-up progress)";
         /// EIP-8379 top-up: payloads delivered to reth and the remaining gap to the
         /// CL's head (what "self-contained catch-up" looks like in monitoring).
-        counter source_sync_delivered = "diorama_source_sync_delivered_total", "execution payloads delivered to reth via the Engine API (EIP-8379 top-up)";
+        counter source_sync_delivered = "diorama_source_sync_delivered_total", "execution payloads delivered to the EL via the Engine API (EIP-8379 top-up)";
         gauge head = "diorama_head", "the devnet chain's head (T)";
         gauge cursor = "diorama_cursor_block", "last applied parent block";
         /// Times T was found re-forked under the engine (its OOM restart, a re-pin).
@@ -23,7 +23,7 @@ diorama_devnet::registry! {
         /// `T's head - T's fork block`: reads below the fork block are served by
         /// reth, whose state window is 10,064 blocks. Past that, any slot T has
         /// not written cannot be read at all - re-pin (make repin) before it.
-        gauge t_fork_age_blocks = "diorama_t_fork_age_blocks", "T head - T fork block (reth serves below it; 10,064-block window)";
+        gauge t_fork_age_blocks = "diorama_t_fork_age_blocks", "T head - T fork block (the source serves below it; its 10,064-block window)";
         gauge pin_age_blocks = "diorama_pin_age_blocks", "blocks since the first processed block in this epoch";
         /// T blocks the shadow scan walked (empty blocks cost one header read; no
         /// traces). The scan-cost reading: it grows ~1 per harness-mined block.
@@ -47,7 +47,7 @@ diorama_devnet::registry! {
     }
     computed {
         gauge "diorama_lag_blocks", "follow head - applied cursor", |m: &MainnetMetrics| m
-            .reth_follow_head
+            .source_follow_head
             .load(Ordering::Relaxed)
             .saturating_sub(m.cursor.load(Ordering::Relaxed));
     }

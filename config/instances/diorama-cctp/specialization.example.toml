@@ -14,7 +14,7 @@ http = ["${T_RPC_URL}"]
 chain_id = 1
 
 [endpoints.anvil]
-http = ["${ANVIL_V_URL}"]
+http = ["${TARGET_RPC_URL}"]
 chain_id = 999
 
 [[services.cctp_bridge.chains]]

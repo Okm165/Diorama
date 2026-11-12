@@ -27,9 +27,9 @@ use std::sync::Arc;
 pub struct StatusResponse {
     #[serde(flatten)]
     shared: SharedStatus,
-    /// `None` when reth did not answer: a diagnostic must not report a
+    /// `None` when the source did not answer: a diagnostic must not report a
     /// fabricated height.
-    reth_head: Option<u64>,
+    source_head: Option<u64>,
     /// `None` when the follow tag could not be resolved.
     follow_head: Option<u64>,
     follow: &'static str,
@@ -73,13 +73,13 @@ fn guard_state(lag: Option<u64>, gap_limit: Option<u64>) -> &'static str {
 /// plausible zero: `/status` is a diagnostic, not a fact source.
 pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
     let shared =
-        SharedStatus::gather(ctx.anvil_t.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
-    let reth_head = ctx.reth.block_number().await.ok();
+        SharedStatus::gather(ctx.target_rpc.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
+    let source_head = ctx.source_rpc.block_number().await.ok();
     let follow = ctx.follow_head().await.ok().flatten();
     let lag = lag_between(follow, shared.cursor);
     let gap_limit = ctx.mirror.policies().gap;
     Ok(StatusResponse {
-        reth_head,
+        source_head,
         follow_head: follow,
         follow: ctx.follow_tag(),
         cursor_t: shared.cursor,
@@ -88,8 +88,8 @@ pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
         guard: guard_state(lag, gap_limit),
         watchlist: ctx.mirror.scope().watch().accounts.len(),
         time_offset_seconds: ctx.plane.time_offset.load(Ordering::Relaxed),
-        sources: ctx.reth.urls().to_vec(),
-        source_pool: ctx.reth.pool().snapshot(),
+        sources: ctx.source_rpc.urls().to_vec(),
+        source_pool: ctx.source_rpc.pool().snapshot(),
         shared,
     })
 }

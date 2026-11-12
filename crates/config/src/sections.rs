@@ -274,7 +274,7 @@ pub struct EngineSection {
     /// constant.
     pub drift_rotate_bytes: u64,
     pub anvil: EngineAnvil,
-    pub reth: EngineReth,
+    pub source: EngineSource,
     pub loops: LoopsSection,
     pub verifier: VerifierSection,
     pub source_sync: SourceSyncSection,
@@ -343,7 +343,11 @@ pub struct EngineAnvil {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct EngineReth {
+/// `[services.engine.source]`: the follow source's request budget. The name
+/// is the plane, not a client brand: the section is read by both profiles and
+/// the mainnet's local node and the venue's public pool are interchangeable
+/// implementations of the same source plane.
+pub struct EngineSource {
     pub request_timeout_secs: u64,
 }
 

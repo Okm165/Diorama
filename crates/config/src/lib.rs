@@ -31,8 +31,8 @@ pub use instance::{
     WatchEntry, RETH_STATE_WINDOW_BLOCKS,
 };
 pub use sections::{
-    BeaconSection, CctpChain, CctpLane, CctpSection, ClosuresSection, EngineAnvil, EngineReth,
-    EngineSection, FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection,
+    BeaconSection, CctpChain, CctpLane, CctpSection, ClosuresSection, EngineAnvil, EngineSection,
+    EngineSource, FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection,
     LaneFee, LoopsSection, MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, Sweep,
     VenueSimSection, VerifierSection,
 };
@@ -301,7 +301,7 @@ mod tests {
     fn wiring() -> Vec<(String, String)> {
         vars(&[
             ("EVM_URL", "http://reth:8545"),
-            ("ANVIL_T_URL", "http://anvil-t:8545"),
+            ("TARGET_RPC_URL", "http://anvil-t:8545"),
             ("BEACON_URL", "http://lighthouse:5052"),
             ("ENGINE_API_URL", "http://reth:8551"),
             ("JWT_PATH", "/secrets/jwt.hex"),
@@ -807,7 +807,7 @@ port = 8096
         assert_eq!(
             names,
             vec![
-                "ANVIL_T_URL",
+                "TARGET_RPC_URL",
                 "BEACON_URL",
                 "ENGINE_API_URL",
                 "EVM_URL",
@@ -944,7 +944,7 @@ port = 8096
         assert_eq!(
             names,
             vec![
-                "ANVIL_V_URL",
+                "TARGET_RPC_URL",
                 "ENGINE_ADMIN_URL",
                 "HL_INFO_API_URL",
                 "HL_WS_API_URL",

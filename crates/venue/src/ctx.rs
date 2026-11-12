@@ -30,8 +30,8 @@ pub struct Ctx {
     /// `[services.engine]` section the mainnet engine carries, read for this
     /// profile's fields.
     pub(crate) engine: EngineSection,
-    /// Anvil V (the devnet chain; chain id 999).
-    pub(crate) anvil_v: Arc<Rpc>,
+    /// The target chain's client (the local devnet, chain id 999).
+    pub(crate) target_rpc: Arc<Rpc>,
     /// The fork source V derives from (the unshadow re-sync truth at the pin).
     pub(crate) source_rpc: Arc<Rpc>,
     /// V's fork pin ([`diorama_devnet::pin::PIN_UNRESOLVED`] until the
@@ -79,8 +79,8 @@ impl Ctx {
         // The engine's configured RPC budget, the same one the source reads
         // use: V is a local anvil and the public source is the slow side.
         let pool = diorama_devnet::engine::source_pool(&cfg, source_urls)?;
-        let timeout = Duration::from_secs(engine.reth.request_timeout_secs);
-        let (source_rpc, anvil_v) = diorama_devnet::engine::build_clients(pool, v_url, timeout)?;
+        let timeout = Duration::from_secs(engine.source.request_timeout_secs);
+        let (source_rpc, target_rpc) = diorama_devnet::engine::build_clients(pool, v_url, timeout)?;
         let uncovered_seen = std::sync::Mutex::new(std::collections::HashSet::new());
         let venue_metrics = VenueMetrics::default();
         let wiring = crate::profile::build(
@@ -88,13 +88,13 @@ impl Ctx {
             crate::profile::Deps {
                 state: plane.state.clone(),
                 source_rpc: source_rpc.clone(),
-                target_rpc: anvil_v.clone(),
+                target_rpc: target_rpc.clone(),
                 watch: cfg.watch_set(),
             },
         );
         Ok(Self {
             engine,
-            anvil_v,
+            target_rpc,
             source_rpc,
             pin: wiring.pin,
             mirror: wiring.mirror,
@@ -121,7 +121,7 @@ impl Engine for Ctx {
         EngineCore {
             plane: &self.plane,
             mirror: &self.mirror,
-            target: &self.anvil_v,
+            target: &self.target_rpc,
             source: &self.source_rpc,
             engine: &self.engine,
         }

@@ -91,7 +91,7 @@ async fn feed_override(
 ) -> Result<Json<FeedAck>> {
     let bridge = state.bridge.as_ref().ok_or(Error::FeedBridgeUnconfigured)?;
     bridge
-        .override_answer(&state.ctx.anvil_t, &req.name, req.answer)
+        .override_answer(&state.ctx.target_rpc, &req.name, req.answer)
         .await?;
     Ok(Json(FeedAck {
         name: req.name,

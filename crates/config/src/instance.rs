@@ -502,7 +502,7 @@ impl Instance {
             }
             if l1.fork_offset >= RETH_STATE_WINDOW_BLOCKS {
                 issues.push(format!(
-                    "chains.l1.fork_offset {} is outside reth's {}-block state window",
+                    "chains.l1.fork_offset {} is outside the source's {}-block state window",
                     l1.fork_offset, RETH_STATE_WINDOW_BLOCKS
                 ));
             }
@@ -767,7 +767,7 @@ impl Instance {
                 "export-env client (mainnet profile) requires [services.engine.anvil].target_url",
             )
         })?;
-        let t = resolved("ANVIL_T_URL", t_url)?;
+        let t = resolved("TARGET_RPC_URL", t_url)?;
         let t = cluster_url(&t, &self.instance.namespace);
         let admin = cluster_url(
             &format!("http://engine:{}", engine.http.port),
@@ -792,7 +792,7 @@ impl Instance {
                 "export-env client (venue profile) requires [services.engine.anvil].target_url",
             )
         })?;
-        let v = resolved("ANVIL_V_URL", v_url)?;
+        let v = resolved("TARGET_RPC_URL", v_url)?;
         let v = cluster_url(&v, &self.instance.namespace);
         let sim = self.services.venue_sim.as_ref().ok_or_else(|| {
             mismatch("export-env client (venue profile) requires [services.venue_sim]")

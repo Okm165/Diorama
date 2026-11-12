@@ -39,7 +39,7 @@ boot_timeout_secs = 900
 # file). A deployment's forensic-retention policy, not a protocol constant.
 drift_rotate_bytes = 16777216
 
-[services.engine.reth]
+[services.engine.source]
 request_timeout_secs = 30
 
 [services.engine.loops]

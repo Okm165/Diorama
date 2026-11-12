@@ -48,7 +48,7 @@ pub struct StatusResponse {
 /// this engine's own state.
 pub(crate) async fn status_doc(ctx: &Ctx) -> Result<StatusResponse> {
     let shared =
-        SharedStatus::gather(ctx.anvil_v.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
+        SharedStatus::gather(ctx.target_rpc.as_ref(), &ctx.plane, ctx.mirror.as_ref()).await?;
     Ok(StatusResponse {
         fork_pin: diorama_devnet::pin::resolved_pin(&ctx.pin),
         epoch_pin: ctx.plane.state.epoch_pin()?,

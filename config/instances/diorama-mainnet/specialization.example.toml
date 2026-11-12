@@ -28,7 +28,7 @@ ws = ["${EVM_URL}"]
 http = ["${EVM_URL}"]
 
 [endpoints.anvil]
-http = ["${ANVIL_T_URL}"]
+http = ["${TARGET_RPC_URL}"]
 chain_id = 1
 
 [endpoints.engine_api]

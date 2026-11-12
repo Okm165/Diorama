@@ -21,18 +21,18 @@ pub async fn run(cfg: Instance, targets: Targets, blocks: u64) -> Result<Verdict
 
     // Wait for the scratch anvil (same pod, it starts in parallel): the
     // instance's own boot budget.
-    ctx.anvil_t
+    ctx.target_rpc
         .wait_until_up(
             "anvil-t",
             std::time::Duration::from_secs(ctx.engine.boot_timeout_secs),
         )
         .await?;
-    ctx.anvil_t
+    ctx.target_rpc
         .anvil_set_automine(diorama_anvil::Automine::Off)
         .await?;
 
     // The pin comes from the scratch anvil itself (forkConfig.forkBlockNumber).
-    let pin = diorama_devnet::pin::fork_pin(&ctx.anvil_t, "anvil-t").await?;
+    let pin = diorama_devnet::pin::fork_pin(&ctx.target_rpc, "anvil-t").await?;
 
     diorama_devnet::engine::selftest_banner(
         "mirror engine selftest",

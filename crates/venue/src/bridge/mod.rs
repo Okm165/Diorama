@@ -54,7 +54,7 @@ pub struct BridgePolicy {
 /// The bridge's own cursor and the persisted state it needs. The cursor lives
 /// in the sim's state file (one state root per service).
 pub struct Bridge {
-    anvil_v: Rpc,
+    target_rpc: Rpc,
     sim: Arc<Sim>,
     feed: Arc<MarketFeed>,
     /// The scan cadence (the deployment's `bridge_poll_interval_ms`).
@@ -77,7 +77,7 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(
-        anvil_v: Rpc,
+        target_rpc: Rpc,
         sim: Arc<Sim>,
         feed: Arc<MarketFeed>,
         metrics: Arc<BridgeMetrics>,
@@ -88,7 +88,7 @@ impl Bridge {
         // the service was down.
         let cursor = sim.bridge_cursor()?;
         Ok(Self {
-            anvil_v,
+            target_rpc,
             sim,
             feed,
             poll: policy.poll,
@@ -112,10 +112,10 @@ impl Bridge {
 
     /// One pass: anchor (pin-aware), then scan every new block.
     pub async fn pass(&self) -> Result<()> {
-        let head = self.anvil_v.block_number().await?;
+        let head = self.target_rpc.block_number().await?;
         self.observe_head_time(head).await?;
         let pin = self
-            .anvil_v
+            .target_rpc
             .fork_config()
             .await?
             .map(|fork| fork.block)
@@ -187,12 +187,12 @@ impl Bridge {
         // simulated accounts holding spot USDC, until the read moved to the
         // pass's anchored head.
         let spot_installed = !self
-            .anvil_v
+            .target_rpc
             .code_at(system::SPOT_BALANCE_MOCK, head)
             .await?
             .is_empty();
         let withdrawable_installed = !self
-            .anvil_v
+            .target_rpc
             .code_at(system::WITHDRAWABLE_MOCK, head)
             .await?
             .is_empty();
@@ -205,12 +205,12 @@ impl Bridge {
             return Ok(());
         }
         if self
-            .anvil_v
+            .target_rpc
             .balance_at(system::PRECOMPILE_WRITER, head)
             .await?
             .is_zero()
         {
-            self.anvil_v
+            self.target_rpc
                 .anvil_set_balance(system::PRECOMPILE_WRITER, self.system_gas_stipend)
                 .await?;
         }
@@ -276,7 +276,7 @@ impl Bridge {
             .from(system::PRECOMPILE_WRITER)
             .to(mock)
             .input(data.into());
-        let hash = self.anvil_v.send_transaction(tx).await?;
+        let hash = self.target_rpc.send_transaction(tx).await?;
         tracing::debug!(mock = %mock, tx = %hash, "bridge: precompile mock write submitted");
         Ok(())
     }
@@ -355,7 +355,7 @@ impl Bridge {
             return Ok(());
         }
         let block = self
-            .anvil_v
+            .target_rpc
             .block_by_number(head, diorama_anvil::Txs::Hashes)
             .await?;
         self.sim
@@ -367,7 +367,7 @@ impl Bridge {
     /// Decode one block's boundary activity and apply it.
     async fn scan_block(&self, n: u64) -> Result<()> {
         let block = self
-            .anvil_v
+            .target_rpc
             .block_by_number(n, diorama_anvil::Txs::Full)
             .await?;
         if block.transactions.is_empty() {
@@ -418,7 +418,7 @@ impl Bridge {
     /// contract (`Received`) and every token's system-address transfers,
     /// from the receipts' logs.
     async fn apply_credits(&self, n: u64, tokens: &[TokenInfo]) -> Result<()> {
-        let receipts = self.anvil_v.receipts(n).await?;
+        let receipts = self.target_rpc.receipts(n).await?;
         for receipt in &receipts {
             // The logs decoded once, with their emitters, so a helper-hop
             // credit can look back at the same transaction's funding leg.
@@ -453,7 +453,7 @@ impl Bridge {
         n: u64,
         block: &alloy_rpc_types_eth::Block,
     ) -> Result<Vec<(Address, CoreAction)>> {
-        match self.anvil_v.trace_block_calls(n).await {
+        match self.target_rpc.trace_block_calls(n).await {
             Ok(traces) => {
                 let mut out = Vec::new();
                 for trace in traces {
@@ -950,8 +950,8 @@ impl Bridge {
         // not); fund it once, at the deployment's declared stipend, so the
         // pool's balance check passes. A balance-read fault propagates: it
         // must not be read as "empty" and funded over a broken RPC.
-        if self.anvil_v.balance_at(from, 0).await?.is_zero() {
-            self.anvil_v
+        if self.target_rpc.balance_at(from, 0).await?.is_zero() {
+            self.target_rpc
                 .anvil_set_balance(from, self.system_gas_stipend)
                 .await?;
         }
@@ -959,7 +959,7 @@ impl Bridge {
             .from(from)
             .to(evm.address)
             .input(system::transfer_calldata(*recipient, value).into());
-        let hash = self.anvil_v.send_transaction(tx).await?;
+        let hash = self.target_rpc.send_transaction(tx).await?;
         self.metrics.inc_completions();
         tracing::info!(
             to = %recipient,

@@ -38,7 +38,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The bridge's own wiring ConfigMap (cctp-config), not the venue's:
-          # CCTP_STATE_DIR, T_RPC_URL and ANVIL_V_URL are all this process
+          # CCTP_STATE_DIR, T_RPC_URL and TARGET_RPC_URL are all this process
           # reads. T lives in the diorama-mainnet namespace, so the bridge
           # reaches it over cross-namespace service DNS.
           envFrom:

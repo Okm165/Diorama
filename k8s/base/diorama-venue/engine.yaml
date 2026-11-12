@@ -35,7 +35,7 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (EVM_FORK_URLS,
-          # ANVIL_V_URL, STATE_DIR) — the same `envFrom` mechanism as the
+          # TARGET_RPC_URL, STATE_DIR) — the same `envFrom` mechanism as the
           # mainnet engine: the ConfigMap carries every key, the pod reads the
           # ones its instance names, and a new wiring var needs no edit here.
           # `EVM_FORK_URLS` is the engine's read pool; `EVM_FORK_URL` is anvil V's

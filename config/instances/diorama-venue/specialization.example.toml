@@ -13,7 +13,7 @@
 # the provider's behavior does.
 
 [endpoints.anvil]
-http = ["${ANVIL_V_URL}"]
+http = ["${TARGET_RPC_URL}"]
 chain_id = 999
 
 # The HyperEVM read pool — one nested declaration per endpoint, each carrying

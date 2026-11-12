@@ -47,12 +47,13 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
         return (sample.len(), 0);
     };
     // T's side is the local anvil: its own 500-item contract (one body for
-    // a full sweep); reth keeps the conservative public cap (its ceiling is
-    // not documented here — 1000 answered live once, not relied on).
+    // a full sweep); the source keeps the conservative public cap (its
+    // ceiling is not documented here — 1000 answered live once, not relied
+    // on).
     let (t_answers, r_answers) = match tokio::try_join!(
-        ctx.anvil_t
+        ctx.target_rpc
             .batch_limited(&calls.t, diorama_anvil::ANVIL_BATCH_MAX_ITEMS, 1 << 20),
-        ctx.reth.batch(&calls.reth)
+        ctx.source_rpc.batch(&calls.source)
     ) {
         Ok(pair) => pair,
         Err(e) => {
@@ -69,11 +70,12 @@ async fn sample_parity(ctx: &Ctx, n: u64, filtered: &[Write], t_latest: u64) -> 
     (sample.len(), sampled_ok)
 }
 
-/// Both sides' call plans for the drift sample: T at the parent block, reth
-/// at its own latest.
+/// Both sides' call plans for the drift sample: T at the parent block, the
+/// source at its own latest.
 struct SampleCalls {
     t: Vec<diorama_anvil::Call>,
-    reth: Vec<diorama_anvil::Call>,
+    /// The source side's plan (the chain-1 node at its own latest).
+    source: Vec<diorama_anvil::Call>,
 }
 
 /// The sample's call plans; `None` when a plan cannot encode (already warned;
@@ -88,7 +90,7 @@ fn sample_calls(n: u64, t_latest: u64, sample: &[Key]) -> Option<SampleCalls> {
     };
     Some(SampleCalls {
         t: plan(t_latest)?,
-        reth: plan(n)?,
+        source: plan(n)?,
     })
 }
 
@@ -125,7 +127,7 @@ fn sample_verdict<E: std::fmt::Display>(
                 block = n,
                 address = %address,
                 slot = %slot,
-                "drift sample mismatch: t={a} reth={b}"
+                "drift sample mismatch: t={a} source={b}"
             );
             false
         }
@@ -163,7 +165,7 @@ async fn t_convergence_probes(ctx: &Ctx, n: u64) -> Result<()> {
             _ => diorama_devnet::probes::ClockOffset::Offset,
         },
     )
-    .parity(&ctx.reth, n, &ctx.anvil_t)
+    .parity(&ctx.source_rpc, n, &ctx.target_rpc)
     .await?;
     // The same summary line the venue's at-pin run reports (one shape for
     // both profiles): the per-probe skips stay DEBUG diagnostics.
