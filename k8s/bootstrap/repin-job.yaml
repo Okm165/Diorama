@@ -37,8 +37,8 @@ spec:
               # reads is /state/pin. (The old /state/anvil-t path never matched
               # the live mount and left the pin in place.)
               for d in /state; do
-                echo "wiping $d: pin (+ legacy dump)"
-                rm -f "$d/pin" "$d/state.json"
+                echo "wiping $d: pin (+ current and legacy state dumps)"
+                rm -f "$d/pin" "$d/anvil-state.json" "$d/state.json"
                 ls -la "$d" || true
               done
           volumeMounts:

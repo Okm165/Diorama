@@ -7,6 +7,7 @@ NS             := $(INSTANCE)
 OVERLAY        := k8s/overlays/$(INSTANCE)
 BOOTSTRAP      := k8s/bootstrap
 KUBECTL        := kubectl -n $(NS)
+IMG_TAR        := target/diorama-img.tar
 
 # The engine image/tag of the selected instance, scraped from the manifest
 # that deploys it - the deployed manifest stays the single source of truth.
@@ -136,18 +137,18 @@ images: ## Build + import the local images, then pull + import the pinned third-
 	  fi; \
 	  printf "== %s (build)\n" "$$ref"; \
 	  podman build -q -f Dockerfile --build-arg BIN=$$bin -t "$$ref" . || exit 1; \
-	  rm -f /tmp/diorama-img.tar; \
-	  podman save -o /tmp/diorama-img.tar "$$ref" || exit 1; \
-	  sudo k3s ctr images import /tmp/diorama-img.tar >/dev/null || exit 1; \
+	  rm -f "$(IMG_TAR)"; \
+	  podman save -o "$(IMG_TAR)" "$$ref" || exit 1; \
+	  sudo k3s ctr images import "$(IMG_TAR)" >/dev/null || exit 1; \
 	done
 	@for img in $(IMAGES); do \
 		printf "== %s\n" "$$img"; \
 		podman pull -q "$$img" || exit 1; \
-		rm -f /tmp/diorama-img.tar; \
-		podman save -o /tmp/diorama-img.tar "$$img" || exit 1; \
-		sudo k3s ctr images import /tmp/diorama-img.tar >/dev/null || exit 1; \
+		rm -f "$(IMG_TAR)"; \
+		podman save -o "$(IMG_TAR)" "$$img" || exit 1; \
+		sudo k3s ctr images import "$(IMG_TAR)" >/dev/null || exit 1; \
 	done
-	@rm -f /tmp/diorama-img.tar
+	@rm -f "$(IMG_TAR)"
 	@echo "local: $(LOCAL_IMAGES)"
 	@echo "imported: $(IMAGES)"
 	@$(MAKE) --no-print-directory check-pins
@@ -298,10 +299,10 @@ pin-show: ## Show the resolved fork pins of the instance's anvils
 	done
 
 mainnet-repin: ## Re-pin drill: wipe the pin, restart the anvil (engine auto-rebases; a new epoch starts)
-	@pin=$$(kubectl -n diorama-mainnet get deploy anvil-t -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="ANVIL_FORK_PIN")].value}' 2>/dev/null); \
+	@cm=$$(kubectl -n diorama-mainnet get deploy anvil-t -o jsonpath='{.spec.template.spec.volumes[?(@.name=="instance")].configMap.name}'); \
+	pin=$$(kubectl -n diorama-mainnet get cm "$$cm" -o go-template='{{index .data "specialization.toml"}}' 2>/dev/null | sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' | tr -d '_'); \
 	if [ -n "$$pin" ]; then \
-	  echo "anvil-t has an explicit ANVIL_FORK_PIN=$$pin; wiping /state/pin is a no-op." >&2; \
-	  echo "Unset or patch ANVIL_FORK_PIN first. The init container only re-resolves the pin when that variable is empty; a changed pin is a new epoch and clears the shadow registry." >&2; \
+	  echo "the mounted specialization still pins fork_pin=$$pin; remove it first (a changed pin is a new epoch and clears the shadow registry)." >&2; \
 	  exit 1; \
 	fi
 	kubectl -n diorama-mainnet scale deploy/anvil-t --replicas=0
