@@ -240,25 +240,39 @@ fn endpoint_policy_refusal(text: &str) -> bool {
 /// endpoint. These messages are provider capability, not a deterministic
 /// revert: a revert (`execution reverted`) stays the node's answer and is
 /// never failed over.
+/// The measured `-32000` spellings of "this endpoint cannot serve that
+/// block": each needle was answered for a request another pool member served,
+/// never guessed from docs.
+const CAPABILITY_REFUSALS: [&str; 9] = [
+    "unsupported block number",
+    "pruned history unavailable",
+    "missing trie node",
+    "header not found",
+    "block not found",
+    "requested block is not available",
+    "historical state",
+    "archive",
+    "state is not available",
+];
+
 fn endpoint_capability_refusal(text: &str) -> bool {
-    let capability = |message: &str| {
+    fn refusal(code: i64, message: &str) -> bool {
         let message = message.to_ascii_lowercase();
-        [
-            "unsupported block number",
-            "pruned history unavailable",
-            "missing trie node",
-            "header not found",
-            "block not found",
-            "requested block is not available",
-            "historical state",
-            "archive",
-            "state is not available",
-        ]
-        .iter()
-        .any(|needle| message.contains(needle))
-    };
+        let needle = |n: &str| message.contains(n);
+        (code == -32000 && CAPABILITY_REFUSALS.iter().any(|n| needle(n)))
+            // Measured 2026-11-12: hyperliquid.api.pocket.network refuses
+            // `eth_getLogs` ranges the other pool members serve (`-32602
+            // invalid block range`) — its per-request result cap sits below
+            // the pool's declared 900, and the same window composed fine via
+            // the official endpoint. A range refusal is the endpoint's
+            // difference, not the call's answer: fail over and cool it.
+            || (code == -32602 && needle("invalid block range"))
+    }
+
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
+        // A batch: any item carrying a capability refusal means this endpoint
+        // cannot serve the body; another endpoint can.
         return serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
             .map(|items| {
                 items.iter().any(|item| {
@@ -270,7 +284,7 @@ fn endpoint_capability_refusal(text: &str) -> bool {
                         .and_then(serde_json::Value::as_i64)
                         .unwrap_or(0);
                     let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                    code == -32000 && capability(message)
+                    refusal(code, message)
                 })
             })
             .unwrap_or(false);
@@ -289,7 +303,7 @@ fn endpoint_capability_refusal(text: &str) -> bool {
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
-    code == -32000 && capability(message)
+    refusal(code, message)
 }
 
 /// Whether an HTTP answer is an endpoint fault rather than the node's own
@@ -2108,6 +2122,14 @@ mod tests {
         ));
         assert!(!endpoint_capability_refusal(
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#
+        ));
+        // Measured 2026-11-12: pocket.network refuses ranges the other pool
+        // members serve — the endpoint's difference, not the call's answer.
+        assert!(endpoint_capability_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid block range"}}"#
+        ));
+        assert!(!endpoint_capability_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params: expected a string"}}"#
         ));
         assert!(endpoint_fault(
             reqwest::StatusCode::OK,
