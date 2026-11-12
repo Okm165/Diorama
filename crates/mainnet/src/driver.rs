@@ -37,6 +37,7 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
         MAINNET_CHAIN_ID,
         Duration::from_secs(ctx.engine.boot_timeout_secs),
         "reth",
+        &diorama_devnet::engine::config_declared_capabilities(ctx.source_rpc().pool()),
     )
     .await?;
     // The epoch pin is anchored before any writes exist (a fresh registry's

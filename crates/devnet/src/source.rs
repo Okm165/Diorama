@@ -96,6 +96,11 @@ impl Capabilities {
     pub fn has(&self, capability: Capability) -> bool {
         self.set.contains(&capability)
     }
+
+    /// Every declared capability (the disagreement report's left side).
+    pub fn names(&self) -> Vec<Capability> {
+        self.set.iter().copied().collect()
+    }
 }
 
 /// The truth an unshadow restores from, and the pipeline's read side.

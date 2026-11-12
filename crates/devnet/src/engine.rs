@@ -359,24 +359,56 @@ pub async fn halt_gate<E: Engine>(ctx: &E, poll: std::time::Duration) -> bool {
     }
 }
 
+/// The config-declared source capabilities: the union of the pool's endpoint
+/// specs' roles parsed through the config vocabulary. A role that names no
+/// source capability (`batch`, the market planes) maps to `None` and is
+/// skipped — those gate admission, not the composer.
+pub fn config_declared_capabilities(
+    pool: &diorama_anvil::EndpointPool,
+) -> Vec<diorama_config::Capability> {
+    let mut out = Vec::new();
+    for spec in pool.specs() {
+        for role in &spec.roles {
+            if let Some(cap) = diorama_config::Capability::parse(role) {
+                if !out.contains(&cap) {
+                    out.push(cap);
+                }
+            }
+        }
+    }
+    out
+}
+
 pub async fn boot_prefix<E: Engine>(
     ctx: &E,
     anvil: &'static str,
     chain_id: u64,
     wait: std::time::Duration,
     source_what: &str,
+    config_declared: &[diorama_config::Capability],
 ) -> crate::Result<(), E::Error> {
     assert_chain(ctx, anvil, chain_id, wait).await?;
     // The target assert above is not enough: a wrong-chain *source* endpoint
     // would answer every read with the wrong state. Assert the whole pool
     // before the first window is composed.
     ctx.source_rpc().verify_chain(chain_id).await?;
-    crate::source::audit_capabilities(
-        source_what,
-        ctx.mirror().follow_source().capabilities(),
-        ctx.source_rpc(),
-    )
-    .await?;
+    let declared = ctx.mirror().follow_source().capabilities();
+    // The config's per-endpoint claims must agree with the profile's source
+    // semantics: an operator who measured `traces` on the pool but runs a
+    // profile whose composer cannot use traces has surfaced a fact into the
+    // wrong plane — say so once, loudly, at boot.
+    let measured = declared.names();
+    crate::source::audit_capabilities(source_what, declared.clone(), ctx.source_rpc()).await?;
+    for cap in config_declared {
+        match crate::source::Capability::from_config(*cap) {
+            Some(mapped) if !measured.contains(&mapped) => tracing::warn!(
+                capability = mapped.name(),
+                "config declares a source capability the profile's composer does not use"
+            ),
+            None => {} // batch/market planes gate admission, not the composer
+            Some(_) => {}
+        }
+    }
     Ok(())
 }
 
