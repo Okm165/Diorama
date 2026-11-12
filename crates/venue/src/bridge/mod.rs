@@ -141,8 +141,10 @@ impl Bridge {
         }
         // The Core-read precompile mocks are projections of the sim. Every
         // block's effects are now durable in the sim, so this is the one
-        // point the projection is refreshed from.
-        self.project_precompiles().await?;
+        // point the projection is refreshed from. The pass's own head is the
+        // block the projection's presence checks read at — a pinned read, not
+        // a genesis read (see the gate's note).
+        self.project_precompiles(head).await?;
         self.metrics
             .set_lag_blocks(head.saturating_sub(self.cursor.load(Ordering::Relaxed)));
         Ok(())
@@ -166,7 +168,7 @@ impl Bridge {
     /// `freeSpotBalance()` reports exactly what the venue will release and a
     /// recall cannot over-recall into a bridge refusal. A production-like
     /// chain (no mock code) is a no-op: the real precompiles serve the reads.
-    async fn project_precompiles(&self) -> Result<()> {
+    async fn project_precompiles(&self, head: u64) -> Result<()> {
         let Some(spot) = self.feed.spot_meta() else {
             return Ok(()); // the feed is warming; the pass already refused the block
         };
@@ -175,14 +177,23 @@ impl Bridge {
             tracing::warn!("bridge: no USDC in the spot registry; the precompile projection is skipped this pass");
             return Ok(());
         };
+        // **The mocks' presence is read at the pass's head, never at block 0.**
+        // The first cut read genesis, where a forked anvil has no mock code —
+        // the deployment's mocks are installed after the fork pin — so the
+        // gate read "not installed" every pass and the projection silently
+        // no-op'd: no writer funding, no mock write, and the exact W-B1
+        // symptom (mock reports 0 while the sim holds the balance) survived
+        // its own fix. Measured live 2026-11-12: writer nonce 0 with 54
+        // simulated accounts holding spot USDC, until the read moved to the
+        // pass's anchored head.
         let spot_installed = !self
             .anvil_v
-            .code_at(system::SPOT_BALANCE_MOCK, 0)
+            .code_at(system::SPOT_BALANCE_MOCK, head)
             .await?
             .is_empty();
         let withdrawable_installed = !self
             .anvil_v
-            .code_at(system::WITHDRAWABLE_MOCK, 0)
+            .code_at(system::WITHDRAWABLE_MOCK, head)
             .await?
             .is_empty();
         if !spot_installed && !withdrawable_installed {
@@ -219,7 +230,7 @@ impl Bridge {
         }
         if self
             .anvil_v
-            .balance_at(system::PRECOMPILE_WRITER, 0)
+            .balance_at(system::PRECOMPILE_WRITER, head)
             .await?
             .is_zero()
         {
