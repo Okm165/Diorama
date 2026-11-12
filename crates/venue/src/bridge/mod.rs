@@ -269,15 +269,17 @@ impl Bridge {
     }
 
     /// One mock write, sent like the Core→EVM completion: a funded plain tx
-    /// that anvil mines before the ack returns, so a failed write is visible
-    /// here and the projection cache is not advanced past it.
+    /// waited to its receipt, so a REVERTED write is an error here and the
+    /// projection cache is not advanced past it. (The hash alone proves
+    /// admission: a reverted tx still mines with status 0x0 — measured on
+    /// the feed bridge, which re-published for hours on a reverting write.)
     async fn send_projection(&self, mock: Address, data: alloy_primitives::Bytes) -> Result<()> {
         let tx = TransactionRequest::default()
             .from(system::PRECOMPILE_WRITER)
             .to(mock)
             .input(data.into());
-        let hash = self.target_rpc.send_transaction(tx).await?;
-        tracing::debug!(mock = %mock, tx = %hash, "bridge: precompile mock write submitted");
+        self.target_rpc.send_transaction_confirmed(tx).await?;
+        tracing::debug!(mock = %mock, "bridge: precompile mock write confirmed");
         Ok(())
     }
 
@@ -959,14 +961,16 @@ impl Bridge {
             .from(from)
             .to(evm.address)
             .input(system::transfer_calldata(*recipient, value).into());
-        let hash = self.target_rpc.send_transaction(tx).await?;
+        // Waited to the receipt: the completion's cursor may only advance on
+        // a write that actually landed (see send_projection).
+        let receipt = self.target_rpc.send_transaction_confirmed(tx).await?;
         self.metrics.inc_completions();
         tracing::info!(
             to = %recipient,
             token = %info.name,
             amount = %amount,
-            tx = %hash,
-            "bridge: Core→EVM completion submitted"
+            tx = %receipt.transaction_hash,
+            "bridge: Core→EVM completion confirmed"
         );
         Ok(())
     }

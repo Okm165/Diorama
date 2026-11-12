@@ -115,8 +115,17 @@ if [ -n "${V_PIN:-}" ] && [ -n "${V_SOURCE:-}" ]; then
     degrade
   fi
   if [ "$V_LAG" -gt 0 ]; then
-    kv "venue follow verdict" "CATCHING UP — bounded windows; not a hard pause"
-    degrade
+    # A continuous follower is ALWAYS a few blocks behind its source: a
+    # bounded window can only follow, never sit at the head. Degrading on
+    # any positive lag made this check permanently red (measured 2026-11-12:
+    # a healthy mirror reported DEGRADED for a 4-block steady-state lag),
+    # which destroys the signal for the lags that matter.
+    if [ "$V_LAG" -gt 50 ]; then
+      kv "venue follow verdict" "LAGGING ${V_LAG} blocks — investigate"
+      degrade
+    else
+      kv "venue follow verdict" "AT HEAD (steady-state lag ${V_LAG} blocks)"
+    fi
   fi
 fi
 

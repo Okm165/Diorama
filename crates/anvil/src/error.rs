@@ -221,6 +221,23 @@ pub enum Error {
     /// The node does not have the block: a fact the caller gates on, named.
     #[error("{endpoint}: block {n} is not available")]
     BlockMissing { endpoint: String, n: u64 },
+
+    /// A submitted write mined and REVERTED (receipt status 0x0).
+    /// `eth_sendTransaction` answering a hash proves admission, not
+    /// execution: the receipt's status is the only on-chain verdict, and a
+    /// revert that is read as success turns the caller's retry policy into
+    /// an infinite silent loop (measured 2026-11-12: the feed bridge
+    /// re-published every round for hours with `last_error: null` because
+    /// its `updateAnswer` reverted each time and the hash was taken as the
+    /// answer).
+    #[error("{tx}: the write mined as a revert")]
+    WriteReverted { tx: String },
+
+    /// A submitted write never mined inside the wait bound: the pool
+    /// displaced it (a same-nonce sender), or the node stalled. The caller
+    /// may retry; the state it assumed is not on chain.
+    #[error("{tx}: the write did not mine within {timeout_ms} ms")]
+    WriteUnmined { tx: String, timeout_ms: u64 },
 }
 
 impl Error {
@@ -292,6 +309,9 @@ impl Error {
     pub fn is_block_unavailable(&self) -> bool {
         match self {
             Error::BlockMissing { .. } => true,
+            // A write that did not land is a wait-and-retry, never a pass
+            // failure the caller should escalate.
+            Error::WriteUnmined { .. } => true,
             Error::Rpc { payload, .. } => {
                 (payload.code == -32001
                     && (payload.message.contains("block not found")
@@ -338,7 +358,9 @@ impl Error {
             | Error::EndpointsExhausted { .. }
             | Error::PoolCooling { .. }
             | Error::PooledWrite
-            | Error::LogRangeTooWide { .. } => "<local>",
+            | Error::LogRangeTooWide { .. }
+            | Error::WriteReverted { .. }
+            | Error::WriteUnmined { .. } => "<local>",
             Error::NotReady { what, .. } => what,
             Error::Transport { endpoint, .. }
             | Error::EndpointFault { endpoint, .. }

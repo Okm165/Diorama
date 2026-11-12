@@ -1799,6 +1799,50 @@ impl Rpc {
         self.call("eth_sendTransaction", (tx,)).await
     }
 
+    /// Send, then WAIT FOR THE RECEIPT and demand a success status.
+    ///
+    /// `send_transaction` proves admission; on an interval-mining anvil a tx
+    /// that reverts still mines with status `0x0`, so the hash alone cannot
+    /// tell "landed" from "reverted". Every write whose caller draws a
+    /// conclusion from its success (the feed bridge's pending state, the
+    /// venue projection cache, the CCTP attester's cursor) goes through
+    /// this, so a revert surfaces as a named error instead of a state
+    /// machine quietly running on a value the chain refused.
+    ///
+    /// The wait bound also catches pool displacement: a same-nonce sender
+    /// replaces our tx, the pool mines *theirs*, and our hash never gets a
+    /// receipt — exactly the measured shape that used to wedge a feed's
+    /// `pending` forever. A timeout names the tx; the caller may retry.
+    pub async fn send_transaction_confirmed(
+        &self,
+        tx: TransactionRequest,
+    ) -> Result<TransactionReceipt> {
+        const WAIT_MS: u64 = 10_000;
+        const POLL_MS: u64 = 250;
+        let hash = self.send_transaction(tx).await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(WAIT_MS);
+        loop {
+            if let Some(receipt) = self
+                .call_opt::<TransactionReceipt>("eth_getTransactionReceipt", (hash,))
+                .await?
+            {
+                // The receipt's status is the only on-chain verdict; 0x0 is
+                // a mined revert, not a landed write.
+                if receipt.status() {
+                    return Ok(receipt);
+                }
+                return Err(Error::WriteReverted { tx: hash.to_string() });
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::WriteUnmined {
+                    tx: hash.to_string(),
+                    timeout_ms: WAIT_MS,
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+        }
+    }
+
     /// One storage word, silently (the venue driver's chain-instance canary;
     /// the same measured wire rules as [`crate::apply_writes`]' storage form).
     pub async fn anvil_set_storage_at(&self, addr: Address, slot: U256, value: B256) -> Result<()> {

@@ -126,6 +126,9 @@ pub(crate) async fn publish(
         .from(writer)
         .to(aggregator)
         .input(call.abi_encode().into());
-    rpc.send_transaction(tx).await?;
+    // The receipt, not the hash: a reverted `updateAnswer` still mines, and
+    // treating its hash as success made the bridge re-publish forever with
+    // `last_error: null` (measured 2026-11-12).
+    rpc.send_transaction_confirmed(tx).await?;
     Ok(())
 }
