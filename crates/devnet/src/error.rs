@@ -84,6 +84,19 @@ pub enum Error {
     #[error("block {block}: shadow scan failed for {failed} tx trace(s); the block is re-scanned")]
     ShadowScan { block: u64, failed: usize },
 
+    /// A capability the composer **needs** is confirmed by no pool endpoint:
+    /// the follow cannot run on this configuration, so boot fails closed
+    /// rather than discovering it mid-window. `detail` carries the
+    /// per-endpoint audit (which endpoint claimed it and what it answered).
+    #[error(
+        "capability {missing} is needed by {what} but no pool endpoint confirmed it ({detail})"
+    )]
+    CapabilityGap {
+        what: String,
+        missing: String,
+        detail: String,
+    },
+
     /// The fork base moved **downward**: the registry and journal belong to a
     /// newer base. The epoch rule refuses to clear them silently — the driver
     /// halts and the operator must investigate (a forward re-pin or an explicit
