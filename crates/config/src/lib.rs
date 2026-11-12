@@ -1014,7 +1014,8 @@ chain_id = 1
         let (inst, _) = load_str(&conflict, &[]).unwrap();
         let err = inst.check().expect_err("one URL cannot be two chains");
         assert!(
-            err.to_string().contains("different roles/chain_id/weight"),
+            err.to_string()
+                .contains("different capabilities/chain_id/weight"),
             "{err}"
         );
     }

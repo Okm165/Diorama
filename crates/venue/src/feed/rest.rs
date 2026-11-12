@@ -102,7 +102,14 @@ impl RestClient {
             req,
             marker: std::marker::PhantomData,
         };
-        match self.pool.execute(&attempt, &self.roles.iter().map(String::as_str).collect::<Vec<_>>()).await {
+        match self
+            .pool
+            .execute(
+                &attempt,
+                &self.roles.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+            .await
+        {
             // A method-level refusal is returned by the attempt as `Served`:
             // it is the venue's answer, not an endpoint to fail over.
             Ok(served) => served.value,
@@ -126,7 +133,14 @@ impl RestClient {
             api: self,
             body: &body,
         };
-        match self.pool.execute(&attempt, &self.roles.iter().map(String::as_str).collect::<Vec<_>>()).await {
+        match self
+            .pool
+            .execute(
+                &attempt,
+                &self.roles.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+            .await
+        {
             Ok(served) => Ok(served.value),
             Err(PoolError::Exhausted { attempts, last }) => Err(Error::ApiExhausted {
                 attempts,

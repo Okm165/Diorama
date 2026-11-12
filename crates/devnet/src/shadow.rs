@@ -704,19 +704,41 @@ mod tests {
         let other = Address::repeat_byte(0xf4);
         let mut s = Shadow::default();
         s.set_fixtures([fixture].into_iter().collect());
-        assert!(!s.record_fixture_code(other, &[0x60, 0x00]), "not a fixture");
-        assert!(!s.record_fixture_code(fixture, &[]), "codeless is not a capture");
-        assert!(s.record_fixture_code(fixture, &[0x60, 0x00, 0x60, 0x00]), "first capture");
-        assert!(!s.record_fixture_code(fixture, &[0x60, 0x00, 0x60, 0x00]), "idempotent");
-        assert!(s.record_fixture_code(fixture, &[0x60, 0x01]), "a changed install is recaptured");
+        assert!(
+            !s.record_fixture_code(other, &[0x60, 0x00]),
+            "not a fixture"
+        );
+        assert!(
+            !s.record_fixture_code(fixture, &[]),
+            "codeless is not a capture"
+        );
+        assert!(
+            s.record_fixture_code(fixture, &[0x60, 0x00, 0x60, 0x00]),
+            "first capture"
+        );
+        assert!(
+            !s.record_fixture_code(fixture, &[0x60, 0x00, 0x60, 0x00]),
+            "idempotent"
+        );
+        assert!(
+            s.record_fixture_code(fixture, &[0x60, 0x01]),
+            "a changed install is recaptured"
+        );
         let recorded: Option<Vec<u8>> = s
             .account_values
             .get(&fixture)
             .and_then(|v| v.code.as_ref())
             .map(|b| b.to_vec());
         assert_eq!(recorded.as_deref(), Some(&[0x60u8, 0x01][..]));
-        assert!(s.accounts.contains(&fixture), "the account is owned so the parent diffs skip it");
-        assert_eq!(s.unrecorded(), (0, 0), "a captured code is a value, not an unrecorded mark");
+        assert!(
+            s.accounts.contains(&fixture),
+            "the account is owned so the parent diffs skip it"
+        );
+        assert_eq!(
+            s.unrecorded(),
+            (0, 0),
+            "a captured code is a value, not an unrecorded mark"
+        );
     }
 
     /// Fixture addresses are whole-account owned: the fixture
@@ -724,7 +746,8 @@ mod tests {
     /// write to those addresses must be skipped without a mark — and the
     /// list is runtime state, never persisted.
     #[test]
-    fn fixture_addresses_are_owned_whole() {        let fixture = Address::repeat_byte(0xf1);
+    fn fixture_addresses_are_owned_whole() {
+        let fixture = Address::repeat_byte(0xf1);
         let other = Address::repeat_byte(0xf2);
         let mut s = Shadow::default();
         s.set_fixtures([fixture].into_iter().collect());

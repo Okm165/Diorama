@@ -148,8 +148,6 @@ pub struct EndpointEntry {
     pub chain_id: Option<u64>,
 }
 
-
-
 /// A named endpoint group: the single home of a deployment's URL lists.
 ///
 /// ```toml
@@ -229,18 +227,30 @@ impl EndpointGroup {
     /// the typed vocabulary — a typo in config is a load error here, never a
     /// silently unclaimed capability.
     pub fn capabilities_for(&self, url: &str) -> Result<Vec<Capability>, String> {
-        let names: &[String] = match self.entries.iter().find(|e| e.url == url || Some(&e.ws) == Some(&Some(url.to_owned()))) {
+        let names: &[String] = match self
+            .entries
+            .iter()
+            .find(|e| e.url == url || Some(&e.ws) == Some(&Some(url.to_owned())))
+        {
             Some(entry) => &entry.capabilities,
             None => &self.roles,
         };
-        names.iter().map(|n| Capability::parse(n).ok_or_else(|| format!("unknown capability {n:?} on endpoint {url:?}"))).collect()
+        names
+            .iter()
+            .map(|n| {
+                Capability::parse(n)
+                    .ok_or_else(|| format!("unknown capability {n:?} on endpoint {url:?}"))
+            })
+            .collect()
     }
 
     /// The effective per-URL attribute overrides (weight, log cap, chain)
     /// for a URL that is a nested entry; `None` when the URL rides the
     /// group-level attributes.
     pub fn entry_attrs(&self, url: &str) -> Option<&EndpointEntry> {
-        self.entries.iter().find(|e| e.url == url || Some(&e.ws) == Some(&Some(url.to_owned())))
+        self.entries
+            .iter()
+            .find(|e| e.url == url || Some(&e.ws) == Some(&Some(url.to_owned())))
     }
 }
 
@@ -666,11 +676,19 @@ mod tests {
         assert!(http.contains(&"https://entry.example/evm".to_string()));
         assert!(http.contains(&"https://second.example/evm".to_string()));
         // The ws pair rides the same entry.
-        assert!(group.ws_all().contains(&"wss://entry.example/ws".to_string()));
+        assert!(group
+            .ws_all()
+            .contains(&"wss://entry.example/ws".to_string()));
         // Entry capabilities are typed and complete; flat urls ride roles.
         let entry_caps = group.capabilities_for("https://entry.example/evm").unwrap();
-        assert_eq!(entry_caps, vec![
-            Capability::SystemTxs, Capability::Batch, Capability::Historical]);
+        assert_eq!(
+            entry_caps,
+            vec![
+                Capability::SystemTxs,
+                Capability::Batch,
+                Capability::Historical
+            ]
+        );
         let flat_caps = group.capabilities_for("https://flat.example/evm").unwrap();
         assert_eq!(flat_caps, vec![Capability::SystemTxs]);
         // Per-entry overrides beat the group attributes.
@@ -690,7 +708,11 @@ mod tests {
         assert_eq!(Capability::parse("trace"), Some(Capability::Traces));
         assert_eq!(Capability::parse("bal"), Some(Capability::Bal));
         // Round-trip: the canonical spelling is stable.
-        for cap in [Capability::SystemTxs, Capability::MarketRest, Capability::Batch] {
+        for cap in [
+            Capability::SystemTxs,
+            Capability::MarketRest,
+            Capability::Batch,
+        ] {
             assert_eq!(Capability::parse(cap.as_str()), Some(cap));
         }
         assert_eq!(Capability::parse("nope"), None);
