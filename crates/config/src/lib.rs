@@ -947,7 +947,6 @@ port = 8096
                 "ANVIL_V_URL",
                 "ENGINE_ADMIN_URL",
                 "HL_INFO_API_URL",
-                "HL_RPC_URLS",
                 "HL_WS_API_URL",
                 "SIM_STATE_DIR",
                 "STATE_DIR"

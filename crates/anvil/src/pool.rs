@@ -382,7 +382,14 @@ impl EndpointPool {
 
     /// The declared primary endpoint (the first one).
     pub fn primary(&self) -> &str {
-        &self.endpoints[0].url
+        self.endpoints[0].url.as_str()
+    }
+
+    /// The primary endpoint's declared capabilities (roles): the lanes that
+    /// build on this pool require them at admission, so a member that did
+    /// not claim the plane is routed around rather than asked.
+    pub fn primary_roles(&self) -> Vec<String> {
+        self.endpoints[0].roles.iter().cloned().collect()
     }
 
     /// Every endpoint, in declaration order.

@@ -135,6 +135,9 @@ struct Ping {
 pub struct WsClient {
     feed: Arc<MarketFeed>,
     pool: EndpointPool,
+    /// The plane's declared capabilities (the primary endpoint's roles):
+    /// every admission requires them, mirroring the REST lane.
+    roles: Vec<String>,
 }
 
 /// One session's outcome: `Served` means the endpoint delivered data (a later
@@ -188,7 +191,8 @@ fn reconnect_delay(backoff: Duration) -> Duration {
 
 impl WsClient {
     pub fn new(feed: Arc<MarketFeed>, pool: EndpointPool) -> Self {
-        Self { feed, pool }
+        let roles = pool.primary_roles().to_vec();
+        Self { feed, pool, roles }
     }
 
     /// Run forever. Admission is the pool's: when every endpoint is cooling,
@@ -201,7 +205,7 @@ impl WsClient {
         let mut backoff = Backoff::new(policy.cooldown_base(), policy.cooldown_max());
         loop {
             let now = now_ms();
-            let admission = self.pool.admit(now, &[]);
+            let admission = self.pool.admit(now, &self.roles.iter().map(String::as_str).collect::<Vec<_>>());
             let indices = if admission.indices.is_empty() {
                 if let Some(index) = self.pool.emergency_probe(now, &[]) {
                     vec![index]

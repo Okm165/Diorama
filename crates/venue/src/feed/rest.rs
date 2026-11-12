@@ -46,6 +46,10 @@ fn venue_method_refusal(status: reqwest::StatusCode) -> bool {
 pub struct RestClient {
     http: reqwest::Client,
     pool: EndpointPool,
+    /// The capabilities the deployment declared for this plane (the primary
+    /// endpoint's roles): every admission requires them, so a member that
+    /// did not claim the plane is routed around, not asked.
+    roles: Vec<String>,
 }
 
 impl RestClient {
@@ -79,7 +83,8 @@ impl RestClient {
 
     fn from_pool(pool: EndpointPool, timeout: Duration) -> Result<Self> {
         let http = reqwest::Client::builder().timeout(timeout).build()?;
-        Ok(Self { http, pool })
+        let roles = pool.primary_roles().to_vec();
+        Ok(Self { http, pool, roles })
     }
 
     /// The shared health/rotation pool, for `/metrics` and diagnostics.
@@ -97,7 +102,7 @@ impl RestClient {
             req,
             marker: std::marker::PhantomData,
         };
-        match self.pool.execute(&attempt, &[]).await {
+        match self.pool.execute(&attempt, &self.roles.iter().map(String::as_str).collect::<Vec<_>>()).await {
             // A method-level refusal is returned by the attempt as `Served`:
             // it is the venue's answer, not an endpoint to fail over.
             Ok(served) => served.value,
@@ -121,7 +126,7 @@ impl RestClient {
             api: self,
             body: &body,
         };
-        match self.pool.execute(&attempt, &[]).await {
+        match self.pool.execute(&attempt, &self.roles.iter().map(String::as_str).collect::<Vec<_>>()).await {
             Ok(served) => Ok(served.value),
             Err(PoolError::Exhausted { attempts, last }) => Err(Error::ApiExhausted {
                 attempts,

@@ -557,6 +557,18 @@ impl Rpc {
     ///
     /// A fault is a transport error, a retryable JSON-RPC refusal (`-32005`
     /// throttle / `-32603` internal), an endpoint-level HTTP refusal (auth,
+    /// The capabilities a JSON-RPC method requires from the endpoint that
+    /// serves it — the client's half of the capability map. A method not
+    /// listed is unqualified (any endpoint serves it); `system_txs` is the
+    /// one gated method today (the follow pool's measured gate: only some
+    /// public endpoints answer `eth_getSystemTxsByBlockNumber`).
+    fn required_capabilities(method: &str) -> &'static [&'static str] {
+        match method {
+            "eth_getSystemTxsByBlockNumber" => &["system_txs"],
+            _ => &[],
+        }
+    }
+
     /// wrong path, 413, 429, 5xx), or a 2xx body that is not JSON-RPC (a
     /// gateway page). A valid JSON-RPC error on any status is the node's
     /// answer and is **not** failed over: it is the same answer every
@@ -582,7 +594,8 @@ impl Rpc {
             method,
             body,
         };
-        match self.pool.execute(&attempt, &[]).await {
+        let required = Self::required_capabilities(method);
+        match self.pool.execute(&attempt, required).await {
             Ok(served) => Ok((
                 self.pool.url(served.index).to_string(),
                 served.value.0,
