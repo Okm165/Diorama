@@ -569,6 +569,25 @@ impl Rpc {
         }
     }
 
+    /// The admission requirement of a **batch**: the union of its items'
+    /// requirements. A batch is not "the batch capability" — one body carries
+    /// many methods, and an endpoint that serves batch transport but not one
+    /// of the methods answers the whole body with a refusal for that item.
+    /// Measured live 2026-11-12: the venue follow's four-item
+    /// `eth_getSystemTxsByBlockNumber` batch rotated onto a pool member that
+    /// claimed `batch` but not `system_txs`, and every such pass failed.
+    fn batch_capabilities(calls: &[Call]) -> Vec<&'static str> {
+        let mut required: Vec<&'static str> = Vec::new();
+        for call in calls {
+            for cap in Self::required_capabilities(call.meta.method.as_ref()) {
+                if !required.contains(cap) {
+                    required.push(*cap);
+                }
+            }
+        }
+        required
+    }
+
     /// wrong path, 413, 429, 5xx), or a 2xx body that is not JSON-RPC (a
     /// gateway page). A valid JSON-RPC error on any status is the node's
     /// answer and is **not** failed over: it is the same answer every
@@ -581,6 +600,7 @@ impl Rpc {
         &self,
         method: &str,
         body: &RawValue,
+        required: &[&'static str],
     ) -> Result<(String, reqwest::StatusCode, String)> {
         // A single endpoint has no failover: one attempt, and its body is the
         // node's answer whatever it is (the caller's `answer` classifies a
@@ -594,7 +614,6 @@ impl Rpc {
             method,
             body,
         };
-        let required = Self::required_capabilities(method);
         match self.pool.execute(&attempt, required).await {
             Ok(served) => Ok((
                 self.pool.url(served.index).to_string(),
@@ -779,8 +798,9 @@ impl Rpc {
         })?;
         self.check_log_range(method, &value)?;
         let request = self.request(self.url(), method, params)?;
+        let required = Self::required_capabilities(method);
         let (endpoint, status, text) = self
-            .post_raw_throttled(method, &request.take_request())
+            .post_raw_throttled(method, &request.take_request(), required)
             .await?;
         Self::answer(&endpoint, method, status, &text)
     }
@@ -958,7 +978,10 @@ impl Rpc {
         calls: &[Call],
     ) -> Result<Vec<std::result::Result<Box<RawValue>, RpcError>>> {
         let (ids, body) = self.batch_request(calls)?;
-        let mut by_id = Self::index_by_id(self.post_batch(&body).await?);
+        // Admission is the union of the items' requirements: the whole body
+        // lands on one endpoint, so it must serve every method in it.
+        let required = Self::batch_capabilities(calls);
+        let mut by_id = Self::index_by_id(self.post_batch(&body, &required).await?);
         let mut out = Vec::with_capacity(calls.len());
         for id in ids {
             match by_id.remove(&id) {
@@ -1087,8 +1110,12 @@ impl Rpc {
     /// `answer` (a body that parses as answers *is* the answers, whatever the
     /// HTTP status); a body that does not is a `BatchDecode` naming the
     /// request text, and a single answer to a batch call is corrupt.
-    async fn post_batch(&self, body: &RawValue) -> Result<Vec<Response>> {
-        let (endpoint, status, text) = self.post_raw_throttled("batch", body).await?;
+    async fn post_batch(
+        &self,
+        body: &RawValue,
+        required: &[&'static str],
+    ) -> Result<Vec<Response>> {
+        let (endpoint, status, text) = self.post_raw_throttled("batch", body, required).await?;
         let packet = match Self::classify(&endpoint, "batch", status, &text) {
             Ok(packet) => packet,
             Err(Error::Decode { source, .. }) => {
@@ -1179,15 +1206,24 @@ impl Rpc {
         Ok(quantity.to::<u64>())
     }
 
-    /// `eth_chainId` against **one** endpoint, outside the pool's rotation:
-    /// the boot identity assert must name the provider that answered wrong,
-    /// not whichever endpoint the rotation picked.
-    pub async fn chain_id_at(&self, index: usize) -> Result<u64> {
+    /// One endpoint's answer to one method, **outside** the pool's rotation.
+    ///
+    /// The per-endpoint primitive behind the boot asserts: an identity check
+    /// must name the provider that answered wrong, and a capability claim is a
+    /// per-provider fact — a pooled probe would attribute one provider's answer
+    /// to another. The pool's bookkeeping still applies, so a fault here cools
+    /// that endpoint for the process.
+    pub async fn call_endpoint<T: DeserializeOwned>(
+        &self,
+        index: usize,
+        method: &'static str,
+        params: impl Serialize,
+    ) -> Result<T> {
         let endpoint = self.pool.url(index);
-        let request = self.request(endpoint, "eth_chainId", NO_PARAMS)?;
+        let request = self.request(endpoint, method, params)?;
         self.pool.record_attempt(index);
         let (status, text) = match self
-            .post_raw_at(endpoint, "eth_chainId", &request.take_request())
+            .post_raw_at(endpoint, method, &request.take_request())
             .await
         {
             Ok(answer) => answer,
@@ -1198,18 +1234,26 @@ impl Rpc {
                 return Err(fault);
             }
         };
-        match Self::answer(endpoint, "eth_chainId", status, &text) {
+        match Self::answer(endpoint, method, status, &text) {
             Ok(value) => {
-                let quantity: U64 = serde_json::from_str(value.get())
-                    .map_err(|source| Self::decode(endpoint, "eth_chainId", source))?;
+                let decoded = serde_json::from_str(value.get())
+                    .map_err(|source| Self::decode(endpoint, method, source))?;
                 self.pool.record_success(index, now_ms());
-                Ok(quantity.to::<u64>())
+                Ok(decoded)
             }
             Err(fault) => {
                 self.pool.record_failure(index, now_ms());
                 Err(fault)
             }
         }
+    }
+
+    /// `eth_chainId` against **one** endpoint, outside the pool's rotation:
+    /// the boot identity assert must name the provider that answered wrong,
+    /// not whichever endpoint the rotation picked.
+    pub async fn chain_id_at(&self, index: usize) -> Result<u64> {
+        let quantity: U64 = self.call_endpoint(index, "eth_chainId", NO_PARAMS).await?;
+        Ok(quantity.to::<u64>())
     }
 
     /// Assert the pool's reachable endpoints are `expected`. A wrong-chain
@@ -2267,5 +2311,30 @@ mod tests {
             .expect("filter serializes");
         rpc.check_log_range("eth_getBlockByNumber", &other_method)
             .expect("only eth_getLogs is range-bounded");
+    }
+
+    /// **A batch's admission requirement is the union of its items'.**
+    /// Measured live 2026-11-12: the venue follow batched four
+    /// `eth_getSystemTxsByBlockNumber` items, the rotation admitted a pool
+    /// member that claimed `batch` but not `system_txs`, and every such pass
+    /// failed on the provider's `-32601`. One body carries one endpoint, so
+    /// the endpoint must serve every method in it — the batch transport
+    /// capability alone is never enough.
+    #[test]
+    fn a_batch_requires_every_capability_its_items_require() {
+        let gated = Rpc::batch_capabilities(&[
+            call("eth_getSystemTxsByBlockNumber", (U64::from(7u64),)).unwrap(),
+            call("eth_getSystemTxsByBlockNumber", (U64::from(8u64),)).unwrap(),
+        ]);
+        assert_eq!(gated, vec!["system_txs"]);
+
+        let mixed = Rpc::batch_capabilities(&[
+            call("eth_chainId", NO_PARAMS).unwrap(),
+            call("eth_getSystemTxsByBlockNumber", (U64::from(7u64),)).unwrap(),
+        ]);
+        assert_eq!(mixed, vec!["system_txs"], "one gated item gates the body");
+
+        let plain = Rpc::batch_capabilities(&[call("eth_chainId", NO_PARAMS).unwrap()]);
+        assert!(plain.is_empty(), "an unqualified body needs no claims");
     }
 }
