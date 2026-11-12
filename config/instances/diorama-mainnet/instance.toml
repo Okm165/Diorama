@@ -38,14 +38,14 @@ max_gap_blocks = 10000
 chunk_size = 500
 
 [services.engine.source_sync]
-engine_url = "@reth_engine"
+engine_url = "@engine_api"
 jwt_path = "${JWT_PATH}"
 
 [services.engine.journal]
 dir = "${STATE_DIR}/journal"
 
 [services.engine.beacon]
-urls = ["@lighthouse"]
+urls = ["@beacon"]
 
 [services.engine.http]
 port = 8080

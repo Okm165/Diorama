@@ -17,10 +17,10 @@ http = ["${EVM_URL}"]
 http = ["${ANVIL_T_URL}"]
 chain_id = 1
 
-[endpoints.reth_engine]
+[endpoints.engine_api]
 http = ["${ENGINE_API_URL}"]
 
-[endpoints.lighthouse]
+[endpoints.beacon]
 http = ["${BEACON_URL}"]
 
 # The explicit fork base. A configured pin preserves the deployment epoch
