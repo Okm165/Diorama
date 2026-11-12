@@ -34,7 +34,23 @@ sol! {
     /// emits `Received(user, amount)` with `user = msg.sender`, so a tx value
     /// sent to `0x2222…2` is the EVM→Core HYPE transfer.
     event Received(address indexed user, uint256 amount);
+    /// The mirror precompile mocks' write surface (`k8s-daloc/precompile-mocks`).
+    /// The real chain's precompiles are read-only oracle contracts; on the
+    /// mirror they are projections of the sim, and the bridge is their writer.
+    function setBalance(address user, uint64 token, uint64 total, uint64 hold);
+    function setWithdrawable(address user, uint64 amount);
 }
+
+/// The mirror's `0x0801` spot-balance precompile mock (the real chain has no
+/// code there — the L1 serves the reads).
+pub(crate) const SPOT_BALANCE_MOCK: Address = address!("0000000000000000000000000000000000000801");
+
+/// The mirror's `0x0803` withdrawable precompile mock.
+pub(crate) const WITHDRAWABLE_MOCK: Address = address!("0000000000000000000000000000000000000803");
+
+/// The funded account the precompile projection txs are sent from (a mirror
+/// control, not a system address: the writer is traceable as itself).
+pub(crate) const PRECOMPILE_WRITER: Address = address!("f000000000000000000000000000000000000001");
 
 /// The native HYPE system address (transfers as tx value; `Received` event).
 pub(crate) const HYPE_SYSTEM: Address = address!("2222222222222222222222222222222222222222");
@@ -166,6 +182,24 @@ pub(crate) fn floor_to_core_wei(amount: Decimal, wei_decimals: u32) -> Option<De
 /// `transfer(address,uint256)` calldata — alloy's own encoder.
 pub(crate) fn transfer_calldata(to: Address, amount: U256) -> Bytes {
     transferCall { to, amount }.abi_encode().into()
+}
+
+/// The `SpotBalanceMock.setBalance` write: one account's spot class figures.
+pub(crate) fn set_balance_calldata(user: Address, token: u64, total: u64, hold: u64) -> Bytes {
+    setBalanceCall {
+        user,
+        token,
+        total,
+        hold,
+    }
+    .abi_encode()
+    .into()
+}
+
+/// The `WithdrawableMock.setWithdrawable` write: one account's perp-class
+/// transferable figure.
+pub(crate) fn set_withdrawable_calldata(user: Address, amount: u64) -> Bytes {
+    setWithdrawableCall { user, amount }.abi_encode().into()
 }
 
 /// Decode a log as an ERC-20 `Transfer`: alloy's validating decoder (the

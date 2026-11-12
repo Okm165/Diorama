@@ -68,6 +68,10 @@ pub struct Bridge {
     /// sim's state so a restart does not lose the boundary activity mined
     /// meanwhile.
     cursor: std::sync::atomic::AtomicU64,
+    /// The last figures each account was projected with (spot total, spot
+    /// hold, perp withdrawable): the projection writes only on change, so a
+    /// quiet book costs no tx.
+    projected: std::sync::Mutex<std::collections::HashMap<Address, [u64; 3]>>,
     pub metrics: Arc<BridgeMetrics>,
 }
 
@@ -91,6 +95,7 @@ impl Bridge {
             system_gas_stipend: policy.system_gas_stipend,
             observed_head: std::sync::atomic::AtomicU64::new(0),
             cursor: std::sync::atomic::AtomicU64::new(cursor),
+            projected: std::sync::Mutex::new(std::collections::HashMap::new()),
             metrics,
         })
     }
@@ -134,9 +139,168 @@ impl Bridge {
             // half-applying (a duplicate credit is a silent balance lie).
             self.sim.save_if_dirty()?;
         }
+        // The Core-read precompile mocks are projections of the sim. Every
+        // block's effects are now durable in the sim, so this is the one
+        // point the projection is refreshed from.
+        self.project_precompiles().await?;
         self.metrics
             .set_lag_blocks(head.saturating_sub(self.cursor.load(Ordering::Relaxed)));
         Ok(())
+    }
+
+    /// Project the sim's Core figures onto the mirror's read-precompile mocks
+    /// (`0x0801` spot balance, `0x0803` perp withdrawable).
+    ///
+    /// **Why.** The mocks are separate Solidity ledgers that nothing wrote:
+    /// a draw that credited the sim's spot class was invisible to
+    /// `freeSpotBalance()`, the owner's recall reverted `ZeroAmount`, the
+    /// close stayed `RecallPending` forever, and a healthy matured book could
+    /// never be settled (measured 2026-11-12: 67.892481 USDC credited in the
+    /// sim and served by the gateway, zero reported by the mock). The sim is
+    /// the single source of truth; the mocks are its write-through
+    /// projection, refreshed here once per pass after the block's effects are
+    /// durable.
+    ///
+    /// The figures are the ones the bridge's own Core→EVM clamp uses
+    /// (`available_after_maintenance`): `hold = total − available`, so
+    /// `freeSpotBalance()` reports exactly what the venue will release and a
+    /// recall cannot over-recall into a bridge refusal. A production-like
+    /// chain (no mock code) is a no-op: the real precompiles serve the reads.
+    async fn project_precompiles(&self) -> Result<()> {
+        let Some(spot) = self.feed.spot_meta() else {
+            return Ok(()); // the feed is warming; the pass already refused the block
+        };
+        let tokens = system::token_registry(&spot);
+        let Some(usdc) = tokens.iter().find(|t| t.name == "USDC") else {
+            tracing::warn!("bridge: no USDC in the spot registry; the precompile projection is skipped this pass");
+            return Ok(());
+        };
+        let spot_installed = !self
+            .anvil_v
+            .code_at(system::SPOT_BALANCE_MOCK, 0)
+            .await?
+            .is_empty();
+        let withdrawable_installed = !self
+            .anvil_v
+            .code_at(system::WITHDRAWABLE_MOCK, 0)
+            .await?
+            .is_empty();
+        if !spot_installed && !withdrawable_installed {
+            return Ok(());
+        }
+        let meta = self.feed.meta();
+        // The figures are read outside the lock; the diff is the only thing it
+        // guards (an account whose projection tx fails retries next pass).
+        let mut current = std::collections::HashMap::new();
+        for address in self.sim.account_addresses()? {
+            match self.core_figures(address, usdc, meta.as_ref()) {
+                Ok(figures) => {
+                    current.insert(address, figures);
+                }
+                Err(e) => {
+                    self.metrics.inc_refusals();
+                    tracing::warn!(
+                        account = %address,
+                        error = %e,
+                        "bridge: precompile projection figures unavailable; the account is not projected this pass"
+                    );
+                }
+            }
+        }
+        let changed: Vec<(Address, [u64; 3])> = {
+            let projected = self.projected.lock().expect("bridge projection cache");
+            current
+                .into_iter()
+                .filter(|(address, figures)| projected.get(address) != Some(figures))
+                .collect()
+        };
+        if changed.is_empty() {
+            return Ok(());
+        }
+        if self
+            .anvil_v
+            .balance_at(system::PRECOMPILE_WRITER, 0)
+            .await?
+            .is_zero()
+        {
+            self.anvil_v
+                .anvil_set_balance(system::PRECOMPILE_WRITER, self.system_gas_stipend)
+                .await?;
+        }
+        for (address, figures) in changed {
+            let [total, hold, withdrawable] = figures;
+            if spot_installed {
+                self.send_projection(
+                    system::SPOT_BALANCE_MOCK,
+                    system::set_balance_calldata(address, u64::from(usdc.index), total, hold),
+                )
+                .await?;
+            }
+            if withdrawable_installed {
+                self.send_projection(
+                    system::WITHDRAWABLE_MOCK,
+                    system::set_withdrawable_calldata(address, withdrawable),
+                )
+                .await?;
+            }
+            self.projected
+                .lock()
+                .expect("bridge projection cache")
+                .insert(address, figures);
+            tracing::info!(
+                account = %address,
+                spot_total_wei8 = total,
+                spot_hold_wei8 = hold,
+                withdrawable_usd6 = withdrawable,
+                "bridge: precompile projection written"
+            );
+        }
+        Ok(())
+    }
+
+    /// One mock write, sent like the Core→EVM completion: a funded plain tx
+    /// that anvil mines before the ack returns, so a failed write is visible
+    /// here and the projection cache is not advanced past it.
+    async fn send_projection(&self, mock: Address, data: alloy_primitives::Bytes) -> Result<()> {
+        let tx = TransactionRequest::default()
+            .from(system::PRECOMPILE_WRITER)
+            .to(mock)
+            .input(data.into());
+        let hash = self.anvil_v.send_transaction(tx).await?;
+        tracing::debug!(mock = %mock, tx = %hash, "bridge: precompile mock write submitted");
+        Ok(())
+    }
+
+    /// One account's projected figures, in the units the mocks store:
+    /// `[spot total (core wei), spot hold (core wei), perp withdrawable (USD
+    /// 1e6)]`. Zeros for an account the sim no longer holds, so the projection
+    /// can never report a balance the venue does not.
+    fn core_figures(
+        &self,
+        address: Address,
+        token: &system::TokenInfo,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<[u64; 3]> {
+        let Some(account) = self.sim.account(address)? else {
+            return Ok([0; 3]);
+        };
+        let entry = account.spot.get(&token.index);
+        let total = entry.map_or(Decimal::ZERO, |e| e.total);
+        let hold =
+            match crate::sim::account::available_after_maintenance(&account, &self.feed, meta)?
+                .into_iter()
+                .find(|(t, _)| *t == token.index)
+                .map(|(_, available)| available)
+            {
+                Some(available) if available < total => total - available,
+                _ => entry.map_or(Decimal::ZERO, |e| e.hold),
+            };
+        let view = crate::sim::account::view(&account, &self.feed, meta)?;
+        Ok([
+            core_units(total, token.wei_decimals)?,
+            core_units(hold, token.wei_decimals)?,
+            core_units(view.withdrawable, system::PERP_USD_DECIMALS)?,
+        ])
     }
 
     /// Keep the sim's served `time` on the venue chain's clock: one header
@@ -772,6 +936,22 @@ fn usd_class_amount(ntl: u64) -> Option<Decimal> {
     system::core_to_human(ntl, system::PERP_USD_DECIMALS)
 }
 
+/// A human decimal as the mocks' raw unit, floored like every other
+/// Core→EVM conversion (`system::human_to_evm`). `None` becomes an error at
+/// the caller: an unrepresentable figure must refuse the projection, never
+/// silently write zero.
+fn core_units(amount: Decimal, decimals: u32) -> Result<u64> {
+    let decimals = i32::try_from(decimals).map_err(|_| Error::Overflow {
+        what: "precompile projection decimals",
+    })?;
+    let raw = system::human_to_evm(amount, decimals).ok_or(Error::Overflow {
+        what: "precompile projection amount",
+    })?;
+    u64::try_from(raw).map_err(|_| Error::Overflow {
+        what: "precompile projection amount exceeds u64",
+    })
+}
+
 /// The Core's intra-block action order (docs: "Within a block, actions are
 /// sorted within each consensus batch as 1. Actions that do not send GTC or
 /// IOC orders to any book 2. Cancels 3. Actions that send at least one GTC or
@@ -869,6 +1049,31 @@ fn core_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The projection's unit rule: the mocks store raw core wei / raw USD
+    /// 1e6, floored like every other Core→EVM conversion, and an
+    /// unrepresentable figure is refused rather than written as zero.
+    #[test]
+    fn core_units_floor_at_the_mock_unit_and_refuse_the_unrepresentable() {
+        use rust_decimal::Decimal;
+        // 67.892481 USDC at 8 decimals — the measured live case.
+        let live: Decimal = "67.892481".parse().unwrap();
+        assert_eq!(core_units(live, 8).expect("representable"), 6_789_248_100);
+        // Sub-wei remainder floors (the chain's own rule).
+        let dust: Decimal = "0.0000000019".parse().unwrap();
+        assert_eq!(core_units(dust, 8).expect("representable"), 0);
+        // The perp class's USD 1e6 scale.
+        let withdrawable: Decimal = "13104.514502".parse().unwrap();
+        assert_eq!(
+            core_units(withdrawable, system::PERP_USD_DECIMALS).expect("representable"),
+            13_104_514_502,
+        );
+        // A negative or absurd figure refuses; it is never laundered into 0.
+        let negative: Decimal = "-1".parse().unwrap();
+        assert!(core_units(negative, 8).is_err());
+        let absurd: Decimal = "100000000000000000000000".parse().unwrap();
+        assert!(core_units(absurd, 8).is_err());
+    }
 
     fn usd_transfer_input(ntl: u64) -> Vec<u8> {
         let mut input = vec![0x01, 0x00, 0x00, 0x07];
