@@ -259,11 +259,30 @@ impl Error {
     /// block height is H but requested was R". A block older than the window
     /// can never be replayed: the caller names it and moves on, never retries.
     pub fn is_history_unavailable(&self) -> bool {
-        matches!(self, Error::Rpc { payload, .. }
-            if (payload.code == -32000
-                && payload.message.contains("historical state needed to replay"))
-                || (payload.code == -32602
-                    && payload.message.contains("BlockOutOfRangeError")))
+        match self {
+            Error::Rpc { payload, .. } => {
+                (payload.code == -32000
+                    && payload
+                        .message
+                        .contains("historical state needed to replay"))
+                    || (payload.code == -32602 && payload.message.contains("BlockOutOfRangeError"))
+            }
+            // The pool classifies a capability refusal ("this endpoint cannot
+            // serve that block") as an endpoint fault and fails over — but a
+            // single-endpoint client (the devnet target the shadow scan
+            // traces on) has nowhere to fail over, so the scan would see a
+            // fault that is neither presence nor absence and retry forever.
+            // Measured 2026-11-12: anvil-t's `--prune-history 32` answered a
+            // re-fork recovery scan exactly this way and the mirror froze.
+            // The body is the answer; the endpoint-name wrapper is not.
+            Error::EndpointFault { detail, .. } => {
+                detail.contains("historical state")
+                    || detail.contains("pruned history")
+                    || detail.contains("missing trie node")
+                    || detail.contains("BlockOutOfRangeError")
+            }
+            _ => false,
+        }
     }
 
     /// The node does not have the requested block yet: its head moved past the
@@ -408,6 +427,22 @@ mod tests {
         )
         .is_history_unavailable());
         assert!(!rpc(-32000, "some other node fault").is_history_unavailable());
+        // The same answer wrapped in an endpoint fault (a single-endpoint
+        // client has no failover): the body is still the answer.
+        assert!(Error::EndpointFault {
+            endpoint: "http://anvil-t:8545".into(),
+            method: "debug_traceTransaction".into(),
+            detail: "HTTP 200: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,                     \"message\":\"historical state needed to replay block 26401441 is not \
+                     available\"}}'"
+                .into(),
+        }
+        .is_history_unavailable());
+        assert!(!Error::EndpointFault {
+            endpoint: "http://x".into(),
+            method: "debug_traceTransaction".into(),
+            detail: "HTTP 200: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,                     \"message\":\"revert: nope\"}}".into(),
+        }
+        .is_history_unavailable());
     }
 
     /// Every measured source-lag shape classifies as a wait; an unrelated
