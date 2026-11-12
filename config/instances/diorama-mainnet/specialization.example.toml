@@ -6,11 +6,14 @@
 # closures. `specialization.example.toml` is the tracked, complete template;
 # copy it to `specialization.toml` for a deployment.
 
-[endpoints.reth]
-http = ["${RETH_URL}"]
+# The chain-1 EVM plane (http + ws; any EVM node — local reth here).
+# Local only by policy: no latency, no public-RPC dependency.
+[endpoints.evm]
 chain_id = 1
+ws = ["${EVM_URL}"]
+http = ["${EVM_URL}"]
 
-[endpoints.anvil_t]
+[endpoints.anvil]
 http = ["${ANVIL_T_URL}"]
 chain_id = 1
 

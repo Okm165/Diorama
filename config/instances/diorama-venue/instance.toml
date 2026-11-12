@@ -16,9 +16,9 @@ kind = "hyperliquid"
 # specialization's [chains.venue] as `fork_pin`.
 # The EVM read pool: random healthy start, fail over to the next endpoint,
 # cool a failed endpoint down, retry it in a later round.
-source_urls = "@hyperevm"
+source_urls = "@evm"
 # The market plane's REST and WS pools (the same rotation/cooldown policy).
-api_urls = "@hyperliquid_api"
+api_urls = "@hyperliquid_info"
 ws_urls = "@hyperliquid_ws"
 
 [services.engine]
@@ -27,7 +27,7 @@ state_dir = "${STATE_DIR}"
 boot_timeout_secs = 120
 
 [services.engine.anvil]
-target_url = "@anvil_v"
+target_url = "@anvil"
 
 # The follow's cadence and window against the public source. The window is
 # the **catch-up width**: a 100-block window advances slower than the source's
@@ -51,7 +51,7 @@ port = 8080
 [services.venue_sim]
 state_dir = "${SIM_STATE_DIR}"
 engine_admin_url = "@engine_admin"
-anvil_url = "@anvil_v"
+anvil_url = "@anvil"
 
 [services.venue_sim.info]
 addr = "0.0.0.0"

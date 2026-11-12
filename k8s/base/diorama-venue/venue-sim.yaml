@@ -36,7 +36,7 @@ spec:
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The same `envFrom` mechanism as the engines: the ConfigMap carries
           # every key (SIM_STATE_DIR, ANVIL_V_URL, ENGINE_ADMIN_URL, and the
-          # ${HL_RPC_URL} the instance's source_url names), the pod reads the
+          # ${EVM_FORK_URL} the instance's source_url names), the pod reads the
           # ones its instance resolves, and a new wiring var needs no edit here.
           envFrom:
             - configMapRef: { name: diorama-config }

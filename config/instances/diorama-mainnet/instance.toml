@@ -14,7 +14,7 @@ project = "specialization"
 kind = "ethereum"
 # The read pool's first entry is the anvil fork source and the
 # `/admin/epoch` re-pin target; the engine fans out over the whole group.
-source_urls = "@reth"
+source_urls = "@evm"
 follow = "latest"
 follow_margin_blocks = 2
 # Blocks between the follow head and T's fork base; the single home of the
@@ -27,7 +27,7 @@ fork_offset = 128
 state_dir = "${STATE_DIR}"
 
 [services.engine.anvil]
-target_url = "@anvil_t"
+target_url = "@anvil"
 
 [services.engine.loops]
 # Chain-1 catch-up: the live gap is ~3.3k blocks; 10k stays below the

@@ -40,9 +40,9 @@ spec:
             - |
               set -eu
               # The fork source is the archive plane; the engine's read pool
-              # (`HL_RPC_URLS`) deliberately excludes it because it does not
+              # (`EVM_FORK_URLS`) deliberately excludes it because it does not
               # answer `eth_getSystemTxsByBlockNumber`.
-              : "${HL_RPC_URL:?HL_RPC_URL is required}"
+              : "${EVM_FORK_URL:?EVM_FORK_URL is required}"
               # An explicit pin preserves the epoch across a source change. A
               # re-pin to the source's current head is a *new base*: the driver
               # clears the shadow registry (measured 2026-11-01, a restart moved
@@ -65,11 +65,11 @@ spec:
               while [ -z "$HEAD" ] && [ "$i" -lt 240 ]; do
                 HEAD=$(wget -qO- --header='Content-Type: application/json' \
                   --post-data='{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                  "$HL_RPC_URL" 2>/dev/null \
+                  "$EVM_FORK_URL" 2>/dev/null \
                   | sed -n 's/.*"result":"\(0x[0-9a-fA-F]*\)".*/\1/p')
                 [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
               done
-              [ -n "$HEAD" ] || { echo "ERROR: fork source unreachable at $HL_RPC_URL"; exit 1; }
+              [ -n "$HEAD" ] || { echo "ERROR: fork source unreachable at $EVM_FORK_URL"; exit 1; }
               PIN=$((HEAD))
               echo "$PIN" > /state/pin
               # The container runs unprivileged and re-resolves the pin on every
@@ -80,8 +80,8 @@ spec:
               chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (source head=$HEAD)"
           env:
-            - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
+            - name: EVM_FORK_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: EVM_FORK_URL } }
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -100,7 +100,7 @@ spec:
           args:
             - |
               # The fork source is the archive plane; the engine pool is separate.
-              : "${HL_RPC_URL:?HL_RPC_URL is required}"
+              : "${EVM_FORK_URL:?EVM_FORK_URL is required}"
               # An explicit pin keeps the epoch across a source change. Without
               # it, re-resolve on *every container start* (k8s restarts only the
               # container on OOM): a fresh base is an epoch, and the driver
@@ -111,7 +111,7 @@ spec:
               if [ -n "$FORK_PIN" ]; then
                 PIN="$FORK_PIN"
               else
-                PIN=$(cast block-number --rpc-url "$HL_RPC_URL" 2>/dev/null || echo 0)
+                PIN=$(cast block-number --rpc-url "$EVM_FORK_URL" 2>/dev/null || echo 0)
                 if [ "${PIN:-0}" -gt 0 ]; then
                   echo "$PIN" > /state/pin
                 else
@@ -119,7 +119,7 @@ spec:
                   echo "fork source unreachable; keeping persisted pin $PIN" >&2
                 fi
               fi
-              echo "anvil-v: fork-url=$HL_RPC_URL pin=$PIN"
+              echo "anvil-v: fork-url=$EVM_FORK_URL pin=$PIN"
               # Why these flags (the parity list):
               #   --no-mining          the engine owns block production; without
               #                        it every cheatcode write automines and the
@@ -130,7 +130,11 @@ spec:
               #                        address.
               #   --hardfork cancun    the real chain is Cancun-without-blobs;
               #                        pinning it is the faithful choice.
-              #   --gas-limit 1e8      their HyperEVM arg.
+              #   --gas-limit 3e8      pre-launch mirror override: unoptimized
+              #                        creation code needs ~106.4M gas for the
+              #                        largest deploy, above HyperEVM's 1e8
+              #                        block limit. Restore 1e8 with the
+              #                        optimized release build.
               #   --code-size-limit    their entrypoint's deliberate 99999: an
               #                        oversize deploy must not surface at run
               #                        time.
@@ -150,11 +154,11 @@ spec:
               #                        is what the driver's failing-run reads need.
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
-                --fork-url "$HL_RPC_URL" \
+                --fork-url "$EVM_FORK_URL" \
                 --fork-block-number "$PIN" \
                 --chain-id 999 \
                 --hardfork cancun \
-                --gas-limit 100000000 \
+                --gas-limit 300000000 \
                 --code-size-limit 99999 \
                 --disable-pool-balance-checks \
                 --order fifo \
@@ -168,8 +172,8 @@ spec:
                 --no-request-size-limit \
                 --no-fork-node-info
           env:
-            - name: HL_RPC_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: HL_RPC_URL } }
+            - name: EVM_FORK_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: EVM_FORK_URL } }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

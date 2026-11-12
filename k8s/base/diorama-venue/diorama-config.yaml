@@ -14,7 +14,7 @@ data:
   # sysTxs-capable entries with per-endpoint measured capabilities — and the
   # fork source stays this archive (latest-only providers can never fork).
   # ENV overrides remain available via DIORAMA__ENDPOINTS__*.
-  HL_RPC_URL: "https://rpc.hyperlend.finance/archive"
+  EVM_FORK_URL: "https://rpc.hyperlend.finance/archive"
 
   # The venue's market plane. Both are URL lists in the instance's
   # [endpoints] groups; the env carries the deployment values, never a second

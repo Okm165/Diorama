@@ -50,11 +50,11 @@ spec:
               while [ -z "$HEAD" ] && [ "$i" -lt 240 ]; do
                 HEAD=$(wget -qO- --header='Content-Type: application/json' \
                   --post-data='{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                  "$RETH_URL" 2>/dev/null \
+                  "$EVM_URL" 2>/dev/null \
                   | sed -n 's/.*"result":"\(0x[0-9a-fA-F]*\)".*/\1/p')
                 [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
               done
-              [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
+              [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $EVM_URL"; exit 1; }
               # A configured fork_pin preserves the deployment epoch. The
               # chain-1 mirror carries the only project contract deployment;
               # re-resolving a fresh base on every restart makes the engine
@@ -78,7 +78,7 @@ spec:
               # this is a read of the mounted file, not a second definition.
               FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
               [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
-              echo "resolving pin: $RETH_URL head - $FORK_OFFSET"
+              echo "resolving pin: $EVM_URL head - $FORK_OFFSET"
               PIN=$((HEAD - FORK_OFFSET))
               echo "$PIN" > /state/pin
               # The container runs unprivileged and re-resolves the pin on every
@@ -90,8 +90,8 @@ spec:
               chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (reth head=$HEAD)"
           env:
-            - name: RETH_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
+            - name: EVM_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: EVM_URL } }
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -122,7 +122,7 @@ spec:
               if [ -n "$FORK_PIN" ]; then
                 PIN="$FORK_PIN"
               else
-                PIN=$(cast block-number --rpc-url "$RETH_URL" 2>/dev/null || echo 0)
+                PIN=$(cast block-number --rpc-url "$EVM_URL" 2>/dev/null || echo 0)
                 if [ "${PIN:-0}" -gt 0 ]; then
                   PIN=$((PIN - FORK_OFFSET))
                   echo "$PIN" > /state/pin
@@ -131,7 +131,7 @@ spec:
                   echo "reth unreachable; keeping persisted pin $PIN" >&2
                 fi
               fi
-              echo "anvil-t: fork-url=$RETH_URL pin=$PIN"
+              echo "anvil-t: fork-url=$EVM_URL pin=$PIN"
               # The engine owns block production on both chains: without
               # --no-mining, every raw tx / cheatcode write would automine its
               # own block and the engine's mine(1) would produce empty blocks
@@ -146,13 +146,16 @@ spec:
               # run forensics read the run's own chain; keeper 2 makes a run
               # unreadable seconds after it ends). --hardfork stays bpo2 here
               # (V takes cancun — the real HyperEVM's fork).
+              # Pre-launch mirror: the unoptimized creation code needs ~106.4M
+              # gas for the largest deploy, above the production 60M block
+              # limit. Raise the block limit until the optimized release build.
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
-                --fork-url "$RETH_URL" \
+                --fork-url "$EVM_URL" \
                 --fork-block-number "$PIN" \
                 --chain-id 1 \
                 --hardfork bpo2 \
-                --gas-limit 60000000 \
+                --gas-limit 300000000 \
                 --enable-tx-gas-limit \
                 --code-size-limit 99999 \
                 --disable-pool-balance-checks \
@@ -167,8 +170,8 @@ spec:
                 --state /state/anvil-state.json \
                 --state-interval 300 \
           env:
-            - name: RETH_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
+            - name: EVM_URL
+              valueFrom: { configMapKeyRef: { name: diorama-config, key: EVM_URL } }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

@@ -6,7 +6,7 @@
 # closures. `specialization.example.toml` is the tracked, complete template;
 # copy it to `specialization.toml` for a deployment.
 
-[endpoints.anvil_v]
+[endpoints.anvil]
 http = ["${ANVIL_V_URL}"]
 chain_id = 999
 
@@ -17,25 +17,25 @@ chain_id = 999
 # capability, round-robins, cools failures down and fails over; `max_log_range`
 # and `weight` ride the entry, the group-level values are the fallback.
 # ENV override for the whole flat list remains `DIORAMA__ENDPOINTS__*`.
-[endpoints.hyperevm]
+[endpoints.evm]
 chain_id = 999
 # The public HyperEVM source pool's measured free-plan cap: wider eth_getLogs
 # ranges stall or are refused. The client splits scans at this bound.
 max_log_range = 900
 
-[[endpoints.hyperevm.entries]]
+[[endpoints.evm.entries]]
 url = "https://rpc.hyperliquid.xyz/evm"
 capabilities = ["system_txs", "batch"]
 
-[[endpoints.hyperevm.entries]]
+[[endpoints.evm.entries]]
 url = "https://rpc.hypurrscan.io"
 capabilities = ["system_txs", "batch"]
 
-[[endpoints.hyperevm.entries]]
+[[endpoints.evm.entries]]
 url = "https://hyperliquid-json-rpc.stakely.io"
 capabilities = ["system_txs", "batch"]
 
-[endpoints.hyperliquid_api]
+[endpoints.hyperliquid_info]
 # The market REST plane. A keyed mirror (e.g. ZAN: `https://api.zan.top/node/
 # v1/hyperliquid/mainnet/<KEY>`) slots in as the first entry with
 # `capabilities = ["market_rest"]`; the official API stays as failover.

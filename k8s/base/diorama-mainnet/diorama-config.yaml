@@ -11,7 +11,7 @@ metadata:
 data:
   # Local fork source (reth). Never point this at a remote endpoint in
   # production mode: remote mining is 55-256 s/block (measured).
-  RETH_URL: "http://reth:8545"
+  EVM_URL: "http://reth:8545"
 
   # The chain endpoint the engine drives, plus the beacon/engine-api/JWT
   # wiring for the top-up loop (EIP-8379). The fork offset's single home is
