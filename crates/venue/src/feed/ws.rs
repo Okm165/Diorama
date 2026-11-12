@@ -17,7 +17,7 @@
 //! then dropped reconnects immediately; only a failed session sleeps.
 use crate::feed::MarketFeed;
 use crate::wire::{AssetCtx, L2Book};
-use diorama_anvil::{now_ms, Backoff, EndpointPool, Progress};
+use diorama_anvil::{now_ms, Attempt, AttemptOutcome, Backoff, EndpointPool, PoolError, Progress};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -185,6 +185,34 @@ fn cooling_wait_ms(retry_after_ms: u64) -> u64 {
 }
 
 /// The reconnect sleep: the endpoint policy's backoff, never below the floor.
+/// One session, as the pool's executor sees it: dial, subscribe, serve until
+/// the socket drops or the data-idle deadline fires. `Served` = the session
+/// delivered data (the endpoint is healthy, whatever the close); `Fault` = it
+/// never did, or the dial failed — the endpoint cools and the pool rotates.
+struct SessionAttempt<'a> {
+    lane: &'a WsClient,
+}
+
+impl Attempt for SessionAttempt<'_> {
+    type Output = ();
+    type Fault = WsError;
+
+    async fn attempt(&self, index: usize) -> AttemptOutcome<(), WsError> {
+        let url = self.lane.pool.url(index);
+        match self.lane.session(index, url).await {
+            SessionOutcome::Served => AttemptOutcome::Served(()),
+            SessionOutcome::Failed(error) => {
+                tracing::warn!(
+                    url = %url,
+                    error = %error,
+                    "market websocket endpoint failed; trying the next endpoint"
+                );
+                AttemptOutcome::Fault(error)
+            }
+        }
+    }
+}
+
 fn reconnect_delay(backoff: Duration) -> Duration {
     backoff.max(MIN_RECONNECT_DELAY)
 }
@@ -195,81 +223,45 @@ impl WsClient {
         Self { feed, pool, roles }
     }
 
-    /// Run forever. Admission is the pool's: when every endpoint is cooling,
-    /// one rate-limited emergency probe is tried, then the loop waits for the
-    /// earliest cooldown instead of hammering the whole pool.
+    /// Run forever — on the pool's executor, exactly like the REST lane: one
+    /// `execute` is one rotation pass (admission, the jittered emergency
+    /// probe, cooldowns, the attempt budget and the failover order are the
+    /// shared spine's, not a second copy in this lane), and a `Served`
+    /// session is a healthy endpoint even though it eventually closes.
     pub async fn run(self) {
         // The reconnect shape is the deployment's endpoint policy: the same
         // cooldown base/cap a failed HTTP endpoint gets, not a second copy.
         let policy = self.pool.policy();
         let mut backoff = Backoff::new(policy.cooldown_base(), policy.cooldown_max());
+        let roles: Vec<&str> = self.roles.iter().map(String::as_str).collect();
+        let attempt = SessionAttempt { lane: &self };
         loop {
-            let now = now_ms();
-            let Some(indices) = self.admitted(&now).await else {
-                continue;
-            };
-            let served = self.try_endpoints(&indices).await;
+            let outcome = self.pool.execute(&attempt, &roles).await;
             self.feed.metrics.mark_ws_down();
             self.feed.metrics.inc_ws_reconnects();
-            if served {
+            match outcome {
                 // The endpoint was live; a later close is the network's, not
                 // the endpoint's. Reset the failure backoff, but still wait
                 // the floor: an accept-then-close server must not spin.
-                backoff.record(Progress::Progressed);
-                tokio::time::sleep(reconnect_delay(backoff.delay())).await;
-                continue;
-            }
-            let delay = reconnect_delay(backoff.delay());
-            backoff.record(Progress::Stalled);
-            tokio::time::sleep(delay).await;
-        }
-    }
-
-    /// The endpoints this pass may dial: the pool's admission, or the one
-    /// jittered emergency probe. When everything is cooling, wait the pool's
-    /// own bound (only a zero wait is floored — it would spin) and answer
-    /// `None`: the loop parks instead of hammering.
-    async fn admitted(&self, now: &u64) -> Option<Vec<usize>> {
-        let admission = self.pool.admit(
-            *now,
-            &self.roles.iter().map(String::as_str).collect::<Vec<_>>(),
-        );
-        if !admission.indices.is_empty() {
-            return Some(admission.indices);
-        }
-        // The pool already names the earliest cooldown. No ceiling: the
-        // configured `cooldown_max_ms` is the policy's own bound.
-        if let Some(index) = self.pool.emergency_probe(*now, &[]) {
-            return Some(vec![index]);
-        }
-        tokio::time::sleep(Duration::from_millis(cooling_wait_ms(
-            admission.retry_after_ms,
-        )))
-        .await;
-        None
-    }
-
-    /// Dial the admitted endpoints in order; the first one that serves wins.
-    /// A failed dial cools that endpoint and logs the rotation.
-    async fn try_endpoints(&self, indices: &[usize]) -> bool {
-        for index in indices {
-            let url = self.pool.url(*index).to_string();
-            match self.session(*index, &url).await {
-                SessionOutcome::Served => {
-                    self.pool.record_success(*index, now_ms());
-                    return true;
+                Ok(diorama_anvil::Served { .. }) => {
+                    backoff.record(Progress::Progressed);
+                    tokio::time::sleep(reconnect_delay(backoff.delay())).await;
                 }
-                SessionOutcome::Failed(error) => {
-                    self.pool.record_failure(*index, now_ms());
-                    tracing::warn!(
-                        url = %url,
-                        error = %error,
-                        "market websocket endpoint failed; trying the next endpoint"
-                    );
+                // Every endpoint is cooling: the pool already names the
+                // earliest cooldown. No ceiling — the configured
+                // `cooldown_max_ms` is the policy's own bound.
+                Err(PoolError::Cooling { retry_after_ms }) => {
+                    tokio::time::sleep(Duration::from_millis(cooling_wait_ms(retry_after_ms)))
+                        .await;
+                }
+                // The rotation was exhausted: every dial failed and the pool
+                // has cooled each one. Wait out this lane's own backoff.
+                Err(_) => {
+                    backoff.record(Progress::Stalled);
+                    tokio::time::sleep(reconnect_delay(backoff.delay())).await;
                 }
             }
         }
-        false
     }
 
     /// One connection: subscribe, wait for the first data frame, then read
