@@ -18,8 +18,10 @@
 //! decoded, so a burn delivered by both lanes is processed once. Each log is
 //! decoded into a [`MessageRecord`], the attester fields are patched (`nonce =
 //! keccak256(burn-tx ‖ log-index)`, `finalityThresholdExecuted = 2000`,
-//! `feeExecuted = 0`, `expirationBlock = configured`, §15.3), and every record
-//! whose emulated PENDING window has elapsed is signed.
+//! `feeExecuted = min(maxFee, amount)`, `expirationBlock = configured`, §15.3),
+//! and every record whose emulated PENDING window has elapsed is signed. The
+//! fee is the sender's cap, matching DALOC's `amount - maxFee` pricing; a zero
+//! fee stranded the difference at the destination ProofExecutor.
 //!
 //! **Restart backfill**: the first HTTP scan of every run starts at
 //! `start_block` — a burn awaiting attestation across a restart is re-read
@@ -452,10 +454,19 @@ impl Watcher {
     fn record_of(&self, sent: MessageSent, parsed: &Message, expiration: U256) -> MessageRecord {
         let burn_tx = sent.burn_tx;
         let nonce = burn_nonce(burn_tx, sent.log_index);
+        // **The mock must charge the sender's cap, not zero.** DALOC's CCTP
+        // circuit prices the delivered amount as `amount - maxFee` (the
+        // worst-case Circle Fast fee). Serving `feeExecuted = 0` left the
+        // difference at the destination ProofExecutor: 5.97229 USDC stranded
+        // across the mirror's cross-chain creations. Charging `maxFee` (bounded
+        // by the amount) makes the delivered amount equal the circuit's
+        // expectation; a real Circle fee at or below the cap would leave at
+        // most the cap's headroom, which is the value the sender authorized.
+        let fee_executed = parsed.body.max_fee.min(parsed.body.amount);
         let served = parsed.with_attester_fields(
             nonce,
             FINALITY_THRESHOLD_FINALIZED,
-            U256::ZERO,
+            fee_executed,
             expiration,
         );
         let now = crate::now_ms();
@@ -937,6 +948,44 @@ mod tests {
             cursor_off_base(150, 100, None),
             "a rewind on a real chain still parks"
         );
+    }
+
+    /// **The mock charges the sender's cap, not zero.** DALOC prices the
+    /// delivered amount as `amount - maxFee`; a zero `feeExecuted` left the
+    /// difference at the destination ProofExecutor (measured 5.97229 USDC).
+    #[test]
+    fn the_attester_charges_the_senders_max_fee() {
+        let dir = std::env::temp_dir().join(format!("diorama-cctp-fee-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let w = watcher(&dir, Domain(0), Duration::ZERO);
+        // The shared sample carries no cap; this circuit's senders always do
+        // (`validate_max_fee` refuses a zero-cap fast burn). Build the log
+        // from a capped message.
+        let max_fee = U256::from(1_000_000u64);
+        let mut message = Message::decode(&sample_raw_message()).unwrap();
+        message.body.max_fee = max_fee;
+        let event = IMessageTransmitterV2::MessageSent {
+            message: message.encode(),
+        };
+        let log = Log {
+            inner: alloy_primitives::Log {
+                address: crate::chains::MESSAGE_TRANSMITTER_V2,
+                data: event.encode_log_data(),
+            },
+            block_hash: None,
+            block_number: Some(7),
+            block_timestamp: None,
+            transaction_hash: Some(B256::repeat_byte(0x11)),
+            transaction_index: Some(0),
+            log_index: Some(0),
+            removed: false,
+        };
+        let sent = decode_message_sent(&log).unwrap();
+        let parsed = Message::decode(&sent.raw_message).unwrap();
+        let record = w.record_of(sent, &parsed, U256::from(100u64));
+        let served = Message::decode(&record.message).unwrap();
+        assert_eq!(served.body.fee_executed, max_fee);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn watcher(
