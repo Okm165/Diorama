@@ -15,6 +15,12 @@
 # what the boot audit probes per endpoint and what capability-gated admission
 # routes on — an unqualified endpoint would be admitted to every call but
 # credited with nothing.
+# Endpoint capability claims are verified endpoint-by-endpoint at boot (the
+# capability audit, `crates/devnet/src/source.rs::audit_capabilities`); the
+# wire facts behind them are measured with `scripts/probe-endpoint.sh`, which
+# is also the re-probe for provider drift - a claim lives exactly as long as
+# the provider's behavior does.
+
 [endpoints.evm]
 chain_id = 1
 roles = ["bal", "traces", "historical", "heads_ws", "batch"]

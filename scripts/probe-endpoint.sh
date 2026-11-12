@@ -79,14 +79,30 @@ echo "    head=$AT_HEAD  20min=$AT_20MIN  deep=$AT_DEEP"
 LG=$(rpc "$RPC" eth_getLogs "[{\"address\":\"$ORACLE\",\"fromBlock\":\"0x$(printf '%x' "$((HEAD-900))")\",\"toBlock\":\"0x$(printf '%x' "$((HEAD-880))")\"}]")
 if echo "$LG" | grep -q '"result"'; then ok "eth_getLogs 900-block range accepted"; else fail "eth_getLogs 900-block: $(echo "$LG" | head -c 120)"; fi
 
-# --- 3. eth_getSystemTxsByBlockNumber (Diorama read-pool gate) --------------
+# --- 3. eth_getSystemTxsByBlockNumber (read-pool gate) ----------------------
+# The oracle mirrors the engine's, not a substring: some providers answer an
+# unsupported method with BOTH `"result":null` and `"error"` in one body
+# (measured 2026-11-12 on rpc.sentio.xyz/hyperevm), so grepping for
+# `"result"` reads a refusal as "served". A result must be present, not an
+# error, and not null (a null is not the list the client decodes).
 ST=$(rpc "$RPC" eth_getSystemTxsByBlockNumber "[\"0x$(printf '%x' "$((HEAD-1100))")\"]")
-if echo "$ST" | grep -q '"result"'; then ok "eth_getSystemTxsByBlockNumber served (read-pool eligible)"; else fail "eth_getSystemTxsByBlockNumber: $(echo "$ST" | head -c 100)"; fi
+case "$ST" in
+  *'"error"'*) fail "eth_getSystemTxsByBlockNumber: $(echo "$ST" | head -c 100)";;
+  *'"result":null'*) fail "eth_getSystemTxsByBlockNumber: answered null, not a list";;
+  *'"result"'*) ok "eth_getSystemTxsByBlockNumber served";;
+  *) fail "eth_getSystemTxsByBlockNumber: no JSON-RPC answer";;
+esac
 
 # --- 4. JSON-RPC batching (Diorama follow driver batches 20/body) -----------
 BATCH=$(curl -s --max-time 20 -H 'content-type: application/json' \
   -d '[{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]},{"jsonrpc":"2.0","id":2,"method":"eth_blockNumber","params":[]}]' "$RPC")
-if echo "$BATCH" | grep -q '^\['; then ok "batch JSON-RPC supported (follow-driver eligible)"; else fail "batch JSON-RPC rejected: $(echo "$BATCH" | head -c 100)"; fi
+# Same oracle rule: a batch *of errors* is still an array — every item must
+# have carried a result, or the body is not "batch supported".
+case "$BATCH" in
+  *'"error"'*) fail "batch JSON-RPC: the body carries an error item: $(echo "$BATCH" | head -c 100)";;
+  \[*'"result"'*) ok "batch JSON-RPC supported (follow-driver eligible)";;
+  *) fail "batch JSON-RPC rejected: $(echo "$BATCH" | head -c 100)";;
+esac
 
 # --- 5. eth_getProof (informational; production does not require it) --------
 GP=$(rpc "$RPC" eth_getProof "[\"$ORACLE\",[],\"latest\"]")
@@ -110,5 +126,29 @@ if [ -n "$INFO_BASE" ]; then
 fi
 
 echo "----"
-[ "$FAIL" = 0 ] && echo "RESULT: USABLE (latest-read pool)" || echo "RESULT: REJECTED"
-exit "$FAIL"
+
+# The verdict is per plane, because the specialization wires them separately:
+# a fork source needs archive-grade pinned reads; a read-pool member needs
+# the follow's wire shape (system txs + batch bodies + the declared log cap).
+# One endpoint can serve either without the other — the official HyperEVM RPC
+# is a fine pool member and a poisoned fork source (measured 2026-11-12).
+FAIL_SYSTXS=1; FAIL_BATCH=1; FAIL_FORK=1
+case "$ST" in *'"error"'*|*'"result":null'*) ;; *'"result"'*) FAIL_SYSTXS=0;; esac
+case "$BATCH" in *'"error"'*) ;; \[*'"result"'*) FAIL_BATCH=0;; esac
+case "$PIN" in TRUE-ARCHIVE*) FAIL_FORK=0;; esac
+FAIL_POOL=1
+[ "$FAIL_SYSTXS" = 0 ] && [ "$FAIL_BATCH" = 0 ] && FAIL_POOL=0
+
+if [ "$FAIL_POOL" = 0 ]; then
+  echo "VERDICT read-pool: USABLE (serves the follow's wire shape)"
+else
+  echo "VERDICT read-pool: NOT ELIGIBLE (needs eth_getSystemTxsByBlockNumber + batch bodies)"
+fi
+if [ "$FAIL_FORK" = 0 ]; then
+  echo "VERDICT fork-source: USABLE (archive-grade pinned reads)"
+else
+  echo "VERDICT fork-source: NOT ELIGIBLE ($PIN)"
+fi
+[ "$FAIL_POOL" = 0 ] || [ "$FAIL_FORK" = 0 ] || { echo "RESULT: the endpoint serves neither plane"; exit 1; }
+[ "$FAIL" = 0 ] || echo "note: some probes above failed; read the lines, not just the verdict"
+exit 0
