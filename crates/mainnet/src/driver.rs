@@ -37,7 +37,6 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
         MAINNET_CHAIN_ID,
         Duration::from_secs(ctx.engine.boot_timeout_secs),
         "reth",
-        &diorama_devnet::engine::config_declared_capabilities(ctx.source_rpc().pool()),
     )
     .await?;
     // The epoch pin is anchored before any writes exist (a fresh registry's
@@ -377,7 +376,10 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
         match ctx.plane.capture_fixtures_if_due(&ctx.anvil_t, 60).await {
             Ok(0) => {}
             Ok(captured) => {
-                tracing::info!(captured, "fixture runtime code captured for re-fork restore");
+                tracing::info!(
+                    captured,
+                    "fixture runtime code captured for re-fork restore"
+                );
                 if let Err(e) = ctx.plane.save_shadow() {
                     tracing::warn!(error = %e, "shadow registry save after fixture capture failed");
                 }

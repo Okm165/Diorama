@@ -1338,7 +1338,11 @@ impl Rpc {
                 what: "eth_getSystemTxsByBlockNumber",
                 detail: format!("block {n} answered null, not a list"),
             }),
-            Err(e) if e.is_method_not_found() => Ok(Vec::new()),
+            // No silent-empty on method-not-found: the capability gate routed
+            // this call to an endpoint that *claimed* `system_txs`, so a
+            // `-32601` is a claim/endpoint disagreement (or the measured
+            // system-tx index lag) and must surface as an error, never as
+            // "this block had no system transactions".
             Err(e) => Err(e),
         }
     }

@@ -385,7 +385,6 @@ pub async fn boot_prefix<E: Engine>(
     chain_id: u64,
     wait: std::time::Duration,
     source_what: &str,
-    config_declared: &[diorama_config::Capability],
 ) -> crate::Result<(), E::Error> {
     assert_chain(ctx, anvil, chain_id, wait).await?;
     // The target assert above is not enough: a wrong-chain *source* endpoint
@@ -393,22 +392,32 @@ pub async fn boot_prefix<E: Engine>(
     // before the first window is composed.
     ctx.source_rpc().verify_chain(chain_id).await?;
     let declared = ctx.mirror().follow_source().capabilities();
-    // The config's per-endpoint claims must agree with the profile's source
-    // semantics: an operator who measured `traces` on the pool but runs a
-    // profile whose composer cannot use traces has surfaced a fact into the
-    // wrong plane — say so once, loudly, at boot.
+    // The config↔profile cross-check, in the operationally meaningful
+    // direction: every capability the composer *needs* must be claimed by at
+    // least one endpoint in the pool. The inverse (a claimed capability the
+    // composer does not use) is a per-endpoint fact, not an error — the pool
+    // may legitimately carry richer endpoints than this profile consumes.
     let measured = declared.names();
-    crate::source::audit_capabilities(source_what, declared.clone(), ctx.source_rpc()).await?;
-    for cap in config_declared {
-        match crate::source::Capability::from_config(*cap) {
-            Some(mapped) if !measured.contains(&mapped) => tracing::warn!(
-                capability = mapped.name(),
-                "config declares a source capability the profile's composer does not use"
-            ),
-            None => {} // batch/market planes gate admission, not the composer
-            Some(_) => {}
+    if !measured.is_empty() {
+        let claimed: Vec<crate::source::Capability> =
+            config_declared_capabilities(ctx.source_rpc().pool())
+                .into_iter()
+                .filter_map(crate::source::Capability::from_config)
+                .collect();
+        let unclaimed: Vec<&str> = measured
+            .iter()
+            .filter(|need| !claimed.contains(need))
+            .map(|need| need.name())
+            .collect();
+        if !unclaimed.is_empty() {
+            tracing::warn!(
+                unclaimed = %unclaimed.join(","),
+                "the composer needs capabilities no pool endpoint claims — add them to the \
+                 [endpoints] entries or expect follow failures"
+            );
         }
     }
+    crate::source::audit_capabilities(source_what, declared.clone(), ctx.source_rpc()).await?;
     Ok(())
 }
 

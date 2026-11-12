@@ -49,7 +49,6 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
         VENUE_CHAIN_ID,
         Duration::from_secs(ctx.engine.boot_timeout_secs),
         "hl public api",
-        &diorama_devnet::engine::config_declared_capabilities(ctx.source_rpc().pool()),
     )
     .await?;
     let pin = reconcile(ctx).await?;
