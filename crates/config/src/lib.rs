@@ -807,12 +807,12 @@ port = 8096
         assert_eq!(
             names,
             vec![
-                "TARGET_RPC_URL",
                 "BEACON_URL",
                 "ENGINE_API_URL",
                 "EVM_URL",
                 "JWT_PATH",
-                "STATE_DIR"
+                "STATE_DIR",
+                "TARGET_RPC_URL"
             ],
             "the wiring the instance references"
         );
@@ -944,12 +944,12 @@ port = 8096
         assert_eq!(
             names,
             vec![
-                "TARGET_RPC_URL",
                 "ENGINE_ADMIN_URL",
                 "HL_INFO_API_URL",
                 "HL_WS_API_URL",
                 "SIM_STATE_DIR",
-                "STATE_DIR"
+                "STATE_DIR",
+                "TARGET_RPC_URL"
             ],
             "the wiring the venue instance references"
         );
