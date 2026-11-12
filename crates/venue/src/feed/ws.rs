@@ -205,43 +205,10 @@ impl WsClient {
         let mut backoff = Backoff::new(policy.cooldown_base(), policy.cooldown_max());
         loop {
             let now = now_ms();
-            let admission = self.pool.admit(now, &self.roles.iter().map(String::as_str).collect::<Vec<_>>());
-            let indices = if admission.indices.is_empty() {
-                if let Some(index) = self.pool.emergency_probe(now, &[]) {
-                    vec![index]
-                } else {
-                    // The pool already names the earliest cooldown; only a
-                    // zero wait is floored (it would spin). No ceiling: the
-                    // configured `cooldown_max_ms` is the policy's own bound.
-                    tokio::time::sleep(Duration::from_millis(cooling_wait_ms(
-                        admission.retry_after_ms,
-                    )))
-                    .await;
-                    continue;
-                }
-            } else {
-                admission.indices
+            let Some(indices) = self.admitted(&now).await else {
+                continue;
             };
-
-            let mut served = false;
-            for index in indices {
-                let url = self.pool.url(index).to_string();
-                match self.session(index, &url).await {
-                    SessionOutcome::Served => {
-                        self.pool.record_success(index, now_ms());
-                        served = true;
-                        break;
-                    }
-                    SessionOutcome::Failed(error) => {
-                        self.pool.record_failure(index, now_ms());
-                        tracing::warn!(
-                            url = %url,
-                            error = %error,
-                            "market websocket endpoint failed; trying the next endpoint"
-                        );
-                    }
-                }
-            }
+            let served = self.try_endpoints(&indices).await;
             self.feed.metrics.mark_ws_down();
             self.feed.metrics.inc_ws_reconnects();
             if served {
@@ -256,6 +223,53 @@ impl WsClient {
             backoff.record(Progress::Stalled);
             tokio::time::sleep(delay).await;
         }
+    }
+
+    /// The endpoints this pass may dial: the pool's admission, or the one
+    /// jittered emergency probe. When everything is cooling, wait the pool's
+    /// own bound (only a zero wait is floored — it would spin) and answer
+    /// `None`: the loop parks instead of hammering.
+    async fn admitted(&self, now: &u64) -> Option<Vec<usize>> {
+        let admission = self.pool.admit(
+            *now,
+            &self.roles.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        if !admission.indices.is_empty() {
+            return Some(admission.indices);
+        }
+        // The pool already names the earliest cooldown. No ceiling: the
+        // configured `cooldown_max_ms` is the policy's own bound.
+        if let Some(index) = self.pool.emergency_probe(*now, &[]) {
+            return Some(vec![index]);
+        }
+        tokio::time::sleep(Duration::from_millis(cooling_wait_ms(
+            admission.retry_after_ms,
+        )))
+        .await;
+        None
+    }
+
+    /// Dial the admitted endpoints in order; the first one that serves wins.
+    /// A failed dial cools that endpoint and logs the rotation.
+    async fn try_endpoints(&self, indices: &[usize]) -> bool {
+        for index in indices {
+            let url = self.pool.url(*index).to_string();
+            match self.session(*index, &url).await {
+                SessionOutcome::Served => {
+                    self.pool.record_success(*index, now_ms());
+                    return true;
+                }
+                SessionOutcome::Failed(error) => {
+                    self.pool.record_failure(*index, now_ms());
+                    tracing::warn!(
+                        url = %url,
+                        error = %error,
+                        "market websocket endpoint failed; trying the next endpoint"
+                    );
+                }
+            }
+        }
+        false
     }
 
     /// One connection: subscribe, wait for the first data frame, then read

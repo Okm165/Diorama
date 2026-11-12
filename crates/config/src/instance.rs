@@ -188,6 +188,80 @@ pub const RETH_STATE_WINDOW_BLOCKS: u64 = 10_064;
 /// The safe-head lag the pin must clear (~32-64 blocks, measured).
 const MIN_FORK_OFFSET_BLOCKS: u64 = 64;
 
+/// The attributes one endpoint group or nested entry declares for its URLs:
+/// the capability set, the chain the endpoint must answer, its pool weight
+/// and its `eth_getLogs` cap.
+type Attributes = (
+    std::collections::BTreeSet<String>,
+    Option<u64>,
+    u32,
+    Option<u64>,
+);
+
+/// The one cross-group conflict check, shared by flat URLs and nested
+/// entries: a URL declared twice must carry the same capabilities, chain,
+/// weight and log cap, or the pool's admission would depend on which
+/// declaration the loader happened to expand first.
+fn check_seen(
+    seen: &mut BTreeMap<String, Attributes>,
+    key: &str,
+    url: &str,
+    attributes: &Attributes,
+    issues: &mut Vec<String>,
+) {
+    match seen.get(url) {
+        None => {
+            seen.insert(url.to_string(), attributes.clone());
+        }
+        Some(known) if known == attributes => {}
+        Some(_) => issues.push(format!(
+            "{key}: {url:?} is also declared in another endpoint group with \
+             different capabilities/chain_id/weight/max_log_range"
+        )),
+    }
+}
+
+/// One nested entry: its capability names must parse through the typed
+/// vocabulary, its URLs must carry a valid scheme, and its attribute tuple
+/// participates in the same cross-group conflict check as flat URLs.
+fn check_endpoint_entry(
+    key: &str,
+    group: &EndpointGroup,
+    entry: &crate::endpoints::EndpointEntry,
+    seen: &mut BTreeMap<String, Attributes>,
+    issues: &mut Vec<String>,
+) {
+    if let Err(why) = group.capabilities_for(&entry.url) {
+        issues.push(format!("{key}: {why}"));
+    }
+    let entry_attributes = (
+        entry.capabilities.iter().cloned().collect(),
+        entry.chain_id,
+        entry.weight,
+        entry.max_log_range,
+    );
+    for url in [Some(&entry.url), entry.ws.as_ref()] {
+        let Some(url) = url else { continue };
+        if !url.starts_with("http://")
+            && !url.starts_with("https://")
+            && !url.starts_with("ws://")
+            && !url.starts_with("wss://")
+        {
+            issues.push(format!("{key}: entry {url:?} is not an http(s)/ws(s) URL"));
+        }
+        check_seen(seen, key, url, &entry_attributes, issues);
+    }
+    if entry.weight == 0 {
+        issues.push(format!("{key}: entry {} weight must be >= 1", entry.url));
+    }
+    if entry.max_log_range == Some(0) {
+        issues.push(format!(
+            "{key}: entry {} max_log_range must be > 0",
+            entry.url
+        ));
+    }
+}
+
 impl Instance {
     /// The watched addresses, as the engine's COW scope.
     pub fn watch_set(&self) -> HashSet<Address> {
@@ -477,12 +551,6 @@ impl Instance {
     /// loader expands a URL list before the pool sees it, so a conflicting
     /// duplicate across groups would otherwise be resolved by group order.
     fn check_endpoint_groups(&self, issues: &mut Vec<String>) {
-        type Attributes = (
-            std::collections::BTreeSet<String>,
-            Option<u64>,
-            u32,
-            Option<u64>,
-        );
         let mut seen: BTreeMap<String, Attributes> = BTreeMap::new();
         for (name, group) in &self.endpoints {
             let key = format!("endpoints.{name}");
@@ -498,42 +566,8 @@ impl Instance {
                 group.weight,
                 group.max_log_range,
             );
-            // Nested entries: every capability name must parse through the
-            // typed vocabulary, every URL must carry a valid scheme, and an
-            // entry's (capability, chain, weight, log-cap) tuple participates
-            // in the same cross-group conflict check as flat URLs.
             for entry in &group.entries {
-                if let Err(why) = group.capabilities_for(&entry.url) {
-                    issues.push(format!("{key}: {why}"));
-                }
-                for url in [Some(&entry.url), entry.ws.as_ref()] {
-                    let Some(url) = url else { continue };
-                    if !url.starts_with("http://") && !url.starts_with("https://") && !url.starts_with("ws://") && !url.starts_with("wss://") {
-                        issues.push(format!("{key}: entry {url:?} is not an http(s)/ws(s) URL"));
-                    }
-                    let entry_attributes = (
-                        entry.capabilities.iter().cloned().collect(),
-                        entry.chain_id,
-                        entry.weight,
-                        entry.max_log_range,
-                    );
-                    match seen.get(url.as_str()) {
-                        None => {
-                            seen.insert(url.clone(), entry_attributes);
-                        }
-                        Some(known) if known == &entry_attributes => {}
-                        Some(_) => issues.push(format!(
-                            "{key}: {url:?} is also declared in another endpoint group with \
-                             different capabilities/chain_id/weight/max_log_range"
-                        )),
-                    }
-                }
-                if entry.weight == 0 {
-                    issues.push(format!("{key}: entry {} weight must be >= 1", entry.url));
-                }
-                if entry.max_log_range == Some(0) {
-                    issues.push(format!("{key}: entry {} max_log_range must be > 0", entry.url));
-                }
+                check_endpoint_entry(&key, group, entry, &mut seen, issues);
             }
             for url in group.http.iter().chain(group.ws.iter()) {
                 for part in url.split(',') {
@@ -541,16 +575,7 @@ impl Instance {
                     if part.is_empty() {
                         continue;
                     }
-                    match seen.get(part) {
-                        None => {
-                            seen.insert(part.to_string(), attributes.clone());
-                        }
-                        Some(known) if known == &attributes => {}
-                        Some(_) => issues.push(format!(
-                            "{key}: {part:?} is also declared in another endpoint group with \
-                             different roles/chain_id/weight/max_log_range"
-                        )),
-                    }
+                    check_seen(&mut seen, &key, part, &attributes, issues);
                 }
             }
         }

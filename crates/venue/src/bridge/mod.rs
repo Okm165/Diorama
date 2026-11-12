@@ -200,31 +200,7 @@ impl Bridge {
             return Ok(());
         }
         let meta = self.feed.meta();
-        // The figures are read outside the lock; the diff is the only thing it
-        // guards (an account whose projection tx fails retries next pass).
-        let mut current = std::collections::HashMap::new();
-        for address in self.sim.account_addresses()? {
-            match self.core_figures(address, usdc, meta.as_ref()) {
-                Ok(figures) => {
-                    current.insert(address, figures);
-                }
-                Err(e) => {
-                    self.metrics.inc_refusals();
-                    tracing::warn!(
-                        account = %address,
-                        error = %e,
-                        "bridge: precompile projection figures unavailable; the account is not projected this pass"
-                    );
-                }
-            }
-        }
-        let changed: Vec<(Address, [u64; 3])> = {
-            let projected = self.projected.lock().expect("bridge projection cache");
-            current
-                .into_iter()
-                .filter(|(address, figures)| projected.get(address) != Some(figures))
-                .collect()
-        };
+        let changed = self.changed_figures(usdc, meta.as_ref(), head).await?;
         if changed.is_empty() {
             return Ok(());
         }
@@ -239,33 +215,56 @@ impl Bridge {
                 .await?;
         }
         for (address, figures) in changed {
-            let [total, hold, withdrawable] = figures;
-            if spot_installed {
-                self.send_projection(
-                    system::SPOT_BALANCE_MOCK,
-                    system::set_balance_calldata(address, u64::from(usdc.index), total, hold),
-                )
-                .await?;
-            }
-            if withdrawable_installed {
-                self.send_projection(
-                    system::WITHDRAWABLE_MOCK,
-                    system::set_withdrawable_calldata(address, withdrawable),
-                )
-                .await?;
-            }
-            self.projected
-                .lock()
-                .expect("bridge projection cache")
-                .insert(address, figures);
-            tracing::info!(
-                account = %address,
-                spot_total_wei8 = total,
-                spot_hold_wei8 = hold,
-                withdrawable_usd6 = withdrawable,
-                "bridge: precompile projection written"
-            );
+            self.write_projection(
+                address,
+                figures,
+                u64::from(usdc.index),
+                spot_installed,
+                withdrawable_installed,
+            )
+            .await?;
         }
+        Ok(())
+    }
+
+    /// One account's mock writes plus the cache advance. The cache moves only
+    /// after both sends ack (a faulted write retries the whole account next
+    /// pass), so the projection never claims a write the chain refused.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_projection(
+        &self,
+        address: Address,
+        figures: [u64; 3],
+        token_index: u64,
+        spot_installed: bool,
+        withdrawable_installed: bool,
+    ) -> Result<()> {
+        let [total, hold, withdrawable] = figures;
+        if spot_installed {
+            self.send_projection(
+                system::SPOT_BALANCE_MOCK,
+                system::set_balance_calldata(address, token_index, total, hold),
+            )
+            .await?;
+        }
+        if withdrawable_installed {
+            self.send_projection(
+                system::WITHDRAWABLE_MOCK,
+                system::set_withdrawable_calldata(address, withdrawable),
+            )
+            .await?;
+        }
+        self.projected
+            .lock()
+            .expect("bridge projection cache")
+            .insert(address, figures);
+        tracing::info!(
+            account = %address,
+            spot_total_wei8 = total,
+            spot_hold_wei8 = hold,
+            withdrawable_usd6 = withdrawable,
+            "bridge: precompile projection written"
+        );
         Ok(())
     }
 
@@ -280,6 +279,39 @@ impl Bridge {
         let hash = self.anvil_v.send_transaction(tx).await?;
         tracing::debug!(mock = %mock, tx = %hash, "bridge: precompile mock write submitted");
         Ok(())
+    }
+
+    /// The accounts whose projected figures changed this pass: every sim
+    /// account is re-read (outside the projection lock — the lock guards only
+    /// the diff write-back, so a projection tx that faults retries next pass)
+    /// and compared against the cache.
+    async fn changed_figures(
+        &self,
+        usdc: &system::TokenInfo,
+        meta: Option<&crate::wire::Meta>,
+        _head: u64,
+    ) -> Result<Vec<(Address, [u64; 3])>> {
+        let mut current = std::collections::HashMap::new();
+        for address in self.sim.account_addresses()? {
+            match self.core_figures(address, usdc, meta) {
+                Ok(figures) => {
+                    current.insert(address, figures);
+                }
+                Err(e) => {
+                    self.metrics.inc_refusals();
+                    tracing::warn!(
+                        account = %address,
+                        error = %e,
+                        "bridge: precompile projection figures unavailable; the account is not projected this pass"
+                    );
+                }
+            }
+        }
+        let projected = self.projected.lock().expect("bridge projection cache");
+        Ok(current
+            .into_iter()
+            .filter(|(address, figures)| projected.get(address) != Some(figures))
+            .collect())
     }
 
     /// One account's projected figures, in the units the mocks store:
