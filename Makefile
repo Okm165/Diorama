@@ -155,13 +155,20 @@ images: ## Build + import the local images, then pull + import the pinned third-
 
 ##@ Engine
 
-build: ## Build the selected instance's engine image with podman (Dockerfile at the workspace root)
-	podman build -f Dockerfile --build-arg BIN=$(ENGINE_BIN) -t $(ENGINE_IMAGE):$(ENGINE_TAG) .
+# --no-cache is deliberate: a cached layer once survived a source change and
+# the old binary shipped under the pinned tag (measured 2026-11-12 — two
+# builds of the same tag printed one digest while crates/anvil differed). A
+# deploy image must be reproducible from the tree, never "probably the tree";
+# the dependency layer costs ~30 s uncached.
+build: ## Build the selected instance's engine image fresh (no layer cache)
+	podman build --no-cache -f Dockerfile --build-arg BIN=$(ENGINE_BIN) -t $(ENGINE_IMAGE):$(ENGINE_TAG) .
 
 import: build ## Import the engine image into the k3s containerd store
 	podman save -o /tmp/engine-image.tar $(ENGINE_IMAGE):$(ENGINE_TAG)
 	sudo k3s ctr images import /tmp/engine-image.tar
 	rm -f /tmp/engine-image.tar
+	@id=$$(podman images --format "{{.ID}}" $(ENGINE_IMAGE):$(ENGINE_TAG)); \
+	  echo "imported $$id -> $(ENGINE_IMAGE):$(ENGINE_TAG)"
 
 deploy-engine: import ## Rebuild + redeploy the selected instance's engine
 	$(KUBECTL) rollout restart deploy/engine
