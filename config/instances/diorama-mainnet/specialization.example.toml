@@ -8,8 +8,16 @@
 
 # The chain-1 EVM plane (http + ws; any EVM node — local reth here).
 # Local only by policy: no latency, no public-RPC dependency.
+#
+# The claims are the node's measured facts, not its brand: reth serves the
+# native BAL rung (EIP-7928), the `debug_*` trace rung, state at historical
+# blocks (its 10,064-block window) and `eth_subscribe("newHeads")`. They are
+# what the boot audit probes per endpoint and what capability-gated admission
+# routes on — an unqualified endpoint would be admitted to every call but
+# credited with nothing.
 [endpoints.evm]
 chain_id = 1
+roles = ["bal", "traces", "historical", "heads_ws"]
 ws = ["${EVM_URL}"]
 http = ["${EVM_URL}"]
 
