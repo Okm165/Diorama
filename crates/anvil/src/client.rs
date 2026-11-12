@@ -569,15 +569,18 @@ impl Rpc {
         }
     }
 
-    /// The admission requirement of a **batch**: the union of its items'
-    /// requirements. A batch is not "the batch capability" — one body carries
-    /// many methods, and an endpoint that serves batch transport but not one
-    /// of the methods answers the whole body with a refusal for that item.
-    /// Measured live 2026-11-12: the venue follow's four-item
-    /// `eth_getSystemTxsByBlockNumber` batch rotated onto a pool member that
-    /// claimed `batch` but not `system_txs`, and every such pass failed.
+    /// The admission requirement of a **batch**, as a set: the transport
+    /// capability it needs (`batch` — providers exist that refuse batch
+    /// bodies outright) plus the union of its items' method requirements.
+    ///
+    /// The union is the part that was missing: one body carries many methods,
+    /// and an endpoint that serves batch transport but not one of the methods
+    /// answers the whole body with a refusal for that item. Measured live
+    /// 2026-11-12: the venue follow's four-item `eth_getSystemTxsByBlockNumber`
+    /// batch rotated onto a pool member that claimed `batch` but not
+    /// `system_txs`, and every such pass failed.
     fn batch_capabilities(calls: &[Call]) -> Vec<&'static str> {
-        let mut required: Vec<&'static str> = Vec::new();
+        let mut required: Vec<&'static str> = vec!["batch"];
         for call in calls {
             for cap in Self::required_capabilities(call.meta.method.as_ref()) {
                 if !required.contains(cap) {
@@ -601,7 +604,7 @@ impl Rpc {
         method: &str,
         body: &RawValue,
         required: &[&'static str],
-    ) -> Result<(String, reqwest::StatusCode, String)> {
+    ) -> Result<(String, ResponsePacket)> {
         // A single endpoint has no failover: one attempt, and its body is the
         // node's answer whatever it is (the caller's `answer` classifies a
         // throttle/refusal). This preserves the write client's semantics and
@@ -615,11 +618,7 @@ impl Rpc {
             body,
         };
         match self.pool.execute(&attempt, required).await {
-            Ok(served) => Ok((
-                self.pool.url(served.index).to_string(),
-                served.value.0,
-                served.value.1,
-            )),
+            Ok(served) => Ok((self.pool.url(served.index).to_string(), served.value)),
             Err(error) => {
                 let typed = pool_error(error);
                 if typed.is_block_unavailable() {
@@ -649,49 +648,35 @@ impl Rpc {
         &self,
         method: &str,
         body: &RawValue,
-    ) -> Result<(String, reqwest::StatusCode, String)> {
+    ) -> Result<(String, ResponsePacket)> {
         let endpoint = self.pool.url(0);
         self.pool.record_attempt(0);
-        match self.post_raw_at(endpoint, method, body).await {
-            Ok((status, text)) => {
-                if endpoint_fault(status, &text) {
-                    self.pool.record_failure(0, now_ms());
-                } else {
-                    self.pool.record_success(0, now_ms());
-                }
-                Ok((endpoint.to_string(), status, text))
-            }
-            Err(fault) => {
-                self.pool.record_failure(0, now_ms());
-                Err(fault)
-            }
+        let classified = self.attempt_endpoint(0, method, body).await;
+        match &classified {
+            Ok(_) => self.pool.record_success(0, now_ms()),
+            Err(_) => self.pool.record_failure(0, now_ms()),
         }
+        Ok((endpoint.to_string(), classified?))
     }
 
     /// One endpoint's attempt for the shared executor: the pool records the
     /// health and owns the rotation; this owns one try and its classification.
+    ///
+    /// **The JSON-RPC boundary is inside the attempt.** A body that is not a
+    /// JSON-RPC answer is *this endpoint's* fault and must fail over, not a
+    /// decode fault on an already-admitted body — measured live 2026-11-12:
+    /// one HyperEVM provider answers an unsupported method with **both**
+    /// `result` and `error`, which no client can parse, and the venue's log
+    /// read failed the whole pass instead of trying the next endpoint.
     async fn attempt_endpoint(
         &self,
         index: usize,
         method: &str,
         body: &RawValue,
-    ) -> Result<(reqwest::StatusCode, String)> {
+    ) -> Result<ResponsePacket> {
         let endpoint = self.pool.url(index);
-        match self.post_raw_at(endpoint, method, body).await {
-            Ok((status, text)) if !endpoint_fault(status, &text) => Ok((status, text)),
-            Ok((status, text)) => {
-                tracing::debug!(
-                    endpoint = %endpoint,
-                    method,
-                    status = status.as_u16(),
-                    "endpoint fault; cooling it down and trying the next endpoint"
-                );
-                Err(Error::EndpointFault {
-                    endpoint: endpoint.to_string(),
-                    method: method.to_string(),
-                    detail: format!("HTTP {}: {}", status.as_u16(), truncate(&text, 300)),
-                })
-            }
+        let (status, text) = match self.post_raw_at(endpoint, method, body).await {
+            Ok(answer) => answer,
             Err(fault) => {
                 tracing::debug!(
                     endpoint = %endpoint,
@@ -699,7 +684,37 @@ impl Rpc {
                     error = %fault,
                     "endpoint transport fault; cooling it down and trying the next endpoint"
                 );
-                Err(fault)
+                return Err(fault);
+            }
+        };
+        if endpoint_fault(status, &text) {
+            tracing::debug!(
+                endpoint = %endpoint,
+                method,
+                status = status.as_u16(),
+                "endpoint fault; cooling it down and trying the next endpoint"
+            );
+            return Err(Error::EndpointFault {
+                endpoint: endpoint.to_string(),
+                method: method.to_string(),
+                detail: format!("HTTP {}: {}", status.as_u16(), truncate(&text, 300)),
+            });
+        }
+        match Self::classify(endpoint, method, status, &text) {
+            Ok(packet) => Ok(packet),
+            Err(fault) => {
+                tracing::debug!(
+                    endpoint = %endpoint,
+                    method,
+                    error = %fault,
+                    "endpoint answered a body that is not JSON-RPC; cooling it down and trying \
+                     the next endpoint"
+                );
+                Err(Error::EndpointFault {
+                    endpoint: endpoint.to_string(),
+                    method: method.to_string(),
+                    detail: format!("HTTP {}: {fault}", status.as_u16()),
+                })
             }
         }
     }
@@ -713,7 +728,7 @@ struct RpcAttempt<'a> {
 }
 
 impl Attempt for RpcAttempt<'_> {
-    type Output = (reqwest::StatusCode, String);
+    type Output = ResponsePacket;
     type Fault = Error;
 
     async fn attempt(&self, index: usize) -> AttemptOutcome<Self::Output, Self::Fault> {
@@ -770,14 +785,29 @@ impl Rpc {
         }
     }
 
-    /// One call's answer: exactly one `Response` (a batch body here is corrupt).
+    /// One call's answer, from a body: its classification plus
+    /// [`Self::answer_packet`] (the single-endpoint and test path).
     fn answer(
         endpoint: &str,
         method: &str,
         status: reqwest::StatusCode,
         text: &str,
     ) -> Result<Box<RawValue>> {
-        match Self::classify(endpoint, method, status, text)? {
+        Self::answer_packet(
+            endpoint,
+            method,
+            Self::classify(endpoint, method, status, text)?,
+        )
+    }
+
+    /// One call's answer, from an already-classified packet: exactly one
+    /// `Response` (a batch body here is corrupt).
+    fn answer_packet(
+        endpoint: &str,
+        method: &str,
+        packet: ResponsePacket,
+    ) -> Result<Box<RawValue>> {
+        match packet {
             ResponsePacket::Single(response) => Self::response_result(response)
                 .map_err(|payload| Self::rpc(endpoint, method, payload)),
             ResponsePacket::Batch(_) => Err(Self::decode(
@@ -799,10 +829,10 @@ impl Rpc {
         self.check_log_range(method, &value)?;
         let request = self.request(self.url(), method, params)?;
         let required = Self::required_capabilities(method);
-        let (endpoint, status, text) = self
+        let (endpoint, packet) = self
             .post_raw_throttled(method, &request.take_request(), required)
             .await?;
-        Self::answer(&endpoint, method, status, &text)
+        Self::answer_packet(&endpoint, method, packet)
     }
 
     /// Refuse an over-cap `eth_getLogs` before it reaches an endpoint. A
@@ -1115,18 +1145,7 @@ impl Rpc {
         body: &RawValue,
         required: &[&'static str],
     ) -> Result<Vec<Response>> {
-        let (endpoint, status, text) = self.post_raw_throttled("batch", body, required).await?;
-        let packet = match Self::classify(&endpoint, "batch", status, &text) {
-            Ok(packet) => packet,
-            Err(Error::Decode { source, .. }) => {
-                return Err(Error::BatchDecode {
-                    endpoint,
-                    request: truncate(body.get(), 600).to_string(),
-                    source,
-                })
-            }
-            Err(e) => return Err(e),
-        };
+        let (endpoint, packet) = self.post_raw_throttled("batch", body, required).await?;
         match packet {
             ResponsePacket::Batch(responses) => Ok(responses),
             // A single answer to a batch: an *error* is the node's refusal
@@ -1135,11 +1154,11 @@ impl Rpc {
             // is a server that mishandled the batch.
             ResponsePacket::Single(response) => match Self::response_result(response) {
                 Err(payload) => Err(Self::rpc(&endpoint, "batch", payload)),
-                Ok(_) => Err(Self::decode(
-                    &endpoint,
-                    "batch",
-                    serde_json::Error::custom("a single answer to a batch call"),
-                )),
+                Ok(_) => Err(Error::BatchDecode {
+                    endpoint,
+                    request: truncate(body.get(), 600).to_string(),
+                    source: serde_json::Error::custom("a single success answer to a batch call"),
+                }),
             },
         }
     }
@@ -2313,28 +2332,37 @@ mod tests {
             .expect("only eth_getLogs is range-bounded");
     }
 
-    /// **A batch's admission requirement is the union of its items'.**
-    /// Measured live 2026-11-12: the venue follow batched four
-    /// `eth_getSystemTxsByBlockNumber` items, the rotation admitted a pool
+    /// **A batch's admission requirement is the union of its items'** plus the
+    /// transport capability. Measured live 2026-11-12: the venue follow batched
+    /// four `eth_getSystemTxsByBlockNumber` items, the rotation admitted a pool
     /// member that claimed `batch` but not `system_txs`, and every such pass
-    /// failed on the provider's `-32601`. One body carries one endpoint, so
-    /// the endpoint must serve every method in it — the batch transport
-    /// capability alone is never enough.
+    /// failed on the provider's `-32601`. One body carries one endpoint, so the
+    /// endpoint must serve every method in it — the batch transport capability
+    /// alone is never enough, and it is never skipped either (some providers
+    /// refuse batch bodies outright).
     #[test]
     fn a_batch_requires_every_capability_its_items_require() {
         let gated = Rpc::batch_capabilities(&[
             call("eth_getSystemTxsByBlockNumber", (U64::from(7u64),)).unwrap(),
             call("eth_getSystemTxsByBlockNumber", (U64::from(8u64),)).unwrap(),
         ]);
-        assert_eq!(gated, vec!["system_txs"]);
+        assert_eq!(gated, vec!["batch", "system_txs"]);
 
         let mixed = Rpc::batch_capabilities(&[
             call("eth_chainId", NO_PARAMS).unwrap(),
             call("eth_getSystemTxsByBlockNumber", (U64::from(7u64),)).unwrap(),
         ]);
-        assert_eq!(mixed, vec!["system_txs"], "one gated item gates the body");
+        assert_eq!(
+            mixed,
+            vec!["batch", "system_txs"],
+            "one gated item gates the body"
+        );
 
         let plain = Rpc::batch_capabilities(&[call("eth_chainId", NO_PARAMS).unwrap()]);
-        assert!(plain.is_empty(), "an unqualified body needs no claims");
+        assert_eq!(
+            plain,
+            vec!["batch"],
+            "an unqualified body still needs transport"
+        );
     }
 }
