@@ -17,7 +17,7 @@
 # credited with nothing.
 [endpoints.evm]
 chain_id = 1
-roles = ["bal", "traces", "historical", "heads_ws"]
+roles = ["bal", "traces", "historical", "heads_ws", "batch"]
 ws = ["${EVM_URL}"]
 http = ["${EVM_URL}"]
 
