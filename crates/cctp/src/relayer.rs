@@ -329,10 +329,21 @@ impl Relayer {
         // whose burn a re-pin or rewind removed must never mint (I6 — stale
         // derivations are parked, never re-owned).
         if !self.burn_exists(record).await? {
-            return self.refuse(
-                record.nonce,
-                "the source burn no longer exists (a re-pin or rewind); re-run the transfer".into(),
-            );
+            // Two consecutive source-gone observations (this record was parked,
+            // then re-armed through reattest, then found gone again) are the
+            // typed proof that the transfer is final for this chain history:
+            // the origin burn does not exist. Keep it visible as `retired` —
+            // never silently dropped, but no longer a live parked failure that
+            // pins every cross-chain consumer degraded.
+            if record.state == RelayState::Parked {
+                self.retire(record.nonce)?;
+            } else {
+                self.park(
+                    record.nonce,
+                    "the source burn no longer exists (a re-pin or rewind); re-run the transfer".into(),
+                )?;
+            }
+            return Ok(Relayed::No);
         }
         match self.resume_in_flight(chain, record).await? {
             Resume::ReSend => {}
@@ -627,6 +638,18 @@ impl Relayer {
             },
         )?;
         self.metrics.relays_parked.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Retire a record whose unrelayability is final for this chain history:
+    /// out of the retry loop, out of the live parked count, still in the store
+    /// and on `/control/state` (the USDC is burned until an operator re-runs
+    /// the transfer, which mints a new record — this one is not revived).
+    fn retire(&self, nonce: B256) -> Result<()> {
+        tracing::warn!(%nonce, "cctp message RETIRED — source burn gone on two consecutive observations; re-run the transfer to mint a new one");
+        self.store.update_message(|m| m.nonce == nonce, |m| {
+            m.state = RelayState::Retired;
+        })?;
         Ok(())
     }
 

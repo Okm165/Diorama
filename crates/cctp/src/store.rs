@@ -29,6 +29,14 @@ pub(crate) enum RelayState {
     /// A definitive failure (a mined revert, or repeated send refusals); kept
     /// visible, never retried silently.
     Parked,
+    /// Final for the current chain history: the record was parked, re-armed
+    /// (reattest) and its source burn was found gone **again** — two
+    /// consecutive observations. The transfer can never be relayed in this
+    /// epoch; re-running it is a NEW transfer, not this record. Retired records
+    /// are reported as a count (like archived records), not as live parked
+    /// failures: they must not pin the relay — and every capacity consumer
+    /// behind it — degraded forever on a devnet that rewinds.
+    Retired,
 }
 
 /// One watched burn and everything the service knows about it.
@@ -121,6 +129,9 @@ pub struct Counts {
     pub signed: usize,
     pub relayed: usize,
     pub parked: usize,
+    /// Records retired from the live failure count: final for this epoch's
+    /// history (the source burn is gone twice-observed).
+    pub retired: usize,
 }
 
 impl Counts {
@@ -132,6 +143,7 @@ impl Counts {
                 RelayState::Signed => counts.signed += 1,
                 RelayState::Relayed => counts.relayed += 1,
                 RelayState::Parked => counts.parked += 1,
+                RelayState::Retired => counts.retired += 1,
             }
         }
         counts

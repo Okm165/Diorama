@@ -88,6 +88,11 @@ pub(crate) struct HealthResponse {
     pub signed: usize,
     pub relayed: usize,
     pub parked: usize,
+    /// Records retired from the live failure count: final for this epoch
+    /// (source burn gone on two consecutive observations). A count, like the
+    /// archive — it does not degrade the bridge, and re-running the transfer
+    /// mints a new record rather than reviving this one.
+    pub retired: usize,
     /// Parked records in the durable archives (outside the live store).
     pub archived_parked: u64,
     pub chains: Vec<ChainHealth>,
@@ -121,6 +126,7 @@ pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Jso
         signed: counts.signed,
         relayed: counts.relayed,
         parked: counts.parked,
+        retired: counts.retired,
         archived_parked: state
             .metrics
             .archived_parked
