@@ -327,23 +327,35 @@ impl Relayer {
         }
         // The burn must still exist on the source: a reattest of a record
         // whose burn a re-pin or rewind removed must never mint (I6 — stale
-        // derivations are parked, never re-owned).
+        // derivations are parked, never re-owned). The count of consecutive
+        // gone observations lives on the record: the first one parks the
+        // record and removes it from the relay set, so a state-based test
+        // could never observe the second. Two observations are the typed
+        // proof the transfer is final for this chain history; the record
+        // stays visible as `retired` and stops pinning the live parked count.
         if !self.burn_exists(record).await? {
-            // Two consecutive source-gone observations (this record was parked,
-            // then re-armed through reattest, then found gone again) are the
-            // typed proof that the transfer is final for this chain history:
-            // the origin burn does not exist. Keep it visible as `retired` —
-            // never silently dropped, but no longer a live parked failure that
-            // pins every cross-chain consumer degraded.
-            if record.state == RelayState::Parked {
+            let observations = record.source_gone_observations + 1;
+            if observations >= Self::SOURCE_GONE_RETIRE_OBSERVATIONS {
                 self.retire(record.nonce)?;
             } else {
                 self.park(
                     record.nonce,
-                    "the source burn no longer exists (a re-pin or rewind); re-run the transfer".into(),
+                    format!(
+                        "the source burn no longer exists (a re-pin or rewind; observation {observations} of 2); re-run the transfer"
+                    ),
+                )?;
+                self.store.update_message(
+                    |m| m.nonce == record.nonce,
+                    |m| m.source_gone_observations = observations,
                 )?;
             }
             return Ok(Relayed::No);
+        }
+        if record.source_gone_observations != 0 {
+            // The burn is back: the earlier "gone" was not final, so the
+            // counter starts over.
+            self.store
+                .update_message(|m| m.nonce == record.nonce, |m| m.source_gone_observations = 0)?;
         }
         match self.resume_in_flight(chain, record).await? {
             Resume::ReSend => {}
@@ -640,6 +652,12 @@ impl Relayer {
         self.metrics.relays_parked.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
+
+    /// The consecutive source-burn-gone observations that retire a record.
+    /// Two: one is exactly the parked state every rewind produces (the
+    /// deployment's own 34), and a single blip must not finalize a transfer
+    /// the next poll could still find.
+    const SOURCE_GONE_RETIRE_OBSERVATIONS: u32 = 2;
 
     /// Retire a record whose unrelayability is final for this chain history:
     /// out of the retry loop, out of the live parked count, still in the store

@@ -396,6 +396,9 @@ fn refresh_record(
                 rec.park_reason = None;
                 rec.relay_tx = None;
                 rec.attempts = 0;
+                // Re-arming is an operator decision to try again: the
+                // gone-observation count starts over with it.
+                rec.source_gone_observations = 0;
                 rec.clone()
             },
         )
@@ -464,6 +467,7 @@ mod tests {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
+            source_gone_observations: 0,
         }
     }
 

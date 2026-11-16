@@ -167,6 +167,7 @@ mod tests {
             relayed_ms: None,
             attempts: 0,
             park_reason: Some("re-pinned".into()),
+            source_gone_observations: 0,
         }
     }
 

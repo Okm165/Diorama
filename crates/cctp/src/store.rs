@@ -84,6 +84,13 @@ pub(crate) struct MessageRecord {
     /// Why a parked message was parked, in the boundary's own words.
     #[serde(default)]
     pub park_reason: Option<String>,
+    /// Consecutive source-burn-gone observations. The two-observation proof
+    /// that a transfer is final for this chain history is carried **on the
+    /// record**, not inferred from its state: the first observation parks the
+    /// record and takes it out of the relay set, so a state-based test could
+    /// never see the second one. Reset whenever the burn exists again.
+    #[serde(default)]
+    pub source_gone_observations: u32,
 }
 
 impl MessageRecord {
@@ -336,6 +343,7 @@ mod tests {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
+            source_gone_observations: 0,
         }
     }
 

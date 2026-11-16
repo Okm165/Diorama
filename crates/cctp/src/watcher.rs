@@ -488,6 +488,7 @@ impl Watcher {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
+            source_gone_observations: 0,
         }
     }
 

@@ -576,6 +576,7 @@ mod tests {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
+            source_gone_observations: 0,
         };
         let summary = MessageSummary::of(&record);
         assert!(summary.message.starts_with("0x"));
