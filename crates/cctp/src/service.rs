@@ -462,9 +462,9 @@ fn build_chains(
             want: "a legacy two-chain URL".into(),
         })?;
     let mut t = Chain::ethereum(t_url, timeout, policy)?;
-    t.start_block = section.start.t_start_block.unwrap_or(0);
+    t.start_block = section.start.t_start_block;
     let mut v = Chain::hyper_evm(v_url, timeout, policy)?;
-    v.start_block = section.start.v_start_block.unwrap_or(0);
+    v.start_block = section.start.v_start_block;
     Ok(vec![t, v])
 }
 

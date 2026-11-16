@@ -65,9 +65,11 @@ pub struct Watcher {
     pub destination: Chain,
     pub store: Arc<Store>,
     pub attester: Arc<Attester>,
-    /// First block scanned every boot (the deploy block of the CCTP contracts
-    /// on that chain; 0 = genesis, correct but slow on a deep fork).
-    pub start_block: u64,
+    /// First block scanned every boot. `None` — the mirror spelling — means
+    /// "the chain's fork pin": the boot scan begins at the base and the
+    /// below-pin clamp is a no-op rather than a correction. `Some(0)` =
+    /// genesis, correct but slow on a deep fork.
+    pub start_block: Option<u64>,
     /// Where the *next* HTTP reconciliation resumes inside this run (0 = not
     /// scanned yet, so the first pass backfills from `start_block`; later
     /// passes continue from the last scanned head). **Only the HTTP arm writes
@@ -285,6 +287,7 @@ impl Watcher {
     /// at are gone: their records are parked (stale derivations, I6 — never
     /// relayed) and the scan restarts from the base.
     async fn resume_from(&self, last: u64, head: u64, pin: Option<u64>) -> Result<u64> {
+        let configured_start = self.start_block.unwrap_or(0);
         let cursor_off_base = cursor_off_base(last, head, pin);
         if cursor_off_base {
             tracing::warn!(
@@ -304,16 +307,20 @@ impl Watcher {
             // A rewind: everything above the head is invalid, so the cursor
             // cannot resume — restart at the configured start (the pin clamp
             // below still applies).
-            self.start_block
+            configured_start
         } else {
             match last {
-                0 => self.start_block,
-                n => (n + 1).max(self.start_block),
+                0 => configured_start,
+                n => (n + 1).max(configured_start),
             }
         };
         let floor = pin.map(|pin| pin.saturating_add(1));
         Ok(match floor {
-            Some(floor) if self.start_block < floor => {
+            // A declared start below the pin is a correction the config owes
+            // once; an omitted start **is** the pin, so no warning exists to
+            // silence — the mirror never declares a block number it would have
+            // to keep true across re-pins.
+            Some(floor) if self.start_block.is_some() && self.start_block < Some(floor) => {
                 if self
                     .clamp_warned
                     .swap(floor, std::sync::atomic::Ordering::Relaxed)
@@ -321,14 +328,14 @@ impl Watcher {
                 {
                     tracing::warn!(
                         chain = self.chain.name,
-                        configured_start = self.start_block,
+                        configured_start,
                         pin = floor - 1,
                         "configured start block is below the fork pin; scanning from the pin"
                     );
                 }
                 base.max(floor)
             }
-            _ => base,
+            _ => base.max(floor.unwrap_or(0)),
         })
     }
 
@@ -1012,7 +1019,7 @@ mod tests {
             .unwrap(),
             store: Arc::new(Store::load(dir.join("cctp.json")).unwrap()),
             attester: Arc::new(Attester::from_seed("watcher-test").unwrap()),
-            start_block: 0,
+            start_block: Some(0),
             scanned_upto: std::sync::atomic::AtomicU64::new(0),
             chunk_blocks: 2000,
             finality_delay,
