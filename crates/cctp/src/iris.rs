@@ -396,9 +396,11 @@ fn refresh_record(
                 rec.park_reason = None;
                 rec.relay_tx = None;
                 rec.attempts = 0;
-                // Re-arming is an operator decision to try again: the
-                // gone-observation count starts over with it.
-                rec.source_gone_observations = 0;
+                // The gone-observation count deliberately survives a re-arm:
+                // re-arming a source-gone record and finding it gone again is
+                // exactly the evidence chain the retirement proof counts, and
+                // a burn that came back resets the counter on the relay path
+                // (`burn_exists`), not here.
                 rec.clone()
             },
         )
