@@ -26,11 +26,20 @@ BOOTSTRAP    := k8s/bootstrap
 #               and `make import` can be a no-op)
 #   SUDO        how privileged commands are issued (empty for root)
 #   K3S_STORAGE the node's PVC backing dir (the prune-size probe)
+#
+# The image *registry* is not a Makefile variable: k8s/components/registry is
+# the one file that maps this repo's four images to the path a non-k3s host
+# pulls from, and `make registry-push` pushes the same tags there. The storage
+# *class* is the other one-file cluster fact (k8s/base/shared/storageclass.yaml,
+# fanned out to every claim by k8s/components/storage). A move's copy target
+# (a k3s node path) is what `K3S_STORAGE` names; the `bind-claims` target
+# prints it from the cluster instead, so only the prune-size probe needs it.
 KUBECTL      ?= kubectl
 SUDO         ?= sudo
 RUNTIME      ?= podman
 CTR          ?= $(SUDO) k3s ctr
 K3S_STORAGE  ?= /var/lib/rancher/k3s/storage
+JQ           ?= jq
 KUBECTL_NS   := $(KUBECTL) -n $(NS)
 IMG_TAR      := target/diorama-img.tar
 PATH         := $(HOME)/.cargo/bin:$(PATH)
@@ -44,6 +53,9 @@ ENGINE_REF         := $(shell grep -ohE 'image: localhost/[^ ]+' $(ENGINE_MANIFE
 ENGINE_IMAGE       := $(word 1,$(subst :, ,$(ENGINE_REF)))
 ENGINE_TAG         := $(lastword $(subst :, ,$(ENGINE_REF)))
 ENGINE_BIN         := $(notdir $(ENGINE_IMAGE))
+# The claim binder's image (a move's `bind-claims`): the pinned alpine the anvil
+# pods already import, read from the manifest so the digest has one home.
+BINDER_IMAGE       := $(shell grep -rhoE 'image: docker.io/library/alpine:[^ ]+' k8s/base --include="*.yaml" | head -1 | awk '{print $$2}')
 INSTANCE_IMAGES    := $(shell grep -rhoE 'image: [^ ]+' $(INSTANCE_MANIFESTS) 2>/dev/null | awk '{print $$2}' | sort -u)
 LOCAL_IMAGES       := $(filter localhost/%,$(INSTANCE_IMAGES))
 PINNED_IMAGES      := $(filter-out localhost/%,$(INSTANCE_IMAGES))
@@ -88,7 +100,13 @@ harness-env:
 # mirror needs chain state; the first one takes hours) -> apply. `build` runs
 # `deps` itself, so the pinned third-party set is imported without a second
 # pull.
-up: spec-present build secrets snapshot-$(INSTANCE) apply ## Build + import the images, create the reth JWT, source chain state, apply
+#
+# SKIP_SNAPSHOT=1 drops the state-source step for a stack whose chain state was
+# COPIED from an earlier host (README, "Moving the stack"): `make snapshot`
+# would otherwise see reth down and re-download 165 GB over the datadir that
+# was just copied in. The step is the only thing `up` adds to
+# `build secrets apply`.
+up: spec-present build secrets $(if $(SKIP_SNAPSHOT),,snapshot-$(INSTANCE)) apply ## Build, create the JWT, source chain state (SKIP_SNAPSHOT=1 when it was copied), apply
 	@echo "== $(INSTANCE) applied"
 	@echo "   watch:      make status INSTANCE=$(INSTANCE)"
 	@echo "   host reach: make port-forward INSTANCE=$(INSTANCE)"
@@ -103,6 +121,45 @@ diff: spec-present ## Show what `make apply` would change
 
 delete: ## Delete the namespace (data survives: the StorageClass is Retain)
 	$(KUBECTL) delete namespace $(NS) --ignore-not-found
+
+##@ Move (a stack to another cluster)
+
+# The target-side first step: the namespace and the instance's claims only (no
+# workload starts), bound through a throwaway pod - with WaitForFirstConsumer a
+# claim only binds when a pod consumes it, and only then does a node-local
+# provisioner create the volume's path. The pod is left holding every claim so
+# a pod-mediated copy (a CSI cluster: no node path to rsync into) has a writer;
+# `unbind-claims` releases them before `make apply`.
+#
+# The printed `claim -> PV -> path` line is the copy destination: on a
+# node-local provisioner it is a directory on the node, on a CSI provisioner
+# the volume handle (copy through the binder pod instead).
+bind-claims: spec-present ## Create + bind the instance's claims, print each claim's volume path (a move's target step)
+	@$(KUBECTL) apply -f $(NS_MANIFEST) >/dev/null
+	@$(KUBECTL) kustomize $(OVERLAY) \
+	  | awk 'BEGIN{RS="---\n"; ORS=""} /(^|\n)kind: PersistentVolumeClaim\n/{print "---\n" $$0}' \
+	  | $(KUBECTL) -n $(NS) apply -f - >/dev/null
+	@claims=$$($(KUBECTL) -n $(NS) get pvc -o json | $(JQ) -c '[.items[].metadata.name]'); \
+	 [ "$$claims" != "[]" ] || { echo "no claims in $(NS)" >&2; exit 1; }; \
+	 $(KUBECTL) -n $(NS) delete pod claim-binder --ignore-not-found >/dev/null; \
+	 $(JQ) -n --argjson c "$$claims" '
+	   {apiVersion:"v1", kind:"Pod", metadata:{name:"claim-binder"},
+	    spec:{restartPolicy:"Never",
+	      containers:[{name:"hold", image:"$(BINDER_IMAGE)", command:["sh","-c","sleep 3600"],
+	        volumeMounts:[$$c[] | {name:., mountPath:("/mnt/" + .)}]}],
+	      volumes:[$$c[] | {name:., persistentVolumeClaim:{claimName:.}}]}}' \
+	   | $(KUBECTL) -n $(NS) apply -f - >/dev/null
+	@$(KUBECTL) -n $(NS) wait --for=jsonpath='{.status.phase}'=Bound pvc --all --timeout=300s
+	@$(KUBECTL) -n $(NS) get pvc
+	@echo "--- volume paths (copy destinations)"
+	@for p in $$($(KUBECTL) -n $(NS) get pvc -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do \
+	  v=$$($(KUBECTL) -n $(NS) get pvc "$$p" -o jsonpath='{.spec.volumeName}'); \
+	  path=$$($(KUBECTL) get pv "$$v" -o jsonpath='{.spec.local.path}{.spec.hostPath.path}{.spec.csi.volumeHandle}' 2>/dev/null); \
+	  printf "  %-16s %-45s %s\n" "$$p" "$$v" "$${path:-<no node path: copy through the claim-binder pod>}"; \
+	done
+
+unbind-claims: ## Release the claims (delete the binder pod) before starting the stack
+	@$(KUBECTL) -n $(NS) delete pod claim-binder --ignore-not-found
 
 ##@ Images (a machine cannot clone these: they are built here)
 
@@ -148,6 +205,28 @@ build: ## Build + import every image the selected instance needs (local builds f
 	@$(MAKE) --no-print-directory check-pins INSTANCE=$(INSTANCE)
 
 import: build ## Alias of `build` (kept for the documented pipeline: build + import)
+
+# The one registry point: k8s/components/registry maps each of this repo's four
+# images from its local build name (`localhost/…`, the k3s store prefix) to the
+# name the cluster pulls. Nothing else names a registry or a path.
+REGISTRY_COMPONENT := k8s/components/registry/kustomization.yaml
+
+registry-push: ## Tag + push this instance's images to the registry the component names (registry hosts)
+	@set -u; pushed=0; \
+	for ref in $(LOCAL_IMAGES); do \
+	  want=$$(awk -v old="$$ref" '\
+	    /^  - name: /{n=$$3} \
+	    /newName: /{ if (n != "" && index(old, n ":") == 1) print $$2 ":" substr(old, length(n) + 2); n="" }' \
+	    $(REGISTRY_COMPONENT)); \
+	  [ -n "$$want" ] || { echo "  $$ref: no mapping in $(REGISTRY_COMPONENT)" >&2; exit 1; }; \
+	  if [ "$$ref" = "$$want" ]; then printf "  %-58s local build (no registry configured)\n" "$$ref"; continue; fi; \
+	  printf "  %-58s -> %s\n" "$$ref" "$$want"; \
+	  $(RUNTIME) tag "$$ref" "$$want" || exit 1; \
+	  $(RUNTIME) push -q "$$want" || exit 1; \
+	  pushed=1; \
+	done; \
+	if [ $$pushed -eq 1 ]; then echo "pushed: $(LOCAL_IMAGES)"; \
+	else echo "nothing pushed: $(REGISTRY_COMPONENT) still names the local builds (the k3s import path)"; fi
 
 check-pins: ## Verify every image reference is pinned by tag+digest and present locally
 	@fail=0; \
@@ -399,7 +478,7 @@ help: ## Show this help
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: up spec-present harness-env apply diff delete deps build import check-pins deploy-engine \
+.PHONY: up spec-present harness-env apply diff delete bind-claims unbind-claims deps build import registry-push check-pins deploy-engine \
 	secrets snapshot snapshot-force snapshot-diorama-mainnet snapshot-diorama-venue snapshot-diorama-cctp \
 	snapshot-status reset port-forward endpoints status logs logs-check smoke \
 	mirror-freshness substrate-attest pin-show repin venue-repin backfill prune-blobs \
