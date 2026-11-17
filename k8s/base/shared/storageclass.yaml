@@ -1,13 +1,36 @@
-# The cluster-scoped resources every instance shares: the retain StorageClass.
+# The cluster-scoped resource every instance shares: the retain StorageClass.
 # Included by each base (idempotent - it is the same object, created once and
-# re-applied harmlessly by either stack).
+# re-applied harmlessly by any stack, including a bridge-only one).
 #
-# Retain: deleting a PVC never deletes the underlying data. Recreate a PVC
-# with the same name to re-attach an existing volume. The name below is the
-# one spelling of the claim class: every claim of every instance names this
-# literal (a k8s-native fact, not Diorama configuration — the specialization
-# carries no storage key), and a cluster with its own provisioner edits this
-# file once on an empty cluster: a bound claim's class does not rebind.
+# THIS FILE IS THE ONE SUBSTITUTION POINT FOR STORAGE. Two create-time values
+# live here and nowhere else:
+#
+#   metadata.name   the class every claim binds. The overlay's storage
+#                   component (k8s/components/storage) copies this name onto
+#                   every PersistentVolumeClaim in the build, so no claim
+#                   carries a second literal - rename the class here and all
+#                   eight claims re-point (verified: the rendered build names
+#                   the new class on every claim and keeps no old one).
+#   provisioner     who makes the volumes. `rancher.io/local-path` is k3s'
+#                   node-local provisioner (the default on the host this
+#                   deployment came from). A cluster with its own storage
+#                   edits this line: `ebs.csi.aws.com`, `local.csi.azure.com`,
+#                   `rancher.io/local-path` (Rancher's chart on any distro),
+#                   `standard` (kind), ...
+#
+# On an EMPTY cluster only. Both fields are create-time facts: a StorageClass's
+# provisioner cannot be changed after creation, and a bound claim's class does
+# not rebind. On a host that already carries this class with a different
+# provisioner, rename the class (both fields together) instead.
+#
+# Retain is deliberate: deleting a PVC never deletes the data. Recreate a PVC
+# with the same name to re-attach an existing volume; a PV whose claim was
+# deleted keeps its data (and its claimRef) for a rebind or a copy.
+#
+# WaitForFirstConsumer: the volume binds when a pod consumes the claim, so a
+# claim never pairs with a node the workload cannot land on. This is also why
+# a move's copy step binds the claims with a throwaway pod first (README,
+# "Moving the stack").
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:

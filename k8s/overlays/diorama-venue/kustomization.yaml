@@ -35,3 +35,10 @@ resources:
   # pod of this instance mounts at /etc/mirror, and their generator. The
   # generator FAILS the build when the specialization is absent.
   - ../../../config/instances/diorama-venue
+
+# The cluster facts every claim and every repo image derives from: the one
+# storage-class substitution point and the one registry point (components/
+# storage, components/registry). Both are shared by all three instances.
+components:
+  - ../../components/storage
+  - ../../components/registry

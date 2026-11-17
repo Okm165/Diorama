@@ -33,7 +33,15 @@
 #      audit removed must not grow back). The other direction — every
 #      specialization key has a reader — is enforced by the typed loader's
 #      `deny_unknown_fields` at every level: `make config-check` refuses a
-#      key nobody reads, so the specialization cannot grow dead weight.
+#      key nobody reads, so the specialization cannot grow dead weight;
+#   7. the two cluster facts a move changes are single-valued: the
+#      StorageClass name and the repo images' registry path. Every overlay
+#      includes both components; every claim in the build names the class the
+#      build ships (no second literal, no class the tree does not create);
+#      the only k3s-specific literal in the tree is that class's provisioner;
+#      every `localhost/…` image is mapped in the registry component and every
+#      mapping is used; each overlay's namespace transform names the Namespace
+#      object it ships, and no rendered object carries another namespace.
 #
 # Exit: 0 clean, 1 with one line per violation.
 set -euo pipefail
@@ -94,6 +102,58 @@ if command -v "${KUBECTL:-kubectl}" >/dev/null 2>&1; then
             bad "kustomize build for $inst failed: $(head -c 200 "$tmpdir/$inst.err")"
         fi
     done
+    # 7a. Storage: exactly one class object, and every claim names it. The
+    #     replacement is what normalizes the claims, so this asserts the fan-out
+    #     (one object, every claim on it) - and the failure it guards is the one
+    #     the bridge hit: a claim on `diorama-retain`, a class the tree no longer
+    #     creates, which a fresh host would leave Pending forever.
+    sc_name=$(awk '/^metadata:/{m=1;next} m && /^  name:/{print $2; exit}' k8s/base/shared/storageclass.yaml)
+    [ -n "$sc_name" ] || bad "no StorageClass name in k8s/base/shared/storageclass.yaml"
+    for inst in "${instances[@]}"; do
+        f="$tmpdir/$inst.yaml"
+        [ -s "$f" ] || continue
+        classes=$(grep -c '^kind: StorageClass' "$f")
+        [ "$classes" = "1" ] || bad "$inst renders $classes StorageClass objects (one class per cluster)"
+        claims=$(grep -c '^  storageClassName:' "$f")
+        on_class=$(grep -c "^  storageClassName: $sc_name\$" "$f")
+        [ "$claims" = "$on_class" ] || bad "$inst: $((claims - on_class)) of $claims claims do not name the rendered class '$sc_name'"
+    done
+    # 7b. The only k3s-specific literal left is the class's own provisioner.
+    while read -r hit; do
+        case "$hit" in k8s/base/shared/storageclass.yaml:*provisioner:*) continue ;; esac
+        bad "a k3s/local-path literal in a tracked manifest line: $hit"
+    done < <(grep -rnE '^[^#]*(local-path|k3s|/var/lib/rancher)' k8s/ --include="*.yaml")
+    # 7c. Every repo image is mapped in the one registry component, and every
+    #     mapping names an image a manifest actually uses.
+    for ref in $(grep -rhoE 'image: localhost/[^ ]+' k8s/base k8s/bootstrap --include="*.yaml" | awk '{print $2}' | sed 's/:.*//' | sort -u); do
+        grep -qE "^  - name: $ref\$" k8s/components/registry/kustomization.yaml \
+            || bad "image $ref is used by a manifest but not mapped in k8s/components/registry/kustomization.yaml"
+    done
+    while read -r mapped; do
+        grep -rqE "image: $mapped:" k8s/base k8s/bootstrap --include="*.yaml" \
+            || bad "k8s/components/registry maps $mapped but no manifest uses it"
+    done < <(awk '/^  - name: /{print $3}' k8s/components/registry/kustomization.yaml)
+    # 7d. The namespace is instance-parameterized: the overlay's transform
+    #     names the Namespace it ships, no manifest in the base pins one, and
+    #     every namespaced object of the build lands in it.
+    for inst in "${instances[@]}"; do
+        ns=$(awk '/^metadata:/{m=1;next} m && /^  name:/{print $2; exit}' "k8s/overlays/$inst/namespace.yaml")
+        transform=$(awk '/^namespace:/{print $2}' "k8s/overlays/$inst/kustomization.yaml")
+        [ "$ns" = "$transform" ] \
+            || bad "$inst: namespace.yaml ships '$ns' but the overlay transforms to '$transform'"
+        grep -q 'components/storage' "k8s/overlays/$inst/kustomization.yaml" \
+            || bad "$inst: overlay does not include the storage component (its claims would keep a second literal)"
+        grep -q 'components/registry' "k8s/overlays/$inst/kustomization.yaml" \
+            || bad "$inst: overlay does not include the registry component (its images would keep the local-build prefix)"
+        f="$tmpdir/$inst.yaml"
+        [ -s "$f" ] || continue
+        stray=$(grep -E '^  namespace: ' "$f" | grep -vc "namespace: $ns\$" || true)
+        [ "$stray" = "0" ] || bad "$inst: $stray rendered object(s) carry a namespace other than '$ns'"
+    done
+    if grep -rn '^  namespace:' k8s/base --include="*.yaml" | grep -q .; then
+        grep -rn '^  namespace:' k8s/base --include="*.yaml" >&2
+        bad "a base manifest pins a namespace (the overlay's transform is the one place)"
+    fi
     # The negative: a missing specialization.toml must FAIL the build, never
     # silently skip the generator entry.
     rm -f "$tmpdir/config/instances/diorama-cctp/specialization.toml"

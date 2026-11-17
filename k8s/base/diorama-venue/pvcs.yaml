@@ -1,8 +1,9 @@
-# Persistent volumes for the Venue Mirror. The claims request the instance
-# wiring's `STORAGE_CLASS` (the overlay's replacement; default
-# `mirror-retain`, reclaimPolicy Retain) - one file per mirror's claims,
-# because a kustomize overlay composes whole files and the venue overlay must
-# not declare the mainnet claims (reth-data is 400Gi, lighthouse-data 1500Gi).
+# Persistent volumes for the Venue Mirror. Every claim names the shared
+# `mirror-retain` class - the overlay's storage component rewrites it from the
+# class object's name, so this literal is only the standalone default. One file
+# per mirror's claims, because a kustomize overlay composes whole files and the
+# venue overlay must not declare the mainnet claims (reth-data is 400Gi,
+# lighthouse-data 1500Gi).
 #
 # Every claim here is disposable: V forks the source on demand and carries
 # only the devnet's own writes, so deleting a PVC and re-applying provisions a

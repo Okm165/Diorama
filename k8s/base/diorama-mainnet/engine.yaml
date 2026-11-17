@@ -47,10 +47,10 @@ spec:
             # without any P2P peers.
             - { name: jwt, mountPath: /secrets, readOnly: true }
           # `/livez`, not `/healthz`: the engine's healthz reports its own
-          # state (503 while paused), and probing it would drop the pod (and
-          # its NodePort) out of rotation — and eventually restart it — in the
-          # middle of a documented pause drill, while the contract says a
-          # paused engine keeps serving reads and writes.
+          # state (503 while paused), and probing it would drop the pod out of
+          # its Service — and eventually restart it — in the middle of a
+          # documented pause drill, while the contract says a paused engine
+          # keeps serving reads and writes.
           # The boot-wait may outlast a dependency's own restart (the
           # engines wait for their anvil/reth, the bridge for two chains): a
           # startupProbe suspends the liveness/readiness probes through it, so

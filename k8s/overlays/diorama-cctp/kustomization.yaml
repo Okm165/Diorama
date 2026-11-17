@@ -28,3 +28,10 @@ resources:
   - namespace.yaml
   - ../../base/cctp-bridge
   - ../../../config/instances/diorama-cctp
+
+# The cluster facts every claim and every repo image derives from: the one
+# storage-class substitution point and the one registry point (components/
+# storage, components/registry). Both are shared by all three instances.
+components:
+  - ../../components/storage
+  - ../../components/registry

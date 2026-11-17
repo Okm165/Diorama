@@ -1,13 +1,21 @@
-# Persistent volumes for the mainnet mirror. Every claim requests the
-# StorageClass named by the instance wiring's `STORAGE_CLASS` (the overlay's
-# replacement; default `mirror-retain`, reclaimPolicy Retain), so deleting a
-# PVC never destroys the data.
+# Persistent volumes for the mainnet mirror. Every claim names the shared
+# `mirror-retain` class (reclaimPolicy Retain); the overlay's storage component
+# rewrites that field from the class object's own name, so this literal is only
+# the standalone default and `k8s/base/shared/storageclass.yaml` is the one
+# place a host changes it.
 #
 # No claim pins a `volumeName`: a pre-bound claim names a volume that exists on
 # one machine only, and the manifests must boot on any. A deployment that must
 # re-attach volumes left behind by an earlier run binds them by their PV's
 # claimRef (delete the PVC, keep the PV, re-apply - WaitForFirstConsumer binds
 # the retained volume back); that is a host step, never a tracked literal.
+#
+# The sizes are the *host's disk plan*, not a measurement: k3s' local-path
+# provisioner does not enforce them (the live lighthouse PV is 500Gi under a
+# 1500Gi request), while a CSI provisioner makes them real reservations. Sizes
+# on the move: reth's snapshot+steady state ~300GiB (400Gi request), the CL's
+# 18-day column window + payloads + beacon DB ~330GiB today with a ~900GiB
+# backfill peak (1500Gi request).
 #
 # This file is the mainnet mirror's claims; the Venue Mirror's live in
 # diorama-venue/pvcs.yaml - one file per mirror, because a kustomize overlay
