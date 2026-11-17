@@ -19,13 +19,6 @@
 http = ["http://anvil-v:8545"]
 chain_id = 999
 
-# The deployment's state roots: the pods' own PVC mount paths.
-[services.engine]
-state_dir = "/state"
-
-[services.venue_sim]
-state_dir = "/state"
-
 # The HyperEVM read pool — one nested declaration per endpoint, each carrying
 # the capabilities it is *measured* to serve (`scripts/probe-endpoint.sh` is
 # the acceptance test; run it 3× before claiming `historical`, the keyless
@@ -101,6 +94,8 @@ fork_url = "https://rpc.hyperliquid.xyz/evm"
 
 
 [services.engine]
+# The deployment's state root: the engine pod's own PVC mount path.
+state_dir = "/state"
 fixture_addresses = ["0xb88339CB7199b77E23DB6E890353E22632Ba630f", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", "0x6B175474E89094C44Da98b954EedeAC495271d0F", "0x5555555555555555555555555555555555555555", "0x94e8396e0869c9F2200760aF0621aFd240E1CF38"]
 
 [services.engine.verifier]
@@ -139,6 +134,8 @@ contract = "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
 slots = ["0x3e54e5ae16d7bdb0bade122edbe34ab784fcd78c6d535e29aff3bc7d357e7586"]
 
 [services.venue_sim]
+# The deployment's state root: the sim pod's own PVC mount path.
+state_dir = "/state"
 # The market list the sim quotes and prices accounts from: the core perps plus
 # every HIP-3 builder-dex market the deployment needs. A `dex:coin` name makes
 # the poller fetch that dex's own meta (`metaAndAssetCtxs` with a `dex`
