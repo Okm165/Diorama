@@ -211,16 +211,7 @@ impl Bridge {
         if changed.is_empty() {
             return Ok(());
         }
-        if self
-            .target_rpc
-            .balance_at(system::PRECOMPILE_WRITER, head)
-            .await?
-            .is_zero()
-        {
-            self.target_rpc
-                .anvil_set_balance(system::PRECOMPILE_WRITER, self.system_gas_stipend)
-                .await?;
-        }
+        self.ensure_gas(system::PRECOMPILE_WRITER).await?;
         for (address, figures) in changed {
             self.write_projection(
                 address,
@@ -272,6 +263,31 @@ impl Bridge {
             withdrawable_usd6 = withdrawable,
             "bridge: precompile projection written"
         );
+        Ok(())
+    }
+
+    /// Give `address` the deployment's gas stipend unless it already holds
+    /// at least that much.
+    ///
+    /// The measured bug (2026-11-17, venue-sim logging
+    /// `the write did not mine within 10000 ms` once every 11 s for hours):
+    /// the gate was `balance.is_zero()`, so a writer holding ~2.3e-5 HYPE —
+    /// real, but less than one projection tx's up-front cost — was never
+    /// topped up. Anvil admits an impersonated sender's tx without a balance
+    /// check and the miner then drops it, so `eth_getTransactionReceipt`
+    /// answers `null` for the whole wait on every pass and no projection ever
+    /// lands. The stipend is 1 HYPE, orders of magnitude above a write's
+    /// cost: topping up *below* the stipend (not only at zero) keeps the next
+    /// write valid without guessing a per-tx fee. A balance-read fault
+    /// propagates: it must not be read as "empty" and funded over a broken
+    /// RPC.
+    async fn ensure_gas(&self, address: Address) -> Result<()> {
+        let balance = self.target_rpc.balance_latest(address).await?;
+        if needs_stipend(balance, self.system_gas_stipend) {
+            self.target_rpc
+                .anvil_set_balance(address, self.system_gas_stipend)
+                .await?;
+        }
         Ok(())
     }
 
@@ -995,14 +1011,9 @@ impl Bridge {
         };
         let from = system::system_address(u64::from(info.index));
         // The system address pays gas on V (the real chain's system txs do
-        // not); fund it once, at the deployment's declared stipend, so the
-        // pool's balance check passes. A balance-read fault propagates: it
-        // must not be read as "empty" and funded over a broken RPC.
-        if self.target_rpc.balance_at(from, 0).await?.is_zero() {
-            self.target_rpc
-                .anvil_set_balance(from, self.system_gas_stipend)
-                .await?;
-        }
+        // not); keep it at the deployment's declared stipend so the pool's
+        // balance check passes.
+        self.ensure_gas(from).await?;
         let tx = TransactionRequest::default()
             .from(from)
             .to(evm.address)
@@ -1027,6 +1038,15 @@ impl Bridge {
 /// Pure, so the unit rule is testable without a chain.
 fn usd_class_amount(ntl: u64) -> Option<Decimal> {
     system::core_to_human(ntl, system::PERP_USD_DECIMALS)
+}
+
+/// Whether a funded mirror sender needs its stipend topped up: any balance
+/// below the stipend, not only a zero one. The live bug this answers is a
+/// writer holding *some* HYPE but less than one write's up-front cost — anvil
+/// admits the tx (no balance check for an impersonated sender) and the miner
+/// drops it, so the write silently never mines.
+fn needs_stipend(balance: U256, stipend: U256) -> bool {
+    balance < stipend
 }
 
 /// A human decimal as the mocks' raw unit, floored like every other
@@ -1166,6 +1186,28 @@ mod tests {
         assert!(core_units(negative, 8).is_err());
         let absurd: Decimal = "100000000000000000000000".parse().unwrap();
         assert!(core_units(absurd, 8).is_err());
+    }
+
+    /// The funding gate: a *non-zero* balance below the stipend still needs
+    /// the top-up. The measured live shape was 22 955 149 261 668 wei against
+    /// a 24 245 000 169 715 wei projection cost — non-zero, and the reason
+    /// every bridge pass timed out in `send_transaction_confirmed` for hours.
+    #[test]
+    fn a_balance_below_the_stipend_is_topped_up() {
+        let stipend = U256::from(1_000_000_000_000_000_000u128);
+        assert!(
+            needs_stipend(U256::ZERO, stipend),
+            "an empty writer is funded"
+        );
+        assert!(
+            needs_stipend(U256::from(22_955_149_261_668u128), stipend),
+            "a dust balance below one write's cost is funded too"
+        );
+        assert!(
+            !needs_stipend(stipend, stipend),
+            "a writer already holding the stipend is left alone"
+        );
+        assert!(!needs_stipend(stipend + U256::from(1), stipend));
     }
 
     fn usd_transfer_input(ntl: u64) -> Vec<u8> {
