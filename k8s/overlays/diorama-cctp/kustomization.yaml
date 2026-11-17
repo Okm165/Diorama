@@ -3,7 +3,9 @@
 # It is deliberately not part of the venue overlay: a venue can run without a
 # bridge, a bridge can run without the venue, and a deployment may run several
 # bridges. Each bridge gets its own namespace, ConfigMap, Secret, PVC and
-# NodePorts; the shared spine is the code, not the Kubernetes objects.
+# harness services; the shared spine is the code, not the Kubernetes objects.
+# The overlay's shape is the two mirror overlays' (namespace, wiring, harness
+# services, the class replacement) with the bridge's own ConfigMap names.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -11,12 +13,25 @@ namespace: diorama-cctp
 
 # The bridge's chain wiring (T_RPC_URL, TARGET_RPC_URL, CCTP_STATE_DIR):
 # generated from `wiring.env`, the gitignored copy of `wiring.example.env`.
+# The host harness surface (`harness.env`) is the second entry: the loopback
+# forward the operator chooses (`make port-forward` opens it). The Iris base
+# (`cctp-bridge.diorama-cctp.svc:8095`) is derived by
+# `diorama-config export-env --section client`; no pod reads that map - only
+# the host harness - so it carries no roll-triggering hash.
 configMapGenerator:
   - name: cctp-config
     envs: [wiring.env]
+  - name: cctp-test-endpoints
+    envs: [harness.env]
+    options:
+      disableNameSuffixHash: true
 
 resources:
   - namespace.yaml
   - ../../base/cctp-bridge
   - ../../../config/instances/diorama-cctp
-  - nodeports.yaml
+
+# One fact, one spelling: the StorageClass's name and every claim's class are
+# the wiring's `STORAGE_CLASS` (see storage-class.yaml).
+replacements:
+  - path: storage-class.yaml

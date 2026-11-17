@@ -1,14 +1,17 @@
-# Persistent volumes for the mirror. All use the diorama-retain StorageClass
-# (reclaimPolicy: Retain) so deleting a PVC never destroys the data.
+# Persistent volumes for the mainnet mirror. Every claim requests the
+# StorageClass named by the instance wiring's `STORAGE_CLASS` (the overlay's
+# replacement; default `mirror-retain`, reclaimPolicy Retain), so deleting a
+# PVC never destroys the data.
+#
+# No claim pins a `volumeName`: a pre-bound claim names a volume that exists on
+# one machine only, and the manifests must boot on any. A deployment that must
+# re-attach volumes left behind by an earlier run binds them by their PV's
+# claimRef (delete the PVC, keep the PV, re-apply - WaitForFirstConsumer binds
+# the retained volume back); that is a host step, never a tracked literal.
 #
 # This file is the mainnet mirror's claims; the Venue Mirror's live in
 # diorama-venue/pvcs.yaml - one file per mirror, because a kustomize overlay
 # composes whole files and must not declare the other mirror's claims.
-#
-# LOCAL (workshop): the expensive reth/lighthouse claims stay pre-bound to the
-# volumes a previous run left behind. The disposable anvil/engine claims carry
-# no volumeName: deleting their PVC+PV and re-applying provisions a fresh
-# volume through the same mirror-retain StorageClass.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -18,7 +21,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-ba8c5267-0d07-4618-8986-005b66f8f239
   resources:
     requests:
       storage: 400Gi
@@ -31,7 +33,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-01355a6c-d49c-4ba2-9eb6-a944f73e739a
   resources:
     requests:
       # Data columns (PeerDAS semi-supernode, ~18 day availability window,

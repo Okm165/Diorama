@@ -1,11 +1,12 @@
-# Persistent volumes for the Venue Mirror. Same diorama-retain StorageClass
-# (Retain) as the mainnet mirror's pvcs.yaml - one file per mirror's claims,
+# Persistent volumes for the Venue Mirror. The claims request the instance
+# wiring's `STORAGE_CLASS` (the overlay's replacement; default
+# `mirror-retain`, reclaimPolicy Retain) - one file per mirror's claims,
 # because a kustomize overlay composes whole files and the venue overlay must
 # not declare the mainnet claims (reth-data is 400Gi, lighthouse-data 1500Gi).
 #
-# LOCAL (workshop): every claim here is disposable. Deleting a PVC+PV and
-# re-applying provisions a fresh volume through the same mirror-retain
-# StorageClass; see the mainnet pvcs.yaml for the retained claims.
+# Every claim here is disposable: V forks the source on demand and carries
+# only the devnet's own writes, so deleting a PVC and re-applying provisions a
+# fresh volume through the same class (`make reset INSTANCE=…`).
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

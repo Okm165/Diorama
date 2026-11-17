@@ -1,7 +1,11 @@
 # The Mainnet Mirror instance overlay: the mirror base + the instance
 # ConfigMap + the wiring ConfigMap + the harness services. The diorama-venue
 # overlay is untouched: the two mirrors share the cluster and the
-# diorama-retain StorageClass, not a namespace.
+# wire-named StorageClass, not a namespace.
+#
+# The two mirror overlays are structurally identical (namespace, wiring,
+# inventory, harness services, the class replacement): a change to one is a
+# change to both, or it is a bug in whichever came first.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -12,6 +16,16 @@ namespace: diorama-mainnet
 configMapGenerator:
   - name: diorama-config
     envs: [wiring.env]
+  # The host harness surface: the loopback forwards the operator chooses
+  # (`harness.env`, the gitignored copy of the tracked `harness.example.env`;
+  # `make port-forward` opens them). The chain ids and in-cluster service DNS
+  # are derived by `diorama-config export-env --section client`, never
+  # repeated here. No pod reads this map - only the host harness - so it
+  # carries no roll-triggering hash.
+  - name: test-endpoints
+    envs: [harness.env]
+    options:
+      disableNameSuffixHash: true
 
 resources:
   - namespace.yaml
@@ -19,4 +33,8 @@ resources:
   # This instance's unit (config/instances/diorama-mainnet): the file every pod
   # of this instance mounts at /etc/mirror/instance.toml, and its generator.
   - ../../../config/instances/diorama-mainnet
-  - nodeports.yaml
+
+# One fact, one spelling: the StorageClass's name and every claim's class are
+# the wiring's `STORAGE_CLASS` (see storage-class.yaml).
+replacements:
+  - path: storage-class.yaml

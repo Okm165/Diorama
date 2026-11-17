@@ -1,10 +1,17 @@
-# Dedicated StorageClass for the mirror: local-path provisioner with
-# reclaimPolicy Retain, so deleting a PVC never deletes the underlying data.
-# Recreate a PVC with the same name to re-attach an existing volume.
+# The cluster-scoped resources every instance shares: the retain StorageClass.
+# Included by each base (idempotent - it is the same object, created once and
+# re-applied harmlessly by either stack).
+#
+# Retain: deleting a PVC never deletes the underlying data. Recreate a PVC
+# with the same name to re-attach an existing volume. The name below is the
+# default, created on a fresh cluster; an instance whose volumes live under
+# another class of the same shape (e.g. a pre-existing `mirror-retain`)
+# names that class in its wiring's `STORAGE_CLASS`, and the overlay points
+# both this object and every claim at it (see the overlays' replacements).
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: diorama-retain
+  name: mirror-retain
   labels:
     app.kubernetes.io/part-of: devnet
 provisioner: rancher.io/local-path
