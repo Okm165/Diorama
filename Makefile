@@ -54,48 +54,51 @@ NS_MANIFEST := $(OVERLAY)/namespace.yaml
 
 .DEFAULT_GOAL := help
 
-# The deploy chain (up: wiring -> images -> secrets -> snapshot -> apply) is
+# The deploy chain (spec present -> images -> secrets -> snapshot -> apply) is
 # order-sensitive; never let a parallel make interleave it.
 .NOTPARALLEL:
 
+# The one deployment input: the gitignored specialization. `make up` does not
+# create it (its values are this deployment's facts, not boilerplate); a
+# missing file is named here - with the remedy - before the kustomize build
+# refuses it loudly.
+spec-present:
+	@if [ ! -f config/instances/$(INSTANCE)/specialization.toml ]; then \
+	  echo "config/instances/$(INSTANCE)/specialization.toml is missing." >&2; \
+	  echo "  copy the tracked template:" >&2; \
+	  echo "    cp config/instances/$(INSTANCE)/specialization.example.toml config/instances/$(INSTANCE)/specialization.toml" >&2; \
+	  echo "  then hardcode this deployment's values (endpoints, fork facts, state roots)" >&2; \
+	  echo "  - the file must carry no \$${VAR} references; it is the only config source." >&2; \
+	  exit 1; \
+	fi
+
+# The host harness surface: the gitignored copy of harness.example.env. It is
+# not configuration (no pod reads it; the operator's loopback forwards do), so
+# a fresh clone bootstraps it silently.
+harness-env:
+	@for f in k8s/overlays/*/harness.example.env; do \
+	  d=$${f%/*}; \
+	  if [ ! -f "$$d/harness.env" ]; then cp "$$f" "$$d/harness.env"; echo "created $$d/harness.env from template"; fi; \
+	done
+
 ##@ Deploy (any instance)
 
-# The one command from a fresh clone: wiring -> images (built + imported) ->
-# secrets -> snapshot (a mirror needs chain state; the first one takes hours)
-# -> apply. `build` runs `deps` itself, so the pinned third-party set is
-# imported without a second pull.
-up: config-bootstrap build secrets snapshot-$(INSTANCE) apply ## Build + import the images, create secrets/namespace, source chain state, apply
+# The one command from a fresh clone: specialization (the operator's one
+# file) -> images (built + imported) -> secrets (the reth JWT) -> snapshot (a
+# mirror needs chain state; the first one takes hours) -> apply. `build` runs
+# `deps` itself, so the pinned third-party set is imported without a second
+# pull.
+up: spec-present build secrets snapshot-$(INSTANCE) apply ## Build + import the images, create the reth JWT, source chain state, apply
 	@echo "== $(INSTANCE) applied"
 	@echo "   watch:      make status INSTANCE=$(INSTANCE)"
 	@echo "   host reach: make port-forward INSTANCE=$(INSTANCE)"
 	@echo "   endpoints:  make endpoints INSTANCE=$(INSTANCE)"
 
-# The deployment data: the gitignored copies of every tracked *.example.*
-# template (the wiring, the harness surface, the specialization).
-config-bootstrap: ## Copy every tracked *.example template to its gitignored live file when absent
-	@for f in config/instances/*/specialization.example.toml; do \
-	  d=$${f%/*}; \
-	  if [ ! -f "$$d/specialization.toml" ]; then cp "$$f" "$$d/specialization.toml"; echo "created $$d/specialization.toml from template"; fi; \
-	done
-	@for f in k8s/overlays/*/wiring.example.env; do \
-	  d=$${f%/*}; \
-	  if [ ! -f "$$d/wiring.env" ]; then cp "$$f" "$$d/wiring.env"; echo "created $$d/wiring.env from template"; fi; \
-	done
-	@for f in k8s/overlays/*/harness.example.env; do \
-	  d=$${f%/*}; \
-	  if [ ! -f "$$d/harness.env" ]; then cp "$$f" "$$d/harness.env"; echo "created $$d/harness.env from template"; fi; \
-	done
-	@for f in k8s/overlays/*/secrets.example.env; do \
-	  d=$${f%/*}; \
-	  if [ ! -f "$$d/secrets.env" ]; then cp "$$f" "$$d/secrets.env"; echo "created $$d/secrets.env from template"; fi; \
-	done
-	@echo "deployment data present (specialization.toml, wiring.env, harness.env, secrets.env) - the tracked tree stays template-only"
-
-apply: secrets ## Apply the selected instance's stack (its Secret is synced first)
+apply: spec-present secrets ## Apply the selected instance's stack
 	$(KUBECTL) apply -k $(OVERLAY)
 	@$(MAKE) --no-print-directory endpoints INSTANCE=$(INSTANCE)
 
-diff: config-bootstrap ## Show what `make apply` would change
+diff: spec-present ## Show what `make apply` would change
 	$(KUBECTL) diff -k $(OVERLAY) || true
 
 delete: ## Delete the namespace (data survives: the StorageClass is Retain)
@@ -175,12 +178,13 @@ deploy-engine: build ## Rebuild + redeploy the selected instance's engine
 
 ##@ Secrets (a machine has no key: created here, never tracked)
 
-# The wiring's keyed values live in the instance's Secret (written from
-# secrets.env), and the reth<->lighthouse JWT is generated once. Both
-# idempotent: an existing value is never rotated.
-secrets: config-bootstrap ## Create/sync the selected instance's Secret + the reth JWT (idempotent)
+# The only k8s-native credentials left: the reth<->lighthouse JWT (a random
+# shared secret between two of this repo's own pods, useless outside the
+# cluster) and the namespace itself. Every configuration value - keyed
+# endpoints, the relay wallet - lives in the gitignored specialization file,
+# which is mounted into the pods as a file.
+secrets: ## Create the namespace + the reth JWT (idempotent; an existing JWT is never rotated)
 	@$(KUBECTL) apply -f $(NS_MANIFEST) >/dev/null
-	@REPO_ROOT=$(CURDIR) KUBECTL="$(KUBECTL)" NS=$(NS) ./scripts/sync-instance-secrets.sh $(INSTANCE)
 	@if [ "$(INSTANCE)" = "diorama-mainnet" ]; then \
 	  if $(KUBECTL) -n $(NS) get secret reth-jwt >/dev/null 2>&1; then \
 	    echo "secret reth-jwt already exists in $(NS) (left untouched)"; \
@@ -189,7 +193,6 @@ secrets: config-bootstrap ## Create/sync the selected instance's Secret + the re
 	    echo "created secret reth-jwt in $(NS)"; \
 	  fi; \
 	fi
-	@KUBECTL="$(KUBECTL)" NS=$(NS) INSTANCE=$(INSTANCE) ./scripts/check-secrets.sh
 
 ##@ Chain state (a machine has no state: a fresh chain starts at a pin)
 
@@ -239,7 +242,7 @@ reset: ## Delete the selected instance's PVCs so the next apply re-forks fresh (
 # Exactly the forwards `harness.env` names, in the background. The anvil
 # cheatcode set and /admin/* must never be a NodePort (they bind every host
 # interface); a ClusterIP + a loopback forward is the only reachable shape.
-port-forward: ## Open the instance's loopback port-forwards (FORWARD_* in harness.env)
+port-forward: harness-env ## Open the instance's loopback port-forwards (FORWARD_* in harness.env)
 	@set -a; . $(OVERLAY)/harness.env; set +a; \
 	pids=""; \
 	for pair in $$(env | grep -E '^FORWARD_[A-Z0-9_]+=' | sort); do \
@@ -249,14 +252,12 @@ port-forward: ## Open the instance's loopback port-forwards (FORWARD_* in harnes
 	done; \
 	trap 'kill'$$pids' 2>/dev/null' EXIT INT TERM; wait
 
-endpoints: config-bootstrap ## Render the consumer harness env for the selected instance (in-cluster DNS; the wiring is loaded)
+endpoints: spec-present harness-env ## Render the consumer harness env for the selected instance (in-cluster DNS)
 	@# The block `make port-forward` complements: every chain id and service
-	@# name derived from the instance file, never repeated in a manifest. The
-	@# `${VAR}` references resolve from the instance wiring exactly as a pod's
-	@# envFrom resolves them; a key also in secrets.env resolves from there,
-	@# like the Secret that rides last in the pods.
-	@set -a; . $(OVERLAY)/wiring.env; [ -f $(OVERLAY)/secrets.env ] && . $(OVERLAY)/secrets.env; set +a; \
-	cargo run -q -p diorama-config -- export-env config/instances/$(INSTANCE)/instance.toml --section client
+	@# name derived from the merged instance config, never repeated in a
+	@# manifest. The specialization is self-sustained - every value resolves
+	@# from the files alone, with no pod environment at all.
+	@cargo run -q -p diorama-config -- export-env config/instances/$(INSTANCE)/instance.toml --section client
 
 ##@ Operate (any instance)
 
@@ -357,7 +358,13 @@ prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; safe for 
 test-engine: ## Run workspace unit tests on the host (cargo)
 	cargo test --workspace
 
-config-check: config-bootstrap ## Validate every instance file through the layered loader
+config-check: ## Validate every instance file through the layered loader (every specialization must be present)
+	@for f in config/instances/*/instance.toml; do \
+	  d=$${f%/*}; \
+	  if [ ! -f "$$d/specialization.toml" ]; then \
+	    echo "missing $$d/specialization.toml (copy $$d/specialization.example.toml and hardcode the deployment's values)" >&2; exit 1; \
+	  fi; \
+	done
 	@for f in config/instances/*/instance.toml; do \
 	  cargo run -q -p diorama-config -- check "$$f" || exit 1; \
 	done
@@ -392,7 +399,7 @@ help: ## Show this help
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: up config-bootstrap apply diff delete deps build import check-pins deploy-engine \
+.PHONY: up spec-present harness-env apply diff delete deps build import check-pins deploy-engine \
 	secrets snapshot snapshot-force snapshot-diorama-mainnet snapshot-diorama-venue snapshot-diorama-cctp \
 	snapshot-status reset port-forward endpoints status logs logs-check smoke \
 	mirror-freshness substrate-attest pin-show repin venue-repin backfill prune-blobs \

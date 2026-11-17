@@ -1,29 +1,39 @@
 #!/usr/bin/env bash
 # scripts/config-lint.sh — the trackable tree's deployment gates, no cluster.
 #
-# The deployment story is "clone, copy one env, make up", so every rule that
-# story depends on is checked here rather than discovered on a fresh machine:
+# The configuration model is single-artifact: the gitignored specialization
+# file is the ONLY per-deployment source of truth, hardcoded, mounted into
+# the pods as a file. No `${VAR}` references anywhere, no config envs and no
+# config Secrets on the k8s side. The gates:
 #
-#   1. every instance's wiring.example.env answers exactly the `${VAR}`s its
-#      TOML references (a missing key is a pod that boots into a NamedError;
-#      an extra key is a value no pod reads);
-#   2. both mirrors are structurally identical: the same overlay files, the
-#      same base layout (one service file per concern, the same inventory),
-#      and the same Makefile surface for both INSTANCEs;
-#   3. the wiring key sets differ only by the source facts each chain
-#      genuinely has (declared below, with the reason);
-#   4. no machine-specific literal survives in a tracked manifest (a PV
-#      `volumeName`, a `latest` tag, an unpinned third-party image);
-#   5. every `*.example.*` template has a bootstrap rule, and no live
-#      deployment file is tracked by mistake;
-#   6. the live audit is a gate: `scripts/cluster-config-audit.txt` records
-#      every key the live cluster's ConfigMaps carried, classed live-read or
-#      live-dead, and the build must carry exactly those - a live fact the
-#      repo lost is a porting gap, a dead key the repo grew back is a
-#      regression of the leak the audit removed;
-#   7. the two mirrors' instance files are TOML-shape symmetric: the same
-#      sections, and the same keys in every shared section, beyond the
-#      declared per-profile facts.
+#   1. no `${VAR}` reference survives in any TOML layer (defaults, instance,
+#      specialization — example or live): an env indirection would make the
+#      specialization specific to one cluster's wiring, and the values must
+#      be hardcoded because specializations are not committed;
+#   2. no config-bearing env or Secret in the manifests: no `envFrom`, no
+#      `configMapKeyRef`, no `secretKeyRef` anywhere under k8s/; the only
+#      Secret material allowed is the generated `reth-jwt`, mounted as a
+#      FILE (a credential between two of this repo's own pods, never config);
+#   3. the instance units' ConfigMap generator carries the specialization as
+#      a FILE and fails the build loudly when the file is absent (the
+#      no-silent-gap behavior — a generator silently skipping a missing
+#      source is exactly how a fresh clone loses a live fact);
+#   4. the two mirrors are structurally identical (the same overlay files,
+#      the same base shape, the same Makefile surface) and their instance
+#      files are TOML-shape symmetric beyond the declared per-profile facts;
+#   5. no machine-specific literal in a tracked manifest (a PV `volumeName`,
+#      a `latest` tag, an unpinned third-party image); every template has
+#      its bootstrap rule (harness) or its named remedy (specialization),
+#      and no live deployment file is tracked by mistake;
+#   6. the live audit, re-pointed: `scripts/cluster-config-audit.txt` names
+#      every key the live pods resolve, as a dotted path into the merged
+#      config. live-read: the key must exist in the merged
+#      defaults+specialization+instance (a fresh clone with the template
+#      must carry the fact). live-dead: the key must NOT exist (a leak the
+#      audit removed must not grow back). The other direction — every
+#      specialization key has a reader — is enforced by the typed loader's
+#      `deny_unknown_fields` at every level: `make config-check` refuses a
+#      key nobody reads, so the specialization cannot grow dead weight.
 #
 # Exit: 0 clean, 1 with one line per violation.
 set -euo pipefail
@@ -34,170 +44,79 @@ fail=0
 bad() { echo "FAIL: $*" >&2; fail=1; }
 
 instances=(diorama-mainnet diorama-venue diorama-cctp)
-keys_of() { awk -F= '$0 !~ /^[[:space:]]*#/ && $1 ~ /^[A-Z][A-Z0-9_]*$/ { print $1 }' "$1" | sort; }
 
-# 1. The wiring (or the secrets file) answers the instance's references.
-for inst in "${instances[@]}"; do
-    wiring="k8s/overlays/$inst/wiring.example.env"
-    secretf="k8s/overlays/$inst/secrets.example.env"
-    [ -f "$wiring" ] || { bad "$wiring missing"; continue; }
-    [ -f "$secretf" ] || { bad "$secretf missing"; continue; }
-    declared=$(grep -rhoE '\$\{[A-Z][A-Z0-9_]*\}' "config/instances/$inst" | tr -d '${}' | sort -u)
-    provided=$( { keys_of "$wiring"; keys_of "$secretf"; } | sort -u)
-    for var in $declared; do
-        echo "$provided" | grep -qx "$var" || bad "$inst references \${$var} but neither $wiring nor the secrets template answers it"
-    done
-done
-
-# 2. Symmetry: the two mirrors' overlays carry the same files, and their bases
-#    the same *shape*: the shared layer, the claims, the secrets inventory, one
-#    engine and one anvil each (plus the profile's own service - the mainnet's
-#    reth/lighthouse pair, the venue's simulator). The service files differ by
-#    design (one binary per concern); the set of concerns never does.
-a=$(cd k8s/overlays/diorama-mainnet && ls -1 | sort)
-b=$(cd k8s/overlays/diorama-venue && ls -1 | sort)
-[ "$a" = "$b" ] || bad "overlays differ (only in one: $(comm -3 <(echo "$a") <(echo "$b") | tr -d ' \t' | tr '\n' ' '))"
-for f in kustomization.yaml pvcs.yaml engine.yaml secrets.yaml; do
-    [ -f "k8s/base/diorama-mainnet/$f" ] && [ -f "k8s/base/diorama-venue/$f" ] || bad "base $f exists in only one mirror"
-done
-ls k8s/base/diorama-mainnet | grep -qE '^anvil-t\.yaml$' || bad "mainnet base has no anvil"
-ls k8s/base/diorama-venue | grep -qE '^anvil-v\.yaml$' || bad "venue base has no anvil"
-# ...and both overlays name the same Makefile targets for their INSTANCE.
-for tgt in up apply diff delete secrets deps build snapshot status logs smoke port-forward endpoints; do
-    grep -qE "^$tgt[^:]*:" Makefile || bad "Makefile has no instance-parameterized target: $tgt"
-done
-
-# 3. The wiring key sets differ only by the declared per-chain facts.
-mainnet_only="BEACON_URL CHECKPOINT_SYNC_URL ENGINE_API_URL EVM_URL JWT_PATH SNAPSHOT_URL"
-venue_only="ENGINE_ADMIN_URL EVM_FORK_URL HL_INFO_API_URL HL_WS_API_URL SIM_STATE_DIR"
-a=$(keys_of k8s/overlays/diorama-mainnet/wiring.example.env)
-b=$(keys_of k8s/overlays/diorama-venue/wiring.example.env)
-for k in $(comm -23 <(echo "$a") <(echo "$b")); do
-    echo "$mainnet_only" | grep -qw "$k" || bad "mainnet-only wiring key $k is not a declared per-chain fact"
-done
-for k in $(comm -13 <(echo "$a") <(echo "$b")); do
-    echo "$venue_only" | grep -qw "$k" || bad "venue-only wiring key $k is not a declared per-chain fact"
-done
-
-# 4. No machine-specific literal in a tracked manifest.
-if grep -rn "volumeName:" k8s/ --include="*.yaml" | grep -q .; then
-    bad "a tracked PVC pins a volumeName (a volume that exists on one machine only)"
+# 1. No `${VAR}` reference in any TOML layer (comments excluded: the rule
+#    itself is documented inside the files).
+if grep -rn '^\s*[^#].*\${' config/defaults.toml config/instances/*/*.toml \
+    | grep -q .; then
+    grep -rn '^\s*[^#].*\${' config/defaults.toml config/instances/*/*.toml >&2
+    bad "a \${VAR} reference survives in a TOML layer (the specialization is self-sustained: values are hardcoded)"
 fi
-if grep -rnE 'image: [^ ]*:latest' k8s/ --include="*.yaml" | grep -q .; then
-    bad "a tracked manifest carries a floating ':latest' tag"
+
+# 2. No config-bearing env or Secret in the manifests.
+if grep -rn "envFrom:" k8s/ --include="*.yaml" | grep -q .; then
+    grep -rn "envFrom:" k8s/ --include="*.yaml" >&2
+    bad "envFrom in a manifest (configuration is the mounted specialization file, never pod env)"
+fi
+if grep -rn "configMapKeyRef\|secretKeyRef" k8s/ --include="*.yaml" | grep -q .; then
+    grep -rn "configMapKeyRef\|secretKeyRef" k8s/ --include="*.yaml" >&2
+    bad "a keyRef in a manifest (configuration is file-mounted, never injected as env)"
 fi
 while read -r ref; do
-    case "$ref" in
-        localhost/*|'') continue ;;
-        *@sha256:*) continue ;;
-        *) bad "third-party image not pinned by digest: $ref" ;;
-    esac
-done <<< "$(grep -rhoE 'image: [^ ]+' k8s/base k8s/bootstrap --include="*.yaml" | awk '{print $2}' | sort -u)"
-
-# 5. Every template has a bootstrap rule, and no live file is tracked.
-for kind in wiring harness secrets specialization; do
-    for f in k8s/overlays/*/$kind.example.env config/instances/*/$kind.example.toml; do
-        [ -f "$f" ] || continue
-        live="${f/.example./.}"
-        if git ls-files --error-unmatch "$live" >/dev/null 2>&1; then
-            bad "$live is tracked; it is deployment data (only its .example template belongs in git)"
-        fi
-        # The bootstrap rule's glob, as written in the Makefile.
-        glob="k8s/overlays/*/$kind.example.env"
-        case "$kind" in specialization) glob="config/instances/*/$kind.example.toml" ;; esac
-        grep -qF "$glob" Makefile || bad "no config-bootstrap rule covers $(basename "$f")"
-    done
+    [ -n "$ref" ] || continue
+    case "$ref" in *secretName:\ reth-jwt*) continue ;; esac
+    bad "a Secret volume other than the generated reth-jwt: $ref"
+done < <(grep -rhoE 'secretName: [a-z0-9-]+' k8s/ --include="*.yaml" | sort -u)
+for f in k8s/overlays/*/wiring.env k8s/overlays/*/wiring.example.env \
+         k8s/overlays/*/secrets.env k8s/overlays/*/secrets.example.env; do
+    [ -e "$f" ] && bad "$f exists (the wiring/secrets plumbing is gone: the specialization is the only config source)"
 done
 
-# 6. The live audit as a gate: every live-read key exists in the build, and
-#    no live-dead key grew back.
-if [ ! -f scripts/cluster-config-audit.txt ]; then
-    bad "scripts/cluster-config-audit.txt missing (the live audit is the porting gate)"
-fi
-for inst in "${instances[@]}"; do
-    for f in "k8s/overlays/$inst/wiring.example.env" "k8s/overlays/$inst/secrets.example.env" \
-             "config/instances/$inst/specialization.example.toml"; do
-        [ -f "$f" ] || bad "$f missing (the audit gate builds each instance from the tracked templates)"
-    done
-done
+# 3. The instance units build from the mounted files, and the build fails
+#    loudly when the specialization is absent.
+command -v "${KUBECTL:-kubectl}" >/dev/null 2>&1 \
+    || { bad "no kubectl on PATH; the build gates cannot run"; }
 if command -v "${KUBECTL:-kubectl}" >/dev/null 2>&1; then
     tmpdir=$(mktemp -d)
     trap 'rm -rf "$tmpdir"' EXIT
-    # The gate reads the tracked tree only: every overlay is built on a
-    # scratch copy in which each gitignored wiring/specialization file is the
-    # tracked `.example` template (an absent file is silently skipped by the
-    # generator, and a local live value is not what a clone would produce).
     cp -a k8s config "$tmpdir/"
-    for f in "$tmpdir"/k8s/overlays/*/wiring.env "$tmpdir"/k8s/overlays/*/secrets.env; do
+    # The harness surface is the operator's (no pod reads it): a fresh-clone
+    # build uses the tracked template, the same copy `make port-forward` makes.
+    for f in "$tmpdir"/k8s/overlays/*/harness.env; do
         [ -f "$f" ] || continue
         template="${f%.env}.example.env"
         [ -f "$template" ] && cp "$template" "$f"
     done
-    for f in "$tmpdir"/config/instances/*/specialization.toml; do
-        [ -f "$f" ] || continue
-        template="${f%.toml}.example.toml"
-        [ -f "$template" ] && cp "$template" "$f"
-    done
     for inst in "${instances[@]}"; do
-        "${KUBECTL:-kubectl}" kustomize "$tmpdir/k8s/overlays/$inst" > "$tmpdir/$inst.yaml" 2>"$tmpdir/$inst.err" \
-            || bad "kustomize build for $inst failed: $(head -c 200 "$tmpdir/$inst.err")"
+        if "${KUBECTL:-kubectl}" kustomize "$tmpdir/k8s/overlays/$inst" > "$tmpdir/$inst.yaml" 2>"$tmpdir/$inst.err"; then
+            echo "  build ok: $inst ($(grep -c '^kind:' "$tmpdir/$inst.yaml") objects)"
+        else
+            bad "kustomize build for $inst failed: $(head -c 200 "$tmpdir/$inst.err")"
+        fi
     done
-    # The build's ConfigMap (name, data key) pairs: one pass over each
-    # overlay's build output. The generator emits `data:` before `metadata:`,
-    # so each document is buffered and flushed whole.
-    built_keys_of() {
-        awk '
-            function flush() {
-                if (iscm) for (i = 1; i <= nk; i++) print cname " " keys[i];
-            }
-            function reset() {
-                iscm=0; inmeta=0; top=0; indata=0; cname=""; nk=0;
-                split("", keys);
-            }
-            /^---$/ { flush(); reset(); next }
-            /^[^[:space:]]/ { top=1; inmeta=0; indata=0 }
-            top && /^kind: ConfigMap/ { iscm=1; next }
-            top && /^metadata:/ { inmeta=1; next }
-            inmeta && /^  name:/ && cname == "" { cname=$2; next }
-            top && /^data:/ { indata=1; next }
-            indata && /^  [A-Za-z0-9._-]+:/ {
-                line=$0; sub(/^  /, "", line); sub(/:.*/, "", line);
-                if (line !~ /^metadata$/) keys[++nk]=line;
-            }
-            END { flush() }
-        ' "$1" | sort -u
-    }
-    for inst in "${instances[@]}"; do
-        [ -s "$tmpdir/$inst.yaml" ] || continue
-        built=$(built_keys_of "$tmpdir/$inst.yaml")
-        while IFS='|' read -r ns cm key class; do
-            case "$ns" in ''|'#'*) continue ;; esac
-            [ "$ns" = "$inst" ] || continue
-            # The built map: its name is the base name, with or without the
-            # generator's hash suffix.
-            matches=$(printf '%s\n' "$built" | awk -v cm="$cm" -v key="$key" \
-                '$1 == cm || $1 ~ "^"cm"-" { if ($2 == key) print "hit"; } ')
-            case "$class" in
-                live-read)
-                    [ -n "$matches" ] || bad "$inst build dropped a live-read key: $cm/$key (a fresh clone loses a live fact)"
-                    ;;
-                live-dead)
-                    [ -z "$matches" ] || bad "$inst build grew a live-dead key back: $cm/$key (the audit cut it: no reader)"
-                    ;;
-                *)
-                    bad "scripts/cluster-config-audit.txt: unknown class '$class' for $ns/$cm/$key"
-                    ;;
-            esac
-        done < scripts/cluster-config-audit.txt
-    done
-elif [ "$fail" -eq 0 ]; then
-    bad "no kubectl on PATH; the audit gate cannot build the overlays"
+    # The negative: a missing specialization.toml must FAIL the build, never
+    # silently skip the generator entry.
+    rm -f "$tmpdir/config/instances/diorama-cctp/specialization.toml"
+    if "${KUBECTL:-kubectl}" kustomize "$tmpdir/k8s/overlays/diorama-cctp" >/dev/null 2>&1; then
+        bad "the build SUCCEEDED without config/instances/diorama-cctp/specialization.toml (a missing source file must fail loudly)"
+    fi
 fi
 
-# 7. TOML shape symmetry: the two mirrors' instance files declare the same
-#    sections, and the same keys in every shared section. The per-profile
-#    facts are declared here, with the reason, the same way the wiring key
-#    deltas are (rule 3).
+# 4. Symmetry: the two mirrors' overlays carry the same files, their bases
+#    the same *shape*, and their instance files the same TOML shape beyond
+#    the declared per-profile facts (the specialization files differ by
+#    product scope; the instance files are one deployment grammar).
+a=$(cd k8s/overlays/diorama-mainnet && ls -1 | sort)
+b=$(cd k8s/overlays/diorama-venue && ls -1 | sort)
+[ "$a" = "$b" ] || bad "overlays differ (only in one: $(comm -3 <(echo "$a") <(echo "$b") | tr -d ' \t' | tr '\n' ' '))"
+for f in kustomization.yaml pvcs.yaml engine.yaml; do
+    [ -f "k8s/base/diorama-mainnet/$f" ] && [ -f "k8s/base/diorama-venue/$f" ] || bad "base $f exists in only one mirror"
+done
+ls k8s/base/diorama-mainnet | grep -qE '^anvil-t\.yaml$' || bad "mainnet base has no anvil"
+ls k8s/base/diorama-venue | grep -qE '^anvil-v\.yaml$' || bad "venue base has no anvil"
+for tgt in up apply diff delete secrets deps build snapshot status logs smoke port-forward endpoints; do
+    grep -qE "^$tgt[^:]*:" Makefile || bad "Makefile has no instance-parameterized target: $tgt"
+done
 toml_keys() {
     awk '
         /^[[:space:]]*#/  { next }
@@ -212,8 +131,6 @@ venue_instance=config/instances/diorama-venue/instance.toml
 if [ -f "$mainnet_instance" ] && [ -f "$venue_instance" ]; then
     mainnet_only_sections="chains.l1 services.engine.source_sync services.engine.beacon"
     venue_only_sections="chains.venue services.venue_sim"
-    # The key spelling is the extractor's `section:key` (the section path and
-    # the key, colon-joined).
     mainnet_only_keys=""
     venue_only_keys="services.engine:boot_timeout_secs services.engine.loops:poll_interval_ms"
     a=$(toml_keys "$mainnet_instance")
@@ -230,13 +147,121 @@ if [ -f "$mainnet_instance" ] && [ -f "$venue_instance" ]; then
         echo "$venue_only_keys" | grep -qw "$k" && continue
         bad "venue instance carries $k and the mainnet's does not (undeclared per-profile delta)"
     done
-    # The instance units are one shape: the same tracked files per instance.
-    for d in config/instances/*/; do
-        for f in kustomization.yaml instance.toml specialization.example.toml; do
-            [ -f "$d$f" ] || bad "$d$f missing (the instance units are one shape)"
-        done
-    done
 fi
+# The instance units are one shape: the same tracked files per instance.
+for d in config/instances/*/; do
+    for f in kustomization.yaml instance.toml specialization.example.toml; do
+        [ -f "$d$f" ] || bad "$d$f missing (the instance units are one shape)"
+    done
+done
 
-[ "$fail" -eq 0 ] && echo "config lint clean: wiring complete, mirrors symmetric, no machine literals, every template bootstrap-able, the live audit gates the build"
+# 5. No machine-specific literal in a tracked manifest; templates bootstrap
+#    (harness) or name their remedy (specialization); no live file tracked.
+if grep -rn "volumeName:" k8s/ --include="*.yaml" | grep -q .; then
+    bad "a tracked PVC pins a volumeName (a volume that exists on one machine only)"
+fi
+if grep -rnE 'image: [^ ]*:latest' k8s/ --include="*.yaml" | grep -q .; then
+    bad "a tracked manifest carries a floating ':latest' tag"
+fi
+while read -r ref; do
+    case "$ref" in
+        localhost/*|'') continue ;;
+        *@sha256:*) continue ;;
+        *) bad "third-party image not pinned by digest: $ref" ;;
+    esac
+done <<< "$(grep -rhoE 'image: [^ ]+' k8s/base k8s/bootstrap --include="*.yaml" | awk '{print $2}' | sort -u)"
+# The specialization is deliberately NOT auto-copied (`make up` names the
+# remedy instead - its values are the deployment's facts, not boilerplate),
+# but no live file may be tracked, and the tracked template must exist.
+for f in config/instances/*/specialization.example.toml; do
+    [ -f "$f" ] || bad "$f missing (the tracked template is the copy source)"
+    live="${f/.example./.}"
+    if git ls-files --error-unmatch "$live" >/dev/null 2>&1; then
+        bad "$live is tracked; it is deployment data - keyed endpoints and wallet keys never enter git"
+    fi
+done
+for f in k8s/overlays/*/harness.example.env; do
+    [ -f "$f" ] || continue
+    live="${f/.example./.}"
+    if git ls-files --error-unmatch "$live" >/dev/null 2>&1; then
+        bad "$live is tracked; it is deployment data (only its .example template belongs in git)"
+    fi
+    grep -qF "harness.example.env" Makefile || bad "no harness bootstrap rule covers $(basename "$f")"
+done
+
+# 6. The live audit, re-pointed: dotted paths into the merged config. The
+#    merged shape is computed from defaults + (live specialization if
+#    present, else the tracked example) + instance — the same deep merge the
+#    loader runs, so a live-read key the tree lost fails here.
+if [ ! -f scripts/cluster-config-audit.txt ]; then
+    bad "scripts/cluster-config-audit.txt missing (the live audit is the porting gate)"
+fi
+audit_check() {
+    python3 - "$1" "$2" <<'PYEOF'
+import sys, tomllib
+
+instance_path, audit_path = sys.argv[1], sys.argv[2]
+from pathlib import Path
+d = Path(instance_path).parent
+
+def load(p):
+    with open(p, "rb") as f:
+        return tomllib.load(f)
+
+def merge(base, over):
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            merge(base[k], v)
+        else:
+            base[k] = v
+
+merged = load(Path("config/defaults.toml"))
+spec = d / "specialization.toml"
+if not spec.exists():
+    spec = d / "specialization.example.toml"
+merge(merged, load(spec))
+merge(merged, load(instance_path))
+
+def lookup(path):
+    cur = merged
+    for seg in path.split("."):
+        if seg.endswith("]"):
+            name, idx = seg[:-1].split("[")
+            cur = cur.get(name)
+            if cur is None:
+                return None
+            i = int(idx)
+            cur = cur[i] if isinstance(cur, list) and i < len(cur) else None
+        else:
+            cur = cur.get(seg) if isinstance(cur, dict) else None
+        if cur is None:
+            return None
+    return cur
+
+status = 0
+for line in open(audit_path):
+    line = line.strip()
+    if not line or line.startswith("#"):
+        continue
+    ns, key, cls = (part.strip() for part in line.split("|"))
+    if ns != d.name:
+        continue
+    present = lookup(key) is not None
+    if cls == "live-read" and not present:
+        print(f"FAIL: {ns} lost a live-read key: {key} (a fresh clone loses a live fact)", file=sys.stderr)
+        status = 1
+    elif cls == "live-dead" and present:
+        print(f"FAIL: {ns} grew a live-dead key back: {key} (the audit cut it: no reader)", file=sys.stderr)
+        status = 1
+    elif cls not in ("live-read", "live-dead"):
+        print(f"FAIL: {audit_path}: unknown class '{cls}' for {ns}/{key}", file=sys.stderr)
+        status = 1
+sys.exit(status)
+PYEOF
+}
+for inst in "${instances[@]}"; do
+    audit_check "config/instances/$inst/instance.toml" scripts/cluster-config-audit.txt || fail=1
+done
+
+[ "$fail" -eq 0 ] && echo "config lint clean: no \${VAR} in any TOML, no config env/Secret in the manifests, the specialization build fails loudly when absent, mirrors symmetric, no machine literals, the live audit gates the merged shape"
 exit "$fail"

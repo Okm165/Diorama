@@ -11,24 +11,27 @@ run on, and the CCTP bridge between them:
 - **diorama-cctp** — the standalone bridge that relays burns between the two
   mirrors.
 
-Every deployment value lives in gitignored env files per instance; everything
+Every deployment value lives in one gitignored file per instance — the
+specialization — hardcoded, mounted into the pods as a file; everything
 tracked is a template that boots unchanged on another machine. The three
 instances are structurally identical — the same Makefile surface, the same
 overlay shape — and a second deployment on another host is a clone plus one
-edited env (see "Porting to another host").
+edited specialization (see "Porting to another host").
 
 ## Boot a stack (from a fresh clone)
 
 ```sh
 make up INSTANCE=diorama-venue    # the venue mirror (engine, anvil-v, venue-sim)
 make up INSTANCE=diorama-mainnet  # the Ethereum mirror (reth, lighthouse, anvil-t, engine)
-make up INSTANCE=diorama-cctp     # the bridge (its relay key goes in secrets.env first)
+make up INSTANCE=diorama-cctp     # the bridge (its relay key goes in the specialization first)
 ```
 
-`make up` = wiring (`config-bootstrap`) → images (`build`: the repo's
-binaries are built fresh, the pinned third-party set imported) → secrets →
-chain state (`snapshot`: the venue re-forks from its source; the mainnet's
-reth downloads its snapshot — the one step measured in hours, resumable) →
+`make up` requires exactly one deployment input — the specialization file
+(it names the remedy if it is missing: copy the tracked template, hardcode
+the values) — then images (`build`: the repo's binaries are built fresh, the
+pinned third-party set imported) → secrets (the reth↔lighthouse JWT) → chain
+state (`snapshot`: the venue re-forks from its source; the mainnet's reth
+downloads its snapshot — the one step measured in hours, resumable) →
 `apply`. Prerequisites:
 
 - a single-node **k3s** cluster reachable by `kubectl`
@@ -59,108 +62,108 @@ make endpoints INSTANCE=diorama-mainnet      # CHAIN_1_* / DIORAMA_ADMIN_URL
 ```
 
 `make endpoints` renders `diorama-config export-env --section client`: service
-DNS and chain ids derived from the instance file, under the exact key names the
-consumer harness sources. The loopback ports live in `harness.env` (see
-"Deployment data"); a port collision on another machine is a wiring edit, not
-a manifest one.
+DNS and chain ids derived from the merged instance config, under the exact key
+names the consumer harness sources. The loopback ports live in `harness.env`
+(see "Deployment data"); a port collision on another machine is a harness
+edit, not a manifest one.
 
-## Deployment data (the env files that are never committed)
-
-`make config-bootstrap` creates each gitignored file from its tracked
-`*.example` template whenever it is missing; `make apply` runs it first — a
-fresh clone cannot apply a half-configured stack.
+## Deployment data (the files that are never committed)
 
 | file | what it carries |
 | --- | --- |
-| `k8s/overlays/<instance>/wiring.env` | the cluster wiring every pod resolves: fork source, market plane, service DNS, state roots, the claim class |
-| `k8s/overlays/<instance>/secrets.env` | the keyed values (a provider URL with its key, the relay wallet): written into the instance's Secret by `make secrets`, never into a ConfigMap |
-| `k8s/overlays/<instance>/harness.env` | the host harness surface: the loopback port-forwards |
-| `config/instances/<instance>/specialization.toml` | the TOML mounted at `/etc/mirror`: endpoint capability claims, watch scope, fixtures, markets, the fork pin |
+| `config/instances/<instance>/specialization.toml` | the TOML mounted at `/etc/mirror`: every per-deployment value, hardcoded — endpoint groups (keyed ones included), fork source and pin, state roots, the JWT path, the relay key, watch scope, fixtures, markets |
+| `k8s/overlays/<instance>/harness.env` | the host harness surface: the loopback port-forwards (no pod reads it; `make port-forward` bootstraps it from the template) |
 
-Secrets have exactly two homes: `secrets.env` (gitignored, → the instance
-Secret) and generated ones (`make secrets` also creates the reth↔lighthouse
-JWT). Never put a key in a tracked manifest, a tracked config, or `wiring.env`
-(a ConfigMap is readable by anyone with `get cm`).
+The specialization is the ONLY per-deployment source of truth. It carries no
+`${VAR}` references — env indirection would make it specific to one cluster's
+wiring — and it is gitignored, which is what makes it a safe home for
+credentials (a keyed ZAN URL, the bridge's relay wallet): the values never
+enter git and never enter a cluster Secret or ConfigMap. The pods read it as
+a file. `make secrets` generates only the reth↔lighthouse JWT.
 
 ## The config layering
 
-`config/defaults.toml` → `config/instances/<instance>/instance.toml` →
-`specialization.toml`, with `${VAR}` references expanded from the pod's env
-(the `wiring.env` ConfigMap; a key also present in the instance Secret
-resolves from the Secret). `defaults.toml` carries the workspace conventions
-every deployment shares — the service ports, the journal's home under the
-state root, the engine's `@anvil` target, the endpoint-pool policy and
-cadences — so `instance.toml` states only what makes one deployment
-different (identity, chain wiring, state roots, the measured deltas; a fresh
-instance's file is a dozen lines) and `specialization.toml` carries the
-product's scope (endpoint groups, watchlists, markets, the fork pin).
+`config/defaults.toml` → `specialization.toml` →
+`config/instances/<instance>/instance.toml` (deep merge, arrays replace,
+unknown keys are errors at every level). `defaults.toml` carries the workspace
+conventions every deployment shares — the service ports, the journal's home,
+the engine's `@anvil` target, the endpoint-pool policy and cadences — so
+`instance.toml` states only what makes one deployment different (identity,
+chain endpoint references, the measured deltas; a fresh instance's file is a
+dozen lines) and `specialization.toml` hardcodes the per-deployment facts the
+instance only names by reference (`@evm`, `@anvil`, `@engine_api`).
 Validate the result without a cluster:
 
 ```sh
 make config-check
 ```
 
-`scripts/config-lint.sh` also gates the porting surface: the audit
-(`scripts/cluster-config-audit.txt`) records every key the live cluster's
-ConfigMaps carried, classed live-read (the build must carry it) or live-dead
-(the build must not grow it back), the two mirrors' instance files stay
-TOML-shape symmetric, and every overlay builds from the tracked templates
-alone.
+`scripts/config-lint.sh` also gates the model: no `${VAR}` reference in any
+TOML layer, no config env or Secret in the manifests (configuration is the
+mounted file; the only Secret is the generated `reth-jwt`, file-mounted), the
+kustomize build fails loudly when a specialization file is absent, the two
+mirrors stay structurally and TOML-shape symmetric, and the audit
+(`scripts/cluster-config-audit.txt`) records every key the live pods resolve
+— live-read keys must exist in the merged config, live-dead keys must not
+grow back.
 
 ## Porting to another host
 
 ```sh
 git clone <this repo> && cd Diorama
-make up INSTANCE=diorama-venue    # ends with the few values to review
+cp config/instances/diorama-venue/specialization.example.toml \
+   config/instances/diorama-venue/specialization.toml
+# hardcode the deployment's values in the specialization, then:
+make up INSTANCE=diorama-venue
 ```
 
-The boot prints the env files it created; the values a porting operator
-reviews are the wiring's machine choices (each documented in its template):
+The values a porting operator replaces are all in the specialization (each
+documented in its template):
 
-- `EVM_FORK_URL` / `HL_INFO_API_URL` — the venue's source plane (keyed
-  providers go in `secrets.env`);
-- `CHECKPOINT_SYNC_URL` / `SNAPSHOT_URL` — the mainnet's chain-state sources
-  (`SNAPSHOT_URL` also accepts `file:///…` staged on the node);
-- `T_RPC_URL` / `TARGET_RPC_URL` — the bridge's chains (in-cluster DNS;
-  override for providers outside the cluster);
-- `STORAGE_CLASS` — the claim class (`make up` creates the default; a cluster
-  with its own provisioner names it here; change only on an empty cluster —
-  a bound claim's class does not rebind);
-- `harness.env` — the loopback forwards.
+- `endpoints.evm` / `endpoints.hyperliquid_*` — the venue's source and market
+  planes (keyed URLs go straight into the file; it is gitignored);
+- `chains.venue.fork_url` / `fork_pin` — the venue's fork source and base;
+- `endpoints.*` and `services.engine.state_dir` / `source_sync.jwt_path` —
+  the mainnet's in-cluster wiring;
+- the bridge's `endpoints.*`, `state_dir` and `relay_key`.
 
-What a clone cannot carry, and where the Makefile owns it instead: images
-(`make build` — one binary per manifest tag), chain state (`make snapshot` —
-the reth download; the venue needs none), keys (`make secrets` — the JWT is
-generated, the relay key is `secrets.env`).
+The claim class (`mirror-retain`, or the bridge's `diorama-retain`) and the
+lighthouse checkpoint-sync URL are manifest literals: k8s-native facts, edited
+in the manifests on an empty cluster only (a bound claim's class does not
+rebind). What a clone cannot carry, and where the Makefile owns it instead:
+images (`make build`), chain state (`make snapshot`), keys (`make secrets` —
+the JWT is generated; the relay wallet is the specialization's).
 
 ## Transition notes (the current host)
 
-The tracked tree is now portable; the live cluster carries three artifacts of
-its pre-portability history. The next applies reconcile them, in this order:
+The specialization replaces the wiring/Secret env plumbing. The one-time
+conversion for the live host — the live values are exactly what each
+specialization.toml must hardcode:
 
-1. **The keyed values move to Secrets.** `make secrets INSTANCE=diorama-venue`
-   writes the keyed fork source (the URL was in `wiring.env`, readable via
-   `get cm`) into `diorama-venue-secrets`; for the bridge,
-   `make secrets INSTANCE=diorama-cctp` carries the relay wallet over from the
-   legacy `cctp-relay-key` Secret once. The next
-   `make apply INSTANCE=diorama-venue` / `INSTANCE=diorama-cctp` rolls those
-   pods (anvil-v, engine, venue-sim, cctp-bridge); the resolved values are
-   identical, so the follow resumes from its persisted cursor.
-2. **The harness env is derived, not a ConfigMap literal.** Source
-   `make endpoints INSTANCE=…` (the old `test-endpoints` block's keys, now
-   rendered from the instance file) and open the forwards with
-   `make port-forward INSTANCE=…` (the ports live in `harness.env`). The
-   retired `*-nodeport` Service twins are not removed by apply — delete them
-   once: `kubectl -n <ns> delete svc --ignore-not-found anvil-t-nodeport
-   engine-nodeport` (and the venue's `anvil-v-nodeport engine-nodeport
-   venue-sim-nodeport`, the bridge's `cctp-bridge-nodeport`).
+1. **Read the live values, write the specializations.** For each instance:
+   the endpoint groups from the wiring ConfigMap
+   (`kubectl -n <ns> get cm <wiring-map> -o jsonpath='{.data}'`), the fork
+   pin from the mounted specialization (`kubectl -n <ns> exec deploy/anvil-v
+   -- cat /state/pin`), the state roots (`/state`), the JWT path
+   (`/secrets/jwt.hex`), and — for the bridge — the relay wallet from the
+   legacy Secret (`kubectl -n diorama-cctp get secret cctp-relay-key -o
+   jsonpath='{.data.relay-key}' | base64 -d`). Write them into
+   `config/instances/<instance>/specialization.toml` as literals; then
+   `make config-check` must print `ok` for all three with an empty
+   environment (the files are self-sustained).
+2. **Apply once, per instance.** `make apply INSTANCE=<name>` — the wiring
+   ConfigMap and the `*-secrets` Secret objects leave the cluster, and every
+   pod re-mounts the specialization file. The resolved values are identical
+   (proven by `cargo run -p diorama-config --example effective` before and
+   after), so the engines resume from their persisted cursors; the anvil pods
+   read their fork source from the mounted file.
 3. **The mainnet's two pre-bound claims.** Their PV `volumeName` left the
-   tracked manifests (a fresh host must bind its own volumes), and a
-   client-side apply refuses to patch the immutable field on the live claims.
+   tracked manifests long ago (a fresh host must bind its own volumes), and
+   an apply refuses to patch the immutable field on the live claims.
    Reconcile once with
-   `kubectl apply -k k8s/overlays/diorama-mainnet --server-side` (verified by
-   server dry-run: every object `serverside-applied`, nothing restarts — the
-   volumes' field keeps its `k3s` manager).
+   `kubectl apply -k k8s/overlays/diorama-mainnet --server-side` (server
+   dry-run verified: the only Invalid objects are the two bound claims, whose
+   spec is unchanged by this work).
 
 ## Development gates
 
@@ -170,10 +173,11 @@ make lint        # clippy, all targets, warnings are errors
 make ast-scope   # fn/struct size and nesting analysis
 ```
 
-`scripts/config-lint.sh` (part of `make fitness`) keeps the portability story
-honest: the wiring answers every `${VAR}` the instances reference, the two
-mirrors stay structurally symmetric, no machine-specific literal survives in a
-tracked manifest, and no deployment file is tracked by mistake.
+`scripts/config-lint.sh` (part of `make fitness`) keeps the model honest: no
+`${VAR}` reference in any TOML, no config env or Secret in the manifests, the
+specialization build fails loudly when absent, the two mirrors stay
+structurally symmetric, no machine-specific literal survives in a tracked
+manifest, and the live audit gates the merged shape.
 
 ## Ops (read-only first)
 
