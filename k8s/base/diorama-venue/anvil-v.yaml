@@ -194,7 +194,10 @@ spec:
           startupProbe:
             tcpSocket: { port: 8545 }
             periodSeconds: 5
-            failureThreshold: 60 # up to 5 min to fork
+            # A fork bootstrap from a rate-limited archive source (ZAN single-call)
+            # has been measured past 5 min; 60×5s killed the container mid-fork and
+            # looped it forever (measured 2026-11-14 ~23:0xZ). 240×5s = 20 min.
+            failureThreshold: 240
           readinessProbe:
             tcpSocket: { port: 8545 }
             periodSeconds: 5

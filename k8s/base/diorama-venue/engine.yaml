@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-venue-engine:v13
+          image: localhost/diorama-venue-engine:v19
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The wiring the instance TOML references as ${...} (EVM_FORK_URLS,
@@ -55,12 +55,14 @@ spec:
           # startupProbe suspends the liveness/readiness probes through it, so
           # a coordinated rollout never kills a booting container (measured:
           # exit 137 at ~2 minutes when anvil-t restarted under a rolling
-          # engine). The 30 x 10 s window (5 min) was shorter than a reth
-          # restart; 90 x 10 s (15 min) covers the measured ~10 min outage.
+          # engine). This budget is the boot wait plus slack, not a second
+          # guess: the instance's boot_timeout_secs is 1200 (a re-forking V),
+          # so 150 x 10 s (25 min) lets the engine wait out V's own 20-minute
+          # startupProbe and then serve.
           startupProbe:
             httpGet: { path: /livez, port: 8080 }
             periodSeconds: 10
-            failureThreshold: 90
+            failureThreshold: 150
           readinessProbe:
             # `/livez`, not `/healthz`: a gap-paused engine is still serving
             # reads/writes (it is catching up, not dead), so it must stay in

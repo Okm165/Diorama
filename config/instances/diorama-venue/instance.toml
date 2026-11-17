@@ -23,8 +23,14 @@ ws_urls = "@hyperliquid_ws"
 
 [services.engine]
 state_dir = "${STATE_DIR}"
-# A fork-mode anvil comes up in seconds; only a coordinated restart delays it.
-boot_timeout_secs = 120
+# The boot wait for V. This is the *anvil's* budget, not the engine's: a
+# fork-mode anvil loads its state dump and materializes source state on
+# demand, and a rate-limited archive source has been measured past 5 minutes
+# (2026-11-17: 120 s here exited the engine while V was still forking — 35
+# restarts in 42 h, and every restart re-stitched the follow from the pin).
+# 1200 s is the same 20-minute budget as the anvil's startupProbe
+# (240 x 5 s in k8s/base/diorama-venue/anvil-v.yaml); keep the two equal.
+boot_timeout_secs = 1200
 
 [services.engine.anvil]
 target_url = "@anvil"
