@@ -29,7 +29,10 @@ attester_seed = "diorama-cctp-devnet-attester"
 # 56,854,459.08 USDC). This deployment pins the measured value; there is no
 # safe generic fallback.
 fast_burn_allowance = 56854459.08
-# The watcher scans the mirror anvils, whose per-call range is 2,000 blocks.
-# The client still clamps any chunk to the endpoint group's `max_log_range`,
-# so a public source cannot receive a wider range.
+# The watcher scans the mirror anvils. The 2,000 figure is a RESULT cap
+# (re-measured 2026-11-17), not a block-range cap: a filtered scan over a
+# 2,000-block window works because its result count stays under the cap,
+# while an unfiltered scan hits the cap long before 2,000 blocks. The client
+# still clamps any chunk to the endpoint group's `max_log_range`, so a public
+# source cannot receive a wider range.
 scan_chunk_blocks = 2000

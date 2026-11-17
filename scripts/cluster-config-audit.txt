@@ -39,9 +39,12 @@ diorama-mainnet|services.engine.source_sync.jwt_path|live-read
 diorama-mainnet|chains.l1.fork_pin|live-read
 diorama-mainnet|chains.l1.fork_offset|live-read
 #
-# diorama-venue: the keyed fork URL and the keyed market-REST mirror live in
-# the specialization (gitignored - the credential never enters git or a
-# cluster Secret). T_RPC_URL and CCTP_STATE_DIR were a leak from the bridge's
+# diorama-venue: the keyed market-REST mirror lives in the specialization
+# (gitignored - the credential never enters git or a cluster Secret);
+# `chains.venue.fork_url` is the keyless hyperlend archive fork source
+# (re-measured 2026-11-17 - the earlier keyed-fork-URL note is stale: the
+# deployment forks from the keyless archive, and no keyed URL is resolved
+# for the fork). T_RPC_URL and CCTP_STATE_DIR were a leak from the bridge's
 # namespace (the bridge reads its own map; nothing here resolved them) - the
 # old wiring map carried them, the specialization must not.
 diorama-venue|endpoints.anvil.http|live-read
