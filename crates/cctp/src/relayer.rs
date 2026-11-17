@@ -325,14 +325,30 @@ impl Relayer {
                 ),
             );
         }
-        // The burn must still exist on the source: a reattest of a record
-        // whose burn a re-pin or rewind removed must never mint (I6 — stale
-        // derivations are parked, never re-owned). The count of consecutive
-        // gone observations lives on the record: the first one parks the
-        // record and removes it from the relay set, so a state-based test
-        // could never observe the second. Two observations are the typed
-        // proof the transfer is final for this chain history; the record
-        // stays visible as `retired` and stops pinning the live parked count.
+        if let Some(verdict) = self.account_for_gone_burn(record).await? {
+            return Ok(verdict);
+        }
+        match self.resume_in_flight(chain, record).await? {
+            Resume::ReSend => {}
+            Resume::InFlight => return Ok(Relayed::InFlight),
+            Resume::Settled(verdict) => return Ok(verdict),
+        }
+        self.submit(chain, record, target, &decoded).await
+    }
+
+    /// The burn's continued existence, as a relay verdict.
+    ///
+    /// The burn must still exist on the source: a reattest of a record
+    /// whose burn a re-pin or rewind removed must never mint (I6 — stale
+    /// derivations are parked, never re-owned). The count of consecutive
+    /// gone observations lives on the record: the first one parks the
+    /// record and removes it from the relay set, so a state-based test
+    /// could never observe the second. Two observations are the typed
+    /// proof the transfer is final for this chain history; the record
+    /// stays visible as `retired` and stops pinning the live parked count.
+    /// `None` = the burn is present (and a previously observed absence is
+    /// not final, so its counter restarts).
+    async fn account_for_gone_burn(&self, record: &MessageRecord) -> Result<Option<Relayed>> {
         if !self.burn_exists(record).await? {
             let observations = record.source_gone_observations + 1;
             if observations >= Self::SOURCE_GONE_RETIRE_OBSERVATIONS {
@@ -349,20 +365,17 @@ impl Relayer {
                     |m| m.source_gone_observations = observations,
                 )?;
             }
-            return Ok(Relayed::No);
+            return Ok(Some(Relayed::No));
         }
         if record.source_gone_observations != 0 {
             // The burn is back: the earlier "gone" was not final, so the
             // counter starts over.
-            self.store
-                .update_message(|m| m.nonce == record.nonce, |m| m.source_gone_observations = 0)?;
+            self.store.update_message(
+                |m| m.nonce == record.nonce,
+                |m| m.source_gone_observations = 0,
+            )?;
         }
-        match self.resume_in_flight(chain, record).await? {
-            Resume::ReSend => {}
-            Resume::InFlight => return Ok(Relayed::InFlight),
-            Resume::Settled(verdict) => return Ok(verdict),
-        }
-        self.submit(chain, record, target, &decoded).await
+        Ok(None)
     }
 
     /// The call target and the caller the message pins: the transmitter for a
@@ -665,9 +678,12 @@ impl Relayer {
     /// the transfer, which mints a new record — this one is not revived).
     fn retire(&self, nonce: B256) -> Result<()> {
         tracing::warn!(%nonce, "cctp message RETIRED — source burn gone on two consecutive observations; re-run the transfer to mint a new one");
-        self.store.update_message(|m| m.nonce == nonce, |m| {
-            m.state = RelayState::Retired;
-        })?;
+        self.store.update_message(
+            |m| m.nonce == nonce,
+            |m| {
+                m.state = RelayState::Retired;
+            },
+        )?;
         Ok(())
     }
 
