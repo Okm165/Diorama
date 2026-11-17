@@ -846,7 +846,47 @@ impl Rpc {
         let (endpoint, packet) = self
             .post_raw_throttled(method, &request.take_request(), required)
             .await?;
-        Self::answer_packet(&endpoint, method, packet)
+        let answer = Self::answer_packet(&endpoint, method, packet);
+        match &answer {
+            Err(error) if error.is_method_not_found() && !required.is_empty() => {
+                self.retire_capabilities(&endpoint, required);
+            }
+            _ => {}
+        }
+        answer
+    }
+
+    /// Retire the capability claims an endpoint has just disproved. A
+    /// method-gated call that answers `-32601` did not merely fail: the
+    /// endpoint's declared claim is false under load, and every later pass
+    /// that rotates the gated method onto it would fail the same way.
+    /// Retiring the claim moves the method to a member that answers it;
+    /// unqualified calls still use this endpoint.
+    fn retire_capabilities(&self, endpoint: &str, roles: &[&str]) {
+        for role in self.pool.retire_capabilities(endpoint, roles) {
+            tracing::warn!(
+                endpoint,
+                capability = %role,
+                "endpoint refused a capability-gated method (-32601); its claim is retired for \
+                 this process and the pool stops admitting it for that capability"
+            );
+        }
+    }
+
+    /// Retire one declared role of one endpoint (the capability audit's
+    /// verdict, and the pooled path's `-32601` verdict share this seam).
+    /// `true` means this call made the transition; a repeat is silent.
+    pub fn retire_capability(&self, url: &str, role: &str) -> bool {
+        let retired = self.pool.retire_capability(url, role);
+        if retired {
+            tracing::warn!(
+                endpoint = url,
+                capability = role,
+                "endpoint refused a capability-gated method (-32601); its claim is retired for \
+                 this process and the pool stops admitting it for that capability"
+            );
+        }
+        retired
     }
 
     /// Refuse an over-cap `eth_getLogs` before it reaches an endpoint. A
@@ -1025,12 +1065,26 @@ impl Rpc {
         // Admission is the union of the items' requirements: the whole body
         // lands on one endpoint, so it must serve every method in it.
         let required = Self::batch_capabilities(calls);
-        let mut by_id = Self::index_by_id(self.post_batch(&body, &required).await?);
+        let (endpoint, responses) = self.post_batch(&body, &required).await?;
+        let mut by_id = Self::index_by_id(responses);
         let mut out = Vec::with_capacity(calls.len());
-        for id in ids {
-            match by_id.remove(&id) {
-                Some(response) => out.push(Self::response_result(response)),
-                None => out.push(Err(missing_from_batch(id))),
+        for (id, call) in ids.iter().zip(calls) {
+            match by_id.remove(id) {
+                Some(response) => {
+                    let answer = Self::response_result(response);
+                    // A method-gated item refused with `-32601` is a retired
+                    // claim, exactly as on the single-call path: the whole
+                    // batch landed on this endpoint, so the endpoint is the
+                    // one that lied.
+                    if let Err(payload) = &answer {
+                        let caps = Self::required_capabilities(call.meta.method.as_ref());
+                        if payload.code == METHOD_NOT_FOUND && !caps.is_empty() {
+                            self.retire_capabilities(&endpoint, caps);
+                        }
+                    }
+                    out.push(answer);
+                }
+                None => out.push(Err(missing_from_batch(*id))),
             }
         }
         Ok(out)
@@ -1158,10 +1212,10 @@ impl Rpc {
         &self,
         body: &RawValue,
         required: &[&'static str],
-    ) -> Result<Vec<Response>> {
+    ) -> Result<(String, Vec<Response>)> {
         let (endpoint, packet) = self.post_raw_throttled("batch", body, required).await?;
         match packet {
-            ResponsePacket::Batch(responses) => Ok(responses),
+            ResponsePacket::Batch(responses) => Ok((endpoint, responses)),
             // A single answer to a batch: an *error* is the node's refusal
             // (a throttled batch is answered with one error object) —
             // surfaced as such, never as a decode fault; a single *success*
@@ -1276,6 +1330,10 @@ impl Rpc {
             }
             Err(fault) => {
                 self.pool.record_failure(index, now_ms());
+                let caps = Self::required_capabilities(method);
+                if fault.is_method_not_found() && !caps.is_empty() {
+                    self.retire_capabilities(endpoint, caps);
+                }
                 Err(fault)
             }
         }
@@ -1490,6 +1548,16 @@ impl Rpc {
 
     pub async fn balance_at(&self, addr: Address, block: u64) -> Result<U256> {
         self.call(crate::ETH_GET_BALANCE, (addr, U64::from(block)))
+            .await
+    }
+
+    /// The native balance at the node's latest state. The block parameter `0`
+    /// names the fork's genesis-era block, not "latest" (the same measured
+    /// rule as [`Self::storage_at_latest`]): a funding check read at `0` saw
+    /// the source's empty genesis balance and clobbered the writer's balance
+    /// on every pass.
+    pub async fn balance_latest(&self, addr: Address) -> Result<U256> {
+        self.call(crate::ETH_GET_BALANCE, (addr, BlockNumberOrTag::Latest))
             .await
     }
 
@@ -1831,7 +1899,9 @@ impl Rpc {
                 if receipt.status() {
                     return Ok(receipt);
                 }
-                return Err(Error::WriteReverted { tx: hash.to_string() });
+                return Err(Error::WriteReverted {
+                    tx: hash.to_string(),
+                });
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(Error::WriteUnmined {
@@ -2204,6 +2274,51 @@ mod tests {
         assert_eq!(value.to::<u64>(), 42);
         first.join().expect("the refusing server exits");
         second.join().expect("the live server exits");
+    }
+
+    /// A capability claim is retired by the endpoint's own answer: a
+    /// method-gated call that answers `-32601` stops being admitted to that
+    /// endpoint, while unqualified calls keep using it. This is the live
+    /// HyperEVM follow's failure class (the official RPC serves
+    /// `eth_getSystemTxsByBlockNumber` cold and refuses it under load).
+    #[tokio::test]
+    async fn a_refused_capability_is_retired_by_the_endpoints_own_answer() {
+        let (liar, liar_handle) = serve_once(
+            r#"{"id":1,"jsonrpc":"2.0","error":{"code":-32601,"message":"method not found"}}"#,
+        );
+        let (honest, honest_handle) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":[]}"#);
+        let mut first = crate::pool::EndpointSpec::url(liar);
+        first.roles.insert("system_txs".into());
+        let mut second = crate::pool::EndpointSpec::url(honest);
+        second.roles.insert("system_txs".into());
+        let pool = EndpointPool::from_specs([first, second], Scheme::Http, PoolPolicy::default())
+            .expect("a valid pool");
+        let rpc = Rpc::with_pool(pool, Duration::from_secs(2)).expect("a valid client");
+
+        let error = rpc
+            .call_endpoint::<Vec<Transaction>>(0, "eth_getSystemTxsByBlockNumber", (U64::from(1),))
+            .await
+            .expect_err("the endpoint refuses the gated method");
+        assert!(error.is_method_not_found(), "{error}");
+
+        let snapshot = rpc.pool().snapshot();
+        assert_eq!(
+            snapshot[0].retired_roles,
+            vec!["system_txs".to_string()],
+            "the refusal retires the claim"
+        );
+        assert_eq!(
+            rpc.pool().admit(u64::MAX, &["system_txs"]).indices,
+            vec![1],
+            "the gated method moves to the member that answers it"
+        );
+        assert!(
+            rpc.pool().admit(u64::MAX, &[]).indices.contains(&0),
+            "unqualified calls still use the endpoint"
+        );
+
+        liar_handle.join().expect("the liar exits");
+        honest_handle.join().expect("the honest server exits");
     }
 
     /// One HTTP request's answer, on a std thread: the smallest server that

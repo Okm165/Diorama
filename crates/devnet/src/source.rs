@@ -357,6 +357,24 @@ fn role_probe(role: &str, head: u64) -> Option<(Capability, &'static str, serde_
     Some((capability, method, params))
 }
 
+/// The one log line a disproved capability claim earns: the endpoint, the
+/// role, and whether the pool retired it for this process.
+fn note_absent(
+    what: &str,
+    spec: &diorama_anvil::EndpointSpec,
+    capability: Capability,
+    retired: bool,
+) {
+    tracing::warn!(
+        source = what,
+        url = %spec.url,
+        capability = capability.name(),
+        retired,
+        "a declared capability is not served by this endpoint - the claim and the provider \
+         disagree; the claim is retired for this process"
+    );
+}
+
 /// One endpoint's claims, probed: the capabilities it proved, with every
 /// disagreement or unknown answer appended to `gaps`.
 async fn audit_endpoint(
@@ -391,13 +409,14 @@ async fn audit_endpoint(
         ) {
             Probe::Present => confirmed.push(capability),
             Probe::Absent => {
-                tracing::warn!(
-                    source = what,
-                    url = %spec.url,
-                    capability = capability.name(),
-                    "a declared capability is not served by this endpoint - the claim and the \
-                     provider disagree; re-probe with scripts/probe-endpoint.sh"
-                );
+                // The disagreement is a fact about this endpoint, not a note
+                // about the audit: retire the claim so the pool stops
+                // rotating the gated method onto an endpoint that answers
+                // `-32601` for it. A claim that is not retired (declared under
+                // another spelling, or the pool is single-endpoint) stays a
+                // gap, exactly as before.
+                let retired = rpc.retire_capability(&spec.url, role);
+                note_absent(what, spec, capability, retired);
                 gaps.push(format!("{}: {} absent", spec.url, capability.name()));
             }
             Probe::Unknown(error) => {

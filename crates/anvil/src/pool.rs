@@ -192,6 +192,12 @@ struct Health {
     attempts: AtomicU64,
     faults: AtomicU64,
     last_ok_ms: AtomicU64,
+    /// Declared roles this endpoint has been measured **not** to serve, as a
+    /// bitmask over its own `EndpointSpec::roles` (the set's iteration order
+    /// is its `Ord` order, so bit `n` is stable for the process). A
+    /// capability claim is a nominal fact; an endpoint that answers `-32601`
+    /// for the method it gated has retired that claim for this process.
+    retired: AtomicU64,
 }
 
 impl Health {
@@ -202,6 +208,7 @@ impl Health {
             attempts: AtomicU64::new(0),
             faults: AtomicU64::new(0),
             last_ok_ms: AtomicU64::new(0),
+            retired: AtomicU64::new(0),
         }
     }
 }
@@ -213,6 +220,9 @@ pub struct EndpointSnapshot {
     pub url: String,
     pub chain_id: Option<u64>,
     pub roles: Vec<String>,
+    /// Declared roles retired at runtime because the endpoint refused the
+    /// method they gate (see [`EndpointPool::retire_capability`]).
+    pub retired_roles: Vec<String>,
     pub weight: u32,
     pub max_log_range: u64,
     pub down_until_ms: u64,
@@ -463,13 +473,79 @@ impl EndpointPool {
         self.seed
     }
 
+    /// Whether endpoint `index` may serve a call requiring `required`: it
+    /// declared the roles **and** has not retired them at runtime.
+    fn serves(&self, index: usize, required: &[&str]) -> bool {
+        let spec = &self.endpoints[index];
+        if !spec.serves(required) {
+            return false;
+        }
+        let retired = self.health[index].retired.load(Ordering::Relaxed);
+        retired == 0
+            || required.iter().all(|role| {
+                spec.roles
+                    .iter()
+                    .position(|declared| declared == role)
+                    // `spec.serves` already proved membership; the fallback
+                    // keeps the check total if the two ever drift. A role set
+                    // wider than the mask's 64 bits is never retireable and
+                    // stays intact.
+                    .is_none_or(|bit| role_bit(bit).is_none_or(|flag| retired & flag == 0))
+            })
+    }
+
+    /// Retire one **declared** role of the endpoint at `url` for the process
+    /// lifetime, because the endpoint answered `-32601` for the method that
+    /// role gates.
+    ///
+    /// A capability claim is only as good as the last answer: the live
+    /// HyperEVM pool's official endpoint serves `eth_getSystemTxsByBlockNumber`
+    /// on a cold probe and intermittently answers `-32601` under load
+    /// (measured 2026-11-15: 65 of 96 follow passes failed on it). The audit
+    /// measured the disagreement but only warned, so the pool kept rotating
+    /// the gated method onto the liar. Retirement is fail-safe: the endpoint
+    /// stays in the pool for every unqualified call, and only the gated
+    /// method moves to a member that answers it.
+    ///
+    /// `true` means this call made the transition (the caller logs once).
+    pub fn retire_capability(&self, url: &str, role: &str) -> bool {
+        let Some((index, spec)) = self
+            .endpoints
+            .iter()
+            .enumerate()
+            .find(|(_, spec)| spec.url == url)
+        else {
+            return false;
+        };
+        let Some(bit) = spec.roles.iter().position(|declared| declared == role) else {
+            return false;
+        };
+        let Some(mask) = role_bit(bit) else {
+            // More than 64 declared roles on one endpoint: the claim is not
+            // representable, so it is left intact rather than retired by a
+            // colliding bit.
+            return false;
+        };
+        self.health[index].retired.fetch_or(mask, Ordering::Relaxed) & mask == 0
+    }
+
+    /// [`Self::retire_capability`] for a method's whole requirement set.
+    /// Returns the roles this call retired (empty on a repeat).
+    pub fn retire_capabilities(&self, url: &str, roles: &[&str]) -> Vec<String> {
+        roles
+            .iter()
+            .filter(|role| self.retire_capability(url, role))
+            .map(|role| (*role).to_string())
+            .collect()
+    }
+
     /// Admission for one round: healthy endpoints that serve `roles`, in
     /// random order. Cooling endpoints are omitted; if none is healthy the
     /// caller gets the earliest retry instead of the whole cooling set.
     pub fn admit(&self, now_ms: u64, roles: &[&str]) -> Admission {
         let len = self.endpoints.len();
         let mut indices: Vec<usize> = (0..len)
-            .filter(|index| self.endpoints[*index].serves(roles))
+            .filter(|index| self.serves(*index, roles))
             .collect();
         weighted_order(
             &mut indices,
@@ -512,7 +588,7 @@ impl EndpointPool {
             return None;
         }
         let mut candidates: Vec<usize> = (0..self.endpoints.len())
-            .filter(|index| self.endpoints[*index].serves(roles))
+            .filter(|index| self.serves(*index, roles))
             .collect();
         if candidates.is_empty() {
             return None;
@@ -562,8 +638,8 @@ impl EndpointPool {
     /// healthy again (0 when one is healthy now).
     pub fn next_ready_ms(&self, now_ms: u64, roles: &[&str]) -> u64 {
         let mut next = u64::MAX;
-        for (index, spec) in self.endpoints.iter().enumerate() {
-            if !spec.serves(roles) {
+        for index in 0..self.endpoints.len() {
+            if !self.serves(index, roles) {
                 continue;
             }
             let down = self.health[index].down_until_ms.load(Ordering::Relaxed);
@@ -745,6 +821,7 @@ impl EndpointPool {
                 url: self.endpoints[index].url.clone(),
                 chain_id: self.endpoints[index].chain_id,
                 roles: self.endpoints[index].roles.iter().cloned().collect(),
+                retired_roles: retired_roles(self.endpoints[index].roles.iter(), health),
                 weight: self.endpoints[index].weight,
                 max_log_range: self.endpoints[index].max_log_range,
                 down_until_ms: health.down_until_ms.load(Ordering::Relaxed),
@@ -755,6 +832,26 @@ impl EndpointPool {
             })
             .collect()
     }
+}
+
+/// The bit one declared role occupies in [`Health::retired`].
+fn role_bit(bit: usize) -> Option<u64> {
+    u32::try_from(bit)
+        .ok()
+        .and_then(|bit| 1u64.checked_shl(bit))
+}
+
+/// The declared roles of one endpoint that were retired at runtime.
+fn retired_roles<'a>(roles: impl Iterator<Item = &'a String>, health: &Health) -> Vec<String> {
+    let mask = health.retired.load(Ordering::Relaxed);
+    if mask == 0 {
+        return Vec::new();
+    }
+    roles
+        .enumerate()
+        .filter(|(bit, _)| role_bit(*bit).is_some_and(|flag| mask & flag != 0))
+        .map(|(_, role)| role.clone())
+        .collect()
 }
 
 /// The current wall clock in milliseconds. The pool's health is expressed in
@@ -1064,6 +1161,76 @@ mod tests {
         assert_eq!(admission.indices, vec![0]);
         assert_eq!(pool.chain_id(0), Some(1));
         assert_eq!(pool.snapshot()[0].roles, vec!["archive".to_string()]);
+    }
+
+    /// A declared capability is only as good as the last answer. An endpoint
+    /// that answers `-32601` for the method it gated has retired that claim:
+    /// the gated call stops being admitted to it, every unqualified call still
+    /// is, and a repeat retirement is not a second transition.
+    #[test]
+    fn a_refused_capability_is_retired_from_admission() {
+        let mut liar = EndpointSpec::url("http://liar");
+        liar.roles.insert("system_txs".into());
+        liar.roles.insert("batch".into());
+        let mut honest = EndpointSpec::url("http://honest");
+        honest.roles.insert("system_txs".into());
+        let pool =
+            EndpointPool::from_specs([liar, honest], Scheme::Http, PoolPolicy::default()).unwrap();
+
+        assert_eq!(pool.admit(0, &["system_txs"]).indices.len(), 2);
+        assert!(pool.retire_capability("http://liar", "system_txs"));
+        assert!(
+            !pool.retire_capability("http://liar", "system_txs"),
+            "the transition is reported once"
+        );
+        assert!(
+            !pool.retire_capability("http://liar", "traces"),
+            "a role the endpoint never declared cannot be retired"
+        );
+        assert!(
+            !pool.retire_capability("http://unknown", "system_txs"),
+            "an unknown URL is not an endpoint"
+        );
+
+        assert_eq!(
+            pool.admit(0, &["system_txs"]).indices,
+            vec![1],
+            "the gated method moves to the member that answers it"
+        );
+        assert_eq!(
+            pool.admit(0, &["batch"]).indices,
+            vec![0],
+            "an unrelated capability of the same endpoint is untouched"
+        );
+        let all = pool.admit(0, &[]);
+        assert_eq!(
+            all.indices.len(),
+            2,
+            "an unqualified call still admits the liar"
+        );
+        assert_eq!(
+            pool.snapshot()[0].retired_roles,
+            vec!["system_txs".to_string()]
+        );
+    }
+
+    #[test]
+    fn retiring_every_member_fails_closed_for_the_gated_role_only() {
+        let mut first = EndpointSpec::url("http://a");
+        first.roles.insert("system_txs".into());
+        let mut second = EndpointSpec::url("http://b");
+        second.roles.insert("system_txs".into());
+        let pool =
+            EndpointPool::from_specs([first, second], Scheme::Http, PoolPolicy::default()).unwrap();
+        assert!(pool.retire_capability("http://a", "system_txs"));
+        assert!(pool.retire_capability("http://b", "system_txs"));
+        let admission = pool.admit(0, &["system_txs"]);
+        assert!(admission.indices.is_empty());
+        assert_eq!(
+            admission.retry_after_ms, 0,
+            "a retired role is absent, not cooling: waiting cannot change it"
+        );
+        assert_eq!(pool.admit(0, &[]).indices.len(), 2);
     }
 
     #[test]
