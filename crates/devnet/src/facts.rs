@@ -99,7 +99,9 @@ pub enum Fact {
     },
     /// The top-up loop delivered payloads to reth (mainnet-only).
     TopUpDelivered { delivered: usize },
-    /// The faucet wrote a key and marked it devnet-owned.
+    /// A scenario control wrote a devnet-owned value at `address`: the
+    /// faucet's deal, or an on-chain oracle's answer (`/admin/feed`). The
+    /// wire shape stays `deal_applied` — consumers key on the address.
     DealApplied {
         chain: &'static str,
         address: Address,

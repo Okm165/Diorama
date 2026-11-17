@@ -13,6 +13,7 @@ use crate::admin::{
 use crate::deal::{DealOutcome, DealRequest};
 use crate::engine::Engine;
 use crate::facts::Fact;
+use crate::feeds::{FeedControlOutcome, FeedControlRequest};
 use crate::probes::ProbeOutcome;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -86,6 +87,7 @@ pub fn shared_routes<E: Engine>() -> Router<Arc<E>> {
         .route("/admin/rewind", post(admin_rewind::<E>))
         .route("/admin/shadow", post(admin_shadow::<E>))
         .route("/admin/deal", post(admin_deal::<E>))
+        .route("/admin/feed", post(admin_feed::<E>))
         .route("/admin/epoch", post(admin_epoch::<E>))
         .route("/admin/probes", post(admin_probes::<E>))
 }
@@ -155,6 +157,24 @@ async fn admin_deal<E: Engine>(
         ctx.plane().facts.publish(Fact::DealApplied {
             chain: ctx.label(),
             address: req.to,
+        });
+    }
+    Ok(Json(outcome))
+}
+
+/// `/admin/feed` — the on-chain oracle control: crash/rally/set a
+/// MirrorPriceFeed's answer with a fresh timestamp and a strictly increasing
+/// round. Silent, journaled, marked devnet-owned; the outcome carries the
+/// before/after answers so the caller can log the scenario.
+async fn admin_feed<E: Engine>(
+    State(ctx): State<Arc<E>>,
+    Json(req): Json<FeedControlRequest>,
+) -> crate::Result<Json<FeedControlOutcome>, E::Error> {
+    let outcome = ctx.admin().feed_control(&req).await?;
+    if outcome.ok {
+        ctx.plane().facts.publish(Fact::DealApplied {
+            chain: ctx.label(),
+            address: req.feed,
         });
     }
     Ok(Json(outcome))

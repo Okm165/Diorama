@@ -7,6 +7,7 @@
 //! a profile runs one devnet chain, so the venue profile reuses it for V).
 use crate::deal;
 use crate::error::{Error, Result};
+use crate::feeds;
 use crate::journal::JournalSink;
 use crate::metrics::Registry;
 use crate::plane::{Plane, ReapplyRange};
@@ -40,6 +41,18 @@ impl AdminSurface<'_> {
     pub async fn deal(&self, req: &deal::DealRequest) -> Result<deal::DealOutcome> {
         let journal = self.journal_sink().await?;
         deal::deal(self, journal, req).await
+    }
+
+    /// `POST /admin/feed` — the on-chain oracle control (the spot-plane twin
+    /// of the venue sim's `/control/crash`): one scenario answer on a
+    /// MirrorPriceFeed, fresh timestamp, strictly increasing round, journaled
+    /// and marked devnet-owned.
+    pub async fn feed_control(
+        &self,
+        req: &feeds::FeedControlRequest,
+    ) -> Result<feeds::FeedControlOutcome> {
+        let journal = self.journal_sink().await?;
+        feeds::feed_control(self, journal, req).await
     }
 
     /// Force the shadow scan up to the chain head — the hand-back's pre-step.

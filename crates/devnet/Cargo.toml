@@ -19,6 +19,9 @@ alloy-rpc-types-eth = { workspace = true }
 # serve) and the error contract the mirrors implement.
 axum = { workspace = true }
 futures-util = { workspace = true }
+# The feed control's percentage move is exact decimal arithmetic: an answer
+# is an integer in the feed's own decimals, and a binary float would drift it.
+rust_decimal = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

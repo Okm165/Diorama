@@ -77,6 +77,12 @@ pub enum Error {
     #[error("invalid shadow request: {reason}")]
     InvalidShadow { reason: &'static str },
 
+    /// A feed-control write did not land. A refused write must surface, never
+    /// silently pass: an oracle the scenario did not own would let the shadow
+    /// scanner overwrite the drill mid-flight.
+    #[error("feed control: {reason}")]
+    FeedControlRefused { reason: String },
+
     /// A devnet block's shadow scan could not trace some of its txs. The scan
     /// stops before that block (the watermark must not advance past it): its
     /// writes would stay unmarked, and the next parent diff would overwrite
