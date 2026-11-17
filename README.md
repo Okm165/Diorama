@@ -87,11 +87,25 @@ JWT). Never put a key in a tracked manifest, a tracked config, or `wiring.env`
 `config/defaults.toml` → `config/instances/<instance>/instance.toml` →
 `specialization.toml`, with `${VAR}` references expanded from the pod's env
 (the `wiring.env` ConfigMap; a key also present in the instance Secret
-resolves from the Secret). Validate the result without a cluster:
+resolves from the Secret). `defaults.toml` carries the workspace conventions
+every deployment shares — the service ports, the journal's home under the
+state root, the engine's `@anvil` target, the endpoint-pool policy and
+cadences — so `instance.toml` states only what makes one deployment
+different (identity, chain wiring, state roots, the measured deltas; a fresh
+instance's file is a dozen lines) and `specialization.toml` carries the
+product's scope (endpoint groups, watchlists, markets, the fork pin).
+Validate the result without a cluster:
 
 ```sh
 make config-check
 ```
+
+`scripts/config-lint.sh` also gates the porting surface: the audit
+(`scripts/cluster-config-audit.txt`) records every key the live cluster's
+ConfigMaps carried, classed live-read (the build must carry it) or live-dead
+(the build must not grow it back), the two mirrors' instance files stay
+TOML-shape symmetric, and every overlay builds from the tracked templates
+alone.
 
 ## Porting to another host
 
