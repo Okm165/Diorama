@@ -1,11 +1,18 @@
 # The Venue Mirror instance overlay: the venue base + the instance ConfigMap +
-# the harness NodePorts. The diorama-mainnet overlay is untouched: the two
-# mirrors share the cluster and the diorama-retain StorageClass, not a
-# namespace.
+# the wiring ConfigMap + the harness services. The diorama-mainnet overlay is
+# untouched: the two mirrors share the cluster and the diorama-retain
+# StorageClass, not a namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: diorama-venue
+
+# The deployment wiring (EVM_FORK_URL, the market plane, the service DNS):
+# generated from `wiring.env`, the gitignored copy of `wiring.example.env`.
+# `make config-bootstrap` creates it; `make apply` does not run without it.
+configMapGenerator:
+  - name: diorama-config
+    envs: [wiring.env]
 
 resources:
   - namespace.yaml

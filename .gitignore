@@ -10,6 +10,10 @@
 # `config/instances/*/specialization.example.toml`; the live file is deployment data.
 config/instances/*/specialization.toml
 
+# Per-deployment cluster wiring (fork source, mirror endpoints, service DNS).
+# The tracked template is `k8s/overlays/*/wiring.example.env`.
+k8s/overlays/*/wiring.env
+
 # Never commit secret material (JWT is created by scripts/gen-secret.sh)
 k8s/**/secret-*.yaml
 

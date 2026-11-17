@@ -41,6 +41,18 @@ capabilities = ["system_txs", "batch"]
 url = "https://hyperliquid-json-rpc.stakely.io"
 capabilities = ["system_txs", "batch"]
 
+[[endpoints.evm.entries]]
+url = "https://hyperliquid-rpc.publicnode.com"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.evm.entries]]
+url = "https://hyperliquid.rpc.blxrbdn.com"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.evm.entries]]
+url = "https://hyperliquid.api.pocket.network"
+capabilities = ["system_txs", "batch"]
+
 [endpoints.hyperliquid_info]
 # The market REST plane. A keyed mirror (e.g. ZAN: `https://api.zan.top/node/
 # v1/hyperliquid/mainnet/<KEY>`) slots in as the first entry with
@@ -56,9 +68,15 @@ roles = ["market_ws"]
 http = ["${ENGINE_ADMIN_URL}"]
 
 # The explicit fork base. A configured pin preserves the deployment epoch
-# across restarts; omit it to resolve a fresh pin at start-up.
+# across restarts; omit it (or comment the line out) to resolve a fresh pin
+# at start-up — that is what a **fresh** deployment does (a new machine has no
+# persisted state to preserve, and a pin a state file does not agree with
+# trips the engine's epoch-rollback guard, fail-closed).
+# The live deployment pins its base in its own specialization.toml and pairs
+# it with an archive-deep fork source in k8s/overlays/diorama-venue/wiring.env
+# (EVM_FORK_URL) — the official endpoint serves `latest` only.
 [chains.venue]
-fork_pin = 50748852
+# fork_pin = 51273700
 
 
 [services.engine]
@@ -100,7 +118,12 @@ contract = "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
 slots = ["0x3e54e5ae16d7bdb0bade122edbe34ab784fcd78c6d535e29aff3bc7d357e7586"]
 
 [services.venue_sim]
-markets = ["BTC", "ETH", "HYPE", "SOL"]
+# The market list the sim quotes and prices accounts from: the core perps plus
+# every HIP-3 builder-dex market the deployment needs. A `dex:coin` name makes
+# the poller fetch that dex's own meta (`metaAndAssetCtxs` with a `dex`
+# parameter) and fold it into the account-plane view — a market missing from
+# the served meta is unpriceable, so a listed market must exist upstream.
+markets = ["BTC", "ETH", "HYPE", "SOL", "xyz:SP500", "xyz:XYZ100", "xyz:GOLD", "xyz:SILVER", "xyz:COPPER", "xyz:BRENTOIL", "xyz:CL", "xyz:NATGAS", "xyz:NVDA", "xyz:AAPL", "xyz:TSLA", "xyz:GOOGL", "xyz:META", "xyz:MSFT", "xyz:AMZN", "xyz:AMD", "xyz:MU", "xyz:COIN", "xyz:EUR", "xyz:SOXL", "xyz:PLTR", "xyz:ORCL", "xyz:NFLX", "xyz:COST", "xyz:LLY", "xyz:TSM", "xyz:INTC", "xyz:ARM", "xyz:ASML", "xyz:HOOD", "xyz:MSTR", "xyz:BABA", "xyz:GME", "xyz:PLATINUM", "xyz:PALLADIUM", "xyz:URNM", "xyz:XLE", "xyz:TLT", "xyz:JPY", "xyz:KR200"]
 
 [[watchlist]]
 address = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"

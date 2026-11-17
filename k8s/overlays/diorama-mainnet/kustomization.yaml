@@ -1,11 +1,17 @@
 # The Mainnet Mirror instance overlay: the mirror base + the instance
-# ConfigMap + the harness NodePorts. The diorama-venue overlay is untouched:
-# the two mirrors share the cluster and the diorama-retain StorageClass, not a
-# namespace.
+# ConfigMap + the wiring ConfigMap + the harness services. The diorama-venue
+# overlay is untouched: the two mirrors share the cluster and the
+# diorama-retain StorageClass, not a namespace.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: diorama-mainnet
+
+# The deployment wiring (reth, the beacon, the engine API): generated from
+# `wiring.env`, the gitignored copy of `wiring.example.env`.
+configMapGenerator:
+  - name: diorama-config
+    envs: [wiring.env]
 
 resources:
   - namespace.yaml

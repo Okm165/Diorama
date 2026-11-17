@@ -24,9 +24,9 @@ K="${KUBECTL:-kubectl}"
 NS_MAINNET="${NS_MAINNET:-diorama-mainnet}"
 NS_VENUE="${NS_VENUE:-diorama-venue}"
 NS_CCTP="${NS_CCTP:-diorama-cctp}"
-NS_CONSUMER="${NS_CONSUMER:-consumer}"
-PGUSER="${PGUSER:-consumer}"
-PGDATABASE="${PGDATABASE:-consumer}"
+NS_CONSUMER="${NS_CONSUMER:-daloc}"
+PGUSER="${PGUSER:-daloc}"
+PGDATABASE="${PGDATABASE:-daloc}"
 CONSUMER_REGISTRY_PATH="${CONSUMER_REGISTRY_PATH:-/etc/consumer/chain-registry.env}"
 # Conservative decision bounds. Override per deployment only with a recorded
 # reason: these are the values the research conclusions rely on.

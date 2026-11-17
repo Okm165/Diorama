@@ -9,9 +9,14 @@ kind: Kustomization
 
 namespace: diorama-cctp
 
+# The bridge's chain wiring (T_RPC_URL, TARGET_RPC_URL, CCTP_STATE_DIR):
+# generated from `wiring.env`, the gitignored copy of `wiring.example.env`.
+configMapGenerator:
+  - name: cctp-config
+    envs: [wiring.env]
+
 resources:
   - namespace.yaml
-  - wiring.yaml
   - ../../base/cctp-bridge
   - ../../../config/instances/diorama-cctp
   - nodeports.yaml
