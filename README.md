@@ -13,10 +13,13 @@ run on, and the CCTP bridge between them:
 
 Every deployment value lives in one gitignored file per instance — the
 specialization — hardcoded, mounted into the pods as a file; everything
-tracked is a template that boots unchanged on another machine. The three
-instances are structurally identical — the same Makefile surface, the same
-overlay shape — and a second deployment on another host is a clone plus one
-edited specialization (see "Porting to another host").
+tracked is a template that boots unchanged on another machine, with two
+cluster facts named in one file each (the StorageClass and the image
+registry — see "Porting to another host"). The three instances are
+structurally identical — the same Makefile surface, the same overlay shape —
+and a second deployment on another host is a clone plus one edited
+specialization; **moving this stack**, data and all, is the runbook under
+"Moving the stack to another cluster".
 
 ## Boot a stack (from a fresh clone)
 
@@ -102,12 +105,16 @@ make config-check
 TOML layer, no config env or Secret in the manifests (configuration is the
 mounted file; the only Secret is the generated `reth-jwt`, file-mounted), the
 kustomize build fails loudly when a specialization file is absent, the two
-mirrors stay structurally and TOML-shape symmetric, and the audit
+mirrors stay structurally and TOML-shape symmetric, no machine literal
+survives in a tracked manifest, the audit
 (`scripts/cluster-config-audit.txt`) records every key the live pods resolve
 — live-read keys must exist in the merged config, live-dead keys must not
-grow back.
+grow back — and the two facts a move changes are single-valued: every rendered
+claim names the one StorageClass object the build ships (no second literal, no
+class the tree does not create) and every repo image is mapped in the one
+registry component.
 
-## Porting to another host
+## Porting to another host (a new deployment)
 
 ```sh
 git clone <this repo> && cd Diorama
@@ -127,43 +134,229 @@ documented in its template):
   the mainnet's in-cluster wiring;
 - the bridge's `endpoints.*`, `state_dir` and `relay_key`.
 
-The claim class (`mirror-retain`, or the bridge's `diorama-retain`) and the
-lighthouse checkpoint-sync URL are manifest literals: k8s-native facts, edited
-in the manifests on an empty cluster only (a bound claim's class does not
-rebind). What a clone cannot carry, and where the Makefile owns it instead:
-images (`make build`), chain state (`make snapshot`), keys (`make secrets` —
-the JWT is generated; the relay wallet is the specialization's).
+Two cluster facts are deliberately NOT in the specialization — they are
+Kubernetes objects, and both are create-time facts on an empty cluster:
 
-## Transition notes (the current host)
+- **the storage class** — `k8s/base/shared/storageclass.yaml`'s
+  `metadata.name` + `provisioner`. Every claim of every instance takes that
+  name through `k8s/components/storage`, so renaming the class in that one file
+  re-points all eight claims (no claim carries a second literal; the rendered
+  build names one class object and nothing else). The default is
+  `mirror-retain` on `rancher.io/local-path` (k3s' node-local provisioner). A
+  cluster with its own storage edits the two lines: `ebs.csi.aws.com`,
+  `local.csi.azure.com`, `standard` (kind), or Rancher's local-path chart on
+  any distro (which keeps the default). A bound claim's class never rebinds and
+  a StorageClass's provisioner cannot be changed, so this is an empty-cluster
+  edit — on a host that already has the class, rename it (both fields).
+- **the repo images' registry path** — `k8s/components/registry`, four
+  `newName`s, one per image this repo builds (the build *tag* stays in the
+  manifest beside the image; the component carries no version). The default
+  `localhost/…` is k3s' node-store prefix: the images `make build` imports, no
+  registry contacted. A registry host edits the four names and runs
+  `make registry-push`, which tags and pushes exactly those refs.
 
-The specialization replaces the wiring/Secret env plumbing. The one-time
-conversion for the live host — the live values are exactly what each
-specialization.toml must hardcode:
+The lighthouse checkpoint-sync URL is the one remaining third-party literal in
+a manifest (a provider choice, not a cluster fact; the known-good alternative
+is in `OPERATIONS`, "sync stuck"). The Makefile's machine plumbing
+(`KUBECTL`, `CTR`, `SUDO`, `RUNTIME`, `K3S_STORAGE`, all documented at the top
+of the Makefile) overrides the k3s defaults. What a clone cannot carry, and
+where the Makefile owns it instead: images (`make build`), chain state
+(`make snapshot`), keys (`make secrets` — the JWT is generated; the relay
+wallet is the specialization's).
 
-1. **Read the live values, write the specializations.** For each instance:
-   the endpoint groups from the wiring ConfigMap
-   (`kubectl -n <ns> get cm <wiring-map> -o jsonpath='{.data}'`), the fork
-   pin from the mounted specialization (`kubectl -n <ns> exec deploy/anvil-v
-   -- cat /state/pin`), the state roots (`/state`), the JWT path
-   (`/secrets/jwt.hex`), and — for the bridge — the relay wallet from the
-   legacy Secret (`kubectl -n diorama-cctp get secret cctp-relay-key -o
-   jsonpath='{.data.relay-key}' | base64 -d`). Write them into
-   `config/instances/<instance>/specialization.toml` as literals; then
-   `make config-check` must print `ok` for all three with an empty
-   environment (the files are self-sustained).
-2. **Apply once, per instance.** `make apply INSTANCE=<name>` — the wiring
-   ConfigMap and the `*-secrets` Secret objects leave the cluster, and every
-   pod re-mounts the specialization file. The resolved values are identical
-   (proven by `cargo run -p diorama-config --example effective` before and
-   after), so the engines resume from their persisted cursors; the anvil pods
-   read their fork source from the mounted file.
-3. **The mainnet's two pre-bound claims.** Their PV `volumeName` left the
-   tracked manifests long ago (a fresh host must bind its own volumes), and
-   an apply refuses to patch the immutable field on the live claims.
-   Reconcile once with
-   `kubectl apply -k k8s/overlays/diorama-mainnet --server-side` (server
-   dry-run verified: the only Invalid objects are the two bound claims, whose
-   spec is unchanged by this work).
+## Moving the stack to another cluster
+
+This is the audited runbook (measured 2026-11-17: three instances, eight
+claims). The source host is a single-node k3s; the target may be anything. Two
+facts decide everything: which volume content is irreproducible, and which
+cluster facts are create-time only.
+
+### The eight claims: re-derive or copy
+
+`request` is the manifest's claim size; `data` is what the live volume holds.
+The whole **must-copy set is ~300 MiB** — the two big claims are public chain
+data that any host can re-download.
+
+| claim | request | data | written by | its content | move = |
+| --- | --- | --- | --- | --- | --- |
+| `diorama-mainnet/reth-data` | 400Gi | 293Gi | `reth` Deployment, `reth-snapshot` Job | public mainnet execution data, pruned to the mirror's window (`reth.toml`: 10k state, 20k bodies/receipts) | **re-derive**: `make snapshot INSTANCE=diorama-mainnet` — 165 GB compressed, `.part`-resumable, measured in hours |
+| `diorama-mainnet/lighthouse-data` | 1500Gi | 329Gi | `lighthouse` Deployment, `lighthouse-prune-blobs` Job | public consensus data: beacon DB, the 18-day column window, retained payloads | **re-derive**: checkpoint sync reaches head in minutes, the backfill takes hours and peaks ~900 Gi before the first prune. Copy 329Gi only to skip the backfill |
+| `diorama-mainnet/anvil-t-state` | 40Gi | 663Mi | `anvil-t` (init resolves the pin, anvil dumps `--state` every 300 s) | `/state/pin`, `anvil-state.json` (27 Mi), `.foundry` fork cache (69 Mi), five pre-epoch backups | **copy** (~100 Mi w/o backups): the pin-epoch's deployed contracts + T's writes. Re-derive = a fresh pin + the full protocol re-deploy (proven path, today's bootstrap) |
+| `diorama-mainnet/engine-state` | 10Gi | 7.5Mi | mainnet engine | `cursor.json`, `journal/` (rewind), `shadow.json` (the COW record of T's writes), `drift.jsonl` | **copy** (7.5 Mi): exactness for ~0 cost. Re-derive = re-follow from the pin + re-scan T's own blocks into the shadow registry (the rewind window is lost) |
+| `diorama-venue/anvil-v-state` | 20Gi | 1.4Gi | `anvil-v` | `/state/pin` (51273700), `anvil-state.json` (257 Mi), fork cache, seven pre-epoch backups | **copy** (~260 Mi w/o backups): V's epoch state. Re-derive = a fresh pin; the venue's writes are gone |
+| `diorama-venue/engine-state` | 10Gi | 5.8Mi | venue engine | `cursor.json`, `shadow.json` (5.8 Mi — the venue's write record), `drift.jsonl`; the journal is empty | **copy** (5.8 Mi): without it a same-pin re-fork cannot restore the venue's writes (ADR 0003) and the write-backs are only recoverable from a re-scan |
+| `diorama-venue/venue-sim-state` | 5Gi | 120Ki | `venue-sim` | `sim.json` (the market/account scenario), `feed.json`, dated backups | **copy** (120Ki). Re-derive = `/control/reset` blanks the account plane and the sim re-seeds from its config |
+| `diorama-cctp/cctp-state` | 5Gi | 760Ki | `cctp-bridge` | `cctp.json` (watcher cursors + in-flight ledger), `retired/` | **copy** (760Ki). Re-derive = the watcher re-scans both chains; a burn in flight at the cut needs re-attesting |
+
+Total claimed: 1990 GiB. Total live data: ~624 GiB. `k3s`' local-path
+provisioner does not enforce claim sizes (the live lighthouse PV is 500Gi under
+a 1500Gi request, and the resize never happened) — on a CSI provisioner they
+are real reservations, so lower the two mirror claims to the disk you actually
+plan (400Gi + 400Gi is honest for a copy-only move; 1500Gi is the CL backfill
+peak).
+
+Outside this tree, the protocol side's `daloc/daloc-deployed-env` (864Ki) is
+**re-seeded, not copied**: `k8s-daloc/scripts/post-deploy.sh` rebuilds it and
+rolls its consumers (proven today). Its *input* is not the chain: it merges
+`daloc-monorepo/contracts/deployments/*.env`, which are host-local and
+gitignored exactly like the specializations — carry those five `.env` files (and their
+`.json`) with the copy set, or re-run the contract deploy (the records are its output).
+`daloc/daloc-postgres-data-v2` (3.3Gi) is the platform's own state — copy it
+with the same procedure or re-index; it is not Diorama's.
+
+### Ordered steps
+
+0. **Preflight the target.** The pod requests sum to 18.9 GiB (~0.55 CPU),
+   so ≥32 GiB allocatable covers the steady state — but the measured peaks are
+   higher (reth's 24 GiB limit, the venue anvil's 40 GiB fork-materialization
+   ceiling; the source host has 94 GiB), so a 64 GiB node keeps today's
+   headroom. ≥2 TB of volume space for the requested claims (or the lowered
+   sizes above), ports 9000/tcp and 9000/udp free (lighthouse's P2P
+   `hostPort` — a busy port keeps the pod from starting; the CL dials out, so
+   dropping the `hostPort` lines is a legitimate one-line edit on a busy host),
+   and the deploy host needs `kubectl`, `make`, `bash`, `jq`, `openssl`, a
+   container runtime and the Rust toolchain (`make endpoints`/`config-check`
+   run `cargo run`). Permissions: there is no RBAC object in this tree (no
+   ServiceAccount, Role, ClusterRole or binding — every workload runs as the
+   namespace default), so a namespace-scoped installer needs only the three
+   namespaces, the objects in them, and permission to create the one
+   cluster-scoped StorageClass. On a cluster that forbids creating a class,
+   point `k8s/components/storage` at the operator's existing class (it is one
+   value in one file) instead of shipping one.
+1. **Read the source's deployment data.** The three
+   `config/instances/*/specialization.toml` and the three `harness.env` are
+   gitignored: copy them by hand (they carry the keyed endpoints, the relay
+   key, the fork sources). Verify the pins now — the anvil state and the
+   specialization must agree, or the copied dump is loaded onto a different
+   base: `kubectl -n <ns> exec deploy/anvil-t -c anvil -- cat /state/pin`
+   (measured: T 26437369, V 51273700, equal to both files' `fork_pin`). If the
+   target renames a namespace or uses a non-`cluster.local` DNS domain, the
+   edits are in the specializations (the bridge reaches T as
+   `http://anvil-t.diorama-mainnet.svc.cluster.local:8545`) and in the
+   harness's loopback ports — never in the manifests.
+2. **Gate the target's tree before touching anything:**
+   `make config-check` (all three `ok`, empty environment), `make config-lint`
+   (builds every overlay; the single class and single registry point, the
+   namespace transform, the audit), and the rendered proof:
+   ```sh
+   for i in diorama-mainnet diorama-venue diorama-cctp; do
+     kubectl kustomize k8s/overlays/$i > /tmp/$i.yaml
+     printf '%s: %s class, %s claims on it, %s k3s literals\n' "$i" \
+       "$(grep -c '^kind: StorageClass' /tmp/$i.yaml)" \
+       "$(grep -c '^  storageClassName: mirror-retain$' /tmp/$i.yaml)" \
+       "$(grep -vE '^provisioner:' /tmp/$i.yaml | grep -cE 'local-path|k3s|/var/lib/rancher')"
+   done   # expect: 1 class, every claim on it, 0 k3s literals
+   ```
+   then the server dry-run — `kubectl apply -k k8s/overlays/<i> --server-side
+   --dry-run=server` — which on an empty target reports nothing Invalid (a
+   fresh host binds its own volumes; the two pre-bound claims only exist on the
+   source — see "the source host's one-time reconciles").
+3. **Quiesce the source.** `kubectl -n <ns> scale deploy --all --replicas=0`
+   for all three instances, then wait for the pods to be gone. The anvil
+   dumps its state on SIGTERM (the dump is what you copy); the engine persists
+   per pass; the bridge's ledger is written per message. Copying a live
+   datadir is how you get a half-written `anvil-state.json`.
+4. **Stage the copy set.** The source node's directories are
+   `/var/lib/rancher/k3s/storage/<pvc-uid>_<namespace>_<claim>/`. The trailing
+   pair is frozen at creation and can predate a rename — the live reth and
+   lighthouse directories still say `mainnet-mirror` — so read the mapping from
+   the cluster, never from the name: `kubectl get pv -o
+   custom-columns=PATH:.spec.hostPath.path` (or join it with
+   `kubectl get pvc -o jsonpath` per claim). Example:
+   ```sh
+   sudo rsync -aHAX --numeric-ids --info=progress2 \
+     /var/lib/rancher/k3s/storage/pvc-<uid>_diorama-mainnet_anvil-t-state/ \
+     /srv/move/mainnet/anvil-t-state/
+   ```
+   Copy the live files only (`pin`, `anvil-state.json`, `.foundry/`), not the
+   pre-epoch backups. Ownership: the anvil's files are uid 1000 (`foundry`),
+   the engines' and the PVC root are root — `--numeric-ids` keeps them, the
+   PVC root is 0777 (k3s' local-path mode) so the unprivileged processes can
+   rewrite their state.
+5. **Bind the target's claims** (the namespace and the claims only — no
+   workload starts):
+   ```sh
+   make bind-claims INSTANCE=diorama-mainnet
+   ```
+   `WaitForFirstConsumer` only binds a claim when a pod consumes it, so the
+   target creates them plus one `claim-binder` pod that mounts every claim;
+   the target prints each claim's PV path. The pod stays so a pod-mediated
+   copy has a writer; `make unbind-claims INSTANCE=…` releases the claims.
+6. **Copy in.** Node-local provisioner: `rsync -aHAX --numeric-ids --delete
+   /srv/move/mainnet/anvil-t-state/ <target path>/` (delete is safe — the
+   target volume is empty by construction). Any provisioner, no node access:
+   stream through the binder pod, `tar -C <dir> -cf - . | kubectl -n <ns> exec
+   -i claim-binder -- tar -C /mnt/<claim> -xf -` (rsync over `kubectl
+   exec` works the same way). Do **not** copy `reth-data`/`lighthouse-data`
+   this way unless the link beats the snapshot source: 622 GiB.
+7. **Start each instance.** `make unbind-claims INSTANCE=…` releases the
+   claims, then: for a stack whose chain state was copied,
+   `SKIP_SNAPSHOT=1 make up INSTANCE=diorama-mainnet` — plain `make up` would
+   find reth down and re-download 165 GB over the datadir just copied;
+   `SKIP_SNAPSHOT=1` is exactly `build secrets apply`. Re-derived state needs
+   nothing special (`make up` sources it).
+8. **Gate the move.** Per instance: `make status` (every pod Ready, every
+   claim Bound to a *new* PV), `make pin-show` (the pins are the ones copied),
+   `make logs-check` (no new WARN/ERROR classes), `make smoke INSTANCE=…` (the
+   venue and the mainnet suites), `make mirror-freshness` (all four planes lag
+   in seconds), `make substrate-attest` (read-only invariants: cursors, pins,
+   contract code, bridge, DB, host). The contract-level proof is the protocol
+   side's `preflight-all.sh` (both chains' catalog + signer bindings).
+9. **The protocol side, in this order** (nothing the other way: the `daloc`
+   namespace's env points *into* these services — `anvil-t.diorama-mainnet.svc`,
+   `venue-sim.diorama-venue.svc`, `cctp-bridge.diorama-cctp.svc` — and no
+   Diorama manifest points at `daloc`):
+   1. the three instances are up **with their pins set** (a re-fork at a live
+      head is a new epoch and clears the shadow registry — never deploy onto an
+      unpinned anvil);
+   2. deploy the contracts onto the pinned chains
+      (`daloc-monorepo`: `just deploy-mirror-evm 1`, `just deploy-mirror-hyperevm`);
+   3. seed the registry: `k8s-daloc/scripts/post-deploy.sh` writes
+      `chain-registry.env` + the per-chain records into the
+      `daloc-deployed-env` PVC and rolls the consumers;
+   4. project it into the env manifest:
+      `k8s-daloc/scripts/sync-chain-addresses.sh --write`;
+   5. `k8s-daloc/apply.sh` (or `kubectl apply -f deploy`), then
+      `preflight-all.sh`.
+
+   If the anvil state was copied, the contracts are already deployed at the
+   pin, so 9.2 is a re-deploy over the existing timelock (or nothing) and 9.3
+   re-seeds the PVC from the carried `contracts/deployments/*.env` records —
+   either way the PVC registry is the fresh host's to rebuild, never a volume
+   to copy.
+
+### The source host's one-time reconciles (not needed on the target)
+
+A fresh host creates its claims and binds its own volumes, so none of this
+applies there. It is the *source* host's cleanup if it keeps running:
+
+1. **The mainnet's two pre-bound claims** (`reth-data`, `lighthouse-data`).
+   Their `volumeName` left the tracked manifests long ago; the live claims were
+   created when it was still there, so a server-side apply tries to unset a
+   field the old manager owns and refuses an immutable change. Measured with
+   `kubectl apply -k k8s/overlays/diorama-mainnet --server-side
+   --dry-run=server`: the only two Invalid objects are those claims; the other
+   twelve apply, and the venue's three claims (never pre-bound) apply clean. A
+   host that has them reconciles once by rewriting the claims' stored
+   definitions (delete the claim objects — the PVs are `Retain` — and re-apply;
+   WaitForFirstConsumer rebinds the retained volumes).
+2. **The bridge's claim class** (`diorama-cctp/cctp-state`). It was created
+   when the tree's class was still named `diorama-retain`; the mirrors were
+   renamed to `mirror-retain` (162bd86) and the bridge's claim was left on the
+   old name, which no tracked object creates any more — so a fresh host would
+   have left that one claim Pending forever. The tree now ships the one class
+   and every claim names it (measured: server dry-run's only new Invalid object
+   on the source host is `cctp-state`, `StorageClassName: diorama-retain ->
+   mirror-retain`). On the source host a bound claim's class is immutable:
+   scale the bridge to 0, delete the claim (760Ki of cursors; the volume stays
+   `Retain`), re-apply — or leave it bound and accept one Invalid object on the
+   next `make apply INSTANCE=diorama-cctp`.
+3. **The deleted `-nodeport` twins.** The services are ClusterIP by design
+   (the harness uses loopback forwards), so the old NodePort twins are not in
+   the manifests. They are still present on the source host as ClusterIP
+   objects (`anvil-t-nodeport`, `engine-nodeport`, `venue-sim-nodeport`, …) and
+   are not carried by a move; delete them once or let `make delete` take the
+   namespace.
 
 ## Development gates
 
@@ -177,7 +370,9 @@ make ast-scope   # fn/struct size and nesting analysis
 `${VAR}` reference in any TOML, no config env or Secret in the manifests, the
 specialization build fails loudly when absent, the two mirrors stay
 structurally symmetric, no machine-specific literal survives in a tracked
-manifest, and the live audit gates the merged shape.
+manifest, the live audit gates the merged shape, and the move's two cluster
+facts stay single-valued (one StorageClass object fanned out to every claim,
+one registry component for the four repo images).
 
 ## Ops (read-only first)
 
