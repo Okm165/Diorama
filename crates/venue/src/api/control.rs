@@ -721,14 +721,14 @@ fn control_state(state: &ApiState, address: Address) -> Result<AccountSeed> {
             mode: UserAbstraction::Disabled,
             ..Default::default()
         };
-        return control_view(None, &empty, &state.feed, state.feed.meta().as_ref());
+        return control_view(None, &empty, &state.feed, state.feed.margin_meta().as_ref());
     };
     let fixture = state.sim.control_fixture(address)?;
     control_view(
         fixture.as_ref(),
         &account,
         &state.feed,
-        state.feed.meta().as_ref(),
+        state.feed.margin_meta().as_ref(),
     )
 }
 

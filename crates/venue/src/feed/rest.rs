@@ -330,9 +330,53 @@ impl Poller {
                 for (asset, ctx) in meta.universe.iter().zip(ctxs) {
                     self.feed.put_ctx(asset.name.clone(), ctx, now);
                 }
+                // The account plane needs the dex's markets too: fold every
+                // configured HIP-3 dex in after the default one (the served
+                // `meta` response stays the default dex).
+                self.dex_metas(&meta).await;
                 self.feed.put_meta(meta, now);
             }
             Err(e) => self.rest_fault("metaAndAssetCtxs", &e),
+        }
+    }
+
+    /// One `metaAndAssetCtxs` per configured perp dex the default meta does
+    /// not cover (the HIP-3 `xyz:*` markets), absorbed into the account-plane
+    /// view. The default dex's own markets are already loaded; a dex whose
+    /// every configured market resolves in the default meta is skipped.
+    async fn dex_metas(&self, core: &crate::wire::Meta) {
+        for dex in configured_dexes(&self.feed.markets) {
+            let mut covered = true;
+            for coin in self
+                .feed
+                .markets
+                .iter()
+                .filter(|coin| dex_of(coin).is_some_and(|d| d == dex))
+            {
+                if core.asset(coin).is_none() {
+                    covered = false;
+                    break;
+                }
+            }
+            if covered {
+                continue;
+            }
+            if !self.gated(crate::feed::budget::weight::HEAVY) {
+                return;
+            }
+            let req = InfoRequest::MetaAndAssetCtxs {
+                dex: Some(dex.clone()),
+            };
+            match self.api.info::<MetaAndAssetCtxs>(&req).await {
+                Ok(MetaAndAssetCtxs(meta, ctxs)) => {
+                    let now = crate::now_ms();
+                    for (asset, ctx) in meta.universe.iter().zip(ctxs) {
+                        self.feed.put_ctx(asset.name.clone(), ctx, now);
+                    }
+                    self.feed.put_dex_meta(dex, meta, now);
+                }
+                Err(e) => self.rest_fault("metaAndAssetCtxs(dex)", &e),
+            }
         }
     }
 
@@ -398,10 +442,46 @@ impl Poller {
     }
 }
 
+/// The dex a perp coin belongs to: `xyz:NVDA` → `xyz`, a core coin
+/// (`BTC`) → `None`. The prefix is the wire's own dex name (the
+/// `metaAndAssetCtxs` `dex` field), so no registry is needed.
+fn dex_of(coin: &str) -> Option<&str> {
+    coin.split_once(':')
+        .map(|(dex, _)| dex)
+        .filter(|dex| !dex.is_empty())
+}
+
+/// The distinct perp dexes the venue's configured markets name, in first-seen
+/// order (deterministic poll order).
+fn configured_dexes(markets: &[String]) -> Vec<String> {
+    let mut dexes: Vec<String> = Vec::new();
+    for dex in markets.iter().filter_map(|coin| dex_of(coin)) {
+        if !dexes.iter().any(|known| known == dex) {
+            dexes.push(dex.to_string());
+        }
+    }
+    dexes
+}
+
 #[cfg(test)]
 mod tests {
-    use super::venue_method_refusal;
+    use super::{configured_dexes, dex_of, venue_method_refusal};
     use reqwest::StatusCode;
+
+    /// The configured market list names its dexes; the poller must fetch each
+    /// one's meta once, in first-seen order (a HIP-3 market's maintenance
+    /// tier is not in the default dex's meta).
+    #[test]
+    fn configured_dexes_are_deduplicated_in_first_seen_order() {
+        let markets: Vec<String> = ["BTC", "xyz:NVDA", "xyz:SOXL", "ETH", "km:JPY"]
+            .iter()
+            .map(|coin| (*coin).to_string())
+            .collect();
+        assert_eq!(configured_dexes(&markets), vec!["xyz", "km"]);
+        assert_eq!(dex_of("xyz:NVDA"), Some("xyz"));
+        assert_eq!(dex_of("BTC"), None);
+        assert_eq!(dex_of(":broken"), None);
+    }
 
     /// A bad request is the venue's answer; an endpoint wall is a failover.
     /// This is the boundary the old `raw_info` collapsed: it retried every

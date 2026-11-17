@@ -100,6 +100,15 @@ pub(crate) enum BookAge {
 #[derive(Default)]
 struct Cache {
     meta: Option<Meta>,
+    /// The last meta of each **non-default** perp dex (keyed by dex name),
+    /// kept separately so the default dex's poll can rebuild the account
+    /// view without losing the absorbed universes.
+    dex_metas: BTreeMap<String, Meta>,
+    /// The account-plane view over **every** perp dex the venue quotes: the
+    /// served `meta` (the default dex) plus each configured HIP-3 dex's
+    /// universe (see [`Meta::absorb`]). The account and margin lookups read
+    /// this; the `meta` response stays the default dex verbatim.
+    margin_meta: Option<Meta>,
     meta_at: Option<u64>,
     spot_meta: Option<crate::wire::SpotMeta>,
     ctxs: BTreeMap<String, AssetCtx>,
@@ -272,6 +281,37 @@ impl MarketFeed {
         let mut c = self.write();
         c.meta = Some(meta);
         c.meta_at = Some(now_ms);
+        Self::rebuild_margin_meta(&mut c);
+    }
+
+    /// One perp dex's meta, kept and folded into the account-plane view.
+    /// Polled for each configured dex the default meta does not cover, so an
+    /// account holding a HIP-3 market is priceable instead of refused.
+    pub(crate) fn put_dex_meta(&self, dex: String, meta: Meta, now_ms: u64) {
+        if self.stalled() {
+            tracing::debug!("live dex meta dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
+        let mut c = self.write();
+        c.dex_metas.insert(dex, meta);
+        c.meta_at = Some(c.meta_at.map_or(now_ms, |at| at.max(now_ms)));
+        Self::rebuild_margin_meta(&mut c);
+    }
+
+    /// The account-plane view from scratch: the default dex, then each dex's
+    /// universe absorbed in its cached form. Rebuilt on every write (instead
+    /// of mutating in place) so the default dex's poll never momentarily
+    /// erases a HIP-3 account's margin tiers — that would make every account
+    /// holding a HIP-3 market unpriceable once per poll cycle.
+    fn rebuild_margin_meta(c: &mut Cache) {
+        let Some(core) = c.meta.clone() else {
+            return;
+        };
+        let mut union = core;
+        for meta in c.dex_metas.values() {
+            union.absorb(meta.clone());
+        }
+        c.margin_meta = Some(union);
     }
 
     pub(crate) fn put_spot_meta(&self, spot: crate::wire::SpotMeta) {
@@ -559,6 +599,15 @@ impl MarketFeed {
         self.read().meta.clone()
     }
 
+    /// The account-plane meta: the default dex plus every configured perp
+    /// dex (HIP-3) the venue quotes. Maintenance tiers, max leverage and the
+    /// strict-isolation flags resolve here; the `meta` response keeps the
+    /// default dex (a client reading `meta` must not see another dex's
+    /// universe).
+    pub(crate) fn margin_meta(&self) -> Option<Meta> {
+        self.read().margin_meta.clone()
+    }
+
     /// The spot token registry (`None` until the first poll lands).
     pub(crate) fn spot_meta(&self) -> Option<crate::wire::SpotMeta> {
         self.read().spot_meta.clone()
@@ -593,34 +642,29 @@ impl MarketFeed {
         let ctxs = meta
             .universe
             .iter()
-            .filter_map(|asset| {
-                let mut ctx = c.ctxs.get(&asset.name)?.clone();
-                // `control_owned` is the PRICE ownership bit: the mark/oracle
-                // (`crash`/`rally`), the book (`set_book`) or the whole live
-                // plane (`stall`). Funding moves no mark and is reported
-                // separately below; conflating the two froze the mirror's
-                // WHYPE oracle on a funding-only scenario.
-                let price_owned = overrides.prices.contains_key(&asset.name)
-                    || overrides.books.contains_key(&asset.name)
-                    || stalled;
-                let funding_owned = overrides.funding.contains_key(&asset.name)
-                    && overrides
-                        .funding_expires_ms
-                        .get(&asset.name)
-                        .is_none_or(|deadline| *deadline > now);
-                if let Some(p) = overrides.prices.get(&asset.name) {
-                    ctx.mark_px = p.mark;
-                    ctx.oracle_px = p.oracle;
-                }
-                if funding_owned {
-                    if let Some(rate) = overrides.funding.get(&asset.name) {
-                        ctx.funding = *rate;
-                    }
-                }
-                ctx.control_owned = price_owned;
-                ctx.funding_owned = funding_owned;
-                Some(ctx)
-            })
+            .filter_map(|asset| served_ctx(&c.ctxs, &overrides, stalled, now, &asset.name))
+            .collect();
+        Some(crate::wire::MetaAndAssetCtxs(meta, ctxs))
+    }
+
+    /// `metaAndAssetCtxs` for a **named builder dex** (HIP-3): the dex's own
+    /// cached meta plus the contexts of exactly its universe coins. The
+    /// measured 2026-11-16 friction: the sim answered `metaAndAssetCtxs` for
+    /// the default dex only, so the indexer's `xyz` dex book poll — whose
+    /// ladder read succeeded — failed its context read for all 40 builder-dex
+    /// coins (~29 failed ticks/coin/5 min) while the same coins' books were
+    /// fresh. The dex metas are already cached here (`put_dex_meta`); serving
+    /// them is the honest multi-dex shape, not a new plane.
+    pub(crate) fn dex_meta_and_ctxs(&self, dex: &str) -> Option<crate::wire::MetaAndAssetCtxs> {
+        let overrides = self.read_overrides().clone();
+        let stalled = self.stalled();
+        let now = crate::now_ms();
+        let c = self.read();
+        let meta = c.dex_metas.get(dex)?.clone();
+        let ctxs = meta
+            .universe
+            .iter()
+            .filter_map(|asset| served_ctx(&c.ctxs, &overrides, stalled, now, &asset.name))
             .collect();
         Some(crate::wire::MetaAndAssetCtxs(meta, ctxs))
     }
@@ -729,10 +773,100 @@ fn apply_consumptions(mut book: L2Book, consumptions: &[Consumption]) -> L2Book 
     book
 }
 
+/// One coin's served context: the live ctx with the scenario's overrides
+/// applied. The default dex's `metaAndAssetCtxs` and a named builder dex's
+/// answer are shaped **here**, so an override can never be honoured on one
+/// lane and silently dropped on the other (the measured 2026-11-11 class: a
+/// `/control/crash` moved the mark the account plane used while the served
+/// context kept the live figure).
+///
+/// `control_owned` is the PRICE ownership bit: the mark/oracle
+/// (`crash`/`rally`), the book (`set_book`) or the whole live plane
+/// (`stall`). Funding moves no mark and is reported separately
+/// (`funding_owned`); conflating the two froze the mirror's WHYPE oracle on
+/// a funding-only scenario.
+fn served_ctx(
+    ctxs: &BTreeMap<String, AssetCtx>,
+    overrides: &Overrides,
+    stalled: bool,
+    now: u64,
+    name: &str,
+) -> Option<AssetCtx> {
+    let mut ctx = ctxs.get(name)?.clone();
+    let price_owned =
+        overrides.prices.contains_key(name) || overrides.books.contains_key(name) || stalled;
+    let funding_owned = overrides.funding.contains_key(name)
+        && overrides
+            .funding_expires_ms
+            .get(name)
+            .is_none_or(|deadline| *deadline > now);
+    if let Some(p) = overrides.prices.get(name) {
+        ctx.mark_px = p.mark;
+        ctx.oracle_px = p.oracle;
+    }
+    // An owned book **is** the executable depth: the served mid and impact
+    // prices must follow it, or a scenario presents an oracle the book does
+    // not confirm and every consumer that re-stamps a feed refuses it
+    // (measured 2026-11-13: the liquidation drill's `/control/crash` moved
+    // mark/oracle while `midPx`/`impactPxs` stayed at the live depth, so
+    // `oracle-liveness` wrote the un-moved mid and the breach never reached
+    // the chain). Best bid/ask of the owned book is the same definition the
+    // live ctx's figures carry.
+    if let Some(book) = overrides.books.get(name) {
+        if let (Some(bid), Some(ask)) = (book.levels[0].first(), book.levels[1].first()) {
+            let mid = (bid.px + ask.px) / Decimal::from(2);
+            ctx.mid_px = Some(mid);
+            ctx.impact_pxs = Some([bid.px, ask.px]);
+        }
+    }
+    if funding_owned {
+        if let Some(rate) = overrides.funding.get(name) {
+            ctx.funding = *rate;
+        }
+    }
+    ctx.control_owned = price_owned;
+    ctx.funding_owned = funding_owned;
+    Some(ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wire::{test_ctx, Level};
+
+    /// A minimal wire meta for the cache tests: `szDecimals`/`maxLeverage`
+    /// are required, the margin tables are optional.
+    fn meta_with(coins: &[&str]) -> crate::wire::Meta {
+        let universe: Vec<String> = coins
+            .iter()
+            .map(|coin| format!(r#"{{"name":"{coin}","szDecimals":5,"maxLeverage":40}}"#))
+            .collect();
+        serde_json::from_str(&format!(r#"{{"universe":[{}]}}"#, universe.join(", ")))
+            .expect("a well-formed meta")
+    }
+
+    /// The default dex's poll must not erase an absorbed HIP-3 dex: the live
+    /// bug was a `margin_meta` reset on every core poll, which made any
+    /// account holding a HIP-3 market unpriceable once per poll cycle.
+    #[test]
+    fn a_default_dex_poll_keeps_the_absorbed_dexes() {
+        let feed = MarketFeed::memory(vec!["BTC".into(), "xyz:NVDA".into()]);
+        feed.put_meta(meta_with(&["BTC"]), 1);
+        feed.put_dex_meta("xyz".into(), meta_with(&["xyz:NVDA"]), 2);
+        assert!(
+            feed.margin_meta().unwrap().asset("xyz:NVDA").is_some(),
+            "the absorbed dex prices its markets"
+        );
+
+        feed.put_meta(meta_with(&["BTC"]), 3);
+        let view = feed.margin_meta().expect("the account view survives");
+        assert!(view.asset("BTC").is_some());
+        assert!(view.asset("xyz:NVDA").is_some());
+        assert!(
+            view.asset("xyz:NVDA").is_some_and(|a| a.max_leverage == 40),
+            "the absorbed tiers are the dex's own"
+        );
+    }
 
     /// A scripted book owns the coin until its hand-back: live updates are
     /// not the served base, so they neither refresh nor prune its consumed
@@ -1009,6 +1143,53 @@ mod tests {
         assert_eq!(btc.funding, Decimal::new(-4, 2));
         // The live oracle is still what a re-stamping consumer reads.
         assert_eq!(feed.oracle("BTC"), Some(Decimal::from(101)));
+    }
+
+    /// An owned book **is** the executable depth: the served `midPx` and
+    /// `impactPxs` must follow it. Measured 2026-11-13: the liquidation drill's
+    /// `/control/crash` moved mark/oracle while the served mid stayed at the
+    /// live depth, so `oracle-liveness` wrote the un-moved mid and the breach
+    /// never reached the chain feed.
+    #[test]
+    fn an_owned_book_owns_the_served_mid_and_impact() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        feed.put_meta(meta_with(&["BTC"]), 1_000);
+        feed.put_ctx("BTC".into(), test_ctx("100", "101"), 1_000);
+        let book = crate::wire::L2Book {
+            coin: "BTC".into(),
+            time: 1_001,
+            levels: [
+                vec![crate::wire::Level {
+                    px: Decimal::from(40),
+                    sz: Decimal::from(5),
+                    n: 1,
+                }],
+                vec![crate::wire::Level {
+                    px: Decimal::from(41),
+                    sz: Decimal::from(5),
+                    n: 1,
+                }],
+            ],
+            spread: None,
+        };
+        feed.own_book(&book).unwrap();
+        let served = feed.meta_and_ctxs().expect("ctx");
+        let btc = served.1.first().expect("BTC ctx");
+        assert_eq!(
+            btc.mark_px,
+            Decimal::from(100),
+            "the mark is a separate input"
+        );
+        assert_eq!(
+            btc.mid_px,
+            Some(Decimal::new(405, 1)),
+            "the owned book's mid is served"
+        );
+        assert_eq!(
+            btc.impact_pxs,
+            Some([Decimal::from(40), Decimal::from(41)]),
+            "the owned book's best bid/ask are the impact prices"
+        );
     }
 
     /// A deadline bounds the override: past it the live rate answers and the

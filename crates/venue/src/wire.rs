@@ -374,6 +374,54 @@ impl Meta {
             .find(|(tid, _)| *tid == id)
             .map(|(_, t)| t)
     }
+
+    /// Merge another **perp dex's** meta into this account-plane view.
+    ///
+    /// The served `meta` answers the default dex only, but an account's
+    /// positions may live on any dex the venue quotes (`markets` carries
+    /// `xyz:*`), and the maintenance lookup is a pure function of the coin's
+    /// asset entry. The merge therefore keeps one view over every market the
+    /// venue can hold.
+    ///
+    /// Margin-table ids are **dex-local**: two dexes may both declare table
+    /// `20` with different tiers. Absorbed tables are renumbered above every
+    /// id already present and the absorbed assets are pointed at their new
+    /// ids, so a lookup can never land on another dex's tiers. A coin already
+    /// present (the core dex repeats, or a duplicate poll) is left as served.
+    pub(crate) fn absorb(&mut self, other: Meta) {
+        let universe: Vec<AssetInfo> = other
+            .universe
+            .into_iter()
+            .filter(|asset| self.asset(&asset.name).is_none())
+            .collect();
+        if universe.is_empty() {
+            // A repeated poll of a covered dex, or a duplicate declaration:
+            // nothing new, and no table rows to renumber.
+            return;
+        }
+        let mut next = self
+            .margin_tables
+            .iter()
+            .map(|(id, _)| *id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut remap: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+        for (id, table) in other.margin_tables {
+            let assigned = *remap.entry(id).or_insert_with(|| {
+                let assigned = next;
+                next = next.saturating_add(1);
+                assigned
+            });
+            self.margin_tables.push((assigned, table));
+        }
+        for mut asset in universe {
+            if let Some(id) = asset.margin_table_id {
+                asset.margin_table_id = Some(remap.get(&id).copied().unwrap_or(id));
+            }
+            self.universe.push(asset);
+        }
+    }
 }
 
 /// The asset's margin mode (docs, margining: "strictIsolated" means margin
@@ -1326,4 +1374,73 @@ pub(crate) struct CancelData {
 pub(crate) struct ExchangeResponse {
     pub status: &'static str,
     pub response: String,
+}
+
+#[cfg(test)]
+mod absorb_tests {
+    use super::Meta;
+
+    fn meta(universe: &str, tables: &str) -> Meta {
+        serde_json::from_str(&format!(
+            r#"{{"universe":[{universe}],"marginTables":[{tables}]}}"#
+        ))
+        .expect("a well-formed meta")
+    }
+
+    /// Two dexes may both number a margin table `20`. Absorbing one into the
+    /// other must renumber, never let the account plane apply another dex's
+    /// tiers: a HIP-3 position silently priced at the core table's leverage
+    /// is the exact failure this merge exists to prevent.
+    #[test]
+    fn an_absorbed_dex_keeps_its_own_margin_tiers() {
+        let mut core = meta(
+            r#"{"name":"BTC","szDecimals":5,"maxLeverage":40,"marginTableId":20}"#,
+            r#"[20,{"description":"","marginTiers":[{"lowerBound":"0","maxLeverage":40}]}]"#,
+        );
+        let xyz = meta(
+            r#"{"name":"xyz:NVDA","szDecimals":2,"maxLeverage":10,"marginTableId":20}"#,
+            r#"[20,{"description":"","marginTiers":[{"lowerBound":"0","maxLeverage":10}]}]"#,
+        );
+
+        core.absorb(xyz);
+
+        assert_eq!(core.asset("BTC").unwrap().margin_table_id, Some(20));
+        let nvda_id = core.asset("xyz:NVDA").unwrap().margin_table_id;
+        assert_ne!(
+            nvda_id,
+            Some(20),
+            "a colliding id is renumbered, never shared"
+        );
+        assert_eq!(
+            core.margin_table("BTC").unwrap().margin_tiers[0].max_leverage,
+            40
+        );
+        assert_eq!(
+            core.margin_table("xyz:NVDA").unwrap().margin_tiers[0].max_leverage,
+            10
+        );
+    }
+
+    /// A repeated poll of the same dex is idempotent: the universe and the
+    /// table list do not grow, so a per-poll absorb cannot inflate the
+    /// account-plane view (or shift an id an asset already points at).
+    #[test]
+    fn absorbing_the_same_dex_twice_changes_nothing() {
+        let mut core = meta(
+            r#"{"name":"BTC","szDecimals":5,"maxLeverage":40,"marginTableId":1}"#,
+            r#"[1,{"description":"","marginTiers":[{"lowerBound":"0","maxLeverage":40}]}]"#,
+        );
+        let xyz = meta(
+            r#"{"name":"xyz:NVDA","szDecimals":2,"maxLeverage":10,"marginTableId":7}"#,
+            r#"[7,{"description":"","marginTiers":[{"lowerBound":"0","maxLeverage":10}]}]"#,
+        );
+        core.absorb(xyz.clone());
+        let once = (core.universe.len(), core.margin_tables.len());
+        core.absorb(xyz);
+        assert_eq!((core.universe.len(), core.margin_tables.len()), once);
+        assert_eq!(
+            core.margin_table("xyz:NVDA").unwrap().margin_tiers[0].max_leverage,
+            10
+        );
+    }
 }

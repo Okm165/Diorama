@@ -136,7 +136,7 @@ async fn clearinghouse(
 async fn spot_state(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
     // Pure observation; the 1 Hz tick owns accrual and liquidation.
     simulated(state, &body, user, |account| {
-        let meta = state.feed.meta();
+        let meta = state.feed.margin_meta();
         Ok(Json(crate::wire::SpotClearinghouseState {
             balances: account::spot_balances(account),
             token_to_available_after_maintenance: account::available_after_maintenance(
@@ -446,10 +446,21 @@ fn meta(dex: &Option<String>, state: &ApiState) -> Result<Response> {
     Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response())
 }
 
-/// `metaAndAssetCtxs`: the cached metadata + per-market ctxs, default dex.
+/// `metaAndAssetCtxs`: the cached metadata + per-market ctxs. The default dex
+/// is served from the feed's core cache; a named builder dex (HIP-3) is served
+/// from its own cached meta and contexts — refusing it made every builder-dex
+/// book poll fail its context read while its ladder succeeded (the measured
+/// 2026-11-16 friction on the `xyz` dex).
 fn meta_and_ctxs(dex: &Option<String>, state: &ApiState) -> Result<Response> {
-    expect_default_dex(dex)?;
-    let MetaAndAssetCtxs(meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
+    let dex_name = dex.as_deref().unwrap_or("");
+    if dex_name.is_empty() {
+        let MetaAndAssetCtxs(meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
+        return Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response());
+    }
+    let MetaAndAssetCtxs(meta, ctxs) = state
+        .feed
+        .dex_meta_and_ctxs(dex_name)
+        .ok_or(Error::Warming)?;
     Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response())
 }
 
@@ -617,7 +628,7 @@ pub(crate) fn clearinghouse_of(
     let Some(account) = state.sim.account(address)? else {
         return Ok(None);
     };
-    let meta = state.feed.meta();
+    let meta = state.feed.margin_meta();
     // The served `time` is the **oldest live mark** the account is priced
     // from, not the read's clock. A stalled feed keeps its old mark; stamping
     // the read's clock made that stale mark look fresh and passed the
@@ -721,7 +732,7 @@ fn active_asset_data(
     let mark = state.feed.mark(coin).ok_or_else(|| Error::NoMarket {
         coin: coin.to_string(),
     })?;
-    let meta = state.feed.meta();
+    let meta = state.feed.margin_meta();
     let leverage = account
         .positions
         .get(coin)

@@ -554,7 +554,7 @@ impl Sim {
                 }
                 Direction::ToSpot => {
                     if account.mode == UserAbstraction::UnifiedAccount {
-                        let meta = feed.meta();
+                        let meta = feed.margin_meta();
                         // A mark not yet served (`view` faults) is a refusal,
                         // never a guess — the caller re-sends.
                         let Some(bound) =
