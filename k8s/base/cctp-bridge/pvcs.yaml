@@ -4,8 +4,8 @@
 #
 # The claim is deliberately portable (no `volumeName`): a standalone bridge in
 # a fresh namespace must be able to bind a volume through the StorageClass.
-# The local workshop's pre-bound claim is a deployment overlay concern, not a
-# property every bridge inherits.
+# The class is this base's own literal `diorama-retain` - the live claim is
+# bound under it, and a claim's class does not rebind.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

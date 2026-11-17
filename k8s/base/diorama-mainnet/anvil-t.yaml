@@ -43,6 +43,12 @@ spec:
           args:
             - |
               set -eu
+              # The fork source is the specialization's read pool's primary
+              # entry ([endpoints.evm] http[0]) — the same URL the engine's
+              # `/admin/epoch` re-pins against. One fact, one spelling: this
+              # is a read of the mounted file, never an env.
+              EVM_URL=$(awk '/^\[endpoints\.evm\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_URL" ] || { echo "ERROR: fork source missing from /etc/mirror/specialization.toml ([endpoints.evm] http)"; exit 1; }
               # Always wait for reth first, even when the pin is persisted:
               # anvil forks at start-up, so restarting while reth is restarting
               # would crash-loop (measured: "failed to fetch network chain ID").
@@ -89,9 +95,8 @@ spec:
               chmod 0777 /state 2>/dev/null || true
               chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (reth head=$HEAD)"
-          env:
-            - name: EVM_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: EVM_URL } }
+          # No env: the fork source comes from the mounted specialization
+          # file, read above.
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -103,6 +108,12 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
+              # The fork source is the specialization's read pool's primary
+              # entry ([endpoints.evm] http[0]) — the same URL the engine's
+              # `/admin/epoch` re-pins against. One fact, one spelling: a
+              # read of the mounted file, never an env.
+              EVM_URL=$(awk '/^\[endpoints\.evm\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_URL" ] || { echo "ERROR: fork source missing from /etc/mirror/specialization.toml ([endpoints.evm] http)"; exit 1; }
               # Re-resolve the pin on *every container start*, not just every
               # pod start: k8s restarts only the container on OOM (T's normal
               # cycle), so the init container's pin would age with the pod and
@@ -169,9 +180,9 @@ spec:
                 --no-fork-node-info \
                 --state /state/anvil-state.json \
                 --state-interval 300 \
+          # No config env: the fork source comes from the mounted
+          # specialization file, read above. Only container plumbing remains.
           env:
-            - name: EVM_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: EVM_URL } }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }

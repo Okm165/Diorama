@@ -1,31 +1,28 @@
 # The Venue Mirror instance overlay: the venue base + the instance ConfigMap +
-# the wiring ConfigMap + the harness services. The diorama-mainnet overlay is
-# untouched: the two mirrors share the cluster and the wire-named
-# StorageClass, not a namespace.
+# the harness services. The diorama-mainnet overlay is untouched: the two
+# mirrors share the cluster and the literal claim class, not a namespace.
 #
-# The two mirror overlays are structurally identical (namespace, wiring,
-# inventory, harness services, the class replacement): a change to one is a
-# change to both, or it is a bug in whichever came first.
+# The two mirror overlays are structurally identical (namespace, inventory,
+# harness services, the class literal): a change to one is a change to both,
+# or it is a bug in whichever came first.
 #
 # The CCTP bridge is its own instance/overlay (k8s/overlays/diorama-cctp), so
 # a venue can run without a bridge and a bridge can run without this venue.
+#
+# No wiring ConfigMap: the configuration is the specialization file, mounted
+# into every pod at /etc/mirror/specialization.toml by the instance unit
+# below. There are no config envs and no config Secrets on the k8s side.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: diorama-venue
 
-# The deployment wiring (EVM_FORK_URL, the market plane, the service DNS):
-# generated from `wiring.env`, the gitignored copy of `wiring.example.env`.
-# `make config-bootstrap` creates it; `make apply` does not run without it.
-# The host harness surface (`harness.env`) is the second entry: the loopback
-# forwards the operator chooses (`make port-forward` opens them). The chain
-# ids and in-cluster service DNS are derived by
-# `diorama-config export-env --section client`, never repeated here; no pod
-# reads that map - only the host harness - so it carries no roll-triggering
-# hash.
+# The host harness surface (`harness.env`): the loopback forwards the
+# operator chooses (`make port-forward` opens them). The chain ids and
+# in-cluster service DNS are derived by `diorama-config export-env --section
+# client`, never repeated here; no pod reads that map - only the host
+# harness - so it carries no roll-triggering hash.
 configMapGenerator:
-  - name: diorama-config
-    envs: [wiring.env]
   - name: test-endpoints
     envs: [harness.env]
     options:
@@ -34,11 +31,7 @@ configMapGenerator:
 resources:
   - namespace.yaml
   - ../../base/diorama-venue
-  # This instance's unit (config/instances/diorama-venue): the file every pod
-  # of this instance mounts at /etc/mirror/instance.toml, and its generator.
+  # This instance's unit (config/instances/diorama-venue): the files every
+  # pod of this instance mounts at /etc/mirror, and their generator. The
+  # generator FAILS the build when the specialization is absent.
   - ../../../config/instances/diorama-venue
-
-# One fact, one spelling: the StorageClass's name and every claim's class are
-# the wiring's `STORAGE_CLASS` (see storage-class.yaml).
-replacements:
-  - path: storage-class.yaml

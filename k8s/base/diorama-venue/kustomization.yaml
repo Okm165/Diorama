@@ -12,4 +12,3 @@ resources:
   - anvil-v.yaml
   - engine.yaml
   - venue-sim.yaml
-  - secrets.yaml

@@ -32,19 +32,17 @@ spec:
       containers:
         - name: download
           image: ghcr.io/paradigmxyz/reth:v2.8.0@sha256:796c866410171459946d6607301ad728a1b150ea0aa05623cf6bdf79cd3e3322
-          # The snapshot source is the wiring's `SNAPSHOT_URL` (an https://
-          # snapshot source, or a file:///path staged on the node for an
-          # offline mirror). The flag is passed only when the wiring names a
-          # source: `--url=` with an empty value is refused ("Unsupported file
-          # format ... got: ", measured), while omitting it makes reth propose
-          # its own newest mainnet snapshot.
+          # The snapshot source: reth proposes its own newest mainnet
+          # snapshot when the flag is absent (https://snapshots.reth.rs). An
+          # offline mirror stages the snapshot on the node manually (a
+          # `file:///path` needs reth's own downloader, so it is a one-off
+          # `kubectl run` with `--url=`, not a manifest value - no config
+          # envs on the k8s side).
           command: ["/bin/sh", "-c"]
           args:
             - |
               set -eu
-              url_flag=""
-              if [ -n "${SNAPSHOT_URL:-}" ]; then url_flag="--url=$SNAPSHOT_URL"; fi
-              echo "snapshot source: ${SNAPSHOT_URL:-reth's own default}"
+              echo "snapshot source: reth's own default"
               # Explicit component selection instead of the --minimal preset,
               # so the snapshot matches the runtime prune profile
               # (receipts/bodies 20k, account/storage history 10,064) and no
@@ -56,7 +54,6 @@ spec:
               # eth_getBlockAccessList. `--without-rocksdb` would break them.
               exec reth download \
                 --chain=mainnet \
-                $url_flag \
                 --with-txs-distance=20000 \
                 --with-receipts-distance=20000 \
                 --with-state-history-distance=10064 \
@@ -67,9 +64,6 @@ spec:
                 --download-concurrency=16 \
                 --datadir=/data \
                 --color=never
-          env:
-            - name: SNAPSHOT_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: SNAPSHOT_URL, optional: true } }
           volumeMounts:
             - { name: data, mountPath: /data }
           resources:

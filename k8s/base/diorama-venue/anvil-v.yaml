@@ -39,10 +39,12 @@ spec:
           args:
             - |
               set -eu
-              # The fork source is the archive plane; the engine's read pool
-              # (`EVM_FORK_URLS`) deliberately excludes it because it does not
-              # answer `eth_getSystemTxsByBlockNumber`.
-              : "${EVM_FORK_URL:?EVM_FORK_URL is required}"
+              # The fork source is the specialization's [chains.venue]
+              # fork_url — a read of the mounted file, never an env. It is
+              # deliberately not a member of the read pool (the measured
+              # archive plane refuses the pool's batched calls).
+              EVM_FORK_URL=$(awk '/^\[chains\.venue\]/{f=1;next} /^\[/{f=0} f && /^fork_url[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_FORK_URL" ] || { echo "ERROR: fork_url missing from /etc/mirror/specialization.toml ([chains.venue])"; exit 1; }
               # An explicit pin preserves the epoch across a source change. A
               # re-pin to the source's current head is a *new base*: the driver
               # clears the shadow registry (measured 2026-11-01, a restart moved
@@ -79,16 +81,8 @@ spec:
               chmod 0777 /state 2>/dev/null || true
               chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (source head=$HEAD)"
-          # The wiring the instance resolves (${EVM_FORK_URL}, the fork
-          # source), plus the instance Secret as the LAST envFrom source: a
-          # key both carry resolves from the Secret (a keyed archive URL is a
-          # credential; secrets.env + `make secrets`). Optional: a keyless
-          # instance has an empty Secret and keeps the wiring's public value.
-          envFrom:
-            - configMapRef: { name: diorama-config }
-            - secretRef:
-                name: diorama-venue-secrets
-                optional: true
+          # No env: the fork source comes from the mounted specialization
+          # file, read above.
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -106,8 +100,10 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              # The fork source is the archive plane; the engine pool is separate.
-              : "${EVM_FORK_URL:?EVM_FORK_URL is required}"
+              # The fork source is the specialization's [chains.venue]
+              # fork_url — a read of the mounted file, never an env.
+              EVM_FORK_URL=$(awk '/^\[chains\.venue\]/{f=1;next} /^\[/{f=0} f && /^fork_url[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_FORK_URL" ] || { echo "ERROR: fork_url missing from /etc/mirror/specialization.toml ([chains.venue])"; exit 1; }
               # An explicit pin keeps the epoch across a source change. Without
               # it, re-resolve on *every container start* (k8s restarts only the
               # container on OOM): a fresh base is an epoch, and the driver
@@ -178,15 +174,10 @@ spec:
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info
-          # The wiring (${EVM_FORK_URL}) plus the instance Secret LAST: a key
-          # both carry resolves from the Secret (a keyed archive URL is a
-          # credential; secrets.env + `make secrets`). Optional: a keyless
-          # instance keeps the wiring's public value.
-          envFrom:
-            - configMapRef: { name: diorama-config }
-            - secretRef:
-                name: diorama-venue-secrets
-                optional: true
+          # No config env: the fork source comes from the mounted
+          # specialization file, read above (the keyed archive URL is a
+          # credential that lives in the gitignored file, never a cluster
+          # Secret). Only container plumbing remains.
           env:
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.

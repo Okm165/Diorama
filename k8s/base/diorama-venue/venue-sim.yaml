@@ -34,18 +34,11 @@ spec:
           image: localhost/diorama-venue-sim:wb5-20261117
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
-          # The same `envFrom` mechanism as the engines: the ConfigMap carries
-          # every key the instance resolves (SIM_STATE_DIR, TARGET_RPC_URL,
-          # ENGINE_ADMIN_URL, HL_INFO_API_URL), and a new wiring var needs no
-          # edit here. The instance Secret rides LAST: the keyed market-REST
-          # mirror (secrets.env HL_INFO_API_URL) shadows the wiring's public
-          # value in this pod. Optional: a keyless instance serves the public
-          # API only.
-          envFrom:
-            - configMapRef: { name: diorama-config }
-            - secretRef:
-                name: diorama-venue-secrets
-                optional: true
+          # No env: the configuration is the mounted specialization file
+          # (/etc/mirror/specialization.toml beside the instance file). The
+          # keyed market-REST mirror lives in the specialization's
+          # [endpoints.hyperliquid_info] - gitignored, so the key never
+          # enters a cluster Secret.
           ports:
             - { name: info, containerPort: 8090 }
             - { name: control, containerPort: 8091 }

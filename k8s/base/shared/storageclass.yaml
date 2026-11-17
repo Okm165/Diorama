@@ -4,10 +4,10 @@
 #
 # Retain: deleting a PVC never deletes the underlying data. Recreate a PVC
 # with the same name to re-attach an existing volume. The name below is the
-# default, created on a fresh cluster; an instance whose volumes live under
-# another class of the same shape (e.g. a pre-existing `mirror-retain`)
-# names that class in its wiring's `STORAGE_CLASS`, and the overlay points
-# both this object and every claim at it (see the overlays' replacements).
+# one spelling of the claim class: every claim of every instance names this
+# literal (a k8s-native fact, not Diorama configuration — the specialization
+# carries no storage key), and a cluster with its own provisioner edits this
+# file once on an empty cluster: a bound claim's class does not rebind.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:

@@ -37,20 +37,10 @@ spec:
           image: localhost/diorama-cctp-bridge:pin3-20261117
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
-          # The bridge's own wiring ConfigMap (cctp-config), not the venue's:
-          # CCTP_STATE_DIR, T_RPC_URL and TARGET_RPC_URL are all this process
-          # reads. T lives in the diorama-mainnet namespace, so the bridge
-          # reaches it over cross-namespace service DNS.
-          # The bridge's wiring (cctp-config) plus the instance Secret LAST:
-          # the relay wallet's hex key is a credential (secrets.env
-          # CCTP_RELAY_KEY + `make secrets`), never a ConfigMap key. Optional:
-          # a bridge with no relay yet boots and reports the missing key at
-          # its own gate.
-          envFrom:
-            - configMapRef: { name: cctp-config }
-            - secretRef:
-                name: diorama-cctp-secrets
-                optional: true
+          # No env: the configuration is the mounted specialization file
+          # (/etc/mirror/specialization.toml beside the instance file), which
+          # carries the chain endpoints, the state root and the relay key
+          # (gitignored, so the key never enters a cluster Secret).
           ports:
             - { name: iris, containerPort: 8095 }
             - { name: control, containerPort: 8096 }

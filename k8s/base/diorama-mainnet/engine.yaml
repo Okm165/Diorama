@@ -34,10 +34,9 @@ spec:
           image: localhost/diorama-mainnet-engine:v17
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
-          # The wiring the instance TOML references as ${...} (EVM_URL,
-          # TARGET_RPC_URL, BEACON_URL, ENGINE_API_URL, JWT_PATH, STATE_DIR).
-          envFrom:
-            - configMapRef: { name: diorama-config }
+          # No env: the configuration is the mounted specialization file
+          # (/etc/mirror/specialization.toml beside the instance file). The
+          # specialization is the only per-deployment source of truth.
           ports:
             - { name: http, containerPort: 8080 }
           volumeMounts:

@@ -13,4 +13,3 @@ resources:
   - lighthouse.yaml
   - anvil-t.yaml
   - engine.yaml
-  - secrets.yaml
