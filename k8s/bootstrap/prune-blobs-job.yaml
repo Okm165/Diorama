@@ -13,7 +13,8 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: lighthouse-prune-blobs
-  namespace: diorama-mainnet
+  # The namespace is the instance's (the overlay's `namespace:` transform);
+  # the Job is applied from a mirror's own namespace context.
   labels:
     app.kubernetes.io/name: lighthouse-prune-blobs
     app.kubernetes.io/part-of: diorama-mainnet

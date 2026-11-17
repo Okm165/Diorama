@@ -12,7 +12,8 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: repin-wipe
-  namespace: diorama-mainnet
+  # The namespace is the instance's (the overlay's `namespace:` transform);
+  # the Job is applied from a mirror's own namespace context.
   labels:
     app.kubernetes.io/name: repin-wipe
     app.kubernetes.io/part-of: diorama-mainnet
