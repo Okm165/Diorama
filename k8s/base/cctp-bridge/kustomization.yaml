@@ -8,3 +8,4 @@ kind: Kustomization
 resources:
   - cctp-bridge.yaml
   - pvcs.yaml
+  - secrets.yaml

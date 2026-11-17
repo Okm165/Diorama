@@ -35,11 +35,17 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # The same `envFrom` mechanism as the engines: the ConfigMap carries
-          # every key (SIM_STATE_DIR, TARGET_RPC_URL, ENGINE_ADMIN_URL, and the
-          # ${EVM_FORK_URL} the instance's source_url names), the pod reads the
-          # ones its instance resolves, and a new wiring var needs no edit here.
+          # every key the instance resolves (SIM_STATE_DIR, TARGET_RPC_URL,
+          # ENGINE_ADMIN_URL, HL_INFO_API_URL), and a new wiring var needs no
+          # edit here. The instance Secret rides LAST: the keyed market-REST
+          # mirror (secrets.env HL_INFO_API_URL) shadows the wiring's public
+          # value in this pod. Optional: a keyless instance serves the public
+          # API only.
           envFrom:
             - configMapRef: { name: diorama-config }
+            - secretRef:
+                name: diorama-venue-secrets
+                optional: true
           ports:
             - { name: info, containerPort: 8090 }
             - { name: control, containerPort: 8091 }

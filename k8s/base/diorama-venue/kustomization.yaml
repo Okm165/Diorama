@@ -1,8 +1,8 @@
 # The Venue Mirror's manifest base: V (the fork-mode anvil), the venue engine,
-# the simulator. The namespace, the instance ConfigMap and the harness
-# NodePorts are the overlay's — the same split as k8s/base/diorama-mainnet.
-# The cross-mirror CCTP bridge is its own base (k8s/base/cctp-bridge), not a
-# venue specialization.
+# the simulator, and the instance's Secret inventory. The namespace, the
+# instance ConfigMap and the harness services are the overlay's — the same
+# split as k8s/base/diorama-mainnet. The cross-mirror CCTP bridge is its own
+# base (k8s/base/cctp-bridge), not a venue specialization.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -12,3 +12,4 @@ resources:
   - anvil-v.yaml
   - engine.yaml
   - venue-sim.yaml
+  - secrets.yaml

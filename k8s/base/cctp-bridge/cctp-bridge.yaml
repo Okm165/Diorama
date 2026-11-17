@@ -41,14 +41,16 @@ spec:
           # CCTP_STATE_DIR, T_RPC_URL and TARGET_RPC_URL are all this process
           # reads. T lives in the diorama-mainnet namespace, so the bridge
           # reaches it over cross-namespace service DNS.
+          # The bridge's wiring (cctp-config) plus the instance Secret LAST:
+          # the relay wallet's hex key is a credential (secrets.env
+          # CCTP_RELAY_KEY + `make secrets`), never a ConfigMap key. Optional:
+          # a bridge with no relay yet boots and reports the missing key at
+          # its own gate.
           envFrom:
             - configMapRef: { name: cctp-config }
-          env:
-            # The funded relay wallet's hex key: a Secret, never a manifest
-            # literal (the instance reads it as ${CCTP_RELAY_KEY}); create it
-            # once with `make venue-secrets CCTP_RELAY_KEY=0x…`.
-            - name: CCTP_RELAY_KEY
-              valueFrom: { secretKeyRef: { name: cctp-relay-key, key: relay-key } }
+            - secretRef:
+                name: diorama-cctp-secrets
+                optional: true
           ports:
             - { name: iris, containerPort: 8095 }
             - { name: control, containerPort: 8096 }

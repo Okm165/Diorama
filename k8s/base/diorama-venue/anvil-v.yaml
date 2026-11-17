@@ -79,9 +79,16 @@ spec:
               chmod 0777 /state 2>/dev/null || true
               chmod 0666 /state/pin 2>/dev/null || true
               echo "resolved pin=$PIN (source head=$HEAD)"
-          env:
-            - name: EVM_FORK_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: EVM_FORK_URL } }
+          # The wiring the instance resolves (${EVM_FORK_URL}, the fork
+          # source), plus the instance Secret as the LAST envFrom source: a
+          # key both carry resolves from the Secret (a keyed archive URL is a
+          # credential; secrets.env + `make secrets`). Optional: a keyless
+          # instance has an empty Secret and keeps the wiring's public value.
+          envFrom:
+            - configMapRef: { name: diorama-config }
+            - secretRef:
+                name: diorama-venue-secrets
+                optional: true
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -171,9 +178,16 @@ spec:
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info
+          # The wiring (${EVM_FORK_URL}) plus the instance Secret LAST: a key
+          # both carry resolves from the Secret (a keyed archive URL is a
+          # credential; secrets.env + `make secrets`). Optional: a keyless
+          # instance keeps the wiring's public value.
+          envFrom:
+            - configMapRef: { name: diorama-config }
+            - secretRef:
+                name: diorama-venue-secrets
+                optional: true
           env:
-            - name: EVM_FORK_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: EVM_FORK_URL } }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }
