@@ -72,6 +72,12 @@ pub struct Bridge {
     /// hold, perp withdrawable): the projection writes only on change, so a
     /// quiet book costs no tx.
     projected: std::sync::Mutex<std::collections::HashMap<Address, [u64; 3]>>,
+    /// The reason each account's figures could not be computed, keyed by
+    /// address. A projection refusal is a **state**, not an event: a fixture
+    /// account holding a market the served meta does not carry is refused on
+    /// every pass (measured: ~1/s for `xyz:NVDA`), so the log fires on the
+    /// transition into and out of the refusal, not on each retry.
+    refusals: std::sync::Mutex<std::collections::HashMap<Address, String>>,
     pub metrics: Arc<BridgeMetrics>,
 }
 
@@ -96,6 +102,7 @@ impl Bridge {
             observed_head: std::sync::atomic::AtomicU64::new(0),
             cursor: std::sync::atomic::AtomicU64::new(cursor),
             projected: std::sync::Mutex::new(std::collections::HashMap::new()),
+            refusals: std::sync::Mutex::new(std::collections::HashMap::new()),
             metrics,
         })
     }
@@ -199,7 +206,7 @@ impl Bridge {
         if !spot_installed && !withdrawable_installed {
             return Ok(());
         }
-        let meta = self.feed.meta();
+        let meta = self.feed.margin_meta();
         let changed = self.changed_figures(usdc, meta.as_ref(), head).await?;
         if changed.is_empty() {
             return Ok(());
@@ -298,15 +305,20 @@ impl Bridge {
             match self.core_figures(address, usdc, meta) {
                 Ok(figures) => {
                     current.insert(address, figures);
+                    if self
+                        .refusals
+                        .lock()
+                        .expect("bridge refusal cache")
+                        .remove(&address)
+                        .is_some()
+                    {
+                        tracing::info!(
+                            account = %address,
+                            "bridge: precompile projection figures available again"
+                        );
+                    }
                 }
-                Err(e) => {
-                    self.metrics.inc_refusals();
-                    tracing::warn!(
-                        account = %address,
-                        error = %e,
-                        "bridge: precompile projection figures unavailable; the account is not projected this pass"
-                    );
-                }
+                Err(e) => self.note_refusal(address, &e.to_string()),
             }
         }
         let projected = self.projected.lock().expect("bridge projection cache");
@@ -314,6 +326,40 @@ impl Bridge {
             .into_iter()
             .filter(|(address, figures)| projected.get(address) != Some(figures))
             .collect())
+    }
+
+    /// One account's unpriceable figures, logged once per distinct cause.
+    ///
+    /// The account stays out of this pass (a projection that omits an
+    /// unpriceable leg would understate maintenance), but a permanently
+    /// unpriceable fixture must not read as a 1 Hz fault: the reason is a
+    /// state, so the log fires on the transition into and out of it.
+    fn note_refusal(&self, address: Address, reason: &str) {
+        self.metrics.inc_refusals();
+        let first = {
+            let mut refusals = self.refusals.lock().expect("bridge refusal cache");
+            match refusals.get(&address) {
+                Some(known) if known == reason => false,
+                _ => {
+                    refusals.insert(address, reason.to_string());
+                    true
+                }
+            }
+        };
+        if first {
+            tracing::warn!(
+                account = %address,
+                error = %reason,
+                "bridge: precompile projection figures unavailable; the account is not projected \
+                 until the cause clears"
+            );
+        } else {
+            tracing::debug!(
+                account = %address,
+                error = %reason,
+                "bridge: precompile projection figures still unavailable"
+            );
+        }
     }
 
     /// One account's projected figures, in the units the mocks store:
@@ -911,7 +957,7 @@ impl Bridge {
             tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
             return Ok(false);
         };
-        let meta = self.feed.meta();
+        let meta = self.feed.margin_meta();
         if let Some(bound) =
             crate::sim::account::spot_bridge_bound(&account, &self.feed, meta.as_ref(), info.index)?
         {
