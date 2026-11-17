@@ -443,11 +443,10 @@ port = 8080
 
     #[test]
     fn client_export_uses_the_manifests_spellings() {
-        // The two `test-endpoints` ConfigMaps are the other surface of these
-        // facts (`k8s/overlays/diorama-mainnet/` + `overlays/diorama-venue/`):
-        // one spelling on both sides, or the harness's env silently carries
-        // the wrong name. The keys are the chain-id family the consumer's
-        // loader reads: `CHAIN_1_*` and `CHAIN_999_*`.
+        // `make endpoints` renders this block beside the loopback forwards
+        // (`harness.env`): one spelling on both sides, or the harness's env
+        // silently carries the wrong name. The keys are the chain-id family
+        // the consumer's loader reads: `CHAIN_1_*` and `CHAIN_999_*`.
         let (inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
         assert_eq!(
             inst.export_env("client").unwrap(),

@@ -710,14 +710,14 @@ impl Instance {
 
     /// The client-facing endpoint block: our values under
     /// their names — we provide values, never rename their interface. The
-    /// keys are **exactly** the `test-endpoints` ConfigMaps' spellings
-    /// (`k8s/base/nodeports.yaml` for the first chain,
-    /// `k8s/overlays/diorama-venue/nodeports.yaml` for the venue's
-    /// `CHAIN_1_`-prefixed block): one fact, one spelling, whichever surface
-    /// renders it. The chain URL is the deployment wiring (the same env the
-    /// pods read); the service URLs are in-cluster DNS built from the
-    /// instance's own ports, under the manifests' Service names (`engine`,
-    /// `venue-sim`, `cctp-bridge` — `k8s/base/engine.yaml`, `base/venue/`).
+    /// keys are the consumer harness's spellings (`CHAIN_1_*` on the
+    /// mainnet, `CHAIN_999_*`/`VENUE_*`/`HL_INFO_API_URL` on the venue —
+    /// `make endpoints` renders the block; the loopback forwards come from
+    /// the instance's `harness.env`). One fact, one spelling, whichever
+    /// surface renders it. The chain URL is the deployment wiring (the same
+    /// env the pods read); the service URLs are in-cluster DNS built from
+    /// the instance's own ports, under the manifests' Service names
+    /// (`engine`, `venue-sim`, `cctp-bridge`).
     fn client_env(&self) -> Result<Vec<String>, ConfigError> {
         let mut vars = match self.instance.profile {
             Profile::Mainnet => self.client_env_mainnet()?,
