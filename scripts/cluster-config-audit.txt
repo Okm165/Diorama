@@ -1,0 +1,64 @@
+# The live-vs-repo ConfigMap audit (measured 2026-11-17), kept as a gate.
+#
+# One line per key the LIVE cluster's ConfigMaps carried when the audit ran:
+#
+#   namespace|configmap-base-name|key|class
+#
+# The configmap name is the generator's base name; the build's hash suffix
+# (or its absence) does not matter, the match is by prefix.
+#
+# class live-read : a pod of that namespace resolves the key (envFrom, a
+#                   configMapKeyRef, or a mounted file key) - the repo build
+#                   must still carry it, or a fresh clone loses a live fact.
+# class live-dead : no reader anywhere (a stale generation's key, or a leak
+#                   from another namespace's wiring) - the build must NOT
+#                   carry it back; the value's real home is named in the
+#                   comment beside the group.
+#
+# The ConfigMaps the host harness reads are derived today (`make endpoints`,
+# `make port-forward` source harness.env; nothing mounts the old
+# `test-endpoints.env` block), so their live key is recorded live-dead: the
+# build's FORWARD_* keys are the shape the next apply converges to.
+#
+# diorama-mainnet: the wiring map live was a hand-applied object from before
+# the generator (no hash suffix); its seven keys are all read (the engine and
+# lighthouse envFrom it, the anvil pods configMapKeyRef EVM_URL).
+diorama-mainnet|diorama-config|EVM_URL|live-read
+diorama-mainnet|diorama-config|TARGET_RPC_URL|live-read
+diorama-mainnet|diorama-config|BEACON_URL|live-read
+diorama-mainnet|diorama-config|ENGINE_API_URL|live-read
+diorama-mainnet|diorama-config|JWT_PATH|live-read
+diorama-mainnet|diorama-config|STATE_DIR|live-read
+diorama-mainnet|diorama-config|CHECKPOINT_SYNC_URL|live-read
+diorama-mainnet|mainnet-instance|instance.toml|live-read
+diorama-mainnet|mainnet-instance|specialization.toml|live-read
+diorama-mainnet|reth-config|reth.toml|live-read
+diorama-mainnet|test-endpoints|test-endpoints.env|live-dead
+#
+# diorama-venue: the wiring map live still carried the keyed fork URL in
+# plain data (it moved to secrets.env + the instance Secret) and two bridge
+# facts that leaked in before the split (T_RPC_URL, CCTP_STATE_DIR - the
+# bridge reads its own namespace's map; nothing in diorama-venue resolves
+# them).
+diorama-venue|diorama-config|EVM_FORK_URL|live-read
+diorama-venue|diorama-config|HL_INFO_API_URL|live-read
+diorama-venue|diorama-config|HL_WS_API_URL|live-read
+diorama-venue|diorama-config|TARGET_RPC_URL|live-read
+diorama-venue|diorama-config|ENGINE_ADMIN_URL|live-read
+diorama-venue|diorama-config|STATE_DIR|live-read
+diorama-venue|diorama-config|SIM_STATE_DIR|live-read
+diorama-venue|diorama-config|T_RPC_URL|live-dead
+diorama-venue|diorama-config|CCTP_STATE_DIR|live-dead
+diorama-venue|venue-instance|instance.toml|live-read
+diorama-venue|venue-instance|specialization.toml|live-read
+diorama-venue|test-endpoints|test-endpoints.env|live-dead
+#
+# diorama-cctp: the bridge envFroms its wiring map (state root, both chains);
+# the legacy unsuffixed `cctp-config` object beside it is an unreferenced
+# stale generation (its content is identical, so the keys gate either way).
+diorama-cctp|cctp-config|CCTP_STATE_DIR|live-read
+diorama-cctp|cctp-config|T_RPC_URL|live-read
+diorama-cctp|cctp-config|TARGET_RPC_URL|live-read
+diorama-cctp|cctp-instance|instance.toml|live-read
+diorama-cctp|cctp-instance|specialization.toml|live-read
+diorama-cctp|cctp-test-endpoints|test-endpoints.env|live-dead
