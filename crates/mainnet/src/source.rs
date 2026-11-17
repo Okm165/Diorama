@@ -1,5 +1,5 @@
 //! `NativeSource: Source` — the mainnet profile's source: reth, the local fork
-//! source (BALs, traces, a 10,064-block state window; WS heads available).
+//! source (BALs, traces, a 10,064-block state window).
 //!
 //! Both composer rungs come from here: [`Source::bal`] is the native rung
 //! (`eth_getBlockAccessList`), [`Source::touched`] the trace rung — the
@@ -15,13 +15,14 @@ use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// What reth serves (measured): the native BAL rung, traces, a 10,064-block
-/// state window, WS heads; no system transactions (Ethereum has none).
+/// state window; no system transactions (Ethereum has none) and no WebSocket
+/// listener (re-measured 2026-11-17: 8545/8551 only, an upgrade on 8545 is
+/// refused with 403).
 pub(crate) fn declared() -> Capabilities {
     Capabilities::of([
         Capability::NativeBal,
         Capability::Traces,
         Capability::Historical,
-        Capability::HeadsWs,
     ])
 }
 
@@ -219,7 +220,6 @@ mod tests {
                 Capability::NativeBal,
                 Capability::Traces,
                 Capability::Historical,
-                Capability::HeadsWs,
             ]),
             "the declaration the boot audit compares against"
         );

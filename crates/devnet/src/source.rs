@@ -28,8 +28,6 @@ pub enum Capability {
     /// State reads at arbitrary blocks; when absent, historical reads are
     /// refused with the numbers, never answered with a newer value.
     Historical,
-    /// `eth_subscribe newHeads` (reth; the HL public RPC documents none).
-    HeadsWs,
     /// `eth_getSystemTxsByBlockNumber` (HyperEVM's Core→EVM completions).
     SystemTxs,
     /// Receipts (and therefore logs) for the system txs. The HL public RPC
@@ -48,7 +46,6 @@ impl Capability {
             Capability::NativeBal => "native_bal",
             Capability::Traces => "traces",
             Capability::Historical => "historical",
-            Capability::HeadsWs => "heads_ws",
             Capability::SystemTxs => "system_txs",
             Capability::SystemTxReceipts => "system_tx_receipts",
         }
@@ -63,7 +60,6 @@ impl Capability {
             diorama_config::Capability::Bal => Self::NativeBal,
             diorama_config::Capability::Traces => Self::Traces,
             diorama_config::Capability::Historical => Self::Historical,
-            diorama_config::Capability::HeadsWs => Self::HeadsWs,
             diorama_config::Capability::SystemTxs => Self::SystemTxs,
             diorama_config::Capability::SystemTxReceipts => Self::SystemTxReceipts,
             diorama_config::Capability::Batch
@@ -213,7 +209,7 @@ pub trait Source: Send + Sync {
 }
 
 impl Capabilities {
-    /// Is this capability provable by a read? `historical` and `heads_ws` are
+    /// Is this capability provable by a read? `historical` is
     /// behavioral ("the block parameter is ignored" cannot be distinguished
     /// from "the value did not change" by a read) and `system_tx_receipts` is
     /// the absence of a value — they stay declarations with their
@@ -256,7 +252,7 @@ impl Capabilities {
                 "eth_getSystemTxsByBlockNumber",
                 serde_json::json!([U64::from(head.saturating_sub(SYSTEM_TX_PROBE_LAG))]),
             ),
-            Capability::Historical | Capability::HeadsWs | Capability::SystemTxReceipts => {
+            Capability::Historical | Capability::SystemTxReceipts => {
                 return None
             }
         })
@@ -809,7 +805,6 @@ mod tests {
         }
         for cap in [
             Capability::Historical,
-            Capability::HeadsWs,
             Capability::SystemTxReceipts,
         ] {
             assert!(!Capabilities::probeable(cap), "{cap:?}");

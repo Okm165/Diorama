@@ -31,7 +31,6 @@
 # diorama-mainnet: the wiring env map is gone; every key it carried lives in
 # the specialization (endpoints, state root, JWT path) or the defaults.
 diorama-mainnet|endpoints.evm.http|live-read
-diorama-mainnet|endpoints.evm.ws|live-read
 diorama-mainnet|endpoints.anvil.http|live-read
 diorama-mainnet|endpoints.engine_api.http|live-read
 diorama-mainnet|endpoints.beacon.http|live-read

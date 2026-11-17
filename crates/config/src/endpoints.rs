@@ -61,13 +61,15 @@ pub enum Capability {
     Traces,
     /// `eth_getBlockAccessList` (EIP-7928).
     Bal,
-    /// `eth_subscribe("newHeads")` over WebSocket.
-    HeadsWs,
     /// `eth_getSystemTxsByBlockNumber` — the Diorama follow pool's gate.
     SystemTxs,
     /// Receipts for system transactions.
     SystemTxReceipts,
-    /// Accepts JSON-RPC **batch** bodies (ZAN-class providers refuse them).
+    /// Accepts JSON-RPC **batch** bodies. Re-measured 2026-11-17: ZAN
+    /// accepts batch bodies too (the earlier "ZAN-class providers refuse
+    /// them" no longer holds); what still separates providers is pinned
+    /// reads — ZAN serves `latest`-block reads only, so the pinned-deployment
+    /// fork source stays off the read pool.
     Batch,
     /// Hyperliquid `/info` REST plane.
     MarketRest,
@@ -82,7 +84,6 @@ impl Capability {
             Self::Historical => "historical",
             Self::Traces => "traces",
             Self::Bal => "bal",
-            Self::HeadsWs => "heads_ws",
             Self::SystemTxs => "system_txs",
             Self::SystemTxReceipts => "system_tx_receipts",
             Self::Batch => "batch",
@@ -98,7 +99,6 @@ impl Capability {
             "archive" | "historical" => Self::Historical,
             "trace" | "traces" => Self::Traces,
             "bal" => Self::Bal,
-            "heads_ws" => Self::HeadsWs,
             "system_txs" => Self::SystemTxs,
             "system_tx_receipts" => Self::SystemTxReceipts,
             "batch" => Self::Batch,
