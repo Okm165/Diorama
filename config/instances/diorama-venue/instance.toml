@@ -1,9 +1,12 @@
-# The generic Venue Mirror instance: deployment facts only.
+# The Venue Mirror instance: deployment facts only.
 #
-# Product-specific scope (markets, fixture ownership, probes, closures,
-# endpoint groups) lives in `specialization.toml`, which is gitignored;
-# `specialization.example.toml` is the tracked template. Endpoint references
-# use `@name` and are expanded from `[endpoints]` before validation.
+# One file = one deployment. Every key here differs between deployments;
+# everything else is `config/defaults.toml` (ports, the journal ring and its
+# location, the endpoint policy, the engine's cadence). Product scope
+# (endpoint groups, markets, fixtures, probes, closures) lives in
+# `specialization.toml`, gitignored; `specialization.example.toml` is the
+# tracked template. Endpoint references use `@name` and are expanded from
+# `[endpoints]` before validation.
 [instance]
 name = "diorama-venue"
 namespace = "diorama-venue"
@@ -12,57 +15,38 @@ project = "specialization"
 
 [chains.venue]
 kind = "hyperliquid"
-# An explicit fork base, when the deployment pins one, lives in the
-# specialization's [chains.venue] as `fork_pin`.
-# The EVM read pool: random healthy start, fail over to the next endpoint,
-# cool a failed endpoint down, retry it in a later round.
+# The EVM read pool (random healthy start, fail over, cool a failed endpoint
+# down). The market plane's REST and WS pools ride the same policy.
 source_urls = "@evm"
-# The market plane's REST and WS pools (the same rotation/cooldown policy).
 api_urls = "@hyperliquid_info"
 ws_urls = "@hyperliquid_ws"
+# An explicit fork base, when the deployment pins one, lives in the
+# specialization's `[chains.venue]` as `fork_pin`.
 
 [services.engine]
 state_dir = "${STATE_DIR}"
-# The boot wait for V. This is the *anvil's* budget, not the engine's: a
+# The boot wait for V: this is the *anvil's* budget, not the engine's. A
 # fork-mode anvil loads its state dump and materializes source state on
 # demand, and a rate-limited archive source has been measured past 5 minutes
-# (2026-11-17: 120 s here exited the engine while V was still forking — 35
-# restarts in 42 h, and every restart re-stitched the follow from the pin).
-# 1200 s is the same 20-minute budget as the anvil's startupProbe
-# (240 x 5 s in k8s/base/diorama-venue/anvil-v.yaml); keep the two equal.
+# (2026-11-17: 120 s here exited the engine while V was still forking, 35
+# restarts in 42 h). 1200 s is the same 20-minute budget as the anvil's
+# startupProbe (240 x 5 s in k8s/base/diorama-venue/anvil-v.yaml); keep the
+# two equal.
 boot_timeout_secs = 1200
 
-[services.engine.anvil]
-target_url = "@anvil"
-
 # The follow's cadence and window against the public source. The window is
-# the **catch-up width**: a 100-block window advances slower than the source's
+# the catch-up width: a 100-block window advances slower than the source's
 # ~60 blocks/min, so a 35k-block gap never closes. 900 blocks per pass is the
-# live catch-up width that closed the measured 35k gap; the composer halves an
-# `eth_getLogs` chunk on a response-size refusal or a transient `-32000`
-# timeout, so the wider window still respects the endpoint's request budget.
+# live catch-up width that closed the measured 35k gap; the composer halves
+# an `eth_getLogs` chunk on a response-size refusal, so the wider window still
+# respects the endpoint's request budget.
 [services.engine.loops]
 poll_interval_ms = 2000
 max_gap_blocks = 900
-# JSON-RPC batch items for source reads and local cheatcode writes. This is
-# the deployment's endpoint contract (the live value), not a global default.
+# The deployment's endpoint contract (the public pool's batch size).
 chunk_size = 500
-
-[services.engine.journal]
-dir = "${STATE_DIR}/journal"
-
-[services.engine.http]
-port = 8080
 
 [services.venue_sim]
 state_dir = "${SIM_STATE_DIR}"
 engine_admin_url = "@engine_admin"
 anvil_url = "@anvil"
-
-[services.venue_sim.info]
-addr = "0.0.0.0"
-port = 8090
-
-[services.venue_sim.control]
-addr = "0.0.0.0"
-port = 8091
