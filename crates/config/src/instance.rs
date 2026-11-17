@@ -144,6 +144,13 @@ pub struct ChainVenue {
     /// it from the mounted specialization).
     #[serde(default)]
     pub fork_pin: Option<u64>,
+    /// The fork source anvil V forks from. Its own key, deliberately not a
+    /// member of the `@evm` read pool: the measured archive plane (keyed,
+    /// single-call) refuses the pool's batched calls, so the fork target and
+    /// the read pool are different endpoints by measurement. The anvil pod's
+    /// init container reads it from the mounted specialization file.
+    #[serde(default)]
+    pub fork_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]

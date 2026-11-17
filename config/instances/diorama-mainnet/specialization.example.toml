@@ -1,10 +1,11 @@
 # Project specialization — gitignored.
 #
-# The generic `instance.toml` carries deployment facts (identity,
-# profile, state paths, ports). This file carries the product's
-# endpoint groups, watch scope, fixture ownership, probes and
-# closures. `specialization.example.toml` is the tracked, complete template;
-# copy it to `specialization.toml` for a deployment.
+# This file is the deployment's ONLY config source beyond the shared
+# defaults: every value below is hardcoded here (endpoints, fork facts, state
+# roots), and no `${VAR}` reference may appear — the file is mounted into the
+# pods as a file, and env indirection would make it specific to one cluster's
+# wiring. `specialization.example.toml` is the tracked, complete template;
+# copy it to `specialization.toml` for a deployment and replace every value.
 
 # The chain-1 EVM plane (http + ws; any EVM node — local reth here).
 # Local only by policy: no latency, no public-RPC dependency.
@@ -24,25 +25,43 @@
 [endpoints.evm]
 chain_id = 1
 roles = ["bal", "traces", "historical", "heads_ws", "batch"]
-ws = ["${EVM_URL}"]
-http = ["${EVM_URL}"]
+# The read pool AND the anvil fork/re-pin target (the primary entry). The
+# in-cluster reth is the fresh-clone default; a remote archive is an operator
+# replacement of these two literals.
+ws = ["http://reth:8545"]
+http = ["http://reth:8545"]
 
 [endpoints.anvil]
-http = ["${TARGET_RPC_URL}"]
+# The devnet chain the engine drives (T).
+http = ["http://anvil-t:8545"]
 chain_id = 1
 
 [endpoints.engine_api]
-http = ["${ENGINE_API_URL}"]
+# reth's authrpc: the top-up loop's Engine API (EIP-8379).
+http = ["http://reth:8551"]
 
 [endpoints.beacon]
-http = ["${BEACON_URL}"]
+# The local consensus client.
+http = ["http://lighthouse:5052"]
+
+# The reth<->lighthouse JWT is a generated file (`make secrets`), mounted as
+# a file; its path on the engine pod is a deployment fact. Both live in the
+# deployment's [services.engine] table below (state root) and its
+# source_sync sub-table.
+[services.engine.source_sync]
+jwt_path = "/secrets/jwt.hex"
 
 # The explicit fork base. A configured pin preserves the deployment epoch
-# across restarts; omit it to resolve a fresh pin at start-up.
+# across restarts; omit it to resolve a fresh pin at start-up. The pin must stay
+# inside reth's state window (`reth.toml` account/storage history, 10,064
+# blocks): an older pin makes every unwritten read fail with "pruned history
+# unavailable", which freezes chain 1 while the block head still advances.
 [chains.l1]
 fork_pin = 26377102
 
 [services.engine]
+# The deployment's state root: the engine pod's own PVC mount path.
+state_dir = "/state"
 fixture_addresses = ["0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", "0x6B175474E89094C44Da98b954EedeAC495271d0F", "0x98C23E9d8f34FEFb1B7BD6a91B7FF122F4e16F5c", "0x4d5F47FA6A74757f35C14fD3a6Ef8E3C9BC514E8", "0x23878914EFE38d27C4D67Ab83ed1b93A74D4086a", "0x5Ee5bf7ae06D1Be5997A1A72006FE6C607eC6DE8", "0x0B925eD163218f6662a35e0f0371Ac234f9E9371", "0x4575acc57E1FFA7CcccD5969898d1114c0792216", "0x5c4075FCC531b2227dd1E6Aef747BeEe3a0A7067", "0x6359978c0dF49aBf6A163E3F526c29b2602645fb", "0x8EdCC3340e082033D78F9C1ef177CA5c10963bcB", "0xCd171B437d9329C2654128645944fbC05C9AA2BF", "0x797945E6995c60933E635623A5dD7F3822DD2AF5", "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419", "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c", "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8", "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6", "0x3E7d1EAB13ad0104d2750B8863b489D65364e32D"]
 
 # The parent chain's live Chainlink answers → T's mock aggregators.

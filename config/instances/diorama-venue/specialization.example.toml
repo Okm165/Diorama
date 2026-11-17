@@ -1,10 +1,12 @@
 # Project specialization — gitignored.
 #
-# The generic `instance.toml` carries deployment facts (identity,
-# profile, state paths, ports). This file carries the product's
-# endpoint groups, watch scope, fixture ownership, probes and
-# closures. `specialization.example.toml` is the tracked, complete template;
-# copy it to `specialization.toml` for a deployment.
+# This file is the deployment's ONLY config source beyond the shared
+# defaults: every value below is hardcoded here (endpoints — keyed ones
+# included —, fork facts, state roots), and no `${VAR}` reference may appear
+# — the file is mounted into the pods as a file, and env indirection would
+# make it specific to one cluster's wiring. `specialization.example.toml` is
+# the tracked, complete template; copy it to `specialization.toml` for a
+# deployment and replace every value.
 
 # Endpoint capability claims are verified endpoint-by-endpoint at boot (the
 # capability audit, `crates/devnet/src/source.rs::audit_capabilities`); the
@@ -13,8 +15,16 @@
 # the provider's behavior does.
 
 [endpoints.anvil]
-http = ["${TARGET_RPC_URL}"]
+# The devnet chain the engine drives (V).
+http = ["http://anvil-v:8545"]
 chain_id = 999
+
+# The deployment's state roots: the pods' own PVC mount paths.
+[services.engine]
+state_dir = "/state"
+
+[services.venue_sim]
+state_dir = "/state"
 
 # The HyperEVM read pool — one nested declaration per endpoint, each carrying
 # the capabilities it is *measured* to serve (`scripts/probe-endpoint.sh` is
@@ -54,18 +64,23 @@ url = "https://hyperliquid.api.pocket.network"
 capabilities = ["system_txs", "batch"]
 
 [endpoints.hyperliquid_info]
-# The market REST plane. A keyed mirror (e.g. ZAN: `https://api.zan.top/node/
-# v1/hyperliquid/mainnet/<KEY>`) slots in as the first entry with
-# `capabilities = ["market_rest"]`; the official API stays as failover.
-http = ["${HL_INFO_API_URL}"]
+# The market REST plane. A keyed mirror (e.g. ZAN) slots in as the first
+# entry with `capabilities = ["market_rest"]`; the official API stays as
+# failover. The keyed URL is hardcoded here — the specialization is
+# gitignored, so the key never enters git or a cluster Secret.
+http = [
+  "https://api.zan.top/node/v1/hyperliquid/mainnet/<YOUR_ZAN_KEY>",
+  "https://api.hyperliquid.xyz",
+]
 roles = ["market_rest"]
 
 [endpoints.hyperliquid_ws]
-ws = ["${HL_WS_API_URL}"]
+ws = ["wss://api.hyperliquid.xyz/ws"]
 roles = ["market_ws"]
 
 [endpoints.engine_admin]
-http = ["${ENGINE_ADMIN_URL}"]
+# The venue engine's admin API (in-namespace service DNS).
+http = ["http://engine:8080"]
 
 # The explicit fork base. A configured pin preserves the deployment epoch
 # across restarts; omit it (or comment the line out) to resolve a fresh pin
@@ -73,10 +88,16 @@ http = ["${ENGINE_ADMIN_URL}"]
 # persisted state to preserve, and a pin a state file does not agree with
 # trips the engine's epoch-rollback guard, fail-closed).
 # The live deployment pins its base in its own specialization.toml and pairs
-# it with an archive-deep fork source in k8s/overlays/diorama-venue/wiring.env
-# (EVM_FORK_URL) — the official endpoint serves `latest` only.
+# it with an archive-deep fork source below — the official endpoint serves
+# `latest` only.
 [chains.venue]
 # fork_pin = 51273700
+# The fork source anvil V forks from: archive-deep, usually keyed. The
+# official endpoint is the keyless default; a keyed archive (e.g. ZAN's
+# .../node/v1/hyperliquid/mainnet/<KEY>/evm) is the pinned deployment's
+# choice. It is deliberately NOT a member of the `@evm` read pool (measured:
+# the keyed planes refuse batched calls).
+fork_url = "https://rpc.hyperliquid.xyz/evm"
 
 
 [services.engine]

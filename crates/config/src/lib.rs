@@ -7,7 +7,11 @@
 //! are errors at every level.
 //!
 //! `${VAR}` references in string values resolve from the environment at load
-//! time (deploy-time wiring, §19.4). [`Instance::inspect`] is the one entry
+//! time — but the deployment model forbids them: the specialization is
+//! self-sustained (every value hardcoded, mounted as a file) and
+//! `scripts/config-lint.sh` fails on any `${VAR}` in a TOML layer. The
+//! mechanism stays for the tooling and the tests; the audited files carry
+//! none. [`Instance::inspect`] is the one entry
 //! every service and the tooling share: it reports unresolved wiring instead
 //! of failing on it — each service then requires only its own sections by
 //! name (`require_resolved` / `require_resolved_logged`; one instance file,
@@ -801,20 +805,11 @@ port = 8096
         // stable-feed pulse pinned USDT to 1.0 and the probe had no tolerance
         // (measured 2026-10-31; the mainnet engine now reports `failed:0`).
         assert_eq!(engine(&inst).verifier.probes.len(), 10);
-        let mut names = unresolved.clone();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "BEACON_URL",
-                "ENGINE_API_URL",
-                "EVM_URL",
-                "JWT_PATH",
-                "STATE_DIR",
-                "TARGET_RPC_URL"
-            ],
-            "the wiring the instance references"
-        );
+        // The specialization is self-sustained: every value is hardcoded in
+        // the file, so the tracked template resolves with an empty pod
+        // environment. A `${VAR}` reference surviving in any layer would
+        // reintroduce the cluster-specific wiring the model removed.
+        assert!(unresolved.is_empty(), "unresolved: {unresolved:?}");
     }
 
     #[test]
@@ -938,20 +933,9 @@ port = 8096
             inst.chains.venue.as_ref().unwrap().kind,
             ChainKind::Hyperliquid
         );
-        let mut names = unresolved.clone();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "ENGINE_ADMIN_URL",
-                "HL_INFO_API_URL",
-                "HL_WS_API_URL",
-                "SIM_STATE_DIR",
-                "STATE_DIR",
-                "TARGET_RPC_URL"
-            ],
-            "the wiring the venue instance references"
-        );
+        // The specialization is self-sustained: nothing is resolved from the
+        // pod environment any more (see the mainnet instance test).
+        assert!(unresolved.is_empty(), "unresolved: {unresolved:?}");
     }
 
     /// The bridge is its own profile: it carries only

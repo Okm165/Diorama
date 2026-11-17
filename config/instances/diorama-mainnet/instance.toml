@@ -25,9 +25,6 @@ follow = "latest"
 # `fork_pin`.
 fork_offset = 128
 
-[services.engine]
-state_dir = "${STATE_DIR}"
-
 [services.engine.loops]
 # Chain-1 catch-up: the live gap is ~3.3k blocks; 10k stays below the
 # 10,064-block rebase bound and leaves margin for source advance.
@@ -36,10 +33,11 @@ max_gap_blocks = 10000
 # deployment's endpoint contract (the local reth), not a global default.
 chunk_size = 500
 
-# The top-up loop (EIP-8379): reth's engine API plus the shared JWT path.
+# The top-up loop (EIP-8379): reth's engine API. The JWT file's path is a
+# deployment fact and lives in the specialization's
+# [services.engine.source_sync].
 [services.engine.source_sync]
 engine_url = "@engine_api"
-jwt_path = "${JWT_PATH}"
 
 # The local consensus client is the beacon source.
 [services.engine.beacon]

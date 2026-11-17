@@ -24,7 +24,6 @@ ws_urls = "@hyperliquid_ws"
 # specialization's `[chains.venue]` as `fork_pin`.
 
 [services.engine]
-state_dir = "${STATE_DIR}"
 # The boot wait for V: this is the *anvil's* budget, not the engine's. A
 # fork-mode anvil loads its state dump and materializes source state on
 # demand, and a rate-limited archive source has been measured past 5 minutes
@@ -47,6 +46,5 @@ max_gap_blocks = 900
 chunk_size = 500
 
 [services.venue_sim]
-state_dir = "${SIM_STATE_DIR}"
 engine_admin_url = "@engine_admin"
 anvil_url = "@anvil"

@@ -20,10 +20,10 @@ profile = "cctp"
 project = "specialization"
 
 [services.cctp_bridge]
-state_dir = "${CCTP_STATE_DIR}"
-# A Secret, never a ConfigMap key: `make secrets` writes it from
-# `secrets.env` into the instance's Secret.
-relay_key = "${CCTP_RELAY_KEY}"
+# The state root and the relay wallet's hex key are deployment facts; they
+# live in the specialization's [services.cctp_bridge] (the relay key is
+# secret material: the specialization is gitignored, a Secret would be a
+# second home).
 attester_seed = "diorama-cctp-devnet-attester"
 # Circle's live fast-burn allowance is a rolling figure (measured 2026-10-31:
 # 56,854,459.08 USDC). This deployment pins the measured value; there is no

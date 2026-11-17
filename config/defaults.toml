@@ -7,8 +7,10 @@
 # config/instances/<name>/instance.toml. Protocol facts and measured
 # conventions are code constants, not configuration.
 #
-# Merge semantics: deep merge, defaults <- instance <- env; arrays replace,
-# never concatenate; unknown keys are errors at every level.
+# Merge semantics: deep merge, defaults <- specialization <- instance; arrays
+# replace, never concatenate; unknown keys are errors at every level. The
+# specialization (gitignored, file-mounted) is the only per-deployment source
+# of truth: no `${VAR}` reference may appear in any layer.
 
 # The shared endpoint pool policy: every lane (JSON-RPC, REST, WS, beacon)
 # reads this table. A failed endpoint cools for an exponentially growing
@@ -93,9 +95,11 @@ request_timeout_secs = 180
 
 [services.engine.journal]
 blocks = 1024
-# The journal lives on the engine's own state root: one ring per deployment,
-# so the root is the only deployment fact.
-dir = "${STATE_DIR}/journal"
+# The journal lives on the engine's own state root: one ring per deployment.
+# `/state` is the manifests' PVC mount path (a workspace convention); a
+# deployment whose state root differs overrides `state_dir` and this path
+# together in its specialization.
+dir = "/state/journal"
 
 [services.engine.beacon]
 # Beacon-API base URLs, tried in order. The top-up loop is the only reader

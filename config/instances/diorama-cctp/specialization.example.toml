@@ -1,7 +1,12 @@
 # Project specialization for the CCTP bridge — gitignored.
 #
-# The generic `instance.toml` carries the bridge's deployment facts; this file
-# carries the endpoint groups. `specialization.example.toml` is the tracked template.
+# This file is the deployment's ONLY config source beyond the shared
+# defaults: every value below is hardcoded here (endpoints, the state root,
+# the relay wallet's key), and no `${VAR}` reference may appear — the file is
+# mounted into the pod as a file. The relay key is secret material and is
+# safe here because the specialization is gitignored; a Secret would be a
+# second home for the same fact. `specialization.example.toml` is the tracked
+# template.
 
 # Endpoint capability claims are verified endpoint-by-endpoint at boot (the
 # capability audit, `crates/devnet/src/source.rs::audit_capabilities`); the
@@ -10,12 +15,19 @@
 # the provider's behavior does.
 
 [endpoints.t_rpc]
-http = ["${T_RPC_URL}"]
+# T lives in the mirror's namespace; the bridge reaches it cross-namespace.
+http = ["http://anvil-t.diorama-mainnet.svc.cluster.local:8545"]
 chain_id = 1
 
 [endpoints.anvil]
-http = ["${TARGET_RPC_URL}"]
+http = ["http://anvil-v.diorama-venue.svc.cluster.local:8545"]
 chain_id = 999
+
+[services.cctp_bridge]
+# The state root on the bridge pod's own PVC, and the funded relay wallet's
+# hex key (0x + 64 hex chars). Replace the key below with the real one.
+state_dir = "/state"
+relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
 
 [[services.cctp_bridge.chains]]
 id = "ethereum"
