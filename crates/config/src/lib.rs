@@ -784,21 +784,25 @@ port = 8096
         let (inst, unresolved) = Instance::inspect(&path).unwrap();
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(inst.instance.name, "diorama-mainnet");
-        // 44 market/protocol entries + the dapp's 44-address mainnet
-        // deployment in the tracked template. Update this count deliberately
-        // when the audit changes.
+        // 42 watchlist entries (re-audited 2026-11-17): the market/protocol
+        // addresses a fresh clone watches. The 46 project-side and beacon
+        // contracts the earlier template carried are not watched on the
+        // parent chain (the project deploy owns them on T). Update this
+        // count deliberately when the audit changes.
         assert_eq!(
             inst.watchlist.len(),
-            88,
+            42,
             "the audited example watchlist is complete"
         );
         assert_eq!(l1(&inst).fork_offset, 128);
-        assert_eq!(l1(&inst).fork_pin, Some(26_377_102));
+        // Pinned 2026-11-17 (measured: anvil_nodeInfo, /state/pin and the
+        // engine cursor all agree on 26437369).
+        assert_eq!(l1(&inst).fork_pin, Some(26_437_369));
         assert_eq!(
             inst.export_env("anvil").unwrap(),
             vec![
                 "FORK_OFFSET=128".to_string(),
-                "FORK_PIN=26377102".to_string()
+                "FORK_PIN=26437369".to_string()
             ]
         );
         // 10 probes: the Aave USDT price probe was removed after the

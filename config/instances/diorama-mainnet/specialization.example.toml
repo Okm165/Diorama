@@ -1,63 +1,63 @@
 # Project specialization — gitignored.
 #
-# This file is the deployment's ONLY config source beyond the shared
-# defaults: every value below is hardcoded here (endpoints, fork facts, state
-# roots), and no `${VAR}` reference may appear — the file is mounted into the
-# pods as a file, and env indirection would make it specific to one cluster's
-# wiring. `specialization.example.toml` is the tracked, complete template;
-# copy it to `specialization.toml` for a deployment and replace every value.
+# The generic `instance.toml` carries one deployment's identity, profile and
+# chain/cadence deltas. This file carries the deployment's endpoint groups,
+# state root, watch scope, fixture ownership, probes and closures. Ports and
+# the journal ring are the shared defaults. `specialization.example.toml` is
+# the tracked, complete template; copy it to `specialization.toml` for a
+# deployment.
 
-# The chain-1 EVM plane (http + ws; any EVM node — local reth here).
+# The chain-1 EVM plane (http only; any EVM node — local reth here).
 # Local only by policy: no latency, no public-RPC dependency.
 #
 # The claims are the node's measured facts, not its brand: reth serves the
 # native BAL rung (EIP-7928), the `debug_*` trace rung, state at historical
-# blocks (its 10,064-block window) and `eth_subscribe("newHeads")`. They are
-# what the boot audit probes per endpoint and what capability-gated admission
+# blocks (its 10,064-block window) and batch bodies; it serves NO WebSocket
+# listener (re-measured 2026-11-17: /proc/net/tcp in the reth pod shows
+# listeners on 8545 and 8551 only, an upgrade on 8545 is refused with 403,
+# and 8546 is closed — so no `heads_ws` and no `ws` list). They are what
+# the boot audit probes per endpoint and what capability-gated admission
 # routes on — an unqualified endpoint would be admitted to every call but
 # credited with nothing.
-# Endpoint capability claims are verified endpoint-by-endpoint at boot (the
-# capability audit, `crates/devnet/src/source.rs::audit_capabilities`); the
-# wire facts behind them are measured with `scripts/probe-endpoint.sh`, which
-# is also the re-probe for provider drift - a claim lives exactly as long as
-# the provider's behavior does.
-
 [endpoints.evm]
 chain_id = 1
-roles = ["bal", "traces", "historical", "heads_ws", "batch"]
-# The read pool AND the anvil fork/re-pin target (the primary entry). The
-# in-cluster reth is the fresh-clone default; a remote archive is an operator
-# replacement of these two literals.
-ws = ["http://reth:8545"]
+# Measured 2026-11-17 on the live reth: eth_getBlockAccessList (bal),
+# debug_traceBlockByNumber with prestateTracer/diffMode (traces), state reads
+# inside its 10,064-block window (historical; reth.toml account/storage
+# distance=10064) and batch bodies all answered.
 http = ["http://reth:8545"]
 
 [endpoints.anvil]
-# The devnet chain the engine drives (T).
 http = ["http://anvil-t:8545"]
 chain_id = 1
 
 [endpoints.engine_api]
-# reth's authrpc: the top-up loop's Engine API (EIP-8379).
 http = ["http://reth:8551"]
 
 [endpoints.beacon]
-# The local consensus client.
 http = ["http://lighthouse:5052"]
-
-# The reth<->lighthouse JWT is a generated file (`make secrets`), mounted as
-# a file; its path on the engine pod is a deployment fact. Both live in the
-# deployment's [services.engine] table below (state root) and its
-# source_sync sub-table.
-[services.engine.source_sync]
-jwt_path = "/secrets/jwt.hex"
 
 # The explicit fork base. A configured pin preserves the deployment epoch
 # across restarts; omit it to resolve a fresh pin at start-up. The pin must stay
 # inside reth's state window (`reth.toml` account/storage history, 10,064
 # blocks): an older pin makes every unwritten read fail with "pruned history
 # unavailable", which freezes chain 1 while the block head still advances.
+# `make mainnet-repin` resolves a fresh pin and starts a new epoch.
 [chains.l1]
-fork_pin = 26377102
+# Pinned 2026-11-17 for the chain-1 mirror bootstrap (register §8.27 rule b):
+# a changed fork pin is a new epoch, and a re-resolved pin above the deploy
+# block loses the epoch's contracts. This pin (reth head 26437497 at
+# resolution minus the 128-block offset) is at/below the deploy block and
+# inside reth's 10,064-block state window, so the epoch's contracts survive
+# every restart while the pin stands. A future deliberate re-pin edits this
+# line first.
+#
+# Measured 2026-11-17 (not inherited): `anvil_nodeInfo` on the live anvil-t
+# reports forkConfig.forkBlockNumber=26437369, /state/pin holds 26437369, and
+# the engine's cursor.json says epoch_pin=26437369 — all three agree. reth
+# head was 26437688 at measurement (319 blocks above the pin, inside the
+# window).
+fork_pin = 26437369
 
 [services.engine]
 # The deployment's state root: the engine pod's own PVC mount path.
@@ -66,38 +66,50 @@ fixture_addresses = ["0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "0xC02aaA39b2
 
 # The parent chain's live Chainlink answers → T's mock aggregators.
 # In mirror mode the bridge is the single price writer (the mocks' own
-# refresher is off). 5s keeps a source round inside the consumer's freshness
+# refresher is off). 5s keeps a source round inside the client's freshness
 # budget without waiting a full minute; the confirmation window is the
 # outcome-unknown reconciliation bound. The source `AnswerUpdated`
 # subscription is the event-lane target; this poll remains its reconciliation
 # net.
 #
-# The targets are the devnet fixture mocks (the `updateAnswer` surface), not
-# the read-only real aggregator code that the mirror also carries at
-# `0x7d4e…`/`0x4a34…`/`0x26f1…`/`0x54bc…`/`0x9c41…`. The mocks are listed in
-# `fixture_addresses` so the parent-diff apply never clobbers the bridge's
-# writes.
+# The bridge writes to the **canonical aggregator addresses** on T, where the
+# mirror is supposed to install a mock (the `updateAnswer` surface). Those
+# addresses are also the guard's proof-oracle feeds (`config/oracles`), so one
+# write would keep the indexer's served price and the close/enforcement
+# witness on the same round.
+#
+# Re-measured 2026-11-17 (live T, eth_getCode at `latest`): only the WETH and
+# WBTC targets hold the mock (3974-byte code, fixture-owned — their writes
+# mine); the STETH, USDC and USDT targets still hold the chain-1 aggregator
+# proxy code (9572 bytes, byte-identical to reth) and every write to them
+# mines as a revert (the live engine logs "the write mined as a revert" /
+# "did not mine within 10000 ms"). And the live indexer (`daloc` namespace,
+# CHAIN_1_CHAINLINK_FEEDS in its mounted chain-registry.env) reads the
+# *fixture CREATE* feeds, not these addresses: ETH 0x19f33b95…, BTC
+# 0x63f3A211…, STETH 0xD701E6F4…, USDC 0x1b488abd…, USDT 0x6c03CB02…,
+# WSTETH 0x7c8E4c87… — all six are code-bearing on T (4340-byte mock) and
+# come from today's DeployTestFixtures run. So the design below ("the mirror
+# installs a mock at the canonical address") is only half true this epoch:
+# the consumer deploy must either etch the mocks at these canonical addresses
+# (the stable design this list encodes — the target then survives a fresh
+# fork) or the target must become the fixture address (which changes on every
+# deploy). That is a deploy-side choice, not a config literal to guess here.
+#
+# The old non-guard fixture proxies (`0x4575…`, `0x5c40…`, …) are no longer a
+# read topology, but they are still listed in `fixture_addresses` as
+# whole-account ownership markers (measured 2026-11-17: codeless on T and on
+# the chain-1 source — nothing deploys or reads them today; harmless there,
+# and can be dropped when the deploy stops mentioning them).
 [services.engine.feed_bridge]
 poll_interval_ms = 5000
 confirm_window_ms = 120000
 writer = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 feeds = [
-  { name = "WETH/USD", source = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419", target = "0x4575acc57E1FFA7CcccD5969898d1114c0792216" },
-  { name = "WBTC/USD", source = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c", target = "0x5c4075FCC531b2227dd1E6Aef747BeEe3a0A7067" },
-  { name = "STETH/USD", source = "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8", target = "0x8EdCC3340e082033D78F9C1ef177CA5c10963bcB" },
   # wstETH is **not** proxied to stETH. The mirror deploys the composed
-  # wstETH/USD feed at the registry address (`0xC3D8...`), which multiplies the
-  # mirrored STETH/USD answer by the on-chain `stEthPerToken()` rate. Writing
-  # the stETH answer into a 1:1 wstETH mock misprices every wstETH book while
-  # the rate is not exactly 1.0; the composed feed is the only correct source.
-  { name = "USDC/USD", source = "0x8fFfFfd4AfB6115b954Bd326cbe7B4BA576818f6", target = "0xCd171B437d9329C2654128645944fbC05C9AA2BF" },
-  { name = "USDT/USD", source = "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D", target = "0x797945E6995c60933E635623A5dD7F3822DD2AF5" },
-  # The **proof oracle** is the guard's feed (`config/oracles`), not the writable
-  # price target above. On the mirror the guard feed is the canonical aggregator
-  # address; the mirror installs a mock at that address and the bridge writes the
-  # parent chain's live answer into it, so the close/enforcement witness reads a
-  # feed inside its own heartbeat instead of a static mainnet round. The source
-  # is read from reth, the target from T (same address, different chains).
+  # wstETH/USD feed at the registry address, which multiplies the mirrored
+  # STETH/USD answer by the on-chain `stEthPerToken()` rate. Writing the stETH
+  # answer into a 1:1 wstETH mock misprices every wstETH book while the rate is
+  # not exactly 1.0; the composed feed is the only correct source.
   { name = "WETH/USD (guard)", source = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419", target = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419" },
   { name = "WBTC/USD (guard)", source = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c", target = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c" },
   { name = "STETH/USD (guard)", source = "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8", target = "0xCfE54B5cD566aB89272946F602D76Ea879CAb4a8" },
@@ -140,30 +152,6 @@ address = "0x3E7d1eAB13ad0104d2750B8863b489D65364e32D"
 note = "Chainlink USDT/USD"
 
 [[watchlist]]
-address = "0x7d4e742018fb52e48b08be73d041c18b21de6fb5"
-note = "Chainlink WETH/USD aggregator"
-
-[[watchlist]]
-address = "0x4a3411ac2948b33c69666b35cc6d055b27ea84f1"
-note = "Chainlink WBTC/USD aggregator"
-
-[[watchlist]]
-address = "0x26f196806f43e88fd27798c9e3fb8fdf4618240f"
-note = "Chainlink STETH/USD aggregator"
-
-[[watchlist]]
-address = "0x54bcc589d9743e521c64233706fc8cb36d275b07"
-note = "Chainlink USDC/USD aggregator"
-
-[[watchlist]]
-address = "0x9c41663bb8d6800c8050e2fbf98e86ad01c973e3"
-note = "Chainlink USDT/USD aggregator"
-
-[[watchlist]]
-address = "0x6359978c0dF49aBf6A163E3F526c29b2602645fb"
-note = "Chainlink WSTETH/USD mock fixture (the live feed is the composed registry feed)"
-
-[[watchlist]]
 address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
 note = "USDC"
 
@@ -190,166 +178,6 @@ note = "Universal Router"
 [[watchlist]]
 address = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
 note = "UniV3 WETH/USDC 0.05%"
-
-[[watchlist]]
-address = "0xDA10C0070a117b6e97EC01E983236F9D39E3152d"
-note = "dapp hub (proxy)"
-
-[[watchlist]]
-address = "0x68668a7A8CbA5ccfa4462415D464F52185797f18"
-note = "dapp hub beacon"
-
-[[watchlist]]
-address = "0x91dB1a829b4C81a06F83404278f2269874fDdB8f"
-note = "dapp DeployFactory"
-
-[[watchlist]]
-address = "0x1c5bB1eC377663C2A84De3c6248BeC1D6b5B8639"
-note = "dapp timelock"
-
-[[watchlist]]
-address = "0xEb968bF3B7BB24DC0B999623356b532624d78c27"
-note = "dapp governance multisig"
-
-[[watchlist]]
-address = "0x5907ED3A2b95dAE7f200b81c33800C27AB6Af0D7"
-note = "facts registry"
-
-[[watchlist]]
-address = "0x07A2Af1983Af54687CE3577FcdED810117202D8B"
-note = "facts registry beacon"
-
-[[watchlist]]
-address = "0x613Fc72972143E6c9A2b87FdC96569D035383156"
-note = "proof executor"
-
-[[watchlist]]
-address = "0xa6A86b6280d42C900e45a4072bFc7A2D178C747e"
-note = "proof executor beacon"
-
-[[watchlist]]
-address = "0xc721d53A9533E7011fb87968cE96DC04CCAfE71C"
-note = "commitment registry"
-
-[[watchlist]]
-address = "0xd5fFAb56D8Ee803A3d4cCd6caf8ca5a7B07b6393"
-note = "commitment registry beacon"
-
-[[watchlist]]
-address = "0x6B565056EC2A03630D8daCdd508131e873352032"
-note = "authorization flags"
-
-[[watchlist]]
-address = "0x33Db1109072a5e0051169971a4Cf96eeE636dBF0"
-note = "authorization flags beacon"
-
-[[watchlist]]
-address = "0x1BD6e752a6E140264cc9E56725248D3d92105cE8"
-note = "underwriter"
-
-[[watchlist]]
-address = "0x9f2cd9d209042120F0823AbB7aFA5D8E995915CE"
-note = "underwriter beacon"
-
-[[watchlist]]
-address = "0xeb9a92791F1be4605fA80aE48e6b3b546D4C82CB"
-note = "liquidation executor"
-
-[[watchlist]]
-address = "0x231F11f6F00FdC1A37C73177FFACAC2bdFc8A198"
-note = "liquidation executor beacon"
-
-[[watchlist]]
-address = "0x07B63204FeFb5B984DE8f7fC4336Ffa8Ce6607B7"
-note = "lending adapter"
-
-[[watchlist]]
-address = "0x98c660636Cbf4AF2B98c46B5EE1D40E090d9aab1"
-note = "lending adapter beacon"
-
-[[watchlist]]
-address = "0x4e14fbFE3D593D922a91FbEFD0f912f1971c7B40"
-note = "debt issuer"
-
-[[watchlist]]
-address = "0x7B4ec265317b3D6b435158382c2044B0E68CeADD"
-note = "debt issuer beacon"
-
-[[watchlist]]
-address = "0x20218D28E5699CBF0ffeEb2FA5b56F646B3C9BdF"
-note = "collateral-manager issuer"
-
-[[watchlist]]
-address = "0xb529aEF000e771143Cce893eA208758AF06c3eab"
-note = "collateral-manager issuer beacon"
-
-[[watchlist]]
-address = "0xe93AC354a302a871deF36C06D43c645e6a7ece98"
-note = "collateral-manager beacon"
-
-[[watchlist]]
-address = "0x31cD9c4888b1F20AC6E7aB3A80f4b97AeEeC736d"
-note = "issued-debt beacon"
-
-[[watchlist]]
-address = "0xAAD5eBb10c764FA39382FA4BF0874B872B99bbD3"
-note = "curator-vault beacon"
-
-[[watchlist]]
-address = "0x538B1024f734f05329222021C11811cDFe5a27df"
-note = "curator-vault factory"
-
-[[watchlist]]
-address = "0xAF6967F0757bEe62434417C6a2976dE6a18d88B0"
-note = "curator-vault factory beacon"
-
-[[watchlist]]
-address = "0xdD736F662003C016C3F583D320914047154A8DBD"
-note = "oracle syncer"
-
-[[watchlist]]
-address = "0xD344d7bd24cF6d20A1be08164a168bfF56195D76"
-note = "oracle syncer beacon"
-
-[[watchlist]]
-address = "0x5B4E995B8D5Fb877dE2B65De038DE46c872BEE4a"
-note = "batch executor"
-
-[[watchlist]]
-address = "0xA65911f8D6FD989dEcCf2C2e7815588CEFD8EC59"
-note = "batch executor beacon"
-
-[[watchlist]]
-address = "0xa3Ede4d669b95193C892eE670E4E88243e393c6C"
-note = "oracle adapter ETH"
-
-[[watchlist]]
-address = "0x47427376fa9C9F2E777412d60132FB05764329eD"
-note = "oracle adapter ETH beacon"
-
-[[watchlist]]
-address = "0x9Bd1A7A3FC18A3829ADCF1B003A17dd28c1d049B"
-note = "oracle adapter BTC"
-
-[[watchlist]]
-address = "0x00f0Acd21c9B156c9703f6B28CC9d56a79772C95"
-note = "oracle adapter BTC beacon"
-
-[[watchlist]]
-address = "0x78b083b7334b8a0D8a151F5570cf437E6dc9CB77"
-note = "oracle adapter USDC"
-
-[[watchlist]]
-address = "0x49674C0372113BB5ff40e5Da06d63f18Cc98c45B"
-note = "oracle adapter USDC beacon"
-
-[[watchlist]]
-address = "0x5cB420Ba6aBC649bc2F0b2D8b86aBb1f771F32B2"
-note = "oracle adapter USDT"
-
-[[watchlist]]
-address = "0x72eA358E86Fa607e504211896053953Ca4863e7e"
-note = "oracle adapter USDT beacon"
 
 [[watchlist]]
 address = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
@@ -470,3 +298,8 @@ note = "Aave WBTC source: WBTC/BTC aggregator"
 [[watchlist]]
 address = "0xe1D97bF61901B075E9626c8A2340a7De385861Ef"
 note = "Aave oracle source: wstETH/USD"
+
+# The generated reth<->lighthouse JWT, mounted as a file (`make secrets`
+# creates it; the path on the engine pod is this deployment's fact).
+[services.engine.source_sync]
+jwt_path = "/secrets/jwt.hex"
