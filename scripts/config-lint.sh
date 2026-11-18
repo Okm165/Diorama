@@ -56,7 +56,12 @@ cd "$ROOT"
 fail=0
 bad() { echo "FAIL: $*" >&2; fail=1; }
 
-instances=(diorama-mainnet diorama-venue diorama-cctp)
+# Discovered, not listed: a host that adds an instance
+# (`config/instances/<name>/instance.toml` plus its overlay) gets it built and
+# checked without editing this script. The *symmetry* comparison below stays
+# pinned to the two product mirrors, because "the mirrors have the same shape"
+# is a product property, not a discovery result.
+mapfile -t instances < <(cd config/instances && printf '%s\n' */instance.toml | sed 's#/instance.toml##' | sort)
 
 # 1. No `${VAR}` reference in any TOML layer (comments excluded: the rule
 #    itself is documented inside the files).
