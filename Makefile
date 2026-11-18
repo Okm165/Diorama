@@ -437,13 +437,7 @@ prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; safe for 
 test-engine: ## Run workspace unit tests on the host (cargo)
 	cargo test --workspace
 
-config-check: ## Validate every instance file through the layered loader (every specialization must be present)
-	@for f in config/instances/*/instance.toml; do \
-	  d=$${f%/*}; \
-	  if [ ! -f "$$d/specialization.toml" ]; then \
-	    echo "missing $$d/specialization.toml (copy $$d/specialization.example.toml and hardcode the deployment's values)" >&2; exit 1; \
-	  fi; \
-	done
+config-check: ## Validate every instance file through the layered loader (a live specialization, or the tracked template for a fresh clone)
 	@for f in config/instances/*/instance.toml; do \
 	  cargo run -q -p diorama-config -- check "$$f" || exit 1; \
 	done

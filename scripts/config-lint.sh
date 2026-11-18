@@ -30,10 +30,15 @@
 #      config. live-read: the key must exist in the merged
 #      defaults+specialization+instance (a fresh clone with the template
 #      must carry the fact). live-dead: the key must NOT exist (a leak the
-#      audit removed must not grow back). The other direction — every
-#      specialization key has a reader — is enforced by the typed loader's
-#      `deny_unknown_fields` at every level: `make config-check` refuses a
-#      key nobody reads, so the specialization cannot grow dead weight;
+#      audit removed must not grow back). host-fact: the pods read it, but
+#      its presence is the *deployment's* state, not the tree's — a fresh
+#      clone is correct to omit it (an epoch pin is the case: a pin the
+#      fresh node's state does not agree with trips the engine's rollback
+#      guard, fail-closed), so neither presence nor absence is a finding.
+#      The other direction — every specialization key has a
+#      reader — is enforced by the typed loader's `deny_unknown_fields` at
+#      every level: `make config-check` refuses a key nobody reads, so the
+#      specialization cannot grow dead weight;
 #   7. the two cluster facts a move changes are single-valued: the
 #      StorageClass name and the repo images' registry path. Every overlay
 #      includes both components; every claim in the build names the class the
@@ -90,10 +95,23 @@ if command -v "${KUBECTL:-kubectl}" >/dev/null 2>&1; then
     cp -a k8s config "$tmpdir/"
     # The harness surface is the operator's (no pod reads it): a fresh-clone
     # build uses the tracked template, the same copy `make port-forward` makes.
-    for f in "$tmpdir"/k8s/overlays/*/harness.env; do
-        [ -f "$f" ] || continue
-        template="${f%.env}.example.env"
-        [ -f "$template" ] && cp "$template" "$f"
+    # Iterate the *templates*: on a fresh clone no live harness.env exists, so
+    # iterating those would expand to nothing and the build would fail on a
+    # missing source instead of using the template.
+    for template in "$tmpdir"/k8s/overlays/*/harness.example.env; do
+        [ -f "$template" ] || continue
+        f="${template%.example.env}.env"
+        [ -f "$f" ] || cp "$template" "$f"
+    done
+    # A fresh clone has no specialization (it is deployment data): the build
+    # gate uses the tracked template, exactly like the harness above and like
+    # the loader's own fallback. A *host's* checkout keeps its live file and
+    # this loop does nothing. The negative test below still proves a missing
+    # source fails the build loudly.
+    for d in "$tmpdir"/config/instances/*/; do
+        live="$d/specialization.toml"
+        [ -f "$live" ] && continue
+        [ -f "$d/specialization.example.toml" ] && cp "$d/specialization.example.toml" "$live"
     done
     for inst in "${instances[@]}"; do
         if "${KUBECTL:-kubectl}" kustomize "$tmpdir/k8s/overlays/$inst" > "$tmpdir/$inst.yaml" 2>"$tmpdir/$inst.err"; then
@@ -313,7 +331,11 @@ for line in open(audit_path):
     elif cls == "live-dead" and present:
         print(f"FAIL: {ns} grew a live-dead key back: {key} (the audit cut it: no reader)", file=sys.stderr)
         status = 1
-    elif cls not in ("live-read", "live-dead"):
+    elif cls == "host-fact":
+        # Presence is the deployment's state, not the tree's: a fresh clone
+        # omitting it is correct, and so is a live deployment that pins it.
+        continue
+    elif cls not in ("live-read", "live-dead", "host-fact"):
         print(f"FAIL: {audit_path}: unknown class '{cls}' for {ns}/{key}", file=sys.stderr)
         status = 1
 sys.exit(status)

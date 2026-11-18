@@ -374,6 +374,30 @@ manifest, the live audit gates the merged shape, and the move's two cluster
 facts stay single-valued (one StorageClass object fanned out to every claim,
 one registry component for the four repo images).
 
+**The gates run on a fresh clone.** `make config-check` and `make config-lint`
+both fall back to the tracked `*.example` templates for the files a host owns
+(`specialization.toml`, `harness.env`) and warn when they do; a checkout that
+has them validates the live files instead. That is what makes `make fitness`
+usable in CI, where the gitignored deployment data does not exist — and it is
+the property to keep: a gate that needs a file the repository deliberately does
+not ship is a gate nobody else can run.
+
+### The two-repo gate pair
+
+Diorama owns the mirrors; the DALOC monorepo owns the product's config. Each
+repository answers the same two questions with its own command, and a host runs
+both before it trusts a deployment:
+
+| Question | Diorama | DALOC monorepo |
+|---|---|---|
+| Is the tracked config self-consistent? | `make config-check`, `make config-lint` | `just config-check-self` |
+| Has *this* host replaced the host facts? | the template fallback warns; `make up` refuses to run on it | `just config-preflight` (the `DALOC_PROFILE_ORIGIN` sentinel) |
+
+Diorama's host facts are in-cluster DNS names its own manifests create, so a
+copied template is already correct on any cluster running those manifests.
+DALOC's host facts are endpoints, ports and keys outside both repositories,
+which is why it carries an explicit sentinel for "edited for this host".
+
 ## Ops (read-only first)
 
 ```sh
