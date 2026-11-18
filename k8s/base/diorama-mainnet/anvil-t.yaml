@@ -206,19 +206,33 @@ spec:
             periodSeconds: 5
             failureThreshold: 60 # up to 5 min to fork + catch up
           readinessProbe:
-            tcpSocket: { port: 8545 }
+            # **Ready must mean serving, not merely listening.** The TCP probe
+            # answers while anvil is mid-fork, so the pod reported Ready and
+            # every dependent burned 30 s RPC timeouts against it (measured
+            # 2026-11-18: the node was OOM-killed at 21:14Z, and the indexer's
+            # chain-1 scans failed until 23:18Z). The exec probe runs the same
+            # `eth_blockNumber` read the dependents' scans open with: Ready
+            # only when the node answers reads.
+            exec:
+              command: ["/bin/sh", "-c", "cast block-number --rpc-url http://127.0.0.1:8545"]
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
+            # TCP on purpose: an exec liveness would restart anvil mid-fork,
+            # which is the one state it cannot survive usefully.
             tcpSocket: { port: 8545 }
             periodSeconds: 30
           resources:
             # T never executes mainnet txs (BAL diffs only), so its state stays
             # small (measured ~2.5 GB on disk with --prune-history 32; the
-            # snapshots are the dominant term). Measured 2026-10-31 (60 s
-            # sample): ~14-15m CPU, 1.64 GiB RSS. The request covers the
-            # measured steady state; the limit stays the OOM ceiling for fork
-            # materialization spikes.
-            requests: { cpu: "25m", memory: 2Gi }
+            # snapshots are the dominant term). Measured 2026-11-18: 4.0 GiB
+            # RSS, 24 m CPU, and **two OOM kills at 21:14Z** — the node's
+            # memory-pressure sweep ranked T near-BestEffort because the request
+            # (2 Gi, the 2026-10-31 steady state) sat 2× under the working set.
+            # The request now covers the measured steady state with headroom;
+            # the limit stays the OOM ceiling for fork materialization spikes.
+            requests: { cpu: "100m", memory: 8Gi }
             limits: { memory: 16Gi }
       volumes:
         - name: state

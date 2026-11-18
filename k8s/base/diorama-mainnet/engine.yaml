@@ -1,7 +1,10 @@
 # engine - the Mainnet Mirror engine: the BAL applier (T), the shadow scan,
-# the state probes, the top-up loop (the local CL -> reth), the feed bridge,
-# and the admin surface (/admin/epoch, /admin/shadow, /admin/feed, /admin/time,
-# /admin/rewind).
+# the state probes, the feed bridge, and the admin surface (/admin/epoch,
+# /admin/shadow, /admin/feed, /admin/time, /admin/rewind).
+#
+# Chain 1 is read over the LAN from the source host's reth; this host runs no
+# execution/consensus node and no top-up loop (the source host's engine owns
+# reth's single CL writer).
 #
 # Same shape as the venue engine deployment: the image carries the mainnet
 # binary, the mounted instance file selects the profile, and the
@@ -31,7 +34,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-mainnet-engine:v17
+          image: localhost/diorama-mainnet-engine:v18
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # No env: the configuration is the mounted specialization file
@@ -42,10 +45,6 @@ spec:
           volumeMounts:
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
             - { name: state, mountPath: /state }
-            # Shared with reth + lighthouse: the engine calls reth's authrpc
-            # (Engine API) to run the top-up loop that keeps reth at the CL head
-            # without any P2P peers.
-            - { name: jwt, mountPath: /secrets, readOnly: true }
           # `/livez`, not `/healthz`: the engine's healthz reports its own
           # state (503 while paused), and probing it would drop the pod out of
           # its Service — and eventually restart it — in the middle of a
@@ -77,10 +76,15 @@ spec:
             periodSeconds: 30
           resources:
             # No CPU limit (the applier's passes are latency-sensitive).
-            # Measured 2026-10-31 (60 s sample): ~3-4m CPU, 22-24 MiB RSS. The
-            # request tracks the measured steady state; the limit stays the OOM
-            # ceiling for a wide window's composition state.
-            requests: { cpu: "5m", memory: 32Mi }
+            # Measured 2026-11-18: ~4m CPU, 63 MiB RSS — the request was the
+            # 2026-10-31 steady state (32 Mi) and the pod now uses 2× it, so
+            # the node's 2026-11-18 memory sweep ranked the engine an easy
+            # victim (OOMKilled alongside anvil-t; the journal resume made it
+            # recoverable, but the BAL application silently stopped for the
+            # restart's duration). The request covers the measured working
+            # set; the limit stays the OOM ceiling for a wide window's
+            # composition state.
+            requests: { cpu: "10m", memory: 64Mi }
             # 2026-11-06: the 512Mi ceiling OOMed during a wide-window
             # composition (exit 137 at 13:50Z). The venue engine was already
             # raised to 2Gi for the same reason; match it. The applier is
@@ -91,8 +95,6 @@ spec:
           configMap: { name: mainnet-instance }
         - name: state
           persistentVolumeClaim: { claimName: engine-state }
-        - name: jwt
-          secret: { secretName: reth-jwt }
 ---
 apiVersion: v1
 kind: Service

@@ -204,21 +204,33 @@ spec:
             # looped it forever (measured 2026-11-14 ~23:0xZ). 240×5s = 20 min.
             failureThreshold: 240
           readinessProbe:
-            tcpSocket: { port: 8545 }
+            # **Ready must mean serving, not merely listening** — same shape as
+            # anvil-t (measured 2026-11-18: a TCP-Ready pod mid-fork burned 30 s
+            # RPC timeouts in every dependent). Ready only when the node answers
+            # `eth_blockNumber`, the read every scanner opens with.
+            exec:
+              command: ["/bin/sh", "-c", "cast block-number --rpc-url http://127.0.0.1:8545"]
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
+            # TCP on purpose: an exec liveness would restart anvil mid-fork.
             tcpSocket: { port: 8545 }
             periodSeconds: 30
           resources:
             # Like T, V never executes source txs: it materializes the fork
             # state on demand and carries the devnet's own writes. Measured
             # 2026-10-31 (60 s sample): ~11-12m CPU, 619-625 MiB RSS. The
-            # request covers that measured steady state; the 16 GiB ceiling is
-            # the fork-materialization + write-volume headroom. The 2026-11-02
-            # OOM at 16 GiB was not steady state: the 1e6 transaction keeper
-            # retained every block/tx and grew without bound (fixed above to
-            # 10k). Re-measure before changing either the keeper or the limit.
-            requests: { cpu: "25m", memory: 768Mi }
+            # request covered that steady state — but the venue state has since
+            # grown 22×: measured 2026-11-18, 13.9 GiB RSS / 87 m CPU, with the
+            # request still at 768 Mi. A pod using 18× its request sits near the
+            # top of the kernel's OOM ranking (T was killed twice under the same
+            # sweep), so the request now covers the measured working set with
+            # headroom; the 40 GiB limit stays the materialization-spike
+            # ceiling (the 2026-11-02 OOM at 16 GiB was the unbounded 1e6
+            # transaction keeper, fixed to 10k — re-measure before moving
+            # either).
+            requests: { cpu: "100m", memory: 16Gi }
             limits: { memory: 40Gi }
       volumes:
         - name: state
