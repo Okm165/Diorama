@@ -129,7 +129,18 @@ documented in its template):
 
 - `endpoints.evm` / `endpoints.hyperliquid_*` — the venue's source and market
   planes (keyed URLs go straight into the file; it is gitignored);
-- `chains.venue.fork_url` / `fork_pin` — the venue's fork source and base;
+- `chains.venue.fork_url` — the venue's fork source (keyless default; a keyed
+  archive goes here, never into a cluster Secret);
+- `chains.l1.fork_pin` — **the source host's measurement, not a default.** The
+  mainnet template pins the epoch it measured (`26437369`); a copied pin is only
+  valid if it is still inside reth's state window (`reth.toml` state history,
+  10 064 blocks). Past that, every unwritten read fails with `pruned history
+  unavailable` and chain 1 freezes while the block head still advances. A new
+  host resolves its own with `make mainnet-repin` (a new epoch), or omits the
+  line to resolve a fresh pin at start-up. `chains.venue.fork_pin` is omitted
+  from the template for the mirror-image reason: the keyless public fork source
+  serves `latest` only, and a pin the fresh node's state does not agree with
+  trips the engine's epoch-rollback guard;
 - `endpoints.*` and `services.engine.state_dir` / `source_sync.jwt_path` —
   the mainnet's in-cluster wiring;
 - the bridge's `endpoints.*`, `state_dir` and `relay_key`.
