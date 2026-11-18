@@ -445,11 +445,21 @@ config-check: ## Validate every instance file through the layered loader (a live
 config-lint: ## Structural gates over the tracked tree (wiring keys, templates, image pins)
 	@./scripts/config-lint.sh
 
-fitness: lint design-assertions config-check ast-scope config-lint ## Run the structural gates: lint, design assertions, config check, AST scope, config lint
+fitness: toolchain-check lint design-assertions config-check ast-scope config-lint ## Run the structural gates: toolchain, lint, design assertions, config check, AST scope, config lint
 
 ci: ## Run the exact CI gates locally: workspace tests, then fitness
 	cargo test --workspace --locked
 	$(MAKE) fitness
+
+toolchain-check: ## The pinned toolchain, the CI pin and Cargo's rust-version agree
+	@pin=$$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml); \
+	[ -n "$$pin" ] || { echo "FAIL: rust-toolchain.toml names no channel (a host would build with its own default)" >&2; exit 1; }; \
+	ci=$$(sed -n 's/^ *toolchain: *\(.*\)/\1/p' .github/workflows/ci.yml | head -1); \
+	[ "$$pin" = "$$ci" ] || { echo "FAIL: rust-toolchain.toml pins $$pin but CI builds with $${ci:-<no toolchain: line>}" >&2; exit 1; }; \
+	msrv=$$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml | head -1); \
+	[ -n "$$msrv" ] || { echo "FAIL: Cargo.toml names no rust-version" >&2; exit 1; }; \
+	[ "$$(echo "$$pin" | cut -d. -f1,2)" = "$$msrv" ] || { echo "FAIL: toolchain $$pin and rust-version $$msrv disagree" >&2; exit 1; }; \
+	echo "toolchain ok: $$pin (Cargo rust-version $${msrv}, CI pin $$ci)"
 
 lint: ## lint-gate: clippy, all targets, warnings are errors
 	cargo clippy --workspace --all-targets -- -D warnings
