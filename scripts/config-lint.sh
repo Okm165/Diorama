@@ -38,7 +38,11 @@
 #      The other direction — every specialization key has a
 #      reader — is enforced by the typed loader's `deny_unknown_fields` at
 #      every level: `make config-check` refuses a key nobody reads, so the
-#      specialization cannot grow dead weight;
+#      specialization cannot grow dead weight. The same pass refuses a
+#      `journal.dir` outside the engine's `state_dir`: the ring is a file on the
+#      state PVC, and a host that moves the state root (the first porting step)
+#      would otherwise leave it on the container's ephemeral root — healthy
+#      until the restart that needs it;
 #   7. the two cluster facts a move changes are single-valued: the
 #      StorageClass name and the repo images' registry path. Every overlay
 #      includes both components; every claim in the build names the class the
@@ -322,6 +326,30 @@ def lookup(path):
     return cur
 
 status = 0
+
+# The journal is a ring on the engine's state PVC. `defaults.toml` derives its
+# path from `state_dir`, but a host that overrides the state root (the first
+# porting step) and forgets the journal leaves the ring on the container's
+# ephemeral root: it looks healthy and is lost on restart, which is exactly the
+# state a rewind needs.
+def under(root, sub):
+    if not root or not sub:
+        return True
+    root = str(root).rstrip("/")
+    sub = str(sub)
+    return sub == root or sub.startswith(root + "/")
+
+engine_state = lookup("services.engine.state_dir")
+journal_dir = lookup("services.engine.journal.dir")
+if journal_dir and not under(engine_state, journal_dir):
+    print(
+        f"FAIL: {d.name} services.engine.journal.dir={journal_dir} is outside "
+        f"services.engine.state_dir={engine_state} (the journal is a ring on the state PVC; "
+        "elsewhere it lands on the container's ephemeral root and is lost on restart)",
+        file=sys.stderr,
+    )
+    status = 1
+
 for line in open(audit_path):
     line = line.strip()
     if not line or line.startswith("#"):
