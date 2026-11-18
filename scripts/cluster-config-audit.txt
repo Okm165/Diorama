@@ -9,6 +9,12 @@
 #                   config - the tracked tree must carry it (through the live
 #                   specialization, or the shared defaults), or a fresh clone
 #                   loses a live fact.
+# class host-fact : a pod resolves it, but its presence is the deployment's
+#                   state, not the tree's. A fresh clone is correct to omit
+#                   it (an epoch pin: a pin the fresh node's state does not
+#                   agree with trips the engine's rollback guard, so the
+#                   template leaves it to the deployment). Neither presence
+#                   nor absence is a finding.
 # class live-dead : no reader anywhere - the build must NOT carry it back;
 #                   the value's real home is named in the comment beside it.
 #
@@ -53,7 +59,7 @@ diorama-venue|endpoints.evm.max_log_range|live-read
 diorama-venue|endpoints.hyperliquid_info.http[0]|live-read
 diorama-venue|endpoints.hyperliquid_ws.ws[0]|live-read
 diorama-venue|endpoints.engine_admin.http[0]|live-read
-diorama-venue|chains.venue.fork_pin|live-read
+diorama-venue|chains.venue.fork_pin|host-fact
 diorama-venue|chains.venue.fork_url|live-read
 diorama-venue|services.engine.state_dir|live-read
 diorama-venue|services.venue_sim.state_dir|live-read
