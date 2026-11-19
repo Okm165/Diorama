@@ -140,7 +140,16 @@ documented in its template):
   line to resolve a fresh pin at start-up. `chains.venue.fork_pin` is omitted
   from the template for the mirror-image reason: the keyless public fork source
   serves `latest` only, and a pin the fresh node's state does not agree with
-  trips the engine's epoch-rollback guard;
+  trips the engine's epoch-rollback guard.
+  **Measured 2026-11-19:** the pin was 12 045 blocks old — 1 981 past the
+  10 064-block window. The anvil fell back to the public archive in
+  `endpoints.evm_archive`, whose free tier returned HTTP 429 on every uncached
+  slot; the applier stalled, the mirror head timestamp fell five hours behind
+  wall time, and the feed bridge/heartbeat gates refused chain-1 prices. The
+  engine's `POST /admin/time` offset restored a current clock (and made the
+  feed repair stick), but that is a compensating control: a pin outside the
+  state window still needs a re-pin plus the full protocol redeploy, not a
+  public archive on the read path;
 - `endpoints.*` and `services.engine.state_dir` / `source_sync.jwt_path` —
   the mainnet's in-cluster wiring;
 - the bridge's `endpoints.*`, `state_dir` and `relay_key`.
