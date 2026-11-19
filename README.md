@@ -206,14 +206,15 @@ are real reservations, so lower the two mirror claims to the disk you actually
 plan (400Gi + 400Gi is honest for a copy-only move; 1500Gi is the CL backfill
 peak).
 
-Outside this tree, the protocol side's `daloc/daloc-deployed-env` (864Ki) is
-**re-seeded, not copied**: `k8s-daloc/scripts/post-deploy.sh` rebuilds it and
-rolls its consumers (proven today). Its *input* is not the chain: it merges
-`daloc-monorepo/contracts/deployments/*.env`, which are host-local and
-gitignored exactly like the specializations — carry those five `.env` files (and their
-`.json`) with the copy set, or re-run the contract deploy (the records are its output).
-`daloc/daloc-postgres-data-v2` (3.3Gi) is the platform's own state — copy it
-with the same procedure or re-index; it is not Diorama's.
+Outside this tree, the protocol deployment's `*-deployed-env` volume is
+**re-seeded, not copied**: its deployment tree's `scripts/post-deploy.sh`
+rebuilds it and rolls its consumers. Its *input* is not the chain: it merges the
+protocol checkout's `contracts/deployments/*.env`, which are host-local and
+gitignored exactly like the specializations — carry those five `.env` files
+(and their `.json`) with the copy set, or re-run the contract deploy (the
+records are its output). The protocol deployment's own postgres volume is that
+platform's state — copy it with the same procedure or re-index; it is not this
+environment's.
 
 ### Ordered steps
 
@@ -313,21 +314,20 @@ with the same procedure or re-index; it is not Diorama's.
    in seconds), `make substrate-attest` (read-only invariants: cursors, pins,
    contract code, bridge, DB, host). The contract-level proof is the protocol
    side's `preflight-all.sh` (both chains' catalog + signer bindings).
-9. **The protocol side, in this order** (nothing the other way: the `daloc`
-   namespace's env points *into* these services — `anvil-t.diorama-mainnet.svc`,
-   `venue-sim.diorama-venue.svc`, `cctp-bridge.diorama-cctp.svc` — and no
-   Diorama manifest points at `daloc`):
+9. **The protocol deployment, in this order** (nothing the other way: its env
+   points *into* these services and no manifest here points at it — the only
+   tie is the endpoint values in its env files):
    1. the three instances are up **with their pins set** (a re-fork at a live
       head is a new epoch and clears the shadow registry — never deploy onto an
       unpinned anvil);
-   2. deploy the contracts onto the pinned chains
-      (`daloc-monorepo`: `just deploy-mirror-evm 1`, `just deploy-mirror-hyperevm`);
-   3. seed the registry: `k8s-daloc/scripts/post-deploy.sh` writes
-      `chain-registry.env` + the per-chain records into the
-      `daloc-deployed-env` PVC and rolls the consumers;
+   2. deploy the contracts onto the pinned chains (the protocol checkout's
+      `just deploy-mirror-evm 1` / `just deploy-mirror-hyperevm`);
+   3. seed the registry: its `k8s/scripts/post-deploy.sh` writes
+      `chain-registry.env` + the per-chain records into its deployed-env PVC
+      and rolls the consumers;
    4. project it into the env manifest:
-      `k8s-daloc/scripts/sync-chain-addresses.sh --write`;
-   5. `k8s-daloc/apply.sh` (or `kubectl apply -f deploy`), then
+      its `k8s/scripts/sync-deployed-env.sh --write`;
+   5. its `k8s/apply.sh` (or `kubectl apply -f deploy`), then its
       `preflight-all.sh`.
 
    If the anvil state was copied, the contracts are already deployed at the
