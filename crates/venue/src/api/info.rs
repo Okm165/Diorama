@@ -77,6 +77,11 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
     let req: InfoRequest = serde_json::from_slice(&body)
         .map_err(|source| Error::bad_request(format!("invalid info request: {source}")))?;
     match req {
+        // The archive read routes through the endpoint pool: the sim composes
+        // live marks, the candles are the upstream's, and the pool (several
+        // URLs, failover, budget) is the router. The original body is forwarded
+        // verbatim, so the wire contract stays the upstream's.
+        InfoRequest::CandleSnapshot { .. } => pass_through(&state, &body).await,
         // hl_mock's contract for types it does not route.
         InfoRequest::Unrouted => Ok(Json("unrouted").into_response()),
         // ---- account-scoped: the sim's, or the venue's -------------------

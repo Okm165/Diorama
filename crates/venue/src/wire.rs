@@ -119,8 +119,29 @@ pub(crate) enum InfoRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dex: Option<String>,
     },
+    /// Historical candles. The sim composes *live* marks only; the archive is
+    /// the upstream's, and the endpoint pool (roles `market_rest`) is the
+    /// router that serves it — one pool, several URLs, failover included.
+    /// A deployment's history reader therefore reads the venue cell, never a
+    /// hard-coded upstream host.
+    #[serde(rename = "candleSnapshot")]
+    CandleSnapshot {
+        #[serde(default)]
+        req: CandleRequest,
+    },
     #[serde(other)]
     Unrouted,
+}
+
+/// `candleSnapshot`'s `req` body. The fields are the venue's wire names; the
+/// passthrough forwards the original bytes verbatim, so this only parses what
+/// a caller needs for budget accounting and logging.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CandleRequest {
+    #[serde(default)]
+    pub(crate) coin: String,
+    #[serde(default)]
+    pub(crate) interval: String,
 }
 
 impl InfoRequest {
@@ -145,6 +166,7 @@ impl InfoRequest {
             InfoRequest::ExchangeStatus => "exchangeStatus",
             InfoRequest::SpotMeta => "spotMeta",
             InfoRequest::AllMids { .. } => "allMids",
+            InfoRequest::CandleSnapshot { .. } => "candleSnapshot",
             InfoRequest::Unrouted => "unrouted",
         }
     }
