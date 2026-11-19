@@ -36,6 +36,11 @@ chain_id = 1
 domain = 0
 rpc_urls = "@t_rpc"
 usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+# The messenger/transmitter addresses are deployment facts. On a chain whose
+# fork carries the production Circle stack, they are the production addresses;
+# on a mirror chain that needs the impersonation, both name the address the
+# mirror installer wrote (crates/cctp/impersonation) and the minter key is
+# omitted (the bridge skips the localMinter assertion when it is absent).
 token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
 message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
 token_minter = "0xfd78EE919681417d192449715b2594ab58f5D002"
