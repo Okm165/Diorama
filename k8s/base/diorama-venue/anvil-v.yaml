@@ -155,6 +155,18 @@ spec:
               #                        (2026-11-02 02:19Z). 10 000 blocks is
               #                        ~2.8 h of the mirror's own history, which
               #                        is what the driver's failing-run reads need.
+              # A torn state write (the process killed mid-save) leaves a truncated JSON file
+              # that anvil refuses to parse on the next start - a crash loop with no way in
+              # (measured 5 times on the venue: .prefix-/.stuck-/.truncated- siblings).
+              # A complete JSON object ends in '}'; anything else is parked and the chain
+              # re-forks from the pin, which the engine's journal restores.
+              if [ -f /state/anvil-state.json ]; then
+                if [ "$(tail -c 64 /state/anvil-state.json | tr -d '[:space:]' | tail -c 1)" != "}" ]; then
+                  mv /state/anvil-state.json "/state/anvil-state.json.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
+                  echo "parked a torn state file; starting from the pin" >&2
+                fi
+              fi
+
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
                 --fork-url "$EVM_FORK_URL" \
