@@ -43,12 +43,18 @@ spec:
           args:
             - |
               set -eu
-              # The fork source is the specialization's read pool's primary
-              # entry ([endpoints.evm] http[0]) — the same URL the engine's
-              # `/admin/epoch` re-pins against. One fact, one spelling: this
-              # is a read of the mounted file, never an env.
-              EVM_URL=$(awk '/^\[endpoints\.evm\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
-              [ -n "$EVM_URL" ] || { echo "ERROR: fork source missing from /etc/mirror/specialization.toml ([endpoints.evm] http)"; exit 1; }
+              # The anvil fork source is the specialization's archive endpoint
+              # ([endpoints.evm_archive] http[0]) when one is declared: the
+              # epoch's fork pin can age out of the read pool's pruned state
+              # window, and a pruned reth then freezes block production. The
+              # engine's BAL/trace reads stay on [endpoints.evm]; the split is
+              # what lets a same-pin restart preserve the epoch. Falling back
+              # to [endpoints.evm] keeps a fresh mirror (pin inside the window)
+              # working with no archive endpoint. One fact, one spelling: a
+              # read of the mounted file, never an env.
+              EVM_URL=$(awk '/^\[endpoints\.evm_archive\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_URL" ] || EVM_URL=$(awk '/^\[endpoints\.evm\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_URL" ] || { echo "ERROR: fork source missing from /etc/mirror/specialization.toml ([endpoints.evm_archive] or [endpoints.evm] http)"; exit 1; }
               # Always wait for reth first, even when the pin is persisted:
               # anvil forks at start-up, so restarting while reth is restarting
               # would crash-loop (measured: "failed to fetch network chain ID").
@@ -114,12 +120,18 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              # The fork source is the specialization's read pool's primary
-              # entry ([endpoints.evm] http[0]) — the same URL the engine's
-              # `/admin/epoch` re-pins against. One fact, one spelling: a
+              # The anvil fork source is the specialization's archive endpoint
+              # ([endpoints.evm_archive] http[0]) when one is declared: the
+              # epoch's fork pin can age out of the read pool's pruned state
+              # window, and a pruned reth then freezes block production. The
+              # engine's BAL/trace reads stay on [endpoints.evm]; the split is
+              # what lets a same-pin restart preserve the epoch. Falling back
+              # to [endpoints.evm] keeps a fresh mirror (pin inside the window)
+              # working with no archive endpoint. One fact, one spelling: a
               # read of the mounted file, never an env.
-              EVM_URL=$(awk '/^\[endpoints\.evm\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
-              [ -n "$EVM_URL" ] || { echo "ERROR: fork source missing from /etc/mirror/specialization.toml ([endpoints.evm] http)"; exit 1; }
+              EVM_URL=$(awk '/^\[endpoints\.evm_archive\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_URL" ] || EVM_URL=$(awk '/^\[endpoints\.evm\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_URL" ] || { echo "ERROR: fork source missing from /etc/mirror/specialization.toml ([endpoints.evm_archive] or [endpoints.evm] http)"; exit 1; }
               # Re-resolve the pin on *every container start*, not just every
               # pod start: k8s restarts only the container on OOM (T's normal
               # cycle), so the init container's pin would age with the pod and
