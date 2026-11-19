@@ -1885,7 +1885,13 @@ impl Rpc {
         &self,
         tx: TransactionRequest,
     ) -> Result<TransactionReceipt> {
-        const WAIT_MS: u64 = 10_000;
+        // The wait bound must exceed the target chain's block cadence: the
+        // mirror's is 11-14 s (the engine composes on the source's windows),
+        // so a 10 s bound timed out on every feed publish structurally
+        // (measured 2026-11-19: 37 of 151 failures in 11 minutes were this,
+        // not a chain refusal). 30 s covers two mirror blocks and still sits
+        // well inside the feed bridge's 120 s confirm window.
+        const WAIT_MS: u64 = 30_000;
         const POLL_MS: u64 = 250;
         let hash = self.send_transaction(tx).await?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(WAIT_MS);
