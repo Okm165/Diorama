@@ -72,12 +72,19 @@ edit, not a manifest one.
 
 ### Place orders in the simulated venue (testers)
 
-The venue simulator is the trading surface. It is a ClusterIP service like the
-rest, so reach it through the venue harness's forward
-(`kubectl -n diorama-venue port-forward svc/venue-sim 18100:8090`), or use the
-in-cluster name `http://venue-sim.diorama-venue.svc.cluster.local:8090`. There
-is no order route on the consumer API by design — DALOC reads the venue's
-account and book state; it does not proxy trades.
+The venue simulator is the trading surface. The `venue-sim-nodeport` Service
+publishes the **info listener** (`/info`, `/exchange`, `/ws`) on node port
+**31090**, so a tester does not need a port-forward:
+
+```sh
+export DALOC_VENUE_INFO_URL=http://<node-ip>:31090
+```
+
+The in-cluster name (`http://venue-sim.diorama-venue.svc.cluster.local:8090`)
+and a loopback forward (`kubectl -n diorama-venue port-forward svc/venue-sim
+18100:8090`) still work. There is no order route on the consumer API by
+design — DALOC reads the venue's account and book state; it does not proxy
+trades.
 
 ```sh
 # the market list (the asset index `a` in an order comes from here)
@@ -419,12 +426,13 @@ applies there. It is the *source* host's cleanup if it keeps running:
    scale the bridge to 0, delete the claim (760Ki of cursors; the volume stays
    `Retain`), re-apply — or leave it bound and accept one Invalid object on the
    next `make apply INSTANCE=diorama-cctp`.
-3. **The deleted `-nodeport` twins.** The services are ClusterIP by design
-   (the harness uses loopback forwards), so the old NodePort twins are not in
-   the manifests. They are still present on the source host as ClusterIP
-   objects (`anvil-t-nodeport`, `engine-nodeport`, `venue-sim-nodeport`, …) and
-   are not carried by a move; delete them once or let `make delete` take the
-   namespace.
+3. **NodePorts.** `venue-sim-nodeport` (31090) is the one intentional NodePort:
+   the trading surface has to be reachable without a port-forward. The rest of
+   the venue services are ClusterIP by design (the harness uses loopback
+   forwards). The old generic `-nodeport` twins (`anvil-t-nodeport`,
+   `engine-nodeport`, …) are not in the manifests; they may still exist on an
+   older host as ClusterIP objects and are not carried by a move — delete them
+   once or let `make delete` take the namespace.
 
 ## Development gates
 
