@@ -48,7 +48,11 @@ pragma solidity 0.8.24;
 ///
 /// Everything else — the getters, the packed message, the raw
 /// `keccak256(message)` attestation (65-byte `r ‖ s ‖ v`), the nonce replay
-/// guard, the attester threshold — is what production verifies.
+/// guard, the attester threshold, and the `destinationCaller` caller guard the
+/// production transmitter enforces — is what production verifies. Both burn
+/// entry points are present (`depositForBurn` and `depositForBurnWithHook`):
+/// the protocol's `ProofExecutor` calls the hook one for the recovery lane, so
+/// a surface missing it would revert a production client's burn.
 contract MirrorCctpV2 {
     // ---------------------------------------------------------------- roles
 
@@ -163,6 +167,58 @@ contract MirrorCctpV2 {
         uint256 maxFee,
         uint32 minFinalityThreshold
     ) external returns (uint64) {
+        return _depositForBurn(
+            amount,
+            destinationDomain,
+            mintRecipient,
+            burnToken,
+            destinationCaller,
+            maxFee,
+            minFinalityThreshold,
+            new bytes(0)
+        );
+    }
+
+    /// CCTP V2 `depositForBurnWithHook` — the same burn with `hookData`
+    /// appended to the message. Circle's V2 does not execute the hook itself;
+    /// the integrator that `destinationCaller` names consumes the message and
+    /// runs it (the protocol's recovery wrapper is that integrator). The mirror
+    /// must carry the function because the protocol's `ProofExecutor` calls it
+    /// for the recovery lane: a surface missing it would revert a production
+    /// client's burn, which is exactly the special casing a mirror must not
+    /// demand.
+    function depositForBurnWithHook(
+        uint256 amount,
+        uint32 destinationDomain,
+        bytes32 mintRecipient,
+        address burnToken,
+        bytes32 destinationCaller,
+        uint256 maxFee,
+        uint32 minFinalityThreshold,
+        bytes calldata hookData
+    ) external returns (uint64) {
+        return _depositForBurn(
+            amount,
+            destinationDomain,
+            mintRecipient,
+            burnToken,
+            destinationCaller,
+            maxFee,
+            minFinalityThreshold,
+            hookData
+        );
+    }
+
+    function _depositForBurn(
+        uint256 amount,
+        uint32 destinationDomain,
+        bytes32 mintRecipient,
+        address burnToken,
+        bytes32 destinationCaller,
+        uint256 maxFee,
+        uint32 minFinalityThreshold,
+        bytes memory hookData
+    ) private returns (uint64) {
         require(burnToken == localToken, "MirrorCctpV2: burn token");
         require(amount > 0, "MirrorCctpV2: amount");
         require(maxFee < amount, "MirrorCctpV2: maxFee");
@@ -186,7 +242,7 @@ contract MirrorCctpV2 {
             destinationCaller,
             minFinalityThreshold,
             minFinalityThreshold,
-            new bytes(0)
+            hookData
         );
         emit MessageSent(message);
         return uint64(nonce);
@@ -248,6 +304,19 @@ contract MirrorCctpV2 {
         bytes32 digest = keccak256(message);
         address signer = _recover(digest, attestation);
         require(isEnabledAttester[signer], "MirrorCctpV2: attester");
+
+        // The production transmitter's caller guard, after the attestation
+        // (measured on the live contract: a valid attestation from a
+        // non-designated caller reverts "Invalid caller for message"). A
+        // message that names a `destinationCaller` may be consumed only by that
+        // address; zero means anyone. The protocol's recovery wrapper relies on
+        // this to be the sole consumer, so a mirror that skipped it would mint
+        // without the credit — the unattributed-arrival bug the wrapper exists
+        // to prevent.
+        bytes32 destinationCaller = _b32(message, 108);
+        if (destinationCaller != bytes32(0)) {
+            require(msg.sender == address(uint160(uint256(destinationCaller))), "MirrorCctpV2: destination caller");
+        }
 
         usedNonces[nonce] = true;
 
