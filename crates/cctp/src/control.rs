@@ -105,6 +105,16 @@ pub(crate) struct HealthResponse {
 pub(crate) struct ChainHealth {
     pub name: &'static str,
     pub domain: Domain,
+    /// The messenger the chain's burns enter (`depositForBurn`). Published so
+    /// an integration client can verify the wiring end to end: a burn whose
+    /// messenger is not this address never reaches this bridge's lanes.
+    pub token_messenger: Address,
+    /// The transmitter whose `MessageSent` log this chain's watcher filters on
+    /// — the one address where a wrong value is **silent** (the watcher sees
+    /// no logs and has nothing to be wrong about). An integration client (the
+    /// DALOC relay's boot check) compares this against the transmitter its own
+    /// deployment records; a disagreement is a wiring drift, not a style.
+    pub message_transmitter: Address,
 }
 
 pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Json<HealthResponse>> {
@@ -137,6 +147,8 @@ pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Jso
             .map(|chain| ChainHealth {
                 name: chain.name,
                 domain: chain.domain,
+                token_messenger: chain.token_messenger,
+                message_transmitter: chain.message_transmitter,
             })
             .collect(),
         watchers,

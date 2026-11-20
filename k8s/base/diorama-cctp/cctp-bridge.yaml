@@ -34,7 +34,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: cctp-bridge
-          image: localhost/diorama-cctp-bridge:pin3-20261119
+          image: localhost/diorama-cctp-bridge:pin3-20261120
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # No env: the configuration is the mounted specialization file

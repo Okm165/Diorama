@@ -29,7 +29,11 @@ fee taken is the caller's `maxFee` (the conservative bound; delivery credits
 `install.sh` writes the compiled code at the deployment's transmitter address,
 clears the previous fixture's storage, initializes the facts and verifies the
 surface. It takes only environment inputs (RPC, addresses, domains) — no host
-is named here.
+is named here. The install is `anvil_setCode` + an `initialize` transaction, so
+it is a **chain-state write the engine's shadow registry replays** across
+same-pin restarts; a fresh epoch (a moved fork pin clears the shadow registry)
+re-runs this script as part of the epoch's bring-up, before the deployment
+client boots against the chain.
 
 ```
 RPC_URL=… TARGET_ADDRESS=… LOCAL_DOMAIN=0 LOCAL_TOKEN=… \
