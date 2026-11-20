@@ -733,7 +733,7 @@ impl Sim {
         ntli: i64,
         feed: &MarketFeed,
     ) -> Result<()> {
-        let meta = feed.meta();
+        let meta = feed.margin_meta();
         let delta = Decimal::from(ntli) / Decimal::from(1_000_000);
         if delta < Decimal::ZERO && account::strict_isolated(coin, meta.as_ref()) {
             return Err(crate::error::Error::bad_request(

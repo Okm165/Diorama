@@ -520,7 +520,7 @@ impl Sim {
     /// orders (fees on both sides), the remainder resting (Gtc/Alo), or the
     /// trigger armed (no walk; the tick fires it when the mark crosses).
     pub(crate) fn place(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<Placed> {
-        let meta = feed.meta();
+        let meta = feed.margin_meta();
         validate_order(feed, meta.as_ref(), req)?;
         self.pre_place_refusals(feed, address, req, meta.as_ref())?;
         // A trigger arms instead of walking.
@@ -587,7 +587,7 @@ impl Sim {
     /// margin (value minus the positions' margin minus the account's other
     /// open orders' reservations) must cover the order's own requirement.
     pub(crate) fn remargin_ok(&self, feed: &MarketFeed, r: &RestingOrder) -> Result<bool> {
-        let meta = feed.meta();
+        let meta = feed.margin_meta();
         let leverage = self.leverage_for(r.account, &r.coin, meta.as_ref())?;
         let requirement = order_requirement(r.sz, feed.mark_or(&r.coin, r.px), leverage, r.reduce)?;
         let Some(available) = self.available_for(feed, r.account, Some(r.oid), meta.as_ref())?
@@ -633,7 +633,7 @@ impl Sim {
             return Ok(());
         }
         let (px, sz) = resting_at;
-        let meta = feed.meta();
+        let meta = feed.margin_meta();
         let leverage = self.leverage_for(address, &req.coin, meta.as_ref())?;
         let requirement =
             order_requirement(sz, feed.mark_or(&req.coin, px), leverage, Reduce::Any)?;
@@ -712,7 +712,7 @@ impl Sim {
         coin: &str,
         size: Decimal,
     ) -> Result<Fill> {
-        let meta = feed.meta();
+        let meta = feed.margin_meta();
         let direction = self
             .account(address)?
             .and_then(|a| {
@@ -815,7 +815,7 @@ impl Sim {
     /// fee; each maker's account is settled at their own price with the maker
     /// fee (no opening probe: the venue reserves margin at placement).
     pub(crate) fn order(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<Fill> {
-        let meta = feed.meta();
+        let meta = feed.margin_meta();
         let resting = self.resting_orders(None)?;
         // The plan's rule: resting orders are re-margined at match time (the
         // oracle moves after placement). A maker whose account cannot carry
@@ -2738,5 +2738,36 @@ mod tests {
         let refused = sim.schedule_cancel(a, ScheduleCancel::At(now + 60_000));
         assert!(refused.is_err(), "the 11th trigger of the day is refused");
         assert!(refused.unwrap_err().to_string().contains("per day"));
+    }
+
+    /// Name-based validation/margin resolves a HIP-3 coin from the
+    /// account-plane `margin_meta`, not the served default-dex meta: a
+    /// `xyz:*` order no longer reads as "not in the venue's meta".
+    #[test]
+    fn an_xyz_coin_validates_from_the_account_plane_meta() {
+        let feed = MarketFeed::memory(vec!["BTC".into(), "xyz:NVDA".into()]);
+        let now = crate::now_ms();
+        feed.put_meta(meta_with("BTC", 20), now);
+        feed.put_ctx("xyz:NVDA".into(), crate::wire::test_ctx("200", "201"), now);
+        feed.put_book(book("xyz:NVDA", &[("200", "2")], &[("201", "2")]), now);
+        feed.put_oi_caps(Vec::new());
+        let (sim, a) = funded_sim(&feed, "10000");
+        let order = Order {
+            coin: "xyz:NVDA".into(),
+            ..ioc(Side::Buy, "1")
+        };
+        // Without the dex's meta the name is genuinely outside the venue's
+        // universe.
+        let err = sim.place(&feed, a, &order).unwrap_err();
+        assert!(err.to_string().contains("not in the venue's meta"), "{err}");
+        // Folded in, the same order validates and fills on the xyz book.
+        feed.put_dex_meta("xyz".into(), meta_with("xyz:NVDA", 10), now);
+        let placed = sim.place(&feed, a, &order).unwrap();
+        assert_eq!(
+            placed.fill.expect("the order fills").avg_px,
+            Decimal::from(201)
+        );
+        let account = sim.account(a).unwrap().unwrap();
+        assert_eq!(account.positions["xyz:NVDA"].szi, Decimal::ONE);
     }
 }

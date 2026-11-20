@@ -23,7 +23,7 @@ pub(crate) mod rest;
 pub(crate) mod ws;
 
 use crate::error::Result;
-use crate::wire::{AllMids, AssetCtx, L2Book, Meta};
+use crate::wire::{AllMids, AssetCtx, L2Book, Meta, PerpDex};
 use budget::Budget;
 use diorama_devnet::store;
 use metrics::FeedMetrics;
@@ -109,6 +109,11 @@ struct Cache {
     /// universe (see [`Meta::absorb`]). The account and margin lookups read
     /// this; the `meta` response stays the default dex verbatim.
     margin_meta: Option<Meta>,
+    /// The upstream `perpDexs` list, verbatim and in the venue's order: the
+    /// **only** source of the HIP-3 asset-id namespace's dex positions
+    /// (`[0]` is the default dex, `null`). `None` until the poll lands: an
+    /// index `a >= 100000` cannot be resolved without it.
+    perp_dexs: Option<Vec<Option<PerpDex>>>,
     meta_at: Option<u64>,
     spot_meta: Option<crate::wire::SpotMeta>,
     ctxs: BTreeMap<String, AssetCtx>,
@@ -282,6 +287,19 @@ impl MarketFeed {
         c.meta = Some(meta);
         c.meta_at = Some(now_ms);
         Self::rebuild_margin_meta(&mut c);
+    }
+
+    /// `perpDexs`: the venue's perp-dex list, kept verbatim **and in the
+    /// upstream's order**. The list position is the HIP-3 asset index's dex
+    /// slot (`a = 100000 + index*10000 + universe`), so reordering it (for
+    /// example to the configured markets' first-seen order) would silently
+    /// remap every order to another dex.
+    pub(crate) fn put_perp_dexs(&self, dexs: Vec<Option<PerpDex>>) {
+        if self.stalled() {
+            tracing::debug!("live perpDexs dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
+        self.write().perp_dexs = Some(dexs);
     }
 
     /// One perp dex's meta, kept and folded into the account-plane view.
@@ -597,6 +615,70 @@ impl MarketFeed {
     /// first poll lands — a read that needs it is a 503, never a guess).
     pub(crate) fn meta(&self) -> Option<Meta> {
         self.read().meta.clone()
+    }
+
+    /// The upstream `perpDexs` list in the venue's order (the first element
+    /// is the default dex, `null`). `None` until the poll lands.
+    pub(crate) fn perp_dexs(&self) -> Option<Vec<Option<PerpDex>>> {
+        self.read().perp_dexs.clone()
+    }
+
+    /// A named perp dex's position in the upstream `perpDexs` list — the
+    /// index the HIP-3 asset namespace encodes. `None` = the list has not
+    /// landed, or the venue does not quote that dex.
+    pub(crate) fn dex_index(&self, name: &str) -> Option<usize> {
+        self.read()
+            .perp_dexs
+            .as_ref()?
+            .iter()
+            .position(|dex| dex.as_ref().is_some_and(|dex| dex.name == name))
+    }
+
+    /// One named builder dex's cached `meta` (the `meta?dex=` read). `None`
+    /// = the dex has not been polled: a named refusal, never the default
+    /// dex's meta.
+    pub(crate) fn dex_meta(&self, dex: &str) -> Option<Meta> {
+        self.read().dex_metas.get(dex).cloned()
+    }
+
+    /// The asset index → coin map the order paths address (`/exchange`, the
+    /// CoreWriter lane). The namespace is the venue's:
+    ///
+    /// - `a < 10000`: the default dex's universe, positionally (unchanged);
+    /// - `10000 <= a < 100000`: the spot namespace — not modeled here, so
+    ///   `None`;
+    /// - `a >= 100000`: `100000 + perp_dex_index*10000 + universe_index`,
+    ///   where the dex index is the **upstream `perpDexs` position** (never
+    ///   the configured markets' order) and the universe is that dex's own
+    ///   cached meta.
+    ///
+    /// `None` = an index no loaded dex carries. The account-plane
+    /// `margin_meta` view is deliberately not consulted: it merges dexes for
+    /// name-based margin lookups, not for index resolution.
+    pub(crate) fn coin_of_asset(&self, asset: u32) -> Option<String> {
+        let c = self.read();
+        if asset < 10_000 {
+            return c
+                .meta
+                .as_ref()?
+                .universe
+                .get(asset as usize)
+                .map(|a| a.name.clone());
+        }
+        if asset < 100_000 {
+            return None; // the spot asset namespace: no perp order lives here
+        }
+        let offset = asset - 100_000;
+        let dex = c
+            .perp_dexs
+            .as_ref()?
+            .get((offset / 10_000) as usize)?
+            .as_ref()?;
+        c.dex_metas
+            .get(&dex.name)?
+            .universe
+            .get((offset % 10_000) as usize)
+            .map(|a| a.name.clone())
     }
 
     /// The account-plane meta: the default dex plus every configured perp
@@ -1204,5 +1286,108 @@ mod tests {
         assert!(!feed.funding_is_owned("BTC"));
         assert_eq!(feed.owned_count(), 0);
         assert_eq!(feed.funding("BTC"), Some(Decimal::ZERO));
+    }
+
+    /// One `perpDexs` entry (the resolver reads only `name`; the rest keeps
+    /// the wire shape complete).
+    fn perp_dex(name: &str) -> crate::wire::PerpDex {
+        crate::wire::PerpDex {
+            name: name.into(),
+            full_name: format!("{name} dex"),
+            deployer: alloy_primitives::Address::repeat_byte(0x01),
+            oracle_updater: None,
+            fee_recipient: None,
+            asset_to_streaming_oi_cap: Vec::new(),
+            asset_to_funding_clamp: Vec::new(),
+            asset_to_funding_interest_rate: Vec::new(),
+            asset_to_funding_multiplier: Vec::new(),
+            sub_deployers: Vec::new(),
+        }
+    }
+
+    /// The asset-id namespace: the default dex's positional indices are
+    /// unchanged and a HIP-3 market is `100000 + dex_index*10000 +
+    /// universe_index`, with the dex index taken from the upstream
+    /// `perpDexs` order (whose first entry is the default dex's `null`).
+    #[test]
+    fn the_asset_namespace_resolves_default_and_hip3_indices() {
+        let feed = MarketFeed::memory(vec!["BTC".into(), "xyz:NVDA".into()]);
+        feed.put_meta(meta_with(&["BTC", "ETH"]), 1);
+        feed.put_perp_dexs(vec![None, Some(perp_dex("xyz"))]);
+        feed.put_dex_meta("xyz".into(), meta_with(&["xyz:NVDA", "xyz:TSLA"]), 2);
+        assert_eq!(feed.coin_of_asset(0).as_deref(), Some("BTC"));
+        assert_eq!(feed.coin_of_asset(1).as_deref(), Some("ETH"));
+        assert_eq!(
+            feed.coin_of_asset(2),
+            None,
+            "past the default dex's universe"
+        );
+        assert_eq!(feed.coin_of_asset(110_000).as_deref(), Some("xyz:NVDA"));
+        assert_eq!(feed.coin_of_asset(110_001).as_deref(), Some("xyz:TSLA"));
+        assert_eq!(
+            feed.coin_of_asset(110_002),
+            None,
+            "past the xyz dex's universe"
+        );
+        // The spot namespace is not modeled, and `perpDexs[0]`/missing slots
+        // are null, so a HIP-3 index over them is unknown.
+        assert_eq!(feed.coin_of_asset(10_000), None);
+        assert_eq!(feed.coin_of_asset(99_999), None);
+        assert_eq!(feed.coin_of_asset(120_000), None);
+        assert_eq!(feed.coin_of_asset(1_000_000), None);
+    }
+
+    /// Resolution needs the upstream list *and* the dex's own meta; it never
+    /// falls back to the merged account-plane view. A `margin_meta` carrying
+    /// `xyz:NVDA` must not make an unresolvable index resolve.
+    #[test]
+    fn a_hip3_index_requires_the_perp_dexs_and_the_dex_meta() {
+        let no_list = MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        no_list.put_meta(meta_with(&["BTC"]), 1);
+        no_list.put_dex_meta("xyz".into(), meta_with(&["xyz:NVDA"]), 2);
+        assert!(
+            no_list.margin_meta().unwrap().asset("xyz:NVDA").is_some(),
+            "the account view carries the absorbed market"
+        );
+        assert_eq!(
+            no_list.coin_of_asset(110_000),
+            None,
+            "no perpDexs cache: the index is unknown"
+        );
+
+        let no_meta = MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        no_meta.put_meta(meta_with(&["BTC"]), 1);
+        no_meta.put_perp_dexs(vec![None, Some(perp_dex("xyz"))]);
+        assert_eq!(
+            no_meta.coin_of_asset(110_000),
+            None,
+            "the dex's meta has not landed"
+        );
+
+        let unknown_slot = MarketFeed::memory(vec![]);
+        unknown_slot.put_meta(meta_with(&["BTC"]), 1);
+        unknown_slot.put_perp_dexs(vec![None, Some(perp_dex("km"))]);
+        unknown_slot.put_dex_meta("xyz".into(), meta_with(&["xyz:NVDA"]), 2);
+        assert_eq!(
+            unknown_slot.coin_of_asset(110_000),
+            None,
+            "slot 1 belongs to `km`, not `xyz`"
+        );
+    }
+
+    /// The cached list keeps the upstream order (a leading `null`), and that
+    /// position — not the configured markets' first-seen order — is the index
+    /// namespace.
+    #[test]
+    fn perp_dexs_keep_the_upstream_order_and_define_dex_indices() {
+        let feed = MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        feed.put_perp_dexs(vec![None, Some(perp_dex("km")), Some(perp_dex("xyz"))]);
+        let dexs = feed.perp_dexs().expect("the cache is loaded");
+        assert!(dexs[0].is_none(), "the default dex is `null`");
+        assert_eq!(dexs[1].as_ref().unwrap().name, "km");
+        assert_eq!(dexs[2].as_ref().unwrap().name, "xyz");
+        assert_eq!(feed.dex_index("km"), Some(1));
+        assert_eq!(feed.dex_index("xyz"), Some(2));
+        assert_eq!(feed.dex_index("nope"), None);
     }
 }

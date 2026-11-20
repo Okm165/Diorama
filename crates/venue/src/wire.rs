@@ -574,8 +574,9 @@ pub(crate) fn funding_ctx(mark: &str, oracle: &str) -> AssetCtx {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct MetaAndAssetCtxs(pub Meta, pub Vec<AssetCtx>);
 
-/// `perpDexs`: `[null, …]` (the first dex is null). The sim serves the first
-/// dex only (multi-dex is deferred — docs/INTEGRATION.md).
+/// `perpDexs`: `[null, …]` (the first dex is null). The sim caches and
+/// serves the upstream list verbatim — its order is the HIP-3 asset index's
+/// dex namespace. Per-dex balances/collateral are not modeled.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PerpDex {
@@ -1226,23 +1227,13 @@ fn decimal_or_refuse(what: &str, s: &str) -> Result<Decimal> {
 }
 
 impl OrderAction {
-    /// The compact action → the lane's order: the asset index resolves
-    /// through the live meta (unknown = a named refusal), size and limit are
-    /// decimal strings; the tif decides what rests (the sim's `place` owns
-    /// the semantics).
-    pub(crate) fn to_order(
-        &self,
-        meta: Option<&crate::wire::Meta>,
-    ) -> Result<crate::sim::order::Order> {
-        let coin = meta
-            .and_then(|m| m.universe.get(self.a as usize))
-            .map(|a| a.name.clone())
-            .ok_or_else(|| {
-                Error::bad_request(format!(
-                    "unknown asset index {} (the live meta has not landed, or is shorter)",
-                    self.a
-                ))
-            })?;
+    /// The compact action → the lane's order. The caller resolves the asset
+    /// index through the feed (`MarketFeed::coin_of_asset`: the default dex's
+    /// positional indices plus the HIP-3 `100000 + dex_index*10000 +
+    /// universe_index` namespace), so this wire mapping stays independent of
+    /// the feed's cache. Size and limit are decimal strings; the tif decides
+    /// what rests (the sim's `place` owns the semantics).
+    pub(crate) fn to_order(&self, coin: String) -> Result<crate::sim::order::Order> {
         let size: Decimal = decimal_or_refuse("size", &self.s)?;
         let limit_px = match &self.p {
             Some(p) => Some(decimal_or_refuse("limit price", p)?),

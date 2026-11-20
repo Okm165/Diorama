@@ -419,7 +419,7 @@ fn account_states(
                         what: format!("simulated account `{user}`"),
                     }
                 })?;
-            let meta = state.feed.meta();
+            let meta = state.feed.margin_meta();
             let spot_state = SpotClearinghouseState {
                 balances: crate::sim::account::spot_balances(&account),
                 token_to_available_after_maintenance:

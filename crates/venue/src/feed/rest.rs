@@ -273,16 +273,35 @@ impl Poller {
         }
     }
 
-    /// One pass: meta+ctxs, spot meta, the configured books, allMids;
-    /// failures are logged and counted, never fatal (the WS lane may be
-    /// carrying the data).
+    /// One pass: perpDexs, meta+ctxs, spot meta, the configured books,
+    /// allMids; failures are logged and counted, never fatal (the WS lane may
+    /// be carrying the data).
     async fn pass(&self) {
+        self.perp_dexs().await;
         self.meta_and_ctxs().await;
         self.spot_meta().await;
         self.books().await;
         self.mids().await;
         self.oi_caps().await;
         self.feed.publish_metrics(crate::now_ms());
+    }
+
+    /// `perpDexs`: the venue's dex list in its own order (`[0]` is the
+    /// default dex, `null`). It is the **only** source of the HIP-3 asset
+    /// index's dex positions — the configured markets name their dex, but the
+    /// index `a` encodes the upstream list position, not the config's order.
+    async fn perp_dexs(&self) {
+        if !self.gated(crate::feed::budget::weight::LIGHT) {
+            return;
+        }
+        match self
+            .api
+            .info::<Vec<Option<crate::wire::PerpDex>>>(&InfoRequest::PerpDexs)
+            .await
+        {
+            Ok(dexs) => self.feed.put_perp_dexs(dexs),
+            Err(e) => self.rest_fault("perpDexs", &e),
+        }
     }
 
     /// `perpsAtOpenInterestCap`: the venue's cap list (light weight; the

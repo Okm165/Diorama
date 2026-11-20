@@ -83,6 +83,19 @@ impl ApiState {
         if self.feed.meta().is_none() {
             return false;
         }
+        // A configured HIP-3 market (`xyz:*`) is addressable only through the
+        // upstream `perpDexs` list: the asset index encodes that list's
+        // position. Before the list lands — or if the venue does not quote a
+        // configured dex — the order lane cannot reach the market, so
+        // readiness would be a lie.
+        for market in &self.feed.markets {
+            let Some((dex, _)) = market.split_once(':') else {
+                continue;
+            };
+            if self.feed.dex_index(dex).is_none() {
+                return false;
+            }
+        }
         // The spot token registry is part of the served contract (spot deals,
         // `spotClearinghouseState`'s token mapping). The poller fetches it in
         // the same pass as the meta, one HEAVY call later — readiness that

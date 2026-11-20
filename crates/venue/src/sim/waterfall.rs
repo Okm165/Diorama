@@ -120,7 +120,7 @@ impl Sim {
         if account.positions.is_empty() {
             return Ok(None);
         }
-        let meta = feed.meta();
+        let meta = feed.margin_meta();
         let v = account::view(account, feed, meta.as_ref())?;
         let pass = Pass {
             feed,
@@ -396,7 +396,7 @@ impl Sim {
     /// ranked by `(mark/entry)·(notional/account_value)` and closed at the
     /// *previous* mark against the underwater account (docs).
     fn adl(&self, pass: &Pass<'_>, leg: Leg<'_>) -> Result<Vec<String>> {
-        let meta = pass.feed.meta();
+        let meta = pass.feed.margin_meta();
         let mut closed = Vec::new();
         for (coin, p) in &pass.account.positions {
             if !leg.holds(coin, p) {
@@ -633,7 +633,7 @@ fn vault_take_coin(
         reduce: crate::sim::order::Reduce::Any,
         fee: Decimal::ZERO,
     };
-    if let Err(e) = account::apply_fill(vault, &facts, feed.meta().as_ref()) {
+    if let Err(e) = account::apply_fill(vault, &facts, feed.margin_meta().as_ref()) {
         tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
         return None;
     }
