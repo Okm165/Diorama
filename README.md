@@ -104,6 +104,9 @@ curl -s -X POST localhost:18100/exchange -d '{
   needs a fresh nonce.
 - **`clearinghouseState` is the perp view**; the USDC a unified book deposited
   is spot — read `spotClearinghouseState` for it.
+- **The simulator serves the first perp dex only** (multi-dex is deferred): the
+  HIP-3 `xyz:*` instruments are price/book data, not orderable — place orders
+  against default-dex instruments (BTC, ETH, HYPE, …).
 - The simulator models `order`, `cancel`, `cancelByCloid`, `modify`,
   `batchModify`, `updateLeverage`, `updateIsolatedMargin`, `scheduleCancel`
   and `noop`. An unmodeled tag is refused by name in the venue's own error
