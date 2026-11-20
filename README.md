@@ -70,6 +70,46 @@ names the consumer harness sources. The loopback ports live in `harness.env`
 (see "Deployment data"); a port collision on another machine is a harness
 edit, not a manifest one.
 
+### Place orders in the simulated venue (testers)
+
+The venue simulator is the trading surface. It is a ClusterIP service like the
+rest, so reach it through the venue harness's forward
+(`kubectl -n diorama-venue port-forward svc/venue-sim 18100:8090`), or use the
+in-cluster name `http://venue-sim.diorama-venue.svc.cluster.local:8090`. There
+is no order route on the consumer API by design — DALOC reads the venue's
+account and book state; it does not proxy trades.
+
+```sh
+# the market list (the asset index `a` in an order comes from here)
+curl -s -X POST localhost:18100/info -d '{"type":"meta"}'
+
+# the account the venue credits: the margin agent's EVM address, spot USDC
+curl -s -X POST localhost:18100/info \
+  -d '{"type":"spotClearinghouseState","user":"0x<margin-agent>"}'
+
+# a market order (IOC) in the venue's own exchange envelope
+curl -s -X POST localhost:18100/exchange -d '{
+  "action":{"type":"order","orders":[
+    {"a":<asset-index>,"b":true,"p":"<limit-price>","s":"<size>","r":false,
+     "t":{"limit":{"tif":"Ioc"}}}]},
+  "user":"0x<margin-agent>","nonce":<unix-ms>
+}'
+```
+
+- **The acting account is `user`** (or `vaultAddress`); the order book, fills,
+  fees and funding all land on that account.
+- **Signatures are accepted, never verified** on the devnet — the simulator has
+  no key material (the anvil-impersonation analogue). A signature field is
+  optional; `nonce` is milliseconds and is consumed per account, so a retry
+  needs a fresh nonce.
+- **`clearinghouseState` is the perp view**; the USDC a unified book deposited
+  is spot — read `spotClearinghouseState` for it.
+- The simulator models `order`, `cancel`, `cancelByCloid`, `modify`,
+  `batchModify`, `updateLeverage`, `updateIsolatedMargin`, `scheduleCancel`
+  and `noop`. An unmodeled tag is refused by name in the venue's own error
+  envelope (HTTP 200, the shape their clients parse); TP/SL orders must be
+  reduce-only.
+
 ## Deployment data (the files that are never committed)
 
 | file | what it carries |
