@@ -88,3 +88,28 @@ spec:
   ports:
     - { name: info, port: 8090, targetPort: 8090 }
     - { name: control, port: 8091, targetPort: 8091 }
+---
+# The public order path. A stable NodePort (31090 — the port the harness docs
+# already name) so the Funnel ingress and any host-side proxy point at the
+# node, not at a kubectl forward that dies with its session (measured
+# 2026-11-20: the venue funnel's upstream forward lost its pod and 502'd the
+# public /info and /exchange surface).
+#
+# ── Apply this file through the instance overlay only ─────────────────────────
+# The Deployment above names the configMapGenerator's template (`venue-instance`);
+# the live Deployment mounts the overlay's hash-suffixed render. A raw
+# `kubectl apply -f` of this base rewrites the volume to a name that does not
+# exist and the simulator loses its mount (measured: FailedMount
+# `configmap "venue-instance" not found`). Services are safe standalone; the
+# Deployment is not: `make up INSTANCE=diorama-venue` (the overlay) or a
+# service-only extraction.
+apiVersion: v1
+kind: Service
+metadata:
+  name: venue-sim-nodeport
+  labels: { app.kubernetes.io/name: venue-sim, app.kubernetes.io/part-of: diorama-venue }
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: venue-sim }
+  ports:
+    - { name: info, port: 8090, targetPort: 8090, nodePort: 31090 }
