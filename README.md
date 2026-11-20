@@ -104,9 +104,14 @@ curl -s -X POST localhost:18100/exchange -d '{
   needs a fresh nonce.
 - **`clearinghouseState` is the perp view**; the USDC a unified book deposited
   is spot — read `spotClearinghouseState` for it.
-- **The simulator serves the first perp dex only** (multi-dex is deferred): the
-  HIP-3 `xyz:*` instruments are price/book data, not orderable — place orders
-  against default-dex instruments (BTC, ETH, HYPE, …).
+- **Every HIP-3 dex is orderable.** An order's `a` resolves in the venue's own
+  namespace: `a < 10000` is the default dex's universe index and
+  `a >= 100000` is `100000 + perpDexIndex * 10000 + indexInThatDexUniverse`,
+  with `perpDexIndex` the position in the upstream `perpDexs` list (`[0]` is
+  `null`, so `xyz` is `1` → `110000` is `xyz` universe index 0). `meta?dex=xyz`
+  returns that dex's universe; the account plane validates and margins every
+  configured `dex:coin` by name. Per-dex balances, per-dex fees/OI caps and a
+  multi-dex `sendAsset` are still unmodeled.
 - The simulator models `order`, `cancel`, `cancelByCloid`, `modify`,
   `batchModify`, `updateLeverage`, `updateIsolatedMargin`, `scheduleCancel`
   and `noop`. An unmodeled tag is refused by name in the venue's own error
