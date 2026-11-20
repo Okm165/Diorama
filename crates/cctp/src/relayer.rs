@@ -302,10 +302,10 @@ impl Relayer {
         let decoded = record.decoded()?;
         let (target, consumer) = self.consumer(chain, record, &decoded)?;
         if caller_mismatch(decoded.header.destination_caller, consumer) {
-            return self.refuse(
+            return self.hand_off(
                 record.nonce,
                 format!(
-                    "destinationCaller {} is not this bridge's consumer ({consumer})",
+                    "destinationCaller {} is another integrator's — the attestation is served and its delivery is theirs ({consumer} is this bridge)",
                     decoded.header.destination_caller
                 ),
             );
@@ -631,6 +631,24 @@ impl Relayer {
     /// every gate in `relay` uses — the reason names what was seen.
     fn refuse(&self, nonce: B256, reason: String) -> Result<Relayed> {
         self.park(nonce, reason)?;
+        Ok(Relayed::No)
+    }
+
+    /// The message is attested and served, but another integrator is its
+    /// `destinationCaller`. This is the production division of labour (Circle
+    /// attests, the designated caller delivers), so it is an INFO fact, not a
+    /// failure: no park, no degradation, no retry — the record leaves the
+    /// signed set and the Iris keeps answering it.
+    fn hand_off(&self, nonce: B256, reason: String) -> Result<Relayed> {
+        tracing::info!(%nonce, reason, "cctp message handed off to its destinationCaller (attestation served)");
+        self.store.update_message(
+            |m| m.nonce == nonce,
+            |m| {
+                m.state = RelayState::HandedOff;
+                m.park_reason = Some(reason);
+            },
+        )?;
+        self.metrics.messages_handed_off.fetch_add(1, Ordering::Relaxed);
         Ok(Relayed::No)
     }
 

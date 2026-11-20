@@ -761,7 +761,7 @@ mod tests {
             })
             .unwrap();
         let served = messages(
-            State(state),
+            State(state.clone()),
             Path(Domain(0)),
             Query(MessageQuery {
                 transaction_hash: Some(tx.to_string()),
@@ -771,6 +771,39 @@ mod tests {
         .expect("the live burn is still served");
         assert_eq!(served.0.messages.len(), 1);
         assert_eq!(served.0.messages[0].burn_log_index, 1);
+
+        // **A handed-off record is the opposite of parked**: the burn is valid
+        // and another integrator is its `destinationCaller` (a cross-chain
+        // recovery's wrapper). Production Circle attests such a message and
+        // delivers none, so the mirror must serve it or the designated caller
+        // has no attestation to deliver — the lane would be dead end to end.
+        store
+            .with(|s| {
+                s.messages[0] = {
+                    let mut handed = record(true);
+                    handed.burn_tx = tx;
+                    handed.nonce = B256::repeat_byte(0x01);
+                    handed.burn_log_index = 0;
+                    handed.state = RelayState::HandedOff;
+                    handed
+                };
+                Ok(())
+            })
+            .unwrap();
+        let served = messages(
+            State(state),
+            Path(Domain(0)),
+            Query(MessageQuery {
+                transaction_hash: Some(tx.to_string()),
+            }),
+        )
+        .await
+        .expect("a handed-off burn is served");
+        assert_eq!(served.0.messages.len(), 2);
+        assert!(
+            served.0.messages[0].attestation.is_some(),
+            "the handed-off record's attestation is what its destinationCaller delivers"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

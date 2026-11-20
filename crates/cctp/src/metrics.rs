@@ -18,6 +18,9 @@ pub struct CctpMetrics {
     pub relays_confirmed: AtomicU64,
     /// Definitive failures parked for an operator.
     pub relays_parked: AtomicU64,
+    /// Messages attested and served, whose delivery belongs to the
+    /// `destinationCaller` (a cross-chain recovery's hook wrapper).
+    pub messages_handed_off: AtomicU64,
     /// Signed records re-checked by the relayer (one per tick per record).
     pub relay_attempts: AtomicU64,
     /// Scan passes that failed (logged with the chain).
@@ -88,6 +91,12 @@ impl CctpMetrics {
             "cctp_relays_parked_total",
             "messages parked on a definitive failure",
             self.relays_parked.load(Ordering::Relaxed),
+        );
+        counter(
+            out,
+            "cctp_messages_handed_off_total",
+            "messages attested and served, delivered by their destinationCaller",
+            self.messages_handed_off.load(Ordering::Relaxed),
         );
         counter(
             out,

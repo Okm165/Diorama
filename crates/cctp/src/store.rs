@@ -26,6 +26,13 @@ pub(crate) enum RelayState {
     Signed,
     /// `receiveMessage` landed (or the nonce was already consumed on-chain).
     Relayed,
+    /// Attested and **served** (the Iris answers it), but the message names
+    /// another `destinationCaller`: delivery is that integrator's job, not this
+    /// bridge's. Production Circle attests every message and delivers none; a
+    /// mirror that withheld the attestation would make a cross-chain recovery
+    /// (whose wrapper is the caller) unreceivable end to end. Distinct from
+    /// `Parked`, which is a definitive failure.
+    HandedOff,
     /// A definitive failure (a mined revert, or repeated send refusals); kept
     /// visible, never retried silently.
     Parked,
@@ -135,6 +142,9 @@ pub struct Counts {
     pub pending: usize,
     pub signed: usize,
     pub relayed: usize,
+    /// Attested and served, but addressed to another consumer — this bridge
+    /// does not deliver it (no failure, no health degradation).
+    pub handed_off: usize,
     pub parked: usize,
     /// Records retired from the live failure count: final for this epoch's
     /// history (the source burn is gone twice-observed).
@@ -149,6 +159,7 @@ impl Counts {
                 RelayState::Pending => counts.pending += 1,
                 RelayState::Signed => counts.signed += 1,
                 RelayState::Relayed => counts.relayed += 1,
+                RelayState::HandedOff => counts.handed_off += 1,
                 RelayState::Parked => counts.parked += 1,
                 RelayState::Retired => counts.retired += 1,
             }

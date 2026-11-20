@@ -87,6 +87,9 @@ pub(crate) struct HealthResponse {
     pub pending: usize,
     pub signed: usize,
     pub relayed: usize,
+    /// Attested and served, delivered by their `destinationCaller` (the
+    /// cross-chain recovery hooks). Not a failure: the Iris answers them.
+    pub handed_off: usize,
     pub parked: usize,
     /// Records retired from the live failure count: final for this epoch
     /// (source burn gone on two consecutive observations). A count, like the
@@ -135,6 +138,7 @@ pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Jso
         pending: counts.pending,
         signed: counts.signed,
         relayed: counts.relayed,
+        handed_off: counts.handed_off,
         parked: counts.parked,
         retired: counts.retired,
         archived_parked: state
