@@ -38,10 +38,7 @@
 # the specialization (endpoints, state root, JWT path) or the defaults.
 diorama-mainnet|endpoints.evm.http|live-read
 diorama-mainnet|endpoints.anvil.http|live-read
-diorama-mainnet|endpoints.engine_api.http|live-read
-diorama-mainnet|endpoints.beacon.http|live-read
 diorama-mainnet|services.engine.state_dir|live-read
-diorama-mainnet|services.engine.source_sync.jwt_path|live-read
 diorama-mainnet|chains.l1.fork_pin|live-read
 diorama-mainnet|chains.l1.fork_offset|live-read
 #

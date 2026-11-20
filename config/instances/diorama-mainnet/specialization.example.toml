@@ -103,7 +103,11 @@ fixture_addresses = ["0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "0xC02aaA39b2
 [services.engine.feed_bridge]
 poll_interval_ms = 5000
 confirm_window_ms = 120000
-writer = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+# A dedicated writer, never the deploy account: the bridge and the deployer
+# share a chain and an anvil pool, and a shared nonce sequence races them
+# (measured 2026-11-19: the deployer's stuck feed tx displaced the first
+# initialize). The section's own contract demands this; the template now does.
+writer = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 feeds = [
   # wstETH is **not** proxied to stETH. The mirror deploys the composed
   # wstETH/USD feed at the registry address, which multiplies the mirrored

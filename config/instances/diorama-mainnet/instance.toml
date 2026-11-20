@@ -30,15 +30,5 @@ fork_offset = 128
 # 10,064-block rebase bound and leaves margin for source advance.
 max_gap_blocks = 10000
 # JSON-RPC batch items for source reads and local cheatcode writes: the
-# deployment's endpoint contract (the local reth), not a global default.
+# deployment's endpoint contract (the LAN reth source), not a global default.
 chunk_size = 500
-
-# The top-up loop (EIP-8379): reth's engine API. The JWT file's path is a
-# deployment fact and lives in the specialization's
-# [services.engine.source_sync].
-[services.engine.source_sync]
-engine_url = "@engine_api"
-
-# The local consensus client is the beacon source.
-[services.engine.beacon]
-urls = ["@beacon"]
