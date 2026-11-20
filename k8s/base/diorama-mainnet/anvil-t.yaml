@@ -173,13 +173,17 @@ spec:
               # Pre-launch mirror: the unoptimized creation code needs ~106.4M
               # gas for the largest deploy, above the production 60M block
               # limit. Raise the block limit until the optimized release build.
-              # No state file. The chain's content has one owner: the engine's
-              # fork pin plus its journal/shadow registry, which restore the
-              # chain on any start. An anvil `--state` file was a second,
-              # writable home for the same content and has wedged this pod
-              # repeatedly (torn JSON refused at boot 5 times on the venue;
-              # today a *valid* file wedged restore past the startup probe).
-              # A restart re-forks from the pin and the engine replays.
+              # The chain's content is the pod's own state file. The engine's pin
+              # does NOT restore a deployment made after it (measured 2026-11-20
+              # on the venue: a rollout re-forked at the pin and every DALOC
+              # contract vanished). A torn write leaves a truncated JSON object
+              # that anvil refuses at boot, so park anything that does not end in
+              # `}` and let the pin be the fallback. `--state-interval 300`
+              # re-dumps while running; anvil also dumps on a clean SIGTERM.
+              if [ -f /state/anvil-state.json ] && [ "$(tail -c 64 /state/anvil-state.json | tr -d '[:space:]' | tail -c 1)" != "}" ]; then
+                mv /state/anvil-state.json "/state/anvil-state.json.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
+                echo "anvil-t: parked a torn state file; starting from the pin" >&2
+              fi
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
                 --fork-url "$EVM_URL" \
@@ -195,6 +199,8 @@ spec:
                 --auto-impersonate \
                 --prune-history 32 \
                 --transaction-block-keeper 1000000 \
+                --state /state/anvil-state.json \
+                --state-interval 300 \
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info \
