@@ -163,11 +163,28 @@ impl ApiState {
         // A mirrored spot pair has a book and an `allMids` entry, but no
         // `activeAssetCtx` (there is no spot funding). Requiring a ctx would
         // keep readiness false forever.
+        //
+        // **A quiet spot pair is not a frozen book.** The venue's `l2` channel
+        // pushes on change only, so a pair nobody trades sends nothing for
+        // minutes and its cache stamp ages — measured 2026-11-21: `@142` and
+        // `@151` (HIP-1 pairs) froze 32–37 s with the socket up, no REST
+        // errors and every ctx fresh, flipping `/readyz` 503 while the plane
+        // was healthy. A perp has its ctx to corroborate liveness (a stale
+        // book with a fresh ctx is a real fault); a spot pair has no ctx, so
+        // the cache alone cannot tell "quiet" from "dead" — and the read path
+        // can: `book()` re-reads a stale book over REST and re-stamps it, so
+        // the market is served fresh on demand. Readiness therefore accepts a
+        // stale spot book while the plane is healthy, and the order lane still
+        // refuses/fetches by name when the REST refresh fails.
+        let spot_book_ready = |coin: &str| match self.feed.book_age(coin, now, max_stale_ms) {
+            crate::feed::BookAge::Scripted | crate::feed::BookAge::Fresh => true,
+            crate::feed::BookAge::Warming | crate::feed::BookAge::Stale(_) => plane_healthy,
+        };
         for coin in &self.feed.spot_markets {
             if self.feed.mark(coin).is_none() {
                 return Err(format!("{coin}: no mark"));
             }
-            if !book_ready(coin) {
+            if !spot_book_ready(coin) {
                 return Err(match self.feed.book_age(coin, now, max_stale_ms) {
                     crate::feed::BookAge::Stale(age) => format!("{coin}: book frozen {age} ms"),
                     _ => format!("{coin}: book not ready"),
@@ -336,6 +353,60 @@ mod readiness_tests {
             crate::now_ms() - 600_000,
         );
         assert!(!state(feed).ready(MarketFeed::MAX_STALE_MS), "a frozen book refuses readiness");
+    }
+
+    /// **A quiet spot pair is not a frozen book.** The venue's `l2` channel
+    /// pushes on change only, so a HIP-1 pair nobody trades ages its cache
+    /// stamp while the plane is healthy (measured 2026-11-21: `@142`/`@151`
+    /// froze 32–37 s). Readiness accepts it — the read path re-fetches over
+    /// REST on demand — while a **perp** with a frozen book still refuses (its
+    /// fresh ctx is what makes the stale book a real fault).
+    #[test]
+    fn a_quiet_spot_book_is_ready_but_a_frozen_perp_book_is_not() {
+        let feed = feed_with("ETH");
+        feed.put_spot_meta(crate::wire::SpotMeta {
+            tokens: vec![],
+            universe: vec![crate::wire::SpotPair {
+                tokens: [1, 0],
+                name: "@151".into(),
+                index: 151,
+                is_canonical: false,
+            }],
+        });
+        feed.metrics.mark_ws_up();
+        // The spot pair's book is cached and stale (a quiet market).
+        feed.put_book(
+            crate::wire::L2Book {
+                coin: "@151".into(),
+                time: 1,
+                spread: None,
+                levels: [vec![], vec![]],
+            },
+            crate::now_ms() - 600_000,
+        );
+        // The spot mark lands in `allMids`.
+        feed.put_mids(
+            std::collections::BTreeMap::from([("@151".to_string(), Decimal::from(3))]),
+            crate::now_ms(),
+        );
+        let quiet = state(feed);
+        assert!(quiet.ready(MarketFeed::MAX_STALE_MS), "a quiet spot book is served on demand, not a fault: {:?}", quiet.readiness(MarketFeed::MAX_STALE_MS));
+
+        // The same staleness on a **perp** whose ctx is fresh refuses.
+        let feed = feed_with("ETH");
+        feed.put_spot_meta(crate::wire::SpotMeta { tokens: vec![], universe: vec![] });
+        feed.metrics.mark_ws_up();
+        feed.put_book(
+            crate::wire::L2Book {
+                coin: "ETH".into(),
+                time: 1,
+                spread: None,
+                levels: [vec![], vec![]],
+            },
+            crate::now_ms() - 600_000,
+        );
+        let frozen = state(feed);
+        assert!(!frozen.ready(MarketFeed::MAX_STALE_MS), "a perp's frozen book with fresh ctx is a real fault");
     }
 
     #[test]
