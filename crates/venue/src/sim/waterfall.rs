@@ -645,8 +645,10 @@ fn vault_take_coin(
         size,
         px: feed.mark_or(coin, entry_px),
         leverage,
+        mode: crate::wire::LeverageType::Cross,
         reduce: crate::sim::order::Reduce::Any,
         fee: Decimal::ZERO,
+        builder: None,
     };
     if let Err(e) = account::apply_fill(vault, &facts, feed.margin_meta().as_ref()) {
         tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");

@@ -179,6 +179,8 @@ pub(crate) struct Deal {
     /// The spot coin (`None` = USDC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coin: Option<String>,
+    // step-9: the per-dex ledger gives this a `dex` (the fork's `/control/deal`
+    // and seed shapes); today every deal lands on the one clearinghouse.
     pub amount: Decimal,
 }
 
@@ -263,6 +265,29 @@ impl Sim {
     /// the read through to the real venue).
     pub(crate) fn account(&self, address: Address) -> Result<Option<Account>> {
         self.with_state(|state| Ok(state.accounts.get(&address).cloned()))
+    }
+
+    /// The account a recovered `/exchange` signer acts for (the venue's
+    /// rule): the account that registered it as an API wallet (CoreWriter
+    /// action 9), else its own account. `None` when it is neither — the
+    /// venue's "User or API Wallet … does not exist". An API wallet two
+    /// accounts registered is refused by name rather than guessed.
+    #[allow(dead_code)] // the `/exchange` lane resolves the acting account through it next
+    pub(crate) fn signer_account(&self, signer: Address) -> Result<Option<Address>> {
+        self.with_state(|state| {
+            let mut owners = state
+                .accounts
+                .iter()
+                .filter(|(_, account)| account.agents.iter().any(|a| a.wallet == signer))
+                .map(|(owner, _)| *owner);
+            match (owners.next(), owners.next()) {
+                (Some(owner), None) => Ok(Some(owner)),
+                (Some(_), Some(_)) => Err(crate::error::Error::bad_request(format!(
+                    "venue-sim: API wallet {signer} is registered by more than one account"
+                ))),
+                (None, _) => Ok(state.accounts.contains_key(&signer).then_some(signer)),
+            }
+        })
     }
 
     /// The sim clock (ms) at wall time `now_ms`.
@@ -642,8 +667,77 @@ impl Sim {
         })
     }
 
+    /// Record a builder-fee approval (CoreWriter action 12, the margin
+    /// agent's `approveBuilderFee`): the account's approved maximum for
+    /// `builder`, in tenths of a basis point. The venue *sets* the maximum, so
+    /// a later approval for the same builder overwrites the earlier one; an
+    /// approval of 0 revokes it.
+    #[allow(dead_code)] // the `/exchange` approveBuilderFee action adopts it next
+    pub(crate) fn approve_builder_fee(
+        &self,
+        address: Address,
+        builder: Address,
+        max_fee_rate: u64,
+    ) -> Result<()> {
+        self.mutate_account(address, |account| {
+            if max_fee_rate == 0 {
+                account.builder_approvals.remove(&builder);
+            } else {
+                account.builder_approvals.insert(builder, max_fee_rate);
+            }
+            Ok(())
+        })
+    }
+
+    /// The account's approved maximum builder fee for `builder` (the info
+    /// `maxBuilderFee` answer: 0 when never approved); `None` when the sim
+    /// never touched the account.
+    #[allow(dead_code)] // the `/exchange` gate and the info read adopt it next
+    pub(crate) fn max_builder_fee(
+        &self,
+        address: Address,
+        builder: Address,
+    ) -> Result<Option<u64>> {
+        self.with_state(|state| {
+            Ok(state
+                .accounts
+                .get(&address)
+                .map(|a| a.builder_approvals.get(&builder).copied().unwrap_or(0)))
+        })
+    }
+
+    /// The builder-fee gate of an order action: the fee must be within the
+    /// venue's perp cap and within what the account approved for the builder.
+    /// The refusals are the venue's envelope text (`err` response).
+    #[allow(dead_code)] // the `/exchange` order action calls it next
+    pub(crate) fn authorize_builder(
+        &self,
+        address: Address,
+        builder: Address,
+        f: u64,
+    ) -> Result<order::BuilderFee> {
+        if f > order::MAX_PERP_BUILDER_FEE {
+            return Err(Error::bad_request(format!(
+                "venue-sim: the builder fee {f} exceeds the perp builder fee cap of {} \
+                 tenths of a basis point (0.1%).",
+                order::MAX_PERP_BUILDER_FEE
+            )));
+        }
+        match self.max_builder_fee(address, builder)?.unwrap_or(0) {
+            0 => Err(Error::bad_request("Builder fee has not been approved.")),
+            max if f > max => Err(Error::bad_request(format!(
+                "venue-sim: the builder fee {f} exceeds the {max} tenths of a basis point \
+                 the account approved for builder {builder}."
+            ))),
+            _ => Ok(order::BuilderFee { builder, f }),
+        }
+    }
+
     /// Set the account's abstraction mode (CoreWriter action 16). Portfolio
     /// margin is refused by name (see `account::refuse_unmodeled_mode`).
+    // step-9: switching to `unifiedAccount` merges the perp ledgers into spot
+    // first (`fold_ledgers_into_spot`, fed by each dex's collateral token);
+    // the unified switch and the signed actions it refuses land then.
     pub(crate) fn set_mode(
         &self,
         address: Address,
@@ -1716,5 +1810,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sim.save_if_dirty().unwrap(), Flushed::Written);
+    }
+
+    /// The `/exchange` signer rule: an account resolves to itself, an API
+    /// wallet to the account that registered it, an unknown address to
+    /// nothing, and a wallet two accounts registered is refused by name.
+    #[test]
+    fn the_recovered_signer_resolves_to_its_owner() {
+        let feed = feed_with(&[("ETH", "100", "100")]);
+        let sim = Sim::memory();
+        let owner = Address::repeat_byte(0xa1);
+        let agent = Address::repeat_byte(0xa2);
+        assert_eq!(sim.signer_account(owner).unwrap(), None, "untouched");
+        sim.deal(
+            &feed,
+            &Deal {
+                address: owner,
+                class: DealClass::Perp,
+                coin: None,
+                amount: Decimal::ONE,
+            },
+        )
+        .unwrap();
+        assert_eq!(sim.signer_account(owner).unwrap(), Some(owner));
+        assert_eq!(sim.signer_account(agent).unwrap(), None);
+        sim.note_agent(owner, agent, "bot").unwrap();
+        assert_eq!(sim.signer_account(agent).unwrap(), Some(owner));
+
+        // A second account registering the same wallet is ambiguous: refused
+        // rather than guessed.
+        let other = Address::repeat_byte(0xa3);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: other,
+                class: DealClass::Perp,
+                coin: None,
+                amount: Decimal::ONE,
+            },
+        )
+        .unwrap();
+        sim.note_agent(other, agent, "bot").unwrap();
+        let err = sim.signer_account(agent).unwrap_err();
+        assert!(
+            err.to_string().contains("registered by more than one account"),
+            "{err}"
+        );
     }
 }

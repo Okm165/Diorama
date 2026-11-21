@@ -50,6 +50,9 @@ fn record_boundaries(
 /// position's boundaries settle before its size moves; the rate served at
 /// the accrual prices every boundary crossed since the last one (the sim
 /// keeps no per-boundary rate history — the gaps table names it).
+// step-9: funding is per dex (one clearinghouse per (user, dex)): each dex's
+// own stamp, ledger and dex-scoped all-or-nothing gate (the fork's
+// `accrue_dex` split) land with the per-dex ledger.
 pub(crate) fn accrue_funding(
     account: &mut Account,
     feed: &MarketFeed,

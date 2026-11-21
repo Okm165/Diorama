@@ -65,8 +65,6 @@ pub(crate) struct UserFill {
     pub fee: Decimal,
     /// The builder fee the fill charged on top of `fee` (the order's
     /// `builder`); omitted when the fill carried none, as the venue's is.
-    /// The sim does not charge builder fees yet (the order lane's builder
-    /// delta lands with `/exchange`), so this is `None` on every fill.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -331,7 +329,7 @@ pub(crate) fn record_fill(
             oid: fill.oid,
             crossed: fill.liquidity == Liquidity::Taker,
             fee: facts.fee,
-            builder_fee: None,
+            builder_fee: facts.builder.map(|b| b.amount),
             tid,
             cloid: fill
                 .cloid

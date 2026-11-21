@@ -46,6 +46,9 @@ pub(crate) struct AgentWallet {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Account {
     /// The perp wallet's raw USDC balance (before cost basis).
+    // step-9: the per-dex clearinghouse ledger (`perps`/`DexLedger`, one
+    // stamp and balance per dex, USDH collateral included) replaces this
+    // single balance; every `perp_balance` read becomes `perp_balance(dex)`.
     #[serde(default)]
     pub perp_balance: Decimal,
     #[serde(default)]
@@ -79,6 +82,14 @@ pub(crate) struct Account {
     /// API wallets the CoreWriter registered for this account.
     #[serde(default)]
     pub agents: Vec<AgentWallet>,
+    /// The builder fees this account approved (CoreWriter action 12 /
+    /// `approveBuilderFee`): builder address to the approved maximum fee rate,
+    /// in tenths of a basis point. A later approval for the same builder
+    /// overwrites; an approval of 0 revokes (the entry is removed). A plain
+    /// map, not an `Arc`: an account approves a handful of builders, so the
+    /// clone every read takes is a few entries (unlike the ledgers below).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub builder_approvals: BTreeMap<Address, u64>,
     /// The UTC day (epoch days) of the last scheduled-cancel fire, and the
     /// day's count — the venue caps triggers at 10 per day, reset at 00:00
     /// UTC (docs).
@@ -327,6 +338,11 @@ struct PositionTotals {
     cross_margin: Decimal,
     cross_maintenance: Decimal,
     isolated_margin: Decimal,
+    /// The isolated positions' own equity, `margin + unrealized pnl`: what the
+    /// venue serves as an isolated position's `marginUsed` and carves out of
+    /// the cross summary (the cross figure is the free cash alone: an isolated
+    /// position's pnl is its own).
+    isolated_equity: Decimal,
     /// The isolated positions' signed value (`Σ sign(szi)·positionValue`):
     /// the cross summary's raw balance subtracts the margins and adds this
     /// back (measured live).
@@ -340,7 +356,17 @@ impl PositionTotals {
             Direction::Short => -facts.value,
         };
         self.notional = add(self.notional, facts.value, "total notional")?;
-        self.margin = add(self.margin, p.margin_used, "total margin")?;
+        // An isolated position's `marginUsed` is its equity (margin plus
+        // unrealized pnl), measured live: `rawUsd + positionValue` of the row.
+        let served_margin = match p.leverage {
+            LeverageType::Cross => p.margin_used,
+            LeverageType::Isolated => add(
+                p.margin_used,
+                p.unrealized_pnl(facts.mark)?,
+                "isolated equity",
+            )?,
+        };
+        self.margin = add(self.margin, served_margin, "total margin")?;
         self.signed_value = add(self.signed_value, signed, "signed value")?;
         self.cost_basis = add(self.cost_basis, p.cost_basis()?, COST_BASIS)?;
         if p.leverage == LeverageType::Cross {
@@ -353,6 +379,7 @@ impl PositionTotals {
             )?;
         } else {
             self.isolated_margin = add(self.isolated_margin, p.margin_used, ISOLATED_MARGIN)?;
+            self.isolated_equity = add(self.isolated_equity, served_margin, ISOLATED_MARGIN)?;
             self.isolated_signed = add(self.isolated_signed, signed, "isolated signed value")?;
         }
         Ok(())
@@ -378,6 +405,12 @@ fn position_row(
         )?),
         LeverageType::Cross => None,
     };
+    // The served `marginUsed` of an isolated row is its equity (measured
+    // live); a cross row keeps its margin.
+    let served_margin = match p.leverage {
+        LeverageType::Cross => p.margin_used,
+        LeverageType::Isolated => p.margin_used + u_pnl,
+    };
     Ok(AssetPosition {
         kind: PositionKind::OneWay,
         position: WirePosition {
@@ -386,10 +419,20 @@ fn position_row(
             leverage: Leverage {
                 kind: p.leverage,
                 value: p.leverage_value,
-                raw_usd: Some(p.margin_used - facts.value),
+                // The isolated carve-out only: the venue omits it on a cross
+                // position. `marginUsed` less the position's signed value: a
+                // short's raw balance is positive (it holds the proceeds),
+                // measured live.
+                raw_usd: (p.leverage == LeverageType::Isolated).then(|| {
+                    let signed = match p.direction() {
+                        Direction::Long => facts.value,
+                        Direction::Short => -facts.value,
+                    };
+                    served_margin - signed
+                }),
             },
             liquidation_px,
-            margin_used: p.margin_used,
+            margin_used: served_margin,
             // The live bound for a tracked coin; for a coin the meta does not
             // carry (a seeded position outside the markets) the position's own
             // leverage — a value we know, never a fabricated bound.
@@ -437,8 +480,8 @@ fn assemble(
     // equity, parked on their positions — so
     // `accountValue = totalRawUsd + Σ sign·positionValue` holds with them
     // included; and the cross summary is the total minus the isolated legs'
-    // contribution: value minus their margins, raw minus (margin − signed
-    // value).
+    // contribution: value minus their equity (`margin + pnl`), raw minus
+    // (equity − signed value).
     let cash = account.perp_balance + totals.isolated_margin;
     let total_raw = cash - totals.cost_basis;
     let account_value = total_raw + totals.signed_value;
@@ -448,8 +491,8 @@ fn assemble(
         total_raw_usd: total_raw,
         total_margin_used: totals.margin,
     };
-    let cross_account_value = account_value - totals.isolated_margin;
-    let cross_raw = total_raw - totals.isolated_margin + totals.isolated_signed;
+    let cross_account_value = account_value - totals.isolated_equity;
+    let cross_raw = total_raw - totals.isolated_equity + totals.isolated_signed;
     let cross_margin_summary = MarginSummary {
         account_value: cross_account_value,
         total_ntl_pos: totals.cross_notional,
@@ -898,10 +941,17 @@ pub(crate) struct FillFacts {
     pub size: Decimal,
     pub px: Decimal,
     pub leverage: u32,
+    /// The margin mode a new position opens in (the account's setting for the
+    /// coin, else the market's default); an existing position keeps its own.
+    pub mode: LeverageType,
     pub reduce: crate::sim::order::Reduce,
     /// The trading fee (venue base tier; charged on top of the fill — the
     /// plan's `closedPnl = fee + side·(mark−entry)·size`).
     pub fee: Decimal,
+    /// The builder fee the fill's order carries, computed (`None` for an
+    /// order without a builder, and for every liquidation, ADL and
+    /// settlement fill). Debited with the trading fee, on top of it.
+    pub builder: Option<crate::sim::order::BuilderCharge>,
 }
 
 impl FillFacts {
@@ -920,12 +970,16 @@ impl FillFacts {
             size: sz,
             px,
             leverage,
+            mode: LeverageType::Cross,
             reduce: crate::sim::order::Reduce::Only,
             fee: Decimal::ZERO,
+            builder: None,
         }
     }
 }
 
+/// Apply one fill to the account; the effect (the size before, the realized
+/// PnL of the closed part, the direction) is what the ledger records.
 pub(crate) fn apply_fill(
     account: &mut Account,
     fill: &FillFacts,
@@ -942,8 +996,14 @@ pub(crate) fn apply_fill(
         .positions
         .entry(fill.coin.clone())
         .or_insert_with(|| fresh_position(fill));
+    let mut allocated = Decimal::ZERO;
     let (closed, realized) = if same_direction(old, signed) {
-        apply_increase(position, old, fill)?;
+        allocated = apply_increase(position, old, fill)?;
+        position.isolated_margin = add(
+            position.isolated_margin,
+            allocated,
+            "isolated margin allocation",
+        )?;
         (Decimal::ZERO, Decimal::ZERO)
     } else {
         let closed = old.abs().min(fill.size);
@@ -951,10 +1011,20 @@ pub(crate) fn apply_fill(
         account.perp_balance = add(account.perp_balance, realized, "realized PnL")?;
         (closed, realized)
     };
+    // An isolated position funds its own margin: the increase's initial margin
+    // leaves the cross balance for the position (the venue's isolated open).
+    if !allocated.is_zero() {
+        account.perp_balance = sub(account.perp_balance, allocated, "isolated margin allocation")?;
+    }
     // The trading fee (the venue's base tier): charged on the fill's notional,
     // on both sides of a trade, in USDC — so a closing fill pays it too.
     if !fill.fee.is_zero() {
         account.perp_balance = sub(account.perp_balance, fill.fee, "trading fee")?;
+    }
+    // The builder fee rides on top of the trading fee (the order's `builder`),
+    // debited from the same balance; the builder's credit is the caller's.
+    if let Some(charge) = &fill.builder {
+        account.perp_balance = sub(account.perp_balance, charge.amount, "builder fee")?;
     }
     // The position's last use: the borrow ends here, so the release (which
     // re-looks the position up) can borrow the account whole.
@@ -1027,13 +1097,14 @@ fn refuse_non_reducing(old: Decimal, signed: Decimal, fill: &FillFacts) -> Resul
     Ok(())
 }
 
-/// A position's first appearance: cross, at the fill's price and the fill's
-/// leverage (the account's setting decides later fills' leverage, not this).
+/// A position's first appearance: the fill's margin mode, at the fill's price
+/// and the fill's leverage (the account's setting decides later fills'
+/// leverage, not this).
 fn fresh_position(fill: &FillFacts) -> Position {
     Position {
         szi: Decimal::ZERO,
         entry_px: fill.px,
-        leverage: LeverageType::Cross,
+        leverage: fill.mode,
         leverage_value: fill.leverage.max(1),
         margin_used: Decimal::ZERO,
         isolated_margin: Decimal::ZERO,
@@ -1065,8 +1136,9 @@ fn settle_margin(position: &mut Position) -> Result<()> {
 }
 
 /// An increase (or a fresh position): the entry becomes the size-weighted
-/// average of the old notional and the fill.
-fn apply_increase(position: &mut Position, old: Decimal, fill: &FillFacts) -> Result<()> {
+/// average of the old notional and the fill; an isolated position returns the
+/// fill's own initial margin (moved out of the cross balance by the caller).
+fn apply_increase(position: &mut Position, old: Decimal, fill: &FillFacts) -> Result<Decimal> {
     let signed = fill.size * fill.side.sign();
     let old_notional = mul(old.abs(), position.entry_px, "entry notional")?;
     let fill_notional = mul(fill.size, fill.px, FILL_NOTIONAL)?;
@@ -1077,7 +1149,16 @@ fn apply_increase(position: &mut Position, old: Decimal, fill: &FillFacts) -> Re
         "entry price",
     )?;
     position.szi = new_szi;
-    Ok(())
+    // An isolated position funds its own margin: the increase's initial margin
+    // leaves the cross balance for the position (the venue's isolated open).
+    if position.leverage == LeverageType::Isolated {
+        return div(
+            fill_notional,
+            Decimal::from(position.leverage_value),
+            "isolated margin allocation",
+        );
+    }
+    Ok(Decimal::ZERO)
 }
 
 /// A reduction (or a flip): the closed part's realized PnL (returned for the
@@ -1534,5 +1615,79 @@ mod tests {
         assert_eq!(ctx.funding, Decimal::new(125, 7));
         assert_eq!(ctx.mark_px, Decimal::from(100));
         assert_eq!(ctx.oracle_px, Decimal::from(101));
+    }
+
+    /// An isolated position's loss is its own: with almost no free cash beside
+    /// it, the cross figure stays the cash (not cash minus the isolated loss),
+    /// the waterfall leaves the solvent isolated leg alone, and the position
+    /// row serves the venue's figures (`marginUsed` = margin + pnl, `rawUsd` =
+    /// `marginUsed` less the signed value, positive for a short).
+    #[test]
+    #[allow(clippy::too_many_lines)] // one scenario: the served figures and the waterfall's verdict
+    fn an_isolated_loss_beyond_the_free_cash_is_not_a_cross_liquidation() {
+        for long in [true, false] {
+            let feed = feed_with(&[("ETH", "100", "100")]);
+            feed.put_meta(meta_with("ETH", 10), crate::now_ms());
+            feed.put_oi_caps(Vec::new());
+            let sim = crate::sim::Sim::memory();
+            let a = Address::repeat_byte(0xa6);
+            let signed = if long { Decimal::ONE } else { -Decimal::ONE };
+            sim.with_account(a, |account| {
+                // 110 funded, 10 at 10x: 100 parked on the isolated position.
+                account.perp_balance = Decimal::from(10);
+                account.positions.insert(
+                    "ETH".into(),
+                    Position {
+                        szi: signed * Decimal::from(10),
+                        entry_px: Decimal::from(100),
+                        leverage: LeverageType::Isolated,
+                        leverage_value: 10,
+                        margin_used: Decimal::from(100),
+                        isolated_margin: Decimal::from(100),
+                        funding_all_time: Decimal::ZERO,
+                        funding_since_open: Decimal::ZERO,
+                        funding_since_change: Decimal::ZERO,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+            let cash = sim.account(a).unwrap().unwrap().perp_balance;
+            // 4 % against the position: a loss of 40 on a margin of 100, far
+            // more than the free cash, still above the leg's 5 % maintenance
+            // (48).
+            let mark = if long {
+                Decimal::from(96)
+            } else {
+                Decimal::from(104)
+            };
+            let text = mark.to_string();
+            feed.put_ctx(
+                "ETH".into(),
+                crate::wire::test_ctx(&text, &text),
+                crate::now_ms(),
+            );
+            let held = sim.account(a).unwrap().unwrap().positions["ETH"].clone();
+            let equity = held.isolated_margin + held.unrealized_pnl(mark).unwrap();
+            assert!(
+                sim.check_all(&feed, crate::now_ms()).unwrap().is_empty(),
+                "a solvent isolated leg is not liquidated"
+            );
+            let account = sim.account(a).unwrap().unwrap();
+            assert_ne!(account.positions["ETH"].szi, Decimal::ZERO);
+            let served = clearinghouse(&account, &feed, feed.meta().as_ref(), 0).unwrap();
+            assert_eq!(
+                served.cross_margin_summary.account_value, cash,
+                "the cross figure is the free cash alone"
+            );
+            let position = &served.asset_positions[0].position;
+            let value = position.position_value;
+            assert_eq!(position.margin_used, equity, "the margin plus the pnl");
+            assert_eq!(
+                position.leverage.raw_usd,
+                Some(if long { equity - value } else { equity + value }),
+            );
+            assert_eq!(served.margin_summary.total_margin_used, equity);
+        }
     }
 }

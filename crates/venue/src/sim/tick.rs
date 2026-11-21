@@ -204,7 +204,7 @@ impl Sim {
                 cloid: r.cloid,
                 trigger: None,
             };
-            match self.place(feed, r.account, &order) {
+            match self.place_with_builder(feed, r.account, &order, r.builder) {
                 Ok(placed) => {
                     self.metrics
                         .triggers_fired_total
@@ -277,20 +277,23 @@ impl Sim {
         level_px: Decimal,
         feed: &MarketFeed,
     ) -> Result<()> {
-        let leverage = self.leverage_for(r.account, &r.coin, feed.margin_meta().as_ref())?;
+        let setting = self.leverage_setting_for(r.account, &r.coin, feed.margin_meta().as_ref())?;
         let notional = crate::sim::account::mul(take, r.px, "maker notional")?;
         let facts = crate::sim::account::FillFacts {
             coin: r.coin.clone(),
             side: r.side,
             size: take,
             px: r.px,
-            leverage,
+            leverage: setting.leverage,
+            mode: setting.mode,
             reduce: r.reduce,
             fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
+            builder: r.builder.map(|b| b.charge(notional)).transpose()?,
         };
         let effect = self.with_account_now(r.account, feed, |account| {
             crate::sim::account::apply_fill(account, &facts, feed.margin_meta().as_ref())
         })?;
+        self.credit_builder(facts.builder)?;
         self.record_fill(
             r.account,
             &FillRecord {
