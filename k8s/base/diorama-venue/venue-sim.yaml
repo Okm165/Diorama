@@ -31,7 +31,7 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: venue-sim
-          image: localhost/diorama-venue-sim:wb6-20261120-multidex
+          image: localhost/diorama-venue-sim:port-a92331f
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
           # No env: the configuration is the mounted specialization file
