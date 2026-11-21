@@ -199,6 +199,16 @@ mark/PnL deltas every 5 s across held positions, and the portfolio statement
 over both accounts (71 + 36 fills; realized, fees, funding, unrealized per
 account and total). Every fill was judged from the venue's own ledger.
 
+Deposit credit latency (the report's "recall reverts `ZeroAmount` right after
+Active" family), measured 2026-11-21: a CoreDepositWallet deposit's credit is
+visible at `/info` **0.5 s after the deposit tx confirms** — the bridge scans
+every block and mirrors the L1 read precompiles in the same pass. A recall
+sent seconds after a deposit should no longer race the credit; if a consumer
+still sees a stale zero, the suspect is its own read cache, not the bridge.
+The gateway's `top_up_quote` route now also quotes the creation fee on
+top-ups (the report's "empty revert" integrator complaint).
+
+
 
 ## Ideas, ordered by value
 
