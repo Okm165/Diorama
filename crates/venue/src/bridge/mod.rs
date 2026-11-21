@@ -22,6 +22,7 @@
 //! not the devnet's); a re-pin re-anchors the cursor to the new pin.
 pub(crate) mod corewriter;
 pub(crate) mod metrics;
+pub(crate) mod precompiles;
 pub(crate) mod system;
 
 use crate::error::{Error, Result};
@@ -70,16 +71,9 @@ pub struct Bridge {
     /// sim's state so a restart does not lose the boundary activity mined
     /// meanwhile.
     cursor: std::sync::atomic::AtomicU64,
-    /// The last figures each account was projected with (spot total, spot
-    /// hold, perp withdrawable): the projection writes only on change, so a
-    /// quiet book costs no tx.
-    projected: std::sync::Mutex<std::collections::HashMap<Address, [u64; 3]>>,
-    /// The reason each account's figures could not be computed, keyed by
-    /// address. A projection refusal is a **state**, not an event: a fixture
-    /// account holding a market the served meta does not carry is refused on
-    /// every pass (measured: ~1/s for `xyz:NVDA`), so the log fires on the
-    /// transition into and out of the refusal, not on each retry.
-    refusals: std::sync::Mutex<std::collections::HashMap<Address, String>>,
+    /// The precompile answers last written into V's mocks (the diff base of
+    /// [`Self::mirror_precompiles`]); empty = write everything.
+    mirrored: std::sync::Mutex<std::collections::HashMap<(Address, U256), precompiles::Answer>>,
     pub metrics: Arc<BridgeMetrics>,
 }
 
@@ -103,8 +97,7 @@ impl Bridge {
             system_gas_stipend: policy.system_gas_stipend,
             observed_head: std::sync::atomic::AtomicU64::new(0),
             cursor: std::sync::atomic::AtomicU64::new(cursor),
-            projected: std::sync::Mutex::new(std::collections::HashMap::new()),
-            refusals: std::sync::Mutex::new(std::collections::HashMap::new()),
+            mirrored: std::sync::Mutex::default(),
             metrics,
         })
     }
@@ -148,268 +141,105 @@ impl Bridge {
             // half-applying (a duplicate credit is a silent balance lie).
             self.sim.save_if_dirty()?;
         }
-        // The Core-read precompile mocks are projections of the sim. Every
-        // block's effects are now durable in the sim, so this is the one
-        // point the projection is refreshed from. The pass's own head is the
-        // block the projection's presence checks read at — a pinned read, not
-        // a genesis read (see the gate's note).
-        self.project_precompiles(head).await?;
         self.metrics
             .set_lag_blocks(head.saturating_sub(self.cursor.load(Ordering::Relaxed)));
+        // The L1 read precompiles follow the sim (trades move them too, not
+        // only the chain's blocks); a failure here never stalls the scan.
+        if let Err(e) = self.mirror_precompiles(head).await {
+            tracing::warn!(error = %e, "venue bridge: precompile mirror failed; will retry");
+        }
         Ok(())
     }
 
-    /// Project the sim's Core figures onto the mirror's read-precompile mocks
-    /// (`0x0801` spot balance, `0x0803` perp withdrawable).
-    ///
-    /// **Why.** The mocks are separate Solidity ledgers that nothing wrote:
-    /// a draw that credited the sim's spot class was invisible to
-    /// `freeSpotBalance()`, the owner's recall reverted `ZeroAmount`, the
-    /// close stayed `RecallPending` forever, and a healthy matured book could
-    /// never be settled (measured 2026-11-12: 67.892481 USDC credited in the
-    /// sim and served by the gateway, zero reported by the mock). The sim is
-    /// the single source of truth; the mocks are its write-through
-    /// projection, refreshed here once per pass after the block's effects are
-    /// durable.
-    ///
-    /// The figures are the ones the bridge's own Core→EVM clamp uses
-    /// (`available_after_maintenance`): `hold = total − available`, so
-    /// `freeSpotBalance()` reports exactly what the venue will release and a
-    /// recall cannot over-recall into a bridge refusal. A production-like
-    /// chain (no mock code) is a no-op: the real precompiles serve the reads.
-    async fn project_precompiles(&self, head: u64) -> Result<()> {
+    /// Keep V's L1 read precompiles (`precompiles` module docs) equal to the
+    /// sim's Core state: install the mock where it is missing (first pass, a
+    /// chain reset, a re-install by someone else), then write only the answers
+    /// that changed and clear the ones that are gone.
+    async fn mirror_precompiles(&self, head: u64) -> Result<()> {
         let Some(spot) = self.feed.spot_meta() else {
-            return Ok(()); // the feed is warming; the pass already refused the block
+            return Ok(());
         };
         let tokens = system::token_registry(&spot);
-        let Some(usdc) = tokens.iter().find(|t| t.name == "USDC") else {
-            tracing::warn!("bridge: no USDC in the spot registry; the precompile projection is skipped this pass");
-            return Ok(());
+        let code = precompiles::mock_code();
+        let mut mirrored = {
+            let mut guard = self
+                .mirrored
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *guard)
         };
-        // **The mocks' presence is read at the pass's head, never at block 0.**
-        // The first cut read genesis, where a forked anvil has no mock code —
-        // the deployment's mocks are installed after the fork pin — so the
-        // gate read "not installed" every pass and the projection silently
-        // no-op'd: no writer funding, no mock write, and the exact W-B1
-        // symptom (mock reports 0 while the sim holds the balance) survived
-        // its own fix. Measured live 2026-11-12: writer nonce 0 with 54
-        // simulated accounts holding spot USDC, until the read moved to the
-        // pass's anchored head.
-        let spot_installed = !self
+        if self
             .target_rpc
-            .code_at(system::SPOT_BALANCE_MOCK, head)
+            .code_at(precompiles::SPOT_BALANCE, head)
             .await?
-            .is_empty();
-        let withdrawable_installed = !self
-            .target_rpc
-            .code_at(system::WITHDRAWABLE_MOCK, head)
-            .await?
-            .is_empty();
-        if !spot_installed && !withdrawable_installed {
-            return Ok(());
-        }
-        let meta = self.feed.margin_meta();
-        let changed = self.changed_figures(usdc, meta.as_ref(), head).await?;
-        if changed.is_empty() {
-            return Ok(());
-        }
-        self.ensure_gas(system::PRECOMPILE_WRITER).await?;
-        for (address, figures) in changed {
-            self.write_projection(
-                address,
-                figures,
-                u64::from(usdc.index),
-                spot_installed,
-                withdrawable_installed,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// One account's mock writes plus the cache advance. The cache moves only
-    /// after both sends ack (a faulted write retries the whole account next
-    /// pass), so the projection never claims a write the chain refused.
-    #[allow(clippy::too_many_arguments)]
-    async fn write_projection(
-        &self,
-        address: Address,
-        figures: [u64; 3],
-        token_index: u64,
-        spot_installed: bool,
-        withdrawable_installed: bool,
-    ) -> Result<()> {
-        let [total, hold, withdrawable] = figures;
-        if spot_installed {
-            self.send_projection(
-                system::SPOT_BALANCE_MOCK,
-                system::set_balance_calldata(address, token_index, total, hold),
-            )
-            .await?;
-        }
-        if withdrawable_installed {
-            self.send_projection(
-                system::WITHDRAWABLE_MOCK,
-                system::set_withdrawable_calldata(address, withdrawable),
-            )
-            .await?;
-        }
-        self.projected
-            .lock()
-            .expect("bridge projection cache")
-            .insert(address, figures);
-        tracing::info!(
-            account = %address,
-            spot_total_wei8 = total,
-            spot_hold_wei8 = hold,
-            withdrawable_usd6 = withdrawable,
-            "bridge: precompile projection written"
-        );
-        Ok(())
-    }
-
-    /// Give `address` the deployment's gas stipend unless it already holds
-    /// at least that much.
-    ///
-    /// The measured bug (2026-11-17, venue-sim logging
-    /// `the write did not mine within 10000 ms` once every 11 s for hours):
-    /// the gate was `balance.is_zero()`, so a writer holding ~2.3e-5 HYPE —
-    /// real, but less than one projection tx's up-front cost — was never
-    /// topped up. Anvil admits an impersonated sender's tx without a balance
-    /// check and the miner then drops it, so `eth_getTransactionReceipt`
-    /// answers `null` for the whole wait on every pass and no projection ever
-    /// lands. The stipend is 1 HYPE, orders of magnitude above a write's
-    /// cost: topping up *below* the stipend (not only at zero) keeps the next
-    /// write valid without guessing a per-tx fee. A balance-read fault
-    /// propagates: it must not be read as "empty" and funded over a broken
-    /// RPC.
-    async fn ensure_gas(&self, address: Address) -> Result<()> {
-        let balance = self.target_rpc.balance_latest(address).await?;
-        if needs_stipend(balance, self.system_gas_stipend) {
-            self.target_rpc
-                .anvil_set_balance(address, self.system_gas_stipend)
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// One mock write, sent like the Core→EVM completion: a funded plain tx
-    /// waited to its receipt, so a REVERTED write is an error here and the
-    /// projection cache is not advanced past it. (The hash alone proves
-    /// admission: a reverted tx still mines with status 0x0 — measured on
-    /// the feed bridge, which re-published for hours on a reverting write.)
-    async fn send_projection(&self, mock: Address, data: alloy_primitives::Bytes) -> Result<()> {
-        let tx = TransactionRequest::default()
-            .from(system::PRECOMPILE_WRITER)
-            .to(mock)
-            .input(data.into());
-        self.target_rpc.send_transaction_confirmed(tx).await?;
-        tracing::debug!(mock = %mock, "bridge: precompile mock write confirmed");
-        Ok(())
-    }
-
-    /// The accounts whose projected figures changed this pass: every sim
-    /// account is re-read (outside the projection lock — the lock guards only
-    /// the diff write-back, so a projection tx that faults retries next pass)
-    /// and compared against the cache.
-    async fn changed_figures(
-        &self,
-        usdc: &system::TokenInfo,
-        _meta: Option<&crate::wire::Meta>,
-        _head: u64,
-    ) -> Result<Vec<(Address, [u64; 3])>> {
-        let mut current = std::collections::HashMap::new();
-        for address in self.sim.account_addresses()? {
-            match self.core_figures(address, usdc, _meta) {
-                Ok(figures) => {
-                    current.insert(address, figures);
-                    if self
-                        .refusals
-                        .lock()
-                        .expect("bridge refusal cache")
-                        .remove(&address)
-                        .is_some()
-                    {
-                        tracing::info!(
-                            account = %address,
-                            "bridge: precompile projection figures available again"
-                        );
-                    }
-                }
-                Err(e) => self.note_refusal(address, &e.to_string()),
+            != code
+        {
+            for address in precompiles::MIRRORED {
+                self.set_code(address, code.clone()).await?;
             }
+            mirrored.clear();
+            tracing::info!("venue bridge: L1 read precompile mocks installed");
         }
-        let projected = self.projected.lock().expect("bridge projection cache");
-        Ok(current
-            .into_iter()
-            .filter(|(address, figures)| projected.get(address) != Some(figures))
-            .collect())
-    }
-
-    /// One account's unpriceable figures, logged once per distinct cause.
-    ///
-    /// The account stays out of this pass (a projection that omits an
-    /// unpriceable leg would understate maintenance), but a permanently
-    /// unpriceable fixture must not read as a 1 Hz fault: the reason is a
-    /// state, so the log fires on the transition into and out of it.
-    fn note_refusal(&self, address: Address, reason: &str) {
-        self.metrics.inc_refusals();
-        let first = {
-            let mut refusals = self.refusals.lock().expect("bridge refusal cache");
-            match refusals.get(&address) {
-                Some(known) if known == reason => false,
-                _ => {
-                    refusals.insert(address, reason.to_string());
-                    true
-                }
-            }
-        };
-        if first {
-            tracing::warn!(
-                account = %address,
-                error = %reason,
-                "bridge: precompile projection figures unavailable; the account is not projected \
-                 until the cause clears"
-            );
-        } else {
-            tracing::debug!(
-                account = %address,
-                error = %reason,
-                "bridge: precompile projection figures still unavailable"
-            );
-        }
-    }
-
-    /// One account's projected figures, in the units the mocks store:
-    /// `[spot total (core wei), spot hold (core wei), perp withdrawable (USD
-    /// 1e6)]`. Zeros for an account the sim no longer holds, so the projection
-    /// can never report a balance the venue does not.
-    fn core_figures(
-        &self,
-        address: Address,
-        token: &system::TokenInfo,
-        _meta: Option<&crate::wire::Meta>,
-    ) -> Result<[u64; 3]> {
-        let Some(account) = self.sim.account(address)? else {
-            return Ok([0; 3]);
-        };
-        let entry = account.spot.get(&token.index);
-        let total = entry.map_or(Decimal::ZERO, |e| e.total);
-        let hold =
-            match crate::sim::account::available_after_maintenance(&account, &self.feed)?
-                .into_iter()
-                .find(|(t, _)| *t == token.index)
-                .map(|(_, available)| available)
-            {
-                Some(available) if available < total => total - available,
-                _ => entry.map_or(Decimal::ZERO, |e| e.hold),
+        let mut wanted = std::collections::HashMap::new();
+        for user in self.sim.account_addresses()? {
+            let Some(account) = self.sim.account(user)? else {
+                continue;
             };
-        let view = crate::sim::account::view(&account, &self.feed, "")?;
-        Ok([
-            core_units(total, token.wei_decimals)?,
-            core_units(hold, token.wei_decimals)?,
-            core_units(view.withdrawable, system::PERP_USD_DECIMALS)?,
-        ])
+            for answer in precompiles::answers_of(user, &account, &self.feed, &tokens) {
+                wanted.insert((answer.target, answer.slot()), answer);
+            }
+        }
+        let result = self.write_answers(&mut mirrored, wanted).await;
+        *self
+            .mirrored
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = mirrored;
+        result
+    }
+
+    /// Install the mock's runtime code at `address` (anvil's `anvil_setCode`;
+    /// the RPC client has no typed wrapper for it).
+    async fn set_code(&self, address: Address, code: alloy_primitives::Bytes) -> Result<()> {
+        self.target_rpc
+            .call_raw("anvil_setCode", (address, code))
+            .await?;
+        Ok(())
+    }
+
+    /// Write the answers that differ from `mirrored` and clear those no
+    /// longer wanted, recording each in `mirrored` as it lands (a failure
+    /// leaves the rest for the next pass).
+    async fn write_answers(
+        &self,
+        mirrored: &mut std::collections::HashMap<(Address, U256), precompiles::Answer>,
+        wanted: std::collections::HashMap<(Address, U256), precompiles::Answer>,
+    ) -> Result<()> {
+        let gone: Vec<(Address, U256)> = mirrored
+            .keys()
+            .filter(|key| !wanted.contains_key(key))
+            .copied()
+            .collect();
+        for key in gone {
+            if let Some(answer) = mirrored.get(&key) {
+                let (slot, value) = answer.cleared();
+                self.target_rpc
+                    .anvil_set_storage_at(answer.target, slot, value)
+                    .await?;
+            }
+            mirrored.remove(&key);
+        }
+        for (key, answer) in wanted {
+            if mirrored.get(&key) == Some(&answer) {
+                continue;
+            }
+            for (slot, value) in answer.storage() {
+                self.target_rpc
+                    .anvil_set_storage_at(answer.target, slot, value)
+                    .await?;
+            }
+            mirrored.insert(key, answer);
+        }
+        Ok(())
     }
 
     /// Keep the sim's served `time` on the venue chain's clock: one header
@@ -1012,6 +842,26 @@ impl Bridge {
         Ok(true)
     }
 
+    /// Give `address` the deployment's gas stipend unless it already holds
+    /// at least that much. The measured bug (2026-11-17, venue-sim logging
+    /// `the write did not mine within 10000 ms` once every 11 s for hours):
+    /// the gate was `balance.is_zero()`, so a writer holding ~2.3e-5 HYPE —
+    /// real, but less than one projection tx's up-front cost — was never
+    /// topped up. The stipend is 1 HYPE, orders of magnitude above a write's
+    /// cost: topping up *below* the stipend (not only at zero) keeps the next
+    /// write valid without guessing a per-tx fee. A balance-read fault
+    /// propagates: it must not be read as "empty" and funded over a broken
+    /// RPC.
+    async fn ensure_gas(&self, address: Address) -> Result<()> {
+        let balance = self.target_rpc.balance_latest(address).await?;
+        if needs_stipend(balance, self.system_gas_stipend) {
+            self.target_rpc
+                .anvil_set_balance(address, self.system_gas_stipend)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// The completion tx: `transfer(caller, amount)` on the linked ERC20 from
     /// the system address (auto-impersonate). It lands with the devnet's next
     /// mined block, like the real chain's system tx.
@@ -1070,21 +920,6 @@ fn needs_stipend(balance: U256, stipend: U256) -> bool {
     balance < stipend
 }
 
-/// A human decimal as the mocks' raw unit, floored like every other
-/// Core→EVM conversion (`system::human_to_evm`). `None` becomes an error at
-/// the caller: an unrepresentable figure must refuse the projection, never
-/// silently write zero.
-fn core_units(amount: Decimal, decimals: u32) -> Result<u64> {
-    let decimals = i32::try_from(decimals).map_err(|_| Error::Overflow {
-        what: "precompile projection decimals",
-    })?;
-    let raw = system::human_to_evm(amount, decimals).ok_or(Error::Overflow {
-        what: "precompile projection amount",
-    })?;
-    u64::try_from(raw).map_err(|_| Error::Overflow {
-        what: "precompile projection amount exceeds u64",
-    })
-}
 
 /// The Core's intra-block action order (docs: "Within a block, actions are
 /// sorted within each consensus batch as 1. Actions that do not send GTC or
@@ -1185,33 +1020,6 @@ mod tests {
 
     /// The projection's unit rule: the mocks store raw core wei / raw USD
     /// 1e6, floored like every other Core→EVM conversion, and an
-    /// unrepresentable figure is refused rather than written as zero.
-    #[test]
-    fn core_units_floor_at_the_mock_unit_and_refuse_the_unrepresentable() {
-        use rust_decimal::Decimal;
-        // 67.892481 USDC at 8 decimals — the measured live case.
-        let live: Decimal = "67.892481".parse().unwrap();
-        assert_eq!(core_units(live, 8).expect("representable"), 6_789_248_100);
-        // Sub-wei remainder floors (the chain's own rule).
-        let dust: Decimal = "0.0000000019".parse().unwrap();
-        assert_eq!(core_units(dust, 8).expect("representable"), 0);
-        // The perp class's USD 1e6 scale.
-        let withdrawable: Decimal = "13104.514502".parse().unwrap();
-        assert_eq!(
-            core_units(withdrawable, system::PERP_USD_DECIMALS).expect("representable"),
-            13_104_514_502,
-        );
-        // A negative or absurd figure refuses; it is never laundered into 0.
-        let negative: Decimal = "-1".parse().unwrap();
-        assert!(core_units(negative, 8).is_err());
-        let absurd: Decimal = "100000000000000000000000".parse().unwrap();
-        assert!(core_units(absurd, 8).is_err());
-    }
-
-    /// The funding gate: a *non-zero* balance below the stipend still needs
-    /// the top-up. The measured live shape was 22 955 149 261 668 wei against
-    /// a 24 245 000 169 715 wei projection cost — non-zero, and the reason
-    /// every bridge pass timed out in `send_transaction_confirmed` for hours.
     #[test]
     fn a_balance_below_the_stipend_is_topped_up() {
         let stipend = U256::from(1_000_000_000_000_000_000u128);

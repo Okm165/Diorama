@@ -1075,6 +1075,7 @@ impl MarketFeed {
     /// strict-isolation flags resolve here; the `meta` response keeps the
     /// default dex (a client reading `meta` must not see another dex's
     /// universe).
+    #[allow(dead_code)] // kept for the feed's own union-shape tests; the account reads per dex
     pub(crate) fn margin_meta(&self) -> Option<Meta> {
         self.read().margin_meta.clone()
     }

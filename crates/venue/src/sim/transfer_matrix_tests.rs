@@ -1208,6 +1208,91 @@ fn a_unified_position_margin_is_served_as_spot_hold() {
     );
 }
 
+/// The L1 spot-balance precompile answers the same `hold` (core wei), so the
+/// margin agents' `freeSpotBalance()` (`total - hold`) matches the venue.
+#[test]
+fn the_spot_balance_precompile_carries_the_unified_margin_hold() {
+    let feed = feed();
+    let sim = Sim::memory();
+    deal_perp(&sim, &feed, ME, None, "100");
+    sim.order(&feed, ME, &buy("ETH", "1")).unwrap();
+    sim.set_mode(ME, UserAbstraction::UnifiedAccount, &feed)
+        .unwrap();
+    let acct = account(&sim, ME);
+    let margin = acct.positions["ETH"].margin_used;
+    assert!(margin > Decimal::ZERO);
+    let tokens = [crate::bridge::system::TokenInfo {
+        index: 0,
+        name: "USDC".into(),
+        wei_decimals: 8,
+        evm: None,
+    }];
+    let answers = crate::bridge::precompiles::answers_of(ME, &acct, &feed, &tokens);
+    let balance = answers
+        .iter()
+        .find(|a| a.target == crate::bridge::precompiles::SPOT_BALANCE)
+        .expect("a spot balance answer");
+    let word = |i: usize| {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&balance.returned[i * 32 + 24..i * 32 + 32]);
+        u64::from_be_bytes(bytes)
+    };
+    let wei =
+        |amount: Decimal| u64::try_from((amount * Decimal::from(100_000_000u64)).trunc()).unwrap();
+    assert_eq!(word(0), wei(acct.spot[&0].total));
+    assert_eq!(
+        word(1),
+        wei(margin),
+        "the precompile's hold carries the margin"
+    );
+}
+
+/// The L1 read precompiles the bridge mirrors answer from the sim's own Core
+/// state: the spot wallet in Core wei, the default dex's withdrawable and
+/// margin summary in perp-class USD, and the account's existence.
+#[test]
+fn the_precompile_answers_follow_the_sims_core_state() {
+    use crate::bridge::precompiles as p;
+    use crate::bridge::system::TokenInfo;
+    use alloy_sol_types::SolValue;
+    let feed = feed();
+    let sim = Sim::memory();
+    spot(&sim, ME, USDC, "12.5");
+    sim.credit_evm_deposit_to((ME, &Wallet::Perp(String::new())), USDC, dec("10"), &feed)
+        .unwrap();
+    let tokens = [TokenInfo {
+        index: 0,
+        name: "USDC".into(),
+        wei_decimals: 8,
+        evm: None,
+    }];
+    let answers = p::answers_of(ME, &account(&sim, ME), &feed, &tokens);
+    let returned = |target| {
+        answers
+            .iter()
+            .find(|a| a.target == target)
+            .map(|a| a.returned.clone())
+            .expect("an answer")
+    };
+
+    // spotBalance(ME, 0): (total, hold, entryNtl), Core wei.
+    let spot = <(u64, u64, u64)>::abi_decode_params(&returned(p::SPOT_BALANCE)).unwrap();
+    assert_eq!(spot, (1_250_000_000, 0, 0));
+    // withdrawable(ME): the perp-class USD (1e6), here the whole perp balance.
+    let withdrawable = <u64>::abi_decode(&returned(p::WITHDRAWABLE)).unwrap();
+    assert_eq!(withdrawable, 10_000_000);
+    // accountMarginSummary(0, ME): (accountValue, marginUsed, ntlPos, rawUsd).
+    let summary = <(i64, u64, u64, i64)>::abi_decode_params(&returned(p::MARGIN_SUMMARY)).unwrap();
+    assert_eq!(summary, (10_000_000, 0, 0, 10_000_000));
+    assert!(<bool>::abi_decode(&returned(p::USER_EXISTS)).unwrap());
+    // The calls are the agents' own: `abi.encode(user, token)` and friends.
+    let spot_call = answers
+        .iter()
+        .find(|a| a.target == p::SPOT_BALANCE)
+        .unwrap();
+    assert_eq!(spot_call.calldata, (ME, 0u64).abi_encode_params());
+}
+
 /// A standard account's spot serves no margin hold.
 #[test]
 fn a_standard_account_serves_no_margin_hold() {
