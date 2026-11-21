@@ -1045,6 +1045,17 @@ fn open_interest_caps(dex: &Option<String>, state: &ApiState) -> Result<Response
 /// request's parameters (docs: `nSigFigs ∈ {2,3,4,5}`, `mantissa ∈ {1,2,5}`
 /// only with `nSigFigs = 5`). A parameter outside the documented set is a
 /// named 400 — never silently ignored.
+/// The wire's `l2Book.time`: the served clock, never older than the book's
+/// last change. Measured on the live venue (2026-11-21): `l2Book.time`
+/// advances while the levels are identical (an 8 s gap, same level hash), so
+/// the stamp is the *response's* freshness, not the last change — a thin book
+/// whose levels have not moved for minutes must not read as a stalled feed at
+/// the wire (the report's `xyz:ANT`/`para:SMH` staleness). The mirror's true
+/// book age stays where it belongs: `/metrics` and the health gate.
+pub(crate) fn wire_book_time(book_time: u64, now_ms: u64) -> u64 {
+    book_time.max(Sim::served_time(now_ms))
+}
+
 async fn l2_book(
     coin: &str,
     (n_sig_figs, mantissa): (Option<u8>, Option<u8>),
@@ -1078,7 +1089,8 @@ async fn l2_book(
     };
     // The sim's resting makers are participants: their orders join the book
     // before the aggregation (see `with_resting`).
-    let book = with_resting(book, &state.sim.resting_book(coin));
+    let mut book = with_resting(book, &state.sim.resting_book(coin));
+    book.time = wire_book_time(book.time, crate::now_ms());
     Ok(Json(aggregate_book(book, n_sig_figs, mantissa.unwrap_or(1))).into_response())
 }
 

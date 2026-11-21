@@ -759,7 +759,8 @@ pub(super) fn pushes(live: &mut Live, state: &ApiState, now_ms: u64) -> Vec<Stri
                 });
             };
             // The sim's resting makers join the book (see `with_resting`).
-            let book = super::info::with_resting(book, &state.sim.resting_book(c));
+            let mut book = super::info::with_resting(book, &state.sim.resting_book(c));
+            book.time = super::info::wire_book_time(book.time, now_ms);
             let next = match s {
                 Some(_) => super::info::aggregate_book(book, *s, m.unwrap_or(1)),
                 None => book,
@@ -896,7 +897,8 @@ fn push_frame(sub: &Subscription, state: &ApiState, now_ms: u64) -> Option<Strin
         } => match feed.book(coin, now_ms) {
             Some(book) => {
                 // The sim's resting makers join the book (see `with_resting`).
-                let book = super::info::with_resting(book, &state.sim.resting_book(coin));
+                let mut book = super::info::with_resting(book, &state.sim.resting_book(coin));
+                book.time = super::info::wire_book_time(book.time, now_ms);
                 let book = match n_sig_figs {
                     Some(_) => {
                         super::info::aggregate_book(book, *n_sig_figs, mantissa.unwrap_or(1))
@@ -1488,7 +1490,10 @@ mod tests {
                     );
                     let data: L2Book = serde_json::from_value(value["data"].clone()).unwrap();
                     assert_eq!(data.coin, "BTC");
-                    assert_eq!(data.time, 1_000, "the live book keeps its update stamp");
+                    assert!(
+                        data.time >= 2_000,
+                        "the live book's stamp is the served clock"
+                    );
                 }
                 "clearinghouseState" => {
                     let data = &value["data"];
@@ -1656,8 +1661,10 @@ mod tests {
         ));
     }
 
-    /// `l2Book` pushes the composed book: a live book keeps its update stamp,
-    /// a scripted book is the scenario's present, and the order lane's
+    /// `l2Book` pushes the composed book: a live book is stamped with the
+    /// served clock (never older than its update — the venue's own contract,
+    /// measured: `l2Book.time` advances while the levels stand still), a
+    /// scripted book is the scenario's present, and the order lane's
     /// consumption shows in the served size (the same read `/info` serves).
     #[test]
     fn l2_book_push_is_the_composed_book() {
@@ -1669,7 +1676,10 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&live).unwrap();
         assert_eq!(value["channel"], "l2Book");
         let book: L2Book = serde_json::from_value(value["data"].clone()).unwrap();
-        assert_eq!(book.time, 1_000, "the live book's stamp is its update");
+        assert!(
+            book.time >= 5_000,
+            "the live book's stamp is the served clock, never older than its update"
+        );
         assert_eq!(book.levels[0][0].px, Decimal::from(100));
 
         feed.own_book(&test_book("BTC", "99")).unwrap();
