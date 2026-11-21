@@ -238,6 +238,50 @@ for every holder of the coin (`positions were excluded from this HF scan`,
 1/9 during the measurement). Always hand a move back; a held plane is a
 silent, swarm-wide degradation, not a local scenario state.
 
+**Held-plane, measured to the second (2026-11-21 23:40 UTC):** the blindness
+begins between **10 s and 20 s** of hold (the price feed's own freshness
+bound), excludes exactly the holders of the held coin
+(`hf_scan_observed_positions` 9 → 8, `hf_scan_blind_positions` 1, cause
+`venue_term`), and clears on the first tick after hand-back (8 → 9, blind 0).
+A position liquidated or flattened before the bound passes never shows the
+flag, which is why short holds look clean. The rule is unchanged: always hand
+back.
+
+### Multi-dex account plane, measured live (2026-11-21)
+
+The venue keys one `clearinghouseState` **per dex**, and a unified account's
+money is spot **plus** perp. Both halves verified against the ledger rather
+than assumed:
+
+- **The indexer already folds every dex.** One tick read
+  `spot_collateral_total 47.760 − hold 5.982 = account_equity 41.778` and
+  `perp_equity 1.784` (itself the sum of the default dex's `−0.114`, `xyz`'s
+  `6.072` and `para`'s `−4.174`); the operator's `venue_equity_usd` was
+  `43.5988` — the same figure. A HIP-3 move reaches the tick in **≤ 2 s**
+  (`perp_equity` 5.960 → 3.900 on a held −5 % of `para:SMH`, recovered on
+  hand-back).
+- **The user-sim was the single-dex reader** (not the venue): `venue-portfolio`
+  and `venue-account` sent one `clearinghouseState` and reported 1 of 3 open
+  positions, omitting every `xyz:*`/`para:*` leg. Fixed (user-sim `e4a743e8`):
+  the untouched read now walks `perpDexs` and adds the spot leg
+  (`spot_usdc`, `spot_balances`); a `--coin` remains single-dex.
+- **Isolated-margin liquidation is real and faithful.** A held −10 % on an
+  isolated `0.1 para:SMH` (margin 4.11) consumed the margin: the venue closed
+  it at `371.52` against a `371.7099` mark (a book walk), realized `−4.17`,
+  served the real `liquidation {liquidatedUser, markPx, method: market}`
+  object, and the account kept the realized loss. The hand-back restored the
+  mark to `413.011`, **identical to the real venue's** mark at the same
+  moment.
+- **Spot maker lane verified** (see idea 2): 4.00 bps maker / 7.00 bps taker,
+  fee in the received token, hold lifecycle and book visibility intact.
+- **Rollout churn, not a live fault.** Every `venue account poll refused` in
+  the indexer's last 3 h mapped to a `venue-sim` ReplicaSet creation to the
+  second (10/10 swaps: 20:34:59, 21:25:49, 21:32:36, 22:02:38, 22:24:05,
+  22:27:57, 22:29:36, 22:38:22, 22:55:07, 23:06:10). Steady state: zero
+  refusals. Each single-replica swap costs ~10–20 s of no endpoints (the 5 s
+  timeout refuses every poll in flight); a shared-storage rolling update is
+  the only way to remove it, and it is not worth the state-coupling.
+
 
 
 
@@ -264,18 +308,24 @@ silent, swarm-wide degradation, not a local scenario state.
    makes "all markets tradeable" a gate, not an anecdote. Empty and unknown
    coins already match real shape-for-shape (`flx:TSLA` empty both sides;
    `km:SOL` → 500 `null` both sides).
-2. **Maker (resting spot) lane on the fast books.** Our taker lane settles
-   tokens; a resting spot order needs the hold lifecycle (holds exist in the
-   sim). Maker fills then need the same received-token fee rule and the
-   maker/taker 0.040/0.070 % split.
-2. **Impact-model calibration.** Measure our fills' slippage distribution
+2. **Maker (resting spot) lane — verified live 2026-11-21, nothing to build.**
+   The lane existed; the earlier "missing" note was wrong. Measured on
+   `@107` (HYPE/USDC): a `Gtc` sell from a funded spot account rests
+   (`oid` assigned, `hold` = the resting size in `spotClearinghouseState`,
+   the served book gains the level), a taker IOC buys into it, and both
+   fills carry the real fee rule — **maker 4.00 bps, taker 7.00 bps**, the
+   fee denominated in the token *received* (sell → USDC, buy → HYPE:
+   `feeToken` + the credited size both agree), exactly the venue's spot
+   schedule. The resting order leaves the book on fill and the hold releases.
+   No code change.
+3. **Impact-model calibration.** Measure our fills' slippage distribution
    against real HL depth (per coin, per size bucket) and tune the consumption
    model (served = live − consumed) so a strategy's paper fill quality predicts
    the real one. A weekly calibration report keyed by coin.
-3. **Funding accuracy.** Funding is priced from HL marks (trusted in witness);
+4. **Funding accuracy.** Funding is priced from HL marks (trusted in witness);
    charge it on the real cadence (hourly, premium-weighted) and reconcile our
    accrued funding against HL's published `fundingRate` history per coin.
-4. **Fee tiers by 24 h volume (investigated 2026-11-21, deliberately not
+5. **Fee tiers by 24 h volume (investigated 2026-11-21, deliberately not
    built):** the venue's API never exposes a user's fee tier — `webData2`
    carries no fee fields and `userRole` answers `missing` (probed live);
    only the charged `fee` per fill is observable. A tier schedule keyed on
@@ -284,7 +334,7 @@ silent, swarm-wide degradation, not a local scenario state.
    (measured 4.5/1.5 bps taker/maker, matching observed charges) and the
    honesty metric stays: the sim's charged fees vs the fill rows, which a
    later per-user tier would have to show up in anyway.
-5. **Sub-accounts and vault endpoints.** (`vaultRoles`/`userRole` and a minimal
+6. **Sub-accounts and vault endpoints.** (`vaultRoles`/`userRole` and a minimal
    vault transfer surface let multi-entity strategies (curator/vault) run on
    the venue like they do on HL.) **Account reads verified at parity
    2026-11-21:** `userRole` (a known sim account answers `user` — a fresh
@@ -294,19 +344,34 @@ silent, swarm-wide degradation, not a local scenario state.
    *transfer* surface (deposit/withdraw into a vault) is deferred until a
    scenario needs it: the sim models no vault entity, and inventing one
    before a consumer exists is unobservable complexity.
-6. **Latency emulation.** An optional per-endpoint latency distribution
+7. **Latency emulation.** An optional per-endpoint latency distribution
    (measured from the real venue) so strategies observe realistic reaction
    times instead of a local socket.
-7. **`orderStatus` history window as config** (already ours);
+8. **`orderStatus` history window as config** (already ours);
    `historicalOrders` pagination **(verified 2026-11-21, nothing to build)**:
    the venue documents no cursor scheme — "at most 2000 most recent
    historical orders" — and the sim's `USER_FILLS_PAGE = 2_000` is exactly
    that bound, applied to `userFills` and `historicalOrders` alike. The
    undocumented `startTime`/`startAfter` params are accepted by both with
    HTTP 200 (probed live upstream and on the mirror).
-8. **Oracle-band metrics.** Publish the distance between our served mark and
+9. **Oracle-band metrics.** Publish the distance between our served mark and
    HL's real mark per coin (the mirror's honesty metric), alerting when a
    scripted overlay drags a coin outside the band.
+10. **Terminal-refusal coverage for the orphan reconciler (measured defect).**
+   One `MarginBridging` position whose `CreationPhase2` proof the keeper
+   retired deterministically (`empty_revert_unresolved`) produced **472
+   `re-enqueuing` WARNs + 287 `retired this proof … not re-driving` WARNs in
+   6 h** — one pair every 15 s — until the position was `Cancelled`.
+   Root cause: `keeper_submission_blocks` reads the *keeper's* terminal verdict
+   (a separate database) and returns early, but writes nothing on the
+   operator side, so the status-keyed orphan query re-selects the position on
+   every tick and the guard re-reads the same verdict. The guard is correct;
+   its coverage is invisible to its own selector. Minimal fix: the first
+   observation records the verdict as a failed, non-retryable coverage row
+   (so the existing `proof_queue` coverage branch matches and the selector
+   stops), and the WARN speaks on the transition only — the same discipline
+   the bridge's refusal speech already uses. Do not roll this alone: it
+   belongs with the next operator roll.
 
 ## Book-simulation ideas (the "proper sims of books" ask)
 
