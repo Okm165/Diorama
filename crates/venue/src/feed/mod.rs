@@ -15,7 +15,7 @@
 //!
 //! Every read goes through the composed view ([`MarketFeed::mark`] and
 //! friends): a crash owns both mark and oracle, and `metaAndAssetCtxs` serves
-//! the same owned numbers the account plane computes with — daloc must never
+//! the same owned numbers the account plane computes with — the consumer must never
 //! read a different mark than the sim used for margin.
 pub(crate) mod budget;
 pub(crate) mod metrics;
@@ -23,7 +23,7 @@ pub(crate) mod rest;
 pub(crate) mod ws;
 
 use crate::error::Result;
-use crate::wire::{AllMids, AssetCtx, L2Book, Meta};
+use crate::wire::{AllMids, AssetCtx, L2Book, Meta, PerpDex};
 use budget::Budget;
 use diorama_devnet::store;
 use metrics::FeedMetrics;
@@ -100,6 +100,20 @@ pub(crate) enum BookAge {
 #[derive(Default)]
 struct Cache {
     meta: Option<Meta>,
+    /// The last meta of each **non-default** perp dex (keyed by dex name),
+    /// kept separately so the default dex's poll can rebuild the account
+    /// view without losing the absorbed universes.
+    dex_metas: BTreeMap<String, Meta>,
+    /// The account-plane view over **every** perp dex the venue quotes: the
+    /// served `meta` (the default dex) plus each configured HIP-3 dex's
+    /// universe (see [`Meta::absorb`]). The account and margin lookups read
+    /// this; the `meta` response stays the default dex verbatim.
+    margin_meta: Option<Meta>,
+    /// The upstream `perpDexs` list, verbatim and in the venue's order: the
+    /// **only** source of the HIP-3 asset-id namespace's dex positions
+    /// (`[0]` is the default dex, `null`). `None` until the poll lands: an
+    /// index `a >= 100000` cannot be resolved without it.
+    perp_dexs: Option<Vec<Option<PerpDex>>>,
     meta_at: Option<u64>,
     spot_meta: Option<crate::wire::SpotMeta>,
     ctxs: BTreeMap<String, AssetCtx>,
@@ -272,6 +286,50 @@ impl MarketFeed {
         let mut c = self.write();
         c.meta = Some(meta);
         c.meta_at = Some(now_ms);
+        Self::rebuild_margin_meta(&mut c);
+    }
+
+    /// `perpDexs`: the venue's perp-dex list, kept verbatim **and in the
+    /// upstream's order**. The list position is the HIP-3 asset index's dex
+    /// slot (`a = 100000 + index*10000 + universe`), so reordering it (for
+    /// example to the configured markets' first-seen order) would silently
+    /// remap every order to another dex.
+    pub(crate) fn put_perp_dexs(&self, dexs: Vec<Option<PerpDex>>) {
+        if self.stalled() {
+            tracing::debug!("live perpDexs dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
+        self.write().perp_dexs = Some(dexs);
+    }
+
+    /// One perp dex's meta, kept and folded into the account-plane view.
+    /// Polled for each configured dex the default meta does not cover, so an
+    /// account holding a HIP-3 market is priceable instead of refused.
+    pub(crate) fn put_dex_meta(&self, dex: String, meta: Meta, now_ms: u64) {
+        if self.stalled() {
+            tracing::debug!("live dex meta dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
+        let mut c = self.write();
+        c.dex_metas.insert(dex, meta);
+        c.meta_at = Some(c.meta_at.map_or(now_ms, |at| at.max(now_ms)));
+        Self::rebuild_margin_meta(&mut c);
+    }
+
+    /// The account-plane view from scratch: the default dex, then each dex's
+    /// universe absorbed in its cached form. Rebuilt on every write (instead
+    /// of mutating in place) so the default dex's poll never momentarily
+    /// erases a HIP-3 account's margin tiers — that would make every account
+    /// holding a HIP-3 market unpriceable once per poll cycle.
+    fn rebuild_margin_meta(c: &mut Cache) {
+        let Some(core) = c.meta.clone() else {
+            return;
+        };
+        let mut union = core;
+        for meta in c.dex_metas.values() {
+            union.absorb(meta.clone());
+        }
+        c.margin_meta = Some(union);
     }
 
     pub(crate) fn put_spot_meta(&self, spot: crate::wire::SpotMeta) {
@@ -559,6 +617,79 @@ impl MarketFeed {
         self.read().meta.clone()
     }
 
+    /// The upstream `perpDexs` list in the venue's order (the first element
+    /// is the default dex, `null`). `None` until the poll lands.
+    pub(crate) fn perp_dexs(&self) -> Option<Vec<Option<PerpDex>>> {
+        self.read().perp_dexs.clone()
+    }
+
+    /// A named perp dex's position in the upstream `perpDexs` list — the
+    /// index the HIP-3 asset namespace encodes. `None` = the list has not
+    /// landed, or the venue does not quote that dex.
+    pub(crate) fn dex_index(&self, name: &str) -> Option<usize> {
+        self.read()
+            .perp_dexs
+            .as_ref()?
+            .iter()
+            .position(|dex| dex.as_ref().is_some_and(|dex| dex.name == name))
+    }
+
+    /// One named builder dex's cached `meta` (the `meta?dex=` read). `None`
+    /// = the dex has not been polled: a named refusal, never the default
+    /// dex's meta.
+    pub(crate) fn dex_meta(&self, dex: &str) -> Option<Meta> {
+        self.read().dex_metas.get(dex).cloned()
+    }
+
+    /// The asset index → coin map the order paths address (`/exchange`, the
+    /// CoreWriter lane). The namespace is the venue's:
+    ///
+    /// - `a < 10000`: the default dex's universe, positionally (unchanged);
+    /// - `10000 <= a < 100000`: the spot namespace — not modeled here, so
+    ///   `None`;
+    /// - `a >= 100000`: `100000 + perp_dex_index*10000 + universe_index`,
+    ///   where the dex index is the **upstream `perpDexs` position** (never
+    ///   the configured markets' order) and the universe is that dex's own
+    ///   cached meta.
+    ///
+    /// `None` = an index no loaded dex carries. The account-plane
+    /// `margin_meta` view is deliberately not consulted: it merges dexes for
+    /// name-based margin lookups, not for index resolution.
+    pub(crate) fn coin_of_asset(&self, asset: u32) -> Option<String> {
+        let c = self.read();
+        if asset < 10_000 {
+            return c
+                .meta
+                .as_ref()?
+                .universe
+                .get(asset as usize)
+                .map(|a| a.name.clone());
+        }
+        if asset < 100_000 {
+            return None; // the spot asset namespace: no perp order lives here
+        }
+        let offset = asset - 100_000;
+        let dex = c
+            .perp_dexs
+            .as_ref()?
+            .get((offset / 10_000) as usize)?
+            .as_ref()?;
+        c.dex_metas
+            .get(&dex.name)?
+            .universe
+            .get((offset % 10_000) as usize)
+            .map(|a| a.name.clone())
+    }
+
+    /// The account-plane meta: the default dex plus every configured perp
+    /// dex (HIP-3) the venue quotes. Maintenance tiers, max leverage and the
+    /// strict-isolation flags resolve here; the `meta` response keeps the
+    /// default dex (a client reading `meta` must not see another dex's
+    /// universe).
+    pub(crate) fn margin_meta(&self) -> Option<Meta> {
+        self.read().margin_meta.clone()
+    }
+
     /// The spot token registry (`None` until the first poll lands).
     pub(crate) fn spot_meta(&self) -> Option<crate::wire::SpotMeta> {
         self.read().spot_meta.clone()
@@ -593,34 +724,29 @@ impl MarketFeed {
         let ctxs = meta
             .universe
             .iter()
-            .filter_map(|asset| {
-                let mut ctx = c.ctxs.get(&asset.name)?.clone();
-                // `control_owned` is the PRICE ownership bit: the mark/oracle
-                // (`crash`/`rally`), the book (`set_book`) or the whole live
-                // plane (`stall`). Funding moves no mark and is reported
-                // separately below; conflating the two froze the mirror's
-                // WHYPE oracle on a funding-only scenario.
-                let price_owned = overrides.prices.contains_key(&asset.name)
-                    || overrides.books.contains_key(&asset.name)
-                    || stalled;
-                let funding_owned = overrides.funding.contains_key(&asset.name)
-                    && overrides
-                        .funding_expires_ms
-                        .get(&asset.name)
-                        .is_none_or(|deadline| *deadline > now);
-                if let Some(p) = overrides.prices.get(&asset.name) {
-                    ctx.mark_px = p.mark;
-                    ctx.oracle_px = p.oracle;
-                }
-                if funding_owned {
-                    if let Some(rate) = overrides.funding.get(&asset.name) {
-                        ctx.funding = *rate;
-                    }
-                }
-                ctx.control_owned = price_owned;
-                ctx.funding_owned = funding_owned;
-                Some(ctx)
-            })
+            .filter_map(|asset| served_ctx(&c.ctxs, &overrides, stalled, now, &asset.name))
+            .collect();
+        Some(crate::wire::MetaAndAssetCtxs(meta, ctxs))
+    }
+
+    /// `metaAndAssetCtxs` for a **named builder dex** (HIP-3): the dex's own
+    /// cached meta plus the contexts of exactly its universe coins. The
+    /// measured 2026-11-16 friction: the sim answered `metaAndAssetCtxs` for
+    /// the default dex only, so the indexer's `xyz` dex book poll — whose
+    /// ladder read succeeded — failed its context read for all 40 builder-dex
+    /// coins (~29 failed ticks/coin/5 min) while the same coins' books were
+    /// fresh. The dex metas are already cached here (`put_dex_meta`); serving
+    /// them is the honest multi-dex shape, not a new plane.
+    pub(crate) fn dex_meta_and_ctxs(&self, dex: &str) -> Option<crate::wire::MetaAndAssetCtxs> {
+        let overrides = self.read_overrides().clone();
+        let stalled = self.stalled();
+        let now = crate::now_ms();
+        let c = self.read();
+        let meta = c.dex_metas.get(dex)?.clone();
+        let ctxs = meta
+            .universe
+            .iter()
+            .filter_map(|asset| served_ctx(&c.ctxs, &overrides, stalled, now, &asset.name))
             .collect();
         Some(crate::wire::MetaAndAssetCtxs(meta, ctxs))
     }
@@ -729,10 +855,100 @@ fn apply_consumptions(mut book: L2Book, consumptions: &[Consumption]) -> L2Book 
     book
 }
 
+/// One coin's served context: the live ctx with the scenario's overrides
+/// applied. The default dex's `metaAndAssetCtxs` and a named builder dex's
+/// answer are shaped **here**, so an override can never be honoured on one
+/// lane and silently dropped on the other (the measured 2026-11-11 class: a
+/// `/control/crash` moved the mark the account plane used while the served
+/// context kept the live figure).
+///
+/// `control_owned` is the PRICE ownership bit: the mark/oracle
+/// (`crash`/`rally`), the book (`set_book`) or the whole live plane
+/// (`stall`). Funding moves no mark and is reported separately
+/// (`funding_owned`); conflating the two froze the mirror's WHYPE oracle on
+/// a funding-only scenario.
+fn served_ctx(
+    ctxs: &BTreeMap<String, AssetCtx>,
+    overrides: &Overrides,
+    stalled: bool,
+    now: u64,
+    name: &str,
+) -> Option<AssetCtx> {
+    let mut ctx = ctxs.get(name)?.clone();
+    let price_owned =
+        overrides.prices.contains_key(name) || overrides.books.contains_key(name) || stalled;
+    let funding_owned = overrides.funding.contains_key(name)
+        && overrides
+            .funding_expires_ms
+            .get(name)
+            .is_none_or(|deadline| *deadline > now);
+    if let Some(p) = overrides.prices.get(name) {
+        ctx.mark_px = p.mark;
+        ctx.oracle_px = p.oracle;
+    }
+    // An owned book **is** the executable depth: the served mid and impact
+    // prices must follow it, or a scenario presents an oracle the book does
+    // not confirm and every consumer that re-stamps a feed refuses it
+    // (measured 2026-11-13: the liquidation drill's `/control/crash` moved
+    // mark/oracle while `midPx`/`impactPxs` stayed at the live depth, so
+    // `oracle-liveness` wrote the un-moved mid and the breach never reached
+    // the chain). Best bid/ask of the owned book is the same definition the
+    // live ctx's figures carry.
+    if let Some(book) = overrides.books.get(name) {
+        if let (Some(bid), Some(ask)) = (book.levels[0].first(), book.levels[1].first()) {
+            let mid = (bid.px + ask.px) / Decimal::from(2);
+            ctx.mid_px = Some(mid);
+            ctx.impact_pxs = Some([bid.px, ask.px]);
+        }
+    }
+    if funding_owned {
+        if let Some(rate) = overrides.funding.get(name) {
+            ctx.funding = *rate;
+        }
+    }
+    ctx.control_owned = price_owned;
+    ctx.funding_owned = funding_owned;
+    Some(ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wire::{test_ctx, Level};
+
+    /// A minimal wire meta for the cache tests: `szDecimals`/`maxLeverage`
+    /// are required, the margin tables are optional.
+    fn meta_with(coins: &[&str]) -> crate::wire::Meta {
+        let universe: Vec<String> = coins
+            .iter()
+            .map(|coin| format!(r#"{{"name":"{coin}","szDecimals":5,"maxLeverage":40}}"#))
+            .collect();
+        serde_json::from_str(&format!(r#"{{"universe":[{}]}}"#, universe.join(", ")))
+            .expect("a well-formed meta")
+    }
+
+    /// The default dex's poll must not erase an absorbed HIP-3 dex: the live
+    /// bug was a `margin_meta` reset on every core poll, which made any
+    /// account holding a HIP-3 market unpriceable once per poll cycle.
+    #[test]
+    fn a_default_dex_poll_keeps_the_absorbed_dexes() {
+        let feed = MarketFeed::memory(vec!["BTC".into(), "xyz:NVDA".into()]);
+        feed.put_meta(meta_with(&["BTC"]), 1);
+        feed.put_dex_meta("xyz".into(), meta_with(&["xyz:NVDA"]), 2);
+        assert!(
+            feed.margin_meta().unwrap().asset("xyz:NVDA").is_some(),
+            "the absorbed dex prices its markets"
+        );
+
+        feed.put_meta(meta_with(&["BTC"]), 3);
+        let view = feed.margin_meta().expect("the account view survives");
+        assert!(view.asset("BTC").is_some());
+        assert!(view.asset("xyz:NVDA").is_some());
+        assert!(
+            view.asset("xyz:NVDA").is_some_and(|a| a.max_leverage == 40),
+            "the absorbed tiers are the dex's own"
+        );
+    }
 
     /// A scripted book owns the coin until its hand-back: live updates are
     /// not the served base, so they neither refresh nor prune its consumed
@@ -1011,6 +1227,53 @@ mod tests {
         assert_eq!(feed.oracle("BTC"), Some(Decimal::from(101)));
     }
 
+    /// An owned book **is** the executable depth: the served `midPx` and
+    /// `impactPxs` must follow it. Measured 2026-11-13: the liquidation drill's
+    /// `/control/crash` moved mark/oracle while the served mid stayed at the
+    /// live depth, so `oracle-liveness` wrote the un-moved mid and the breach
+    /// never reached the chain feed.
+    #[test]
+    fn an_owned_book_owns_the_served_mid_and_impact() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        feed.put_meta(meta_with(&["BTC"]), 1_000);
+        feed.put_ctx("BTC".into(), test_ctx("100", "101"), 1_000);
+        let book = crate::wire::L2Book {
+            coin: "BTC".into(),
+            time: 1_001,
+            levels: [
+                vec![crate::wire::Level {
+                    px: Decimal::from(40),
+                    sz: Decimal::from(5),
+                    n: 1,
+                }],
+                vec![crate::wire::Level {
+                    px: Decimal::from(41),
+                    sz: Decimal::from(5),
+                    n: 1,
+                }],
+            ],
+            spread: None,
+        };
+        feed.own_book(&book).unwrap();
+        let served = feed.meta_and_ctxs().expect("ctx");
+        let btc = served.1.first().expect("BTC ctx");
+        assert_eq!(
+            btc.mark_px,
+            Decimal::from(100),
+            "the mark is a separate input"
+        );
+        assert_eq!(
+            btc.mid_px,
+            Some(Decimal::new(405, 1)),
+            "the owned book's mid is served"
+        );
+        assert_eq!(
+            btc.impact_pxs,
+            Some([Decimal::from(40), Decimal::from(41)]),
+            "the owned book's best bid/ask are the impact prices"
+        );
+    }
+
     /// A deadline bounds the override: past it the live rate answers and the
     /// ownership bit clears, without a control write.
     #[test]
@@ -1023,5 +1286,108 @@ mod tests {
         assert!(!feed.funding_is_owned("BTC"));
         assert_eq!(feed.owned_count(), 0);
         assert_eq!(feed.funding("BTC"), Some(Decimal::ZERO));
+    }
+
+    /// One `perpDexs` entry (the resolver reads only `name`; the rest keeps
+    /// the wire shape complete).
+    fn perp_dex(name: &str) -> crate::wire::PerpDex {
+        crate::wire::PerpDex {
+            name: name.into(),
+            full_name: format!("{name} dex"),
+            deployer: alloy_primitives::Address::repeat_byte(0x01),
+            oracle_updater: None,
+            fee_recipient: None,
+            asset_to_streaming_oi_cap: Vec::new(),
+            asset_to_funding_clamp: Vec::new(),
+            asset_to_funding_interest_rate: Vec::new(),
+            asset_to_funding_multiplier: Vec::new(),
+            sub_deployers: Vec::new(),
+        }
+    }
+
+    /// The asset-id namespace: the default dex's positional indices are
+    /// unchanged and a HIP-3 market is `100000 + dex_index*10000 +
+    /// universe_index`, with the dex index taken from the upstream
+    /// `perpDexs` order (whose first entry is the default dex's `null`).
+    #[test]
+    fn the_asset_namespace_resolves_default_and_hip3_indices() {
+        let feed = MarketFeed::memory(vec!["BTC".into(), "xyz:NVDA".into()]);
+        feed.put_meta(meta_with(&["BTC", "ETH"]), 1);
+        feed.put_perp_dexs(vec![None, Some(perp_dex("xyz"))]);
+        feed.put_dex_meta("xyz".into(), meta_with(&["xyz:NVDA", "xyz:TSLA"]), 2);
+        assert_eq!(feed.coin_of_asset(0).as_deref(), Some("BTC"));
+        assert_eq!(feed.coin_of_asset(1).as_deref(), Some("ETH"));
+        assert_eq!(
+            feed.coin_of_asset(2),
+            None,
+            "past the default dex's universe"
+        );
+        assert_eq!(feed.coin_of_asset(110_000).as_deref(), Some("xyz:NVDA"));
+        assert_eq!(feed.coin_of_asset(110_001).as_deref(), Some("xyz:TSLA"));
+        assert_eq!(
+            feed.coin_of_asset(110_002),
+            None,
+            "past the xyz dex's universe"
+        );
+        // The spot namespace is not modeled, and `perpDexs[0]`/missing slots
+        // are null, so a HIP-3 index over them is unknown.
+        assert_eq!(feed.coin_of_asset(10_000), None);
+        assert_eq!(feed.coin_of_asset(99_999), None);
+        assert_eq!(feed.coin_of_asset(120_000), None);
+        assert_eq!(feed.coin_of_asset(1_000_000), None);
+    }
+
+    /// Resolution needs the upstream list *and* the dex's own meta; it never
+    /// falls back to the merged account-plane view. A `margin_meta` carrying
+    /// `xyz:NVDA` must not make an unresolvable index resolve.
+    #[test]
+    fn a_hip3_index_requires_the_perp_dexs_and_the_dex_meta() {
+        let no_list = MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        no_list.put_meta(meta_with(&["BTC"]), 1);
+        no_list.put_dex_meta("xyz".into(), meta_with(&["xyz:NVDA"]), 2);
+        assert!(
+            no_list.margin_meta().unwrap().asset("xyz:NVDA").is_some(),
+            "the account view carries the absorbed market"
+        );
+        assert_eq!(
+            no_list.coin_of_asset(110_000),
+            None,
+            "no perpDexs cache: the index is unknown"
+        );
+
+        let no_meta = MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        no_meta.put_meta(meta_with(&["BTC"]), 1);
+        no_meta.put_perp_dexs(vec![None, Some(perp_dex("xyz"))]);
+        assert_eq!(
+            no_meta.coin_of_asset(110_000),
+            None,
+            "the dex's meta has not landed"
+        );
+
+        let unknown_slot = MarketFeed::memory(vec![]);
+        unknown_slot.put_meta(meta_with(&["BTC"]), 1);
+        unknown_slot.put_perp_dexs(vec![None, Some(perp_dex("km"))]);
+        unknown_slot.put_dex_meta("xyz".into(), meta_with(&["xyz:NVDA"]), 2);
+        assert_eq!(
+            unknown_slot.coin_of_asset(110_000),
+            None,
+            "slot 1 belongs to `km`, not `xyz`"
+        );
+    }
+
+    /// The cached list keeps the upstream order (a leading `null`), and that
+    /// position — not the configured markets' first-seen order — is the index
+    /// namespace.
+    #[test]
+    fn perp_dexs_keep_the_upstream_order_and_define_dex_indices() {
+        let feed = MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        feed.put_perp_dexs(vec![None, Some(perp_dex("km")), Some(perp_dex("xyz"))]);
+        let dexs = feed.perp_dexs().expect("the cache is loaded");
+        assert!(dexs[0].is_none(), "the default dex is `null`");
+        assert_eq!(dexs[1].as_ref().unwrap().name, "km");
+        assert_eq!(dexs[2].as_ref().unwrap().name, "xyz");
+        assert_eq!(feed.dex_index("km"), Some(1));
+        assert_eq!(feed.dex_index("xyz"), Some(2));
+        assert_eq!(feed.dex_index("nope"), None);
     }
 }

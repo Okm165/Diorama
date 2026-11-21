@@ -31,17 +31,14 @@ spec:
       terminationGracePeriodSeconds: 30
       containers:
         - name: engine
-          image: localhost/diorama-venue-engine:v9
+          image: localhost/diorama-venue-engine:v19
           imagePullPolicy: IfNotPresent
           args: ["run", "--config", "/etc/mirror/instance.toml"]
-          # The wiring the instance TOML references as ${...} (HL_RPC_URLS,
-          # ANVIL_V_URL, STATE_DIR) — the same `envFrom` mechanism as the
-          # mainnet engine: the ConfigMap carries every key, the pod reads the
-          # ones its instance names, and a new wiring var needs no edit here.
-          # `HL_RPC_URLS` is the engine's read pool; `HL_RPC_URL` is anvil V's
-          # single fork source.
-          envFrom:
-            - configMapRef: { name: diorama-config }
+          # No env: the configuration is the mounted specialization file
+          # (/etc/mirror/specialization.toml beside the instance file). The
+          # keyed market-REST mirror lives in the specialization's
+          # [endpoints.hyperliquid_info] - gitignored, so the key never
+          # enters a cluster Secret.
           ports:
             - { name: http, containerPort: 8080 }
           volumeMounts:
@@ -55,13 +52,20 @@ spec:
           # startupProbe suspends the liveness/readiness probes through it, so
           # a coordinated rollout never kills a booting container (measured:
           # exit 137 at ~2 minutes when anvil-t restarted under a rolling
-          # engine). The 30 x 10 s window (5 min) was shorter than a reth
-          # restart; 90 x 10 s (15 min) covers the measured ~10 min outage.
+          # engine). This budget is the boot wait plus slack, not a second
+          # guess: the instance's boot_timeout_secs is 1200 (a re-forking V),
+          # so 150 x 10 s (25 min) lets the engine wait out V's own 20-minute
+          # startupProbe and then serve.
           startupProbe:
             httpGet: { path: /livez, port: 8080 }
             periodSeconds: 10
-            failureThreshold: 90
+            failureThreshold: 150
           readinessProbe:
+            # `/livez`, not `/healthz`: a gap-paused engine is still serving
+            # reads/writes (it is catching up, not dead), so it must stay in
+            # the Service. `/healthz` is the diagnostic state report (200 ok,
+            # 503 halted/gap-paused); probing it here took the engine out of
+            # rotation for the whole catch-up and starved its admin consumers.
             httpGet: { path: /livez, port: 8080 }
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -72,10 +76,13 @@ spec:
           resources:
             # No CPU limit (the follow's passes are latency-sensitive).
             # Measured 2026-10-31 (60 s sample): ~1-2m CPU, 8-10 MiB RSS. The
-            # request tracks the measured steady state; the limit stays the OOM
-            # ceiling for a wide catch-up window's composition state.
-            requests: { cpu: "5m", memory: 16Mi }
-            limits: { memory: 512Mi }
+            # request tracks the measured steady state. The 512Mi limit was
+            # measured OOM-killing the engine during the 2026-11-06 wide
+            # catch-up (the composition state grows with the window, and a
+            # restart resets the follow cursor to the pin). 2Gi is the OOM
+            # ceiling for a wide catch-up window; the steady state stays tiny.
+            requests: { cpu: "5m", memory: 64Mi }
+            limits: { memory: 2Gi }
       volumes:
         - name: instance
           configMap: { name: venue-instance }

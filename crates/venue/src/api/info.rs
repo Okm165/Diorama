@@ -1,15 +1,15 @@
-//! The daloc-facing info API (8090): one `POST /info` endpoint, dispatched by
+//! The client-facing info API (8090): one `POST /info` endpoint, dispatched by
 //! the request's `type`.
 //!
 //! COW rule: a **touched** account is answered from the sim; an **untouched**
 //! one is passed through to the real venue (which serves its own empty shapes
-//! for addresses it has never seen — daloc's "unconfigured accounts → empty
+//! for addresses it has never seen — the consumer's "unconfigured accounts → empty
 //! shape, 200 OK" contract holds either way). Market data is answered from
 //! the composed feed, so a crashed mark is the same number the sim priced
 //! with.
 use super::ApiState;
 use crate::error::{Error, Result};
-use crate::sim::account;
+use crate::sim::{account, Sim};
 use crate::wire::{
     ActiveAssetData, ClearinghouseState, ExchangeStatus, InfoRequest, Leverage, LeverageType,
     MarginSummary, MetaAndAssetCtxs, UserAbstraction,
@@ -48,9 +48,9 @@ pub async fn healthz(State(state): State<Arc<ApiState>>) -> Response {
 
 /// `GET /health`: the inter-service health contract on the info port.
 ///
-/// The shared `DalocHttpClient::health_verdict` reads a JSON `status`; the
+/// The shared `the HTTP client::health_verdict` reads a JSON `status`; the
 /// text liveness body (`/healthz`) is for humans and orchestrators, while a
-/// DALOC service probing this port needs the same shape every other service
+/// the consumer's service probing this port needs the same shape every other service
 /// serves. Both answer the sim-poisoned gate identically.
 pub async fn health(State(state): State<Arc<ApiState>>) -> Response {
     if let Err(refusal) = super::sim_gate(&state) {
@@ -77,6 +77,11 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
     let req: InfoRequest = serde_json::from_slice(&body)
         .map_err(|source| Error::bad_request(format!("invalid info request: {source}")))?;
     match req {
+        // The archive read routes through the endpoint pool: the sim composes
+        // live marks, the candles are the upstream's, and the pool (several
+        // URLs, failover, budget) is the router. The original body is forwarded
+        // verbatim, so the wire contract stays the upstream's.
+        InfoRequest::CandleSnapshot { .. } => pass_through(&state, &body).await,
         // hl_mock's contract for types it does not route.
         InfoRequest::Unrouted => Ok(Json("unrouted").into_response()),
         // ---- account-scoped: the sim's, or the venue's -------------------
@@ -98,14 +103,16 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         // ---- market-scoped: the feed's -----------------------------------
         InfoRequest::Meta { dex } => meta(&dex, &state),
         InfoRequest::MetaAndAssetCtxs { dex } => meta_and_ctxs(&dex, &state),
-        InfoRequest::PerpDexs => Ok(Json(vec![None::<crate::wire::PerpDex>]).into_response()),
+        InfoRequest::PerpDexs => {
+            Ok(Json(state.feed.perp_dexs().ok_or(Error::Warming)?).into_response())
+        }
         InfoRequest::L2Book {
             coin,
             n_sig_figs,
             mantissa,
         } => l2_book(&coin, n_sig_figs, mantissa, &state),
         InfoRequest::MarginTable { id } => margin_table(id, &state),
-        InfoRequest::ExchangeStatus => exchange_status(&state),
+        InfoRequest::ExchangeStatus => Ok(exchange_status()),
         InfoRequest::SpotMeta => {
             Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response())
         }
@@ -113,8 +120,9 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
     }
 }
 
-/// `clearinghouseState`: the sim's for a touched account (the first perp dex
-/// only), the venue's verbatim otherwise.
+/// `clearinghouseState`: the sim's for a touched account (the default dex
+/// only: per-dex balances/collateral are not modeled), the venue's verbatim
+/// otherwise.
 async fn clearinghouse(
     state: &ApiState,
     body: Bytes,
@@ -122,10 +130,9 @@ async fn clearinghouse(
     dex: Option<String>,
 ) -> Result<Response> {
     if !dex.as_deref().unwrap_or("").is_empty() {
-        // The sim serves the first perp dex only (perpDexs = [null]).
-        return Ok(
-            Json(empty_clearinghouse(state.sim.served_time(crate::now_ms())?)).into_response(),
-        );
+        // Per-dex balances/collateral are not modeled (Phase A): a named dex
+        // answers the empty shape rather than the default dex's positions.
+        return Ok(Json(empty_clearinghouse(Sim::served_time(crate::now_ms()))).into_response());
     }
     match clearinghouse_of(state, user)? {
         Some(served) => Ok(Json(served).into_response()),
@@ -138,7 +145,7 @@ async fn clearinghouse(
 async fn spot_state(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
     // Pure observation; the 1 Hz tick owns accrual and liquidation.
     simulated(state, &body, user, |account| {
-        let meta = state.feed.meta();
+        let meta = state.feed.margin_meta();
         Ok(Json(crate::wire::SpotClearinghouseState {
             balances: account::spot_balances(account),
             token_to_available_after_maintenance: account::available_after_maintenance(
@@ -442,16 +449,37 @@ async fn active_asset(
     .await
 }
 
-/// `meta`: the cached metadata for the default dex.
+/// `meta`: the cached metadata for the default dex, or a named builder dex's
+/// own cached meta. An unknown (or not-yet-polled) dex is a named 400 — never
+/// a silent fallback to the default dex's universe.
 fn meta(dex: &Option<String>, state: &ApiState) -> Result<Response> {
-    expect_default_dex(dex)?;
-    Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response())
+    let dex_name = dex.as_deref().unwrap_or("");
+    if dex_name.is_empty() {
+        return Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response());
+    }
+    let meta = state.feed.dex_meta(dex_name).ok_or_else(|| {
+        Error::bad_request(format!(
+            "unknown perp dex `{dex_name}` (not among the venue's cached HIP-3 dexes)"
+        ))
+    })?;
+    Ok(Json(meta).into_response())
 }
 
-/// `metaAndAssetCtxs`: the cached metadata + per-market ctxs, default dex.
+/// `metaAndAssetCtxs`: the cached metadata + per-market ctxs. The default dex
+/// is served from the feed's core cache; a named builder dex (HIP-3) is served
+/// from its own cached meta and contexts — refusing it made every builder-dex
+/// book poll fail its context read while its ladder succeeded (the measured
+/// 2026-11-16 friction on the `xyz` dex).
 fn meta_and_ctxs(dex: &Option<String>, state: &ApiState) -> Result<Response> {
-    expect_default_dex(dex)?;
-    let MetaAndAssetCtxs(meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
+    let dex_name = dex.as_deref().unwrap_or("");
+    if dex_name.is_empty() {
+        let MetaAndAssetCtxs(meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
+        return Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response());
+    }
+    let MetaAndAssetCtxs(meta, ctxs) = state
+        .feed
+        .dex_meta_and_ctxs(dex_name)
+        .ok_or(Error::Warming)?;
     Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response())
 }
 
@@ -595,12 +623,12 @@ fn margin_table(id: u32, state: &ApiState) -> Result<Response> {
 }
 
 /// `exchangeStatus`: the served clock.
-fn exchange_status(state: &ApiState) -> Result<Response> {
-    Ok(Json(ExchangeStatus {
+fn exchange_status() -> Response {
+    Json(ExchangeStatus {
         special_statuses: None,
-        time: state.sim.served_time(crate::now_ms())?,
+        time: Sim::served_time(crate::now_ms()),
     })
-    .into_response())
+    .into_response()
 }
 
 /// The served `clearinghouseState` for a touched account: accrual *first*,
@@ -611,7 +639,7 @@ pub(crate) fn clearinghouse_of(
     address: Address,
 ) -> Result<Option<ClearinghouseState>> {
     let now = crate::now_ms();
-    let served_time = state.sim.served_time(now)?;
+    let served_time = Sim::served_time(now);
     // A read is an observation, not a step: the 1 Hz account tick owns
     // funding/liquidation. Running the automaton here made a read of an
     // underwater account liquidate it, so two pollers could change the
@@ -619,7 +647,7 @@ pub(crate) fn clearinghouse_of(
     let Some(account) = state.sim.account(address)? else {
         return Ok(None);
     };
-    let meta = state.feed.meta();
+    let meta = state.feed.margin_meta();
     // The served `time` is the **oldest live mark** the account is priced
     // from, not the read's clock. A stalled feed keeps its old mark; stamping
     // the read's clock made that stale mark look fresh and passed the
@@ -641,7 +669,7 @@ pub(crate) fn clearinghouse_of(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::error!(
             address = %address,
-            "served clearinghouseState failed the identity re-check; daloc's client gate would refuse it"
+            "served clearinghouseState failed the identity re-check; the consumer's gate would refuse it"
         );
     }
     Ok(Some(served))
@@ -703,15 +731,6 @@ fn empty_clearinghouse(time: u64) -> ClearinghouseState {
     }
 }
 
-fn expect_default_dex(dex: &Option<String>) -> Result<()> {
-    if dex.as_deref().unwrap_or("").is_empty() {
-        return Ok(());
-    }
-    Err(Error::bad_request(
-        "the sim serves the first perp dex only (multi-dex is deferred; see docs/INTEGRATION.md)",
-    ))
-}
-
 /// `activeAssetData`: the coin's mark, the user's leverage, and the sizes the
 /// withdrawable margin supports at that leverage.
 fn active_asset_data(
@@ -723,7 +742,7 @@ fn active_asset_data(
     let mark = state.feed.mark(coin).ok_or_else(|| Error::NoMarket {
         coin: coin.to_string(),
     })?;
-    let meta = state.feed.meta();
+    let meta = state.feed.margin_meta();
     let leverage = account
         .positions
         .get(coin)
@@ -853,5 +872,85 @@ mod tests {
         let err = active_asset_data(&state, user, &account::Account::default(), "ETH").unwrap_err();
         assert!(matches!(err, Error::NotFound { .. }), "{err}");
         assert!(err.to_string().contains("not a simulated account"), "{err}");
+    }
+
+    fn state_with(feed: crate::feed::MarketFeed) -> Arc<ApiState> {
+        let api = crate::feed::rest::RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap();
+        Arc::new(
+            ApiState::new(
+                Arc::new(feed),
+                Arc::new(crate::sim::Sim::memory()),
+                api,
+                None,
+                None,
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap(),
+        )
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn perp_dex(name: &str) -> crate::wire::PerpDex {
+        crate::wire::PerpDex {
+            name: name.into(),
+            full_name: format!("{name} dex"),
+            deployer: Address::repeat_byte(0x01),
+            oracle_updater: None,
+            fee_recipient: None,
+            asset_to_streaming_oi_cap: Vec::new(),
+            asset_to_funding_clamp: Vec::new(),
+            asset_to_funding_interest_rate: Vec::new(),
+            asset_to_funding_multiplier: Vec::new(),
+            sub_deployers: Vec::new(),
+        }
+    }
+
+    /// `meta?dex=` answers the named builder dex's cached meta; the default
+    /// read stays the default dex, and an unknown (or not-yet-polled) dex is
+    /// a named 400 — never a silent fallback.
+    #[tokio::test]
+    async fn meta_dex_serves_the_named_dexs_cached_meta() {
+        let feed = crate::feed::MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        feed.put_meta(crate::sim::meta_of(&[("BTC", 40)]), 1);
+        feed.put_dex_meta("xyz".into(), crate::sim::meta_of(&[("xyz:NVDA", 10)]), 2);
+        let state = state_with(feed);
+
+        let out = response_json(meta(&Some("xyz".into()), &state).unwrap()).await;
+        assert_eq!(out["universe"][0]["name"], "xyz:NVDA");
+        assert_eq!(out["universe"][0]["maxLeverage"], 10);
+
+        let default = response_json(meta(&None, &state).unwrap()).await;
+        assert_eq!(default["universe"][0]["name"], "BTC");
+
+        let err = meta(&Some("unknown".into()), &state).unwrap_err();
+        assert!(matches!(err, Error::BadRequest { .. }), "{err}");
+        assert!(
+            err.to_string().contains("unknown perp dex `unknown`"),
+            "{err}"
+        );
+    }
+
+    /// `perpDexs` serves the upstream list verbatim: leading `null`, then the
+    /// dexes in the order the venue returned them (the order the HIP-3 asset
+    /// namespace encodes).
+    #[tokio::test]
+    async fn perp_dexs_serves_the_cached_list_in_upstream_order() {
+        let feed = crate::feed::MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        feed.put_perp_dexs(vec![None, Some(perp_dex("km")), Some(perp_dex("xyz"))]);
+        let state = state_with(feed);
+        let response = info(State(state), Bytes::from(r#"{"type":"perpDexs"}"#))
+            .await
+            .unwrap();
+        let out = response_json(response).await;
+        assert!(out[0].is_null(), "the default dex is `null`");
+        assert_eq!(out[1]["name"], "km");
+        assert_eq!(out[2]["name"], "xyz");
     }
 }

@@ -13,8 +13,8 @@
 //!
 //! Measured caveat: the *real* HyperEVM USDC blacklists token 0's system
 //! address (`isBlacklisted(0x2000…0) == true` on the live chain), so
-//! EVM→Core USDC cannot be a plain transfer with the real token. Daloc's
-//! deploy replaces the canonical ERC20s with its own mocks (the fixture
+//! EVM→Core USDC cannot be a plain transfer with the real token. The
+//! deployment replaces the canonical ERC20s with its own mocks (the fixture
 //! set), whose transfers to system addresses succeed — that is the path the
 //! bridge credits.
 use crate::error::Error;
@@ -34,7 +34,23 @@ sol! {
     /// emits `Received(user, amount)` with `user = msg.sender`, so a tx value
     /// sent to `0x2222…2` is the EVM→Core HYPE transfer.
     event Received(address indexed user, uint256 amount);
+    /// The mirror precompile mocks' write surface (`k8s-daloc/precompile-mocks`).
+    /// The real chain's precompiles are read-only oracle contracts; on the
+    /// mirror they are projections of the sim, and the bridge is their writer.
+    function setBalance(address user, uint64 token, uint64 total, uint64 hold);
+    function setWithdrawable(address user, uint64 amount);
 }
+
+/// The mirror's `0x0801` spot-balance precompile mock (the real chain has no
+/// code there — the L1 serves the reads).
+pub(crate) const SPOT_BALANCE_MOCK: Address = address!("0000000000000000000000000000000000000801");
+
+/// The mirror's `0x0803` withdrawable precompile mock.
+pub(crate) const WITHDRAWABLE_MOCK: Address = address!("0000000000000000000000000000000000000803");
+
+/// The funded account the precompile projection txs are sent from (a mirror
+/// control, not a system address: the writer is traceable as itself).
+pub(crate) const PRECOMPILE_WRITER: Address = address!("f000000000000000000000000000000000000001");
 
 /// The native HYPE system address (transfers as tx value; `Received` event).
 pub(crate) const HYPE_SYSTEM: Address = address!("2222222222222222222222222222222222222222");
@@ -168,6 +184,24 @@ pub(crate) fn transfer_calldata(to: Address, amount: U256) -> Bytes {
     transferCall { to, amount }.abi_encode().into()
 }
 
+/// The `SpotBalanceMock.setBalance` write: one account's spot class figures.
+pub(crate) fn set_balance_calldata(user: Address, token: u64, total: u64, hold: u64) -> Bytes {
+    setBalanceCall {
+        user,
+        token,
+        total,
+        hold,
+    }
+    .abi_encode()
+    .into()
+}
+
+/// The `WithdrawableMock.setWithdrawable` write: one account's perp-class
+/// transferable figure.
+pub(crate) fn set_withdrawable_calldata(user: Address, amount: u64) -> Bytes {
+    setWithdrawableCall { user, amount }.abi_encode().into()
+}
+
 /// Decode a log as an ERC-20 `Transfer`: alloy's validating decoder (the
 /// topic0 hash, the indexed-address count and the data length), so a
 /// look-alike or malformed event decodes to `None` instead of a credit.
@@ -245,6 +279,78 @@ pub(crate) fn credit_of<'a>(
     )?;
     Some(EvmCredit {
         sender: transfer.from,
+        token,
+        amount: credited,
+    })
+}
+
+/// The EVM→Core credit when a **bridge entry point** emits the system-bound
+/// transfer: the entry point moves its own balance to a token's system
+/// address, so the observed `Transfer` names the entry point, not the
+/// depositor.
+///
+/// The entry point's log alone cannot prove who funded the deposit. The same
+/// transaction's earlier transfer **into the entry point** can: the depositor
+/// sent exactly this amount, and the entry point then sent it on to the system
+/// address. Credit that depositor, never the entry point.
+///
+/// Two measured shapes are covered:
+/// - a **bridge helper** (a contract other than the linked token) emits the
+///   self-transfer; the funding leg must be a transfer of the linked token
+///   into the helper;
+/// - the **linked token's own bridge entry point** emits the self-transfer
+///   after pulling a reserve token from the depositor (the 2026-11-07 simple
+///   `depositToCore`: the USDC fixture `0xb883…` funded the linked USDC
+///   token `0x6b9e…`, which then emitted `0x6b9e… → system`); the funding leg
+///   may be emitted by the reserve token, because the linked token is the one
+///   performing the deposit.
+///
+/// The shape is deliberately narrow:
+/// - the observed transfer must be the entry point's own self-transfer
+///   (`from == emitter`);
+/// - an earlier log in the same transaction must transfer **exactly** the
+///   system-bound amount **to the entry point**;
+/// - for a non-linked helper the funding leg must be the linked token, while
+///   the linked token's own entry point accepts the reserve token it pulled.
+///
+/// A helper that pools several deposits and forwards a different amount gets
+/// no credit from this rule; the log pair must be one-for-one. A self-transfer
+/// with no funding leg (the measured 2026-10-31 mint/self-move) stays refused.
+pub(crate) fn hop_credit_of<'a>(
+    transfer: &Transfer,
+    prior: &[(Address, &LogData)],
+    tokens: &'a [TokenInfo],
+    emitter: Address,
+) -> Option<EvmCredit<'a>> {
+    if transfer.from != emitter {
+        return None;
+    }
+    let index = token_index_of(transfer.to)?;
+    let token = by_index(tokens, u32::try_from(index).ok()?)?;
+    let EvmToken {
+        address: linked, ..
+    } = token.evm?;
+    let linked_entry_point = emitter == linked;
+    let depositor = prior
+        .iter()
+        .filter_map(|(address, data)| {
+            // A helper must be funded with the linked token; the linked
+            // token's own entry point may be funded with the reserve token it
+            // pulls from the depositor.
+            if !linked_entry_point && *address != linked {
+                return None;
+            }
+            let funding = transfer_of(data)?;
+            (funding.to == emitter && funding.value == transfer.value).then_some(funding.from)
+        })
+        .next()?;
+    let evm_decimals = token.evm_decimals()?;
+    let credited = floor_to_core_wei(
+        evm_to_human(transfer.value, evm_decimals)?,
+        token.wei_decimals,
+    )?;
+    Some(EvmCredit {
+        sender: depositor,
         token,
         amount: credited,
     })
@@ -443,6 +549,67 @@ mod tests {
             credit_of(&t, &tokens, linked).is_none(),
             "a self-transfer by the token contract is not an EVM→Core deposit"
         );
+    }
+
+    /// The measured 2026-11-07 simple `depositToCore`: the linked USDC emits
+    /// `agent → helper`, then the helper emits `helper → system`. The helper's
+    /// log alone names the helper; the earlier funding leg names the agent.
+    #[test]
+    fn a_helper_hop_credits_the_funding_depositor() {
+        let usdc = TokenInfo {
+            index: 0,
+            name: "USDC".into(),
+            wei_decimals: 8,
+            evm: Some(EvmToken {
+                address: Address::repeat_byte(0x88),
+                extra_decimals: -2,
+            }),
+        };
+        let tokens = vec![usdc];
+        let linked = Address::repeat_byte(0x88);
+        let agent = Address::repeat_byte(0xaa);
+        let helper = Address::repeat_byte(0xbb);
+        let value = U256::from(1_652_318_459u64);
+
+        let funding = transfer_log(agent, helper, value);
+        let hop = transfer_of(&transfer_log(helper, system_address(0), value)).unwrap();
+        // The ordinary rule still refuses the helper's log.
+        assert!(credit_of(&hop, &tokens, helper).is_none());
+        let credit = hop_credit_of(&hop, &[(linked, &funding)], &tokens, helper).unwrap();
+        assert_eq!(credit.sender, agent, "the depositor, not the helper");
+        assert_eq!(
+            credit.amount,
+            Decimal::from_str("1652.318459").unwrap(),
+            "the system-bound amount at the token's EVM scale"
+        );
+
+        // No funding leg: refuse.
+        assert!(hop_credit_of(&hop, &[], &tokens, helper).is_none());
+        // A different amount: refuse (the pair must be one-for-one).
+        let short = transfer_log(agent, helper, value - U256::from(1u64));
+        assert!(hop_credit_of(&hop, &[(linked, &short)], &tokens, helper).is_none());
+        // A funding leg to someone else: refuse.
+        let elsewhere = transfer_log(agent, Address::repeat_byte(0xcc), value);
+        assert!(hop_credit_of(&hop, &[(linked, &elsewhere)], &tokens, helper).is_none());
+        // The linked token's own bridge entry point is covered too, but only
+        // with a funding leg into it. The measured 2026-11-07 shape funds it
+        // with the reserve fixture token (not the linked token).
+        let token_hop = transfer_of(&transfer_log(linked, system_address(0), value)).unwrap();
+        let reserve = Address::repeat_byte(0x99);
+        let reserve_funding = transfer_log(agent, linked, value);
+        let credit = hop_credit_of(&token_hop, &[(reserve, &reserve_funding)], &tokens, linked)
+            .expect("the linked entry point with a reserve-token funding leg");
+        assert_eq!(credit.sender, agent);
+        assert_eq!(credit.amount, Decimal::from_str("1652.318459").unwrap());
+        // The linked token's self-transfer with no funding leg is the
+        // measured 2026-10-31 mint/self-move: still refused.
+        assert!(hop_credit_of(&token_hop, &[], &tokens, linked).is_none());
+        // A helper funded by something other than the linked token is not the
+        // helper-hop shape (only the linked entry point may accept a reserve).
+        assert!(hop_credit_of(&hop, &[(reserve, &reserve_funding)], &tokens, helper).is_none());
+        // A third party's transfer is not the helper-hop shape.
+        let third = transfer_of(&transfer_log(agent, system_address(0), value)).unwrap();
+        assert!(hop_credit_of(&third, &[(linked, &funding)], &tokens, helper).is_none());
     }
 
     #[test]

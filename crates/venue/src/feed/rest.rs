@@ -46,6 +46,10 @@ fn venue_method_refusal(status: reqwest::StatusCode) -> bool {
 pub struct RestClient {
     http: reqwest::Client,
     pool: EndpointPool,
+    /// The capabilities the deployment declared for this plane (the primary
+    /// endpoint's roles): every admission requires them, so a member that
+    /// did not claim the plane is routed around, not asked.
+    roles: Vec<String>,
 }
 
 impl RestClient {
@@ -79,7 +83,8 @@ impl RestClient {
 
     fn from_pool(pool: EndpointPool, timeout: Duration) -> Result<Self> {
         let http = reqwest::Client::builder().timeout(timeout).build()?;
-        Ok(Self { http, pool })
+        let roles = pool.primary_roles().to_vec();
+        Ok(Self { http, pool, roles })
     }
 
     /// The shared health/rotation pool, for `/metrics` and diagnostics.
@@ -97,7 +102,14 @@ impl RestClient {
             req,
             marker: std::marker::PhantomData,
         };
-        match self.pool.execute(&attempt, &[]).await {
+        match self
+            .pool
+            .execute(
+                &attempt,
+                &self.roles.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+            .await
+        {
             // A method-level refusal is returned by the attempt as `Served`:
             // it is the venue's answer, not an endpoint to fail over.
             Ok(served) => served.value,
@@ -121,7 +133,14 @@ impl RestClient {
             api: self,
             body: &body,
         };
-        match self.pool.execute(&attempt, &[]).await {
+        match self
+            .pool
+            .execute(
+                &attempt,
+                &self.roles.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+            .await
+        {
             Ok(served) => Ok(served.value),
             Err(PoolError::Exhausted { attempts, last }) => Err(Error::ApiExhausted {
                 attempts,
@@ -254,16 +273,35 @@ impl Poller {
         }
     }
 
-    /// One pass: meta+ctxs, spot meta, the configured books, allMids;
-    /// failures are logged and counted, never fatal (the WS lane may be
-    /// carrying the data).
+    /// One pass: perpDexs, meta+ctxs, spot meta, the configured books,
+    /// allMids; failures are logged and counted, never fatal (the WS lane may
+    /// be carrying the data).
     async fn pass(&self) {
+        self.perp_dexs().await;
         self.meta_and_ctxs().await;
         self.spot_meta().await;
         self.books().await;
         self.mids().await;
         self.oi_caps().await;
         self.feed.publish_metrics(crate::now_ms());
+    }
+
+    /// `perpDexs`: the venue's dex list in its own order (`[0]` is the
+    /// default dex, `null`). It is the **only** source of the HIP-3 asset
+    /// index's dex positions — the configured markets name their dex, but the
+    /// index `a` encodes the upstream list position, not the config's order.
+    async fn perp_dexs(&self) {
+        if !self.gated(crate::feed::budget::weight::LIGHT) {
+            return;
+        }
+        match self
+            .api
+            .info::<Vec<Option<crate::wire::PerpDex>>>(&InfoRequest::PerpDexs)
+            .await
+        {
+            Ok(dexs) => self.feed.put_perp_dexs(dexs),
+            Err(e) => self.rest_fault("perpDexs", &e),
+        }
     }
 
     /// `perpsAtOpenInterestCap`: the venue's cap list (light weight; the
@@ -311,9 +349,53 @@ impl Poller {
                 for (asset, ctx) in meta.universe.iter().zip(ctxs) {
                     self.feed.put_ctx(asset.name.clone(), ctx, now);
                 }
+                // The account plane needs the dex's markets too: fold every
+                // configured HIP-3 dex in after the default one (the served
+                // `meta` response stays the default dex).
+                self.dex_metas(&meta).await;
                 self.feed.put_meta(meta, now);
             }
             Err(e) => self.rest_fault("metaAndAssetCtxs", &e),
+        }
+    }
+
+    /// One `metaAndAssetCtxs` per configured perp dex the default meta does
+    /// not cover (the HIP-3 `xyz:*` markets), absorbed into the account-plane
+    /// view. The default dex's own markets are already loaded; a dex whose
+    /// every configured market resolves in the default meta is skipped.
+    async fn dex_metas(&self, core: &crate::wire::Meta) {
+        for dex in configured_dexes(&self.feed.markets) {
+            let mut covered = true;
+            for coin in self
+                .feed
+                .markets
+                .iter()
+                .filter(|coin| dex_of(coin).is_some_and(|d| d == dex))
+            {
+                if core.asset(coin).is_none() {
+                    covered = false;
+                    break;
+                }
+            }
+            if covered {
+                continue;
+            }
+            if !self.gated(crate::feed::budget::weight::HEAVY) {
+                return;
+            }
+            let req = InfoRequest::MetaAndAssetCtxs {
+                dex: Some(dex.clone()),
+            };
+            match self.api.info::<MetaAndAssetCtxs>(&req).await {
+                Ok(MetaAndAssetCtxs(meta, ctxs)) => {
+                    let now = crate::now_ms();
+                    for (asset, ctx) in meta.universe.iter().zip(ctxs) {
+                        self.feed.put_ctx(asset.name.clone(), ctx, now);
+                    }
+                    self.feed.put_dex_meta(dex, meta, now);
+                }
+                Err(e) => self.rest_fault("metaAndAssetCtxs(dex)", &e),
+            }
         }
     }
 
@@ -379,10 +461,46 @@ impl Poller {
     }
 }
 
+/// The dex a perp coin belongs to: `xyz:NVDA` → `xyz`, a core coin
+/// (`BTC`) → `None`. The prefix is the wire's own dex name (the
+/// `metaAndAssetCtxs` `dex` field), so no registry is needed.
+fn dex_of(coin: &str) -> Option<&str> {
+    coin.split_once(':')
+        .map(|(dex, _)| dex)
+        .filter(|dex| !dex.is_empty())
+}
+
+/// The distinct perp dexes the venue's configured markets name, in first-seen
+/// order (deterministic poll order).
+fn configured_dexes(markets: &[String]) -> Vec<String> {
+    let mut dexes: Vec<String> = Vec::new();
+    for dex in markets.iter().filter_map(|coin| dex_of(coin)) {
+        if !dexes.iter().any(|known| known == dex) {
+            dexes.push(dex.to_string());
+        }
+    }
+    dexes
+}
+
 #[cfg(test)]
 mod tests {
-    use super::venue_method_refusal;
+    use super::{configured_dexes, dex_of, venue_method_refusal};
     use reqwest::StatusCode;
+
+    /// The configured market list names its dexes; the poller must fetch each
+    /// one's meta once, in first-seen order (a HIP-3 market's maintenance
+    /// tier is not in the default dex's meta).
+    #[test]
+    fn configured_dexes_are_deduplicated_in_first_seen_order() {
+        let markets: Vec<String> = ["BTC", "xyz:NVDA", "xyz:SOXL", "ETH", "km:JPY"]
+            .iter()
+            .map(|coin| (*coin).to_string())
+            .collect();
+        assert_eq!(configured_dexes(&markets), vec!["xyz", "km"]);
+        assert_eq!(dex_of("xyz:NVDA"), Some("xyz"));
+        assert_eq!(dex_of("BTC"), None);
+        assert_eq!(dex_of(":broken"), None);
+    }
 
     /// A bad request is the venue's answer; an endpoint wall is a failover.
     /// This is the boundary the old `raw_info` collapsed: it retried every

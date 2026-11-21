@@ -38,7 +38,7 @@ pub struct Shadow {
     #[serde(default)]
     pub(crate) account_values: BTreeMap<Address, AccountValues>,
     /// Whole-account ownership for the devnet's fixtures: the
-    /// canonical addresses daloc's deploy replaces via `anvil_setCode` write
+    /// canonical addresses the deployment replaces via `anvil_setCode` write
     /// through *cheatcodes*, which the tx scanner cannot see — without this,
     /// the next parent diff would clobber the mock. Config carries the list;
     /// it is runtime state, never persisted.
@@ -283,6 +283,41 @@ impl Shadow {
 
     pub fn mark_account_fields(&mut self, address: Address) {
         self.accounts.insert(address);
+    }
+
+    /// Record one fixture's runtime code when it is installed.
+    ///
+    /// Fixtures are installed with `anvil_setCode` (the canonical token/feed
+    /// mocks and the venue's read precompiles): the write never appears in a T
+    /// transaction, so [`crate::scan`] cannot record it. Their **storage** is
+    /// recorded — the bridge's `updateAnswer` txs and the deploy's ordinary
+    /// writes — so a re-fork without the code restores mock storage under
+    /// pin-era code. The measured 2026-11-10 chain-1 re-fork did exactly that:
+    /// the guard feeds' `latestRoundData` reverted with empty data (real
+    /// aggregator code reading mock rounds) and every price target was
+    /// codeless. Capture the code once it is installed; [`Self::reapply`] then
+    /// restores the whole fixture on the next same-pin re-fork.
+    ///
+    /// Returns whether the recorded code changed (the caller saves the
+    /// registry only when something moved).
+    pub fn record_fixture_code(&mut self, address: Address, code: &[u8]) -> bool {
+        if code.is_empty() || !self.fixtures.contains(&address) {
+            return false;
+        }
+        let code = Bytes::copy_from_slice(code);
+        let entry = self.account_values.entry(address).or_default();
+        if entry.code.as_ref() == Some(&code) {
+            return false;
+        }
+        entry.code = Some(code);
+        self.accounts.insert(address);
+        true
+    }
+
+    /// The fixture addresses, cloned so an RPC read can run without the
+    /// registry lock held across an await.
+    pub fn fixture_addresses(&self) -> Vec<Address> {
+        self.fixtures.iter().copied().collect()
     }
 
     pub fn mark_slot(&mut self, address: Address, slot: U256) {
@@ -658,6 +693,52 @@ mod tests {
         assert!(text.contains("\"balance\":\"0x0\""), "{text}");
         s.unmark_account_fields(a);
         assert_eq!(s.prune_orphans(), (0, 0));
+    }
+
+    /// A fixture's `anvil_setCode` install is invisible to the tx scanner, so
+    /// the registry captures it explicitly. The capture is idempotent, ignores
+    /// non-fixture addresses, and the recorded code is what `reapply` restores.
+    #[test]
+    fn fixture_code_is_captured_and_restored() {
+        let fixture = Address::repeat_byte(0xf3);
+        let other = Address::repeat_byte(0xf4);
+        let mut s = Shadow::default();
+        s.set_fixtures([fixture].into_iter().collect());
+        assert!(
+            !s.record_fixture_code(other, &[0x60, 0x00]),
+            "not a fixture"
+        );
+        assert!(
+            !s.record_fixture_code(fixture, &[]),
+            "codeless is not a capture"
+        );
+        assert!(
+            s.record_fixture_code(fixture, &[0x60, 0x00, 0x60, 0x00]),
+            "first capture"
+        );
+        assert!(
+            !s.record_fixture_code(fixture, &[0x60, 0x00, 0x60, 0x00]),
+            "idempotent"
+        );
+        assert!(
+            s.record_fixture_code(fixture, &[0x60, 0x01]),
+            "a changed install is recaptured"
+        );
+        let recorded: Option<Vec<u8>> = s
+            .account_values
+            .get(&fixture)
+            .and_then(|v| v.code.as_ref())
+            .map(|b| b.to_vec());
+        assert_eq!(recorded.as_deref(), Some(&[0x60u8, 0x01][..]));
+        assert!(
+            s.accounts.contains(&fixture),
+            "the account is owned so the parent diffs skip it"
+        );
+        assert_eq!(
+            s.unrecorded(),
+            (0, 0),
+            "a captured code is a value, not an unrecorded mark"
+        );
     }
 
     /// Fixture addresses are whole-account owned: the fixture

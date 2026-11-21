@@ -1,19 +1,44 @@
 # The Venue Mirror instance overlay: the venue base + the instance ConfigMap +
-# the harness NodePorts. The diorama-mainnet overlay is untouched: the two
-# mirrors share the cluster and the diorama-retain StorageClass, not a
-# namespace.
+# the harness services. The diorama-mainnet overlay is untouched: the two
+# mirrors share the cluster and the literal claim class, not a namespace.
+#
+# The two mirror overlays are structurally identical (namespace, inventory,
+# harness services, the class literal): a change to one is a change to both,
+# or it is a bug in whichever came first.
+#
+# The CCTP bridge is its own instance/overlay (k8s/overlays/diorama-cctp), so
+# a venue can run without a bridge and a bridge can run without this venue.
+#
+# No wiring ConfigMap: the configuration is the specialization file, mounted
+# into every pod at /etc/mirror/specialization.toml by the instance unit
+# below. There are no config envs and no config Secrets on the k8s side.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: diorama-venue
 
+# The host harness surface (`harness.env`): the loopback forwards the
+# operator chooses (`make port-forward` opens them). The chain ids and
+# in-cluster service DNS are derived by `diorama-config export-env --section
+# client`, never repeated here; no pod reads that map - only the host
+# harness - so it carries no roll-triggering hash.
+configMapGenerator:
+  - name: test-endpoints
+    envs: [harness.env]
+    options:
+      disableNameSuffixHash: true
+
 resources:
   - namespace.yaml
   - ../../base/diorama-venue
-  # This instance's unit (config/instances/diorama-venue): the file every pod
-  # of this instance mounts at /etc/mirror/instance.toml, and its generator.
+  # This instance's unit (config/instances/diorama-venue): the files every
+  # pod of this instance mounts at /etc/mirror, and their generator. The
+  # generator FAILS the build when the specialization is absent.
   - ../../../config/instances/diorama-venue
-  - nodeports.yaml
-  # The CCTP bridge is its own instance/overlay
-  # (k8s/overlays/diorama-cctp), so a venue can run without a bridge and a
-  # bridge can run without this venue.
+
+# The cluster facts every claim and every repo image derives from: the one
+# storage-class substitution point and the one registry point (components/
+# storage, components/registry). Both are shared by all three instances.
+components:
+  - ../../components/storage
+  - ../../components/registry

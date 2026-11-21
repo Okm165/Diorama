@@ -282,7 +282,7 @@ pub fn source_pool(
 /// mainnet's 1697). `applied` counts the mirror's own unit: parent blocks
 /// (T), composed windows (V).
 /// The source's short identity for the steady lines: the URL's host without
-/// the scheme or port (`reth` for the mainnet's local node, the venue's live
+/// the scheme or port (the mainnet's local node, the venue's live
 /// RPC host) — a heartbeat's reader should never have to guess which chain
 /// the numbers describe.
 pub fn source_host(url: &str) -> &str {
@@ -359,6 +359,26 @@ pub async fn halt_gate<E: Engine>(ctx: &E, poll: std::time::Duration) -> bool {
     }
 }
 
+/// The config-declared source capabilities: the union of the pool's endpoint
+/// specs' roles parsed through the config vocabulary. A role that names no
+/// source capability (`batch`, the market planes) maps to `None` and is
+/// skipped — those gate admission, not the composer.
+pub fn config_declared_capabilities(
+    pool: &diorama_anvil::EndpointPool,
+) -> Vec<diorama_config::Capability> {
+    let mut out = Vec::new();
+    for spec in pool.specs() {
+        for role in &spec.roles {
+            if let Some(cap) = diorama_config::Capability::parse(role) {
+                if !out.contains(&cap) {
+                    out.push(cap);
+                }
+            }
+        }
+    }
+    out
+}
+
 pub async fn boot_prefix<E: Engine>(
     ctx: &E,
     anvil: &'static str,
@@ -371,12 +391,33 @@ pub async fn boot_prefix<E: Engine>(
     // would answer every read with the wrong state. Assert the whole pool
     // before the first window is composed.
     ctx.source_rpc().verify_chain(chain_id).await?;
-    crate::source::audit_capabilities(
-        source_what,
-        ctx.mirror().follow_source().capabilities(),
-        ctx.source_rpc(),
-    )
-    .await?;
+    let declared = ctx.mirror().follow_source().capabilities();
+    // The config↔profile cross-check, in the operationally meaningful
+    // direction: every capability the composer *needs* must be claimed by at
+    // least one endpoint in the pool. The inverse (a claimed capability the
+    // composer does not use) is a per-endpoint fact, not an error — the pool
+    // may legitimately carry richer endpoints than this profile consumes.
+    let measured = declared.names();
+    if !measured.is_empty() {
+        let claimed: Vec<crate::source::Capability> =
+            config_declared_capabilities(ctx.source_rpc().pool())
+                .into_iter()
+                .filter_map(crate::source::Capability::from_config)
+                .collect();
+        let unclaimed: Vec<&str> = measured
+            .iter()
+            .filter(|need| !claimed.contains(need))
+            .map(|need| need.name())
+            .collect();
+        if !unclaimed.is_empty() {
+            tracing::warn!(
+                unclaimed = %unclaimed.join(","),
+                "the composer needs capabilities no pool endpoint claims — add them to the \
+                 [endpoints] entries or expect follow failures"
+            );
+        }
+    }
+    crate::source::audit_capabilities(source_what, declared.clone(), ctx.source_rpc()).await?;
     Ok(())
 }
 

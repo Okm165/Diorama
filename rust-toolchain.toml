@@ -1,0 +1,14 @@
+# The toolchain this tree is built and tested with.
+#
+# Pinned for the same reason the manifests pin images: `rust-version` in
+# Cargo.toml is a *minimum* (1.99), and a host with a different default stable
+# would compile a different compiler output than CI without anyone noticing.
+# `make toolchain-check` (part of `make fitness`) keeps this file, the CI pin,
+# and the manifest's rust-version in agreement.
+#
+# rustup selects this automatically from the repository root; a host with the
+# channel absent gets one download, not a version mismatch.
+[toolchain]
+channel = "1.99.1"
+profile = "default"
+components = ["clippy"]

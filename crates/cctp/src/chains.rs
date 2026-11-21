@@ -103,9 +103,12 @@ pub struct Chain {
     pub(crate) message_transmitter: Address,
     /// The chain's TokenMinterV2, when the deployment exposes one.
     pub(crate) token_minter: Option<Address>,
-    /// First block the watcher scans on this chain (0 = genesis; a deep fork
-    /// should pin the deployment block).
-    pub start_block: u64,
+    /// First block the watcher scans on this chain. `None` — the mirror
+    /// deployment's spelling — means "the chain's fork pin": the watcher clamps
+    /// to the pin without a warning, because an omitted start on a pinned chain
+    /// is a statement ("begin at the base"), not a stale number to correct.
+    /// `Some(0)` = genesis, correct but slow on a deep fork.
+    pub start_block: Option<u64>,
 }
 
 impl std::fmt::Debug for Chain {
@@ -132,7 +135,7 @@ impl Chain {
             token_messenger: TOKEN_MESSENGER_V2,
             message_transmitter: MESSAGE_TRANSMITTER_V2,
             token_minter: Some(TOKEN_MINTER_V2),
-            start_block: 0,
+            start_block: None,
         })
     }
 
@@ -148,7 +151,7 @@ impl Chain {
             token_messenger: TOKEN_MESSENGER_V2,
             message_transmitter: MESSAGE_TRANSMITTER_V2,
             token_minter: Some(TOKEN_MINTER_V2),
-            start_block: 0,
+            start_block: None,
         })
     }
 
@@ -182,7 +185,7 @@ impl Chain {
             token_messenger: chain.token_messenger,
             message_transmitter: chain.message_transmitter,
             token_minter: chain.token_minter,
-            start_block: chain.start_block.unwrap_or(0),
+            start_block: chain.start_block,
         })
     }
 
@@ -340,7 +343,7 @@ impl Chain {
     }
 
     /// A devnet stipend: write the native balance directly
-    /// (`anvil_setBalance` — the same substitution daloc's harness makes; T's
+    /// (`anvil_setBalance` — the same substitution the consumer harness makes; T's
     /// engine already runs on cheatcodes). The deployment's block producer
     /// mines nothing here; the balance is chain state, not a transaction.
     pub async fn fund_native(&self, who: Address, amount: U256) -> Result<()> {
@@ -425,7 +428,7 @@ mod tests {
                 token_messenger: TOKEN_MESSENGER_V2,
                 message_transmitter: MESSAGE_TRANSMITTER_V2,
                 token_minter: Some(TOKEN_MINTER_V2),
-                start_block: 0,
+                start_block: None,
             },
             Chain {
                 name: "hyper_evm",
@@ -437,7 +440,7 @@ mod tests {
                 token_messenger: TOKEN_MESSENGER_V2,
                 message_transmitter: MESSAGE_TRANSMITTER_V2,
                 token_minter: Some(TOKEN_MINTER_V2),
-                start_block: 0,
+                start_block: None,
             },
         ];
         assert_eq!(by_domain(&chains, Domain(0)).unwrap().name, "ethereum");

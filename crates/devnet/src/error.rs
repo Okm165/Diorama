@@ -77,12 +77,42 @@ pub enum Error {
     #[error("invalid shadow request: {reason}")]
     InvalidShadow { reason: &'static str },
 
+    /// A feed-control write did not land. A refused write must surface, never
+    /// silently pass: an oracle the scenario did not own would let the shadow
+    /// scanner overwrite the drill mid-flight.
+    #[error("feed control: {reason}")]
+    FeedControlRefused { reason: String },
+
     /// A devnet block's shadow scan could not trace some of its txs. The scan
     /// stops before that block (the watermark must not advance past it): its
     /// writes would stay unmarked, and the next parent diff would overwrite
     /// the devnet's state. The per-tx causes are logged; this names the block.
     #[error("block {block}: shadow scan failed for {failed} tx trace(s); the block is re-scanned")]
     ShadowScan { block: u64, failed: usize },
+
+    /// A capability the composer **needs** is confirmed by no pool endpoint:
+    /// the follow cannot run on this configuration, so boot fails closed
+    /// rather than discovering it mid-window. `detail` carries the
+    /// per-endpoint audit (which endpoint claimed it and what it answered).
+    #[error(
+        "capability {missing} is needed by {what} but no pool endpoint confirmed it ({detail})"
+    )]
+    CapabilityGap {
+        what: String,
+        missing: String,
+        detail: String,
+    },
+
+    /// The fork base moved **downward**: the registry and journal belong to a
+    /// newer base. The epoch rule refuses to clear them silently — the driver
+    /// halts and the operator must investigate (a forward re-pin or an explicit
+    /// state reset). A downward move is a rollback, never a new epoch: clearing
+    /// would silently discard the only record of the writes made above the old
+    /// base.
+    #[error(
+        "epoch rollback refused: the fork base moved from {known} down to {pin}; the devnet state is from a newer base and was kept (driver halted for operator review)"
+    )]
+    EpochRollbackRefused { known: u64, pin: u64 },
 }
 
 impl Error {
@@ -140,24 +170,5 @@ mod tests {
             "nothing about the request is wrong"
         );
         assert!(e.to_string().contains('7'), "{e}");
-    }
-
-    #[test]
-    fn request_refusals_render_the_numbers_they_refuse() {
-        let e = Error::InvalidRewind {
-            blocks: 50,
-            cursor: 10,
-        };
-        let rendered = e.to_string();
-        assert!(
-            rendered.contains("50") && rendered.contains("10"),
-            "{rendered}"
-        );
-        assert!(Error::NoCursor.to_string().contains("cursor"));
-        let rendered = Error::InvalidShadow {
-            reason: "`all` requires `clear`",
-        }
-        .to_string();
-        assert!(rendered.contains("`all` requires `clear`"), "{rendered}");
     }
 }

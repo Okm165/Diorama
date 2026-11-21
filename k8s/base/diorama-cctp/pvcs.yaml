@@ -1,0 +1,25 @@
+# The bridge's own state: watcher cursors + the in-flight message ledger.
+# Owned by the bridge base, not by either mirror: a bridge can run beside a
+# venue or in its own namespace, and a second bridge gets its own claim.
+#
+# The claim is deliberately portable (no `volumeName`): a standalone bridge in
+# a fresh namespace must be able to bind a volume through the StorageClass.
+# The class is the shared `mirror-retain` - the same one object every instance
+# includes, so a bridge-only deployment creates it too - and the overlay's
+# storage component rewrites this field from that object's name (this literal
+# is only the standalone default). The live claim was created under the old
+# `diorama-retain` (the tree's class name before 162bd86 renamed it); a class
+# a bound claim names does not rebind, so that one live claim is reconciled by
+# hand (README, "Moving the stack").
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cctp-state
+  labels: { app.kubernetes.io/part-of: diorama-cctp, app: cctp-bridge }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: mirror-retain
+  resources:
+    requests:
+      storage: 5Gi

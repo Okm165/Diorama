@@ -37,7 +37,7 @@ spec:
             - --execution-jwt=/secrets/jwt.hex
             # Fresh head without a genesis sync. Only used on the first start;
             # restarts reuse the datadir.
-            - --checkpoint-sync-url=$(CHECKPOINT_SYNC_URL)
+            - --checkpoint-sync-url=https://mainnet-checkpoint-sync.stakely.io
             - --checkpoint-sync-url-timeout=120
             # Ops/debug API (sync status, beacon headers) - read-only.
             - --http
@@ -97,8 +97,10 @@ spec:
             # plenty - the container's stdout carries the same stream.
             - --logfile-max-number=2
             - --logfile-max-size=50
-          envFrom:
-            - configMapRef: { name: diorama-config }
+          # No env: the checkpoint-sync URL is the manifest's own literal (a
+          # third-party component's arg, not Diorama configuration); a dead
+          # provider is an operator edit of this line (beaconcha.in's sync
+          # endpoint is the known-good alternative - OPERATIONS, "sync stuck").
           ports:
             - { name: http, containerPort: 5052 }
             - { name: metrics, containerPort: 5054 }

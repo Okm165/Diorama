@@ -1,16 +1,19 @@
-# The Mainnet Mirror's manifest base: reth + the local CL, the devnet Anvil,
-# the engine. The namespace, the instance ConfigMap and the harness NodePorts
-# are the overlay's (instance identity/topology, not service templates) — the
-# same split as k8s/base/diorama-venue.
+# The Mainnet Mirror's manifest base: the devnet Anvil and the engine. Chain 1
+# is read from the source host's reth over the LAN; there is no local reth or
+# CL here. The namespace, the instance unit and the harness map are the
+# overlay's (instance identity/topology, not service templates) — the same
+# split as k8s/base/diorama-venue.
+#
+# The fully local topology is one component away: `components/local-reth`
+# (reth + lighthouse + their claims + the one-time snapshot Job). Enable it
+# when the LAN source must leave the picture; the default stays the LAN source
+# until the local reth has been sourced (a 400 Gi claim and a multi-hour
+# download, not something an apply should start implicitly).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   - ../shared
-  - diorama-config.yaml
-  - reth-config.yaml
   - pvcs.yaml
-  - reth.yaml
-  - lighthouse.yaml
   - anvil-t.yaml
   - engine.yaml

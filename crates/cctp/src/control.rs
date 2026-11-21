@@ -87,7 +87,15 @@ pub(crate) struct HealthResponse {
     pub pending: usize,
     pub signed: usize,
     pub relayed: usize,
+    /// Attested and served, delivered by their `destinationCaller` (the
+    /// cross-chain recovery hooks). Not a failure: the Iris answers them.
+    pub handed_off: usize,
     pub parked: usize,
+    /// Records retired from the live failure count: final for this epoch
+    /// (source burn gone on two consecutive observations). A count, like the
+    /// archive — it does not degrade the bridge, and re-running the transfer
+    /// mints a new record rather than reviving this one.
+    pub retired: usize,
     /// Parked records in the durable archives (outside the live store).
     pub archived_parked: u64,
     pub chains: Vec<ChainHealth>,
@@ -100,6 +108,16 @@ pub(crate) struct HealthResponse {
 pub(crate) struct ChainHealth {
     pub name: &'static str,
     pub domain: Domain,
+    /// The messenger the chain's burns enter (`depositForBurn`). Published so
+    /// an integration client can verify the wiring end to end: a burn whose
+    /// messenger is not this address never reaches this bridge's lanes.
+    pub token_messenger: Address,
+    /// The transmitter whose `MessageSent` log this chain's watcher filters on
+    /// — the one address where a wrong value is **silent** (the watcher sees
+    /// no logs and has nothing to be wrong about). An integration client (the
+    /// DALOC relay's boot check) compares this against the transmitter its own
+    /// deployment records; a disagreement is a wiring drift, not a style.
+    pub message_transmitter: Address,
 }
 
 pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Json<HealthResponse>> {
@@ -120,7 +138,9 @@ pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Jso
         pending: counts.pending,
         signed: counts.signed,
         relayed: counts.relayed,
+        handed_off: counts.handed_off,
         parked: counts.parked,
+        retired: counts.retired,
         archived_parked: state
             .metrics
             .archived_parked
@@ -131,6 +151,8 @@ pub(crate) async fn health(State(state): State<Arc<ControlState>>) -> Result<Jso
             .map(|chain| ChainHealth {
                 name: chain.name,
                 domain: chain.domain,
+                token_messenger: chain.token_messenger,
+                message_transmitter: chain.message_transmitter,
             })
             .collect(),
         watchers,
@@ -260,7 +282,7 @@ pub(crate) struct TransferRequest {
 /// The hook a transfer carries — the credit-carrying lane.
 #[derive(Debug, Deserialize)]
 pub(crate) struct HookSpec {
-    /// The contract the wrapper calls after the mint (e.g. daloc's
+    /// The contract the wrapper calls after the mint (e.g. the consumer's
     /// `ProofExecutor.receiveRecovery(positionId, amount)`).
     pub target: Address,
     /// The call's calldata.
@@ -570,6 +592,7 @@ mod tests {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
+            source_gone_observations: 0,
         };
         let summary = MessageSummary::of(&record);
         assert!(summary.message.starts_with("0x"));

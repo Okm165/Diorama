@@ -1,43 +1,27 @@
-# Persistent volumes for the mirror. All use the diorama-retain StorageClass
-# (reclaimPolicy: Retain) so deleting a PVC never destroys the data.
+# Persistent volumes for the mainnet mirror. Every claim names the shared
+# `mirror-retain` class (reclaimPolicy Retain); the overlay's storage component
+# rewrites that field from the class object's own name, so this literal is only
+# the standalone default and `k8s/base/shared/storageclass.yaml` is the one
+# place a host changes it.
+#
+# No claim pins a `volumeName`: a pre-bound claim names a volume that exists on
+# one machine only, and the manifests must boot on any. A deployment that must
+# re-attach volumes left behind by an earlier run binds them by their PV's
+# claimRef (delete the PVC, keep the PV, re-apply - WaitForFirstConsumer binds
+# the retained volume back); that is a host step, never a tracked literal.
+#
+# The sizes are the *host's disk plan*, not a measurement: k3s' local-path
+# provisioner does not enforce them (the live lighthouse PV is 500Gi under a
+# 1500Gi request), while a CSI provisioner makes them real reservations. Sizes
+# on the move: reth's snapshot+steady state ~300GiB (400Gi request), the CL's
+# 18-day column window + payloads + beacon DB ~330GiB today with a ~900GiB
+# backfill peak (1500Gi request).
 #
 # This file is the mainnet mirror's claims; the Venue Mirror's live in
 # diorama-venue/pvcs.yaml - one file per mirror, because a kustomize overlay
 # composes whole files and must not declare the other mirror's claims.
-#
-# LOCAL (workshop): re-bound to the volumes a previous run left behind
-# (Released PVs from the pre-rename namespaces). volumeName pre-binds each
-# claim to its existing volume; the StorageClass name is the one those PVs
-# carry (mirror-retain is the same local-path/Retain definition).
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: reth-data
-  labels: { app.kubernetes.io/part-of: diorama-mainnet, app: reth }
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: mirror-retain
-  volumeName: pvc-ba8c5267-0d07-4618-8986-005b66f8f239
-  resources:
-    requests:
-      storage: 400Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: lighthouse-data
-  labels: { app.kubernetes.io/part-of: diorama-mainnet, app: lighthouse }
-spec:
-  accessModes: [ReadWriteOnce]
-  storageClassName: mirror-retain
-  volumeName: pvc-01355a6c-d49c-4ba2-9eb6-a944f73e739a
-  resources:
-    requests:
-      # Data columns (PeerDAS semi-supernode, ~18 day availability window,
-      # ~100 GB) + retained execution payloads (backfill to the weak
-      # subjectivity point) + the beacon DB.
-      storage: 1500Gi
+# Chain 1 is read from the source host's reth over the LAN; this host holds no
+# reth/lighthouse claims.
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -47,7 +31,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-29d893f7-61dc-42c5-8e31-0bd2adebcf8d
   resources:
     requests:
       storage: 40Gi
@@ -60,7 +43,6 @@ metadata:
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: mirror-retain
-  volumeName: pvc-d7e4b239-b6ce-4824-977b-604f02c9321d
   resources:
     requests:
       storage: 10Gi

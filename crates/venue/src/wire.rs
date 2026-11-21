@@ -1,9 +1,9 @@
 //! The Hyperliquid info API's wire model (measured live).
 //!
 //! One request enum (the endpoint is a single `POST /info` tagged by `type`)
-//! and the response structs daloc's services read — complete shapes, not
+//! and the response structs the consumer's services read — complete shapes, not
 //! projections: every field the venue sends has a typed home, and the ones
-//! daloc gates on (`positionValue` unsigned with the sign in `szi`,
+//! the consumer gates on (`positionValue` unsigned with the sign in `szi`,
 //! `cumFunding.sinceOpen`, `leverage.type`, `totalRawUsd`) are named in the
 //! rustdoc so a refactor cannot quietly drop them.
 //!
@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 /// Serialize a [`Decimal`] the way the real venue does: at most 9 fractional
 /// digits (nano granularity), trailing zeros trimmed. The sim's `Decimal`
-/// arithmetic keeps wide scales (e.g. `45.9053659690`), and DALOC's
+/// arithmetic keeps wide scales (e.g. `45.9053659690`), and the consumer's
 /// `nanos_from_decimal_str` refuses any string with more than nine fraction
 /// digits — a formatting artifact must not read as a malformed venue response.
 pub(crate) mod decimal_nano {
@@ -119,8 +119,29 @@ pub(crate) enum InfoRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dex: Option<String>,
     },
+    /// Historical candles. The sim composes *live* marks only; the archive is
+    /// the upstream's, and the endpoint pool (roles `market_rest`) is the
+    /// router that serves it — one pool, several URLs, failover included.
+    /// A deployment's history reader therefore reads the venue cell, never a
+    /// hard-coded upstream host.
+    #[serde(rename = "candleSnapshot")]
+    CandleSnapshot {
+        #[serde(default)]
+        req: CandleRequest,
+    },
     #[serde(other)]
     Unrouted,
+}
+
+/// `candleSnapshot`'s `req` body. The fields are the venue's wire names; the
+/// passthrough forwards the original bytes verbatim, so this only parses what
+/// a caller needs for budget accounting and logging.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CandleRequest {
+    #[serde(default)]
+    pub(crate) coin: String,
+    #[serde(default)]
+    pub(crate) interval: String,
 }
 
 impl InfoRequest {
@@ -145,6 +166,7 @@ impl InfoRequest {
             InfoRequest::ExchangeStatus => "exchangeStatus",
             InfoRequest::SpotMeta => "spotMeta",
             InfoRequest::AllMids { .. } => "allMids",
+            InfoRequest::CandleSnapshot { .. } => "candleSnapshot",
             InfoRequest::Unrouted => "unrouted",
         }
     }
@@ -164,7 +186,7 @@ impl InfoRequest {
     }
 }
 
-/// `marginSummary` (and `crossMarginSummary`): the figures daloc reads.
+/// `marginSummary` (and `crossMarginSummary`): the figures the consumer reads.
 ///
 /// `totalRawUsd` is the operator's recall amount — the raw USDC balance with
 /// the positions' cost basis removed (`balance − Σ szi·entryPx`). The served
@@ -183,7 +205,7 @@ pub(crate) struct MarginSummary {
 }
 
 /// One position row. `positionValue` is unsigned on the wire; the side comes
-/// from the sign of `szi` (daloc's exact rule). `liquidationPx` is present
+/// from the sign of `szi` (the venue's exact rule). `liquidationPx` is present
 /// for isolated positions only.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -297,7 +319,7 @@ pub(crate) enum PositionKind {
     OneWay,
 }
 
-/// `clearinghouseState`: the venue account read (daloc's equity + recall).
+/// `clearinghouseState`: the venue account read (the consumer's equity + recall).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClearinghouseState {
@@ -308,7 +330,7 @@ pub(crate) struct ClearinghouseState {
     #[serde(serialize_with = "decimal_nano::serialize")]
     pub withdrawable: Decimal,
     pub asset_positions: Vec<AssetPosition>,
-    /// Milliseconds; the client's staleness gate is ≤6 s against this field.
+    /// Milliseconds; the consumer's staleness gate is ≤6 s against this field.
     pub time: u64,
     /// Whether **any** mark this account's figures were computed from is owned by the
     /// scenario control plane (`crash`/`rally`/`set_price`). A control mark is a
@@ -323,7 +345,7 @@ pub(crate) struct ClearinghouseState {
 pub(crate) struct SpotClearinghouseState {
     pub balances: Vec<SpotBalance>,
     /// The venue's "available after maintenance", per token, as `[token, value]`
-    /// pairs. Served for **unified** accounts — it is the input daloc's client
+    /// pairs. Served for **unified** accounts — it is the input the consumer
     /// reconciles (`available + maintenance == the collateral token's balance`);
     /// empty (and omitted) for standard ones, whose spot side is not read for
     /// equity.
@@ -344,7 +366,7 @@ pub(crate) struct SpotBalance {
     pub entry_ntl: Decimal,
 }
 
-/// `meta`: the perp universe + margin tables. daloc's operator reads
+/// `meta`: the perp universe + margin tables. the operator reads
 /// `universe[].szDecimals` for the wire `sz` of unwind orders.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -373,6 +395,54 @@ impl Meta {
             .iter()
             .find(|(tid, _)| *tid == id)
             .map(|(_, t)| t)
+    }
+
+    /// Merge another **perp dex's** meta into this account-plane view.
+    ///
+    /// The served `meta` answers the default dex only, but an account's
+    /// positions may live on any dex the venue quotes (`markets` carries
+    /// `xyz:*`), and the maintenance lookup is a pure function of the coin's
+    /// asset entry. The merge therefore keeps one view over every market the
+    /// venue can hold.
+    ///
+    /// Margin-table ids are **dex-local**: two dexes may both declare table
+    /// `20` with different tiers. Absorbed tables are renumbered above every
+    /// id already present and the absorbed assets are pointed at their new
+    /// ids, so a lookup can never land on another dex's tiers. A coin already
+    /// present (the core dex repeats, or a duplicate poll) is left as served.
+    pub(crate) fn absorb(&mut self, other: Meta) {
+        let universe: Vec<AssetInfo> = other
+            .universe
+            .into_iter()
+            .filter(|asset| self.asset(&asset.name).is_none())
+            .collect();
+        if universe.is_empty() {
+            // A repeated poll of a covered dex, or a duplicate declaration:
+            // nothing new, and no table rows to renumber.
+            return;
+        }
+        let mut next = self
+            .margin_tables
+            .iter()
+            .map(|(id, _)| *id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut remap: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+        for (id, table) in other.margin_tables {
+            let assigned = *remap.entry(id).or_insert_with(|| {
+                let assigned = next;
+                next = next.saturating_add(1);
+                assigned
+            });
+            self.margin_tables.push((assigned, table));
+        }
+        for mut asset in universe {
+            if let Some(id) = asset.margin_table_id {
+                asset.margin_table_id = Some(remap.get(&id).copied().unwrap_or(id));
+            }
+            self.universe.push(asset);
+        }
     }
 }
 
@@ -504,8 +574,9 @@ pub(crate) fn funding_ctx(mark: &str, oracle: &str) -> AssetCtx {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct MetaAndAssetCtxs(pub Meta, pub Vec<AssetCtx>);
 
-/// `perpDexs`: `[null, …]` (the first dex is null). The sim serves the first
-/// dex only (multi-dex is deferred — docs/INTEGRATION.md).
+/// `perpDexs`: `[null, …]` (the first dex is null). The sim caches and
+/// serves the upstream list verbatim — its order is the HIP-3 asset index's
+/// dex namespace. Per-dex balances/collateral are not modeled.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PerpDex {
@@ -533,7 +604,7 @@ pub(crate) struct PerpDex {
     pub sub_deployers: Vec<(String, Vec<Address>)>,
 }
 
-/// `l2Book`: exactly two sides, ≤20 levels each (daloc's gate). `n` is the
+/// `l2Book`: exactly two sides, ≤20 levels each (the consumer's gate). `n` is the
 /// order count per level.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -645,7 +716,7 @@ pub(crate) struct SpotPair {
     pub is_canonical: bool,
 }
 
-/// `userAbstraction`: the account mode enum (daloc refuses
+/// `userAbstraction`: the account mode enum (the consumer refuses
 /// `portfolioMargin`/`dexAbstraction`; unknown users serve `default`).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -809,7 +880,7 @@ mod tests {
         assert_eq!(r, InfoRequest::Unrouted);
     }
 
-    /// The exact live sample (docs, measured): the identity daloc gates on
+    /// The exact live sample (docs, measured): the identity the consumer gates on
     /// holds numerically on the real wire shape.
     #[test]
     #[allow(
@@ -852,7 +923,7 @@ mod tests {
         }"#;
         let s: ClearinghouseState = serde_json::from_str(raw).unwrap();
         let p = &s.asset_positions[0].position;
-        // The identity daloc gates on: accountValue == totalRawUsd + Σ
+        // The identity the consumer gates on: accountValue == totalRawUsd + Σ
         // signed(positionValue), where the wire's positionValue is unsigned
         // and the sign comes from szi (`|szi|·mark` under the hood).
         let signed = if p.szi.is_sign_negative() {
@@ -1156,23 +1227,13 @@ fn decimal_or_refuse(what: &str, s: &str) -> Result<Decimal> {
 }
 
 impl OrderAction {
-    /// The compact action → the lane's order: the asset index resolves
-    /// through the live meta (unknown = a named refusal), size and limit are
-    /// decimal strings; the tif decides what rests (the sim's `place` owns
-    /// the semantics).
-    pub(crate) fn to_order(
-        &self,
-        meta: Option<&crate::wire::Meta>,
-    ) -> Result<crate::sim::order::Order> {
-        let coin = meta
-            .and_then(|m| m.universe.get(self.a as usize))
-            .map(|a| a.name.clone())
-            .ok_or_else(|| {
-                Error::bad_request(format!(
-                    "unknown asset index {} (the live meta has not landed, or is shorter)",
-                    self.a
-                ))
-            })?;
+    /// The compact action → the lane's order. The caller resolves the asset
+    /// index through the feed (`MarketFeed::coin_of_asset`: the default dex's
+    /// positional indices plus the HIP-3 `100000 + dex_index*10000 +
+    /// universe_index` namespace), so this wire mapping stays independent of
+    /// the feed's cache. Size and limit are decimal strings; the tif decides
+    /// what rests (the sim's `place` owns the semantics).
+    pub(crate) fn to_order(&self, coin: String) -> Result<crate::sim::order::Order> {
         let size: Decimal = decimal_or_refuse("size", &self.s)?;
         let limit_px = match &self.p {
             Some(p) => Some(decimal_or_refuse("limit price", p)?),
@@ -1326,4 +1387,73 @@ pub(crate) struct CancelData {
 pub(crate) struct ExchangeResponse {
     pub status: &'static str,
     pub response: String,
+}
+
+#[cfg(test)]
+mod absorb_tests {
+    use super::Meta;
+
+    fn meta(universe: &str, tables: &str) -> Meta {
+        serde_json::from_str(&format!(
+            r#"{{"universe":[{universe}],"marginTables":[{tables}]}}"#
+        ))
+        .expect("a well-formed meta")
+    }
+
+    /// Two dexes may both number a margin table `20`. Absorbing one into the
+    /// other must renumber, never let the account plane apply another dex's
+    /// tiers: a HIP-3 position silently priced at the core table's leverage
+    /// is the exact failure this merge exists to prevent.
+    #[test]
+    fn an_absorbed_dex_keeps_its_own_margin_tiers() {
+        let mut core = meta(
+            r#"{"name":"BTC","szDecimals":5,"maxLeverage":40,"marginTableId":20}"#,
+            r#"[20,{"description":"","marginTiers":[{"lowerBound":"0","maxLeverage":40}]}]"#,
+        );
+        let xyz = meta(
+            r#"{"name":"xyz:NVDA","szDecimals":2,"maxLeverage":10,"marginTableId":20}"#,
+            r#"[20,{"description":"","marginTiers":[{"lowerBound":"0","maxLeverage":10}]}]"#,
+        );
+
+        core.absorb(xyz);
+
+        assert_eq!(core.asset("BTC").unwrap().margin_table_id, Some(20));
+        let nvda_id = core.asset("xyz:NVDA").unwrap().margin_table_id;
+        assert_ne!(
+            nvda_id,
+            Some(20),
+            "a colliding id is renumbered, never shared"
+        );
+        assert_eq!(
+            core.margin_table("BTC").unwrap().margin_tiers[0].max_leverage,
+            40
+        );
+        assert_eq!(
+            core.margin_table("xyz:NVDA").unwrap().margin_tiers[0].max_leverage,
+            10
+        );
+    }
+
+    /// A repeated poll of the same dex is idempotent: the universe and the
+    /// table list do not grow, so a per-poll absorb cannot inflate the
+    /// account-plane view (or shift an id an asset already points at).
+    #[test]
+    fn absorbing_the_same_dex_twice_changes_nothing() {
+        let mut core = meta(
+            r#"{"name":"BTC","szDecimals":5,"maxLeverage":40,"marginTableId":1}"#,
+            r#"[1,{"description":"","marginTiers":[{"lowerBound":"0","maxLeverage":40}]}]"#,
+        );
+        let xyz = meta(
+            r#"{"name":"xyz:NVDA","szDecimals":2,"maxLeverage":10,"marginTableId":7}"#,
+            r#"[7,{"description":"","marginTiers":[{"lowerBound":"0","maxLeverage":10}]}]"#,
+        );
+        core.absorb(xyz.clone());
+        let once = (core.universe.len(), core.margin_tables.len());
+        core.absorb(xyz);
+        assert_eq!((core.universe.len(), core.margin_tables.len()), once);
+        assert_eq!(
+            core.margin_table("xyz:NVDA").unwrap().margin_tiers[0].max_leverage,
+            10
+        );
+    }
 }

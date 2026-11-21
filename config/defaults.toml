@@ -7,8 +7,10 @@
 # config/instances/<name>/instance.toml. Protocol facts and measured
 # conventions are code constants, not configuration.
 #
-# Merge semantics: deep merge, defaults <- instance <- env; arrays replace,
-# never concatenate; unknown keys are errors at every level.
+# Merge semantics: deep merge, defaults <- specialization <- instance; arrays
+# replace, never concatenate; unknown keys are errors at every level. The
+# specialization (gitignored, file-mounted) is the only per-deployment source
+# of truth: no `${VAR}` reference may appear in any layer.
 
 # The shared endpoint pool policy: every lane (JSON-RPC, REST, WS, beacon)
 # reads this table. A failed endpoint cools for an exponentially growing
@@ -33,13 +35,20 @@ follow_margin_blocks = 2
 [services.engine]
 # The boot wait for the devnet chain (reth unwinding and an anvil re-forking
 # both take minutes on a bad source day; a crash-loop is worse than a slow
-# boot). The venue instance pins its own, shorter budget.
+# boot). The venue instance pins its own, measured budget (the fork-mode
+# anvil's wait).
 boot_timeout_secs = 900
 # The drift log's rotation threshold (one retained generation beside the live
 # file). A deployment's forensic-retention policy, not a protocol constant.
 drift_rotate_bytes = 16777216
 
-[services.engine.reth]
+[services.engine.anvil]
+# The devnet chain the engine drives: the `anvil` endpoint group every mirror
+# specialization declares (the primary URL is the fork/re-pin target). A
+# deployment that names its group differently overrides this here.
+target_url = "@anvil"
+
+[services.engine.source]
 request_timeout_secs = 30
 
 [services.engine.loops]
@@ -53,8 +62,9 @@ max_gap_blocks = 300
 # `chunk_size` (JSON-RPC batch items) is a deployment's endpoint contract, not
 # a global default: it lives in each instance's `[services.engine.loops]`.
 # Prepend rounds: devnet txs mined in their own block before the parent's
-# diffs land (T only; the venue sets 0). A steady stream must not starve the
-# parent block, so the drain is bounded by this explicit round budget.
+# diffs land. Only the mainnet profile reads this; the venue profile forces
+# prepending off in code (`crates/venue/src/profile.rs`), so a venue instance
+# never states it.
 prepend_rounds = 3
 # The follow-status heartbeat (one line per interval).
 status_log_interval_ms = 60000
@@ -85,16 +95,26 @@ request_timeout_secs = 180
 
 [services.engine.journal]
 blocks = 1024
+# The journal lives on the engine's own state root: one ring per deployment.
+# `/state` is the manifests' PVC mount path (a workspace convention); a
+# deployment whose state root differs overrides `state_dir` and this path
+# together in its specialization.
+dir = "/state/journal"
 
 [services.engine.beacon]
-# Beacon-API base URLs, tried in order (local Lighthouse first). The top-up
-# loop is the only reader (EIP-8379); the instance supplies the URL.
+# Beacon-API base URLs, tried in order. The top-up loop is the only reader
+# (EIP-8379); the mainnet instance supplies the local CL's group, a profile
+# without a consensus client leaves this empty (no beacon sources).
 urls = []
 # The beacon REST request budget.
 request_timeout_secs = 30
 
 [services.engine.http]
 addr = "0.0.0.0"
+# The engine's admin/status API. A workspace convention (the manifests' and
+# the harness's derived URLs are built from it): an instance overrides only
+# to avoid a collision on one machine.
+port = 8080
 
 # ---- the venue profile ----------------------------------------------------
 # The venue engine is the same `[services.engine]` section: its
@@ -128,9 +148,14 @@ admin_timeout_secs = 45
 
 [services.venue_sim.info]
 addr = "0.0.0.0"
+# The client-facing info API; the harness's `HL_INFO_API_URL` derives from it.
+port = 8090
 
 [services.venue_sim.control]
 addr = "0.0.0.0"
+# The venue's control API (admin drills); the harness's control URL derives
+# from it.
+port = 8091
 
 # ---- the CCTP bridge (optional; either profile) ----------------------------
 # The bridge spans both mirrors: T (Ethereum, domain 0) and V (HyperEVM,
@@ -170,12 +195,17 @@ status_log_interval_ms = 60000
 # Who drives relays: `auto` (the relayer's tick) or `manual` (only
 # `POST /control/relay` — deterministic expiry/reattest tests).
 relayer = "auto"
-# Gas alerts, daloc's defaults: warn below 0.1 ETH, error below 0.01 ETH.
+# Gas alerts, the deployment defaults: warn below 0.1 ETH, error below 0.01 ETH.
 balance_low_wei = "100000000000000000"
 balance_critical_wei = "10000000000000000"
 
 [services.cctp_bridge.iris]
 addr = "0.0.0.0"
+# The Iris-compatible API the consumer relay points at.
+port = 8095
 
 [services.cctp_bridge.control]
 addr = "0.0.0.0"
+# The bridge's control API: it can spend the relay wallet, so the harness
+# forwards it on loopback only, never a NodePort.
+port = 8096

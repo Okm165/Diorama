@@ -6,13 +6,14 @@
 #   the 10,064-block state window, live block bodies and receipts.
 #
 #   Resumable by default (.part + Range), so a killed pod just continues.
-#   Run `make mainnet-snapshot` (which scales reth down first - the downloader refuses
+#   Run `make snapshot INSTANCE=diorama-mainnet` (which scales reth down first - the downloader refuses
 #   to run while the node holds the database lock).
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: reth-snapshot
-  namespace: diorama-mainnet
+  # The namespace is the instance's (the overlay's `namespace:` transform);
+  # the Job is applied from a mirror's own namespace context.
   labels:
     app.kubernetes.io/name: reth-snapshot
     app.kubernetes.io/part-of: diorama-mainnet
@@ -31,28 +32,38 @@ spec:
       containers:
         - name: download
           image: ghcr.io/paradigmxyz/reth:v2.8.0@sha256:796c866410171459946d6607301ad728a1b150ea0aa05623cf6bdf79cd3e3322
+          # The snapshot source: reth proposes its own newest mainnet
+          # snapshot when the flag is absent (https://snapshots.reth.rs). An
+          # offline mirror stages the snapshot on the node manually (a
+          # `file:///path` needs reth's own downloader, so it is a one-off
+          # `kubectl run` with `--url=`, not a manifest value - no config
+          # envs on the k8s side).
+          command: ["/bin/sh", "-c"]
           args:
-            - download
-            - --chain=mainnet
-            # Explicit component selection instead of the --minimal preset, so
-            # the snapshot matches the runtime prune profile (receipts/bodies
-            # 20k, account/storage history 10,064) and no surplus is downloaded
-            # only to be pruned on first start. The state itself (~266 GB) is
-            # the bulk and cannot be trimmed.
-            #
-            # RocksDB stays: it holds the EIP-7928 BAL store that the engine's
-            # diff applier and convergence repair read via
-            # eth_getBlockAccessList. `--without-rocksdb` would break them.
-            - --with-txs-distance=20000
-            - --with-receipts-distance=20000
-            - --with-state-history-distance=10064
-            - --with-senders
-            - --with-rocksdb
-            - --non-interactive
-            - --resumable
-            - --download-concurrency=16
-            - --datadir=/data
-            - --color=never
+            - |
+              set -eu
+              echo "snapshot source: reth's own default"
+              # Explicit component selection instead of the --minimal preset,
+              # so the snapshot matches the runtime prune profile
+              # (receipts/bodies 20k, account/storage history 10,064) and no
+              # surplus is downloaded only to be pruned on first start. The
+              # state itself (~266 GB) is the bulk and cannot be trimmed.
+              #
+              # RocksDB stays: it holds the EIP-7928 BAL store that the engine's
+              # diff applier and convergence repair read via
+              # eth_getBlockAccessList. `--without-rocksdb` would break them.
+              exec reth download \
+                --chain=mainnet \
+                --with-txs-distance=20000 \
+                --with-receipts-distance=20000 \
+                --with-state-history-distance=10064 \
+                --with-senders \
+                --with-rocksdb \
+                --non-interactive \
+                --resumable \
+                --download-concurrency=16 \
+                --datadir=/data \
+                --color=never
           volumeMounts:
             - { name: data, mountPath: /data }
           resources:

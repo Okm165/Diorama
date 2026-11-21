@@ -116,7 +116,7 @@ async fn selftest_cmd(
                             issues: vec!["profile \"mainnet\" requires [services.engine]".into()],
                         })
                     })?
-                    .reth
+                    .source
                     .request_timeout_secs = timeout_secs;
                 selftest::run(cfg, targets, blocks).await
             })
@@ -128,11 +128,11 @@ async fn selftest_cmd(
 /// The `rewind` subcommand: undo the last N applied parent blocks on T.
 async fn rewind_cmd(config: std::path::PathBuf, blocks: u64) -> Result<()> {
     let (cfg, unresolved) = Instance::inspect(&config)?;
-    let (reth, t) = cfg.mainnet_urls()?;
-    let mut endpoints: Vec<&str> = reth.iter().collect();
-    endpoints.push(&t);
+    let (source_urls, target_url) = cfg.mainnet_urls()?;
+    let mut endpoints: Vec<&str> = source_urls.iter().collect();
+    endpoints.push(&target_url);
     require_wiring(&cfg, &unresolved, "mainnet engine wiring", &endpoints)?;
-    let ctx = Ctx::new(cfg, &reth, &t)?;
+    let ctx = Ctx::new(cfg, &source_urls, &target_url)?;
     let out = ctx.admin().rewind(blocks).await?;
     println!(
         "rewound {blocks} block(s): {} values restored, cursor_t now {}",
@@ -174,8 +174,8 @@ impl diorama_devnet::engine::EngineService for Ctx {
 
     fn log_start(ctx: &Self) {
         tracing::info!(
-            reth = %ctx.reth.url(),
-            anvil_t = %ctx.anvil_t.url(),
+            source = %ctx.source_rpc.url(),
+            anvil_t = %ctx.target_rpc.url(),
             follow = ctx.follow_tag(),
             watchlist = ctx.mirror.scope().watch().accounts.len(),
             "mirror engine starting"

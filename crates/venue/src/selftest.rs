@@ -36,7 +36,7 @@ pub async fn run(
     // reconcile (which anchors the cursor and the follow at V's pin), and the
     // at-pin probes — a boot fault is the selftest's first failure.
     crate::driver::boot(&ctx).await?;
-    let pin = diorama_devnet::pin::fork_pin(&ctx.anvil_v, "anvil-v").await?;
+    let pin = diorama_devnet::pin::fork_pin(&ctx.target_rpc, "anvil-v").await?;
 
     diorama_devnet::engine::selftest_banner(
         "venue engine selftest",

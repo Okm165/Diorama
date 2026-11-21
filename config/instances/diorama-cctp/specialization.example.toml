@@ -1,0 +1,80 @@
+# Project specialization for the CCTP bridge — gitignored.
+#
+# This file is the deployment's ONLY config source beyond the shared
+# defaults: every value below is hardcoded here (endpoints, the state root,
+# the relay wallet's key), and no `${VAR}` reference may appear — the file is
+# mounted into the pod as a file. The relay key is secret material and is
+# safe here because the specialization is gitignored; a Secret would be a
+# second home for the same fact. `specialization.example.toml` is the tracked
+# template.
+
+# Endpoint capability claims are verified endpoint-by-endpoint at boot (the
+# capability audit, `crates/devnet/src/source.rs::audit_capabilities`); the
+# wire facts behind them are measured with `scripts/probe-endpoint.sh`, which
+# is also the re-probe for provider drift - a claim lives exactly as long as
+# the provider's behavior does.
+
+[endpoints.t_rpc]
+# T lives in the mirror's namespace; the bridge reaches it cross-namespace.
+http = ["http://anvil-t.diorama-mainnet.svc.cluster.local:8545"]
+chain_id = 1
+
+[endpoints.anvil]
+http = ["http://anvil-v.diorama-venue.svc.cluster.local:8545"]
+chain_id = 999
+
+[services.cctp_bridge]
+# The state root on the bridge pod's own PVC, and the funded relay wallet's
+# hex key (0x + 64 hex chars). Replace the key below with the real one.
+state_dir = "/state"
+relay_key = "0x5959595959595959595959595959595959595959595959595959595959595959"
+
+[[services.cctp_bridge.chains]]
+id = "ethereum"
+family = "ethereum"
+chain_id = 1
+domain = 0
+rpc_urls = "@t_rpc"
+usdc = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+# The messenger/transmitter addresses are deployment facts: Circle's V2 pair is
+# a shared CREATE2 constant, so a fork whose base carries the production stack
+# serves the **real contracts** there (verified: ERC-1967 proxies, per-chain
+# implementations) and the mirror's only mutation is its attester — the
+# authority (`attesterManager()`) is impersonated, the signature verification
+# stays real (crates/cctp/attester.rs). On a base **without** the production
+# stack, the impersonation installer (crates/cctp/impersonation, `install.sh`)
+# writes a faithful surface at these same addresses. The minter key names the
+# deployment's minter; absent, the bridge skips the localMinter assertion.
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+token_minter = "0xfd78EE919681417d192449715b2594ab58f5D002"
+
+[[services.cctp_bridge.chains]]
+id = "hyperevm"
+family = "hyperliquid"
+chain_id = 999
+domain = 19
+rpc_urls = "@anvil"
+usdc = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+token_messenger = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+message_transmitter = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+token_minter = "0xfd78EE919681417d192449715b2594ab58f5D002"
+
+[[services.cctp_bridge.lanes]]
+source = "ethereum"
+destination = "hyperevm"
+# The measured Iris table for this lane: fast burns cost 1 unit at
+# threshold 1000; standard is free.
+fees = [
+  { finalityThreshold = 1000, minimumFee = 1 },
+  { finalityThreshold = 2000, minimumFee = 0 },
+]
+
+[[services.cctp_bridge.lanes]]
+source = "hyperevm"
+destination = "ethereum"
+# HyperEVM has no fast lane; both thresholds are free (measured).
+fees = [
+  { finalityThreshold = 1000, minimumFee = 0 },
+  { finalityThreshold = 2000, minimumFee = 0 },
+]

@@ -60,7 +60,7 @@ struct TDriftEntry<'a> {
 /// and mine the aligned parent block. Returns the writes applied.
 async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[Write]) -> Result<usize> {
     let applied =
-        diorama_anvil::apply_writes(&ctx.anvil_t, filtered, ctx.engine.loops.chunk_size).await?;
+        diorama_anvil::apply_writes(&ctx.target_rpc, filtered, ctx.engine.loops.chunk_size).await?;
     let policies = ctx.mirror.policies();
     // The profile's clock rule: the applied block's context is the parent's
     // (aligned to timestamp + the plane's live offset) or the devnet's own.
@@ -70,7 +70,7 @@ async fn write_and_mine(ctx: &Ctx, header: &Header, filtered: &[Write]) -> Resul
     // The profile's production rule: one T block per applied parent block
     // (T's cadence is the devnet's); a pool-drain profile mines elsewhere.
     if policies.mine == MinePolicy::PerAppliedBlock {
-        ctx.anvil_t.anvil_mine(1).await?;
+        ctx.target_rpc.anvil_mine(1).await?;
     }
     Ok(applied)
 }
@@ -156,11 +156,11 @@ pub(crate) async fn step(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
     let started = Instant::now();
     let header = ctx.mirror.source().header(n).await?;
 
-    let t_head = ctx.anvil_t.block_number().await?;
+    let t_head = ctx.target_rpc.block_number().await?;
     // The base this apply started under: `plan_and_check_base` aborts if a
     // re-pin races the (slow) compose, before any write; the next pass
     // reconciles (the cursor sits below the base → the epoch rule).
-    let base = ctx.anvil_t.fork_block().await?;
+    let base = ctx.target_rpc.fork_block().await?;
     let (reapply, reapply_from) = match apply_entry(ctx, n, t_head, started).await? {
         ApplyEntry::Late(outcome) => return Ok(outcome),
         ApplyEntry::Proceed {
@@ -173,14 +173,14 @@ pub(crate) async fn step(ctx: &Ctx, n: u64) -> Result<ApplyOutcome> {
 
     let plan = plan_and_check_base(ctx, n, base).await?;
     let entries =
-        diorama_devnet::journal::read_before_values(&ctx.anvil_t, &plan.writes, t_head).await?;
+        diorama_devnet::journal::read_before_values(&ctx.target_rpc, &plan.writes, t_head).await?;
 
     let applied = write_and_mine(ctx, &header, &plan.writes).await?;
     journal_and_scan(ctx, n, &entries, t_head).await?;
     // The parent-stream continuity marker (reorg detection reads it).
     ctx.plane.state.set_source_last(n, header.hash)?;
 
-    let t_latest = ctx.anvil_t.block_number().await?;
+    let t_latest = ctx.target_rpc.block_number().await?;
     let (sampled, sampled_ok) = parity_step(ctx, n, &plan.writes, t_latest).await?;
 
     finalize(
@@ -226,7 +226,7 @@ async fn plan_and_check_base(
     }
     .plan(&ctx.plane.shadow, diorama_devnet::bal::Window::single(n))
     .await?;
-    if ctx.anvil_t.fork_block().await? != base {
+    if ctx.target_rpc.fork_block().await? != base {
         return Err(Error::ResetDuringApply { n });
     }
     Ok(plan)
@@ -308,7 +308,7 @@ fn report_applied(plane: &Plane, n: u64, facts: &ApplyFacts, outcome: &ApplyOutc
 /// cursor written through the spine's one cursor step.
 async fn advance_cursor(ctx: &Ctx, n: u64) -> Result<()> {
     let block = ctx
-        .anvil_t
+        .target_rpc
         .block_by_number(n, diorama_anvil::Txs::Hashes)
         .await?;
     diorama_devnet::state::advance_cursor(&ctx.plane.state, &block, n)?;
@@ -415,16 +415,16 @@ async fn late_completion(ctx: &Ctx, n: u64, t_head: u64, started: Instant) -> Re
 async fn align_context(ctx: &Ctx, header: &Header) -> Result<()> {
     let offset = ctx.plane.time_offset.load(Ordering::Relaxed);
     let last_ts = ctx
-        .anvil_t
+        .target_rpc
         .block_by_number(
-            ctx.anvil_t.block_number().await?,
+            ctx.target_rpc.block_number().await?,
             diorama_anvil::Txs::Hashes,
         )
         .await?
         .header
         .timestamp;
     let ts = (header.timestamp + offset).max(last_ts.saturating_add(1));
-    if let Err(e) = ctx.anvil_t.set_next_block_context(ts, header).await {
+    if let Err(e) = ctx.target_rpc.set_next_block_context(ts, header).await {
         tracing::warn!(error = %e, "context alignment failed");
     }
     Ok(())

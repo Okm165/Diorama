@@ -46,11 +46,11 @@ pub(crate) async fn read_decimals(rpc: &diorama_anvil::Rpc, aggregator: Address)
 /// on; a present-but-mismatched target or an unexpected fault is a boot error
 /// naming itself (a mis-scaled answer poisons consumers).
 pub(crate) async fn target_decimals(
-    anvil_t: &diorama_anvil::Rpc,
+    target_rpc: &diorama_anvil::Rpc,
     feed: &FeedSection,
     source: u8,
 ) -> Result<Option<u8>> {
-    match read_decimals(anvil_t, feed.target).await {
+    match read_decimals(target_rpc, feed.target).await {
         Ok(d) if d == source => Ok(Some(d)),
         Ok(d) => Err(Error::FeedBridgeDecimals {
             feed: feed.name.clone(),
@@ -74,13 +74,40 @@ pub(crate) async fn target_decimals(
 }
 
 pub(crate) async fn read_answer(rpc: &diorama_anvil::Rpc, aggregator: Address) -> Result<i128> {
+    Ok(read_answer_with_stamp(rpc, aggregator).await?.0)
+}
+
+/// The answer and the source round's own `updatedAt`.
+///
+/// The stamp is the **heartbeat** signal: Chainlink republishes a round on its
+/// heartbeat even when the answer has not moved. The bridge must propagate that
+/// publication, not just answer changes, or a guard feed with a 2 h max-age goes
+/// stale in a quiet market even though its source is alive. The target mock's
+/// stamp is the block that mined the bridge's write; the source stamp is the
+/// parent-chain round's, so the two are compared only through the bridge's own
+/// last-published stamp, never against each other.
+pub(crate) async fn read_answer_with_stamp(
+    rpc: &diorama_anvil::Rpc,
+    aggregator: Address,
+) -> Result<(i128, u64)> {
     let decoded = rpc
         .call_decode(aggregator, &AggregatorV3Interface::latestRoundDataCall {})
         .await?;
-    decoded.answer.try_into().map_err(|_| Error::FeedBridgeAbi {
-        what: "latestRoundData() answer",
-        detail: "does not fit i128".into(),
-    })
+    let answer = decoded
+        .answer
+        .try_into()
+        .map_err(|_| Error::FeedBridgeAbi {
+            what: "latestRoundData() answer",
+            detail: "does not fit i128".into(),
+        })?;
+    let stamp = decoded
+        .updatedAt
+        .try_into()
+        .map_err(|_| Error::FeedBridgeAbi {
+            what: "latestRoundData() updatedAt",
+            detail: "does not fit u64".into(),
+        })?;
+    Ok((answer, stamp))
 }
 
 pub(crate) async fn publish(
@@ -99,6 +126,9 @@ pub(crate) async fn publish(
         .from(writer)
         .to(aggregator)
         .input(call.abi_encode().into());
-    rpc.send_transaction(tx).await?;
+    // The receipt, not the hash: a reverted `updateAnswer` still mines, and
+    // treating its hash as success made the bridge re-publish forever with
+    // `last_error: null` (measured 2026-11-12).
+    rpc.send_transaction_confirmed(tx).await?;
     Ok(())
 }

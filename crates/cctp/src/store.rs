@@ -26,9 +26,24 @@ pub(crate) enum RelayState {
     Signed,
     /// `receiveMessage` landed (or the nonce was already consumed on-chain).
     Relayed,
+    /// Attested and **served** (the Iris answers it), but the message names
+    /// another `destinationCaller`: delivery is that integrator's job, not this
+    /// bridge's. Production Circle attests every message and delivers none; a
+    /// mirror that withheld the attestation would make a cross-chain recovery
+    /// (whose wrapper is the caller) unreceivable end to end. Distinct from
+    /// `Parked`, which is a definitive failure.
+    HandedOff,
     /// A definitive failure (a mined revert, or repeated send refusals); kept
     /// visible, never retried silently.
     Parked,
+    /// Final for the current chain history: the record was parked, re-armed
+    /// (reattest) and its source burn was found gone **again** — two
+    /// consecutive observations. The transfer can never be relayed in this
+    /// epoch; re-running it is a NEW transfer, not this record. Retired records
+    /// are reported as a count (like archived records), not as live parked
+    /// failures: they must not pin the relay — and every capacity consumer
+    /// behind it — degraded forever on a devnet that rewinds.
+    Retired,
 }
 
 /// One watched burn and everything the service knows about it.
@@ -76,6 +91,13 @@ pub(crate) struct MessageRecord {
     /// Why a parked message was parked, in the boundary's own words.
     #[serde(default)]
     pub park_reason: Option<String>,
+    /// Consecutive source-burn-gone observations. The two-observation proof
+    /// that a transfer is final for this chain history is carried **on the
+    /// record**, not inferred from its state: the first observation parks the
+    /// record and takes it out of the relay set, so a state-based test could
+    /// never see the second one. Reset whenever the burn exists again.
+    #[serde(default)]
+    pub source_gone_observations: u32,
 }
 
 impl MessageRecord {
@@ -120,7 +142,13 @@ pub struct Counts {
     pub pending: usize,
     pub signed: usize,
     pub relayed: usize,
+    /// Attested and served, but addressed to another consumer — this bridge
+    /// does not deliver it (no failure, no health degradation).
+    pub handed_off: usize,
     pub parked: usize,
+    /// Records retired from the live failure count: final for this epoch's
+    /// history (the source burn is gone twice-observed).
+    pub retired: usize,
 }
 
 impl Counts {
@@ -131,7 +159,9 @@ impl Counts {
                 RelayState::Pending => counts.pending += 1,
                 RelayState::Signed => counts.signed += 1,
                 RelayState::Relayed => counts.relayed += 1,
+                RelayState::HandedOff => counts.handed_off += 1,
                 RelayState::Parked => counts.parked += 1,
+                RelayState::Retired => counts.retired += 1,
             }
         }
         counts
@@ -324,6 +354,7 @@ mod tests {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
+            source_gone_observations: 0,
         }
     }
 

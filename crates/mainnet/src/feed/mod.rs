@@ -1,7 +1,7 @@
 //! The feed bridge: the parent chain's live feed answers
 //! → `updateAnswer` on the devnet's mock aggregators.
 //!
-//! Why it exists: daloc's harness periodically re-publishes its own mock
+//! Why it exists: the consumer harness periodically re-publishes its own mock
 //! answers; in mirror mode **the bridge is the single price writer** for the
 //! mock aggregators (their refresher is off, §17.2). The value's source is the
 //! *parent chain's* aggregator for the same feed (the mirror is a mainnet
@@ -27,6 +27,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use alloy_primitives::Address;
 use diorama_config::FeedSection;
+use diorama_devnet::facts::Fact;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -34,7 +35,8 @@ use std::time::Duration;
 pub(crate) use http::admin_routes;
 
 use crate::feed::chainlink::{
-    publish, read_answer, read_decimals, read_target_decimals, target_decimals,
+    publish, read_answer, read_answer_with_stamp, read_decimals, read_target_decimals,
+    target_decimals,
 };
 pub(crate) use crate::feed::metrics::FeedBridgeMetrics;
 use crate::feed::policy::{step, Step, ValueState};
@@ -110,7 +112,7 @@ impl FeedRuntime {
     /// The target's decimals, resolved the first time the target is readable
     /// and cached. `None` = not installed yet (the decode of an empty return
     /// is the *fact*; a transport fault still surfaces).
-    async fn decimals(&self, anvil_t: &diorama_anvil::Rpc) -> Result<Option<u8>> {
+    async fn decimals(&self, target_rpc: &diorama_anvil::Rpc) -> Result<Option<u8>> {
         if let Some(d) = *self
             .decimals
             .lock()
@@ -118,7 +120,7 @@ impl FeedRuntime {
         {
             return Ok(Some(d));
         }
-        let Some(decoded) = read_target_decimals(anvil_t, self.section.target).await? else {
+        let Some(decoded) = read_target_decimals(target_rpc, self.section.target).await? else {
             // An empty return does not decode: the *fact* is "no code yet".
             return Ok(None);
         };
@@ -187,15 +189,14 @@ impl FeedBridge {
     /// an unreachable *source* is a boot fault naming it (a silently
     /// mis-scaled price would poison every scenario).
     async fn feed_runtime(ctx: &Ctx, feed: &FeedSection) -> Result<FeedRuntime> {
-        let source =
-            read_decimals(&ctx.reth, feed.source)
-                .await
-                .map_err(|e| Error::FeedBridgeFeed {
-                    feed: feed.name.clone(),
-                    what: "source decimals",
-                    source: Box::new(e),
-                })?;
-        let decimals = target_decimals(&ctx.anvil_t, feed, source).await?;
+        let source = read_decimals(&ctx.source_rpc, feed.source)
+            .await
+            .map_err(|e| Error::FeedBridgeFeed {
+                feed: feed.name.clone(),
+                what: "source decimals",
+                source: Box::new(e),
+            })?;
+        let decimals = target_decimals(&ctx.target_rpc, feed, source).await?;
         Ok(FeedRuntime {
             section: feed.clone(),
             values: Mutex::new(ValueState::default()),
@@ -206,7 +207,14 @@ impl FeedBridge {
         })
     }
 
-    /// Run forever: one pass per `poll_interval_ms`.
+    /// Run forever: one pass per applied source block, with the configured
+    /// interval as the reconciliation net.
+    ///
+    /// A source feed answer can only move in a source block, and the applier
+    /// mirrors every one, so `ctx.feed_wake` is the primary cadence. The timer
+    /// remains for the cases the wake cannot cover (a heartbeat re-stamp the
+    /// applier did not surface, a bridge that started after the block, a
+    /// source read that failed transiently).
     pub async fn run(self: Arc<Self>, ctx: Arc<Ctx>) {
         loop {
             for feed in &self.feeds {
@@ -224,47 +232,105 @@ impl FeedBridge {
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 }
             }
-            tokio::time::sleep(self.poll).await;
+            tokio::select! {
+                biased;
+                _ = ctx.feed_wake.notified() => {}
+                _ = tokio::time::sleep(self.poll) => {}
+            }
         }
     }
 
     /// One feed, one pass.
+    #[allow(clippy::too_many_lines)] // one state machine: the step arms are the protocol
     async fn pass_one(&self, ctx: &Ctx, feed: &FeedRuntime) -> Result<()> {
         if feed.owner.load() == FeedOwner::Scenario {
             return Ok(());
         }
-        let Some(decimals) = feed.decimals(&ctx.anvil_t).await? else {
-            // The target is not installed yet; wait (the read retries each
-            // pass and the feed starts publishing the moment it appears).
+        let Some((decimals, target_now, source_now, source_stamp)) =
+            self.read_state(ctx, feed).await?
+        else {
             return Ok(());
-        };
-        let source_now = read_answer(&ctx.reth, feed.section.source).await?;
-        let target_now = match read_answer(&ctx.anvil_t, feed.section.target).await {
-            Ok(value) => value,
-            Err(e @ Error::FeedBridgeAbi { .. }) => {
-                forget_target(feed, &e);
-                return Ok(());
-            }
-            Err(e) => return Err(e),
         };
         let state = feed_state(feed);
         let now = crate::now_ms();
-        match step(state, target_now, source_now, now, self.confirm_window_ms) {
+        match step(
+            state,
+            target_now,
+            source_now,
+            source_stamp,
+            now,
+            self.confirm_window_ms,
+        ) {
             Step::Confirm => {
-                confirm(feed);
+                if let Some((answer, source_stamp)) = confirm(feed) {
+                    ctx.plane.facts.publish(Fact::FeedConfirmed {
+                        chain: "t",
+                        feed: feed.section.name.clone(),
+                        target: feed.section.target,
+                        answer,
+                        source_stamp,
+                    });
+                }
                 Ok(())
             }
             Step::WaitPending | Step::SkipUnchanged => Ok(()),
             Step::Publish(answer) => {
-                publish(&ctx.anvil_t, feed.section.target, self.writer, answer).await?;
-                record_publish(feed, &self.metrics, answer, now);
-                tracing::info!(feed = %feed.section.name, answer, decimals, "feed bridge published");
+                publish(&ctx.target_rpc, feed.section.target, self.writer, answer).await?;
+                record_publish(feed, &self.metrics, answer, source_stamp, now);
+                ctx.plane.facts.publish(Fact::FeedPublished {
+                    chain: "t",
+                    feed: feed.section.name.clone(),
+                    target: feed.section.target,
+                    answer,
+                    source_stamp,
+                });
+                tracing::info!(feed = %feed.section.name, answer, source_stamp, decimals, "feed bridge published");
                 Ok(())
             }
             Step::Pause { found } => {
                 pause_feed(feed, &self.metrics, state, found);
+                ctx.plane.facts.publish(Fact::FeedPaused {
+                    chain: "t",
+                    feed: feed.section.name.clone(),
+                    target: feed.section.target,
+                    found,
+                });
                 Ok(())
             }
+        }
+    }
+
+    /// One pass's chain reads: the target's installed decimals/answer and the
+    /// source's answer/stamp. `None` means wait (the target is absent or was
+    /// just forgotten).
+    async fn read_state(
+        &self,
+        ctx: &Ctx,
+        feed: &FeedRuntime,
+    ) -> Result<Option<(u8, i128, i128, u64)>> {
+        let Some(decimals) = feed.decimals(&ctx.target_rpc).await? else {
+            // The target is not installed yet; wait (the read retries each
+            // pass and the feed starts publishing the moment it appears).
+            return Ok(None);
+        };
+        let (source_now, source_stamp) =
+            read_answer_with_stamp(&ctx.source_rpc, feed.section.source).await?;
+        let Some(target_now) = self.target_answer(ctx, feed).await? else {
+            return Ok(None);
+        };
+        Ok(Some((decimals, target_now, source_now, source_stamp)))
+    }
+
+    /// The target's answer; a bridge-ABI fault forgets the target so the next
+    /// pass re-installs it, and a missing target is a wait.
+    async fn target_answer(&self, ctx: &Ctx, feed: &FeedRuntime) -> Result<Option<i128>> {
+        match read_answer(&ctx.target_rpc, feed.section.target).await {
+            Ok(value) => Ok(Some(value)),
+            Err(e @ Error::FeedBridgeAbi { .. }) => {
+                forget_target(feed, &e);
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -283,7 +349,9 @@ impl FeedBridge {
                     source: format!("{:?}", f.section.source).to_lowercase(),
                     owner: f.owner.load(),
                     confirmed_answer: values.confirmed,
+                    confirmed_source_stamp: values.confirmed_source_stamp,
                     pending_answer: values.pending,
+                    pending_source_stamp: values.pending_source_stamp,
                     pending_since_ms: values.pending_since_ms,
                     last_error: f
                         .last_error
@@ -312,10 +380,12 @@ impl FeedBridge {
     pub fn resume(&self, name: &str) -> Result<()> {
         let feed = self.find(name)?;
         feed.owner.store(FeedOwner::Bridge);
-        feed.values
+        let mut state = feed
+            .values
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .confirmed = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.confirmed = None;
+        state.confirmed_source_stamp = None;
         Ok(())
     }
 
@@ -324,22 +394,23 @@ impl FeedBridge {
     /// empty address would report success and change nothing.
     pub async fn override_answer(
         &self,
-        anvil_t: &diorama_anvil::Rpc,
+        target_rpc: &diorama_anvil::Rpc,
         name: &str,
         answer: i128,
     ) -> Result<()> {
         let feed = self.find(name)?;
-        if feed.decimals(anvil_t).await?.is_none() {
+        if feed.decimals(target_rpc).await?.is_none() {
             return Err(Error::FeedBridgeWaiting {
                 feed: name.to_string(),
             });
         }
-        publish(anvil_t, feed.section.target, self.writer, answer).await?;
+        publish(target_rpc, feed.section.target, self.writer, answer).await?;
         let mut state = feed
             .values
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.pending = Some(answer);
+        state.pending_source_stamp = None;
         state.pending_since_ms = Some(crate::now_ms());
         drop(state);
         feed.owner.store(FeedOwner::Scenario);
@@ -365,20 +436,32 @@ fn feed_state(feed: &FeedRuntime) -> ValueState {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// The confirmation window elapsed: the pending answer becomes confirmed.
-fn confirm(feed: &FeedRuntime) {
+/// The confirmation window elapsed: the pending answer and its source stamp
+/// become confirmed. Returns the confirmed pair when there was one, so the
+/// caller can publish the fact (a no-op confirm is not a fact).
+fn confirm(feed: &FeedRuntime) -> Option<(i128, u64)> {
     let mut state = feed
         .values
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let confirmed = state.pending.zip(state.pending_source_stamp);
     state.confirmed = state.pending;
+    state.confirmed_source_stamp = state.pending_source_stamp;
     state.pending = None;
+    state.pending_source_stamp = None;
     state.pending_since_ms = None;
+    confirmed
 }
 
-/// Record the published answer; a pending publish that did not land within the
-/// window is re-published (warned).
-fn record_publish(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, answer: i128, now: u64) {
+/// Record the published answer and the source stamp behind it; a pending
+/// publish that did not land within the window is re-published (warned).
+fn record_publish(
+    feed: &FeedRuntime,
+    metrics: &FeedBridgeMetrics,
+    answer: i128,
+    source_stamp: u64,
+    now: u64,
+) {
     let mut state = feed
         .values
         .lock()
@@ -388,10 +471,12 @@ fn record_publish(feed: &FeedRuntime, metrics: &FeedBridgeMetrics, answer: i128,
             feed = %feed.section.name,
             age_ms = now.saturating_sub(state.pending_since_ms.unwrap_or(now)),
             answer,
+            source_stamp,
             "the pending publish did not land within the confirmation window; re-publishing"
         );
     }
     state.pending = Some(answer);
+    state.pending_source_stamp = Some(source_stamp);
     state.pending_since_ms = Some(now);
     metrics.record_update(&feed.section.name);
 }
@@ -442,8 +527,13 @@ pub(crate) struct FeedStatus {
     pub owner: FeedOwner,
     /// The last value the chain confirmed the bridge wrote.
     pub confirmed_answer: Option<i128>,
+    /// The source round's `updatedAt` behind `confirmed_answer` — the
+    /// heartbeat identity, so a quiet feed that republished is visible.
+    pub confirmed_source_stamp: Option<u64>,
     /// A publish awaiting its block, when one is in flight.
     pub pending_answer: Option<i128>,
+    /// The source stamp carried by the in-flight publish.
+    pub pending_source_stamp: Option<u64>,
     /// When that publish was sent (ms since the epoch): a pending older than
     /// `confirm_window_ms` means it is about to be re-sent (the outcome-unknown
     /// reconciliation) — the operator sees the wait, not a silent stall.

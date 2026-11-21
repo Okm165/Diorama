@@ -69,13 +69,19 @@ pub fn call(method: &'static str, params: impl Serialize) -> Result<Call> {
     Ok(Request::new(method, Id::None, params))
 }
 
-/// The batch's sub-chunk concurrency: one request in flight. The batching's
+/// The batch's sub-chunk concurrency: four bodies in flight. The batching's
 /// win is the request *count* (a wide window is a handful of bodies, not one
-/// per block), and the public HyperEVM RPC's burst limiter refused concurrent
-/// bodies while one-at-a-time traffic — the pre-batching era's own pattern —
-/// passed (measured live). Sequential sub-batches keep the follow inside that
-/// proven-safe shape.
-const BATCH_CONCURRENCY: usize = 1;
+/// per block), and the follow's 900-block window is dominated by the
+/// system-tx read (45 twenty-item bodies at the public endpoint's item cap).
+/// Sequential sub-batches made that window 35-65 s (measured live 2026-11-10),
+/// which is slower than the source's own cadence and is what kept the replay
+/// latch closed. Four concurrent bodies answer in the same per-body latency as
+/// one (measured against all three configured endpoints: 2, 4 and 8 concurrent
+/// bodies each completed in ~0.3-0.9 s), so the window's wall time falls by
+/// roughly the concurrency. The pool still owns throttling: a body the endpoint
+/// rate-limits cools that endpoint and is retried on another, so a burst cannot
+/// silently exceed the measured budget.
+const BATCH_CONCURRENCY: usize = 4;
 
 /// Whether a block read carries its transactions' bodies: the RPC's own
 /// `full` flag, named (a bare `true` at a call site says nothing).
@@ -140,6 +146,12 @@ fn is_retryable(text: &str) -> bool {
                 && !message
                     .to_ascii_lowercase()
                     .contains("invalid block height"))
+            // The public HyperEVM RPC's transient server-side execution
+            // timeout (`-32000 execution aborted (timeout = 5s)`). It is an
+            // endpoint fault: another endpoint may answer, and the composer
+            // narrows the range. A deterministic `-32000` (a revert) is not
+            // matched.
+            || (code == -32000 && message.to_ascii_lowercase().contains("timeout"))
     };
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
@@ -228,25 +240,39 @@ fn endpoint_policy_refusal(text: &str) -> bool {
 /// endpoint. These messages are provider capability, not a deterministic
 /// revert: a revert (`execution reverted`) stays the node's answer and is
 /// never failed over.
+/// The measured `-32000` spellings of "this endpoint cannot serve that
+/// block": each needle was answered for a request another pool member served,
+/// never guessed from docs.
+const CAPABILITY_REFUSALS: [&str; 9] = [
+    "unsupported block number",
+    "pruned history unavailable",
+    "missing trie node",
+    "header not found",
+    "block not found",
+    "requested block is not available",
+    "historical state",
+    "archive",
+    "state is not available",
+];
+
 fn endpoint_capability_refusal(text: &str) -> bool {
-    let capability = |message: &str| {
+    fn refusal(code: i64, message: &str) -> bool {
         let message = message.to_ascii_lowercase();
-        [
-            "unsupported block number",
-            "pruned history unavailable",
-            "missing trie node",
-            "header not found",
-            "block not found",
-            "requested block is not available",
-            "historical state",
-            "archive",
-            "state is not available",
-        ]
-        .iter()
-        .any(|needle| message.contains(needle))
-    };
+        let needle = |n: &str| message.contains(n);
+        (code == -32000 && CAPABILITY_REFUSALS.iter().any(|n| needle(n)))
+            // Measured 2026-11-12: hyperliquid.api.pocket.network refuses
+            // `eth_getLogs` ranges the other pool members serve (`-32602
+            // invalid block range`) — its per-request result cap sits below
+            // the pool's declared 900, and the same window composed fine via
+            // the official endpoint. A range refusal is the endpoint's
+            // difference, not the call's answer: fail over and cool it.
+            || (code == -32602 && needle("invalid block range"))
+    }
+
     let trimmed = text.trim_start();
     if trimmed.starts_with('[') {
+        // A batch: any item carrying a capability refusal means this endpoint
+        // cannot serve the body; another endpoint can.
         return serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
             .map(|items| {
                 items.iter().any(|item| {
@@ -258,7 +284,7 @@ fn endpoint_capability_refusal(text: &str) -> bool {
                         .and_then(serde_json::Value::as_i64)
                         .unwrap_or(0);
                     let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
-                    code == -32000 && capability(message)
+                    refusal(code, message)
                 })
             })
             .unwrap_or(false);
@@ -277,7 +303,7 @@ fn endpoint_capability_refusal(text: &str) -> bool {
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("");
-    code == -32000 && capability(message)
+    refusal(code, message)
 }
 
 /// Whether an HTTP answer is an endpoint fault rather than the node's own
@@ -545,6 +571,40 @@ impl Rpc {
     ///
     /// A fault is a transport error, a retryable JSON-RPC refusal (`-32005`
     /// throttle / `-32603` internal), an endpoint-level HTTP refusal (auth,
+    /// The capabilities a JSON-RPC method requires from the endpoint that
+    /// serves it — the client's half of the capability map. A method not
+    /// listed is unqualified (any endpoint serves it); `system_txs` is the
+    /// one gated method today (the follow pool's measured gate: only some
+    /// public endpoints answer `eth_getSystemTxsByBlockNumber`).
+    fn required_capabilities(method: &str) -> &'static [&'static str] {
+        match method {
+            "eth_getSystemTxsByBlockNumber" => &["system_txs"],
+            _ => &[],
+        }
+    }
+
+    /// The admission requirement of a **batch**, as a set: the transport
+    /// capability it needs (`batch` — providers exist that refuse batch
+    /// bodies outright) plus the union of its items' method requirements.
+    ///
+    /// The union is the part that was missing: one body carries many methods,
+    /// and an endpoint that serves batch transport but not one of the methods
+    /// answers the whole body with a refusal for that item. Measured live
+    /// 2026-11-12: the venue follow's four-item `eth_getSystemTxsByBlockNumber`
+    /// batch rotated onto a pool member that claimed `batch` but not
+    /// `system_txs`, and every such pass failed.
+    fn batch_capabilities(calls: &[Call]) -> Vec<&'static str> {
+        let mut required: Vec<&'static str> = vec!["batch"];
+        for call in calls {
+            for cap in Self::required_capabilities(call.meta.method.as_ref()) {
+                if !required.contains(cap) {
+                    required.push(*cap);
+                }
+            }
+        }
+        required
+    }
+
     /// wrong path, 413, 429, 5xx), or a 2xx body that is not JSON-RPC (a
     /// gateway page). A valid JSON-RPC error on any status is the node's
     /// answer and is **not** failed over: it is the same answer every
@@ -557,7 +617,8 @@ impl Rpc {
         &self,
         method: &str,
         body: &RawValue,
-    ) -> Result<(String, reqwest::StatusCode, String)> {
+        required: &[&'static str],
+    ) -> Result<(String, ResponsePacket)> {
         // A single endpoint has no failover: one attempt, and its body is the
         // node's answer whatever it is (the caller's `answer` classifies a
         // throttle/refusal). This preserves the write client's semantics and
@@ -570,12 +631,8 @@ impl Rpc {
             method,
             body,
         };
-        match self.pool.execute(&attempt, &[]).await {
-            Ok(served) => Ok((
-                self.pool.url(served.index).to_string(),
-                served.value.0,
-                served.value.1,
-            )),
+        match self.pool.execute(&attempt, required).await {
+            Ok(served) => Ok((self.pool.url(served.index).to_string(), served.value)),
             Err(error) => {
                 let typed = pool_error(error);
                 if typed.is_block_unavailable() {
@@ -605,49 +662,35 @@ impl Rpc {
         &self,
         method: &str,
         body: &RawValue,
-    ) -> Result<(String, reqwest::StatusCode, String)> {
+    ) -> Result<(String, ResponsePacket)> {
         let endpoint = self.pool.url(0);
         self.pool.record_attempt(0);
-        match self.post_raw_at(endpoint, method, body).await {
-            Ok((status, text)) => {
-                if endpoint_fault(status, &text) {
-                    self.pool.record_failure(0, now_ms());
-                } else {
-                    self.pool.record_success(0, now_ms());
-                }
-                Ok((endpoint.to_string(), status, text))
-            }
-            Err(fault) => {
-                self.pool.record_failure(0, now_ms());
-                Err(fault)
-            }
+        let classified = self.attempt_endpoint(0, method, body).await;
+        match &classified {
+            Ok(_) => self.pool.record_success(0, now_ms()),
+            Err(_) => self.pool.record_failure(0, now_ms()),
         }
+        Ok((endpoint.to_string(), classified?))
     }
 
     /// One endpoint's attempt for the shared executor: the pool records the
     /// health and owns the rotation; this owns one try and its classification.
+    ///
+    /// **The JSON-RPC boundary is inside the attempt.** A body that is not a
+    /// JSON-RPC answer is *this endpoint's* fault and must fail over, not a
+    /// decode fault on an already-admitted body — measured live 2026-11-12:
+    /// one HyperEVM provider answers an unsupported method with **both**
+    /// `result` and `error`, which no client can parse, and the venue's log
+    /// read failed the whole pass instead of trying the next endpoint.
     async fn attempt_endpoint(
         &self,
         index: usize,
         method: &str,
         body: &RawValue,
-    ) -> Result<(reqwest::StatusCode, String)> {
+    ) -> Result<ResponsePacket> {
         let endpoint = self.pool.url(index);
-        match self.post_raw_at(endpoint, method, body).await {
-            Ok((status, text)) if !endpoint_fault(status, &text) => Ok((status, text)),
-            Ok((status, text)) => {
-                tracing::debug!(
-                    endpoint = %endpoint,
-                    method,
-                    status = status.as_u16(),
-                    "endpoint fault; cooling it down and trying the next endpoint"
-                );
-                Err(Error::EndpointFault {
-                    endpoint: endpoint.to_string(),
-                    method: method.to_string(),
-                    detail: format!("HTTP {}: {}", status.as_u16(), truncate(&text, 300)),
-                })
-            }
+        let (status, text) = match self.post_raw_at(endpoint, method, body).await {
+            Ok(answer) => answer,
             Err(fault) => {
                 tracing::debug!(
                     endpoint = %endpoint,
@@ -655,7 +698,37 @@ impl Rpc {
                     error = %fault,
                     "endpoint transport fault; cooling it down and trying the next endpoint"
                 );
-                Err(fault)
+                return Err(fault);
+            }
+        };
+        if endpoint_fault(status, &text) {
+            tracing::debug!(
+                endpoint = %endpoint,
+                method,
+                status = status.as_u16(),
+                "endpoint fault; cooling it down and trying the next endpoint"
+            );
+            return Err(Error::EndpointFault {
+                endpoint: endpoint.to_string(),
+                method: method.to_string(),
+                detail: format!("HTTP {}: {}", status.as_u16(), truncate(&text, 300)),
+            });
+        }
+        match Self::classify(endpoint, method, status, &text) {
+            Ok(packet) => Ok(packet),
+            Err(fault) => {
+                tracing::debug!(
+                    endpoint = %endpoint,
+                    method,
+                    error = %fault,
+                    "endpoint answered a body that is not JSON-RPC; cooling it down and trying \
+                     the next endpoint"
+                );
+                Err(Error::EndpointFault {
+                    endpoint: endpoint.to_string(),
+                    method: method.to_string(),
+                    detail: format!("HTTP {}: {fault}", status.as_u16()),
+                })
             }
         }
     }
@@ -669,7 +742,7 @@ struct RpcAttempt<'a> {
 }
 
 impl Attempt for RpcAttempt<'_> {
-    type Output = (reqwest::StatusCode, String);
+    type Output = ResponsePacket;
     type Fault = Error;
 
     async fn attempt(&self, index: usize) -> AttemptOutcome<Self::Output, Self::Fault> {
@@ -726,14 +799,29 @@ impl Rpc {
         }
     }
 
-    /// One call's answer: exactly one `Response` (a batch body here is corrupt).
+    /// One call's answer, from a body: its classification plus
+    /// [`Self::answer_packet`] (the single-endpoint and test path).
     fn answer(
         endpoint: &str,
         method: &str,
         status: reqwest::StatusCode,
         text: &str,
     ) -> Result<Box<RawValue>> {
-        match Self::classify(endpoint, method, status, text)? {
+        Self::answer_packet(
+            endpoint,
+            method,
+            Self::classify(endpoint, method, status, text)?,
+        )
+    }
+
+    /// One call's answer, from an already-classified packet: exactly one
+    /// `Response` (a batch body here is corrupt).
+    fn answer_packet(
+        endpoint: &str,
+        method: &str,
+        packet: ResponsePacket,
+    ) -> Result<Box<RawValue>> {
+        match packet {
             ResponsePacket::Single(response) => Self::response_result(response)
                 .map_err(|payload| Self::rpc(endpoint, method, payload)),
             ResponsePacket::Batch(_) => Err(Self::decode(
@@ -754,10 +842,51 @@ impl Rpc {
         })?;
         self.check_log_range(method, &value)?;
         let request = self.request(self.url(), method, params)?;
-        let (endpoint, status, text) = self
-            .post_raw_throttled(method, &request.take_request())
+        let required = Self::required_capabilities(method);
+        let (endpoint, packet) = self
+            .post_raw_throttled(method, &request.take_request(), required)
             .await?;
-        Self::answer(&endpoint, method, status, &text)
+        let answer = Self::answer_packet(&endpoint, method, packet);
+        match &answer {
+            Err(error) if error.is_method_not_found() && !required.is_empty() => {
+                self.retire_capabilities(&endpoint, required);
+            }
+            _ => {}
+        }
+        answer
+    }
+
+    /// Retire the capability claims an endpoint has just disproved. A
+    /// method-gated call that answers `-32601` did not merely fail: the
+    /// endpoint's declared claim is false under load, and every later pass
+    /// that rotates the gated method onto it would fail the same way.
+    /// Retiring the claim moves the method to a member that answers it;
+    /// unqualified calls still use this endpoint.
+    fn retire_capabilities(&self, endpoint: &str, roles: &[&str]) {
+        for role in self.pool.retire_capabilities(endpoint, roles) {
+            tracing::warn!(
+                endpoint,
+                capability = %role,
+                "endpoint refused a capability-gated method (-32601); its claim is retired for \
+                 this process and the pool stops admitting it for that capability"
+            );
+        }
+    }
+
+    /// Retire one declared role of one endpoint (the capability audit's
+    /// verdict, and the pooled path's `-32601` verdict share this seam).
+    /// `true` means this call made the transition; a repeat is silent.
+    pub fn retire_capability(&self, url: &str, role: &str) -> bool {
+        let retired = self.pool.retire_capability(url, role);
+        if retired {
+            tracing::warn!(
+                endpoint = url,
+                capability = role,
+                "endpoint refused a capability-gated method (-32601); its claim is retired for \
+                 this process and the pool stops admitting it for that capability"
+            );
+        }
+        retired
     }
 
     /// Refuse an over-cap `eth_getLogs` before it reaches an endpoint. A
@@ -933,12 +1062,29 @@ impl Rpc {
         calls: &[Call],
     ) -> Result<Vec<std::result::Result<Box<RawValue>, RpcError>>> {
         let (ids, body) = self.batch_request(calls)?;
-        let mut by_id = Self::index_by_id(self.post_batch(&body).await?);
+        // Admission is the union of the items' requirements: the whole body
+        // lands on one endpoint, so it must serve every method in it.
+        let required = Self::batch_capabilities(calls);
+        let (endpoint, responses) = self.post_batch(&body, &required).await?;
+        let mut by_id = Self::index_by_id(responses);
         let mut out = Vec::with_capacity(calls.len());
-        for id in ids {
-            match by_id.remove(&id) {
-                Some(response) => out.push(Self::response_result(response)),
-                None => out.push(Err(missing_from_batch(id))),
+        for (id, call) in ids.iter().zip(calls) {
+            match by_id.remove(id) {
+                Some(response) => {
+                    let answer = Self::response_result(response);
+                    // A method-gated item refused with `-32601` is a retired
+                    // claim, exactly as on the single-call path: the whole
+                    // batch landed on this endpoint, so the endpoint is the
+                    // one that lied.
+                    if let Err(payload) = &answer {
+                        let caps = Self::required_capabilities(call.meta.method.as_ref());
+                        if payload.code == METHOD_NOT_FOUND && !caps.is_empty() {
+                            self.retire_capabilities(&endpoint, caps);
+                        }
+                    }
+                    out.push(answer);
+                }
+                None => out.push(Err(missing_from_batch(*id))),
             }
         }
         Ok(out)
@@ -1062,32 +1208,25 @@ impl Rpc {
     /// `answer` (a body that parses as answers *is* the answers, whatever the
     /// HTTP status); a body that does not is a `BatchDecode` naming the
     /// request text, and a single answer to a batch call is corrupt.
-    async fn post_batch(&self, body: &RawValue) -> Result<Vec<Response>> {
-        let (endpoint, status, text) = self.post_raw_throttled("batch", body).await?;
-        let packet = match Self::classify(&endpoint, "batch", status, &text) {
-            Ok(packet) => packet,
-            Err(Error::Decode { source, .. }) => {
-                return Err(Error::BatchDecode {
-                    endpoint,
-                    request: truncate(body.get(), 600).to_string(),
-                    source,
-                })
-            }
-            Err(e) => return Err(e),
-        };
+    async fn post_batch(
+        &self,
+        body: &RawValue,
+        required: &[&'static str],
+    ) -> Result<(String, Vec<Response>)> {
+        let (endpoint, packet) = self.post_raw_throttled("batch", body, required).await?;
         match packet {
-            ResponsePacket::Batch(responses) => Ok(responses),
+            ResponsePacket::Batch(responses) => Ok((endpoint, responses)),
             // A single answer to a batch: an *error* is the node's refusal
             // (a throttled batch is answered with one error object) —
             // surfaced as such, never as a decode fault; a single *success*
             // is a server that mishandled the batch.
             ResponsePacket::Single(response) => match Self::response_result(response) {
                 Err(payload) => Err(Self::rpc(&endpoint, "batch", payload)),
-                Ok(_) => Err(Self::decode(
-                    &endpoint,
-                    "batch",
-                    serde_json::Error::custom("a single answer to a batch call"),
-                )),
+                Ok(_) => Err(Error::BatchDecode {
+                    endpoint,
+                    request: truncate(body.get(), 600).to_string(),
+                    source: serde_json::Error::custom("a single success answer to a batch call"),
+                }),
             },
         }
     }
@@ -1154,15 +1293,24 @@ impl Rpc {
         Ok(quantity.to::<u64>())
     }
 
-    /// `eth_chainId` against **one** endpoint, outside the pool's rotation:
-    /// the boot identity assert must name the provider that answered wrong,
-    /// not whichever endpoint the rotation picked.
-    pub async fn chain_id_at(&self, index: usize) -> Result<u64> {
+    /// One endpoint's answer to one method, **outside** the pool's rotation.
+    ///
+    /// The per-endpoint primitive behind the boot asserts: an identity check
+    /// must name the provider that answered wrong, and a capability claim is a
+    /// per-provider fact — a pooled probe would attribute one provider's answer
+    /// to another. The pool's bookkeeping still applies, so a fault here cools
+    /// that endpoint for the process.
+    pub async fn call_endpoint<T: DeserializeOwned>(
+        &self,
+        index: usize,
+        method: &'static str,
+        params: impl Serialize,
+    ) -> Result<T> {
         let endpoint = self.pool.url(index);
-        let request = self.request(endpoint, "eth_chainId", NO_PARAMS)?;
+        let request = self.request(endpoint, method, params)?;
         self.pool.record_attempt(index);
         let (status, text) = match self
-            .post_raw_at(endpoint, "eth_chainId", &request.take_request())
+            .post_raw_at(endpoint, method, &request.take_request())
             .await
         {
             Ok(answer) => answer,
@@ -1173,18 +1321,30 @@ impl Rpc {
                 return Err(fault);
             }
         };
-        match Self::answer(endpoint, "eth_chainId", status, &text) {
+        match Self::answer(endpoint, method, status, &text) {
             Ok(value) => {
-                let quantity: U64 = serde_json::from_str(value.get())
-                    .map_err(|source| Self::decode(endpoint, "eth_chainId", source))?;
+                let decoded = serde_json::from_str(value.get())
+                    .map_err(|source| Self::decode(endpoint, method, source))?;
                 self.pool.record_success(index, now_ms());
-                Ok(quantity.to::<u64>())
+                Ok(decoded)
             }
             Err(fault) => {
                 self.pool.record_failure(index, now_ms());
+                let caps = Self::required_capabilities(method);
+                if fault.is_method_not_found() && !caps.is_empty() {
+                    self.retire_capabilities(endpoint, caps);
+                }
                 Err(fault)
             }
         }
+    }
+
+    /// `eth_chainId` against **one** endpoint, outside the pool's rotation:
+    /// the boot identity assert must name the provider that answered wrong,
+    /// not whichever endpoint the rotation picked.
+    pub async fn chain_id_at(&self, index: usize) -> Result<u64> {
+        let quantity: U64 = self.call_endpoint(index, "eth_chainId", NO_PARAMS).await?;
+        Ok(quantity.to::<u64>())
     }
 
     /// Assert the pool's reachable endpoints are `expected`. A wrong-chain
@@ -1313,7 +1473,11 @@ impl Rpc {
                 what: "eth_getSystemTxsByBlockNumber",
                 detail: format!("block {n} answered null, not a list"),
             }),
-            Err(e) if e.is_method_not_found() => Ok(Vec::new()),
+            // No silent-empty on method-not-found: the capability gate routed
+            // this call to an endpoint that *claimed* `system_txs`, so a
+            // `-32601` is a claim/endpoint disagreement (or the measured
+            // system-tx index lag) and must surface as an error, never as
+            // "this block had no system transactions".
             Err(e) => Err(e),
         }
     }
@@ -1384,6 +1548,16 @@ impl Rpc {
 
     pub async fn balance_at(&self, addr: Address, block: u64) -> Result<U256> {
         self.call(crate::ETH_GET_BALANCE, (addr, U64::from(block)))
+            .await
+    }
+
+    /// The native balance at the node's latest state. The block parameter `0`
+    /// names the fork's genesis-era block, not "latest" (the same measured
+    /// rule as [`Self::storage_at_latest`]): a funding check read at `0` saw
+    /// the source's empty genesis balance and clobbered the writer's balance
+    /// on every pass.
+    pub async fn balance_latest(&self, addr: Address) -> Result<U256> {
+        self.call(crate::ETH_GET_BALANCE, (addr, BlockNumberOrTag::Latest))
             .await
     }
 
@@ -1691,6 +1865,58 @@ impl Rpc {
         self.ensure_write()?;
 
         self.call("eth_sendTransaction", (tx,)).await
+    }
+
+    /// Send, then WAIT FOR THE RECEIPT and demand a success status.
+    ///
+    /// `send_transaction` proves admission; on an interval-mining anvil a tx
+    /// that reverts still mines with status `0x0`, so the hash alone cannot
+    /// tell "landed" from "reverted". Every write whose caller draws a
+    /// conclusion from its success (the feed bridge's pending state, the
+    /// venue projection cache, the CCTP attester's cursor) goes through
+    /// this, so a revert surfaces as a named error instead of a state
+    /// machine quietly running on a value the chain refused.
+    ///
+    /// The wait bound also catches pool displacement: a same-nonce sender
+    /// replaces our tx, the pool mines *theirs*, and our hash never gets a
+    /// receipt — exactly the measured shape that used to wedge a feed's
+    /// `pending` forever. A timeout names the tx; the caller may retry.
+    pub async fn send_transaction_confirmed(
+        &self,
+        tx: TransactionRequest,
+    ) -> Result<TransactionReceipt> {
+        // The wait bound must exceed the target chain's block cadence: the
+        // mirror's is 11-14 s (the engine composes on the source's windows),
+        // so a 10 s bound timed out on every feed publish structurally
+        // (measured 2026-11-19: 37 of 151 failures in 11 minutes were this,
+        // not a chain refusal). 30 s covers two mirror blocks and still sits
+        // well inside the feed bridge's 120 s confirm window.
+        const WAIT_MS: u64 = 30_000;
+        const POLL_MS: u64 = 250;
+        let hash = self.send_transaction(tx).await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(WAIT_MS);
+        loop {
+            if let Some(receipt) = self
+                .call_opt::<TransactionReceipt>("eth_getTransactionReceipt", (hash,))
+                .await?
+            {
+                // The receipt's status is the only on-chain verdict; 0x0 is
+                // a mined revert, not a landed write.
+                if receipt.status() {
+                    return Ok(receipt);
+                }
+                return Err(Error::WriteReverted {
+                    tx: hash.to_string(),
+                });
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::WriteUnmined {
+                    tx: hash.to_string(),
+                    timeout_ms: WAIT_MS,
+                });
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(POLL_MS)).await;
+        }
     }
 
     /// One storage word, silently (the venue driver's chain-instance canary;
@@ -2017,6 +2243,14 @@ mod tests {
         assert!(!endpoint_capability_refusal(
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found"}}"#
         ));
+        // Measured 2026-11-12: pocket.network refuses ranges the other pool
+        // members serve — the endpoint's difference, not the call's answer.
+        assert!(endpoint_capability_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid block range"}}"#
+        ));
+        assert!(!endpoint_capability_refusal(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params: expected a string"}}"#
+        ));
         assert!(endpoint_fault(
             reqwest::StatusCode::OK,
             r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"unsupported block number"}}"#
@@ -2046,6 +2280,51 @@ mod tests {
         assert_eq!(value.to::<u64>(), 42);
         first.join().expect("the refusing server exits");
         second.join().expect("the live server exits");
+    }
+
+    /// A capability claim is retired by the endpoint's own answer: a
+    /// method-gated call that answers `-32601` stops being admitted to that
+    /// endpoint, while unqualified calls keep using it. This is the live
+    /// HyperEVM follow's failure class (the official RPC serves
+    /// `eth_getSystemTxsByBlockNumber` cold and refuses it under load).
+    #[tokio::test]
+    async fn a_refused_capability_is_retired_by_the_endpoints_own_answer() {
+        let (liar, liar_handle) = serve_once(
+            r#"{"id":1,"jsonrpc":"2.0","error":{"code":-32601,"message":"method not found"}}"#,
+        );
+        let (honest, honest_handle) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":[]}"#);
+        let mut first = crate::pool::EndpointSpec::url(liar);
+        first.roles.insert("system_txs".into());
+        let mut second = crate::pool::EndpointSpec::url(honest);
+        second.roles.insert("system_txs".into());
+        let pool = EndpointPool::from_specs([first, second], Scheme::Http, PoolPolicy::default())
+            .expect("a valid pool");
+        let rpc = Rpc::with_pool(pool, Duration::from_secs(2)).expect("a valid client");
+
+        let error = rpc
+            .call_endpoint::<Vec<Transaction>>(0, "eth_getSystemTxsByBlockNumber", (U64::from(1),))
+            .await
+            .expect_err("the endpoint refuses the gated method");
+        assert!(error.is_method_not_found(), "{error}");
+
+        let snapshot = rpc.pool().snapshot();
+        assert_eq!(
+            snapshot[0].retired_roles,
+            vec!["system_txs".to_string()],
+            "the refusal retires the claim"
+        );
+        assert_eq!(
+            rpc.pool().admit(u64::MAX, &["system_txs"]).indices,
+            vec![1],
+            "the gated method moves to the member that answers it"
+        );
+        assert!(
+            rpc.pool().admit(u64::MAX, &[]).indices.contains(&0),
+            "unqualified calls still use the endpoint"
+        );
+
+        liar_handle.join().expect("the liar exits");
+        honest_handle.join().expect("the honest server exits");
     }
 
     /// One HTTP request's answer, on a std thread: the smallest server that
@@ -2105,6 +2384,42 @@ mod tests {
         assert!(!is_retryable(
             r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"invalid block height: 50047695"}}]"#
         ));
+    }
+
+    /// The public HyperEVM RPC's `-32000 execution aborted (timeout = 5s)`
+    /// is a transient endpoint fault: the pool must fail over instead of
+    /// surfacing the same endpoint's timeout on every pass. A deterministic
+    /// `-32000` remains the node's answer.
+    #[test]
+    fn an_execution_timeout_is_a_retryable_fault() {
+        assert!(is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution aborted (timeout = 5s)"}}"#
+        ));
+        assert!(is_retryable(
+            r#"[{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"request timeout"}}]"#
+        ));
+        assert!(!is_retryable(
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"execution reverted"}}"#
+        ));
+    }
+
+    /// A pool fails over past the transient execution timeout to the live
+    /// endpoint, so a loaded public RPC does not stall the follow.
+    #[tokio::test]
+    async fn a_pool_fails_over_past_an_execution_timeout() {
+        let (timed_out, first) = serve_once(
+            r#"{"id":1,"jsonrpc":"2.0","error":{"code":-32000,"message":"execution aborted (timeout = 5s)"}}"#,
+        );
+        let (live, second) = serve_once(r#"{"id":1,"jsonrpc":"2.0","result":"0x2a"}"#);
+        let pool =
+            Rpc::with_urls(&[timed_out, live], Duration::from_secs(2)).expect("a valid pool");
+        let value: U64 = pool
+            .call("eth_getLogs", NO_PARAMS)
+            .await
+            .expect("the live endpoint answers");
+        assert_eq!(value.to::<u64>(), 42);
+        first.join().expect("the timed-out server exits");
+        second.join().expect("the live server exits");
     }
 
     /// A batch body answering a single call is corrupt, not a transport fault.
@@ -2202,5 +2517,39 @@ mod tests {
             .expect("filter serializes");
         rpc.check_log_range("eth_getBlockByNumber", &other_method)
             .expect("only eth_getLogs is range-bounded");
+    }
+
+    /// **A batch's admission requirement is the union of its items'** plus the
+    /// transport capability. Measured live 2026-11-12: the venue follow batched
+    /// four `eth_getSystemTxsByBlockNumber` items, the rotation admitted a pool
+    /// member that claimed `batch` but not `system_txs`, and every such pass
+    /// failed on the provider's `-32601`. One body carries one endpoint, so the
+    /// endpoint must serve every method in it — the batch transport capability
+    /// alone is never enough, and it is never skipped either (some providers
+    /// refuse batch bodies outright).
+    #[test]
+    fn a_batch_requires_every_capability_its_items_require() {
+        let gated = Rpc::batch_capabilities(&[
+            call("eth_getSystemTxsByBlockNumber", (U64::from(7u64),)).unwrap(),
+            call("eth_getSystemTxsByBlockNumber", (U64::from(8u64),)).unwrap(),
+        ]);
+        assert_eq!(gated, vec!["batch", "system_txs"]);
+
+        let mixed = Rpc::batch_capabilities(&[
+            call("eth_chainId", NO_PARAMS).unwrap(),
+            call("eth_getSystemTxsByBlockNumber", (U64::from(7u64),)).unwrap(),
+        ]);
+        assert_eq!(
+            mixed,
+            vec!["batch", "system_txs"],
+            "one gated item gates the body"
+        );
+
+        let plain = Rpc::batch_capabilities(&[call("eth_chainId", NO_PARAMS).unwrap()]);
+        assert_eq!(
+            plain,
+            vec!["batch"],
+            "an unqualified body still needs transport"
+        );
     }
 }

@@ -1,5 +1,5 @@
-//! `RethSource: Source` — the mainnet profile's source: reth, the local fork
-//! source (BALs, traces, a 10,064-block state window; WS heads available).
+//! `NativeSource: Source` — the mainnet profile's source: reth, the local fork
+//! source (BALs, traces, a 10,064-block state window).
 //!
 //! Both composer rungs come from here: [`Source::bal`] is the native rung
 //! (`eth_getBlockAccessList`), [`Source::touched`] the trace rung — the
@@ -15,20 +15,21 @@ use futures_util::future::BoxFuture;
 use std::sync::Arc;
 
 /// What reth serves (measured): the native BAL rung, traces, a 10,064-block
-/// state window, WS heads; no system transactions (Ethereum has none).
+/// state window; no system transactions (Ethereum has none) and no WebSocket
+/// listener (re-measured 2026-11-17: 8545/8551 only, an upgrade on 8545 is
+/// refused with 403).
 pub(crate) fn declared() -> Capabilities {
     Capabilities::of([
         Capability::NativeBal,
         Capability::Traces,
         Capability::Historical,
-        Capability::HeadsWs,
     ])
 }
 
 /// The profile's truth source: reth, the native BAL rung with the trace
 /// fallback.
-pub(crate) fn reth(rpc: Arc<diorama_anvil::Rpc>) -> Arc<dyn Source> {
-    Arc::new(RethSource::new(rpc))
+pub(crate) fn native(rpc: Arc<diorama_anvil::Rpc>) -> Arc<dyn Source> {
+    Arc::new(NativeSource::new(rpc))
 }
 
 /// The reth handle is shared (`Arc`): one client per endpoint, referenced by
@@ -36,16 +37,16 @@ pub(crate) fn reth(rpc: Arc<diorama_anvil::Rpc>) -> Arc<dyn Source> {
 /// re-created — rule 15). The raw reads are the spine's [`RawSource`]; this
 /// type adds the mainnet's rungs (the native BAL with its commitment check,
 /// the trace rung) and its declaration.
-pub struct RethSource {
+pub struct NativeSource {
     inner: RawSource,
-    reth: Arc<diorama_anvil::Rpc>,
+    source_rpc: Arc<diorama_anvil::Rpc>,
 }
 
-impl RethSource {
-    pub fn new(reth: Arc<diorama_anvil::Rpc>) -> Self {
+impl NativeSource {
+    pub fn new(source_rpc: Arc<diorama_anvil::Rpc>) -> Self {
         Self {
-            inner: RawSource::new(reth.clone(), declared()),
-            reth,
+            inner: RawSource::new(source_rpc.clone(), declared()),
+            source_rpc,
         }
     }
 
@@ -59,14 +60,14 @@ impl RethSource {
     ) -> diorama_anvil::Result<(usize, Vec<diorama_anvil::Write>)> {
         use alloy_network_primitives::TransactionResponse as _;
         let block = self
-            .reth
+            .source_rpc
             .block_by_number(n, diorama_anvil::Txs::Full)
             .await?;
         let txs = diorama_devnet::scan::block_txs(&block);
         let count = txs.len();
         let mut out = Vec::new();
         for tx in txs {
-            let trace = self.reth.trace_tx_prestate(tx.tx_hash()).await?;
+            let trace = self.source_rpc.trace_tx_prestate(tx.tx_hash()).await?;
             out.extend(diorama_anvil::flatten_trace(&trace));
         }
         Ok((count, out))
@@ -83,7 +84,7 @@ fn empty_populated_trace(n: u64, txs: usize, writes_empty: bool) -> Option<diora
     })
 }
 
-impl Source for RethSource {
+impl Source for NativeSource {
     fn capabilities(&self) -> Capabilities {
         declared()
     }
@@ -146,7 +147,7 @@ impl Source for RethSource {
             // whenever the block carries one. An *absent* list (null, or an
             // endpoint without the method) is the per-block fallback's case; a
             // *mismatched* one is refused — never applied.
-            let Some(bal) = self.reth.block_access_list(n).await? else {
+            let Some(bal) = self.source_rpc.block_access_list(n).await? else {
                 return Ok(None);
             };
             let header = self.header(n).await?;
@@ -172,7 +173,7 @@ impl Source for RethSource {
         Box::pin(async move {
             let mut touched = TouchedSet::default();
             for n in (from + 1)..=to {
-                let traces = self.reth.trace_block_prestate(n).await?;
+                let traces = self.source_rpc.trace_block_prestate(n).await?;
                 if traces.is_empty() {
                     let (txs, writes) = self.trace_block_per_tx(n).await?;
                     if let Some(fault) = empty_populated_trace(n, txs, writes.is_empty()) {
@@ -211,7 +212,7 @@ mod tests {
             diorama_anvil::Rpc::new("http://127.0.0.1:1", std::time::Duration::from_secs(1))
                 .unwrap(),
         );
-        let source = RethSource::new(rpc);
+        let source = NativeSource::new(rpc);
         assert_eq!(source.capabilities(), declared());
         assert_eq!(
             declared(),
@@ -219,7 +220,6 @@ mod tests {
                 Capability::NativeBal,
                 Capability::Traces,
                 Capability::Historical,
-                Capability::HeadsWs,
             ]),
             "the declaration the boot audit compares against"
         );

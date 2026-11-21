@@ -101,7 +101,7 @@ async fn report_top_up(
     }
     if let (Some(cl_head), Ok(reth_head)) = (
         cl_head_el_block(&ctx.beacon, head_cache).await,
-        ctx.reth.block_number().await,
+        ctx.source_rpc.block_number().await,
     ) {
         ctx.mainnet_metrics.set(
             &ctx.mainnet_metrics.source_sync_gap_blocks,
@@ -144,9 +144,9 @@ async fn top_up(ctx: &Ctx, engine: &crate::source_sync::engine_api::EngineClient
         // No beacon configured: the top-up has no source. A fact, not a fault.
         return Ok(0);
     }
-    let el_head = ctx.reth.block_number().await?;
+    let el_head = ctx.source_rpc.block_number().await?;
     let el = ctx
-        .reth
+        .source_rpc
         .block_by_number(el_head, diorama_anvil::Txs::Hashes)
         .await?;
     let cl_head = ctx.beacon.head_slot().await?;

@@ -404,6 +404,13 @@ fn move_price(
     match req.pct {
         None => {
             feed.clear_price(&req.coin)?;
+            // The move owned the book with the price (the 2026-10-29 rally
+            // lesson); the hand-back releases both. Leaving the book scripted
+            // after a hand-back made every venue quote for the coin refuse
+            // with the scenario-owned error until a second control cleared it
+            // (measured 2026-11-20: the LIQ-01 crash handed back, the HYPE
+            // book stayed owned, and MX-09's create refused on it).
+            feed.clear_book(&req.coin)?;
             Ok(PriceMoveResponse {
                 coin: req.coin,
                 owned: false,
@@ -690,7 +697,7 @@ pub(crate) async fn clear_fixture(
 /// answer is the resolved **control view** (the fixture where the scenario owns
 /// it, the sim's derivation where it does not). `/info` keeps serving the live
 /// view — the two are deliberately different: the control read is "what the
-/// scenario set" (daloc's `resolved_equity` assertions read it), the info read
+/// scenario set" (the consumer's `resolved_equity` assertions read it), the info read
 /// is the venue's live report.
 pub(crate) async fn post_state(
     State(state): State<Arc<ApiState>>,
@@ -721,14 +728,14 @@ fn control_state(state: &ApiState, address: Address) -> Result<AccountSeed> {
             mode: UserAbstraction::Disabled,
             ..Default::default()
         };
-        return control_view(None, &empty, &state.feed, state.feed.meta().as_ref());
+        return control_view(None, &empty, &state.feed, state.feed.margin_meta().as_ref());
     };
     let fixture = state.sim.control_fixture(address)?;
     control_view(
         fixture.as_ref(),
         &account,
         &state.feed,
-        state.feed.meta().as_ref(),
+        state.feed.margin_meta().as_ref(),
     )
 }
 
@@ -894,5 +901,47 @@ mod confirm_tests {
             dry_run: false,
         };
         assert!(require_confirm(&right, "reset").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::feed::MarketFeed;
+    use crate::wire::L2Book;
+
+    /// The crash/rally verb owns the mark, the oracle AND the book (the
+    /// 2026-10-29 rally lesson); its hand-back — the verb with no pct — must
+    /// release all three. The measured 2026-11-20 gap: the hand-back cleared
+    /// only the price, the HYPE book stayed scenario-owned, and every venue
+    /// quote for the coin refused until a second control cleared the book.
+    #[test]
+    fn the_hand_back_releases_the_book_the_move_owned() {
+        let feed = MarketFeed::memory(vec!["HYPE".to_string()]);
+        // A memory feed has no live cache; the move's own mark is the scenario's
+        // synthetic value either way.
+        let mark = rust_decimal::Decimal::from(60);
+        feed.own_price("HYPE", PriceOverride { mark, oracle: mark }).expect("own the price");
+        feed.own_book(&L2Book {
+            coin: "HYPE".to_string(),
+            time: crate::now_ms(),
+            levels: [Vec::new(), Vec::new()],
+            spread: None,
+        })
+        .expect("own the book");
+        assert!(feed.market_is_owned("HYPE"), "precondition: the move owns the coin");
+
+        move_price(
+            &feed,
+            PriceMoveRequest {
+                coin: "HYPE".to_string(),
+                pct: None,
+            },
+            PriceMove::Crash,
+        )
+        .expect("the hand-back");
+
+        assert!(!feed.market_is_owned("HYPE"), "the hand-back must release the price AND the book");
+        assert!(!feed.scripted_book("HYPE"), "the book must not stay scripted after the hand-back");
     }
 }

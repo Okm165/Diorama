@@ -22,7 +22,7 @@ impl Sim {
     /// oracle — the docs' settlement price is the 1 h TWAP spot oracle, a
     /// named simplification; no fee is charged (a settlement is not a trade).
     fn settle_delisted(&self, feed: &MarketFeed) -> Result<()> {
-        let Some(meta) = feed.meta() else {
+        let Some(meta) = feed.margin_meta() else {
             return Ok(());
         };
         for coin in feed.markets.clone() {
@@ -100,11 +100,11 @@ impl Sim {
     /// account-scoped read: accrue funding to now, settle delistings, run the
     /// resting book's passes, check every account against its maintenance
     /// requirement (the waterfall), record the marks and persist if anything
-    /// moved — so daloc's set-and-read tests see live liquidation behavior
+    /// moved — so the consumer's set-and-read tests see live liquidation behavior
     /// without ever calling `advance` (funding steps at the hour). A warming
     /// market plane (no meta yet) is a no-op, not a fault storm.
     pub fn evaluate(&self, feed: &MarketFeed) -> Result<Vec<Liquidation>> {
-        if feed.meta().is_none() {
+        if feed.margin_meta().is_none() {
             return Ok(Vec::new());
         }
         let now = crate::now_ms();
@@ -276,7 +276,7 @@ impl Sim {
         level_px: Decimal,
         feed: &MarketFeed,
     ) -> Result<()> {
-        let leverage = self.leverage_for(r.account, &r.coin, feed.meta().as_ref())?;
+        let leverage = self.leverage_for(r.account, &r.coin, feed.margin_meta().as_ref())?;
         let notional = crate::sim::account::mul(take, r.px, "maker notional")?;
         let facts = crate::sim::account::FillFacts {
             coin: r.coin.clone(),
@@ -288,7 +288,7 @@ impl Sim {
             fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
         };
         self.with_account_now(r.account, feed, |account| {
-            crate::sim::account::apply_fill(account, &facts, feed.meta().as_ref())
+            crate::sim::account::apply_fill(account, &facts, feed.margin_meta().as_ref())
         })?;
         feed.consume(crate::feed::Consumption {
             coin: r.coin.clone(),

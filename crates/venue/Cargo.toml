@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The Venue Mirror: the fork driver over anvil V, the market/account simulator, the daloc-facing API"
+description = "The Venue Mirror: the fork driver over anvil V, the market/account simulator, the consumer-facing API"
 
 [dependencies]
 diorama-config = { path = "../config" }

@@ -184,18 +184,29 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
     let applied = apply_window(ctx, &plan).await?;
     let (sampled, sampled_ok) = parity::parity_step(ctx, &plan.bal).await?;
     advance_source_cursor(ctx, to).await?;
-    let stats = FollowOutcome {
+    let stats = outcome(&plan, applied, (sampled, sampled_ok), started);
+    report_applied(ctx, followed, to, source_head, &stats);
+    Ok(Some(stats))
+}
+
+/// The pass's reported numbers (the fact and the per-window log read the
+/// same shape).
+fn outcome(
+    plan: &diorama_devnet::bal::WindowPlan,
+    applied: usize,
+    sampled: (usize, usize),
+    started: Instant,
+) -> FollowOutcome {
+    FollowOutcome {
         source: plan.kind.as_str(),
         writes: plan.total,
         applied,
         filtered: plan.writes.len(),
         skipped_shadowed: plan.filter.skipped_shadowed,
-        sampled,
-        sampled_ok,
+        sampled: sampled.0,
+        sampled_ok: sampled.1,
         duration_ms: started.elapsed().as_millis() as u64,
-    };
-    report_applied(ctx, followed, to, source_head, &stats);
-    Ok(Some(stats))
+    }
 }
 
 /// The compose's landing guard: scan V's chain up to its *current* head, so
@@ -208,7 +219,7 @@ pub(crate) async fn step(ctx: &Ctx) -> Result<Option<FollowOutcome>> {
 /// landing past an unscanned block is the exact COW failure the registry
 /// exists to prevent.
 async fn pre_land_scan(ctx: &Ctx) -> Result<()> {
-    let head = ctx.anvil_v.block_number().await?;
+    let head = ctx.target_rpc.block_number().await?;
     let first = ctx
         .plane
         .state
@@ -218,7 +229,7 @@ async fn pre_land_scan(ctx: &Ctx) -> Result<()> {
         .unwrap_or(head);
     let walk = diorama_devnet::scan::scan_to(
         &ctx.plane,
-        &ctx.anvil_v,
+        &ctx.target_rpc,
         diorama_devnet::pin::resolved_pin(&ctx.pin).unwrap_or(0),
         head,
         first,
@@ -388,7 +399,7 @@ async fn apply_window(ctx: &Ctx, plan: &diorama_devnet::bal::WindowPlan) -> Resu
         return Ok(0);
     }
     Ok(
-        diorama_anvil::apply_writes(&ctx.anvil_v, &plan.writes, ctx.engine.loops.chunk_size)
+        diorama_anvil::apply_writes(&ctx.target_rpc, &plan.writes, ctx.engine.loops.chunk_size)
             .await?,
     )
 }

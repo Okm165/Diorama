@@ -1,132 +1,241 @@
 SHELL := /bin/bash
 
-# INSTANCE selects the mirror: the namespace, the kustomize overlay, the
-# instance TOML and the engine image all follow from it.
-INSTANCE       ?= diorama-mainnet
-NS             := $(INSTANCE)
-OVERLAY        := k8s/overlays/$(INSTANCE)
-BOOTSTRAP      := k8s/bootstrap
-KUBECTL        := kubectl -n $(NS)
+# INSTANCE selects one deployable unit: its namespace, kustomize overlay,
+# instance TOML, images and wiring all follow from it. The three units are
+# structurally identical: the two mirrors (diorama-mainnet, diorama-venue) and
+# the standalone bridge (diorama-cctp).
+#
+#   make up INSTANCE=diorama-venue
+#
+# Every target below that acts on a cluster takes INSTANCE, so a second
+# deployment on the same host is `make up INSTANCE=<name>` with its own
+# directory (see "Horizontal duplication" in the README).
+INSTANCES    := diorama-mainnet diorama-venue diorama-cctp
+INSTANCE     ?= diorama-mainnet
+NS           := $(INSTANCE)
+OVERLAY      := k8s/overlays/$(INSTANCE)
+BOOTSTRAP    := k8s/bootstrap
 
-# The engine image/tag of the selected instance, scraped from the manifest
-# that deploys it - the deployed manifest stays the single source of truth.
-# diorama-mainnet runs the ethereum engine, diorama-venue the venue engine: one
-# deployment shape per profile, one image per binary.
-ENGINE_MANIFEST := k8s/base/$(INSTANCE)/engine.yaml
-ENGINE_REF      := $(shell grep -ohE 'image: localhost/[^ ]+' $(ENGINE_MANIFEST) | head -1 | awk '{print $$2}')
-ENGINE_IMAGE    := $(word 1,$(subst :, ,$(ENGINE_REF)))
-ENGINE_TAG      := $(lastword $(subst :, ,$(ENGINE_REF)))
-ENGINE_BIN      := $(notdir $(ENGINE_IMAGE))
+# Machine plumbing, overridable on another box (a fresh clone boots with the
+# defaults; only a differently-installed cluster needs these).
+#   KUBECTL     the cluster client (pass --context/--kubeconfig through it)
+#   RUNTIME     the local container runtime (podman/docker) that builds+saves
+#               the images `$(CTR)` imports
+#   CTR         the cluster's image importer (k3s' containerd here; a
+#               non-k3s cluster overrides this - e.g. `docker` needs no import
+#               and `make import` can be a no-op)
+#   SUDO        how privileged commands are issued (empty for root)
+#   K3S_STORAGE the node's PVC backing dir (the prune-size probe)
+#
+# The image *registry* is not a Makefile variable: k8s/components/registry is
+# the one file that maps this repo's four images to the path a non-k3s host
+# pulls from, and `make registry-push` pushes the same tags there. The storage
+# *class* is the other one-file cluster fact (k8s/base/shared/storageclass.yaml,
+# fanned out to every claim by k8s/components/storage). A move's copy target
+# (a k3s node path) is what `K3S_STORAGE` names; the `bind-claims` target
+# prints it from the cluster instead, so only the prune-size probe needs it.
+KUBECTL      ?= kubectl
+SUDO         ?= sudo
+RUNTIME      ?= podman
+CTR          ?= $(SUDO) k3s ctr
+K3S_STORAGE  ?= /var/lib/rancher/k3s/storage
+JQ           ?= jq
+KUBECTL_NS   := $(KUBECTL) -n $(NS)
+IMG_TAR      := target/diorama-img.tar
+PATH         := $(HOME)/.cargo/bin:$(PATH)
+export PATH
 
-# The anvil components of the selected instance (pin-show).
-ANVILS := $(if $(filter diorama-mainnet,$(INSTANCE)),anvil-t,anvil-v)
+# The images a manifest of the selected instance pins (`localhost/…` are this
+# repo's builds, one binary per image, `--build-arg BIN=<binary>`).
+INSTANCE_MANIFESTS := k8s/base/$(INSTANCE) $(OVERLAY)
+ENGINE_MANIFEST    := k8s/base/$(INSTANCE)/engine.yaml
+ENGINE_REF         := $(shell grep -ohE 'image: localhost/[^ ]+' $(ENGINE_MANIFEST) 2>/dev/null | head -1 | awk '{print $$2}')
+ENGINE_IMAGE       := $(word 1,$(subst :, ,$(ENGINE_REF)))
+ENGINE_TAG         := $(lastword $(subst :, ,$(ENGINE_REF)))
+ENGINE_BIN         := $(notdir $(ENGINE_IMAGE))
+# The claim binder's image (a move's `bind-claims`): the pinned alpine the anvil
+# pods already import, read from the manifest so the digest has one home.
+BINDER_IMAGE       := $(shell grep -rhoE 'image: docker.io/library/alpine:[^ ]+' k8s/base --include="*.yaml" | head -1 | awk '{print $$2}')
+INSTANCE_IMAGES    := $(shell grep -rhoE 'image: [^ ]+' $(INSTANCE_MANIFESTS) 2>/dev/null | awk '{print $$2}' | sort -u)
+LOCAL_IMAGES       := $(filter localhost/%,$(INSTANCE_IMAGES))
+PINNED_IMAGES      := $(filter-out localhost/%,$(INSTANCE_IMAGES))
 
 # The selected instance's Namespace manifest: the overlay owns it (instance
-# identity, not a service template) - one rule for both mirrors.
+# identity, not a service template) - one rule for every unit.
 NS_MANIFEST := $(OVERLAY)/namespace.yaml
 
 .DEFAULT_GOAL := help
 
-##@ Cluster
+# The deploy chain (spec present -> images -> secrets -> snapshot -> apply) is
+# order-sensitive; never let a parallel make interleave it.
+.NOTPARALLEL:
 
-ns: ## Create namespace + StorageClass (idempotent)
-	kubectl apply -f $(NS_MANIFEST)
-	kubectl apply -f k8s/base/shared/storageclass.yaml
-
-mainnet-secrets: ## Create the reth<->lighthouse JWT secret if missing (mainnet namespace)
-	@NS=diorama-mainnet; \
-	if kubectl -n $$NS get secret reth-jwt >/dev/null 2>&1; then \
-	  echo "secret reth-jwt already exists in $$NS (left untouched)"; \
-	else \
-	  kubectl -n $$NS create secret generic reth-jwt --from-literal=jwt.hex="$$(openssl rand -hex 32)" >/dev/null; \
-	  echo "created secret reth-jwt in $$NS"; \
+# The one deployment input: the gitignored specialization. `make up` does not
+# create it (its values are this deployment's facts, not boilerplate); a
+# missing file is named here - with the remedy - before the kustomize build
+# refuses it loudly.
+spec-present:
+	@if [ ! -f config/instances/$(INSTANCE)/specialization.toml ]; then \
+	  echo "config/instances/$(INSTANCE)/specialization.toml is missing." >&2; \
+	  echo "  copy the tracked template:" >&2; \
+	  echo "    cp config/instances/$(INSTANCE)/specialization.example.toml config/instances/$(INSTANCE)/specialization.toml" >&2; \
+	  echo "  then hardcode this deployment's values (endpoints, fork facts, state roots)" >&2; \
+	  echo "  - the file must carry no \$${VAR} references; it is the only config source." >&2; \
+	  exit 1; \
 	fi
 
-CCTP_NS      ?= diorama-cctp
-CCTP_OVERLAY := k8s/overlays/diorama-cctp
+# The host harness surface: the gitignored copy of harness.example.env. It is
+# not configuration (no pod reads it; the operator's loopback forwards do), so
+# a fresh clone bootstraps it silently.
+harness-env:
+	@for f in k8s/overlays/*/harness.example.env; do \
+	  d=$${f%/*}; \
+	  if [ ! -f "$$d/harness.env" ]; then cp "$$f" "$$d/harness.env"; echo "created $$d/harness.env from template"; fi; \
+	done
 
-# The daloc-monorepo sibling owns the gateway stack and the end-to-end DOD
-# scripts. The portfolio DOD drives every user action through the gateway and
-# reads the deployed factories/registry directly; it needs the sibling checkout,
-# the deploy env, and a borrower key funded on chain 999.
-DALOC_REPO         ?= ../daloc-monorepo
-DALOC_OUT          ?= /tmp/opencode/daloc-out
-BORROWER_KEY_FILE  ?= /tmp/daloc-borrower.key
-DALOC_GATEWAY_URL  ?= http://127.0.0.1:32001
-DALOC_RPC_999      ?= http://127.0.0.1:31545
-ALLOW_TEST_POSTURE ?= 1
+##@ Deploy (any instance)
 
-venue-secrets: ## Create the venue-side secrets (no CCTP key: the bridge owns its own)
-	@NS=diorama-venue; \
-	if kubectl -n $$NS get secret cctp-relay-key >/dev/null 2>&1; then \
-	  echo "legacy cctp-relay-key still exists in $$NS (the standalone bridge uses $(CCTP_NS))"; \
-	fi
+# The one command from a fresh clone: specialization (the operator's one
+# file) -> images (built + imported) -> secrets (the reth JWT) -> snapshot (a
+# mirror needs chain state; the first one takes hours) -> apply. `build` runs
+# `deps` itself, so the pinned third-party set is imported without a second
+# pull.
+#
+# SKIP_SNAPSHOT=1 drops the state-source step for a stack whose chain state was
+# COPIED from an earlier host (README, "Moving the stack"): `make snapshot`
+# would otherwise see reth down and re-download 165 GB over the datadir that
+# was just copied in. The step is the only thing `up` adds to
+# `build secrets apply`.
+up: spec-present build secrets $(if $(SKIP_SNAPSHOT),,snapshot-$(INSTANCE)) apply ## Build, create the JWT, source chain state (SKIP_SNAPSHOT=1 when it was copied), apply
+	@echo "== $(INSTANCE) applied"
+	@echo "   watch:      make status INSTANCE=$(INSTANCE)"
+	@echo "   host reach: make port-forward INSTANCE=$(INSTANCE)"
+	@echo "   endpoints:  make endpoints INSTANCE=$(INSTANCE)"
 
-cctp-secrets: ## Create the bridge's relay-wallet secret (CCTP_RELAY_KEY=0x…; CCTP_NS)
-	@NS=$(CCTP_NS); \
-	if kubectl -n $$NS get secret cctp-relay-key >/dev/null 2>&1; then \
-	  echo "secret cctp-relay-key already exists in $$NS (left untouched)"; \
-	else \
-	  test -n "$$CCTP_RELAY_KEY" || { echo "set CCTP_RELAY_KEY - the dedicated relay wallet hex key" >&2; exit 1; }; \
-	  kubectl -n $$NS create secret generic cctp-relay-key --from-literal=relay-key="$$CCTP_RELAY_KEY" >/dev/null; \
-	  echo "created secret cctp-relay-key in $$NS"; \
-	fi
+apply: spec-present secrets ## Apply the selected instance's stack
+	$(KUBECTL) apply -k $(OVERLAY)
+	@$(MAKE) --no-print-directory endpoints INSTANCE=$(INSTANCE)
 
-apply: ## Apply the selected instance's stack (INSTANCE selects the overlay)
-	kubectl apply -k $(OVERLAY)
+diff: spec-present ## Show what `make apply` would change
+	$(KUBECTL) diff -k $(OVERLAY) || true
 
-diff: ## Show what `make apply` would change
-	kubectl diff -k $(OVERLAY) || true
+delete: ## Delete the namespace (data survives: the StorageClass is Retain)
+	$(KUBECTL) delete namespace $(NS) --ignore-not-found
 
-delete: ## Delete the namespace (data survives: StorageClass is reclaimPolicy Retain)
-	kubectl delete namespace $(NS) --ignore-not-found
+##@ Move (a stack to another cluster)
 
-##@ Bootstrap
+# The target-side first step: the namespace and the instance's claims only (no
+# workload starts), bound through a throwaway pod - with WaitForFirstConsumer a
+# claim only binds when a pod consumes it, and only then does a node-local
+# provisioner create the volume's path. The pod is left holding every claim so
+# a pod-mediated copy (a CSI cluster: no node path to rsync into) has a writer;
+# `unbind-claims` releases them before `make apply`.
+#
+# The printed `claim -> PV -> path` line is the copy destination: on a
+# node-local provisioner it is a directory on the node, on a CSI provisioner
+# the volume handle (copy through the binder pod instead).
+bind-claims: spec-present ## Create + bind the instance's claims, print each claim's volume path (a move's target step)
+	@$(KUBECTL) apply -f $(NS_MANIFEST) >/dev/null
+	@$(KUBECTL) kustomize $(OVERLAY) \
+	  | awk 'BEGIN{RS="---\n"; ORS=""} /(^|\n)kind: PersistentVolumeClaim\n/{print "---\n" $$0}' \
+	  | $(KUBECTL) -n $(NS) apply -f - >/dev/null
+	@claims=$$($(KUBECTL) -n $(NS) get pvc -o json | $(JQ) -c '[.items[].metadata.name]'); \
+	 [ "$$claims" != "[]" ] || { echo "no claims in $(NS)" >&2; exit 1; }; \
+	 $(KUBECTL) -n $(NS) delete pod claim-binder --ignore-not-found >/dev/null; \
+	 $(JQ) -n --argjson c "$$claims" '
+	   {apiVersion:"v1", kind:"Pod", metadata:{name:"claim-binder"},
+	    spec:{restartPolicy:"Never",
+	      containers:[{name:"hold", image:"$(BINDER_IMAGE)", command:["sh","-c","sleep 3600"],
+	        volumeMounts:[$$c[] | {name:., mountPath:("/mnt/" + .)}]}],
+	      volumes:[$$c[] | {name:., persistentVolumeClaim:{claimName:.}}]}}' \
+	   | $(KUBECTL) -n $(NS) apply -f - >/dev/null
+	@$(KUBECTL) -n $(NS) wait --for=jsonpath='{.status.phase}'=Bound pvc --all --timeout=300s
+	@$(KUBECTL) -n $(NS) get pvc
+	@echo "--- volume paths (copy destinations)"
+	@for p in $$($(KUBECTL) -n $(NS) get pvc -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do \
+	  v=$$($(KUBECTL) -n $(NS) get pvc "$$p" -o jsonpath='{.spec.volumeName}'); \
+	  path=$$($(KUBECTL) get pv "$$v" -o jsonpath='{.spec.local.path}{.spec.hostPath.path}{.spec.csi.volumeHandle}' 2>/dev/null); \
+	  printf "  %-16s %-45s %s\n" "$$p" "$$v" "$${path:-<no node path: copy through the claim-binder pod>}"; \
+	done
 
-mainnet-snapshot: ## Download the reth snapshot into the reth PVC (scales reth down first)
-	kubectl -n diorama-mainnet scale deploy/reth --replicas=0 2>/dev/null || true
-	kubectl -n diorama-mainnet delete job reth-snapshot --ignore-not-found
-	kubectl apply -f $(BOOTSTRAP)/snapshot-job.yaml
-	@# The wait bound is the Job's own spec.activeDeadlineSeconds, not a second
-	@# hardcoded number: the manifest already owns how long the download may run.
-	@deadline=$$(kubectl -n diorama-mainnet get job reth-snapshot -o jsonpath='{.spec.activeDeadlineSeconds}'); \
-	 test -n "$$deadline" || { echo "reth-snapshot Job declares no activeDeadlineSeconds" >&2; exit 1; }; \
-	 echo "waiting for snapshot to finish (Job deadline $${deadline}s; resumable)..."; \
-	 kubectl -n diorama-mainnet wait --for=condition=complete job/reth-snapshot --timeout="$${deadline}s" || \
-		{ echo "not complete within the Job's own deadline ($${deadline}s) - check: make mainnet-snapshot-status"; exit 1; }
+unbind-claims: ## Release the claims (delete the binder pod) before starting the stack
+	@$(KUBECTL) -n $(NS) delete pod claim-binder --ignore-not-found
 
-mainnet-snapshot-status: ## Show snapshot job status + progress
-	@$(KUBECTL) get job reth-snapshot 2>/dev/null || echo "no snapshot job"
-	@$(KUBECTL) logs job/reth-snapshot --tail=3 2>/dev/null || true
-
-mainnet-bootstrap: ns mainnet-secrets images ## First-time setup (mainnet): namespace, secrets, images, snapshot, full stack
-	kubectl apply -f k8s/base/diorama-mainnet/pvcs.yaml
-	$(MAKE) mainnet-snapshot
-	$(MAKE) apply
-	@echo "bootstrap complete. watch: make status"
-
-##@ Images
+##@ Images (a machine cannot clone these: they are built here)
 
 # Every image is pinned by full version tag (see k8s/base/**/*.yaml). Pre-importing
 # them into the k3s containerd store keeps pod start-up independent of registry
 # DNS - measured: containerd's resolver can fail transiently while podman's
 # works, which turned a deploy into ImagePullBackOff.
 # Single source of truth: the manifests. LOCAL_IMAGES are the images this repo
-# builds (one binary per image, `--build-arg BIN`); IMAGES are the third-party
-# references, pinned by tag *and* digest. Bumping a version means editing the
-# manifest once.
-LOCAL_IMAGES := $(shell grep -rhoE 'image: localhost/[^ ]+' k8s/ | awk '{print $$2}' | sort -u)
-IMAGES := $(shell grep -rhoE 'image: [^ ]+' k8s/ | awk '{print $$2}' \
-            | grep -v '^localhost/' | sort -u)
+# builds (one binary per image, `--build-arg BIN`); PINNED_IMAGES are the
+# third-party references, pinned by tag *and* digest. Bumping a version means
+# editing the manifest once.
+deps: ## Pull + import the selected instance's pinned third-party images (no build)
+	@for img in $(PINNED_IMAGES); do \
+	  printf "== %s\n" "$$img"; \
+	  $(RUNTIME) pull -q "$$img" || exit 1; \
+	  rm -f "$(IMG_TAR)"; \
+	  $(RUNTIME) save -o "$(IMG_TAR)" "$$img" || exit 1; \
+	  $(CTR) images import "$(IMG_TAR)" >/dev/null || exit 1; \
+	done
+	@rm -f "$(IMG_TAR)"
+	@echo "third-party images imported: $(PINNED_IMAGES)"
+
+# --no-cache is deliberate: a cached layer once survived a source change and
+# the old binary shipped under the pinned tag (measured 2026-11-12 - two
+# builds of the same tag printed one digest while crates/anvil differed). A
+# deploy image must be reproducible from the tree, never "probably the tree";
+# the dependency layer costs ~30 s uncached.
+build: ## Build + import every image the selected instance needs (local builds fresh, no layer cache)
+	@for ref in $(LOCAL_IMAGES); do \
+	  bin=$${ref##*/}; bin=$${bin%%:*}; \
+	  if [ ! -f "bins/$$bin/src/main.rs" ]; then \
+	    printf "  %-62s manifest only (bins/%s has no source yet)\n" "$$ref" "$$bin"; continue; \
+	  fi; \
+	  printf "== %s (build)\n" "$$ref"; \
+	  $(RUNTIME) build --no-cache -q -f Dockerfile --build-arg BIN=$$bin -t "$$ref" . || exit 1; \
+	  rm -f "$(IMG_TAR)"; \
+	  $(RUNTIME) save -o "$(IMG_TAR)" "$$ref" || exit 1; \
+	  $(CTR) images import "$(IMG_TAR)" >/dev/null || exit 1; \
+	done
+	@rm -f "$(IMG_TAR)"
+	@echo "local images built + imported: $(LOCAL_IMAGES)"
+	@$(MAKE) --no-print-directory deps INSTANCE=$(INSTANCE)
+	@$(MAKE) --no-print-directory check-pins INSTANCE=$(INSTANCE)
+
+import: build ## Alias of `build` (kept for the documented pipeline: build + import)
+
+# The one registry point: k8s/components/registry maps each of this repo's four
+# images from its local build name (`localhost/…`, the k3s store prefix) to the
+# name the cluster pulls. Nothing else names a registry or a path.
+REGISTRY_COMPONENT := k8s/components/registry/kustomization.yaml
+
+registry-push: ## Tag + push this instance's images to the registry the component names (registry hosts)
+	@set -u; pushed=0; \
+	for ref in $(LOCAL_IMAGES); do \
+	  want=$$(awk -v old="$$ref" '\
+	    /^  - name: /{n=$$3} \
+	    /newName: /{ if (n != "" && index(old, n ":") == 1) print $$2 ":" substr(old, length(n) + 2); n="" }' \
+	    $(REGISTRY_COMPONENT)); \
+	  [ -n "$$want" ] || { echo "  $$ref: no mapping in $(REGISTRY_COMPONENT)" >&2; exit 1; }; \
+	  if [ "$$ref" = "$$want" ]; then printf "  %-58s local build (no registry configured)\n" "$$ref"; continue; fi; \
+	  printf "  %-58s -> %s\n" "$$ref" "$$want"; \
+	  $(RUNTIME) tag "$$ref" "$$want" || exit 1; \
+	  $(RUNTIME) push -q "$$want" || exit 1; \
+	  pushed=1; \
+	done; \
+	if [ $$pushed -eq 1 ]; then echo "pushed: $(LOCAL_IMAGES)"; \
+	else echo "nothing pushed: $(REGISTRY_COMPONENT) still names the local builds (the k3s import path)"; fi
 
 check-pins: ## Verify every image reference is pinned by tag+digest and present locally
 	@fail=0; \
-	for ref in $$(grep -rhoE 'image: [^ ]+' k8s/ | awk '{print $$2}' | sort -u); do \
+	for ref in $(INSTANCE_IMAGES); do \
 	  case "$$ref" in \
 	    localhost/*) \
 	      printf "  %-62s local build, tag pinned\n" "$$ref" ;; \
 	    *@sha256:*) \
-	      if sudo k3s ctr images ls -q 2>/dev/null | grep -qF "$${ref%%:*}@$${ref##*@}"; then \
+	      if $(CTR) images ls -q 2>/dev/null | grep -qF "$${ref%%@*}@$${ref##*@}"; then \
 	        printf "  %-62s pinned + present locally\n" "$${ref%%@*}"; \
 	      else \
 	        printf "  %-62s PINNED BUT MISSING locally\n" "$${ref%%@*}"; fail=1; \
@@ -139,312 +248,242 @@ check-pins: ## Verify every image reference is pinned by tag+digest and present 
 	if [ $$fail -eq 0 ]; then echo "all images pinned by tag+digest and present"; \
 	else echo "pin check FAILED"; exit 1; fi
 
-images: ## Build + import the local images, then pull + import the pinned third-party images
-	@for ref in $(LOCAL_IMAGES); do \
-	  bin=$${ref##*/}; bin=$${bin%%:*}; \
-	  if [ ! -f "bins/$$bin/src/main.rs" ]; then \
-	    printf "  %-62s manifest only (bins/%s has no source yet)\n" "$$ref" "$$bin"; continue; \
-	  fi; \
-	  printf "== %s (build)\n" "$$ref"; \
-	  podman build -q -f Dockerfile --build-arg BIN=$$bin -t "$$ref" . || exit 1; \
-	  rm -f /tmp/diorama-img.tar; \
-	  podman save -o /tmp/diorama-img.tar "$$ref" || exit 1; \
-	  sudo k3s ctr images import /tmp/diorama-img.tar >/dev/null || exit 1; \
-	done
-	@for img in $(IMAGES); do \
-		printf "== %s\n" "$$img"; \
-		podman pull -q "$$img" || exit 1; \
-		rm -f /tmp/diorama-img.tar; \
-		podman save -o /tmp/diorama-img.tar "$$img" || exit 1; \
-		sudo k3s ctr images import /tmp/diorama-img.tar >/dev/null || exit 1; \
-	done
-	@rm -f /tmp/diorama-img.tar
-	@echo "local: $(LOCAL_IMAGES)"
-	@echo "imported: $(IMAGES)"
-	@$(MAKE) --no-print-directory check-pins
-
-##@ Engine
-
-build: ## Build the selected instance's engine image with podman (Dockerfile at the workspace root)
-	podman build -f Dockerfile --build-arg BIN=$(ENGINE_BIN) -t $(ENGINE_IMAGE):$(ENGINE_TAG) .
-
-import: build ## Import the engine image into the k3s containerd store
-	podman save -o /tmp/engine-image.tar $(ENGINE_IMAGE):$(ENGINE_TAG)
-	sudo k3s ctr images import /tmp/engine-image.tar
-	rm -f /tmp/engine-image.tar
-
-deploy-engine: import ## Rebuild + redeploy the selected instance's engine
-	$(KUBECTL) rollout restart deploy/engine
+deploy-engine: build ## Rebuild + redeploy the selected instance's engine
+	$(KUBECTL_NS) rollout restart deploy/engine
 	@# Bound the wait by the Deployment's own progressDeadlineSeconds (the
 	@# Kubernetes default is 600s when unset), not a second hardcoded timeout.
-	@deadline=$$(kubectl -n $(NS) get deploy/engine -o jsonpath='{.spec.progressDeadlineSeconds}' 2>/dev/null); \
-	 $(KUBECTL) rollout status deploy/engine --timeout="$${deadline:-600}s"
+	@deadline=$($(KUBECTL) -n $(NS) get deploy/engine -o jsonpath='{.spec.progressDeadlineSeconds}' 2>/dev/null); \
+	 $(KUBECTL_NS) rollout status deploy/engine --timeout="$${deadline:-600}s"
 
-venue-build: ## Build the venue binaries on the host (cargo: diorama-venue-engine + diorama-venue-sim)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p diorama-venue-engine -p diorama-venue-sim
+##@ Secrets (a machine has no key: created here, never tracked)
 
-mainnet-build: ## Build the mainnet engine on the host (cargo: diorama-mainnet-engine)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p diorama-mainnet-engine
+# The only k8s-native credentials left: the reth<->lighthouse JWT (a random
+# shared secret between two of this repo's own pods, useless outside the
+# cluster) and the namespace itself. Every configuration value - keyed
+# endpoints, the relay wallet - lives in the gitignored specialization file,
+# which is mounted into the pods as a file.
+secrets: ## Create the namespace + the reth JWT (idempotent; an existing JWT is never rotated)
+	@$(KUBECTL) apply -f $(NS_MANIFEST) >/dev/null
+	@if [ "$(INSTANCE)" = "diorama-mainnet" ]; then \
+	  if $(KUBECTL) -n $(NS) get secret reth-jwt >/dev/null 2>&1; then \
+	    echo "secret reth-jwt already exists in $(NS) (left untouched)"; \
+	  else \
+	    $(KUBECTL) -n $(NS) create secret generic reth-jwt --from-literal=jwt.hex="$$(openssl rand -hex 32)" >/dev/null; \
+	    echo "created secret reth-jwt in $(NS)"; \
+	  fi; \
+	fi
 
-cctp-build: ## Build the CCTP bridge on the host (cargo: diorama-cctp-bridge)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo build -p diorama-cctp-bridge
+##@ Chain state (a machine has no state: a fresh chain starts at a pin)
 
-test-engine: ## Run workspace unit tests on the host (cargo)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace
+# A mirror's anvil re-forks from its source at the pin and needs no imported
+# state (the fork materializes it). The mainnet mirror's reth and lighthouse
+# do: they follow the real chain from a snapshot (reth) and a checkpoint sync
+# (lighthouse), and that download is the one part of a fresh deploy measured
+# in hours. The bridge needs no state at all.
+snapshot-diorama-mainnet: ## Download the reth snapshot into the reth PVC (scales reth down first; skipped while reth serves)
+	@if [ "$$($(KUBECTL) -n diorama-mainnet get deploy/reth -o jsonpath='{.status.readyReplicas}' 2>/dev/null)" = "1" ]; then \
+	  echo "diorama-mainnet: reth is up (state already sourced; a re-download is explicit: make snapshot-force INSTANCE=diorama-mainnet)"; \
+	else \
+	  $(MAKE) --no-print-directory snapshot-force INSTANCE=diorama-mainnet; \
+	fi
 
-config-bootstrap: ## Copy each tracked project template to the gitignored live file when absent
-	@for f in config/instances/*/daloc.example.toml; do \
-	  d=$${f%/*}; \
-	  if [ ! -f "$$d/daloc.toml" ]; then cp "$$f" "$$d/daloc.toml"; echo "created $$d/daloc.toml from template"; fi; \
-	done
+snapshot-force: ## Force the snapshot (re)download: scales reth down first
+	$(KUBECTL) -n $(NS) apply -f $(NS_MANIFEST) >/dev/null 2>&1 || true
+	$(KUBECTL) -n $(NS) scale deploy/reth --replicas=0 2>/dev/null || true
+	$(KUBECTL) -n $(NS) delete job reth-snapshot --ignore-not-found
+	$(KUBECTL) -n $(NS) apply -f $(BOOTSTRAP)/snapshot-job.yaml
+	@# The wait bound is the Job's own spec.activeDeadlineSeconds, not a second
+	@# hardcoded number: the manifest already owns how long the download may run.
+	@deadline=$(KUBECTL) -n $(NS) get job reth-snapshot -o jsonpath='{.spec.activeDeadlineSeconds}'; \
+	 test -n "$$deadline" || { echo "reth-snapshot Job declares no activeDeadlineSeconds" >&2; exit 1; }; \
+	 echo "waiting for snapshot to finish (Job deadline $${deadline}s; resumable)..."; \
+	 $(KUBECTL) -n $(NS) wait --for=condition=complete job/reth-snapshot --timeout="$${deadline}s" || \
+		{ echo "not complete within the Job's own deadline ($${deadline}s) - check: make snapshot-status INSTANCE=$(INSTANCE)"; exit 1; }
 
-config-check: ## Validate every instance file through the layered loader
-	@for f in config/instances/*/instance.toml; do \
-	  PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p diorama-config -- check "$$f" || exit 1; \
-	done
+snapshot-diorama-venue: ## No import needed: anvil-v re-forks from its source at the pin
+	@echo "diorama-venue: no chain state to import (anvil-v forks from EVM_FORK_URL at the pin)"
 
-fitness: lint design-assertions config-check ast-scope ## Run the structural gates: lint, design assertions, config check, AST scope
+snapshot-diorama-cctp: ## No import needed: the bridge carries cursors only
+	@echo "diorama-cctp: no chain state to import (the bridge scans the live anvils)"
 
-lint: ## lint-gate: clippy, all targets, warnings are errors
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo clippy --workspace --all-targets -- -D warnings
+snapshot: ## Source the selected instance's chain state (wrapper; hours on a fresh mainnet)
+	@$(MAKE) --no-print-directory snapshot-$(INSTANCE) INSTANCE=$(INSTANCE)
 
-design-assertions: ## Public types keep Send + Sync (rule 11)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo test --workspace design_assertions
+snapshot-status: ## Show the reth snapshot job status + progress (mainnet)
+	@$(KUBECTL) -n $(NS) get job reth-snapshot 2>/dev/null || echo "no snapshot job"
 
-ast-scope: ## AST scope analysis: fn/struct size and nesting depth (syn, the compiler's parser)
-	PATH="$$HOME/.cargo/bin:$$PATH" cargo run -q -p diorama-ast-scope -- crates bins
+reset: ## Delete the selected instance's PVCs so the next apply re-forks fresh (DESTRUCTIVE)
+	@read -r -p "delete every PVC of $(NS) (data is lost; volumes are Retained) [y/N] " a; [ "$$a" = y ] || exit 1
+	$(KUBECTL_NS) delete pvc --all
 
-##@ Ops
+##@ Host access (loopback only: the services bind ClusterIP by design)
+
+# Exactly the forwards `harness.env` names, in the background. The anvil
+# cheatcode set and /admin/* must never be a NodePort (they bind every host
+# interface); a ClusterIP + a loopback forward is the only reachable shape.
+port-forward: harness-env ## Open the instance's loopback port-forwards (FORWARD_* in harness.env)
+	@set -a; . $(OVERLAY)/harness.env; set +a; \
+	pids=""; \
+	for pair in $$(env | grep -E '^FORWARD_[A-Z0-9_]+=' | sort); do \
+	  var=$${pair%%=*}; spec="$${pair#*=}"; svc=$$(echo "$$var" | sed -E 's/^FORWARD_//; s/_/-/g' | tr 'A-Z' 'a-z'); \
+	  echo "  $$svc: $$spec"; \
+	  $(KUBECTL_NS) port-forward --address 127.0.0.1 "svc/$$svc" $$spec & pids="$$pids $$!"; \
+	done; \
+	trap 'kill'$$pids' 2>/dev/null' EXIT INT TERM; wait
+
+endpoints: spec-present harness-env ## Render the consumer harness env for the selected instance (in-cluster DNS)
+	@# The block `make port-forward` complements: every chain id and service
+	@# name derived from the merged instance config, never repeated in a
+	@# manifest. The specialization is self-sustained - every value resolves
+	@# from the files alone, with no pod environment at all.
+	@cargo run -q -p diorama-config -- export-env config/instances/$(INSTANCE)/instance.toml --section client
+
+##@ Operate (any instance)
 
 status: ## Pods, PVCs, engine status
-	@$(KUBECTL) get pods -o wide
-	@$(KUBECTL) get pvc
+	@$(KUBECTL_NS) get pods -o wide
+	@$(KUBECTL_NS) get pvc
 	@echo "--- engine status ---"
-	@$(KUBECTL) exec deploy/engine -- curl -sf http://localhost:8080/status | jq . 2>/dev/null || echo "(engine not ready)"
+	@$(KUBECTL_NS) exec deploy/engine -- curl -sf http://localhost:8080/status | jq . 2>/dev/null || echo "(no engine in $(NS), or not ready)"
 
 logs: ## Tail logs of all pods of the selected instance (follow)
-	$(KUBECTL) logs -f -l app.kubernetes.io/part-of=$(NS) --max-log-requests=10 --prefix
+	$(KUBECTL_NS) logs -f -l app.kubernetes.io/part-of=$(NS) --max-log-requests=10 --prefix
 
-logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-anvil-t
-	$(KUBECTL) logs -f deploy/$* --tail=100
+logs-%: ## Tail logs of one component, e.g. make logs-engine / logs-reth / logs-anvil-v
+	$(KUBECTL_NS) logs -f deploy/$* --tail=100
 
-# The mirror-specific targets pin their own namespace (the shared targets
-# follow INSTANCE): a `mainnet-*` target is about the mainnet mirror, a
-# `venue-*` target about the venue's.
-mainnet-smoke: ## End-to-end smoke test (mainnet)
-	NS=diorama-mainnet ./scripts/mainnet-smoke.sh
+smoke: ## End-to-end smoke test of the selected mirror (mainnet, venue)
+	@case $(INSTANCE) in \
+	  diorama-mainnet) ./scripts/smoke.sh --side mainnet ;; \
+	  diorama-venue) ./scripts/smoke.sh --side venue ;; \
+	  *) echo "$(INSTANCE) has no smoke suite (TESTING.md: one row per reason)" ;; \
+	esac
 
-venue-smoke: ## End-to-end smoke test of the Venue Mirror (V, engine, sim, bridge)
-	NS=diorama-venue ./scripts/venue-smoke.sh
+##@ Forensics (read-only)
 
-venue-bootstrap: ns venue-secrets images ## First-time setup (venue): namespace, secrets, images, full stack
-	kubectl apply -f k8s/base/diorama-venue/pvcs.yaml
-	$(MAKE) INSTANCE=diorama-venue apply
-	@echo "venue bootstrap complete. watch: make INSTANCE=diorama-venue status"
+mirror-freshness: ## One view of the execution, market-data, venue and relay planes
+	./scripts/mirror-freshness.sh
 
-cctp-ns: ## Create the bridge namespace + StorageClass
-	kubectl apply -f $(CCTP_OVERLAY)/namespace.yaml
-	kubectl apply -f k8s/base/shared/storageclass.yaml
-
-cctp-apply: ## Apply the standalone CCTP bridge instance
-	kubectl apply -k $(CCTP_OVERLAY)
-
-cctp-diff: ## Show what `make cctp-apply` would change
-	kubectl diff -k $(CCTP_OVERLAY) || true
-
-cctp-status: ## Pods, PVC and health of the standalone bridge
-	@kubectl -n $(CCTP_NS) get pods,pvc
-	@kubectl -n $(CCTP_NS) exec deploy/cctp-bridge -- curl -sf localhost:8096/health | jq . 2>/dev/null || echo "(bridge not ready)"
-
-cctp-logs: ## Tail the standalone bridge's logs
-	kubectl -n $(CCTP_NS) logs -f deploy/cctp-bridge --tail=100
-
-cctp-bootstrap: cctp-ns cctp-secrets images ## First-time setup: namespace, secret, images, bridge
-	$(MAKE) cctp-apply
-	@echo "cctp bootstrap complete. watch: make cctp-status"
-
-venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/epoch)
-	kubectl -n diorama-venue exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
-
-venue-scenario: ## The venue epoch scenario (same-pin restore, new-pin epoch, driver liveness)
-	NS=diorama-venue ./scripts/venue-scenario.sh
-
-venue-proof: ## The venue capability proof (mint, sim deal, crash⇒liquidation, bridge round-trip, block production)
-	NS=diorama-venue ./scripts/venue-proof.sh
-
-venue-order-proof: ## The venue order-lane proof (fills vs the real book, the market-impact invariants, hand-back)
-	NS=diorama-venue ./scripts/venue-order-proof.sh
-
-cctp-smoke: ## The CCTP bridge smoke (health, store coherence, metric set)
-	NS=$(CCTP_NS) ./scripts/cctp-smoke.sh
-
-cctp-roundtrip: ## The CCTP round trip (burn -> mint, exact delta; SOURCE/DESTINATION/AMOUNT env)
-	NS=$(CCTP_NS) ./scripts/cctp-roundtrip.sh
-
-cctp-margin-cycle: ## The crosschain unified-margin cycle (T mint -> CCTP -> venue collateral -> trade -> CCTP back)
-	NS=$(CCTP_NS) ./scripts/cctp-margin-cycle.sh
-
-daloc-portfolio-dod: ## The portfolio cardinality DOD on the live daloc stack (simple 1=1=1=1; unified 1 CM + 1 agent + N debts)
-	DALOC_REPO=$(abspath $(DALOC_REPO)) \
-	BORROWER_KEY_FILE=$(BORROWER_KEY_FILE) \
-	DALOC_OUT=$(DALOC_OUT) \
-	GATEWAY_URL=$(DALOC_GATEWAY_URL) \
-	RPC_999=$(DALOC_RPC_999) \
-	ALLOW_TEST_POSTURE=$(ALLOW_TEST_POSTURE) \
-	$(abspath $(DALOC_REPO))/tools/e2e/portfolio-dod.sh
-
-portfolio-sim: ## The portfolio simulation: a delta-neutral basis book across both mirrors (carry + shock + capital efficiency)
-	NS=diorama-venue ./scripts/portfolio-sim.sh
-
-basis-capture: ## The live T-vs-V basis series, traded: the capture + the live carry, the identity checked
-	NS=diorama-venue ./scripts/basis-capture.sh
-
-portfolio-reaction: ## A held portfolio vs another account's impact: both directions, the thresholds, the hedge
-	NS=diorama-venue ./scripts/portfolio-reaction.sh
-
-crosschain-margin: ## The crosschain margin book: bridged collateral, funding costs, served unrealized PnL, the loop closed
-	NS=diorama-venue ./scripts/crosschain-margin.sh
-
-crosschain-recovery: ## The deeper crosschain reads: the funding sign flip + the collateral's way back after a forced close
-	NS=diorama-venue ./scripts/crosschain-recovery.sh
-
-capital-frontier: ## The capital-efficiency frontier: the liquidation distance measured at each leverage
-	NS=diorama-venue ./scripts/capital-frontier.sh
-
-hedged-book: ## The hedged book: same collateral and gross exposure as the unhedged, flat through a 60% crash
-	NS=diorama-venue ./scripts/hedged-book.sh
-
-impact-scenarios: ## The impact ladder: a whale moves the book and the mark; the portfolio's reaction measured
-	NS=diorama-venue ./scripts/impact-scenarios.sh
-
-shadow-audit: ## The shadowing audit: deliberate anvil states vs the COW shadow, both mirrors
-	./scripts/shadow-audit.sh
-
-benchmark: ## The prime-brokerage benchmark session: the seven portfolio studies in sequence
-	@echo "== benchmark session: the seven portfolio studies =="
-	@$(MAKE) --no-print-directory portfolio-sim
-	@$(MAKE) --no-print-directory basis-capture
-	@$(MAKE) --no-print-directory portfolio-reaction
-	@$(MAKE) --no-print-directory crosschain-margin
-	@$(MAKE) --no-print-directory capital-frontier
-	@$(MAKE) --no-print-directory hedged-book
-	@$(MAKE) --no-print-directory impact-scenarios
-	@echo "== benchmark session: all seven studies green ==" 
-
-engine-symmetry: ## Both engines' shared HTTP verbs must answer identically (cross-mirror contract)
-	./scripts/engine-symmetry.sh
-
-log-surface: ## The symmetric log contract, attested against the running services
-	./scripts/log-surface.sh
-
-attest: ## The behavioral attestation: the pass over both mirrors, then the asserting suites
-	./scripts/attest.sh
-	./scripts/log-surface.sh
-	./scripts/engine-symmetry.sh
-
-
-mainnet-scenario: ## Scenario test: self-containment, live parity (T vs reth), devnet workflow
-	NS=diorama-mainnet ./scripts/mainnet-scenario.sh
-
-mainnet-proof: ## Capability proof: live fork, mint funds, real Aave/Uniswap/liquidation interaction
-	NS=diorama-mainnet ./scripts/mainnet-proof.sh
-
-mainnet-product-sim: ## Product simulation: levered position, live-data sampling, bot liquidation on T
-	NS=diorama-mainnet ./scripts/mainnet-product-sim.sh
-
-mainnet-closure-check: ## Audit the watchlist closure: every storage dep of every market-data view
-	NS=diorama-mainnet ./scripts/mainnet-closure-check.sh
-
-
-mainnet-selftest: ## Run the engine selftest Job (public RPC + scratch anvil; no reth needed)
-	kubectl -n diorama-mainnet delete job mainnet-selftest --ignore-not-found
-	kubectl apply -f $(BOOTSTRAP)/mainnet-selftest-job.yaml
-	@# The Job never reaches Complete: its anvil sidecar is a long-running
-	@# server. The engine container prints the verdict, so poll that container
-	@# and gate on `== selftest PASSED ==` instead of waiting on the Job.
-	@for _ in $$(seq 1 450); do \
-	  out=$$(kubectl -n diorama-mainnet logs job/mainnet-selftest -c engine 2>/dev/null || true); \
-	  case "$$out" in \
-	    *"== selftest PASSED =="*) printf '%s\n' "$$out"; exit 0 ;; \
-	    *"== selftest FAILED =="*) printf '%s\n' "$$out"; exit 1 ;; \
-	  esac; \
-	  sleep 2; \
-	done; \
-	echo "mainnet-selftest produced no verdict within 900s" >&2; exit 1
-
-venue-selftest: ## Run the venue selftest Job (public RPC + scratch anvil; no cluster stack needed)
-	kubectl -n diorama-venue delete job venue-selftest --ignore-not-found
-	kubectl apply -f $(BOOTSTRAP)/venue-selftest-job.yaml
-	@# Same shape as mainnet-selftest: poll the engine container's verdict.
-	@for _ in $$(seq 1 450); do \
-	  out=$$(kubectl -n diorama-venue logs job/venue-selftest -c engine 2>/dev/null || true); \
-	  case "$$out" in \
-	    *"== selftest PASSED =="*) printf '%s\n' "$$out"; exit 0 ;; \
-	    *"== selftest FAILED =="*) printf '%s\n' "$$out"; exit 1 ;; \
-	  esac; \
-	  sleep 2; \
-	done; \
-	echo "venue-selftest produced no verdict within 900s" >&2; exit 1
+substrate-attest: ## Read-only substrate invariants: cursors, pins, contract code, bridge, DB, host
+	./scripts/substrate-attest.sh
 
 logs-check: ## Deep log scan: warnings/errors per component (last 30 min, normalized)
-	@for c in reth lighthouse anvil-t engine; do \
+	@for c in $$($(KUBECTL_NS) get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do \
 	  printf "== %s\n" "$$c"; \
-	  kubectl -n $(NS) logs deploy/$$c --since=30m 2>/dev/null \
+	  $(KUBECTL) -n $(NS) logs deploy/$$c --since=30m 2>/dev/null \
 	    | grep -aE "WARN|ERROR|\"level\":\"(WARN|ERROR)\"" \
 	    | sed -E 's/\"timestamp\":\"[^\"]*\"/TS/; s/[0-9a-fx]{8,}/HEX/g; s/[0-9]{4,}/N/g' \
 	    | sort | uniq -c | sort -rn | head -6; \
 	done
 
-mainnet-backfill: ## Show the CL backfill progress and the lighthouse datadir sizes
-	@$(KUBECTL) logs deploy/lighthouse --tail=200 2>/dev/null \
-	  | jq -r 'select(.msg != null and (.msg|test("historical";"i"))) | "backfill: distance=\(.distance // "?") speed=\(.speed // "?") est=\(.est_time // "?")"' 2>/dev/null | tail -1
-	@sudo sh -c 'du -sh /var/lib/rancher/k3s/storage/pvc-*_$(NS)_lighthouse-data/beacon/* 2>/dev/null | sort -h | tail -4'
+# The selected instance's anvils (one per mirror; the bridge has none), read
+# lazily: the recipes that need them query the cluster when they run, never at
+# parse time (an offline `make help` must not hit the cluster).
+ANVILS = $(shell $(KUBECTL_NS) get deploy -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -- '-v$$\|-t$$')
 
-mainnet-prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; safe for the mirror)
-	@echo "scaling lighthouse down (the prune needs the database lock)..."
-	kubectl -n $(NS) scale deploy/lighthouse --replicas=0
-	kubectl -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=lighthouse --timeout=180s || true
-	kubectl -n $(NS) delete job lighthouse-prune-blobs --ignore-not-found
-	kubectl apply -f $(BOOTSTRAP)/prune-blobs-job.yaml
-	kubectl -n $(NS) wait --for=condition=complete job/lighthouse-prune-blobs --timeout=3600s || true
-	$(KUBECTL) logs job/lighthouse-prune-blobs --tail=20 || true
-	kubectl -n $(NS) delete job lighthouse-prune-blobs --ignore-not-found
-	kubectl -n $(NS) scale deploy/lighthouse --replicas=1
-	kubectl -n $(NS) rollout status deploy/lighthouse --timeout=300s
-	@$(MAKE) --no-print-directory mainnet-backfill
+##@ Drills (a mirror's own levers)
 
 pin-show: ## Show the resolved fork pins of the instance's anvils
 	@for c in $(ANVILS); do \
-		printf "%s pin: " $$c; $(KUBECTL) exec deploy/$$c -- cat /state/pin 2>/dev/null || echo "(not resolved yet)"; \
+		printf "%s pin: " $$c; $(KUBECTL_NS) exec deploy/$$c -- cat /state/pin 2>/dev/null || echo "(not resolved yet)"; \
 	done
 
-mainnet-repin: ## Re-pin drill: wipe the pin, restart the anvil (engine auto-rebases; a new epoch starts)
-	kubectl -n diorama-mainnet scale deploy/anvil-t --replicas=0
+repin: ## Re-pin the instance's anvil: wipe the pin, restart (engine auto-rebases; new epoch)
+	@anvil=$(ANVILS); anvil=$${anvil%% *}; \
+	[ -n "$$anvil" ] || { echo "$(NS) has no anvil deployment" >&2; exit 1; }; \
+	cm=$$($(KUBECTL) -n $(NS) get deploy "$$anvil" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="instance")].configMap.name}'); \
+	pin=$$($(KUBECTL) -n $(NS) get cm "$$cm" -o go-template='{{index .data "specialization.toml"}}' 2>/dev/null | sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' | tr -d '_'); \
+	if [ -n "$$pin" ]; then \
+	  echo "the mounted specialization still pins fork_pin=$$pin; remove it first (a changed pin is a new epoch and clears the shadow registry)." >&2; \
+	  exit 1; \
+	fi; \
+	echo "re-pinning $$anvil in $(NS)"; \
+	$(KUBECTL) -n $(NS) scale deploy/$$anvil --replicas=0; \
 	# Wait until the pod is really gone before wiping: the wipe must not
 	# race a container that is still shutting down (its init container
 	# re-resolves the pin on the next start).
-	kubectl -n diorama-mainnet wait --for=delete pod -l app.kubernetes.io/name=anvil-t --timeout=180s || true
-	kubectl -n diorama-mainnet delete job repin-wipe --ignore-not-found
-	kubectl apply -f $(BOOTSTRAP)/repin-job.yaml
-	kubectl -n diorama-mainnet wait --for=condition=complete job/repin-wipe --timeout=300s
-	kubectl -n diorama-mainnet delete job repin-wipe --ignore-not-found
-	kubectl -n diorama-mainnet scale deploy/anvil-t --replicas=1
-	kubectl -n $(NS) rollout status deploy/anvil-t --timeout=600s
-	@echo "re-pinned. engine will rebase automatically on its next poll."
+	$(KUBECTL) -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=$$anvil --timeout=180s || true; \
+	$(KUBECTL) -n $(NS) delete job repin-wipe --ignore-not-found; \
+	$(KUBECTL) -n $(NS) apply -f <(sed "s/claimName: anvil-t-state/claimName: $$anvil-state/" $(BOOTSTRAP)/repin-job.yaml); \
+	$(KUBECTL) -n $(NS) wait --for=condition=complete job/repin-wipe --timeout=300s; \
+	$(KUBECTL) -n $(NS) delete job repin-wipe --ignore-not-found; \
+	$(KUBECTL) -n $(NS) scale deploy/$$anvil --replicas=1; \
+	$(KUBECTL) -n $(NS) rollout status deploy/$$anvil --timeout=1200s; \
+	echo "re-pinned. engine will rebase automatically on its next poll."
+
+venue-repin: ## Re-pin V to the fork source's latest block (the engine's /admin/epoch)
+	$(KUBECTL) -n diorama-venue exec deploy/engine -- curl -sf -m 90 -X POST localhost:8080/admin/epoch
+
+backfill: ## Show the CL backfill progress and the lighthouse datadir sizes (mainnet)
+	@$(KUBECTL) -n $(NS) logs deploy/lighthouse --tail=200 2>/dev/null \
+	  | jq -r 'select(.msg != null and (.msg|test("historical";"i"))) | "backfill: distance=\(.distance // "?") speed=\(.speed // "?") est=\(.est_time // "?")"' 2>/dev/null | tail -1
+	@$(SUDO) sh -c 'du -sh $(K3S_STORAGE)/pvc-*_$(NS)_lighthouse-data/beacon/* 2>/dev/null | sort -h | tail -4'
+
+prune-blobs: ## Reclaim backfilled blob storage (needs the CL stopped; safe for the mirror)
+	@echo "scaling lighthouse down (the prune needs the database lock)..."
+	$(KUBECTL) -n $(NS) scale deploy/lighthouse --replicas=0
+	$(KUBECTL) -n $(NS) wait --for=delete pod -l app.kubernetes.io/name=lighthouse --timeout=180s || true
+	$(KUBECTL) -n $(NS) delete job lighthouse-prune-blobs --ignore-not-found
+	$(KUBECTL) -n $(NS) apply -f $(BOOTSTRAP)/prune-blobs-job.yaml
+	$(KUBECTL) -n $(NS) wait --for=condition=complete job/lighthouse-prune-blobs --timeout=3600s || true
+	$(KUBECTL_NS) logs job/lighthouse-prune-blobs --tail=20 || true
+	$(KUBECTL) -n $(NS) delete job lighthouse-prune-blobs --ignore-not-found
+	$(KUBECTL) -n $(NS) scale deploy/lighthouse --replicas=1
+	$(KUBECTL) -n $(NS) rollout status deploy/lighthouse --timeout=300s
+	@$(MAKE) --no-print-directory backfill INSTANCE=$(NS)
+
+##@ Develop
+
+test-engine: ## Run workspace unit tests on the host (cargo)
+	cargo test --workspace
+
+config-check: ## Validate every instance file through the layered loader (a live specialization, or the tracked template for a fresh clone)
+	@for f in config/instances/*/instance.toml; do \
+	  cargo run -q -p diorama-config -- check "$$f" || exit 1; \
+	done
+
+config-lint: ## Structural gates over the tracked tree (wiring keys, templates, image pins)
+	@./scripts/config-lint.sh
+
+fitness: toolchain-check lint design-assertions config-check ast-scope config-lint ## Run the structural gates: toolchain, lint, design assertions, config check, AST scope, config lint
+
+ci: ## Run the exact CI gates locally: workspace tests, then fitness
+	cargo test --workspace --locked
+	$(MAKE) fitness
+
+toolchain-check: ## The pinned toolchain, the CI pin and Cargo's rust-version agree
+	@pin=$$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml); \
+	[ -n "$$pin" ] || { echo "FAIL: rust-toolchain.toml names no channel (a host would build with its own default)" >&2; exit 1; }; \
+	ci=$$(sed -n 's/^ *toolchain: *\(.*\)/\1/p' .github/workflows/ci.yml | head -1); \
+	[ "$$pin" = "$$ci" ] || { echo "FAIL: rust-toolchain.toml pins $$pin but CI builds with $${ci:-<no toolchain: line>}" >&2; exit 1; }; \
+	msrv=$$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml | head -1); \
+	[ -n "$$msrv" ] || { echo "FAIL: Cargo.toml names no rust-version" >&2; exit 1; }; \
+	[ "$$(echo "$$pin" | cut -d. -f1,2)" = "$$msrv" ] || { echo "FAIL: toolchain $$pin and rust-version $$msrv disagree" >&2; exit 1; }; \
+	echo "toolchain ok: $$pin (Cargo rust-version $${msrv}, CI pin $$ci)"
+
+lint: ## lint-gate: clippy, all targets, warnings are errors
+	cargo clippy --workspace --all-targets -- -D warnings
+
+design-assertions: ## Public types keep Send + Sync (rule 11)
+	cargo test --workspace design_assertions
+
+ast-scope: ## AST scope analysis: fn/struct size and nesting depth (syn, the compiler's parser)
+	cargo run -q -p diorama-ast-scope -- crates bins
 
 ##@ Help
 
+# The instance list, spelled for the usage line.
+space := $(subst ,, )
+INSTANCE_LIST := $(subst $(space),|,$(strip $(INSTANCES)))
+
 help: ## Show this help
-	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage: make \033[36m<target>\033[0m\n"} \
-		/^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 } \
+	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage: make \033[36m<target>\033[0m INSTANCE={$(INSTANCE_LIST)}\n"} \
+		/^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2 } \
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 	@echo
 
-.PHONY: fitness lint design-assertions config-check config-bootstrap ast-scope
-.PHONY: ns mainnet-secrets venue-secrets apply diff delete \
-	mainnet-snapshot mainnet-snapshot-status mainnet-bootstrap venue-bootstrap \
-	images build venue-build mainnet-build cctp-build import deploy-engine test-engine \
-	status logs logs-check check-pins mainnet-smoke venue-smoke venue-repin venue-scenario \
-	venue-proof venue-order-proof venue-selftest cctp-smoke cctp-roundtrip cctp-margin-cycle daloc-portfolio-dod engine-symmetry \
-	mainnet-scenario mainnet-proof mainnet-product-sim mainnet-closure-check \
-	mainnet-selftest mainnet-backfill mainnet-prune-blobs pin-show mainnet-repin help
+.PHONY: up spec-present harness-env apply diff delete bind-claims unbind-claims deps build import registry-push check-pins deploy-engine \
+	secrets snapshot snapshot-force snapshot-diorama-mainnet snapshot-diorama-venue snapshot-diorama-cctp \
+	snapshot-status reset port-forward endpoints status logs logs-check smoke \
+	mirror-freshness substrate-attest pin-show repin venue-repin backfill prune-blobs \
+	test-engine config-check config-lint fitness ci lint design-assertions ast-scope help

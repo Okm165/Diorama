@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 /// not overwrite the devnet's state.
 pub(super) async fn prepend_and_mark(ctx: &Ctx, n: u64) -> Result<()> {
     if let Some(rounds) = ctx.mirror.policies().prepend_rounds {
-        prepend_devnet_txs(&ctx.anvil_t, n, rounds).await?;
+        prepend_devnet_txs(&ctx.target_rpc, n, rounds).await?;
     }
     mark_own_writes(ctx).await
 }
@@ -29,17 +29,17 @@ pub(super) async fn prepend_and_mark(ctx: &Ctx, n: u64) -> Result<()> {
 /// on (measured: an Aave borrow estimated pre-diff came out ~5% short and
 /// reverted). Mine until the pool drains, at most 3 rounds so a steady stream
 /// cannot starve the parent block.
-async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()> {
+async fn prepend_devnet_txs(target_rpc: &Rpc, n: u64, rounds_max: u8) -> Result<()> {
     let mut rounds = 0;
     while rounds < rounds_max {
         // The prepend block's timestamp: monotonic (last+1) so the applied
         // block's alignment below can never fail on a lowered offset. Set
         // before the pool check — a pool that drains first leaves the value
         // for the applied block, which sets its own.
-        let last = anvil_t
-            .block_by_number(anvil_t.block_number().await?, diorama_anvil::Txs::Hashes)
+        let last = target_rpc
+            .block_by_number(target_rpc.block_number().await?, diorama_anvil::Txs::Hashes)
             .await?;
-        if let Err(e) = anvil_t
+        if let Err(e) = target_rpc
             .anvil_set_next_block_timestamp(last.header.timestamp + 1)
             .await
         {
@@ -48,7 +48,7 @@ async fn prepend_devnet_txs(anvil_t: &Rpc, n: u64, rounds_max: u8) -> Result<()>
             // block's timestamp, so this is a named, bounded degradation.
             tracing::debug!(block = n, error = %e, "prepend timestamp not set");
         }
-        let pending = match anvil_t.mine_pending().await {
+        let pending = match target_rpc.mine_pending().await {
             Ok(diorama_anvil::Mined::Block { pending }) => pending,
             Ok(diorama_anvil::Mined::Empty) => return Ok(()),
             Err(e) => {
@@ -87,10 +87,10 @@ async fn mark_own_writes(ctx: &Ctx) -> Result<()> {
 /// blocks included). Anchored at the pin like every scan: a re-pin mid-apply
 /// must not walk the source's blocks.
 pub(super) async fn scan_own_blocks(ctx: &Ctx, from: u64) -> Result<()> {
-    let now = ctx.anvil_t.block_number().await?;
-    let pin = ctx.anvil_t.fork_block().await?.unwrap_or(0);
+    let now = ctx.target_rpc.block_number().await?;
+    let pin = ctx.target_rpc.fork_block().await?.unwrap_or(0);
     let from = diorama_devnet::scan::scan_anchor(from, pin);
-    let walk = diorama_devnet::scan::scan_range(&ctx.plane, &ctx.anvil_t, from, now).await?;
+    let walk = diorama_devnet::scan::scan_range(&ctx.plane, &ctx.target_rpc, from, now).await?;
     ctx.record_scan(&walk);
     Ok(())
 }

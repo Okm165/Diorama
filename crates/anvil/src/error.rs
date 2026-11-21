@@ -221,6 +221,23 @@ pub enum Error {
     /// The node does not have the block: a fact the caller gates on, named.
     #[error("{endpoint}: block {n} is not available")]
     BlockMissing { endpoint: String, n: u64 },
+
+    /// A submitted write mined and REVERTED (receipt status 0x0).
+    /// `eth_sendTransaction` answering a hash proves admission, not
+    /// execution: the receipt's status is the only on-chain verdict, and a
+    /// revert that is read as success turns the caller's retry policy into
+    /// an infinite silent loop (measured 2026-11-12: the feed bridge
+    /// re-published every round for hours with `last_error: null` because
+    /// its `updateAnswer` reverted each time and the hash was taken as the
+    /// answer).
+    #[error("{tx}: the write mined as a revert")]
+    WriteReverted { tx: String },
+
+    /// A submitted write never mined inside the wait bound: the pool
+    /// displaced it (a same-nonce sender), or the node stalled. The caller
+    /// may retry; the state it assumed is not on chain.
+    #[error("{tx}: the write did not mine within {timeout_ms} ms")]
+    WriteUnmined { tx: String, timeout_ms: u64 },
 }
 
 impl Error {
@@ -239,6 +256,19 @@ impl Error {
         matches!(self, Error::Rpc { payload, .. } if payload.code == -32008)
     }
 
+    /// A **transient server-side execution timeout** (measured live: the
+    /// public HyperEVM RPC answers `-32000 execution aborted (timeout = 5s)`
+    /// under load). It is not the method's answer: another endpoint may serve
+    /// the same request, and the same endpoint may serve a narrower
+    /// `eth_getLogs` range. The pool fails over on it; the composer halves the
+    /// range. A deterministic `-32000` (a revert, an unsupported block) is
+    /// deliberately not matched.
+    pub fn is_execution_timeout(&self) -> bool {
+        matches!(self, Error::Rpc { payload, .. }
+            if payload.code == -32000
+                && payload.message.to_ascii_lowercase().contains("timeout"))
+    }
+
     /// Anvil's history-pruned refusals — two measured shapes for the same
     /// `--prune-history` window: a `debug_traceTransaction` answers `-32000`
     /// "historical state needed to replay block N is not available", while a
@@ -246,11 +276,30 @@ impl Error {
     /// block height is H but requested was R". A block older than the window
     /// can never be replayed: the caller names it and moves on, never retries.
     pub fn is_history_unavailable(&self) -> bool {
-        matches!(self, Error::Rpc { payload, .. }
-            if (payload.code == -32000
-                && payload.message.contains("historical state needed to replay"))
-                || (payload.code == -32602
-                    && payload.message.contains("BlockOutOfRangeError")))
+        match self {
+            Error::Rpc { payload, .. } => {
+                (payload.code == -32000
+                    && payload
+                        .message
+                        .contains("historical state needed to replay"))
+                    || (payload.code == -32602 && payload.message.contains("BlockOutOfRangeError"))
+            }
+            // The pool classifies a capability refusal ("this endpoint cannot
+            // serve that block") as an endpoint fault and fails over — but a
+            // single-endpoint client (the devnet target the shadow scan
+            // traces on) has nowhere to fail over, so the scan would see a
+            // fault that is neither presence nor absence and retry forever.
+            // Measured 2026-11-12: anvil-t's `--prune-history 32` answered a
+            // re-fork recovery scan exactly this way and the mirror froze.
+            // The body is the answer; the endpoint-name wrapper is not.
+            Error::EndpointFault { detail, .. } => {
+                detail.contains("historical state")
+                    || detail.contains("pruned history")
+                    || detail.contains("missing trie node")
+                    || detail.contains("BlockOutOfRangeError")
+            }
+            _ => false,
+        }
     }
 
     /// The node does not have the requested block yet: its head moved past the
@@ -260,6 +309,9 @@ impl Error {
     pub fn is_block_unavailable(&self) -> bool {
         match self {
             Error::BlockMissing { .. } => true,
+            // A write that did not land is a wait-and-retry, never a pass
+            // failure the caller should escalate.
+            Error::WriteUnmined { .. } => true,
             Error::Rpc { payload, .. } => {
                 (payload.code == -32001
                     && (payload.message.contains("block not found")
@@ -306,7 +358,9 @@ impl Error {
             | Error::EndpointsExhausted { .. }
             | Error::PoolCooling { .. }
             | Error::PooledWrite
-            | Error::LogRangeTooWide { .. } => "<local>",
+            | Error::LogRangeTooWide { .. }
+            | Error::WriteReverted { .. }
+            | Error::WriteUnmined { .. } => "<local>",
             Error::NotReady { what, .. } => what,
             Error::Transport { endpoint, .. }
             | Error::EndpointFault { endpoint, .. }
@@ -395,6 +449,22 @@ mod tests {
         )
         .is_history_unavailable());
         assert!(!rpc(-32000, "some other node fault").is_history_unavailable());
+        // The same answer wrapped in an endpoint fault (a single-endpoint
+        // client has no failover): the body is still the answer.
+        assert!(Error::EndpointFault {
+            endpoint: "http://anvil-t:8545".into(),
+            method: "debug_traceTransaction".into(),
+            detail: "HTTP 200: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,                     \"message\":\"historical state needed to replay block 26401441 is not \
+                     available\"}}'"
+                .into(),
+        }
+        .is_history_unavailable());
+        assert!(!Error::EndpointFault {
+            endpoint: "http://x".into(),
+            method: "debug_traceTransaction".into(),
+            detail: "HTTP 200: {\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,                     \"message\":\"revert: nope\"}}".into(),
+        }
+        .is_history_unavailable());
     }
 
     /// Every measured source-lag shape classifies as a wait; an unrelated
@@ -417,6 +487,28 @@ mod tests {
         assert!(
             !rpc(-32602, "invalid argument 0: hex string has odd length").is_block_unavailable()
         );
+    }
+
+    /// The public HyperEVM RPC's transient server timeout is an endpoint
+    /// fault, not the method's answer: the pool may fail over and the
+    /// composer may narrow the range. A deterministic `-32000` stays an
+    /// answer.
+    #[test]
+    fn execution_timeout_is_a_transient_fault() {
+        let rpc = |code: i64, message: &'static str| Error::Rpc {
+            endpoint: "https://rpc.hyperliquid.xyz/evm".into(),
+            method: "eth_getLogs".into(),
+            payload: RpcError {
+                code,
+                message: message.into(),
+                data: None,
+            },
+        };
+        assert!(rpc(-32000, "execution aborted (timeout = 5s)").is_execution_timeout());
+        assert!(rpc(-32000, "request timeout").is_execution_timeout());
+        assert!(!rpc(-32000, "execution reverted").is_execution_timeout());
+        assert!(!rpc(-32603, "internal error").is_execution_timeout());
+        assert!(!rpc(-32005, "rate limited").is_execution_timeout());
     }
 
     /// This error is wrapped by the engine's, which must stay under clippy's

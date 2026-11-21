@@ -1,7 +1,7 @@
 //! The watcher: both chains' `MessageSent` events → the persisted attestation
 //! store.
 //!
-//! **Two lanes, two watermarks** (the DALOC `log_scanner` contract):
+//! **Two lanes, two watermarks** (the consumer `log_scanner` contract):
 //!
 //! - **WSS is primary.** `eth_subscribe("logs")` delivers a burn sub-second
 //!   after inclusion; [`crate::ws_logs`] decodes it into the same
@@ -18,8 +18,10 @@
 //! decoded, so a burn delivered by both lanes is processed once. Each log is
 //! decoded into a [`MessageRecord`], the attester fields are patched (`nonce =
 //! keccak256(burn-tx ‖ log-index)`, `finalityThresholdExecuted = 2000`,
-//! `feeExecuted = 0`, `expirationBlock = configured`, §15.3), and every record
-//! whose emulated PENDING window has elapsed is signed.
+//! `feeExecuted = min(maxFee, amount)`, `expirationBlock = configured`, §15.3),
+//! and every record whose emulated PENDING window has elapsed is signed. The
+//! fee is the sender's cap, matching DALOC's `amount - maxFee` pricing; a zero
+//! fee stranded the difference at the destination ProofExecutor.
 //!
 //! **Restart backfill**: the first HTTP scan of every run starts at
 //! `start_block` — a burn awaiting attestation across a restart is re-read
@@ -63,9 +65,11 @@ pub struct Watcher {
     pub destination: Chain,
     pub store: Arc<Store>,
     pub attester: Arc<Attester>,
-    /// First block scanned every boot (the deploy block of the CCTP contracts
-    /// on that chain; 0 = genesis, correct but slow on a deep fork).
-    pub start_block: u64,
+    /// First block scanned every boot. `None` — the mirror spelling — means
+    /// "the chain's fork pin": the boot scan begins at the base and the
+    /// below-pin clamp is a no-op rather than a correction. `Some(0)` =
+    /// genesis, correct but slow on a deep fork.
+    pub start_block: Option<u64>,
     /// Where the *next* HTTP reconciliation resumes inside this run (0 = not
     /// scanned yet, so the first pass backfills from `start_block`; later
     /// passes continue from the last scanned head). **Only the HTTP arm writes
@@ -283,6 +287,7 @@ impl Watcher {
     /// at are gone: their records are parked (stale derivations, I6 — never
     /// relayed) and the scan restarts from the base.
     async fn resume_from(&self, last: u64, head: u64, pin: Option<u64>) -> Result<u64> {
+        let configured_start = self.start_block.unwrap_or(0);
         let cursor_off_base = cursor_off_base(last, head, pin);
         if cursor_off_base {
             tracing::warn!(
@@ -302,16 +307,20 @@ impl Watcher {
             // A rewind: everything above the head is invalid, so the cursor
             // cannot resume — restart at the configured start (the pin clamp
             // below still applies).
-            self.start_block
+            configured_start
         } else {
             match last {
-                0 => self.start_block,
-                n => (n + 1).max(self.start_block),
+                0 => configured_start,
+                n => (n + 1).max(configured_start),
             }
         };
         let floor = pin.map(|pin| pin.saturating_add(1));
         Ok(match floor {
-            Some(floor) if self.start_block < floor => {
+            // A declared start below the pin is a correction the config owes
+            // once; an omitted start **is** the pin, so no warning exists to
+            // silence — the mirror never declares a block number it would have
+            // to keep true across re-pins.
+            Some(floor) if self.start_block.is_some() && self.start_block < Some(floor) => {
                 if self
                     .clamp_warned
                     .swap(floor, std::sync::atomic::Ordering::Relaxed)
@@ -319,14 +328,14 @@ impl Watcher {
                 {
                     tracing::warn!(
                         chain = self.chain.name,
-                        configured_start = self.start_block,
+                        configured_start,
                         pin = floor - 1,
                         "configured start block is below the fork pin; scanning from the pin"
                     );
                 }
                 base.max(floor)
             }
-            _ => base,
+            _ => base.max(floor.unwrap_or(0)),
         })
     }
 
@@ -338,7 +347,7 @@ impl Watcher {
             .from_block(from)
             .to_block(to);
         // The watcher's configured chunk may be wider than the endpoint's
-        // declared cap (the public HyperEVM source is 900); the client splits
+        // declared cap (the public HyperEVM source is 900); the consumer splits
         // it again rather than forwarding an over-cap range.
         Ok(self.chain.rpc.logs_range(&filter, from, to).await?)
     }
@@ -452,10 +461,19 @@ impl Watcher {
     fn record_of(&self, sent: MessageSent, parsed: &Message, expiration: U256) -> MessageRecord {
         let burn_tx = sent.burn_tx;
         let nonce = burn_nonce(burn_tx, sent.log_index);
+        // **The mock must charge the sender's cap, not zero.** DALOC's CCTP
+        // circuit prices the delivered amount as `amount - maxFee` (the
+        // worst-case Circle Fast fee). Serving `feeExecuted = 0` left the
+        // difference at the destination ProofExecutor: 5.97229 USDC stranded
+        // across the mirror's cross-chain creations. Charging `maxFee` (bounded
+        // by the amount) makes the delivered amount equal the circuit's
+        // expectation; a real Circle fee at or below the cap would leave at
+        // most the cap's headroom, which is the value the sender authorized.
+        let fee_executed = parsed.body.max_fee.min(parsed.body.amount);
         let served = parsed.with_attester_fields(
             nonce,
             FINALITY_THRESHOLD_FINALIZED,
-            U256::ZERO,
+            fee_executed,
             expiration,
         );
         let now = crate::now_ms();
@@ -477,6 +495,7 @@ impl Watcher {
             relayed_ms: None,
             attempts: 0,
             park_reason: None,
+            source_gone_observations: 0,
         }
     }
 
@@ -727,7 +746,7 @@ impl HealthStatus {
 }
 
 /// How many reconciliation intervals may pass without a successful HTTP pass
-/// before the HTTP arm counts as stale (the DALOC scanner's five-interval
+/// before the HTTP arm counts as stale (the consumer scanner's five-interval
 /// grace).
 const STALE_SCAN_INTERVALS: u64 = 5;
 
@@ -939,6 +958,44 @@ mod tests {
         );
     }
 
+    /// **The mock charges the sender's cap, not zero.** DALOC prices the
+    /// delivered amount as `amount - maxFee`; a zero `feeExecuted` left the
+    /// difference at the destination ProofExecutor (measured 5.97229 USDC).
+    #[test]
+    fn the_attester_charges_the_senders_max_fee() {
+        let dir = std::env::temp_dir().join(format!("diorama-cctp-fee-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let w = watcher(&dir, Domain(0), Duration::ZERO);
+        // The shared sample carries no cap; this circuit's senders always do
+        // (`validate_max_fee` refuses a zero-cap fast burn). Build the log
+        // from a capped message.
+        let max_fee = U256::from(1_000_000u64);
+        let mut message = Message::decode(&sample_raw_message()).unwrap();
+        message.body.max_fee = max_fee;
+        let event = IMessageTransmitterV2::MessageSent {
+            message: message.encode(),
+        };
+        let log = Log {
+            inner: alloy_primitives::Log {
+                address: crate::chains::MESSAGE_TRANSMITTER_V2,
+                data: event.encode_log_data(),
+            },
+            block_hash: None,
+            block_number: Some(7),
+            block_timestamp: None,
+            transaction_hash: Some(B256::repeat_byte(0x11)),
+            transaction_index: Some(0),
+            log_index: Some(0),
+            removed: false,
+        };
+        let sent = decode_message_sent(&log).unwrap();
+        let parsed = Message::decode(&sent.raw_message).unwrap();
+        let record = w.record_of(sent, &parsed, U256::from(100u64));
+        let served = Message::decode(&record.message).unwrap();
+        assert_eq!(served.body.fee_executed, max_fee);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn watcher(
         dir: &std::path::Path,
         destination_domain: Domain,
@@ -962,7 +1019,7 @@ mod tests {
             .unwrap(),
             store: Arc::new(Store::load(dir.join("cctp.json")).unwrap()),
             attester: Arc::new(Attester::from_seed("watcher-test").unwrap()),
-            start_block: 0,
+            start_block: Some(0),
             scanned_upto: std::sync::atomic::AtomicU64::new(0),
             chunk_blocks: 2000,
             finality_delay,

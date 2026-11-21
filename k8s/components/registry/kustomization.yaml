@@ -1,0 +1,25 @@
+# The image-registry substitution point: the ONE file that says where this
+# repo's own four images come from.
+#
+# `localhost/` is k3s' "this image is in the node's containerd store" prefix:
+# the manifests name the builds `make build` produced and imported, and no
+# registry is contacted. A host without k3s (or one that pulls from a real
+# registry) overrides the *registry path* here — one `newName` per repo image,
+# all four in this file — and `make registry-push` pushes the same tags there.
+# The tag stays in the manifest beside the image (it is the build identity),
+# so this file never carries a version.
+#
+# The third-party images are not rewritten here: they are already absolute
+# (`docker.io/...`, `ghcr.io/...`) and pinned by digest in the manifests.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+images:
+  - name: localhost/diorama-mainnet-engine
+    newName: localhost/diorama-mainnet-engine
+  - name: localhost/diorama-venue-engine
+    newName: localhost/diorama-venue-engine
+  - name: localhost/diorama-venue-sim
+    newName: localhost/diorama-venue-sim
+  - name: localhost/diorama-cctp-bridge
+    newName: localhost/diorama-cctp-bridge

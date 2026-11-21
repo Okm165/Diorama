@@ -21,6 +21,7 @@ pub mod engine;
 pub mod epoch;
 pub mod error;
 pub mod facts;
+pub mod feeds;
 pub mod handlers;
 pub mod journal;
 pub mod metrics;

@@ -43,30 +43,39 @@ spec:
           args:
             - |
               set -eu
-              # Always wait for reth first, even when the pin is persisted:
-              # anvil forks at start-up, so restarting while reth is restarting
-              # would crash-loop (measured: "failed to fetch network chain ID").
+              # The anvil fork source is the specialization's [endpoints.evm]
+              # pool (its first URL) - the chain-1 source's single home. One
+              # fact, one spelling: a read of the mounted file, never an env.
+              EVM_URL=$(awk '/^\[endpoints\.evm\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_URL" ] || { echo "ERROR: fork source missing from /etc/mirror/specialization.toml ([endpoints.evm] http)"; exit 1; }
+              # Always wait for the fork source first, even when the pin is
+              # persisted: anvil forks at start-up, so restarting while the
+              # source is restarting would crash-loop (measured: "failed to
+              # fetch network chain ID").
               i=0; HEAD=""
               while [ -z "$HEAD" ] && [ "$i" -lt 240 ]; do
                 HEAD=$(wget -qO- --header='Content-Type: application/json' \
                   --post-data='{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' \
-                  "$RETH_URL" 2>/dev/null \
+                  "$EVM_URL" 2>/dev/null \
                   | sed -n 's/.*"result":"\(0x[0-9a-fA-F]*\)".*/\1/p')
                 [ -n "$HEAD" ] || { i=$((i+1)); sleep 5; }
               done
-              [ -n "$HEAD" ] || { echo "ERROR: reth unreachable at $RETH_URL"; exit 1; }
-              # An explicit pin preserves the Daloc deployment epoch. The
-              # chain-1 mirror carries the only Daloc contract deployment;
+              [ -n "$HEAD" ] || { echo "ERROR: fork source unreachable at $EVM_URL"; exit 1; }
+              # A configured fork_pin preserves the deployment epoch. The
+              # chain-1 mirror carries the only project contract deployment;
               # re-resolving a fresh base on every restart makes the engine
               # treat the restart as a new epoch and clear its shadow
               # registry — the deployed CMs/Underwriter then vanish and the
               # books become codeless (measured 2026-11-02: all chain-1
-              # Daloc addresses returned 0x after the 07:40Z re-fork).
-              # A deployment that must keep its writes pins the block here.
-              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
-                PIN="$ANVIL_FORK_PIN"
+              # project addresses returned 0x after the 07:40Z re-fork).
+              # A deployment that must keep its writes pins the block in the
+              # specialization TOML; the instance file is the fallback.
+              FORK_PIN=$(sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' \
+                /etc/mirror/specialization.toml /etc/mirror/instance.toml 2>/dev/null | head -n1 | tr -d '_')
+              if [ -n "$FORK_PIN" ]; then
+                PIN="$FORK_PIN"
                 echo "$PIN" > /state/pin
-                echo "using explicit fork pin=$PIN (reth head not re-resolved)"
+                echo "using configured fork pin=$PIN (source head not re-resolved)"
                 chmod 0777 /state 2>/dev/null || true
                 chmod 0666 /state/pin 2>/dev/null || true
                 exit 0
@@ -75,7 +84,7 @@ spec:
               # this is a read of the mounted file, not a second definition.
               FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
               [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
-              echo "resolving pin: $RETH_URL head - $FORK_OFFSET"
+              echo "resolving pin: $EVM_URL head - $FORK_OFFSET"
               PIN=$((HEAD - FORK_OFFSET))
               echo "$PIN" > /state/pin
               # The container runs unprivileged and re-resolves the pin on every
@@ -85,14 +94,15 @@ spec:
               # aged with the pod (measured).
               chmod 0777 /state 2>/dev/null || true
               chmod 0666 /state/pin 2>/dev/null || true
-              echo "resolved pin=$PIN (reth head=$HEAD)"
-          env:
-            - name: RETH_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
-            # Optional explicit epoch pin. Empty = resolve `reth head - offset`
-            # as before. A deployment that must preserve its Daloc contracts
-            # sets this to the persisted /state/pin.
-            - { name: ANVIL_FORK_PIN, value: "" }
+              echo "resolved pin=$PIN (source head=$HEAD)"
+          # No env: the fork source comes from the mounted specialization
+          # file, read above.
+          # Same bound as the venue's init (a short shell+wget loop): without
+          # a request the pod is BestEffort and the node's accounting misses
+          # it; the limit keeps a runaway loop from holding the node.
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {memory: 64Mi}
           volumeMounts:
             - { name: state, mountPath: /state }
             - { name: instance, mountPath: /etc/mirror, readOnly: true }
@@ -104,33 +114,48 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
+              # The anvil fork source is the specialization's [endpoints.evm]
+              # pool (its first URL) - the chain-1 source's single home. One
+              # fact, one spelling: a read of the mounted file, never an env.
+              EVM_URL=$(awk '/^\[endpoints\.evm\]/{f=1;next} /^\[/{f=0} f && /^http[[:space:]]*=/{match($0,/"[^"]*"/); print substr($0,RSTART+1,RLENGTH-2); exit}' /etc/mirror/specialization.toml)
+              [ -n "$EVM_URL" ] || { echo "ERROR: fork source missing from /etc/mirror/specialization.toml ([endpoints.evm] http)"; exit 1; }
               # Re-resolve the pin on *every container start*, not just every
               # pod start: k8s restarts only the container on OOM (T's normal
               # cycle), so the init container's pin would age with the pod and
               # the post-restart replay would grow to the whole pin age (~1.5 h
               # measured). The engine restores the devnet's writes from the
               # shadow registry after a same-pin re-fork. An explicit pin is
-              # required once the chain carries a Daloc deployment: a fresh base
-              # is a new epoch, and the engine clears the shadow registry — the
-              # 2026-11-02 07:40Z re-fork left every chain-1 Daloc address
-              # codeless for exactly this reason.
+              # required once the chain carries a project deployment: a fresh
+              # base is a new epoch, and the engine clears the shadow registry
+              # — the 2026-11-02 07:40Z re-fork left every chain-1 project
+              # address codeless for exactly this reason.
               # The offset's single home is the instance TOML:
               # this is a read of the mounted file, not a second definition.
               FORK_OFFSET=$(sed -n 's/^fork_offset[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' /etc/mirror/instance.toml | tr -d '_')
               [ -n "$FORK_OFFSET" ] || { echo "ERROR: fork_offset missing from /etc/mirror/instance.toml"; exit 1; }
-              if [ -n "${ANVIL_FORK_PIN:-}" ]; then
-                PIN="$ANVIL_FORK_PIN"
+              FORK_PIN=$(sed -n 's/^fork_pin[[:space:]]*=[[:space:]]*\([0-9_]*\).*/\1/p' \
+                /etc/mirror/specialization.toml /etc/mirror/instance.toml 2>/dev/null | head -n1 | tr -d '_')
+              if [ -n "$FORK_PIN" ]; then
+                PIN="$FORK_PIN"
               else
-                PIN=$(cast block-number --rpc-url "$RETH_URL" 2>/dev/null || echo 0)
+                PIN=$(cast block-number --rpc-url "$EVM_URL" 2>/dev/null || echo 0)
                 if [ "${PIN:-0}" -gt 0 ]; then
                   PIN=$((PIN - FORK_OFFSET))
                   echo "$PIN" > /state/pin
                 else
                   PIN=$(cat /state/pin 2>/dev/null || echo 0)
-                  echo "reth unreachable; keeping persisted pin $PIN" >&2
+                  echo "fork source unreachable; keeping persisted pin $PIN" >&2
                 fi
               fi
-              echo "anvil-t: fork-url=$RETH_URL pin=$PIN"
+              # The fork source is the archive group, always: anvil holds one
+              # fork URL for the session's life and has no failover inside it,
+              # so the source must be durable for the whole epoch. Measured
+              # 2026-11-19: a session forked from the LAN reth mid-broadcast
+              # when that node disappeared - the chain answered locally but
+              # every cold account read failed, and the deploy could not finish.
+              # The archive is the epoch's only dependable base; the pin is
+              # chosen so it stays inside the pool's serving depth.
+              echo "anvil-t: fork-url=$EVM_URL pin=$PIN"
               # The engine owns block production on both chains: without
               # --no-mining, every raw tx / cheatcode write would automine its
               # own block and the engine's mine(1) would produce empty blocks
@@ -145,13 +170,27 @@ spec:
               # run forensics read the run's own chain; keeper 2 makes a run
               # unreadable seconds after it ends). --hardfork stays bpo2 here
               # (V takes cancun — the real HyperEVM's fork).
+              # Pre-launch mirror: the unoptimized creation code needs ~106.4M
+              # gas for the largest deploy, above the production 60M block
+              # limit. Raise the block limit until the optimized release build.
+              # The chain's content is the pod's own state file. The engine's pin
+              # does NOT restore a deployment made after it (measured 2026-11-20
+              # on the venue: a rollout re-forked at the pin and every DALOC
+              # contract vanished). A torn write leaves a truncated JSON object
+              # that anvil refuses at boot, so park anything that does not end in
+              # `}` and let the pin be the fallback. `--state-interval 300`
+              # re-dumps while running; anvil also dumps on a clean SIGTERM.
+              if [ -f /state/anvil-state.json ] && [ "$(tail -c 64 /state/anvil-state.json | tr -d '[:space:]' | tail -c 1)" != "}" ]; then
+                mv /state/anvil-state.json "/state/anvil-state.json.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
+                echo "anvil-t: parked a torn state file; starting from the pin" >&2
+              fi
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
-                --fork-url "$RETH_URL" \
+                --fork-url "$EVM_URL" \
                 --fork-block-number "$PIN" \
                 --chain-id 1 \
                 --hardfork bpo2 \
-                --gas-limit 60000000 \
+                --gas-limit 300000000 \
                 --enable-tx-gas-limit \
                 --code-size-limit 99999 \
                 --disable-pool-balance-checks \
@@ -160,14 +199,14 @@ spec:
                 --auto-impersonate \
                 --prune-history 32 \
                 --transaction-block-keeper 1000000 \
+                --state /state/anvil-state.json \
+                --state-interval 300 \
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info \
+          # No config env: the fork source comes from the mounted
+          # specialization file, read above. Only container plumbing remains.
           env:
-            - name: RETH_URL
-              valueFrom: { configMapKeyRef: { name: diorama-config, key: RETH_URL } }
-            # Optional explicit epoch pin (see the init container's comment).
-            - { name: ANVIL_FORK_PIN, value: "" }
             # Fork RPC cache (~/.foundry/cache/rpc/...) lands on the PVC and is
             # flushed on SIGTERM, so restarts keep the read-through warm.
             - { name: HOME, value: /state }
@@ -185,19 +224,33 @@ spec:
             periodSeconds: 5
             failureThreshold: 60 # up to 5 min to fork + catch up
           readinessProbe:
-            tcpSocket: { port: 8545 }
+            # **Ready must mean serving, not merely listening.** The TCP probe
+            # answers while anvil is mid-fork, so the pod reported Ready and
+            # every dependent burned 30 s RPC timeouts against it (measured
+            # 2026-11-18: the node was OOM-killed at 21:14Z, and the indexer's
+            # chain-1 scans failed until 23:18Z). The exec probe runs the same
+            # `eth_blockNumber` read the dependents' scans open with: Ready
+            # only when the node answers reads.
+            exec:
+              command: ["/bin/sh", "-c", "cast block-number --rpc-url http://127.0.0.1:8545"]
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
+            # TCP on purpose: an exec liveness would restart anvil mid-fork,
+            # which is the one state it cannot survive usefully.
             tcpSocket: { port: 8545 }
             periodSeconds: 30
           resources:
             # T never executes mainnet txs (BAL diffs only), so its state stays
             # small (measured ~2.5 GB on disk with --prune-history 32; the
-            # snapshots are the dominant term). Measured 2026-10-31 (60 s
-            # sample): ~14-15m CPU, 1.64 GiB RSS. The request covers the
-            # measured steady state; the limit stays the OOM ceiling for fork
-            # materialization spikes.
-            requests: { cpu: "25m", memory: 2Gi }
+            # snapshots are the dominant term). Measured 2026-11-18: 4.0 GiB
+            # RSS, 24 m CPU, and **two OOM kills at 21:14Z** — the node's
+            # memory-pressure sweep ranked T near-BestEffort because the request
+            # (2 Gi, the 2026-10-31 steady state) sat 2× under the working set.
+            # The request now covers the measured steady state with headroom;
+            # the limit stays the OOM ceiling for fork materialization spikes.
+            requests: { cpu: "100m", memory: 8Gi }
             limits: { memory: 16Gi }
       volumes:
         - name: state

@@ -1,9 +1,11 @@
-//! The mainnet engine's context: reth's and T's clients, the devnet plane
+//! The mainnet engine's context: the source's and the target's clients, the
+//! devnet plane
 //! (registry, journal, cursor state, admin gauges and flags) as one [`Plane`]
 //! — the same bundle the venue engine embeds — and the mainnet's own metrics.
 //!
-//! One Anvil (T) and one source (reth). The spine's seams are wired here,
-//! chosen at boot: the source ([`RethSource`] — native BALs with the trace
+//! One target chain (T, the local devnet) and one source plane (the chain-1
+//! node). The spine's seams are wired here,
+//! chosen at boot: the source ([`NativeSource`] — native BALs with the trace
 //! rung), the reset detector (cursor hash), and the scope (whole accounts).
 //! The composer itself is the spine's generic one (`diorama_devnet::bal`).
 use crate::error::{Error, Result};
@@ -29,9 +31,9 @@ pub struct Ctx {
     /// The engine's section (the run path moved it out of the instance: the
     /// context carries exactly the sections it reads).
     pub(crate) engine: EngineSection,
-    pub(crate) anvil_t: Arc<Rpc>,
-    pub(crate) reth: Arc<Rpc>,
-    /// The mirror bundle: reth-as-source, the cursor-hash reset detector, the
+    pub(crate) target_rpc: Arc<Rpc>,
+    pub(crate) source_rpc: Arc<Rpc>,
+    /// The mirror bundle: the chain-1 node as source, the cursor-hash reset detector, the
     /// whole-account scope, and the policies (see `profile.rs` — the
     /// divergence set, in the profile's own folder).
     pub(crate) mirror: Arc<dyn Mirror>,
@@ -46,12 +48,17 @@ pub struct Ctx {
     /// the shared admin gauges and flags — the same bundle the venue engine
     /// embeds (one home for the wiring that must not drift).
     pub(crate) plane: Plane,
-    /// The profile's own set (reth/T heads, the applier's counters, the
+    /// The profile's own set (source/T heads, the applier's counters, the
     /// probes); rendered beside the shared admin gauges.
     pub(crate) mainnet_metrics: MainnetMetrics,
     /// The feed bridge's counters (shared with the bridge task; /metrics
     /// renders them whether or not the bridge is configured).
     pub(crate) feed_bridge_metrics: Arc<crate::feed::FeedBridgeMetrics>,
+    /// Wakes the feed bridge when the applier lands a source block. The
+    /// source's feeds can only move in a block, so this is the event that
+    /// makes marks follow the mirror instead of a timer. The bridge's own
+    /// interval remains the reconciliation net.
+    pub(crate) feed_wake: Arc<tokio::sync::Notify>,
     pub(crate) drift: Drift,
 }
 
@@ -59,27 +66,27 @@ impl Ctx {
     /// Build the context. Every boundary that must exist for the engine to be
     /// correct is fallible here (clients, state files, the drift log): a
     /// missing boundary is a boot error naming it, never a degraded start.
-    pub fn new(mut cfg: Instance, reth_urls: &Endpoints, anvil_t_url: &str) -> Result<Self> {
+    pub fn new(mut cfg: Instance, source_urls: &Endpoints, target_url: &str) -> Result<Self> {
         // Capture the shared endpoint policy before the sections are taken out
         // of the instance; the beacon lane uses the same budget as the source.
         let endpoint_policy = cfg.endpoint_policy();
         let (l1, engine) = cfg.take_mainnet()?;
         let plane = Plane::from_engine(&engine)?;
         let drift = Drift::from_engine(&engine)?;
-        // The timeout is the config's: reth queries race the sync. The source
-        // pool carries the instance's endpoint attributes and shared policy.
-        let pool = diorama_devnet::engine::source_pool(&cfg, reth_urls)?;
-        let (reth, anvil_t) = diorama_devnet::engine::build_clients(
+        // The timeout is the config's: source queries race the sync. The
+        // source pool carries the instance's endpoint attributes and policy.
+        let pool = diorama_devnet::engine::source_pool(&cfg, source_urls)?;
+        let (source_rpc, target_rpc) = diorama_devnet::engine::build_clients(
             pool,
-            anvil_t_url,
-            Duration::from_secs(engine.reth.request_timeout_secs),
+            target_url,
+            Duration::from_secs(engine.source.request_timeout_secs),
         )?;
         let wiring = crate::profile::build(
             &engine,
             crate::profile::Deps {
                 state: plane.state.clone(),
-                source_rpc: reth.clone(),
-                target_rpc: anvil_t.clone(),
+                source_rpc: source_rpc.clone(),
+                target_rpc: target_rpc.clone(),
                 watch: cfg.watch_set(),
             },
         );
@@ -92,8 +99,8 @@ impl Ctx {
         Ok(Self {
             l1,
             engine,
-            anvil_t,
-            reth,
+            target_rpc,
+            source_rpc,
             mirror: wiring.mirror,
             target: wiring.target,
             beacon,
@@ -101,21 +108,22 @@ impl Ctx {
             plane,
             mainnet_metrics: MainnetMetrics::default(),
             feed_bridge_metrics: Arc::new(crate::feed::FeedBridgeMetrics::default()),
+            feed_wake: Arc::new(tokio::sync::Notify::new()),
             drift,
         })
     }
 
-    /// reth follow head (safe/latest/finalized per config).
+    /// The source's follow head (safe/latest/finalized per config).
     pub async fn follow_head(&self) -> Result<Option<u64>> {
         let tag = self.l1.follow.tag();
         let block = self
-            .reth
+            .source_rpc
             .block_by_tag(tag, diorama_anvil::Txs::Hashes)
             .await?;
         Ok(block.map(|b| b.header.number))
     }
 
-    /// reth follow tag (safe/latest/finalized per config) — the config's own
+    /// The source's follow tag (safe/latest/finalized per config) — the config's own
     /// mapping, never a second copy.
     pub fn follow_tag(&self) -> &'static str {
         self.l1.follow.tag()
@@ -136,8 +144,8 @@ impl Engine for Ctx {
         EngineCore {
             plane: &self.plane,
             mirror: &self.mirror,
-            target: &self.anvil_t,
-            source: &self.reth,
+            target: &self.target_rpc,
+            source: &self.source_rpc,
             engine: &self.engine,
         }
     }

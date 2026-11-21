@@ -1,0 +1,189 @@
+# Project specialization — gitignored.
+#
+# This file is the deployment's ONLY config source beyond the shared
+# defaults: every value below is hardcoded here (endpoints — keyed ones
+# included —, fork facts, state roots), and no `${VAR}` reference may appear
+# — the file is mounted into the pods as a file, and env indirection would
+# make it specific to one cluster's wiring. `specialization.example.toml` is
+# the tracked, complete template; copy it to `specialization.toml` for a
+# deployment and replace every value.
+
+# Endpoint capability claims are verified endpoint-by-endpoint at boot (the
+# capability audit, `crates/devnet/src/source.rs::audit_capabilities`); the
+# wire facts behind them are measured with `scripts/probe-endpoint.sh`, which
+# is also the re-probe for provider drift - a claim lives exactly as long as
+# the provider's behavior does.
+
+[endpoints.anvil]
+# The devnet chain the engine drives (V).
+http = ["http://anvil-v:8545"]
+chain_id = 999
+
+# The HyperEVM read pool — one nested declaration per endpoint, each carrying
+# the capabilities it is *measured* to serve (`scripts/probe-endpoint.sh` is
+# the acceptance test; run it 3× before claiming `historical`, the keyless
+# pools are load balancers whose composition moves). The pool admits by
+# capability, round-robins, cools failures down and fails over; `max_log_range`
+# and `weight` ride the entry, the group-level values are the fallback.
+# ENV override for the whole flat list remains `DIORAMA__ENDPOINTS__*`.
+[endpoints.evm]
+chain_id = 999
+# The public HyperEVM source pool's measured free-plan cap: wider eth_getLogs
+# ranges stall or are refused. The client splits scans at this bound.
+max_log_range = 900
+
+[[endpoints.evm.entries]]
+url = "https://rpc.hyperliquid.xyz/evm"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.evm.entries]]
+url = "https://rpc.hypurrscan.io"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.evm.entries]]
+url = "https://hyperliquid-json-rpc.stakely.io"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.evm.entries]]
+url = "https://hyperliquid-rpc.publicnode.com"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.evm.entries]]
+url = "https://hyperliquid.rpc.blxrbdn.com"
+capabilities = ["system_txs", "batch"]
+
+[[endpoints.evm.entries]]
+url = "https://hyperliquid.api.pocket.network"
+capabilities = ["system_txs", "batch"]
+
+[endpoints.hyperliquid_info]
+# The market REST plane. A keyed mirror (e.g. ZAN) slots in as the first
+# entry with `capabilities = ["market_rest"]`; the official API stays as
+# failover. The keyed URL is hardcoded here — the specialization is
+# gitignored, so the key never enters git or a cluster Secret.
+http = [
+  "https://api.zan.top/node/v1/hyperliquid/mainnet/<YOUR_ZAN_KEY>",
+  "https://api.hyperliquid.xyz",
+]
+roles = ["market_rest"]
+
+[endpoints.hyperliquid_ws]
+ws = ["wss://api.hyperliquid.xyz/ws"]
+roles = ["market_ws"]
+
+[endpoints.engine_admin]
+# The venue engine's admin API (in-namespace service DNS).
+http = ["http://engine:8080"]
+
+# The explicit fork base. A configured pin preserves the deployment epoch
+# across restarts; omit it (or comment the line out) to resolve a fresh pin
+# at start-up — that is what a **fresh** deployment does (a new machine has no
+# persisted state to preserve, and a pin a state file does not agree with
+# trips the engine's epoch-rollback guard, fail-closed).
+# The live deployment pins its base in its own specialization.toml and pairs
+# it with an archive-deep fork source below — the official endpoint serves
+# `latest` only.
+[chains.venue]
+# fork_pin = 51273700
+# The fork source anvil V forks from: archive-deep, usually keyed. The
+# official endpoint is the keyless default; a keyed archive (e.g. ZAN's
+# .../node/v1/hyperliquid/mainnet/<KEY>/evm) is the pinned deployment's
+# choice. It is deliberately NOT a member of the `@evm` read pool (measured:
+# the keyed planes refuse batched calls).
+fork_url = "https://rpc.hyperliquid.xyz/evm"
+
+
+[services.engine]
+# The deployment's state root: the engine pod's own PVC mount path.
+state_dir = "/state"
+fixture_addresses = ["0xb88339CB7199b77E23DB6E890353E22632Ba630f", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599", "0x6B175474E89094C44Da98b954EedeAC495271d0F", "0x5555555555555555555555555555555555555555", "0x94e8396e0869c9F2200760aF0621aFd240E1CF38"]
+
+[services.engine.verifier]
+probes = [
+  { name = "usdc_total_supply", to = "0xb88339CB7199b77E23DB6E890353E22632Ba630f", data = "0x18160ddd" },
+  # Non-devnet-owned CCTP contracts: these give the venue mirror a real at-pin
+  # parity signal even while the USDC probe is skipped (devnet-owned).
+  { name = "cctp_message_transmitter_domain", to = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64", data = "0x8d3638f4" },
+  { name = "cctp_token_minter_messenger", to = "0xfd78EE919681417d192449715b2594ab58f5D002", data = "0x770fc1f0" },
+]
+
+[services.engine.closures]
+
+[[services.engine.closures.mappings]]
+contract = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+base_slot = "0x9"
+topic_index = 1
+
+[[services.engine.closures.mappings]]
+contract = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+base_slot = "0x9"
+topic_index = 2
+
+[[services.engine.closures.mappings]]
+contract = "0x5555555555555555555555555555555555555555"
+base_slot = "0x3"
+topic_index = 1
+
+[[services.engine.closures.mappings]]
+contract = "0x5555555555555555555555555555555555555555"
+base_slot = "0x3"
+topic_index = 2
+
+[[services.engine.closures.fixed]]
+contract = "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
+slots = ["0x3e54e5ae16d7bdb0bade122edbe34ab784fcd78c6d535e29aff3bc7d357e7586"]
+
+[services.venue_sim]
+# The deployment's state root: the sim pod's own PVC mount path.
+state_dir = "/state"
+# The market list the sim quotes and prices accounts from: the core perps plus
+# every HIP-3 builder-dex market the deployment needs. A `dex:coin` name makes
+# the poller fetch that dex's own meta (`metaAndAssetCtxs` with a `dex`
+# parameter) and fold it into the account-plane view — a market missing from
+# the served meta is unpriceable, so a listed market must exist upstream.
+markets = ["BTC", "ETH", "HYPE", "SOL", "xyz:SP500", "xyz:XYZ100", "xyz:GOLD", "xyz:SILVER", "xyz:COPPER", "xyz:BRENTOIL", "xyz:CL", "xyz:NATGAS", "xyz:NVDA", "xyz:AAPL", "xyz:TSLA", "xyz:GOOGL", "xyz:META", "xyz:MSFT", "xyz:AMZN", "xyz:AMD", "xyz:MU", "xyz:COIN", "xyz:EUR", "xyz:SOXL", "xyz:PLTR", "xyz:ORCL", "xyz:NFLX", "xyz:COST", "xyz:LLY", "xyz:TSM", "xyz:INTC", "xyz:ARM", "xyz:ASML", "xyz:HOOD", "xyz:MSTR", "xyz:BABA", "xyz:GME", "xyz:PLATINUM", "xyz:PALLADIUM", "xyz:URNM", "xyz:XLE", "xyz:TLT", "xyz:JPY", "xyz:KR200"]
+
+[[watchlist]]
+address = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
+note = "USDC (999): the CCTP burn/mint token and the at-pin probe's contract"
+
+[[watchlist]]
+address = "0x28b5a0e9C621a5BadaA536219b3a228C8168cf5d"
+note = "CCTP V2 TokenMessenger (999): the bridge's burn/mint door"
+
+[[watchlist]]
+address = "0x81D40F21F12A8F0E3252Bccb954D722d4c464B64"
+note = "CCTP V2 MessageTransmitter (999)"
+
+[[watchlist]]
+address = "0xfd78EE919681417d192449715b2594ab58f5D002"
+note = "CCTP V2 TokenMinter (999)"
+
+[[watchlist]]
+address = "0xec546b6B005471ECf012e5aF77FBeC07e0FD8f78"
+note = "CCTP V2 Message (999)"
+
+[[watchlist]]
+address = "0x3333333333333333333333333333333333333333"
+note = "CoreWriter: the Core's door into the EVM (the bridge's other side)"
+
+[[watchlist]]
+address = "0x5555555555555555555555555555555555555555"
+note = "WHYPE: the wrapped gas token"
+
+[[watchlist]]
+address = "0x94e8396e0869c9F2200760aF0621aFd240E1CF38"
+note = "wstHYPE: the staked gas token"
+
+[[watchlist]]
+address = "0xe4aE88743c3834d0c492eAbC47384c84BcADC6a6"
+note = "RedStone multi-feed adapter: the HYPE/wstHYPE price words (see the fixed closure above)"
+
+# Extra client-facing env values rendered by
+# `diorama-config export-env --section client`. The generated endpoint block
+# stays authoritative; these are additive and duplicate keys are refused.
+# Feed shapes are product data, not URLs:
+# VENUE_ACCOUNT_FEEDS = '[{"venue":"hyperliquid","accounts":["0x..."]}]'
+# VENUE_BOOK_FEEDS = '[{"venue":"hyperliquid","coins":["BTC","ETH"]}]'
+# VENUE_RATE_FEEDS = '[{"chain_id":1,"tokens":["0x..."]}]'
+[client.env]

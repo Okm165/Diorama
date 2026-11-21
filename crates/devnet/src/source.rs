@@ -8,7 +8,7 @@
 //! state, no traces/BAL/proofs — measured 2026-10-24). The trait is exactly
 //! what the pipeline and a hand-back ask for: capabilities, the head, a block
 //! header, and the three account reads an unshadow restores.
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, U64};
 // The seam's reads are dynamic (`&dyn Source`): one box per call, the
 // standard `futures_util` form. These are per-block and admin-path reads,
 // never a hot loop.
@@ -28,8 +28,6 @@ pub enum Capability {
     /// State reads at arbitrary blocks; when absent, historical reads are
     /// refused with the numbers, never answered with a newer value.
     Historical,
-    /// `eth_subscribe newHeads` (reth; the HL public RPC documents none).
-    HeadsWs,
     /// `eth_getSystemTxsByBlockNumber` (HyperEVM's Core→EVM completions).
     SystemTxs,
     /// Receipts (and therefore logs) for the system txs. The HL public RPC
@@ -48,10 +46,26 @@ impl Capability {
             Capability::NativeBal => "native_bal",
             Capability::Traces => "traces",
             Capability::Historical => "historical",
-            Capability::HeadsWs => "heads_ws",
             Capability::SystemTxs => "system_txs",
             Capability::SystemTxReceipts => "system_tx_receipts",
         }
+    }
+
+    /// Bridge from the config vocabulary ([`diorama_config::Capability`]] —
+    /// the single place the two spellings meet. Config-only capabilities
+    /// (`batch`, the market planes) have no source-level meaning and map to
+    /// `None`: they gate admission, not the composer.
+    pub fn from_config(cap: diorama_config::Capability) -> Option<Self> {
+        Some(match cap {
+            diorama_config::Capability::Bal => Self::NativeBal,
+            diorama_config::Capability::Traces => Self::Traces,
+            diorama_config::Capability::Historical => Self::Historical,
+            diorama_config::Capability::SystemTxs => Self::SystemTxs,
+            diorama_config::Capability::SystemTxReceipts => Self::SystemTxReceipts,
+            diorama_config::Capability::Batch
+            | diorama_config::Capability::MarketRest
+            | diorama_config::Capability::MarketWs => return None,
+        })
     }
 }
 
@@ -77,6 +91,11 @@ impl Capabilities {
     /// Does the source declare this capability?
     pub fn has(&self, capability: Capability) -> bool {
         self.set.contains(&capability)
+    }
+
+    /// Every declared capability (the disagreement report's left side).
+    pub fn names(&self) -> Vec<Capability> {
+        self.set.iter().copied().collect()
     }
 }
 
@@ -190,96 +209,229 @@ pub trait Source: Send + Sync {
 }
 
 impl Capabilities {
-    /// Verify the method-presence flags against the live endpoint and return
-    /// the flags that disagree with the declaration (empty = all agree). The
-    /// engines call this once at boot and log any disagreement: a declared
-    /// capability that the endpoint does not serve is a misconfiguration,
-    /// named at the only moment it is cheap to see.
-    ///
-    /// Each probe targets the current head, a block that exists on every
-    /// honest node: a method that exists answers its value (or null), a
-    /// method that does not answers exactly `-32601`. Any other answer —
-    /// transport, HTTP, decode, or a node error with another code — is
-    /// **unknown**, and an unknown probe is a boot fault: treating it as
-    /// "present" would certify a capability the endpoint never demonstrated.
-    ///
-    /// Behavioral capabilities (`historical`, `heads_ws`) are not probed:
-    /// "the block parameter is ignored" cannot be distinguished from "the
-    /// value did not change" by a read. They stay declarations with their
+    /// Is this capability provable by a read? `historical` is
+    /// behavioral ("the block parameter is ignored" cannot be distinguished
+    /// from "the value did not change" by a read) and `system_tx_receipts` is
+    /// the absence of a value — they stay declarations with their
     /// measurements, enforced at the read path (the venue source refuses a
     /// non-latest read rather than silently answering a newer value).
-    pub async fn verify_methods(
-        &self,
-        rpc: &diorama_anvil::Rpc,
-    ) -> diorama_anvil::Result<Vec<&'static str>> {
-        use alloy_primitives::U64;
-        let head = rpc.block_number().await?;
-        let mut disagree = Vec::new();
+    pub fn probeable(capability: Capability) -> bool {
+        matches!(
+            capability,
+            Capability::NativeBal | Capability::Traces | Capability::SystemTxs
+        )
+    }
 
-        let bal = rpc
-            .call::<serde_json::Value>("eth_getBlockAccessList", (U64::from(head),))
-            .await;
-        if self.has(Capability::NativeBal) != method_present(bal)? {
-            disagree.push("native_bal");
-        }
-
-        let trace = rpc
-            .call::<serde_json::Value>(
+    /// The probe that proves a capability, at `head`: the method and its
+    /// params. `None` for a behavioral capability (see [`Self::probeable`]).
+    ///
+    /// Each probe targets an existing block — a future height would let
+    /// "block not found" masquerade as a capability answer — and speaks the
+    /// block as a **hex quantity**, the EIP-1898 block identifier every node
+    /// takes; a bare JSON integer is refused by reth (`-32602`, measured
+    /// 2026-11-12: the audit read a healthy node as having no capabilities).
+    /// One exception:
+    /// HyperEVM's system-tx index lags the head (measured 2026-11-10:
+    /// `-32603 invalid block height` at the head while the same block answers
+    /// normally ~1 000 blocks later), so that probe reads a settled block; a
+    /// genuinely absent method still answers `-32601` there.
+    fn probe(capability: Capability, head: u64) -> Option<(&'static str, serde_json::Value)> {
+        Some(match capability {
+            Capability::NativeBal => (
+                "eth_getBlockAccessList",
+                serde_json::json!([U64::from(head)]),
+            ),
+            Capability::Traces => (
                 diorama_anvil::TRACE_BLOCK_METHOD,
-                (
+                serde_json::json!([
                     U64::from(head),
-                    serde_json::json!({"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}),
-                ),
-            )
-            .await;
-        if self.has(Capability::Traces) != method_present(trace)? {
-            disagree.push("traces");
-        }
-
-        let system = rpc
-            .call::<serde_json::Value>("eth_getSystemTxsByBlockNumber", (U64::from(head),))
-            .await;
-        if self.has(Capability::SystemTxs) != method_present(system)? {
-            disagree.push("system_txs");
-        }
-
-        Ok(disagree)
+                    {"tracer": "prestateTracer", "tracerConfig": {"diffMode": true}}
+                ]),
+            ),
+            Capability::SystemTxs => (
+                "eth_getSystemTxsByBlockNumber",
+                serde_json::json!([U64::from(head.saturating_sub(SYSTEM_TX_PROBE_LAG))]),
+            ),
+            Capability::Historical | Capability::SystemTxReceipts => {
+                return None
+            }
+        })
     }
 }
 
-/// Did the method exist? Only two answers are definitive: a value (present)
-/// or `-32601` (absent). Every other fault is unknown and propagated — never
-/// read as presence.
-fn method_present<T>(r: diorama_anvil::Result<T>) -> diorama_anvil::Result<bool> {
-    match r {
-        Ok(_) => Ok(true),
-        Err(e) if e.is_method_not_found() => Ok(false),
-        Err(e) => Err(e),
+/// How far below the head the system-tx capability probe reads.
+///
+/// HyperEVM's `eth_getSystemTxsByBlockNumber` only indexes settled blocks; the
+/// live endpoint answered `-32603 invalid block height` at the head on
+/// 2026-11-10 while the same block answered normally ~1 000 blocks later. Two
+/// times the measured lag is the probe's safety window.
+const SYSTEM_TX_PROBE_LAG: u64 = 2_048;
+
+/// What one capability probe proved.
+///
+/// Tri-state on purpose: only two answers are definitive (a value is presence,
+/// `-32601` is absence). Every other fault — transport, HTTP, another node
+/// error code, a body that does not decode — is **unknown**, and an unknown
+/// answer must never be read as presence: that is how a claim nobody can serve
+/// gets certified.
+#[derive(Debug)]
+enum Probe {
+    Present,
+    Absent,
+    Unknown(diorama_anvil::Error),
+}
+
+fn classify_probe<T>(answer: diorama_anvil::Result<T>) -> Probe {
+    match answer {
+        Ok(_) => Probe::Present,
+        Err(error) if error.is_method_not_found() => Probe::Absent,
+        Err(error) => Probe::Unknown(error),
     }
 }
 
-/// Probe a source's declared method-presence capabilities against the live
-/// endpoint, once at boot (both engines call this for their follow source):
-/// a declared capability the endpoint does not serve — or one it serves that
-/// the declaration denies — is named at the only moment it is cheap to see,
-/// never discovered mid-window. A probe fault is the caller's (a boot read
-/// that cannot happen is a boot fault).
+/// **The capability audit: claims are verified where they are made, endpoint
+/// by endpoint.**
+///
+/// Every pool member is probed for the capabilities *it* declares, through
+/// [`diorama_anvil::Rpc::call_endpoint`] — never through the pool's rotation.
+/// A pooled probe attributes one provider's answer to another, and on the live
+/// HyperEVM pool a sloppy JSON-RPC envelope from one provider (both `result`
+/// and `error` in one answer) became a whole-boot fault that took the venue
+/// engine down, while the method was simply absent (measured 2026-11-12).
+///
+/// Three outcomes per claim:
+/// - **confirmed**: the method answered, the capability is credited to the
+///   pool's measured set and logged;
+/// - **absent** (`-32601`): the claim and the provider disagree — named
+///   loudly, never credited (this is exactly how provider drift reaches the
+///   follow if it goes unnoticed: sentio dropped `system_txs` under a live
+///   claim and cost four follow passes before the log was read);
+/// - **unverified** (transport, HTTP, decode, another code): unknown, never
+///   credited, and the endpoint is cooled by the client's own bookkeeping.
+///
+/// The audit **fails closed on the one fact that predicts a follow failure**:
+/// a capability the composer *needs* that no endpoint confirmed. A false claim
+/// on a backup is survivable and only warned about; a coverage gap is not.
 pub async fn audit_capabilities(
     what: &str,
-    caps: Capabilities,
+    needs: Capabilities,
     rpc: &diorama_anvil::Rpc,
-) -> diorama_anvil::Result<()> {
-    // The head is a block every honest node can answer at; a future height
-    // would let "block not found" masquerade as a capability answer.
-    let disagree = caps.verify_methods(rpc).await?;
-    if !disagree.is_empty() {
-        tracing::warn!(
-            source = what,
-            disagree = ?disagree,
-            "declared source capabilities disagree with the endpoint"
-        );
+) -> crate::Result<()> {
+    let mut confirmed: Vec<Capability> = Vec::new();
+    let mut gaps: Vec<String> = Vec::new();
+    for (index, spec) in rpc.pool().specs().iter().enumerate() {
+        for capability in audit_endpoint(what, index, spec, rpc, &mut gaps).await {
+            if !confirmed.contains(&capability) {
+                confirmed.push(capability);
+            }
+        }
     }
-    Ok(())
+    // Fail closed on a needed capability nobody confirmed. Behavioral needs
+    // are exempt: no read can prove them, so the declaration stands and the
+    // read path enforces it.
+    let missing: Vec<&'static str> = needs
+        .names()
+        .into_iter()
+        .filter(|need| Capabilities::probeable(*need) && !confirmed.contains(need))
+        .map(Capability::name)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(crate::Error::CapabilityGap {
+        what: what.to_string(),
+        missing: missing.join(","),
+        detail: gaps.join("; "),
+    })
+}
+
+/// What a declared role is proven by, if anything: its source-plane
+/// capability and the method+params that demonstrate it at `head`.
+fn role_probe(role: &str, head: u64) -> Option<(Capability, &'static str, serde_json::Value)> {
+    let capability = diorama_config::Capability::parse(role).and_then(Capability::from_config)?;
+    let (method, params) = Capabilities::probe(capability, head)?;
+    Some((capability, method, params))
+}
+
+/// The one log line a disproved capability claim earns: the endpoint, the
+/// role, and whether the pool retired it for this process.
+fn note_absent(
+    what: &str,
+    spec: &diorama_anvil::EndpointSpec,
+    capability: Capability,
+    retired: bool,
+) {
+    tracing::warn!(
+        source = what,
+        url = %spec.url,
+        capability = capability.name(),
+        retired,
+        "a declared capability is not served by this endpoint - the claim and the provider \
+         disagree; the claim is retired for this process"
+    );
+}
+
+/// One endpoint's claims, probed: the capabilities it proved, with every
+/// disagreement or unknown answer appended to `gaps`.
+async fn audit_endpoint(
+    what: &str,
+    index: usize,
+    spec: &diorama_anvil::EndpointSpec,
+    rpc: &diorama_anvil::Rpc,
+    gaps: &mut Vec<String>,
+) -> Vec<Capability> {
+    let head = match rpc
+        .call_endpoint::<U64>(index, "eth_blockNumber", diorama_anvil::NO_PARAMS)
+        .await
+    {
+        Ok(head) => head.to::<u64>(),
+        Err(error) => {
+            // Not even a height: the endpoint is cooling for the process and
+            // every claim it made is unverified.
+            gaps.push(format!("{}: unreachable ({error})", spec.url));
+            return Vec::new();
+        }
+    };
+    let mut confirmed: Vec<Capability> = Vec::new();
+    for role in &spec.roles {
+        // A config-plane role (batch, the market planes) has no read to probe;
+        // a behavioral capability has no read that could prove it.
+        let Some((capability, method, params)) = role_probe(role, head) else {
+            continue;
+        };
+        match classify_probe(
+            rpc.call_endpoint::<serde_json::Value>(index, method, params)
+                .await,
+        ) {
+            Probe::Present => confirmed.push(capability),
+            Probe::Absent => {
+                // The disagreement is a fact about this endpoint, not a note
+                // about the audit: retire the claim so the pool stops
+                // rotating the gated method onto an endpoint that answers
+                // `-32601` for it. A claim that is not retired (declared under
+                // another spelling, or the pool is single-endpoint) stays a
+                // gap, exactly as before.
+                let retired = rpc.retire_capability(&spec.url, role);
+                note_absent(what, spec, capability, retired);
+                gaps.push(format!("{}: {} absent", spec.url, capability.name()));
+            }
+            Probe::Unknown(error) => {
+                gaps.push(format!(
+                    "{}: {} unverified ({error})",
+                    spec.url,
+                    capability.name()
+                ));
+            }
+        }
+    }
+    tracing::info!(
+        source = what,
+        url = %spec.url,
+        declared = ?spec.roles,
+        confirmed = ?confirmed.iter().map(|c| c.name()).collect::<Vec<_>>(),
+        "capability audit: endpoint claims vs measured answers"
+    );
+    confirmed
 }
 
 /// A source over a raw RPC: the reads are forwarded verbatim and the
@@ -625,14 +777,61 @@ mod tests {
     /// absence, and every other fault is unknown — never presence.
     #[test]
     fn a_capability_probe_never_reads_an_unknown_fault_as_presence() {
-        assert!(method_present::<()>(Ok(())).unwrap());
-        assert!(!method_present::<()>(Err(method_not_found())).unwrap());
-        let unknown = method_present::<()>(Err(diorama_anvil::Error::Corrupt {
-            what: "probe",
-            detail: "node answered something else".into(),
-        }))
-        .unwrap_err();
-        assert!(matches!(unknown, diorama_anvil::Error::Corrupt { .. }));
+        assert!(matches!(classify_probe(Ok(())), Probe::Present));
+        assert!(matches!(
+            classify_probe::<()>(Err(method_not_found())),
+            Probe::Absent
+        ));
+        assert!(matches!(
+            classify_probe::<()>(Err(diorama_anvil::Error::Corrupt {
+                what: "probe",
+                detail: "node answered something else".into(),
+            })),
+            Probe::Unknown(_)
+        ));
+    }
+
+    /// A behavioral capability is never probed by a read, and a method-plane
+    /// capability always is: the probe table is the audit's whole decision.
+    #[test]
+    fn only_method_plane_capabilities_are_probeable() {
+        for cap in [
+            Capability::NativeBal,
+            Capability::Traces,
+            Capability::SystemTxs,
+        ] {
+            assert!(Capabilities::probeable(cap), "{cap:?}");
+            assert!(Capabilities::probe(cap, 100).is_some(), "{cap:?}");
+        }
+        for cap in [
+            Capability::Historical,
+            Capability::SystemTxReceipts,
+        ] {
+            assert!(!Capabilities::probeable(cap), "{cap:?}");
+            assert!(Capabilities::probe(cap, 100).is_none(), "{cap:?}");
+        }
+    }
+
+    /// The system-tx probe reads a settled block, never the head: HyperEVM's
+    /// index lags the head by roughly 1 000 blocks (measured 2026-11-10), and
+    /// probing the head turned a healthy source into a boot fault.
+    #[test]
+    fn the_system_tx_probe_reads_a_settled_block() {
+        let (_, params) = Capabilities::probe(Capability::SystemTxs, 10_000).unwrap();
+        assert_eq!(
+            params[0],
+            serde_json::json!(format!("{:#x}", 10_000 - SYSTEM_TX_PROBE_LAG))
+        );
+    }
+
+    /// A probe's block is the EIP-1898 **hex quantity**, never a bare JSON
+    /// integer: reth refuses `[26401407]` with `-32602` (measured 2026-11-12,
+    /// which made a healthy node look capability-less at boot).
+    #[test]
+    fn a_capability_probe_speaks_a_hex_block_quantity() {
+        let (method, params) = Capabilities::probe(Capability::NativeBal, 26_401_407).unwrap();
+        assert_eq!(method, "eth_getBlockAccessList");
+        assert_eq!(params, serde_json::json!(["0x192da7f"]));
     }
 
     fn method_not_found() -> diorama_anvil::Error {

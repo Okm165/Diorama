@@ -1,5 +1,5 @@
 //! `diorama-config`: check | get | export-env (`--section client`
-//! renders the client-facing endpoint block).
+//! renders the consumer-facing endpoint block).
 //!
 //! The single owner of config semantics: the layered loader lives in this
 //! package's library; this binary is the scripting surface for it.
@@ -35,7 +35,7 @@ enum Cmd {
     ExportEnv {
         /// Path to config/instances/<name>.toml.
         instance: PathBuf,
-        /// Section name (known: anvil, daloc).
+        /// Section name (known: anvil, client).
         #[arg(long, alias = "for", default_value = "anvil")]
         section: String,
     },

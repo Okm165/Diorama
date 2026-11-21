@@ -7,7 +7,11 @@
 //! are errors at every level.
 //!
 //! `${VAR}` references in string values resolve from the environment at load
-//! time (deploy-time wiring, §19.4). [`Instance::inspect`] is the one entry
+//! time — but the deployment model forbids them: the specialization is
+//! self-sustained (every value hardcoded, mounted as a file) and
+//! `scripts/config-lint.sh` fails on any `${VAR}` in a TOML layer. The
+//! mechanism stays for the tooling and the tests; the audited files carry
+//! none. [`Instance::inspect`] is the one entry
 //! every service and the tooling share: it reports unresolved wiring instead
 //! of failing on it — each service then requires only its own sections by
 //! name (`require_resolved` / `require_resolved_logged`; one instance file,
@@ -23,7 +27,7 @@ mod env;
 mod instance;
 mod sections;
 
-pub use endpoints::{EndpointGroup, Endpoints, WsEndpoints};
+pub use endpoints::{Capability, EndpointEntry, EndpointGroup, Endpoints, WsEndpoints};
 pub use env::{require_resolved, require_resolved_logged};
 
 pub use instance::{
@@ -31,8 +35,8 @@ pub use instance::{
     WatchEntry, RETH_STATE_WINDOW_BLOCKS,
 };
 pub use sections::{
-    BeaconSection, CctpChain, CctpLane, CctpSection, ClosuresSection, EngineAnvil, EngineReth,
-    EngineSection, FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection,
+    BeaconSection, CctpChain, CctpLane, CctpSection, ClosuresSection, EngineAnvil, EngineSection,
+    EngineSource, FeedBridgeSection, FeedSection, FixedSlotsSpec, HttpSection, JournalSection,
     LaneFee, LoopsSection, MappingSpec, Probe, RelayerMode, Services, SourceSyncSection, Sweep,
     VenueSimSection, VerifierSection,
 };
@@ -87,9 +91,9 @@ impl Instance {
 ///
 /// The project layer is the generic/project split: `instance.toml` carries
 /// deployment facts (identity, profile, paths, endpoint references), while
-/// `project = "daloc"` names a `daloc.toml` beside it (gitignored) that
-/// carries the product-specific watchlist, fixtures, probes and endpoint
-/// groups. A deployment without a project file is a generic mirror.
+/// `project = "specialization"` names a gitignored `specialization.toml`
+/// beside it that carries the product-specific watchlist, fixtures, probes and
+/// endpoint groups. A deployment without a project file is a generic mirror.
 fn load_merged(
     path: &Path,
     vars: &[(String, String)],
@@ -138,11 +142,11 @@ fn load_merged(
 }
 
 /// Load the optional project specialization named by `[instance].project`
-/// (or `DIORAMA_PROJECT_FILE`). The path is relative to the instance file;
-/// a bare name gains `.toml` (`project = "daloc"` -> `daloc.toml`). A named
-/// project that is missing is a boot error, never a silent fallback: the
-/// specialization carries addresses and watchlists the mirror must not
-/// invent.
+/// (or `DIORAMA_PROJECT_FILE`). The path is relative to the instance file; a
+/// bare name gains `.toml` (`project = "specialization"` ->
+/// `specialization.toml`). A named project that is missing is a boot error,
+/// never a silent fallback: the specialization carries addresses and
+/// watchlists the mirror must not invent.
 fn load_project(
     instance_path: &Path,
     over: &toml::Value,
@@ -179,10 +183,11 @@ fn project_reference(over: &toml::Value, vars: &[(String, String)]) -> Option<St
 }
 
 /// Resolve the project file beside the instance. A bare name gains `.toml`
-/// (`project = "daloc"` -> `daloc.toml`); a relative path is relative to the
-/// instance file. A missing live file falls back to the tracked
-/// `<name>.example.toml` template (loudly) so a fresh clone's config check
-/// works; a deployment that mounts the real file never takes that branch.
+/// (`project = "specialization"` -> `specialization.toml`); a relative path
+/// is relative to the instance file. A missing live file falls back to the
+/// tracked `<name>.example.toml` template (loudly) so a fresh clone's config
+/// check works; a deployment that mounts the real file never takes that
+/// branch.
 fn project_path(instance_path: &Path, raw: &str) -> std::path::PathBuf {
     let raw = if raw.ends_with(".toml") || raw.contains('/') {
         raw.to_string()
@@ -299,8 +304,8 @@ mod tests {
     /// The wiring the diorama-mainnet instance references (its deploy-time env).
     fn wiring() -> Vec<(String, String)> {
         vars(&[
-            ("RETH_URL", "http://reth:8545"),
-            ("ANVIL_T_URL", "http://anvil-t:8545"),
+            ("EVM_URL", "http://reth:8545"),
+            ("TARGET_RPC_URL", "http://anvil-t:8545"),
             ("BEACON_URL", "http://lighthouse:5052"),
             ("ENGINE_API_URL", "http://reth:8551"),
             ("JWT_PATH", "/secrets/jwt.hex"),
@@ -441,18 +446,18 @@ port = 8080
     }
 
     #[test]
-    fn daloc_export_uses_the_manifests_spellings() {
-        // The two `test-endpoints` ConfigMaps are the other surface of these
-        // facts (`k8s/base/nodeports.yaml` + `overlays/diorama-venue/`): one
-        // spelling on both sides, or the harness's env silently carries the
-        // wrong name (the venue is the second chain, so its keys carry the
-        // merge script's `CHAIN_1_` prefix).
+    fn client_export_uses_the_manifests_spellings() {
+        // `make endpoints` renders this block beside the loopback forwards
+        // (`harness.env`): one spelling on both sides, or the harness's env
+        // silently carries the wrong name. The keys are the chain-id family
+        // the consumer's loader reads: `CHAIN_1_*` and `CHAIN_999_*`.
         let (inst, _) = load_str(minimal_instance(), &wiring()).unwrap();
         assert_eq!(
-            inst.export_env("daloc").unwrap(),
+            inst.export_env("client").unwrap(),
             vec![
-                "CHAIN_RPC_URL=http://anvil-t.t.svc.cluster.local:8545",
-                "CHAIN_WS_URL=ws://anvil-t.t.svc.cluster.local:8545",
+                "CHAIN_1_CHAIN_ID=1",
+                "CHAIN_1_RPC_URL=http://anvil-t.t.svc.cluster.local:8545",
+                "CHAIN_1_WS_URL=ws://anvil-t.t.svc.cluster.local:8545",
                 "DIORAMA_ADMIN_URL=http://engine.t.svc.cluster.local:8080",
             ]
         );
@@ -463,15 +468,36 @@ port = 8080
         );
         let (venue, _) = load_str(&venue_src, &[]).unwrap();
         assert_eq!(
-            venue.export_env("daloc").unwrap(),
+            venue.export_env("client").unwrap(),
             vec![
-                "CHAIN_1_CHAIN_RPC_URL=http://anvil-v.v.svc.cluster.local:8545",
-                "CHAIN_1_CHAIN_WS_URL=ws://anvil-v.v.svc.cluster.local:8545",
+                "CHAIN_999_CHAIN_ID=999",
+                "CHAIN_999_RPC_URL=http://anvil-v.v.svc.cluster.local:8545",
+                "CHAIN_999_WS_URL=ws://anvil-v.v.svc.cluster.local:8545",
                 "HL_INFO_API_URL=http://venue-sim.v.svc.cluster.local:8090",
                 "VENUE_CONTROL_URL=http://venue-sim.v.svc.cluster.local:8091",
                 "VENUE_ADMIN_URL=http://engine.v.svc.cluster.local:8080",
             ]
         );
+    }
+
+    #[test]
+    fn client_env_extends_the_generated_block() {
+        let venue = format!(
+            "{}\n[services.venue_sim]\nstate_dir = \"/sim\"\nmarkets = [\"BTC\"]\n\n[services.venue_sim.info]\nport = 8090\n\n[services.venue_sim.control]\nport = 8091\n",
+            minimal_venue_instance()
+        );
+        let feeds = r#"[{"venue":"hyperliquid","accounts":[]}]"#;
+        let src = format!("{venue}\n[client.env]\nVENUE_ACCOUNT_FEEDS = '{feeds}'\n");
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        assert!(inst
+            .export_env("client")
+            .unwrap()
+            .contains(&format!("VENUE_ACCOUNT_FEEDS={feeds}")));
+
+        let src = format!("{venue}\n[client.env]\nCHAIN_999_RPC_URL = \"http://elsewhere\"\n");
+        let (inst, _) = load_str(&src, &[]).unwrap();
+        let err = inst.export_env("client").unwrap_err();
+        assert!(format!("{err}").contains("duplicates"), "{err}");
     }
 
     #[test]
@@ -611,12 +637,12 @@ port = 8096
     fn unresolved_env_is_reported_then_fatal_for_services() {
         let (_, unresolved) = load_str(minimal_instance(), &[]).unwrap();
         assert!(unresolved.is_empty(), "no refs in the minimal instance");
-        let src = minimal_instance().replace("http://reth:8545", "${RETH_URL}");
+        let src = minimal_instance().replace("http://reth:8545", "${EVM_URL}");
         let (inst, unresolved) = load_str(&src, &[]).unwrap();
-        assert_eq!(unresolved, vec!["RETH_URL".to_string()]);
+        assert_eq!(unresolved, vec!["EVM_URL".to_string()]);
         assert_eq!(
             l1(&inst).source_urls.primary(),
-            "${RETH_URL}",
+            "${EVM_URL}",
             "raw ref kept"
         );
         let (inst2, unresolved2) = load_str(&src, &wiring()).unwrap();
@@ -666,6 +692,10 @@ port = 8096
         inst.chains.l1.as_mut().unwrap().fork_offset = 20_000;
         let err = inst.check().unwrap_err();
         assert!(format!("{err}").contains("state window"), "{err}");
+        inst.chains.l1.as_mut().unwrap().fork_offset = 128;
+        inst.chains.l1.as_mut().unwrap().fork_pin = Some(0);
+        let err = inst.check().unwrap_err();
+        assert!(format!("{err}").contains("fork_pin"), "{err}");
     }
 
     /// The simulator's declared memory/cadence facts are required: a zero
@@ -716,42 +746,74 @@ port = 8096
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one fixture: the copy and its assertions are the test
     fn the_real_mainnet_diorama_instance_loads_and_checks() {
-        let path = std::path::Path::new(concat!(
+        // The tracked instance names the gitignored live specialization,
+        // which a deployment may supply. This test is about the **tracked
+        // template**, so copy the instance with the project pointed at the
+        // example and load that: a live specialization must not change the
+        // audited count, and CI has no live file at all.
+        let instance_path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../config/instances/diorama-mainnet/instance.toml"
         ));
-        let (inst, unresolved) = Instance::inspect(path).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "diorama-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let instance_src = std::fs::read_to_string(instance_path).unwrap();
+        std::fs::write(
+            dir.join("instance.toml"),
+            instance_src.replace(
+                "project = \"specialization\"",
+                "project = \"specialization.example\"",
+            ),
+        )
+        .unwrap();
+        std::fs::copy(
+            instance_path.with_file_name("specialization.example.toml"),
+            dir.join("specialization.example.toml"),
+        )
+        .unwrap();
+        let path = dir.join("instance.toml");
+        let (inst, unresolved) = Instance::inspect(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
         assert_eq!(inst.instance.name, "diorama-mainnet");
-        // 46 market/protocol entries + the dapp's 41-address mainnet
-        // deployment (contracts/deployments/ethereum.json; measured complete
-        // 2026-10-23). The codeless "facts registrar" was removed 2026-10-25
-        // after a live re-check (eth_getCode `0x`, nonce 0). Update this
+        // 42 watchlist entries (re-audited 2026-11-17): the market/protocol
+        // addresses a fresh clone watches. The 46 project-side and beacon
+        // contracts the earlier template carried are not watched on the
+        // parent chain (the project deploy owns them on T). Update this
         // count deliberately when the audit changes.
         assert_eq!(
             inst.watchlist.len(),
-            87,
-            "the audited watchlist is complete"
+            42,
+            "the audited example watchlist is complete"
         );
         assert_eq!(l1(&inst).fork_offset, 128);
+        // Pinned 2026-11-17 (measured: anvil_nodeInfo, /state/pin and the
+        // engine cursor all agree on 26437369).
+        assert_eq!(l1(&inst).fork_pin, Some(26_437_369));
+        assert_eq!(
+            inst.export_env("anvil").unwrap(),
+            vec![
+                "FORK_OFFSET=128".to_string(),
+                "FORK_PIN=26437369".to_string()
+            ]
+        );
         // 10 probes: the Aave USDT price probe was removed after the
         // stable-feed pulse pinned USDT to 1.0 and the probe had no tolerance
         // (measured 2026-10-31; the mainnet engine now reports `failed:0`).
         assert_eq!(engine(&inst).verifier.probes.len(), 10);
-        let mut names = unresolved.clone();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "ANVIL_T_URL",
-                "BEACON_URL",
-                "ENGINE_API_URL",
-                "JWT_PATH",
-                "RETH_URL",
-                "STATE_DIR"
-            ],
-            "the wiring the instance references"
-        );
+        // The specialization is self-sustained: every value is hardcoded in
+        // the file, so the tracked template resolves with an empty pod
+        // environment. A `${VAR}` reference surviving in any layer would
+        // reintroduce the cluster-specific wiring the model removed.
+        assert!(unresolved.is_empty(), "unresolved: {unresolved:?}");
     }
 
     #[test]
@@ -875,21 +937,9 @@ port = 8096
             inst.chains.venue.as_ref().unwrap().kind,
             ChainKind::Hyperliquid
         );
-        let mut names = unresolved.clone();
-        names.sort();
-        assert_eq!(
-            names,
-            vec![
-                "ANVIL_V_URL",
-                "ENGINE_ADMIN_URL",
-                "HL_INFO_API_URL",
-                "HL_RPC_URLS",
-                "HL_WS_API_URL",
-                "SIM_STATE_DIR",
-                "STATE_DIR"
-            ],
-            "the wiring the venue instance references"
-        );
+        // The specialization is self-sustained: nothing is resolved from the
+        // pod environment any more (see the mainnet instance test).
+        assert!(unresolved.is_empty(), "unresolved: {unresolved:?}");
     }
 
     /// The bridge is its own profile: it carries only
@@ -951,7 +1001,8 @@ chain_id = 1
         let (inst, _) = load_str(&conflict, &[]).unwrap();
         let err = inst.check().expect_err("one URL cannot be two chains");
         assert!(
-            err.to_string().contains("different roles/chain_id/weight"),
+            err.to_string()
+                .contains("different capabilities/chain_id/weight"),
             "{err}"
         );
     }
@@ -1071,10 +1122,13 @@ port = 8096
         assert_eq!(cctp.expiration_blocks, 0);
         assert_eq!(cctp.scan_chunk_blocks, 2000);
         assert_eq!(cctp.receipt_timeout_secs, 30);
-        assert_eq!(cctp.balance_low_wei, U256::from(100_000_000_000_000_000u64));
-        assert!(cctp.t_start_block.is_none());
+        assert_eq!(
+            cctp.gas.balance_low_wei,
+            U256::from(100_000_000_000_000_000u64)
+        );
+        assert!(cctp.start.t_start_block.is_none());
         let section = inst.take_cctp().unwrap();
-        assert_eq!(section.iris.port, 8095);
+        assert_eq!(section.iris.iris.port, 8095);
         assert_eq!(section.control.port, 8096);
         assert!(
             inst.take_cctp().is_err(),
@@ -1225,7 +1279,10 @@ port = 8096
         let (inst, _) = load_str(minimal_cctp_instance(), &[]).unwrap();
         assert_eq!(
             inst.export_env("client").unwrap(),
-            vec!["IRIS_API_URL=http://cctp-bridge.c.svc.cluster.local:8095"]
+            vec![
+                "IRIS_API_URL=http://cctp-bridge.c.svc.cluster.local:8095",
+                "CCTP_BRIDGE_HEALTH_URL=http://cctp-bridge.c.svc.cluster.local:8096/health",
+            ]
         );
     }
 

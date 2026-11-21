@@ -1,6 +1,6 @@
-# The cluster-scoped resources both mirrors share: the retain StorageClass.
-# Included by each mirror's base (idempotent — it is the same object, created
-# once and re-applied harmlessly by either stack).
+# The cluster-scoped resources every instance shares: the retain StorageClass.
+# Included by each base (idempotent - it is the same object, created once and
+# re-applied harmlessly by either stack).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

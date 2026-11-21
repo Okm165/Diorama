@@ -1,0 +1,73 @@
+# The live-vs-repo config audit (re-measured 2026-11-17), kept as a gate.
+#
+# One line per key the LIVE cluster's pods resolve, as a dotted path into the
+# merged effective config (defaults <- specialization <- instance):
+#
+#   namespace|dotted.key|class
+#
+# class live-read : a pod of that namespace resolves the key from the merged
+#                   config - the tracked tree must carry it (through the live
+#                   specialization, or the shared defaults), or a fresh clone
+#                   loses a live fact.
+# class host-fact : a pod resolves it, but its presence is the deployment's
+#                   state, not the tree's. A fresh clone is correct to omit
+#                   it (an epoch pin: a pin the fresh node's state does not
+#                   agree with trips the engine's rollback guard, so the
+#                   template leaves it to the deployment). Neither presence
+#                   nor absence is a finding.
+# class live-dead : no reader anywhere - the build must NOT carry it back;
+#                   the value's real home is named in the comment beside it.
+#
+# The other direction - every specialization key must have a reader - is not
+# this file's job: the typed loader refuses an unknown key at every level
+# (`deny_unknown_fields`), so `make config-check` fails on a key nobody
+# reads. The specialization cannot grow dead weight silently.
+#
+# The mounted-file keys themselves (instance.toml, specialization.toml) are
+# gated by the build check in config-lint.sh rule 3: the instance unit's
+# generator fails the build when the specialization file is absent, so a
+# ConfigMap can never silently lose its source.
+#
+# The third-party chain nodes' own settings are manifest literals now, not
+# configuration (the lighthouse checkpoint-sync URL in
+# k8s/base/diorama-mainnet/lighthouse.yaml; the reth snapshot source is
+# reth's own default) - they are audited by reading the manifests, not this
+# file.
+#
+# diorama-mainnet: the wiring env map is gone; every key it carried lives in
+# the specialization (endpoints, state root, JWT path) or the defaults.
+diorama-mainnet|endpoints.evm.http|live-read
+diorama-mainnet|endpoints.anvil.http|live-read
+diorama-mainnet|services.engine.state_dir|live-read
+diorama-mainnet|chains.l1.fork_pin|live-read
+diorama-mainnet|chains.l1.fork_offset|live-read
+#
+# diorama-venue: the keyed market-REST mirror lives in the specialization
+# (gitignored - the credential never enters git or a cluster Secret);
+# `chains.venue.fork_url` is the keyless hyperlend archive fork source
+# (re-measured 2026-11-17 - the earlier keyed-fork-URL note is stale: the
+# deployment forks from the keyless archive, and no keyed URL is resolved
+# for the fork). T_RPC_URL and CCTP_STATE_DIR were a leak from the bridge's
+# namespace (the bridge reads its own map; nothing here resolved them) - the
+# old wiring map carried them, the specialization must not.
+diorama-venue|endpoints.anvil.http|live-read
+diorama-venue|endpoints.evm.entries[0]|live-read
+diorama-venue|endpoints.evm.max_log_range|live-read
+diorama-venue|endpoints.hyperliquid_info.http[0]|live-read
+diorama-venue|endpoints.hyperliquid_ws.ws[0]|live-read
+diorama-venue|endpoints.engine_admin.http[0]|live-read
+diorama-venue|chains.venue.fork_pin|host-fact
+diorama-venue|chains.venue.fork_url|live-read
+diorama-venue|services.engine.state_dir|live-read
+diorama-venue|services.venue_sim.state_dir|live-read
+diorama-venue|endpoints.t_rpc|live-dead
+diorama-venue|services.cctp_bridge.state_dir|live-dead
+#
+# diorama-cctp: the bridge's chains, state root and relay key (secret
+# material in the gitignored file, never a Secret env).
+diorama-cctp|endpoints.t_rpc.http[0]|live-read
+diorama-cctp|endpoints.anvil.http[0]|live-read
+diorama-cctp|services.cctp_bridge.state_dir|live-read
+diorama-cctp|services.cctp_bridge.relay_key|live-read
+diorama-cctp|services.cctp_bridge.chains[0]|live-read
+diorama-cctp|services.cctp_bridge.chains[1]|live-read

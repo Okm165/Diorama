@@ -36,14 +36,14 @@ pub(crate) async fn boot(ctx: &Ctx) -> Result<()> {
         ANVIL,
         MAINNET_CHAIN_ID,
         Duration::from_secs(ctx.engine.boot_timeout_secs),
-        "reth",
+        "chain-1 evm",
     )
     .await?;
     // The epoch pin is anchored before any writes exist (a fresh registry's
     // epoch *is* the current fork base; without the record a later same-pin
     // restart would be an unprovable epoch and the rule would have to fail
     // closed, dropping the devnet's writes).
-    let t_pin = ctx.anvil_t.fork_block().await?;
+    let t_pin = ctx.target_rpc.fork_block().await?;
     diorama_devnet::epoch::anchor(&ctx.plane, t_pin)?;
     Ok(())
 }
@@ -64,26 +64,26 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
         return Ok(Next::Idle);
     };
     ctx.mainnet_metrics
-        .set(&ctx.mainnet_metrics.reth_follow_head, follow);
+        .set(&ctx.mainnet_metrics.source_follow_head, follow);
     // Schedule a small margin behind the head: the applier mines one T block
     // per applied parent block, so the follow head *is* the devnet's cadence.
     let follow = follow.saturating_sub(ctx.l1.follow_margin_blocks);
-    observe_reth_head(ctx).await;
+    observe_source_head(ctx).await;
 
-    let head = ctx.anvil_t.block_number().await?;
+    let head = ctx.target_rpc.block_number().await?;
     ctx.mainnet_metrics.set(&ctx.mainnet_metrics.head, head);
     // The cursor's gauges, refreshed per pass like the venue's
     // (`record_cursor_metrics`): the apply path sets them too, but a paused
     // applier (gap) would otherwise leave `diorama_cursor_block` at 0 across a
     // restart and the computed `diorama_lag_blocks` would read the whole
     // follow head (measured: 26,264,761 after a restart with the applier
-    // paused, with reth's real lag ~3k).
+    // paused, with the source's real lag ~3k).
     record_cursor_metrics(
         &ctx.mainnet_metrics,
         ctx.plane.state.cursor()?.as_ref(),
         head,
     );
-    if let Ok(Some(fork)) = ctx.anvil_t.fork_block().await {
+    if let Ok(Some(fork)) = ctx.target_rpc.fork_block().await {
         ctx.plane.metrics.set(
             &ctx.mainnet_metrics.t_fork_age_blocks,
             head.saturating_sub(fork),
@@ -91,9 +91,9 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
     }
 
     let cursor = validate_cursor(ctx, head).await?;
-    let (start, start_kind) = resume_point(&ctx.anvil_t, cursor.as_ref(), head).await?;
+    let (start, start_kind) = resume_point(&ctx.target_rpc, cursor.as_ref(), head).await?;
     if start_kind == state::Start::Rebased {
-        on_rebase(&ctx.anvil_t, head, follow, start).await?;
+        on_rebase(&ctx.target_rpc, head, follow, start).await?;
     }
     if start > follow {
         tracing::debug!(head, follow, start, "chain is at the follow head");
@@ -106,7 +106,7 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
             tracing::error!(
                 gap,
                 start = ?start_kind,
-                "sync gap too large - paused; run the re-pin drill (make repin)"
+                "sync gap too large - paused; if anvil-t has ANVIL_FORK_PIN set, patch/unset it first, then run make mainnet-repin"
             );
         }
         return Ok(Next::Idle);
@@ -118,13 +118,13 @@ async fn next_block(ctx: &Ctx) -> Result<Next> {
     Ok(Next::Apply(start))
 }
 
-/// Metrics-only read: a reth blip must not fail the poll. A failed read
+/// Metrics-only read: a source blip must not fail the poll. A failed read
 /// leaves the gauge at its last observation — writing 0 would claim the
 /// source's head fell to genesis.
-async fn observe_reth_head(ctx: &Ctx) {
-    if let Ok(reth_head) = ctx.reth.block_number().await {
+async fn observe_source_head(ctx: &Ctx) {
+    if let Ok(source_head) = ctx.source_rpc.block_number().await {
         ctx.mainnet_metrics
-            .set(&ctx.mainnet_metrics.reth_head, reth_head);
+            .set(&ctx.mainnet_metrics.source_head, source_head);
     }
 }
 
@@ -151,7 +151,7 @@ async fn validate_cursor(ctx: &Ctx, head: u64) -> Result<Option<ChainCursor>> {
     let Some(c) = ctx.plane.state.cursor()? else {
         return Ok(None);
     };
-    match ctx.mirror.reset().detect(&ctx.anvil_t).await? {
+    match ctx.mirror.reset().detect(&ctx.target_rpc).await? {
         ResetSignal::Steady => Ok(Some(c)),
         signal => on_reset(ctx, head, signal).await,
     }
@@ -176,7 +176,7 @@ async fn on_reset(ctx: &Ctx, head: u64, signal: ResetSignal) -> Result<Option<Ch
 /// is an epoch marker; the next processed block sets a fresh one, or
 /// `diorama_pin_age_blocks` counts across epochs).
 async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
-    let pin = ctx.anvil_t.fork_block().await?;
+    let pin = ctx.target_rpc.fork_block().await?;
     ctx.mainnet_metrics.inc(&ctx.mainnet_metrics.epochs_total);
     ctx.epoch_rule(pin).await?;
     ctx.plane.state.clear_cursor()?;
@@ -194,12 +194,12 @@ async fn rebase(ctx: &Ctx, head: u64) -> Result<()> {
 /// head, stalling T forever (measured). Fail-closed on the pin read: a fault
 /// here must not silently pick that stalled path.
 async fn resume_point(
-    anvil_t: &Rpc,
+    target_rpc: &Rpc,
     cursor: Option<&ChainCursor>,
     head: u64,
 ) -> Result<(u64, state::Start)> {
     let reset_pin = if cursor.is_none() {
-        anvil_t.fork_block().await?
+        target_rpc.fork_block().await?
     } else {
         None
     };
@@ -254,13 +254,13 @@ async fn reorg_continuity(ctx: &Ctx, start: u64) -> Result<()> {
         return Ok(());
     };
     if start > 1 && start - 1 == last_block {
-        if let Some(prev) = diorama_devnet::scan::block_hash(&ctx.reth, start - 1).await? {
+        if let Some(prev) = diorama_devnet::scan::block_hash(&ctx.source_rpc, start - 1).await? {
             if prev != last_hash {
                 ctx.mainnet_metrics
                     .inc(&ctx.mainnet_metrics.reorgs_detected);
                 tracing::warn!(
                     block = start - 1,
-                    "reth reorg detected; applied diffs self-heal on the new branch"
+                    "source reorg detected; applied diffs self-heal on the new branch"
                 );
                 ctx.plane.state.clear_source_last()?;
                 ctx.plane.save_state()?;
@@ -274,7 +274,7 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
     let poll = ctx.engine.loops.poll();
     let status_interval = ctx.engine.loops.status_log_interval_ms;
     let mut last_status = 0u64;
-    let via = diorama_devnet::engine::source_host(ctx.reth.url());
+    let via = diorama_devnet::engine::source_host(ctx.source_rpc.url());
     loop {
         // The follow's heartbeat (the configured cadence, the same shape on
         // both mirrors): the steady DEBUG line only speaks for an idle chain.
@@ -282,7 +282,7 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
             via,
             source_head: ctx
                 .mainnet_metrics
-                .reth_head
+                .source_head
                 .load(std::sync::atomic::Ordering::Relaxed),
             followed: ctx
                 .mainnet_metrics
@@ -307,6 +307,8 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
                 if let Err(e) = step(&ctx, n).await {
                     tracing::error!(block = n, error = %e, "diff apply failed (will retry)");
                     tokio::time::sleep(poll).await;
+                } else {
+                    wake_feed_if_near_head(&ctx, n);
                 }
             }
             Ok(Next::Idle) => tokio::time::sleep(poll).await,
@@ -315,6 +317,20 @@ pub(crate) async fn apply_loop(ctx: Arc<Ctx>) {
                 tokio::time::sleep(poll).await;
             }
         }
+    }
+}
+
+/// The source block landed on T: its feeds can have moved, and the bridge must
+/// read them now rather than on a timer. During catch-up (the cursor far behind
+/// the source head) waking per block would turn a 100k-block replay into 900k
+/// source reads; the bridge's interval remains the net there.
+fn wake_feed_if_near_head(ctx: &Ctx, applied: u64) {
+    let source_head = ctx
+        .mainnet_metrics
+        .source_head
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if applied.saturating_add(2) >= source_head {
+        ctx.feed_wake.notify_one();
     }
 }
 
@@ -353,6 +369,23 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
         if let Err(e) = ctx.plane.save_shadow() {
             tracing::warn!(error = %e, "shadow registry save failed");
         }
+        // Fixture code arrives through `anvil_setCode`, invisible to the tx
+        // scanner. Capture it once installed so a same-pin re-fork restores the
+        // whole fixture, not just its recorded storage (the measured 2026-11-10
+        // chain-1 guard/price-target loss).
+        match ctx.plane.capture_fixtures_if_due(&ctx.target_rpc, 60).await {
+            Ok(0) => {}
+            Ok(captured) => {
+                tracing::info!(
+                    captured,
+                    "fixture runtime code captured for re-fork restore"
+                );
+                if let Err(e) = ctx.plane.save_shadow() {
+                    tracing::warn!(error = %e, "shadow registry save after fixture capture failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "fixture code capture failed; will retry"),
+        }
     }
 }
 
@@ -360,18 +393,19 @@ pub(crate) async fn shadow_loop(ctx: Arc<Ctx>) {
 /// record the walk's metrics, and publish the fact. The loop above is a sleep
 /// plus this call.
 async fn scan_once(ctx: &Ctx) -> Result<()> {
-    let t_head = ctx.anvil_t.block_number().await?;
+    let t_head = ctx.target_rpc.block_number().await?;
     // Never scan at or below T's fork base: after a re-pin those blocks
     // are the source's own (anvil forwards pre-pin ranges upstream), and
     // marking their writes devnet-owned would shadow mainnet's real state
     // (measured: 311 real txs scanned as devnet writes right after a
     // re-pin). The venue driver clamps its scan the same way.
-    let pin = ctx.anvil_t.fork_block().await?.unwrap_or(0);
+    let pin = ctx.target_rpc.fork_block().await?.unwrap_or(0);
     // A fresh mark starts at the head: do not scan pre-existing history
     // (the registry was persisted; T does not advance while the engine is
     // down). The applier's inline scan shares this high-water mark, so its
     // blocks are not re-traced.
-    let walk = diorama_devnet::scan::scan_to(&ctx.plane, &ctx.anvil_t, pin, t_head, t_head).await?;
+    let walk =
+        diorama_devnet::scan::scan_to(&ctx.plane, &ctx.target_rpc, pin, t_head, t_head).await?;
     ctx.record_scan(&walk);
     diorama_devnet::scan::publish(&ctx.plane, ctx.mirror.label(), &walk);
     Ok(())

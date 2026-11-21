@@ -91,7 +91,7 @@ pub fn build(engine: &EngineSection, deps: Deps) -> Wiring {
         target_rpc,
         watch,
     } = deps;
-    let source: Arc<dyn Source> = crate::source::reth(source_rpc);
+    let source: Arc<dyn Source> = crate::source::native(source_rpc);
     let reset: Arc<dyn ResetDetector> = Arc::new(CursorHash::new(state));
     // The mainnet watches whole accounts: the BAL enumerates every changed
     // slot, so no closures are needed (the scope's slot set stays empty).

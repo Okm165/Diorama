@@ -1,46 +1,34 @@
-# The generic Mainnet Mirror instance: deployment facts only.
+# The Mainnet Mirror instance: deployment facts only.
 #
-# Product-specific scope (watchlist, fixture ownership, probes, endpoint
-# groups) lives in `daloc.toml`, which is gitignored; `daloc.example.toml` is
-# the tracked template. Endpoint references use `@name` and are expanded from
-# `[endpoints]` before validation.
+# One file = one deployment. Every key here differs between deployments;
+# everything else is `config/defaults.toml` (the workspace conventions every
+# mirror shares: ports, the journal ring and its location, the endpoint
+# policy, the engine's cadence). Product scope (endpoint groups, watchlist,
+# fixtures, probes, feeds) lives in `specialization.toml`, gitignored;
+# `specialization.example.toml` is the tracked template. Endpoint references
+# use `@name` and are expanded from `[endpoints]` before validation.
 [instance]
 name = "diorama-mainnet"
 namespace = "diorama-mainnet"
 profile = "mainnet"
-project = "daloc"
+project = "specialization"
 
 [chains.l1]
 kind = "ethereum"
-# The read pool's first entry is the anvil fork source and the
+# The read pool: the first entry is the anvil fork source and the
 # `/admin/epoch` re-pin target; the engine fans out over the whole group.
-source_urls = "@reth"
+source_urls = "@evm"
 follow = "latest"
-follow_margin_blocks = 2
 # Blocks between the follow head and T's fork base; the single home of the
-# offset (the anvil init container reads it from this file).
+# offset (the anvil pods read it from this file). An explicit fork base, when
+# the deployment pins one, lives in the specialization's `[chains.l1]` as
+# `fork_pin`.
 fork_offset = 128
 
-[services.engine]
-state_dir = "${STATE_DIR}"
-
-[services.engine.anvil]
-target_url = "@anvil_t"
-
 [services.engine.loops]
-# JSON-RPC batch items for source reads and local cheatcode writes. This is
-# the deployment's endpoint contract (the live value), not a global default.
+# Chain-1 catch-up: the live gap is ~3.3k blocks; 10k stays below the
+# 10,064-block rebase bound and leaves margin for source advance.
+max_gap_blocks = 10000
+# JSON-RPC batch items for source reads and local cheatcode writes: the
+# deployment's endpoint contract (the LAN reth source), not a global default.
 chunk_size = 500
-
-[services.engine.source_sync]
-engine_url = "@reth_engine"
-jwt_path = "${JWT_PATH}"
-
-[services.engine.journal]
-dir = "${STATE_DIR}/journal"
-
-[services.engine.beacon]
-urls = ["@lighthouse"]
-
-[services.engine.http]
-port = 8080

@@ -17,7 +17,7 @@
 //! then dropped reconnects immediately; only a failed session sleeps.
 use crate::feed::MarketFeed;
 use crate::wire::{AssetCtx, L2Book};
-use diorama_anvil::{now_ms, Backoff, EndpointPool, Progress};
+use diorama_anvil::{now_ms, Attempt, AttemptOutcome, Backoff, EndpointPool, PoolError, Progress};
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -135,6 +135,9 @@ struct Ping {
 pub struct WsClient {
     feed: Arc<MarketFeed>,
     pool: EndpointPool,
+    /// The plane's declared capabilities (the primary endpoint's roles):
+    /// every admission requires them, mirroring the REST lane.
+    roles: Vec<String>,
 }
 
 /// One session's outcome: `Served` means the endpoint delivered data (a later
@@ -145,6 +148,36 @@ enum SessionOutcome {
     Failed(WsError),
 }
 
+/// What one decoded frame asks the session's select loop to do.
+enum FrameAction {
+    Continue,
+    Failed(WsError),
+}
+
+/// A closed socket: served when it delivered data, a failed attempt otherwise.
+fn closed_outcome(delivered: bool) -> SessionOutcome {
+    if delivered {
+        SessionOutcome::Served
+    } else {
+        SessionOutcome::Failed(WsError::ClosedBeforeData)
+    }
+}
+
+/// A read fault: after data the session was served (the drop is the
+/// network's); before data it is a failed attempt.
+fn read_outcome(
+    url: &str,
+    delivered: bool,
+    error: tokio_tungstenite::tungstenite::Error,
+) -> SessionOutcome {
+    if delivered {
+        tracing::warn!(url = %url, error = %error, "market websocket read failed; reconnecting");
+        SessionOutcome::Served
+    } else {
+        SessionOutcome::Failed(WsError::Read(error))
+    }
+}
+
 /// The sleep before retrying an all-cooling pool: the pool's own earliest
 /// cooldown, floored at 1 ms so a zero can never spin the loop.
 fn cooling_wait_ms(retry_after_ms: u64) -> u64 {
@@ -152,75 +185,82 @@ fn cooling_wait_ms(retry_after_ms: u64) -> u64 {
 }
 
 /// The reconnect sleep: the endpoint policy's backoff, never below the floor.
+/// One session, as the pool's executor sees it: dial, subscribe, serve until
+/// the socket drops or the data-idle deadline fires. `Served` = the session
+/// delivered data (the endpoint is healthy, whatever the close); `Fault` = it
+/// never did, or the dial failed — the endpoint cools and the pool rotates.
+struct SessionAttempt<'a> {
+    lane: &'a WsClient,
+}
+
+impl Attempt for SessionAttempt<'_> {
+    type Output = ();
+    type Fault = WsError;
+
+    async fn attempt(&self, index: usize) -> AttemptOutcome<(), WsError> {
+        let url = self.lane.pool.url(index);
+        match self.lane.session(index, url).await {
+            SessionOutcome::Served => AttemptOutcome::Served(()),
+            SessionOutcome::Failed(error) => {
+                tracing::warn!(
+                    url = %url,
+                    error = %error,
+                    "market websocket endpoint failed; trying the next endpoint"
+                );
+                AttemptOutcome::Fault(error)
+            }
+        }
+    }
+}
+
 fn reconnect_delay(backoff: Duration) -> Duration {
     backoff.max(MIN_RECONNECT_DELAY)
 }
 
 impl WsClient {
     pub fn new(feed: Arc<MarketFeed>, pool: EndpointPool) -> Self {
-        Self { feed, pool }
+        let roles = pool.primary_roles().to_vec();
+        Self { feed, pool, roles }
     }
 
-    /// Run forever. Admission is the pool's: when every endpoint is cooling,
-    /// one rate-limited emergency probe is tried, then the loop waits for the
-    /// earliest cooldown instead of hammering the whole pool.
+    /// Run forever — on the pool's executor, exactly like the REST lane: one
+    /// `execute` is one rotation pass (admission, the jittered emergency
+    /// probe, cooldowns, the attempt budget and the failover order are the
+    /// shared spine's, not a second copy in this lane), and a `Served`
+    /// session is a healthy endpoint even though it eventually closes.
     pub async fn run(self) {
         // The reconnect shape is the deployment's endpoint policy: the same
         // cooldown base/cap a failed HTTP endpoint gets, not a second copy.
         let policy = self.pool.policy();
         let mut backoff = Backoff::new(policy.cooldown_base(), policy.cooldown_max());
+        let roles: Vec<&str> = self.roles.iter().map(String::as_str).collect();
+        let attempt = SessionAttempt { lane: &self };
         loop {
-            let now = now_ms();
-            let admission = self.pool.admit(now, &[]);
-            let indices = if admission.indices.is_empty() {
-                if let Some(index) = self.pool.emergency_probe(now, &[]) {
-                    vec![index]
-                } else {
-                    // The pool already names the earliest cooldown; only a
-                    // zero wait is floored (it would spin). No ceiling: the
-                    // configured `cooldown_max_ms` is the policy's own bound.
-                    tokio::time::sleep(Duration::from_millis(cooling_wait_ms(
-                        admission.retry_after_ms,
-                    )))
-                    .await;
-                    continue;
-                }
-            } else {
-                admission.indices
-            };
-
-            let mut served = false;
-            for index in indices {
-                let url = self.pool.url(index).to_string();
-                match self.session(index, &url).await {
-                    SessionOutcome::Served => {
-                        self.pool.record_success(index, now_ms());
-                        served = true;
-                        break;
-                    }
-                    SessionOutcome::Failed(error) => {
-                        self.pool.record_failure(index, now_ms());
-                        tracing::warn!(
-                            url = %url,
-                            error = %error,
-                            "market websocket endpoint failed; trying the next endpoint"
-                        );
-                    }
-                }
-            }
+            let outcome = self.pool.execute(&attempt, &roles).await;
             self.feed.metrics.mark_ws_down();
             self.feed.metrics.inc_ws_reconnects();
-            if served {
+            match outcome {
                 // The endpoint was live; a later close is the network's, not
                 // the endpoint's. Reset the failure backoff, but still wait
                 // the floor: an accept-then-close server must not spin.
-                backoff.record(Progress::Progressed);
-                tokio::time::sleep(reconnect_delay(backoff.delay())).await;
-                continue;
+                Ok(diorama_anvil::Served { .. }) => {
+                    backoff.record(Progress::Progressed);
+                    tokio::time::sleep(reconnect_delay(backoff.delay())).await;
+                }
+                // Every endpoint is cooling: the pool already names the
+                // earliest cooldown. No ceiling — the configured
+                // `cooldown_max_ms` is the policy's own bound.
+                Err(PoolError::Cooling { retry_after_ms }) => {
+                    tokio::time::sleep(Duration::from_millis(cooling_wait_ms(retry_after_ms)))
+                        .await;
+                }
+                // The rotation was exhausted: every dial failed and the pool
+                // has cooled each one. Wait out this lane's own backoff.
+                Err(_) => {
+                    backoff.record(Progress::Stalled);
+                    tokio::time::sleep(reconnect_delay(backoff.delay())).await;
+                }
             }
-            let delay = reconnect_delay(backoff.delay());
-            backoff.record(Progress::Stalled);
-            tokio::time::sleep(delay).await;
         }
     }
 
@@ -251,7 +291,6 @@ impl WsClient {
                 return SessionOutcome::Failed(WsError::Send(error));
             }
         }
-
         let mut delivered = false;
         let mut deadline = tokio::time::Instant::now() + FIRST_DATA_TIMEOUT;
         let mut ping = tokio::time::interval(Duration::from_secs(30));
@@ -261,11 +300,11 @@ impl WsClient {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
-                    return if delivered {
-                        SessionOutcome::Failed(WsError::Idle)
+                    return SessionOutcome::Failed(if delivered {
+                        WsError::Idle
                     } else {
-                        SessionOutcome::Failed(WsError::NoData)
-                    };
+                        WsError::NoData
+                    });
                 }
                 _ = ping.tick() => {
                     let ping_msg = match serde_json::to_string(&Ping { method: "ping" }) {
@@ -277,55 +316,58 @@ impl WsClient {
                     }
                 }
                 msg = source.next() => match msg {
-                    Some(Ok(Message::Text(text))) => match self.handle_text(&text) {
-                        Frame::Data => {
-                            if !delivered {
-                                delivered = true;
-                                self.feed.metrics.mark_ws_up();
-                                self.pool.record_success(index, now_ms());
-                                tracing::info!(
-                                    url = %url,
-                                    markets = self.feed.markets.len(),
-                                    "market websocket live"
-                                );
-                            }
-                            deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
+                    Some(Ok(Message::Text(text))) => {
+                        deadline = tokio::time::Instant::now() + DATA_IDLE_TIMEOUT;
+                        match self.handle_frame(index, url, self.handle_text(&text), &mut delivered) {
+                            FrameAction::Continue => {}
+                            FrameAction::Failed(error) => return SessionOutcome::Failed(error),
                         }
-                        Frame::Control => {}
-                        Frame::Error(SubscriptionFailure::Coin(coin)) => {
-                            // One refused coin is not the lane's failure: the
-                            // allMids and every other coin subscription stay
-                            // live. The REST poller backfills the missing coin
-                            // behind the same staleness gate.
-                            tracing::warn!(
-                                url = %url,
-                                coin = %coin,
-                                "venue refused one coin subscription; keeping the session"
-                            );
-                        }
-                        Frame::Error(SubscriptionFailure::Session(error)) => {
-                            return SessionOutcome::Failed(WsError::Subscription(error));
-                        }
-                    },
-                    Some(Ok(Message::Close(_))) | None => {
-                        return if delivered {
-                            SessionOutcome::Served
-                        } else {
-                            SessionOutcome::Failed(WsError::ClosedBeforeData)
-                        };
                     }
+                    Some(Ok(Message::Close(_))) | None => return closed_outcome(delivered),
                     Some(Ok(_)) => {} // binary/ping/pong frames: nothing to fold
-                    Some(Err(error)) => {
-                        return if delivered {
-                            tracing::warn!(url = %url, error = %error, "market websocket read failed; reconnecting");
-                            SessionOutcome::Served
-                        } else {
-                            SessionOutcome::Failed(WsError::Read(error))
-                        };
-                    }
+                    Some(Err(error)) => return read_outcome(url, delivered, error),
                 },
             }
         }
+    }
+
+    /// Fold one decoded text frame into the cache and the lane's health.
+    fn handle_frame(
+        &self,
+        index: usize,
+        url: &str,
+        frame: Frame,
+        delivered: &mut bool,
+    ) -> FrameAction {
+        match frame {
+            Frame::Data => {
+                if !*delivered {
+                    *delivered = true;
+                    self.feed.metrics.mark_ws_up();
+                    self.pool.record_success(index, now_ms());
+                    tracing::info!(
+                        url = %url,
+                        markets = self.feed.markets.len(),
+                        "market websocket live"
+                    );
+                }
+            }
+            Frame::Control => {}
+            Frame::Error(SubscriptionFailure::Coin(coin)) => {
+                // One refused coin is not the lane's failure: the allMids and
+                // every other coin subscription stay live. The REST poller
+                // backfills the missing coin behind the same staleness gate.
+                tracing::warn!(
+                    url = %url,
+                    coin = %coin,
+                    "venue refused one coin subscription; keeping the session"
+                );
+            }
+            Frame::Error(SubscriptionFailure::Session(error)) => {
+                return FrameAction::Failed(WsError::Subscription(error));
+            }
+        }
+        FrameAction::Continue
     }
 
     /// The session's subscription messages. An encode fault is a session

@@ -54,7 +54,7 @@ pub struct BridgePolicy {
 /// The bridge's own cursor and the persisted state it needs. The cursor lives
 /// in the sim's state file (one state root per service).
 pub struct Bridge {
-    anvil_v: Rpc,
+    target_rpc: Rpc,
     sim: Arc<Sim>,
     feed: Arc<MarketFeed>,
     /// The scan cadence (the deployment's `bridge_poll_interval_ms`).
@@ -68,12 +68,22 @@ pub struct Bridge {
     /// sim's state so a restart does not lose the boundary activity mined
     /// meanwhile.
     cursor: std::sync::atomic::AtomicU64,
+    /// The last figures each account was projected with (spot total, spot
+    /// hold, perp withdrawable): the projection writes only on change, so a
+    /// quiet book costs no tx.
+    projected: std::sync::Mutex<std::collections::HashMap<Address, [u64; 3]>>,
+    /// The reason each account's figures could not be computed, keyed by
+    /// address. A projection refusal is a **state**, not an event: a fixture
+    /// account holding a market the served meta does not carry is refused on
+    /// every pass (measured: ~1/s for `xyz:NVDA`), so the log fires on the
+    /// transition into and out of the refusal, not on each retry.
+    refusals: std::sync::Mutex<std::collections::HashMap<Address, String>>,
     pub metrics: Arc<BridgeMetrics>,
 }
 
 impl Bridge {
     pub fn new(
-        anvil_v: Rpc,
+        target_rpc: Rpc,
         sim: Arc<Sim>,
         feed: Arc<MarketFeed>,
         metrics: Arc<BridgeMetrics>,
@@ -84,13 +94,15 @@ impl Bridge {
         // the service was down.
         let cursor = sim.bridge_cursor()?;
         Ok(Self {
-            anvil_v,
+            target_rpc,
             sim,
             feed,
             poll: policy.poll,
             system_gas_stipend: policy.system_gas_stipend,
             observed_head: std::sync::atomic::AtomicU64::new(0),
             cursor: std::sync::atomic::AtomicU64::new(cursor),
+            projected: std::sync::Mutex::new(std::collections::HashMap::new()),
+            refusals: std::sync::Mutex::new(std::collections::HashMap::new()),
             metrics,
         })
     }
@@ -107,10 +119,10 @@ impl Bridge {
 
     /// One pass: anchor (pin-aware), then scan every new block.
     pub async fn pass(&self) -> Result<()> {
-        let head = self.anvil_v.block_number().await?;
+        let head = self.target_rpc.block_number().await?;
         self.observe_head_time(head).await?;
         let pin = self
-            .anvil_v
+            .target_rpc
             .fork_config()
             .await?
             .map(|fork| fork.block)
@@ -134,9 +146,268 @@ impl Bridge {
             // half-applying (a duplicate credit is a silent balance lie).
             self.sim.save_if_dirty()?;
         }
+        // The Core-read precompile mocks are projections of the sim. Every
+        // block's effects are now durable in the sim, so this is the one
+        // point the projection is refreshed from. The pass's own head is the
+        // block the projection's presence checks read at — a pinned read, not
+        // a genesis read (see the gate's note).
+        self.project_precompiles(head).await?;
         self.metrics
             .set_lag_blocks(head.saturating_sub(self.cursor.load(Ordering::Relaxed)));
         Ok(())
+    }
+
+    /// Project the sim's Core figures onto the mirror's read-precompile mocks
+    /// (`0x0801` spot balance, `0x0803` perp withdrawable).
+    ///
+    /// **Why.** The mocks are separate Solidity ledgers that nothing wrote:
+    /// a draw that credited the sim's spot class was invisible to
+    /// `freeSpotBalance()`, the owner's recall reverted `ZeroAmount`, the
+    /// close stayed `RecallPending` forever, and a healthy matured book could
+    /// never be settled (measured 2026-11-12: 67.892481 USDC credited in the
+    /// sim and served by the gateway, zero reported by the mock). The sim is
+    /// the single source of truth; the mocks are its write-through
+    /// projection, refreshed here once per pass after the block's effects are
+    /// durable.
+    ///
+    /// The figures are the ones the bridge's own Core→EVM clamp uses
+    /// (`available_after_maintenance`): `hold = total − available`, so
+    /// `freeSpotBalance()` reports exactly what the venue will release and a
+    /// recall cannot over-recall into a bridge refusal. A production-like
+    /// chain (no mock code) is a no-op: the real precompiles serve the reads.
+    async fn project_precompiles(&self, head: u64) -> Result<()> {
+        let Some(spot) = self.feed.spot_meta() else {
+            return Ok(()); // the feed is warming; the pass already refused the block
+        };
+        let tokens = system::token_registry(&spot);
+        let Some(usdc) = tokens.iter().find(|t| t.name == "USDC") else {
+            tracing::warn!("bridge: no USDC in the spot registry; the precompile projection is skipped this pass");
+            return Ok(());
+        };
+        // **The mocks' presence is read at the pass's head, never at block 0.**
+        // The first cut read genesis, where a forked anvil has no mock code —
+        // the deployment's mocks are installed after the fork pin — so the
+        // gate read "not installed" every pass and the projection silently
+        // no-op'd: no writer funding, no mock write, and the exact W-B1
+        // symptom (mock reports 0 while the sim holds the balance) survived
+        // its own fix. Measured live 2026-11-12: writer nonce 0 with 54
+        // simulated accounts holding spot USDC, until the read moved to the
+        // pass's anchored head.
+        let spot_installed = !self
+            .target_rpc
+            .code_at(system::SPOT_BALANCE_MOCK, head)
+            .await?
+            .is_empty();
+        let withdrawable_installed = !self
+            .target_rpc
+            .code_at(system::WITHDRAWABLE_MOCK, head)
+            .await?
+            .is_empty();
+        if !spot_installed && !withdrawable_installed {
+            return Ok(());
+        }
+        let meta = self.feed.margin_meta();
+        let changed = self.changed_figures(usdc, meta.as_ref(), head).await?;
+        if changed.is_empty() {
+            return Ok(());
+        }
+        self.ensure_gas(system::PRECOMPILE_WRITER).await?;
+        for (address, figures) in changed {
+            self.write_projection(
+                address,
+                figures,
+                u64::from(usdc.index),
+                spot_installed,
+                withdrawable_installed,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// One account's mock writes plus the cache advance. The cache moves only
+    /// after both sends ack (a faulted write retries the whole account next
+    /// pass), so the projection never claims a write the chain refused.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_projection(
+        &self,
+        address: Address,
+        figures: [u64; 3],
+        token_index: u64,
+        spot_installed: bool,
+        withdrawable_installed: bool,
+    ) -> Result<()> {
+        let [total, hold, withdrawable] = figures;
+        if spot_installed {
+            self.send_projection(
+                system::SPOT_BALANCE_MOCK,
+                system::set_balance_calldata(address, token_index, total, hold),
+            )
+            .await?;
+        }
+        if withdrawable_installed {
+            self.send_projection(
+                system::WITHDRAWABLE_MOCK,
+                system::set_withdrawable_calldata(address, withdrawable),
+            )
+            .await?;
+        }
+        self.projected
+            .lock()
+            .expect("bridge projection cache")
+            .insert(address, figures);
+        tracing::info!(
+            account = %address,
+            spot_total_wei8 = total,
+            spot_hold_wei8 = hold,
+            withdrawable_usd6 = withdrawable,
+            "bridge: precompile projection written"
+        );
+        Ok(())
+    }
+
+    /// Give `address` the deployment's gas stipend unless it already holds
+    /// at least that much.
+    ///
+    /// The measured bug (2026-11-17, venue-sim logging
+    /// `the write did not mine within 10000 ms` once every 11 s for hours):
+    /// the gate was `balance.is_zero()`, so a writer holding ~2.3e-5 HYPE —
+    /// real, but less than one projection tx's up-front cost — was never
+    /// topped up. Anvil admits an impersonated sender's tx without a balance
+    /// check and the miner then drops it, so `eth_getTransactionReceipt`
+    /// answers `null` for the whole wait on every pass and no projection ever
+    /// lands. The stipend is 1 HYPE, orders of magnitude above a write's
+    /// cost: topping up *below* the stipend (not only at zero) keeps the next
+    /// write valid without guessing a per-tx fee. A balance-read fault
+    /// propagates: it must not be read as "empty" and funded over a broken
+    /// RPC.
+    async fn ensure_gas(&self, address: Address) -> Result<()> {
+        let balance = self.target_rpc.balance_latest(address).await?;
+        if needs_stipend(balance, self.system_gas_stipend) {
+            self.target_rpc
+                .anvil_set_balance(address, self.system_gas_stipend)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// One mock write, sent like the Core→EVM completion: a funded plain tx
+    /// waited to its receipt, so a REVERTED write is an error here and the
+    /// projection cache is not advanced past it. (The hash alone proves
+    /// admission: a reverted tx still mines with status 0x0 — measured on
+    /// the feed bridge, which re-published for hours on a reverting write.)
+    async fn send_projection(&self, mock: Address, data: alloy_primitives::Bytes) -> Result<()> {
+        let tx = TransactionRequest::default()
+            .from(system::PRECOMPILE_WRITER)
+            .to(mock)
+            .input(data.into());
+        self.target_rpc.send_transaction_confirmed(tx).await?;
+        tracing::debug!(mock = %mock, "bridge: precompile mock write confirmed");
+        Ok(())
+    }
+
+    /// The accounts whose projected figures changed this pass: every sim
+    /// account is re-read (outside the projection lock — the lock guards only
+    /// the diff write-back, so a projection tx that faults retries next pass)
+    /// and compared against the cache.
+    async fn changed_figures(
+        &self,
+        usdc: &system::TokenInfo,
+        meta: Option<&crate::wire::Meta>,
+        _head: u64,
+    ) -> Result<Vec<(Address, [u64; 3])>> {
+        let mut current = std::collections::HashMap::new();
+        for address in self.sim.account_addresses()? {
+            match self.core_figures(address, usdc, meta) {
+                Ok(figures) => {
+                    current.insert(address, figures);
+                    if self
+                        .refusals
+                        .lock()
+                        .expect("bridge refusal cache")
+                        .remove(&address)
+                        .is_some()
+                    {
+                        tracing::info!(
+                            account = %address,
+                            "bridge: precompile projection figures available again"
+                        );
+                    }
+                }
+                Err(e) => self.note_refusal(address, &e.to_string()),
+            }
+        }
+        let projected = self.projected.lock().expect("bridge projection cache");
+        Ok(current
+            .into_iter()
+            .filter(|(address, figures)| projected.get(address) != Some(figures))
+            .collect())
+    }
+
+    /// One account's unpriceable figures, logged once per distinct cause.
+    ///
+    /// The account stays out of this pass (a projection that omits an
+    /// unpriceable leg would understate maintenance), but a permanently
+    /// unpriceable fixture must not read as a 1 Hz fault: the reason is a
+    /// state, so the log fires on the transition into and out of it.
+    fn note_refusal(&self, address: Address, reason: &str) {
+        self.metrics.inc_refusals();
+        let first = {
+            let mut refusals = self.refusals.lock().expect("bridge refusal cache");
+            match refusals.get(&address) {
+                Some(known) if known == reason => false,
+                _ => {
+                    refusals.insert(address, reason.to_string());
+                    true
+                }
+            }
+        };
+        if first {
+            tracing::warn!(
+                account = %address,
+                error = %reason,
+                "bridge: precompile projection figures unavailable; the account is not projected \
+                 until the cause clears"
+            );
+        } else {
+            tracing::debug!(
+                account = %address,
+                error = %reason,
+                "bridge: precompile projection figures still unavailable"
+            );
+        }
+    }
+
+    /// One account's projected figures, in the units the mocks store:
+    /// `[spot total (core wei), spot hold (core wei), perp withdrawable (USD
+    /// 1e6)]`. Zeros for an account the sim no longer holds, so the projection
+    /// can never report a balance the venue does not.
+    fn core_figures(
+        &self,
+        address: Address,
+        token: &system::TokenInfo,
+        meta: Option<&crate::wire::Meta>,
+    ) -> Result<[u64; 3]> {
+        let Some(account) = self.sim.account(address)? else {
+            return Ok([0; 3]);
+        };
+        let entry = account.spot.get(&token.index);
+        let total = entry.map_or(Decimal::ZERO, |e| e.total);
+        let hold =
+            match crate::sim::account::available_after_maintenance(&account, &self.feed, meta)?
+                .into_iter()
+                .find(|(t, _)| *t == token.index)
+                .map(|(_, available)| available)
+            {
+                Some(available) if available < total => total - available,
+                _ => entry.map_or(Decimal::ZERO, |e| e.hold),
+            };
+        let view = crate::sim::account::view(&account, &self.feed, meta)?;
+        Ok([
+            core_units(total, token.wei_decimals)?,
+            core_units(hold, token.wei_decimals)?,
+            core_units(view.withdrawable, system::PERP_USD_DECIMALS)?,
+        ])
     }
 
     /// Keep the sim's served `time` on the venue chain's clock: one header
@@ -148,7 +419,7 @@ impl Bridge {
             return Ok(());
         }
         let block = self
-            .anvil_v
+            .target_rpc
             .block_by_number(head, diorama_anvil::Txs::Hashes)
             .await?;
         self.sim
@@ -160,7 +431,7 @@ impl Bridge {
     /// Decode one block's boundary activity and apply it.
     async fn scan_block(&self, n: u64) -> Result<()> {
         let block = self
-            .anvil_v
+            .target_rpc
             .block_by_number(n, diorama_anvil::Txs::Full)
             .await?;
         if block.transactions.is_empty() {
@@ -211,9 +482,16 @@ impl Bridge {
     /// contract (`Received`) and every token's system-address transfers,
     /// from the receipts' logs.
     async fn apply_credits(&self, n: u64, tokens: &[TokenInfo]) -> Result<()> {
-        let receipts = self.anvil_v.receipts(n).await?;
+        let receipts = self.target_rpc.receipts(n).await?;
         for receipt in &receipts {
-            for log in receipt.logs() {
+            // The logs decoded once, with their emitters, so a helper-hop
+            // credit can look back at the same transaction's funding leg.
+            let logs: Vec<(Address, &alloy_primitives::LogData)> = receipt
+                .logs()
+                .iter()
+                .map(|log| (log.address(), log.data()))
+                .collect();
+            for (index, log) in receipt.logs().iter().enumerate() {
                 // HYPE's boundary is the system contract's `Received` event
                 // (docs): a tx value sent to `0x2222…2` credits Core HYPE.
                 if log.address() == system::HYPE_SYSTEM {
@@ -223,7 +501,8 @@ impl Bridge {
                 let Some(transfer) = system::transfer_of(log.data()) else {
                     continue;
                 };
-                self.apply_credit(&transfer, log.address(), tokens).await?;
+                self.apply_credit(&transfer, log.address(), &logs[..index], tokens)
+                    .await?;
             }
         }
         Ok(())
@@ -238,7 +517,7 @@ impl Bridge {
         n: u64,
         block: &alloy_rpc_types_eth::Block,
     ) -> Result<Vec<(Address, CoreAction)>> {
-        match self.anvil_v.trace_block_calls(n).await {
+        match self.target_rpc.trace_block_calls(n).await {
             Ok(traces) => {
                 let mut out = Vec::new();
                 for trace in traces {
@@ -261,32 +540,37 @@ impl Bridge {
     }
 
     // TRUST: value in = value recorded (token-admission-policy). The guards:
-    // only a Transfer log from the token's linked EVM contract counts, and the
-    // Core amount is the log's exact value converted by the pinned decimals.
-    /// EVM→Core credit from one transfer log (the emitting contract must be
-    /// the token's linked EVM contract).
+    // a Transfer log from the token's linked EVM contract credits its sender;
+    // an entry point's own self-transfer is credited to the same-transaction
+    // funding depositor; the Core amount is the log's exact value converted by
+    // the pinned decimals.
+    /// EVM→Core credit from one transfer log (the linked token's own transfer,
+    /// or an entry-point self-transfer with a same-transaction funding leg).
     async fn apply_credit(
         &self,
         transfer: &Transfer,
         emitter: Address,
+        prior: &[(Address, &alloy_primitives::LogData)],
         tokens: &[TokenInfo],
     ) -> Result<()> {
-        // A spot-token contract transferring **from itself** is the bridge's
-        // internal hop, not the depositor. `credit_of` refuses it; name the gap
-        // here because the refusal is otherwise silent and the deposit has no
-        // Core account. The measured 2026-10-31 USDC deposit credited the token
-        // contract itself; resolving the original depositor from the tx is the
-        // remaining piece (see `credit_of`'s self-transfer guard).
-        if transfer.from == emitter {
-            tracing::warn!(
-                from = %transfer.from,
-                to = %transfer.to,
-                value = %transfer.value,
-                "bridge: EVM→Core transfer originates at the linked token contract itself — refusing to credit the contract; the depositor is not resolvable from this log"
-            );
-            return Ok(());
-        }
-        let Some(credit) = system::credit_of(transfer, tokens, emitter) else {
+        // The linked token's own log is the ordinary deposit. When a bridge
+        // helper moves the tokens on, the helper's self-transfer is resolved
+        // back to the depositor that funded it earlier in the same
+        // transaction. Both rules refuse a self-transfer that no funding leg
+        // backs; the linked token's own self-transfer is never credited (the
+        // measured 2026-10-31 USDC deposit credited the token contract
+        // itself).
+        let credit = system::credit_of(transfer, tokens, emitter)
+            .or_else(|| system::hop_credit_of(transfer, prior, tokens, emitter));
+        let Some(credit) = credit else {
+            if transfer.from == emitter {
+                tracing::warn!(
+                    from = %transfer.from,
+                    to = %transfer.to,
+                    value = %transfer.value,
+                    "bridge: EVM→Core transfer originates at its emitter, and no earlier same-transaction transfer into the emitter funds it — refusing to credit"
+                );
+            }
             return Ok(());
         };
         self.sim.credit_spot(
@@ -431,13 +715,12 @@ impl Bridge {
     }
 
     /// The asset index -> coin map the CoreWriter actions address (`None` =
-    /// an index the live meta does not carry: a named refusal upstream).
+    /// an index no loaded dex carries: a named refusal upstream). The
+    /// namespace is the feed's: the default dex's positional indices plus the
+    /// HIP-3 `100000 + perp_dex_index*10000 + universe_index` (dex position
+    /// from the upstream `perpDexs` order).
     fn coin_of(&self, asset: u32) -> Option<String> {
-        self.feed
-            .meta()?
-            .universe
-            .get(asset as usize)
-            .map(|a| a.name.clone())
+        self.feed.coin_of_asset(asset)
     }
 
     /// The CoreWriter limit order (id 1): prices and sizes arrive as 10^8 ×
@@ -455,7 +738,12 @@ impl Bridge {
             tracing::warn!(account = %caller, tif, "bridge: CoreWriter order with an unknown tif byte");
             return;
         };
-        let Some(order) = core_order(self.feed.meta().as_ref(), action, tif) else {
+        let Some(coin) = self.coin_of(*asset) else {
+            self.metrics.inc_refusals();
+            tracing::warn!(account = %caller, asset, "bridge: CoreWriter order for an unknown asset refused");
+            return;
+        };
+        let Some(order) = core_order(coin, action, tif) else {
             self.metrics.inc_refusals();
             tracing::warn!(account = %caller, asset, "bridge: CoreWriter order for an unknown asset refused");
             return;
@@ -526,7 +814,7 @@ impl Bridge {
     }
 
     /// The `sendAsset` dex guard: this sim models the spot dex, so a perp-dex
-    /// move (multi-dex is deferred — docs/INTEGRATION.md) is refused by name
+    /// move (per-dex balances are not modeled — Phase A) is refused by name
     /// and counted — never applied as a spot send. `true` when the action was
     /// refused.
     fn refuse_off_spot_send_asset(
@@ -636,42 +924,8 @@ impl Bridge {
             return Ok(());
         };
         if destination == system::system_address(u64::from(info.index)) {
-            // Core→EVM: the venue's transfer rule bounds the move by the
-            // account's **spot available after maintenance**, not by the spot
-            // balance and not by the perp class's `withdrawable`. A control-
-            // patched or insolvent account can still hold spot cash while its
-            // equity is below the transfer floor; 4a withdrew 0.55 with
-            // `withdrawable=0` one block before its deficit deposit. But a
-            // unified account's spot principal is a **separate ledger** from the
-            // perp wallet (the live `cf16` recovery: 240.510247 spot against
-            // 0.000000455 perp), so the perp figure is the wrong bound for a
-            // spot→EVM bridge — it refused the whole recovery leg. The
-            // collateral token is bounded by `tokenToAvailableAfterMaintenance`;
-            // other spot tokens are holdings, bounded by the balance alone.
-            if info.index == crate::sim::account::COLLATERAL_TOKEN {
-                let Some(account) = self.sim.account(caller)? else {
-                    self.metrics.inc_refusals();
-                    tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
-                    return Ok(());
-                };
-                let meta = self.feed.meta();
-                if let Some(bound) = crate::sim::account::spot_bridge_bound(
-                    &account,
-                    &self.feed,
-                    meta.as_ref(),
-                    info.index,
-                )? {
-                    if amount > bound {
-                        self.metrics.inc_refusals();
-                        tracing::warn!(
-                            account = %caller,
-                            amount = %amount,
-                            available = %bound,
-                            "bridge: Core→EVM refused (amount exceeds spot available after maintenance)"
-                        );
-                        return Ok(());
-                    }
-                }
+            if !self.core_to_evm_allowed(caller, info, amount)? {
+                return Ok(());
             }
             // Core→EVM: debit the caller, then complete on the EVM side.
             let Some(_after) = self.sim.try_debit_spot(caller, info.index, amount)? else {
@@ -698,6 +952,49 @@ impl Bridge {
         Ok(())
     }
 
+    /// The Core→EVM transfer bound: the venue's rule bounds the move by the
+    /// account's **spot available after maintenance**, not by the spot balance
+    /// and not by the perp class's `withdrawable`. A control-patched or
+    /// insolvent account can still hold spot cash while its equity is below
+    /// the transfer floor; 4a withdrew 0.55 with `withdrawable=0` one block
+    /// before its deficit deposit. But a unified account's spot principal is a
+    /// **separate ledger** from the perp wallet (the live `cf16` recovery:
+    /// 240.510247 spot against 0.000000455 perp), so the perp figure is the
+    /// wrong bound for a spot→EVM bridge — it refused the whole recovery leg.
+    /// The collateral token is bounded by `tokenToAvailableAfterMaintenance`;
+    /// other spot tokens are holdings, bounded by the balance alone.
+    fn core_to_evm_allowed(
+        &self,
+        caller: Address,
+        info: &TokenInfo,
+        amount: Decimal,
+    ) -> Result<bool> {
+        if info.index != crate::sim::account::COLLATERAL_TOKEN {
+            return Ok(true);
+        }
+        let Some(account) = self.sim.account(caller)? else {
+            self.metrics.inc_refusals();
+            tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
+            return Ok(false);
+        };
+        let meta = self.feed.margin_meta();
+        if let Some(bound) =
+            crate::sim::account::spot_bridge_bound(&account, &self.feed, meta.as_ref(), info.index)?
+        {
+            if amount > bound {
+                self.metrics.inc_refusals();
+                tracing::warn!(
+                    account = %caller,
+                    amount = %amount,
+                    available = %bound,
+                    "bridge: Core→EVM refused (amount exceeds spot available after maintenance)"
+                );
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// The completion tx: `transfer(caller, amount)` on the linked ERC20 from
     /// the system address (auto-impersonate). It lands with the devnet's next
     /// mined block, like the real chain's system tx.
@@ -718,26 +1015,23 @@ impl Bridge {
         };
         let from = system::system_address(u64::from(info.index));
         // The system address pays gas on V (the real chain's system txs do
-        // not); fund it once, at the deployment's declared stipend, so the
-        // pool's balance check passes. A balance-read fault propagates: it
-        // must not be read as "empty" and funded over a broken RPC.
-        if self.anvil_v.balance_at(from, 0).await?.is_zero() {
-            self.anvil_v
-                .anvil_set_balance(from, self.system_gas_stipend)
-                .await?;
-        }
+        // not); keep it at the deployment's declared stipend so the pool's
+        // balance check passes.
+        self.ensure_gas(from).await?;
         let tx = TransactionRequest::default()
             .from(from)
             .to(evm.address)
             .input(system::transfer_calldata(*recipient, value).into());
-        let hash = self.anvil_v.send_transaction(tx).await?;
+        // Waited to the receipt: the completion's cursor may only advance on
+        // a write that actually landed (see send_projection).
+        let receipt = self.target_rpc.send_transaction_confirmed(tx).await?;
         self.metrics.inc_completions();
         tracing::info!(
             to = %recipient,
             token = %info.name,
             amount = %amount,
-            tx = %hash,
-            "bridge: Core→EVM completion submitted"
+            tx = %receipt.transaction_hash,
+            "bridge: Core→EVM completion confirmed"
         );
         Ok(())
     }
@@ -748,6 +1042,31 @@ impl Bridge {
 /// Pure, so the unit rule is testable without a chain.
 fn usd_class_amount(ntl: u64) -> Option<Decimal> {
     system::core_to_human(ntl, system::PERP_USD_DECIMALS)
+}
+
+/// Whether a funded mirror sender needs its stipend topped up: any balance
+/// below the stipend, not only a zero one. The live bug this answers is a
+/// writer holding *some* HYPE but less than one write's up-front cost — anvil
+/// admits the tx (no balance check for an impersonated sender) and the miner
+/// drops it, so the write silently never mines.
+fn needs_stipend(balance: U256, stipend: U256) -> bool {
+    balance < stipend
+}
+
+/// A human decimal as the mocks' raw unit, floored like every other
+/// Core→EVM conversion (`system::human_to_evm`). `None` becomes an error at
+/// the caller: an unrepresentable figure must refuse the projection, never
+/// silently write zero.
+fn core_units(amount: Decimal, decimals: u32) -> Result<u64> {
+    let decimals = i32::try_from(decimals).map_err(|_| Error::Overflow {
+        what: "precompile projection decimals",
+    })?;
+    let raw = system::human_to_evm(amount, decimals).ok_or(Error::Overflow {
+        what: "precompile projection amount",
+    })?;
+    u64::try_from(raw).map_err(|_| Error::Overflow {
+        what: "precompile projection amount exceeds u64",
+    })
 }
 
 /// The Core's intra-block action order (docs: "Within a block, actions are
@@ -807,16 +1126,16 @@ fn walk_frame(frame: &CallFrame, out: &mut Vec<(Address, CoreAction)>) {
 }
 
 /// The CoreWriter order's units (docs, pinned): prices and sizes are 10^8 ×
-/// the human value, and the asset index resolves through the live meta
-/// (`None` = an index the meta does not carry — a named refusal upstream).
-/// The tif comes in already mapped (`Tif::from_corewriter`, one home).
+/// the human value, and the coin comes from the feed's asset-id resolution
+/// ([`crate::feed::MarketFeed::coin_of_asset`], so a HIP-3
+/// `100000 + …` index lands on its own market). The tif comes in already
+/// mapped (`Tif::from_corewriter`, one home).
 fn core_order(
-    meta: Option<&crate::wire::Meta>,
+    coin: String,
     action: &CoreAction,
     tif: crate::sim::order::Tif,
 ) -> Option<crate::sim::order::Order> {
     let CoreAction::LimitOrder {
-        asset,
         side,
         limit_px,
         sz,
@@ -827,7 +1146,6 @@ fn core_order(
     else {
         return None;
     };
-    let coin = meta?.universe.get(*asset as usize)?.name.clone();
     let scale = Decimal::from(100_000_000u64);
     Some(crate::sim::order::Order {
         coin,
@@ -848,6 +1166,53 @@ fn core_order(
 mod tests {
     use super::*;
 
+    /// The projection's unit rule: the mocks store raw core wei / raw USD
+    /// 1e6, floored like every other Core→EVM conversion, and an
+    /// unrepresentable figure is refused rather than written as zero.
+    #[test]
+    fn core_units_floor_at_the_mock_unit_and_refuse_the_unrepresentable() {
+        use rust_decimal::Decimal;
+        // 67.892481 USDC at 8 decimals — the measured live case.
+        let live: Decimal = "67.892481".parse().unwrap();
+        assert_eq!(core_units(live, 8).expect("representable"), 6_789_248_100);
+        // Sub-wei remainder floors (the chain's own rule).
+        let dust: Decimal = "0.0000000019".parse().unwrap();
+        assert_eq!(core_units(dust, 8).expect("representable"), 0);
+        // The perp class's USD 1e6 scale.
+        let withdrawable: Decimal = "13104.514502".parse().unwrap();
+        assert_eq!(
+            core_units(withdrawable, system::PERP_USD_DECIMALS).expect("representable"),
+            13_104_514_502,
+        );
+        // A negative or absurd figure refuses; it is never laundered into 0.
+        let negative: Decimal = "-1".parse().unwrap();
+        assert!(core_units(negative, 8).is_err());
+        let absurd: Decimal = "100000000000000000000000".parse().unwrap();
+        assert!(core_units(absurd, 8).is_err());
+    }
+
+    /// The funding gate: a *non-zero* balance below the stipend still needs
+    /// the top-up. The measured live shape was 22 955 149 261 668 wei against
+    /// a 24 245 000 169 715 wei projection cost — non-zero, and the reason
+    /// every bridge pass timed out in `send_transaction_confirmed` for hours.
+    #[test]
+    fn a_balance_below_the_stipend_is_topped_up() {
+        let stipend = U256::from(1_000_000_000_000_000_000u128);
+        assert!(
+            needs_stipend(U256::ZERO, stipend),
+            "an empty writer is funded"
+        );
+        assert!(
+            needs_stipend(U256::from(22_955_149_261_668u128), stipend),
+            "a dust balance below one write's cost is funded too"
+        );
+        assert!(
+            !needs_stipend(stipend, stipend),
+            "a writer already holding the stipend is left alone"
+        );
+        assert!(!needs_stipend(stipend + U256::from(1), stipend));
+    }
+
     fn usd_transfer_input(ntl: u64) -> Vec<u8> {
         let mut input = vec![0x01, 0x00, 0x00, 0x07];
         input.extend_from_slice(&U256::from(ntl).to_be_bytes::<32>());
@@ -856,19 +1221,10 @@ mod tests {
     }
 
     /// The CoreWriter order's units are the docs' own: 10^8 × human for both
-    /// price and size, resolved against the live meta.
+    /// price and size. The coin arrives resolved (the feed's asset namespace);
+    /// this mapping only scales and shapes.
     #[test]
     fn corewriter_orders_scale_by_1e8() {
-        let mut meta: crate::wire::Meta = serde_json::from_str(r#"{"universe": []}"#).unwrap();
-        meta.universe.push(crate::wire::AssetInfo {
-            name: "ETH".into(),
-            sz_decimals: 4,
-            max_leverage: 20,
-            margin_table_id: None,
-            only_isolated: None,
-            is_delisted: None,
-            margin_mode: None,
-        });
         let action = CoreAction::LimitOrder {
             asset: 0,
             side: crate::sim::order::Side::Buy,
@@ -878,25 +1234,13 @@ mod tests {
             tif: 3,
             cloid: 0,
         };
-        let order =
-            core_order(Some(&meta), &action, crate::sim::order::Tif::Ioc).expect("a modeled order");
+        let order = core_order("ETH".into(), &action, crate::sim::order::Tif::Ioc)
+            .expect("a modeled order");
         assert_eq!(order.coin, "ETH");
         assert!(order.is_buy);
         assert_eq!(order.size, "2.5".parse().unwrap());
         assert_eq!(order.limit_px, Some("101.5".parse().unwrap()));
         assert_eq!(order.tif, crate::sim::order::Tif::Ioc);
-        // An index the meta does not carry is a refusal, not a guess.
-        let oob = CoreAction::LimitOrder {
-            asset: 9,
-            side: crate::sim::order::Side::Buy,
-            limit_px: 1,
-            sz: 1,
-            reduce_only: false,
-            tif: 3,
-            cloid: 0,
-        };
-        assert!(core_order(Some(&meta), &oob, crate::sim::order::Tif::Ioc).is_none());
-        assert!(core_order(None, &action, crate::sim::order::Tif::Ioc).is_none());
     }
 
     /// Action 7's unit rule: `ntl` is the *perp class's* USD (1e6), not the

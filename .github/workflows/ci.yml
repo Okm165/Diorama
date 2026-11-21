@@ -1,5 +1,10 @@
 # The gates, exactly as they run locally: the workspace tests, then
 # `make fitness` (clippy, the design assertions, the config check, ast-scope).
+#
+# Keep it that way: `make fitness` must pass on this checkout, which has none of
+# the gitignored deployment data (`config/instances/*/specialization.toml`,
+# `k8s/overlays/*/harness.env`). A gate that needs those files only runs on the
+# machine that owns them, and this workflow is the check that it does not.
 name: gates
 
 on:

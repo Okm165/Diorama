@@ -1,0 +1,15 @@
+# The CCTP bridge's base: its deployment, service and own PVC. Included by
+# the bridge's own overlay (`k8s/overlays/diorama-cctp`), never by a mirror's:
+# a venue can run without a bridge, a bridge can run without the venue, and a
+# deployment may run several bridges.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # The shared spine: the retain StorageClass. Every instance includes it (it
+  # is one object, applied idempotently), because a claim whose class does not
+  # exist on the cluster stays Pending forever - the bridge's build used to
+  # name `diorama-retain`, the class name the mirrors left behind.
+  - ../shared
+  - cctp-bridge.yaml
+  - pvcs.yaml

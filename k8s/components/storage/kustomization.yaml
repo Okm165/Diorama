@@ -1,0 +1,31 @@
+# The storage class substitution point: ONE value names the class every claim
+# of every instance binds.
+#
+# `k8s/base/shared/storageclass.yaml` is the single spelling of the class —
+# its `metadata.name` is the value, its `provisioner` is the class's own fact.
+# This component copies that name onto every PersistentVolumeClaim in the
+# build, so no claim carries a second literal: change the name (and the
+# provisioner) in the one file and every claim of the instance re-points.
+#
+# Why a component and not a per-base field: the class is a *cluster* fact
+# shared by all three instances, and a claim's class does not rebind once
+# bound. A porting operator edits the two create-time values in
+# `k8s/base/shared/storageclass.yaml` on an empty cluster; nothing else names
+# a class.
+#
+# The replacement selects the StorageClass by kind, not by name, so renaming
+# the class is the one edit it takes. A second StorageClass object in the same
+# overlay would make the source ambiguous and fail the build loudly — the
+# intended behavior: one class per cluster.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+replacements:
+  - source:
+      kind: StorageClass
+      fieldPath: metadata.name
+    targets:
+      - select:
+          kind: PersistentVolumeClaim
+        fieldPaths:
+          - spec.storageClassName
