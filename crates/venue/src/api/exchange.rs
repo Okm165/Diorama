@@ -2014,6 +2014,93 @@ mod tests {
         assert_eq!(ledger(&state, who, ""), dec("40"));
     }
 
+    /// The venue disables `usdClassTransfer` on a unified account (one USDC
+    /// pool); the signed API answers its own message, in both directions, and
+    /// moves nothing.
+    #[tokio::test]
+    async fn a_unified_account_gets_the_venues_class_transfer_refusal() {
+        use crate::sim::DealClass::Spot;
+        let state = dex_state();
+        let who: Address = OWNER.parse().unwrap();
+        fund(&state, who, Spot, None, "100");
+        state
+            .sim
+            .set_mode(
+                who,
+                crate::wire::UserAbstraction::UnifiedAccount,
+                &state.feed,
+            )
+            .unwrap();
+        for to_perp in ["true", "false"] {
+            let out = act(
+                &state,
+                &format!(r#"{{"type":"usdClassTransfer","amount":"40","toPerp":{to_perp}}}"#),
+            )
+            .await;
+            assert_eq!(out["status"], "err", "{out}");
+            assert!(
+                out["response"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Action disabled when unified account is active"),
+                "{out}"
+            );
+        }
+        assert_eq!(ledger(&state, who, ""), dec("0"), "nothing moved");
+    }
+
+    /// The venue disables the API-signed `spotSend` on a unified account (any
+    /// token, any destination, a token's system address included) but accepts
+    /// `sendAsset`. The refusal comes first and moves nothing.
+    #[tokio::test]
+    async fn a_unified_account_cannot_spot_send_but_can_send_asset() {
+        use crate::sim::DealClass::Spot;
+        let state = dex_state();
+        let who: Address = OWNER.parse().unwrap();
+        let (_, other) = key(0x22);
+        fund(&state, who, Spot, None, "100");
+        state
+            .sim
+            .set_mode(
+                who,
+                crate::wire::UserAbstraction::UnifiedAccount,
+                &state.feed,
+            )
+            .unwrap();
+        for destination in [
+            format!("{other:#x}"),
+            "0x2000000000000000000000000000000000000000".to_string(),
+        ] {
+            let out = act(
+                &state,
+                &format!(
+                    r#"{{"type":"spotSend","destination":"{destination}","token":"{TOKEN}","amount":"10"}}"#
+                ),
+            )
+            .await;
+            assert_eq!(out["status"], "err", "{out}");
+            assert_eq!(
+                out["response"].as_str().unwrap(),
+                "Action disabled when unified account is active",
+                "{out}"
+            );
+        }
+        assert_eq!(spot_usdc(&state, who), dec("100"), "nothing moved");
+
+        let out = act(
+            &state,
+            &format!(
+                r#"{{"type":"sendAsset","destination":"{other:#x}","sourceDex":"spot","destinationDex":"spot","token":"{TOKEN}","amount":"10"}}"#
+            ),
+        )
+        .await;
+        assert_eq!(out["status"], "ok", "{out}");
+        assert_eq!(
+            (spot_usdc(&state, who), spot_usdc(&state, other)),
+            (dec("90"), dec("10"))
+        );
+    }
+
     const TSLA: u32 = 110_000;
 
     fn order_json(asset: u32, buy: bool, px: &str, tif: &str, cloid: Option<&str>) -> String {

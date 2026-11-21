@@ -10,7 +10,7 @@ use super::exchange::{default_ok, err_envelope};
 use super::ApiState;
 use crate::sim::fees::RowKind;
 use crate::sim::transfer::{AssetSend, Wallet};
-use crate::sim::{Applied, ClassTransfer, Direction, TokenRef};
+use crate::sim::{Applied, ClassTransfer, Direction, TokenRef, UNIFIED_ACTION_REFUSAL};
 use crate::wire::UserAbstraction;
 use alloy_primitives::Address;
 use axum::response::Response;
@@ -38,9 +38,6 @@ const USDC: TokenRef<'static> = TokenRef {
 
 /// `usdClassTransfer`: USDC between the account's spot wallet and its
 /// default perp dex.
-// step-9: the venue disables this action on a unified account (one USDC
-// pool) with `UNIFIED_ACTION_REFUSAL`; the unified switch itself is deferred,
-// so the guard lands with it.
 pub(super) fn usd_class_transfer(
     state: &ApiState,
     account: Address,
@@ -57,6 +54,8 @@ pub(super) fn usd_class_transfer(
         } else {
             Direction::ToSpot
         };
+        // The venue disables the action on a unified account (one USDC pool).
+        refuse_on_unified(state, account)?;
         let applied = state
             .sim
             .usd_class_transfer(
@@ -154,23 +153,39 @@ pub(super) fn send_asset(state: &ApiState, account: Address, send: &SendAsset<'_
     })())
 }
 
-/// `spotSend`: a spot token to another account's spot wallet.
-// step-9: the venue disables the API-signed `spotSend` on a unified account
-// (any token, any destination) with `UNIFIED_ACTION_REFUSAL`; the unified
-// switch itself is deferred, so the guard lands with it.
+/// `spotSend`: a spot token to another account's spot wallet. The venue
+/// disables the signed action on a unified account; `sendAsset` and a
+/// contract's CoreWriter `spotSend` still work there.
 pub(super) fn spot_send(
     state: &ApiState,
     account: Address,
     destination: Address,
     (token, amount): (&str, &str),
 ) -> Response {
-    answer(transfer(
-        state,
-        (account, destination),
-        (token, amount),
-        (Wallet::Spot, Wallet::Spot),
-        RowKind::SpotTransfer,
-    ))
+    answer(refuse_on_unified(state, account).and_then(|()| {
+        transfer(
+            state,
+            (account, destination),
+            (token, amount),
+            (Wallet::Spot, Wallet::Spot),
+            RowKind::SpotTransfer,
+        )
+    }))
+}
+
+/// The venue's refusal of an action a unified account cannot take, as the
+/// answer the API gives.
+fn refuse_on_unified(state: &ApiState, account: Address) -> Result<(), String> {
+    let unified = state
+        .sim
+        .account(account)
+        .map_err(|e| e.to_string())?
+        .is_some_and(|a| a.mode == UserAbstraction::UnifiedAccount);
+    if unified {
+        Err(UNIFIED_ACTION_REFUSAL.to_string())
+    } else {
+        Ok(())
+    }
 }
 
 /// `usdSend`: USDC from the account's default perp dex to another account's.
