@@ -65,8 +65,13 @@ the parity gate, never eyeballing.
 6. **Latency emulation.** An optional per-endpoint latency distribution
    (measured from the real venue) so strategies observe realistic reaction
    times instead of a local socket.
-7. **`orderStatus` history window as config** (already ours); add
-   `historicalOrders` pagination parity.
+7. **`orderStatus` history window as config** (already ours);
+   `historicalOrders` pagination **(verified 2026-11-21, nothing to build)**:
+   the venue documents no cursor scheme — "at most 2000 most recent
+   historical orders" — and the sim's `USER_FILLS_PAGE = 2_000` is exactly
+   that bound, applied to `userFills` and `historicalOrders` alike. The
+   undocumented `startTime`/`startAfter` params are accepted by both with
+   HTTP 200 (probed live upstream and on the mirror).
 8. **Oracle-band metrics.** Publish the distance between our served mark and
    HL's real mark per coin (the mirror's honesty metric), alerting when a
    scripted overlay drags a coin outside the band.
