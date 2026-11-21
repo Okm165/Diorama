@@ -28,7 +28,10 @@ spec:
         app.kubernetes.io/part-of: diorama-venue
     spec:
       # Give anvil time to shut down cleanly on SIGTERM.
-      terminationGracePeriodSeconds: 90
+      # A full state dump is ~430 MB; SIGKILL mid-write is exactly how a torn
+      # state file is made, and a torn file used to mean a silent re-fork at the
+      # pin (a 329 k-block history replacement measured 2026-11-19 21:53Z).
+      terminationGracePeriodSeconds: 180
       initContainers:
         # Resolve a *fresh* pin on every start, like T: the source serves
         # `latest` at archive depth, so a restart re-forks at a current block
@@ -148,24 +151,36 @@ spec:
               #                        pin. 32 blocks (32 s at the mirror's
               #                        1 s cadence) is shorter than a normal
               #                        restart; 10 000 (~2.8 h) covers it.
-              #   --transaction-block-keeper 10000  the forensic tx window.
-              #                        The old 1e6 kept every tx/block forever
-              #                        and was the measured OOM source: the
-              #                        container hit its 16 GiB ceiling in ~1 h
-              #                        (2026-11-02 02:19Z). 10 000 blocks is
-              #                        ~2.8 h of the mirror's own history, which
-              #                        is what the driver's failing-run reads need.
+              #   --transaction-block-keeper 100000  the receipt window.
+              #                        daloc re-proves confirmations after every
+              #                        keeper boot; a window shorter than that
+              #                        horizon turned pruning into "rewind"
+              #                        (measured 1 223 of 1 389 retirements were
+              #                        older than 3 h). 100 000 blocks is ~20 h at
+              #                        the measured 1.36 blk/s. Receipts, not
+              #                        state snapshots: the old 1e6 (every
+              #                        tx/block forever) was the OOM source
+              #                        (2026-11-02 02:19Z). daloc also stores a
+              #                        block witness per settlement, so pruning
+              #                        is no longer load-bearing for proof.
               # The chain's content is the pod's own state file. The engine's pin
-              # does NOT restore a deployment made after it: the 2026-11-20
-              # rollout re-forked at the pin and the Hub, registry and every
-              # DALOC contract vanished from chain 999. A torn write (the process
-              # killed mid-save) leaves a truncated JSON object that anvil
-              # refuses at boot, so park anything that does not end in `}` and
-              # let the pin be the fallback. `--state-interval 300` re-dumps while
-              # running; anvil also dumps on a clean SIGTERM.
+              # does NOT restore a deployment made after it: a re-fork at the pin
+              # deletes every block above it and re-mines the same heights with
+              # different hashes — a 329 k-block history replacement measured
+              # 2026-11-19 21:53Z (a torn dump, silently parked, booted from the
+              # pin; soaks that had settled above the pin lost their receipts).
+              # A torn/absent file is therefore a **hard failure**, not a quiet
+              # rewind: refuse to serve a new history unless the operator says so
+              # with ALLOW_PIN_FALLBACK=1. `--state-interval 300` re-dumps while
+              # running; anvil dumps on a clean SIGTERM and the pod has 180 s.
               if [ -f /state/anvil-state.json ] && [ "$(tail -c 64 /state/anvil-state.json | tr -d '[:space:]' | tail -c 1)" != "}" ]; then
-                mv /state/anvil-state.json "/state/anvil-state.json.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
-                echo "anvil-v: parked a torn state file; starting from the pin" >&2
+                CORRUPT="/state/anvil-state.json.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
+                mv /state/anvil-state.json "$CORRUPT"
+                if [ "${ALLOW_PIN_FALLBACK:-0}" != "1" ]; then
+                  echo "anvil-v: the state file was torn (parked at $CORRUPT). Refusing to boot from the pin: that would replace every block above $PIN and strand confirmed settlements. Inspect, restore a dump, or set ALLOW_PIN_FALLBACK=1 for a deliberate new history." >&2
+                  exit 1
+                fi
+                echo "anvil-v: ALLOW_PIN_FALLBACK=1 — starting a new history from the pin (parked $CORRUPT)" >&2
               fi
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
@@ -180,7 +195,7 @@ spec:
                 --no-mining \
                 --auto-impersonate \
                 --prune-history 10000 \
-                --transaction-block-keeper 10000 \
+                --transaction-block-keeper 100000 \
                 --state /state/anvil-state.json \
                 --state-interval 300 \
                 --no-rate-limit \
