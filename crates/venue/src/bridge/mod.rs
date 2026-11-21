@@ -310,10 +310,7 @@ impl Bridge {
             return Ok(());
         }
         let Some(spot) = self.feed.spot_meta() else {
-            tracing::warn!(
-                block = n,
-                "bridge has no spotMeta yet; the block is re-scanned"
-            );
+            // Warm-up: the pass is retried; the block is not lost.
             return Err(Error::Warming);
         };
         let tokens = system::token_registry(&spot);
