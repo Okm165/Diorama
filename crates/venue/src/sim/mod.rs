@@ -272,7 +272,6 @@ impl Sim {
     /// action 9), else its own account. `None` when it is neither — the
     /// venue's "User or API Wallet … does not exist". An API wallet two
     /// accounts registered is refused by name rather than guessed.
-    #[allow(dead_code)] // the `/exchange` lane resolves the acting account through it next
     pub(crate) fn signer_account(&self, signer: Address) -> Result<Option<Address>> {
         self.with_state(|state| {
             let mut owners = state
@@ -672,7 +671,6 @@ impl Sim {
     /// `builder`, in tenths of a basis point. The venue *sets* the maximum, so
     /// a later approval for the same builder overwrites the earlier one; an
     /// approval of 0 revokes it.
-    #[allow(dead_code)] // the `/exchange` approveBuilderFee action adopts it next
     pub(crate) fn approve_builder_fee(
         &self,
         address: Address,
@@ -692,7 +690,6 @@ impl Sim {
     /// The account's approved maximum builder fee for `builder` (the info
     /// `maxBuilderFee` answer: 0 when never approved); `None` when the sim
     /// never touched the account.
-    #[allow(dead_code)] // the `/exchange` gate and the info read adopt it next
     pub(crate) fn max_builder_fee(
         &self,
         address: Address,
@@ -709,7 +706,6 @@ impl Sim {
     /// The builder-fee gate of an order action: the fee must be within the
     /// venue's perp cap and within what the account approved for the builder.
     /// The refusals are the venue's envelope text (`err` response).
-    #[allow(dead_code)] // the `/exchange` order action calls it next
     pub(crate) fn authorize_builder(
         &self,
         address: Address,

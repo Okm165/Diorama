@@ -91,6 +91,8 @@ fn build_planes(
         policy,
         Duration::from_secs(sim_section.rest_timeout_secs),
     )?;
+    // The order door's on-demand book read fills a coin's gap before it fills.
+    feed.attach_rest(api_client.clone());
     let ws_pool = diorama_anvil::EndpointPool::from_specs(
         cfg.endpoint_specs(chain.ws_urls.as_slice()),
         diorama_anvil::Scheme::Ws,

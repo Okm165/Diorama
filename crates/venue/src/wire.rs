@@ -29,7 +29,6 @@ use std::collections::BTreeMap;
 /// arithmetic keeps wide scales (e.g. `45.9053659690`), and the consumer's
 /// `nanos_from_decimal_str` refuses any string with more than nine fraction
 /// digits — a formatting artifact must not read as a malformed venue response.
-#[allow(dead_code)] // the optional/pair serializers land with the shapes that carry them
 pub(crate) mod decimal_nano {
     use rust_decimal::Decimal;
     use serde::Serializer;
@@ -57,6 +56,7 @@ pub(crate) mod decimal_nano {
 
     /// An optional decimal (`null` when absent; pair with `skip_serializing_if`
     /// where the key is omitted instead).
+    #[allow(dead_code)] // the optional/pair info shapes carry them (step 6)
     pub fn serialize_opt<S: Serializer>(
         value: &Option<Decimal>,
         serializer: S,
@@ -68,6 +68,7 @@ pub(crate) mod decimal_nano {
     }
 
     /// A pair of decimals (`maxTradeSzs`, `availableToTrade`).
+    #[allow(dead_code)] // the optional/pair info shapes carry them (step 6)
     pub fn serialize_pair<S: Serializer>(
         value: &[Decimal; 2],
         serializer: S,
@@ -81,6 +82,7 @@ pub(crate) mod decimal_nano {
     }
 
     /// An optional pair (`impactPxs`).
+    #[allow(dead_code)] // the optional/pair info shapes carry them (step 6)
     pub fn serialize_opt_pair<S: Serializer>(
         value: &Option<[Decimal; 2]>,
         serializer: S,
@@ -1086,17 +1088,16 @@ fn default_true() -> bool {
     true
 }
 
-/// The `/exchange` body: the venue's compact action shape. The devnet reads
-/// the acting account from `user` (the real venue derives it from the
-/// signature) and accepts `signature` without checking it.
+/// The `/exchange` body: the venue's compact action shape. As on the venue,
+/// the acting account is recovered from `signature` (api/signing.rs); a body
+/// that names `user` is the keyless harness shape instead.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExchangeBody {
     pub action: ExchangeAction,
-    /// The acting account. The real venue derives it from the signature; the
-    /// devnet has no keys, so it reads the field (the documented analogue).
-    /// Optional in the body so the SDK's `noop` (which carries no `user`)
-    /// parses; an order without it refuses by name.
+    /// The keyless harness's acting account (the anvil-impersonation
+    /// analogue): when present it is read as named and the signature is not
+    /// checked. A venue client sends none, and its signer is recovered.
     #[serde(default)]
     pub user: Option<Address>,
     #[serde(default)]
@@ -1124,8 +1125,8 @@ pub(crate) struct ActionTagInner {
     pub r#type: String,
 }
 
-/// The EIP-712 signature's fields (accepted, never verified): the devnet
-/// reads only its presence and shape.
+/// The EIP-712 signature's fields: the signer is recovered from them when
+/// the body names no `user` (api/signing.rs).
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct Signature {
     pub r: String,
@@ -1134,17 +1135,26 @@ pub(crate) struct Signature {
 }
 
 impl Signature {
-    /// Whether the signature is shaped like the venue's (nonempty `r`/`s`).
-    /// The devnet never verifies it — the anvil-impersonation analogue.
+    /// Whether the signature is shaped like the venue's (nonempty `r`/`s`):
+    /// the order log's `signed` field.
     pub(crate) fn is_shaped(&self) -> bool {
         !self.r.is_empty() && !self.s.is_empty()
     }
 }
 
-/// The action, tagged by `type`. `order` and `noop` are modeled; every other
-/// tag the venue defines lands in `Unmodeled` and is refused by name.
+/// The action, tagged by `type`: the L1 actions (hashed as msgpack) and the
+/// user-signed ones (`usdClassTransfer`, `sendAsset`, ...; their own EIP-712
+/// type, see api/signing.rs). Their fields are camelCase on the wire; only
+/// what the handlers read is named here (the signature covers the raw body).
+/// A tag the venue defines and the sim does not model lands in `Unmodeled`
+/// and is refused by name; a tag the venue does not define is a 422 (see
+/// [`KNOWN_ACTION_TAGS`]).
 #[derive(Debug, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub(crate) enum ExchangeAction {
     /// The no-operation action (docs): signature-authentication testing with
     /// no side effects. Answers the venue's no-data success envelope.
@@ -1155,8 +1165,8 @@ pub(crate) enum ExchangeAction {
         #[serde(default)]
         grouping: Option<Grouping>,
         /// The optional builder fee (docs: `{"b": address, "f": tenths of a
-        /// basis point}`): refused by name — fees are a research lane, and a
-        /// fill that silently skips the fee would lie.
+        /// basis point}`): accepted when the account approved that builder for
+        /// at least `f`, and charged on every fill of the order.
         #[serde(default)]
         builder: Option<Builder>,
     },
@@ -1208,9 +1218,126 @@ pub(crate) enum ExchangeAction {
         is_cross: bool,
         leverage: u32,
     },
+    /// `{"type":"usdClassTransfer","amount":"1.5","toPerp":true,...}`: USDC
+    /// between the account's spot wallet and its default perp dex.
+    UsdClassTransfer { amount: String, to_perp: bool },
+    /// `{"type":"sendAsset","destination":..,"sourceDex":..,"destinationDex":..,
+    /// "token":..,"amount":..,"fromSubAccount":..}`: a token between two
+    /// wallets (the spot wallet is dex `"spot"`, the default dex `""`).
+    SendAsset {
+        destination: String,
+        source_dex: String,
+        destination_dex: String,
+        token: String,
+        amount: String,
+        #[serde(default)]
+        from_sub_account: String,
+    },
+    /// `{"type":"spotSend","destination":..,"token":"NAME:id","amount":..}`.
+    SpotSend {
+        destination: String,
+        token: String,
+        amount: String,
+    },
+    /// `{"type":"usdSend","destination":..,"amount":..}`: USDC between two
+    /// accounts' default perp dexes.
+    UsdSend { destination: String, amount: String },
+    /// `withdraw3`: bridges USDC out through Arbitrum (refused by name).
+    Withdraw3,
+    /// `{"type":"approveAgent","agentAddress":..,"agentName":..}`: the same
+    /// registration CoreWriter action 9 makes.
+    ApproveAgent {
+        agent_address: Address,
+        #[serde(default)]
+        agent_name: Option<String>,
+    },
+    /// `{"type":"approveBuilderFee","maxFeeRate":"0.01%","builder":..}`.
+    ApproveBuilderFee {
+        max_fee_rate: String,
+        builder: Address,
+    },
+    /// `{"type":"userSetAbstraction","user":..,"abstraction":"unifiedAccount"}`.
+    UserSetAbstraction { user: Address, abstraction: String },
+    /// `{"type":"agentSetAbstraction","abstraction":"i"|"u"|"p"}` (an L1
+    /// action: the account's agent may sign it).
+    AgentSetAbstraction { abstraction: String },
     #[serde(other)]
     Unmodeled,
 }
+
+impl ExchangeAction {
+    /// Whether the action is user-signed (the account's own key, the
+    /// `HyperliquidSignTransaction` domain) rather than an L1 action an API
+    /// wallet may sign.
+    pub(crate) fn is_user_signed(&self) -> bool {
+        matches!(
+            self,
+            Self::UsdClassTransfer { .. }
+                | Self::SendAsset { .. }
+                | Self::SpotSend { .. }
+                | Self::UsdSend { .. }
+                | Self::Withdraw3
+                | Self::ApproveAgent { .. }
+                | Self::ApproveBuilderFee { .. }
+                | Self::UserSetAbstraction { .. }
+        )
+    }
+}
+
+/// Every action tag the real venue defines. A body whose tag is not in this
+/// list is a 422 (measured: the venue answers an unknown tag with its
+/// deserialization failure, not an `err` envelope); a listed tag the sim does
+/// not model is refused by name.
+pub(crate) const KNOWN_ACTION_TAGS: &[&str] = &[
+    "order",
+    "cancel",
+    "cancelByCloid",
+    "modify",
+    "batchModify",
+    "scheduleCancel",
+    "updateLeverage",
+    "updateIsolatedMargin",
+    "topUpIsolatedOnlyMargin",
+    "twapOrder",
+    "twapCancel",
+    "reserveRequestWeight",
+    "noop",
+    "setReferrer",
+    "registerReferrer",
+    "claimRewards",
+    "vaultTransfer",
+    "createVault",
+    "vaultModify",
+    "vaultDistribute",
+    "createSubAccount",
+    "subAccountModify",
+    "subAccountTransfer",
+    "subAccountSpotTransfer",
+    "spotUser",
+    "usdSend",
+    "spotSend",
+    "withdraw3",
+    "usdClassTransfer",
+    "sendAsset",
+    "tokenDelegate",
+    "cDeposit",
+    "cWithdraw",
+    "approveAgent",
+    "approveBuilderFee",
+    "convertToMultiSigUser",
+    "multiSig",
+    "evmUserModify",
+    "userDexAbstraction",
+    "userSetAbstraction",
+    "agentSetAbstraction",
+    "setDisplayName",
+    "perpDeploy",
+    "spotDeploy",
+    "linkStakingUser",
+    "borrowLend",
+    "validatorL1Stream",
+    "finalizeEvmContract",
+];
 
 /// One `cancel` entry (docs: `a` asset, `o` oid).
 #[derive(Debug, serde::Deserialize)]
@@ -1297,13 +1424,20 @@ fn decimal_or_refuse(what: &str, s: &str) -> Result<Decimal> {
 }
 
 impl OrderAction {
-    /// The compact action → the lane's order. The caller resolves the asset
-    /// index through the feed (`MarketFeed::coin_of_asset`: the default dex's
-    /// positional indices plus the HIP-3 `100000 + dex_index*10000 +
-    /// universe_index` namespace), so this wire mapping stays independent of
-    /// the feed's cache. Size and limit are decimal strings; the tif decides
-    /// what rests (the sim's `place` owns the semantics).
-    pub(crate) fn to_order(&self, coin: String) -> Result<crate::sim::order::Order> {
+    /// The compact action → the lane's order: the asset id resolves through
+    /// `coin_of_asset` (the feed's one resolver: unknown = a named refusal),
+    /// size and limit are decimal strings; the tif decides what rests (the
+    /// sim's `place` owns the semantics).
+    pub(crate) fn to_order(
+        &self,
+        coin_of_asset: impl Fn(u32) -> Option<String>,
+    ) -> Result<crate::sim::order::Order> {
+        let coin = coin_of_asset(self.a).ok_or_else(|| {
+            Error::bad_request(format!(
+                "unknown asset index {} (the live meta has not landed, or is shorter)",
+                self.a
+            ))
+        })?;
         let size: Decimal = decimal_or_refuse("size", &self.s)?;
         let limit_px = match &self.p {
             Some(p) => Some(decimal_or_refuse("limit price", p)?),

@@ -41,9 +41,8 @@ use rust_decimal::Decimal;
 pub(crate) enum Wallet {
     Spot,
     /// A perp dex by name (`""` = the default dex). Constructed by the
-    /// transfer tests and by the `/exchange` action dispatch (step 5); the
-    /// sim's one perp wallet reads every name as the same cash.
-    #[allow(dead_code)]
+    /// transfer tests and by the `/exchange` action dispatch; the sim's one
+    /// perp wallet reads every name as the same cash.
     Perp(String),
 }
 
@@ -51,9 +50,7 @@ pub(crate) enum Wallet {
 pub(crate) const SPOT_DEX_NAME: &str = "spot";
 
 impl Wallet {
-    /// The wallet the venue's `sourceDex` / `destinationDex` string names. The
-    /// `/exchange` action dispatch adopts it with step 5.
-    #[allow(dead_code)]
+    /// The wallet the venue's `sourceDex` / `destinationDex` string names.
     pub(crate) fn of_dex_name(name: &str) -> Self {
         if name == SPOT_DEX_NAME {
             Wallet::Spot

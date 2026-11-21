@@ -29,5 +29,9 @@ tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+# Signs test actions as a client's agent key would (api/exchange.rs tests).
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+
 [lints]
 workspace = true

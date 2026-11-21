@@ -12,7 +12,6 @@
 //! `destination` of `usdSend`, `spotSend`, `sendAsset` and `withdraw3` is a
 //! free string (it is validated after the signature), and
 //! `signatureChainId` is a hex quantity of any length (with or without `0x`).
-#![allow(dead_code)] // the `/exchange` lane adopts the gate; its fixtures already pin it
 use serde_json::Value;
 
 /// How one field's value must look.

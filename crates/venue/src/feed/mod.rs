@@ -24,7 +24,7 @@ pub(crate) mod rest;
 pub(crate) mod ws;
 
 use crate::error::Result;
-use crate::wire::{AllMids, AssetCtx, L2Book, Meta, PerpDex};
+use crate::wire::{AllMids, AssetCtx, InfoRequest, L2Book, Meta, PerpDex};
 use budget::Budget;
 use dex::{dex_of_coin, DexRegistry, PerpDexInfo};
 use diorama_devnet::store;
@@ -35,6 +35,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+
+/// USDC's token id on the venue (spot token 0), as the transfer actions write
+/// it (`USDC:0x6d1e...`).
+const USDC_TOKEN_ID: &str = "0x6d1e7cde53ba9467b783cb7c530ce054";
 
 /// The scenario's owned market values (persisted).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -212,6 +216,10 @@ pub struct MarketFeed {
     /// The staleness drill: live writes are dropped until this deadline
     /// (0 = not stalled). The scripted plane is never gated.
     stalled_until_ms: AtomicU64,
+    /// The venue API client the on-demand book read uses (attached by the
+    /// service; absent in fixtures, where [`Self::ensure_book`] only serves
+    /// what is cached).
+    rest: std::sync::OnceLock<rest::RestClient>,
 }
 
 impl MarketFeed {
@@ -227,6 +235,7 @@ impl MarketFeed {
             path: Some(path),
             persist_lock: std::sync::Mutex::new(()),
             stalled_until_ms: AtomicU64::new(0),
+            rest: std::sync::OnceLock::new(),
         })
     }
 
@@ -242,12 +251,41 @@ impl MarketFeed {
             path: None,
             persist_lock: std::sync::Mutex::new(()),
             stalled_until_ms: AtomicU64::new(0),
+            rest: std::sync::OnceLock::new(),
         }
     }
 
     /// The staleness window every consumer shares (`readyz`, the order
     /// lane): live data older than this is stale — and stale is not tradable.
     pub const MAX_STALE_MS: u64 = 30_000;
+
+    /// How long [`MarketFeed::ensure_book`] waits for the venue before the
+    /// caller carries on without the book.
+    const ENSURE_BOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+    /// A spot token named the way the `/exchange` transfers name it: `NAME`
+    /// or `NAME:tokenId` (the venue's token string). The id, when given, must
+    /// be the registry's for the name. `None` for a token the registry does
+    /// not know. USDC resolves before the registry lands.
+    pub(crate) fn resolve_token(&self, spec: &str) -> Option<(u32, String)> {
+        let (name, id) = match spec.split_once(':') {
+            Some((name, id)) => (name, Some(id)),
+            None => (spec, None),
+        };
+        let c = self.read();
+        let found = c
+            .spot_meta
+            .as_ref()
+            .and_then(|s| s.tokens.iter().find(|t| t.name == name));
+        match found {
+            Some(t) => match (id, &t.token_id) {
+                (Some(want), Some(have)) if !want.eq_ignore_ascii_case(have) => None,
+                _ => Some((t.index, t.name.clone())),
+            },
+            None => (name == "USDC" && id.is_none_or(|id| id.eq_ignore_ascii_case(USDC_TOKEN_ID)))
+                .then(|| (0, "USDC".to_string())),
+        }
+    }
 
     /// `stall`: hold the live market plane for `seconds` (0 clears) — the
     /// staleness drill. Live writes are dropped while stalled (a real stall
@@ -683,6 +721,65 @@ impl MarketFeed {
             b
         };
         Some(apply_consumptions(base, &overrides.consumptions))
+    }
+
+    // ---- books on demand --------------------------------------------------
+
+    /// Attach the venue API client the on-demand book read uses (the service
+    /// does this once at boot; a second call is ignored).
+    pub(crate) fn attach_rest(&self, rest: rest::RestClient) {
+        let _ = self.rest.set(rest);
+    }
+
+    /// The coin's book, fetching it from the venue once when it is not cached
+    /// (or is older than the freshness window). `None` for a coin no dex
+    /// lists, a feed with no venue client, a spent request budget, or a venue
+    /// that did not answer in time: the caller carries on as it did without
+    /// the book.
+    // step-8: the fork's demand-driven relay keeps a wanted coin's `l2Book`
+    // stream live (an order, a held position or a downstream subscription);
+    // this one-shot read is the order door's own gap fill until then.
+    pub(crate) async fn ensure_book(&self, coin: &str) -> Option<L2Book> {
+        let now = crate::now_ms();
+        let listed = self
+            .meta_of(dex_of_coin(coin))
+            .is_some_and(|meta| meta.universe.iter().any(|a| a.name == coin));
+        if !listed {
+            return None;
+        }
+        if matches!(
+            self.book_age(coin, now, Self::MAX_STALE_MS),
+            BookAge::Scripted | BookAge::Fresh
+        ) {
+            return self.book(coin, now);
+        }
+        let rest = self.rest.get()?;
+        if self.stalled() || !self.budget.try_spend(budget::weight::LIGHT) {
+            return self.book(coin, now);
+        }
+        let req = InfoRequest::L2Book {
+            coin: coin.to_string(),
+            n_sig_figs: None,
+            mantissa: None,
+        };
+        match tokio::time::timeout(Self::ENSURE_BOOK_TIMEOUT, rest.info::<L2Book>(&req)).await {
+            Ok(Ok(book)) if book.coin == coin => {
+                let now = crate::now_ms();
+                self.put_book(book, now);
+                self.book(coin, now)
+            }
+            Ok(Ok(_)) => None,
+            Ok(Err(e)) => {
+                self.metrics.inc_rest_errors();
+                tracing::warn!(coin, error = %e, "on-demand l2Book read failed");
+                None
+            }
+            Err(_) => {
+                self.metrics.inc_rest_errors();
+                tracing::warn!(coin, "on-demand l2Book read timed out");
+                None
+            }
+        }
     }
 
     /// The perp universe + margin tables (the live meta; `None` until the

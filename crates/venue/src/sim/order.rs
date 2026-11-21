@@ -435,9 +435,9 @@ pub(crate) fn order_requirement(
 /// The venue's base fee tier (docs, fees page: 4.5 bps taker, 1.5 bps maker).
 /// Volume-based tier discounts are not modeled — the sim serves the base tier,
 /// as a flat account would see.
-// step-5: a builder (HIP-3) dex's `deployerFeeScale`/`growthMode` multiplies
+// step-9: a builder (HIP-3) dex's `deployerFeeScale`/`growthMode` multiplies
 // these base rates on its fills (the fork's `dex_fee_multiplier`); the wire's
-// two AssetInfo fields land with that read.
+// two AssetInfo fields are the deferred delta (see `api/exchange.rs`).
 pub(crate) fn taker_fee() -> Decimal {
     Decimal::new(45, 5)
 }
@@ -448,7 +448,6 @@ pub(crate) fn maker_fee() -> Decimal {
 
 /// The venue's perp builder-fee cap (docs: 0.1%), in the wire's unit of
 /// tenths of a basis point: an order may carry `f <= 100`.
-#[allow(dead_code)] // the `/exchange` order gate reads it with `authorize_builder` next
 pub(crate) const MAX_PERP_BUILDER_FEE: u64 = 100;
 
 /// Tenths of a basis point per unit: the fee rate is `f / 100_000`.

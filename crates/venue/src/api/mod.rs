@@ -12,6 +12,7 @@ pub(crate) mod exchange;
 pub(crate) mod info;
 pub(crate) mod shape;
 pub(crate) mod signing;
+mod user_actions;
 pub(crate) mod ws;
 pub(crate) mod ws_codec;
 
@@ -155,6 +156,10 @@ pub(crate) fn sim_gate(state: &ApiState) -> Result<(), SimPoisoned> {
 }
 
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.
+// step-6: the info surface's per-dex reads and the browser-facing CORS layer
+// (`cors::cors`) land with the info port.
+// step-8: the relayed candle hub and the market channels' coalescing window
+// land with the websocket port.
 pub fn info_router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route(
