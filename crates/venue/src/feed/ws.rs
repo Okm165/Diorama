@@ -374,7 +374,7 @@ impl WsClient {
     /// fault (the reconnect retries), never an empty message: a silent `""`
     /// would leave the socket "connected" with no data flowing.
     fn subscriptions(&self) -> Result<Vec<String>, WsError> {
-        let mut subs = Vec::with_capacity(self.feed.markets.len() + 1);
+        let mut subs = Vec::with_capacity(self.feed.markets.len() + self.feed.spot_markets.len() + 1);
         let encode = |sub: Subscription<'_>| {
             serde_json::to_string(&Subscribe {
                 method: "subscribe",
@@ -389,7 +389,10 @@ impl WsClient {
         // The book is the same WSS-primary shape: the venue pushes `l2Book` at
         // its own cadence, and the REST poller backfills a coin the socket has
         // not updated within one poll interval.
-        for coin in &self.feed.markets {
+        // Books cover the spot pairs too: `l2Book` is coin-name keyed, and a
+        // spot pair is a book like any other. Its context channel stays perp
+        // only (spot has no funding).
+        for coin in self.feed.book_coins() {
             subs.push(encode(Subscription::L2Book { coin })?);
         }
         Ok(subs)

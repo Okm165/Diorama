@@ -422,7 +422,7 @@ impl Poller {
     async fn books(&self) {
         let now = crate::now_ms();
         let window = u64::try_from(self.interval.as_millis()).unwrap_or(u64::MAX);
-        for coin in &self.feed.markets {
+        for coin in self.feed.book_coins() {
             // WSS primary, REST gap reconciliation: a book the socket updated
             // within one poll interval is not re-read. A scripted book owns the
             // coin and is never polled; a warming or stale one is.

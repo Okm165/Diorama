@@ -208,6 +208,11 @@ pub struct MarketFeed {
     /// The configured markets (books are cached for these; the staleness
     /// gauges are per-coin over this set).
     pub markets: Vec<String>,
+    /// The configured **spot** pairs (`PURR/USDC`, `@1`, ...). Hyperliquid's
+    /// spot plane is a market plane of its own: these get books and mids but no
+    /// funding context, and their orders settle into the spot balance ledger.
+    /// Empty is the perp-only mirror.
+    pub spot_markets: Vec<String>,
     /// The overrides' state file; `None` keeps them in memory only.
     path: Option<PathBuf>,
     /// Serializes persists (snapshot + write): a concurrent pair must not let
@@ -232,6 +237,7 @@ impl MarketFeed {
             budget: Budget::default(),
             metrics: FeedMetrics::new(&markets),
             markets,
+            spot_markets: Vec::new(),
             path: Some(path),
             persist_lock: std::sync::Mutex::new(()),
             stalled_until_ms: AtomicU64::new(0),
@@ -248,6 +254,7 @@ impl MarketFeed {
             budget: Budget::default(),
             metrics: FeedMetrics::new(&markets),
             markets,
+            spot_markets: Vec::new(),
             path: None,
             persist_lock: std::sync::Mutex::new(()),
             stalled_until_ms: AtomicU64::new(0),
@@ -379,6 +386,46 @@ impl MarketFeed {
     /// already served within the poll interval.
     pub(crate) fn mids_age_ms(&self, now_ms: u64) -> Option<u64> {
         self.read().mids_at.map(|at| now_ms.saturating_sub(at))
+    }
+
+    /// Attach the configured spot pairs (the service's config; fixtures stay
+    /// perp-only).
+    pub fn with_spot_markets(mut self, spot_markets: Vec<String>) -> Self {
+        self.spot_markets = spot_markets;
+        self
+    }
+
+    /// Every coin whose book the market plane keeps: the perp markets plus the
+    /// configured spot pairs (deduplicated, order-preserving).
+    pub fn book_coins(&self) -> impl Iterator<Item = &String> {
+        self.markets
+            .iter()
+            .chain(self.spot_markets.iter().filter(|coin| !self.markets.contains(coin)))
+    }
+
+    /// The configured spot pair named `coin` (`None` = not a mirrored spot
+    /// market). The order lane's pair lookup; the read plane asks
+    /// [`Self::is_listed`] instead (one lock, two planes).
+    #[allow(dead_code)]
+    pub fn spot_pair(&self, coin: &str) -> Option<crate::wire::SpotPair> {
+        self.read()
+            .spot_meta
+            .as_ref()?
+            .universe
+            .iter()
+            .find(|pair| pair.name == coin)
+            .cloned()
+    }
+
+    /// The pair whose **HL asset id** is `10000 + pair.index`.
+    fn spot_pair_by_index(&self, index: u32) -> Option<crate::wire::SpotPair> {
+        self.read()
+            .spot_meta
+            .as_ref()?
+            .universe
+            .iter()
+            .find(|pair| pair.index == index)
+            .cloned()
     }
 
     // ---- writes (the poller / WS client / control plane) ------------------
@@ -692,7 +739,23 @@ impl MarketFeed {
         if let Some(p) = self.read_overrides().prices.get(coin) {
             return Some(p.mark);
         }
-        self.read().ctxs.get(coin).map(|c| c.mark_px)
+        let cache = self.read();
+        if let Some(mark) = cache.ctxs.get(coin).map(|c| c.mark_px) {
+            return Some(mark);
+        }
+        // Spot pairs have no `activeAssetCtx`; their mark is the venue's own
+        // `allMids` value for the pair (`PURR/USDC`, `@N`), which the same WS
+        // push already carries. Only a **configured** spot pair takes it: a
+        // perp with a stale ctx must not be priced off mids.
+        let is_spot = cache
+            .spot_meta
+            .as_ref()
+            .is_some_and(|meta| meta.universe.iter().any(|pair| pair.name == coin));
+        if is_spot {
+            cache.mids.get(coin).copied()
+        } else {
+            None
+        }
     }
 
     /// The coin's mark, or `fallback` when no mark has landed (the caller's
@@ -764,10 +827,17 @@ impl MarketFeed {
     // fill until then.
     pub(crate) async fn ensure_book(&self, coin: &str) -> Option<L2Book> {
         let now = crate::now_ms();
-        let listed = self
+        let perp_listed = self
             .meta_of(dex_of_coin(coin))
             .is_some_and(|meta| meta.universe.iter().any(|a| a.name == coin));
-        if !listed {
+        let spot_listed = {
+            let cache = self.read();
+            cache
+                .spot_meta
+                .as_ref()
+                .is_some_and(|meta| meta.universe.iter().any(|pair| pair.name == coin))
+        };
+        if !perp_listed && !spot_listed {
             return None;
         }
         if matches!(
@@ -1084,6 +1154,11 @@ impl MarketFeed {
     /// `margin_meta` view is deliberately not consulted: it merges dexes for
     /// name-based margin lookups, not for index resolution.
     pub(crate) fn coin_of_asset(&self, asset: u32) -> Option<String> {
+        // The spot namespace: `10000 + pair.index` (the pair's own `index`,
+        // never its position in the array — measured on the live registry).
+        if (10_000..100_000).contains(&asset) {
+            return self.spot_pair_by_index(asset - 10_000).map(|pair| pair.name);
+        }
         self.read().registry.coin_of_asset(asset)
     }
 
@@ -1100,6 +1175,38 @@ impl MarketFeed {
     /// The spot token registry (`None` until the first poll lands).
     pub(crate) fn spot_meta(&self) -> Option<crate::wire::SpotMeta> {
         self.read().spot_meta.clone()
+    }
+
+    /// The served `spotMeta`: the registry's **tokens** verbatim (balances and
+    /// transfers name every token the venue holds) and the universe narrowed to
+    /// the mirrored pairs when the deployment configures a spot set. An empty
+    /// set serves the registry unchanged (the generic mirror).
+    pub(crate) fn served_spot_meta(&self) -> Option<crate::wire::SpotMeta> {
+        let meta = self.spot_meta()?;
+        if self.spot_markets.is_empty() {
+            return Some(meta);
+        }
+        Some(crate::wire::SpotMeta {
+            tokens: meta.tokens,
+            universe: meta
+                .universe
+                .into_iter()
+                .filter(|pair| self.spot_markets.contains(&pair.name))
+                .collect(),
+        })
+    }
+
+    /// Whether the market plane lists `coin` at all — a perp of any dex or a
+    /// spot pair. The difference between "the venue has no such market"
+    /// (its own 500 `null` shape) and "the book has not landed yet" (503).
+    pub fn is_listed(&self, coin: &str) -> bool {
+        if self.meta_for_coin(coin).is_some() {
+            return true;
+        }
+        self.read()
+            .spot_meta
+            .as_ref()
+            .is_some_and(|meta| meta.universe.iter().any(|pair| pair.name == coin))
     }
 
     /// The spot token index for a coin name (`None` = not tracked).
@@ -1734,6 +1841,20 @@ mod tests {
     /// unchanged and a HIP-3 market is `100000 + dex_index*10000 +
     /// universe_index`, with the dex index taken from the upstream
     /// `perpDexs` order (whose first entry is the default dex's `null`).
+    fn spot_token(name: &str, index: u32) -> crate::wire::SpotToken {
+        crate::wire::SpotToken {
+            name: name.into(),
+            sz_decimals: 2,
+            wei_decimals: 8,
+            index,
+            is_canonical: true,
+            evm_contract: None,
+            token_id: None,
+            full_name: None,
+            deployer_trading_fee_share: Decimal::ZERO,
+        }
+    }
+
     #[test]
     fn the_asset_namespace_resolves_default_and_hip3_indices() {
         let feed = MarketFeed::memory(vec!["BTC".into(), "xyz:NVDA".into()]);
@@ -1754,12 +1875,65 @@ mod tests {
             None,
             "past the xyz dex's universe"
         );
-        // The spot namespace is not modeled, and `perpDexs[0]`/missing slots
-        // are null, so a HIP-3 index over them is unknown.
+        // No spot registry on this feed, and `perpDexs[0]`/missing slots are
+        // null, so the spot range and a HIP-3 index over them are unknown.
         assert_eq!(feed.coin_of_asset(10_000), None);
         assert_eq!(feed.coin_of_asset(99_999), None);
         assert_eq!(feed.coin_of_asset(120_000), None);
         assert_eq!(feed.coin_of_asset(1_000_000), None);
+    }
+
+    /// **Spot ids are `10000 + pair.index`**, not the pair's array position:
+    /// the venue's own registry is not ordered by index (measured live). The
+    /// same range is what `/exchange` and the CoreWriter lane send.
+    #[test]
+    fn spot_asset_ids_resolve_the_pairs_own_index() {
+        let feed = MarketFeed::memory(vec!["BTC".into()])
+            .with_spot_markets(vec!["PURR/USDC".into(), "@1".into()]);
+        feed.put_meta(meta_with(&["BTC"]), 1);
+        feed.put_spot_meta(crate::wire::SpotMeta {
+            tokens: vec![spot_token("PURR", 1), spot_token("USDC", 0)],
+            universe: vec![
+                crate::wire::SpotPair { tokens: [1, 0], name: "PURR/USDC".into(), index: 0, is_canonical: true },
+                crate::wire::SpotPair { tokens: [2, 0], name: "@1".into(), index: 1, is_canonical: false },
+            ],
+        });
+        assert_eq!(feed.coin_of_asset(10_000).as_deref(), Some("PURR/USDC"));
+        assert_eq!(feed.coin_of_asset(10_001).as_deref(), Some("@1"));
+        assert_eq!(feed.coin_of_asset(10_002), None, "no pair carries index 2");
+        assert!(feed.is_listed("PURR/USDC"));
+        assert!(feed.is_listed("BTC"));
+        assert!(!feed.is_listed("SOL"));
+
+        feed.put_mids(
+            std::collections::BTreeMap::from([("PURR/USDC".into(), Decimal::new(25, 2))]),
+            2,
+        );
+        assert_eq!(
+            feed.mark("PURR/USDC"),
+            Some(Decimal::new(25, 2)),
+            "a spot pair has no activeAssetCtx — its mark is the venue's allMids value"
+        );
+        assert_eq!(feed.mark("@1"), None, "no mids value has landed for @1");
+    }
+
+    /// The served registry narrows the **universe** to the mirrored pairs and
+    /// keeps every token: balances and transfers name tokens of pairs the
+    /// deployment does not trade.
+    #[test]
+    fn served_spot_meta_lists_only_mirrored_pairs_and_keeps_tokens() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]).with_spot_markets(vec!["PURR/USDC".into()]);
+        feed.put_spot_meta(crate::wire::SpotMeta {
+            tokens: vec![spot_token("PURR", 1), spot_token("USDC", 0), spot_token("HYPE", 2)],
+            universe: vec![
+                crate::wire::SpotPair { tokens: [1, 0], name: "PURR/USDC".into(), index: 0, is_canonical: true },
+                crate::wire::SpotPair { tokens: [2, 0], name: "@1".into(), index: 1, is_canonical: false },
+            ],
+        });
+        let served = feed.served_spot_meta().expect("registry");
+        assert_eq!(served.universe.len(), 1);
+        assert_eq!(served.universe[0].name, "PURR/USDC");
+        assert_eq!(served.tokens.len(), 3, "tokens are the registry's, not the universe's");
     }
 
     /// Resolution needs the upstream list *and* the dex's own meta; it never

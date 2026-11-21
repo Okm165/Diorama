@@ -121,7 +121,7 @@ impl ApiState {
             return false;
         }
         let now = crate::now_ms();
-        self.feed.markets.iter().all(|coin| {
+        let perps_ready = self.feed.markets.iter().all(|coin| {
             let fresh_mark = self
                 .feed
                 .stale_ms(coin, now)
@@ -137,7 +137,19 @@ impl ApiState {
                 crate::feed::BookAge::Scripted | crate::feed::BookAge::Fresh
             );
             fresh_mark && fresh_book
-        })
+        });
+        // A mirrored spot pair has a book and an `allMids` entry, but no
+        // `activeAssetCtx` (there is no spot funding). Requiring a ctx would
+        // keep readiness false forever.
+        let spot_ready = self.feed.spot_markets.iter().all(|coin| {
+            let priced = self.feed.mark(coin).is_some();
+            let fresh_book = matches!(
+                self.feed.book_age(coin, now, max_stale_ms),
+                crate::feed::BookAge::Scripted | crate::feed::BookAge::Fresh
+            );
+            priced && fresh_book
+        });
+        perps_ready && spot_ready
     }
 }
 

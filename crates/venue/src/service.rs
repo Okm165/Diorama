@@ -79,10 +79,13 @@ fn build_planes(
     sim_section: &diorama_config::VenueSimSection,
 ) -> crate::Result<Planes> {
     let policy = cfg.endpoint_policy();
-    let feed = Arc::new(crate::feed::MarketFeed::load(
-        sim_section.state_dir.join("feed.json"),
-        sim_section.markets.clone(),
-    )?);
+    let feed = Arc::new(
+        crate::feed::MarketFeed::load(
+            sim_section.state_dir.join("feed.json"),
+            sim_section.markets.clone(),
+        )?
+        .with_spot_markets(sim_section.spot_markets.clone()),
+    );
     let sim = Arc::new(crate::sim::Sim::load(
         sim_section.state_dir.join("sim.json"),
         sim_section.terminal_orders,

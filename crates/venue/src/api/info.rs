@@ -112,7 +112,7 @@ pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Res
         InfoRequest::MarginTable { id } => margin_table(id, &state),
         InfoRequest::ExchangeStatus => Ok(exchange_status()),
         InfoRequest::SpotMeta => {
-            Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response())
+            Ok(Json(state.feed.served_spot_meta().ok_or(Error::Warming)?).into_response())
         }
         InfoRequest::AllMids { dex } => Ok(all_mids(&dex, &state)),
         InfoRequest::AllPerpMetas => all_perp_metas(&state),
@@ -988,10 +988,10 @@ async fn l2_book(
     // An aggregated book is the venue's own, built from its whole depth (twenty
     // aggregated levels a side); the sim holds twenty raw levels, which would
     // merge into one or two. A coin the scenario owns the book of is the sim's.
-    if n_sig_figs.is_some()
-        && state.feed.meta_for_coin(coin).is_some()
-        && !state.feed.scripted_book(coin)
-    {
+    // A spot pair is a book like a perp's for this purpose: the venue's
+    // aggregated answer comes from its whole depth, not the sim's twenty raw
+    // levels. Only a scenario-owned book is the sim's own.
+    if n_sig_figs.is_some() && state.feed.is_listed(coin) && !state.feed.scripted_book(coin) {
         return pass_through(state, body).await;
     }
     // Every coin a dex lists (default or builder) is a market: its book is
@@ -1003,7 +1003,7 @@ async fn l2_book(
         // unknown coin answers HTTP 500 `null`, builder dexes included). A
         // coin the venue lists with no book yet is a different fault: the
         // plane is warming (503).
-        return if state.feed.meta_for_coin(coin).is_some() {
+        return if state.feed.is_listed(coin) {
             Err(Error::Warming)
         } else {
             Ok(unknown_dex())

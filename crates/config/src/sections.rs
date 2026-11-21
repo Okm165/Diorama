@@ -229,6 +229,12 @@ pub struct VenueSimSection {
     /// the generic mirror; a project specialization supplies its set.
     #[serde(default)]
     pub markets: Vec<String>,
+    /// The mirrored **spot** pairs (`PURR/USDC`, `@1`, ...). Hyperliquid's spot
+    /// plane is symmetric with perps in the serving contract but has no funding
+    /// and settles into spot balances; these pairs get books and mids, and
+    /// their orders use asset ids `10000 + pair.index`. Empty = perp-only.
+    #[serde(default)]
+    pub spot_markets: Vec<String>,
     /// REST cache cadence (WS pushes are the primary freshness source; the
     /// budget meter gates this poller).
     pub poll_interval_ms: u64,
