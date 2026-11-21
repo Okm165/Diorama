@@ -78,6 +78,28 @@ One harness detail: `/control/clear_account` does not reset positions, so the
 sweep now flattens any residue first — a leftover 0.04 ETH long otherwise
 makes the reduce-only and stop-loss probes look wrong.
 
+## Representation check against the real venue
+
+The mirror is a pass-through of the real venue's deltas, so "representative"
+is measurable rather than assumed. A read-only sampler compared the mirror's
+`/info` with the real HL `/info` 30 times, 3 s apart (`venue_fidelity.py`,
+2026-11-21):
+
+| coin | mid Δ bps p50 / p95 / max | spread sim/real bps | 10 bp depth | book age sim/real ms |
+|---|---|---|---|---|
+| ETH | 0 / 0 / 0 | 0.594 / 0.594 | 1.000× | 590 / 656 |
+| BTC | 0 / 0.58 / 1.33 | 0.166 / 0.166 | 1.000× | 635 / 567 |
+| SOL | 0 / 0.28 / 0.43 | 0.143 / 0.143 | 1.000× | 524 / 664 |
+| xyz:ANT | 0 / 0.83 / 0.89 | 1.388 / 1.333 | 1.000× | 698 / 608 |
+| para:SMH | 0 / 0 / 0 | 10.16 / 10.16 | 1.000× | 5 901 / 615 |
+| xyz:XYZ100 | 0 / 0.20 / 0.39 | 0.392 / 0.392 | 1.000× | 634 / 633 |
+
+Funding matched to ≤1e-7 on every sample. Top of book, spread and 10 bp depth
+are the real book to the tick. `para:SMH`'s larger age is a thin-book fact (its
+last change was 5.9 s old and its 10 bp depth is $100), not a stalled feed: its
+mid matched the real book exactly on every sample. The sampler is read-only and
+safe to re-run against the live mirror.
+
 ## Ideas, ordered by value
 
 1. **Maker (resting spot) lane on the fast books.** Our taker lane settles
