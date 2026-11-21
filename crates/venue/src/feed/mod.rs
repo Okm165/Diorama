@@ -331,7 +331,7 @@ impl MarketFeed {
     /// `l2Book` stream until the grace window after the last such ask has run
     /// out. `true` when some dex lists the coin; anything else is `false` (an
     /// unlisted coin is never subscribed: the venue closes the socket on one).
-    #[allow(dead_code, reason = "wired when the ws lane subscribes the relay's stream set (next port step)")]
+    #[allow(dead_code, reason = "the public ask; ensure_book uses the _at twin with its own clock")]
     pub(crate) fn want_book(&self, coin: &str) -> bool {
         self.want_book_at(coin, crate::now_ms())
     }
@@ -927,6 +927,9 @@ impl MarketFeed {
         if !perp_listed && !spot_listed {
             return None;
         }
+        // A read is a use: the coin stays wanted (the poller keeps its book
+        // backfilled for the grace window after the last ask).
+        self.want_book_at(coin, now);
         if matches!(
             self.book_age(coin, now, Self::MAX_STALE_MS),
             BookAge::Scripted | BookAge::Fresh
