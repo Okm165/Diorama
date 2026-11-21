@@ -59,9 +59,16 @@ the parity gate, never eyeballing.
    (measured 4.5/1.5 bps taker/maker, matching observed charges) and the
    honesty metric stays: the sim's charged fees vs the fill rows, which a
    later per-user tier would have to show up in anyway.
-5. **Sub-accounts and vault endpoints.** `vaultRoles`/`userRole` and a minimal
+5. **Sub-accounts and vault endpoints.** (`vaultRoles`/`userRole` and a minimal
    vault transfer surface let multi-entity strategies (curator/vault) run on
-   the venue like they do on HL.
+   the venue like they do on HL.) **Account reads verified at parity
+   2026-11-21:** `userRole` (a known sim account answers `user` — a fresh
+   venue account; unknown users pass through to the real venue's answer,
+   which for an address with no HL history is `missing`), `subAccounts`
+   (`null` both sides), `extraAgents`, `isVip`, delegations. The vault
+   *transfer* surface (deposit/withdraw into a vault) is deferred until a
+   scenario needs it: the sim models no vault entity, and inventing one
+   before a consumer exists is unobservable complexity.
 6. **Latency emulation.** An optional per-endpoint latency distribution
    (measured from the real venue) so strategies observe realistic reaction
    times instead of a local socket.
