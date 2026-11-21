@@ -75,11 +75,23 @@ edit, not a manifest one.
 
 The venue simulator is the trading surface. The `venue-sim-nodeport` Service
 publishes the **info listener** (`/info`, `/exchange`, `/ws`) on node port
-**31090**, so a tester does not need a port-forward:
+**31090**, so a tester does not need a port-forward. From another machine the
+same API is published on the tailnet Funnel:
 
 ```sh
+# this host (NodePort)
 export DALOC_VENUE_INFO_URL=http://<node-ip>:31090
+# another machine on the tailnet
+export DALOC_VENUE_INFO_URL=https://venue.<tailnet>.ts.net
 ```
+
+Orders are signed Hyperliquid actions posted to `$DALOC_VENUE_INFO_URL/exchange`
+(the account is the margin agent's EVM address; a devnet envelope may carry
+`user` explicitly). Spot is served symmetrically: `spotMeta` /
+`spotMetaAndAssetCtxs` / `l2Book` for a pair name, `allMids` carries `@N` and
+`PURR/USDC`, and a spot order's asset id is `10000 + pair.index` (for example
+`PURR/USDC` = `10000`, `@142` = `10142`). Spot fills settle tokens in
+`spotClearinghouseState` — no funding, no leverage.
 
 The in-cluster name (`http://venue-sim.diorama-venue.svc.cluster.local:8090`)
 and a loopback forward (`kubectl -n diorama-venue port-forward svc/venue-sim
