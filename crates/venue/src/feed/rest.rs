@@ -321,12 +321,28 @@ impl Poller {
         }
     }
 
-    /// The configured builder dexes' cap lists: the `perpsAtOpenInterestCap`
-    /// read takes one dex at a time (an unlisted dex and `ALL_DEXS` answer
-    /// 500), so each configured dex is asked its own question. The default
-    /// dex is the poll above.
+    /// The builder dexes' cap lists: the `perpsAtOpenInterestCap` read takes
+    /// one dex at a time (an unlisted dex and `ALL_DEXS` answer 500), so each
+    /// dex is asked its own question. The default dex is the poll above.
+    /// Configured dexes refresh every poll; every other advertised dex is
+    /// cold-loaded once (the same breadth rule as `dex_metas`: an order on a
+    /// market of an unconfigured dex must not be refused for missing caps —
+    /// measured 2026-11-21: `para:SMH` answered "open-interest caps are not
+    /// known yet" with its meta loaded and its book served).
     async fn dex_oi_caps(&self) {
-        for dex in configured_dexes(&self.feed.markets) {
+        let mut targets: Vec<(String, bool)> = configured_dexes(&self.feed.markets)
+            .into_iter()
+            .map(|dex| (dex, true))
+            .collect();
+        for name in self.feed.advertised_dex_names() {
+            if !targets.iter().any(|(dex, _)| *dex == name) {
+                targets.push((name, false));
+            }
+        }
+        for (dex, configured) in targets {
+            if !configured && self.feed.oi_caps_known(&dex) {
+                continue;
+            }
             if !self.gated(crate::feed::budget::weight::LIGHT) {
                 return;
             }

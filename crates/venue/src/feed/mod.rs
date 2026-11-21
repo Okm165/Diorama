@@ -647,6 +647,14 @@ impl MarketFeed {
         self.write().oi_caps.insert(dex.to_string(), caps);
     }
 
+    /// Whether the dex's open-interest cap list has landed (an empty list is
+    /// an answer — no market is at cap — not a gap). The order lane refuses
+    /// an increasing order on a dex whose caps are unknown; the poller uses
+    /// this to cold-load every advertised dex's list exactly once.
+    pub(crate) fn oi_caps_known(&self, dex: &str) -> bool {
+        self.read().oi_caps.contains_key(dex)
+    }
+
     /// The default dex's cached cap list. `None` until the venue has answered:
     /// an unknown cap set is refused by the order lane, never read as
     /// "nothing is capped".
@@ -2215,6 +2223,19 @@ mod tests {
             vec!["xyz".to_string(), "hyna".into(), "flx".into()],
             "every named dex, in `perpDexs` order, default excluded"
         );
+    }
+
+    /// "Caps unknown" and "no market at cap" are different states: the order
+    /// lane refuses an increasing order on the former and admits it on the
+    /// latter, so the poller's cold-load gate must key on presence, never on
+    /// emptiness.
+    #[test]
+    fn an_empty_cap_list_is_known_not_a_gap() {
+        let feed = MarketFeed::memory(vec!["para:SMH".into()]);
+        assert!(!feed.oi_caps_known("para"));
+        feed.put_oi_caps_of("para", Vec::new());
+        assert!(feed.oi_caps_known("para"), "an empty answer is an answer");
+        assert!(!feed.oi_caps_known("hyna"), "still unasked");
     }
 
     /// The feed serves every dex's universe (the push lanes' per-dex read) and
