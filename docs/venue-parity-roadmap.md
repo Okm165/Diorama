@@ -175,6 +175,31 @@ last change was 5.9 s old and its 10 bp depth is $100), not a stalled feed: its
 mid matched the real book exactly on every sample. The sampler is read-only and
 safe to re-run against the live mirror.
 
+Impact calibration (`venue-calibrate`, mirror vs real VWAP slippage per size
+bucket, 5 samples, 2026-11-21 after the `l2Book.time` fix):
+
+| coin | size | mirror bps | real bps | Δ bps |
+|---|---|---|---|---|
+| ETH | 0.05 | 0.2977 | 0.2977 | 0.0 |
+| ETH | 0.5 | 0.2977 | 0.2977 | 0.0 |
+| ETH | 5 | 0.2977 | 0.2977 | 0.0 |
+| para:SMH | 0.5 | 15.04 | 13.27 | 1.77 |
+| para:SMH | 5 | 31.41 | 31.11 | 0.30 |
+| para:SMH | 50 | 48.85 | 48.77 | 0.08 |
+
+ETH (deep book) is byte-identical at every size. `para:SMH`'s small-bucket Δ is
+read-time book churn on a thin, actively-quoting market (its levels move
+between the mirror's read and the real read); at size the structures converge.
+`mark_drift_bps` is 0.0 everywhere.
+
+The live runtime that exercised the same planes (2026-11-21): 5 ETH round
+trips at 4.80 bps each, 2 maker cycles (maker 1.5 / taker 4.5 / flatten 4.5),
+a `para:SMH` round trip at 5.44 bps, two `venue-watch` sessions reading live
+mark/PnL deltas every 5 s across held positions, and the portfolio statement
+over both accounts (71 + 36 fills; realized, fees, funding, unrealized per
+account and total). Every fill was judged from the venue's own ledger.
+
+
 ## Ideas, ordered by value
 
 1. **Maker (resting spot) lane on the fast books.** Our taker lane settles
