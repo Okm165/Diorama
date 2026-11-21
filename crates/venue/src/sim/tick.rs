@@ -314,7 +314,12 @@ impl Sim {
             leverage: setting.leverage,
             mode: setting.mode,
             reduce: r.reduce,
-            fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
+            fee: crate::sim::account::mul(
+                notional,
+                crate::sim::order::maker_fee()
+                    * crate::sim::order::dex_fee_multiplier(meta.as_ref(), &r.coin),
+                "maker fee",
+            )?,
             builder: r.builder.map(|b| b.charge(notional)).transpose()?,
         };
         let effect = self.with_account_now(r.account, feed, |account| {

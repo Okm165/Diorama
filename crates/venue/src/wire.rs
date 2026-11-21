@@ -707,6 +707,18 @@ pub(crate) struct AssetInfo {
     pub only_isolated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_delisted: Option<bool>,
+    /// Builder-dex rows only (the default dex's rows never carry it): the
+    /// asset's growth mode (`"enabled"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub growth_mode: Option<String>,
+    /// Builder-dex rows only: when the fee scale last changed (an ISO-like
+    /// timestamp string, kept verbatim).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_fee_scale_change_time: Option<String>,
+    /// Builder-dex rows only: the deployer's fee scale (a decimal string,
+    /// kept verbatim).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployer_fee_scale: Option<String>,
 }
 
 /// `marginTable`: the leverage tiers. Maintenance margin is ½ the initial
@@ -1107,6 +1119,52 @@ mod tests {
         assert_eq!(dex.asset_to_funding_multiplier[0].1.to_string(), "0.5");
         assert_eq!(dex.sub_deployers[0].0, "registerAsset");
         assert_eq!(dex.sub_deployers[0].1.len(), 1);
+    }
+
+    /// A builder dex's meta round-trips in the real shape: the three
+    /// builder-only row fields survive and a default-dex row never grows them;
+    /// `perpDexs` sends the absent updater/recipient as explicit nulls.
+    #[test]
+    fn a_builder_meta_and_perp_dex_round_trip_in_the_real_shape() {
+        let raw = serde_json::json!({
+            "universe": [{
+                "szDecimals": 3, "name": "xyz:TSLA", "maxLeverage": 10,
+                "marginTableId": 10, "onlyIsolated": true, "isDelisted": false,
+                "growthMode": "enabled",
+                "lastFeeScaleChangeTime": "2025-11-20T10:00:00.000000",
+                "deployerFeeScale": "1.0"
+            }],
+            "marginTables": [],
+            "collateralToken": 360
+        });
+        let meta: Meta = serde_json::from_value(raw.clone()).unwrap();
+        let row = &meta.universe[0];
+        assert_eq!(row.growth_mode.as_deref(), Some("enabled"));
+        assert_eq!(row.deployer_fee_scale.as_deref(), Some("1.0"));
+        let back = serde_json::to_value(&meta).unwrap();
+        assert_eq!(back["universe"][0], raw["universe"][0]);
+        assert_eq!(back["collateralToken"], 360);
+        // A default-dex row carries none of them.
+        let plain: Meta = serde_json::from_str(
+            r#"{"universe":[{"szDecimals":5,"name":"BTC","maxLeverage":40}],"marginTables":[],"collateralToken":0}"#,
+        )
+        .unwrap();
+        let plain = serde_json::to_value(&plain).unwrap();
+        assert!(plain["universe"][0].get("growthMode").is_none());
+        assert!(plain["universe"][0].get("deployerFeeScale").is_none());
+
+        let dex: PerpDex = serde_json::from_value(serde_json::json!({
+            "name": "xyz", "fullName": "XYZ",
+            "deployer": "0x0000000000000000000000000000000000000001",
+            "oracleUpdater": null, "feeRecipient": null,
+            "assetToStreamingOiCap": [], "subDeployers": []
+        }))
+        .unwrap();
+        let served = serde_json::to_value(&dex).unwrap();
+        assert_eq!(served["oracleUpdater"], serde_json::Value::Null);
+        assert_eq!(served["feeRecipient"], serde_json::Value::Null);
+        assert!(served.as_object().unwrap().contains_key("oracleUpdater"));
+        assert!(served.as_object().unwrap().contains_key("feeRecipient"));
     }
 
     #[test]

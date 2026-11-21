@@ -1608,6 +1608,7 @@ mod tests {
                     margin_mode: None,
                     only_isolated: None,
                     is_delisted: None,
+                    ..Default::default()
                 }],
                 margin_tables: Vec::new(),
                 collateral_token: 0,

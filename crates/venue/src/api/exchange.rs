@@ -782,9 +782,6 @@ pub(super) fn err_envelope(response: String) -> Response {
 /// One order's status: the fill, or its refusal, in the venue's own shapes.
 /// `acting` is the acting account and the builder fee the action carries
 /// (every order of the action charges it on its fills).
-// step-9: a builder (HIP-3) dex's `deployerFeeScale`/`growthMode` multiplies
-// the base fee on its fills (the fork's `dex_fee_multiplier`); the wire's two
-// `AssetInfo` fields land with that read, so the fill charges the base tier.
 fn fill_status(
     state: &ApiState,
     acting: (Address, Option<BuilderFee>),
@@ -841,6 +838,7 @@ mod tests {
             margin_mode: None,
             only_isolated: None,
             is_delisted: None,
+            ..Default::default()
         });
         meta
     }

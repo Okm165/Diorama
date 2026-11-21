@@ -436,15 +436,41 @@ pub(crate) fn order_requirement(
 /// The venue's base fee tier (docs, fees page: 4.5 bps taker, 1.5 bps maker).
 /// Volume-based tier discounts are not modeled — the sim serves the base tier,
 /// as a flat account would see.
-// step-9: a builder (HIP-3) dex's `deployerFeeScale`/`growthMode` multiplies
-// these base rates on its fills (the fork's `dex_fee_multiplier`); the wire's
-// two AssetInfo fields are the deferred delta (see `api/exchange.rs`).
 pub(crate) fn taker_fee() -> Decimal {
     Decimal::new(45, 5)
 }
 
 pub(crate) fn maker_fee() -> Decimal {
     Decimal::new(15, 5)
+}
+
+/// The fee multiplier a builder-deployed (HIP-3) market charges over the base
+/// tier: the deployer's `deployerFeeScale` `s` makes it `1 + s` below 1 and
+/// `2 * s` from 1 up (the docs' HIP-3 fee rule, measured on real fills: scale
+/// 1.0 charges twice the base), and a market in `growthMode` pays 10% of that
+/// (the docs' 90% reduction: real xyz fills cost 0.2 of the base). The default
+/// dex has no scale and charges the base tier.
+pub(crate) fn dex_fee_multiplier(meta: Option<&crate::wire::Meta>, coin: &str) -> Decimal {
+    let Some(asset) = meta.and_then(|m| m.universe.iter().find(|a| a.name == coin)) else {
+        return Decimal::ONE;
+    };
+    let Some(scale) = asset
+        .deployer_fee_scale
+        .as_deref()
+        .and_then(|s| s.parse::<Decimal>().ok())
+    else {
+        return Decimal::ONE;
+    };
+    let factor = if scale < Decimal::ONE {
+        Decimal::ONE + scale
+    } else {
+        scale * Decimal::TWO
+    };
+    if asset.growth_mode.as_deref() == Some("enabled") {
+        factor * Decimal::new(1, 1)
+    } else {
+        factor
+    }
 }
 
 /// The venue's perp builder-fee cap (docs: 0.1%), in the wire's unit of
@@ -945,6 +971,7 @@ impl Sim {
     /// `order` for a placer whose order carries a builder fee: the fee is
     /// charged on this take's notional with the taker fee, and credited to
     /// the builder when it is a simulated account.
+    #[allow(clippy::too_many_lines)] // one placement: validate, take, charge, credit
     fn order_with_builder(&self, feed: &MarketFeed, placer: Placer, req: &Order) -> Result<Fill> {
         let address = placer.address;
         let meta = feed.meta_for_lookup(&req.coin);
@@ -964,7 +991,11 @@ impl Sim {
             leverage: setting.leverage,
             mode: setting.mode,
             reduce: req.reduce(),
-            fee: super::account::mul(notional, taker_fee(), "taker fee")?,
+            fee: super::account::mul(
+                notional,
+                taker_fee() * dex_fee_multiplier(meta.as_ref(), &req.coin),
+                "taker fee",
+            )?,
             builder: placer.builder.map(|b| b.charge(notional)).transpose()?,
         };
         let effect = self.land_fill(feed, address, &facts, meta.as_ref())?;
@@ -1027,7 +1058,11 @@ impl Sim {
                         leverage: setting.leverage,
                         mode: setting.mode,
                         reduce,
-                        fee: super::account::mul(notional, maker_fee(), "maker fee")?,
+                        fee: super::account::mul(
+                            notional,
+                            maker_fee() * dex_fee_multiplier(meta, &req.coin),
+                            "maker fee",
+                        )?,
                         builder: builder.map(|b| b.charge(notional)).transpose()?,
                     };
                     let effect = self.with_account_now(*maker, feed, |account| {
@@ -3110,6 +3145,41 @@ mod tests {
         sim.approve_builder_fee(owner, builder, 0).unwrap();
         assert_eq!(sim.max_builder_fee(owner, builder).unwrap(), Some(0));
         assert_eq!(refusal(1), "Builder fee has not been approved.");
+    }
+
+    /// A builder-deployed market's fee follows its deployer's scale (HIP-3):
+    /// scale 1.0 doubles the base tier, a growth-mode market pays a tenth of
+    /// that, a scale under 1 adds to it, and the default dex's coin (no scale)
+    /// pays the base tier. Measured on real fills: xyz growth-mode coins cost
+    /// 0.2 of the base, vntl's 2.0.
+    #[test]
+    fn a_builder_dex_fee_follows_the_deployers_scale_and_growth_mode() {
+        let mut meta = meta_of(&[("a:X", 10), ("a:G", 10), ("a:LOW", 10), ("BASE", 10)]);
+        meta.universe[0].deployer_fee_scale = Some("1.0".into());
+        meta.universe[1].deployer_fee_scale = Some("1.0".into());
+        meta.universe[1].growth_mode = Some("enabled".into());
+        meta.universe[2].deployer_fee_scale = Some("0.5".into());
+        let m = Some(&meta);
+        assert_eq!(dex_fee_multiplier(m, "a:X"), dec("2"));
+        assert_eq!(dex_fee_multiplier(m, "a:G"), dec("0.2"));
+        assert_eq!(dex_fee_multiplier(m, "a:LOW"), dec("1.5"));
+        assert_eq!(dex_fee_multiplier(m, "BASE"), dec("1"));
+        assert_eq!(dex_fee_multiplier(None, "a:X"), dec("1"));
+    }
+
+    /// The taker fee on a growth-mode builder coin is the base fee times its
+    /// multiplier, on the fill and on the account's balance alike.
+    #[test]
+    fn a_take_on_a_growth_mode_builder_coin_pays_the_scaled_fee() {
+        let mut meta = meta_with("ETH", 10);
+        meta.universe[0].deployer_fee_scale = Some("1.0".into());
+        meta.universe[0].growth_mode = Some("enabled".into());
+        let feed = feed_with_book(book("ETH", &[("100", "9")], &[("101", "9")]), meta);
+        let (sim, a) = funded_sim(&feed, "1000");
+        sim.place(&feed, a, &ioc(Side::Buy, "1")).unwrap();
+        let fee = dec("101") * taker_fee() * dec("0.2");
+        assert_eq!(balance(&sim, a), dec("1000") - fee);
+        assert_eq!(sim.user_fills(a).unwrap().remove(0).fee, fee);
     }
 
     /// An immediate take with a builder charges `notional * f / 100_000` on

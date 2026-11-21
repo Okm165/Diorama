@@ -1133,6 +1133,7 @@ pub(crate) fn meta_of(assets: &[(&str, u32)]) -> crate::wire::Meta {
             only_isolated: None,
             is_delisted: None,
             margin_mode: None,
+            ..Default::default()
         });
     }
     m
@@ -1157,6 +1158,7 @@ pub(crate) fn meta_with_table(coin: &str, max_leverage: u32) -> crate::wire::Met
             only_isolated: None,
             is_delisted: None,
             margin_mode: None,
+            ..Default::default()
         }],
         margin_tables: vec![(
             50,

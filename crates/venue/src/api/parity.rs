@@ -26,7 +26,7 @@ use super::{info, ws_codec, ApiState};
 use crate::feed::MarketFeed;
 use crate::sim::order::{Order, Tif};
 use crate::sim::{Deal, DealClass};
-use crate::wire::{AssetInfo, L2Book, Level, MarginTable, MarginTier, Meta, PerpDex};
+use crate::wire::{L2Book, Level, PerpDex};
 use alloy_primitives::Address;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -36,26 +36,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const REAL: &str = include_str!("fixtures/real.json");
-
-/// The capture rows still deferred, one entry per deferred machinery (the
-/// fork's harness has no skip mechanism; this list is the port's own, and the
-/// info test checks each row is still in the capture). Values are the venue's
-/// answer key and the reason.
-const DEFERRED_INFO: [(&str, &str); 3] = [
-    (
-        "meta:xyz",
-        "step-9: a builder dex's HIP-3 fee-scale fields (growthMode, \
-         lastFeeScaleChangeTime, deployerFeeScale) are not modeled",
-    ),
-    (
-        "metaAndAssetCtxs:xyz",
-        "step-9: the same HIP-3 fee-scale fields in the embedded meta",
-    ),
-    (
-        "allPerpMetas[1..]",
-        "step-9: the same HIP-3 fee-scale fields on a builder dex's meta",
-    ),
-];
 
 fn real() -> Value {
     serde_json::from_str(REAL).expect("fixture")
@@ -149,32 +129,28 @@ fn book(coin: &str) -> L2Book {
     }
 }
 
-/// A builder dex's meta: its own margin table and collateral token. The
-/// HIP-3 fee-scale fields the venue's builder metas carry are deferred with
-/// the rest of the builder-dex meta shape (see [`DEFERRED_INFO`]).
-fn builder_meta(coin: &str, table: u32, collateral_token: u32) -> Meta {
-    Meta {
-        universe: vec![AssetInfo {
-            name: coin.into(),
-            sz_decimals: 5,
-            max_leverage: 10,
-            margin_table_id: Some(table),
-            margin_mode: None,
-            only_isolated: None,
-            is_delisted: None,
-        }],
-        margin_tables: vec![(
-            table,
-            MarginTable {
-                description: String::new(),
-                margin_tiers: vec![MarginTier {
-                    lower_bound: Decimal::ZERO,
-                    max_leverage: 10,
-                }],
-            },
-        )],
-        collateral_token,
+/// A builder dex's meta in the real shape: rows carry the builder-only fields
+/// and a margin table, the dex its own collateral token.
+fn builder_meta(coin: &str, table: u32, collateral_token: u32) -> crate::wire::Meta {
+    let mut meta = crate::sim::meta_of(&[(coin, 10)]);
+    for asset in &mut meta.universe {
+        asset.margin_table_id = Some(table);
+        asset.growth_mode = Some("enabled".into());
+        asset.last_fee_scale_change_time = Some("2025-11-24T21:19:25.980742012".into());
+        asset.deployer_fee_scale = Some("1.0".into());
     }
+    meta.margin_tables = vec![(
+        table,
+        crate::wire::MarginTable {
+            description: String::new(),
+            margin_tiers: vec![crate::wire::MarginTier {
+                lower_bound: Decimal::ZERO,
+                max_leverage: 10,
+            }],
+        },
+    )];
+    meta.collateral_token = collateral_token;
+    meta
 }
 
 /// One builder dex's `perpDexs` record, with the fixture's own field set (the
@@ -335,8 +311,16 @@ fn info_cases(user: Address) -> Vec<(&'static str, Value)> {
         ("allPerpMetas", serde_json::json!({"type": "allPerpMetas"})),
         ("meta", serde_json::json!({"type": "meta"})),
         (
+            "meta:xyz",
+            serde_json::json!({"type": "meta", "dex": "xyz"}),
+        ),
+        (
             "metaAndAssetCtxs",
             serde_json::json!({"type": "metaAndAssetCtxs"}),
+        ),
+        (
+            "metaAndAssetCtxs:xyz",
+            serde_json::json!({"type": "metaAndAssetCtxs", "dex": "xyz"}),
         ),
         (
             "clearinghouseState",
@@ -441,23 +425,12 @@ async fn info_responses_have_the_venues_shapes() {
         assert!(!sim.is_null(), "{name}: the sim answered null");
         same_shape(real, &sim, name);
     }
-    // Every deferred row is still in the capture, with a reason (a row that
-    // vanished from the fixture would otherwise look compared).
-    for (name, reason) in DEFERRED_INFO {
-        let key = name.split('[').next().unwrap();
-        assert!(
-            real["info"].get(key).is_some(),
-            "{name}: not in the capture"
-        );
-        assert!(!reason.is_empty(), "{name}: no deferred reason");
-    }
-
-    // `allPerpMetas`: one entry per dex. The default entry is the venue's
-    // shape; a builder entry's HIP-3 fee-scale fields are deferred.
+    // `allPerpMetas`: one entry per dex, each of the venue's shape.
     let metas = info_json(&state, serde_json::json!({"type": "allPerpMetas"})).await;
     let real_metas = &real["info"]["allPerpMetas"];
     assert_eq!(metas.as_array().unwrap().len(), 3);
     same_shape(&real_metas[0], &metas[0], "allPerpMetas[default]");
+    same_shape(&real_metas[1], &metas[1], "allPerpMetas[builder]");
     assert_eq!(metas[1]["universe"][0]["name"], "xyz:TSLA");
     assert_eq!(metas[2]["collateralToken"], 360, "flx is a USDH dex");
     // `meta {dex}` is that dex's entry of `allPerpMetas`.
