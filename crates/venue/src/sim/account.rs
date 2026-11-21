@@ -1263,15 +1263,13 @@ pub(crate) fn mode_of(account: &Account) -> UserAbstraction {
 /// The coin's live context for `activeAssetData`'s mark (the full live ctx
 /// when the feed has one, else a minimal shape from the composed prices).
 pub(crate) fn ctx_of(feed: &MarketFeed, coin: &str) -> Option<AssetCtx> {
-    let Prices { mark, oracle } = feed.required_prices(coin)?;
-    if let Some(crate::wire::MetaAndAssetCtxs(_, ctxs)) = feed.meta_and_ctxs() {
-        if let Some(found) = ctxs
-            .iter()
-            .find(|c| c.mark_px == mark && c.oracle_px == oracle)
-        {
-            return Some(found.clone());
-        }
+    // The feed keeps its contexts by coin name (builder coins included): a
+    // direct lookup, never a match on the mark and the oracle (two coins can
+    // share both and still carry their own open interest).
+    if let Some(ctx) = feed.ctx(coin) {
+        return Some(ctx);
     }
+    let Prices { mark, oracle } = feed.required_prices(coin)?;
     Some(AssetCtx {
         // No funding source (neither an override nor the ctx cache) means this
         // minimal ctx is not servable: a zero would be a silent lie (the

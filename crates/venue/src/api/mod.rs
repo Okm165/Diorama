@@ -167,8 +167,9 @@ pub(crate) fn sim_gate(state: &ApiState) -> Result<(), SimPoisoned> {
 }
 
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.
-// step-8: the market channels' coalescing window lands with the websocket
-// port (the candle hub is attached here; its `candle` channel subscribes it).
+// step-9: the market channels' live relay pushes (the fork's relay) replace
+// this step's tick + dedup; the candle hub is attached and its `candle`
+// channel subscribes it.
 pub fn info_router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route(

@@ -14,15 +14,15 @@
 //! compared: the real sample is one moment of one account.
 //!
 //! The fork's capture also covers the websocket channels (`ws`, `wsSilence`,
-//! `wsErrors`, `dexOrder`); those belong to step 8, when the ws lane is ported.
-//! The fork's ws cases are listed at the bottom of this module so the port's
-//! remaining surface is visible.
+//! `wsErrors`, `dexOrder`); the ported session machinery is held to them
+//! below, shape for shape.
 //!
 //! The capture rows that exercise deferred machinery are not compared: this
 //! step keeps one USDC clearinghouse and no HIP-3 fee-scale fields, so a
 //! builder dex's clearinghouse and meta are marked deferred (see
 //! [`DEFERRED_INFO`]) rather than compared against an empty stand-in.
-use super::{info, ApiState};
+use super::ws::{pushes, request_reply, Live};
+use super::{info, ws_codec, ApiState};
 use crate::feed::MarketFeed;
 use crate::sim::order::{Order, Tif};
 use crate::sim::{Deal, DealClass};
@@ -1036,15 +1036,520 @@ async fn the_transfer_ledger_and_the_activation_check_have_the_venues_shapes() {
     );
 }
 
-// step-8: the fork's websocket parity cases land with the ws lane. They are
-// `websocket_acks_and_frames_have_the_venues_shapes`,
-// `l2_pushes_a_diff_in_the_venues_shapes_then_goes_quiet`,
-// `subscription_errors_read_like_the_venues`,
-// `the_fill_stream_pushes_a_snapshot_then_only_new_fills`,
-// `the_funding_stream_serves_flat_rows`,
-// `bbo_order_updates_and_user_events_push_changes_only`,
-// `the_venues_ws_silences_and_errors_are_mirrored`,
-// `per_dex_pushes_list_the_dexes_in_the_venues_order`, and
-// `fast_asset_ctxs_is_one_map_over_every_dex`. They need the per-dex
-// `Subscription` variants and the `pushes`/`request_reply` session surface
-// this step's older `ws.rs` does not expose yet.
+/// Subscribe through the request path (the ack) and take the first pushes.
+fn subscribe(state: &ApiState, subscription: &Value) -> (Value, Vec<Value>, Live) {
+    let mut subs: Vec<Live> = Vec::new();
+    let request = serde_json::json!({"method": "subscribe", "subscription": subscription});
+    let ack = request_reply(&request.to_string(), &mut subs, state);
+    let ack = serde_json::to_value(&ack).unwrap();
+    assert_eq!(ack["channel"], "subscriptionResponse", "{ack}");
+    let mut live = subs.pop().expect("subscribed");
+    let frames = pushes(&mut live, state, crate::now_ms())
+        .iter()
+        .map(|f| serde_json::from_str(f).unwrap())
+        .collect();
+    (ack, frames, live)
+}
+
+fn decode(frame: &Value) -> Value {
+    // The compressed channels carry base64 of a deflate stream.
+    let text = |s: &str| serde_json::from_str::<Value>(&ws_codec::inflate_b64(s)).unwrap();
+    match frame["channel"].as_str().unwrap() {
+        "fastAssetCtxs" | "pac" => {
+            serde_json::json!({"channel": frame["channel"], "data": text(frame["data"].as_str().unwrap())})
+        }
+        "l2" if frame["data"].get("c").is_some() => serde_json::json!({
+            "channel": "l2",
+            "data": {"c": text(frame["data"]["c"].as_str().unwrap())},
+        }),
+        _ => frame.clone(),
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // one table of subscriptions against the captured frames
+fn websocket_acks_and_frames_have_the_venues_shapes() {
+    let (state, user) = world();
+    let real = real();
+    let subs: Vec<(&str, Value)> = vec![
+        ("allMids", serde_json::json!({"type": "allMids"})),
+        (
+            "activeAssetCtx",
+            serde_json::json!({"type": "activeAssetCtx", "coin": "ETH"}),
+        ),
+        (
+            "l2Book",
+            serde_json::json!({"type": "l2Book", "coin": "ETH"}),
+        ),
+        (
+            "clearinghouseState",
+            serde_json::json!({"type": "clearinghouseState", "user": user}),
+        ),
+        (
+            "openOrders",
+            serde_json::json!({"type": "openOrders", "user": user, "dex": ""}),
+        ),
+        (
+            "clearinghouseState:xyz",
+            serde_json::json!({"type": "clearinghouseState", "user": user, "dex": "xyz"}),
+        ),
+        (
+            "openOrders:xyz",
+            serde_json::json!({"type": "openOrders", "user": user, "dex": "xyz"}),
+        ),
+        (
+            "openOrders:ALL_DEXS",
+            serde_json::json!({"type": "openOrders", "user": user, "dex": "ALL_DEXS"}),
+        ),
+        (
+            "allMids:ALL_DEXS",
+            serde_json::json!({"type": "allMids", "dex": "ALL_DEXS"}),
+        ),
+        (
+            "webData3",
+            serde_json::json!({"type": "webData3", "user": user}),
+        ),
+        (
+            "activeAssetCtx:xyz:TSLA",
+            serde_json::json!({"type": "activeAssetCtx", "coin": "xyz:TSLA"}),
+        ),
+        (
+            "l2Book:xyz:TSLA",
+            serde_json::json!({"type": "l2Book", "coin": "xyz:TSLA"}),
+        ),
+        (
+            "activeAssetData:xyz:TSLA",
+            serde_json::json!({"type": "activeAssetData", "user": user, "coin": "xyz:TSLA"}),
+        ),
+        (
+            "spotState",
+            serde_json::json!({"type": "spotState", "user": user}),
+        ),
+        (
+            "allDexsClearinghouseState",
+            serde_json::json!({"type": "allDexsClearinghouseState", "user": user}),
+        ),
+        (
+            "userFills",
+            serde_json::json!({"type": "userFills", "user": user}),
+        ),
+        (
+            "userFundings",
+            serde_json::json!({"type": "userFundings", "user": user}),
+        ),
+        (
+            "activeAssetData",
+            serde_json::json!({"type": "activeAssetData", "user": user, "coin": "ETH"}),
+        ),
+        (
+            "fastAssetCtxs",
+            serde_json::json!({"type": "fastAssetCtxs"}),
+        ),
+        ("pac", serde_json::json!({"type": "pac"})),
+        ("l2:l2", serde_json::json!({"type": "l2", "c": "ETH"})),
+    ];
+    for (name, subscription) in subs {
+        let (ack, frames, _) = subscribe(&state, &subscription);
+        let real = &real["ws"][name];
+        same_shape(&real["ack"], &ack, &format!("{name} ack"));
+        let first = decode(
+            frames
+                .first()
+                .unwrap_or_else(|| panic!("{name}: no first frame")),
+        );
+        if name == "allMids:ALL_DEXS" {
+            // A map keyed by coin: every value is a price string.
+            assert!(first["data"]["mids"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(Value::is_string));
+            continue;
+        }
+        if name == "fastAssetCtxs" {
+            // A map keyed by coin: the entries' shape, not the coin names.
+            let entry = |frame: &Value| {
+                frame["data"]
+                    .as_object()
+                    .unwrap()
+                    .values()
+                    .next()
+                    .unwrap()
+                    .clone()
+            };
+            same_shape(
+                &entry(&real["first"]),
+                &entry(&first),
+                "fastAssetCtxs entry",
+            );
+            continue;
+        }
+        same_shape(&real["first"], &first, &format!("{name} first frame"));
+    }
+}
+
+/// A diffing channel pushes the change and nothing while nothing changes.
+#[test]
+fn l2_pushes_a_diff_in_the_venues_shape_then_goes_quiet() {
+    let (state, _) = world();
+    let (_, first, mut live) = subscribe(&state, &serde_json::json!({"type": "l2", "c": "ETH"}));
+    assert!(first[0]["data"].get("s").is_some(), "a full book first");
+    assert!(
+        pushes(&mut live, &state, crate::now_ms()).is_empty(),
+        "an unchanged book pushes nothing"
+    );
+    let mut moved = book("ETH");
+    moved.levels[0][0].sz = Decimal::from(77);
+    moved.levels[1].remove(0);
+    state.feed.put_book(moved, crate::now_ms());
+    let frames = pushes(&mut live, &state, crate::now_ms());
+    assert_eq!(frames.len(), 1);
+    let frame: Value = serde_json::from_str(&frames[0]).unwrap();
+    let diff = decode(&frame);
+    same_shape(&real()["ws"]["l2:l2"]["later"], &diff, "l2 diff");
+}
+
+/// The venue's own subscription errors.
+#[test]
+fn subscription_errors_read_like_the_venues() {
+    let (state, user) = world();
+    let mut subs: Vec<Live> = Vec::new();
+    let reply = |text: &str, subs: &mut Vec<Live>| {
+        serde_json::to_value(request_reply(text, subs, &state)).unwrap()
+    };
+    let bogus = r#"{"method":"subscribe","subscription":{"type":"bogusChannel"}}"#;
+    assert_eq!(
+        reply(bogus, &mut subs)["data"],
+        format!("Error parsing JSON into valid websocket request: {bogus}")
+    );
+    let unknown_coin =
+        r#"{"method":"subscribe","subscription":{"type":"activeAssetCtx","coin":"NOPE"}}"#;
+    assert_eq!(
+        reply(unknown_coin, &mut subs)["data"],
+        r#"Invalid subscription {"type":"activeAssetCtx","coin":"NOPE"}"#
+    );
+    let all_mids = r#"{"method":"subscribe","subscription":{"type":"allMids"}}"#;
+    assert_eq!(
+        reply(all_mids, &mut subs)["channel"],
+        "subscriptionResponse"
+    );
+    assert_eq!(
+        reply(all_mids, &mut subs)["data"],
+        r#"Already subscribed: {"type":"allMids"}"#
+    );
+    let _ = user;
+}
+
+/// The fill stream: a snapshot first, then only the fills that are new.
+#[test]
+fn the_fill_stream_pushes_a_snapshot_then_only_new_fills() {
+    let (state, user) = world();
+    let (_, first, mut live) = subscribe(
+        &state,
+        &serde_json::json!({"type": "userFills", "user": user}),
+    );
+    assert_eq!(first[0]["data"]["isSnapshot"], true);
+    let snapshot = first[0]["data"]["fills"].as_array().unwrap().len();
+    assert!(snapshot >= 1);
+    assert!(
+        pushes(&mut live, &state, crate::now_ms()).is_empty(),
+        "no new fill, no frame"
+    );
+    state
+        .sim
+        .order(
+            &state.feed,
+            user,
+            &Order {
+                coin: "ETH".into(),
+                is_buy: true,
+                size: "1".parse().unwrap(),
+                limit_px: None,
+                tif: Tif::Ioc,
+                reduce_only: false,
+                cloid: None,
+                trigger: None,
+            },
+        )
+        .unwrap();
+    let frames = pushes(&mut live, &state, crate::now_ms());
+    assert_eq!(frames.len(), 1);
+    let frame: Value = serde_json::from_str(&frames[0]).unwrap();
+    assert!(
+        frame["data"].get("isSnapshot").is_none(),
+        "an update, not a snapshot"
+    );
+    assert_eq!(frame["data"]["fills"].as_array().unwrap().len(), 1);
+}
+
+/// The funding stream: the hourly payments as a snapshot, flat rows.
+#[test]
+fn the_funding_stream_serves_flat_rows() {
+    let (state, user) = world();
+    let (_, first, mut live) = subscribe(
+        &state,
+        &serde_json::json!({"type": "userFundings", "user": user}),
+    );
+    let rows = first[0]["data"]["fundings"].as_array().unwrap();
+    assert!(!rows.is_empty(), "the world advanced one funding hour");
+    assert!(
+        rows[0].get("delta").is_none(),
+        "flat, not the info route's wrapper"
+    );
+    assert!(pushes(&mut live, &state, crate::now_ms()).is_empty());
+}
+
+/// `bbo` pushes the best bid and ask once, then only when one changes;
+/// `orderUpdates` and `userEvents` start quiet and report what happens after.
+#[test]
+fn bbo_order_updates_and_user_events_push_changes_only() {
+    let (state, user) = world();
+    let (_, first, mut bbo) = subscribe(&state, &serde_json::json!({"type": "bbo", "coin": "ETH"}));
+    assert_eq!(first[0]["channel"], "bbo");
+    assert_eq!(first[0]["data"]["coin"], "ETH");
+    assert_eq!(first[0]["data"]["bbo"].as_array().unwrap().len(), 2);
+    assert!(
+        pushes(&mut bbo, &state, crate::now_ms()).is_empty(),
+        "an unchanged book is silent"
+    );
+
+    let (_, first, mut updates) = subscribe(
+        &state,
+        &serde_json::json!({"type": "orderUpdates", "user": user}),
+    );
+    assert!(first.is_empty(), "the channel carries changes only");
+    let (_, first, mut events) = subscribe(
+        &state,
+        &serde_json::json!({"type": "userEvents", "user": user}),
+    );
+    assert!(first.is_empty(), "no snapshot on userEvents");
+
+    state
+        .sim
+        .order(
+            &state.feed,
+            user,
+            &Order {
+                coin: "ETH".into(),
+                is_buy: true,
+                size: "1".parse().unwrap(),
+                limit_px: None,
+                tif: Tif::Ioc,
+                reduce_only: false,
+                cloid: None,
+                trigger: None,
+            },
+        )
+        .unwrap();
+    let frames = pushes(&mut events, &state, crate::now_ms());
+    assert_eq!(frames.len(), 1);
+    let frame: Value = serde_json::from_str(&frames[0]).unwrap();
+    assert_eq!(frame["channel"], "user");
+    assert_eq!(frame["data"]["fills"].as_array().unwrap().len(), 1);
+    assert!(
+        pushes(&mut events, &state, crate::now_ms()).is_empty(),
+        "each fill is pushed once"
+    );
+    // An IOC that filled in full never rested: no order update.
+    assert!(pushes(&mut updates, &state, crate::now_ms()).is_empty());
+}
+
+/// The venue's quirks and errors on the subscriptions the dexes added,
+/// replayed from the capture: how many frames come back at all (a named
+/// dex's `allMids` is acked and then silent, an unlisted dex on
+/// `clearinghouseState`/`openOrders` gets nothing), and the error text of a
+/// subscription it cannot parse.
+#[test]
+#[allow(clippy::too_many_lines)] // one table of captured quirks and errors
+fn the_venues_ws_silences_and_errors_are_mirrored() {
+    let (state, user) = world();
+    let real = real();
+    let sim_user = user.to_string();
+    let request = |subscription: Value| {
+        let mut subs: Vec<Live> = Vec::new();
+        let reply = request_reply(
+            &serde_json::json!({"method": "subscribe", "subscription": subscription}).to_string(),
+            &mut subs,
+            &state,
+        );
+        let ack = serde_json::to_value(&reply)
+            .ok()
+            .filter(|_| !matches!(reply, super::ws::WsPush::Silent));
+        let frames = subs
+            .last_mut()
+            .map(|live| pushes(live, &state, crate::now_ms()).len())
+            .unwrap_or(0);
+        (ack, frames)
+    };
+    let cases: [(&str, Value); 6] = [
+        (
+            "allMids:xyz",
+            serde_json::json!({"type": "allMids", "dex": "xyz"}),
+        ),
+        (
+            "allMids:empty",
+            serde_json::json!({"type": "allMids", "dex": ""}),
+        ),
+        (
+            "allMids:nope",
+            serde_json::json!({"type": "allMids", "dex": "nope"}),
+        ),
+        (
+            "clearinghouseState:nope",
+            serde_json::json!({"type": "clearinghouseState", "user": sim_user, "dex": "nope"}),
+        ),
+        (
+            "clearinghouseState:ALL_DEXS",
+            serde_json::json!({"type": "clearinghouseState", "user": sim_user, "dex": "ALL_DEXS"}),
+        ),
+        (
+            "openOrders:nope",
+            serde_json::json!({"type": "openOrders", "user": sim_user, "dex": "nope"}),
+        ),
+    ];
+    for (name, subscription) in cases {
+        let venue = &real["wsSilence"][name];
+        let (ack, frames) = request(subscription);
+        // The venue's count includes the ack.
+        let sim_total = usize::from(ack.is_some()) + frames;
+        assert_eq!(
+            sim_total as u64,
+            venue["frames"].as_u64().unwrap(),
+            "{name}"
+        );
+        match (&ack, &venue["ack"]) {
+            (Some(ack), expected) if !expected.is_null() => assert_eq!(ack, expected, "{name}"),
+            (None, expected) => assert!(expected.is_null(), "{name}"),
+            (Some(_), _) => panic!("{name}: the venue sends no ack"),
+        }
+    }
+
+    // The captured error texts, with the capture's placeholder user.
+    let placeholder = "0x1111111111111111111111111111111111111111";
+    let mut subs: Vec<Live> = Vec::new();
+    for (name, subscription) in [
+        (
+            "webData2",
+            serde_json::json!({"type": "webData2", "user": user}),
+        ),
+        (
+            "activeAssetCtx:xyz:NOPE",
+            serde_json::json!({"type": "activeAssetCtx", "coin": "xyz:NOPE"}),
+        ),
+    ] {
+        let reply = request_reply(
+            &serde_json::json!({"method": "subscribe", "subscription": subscription}).to_string(),
+            &mut subs,
+            &state,
+        );
+        let reply = serde_json::to_value(&reply).unwrap();
+        let expected = &real["wsErrors"][name];
+        assert_eq!(reply["channel"], expected["channel"], "{name}");
+        assert_eq!(
+            reply["data"]
+                .as_str()
+                .unwrap()
+                .replace(&sim_user.to_lowercase(), placeholder),
+            expected["data"].as_str().unwrap(),
+            "{name}"
+        );
+    }
+}
+
+/// The venue lists the dexes in one order on `allDexsClearinghouseState` and
+/// `pac`: the default dex first, then alphabetically (not in `perpDexs`
+/// order). The capture is the evidence, the sim follows the same rule over
+/// its own registry (default, xyz, flx here: flx sorts before xyz).
+#[test]
+#[allow(clippy::too_many_lines)] // one scenario over the dex order
+fn per_dex_pushes_list_the_dexes_in_the_venues_order() {
+    let real = real();
+    let venue: Vec<&str> = real["dexOrder"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap())
+        .collect();
+    assert_eq!(venue[0], "");
+    assert!(
+        venue[1..].windows(2).all(|w| w[0] < w[1]),
+        "the capture is alphabetical after the default dex: {venue:?}"
+    );
+
+    let (state, user) = world();
+    // The upstream list keeps its own order (the HIP-3 asset index's slot);
+    // the push lanes reorder it by the venue's rule (below).
+    let venue_order: Vec<String> = state
+        .feed
+        .perp_dexs()
+        .unwrap()
+        .into_iter()
+        .map(|dex| dex.map_or_else(String::new, |dex| dex.name))
+        .collect();
+    assert_eq!(
+        venue_order,
+        ["", "xyz", "flx"],
+        "the registry is in perpDexs order"
+    );
+    let mut registry: Vec<String> = state
+        .feed
+        .dex_collateral_tokens()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    registry.sort_unstable();
+    assert_eq!(registry, ["", "flx", "xyz"]);
+
+    let (_, frames, _) = subscribe(
+        &state,
+        &serde_json::json!({"type": "allDexsClearinghouseState", "user": user}),
+    );
+    let states = frames[0]["data"]["clearinghouseStates"].as_array().unwrap();
+    let all_dexs: Vec<&str> = states.iter().map(|s| s[0].as_str().unwrap()).collect();
+    assert_eq!(all_dexs, ["", "flx", "xyz"]);
+
+    let (_, frames, mut live) = subscribe(&state, &serde_json::json!({"type": "pac"}));
+    let pac = decode(&frames[0]);
+    let dexs: Vec<&str> = pac["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d[0].as_str().unwrap())
+        .collect();
+    assert_eq!(dexs, all_dexs, "pac and allDexsClearinghouseState agree");
+    // One slot per universe coin, the same dexes in every frame.
+    for dex in pac["data"].as_array().unwrap() {
+        assert_eq!(dex[1].as_array().unwrap().len(), 1, "{dex}");
+    }
+    state.feed.put_ctx(
+        "xyz:TSLA".into(),
+        crate::wire::funding_ctx("102", "102"),
+        crate::now_ms(),
+    );
+    let frames = pushes(&mut live, &state, crate::now_ms());
+    let next = decode(&serde_json::from_str(&frames[0]).unwrap());
+    let later: Vec<&str> = next["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d[0].as_str().unwrap())
+        .collect();
+    assert_eq!(later, all_dexs, "every dex is listed in every frame");
+}
+
+/// The flat `fastAssetCtxs` map covers the default dex's coins and the builder
+/// dexes' prefixed ones.
+#[test]
+fn fast_asset_ctxs_is_one_map_over_every_dex() {
+    let (state, _) = world();
+    let (_, frames, _) = subscribe(&state, &serde_json::json!({"type": "fastAssetCtxs"}));
+    let fast = decode(&frames[0]);
+    let mut keys: Vec<&str> = fast["data"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["ETH", "flx:TSLA", "xyz:TSLA"]);
+}

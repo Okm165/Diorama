@@ -475,6 +475,17 @@ impl MarketFeed {
         self.read().oi_caps.get(dex).cloned()
     }
 
+    /// The coin's composed context (overrides applied), looked up by name —
+    /// never by matching a mark/oracle pair, which cannot tell two coins with
+    /// the same price apart.
+    pub(crate) fn ctx(&self, coin: &str) -> Option<AssetCtx> {
+        let overrides = self.read_overrides().clone();
+        let stalled = self.stalled();
+        let now = crate::now_ms();
+        let c = self.read();
+        served_ctx(&c.ctxs, &overrides, stalled, now, coin)
+    }
+
     pub(crate) fn put_ctx(&self, coin: String, ctx: AssetCtx, now_ms: u64) {
         if self.stalled() {
             tracing::debug!(coin = %coin, "live ctx dropped: the feed is stalled (the staleness drill)");
@@ -746,9 +757,10 @@ impl MarketFeed {
     /// lists, a feed with no venue client, a spent request budget, or a venue
     /// that did not answer in time: the caller carries on as it did without
     /// the book.
-    // step-8: the fork's demand-driven relay keeps a wanted coin's `l2Book`
+    // step-9: the fork's demand-driven relay keeps a wanted coin's `l2Book`
     // stream live (an order, a held position or a downstream subscription);
-    // this one-shot read is the order door's own gap fill until then.
+    // this one-shot read is the order door's and the ws subscription's gap
+    // fill until then.
     pub(crate) async fn ensure_book(&self, coin: &str) -> Option<L2Book> {
         let now = crate::now_ms();
         let listed = self

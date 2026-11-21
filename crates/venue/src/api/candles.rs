@@ -5,10 +5,9 @@
 //! come from. One upstream subscription exists per `(coin, interval)` while at
 //! least one session listens (the first listener opens it, the last one to
 //! leave closes it); every session gets the latest candle on subscribe and
-//! each update after it.
-// step-8: the websocket's `candle` channel subscribes this hub; until that
-// port lands the relay is attached and tested but has no live listener.
-#![allow(dead_code)]
+//! each update after it. The websocket's `candle` channel subscribes this
+//! hub.
+#![allow(dead_code)] // `inflate`-side helpers are test-only; the relay is live
 use diorama_anvil::{now_ms, EndpointPool};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
