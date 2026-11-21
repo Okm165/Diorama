@@ -103,6 +103,42 @@ Each deposit credited exactly once: the wallet contract's own `sendAsset`
 because the wallet has no Core account before the block — the route model
 credits the destination directly, and the two never double-credit.
 
+### The account plane answers from the mirror (2026-11-21)
+
+Measured on the live mirror: a per-user `/info` read for an account the sim
+had never touched cost **p50 316 ms, p90 435 ms** (`clearinghouseState`,
+`spotClearinghouseState`, `openOrders`), while the same read for a touched
+account cost **0.2–0.4 ms**. The untouched case was a live-venue passthrough:
+one real `POST /info` to `api.hyperliquid.xyz` per poll, plus a spot in the
+live API's rate budget.
+
+That is not only slow, it was the swarm's flakiness: the indexer polls every
+account on a 5 s cadence, so the live venue's latency and throttling became
+the mirror's. The evidence chain, measured over 90 minutes before the fix:
+
+- indexer: 74 `venue account poll refused — recorded as a gap` events
+  (`margin-venue API request timed out`, `read_ms` 5005) — beyond the few at
+  the rollout windows;
+- `venue_account_ticks`: gap rows for accounts with no sim state;
+- operator: `the stored venue term outlived its reuse bound — refusing this
+  position's HF check`, `positions were excluded from this HF scan for a
+  refused venue term`, `venue HF term refused by the indexer's projection`.
+
+An untouched account holds no Core state in the sim — its state *is* empty —
+so the mirror now answers the venue's own measured empty shape locally (the
+same shape the WS lane already served): zero `clearinghouseState` with the
+served clock, `{"balances":[]}`, `[]` for the order/fill/funding/ledger lists,
+`"default"` abstraction, `0` `maxBuilderFee`, `{"status":"unknownOid"}`.
+Types the mirror does not model (`activeAssetData` — it needs a margin
+account — and the fee/referral/portfolio family) keep the verbatim
+passthrough.
+
+After the roll: untouched-account reads are **0.2 ms**, 901 account ticks in 5
+minutes with **0 gaps** (all 23 accounts), no refusal lines outside the
+rollout window, gateway `healthy` with no advisories. The 13-probe action
+sweep still passes 13/13.
+
+
 
 ## Representation check against the real venue
 
