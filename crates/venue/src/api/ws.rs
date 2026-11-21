@@ -404,10 +404,36 @@ async fn warm(text: &str, state: &ApiState) {
 async fn session(state: Arc<ApiState>, mut socket: WebSocket) {
     let mut subs: Vec<Live> = Vec::new();
     let mut tick = tokio::time::interval(state.push_interval);
+    let mut changes = state.feed.subscribe_changes();
+    // When the pending market flush is due: set by the first change of a
+    // burst, cleared by the flush that composes it (25 ms, the documented
+    // coalescing window — the venue does not stream per-write).
+    let mut flush_at: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                if !push_channels(&mut socket, &mut subs, &state).await {
+                if !push_channels(&mut socket, &mut subs, &state, false).await
+                    || !push_channels(&mut socket, &mut subs, &state, true).await
+                {
+                    return;
+                }
+            }
+            signal = changes.changed() => {
+                if signal.is_err() {
+                    return;
+                }
+                if flush_at.is_none() {
+                    flush_at = Some(tokio::time::Instant::now() + MARKET_COALESCE);
+                }
+            }
+            () = async {
+                match flush_at {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                flush_at = None;
+                if !push_channels(&mut socket, &mut subs, &state, true).await {
                     return;
                 }
             }
@@ -440,12 +466,37 @@ async fn session(state: Arc<ApiState>, mut socket: WebSocket) {
     }
 }
 
+/// The market channels ride the feed's change signal (coalesced); every
+/// account channel stays on the automaton's tick.
+fn is_market(sub: &Subscription) -> bool {
+    matches!(
+        sub,
+        Subscription::L2Book { .. }
+            | Subscription::L2 { .. }
+            | Subscription::Bbo { .. }
+            | Subscription::ActiveAssetCtx { .. }
+            | Subscription::ActiveAssetData { .. }
+            | Subscription::Candle { .. }
+    )
+}
+
+/// The coalescing window for a market change burst (the venue's own cadence).
+const MARKET_COALESCE: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Push one tick's frames for every live subscription. One clock read per
 /// tick: every channel in it serves the same instant (a scripted book is
 /// stamped with it). `false` when the socket is gone.
-async fn push_channels(socket: &mut WebSocket, subs: &mut [Live], state: &ApiState) -> bool {
+async fn push_channels(
+    socket: &mut WebSocket,
+    subs: &mut [Live],
+    state: &ApiState,
+    market: bool,
+) -> bool {
     let now = crate::now_ms();
     for live in subs.iter_mut() {
+        if is_market(&live.sub) != market {
+            continue;
+        }
         for frame in pushes(live, state, now) {
             if socket.send(Message::Text(frame.into())).await.is_err() {
                 return false;

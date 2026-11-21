@@ -236,6 +236,10 @@ pub struct MarketFeed {
     /// socket carries (contexts permanent, books demand-driven). See
     /// [`relay`] for the two policies and the venue's own budgets.
     pub(crate) relay: std::sync::Arc<relay::Relay>,
+    /// The market-content change signal a websocket session waits on: every
+    /// write bumps the version, so a downstream push rides the change instead
+    /// of a clock.
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl MarketFeed {
@@ -254,6 +258,7 @@ impl MarketFeed {
             stalled_until_ms: AtomicU64::new(0),
             rest: std::sync::OnceLock::new(),
             relay: std::sync::Arc::default(),
+            changes: tokio::sync::watch::channel(0).0,
         })
     }
 
@@ -272,12 +277,24 @@ impl MarketFeed {
             stalled_until_ms: AtomicU64::new(0),
             rest: std::sync::OnceLock::new(),
             relay: std::sync::Arc::default(),
+            changes: tokio::sync::watch::channel(0).0,
         }
     }
 
     /// The staleness window every consumer shares (`readyz`, the order
     /// lane): live data older than this is stale — and stale is not tradable.
     pub const MAX_STALE_MS: u64 = 30_000;
+
+    /// Signal that the market content may have changed (one version bump per
+    /// write; the websocket lane coalesces the burst).
+    fn notify(&self) {
+        self.changes.send_modify(|version| *version += 1);
+    }
+
+    /// The change signal a websocket session waits on.
+    pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
 
     /// How long [`MarketFeed::ensure_book`] waits for the venue before the
     /// caller carries on without the book.
@@ -551,6 +568,8 @@ impl MarketFeed {
         }
         let mut c = self.write();
         c.put_dex_meta(String::new(), meta, now_ms);
+        drop(c);
+        self.notify();
     }
 
     /// `perpDexs`: the venue's perp-dex list, kept verbatim **and in the
@@ -566,6 +585,8 @@ impl MarketFeed {
         let mut c = self.write();
         c.perp_dexs = Some(dexs);
         c.rebuild_registry();
+        drop(c);
+        self.notify();
     }
 
     /// One perp dex's meta, kept and folded into the account-plane view: the
@@ -656,6 +677,8 @@ impl MarketFeed {
         let mut c = self.write();
         c.ctx_at.insert(coin.clone(), now_ms);
         c.ctxs.insert(coin, ctx);
+        drop(c);
+        self.notify();
     }
 
     pub(crate) fn put_book(&self, book: L2Book, now_ms: u64) {
@@ -683,6 +706,8 @@ impl MarketFeed {
         c.book_at.insert(book.coin.clone(), now_ms);
         c.book_live_at.insert(book.coin.clone(), now_ms);
         c.books.insert(book.coin.clone(), book);
+        drop(c);
+        self.notify();
     }
 
     /// Prune the coin's consumptions against the base it will serve (a live
@@ -721,6 +746,8 @@ impl MarketFeed {
         let mut c = self.write();
         c.mids = mids;
         c.mids_at = Some(now_ms);
+        drop(c);
+        self.notify();
     }
 
     /// `crash`: own this coin's mark and oracle (live updates stop mattering
@@ -1573,6 +1600,32 @@ fn served_ctx(
 
 #[cfg(test)]
 mod tests {
+    /// The change signal: every market write bumps the version (the websocket
+    /// lane coalesces a burst into one push), and a read never does.
+    #[test]
+    fn a_market_write_bumps_the_change_version_once_per_write() {
+        let feed = MarketFeed::memory(vec!["BTC".into()]);
+        let mut changes = feed.subscribe_changes();
+        assert!(!changes.has_changed().expect("channel alive"));
+        feed.put_ctx("BTC".into(), crate::wire::test_ctx("100", "101"), 1);
+        assert!(changes.has_changed().expect("channel alive"));
+        changes.borrow_and_update();
+        feed.put_book(
+            crate::wire::L2Book {
+                coin: "BTC".into(),
+                time: 1,
+                levels: [vec![], vec![]],
+                spread: None,
+            },
+            1,
+        );
+        assert!(changes.has_changed().expect("channel alive"));
+        changes.borrow_and_update();
+        let _ = feed.mark("BTC");
+        assert!(!changes.has_changed().expect("a read must not wake the pushers"));
+    }
+
+
     use super::*;
     use crate::wire::{test_ctx, Level};
 
