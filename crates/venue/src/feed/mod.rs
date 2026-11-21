@@ -359,7 +359,9 @@ impl MarketFeed {
     }
 
     fn want_book_at(&self, coin: &str, now_ms: u64) -> bool {
-        if self.meta_for_coin(coin).is_none() {
+        // Any listed market — a perp of any dex or a configured spot pair:
+        // the venue's `l2` channel is coin-name keyed on both planes.
+        if !self.is_listed(coin) {
             return false;
         }
         self.relay.touch(coin, now_ms);
@@ -379,7 +381,7 @@ impl MarketFeed {
     /// websocket subscription on it). `None` for a coin no dex lists.
     #[allow(dead_code, reason = "wired when the downstream ws lane takes a lease per subscription")]
     pub(crate) fn lease_coin(&self, coin: &str) -> Option<relay::Lease> {
-        self.meta_for_coin(coin)?;
+        self.is_listed(coin).then_some(())?;
         Some(self.relay.lease(coin, crate::now_ms()))
     }
 
