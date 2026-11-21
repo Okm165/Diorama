@@ -254,6 +254,48 @@ pub struct VenueSimSection {
     /// Core↔EVM boundary (system-address transfers, CoreWriter actions).
     /// Absent disables the bridge (the sim still serves reads).
     pub anvil_url: Option<String>,
+    /// The on-chain print sync: keep each mirrored spot feed's answer in step
+    /// with this sim's own oracle, inside the consuming indexer's two
+    /// ingestion bounds (a single round may not diverge >1500 bps from the
+    /// venue oracle nor move >2000 bps from the previous served answer).
+    /// Absent disables the sync (the prints then hold their seeded value while
+    /// the sim walks — the measured 2026-11-21 drift).
+    #[serde(default)]
+    pub print_sync: Option<PrintSyncSection>,
+}
+
+/// `[services.venue_sim.print_sync]`: the mirror's on-chain print follow.
+///
+/// A venue-sim mirror seeds each `MirrorPriceFeed` once at deploy; only a
+/// scenario moves it. A long-running sim walks its own oracle, so the seeded
+/// print drifts out of the consumer's ingestion bound and the asset becomes
+/// unpricable (measured: xSOXL at 29 % divergence, refused every round).
+/// This loop reads the sim's `oracle_px`, reads the feed's current answer, and
+/// steps the print toward the oracle — clamped, with a deadband, through the
+/// same journaled control the admin route uses.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PrintSyncSection {
+    /// One pass per interval.
+    pub interval_ms: u64,
+    /// Do not write while the drift is at or below this (keeps a quiet feed quiet).
+    pub deadband_bps: u16,
+    /// The largest single write, as bps of the current answer. Must stay under
+    /// the consumer's 2000 bps single-round bound with margin.
+    pub max_step_bps: u16,
+    /// The feeds to follow: the sim coin and the mirror aggregator address.
+    pub feeds: Vec<PrintSyncFeed>,
+}
+
+/// One followed feed: `coin` is the sim's market (`xyz:SOXL`), `feed` the
+/// mirror aggregator whose answer is kept in step with it.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrintSyncFeed {
+    pub coin: String,
+    /// `0x`-prefixed 20-byte address; parsed by the consumer (the config crate
+    /// stays address-crate-free so every profile reads this section).
+    pub feed: String,
 }
 
 /// `[services.engine]`: the mirror engine — one section for both profiles.

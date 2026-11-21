@@ -41,6 +41,7 @@ mod feed;
 mod follow;
 mod http;
 mod metrics;
+mod print_sync;
 mod profile;
 mod reset;
 mod selftest;

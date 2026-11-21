@@ -164,6 +164,24 @@ state_dir = "/state"
 # the served meta is unpriceable, so a listed market must exist upstream.
 markets = ["BTC", "ETH", "HYPE", "SOL", "xyz:SP500", "xyz:XYZ100", "xyz:GOLD", "xyz:SILVER", "xyz:COPPER", "xyz:BRENTOIL", "xyz:CL", "xyz:NATGAS", "xyz:NVDA", "xyz:AAPL", "xyz:TSLA", "xyz:GOOGL", "xyz:META", "xyz:MSFT", "xyz:AMZN", "xyz:AMD", "xyz:MU", "xyz:COIN", "xyz:EUR", "xyz:SOXL", "xyz:PLTR", "xyz:ORCL", "xyz:NFLX", "xyz:COST", "xyz:LLY", "xyz:TSM", "xyz:INTC", "xyz:ARM", "xyz:ASML", "xyz:HOOD", "xyz:MSTR", "xyz:BABA", "xyz:GME", "xyz:PLATINUM", "xyz:PALLADIUM", "xyz:URNM", "xyz:XLE", "xyz:TLT", "xyz:JPY", "xyz:KR200"]
 
+# Keep the mirror's on-chain spot prints in step with the sim's own oracle.
+# A long-running sim walks its oracle; a print seeded once at deploy drifts out
+# of the consuming indexer's two ingestion bounds (a round may not diverge
+# >1500 bps from the venue oracle nor move >2000 bps from the previous served
+# answer) and the asset becomes unpricable. Measured 2026-11-21: the x-* set
+# sat 4–12 % high after a day and xSOXL 29 % — refused every round.
+# Each `feed` is the mirror `MirrorPriceFeed` aggregator for that coin; the
+# loop writes through the engine's journaled `/admin/feed` control, so an
+# operator's scenario move is followed, not fought. `max_step_bps` must stay
+# under the consumer's 2000 bps bound with margin.
+# [services.venue_sim.print_sync]
+# interval_ms = 15000
+# deadband_bps = 100
+# max_step_bps = 1500
+# feeds = [
+#   { coin = "xyz:SOXL", feed = "0x00000000000000000000000000000000000e2114" },
+# ]
+
 [[watchlist]]
 address = "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
 note = "USDC (999): the CCTP burn/mint token and the at-pin probe's contract"

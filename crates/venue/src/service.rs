@@ -38,6 +38,7 @@ pub async fn sim_entry(args: Vec<String>) -> crate::Result<()> {
         Duration::from_secs(sim_section.heartbeat_interval_secs),
     );
     spawn_bridge(&sim_section, &sim, &feed, &bridge_metrics)?;
+    crate::print_sync::spawn(&sim_section, &feed, state.http.clone());
     spawn_tick(
         &sim,
         &feed,

@@ -39,9 +39,10 @@ use serde::{Deserialize, Serialize};
 /// Slot 2 (decimals) and 4 are set at install time and never move here.
 const SLOT_ANSWER: u64 = 0;
 const SLOT_TIMESTAMP: u64 = 1;
+const SLOT_DECIMALS: u64 = 2;
 const SLOT_ROUND: u64 = 5;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FeedMode {
     Crash,
@@ -49,7 +50,7 @@ pub enum FeedMode {
     Set,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedControlRequest {
     pub feed: Address,
@@ -102,6 +103,22 @@ fn decode_u64(word: &[u8; 32]) -> Option<u64> {
 /// is not a MirrorPriceFeed layout).
 async fn read_answer(rpc: &Rpc, feed: Address) -> Result<Option<i128>> {
     Ok(read_u64(rpc, feed, SLOT_ANSWER).await?.map(|v| v as i128))
+}
+
+/// The feed's current answer, read through the same slots the control writes.
+///
+/// Exposed for the venue profile's **print sync**: a long-running sim walks its
+/// own oracle, and the mirror's on-chain print must follow it inside the
+/// indexer's two ingestion bounds (see `[services.venue_sim.print_sync]`). The
+/// caller decides the step; this is only the read.
+pub async fn read_feed_answer(rpc: &Rpc, feed: Address) -> Result<Option<i128>> {
+    read_answer(rpc, feed).await
+}
+
+/// The feed's own `decimals` (slot 2, the mirror runtime's layout). `None` when
+/// slot 2 is not a plain integer — a foreign layout the caller must not guess at.
+pub async fn read_feed_decimals(rpc: &Rpc, feed: Address) -> Result<Option<u8>> {
+    Ok(read_u64(rpc, feed, SLOT_DECIMALS).await?.and_then(|v| u8::try_from(v).ok()))
 }
 
 fn refused(feed: Address, error: impl Into<String>) -> FeedControlOutcome {
