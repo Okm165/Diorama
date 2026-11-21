@@ -212,7 +212,28 @@ top-ups (the report's "empty revert" integrator complaint).
 
 ## Ideas, ordered by value
 
-1. **Maker (resting spot) lane on the fast books.** Our taker lane settles
+0. **Upstream ports reviewed (fork tip `d58afdc`, content-diffed 2026-11-21):**
+   no behavioral gaps left in the venue core. Verified ours is a superset
+   where it matters — multi-dex `sendAsset` (upstream defers multi-dex and
+   *refuses* it; ours routes it, measured live), per-dex `meta` (upstream
+   caches one margin meta; ours relays every advertised dex, `xyz` 147/147
+   vs real), builder-dex asset ids on every asset action (order, leverage,
+   isolated margin, cancel, cancelByCloid, with the venue's
+   `unknown asset index N` refusal), precompile projection (floor/refuse
+   units, mock presence read at the pass's head, `balance < stipend` funding).
+   Ported this pass: **a refusal speaks on its transition** (the bridge's
+   run loop and the callTracer fault warn once per state, repeats at debug,
+   recovery speaks once — the measured 1/s-for-hours WARN class).
+1. **Trading-enablement matrix as a standing check.** For every dex the
+   venue advertises, pick its deepest coin and assert the whole loop: book
+   serves (or is empty *exactly as the real venue's*), an IOC round trip
+   fills from its own book, cancel/modify/leverage by asset id, and the
+   account read carries the position. Proven live on three dex classes
+   2026-11-21 (ETH 4.80 bps, `para:SMH` 5.44, `xyz:TSLA` 1.04); the matrix
+   makes "all markets tradeable" a gate, not an anecdote. Empty and unknown
+   coins already match real shape-for-shape (`flx:TSLA` empty both sides;
+   `km:SOL` → 500 `null` both sides).
+2. **Maker (resting spot) lane on the fast books.** Our taker lane settles
    tokens; a resting spot order needs the hold lifecycle (holds exist in the
    sim). Maker fills then need the same received-token fee rule and the
    maker/taker 0.040/0.070 % split.

@@ -108,6 +108,9 @@ pub struct Bridge {
     /// The precompile answers last written into V's mocks (the diff base of
     /// [`Self::mirror_precompiles`]); empty = write everything.
     mirrored: std::sync::Mutex<std::collections::HashMap<(Address, U256), precompiles::Answer>>,
+    /// Whether a callTracer fault is already spoken (the warn rides its
+    /// transition; a per-block fault must not warn once a block for hours).
+    trace_fault_spoken: std::sync::atomic::AtomicBool,
     pub metrics: Arc<BridgeMetrics>,
 }
 
@@ -132,20 +135,42 @@ impl Bridge {
             observed_head: std::sync::atomic::AtomicU64::new(0),
             cursor: std::sync::atomic::AtomicU64::new(cursor),
             mirrored: std::sync::Mutex::default(),
+            trace_fault_spoken: std::sync::atomic::AtomicBool::new(false),
             metrics,
         })
     }
 
     /// Run forever: one scan pass per configured interval.
+    ///
+    /// A persistent failure speaks on its **transition** and its repeats are
+    /// debug: a state that never changes must not warn once a poll for hours
+    /// while the facts on the ground stand still (the measured 2026-11-17
+    /// projection-writer outage: one identical WARN per pass for hours).
+    /// Recovery speaks once too.
     pub async fn run(self) {
+        let mut spoken: Option<String> = None;
         loop {
-            if let Err(e) = self.pass().await {
-                // Warm-up is a readiness state, not a fault: the feed has no
-                // meta yet, the pass retries and nothing is lost.
-                if matches!(e, Error::Warming) {
-                    tracing::debug!(error = %e, "venue bridge is waiting for the market plane");
-                } else {
-                    tracing::warn!(error = %e, "venue bridge pass failed; will retry");
+            match self.pass().await {
+                Ok(()) => {
+                    if spoken.take().is_some() {
+                        tracing::info!("venue bridge recovered");
+                    }
+                }
+                Err(e) => {
+                    // Warm-up is a readiness state, not a fault: the feed has
+                    // no meta yet, the pass retries and nothing is lost.
+                    let warming = matches!(e, Error::Warming);
+                    let text = e.to_string();
+                    if spoken.as_deref() != Some(text.as_str()) {
+                        if warming {
+                            tracing::debug!(error = %e, "venue bridge is waiting for the market plane");
+                        } else {
+                            tracing::warn!(error = %e, "venue bridge pass failed; will retry");
+                        }
+                        spoken = Some(text);
+                    } else {
+                        tracing::debug!(error = %e, "venue bridge pass still failing (unchanged)");
+                    }
                 }
             }
             tokio::time::sleep(self.poll).await;
@@ -406,14 +431,21 @@ impl Bridge {
     /// for this block.
     async fn block_traces(&self, n: u64) -> Option<Vec<TraceResult>> {
         match self.target_rpc.trace_block_calls(n).await {
-            Ok(traces) => Some(traces),
+            Ok(traces) => {
+                if self.trace_fault_spoken.swap(false, Ordering::Relaxed) {
+                    tracing::info!(block = n, "callTracer recovered");
+                }
+                Some(traces)
+            }
             Err(e) => {
                 self.metrics.inc_trace_faults();
-                tracing::warn!(
-                    block = n,
-                    error = %e,
-                    "callTracer unavailable; deposits are credited to spot and contract-internal CoreWriter calls are not seen this block"
-                );
+                if !self.trace_fault_spoken.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        block = n,
+                        error = %e,
+                        "callTracer unavailable; deposits are credited to spot and contract-internal CoreWriter calls are not seen this block"
+                    );
+                }
                 None
             }
         }
