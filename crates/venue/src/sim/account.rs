@@ -540,6 +540,91 @@ pub(crate) fn settle_spot_fill(
     })
 }
 
+/// Reserve `amount` of the token's spot balance for a resting order: the
+/// free balance (total − hold) must cover it; the venue's spot `hold` is a
+/// reservation on the total, not a second balance.
+pub(crate) fn spot_reserve(account: &mut Account, token: u32, amount: Decimal) -> Result<()> {
+    if amount <= Decimal::ZERO {
+        return Ok(());
+    }
+    let entry = spot_entry(account, crate::sim::TokenRef { index: token, coin: "" });
+    let free = sub(entry.total, entry.hold, "spot free")?;
+    if free < amount {
+        return Err(crate::error::Error::bad_request(
+            "Insufficient spot balance to rest the order.",
+        ));
+    }
+    entry.hold = add(entry.hold, amount, "spot hold")?;
+    Ok(())
+}
+
+/// Settle one spot **maker** fill against its own hold: the maker's side
+/// decides the token flow (a buy maker spends the reserved quote and receives
+/// the base net of the maker fee; a sell the reverse), and the hold releases
+/// by the filled amount. The fee is charged in the token **received** — the
+/// venue's spot rule — so the buy's base arrives net of `fee / px`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one money rule in one place: both directions, their hold release and cost basis"
+)]
+pub(crate) fn settle_spot_maker(
+    account: &mut Account,
+    side: crate::sim::order::Side,
+    hold: Option<crate::sim::order::SpotHold>,
+    px: Decimal,
+    notional: Decimal,
+    quantity: Decimal,
+    fee: Decimal,
+    base_token: u32,
+    quote_token: u32,
+) -> Result<FillEffect> {
+    macro_rules! entry_of {
+        ($account:expr, $token:expr) => {
+            spot_entry($account, crate::sim::TokenRef { index: $token, coin: "" })
+        };
+    }
+    match side {
+        crate::sim::order::Side::Buy => {
+            if let Some(h) = hold {
+                let entry = entry_of!(account, h.token);
+                entry.hold = sub(entry.hold, notional.min(entry.hold), "spot hold release")?;
+            }
+            let quote_entry = entry_of!(account, quote_token);
+            quote_entry.total = sub(quote_entry.total, notional, "spot maker quote debit")?;
+            let received = sub(quantity, div(fee, px, "spot maker fee in base")?, "spot maker fee")?;
+            let base_entry = entry_of!(account, base_token);
+            base_entry.total = add(base_entry.total, received, "spot maker base credit")?;
+            base_entry.entry_ntl = add(base_entry.entry_ntl, notional, "spot maker cost basis")?;
+        }
+        crate::sim::order::Side::Sell => {
+            if let Some(h) = hold {
+                let entry = entry_of!(account, h.token);
+                entry.hold = sub(entry.hold, quantity.min(entry.hold), "spot hold release")?;
+            }
+            let base_entry = entry_of!(account, base_token);
+            let old = base_entry.total;
+            let new = sub(old, quantity, "spot maker base debit")?;
+            base_entry.entry_ntl = if old > Decimal::ZERO {
+                mul(base_entry.entry_ntl, ratio_or(new, old, Decimal::ZERO), "spot maker basis")?
+            } else {
+                Decimal::ZERO
+            };
+            base_entry.total = new;
+            let proceeds = sub(notional, fee, "spot maker proceeds")?;
+            let quote_entry = entry_of!(account, quote_token);
+            quote_entry.total = add(quote_entry.total, proceeds, "spot maker quote credit")?;
+        }
+    }
+    Ok(FillEffect {
+        start_position: Decimal::ZERO,
+        closed_pnl: Decimal::ZERO,
+        dir: match side {
+            crate::sim::order::Side::Buy => "Buy",
+            crate::sim::order::Side::Sell => "Sell",
+        },
+    })
+}
+
 /// The computed account figures, one pass over the positions.
 pub(crate) struct AccountView {
     pub margin_summary: MarginSummary,

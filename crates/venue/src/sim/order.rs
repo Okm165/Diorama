@@ -522,6 +522,17 @@ struct Placer {
     builder: Option<BuilderFee>,
 }
 
+/// A resting **spot** order's balance reservation: the `hold` the venue
+/// serves in `spotClearinghouseState` while the order rests (a buy reserves
+/// quote at its limit, a sell reserves the base it sells). Carried on the
+/// order so a cancel can release it without re-resolving the pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SpotHold {
+    pub token: u32,
+    pub amount: Decimal,
+}
+
 /// A resting order (the devnet's own book): the venue's openOrders row plus
 /// the account that placed it. Persisted with the scenario — a restart keeps
 /// the book.
@@ -560,6 +571,10 @@ pub(crate) struct RestingOrder {
     /// fill on the book or the tick, a fired trigger) charges it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builder: Option<BuilderFee>,
+    /// The spot balance reservation (`None` on a perp order). Older state
+    /// files read back with none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spot_hold: Option<SpotHold>,
 }
 
 /// The venue's terminal order states (orderStatus): what happened to an order
@@ -690,6 +705,12 @@ impl Sim {
         Decimal::new(7, 4)
     }
 
+    /// Spot maker fee: the venue's base tier (the maker side of the same
+    /// schedule), charged in the received token.
+    fn spot_maker_fee() -> Decimal {
+        Decimal::new(4, 4)
+    }
+
     /// `place` for a **spot pair**: the same served book is the executable
     /// depth, but the fill moves tokens in the spot ledger instead of opening
     /// a position. Only IOC is served — a resting spot order needs the hold
@@ -716,9 +737,9 @@ impl Sim {
                 "Reduce-only is a perp order type; a spot sell spends the balance it owns.",
             ));
         }
-        if req.tif != Tif::Ioc {
+        if req.tif == Tif::Alo {
             return Err(Error::bad_request(
-                "Resting spot orders are not served on this mirror yet — send an IOC order.",
+                "Post-only is not served for spot on this mirror.",
             ));
         }
         if req.size <= Decimal::ZERO {
@@ -742,12 +763,29 @@ impl Sim {
             )));
         }
         let book = feed.book(&req.coin, crate::now_ms()).ok_or(Error::Warming)?;
-        // The taker walks live depth only: spot resting orders do not exist on
-        // this lane yet, so there is no maker side to merge.
-        let (legs, filled, avg_px) = walk(&book, req, &[])?;
+        // The venue's self-trade rule first (it releases holds via cancel):
+        // the taker's own crossing resting orders are expired, not matched.
+        self.expire_self_crossing(placer.address, feed, req)?;
+        let resting: Vec<RestingOrder> = self
+            .resting_orders(None)?
+            .into_iter()
+            .filter(|r| r.coin == req.coin)
+            .collect();
+        let (legs, filled, avg_px) = walk(&book, req, &resting)?;
         let notional = super::account::mul(filled, avg_px, super::account::FILL_NOTIONAL)?;
-        // The venue's minimum order value is $10 (both planes).
-        if notional < Decimal::from(10) {
+        // The venue's minimum order value is $10 (both planes), on the
+        // **order**: a non-crossing Gtc takes nothing yet still rests, so its
+        // value is its own size at its limit.
+        let order_value = if filled > Decimal::ZERO {
+            notional
+        } else {
+            super::account::mul(
+                req.size,
+                req.limit_px.unwrap_or(Decimal::ONE),
+                "spot order value",
+            )?
+        };
+        if order_value < Decimal::from(10) {
             return Err(Error::bad_request(
                 "Order value is too small: the venue's minimum is 10 USD.",
             ));
@@ -762,17 +800,28 @@ impl Sim {
             index: quote.index,
             coin: &quote.name,
         };
-        let effect = self.with_account_now(placer.address, feed, |account| {
-            super::account::settle_spot_fill(
-                account,
-                base_ref,
-                quote_ref,
-                req.side(),
-                filled,
-                avg_px,
-                fee,
-            )
-        })?;
+        let effect = if filled > Decimal::ZERO {
+            self.with_account_now(placer.address, feed, |account| {
+                super::account::settle_spot_fill(
+                    account,
+                    base_ref,
+                    quote_ref,
+                    req.side(),
+                    filled,
+                    avg_px,
+                    fee,
+                )
+            })?
+        } else {
+            super::ledger::FillEffect {
+                start_position: Decimal::ZERO,
+                closed_pnl: Decimal::ZERO,
+                dir: "Resting",
+            }
+        };
+        // The resting spot makers this take consumed: their token legs settle
+        // here (holds released pro rata), never in the perp path.
+        let maker_sz = self.settle_spot_makers(feed, req, &legs)?;
         let oid = self.next_oid()?;
         let facts = super::account::FillFacts {
             coin: req.coin.clone(),
@@ -785,50 +834,186 @@ impl Sim {
             fee,
             builder,
         };
-        self.record_fill(
-            placer.address,
-            &FillRecord {
-                liquidation: None,
-                facts: &facts,
-                effect,
-                oid,
-                cloid: req.cloid,
-                liquidity: Liquidity::Taker,
-                fee_token: if req.side() == Side::Buy {
-                    &base.name
-                } else {
-                    &quote.name
+        if filled > Decimal::ZERO {
+            self.record_fill(
+                placer.address,
+                &FillRecord {
+                    liquidation: None,
+                    facts: &facts,
+                    effect,
+                    oid,
+                    cloid: req.cloid,
+                    liquidity: Liquidity::Taker,
+                    fee_token: if req.side() == Side::Buy {
+                        &base.name
+                    } else {
+                        &quote.name
+                    },
                 },
-            },
-        )?;
-        for leg in &legs {
-            if let Candidate::Live(c) = leg {
-                feed.consume(c.clone())?;
+            )?;
+            for leg in &legs {
+                if let Candidate::Live(c) = leg {
+                    feed.consume(c.clone())?;
+                }
             }
+            self.credit_builder(builder, dex_of_coin(&req.coin))?;
+            self.metrics
+                .orders_filled_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .fees_charged_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        self.credit_builder(builder, dex_of_coin(&req.coin))?;
-        self.metrics
-            .orders_filled_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.metrics
-            .fees_charged_total
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.mark_dirty()?;
-        Ok(Placed {
-            fill: Some(Fill {
-                total_sz: filled,
-                avg_px,
-                consumed: legs
-                    .into_iter()
-                    .filter_map(|leg| match leg {
-                        Candidate::Live(c) => Some(c),
-                        Candidate::Maker { .. } => None,
-                    })
-                    .collect(),
-                oid,
-            }),
-            resting: None,
-        })
+        let fill = (filled > Decimal::ZERO).then(|| Fill {
+            total_sz: filled,
+            avg_px,
+            consumed: legs
+                .iter()
+                .filter_map(|leg| match leg {
+                    Candidate::Live(c) => Some(c.clone()),
+                    Candidate::Maker { .. } => None,
+                })
+                .collect(),
+            oid,
+        });
+        // The remainder rests with its balance held: a buy reserves quote at
+        // its limit, a sell reserves the base it sells (the venue's spot
+        // `hold`, served in spotClearinghouseState).
+        let remainder = req.size - filled - maker_sz;
+        let resting = self.rest_spot_remainder(placer, req, remainder, (base.index, quote.index))?;
+        Ok(Placed { fill, resting })
+    }
+
+    /// The maker legs a spot take consumed: each resting order's token legs
+    /// settle against its own hold (a buy maker spends its reserved quote and
+    /// receives the base net of the maker fee; a sell the reverse), its size
+    /// shrinks, and a fully filled order leaves the book. Returns the size
+    /// the resting side absorbed (it is not the taker's fill).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one maker settlement path: shrink the order, settle the tokens, record the fill — read top to bottom"
+    )]
+    fn settle_spot_makers(
+        &self,
+        feed: &MarketFeed,
+        req: &Order,
+        legs: &[Candidate],
+    ) -> Result<Decimal> {
+        let pair = feed.spot_pair(&req.coin).ok_or(Error::Warming)?;
+        let base = feed.spot_token(pair.tokens[0]).ok_or(Error::Warming)?;
+        let quote = feed.spot_token(pair.tokens[1]).ok_or(Error::Warming)?;
+        let mut absorbed = Decimal::ZERO;
+        for leg in legs {
+            let Candidate::Maker { oid, maker, px, sz } = leg else {
+                continue;
+            };
+            absorbed += sz;
+            let notional = super::account::mul(*sz, *px, "spot maker notional")?;
+            // The order's own side decides the token flow; its traits are the
+            // resting order's, not the taker's.
+            let (side, hold, reduce, cloid, builder) = self.with_state(|st| {
+                let r = st.resting.get_mut(oid).filter(|r| r.account == *maker).ok_or_else(|| {
+                    Error::bad_request("the maker's resting order vanished mid-match")
+                })?;
+                r.sz -= sz;
+                r.filled_sz += sz;
+                r.filled_ntl += notional;
+                let out = (r.side, r.spot_hold, r.reduce, r.cloid, r.builder);
+                if r.sz <= Decimal::ZERO {
+                    let done = st.resting.remove(oid).expect("just read");
+                    terminalize(
+                        &mut st.terminal,
+                        done,
+                        TerminalStatus::Filled,
+                        notional,
+                        self.terminal_orders,
+                    );
+                }
+                Ok(out)
+            })?;
+            let fee = super::account::mul(notional, Self::spot_maker_fee(), "spot maker fee")?;
+            let builder = builder.map(|b| b.charge(notional)).transpose()?;
+            let effect = self.with_account_now(*maker, feed, |account| {
+                super::account::settle_spot_maker(
+                    account,
+                    side,
+                    hold,
+                    *px,
+                    notional,
+                    *sz,
+                    fee,
+                    base.index,
+                    quote.index,
+                )
+            })?;
+            let facts = super::account::FillFacts {
+                coin: req.coin.clone(),
+                side,
+                size: *sz,
+                px: *px,
+                leverage: 1,
+                mode: crate::wire::LeverageType::Cross,
+                reduce,
+                fee,
+                builder,
+            };
+            self.record_fill(
+                *maker,
+                &FillRecord {
+                    liquidation: None,
+                    facts: &facts,
+                    effect,
+                    oid: *oid,
+                    cloid,
+                    liquidity: Liquidity::Maker,
+                    fee_token: if side == Side::Buy { &base.name } else { &quote.name },
+                },
+            )?;
+            self.credit_builder(builder, dex_of_coin(&req.coin))?;
+            self.metrics
+                .orders_filled_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.metrics
+                .fees_charged_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(absorbed)
+    }
+
+    /// Reserve the remainder's balance and rest it (a Gtc spot order).
+    fn rest_spot_remainder(
+        &self,
+        placer: Placer,
+        req: &Order,
+        remainder: Decimal,
+        tokens: (u32, u32),
+    ) -> Result<Option<u64>> {
+        if req.tif != Tif::Gtc || remainder <= Decimal::ZERO {
+            return Ok(None);
+        }
+        let Some(px) = req.limit_px else {
+            return Ok(None); // a market order cannot rest
+        };
+        let reserved = match req.side() {
+            Side::Buy => super::account::mul(remainder, px, "spot hold notional")?,
+            Side::Sell => remainder,
+        };
+        let token = match req.side() {
+            Side::Buy => tokens.1,
+            Side::Sell => tokens.0,
+        };
+        self.with_account(placer.address, |account| {
+            super::account::spot_reserve(account, token, reserved)
+        })?;
+        let oid = self.rest_order(placer, req, (px, remainder))?;
+        self.with_state(|st| {
+            if let Some(r) = st.resting.get_mut(&oid) {
+                r.spot_hold = Some(SpotHold { token, amount: reserved });
+            }
+            Ok(())
+        })?;
+        Ok(Some(oid))
     }
 
     /// The pre-place refusals (the open-interest cap and the margin-tier
@@ -1493,6 +1678,7 @@ impl Sim {
             filled_sz: Decimal::ZERO,
             filled_ntl: Decimal::ZERO,
             builder: placer.builder,
+            spot_hold: None,
         };
         self.mutate_state(|st| {
             st.resting.insert(oid, order);
@@ -1552,6 +1738,18 @@ impl Sim {
                 let Some(done) = st.resting.remove(&oid) else {
                     return Ok(());
                 };
+                // A spot order's reservation releases with the order: the
+                // hold is the account's, keyed by the token the order stored.
+                if let Some(h) = done.spot_hold {
+                    if let Some(account) = st.accounts.get_mut(&done.account) {
+                        if let Some(entry) = account.spot.get_mut(&h.token) {
+                            entry.hold -= h.amount;
+                            if entry.hold < Decimal::ZERO {
+                                entry.hold = Decimal::ZERO;
+                            }
+                        }
+                    }
+                }
                 terminalize(
                     &mut st.terminal,
                     done,
@@ -2225,16 +2423,77 @@ mod tests {
         assert!(err.to_string().contains("Insufficient PURR"), "{err}");
     }
 
-    /// Resting spot orders are refused by name until the hold/maker lane
-    /// lands; a silently dropped remainder would lose the client's size.
+    /// A non-crossing spot Gtc rests with its balance **held**: a buy
+    /// reserves quote at its limit (the venue's spot `hold`), and a cancel
+    /// releases it exactly.
     #[test]
-    fn a_resting_spot_order_is_refused_by_name() {
+    fn a_resting_spot_buy_holds_its_quote_and_cancel_releases_it() {
         let feed = spot_feed();
         let (sim, a) = spot_account(&feed, "1000");
-        let mut req = spot_order(Side::Buy, "1000", Some("0.08"));
+        let mut req = spot_order(Side::Buy, "1000", Some("0.07"));
         req.tif = Tif::Gtc;
-        let err = sim.place(&feed, a, &req).expect_err("Gtc is not served");
-        assert!(err.to_string().contains("Resting spot orders"), "{err}");
+        let placed = sim.place(&feed, a, &req).expect("below the bid, it rests");
+        let oid = placed.resting.expect("the remainder rests");
+        let account = sim.account(a).unwrap().expect("the account");
+        let usdc = account.spot.get(&0).unwrap();
+        assert_eq!(usdc.total, Decimal::from(1000), "a hold reserves, it does not debit");
+        assert_eq!(usdc.hold, Decimal::from(70), "1000 PURR at 0.070 reserves 70 USDC");
+        sim.cancel(a, "PURR/USDC", oid, CancelSpeed::Normal).expect("cancel");
+        let account = sim.account(a).unwrap().expect("the account");
+        let usdc = account.spot.get(&0).unwrap();
+        assert_eq!(usdc.hold, Decimal::ZERO, "the cancel releases the hold");
+    }
+
+    /// A resting spot sell is filled by another account's crossing IOC: the
+    /// maker's hold converts into the quote proceeds net of the **maker** fee
+    /// (0.040 %), its ledger carries dir Sell / feeToken USDC, and the taker
+    /// receives the base net of the taker fee charged in the received token.
+    #[test]
+    fn a_resting_spot_sell_fills_as_the_maker_of_a_crossing_ioc() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        // A gets base to sell: buy 999.3 PURR first (IOC at the ask).
+        sim.place(&feed, a, &spot_order(Side::Buy, "1000", Some("0.08")))
+            .expect("the ask has size");
+        // Rests inside the spread (below the 0.075 ask, above the 0.074 bid):
+        // a worse price would never be hit.
+        let mut sell = spot_order(Side::Sell, "500", Some("0.0745"));
+        sell.tif = Tif::Gtc;
+        let placed = sim.place(&feed, a, &sell).expect("inside the spread, it rests");
+        let oid = placed.resting.expect("rests");
+        let account = sim.account(a).unwrap().expect("the account");
+        assert_eq!(account.spot.get(&1).unwrap().hold, Decimal::from(500));
+
+        // B crosses it at the maker's price.
+        let b = Address::repeat_byte(0x5c);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: b,
+                class: DealClass::Spot,
+                coin: None,
+                dex: None,
+                amount: "1000".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        let placed = sim
+            .place(&feed, b, &spot_order(Side::Buy, "500", Some("0.0745")))
+            .expect("crosses the resting sell");
+        assert_eq!(placed.fill.expect("filled").total_sz, Decimal::from(500));
+
+        // The maker: quote credited net of 0.040 % (37.25 × 0.9996 = 37.2351),
+        // the base hold fully released into the fill, the order gone.
+        let account = sim.account(a).unwrap().expect("the account");
+        let purr = account.spot.get(&1).unwrap();
+        let usdc = account.spot.get(&0).unwrap();
+        assert_eq!(purr.hold, Decimal::ZERO);
+        assert_eq!(usdc.total, Decimal::from(925) + Decimal::new(372_351, 4));
+        assert_eq!(purr.total, Decimal::new(9993, 1) - Decimal::from(500));
+        let fill = account.fills.back().unwrap();
+        assert_eq!(fill.dir, "Sell");
+        assert_eq!(fill.fee_token, "USDC");
+        assert!(sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid));
     }
 
     /// The venue's $10 minimum applies to spot too.
@@ -2318,6 +2577,7 @@ mod tests {
             filled_sz: Decimal::ZERO,
             filled_ntl: Decimal::ZERO,
             builder: None,
+            spot_hold: None,
         };
         assert!(!sim.remargin_ok(&feed, &resting).unwrap());
     }
@@ -3776,6 +4036,7 @@ mod tests {
             filled_sz: Decimal::ZERO,
             filled_ntl: Decimal::ZERO,
             builder: None,
+            spot_hold: None,
         };
         // A resting order without a builder omits the key; one written by an
         // older build (no key) reads back with none.
