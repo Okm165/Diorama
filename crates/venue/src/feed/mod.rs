@@ -827,6 +827,24 @@ impl MarketFeed {
         name.is_empty() || self.dex_meta(name).is_some()
     }
 
+    /// Whether `perpDexs` advertises this dex, whether or not its meta has
+    /// landed. A **listed** dex is a dex the venue knows: an account read for it
+    /// is an empty book, never the unknown-dex 500. The two predicates differ
+    /// because the mirror relays the venue's full dex list while carrying marks
+    /// for only the configured ones; a unified account read enumerates every
+    /// advertised dex to prove it saw no unseen book, so the 500 for an unserved
+    /// one refused the whole read (measured 2026-11-21: all six venue-account
+    /// feeds, the HF scan's venue terms behind them, and the gateway's health).
+    pub(crate) fn advertises_dex(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return true;
+        }
+        self.read()
+            .perp_dexs
+            .as_ref()
+            .is_some_and(|dexs| dexs.iter().flatten().any(|dex| dex.name == name))
+    }
+
     /// Every dex's meta in `perpDexs` order (what `allPerpMetas` serves),
     /// followed by any dex meta that landed without a `perpDexs` slot.
     pub(crate) fn metas(&self) -> Vec<Meta> {

@@ -168,6 +168,23 @@ fn unknown_dex() -> Response {
         .into_response()
 }
 
+/// The dex scope for an **account-scoped** read.
+///
+/// [`dex_scope`] answers "may this request be served from the sim's book", which
+/// is the right question for market data but the wrong one for an account. A
+/// dex `perpDexs` **advertises** but the sim carries no book for is a dex the
+/// venue knows: the account holds no positions there and the real venue answers
+/// an empty state. Answering [`unknown_dex`] instead refused every unified
+/// account read — the client enumerates every advertised dex to prove it saw no
+/// unseen book — and with it the venue-term projection behind the HF scan
+/// (measured 2026-11-21: six account feeds refused, four Active books blind, the
+/// gateway degraded). The empty scope produces exactly that empty state: no
+/// position matches, no resting order matches.
+fn account_scope(feed: &MarketFeed, dex: &str, allow_all: bool) -> Option<DexScope> {
+    dex_scope(feed, dex, allow_all)
+        .or_else(|| feed.advertises_dex(dex).then(|| DexScope::One(dex.to_string())))
+}
+
 /// A plain 200 `null` (the real `allMids` answer for an unknown dex).
 fn null_ok() -> Response {
     (
@@ -463,7 +480,7 @@ async fn clearinghouse(
     dex: Option<String>,
 ) -> Result<Response> {
     let name = dex.as_deref().unwrap_or("");
-    let Some(DexScope::One(name)) = dex_scope(&state.feed, name, false) else {
+    let Some(DexScope::One(name)) = account_scope(&state.feed, name, false) else {
         return Ok(unknown_dex());
     };
     match dex_clearinghouse_of(state, user, &name)? {
@@ -599,7 +616,7 @@ async fn open_orders(
     user: Address,
     dex: Option<String>,
 ) -> Result<Response> {
-    let Some(scope) = dex_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
+    let Some(scope) = account_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
         return Ok(unknown_dex());
     };
     simulated(state, &body, user, |_| {
@@ -628,7 +645,7 @@ async fn frontend_open_orders(
     user: Address,
     dex: Option<String>,
 ) -> Result<Response> {
-    let Some(scope) = dex_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
+    let Some(scope) = account_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
         return Ok(unknown_dex());
     };
     simulated(state, &body, user, |_| {
@@ -1453,6 +1470,51 @@ mod tests {
             assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
             assert!(response_json(response).await.is_null());
         }
+    }
+
+    /// A dex `perpDexs` advertises but the sim carries no book for is a
+    /// **known** dex: the account holds nothing there and the real venue
+    /// answers an empty state. It must never answer the unknown-dex 500 — a
+    /// unified account read enumerates every advertised dex, so that 500
+    /// refused the whole read and starved the venue-term projection.
+    #[tokio::test]
+    async fn an_advertised_dex_the_sim_does_not_serve_is_an_empty_account_not_a_500() {
+        let feed = crate::feed::MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        feed.put_meta(crate::sim::meta_of(&[("BTC", 40)]), 1);
+        feed.put_dex_meta("xyz".into(), crate::sim::meta_of(&[("xyz:NVDA", 10)]), 2);
+        feed.put_perp_dexs(vec![None, Some(perp_dex("flx")), Some(perp_dex("xyz"))]);
+        let sim = Arc::new(crate::sim::Sim::memory());
+        let user = Address::repeat_byte(0x11);
+        sim.set_account(
+            user,
+            crate::sim::seed::AccountSeed {
+                user_abstraction: Some(crate::wire::UserAbstraction::UnifiedAccount),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let state = state_with_sim(feed, sim);
+
+        // Listed but unserved: an empty book, not the unknown-dex 500.
+        let response = clearinghouse(&state, Bytes::from_static(br#"{}"#), user, Some("flx".into()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let out = response_json(response).await;
+        assert_eq!(out["marginSummary"]["accountValue"], "0.0");
+        assert!(out["assetPositions"].as_array().unwrap().is_empty());
+
+        // A name the venue does not list is still the venue's 500 `null`.
+        let response = clearinghouse(
+            &state,
+            Bytes::from_static(br#"{}"#),
+            user,
+            Some("not-a-dex".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response_json(response).await.is_null());
     }
 
     /// `perpDexs` serves the upstream list verbatim: leading `null`, then the
