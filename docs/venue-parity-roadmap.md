@@ -71,6 +71,13 @@ live position) instead of being refused on every tick. Regression tests:
 `a_reduce_only_order_with_nothing_to_reduce_is_refused`,
 `a_resting_reduce_only_order_is_canceled_when_its_position_is_gone`.
 
+The fix was rolled into the live mirror as `relay-aaa662d` and the same
+13-probe sweep then passed 13/13 on the live venue, including the
+`Reduce only order would increase position.` refusal on a flat account.
+One harness detail: `/control/clear_account` does not reset positions, so the
+sweep now flattens any residue first — a leftover 0.04 ETH long otherwise
+makes the reduce-only and stop-loss probes look wrong.
+
 ## Ideas, ordered by value
 
 1. **Maker (resting spot) lane on the fast books.** Our taker lane settles
