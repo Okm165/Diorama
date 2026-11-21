@@ -235,7 +235,8 @@ check-pins: ## Verify every image reference is pinned by tag+digest and present 
 	    localhost/*) \
 	      printf "  %-62s local build, tag pinned\n" "$$ref" ;; \
 	    *@sha256:*) \
-	      if $(CTR) images ls -q 2>/dev/null | grep -qF "$${ref%%@*}@$${ref##*@}"; then \
+	      if $(CTR) images ls -q 2>/dev/null | grep -qF "$${ref%%@*}@$${ref##*@}" \
+	         || $(CTR) images ls -q 2>/dev/null | grep -qF "$${ref##*@}"; then \
 	        printf "  %-62s pinned + present locally\n" "$${ref%%@*}"; \
 	      else \
 	        printf "  %-62s PINNED BUT MISSING locally\n" "$${ref%%@*}"; fail=1; \
