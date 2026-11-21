@@ -382,25 +382,44 @@ impl Poller {
         }
     }
 
-    /// One `metaAndAssetCtxs` per configured perp dex the default meta does
-    /// not cover (the HIP-3 `xyz:*` markets), absorbed into the account-plane
-    /// view. The default dex's own markets are already loaded; a dex whose
-    /// every configured market resolves in the default meta is skipped.
+    /// One `metaAndAssetCtxs` per perp dex: the configured HIP-3 dexes (the
+    /// `xyz:*` markets, refreshed every poll) plus every other dex the
+    /// relayed `perpDexs` advertises, loaded once when its meta is missing.
+    /// The venue serves and trades the whole advertised dex list; a coin of
+    /// an unconfigured dex must resolve as listed (its books then fetch on
+    /// demand), never as the unknown-coin shape. Cold-only for the
+    /// unconfigured dexes: their metadata is static enough that a boot load
+    /// is honest, and nine extra heavy polls would starve the book lane.
     async fn dex_metas(&self, core: &crate::wire::Meta) {
-        for dex in configured_dexes(&self.feed.markets) {
-            let mut covered = true;
-            for coin in self
-                .feed
-                .markets
-                .iter()
-                .filter(|coin| dex_of(coin).is_some_and(|d| d == dex))
-            {
-                if core.asset(coin).is_none() {
-                    covered = false;
-                    break;
-                }
+        let mut targets: Vec<(String, bool)> = configured_dexes(&self.feed.markets)
+            .into_iter()
+            .map(|dex| (dex, true))
+            .collect();
+        for name in self.feed.advertised_dex_names() {
+            if !targets.iter().any(|(dex, _)| *dex == name) {
+                targets.push((name, false));
             }
-            if covered {
+        }
+        for (dex, configured) in targets {
+            if configured {
+                // A configured dex whose every configured market resolves in
+                // the default meta needs no call (the names are unambiguous).
+                let mut covered = true;
+                for coin in self
+                    .feed
+                    .markets
+                    .iter()
+                    .filter(|coin| dex_of(coin).is_some_and(|d| d == dex))
+                {
+                    if core.asset(coin).is_none() {
+                        covered = false;
+                        break;
+                    }
+                }
+                if covered {
+                    continue;
+                }
+            } else if self.feed.dex_meta(&dex).is_some() {
                 continue;
             }
             if !self.gated(crate::feed::budget::weight::HEAVY) {

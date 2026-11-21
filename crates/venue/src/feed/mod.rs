@@ -1062,6 +1062,27 @@ impl MarketFeed {
             .is_some_and(|dexs| dexs.iter().flatten().any(|dex| dex.name == name))
     }
 
+    /// Every dex name the relayed `perpDexs` advertises (default dex excluded:
+    /// the empty string). The venue's whole dex list is tradeable surface —
+    /// `perpDexs` is served from upstream verbatim, so every name here must
+    /// resolve to a meta the order path can trade, not only the dexes some
+    /// configured market happens to name (measured 2026-11-21: `hyna:BTC`
+    /// answered the unknown-coin 500 shape while the real venue serves it an
+    /// empty book).
+    pub(crate) fn advertised_dex_names(&self) -> Vec<String> {
+        self.read()
+            .perp_dexs
+            .as_ref()
+            .map(|dexs| {
+                dexs.iter()
+                    .flatten()
+                    .map(|dex| dex.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Every dex's meta in `perpDexs` order (what `allPerpMetas` serves),
     /// followed by any dex meta that landed without a `perpDexs` slot.
     pub(crate) fn metas(&self) -> Vec<Meta> {
@@ -2172,6 +2193,28 @@ mod tests {
         assert_eq!(feed.dex_index("km"), Some(1));
         assert_eq!(feed.dex_index("xyz"), Some(2));
         assert_eq!(feed.dex_index("nope"), None);
+    }
+
+    /// Every advertised dex is a tradeable surface: the poller's cold-load
+    /// list is the relayed registry, not only the configured markets' dexes.
+    /// (Measured 2026-11-21: `hyna:BTC` answered the unknown-coin 500 shape
+    /// while the real venue serves it an empty book — the dex list was served
+    /// but its metas never loaded.)
+    #[test]
+    fn advertised_dex_names_cover_the_whole_registry() {
+        let feed = MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        assert!(feed.advertised_dex_names().is_empty(), "no registry yet");
+        feed.put_perp_dexs(vec![
+            None,
+            Some(perp_dex("xyz")),
+            Some(perp_dex("hyna")),
+            Some(perp_dex("flx")),
+        ]);
+        assert_eq!(
+            feed.advertised_dex_names(),
+            vec!["xyz".to_string(), "hyna".into(), "flx".into()],
+            "every named dex, in `perpDexs` order, default excluded"
+        );
     }
 
     /// The feed serves every dex's universe (the push lanes' per-dex read) and

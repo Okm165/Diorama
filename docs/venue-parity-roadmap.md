@@ -10,6 +10,15 @@ spot" to a **1:1 HL exchange mirror** with honest book simulation.
   contexts; 11 book updates / 10 s on BTC).
 - Spot: read plane + taker lane + relay leases landed; the deployment roll
   enables the configured pairs.
+- Market breadth (2026-11-21): the relayed `perpDexs` registry is served
+  verbatim (10 dexes: xyz, flx, vntl, hyna, km, abcd, cash, para, mkts, io —
+  235 default perps, 519 spot tokens / 8 pairs). The poller now cold-loads a
+  meta for **every** advertised dex, not only the dexes a configured market
+  names: a coin of any advertised dex resolves as listed and its books fetch
+  on demand (before: `hyna:BTC` answered the unknown-coin 500 shape while the
+  real venue serves it an empty-levels book). Configured dexes still refresh
+  every poll; cold-only for the rest so nine extra heavy polls cannot starve
+  the book lane.
 - Downstream WS: leases per subscription, push-on-change (25 ms coalescing),
   socket-level tests.
 
