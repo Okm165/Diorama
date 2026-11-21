@@ -85,6 +85,25 @@ One harness detail: `/control/clear_account` does not reset positions, so the
 sweep now flattens any residue first — a leftover 0.04 ETH long otherwise
 makes the reduce-only and stop-loss probes look wrong.
 
+### CoreDepositWallet route, measured live (2026-11-21)
+
+`deposit(amount, destinationDex)` and `depositFor(recipient, amount,
+destinationDex)` were exercised on the mirror with fresh USDC from the test
+wallet `0xb774…37f`, and every effect was read back from `/info`:
+
+| call | route | observed |
+|---|---|---|
+| `deposit(5, 0)` | default perp dex | perp `accountValue` +5, spot untouched |
+| `deposit(2, u32::MAX)` | spot | `spotClearinghouseState` USDC `total` 2.0, perp untouched |
+| `deposit(1, 8)` | `para` (HIP-3 perp dex) | `clearinghouseState?dex=para` +1, default perp untouched |
+| `depositFor(0x57AC…109, 1, 0)` | named recipient | recipient's perp +1, the funder's balances untouched |
+
+Each deposit credited exactly once: the wallet contract's own `sendAsset`
+(the same deposit, seen from Core) is refused by the pre-existence rule
+because the wallet has no Core account before the block — the route model
+credits the destination directly, and the two never double-credit.
+
+
 ## Representation check against the real venue
 
 The mirror is a pass-through of the real venue's deltas, so "representative"
