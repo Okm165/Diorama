@@ -6,6 +6,7 @@
 //! venue for untouched ones), the control router drives scenarios. The error
 //! mapping keeps the taxonomy's meaning on the wire: control refusals are
 //! 4xx, a warming market plane is 503, a venue fault is 502.
+pub(crate) mod candles;
 pub(crate) mod control;
 pub(crate) mod cors;
 pub(crate) mod exchange;
@@ -43,6 +44,9 @@ pub struct ApiState {
     /// The venue websocket's push cadence (the account automaton's configured
     /// tick, not a second hardcoded second).
     pub push_interval: std::time::Duration,
+    /// The relayed candle streams (the venue serves candles; the sim has no
+    /// trade tape to build them from).
+    pub candles: Arc<candles::CandleHub>,
 }
 
 impl ApiState {
@@ -71,13 +75,16 @@ impl ApiState {
             bridge,
             ws_pool: None,
             push_interval,
+            candles: Arc::new(candles::CandleHub::default()),
         })
     }
 
     /// Attach the market websocket lane's pool so `/metrics` can expose its
-    /// per-endpoint health. One pool per lane, not a second policy.
+    /// per-endpoint health. One pool per lane, not a second policy; the
+    /// candle relays use the same venue endpoints.
     #[must_use]
     pub fn with_ws_pool(mut self, pool: diorama_anvil::EndpointPool) -> Self {
+        self.candles.set_pool(pool.clone());
         self.ws_pool = Some(pool);
         self
     }
@@ -156,10 +163,8 @@ pub(crate) fn sim_gate(state: &ApiState) -> Result<(), SimPoisoned> {
 }
 
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.
-// step-6: the info surface's per-dex reads and the browser-facing CORS layer
-// (`cors::cors`) land with the info port.
-// step-8: the relayed candle hub and the market channels' coalescing window
-// land with the websocket port.
+// step-8: the market channels' coalescing window lands with the websocket
+// port (the candle hub is attached here; its `candle` channel subscribes it).
 pub fn info_router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route(
@@ -177,6 +182,10 @@ pub fn info_router(state: Arc<ApiState>) -> Router {
         .route("/exchange", axum::routing::post(exchange::exchange))
         // The venue's websocket lane ("info + WS" on this port).
         .route("/ws", axum::routing::get(ws::ws))
+        // Browsers call this port straight from the page (a JSON POST, so a
+        // preflight first): the info surface answers any origin, like the
+        // venue it mirrors. The control router stays closed to browsers.
+        .layer(axum::middleware::from_fn(cors::cors))
         .with_state(state)
 }
 

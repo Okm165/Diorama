@@ -14,7 +14,6 @@ use crate::wire::{Meta, PerpDex};
 
 /// The `dex` value that selects every dex at once (`allMids`, `openOrders`,
 /// `frontendOpenOrders` accept it; the other info types answer 500).
-#[allow(dead_code)] // the info handlers adopt it with the multi-dex serving phase
 pub(crate) const ALL_DEXS: &str = "ALL_DEXS";
 
 /// The first builder dex's asset-id base is `BUILDER_ASSET_BASE +

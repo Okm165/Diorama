@@ -133,10 +133,10 @@ struct Cache {
     book_at: BTreeMap<String, u64>,
     mids: BTreeMap<String, Decimal>,
     mids_at: Option<u64>,
-    /// `perpsAtOpenInterestCap`'s last answer (the venue's cap list).
-    /// `None` = the market plane has not answered yet: the order lane refuses
-    /// rather than treating an unknown cap set as "no caps".
-    pub(crate) oi_caps: Option<Vec<String>>,
+    /// `perpsAtOpenInterestCap`'s last answer per dex (the venue's cap list).
+    /// An absent dex = the market plane has not answered for it yet: the order
+    /// lane refuses rather than treating an unknown cap set as "no caps".
+    pub(crate) oi_caps: BTreeMap<String, Vec<String>>,
 }
 
 impl Cache {
@@ -451,18 +451,28 @@ impl MarketFeed {
     /// `perpsAtOpenInterestCap`: the coins at their cap (the venue's own
     /// list; the order lane refuses orders that would increase their OI).
     pub(crate) fn put_oi_caps(&self, caps: Vec<String>) {
-        if self.stalled() {
-            tracing::debug!("live OI caps dropped: the feed is stalled (the staleness drill)");
-            return;
-        }
-        self.write().oi_caps = Some(caps);
+        self.put_oi_caps_of("", caps);
     }
 
-    /// The cached cap list. `None` until the venue has answered: an unknown
-    /// cap set is refused by the order lane, never read as "nothing is
-    /// capped".
+    /// One dex's cap list (the default dex is `""`).
+    pub(crate) fn put_oi_caps_of(&self, dex: &str, caps: Vec<String>) {
+        if self.stalled() {
+            tracing::debug!(dex = %dex, "live OI caps dropped: the feed is stalled (the staleness drill)");
+            return;
+        }
+        self.write().oi_caps.insert(dex.to_string(), caps);
+    }
+
+    /// The default dex's cached cap list. `None` until the venue has answered:
+    /// an unknown cap set is refused by the order lane, never read as
+    /// "nothing is capped".
     pub fn open_interest_caps(&self) -> Option<Vec<String>> {
-        self.read().oi_caps.clone()
+        self.open_interest_caps_of("")
+    }
+
+    /// One dex's cached cap list (`None` = not answered yet).
+    pub(crate) fn open_interest_caps_of(&self, dex: &str) -> Option<Vec<String>> {
+        self.read().oi_caps.get(dex).cloned()
     }
 
     pub(crate) fn put_ctx(&self, coin: String, ctx: AssetCtx, now_ms: u64) {
@@ -796,6 +806,62 @@ impl MarketFeed {
             return self.meta();
         }
         self.dex_meta(dex)
+    }
+
+    /// Whether the feed lists the dex (`""` is the default dex): the names an
+    /// info request or a subscription may select.
+    pub(crate) fn has_dex(&self, name: &str) -> bool {
+        name.is_empty() || self.dex_meta(name).is_some()
+    }
+
+    /// Every dex's meta in `perpDexs` order (what `allPerpMetas` serves),
+    /// followed by any dex meta that landed without a `perpDexs` slot.
+    pub(crate) fn metas(&self) -> Vec<Meta> {
+        let c = self.read();
+        let mut metas = Vec::with_capacity(c.dex_metas.len() + 1);
+        let mut seen: Vec<String> = Vec::with_capacity(c.dex_metas.len() + 1);
+        if let Some(dexs) = &c.perp_dexs {
+            for slot in dexs {
+                let name = slot.as_ref().map_or("", |dex| dex.name.as_str());
+                if name.is_empty() {
+                    if let Some(meta) = &c.meta {
+                        metas.push(meta.clone());
+                        seen.push(String::new());
+                    }
+                } else if let Some(meta) = c.dex_metas.get(name) {
+                    metas.push(meta.clone());
+                    seen.push(name.to_string());
+                }
+            }
+        }
+        if !seen.iter().any(String::is_empty) {
+            if let Some(meta) = &c.meta {
+                metas.insert(0, meta.clone());
+            }
+        }
+        metas.extend(
+            c.dex_metas
+                .iter()
+                .filter(|(name, _)| !seen.iter().any(|known| known == *name))
+                .map(|(_, meta)| meta.clone()),
+        );
+        metas
+    }
+
+    /// The meta of the dex that lists `coin` (`None` = no dex lists it).
+    pub(crate) fn meta_for_coin(&self, coin: &str) -> Option<Meta> {
+        self.meta_of(dex_of_coin(coin))
+            .filter(|meta| meta.asset(coin).is_some())
+    }
+
+    /// The meta a per-coin lookup (margin tiers, leverage bounds, tick/lot,
+    /// delisting) resolves `coin` against: its dex's meta whether or not the
+    /// dex lists the coin (so an unknown coin of a known dex reads as
+    /// not-found, never as a warming plane), the default dex's meta when the
+    /// coin's dex is not cached (an unknown prefix is not-found there too).
+    /// `None` only while no meta has landed.
+    pub(crate) fn meta_for_lookup(&self, coin: &str) -> Option<Meta> {
+        self.meta_of(dex_of_coin(coin)).or_else(|| self.meta())
     }
 
     /// The collateral token a dex margins against (`0` = USDC). A dex that
@@ -1654,6 +1720,29 @@ mod tests {
             feed.dex_collateral_tokens(),
             [(String::new(), 0), ("xyz".to_string(), 360)]
         );
+        assert!(feed.has_dex(""));
+        assert!(feed.has_dex("xyz"));
+        assert!(!feed.has_dex("nope"));
+        assert!(feed.meta_for_coin("BTC").is_some());
+        assert!(feed.meta_for_coin("xyz:TSLA").is_some());
+        assert!(feed.meta_for_coin("xyz:NOPE").is_none());
+        assert_eq!(feed.metas().len(), 2, "the default dex, then `xyz`");
+    }
+
+    /// Caps are per dex; a dex that has not answered is unknown, never
+    /// "nothing capped".
+    #[test]
+    fn open_interest_caps_are_per_dex() {
+        let feed = MarketFeed::memory(Vec::new());
+        assert_eq!(feed.open_interest_caps_of("xyz"), None);
+        feed.put_oi_caps_of("xyz", vec!["xyz:TSLA".into()]);
+        feed.put_oi_caps(vec!["BTC".into()]);
+        assert_eq!(
+            feed.open_interest_caps_of("xyz"),
+            Some(vec!["xyz:TSLA".into()])
+        );
+        assert_eq!(feed.open_interest_caps(), Some(vec!["BTC".into()]));
+        assert_eq!(feed.open_interest_caps_of("flx"), None);
     }
 
     /// A builder dex's contexts align to its universe by index, are quoted by

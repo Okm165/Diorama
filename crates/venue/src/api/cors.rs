@@ -7,7 +7,6 @@
 //! fine. The info port is read-only market data plus the order lane's named
 //! refusal and takes no credentials, so any origin is allowed and cookies are
 //! not (no `Allow-Credentials`).
-#![allow(dead_code)] // the info router adopts the layer next
 use axum::extract::Request;
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,

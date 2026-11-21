@@ -1427,8 +1427,27 @@ impl Sim {
         })
     }
 
-    // step-6: `historicalOrders` (open orders first, then the terminal history,
-    // newest first) adopts the fork's `order_history` with the info surface.
+    /// The account's open orders and its terminal history: what
+    /// `historicalOrders` serves (the handler puts them newest first).
+    pub(crate) fn order_history(
+        &self,
+        account: Address,
+    ) -> Result<(Vec<RestingOrder>, Vec<TerminalOrder>)> {
+        self.with_state(|st| {
+            Ok((
+                st.resting
+                    .values()
+                    .filter(|r| r.account == account)
+                    .cloned()
+                    .collect(),
+                st.terminal
+                    .values()
+                    .filter(|t| t.order.account == account)
+                    .cloned()
+                    .collect(),
+            ))
+        })
+    }
 
     pub(crate) fn resting_by_cloid(
         &self,

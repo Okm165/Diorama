@@ -357,6 +357,8 @@ fn open_orders_push(user: Address, state: &ApiState) -> WsPush {
                         side: super::info::side_letter(r.side),
                         sz: r.sz.to_string(),
                         timestamp: r.placed_ms,
+                        orig_sz: r.orig_sz.to_string(),
+                        cloid: r.cloid,
                     })
                     .collect(),
             },

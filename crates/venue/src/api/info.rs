@@ -9,6 +9,8 @@
 //! with.
 use super::ApiState;
 use crate::error::{Error, Result};
+use crate::feed::dex::{dex_of_coin, ALL_DEXS};
+use crate::feed::MarketFeed;
 use crate::sim::{account, Sim};
 use crate::wire::{
     ActiveAssetData, ClearinghouseState, ExchangeStatus, InfoRequest, Leverage, LeverageType,
@@ -71,68 +73,411 @@ pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> Response {
 }
 
 /// `POST /info`: parse the typed request, dispatch, or pass through.
+#[allow(clippy::too_many_lines)] // one dispatch over every info type
 pub async fn info(State(state): State<Arc<ApiState>>, body: Bytes) -> Result<Response> {
-    // A malformed body is the caller's fault (400), not a server fault: the
-    // verifier measured a 500 here, which reads as "the sim is broken".
-    let req: InfoRequest = serde_json::from_slice(&body)
-        .map_err(|source| Error::bad_request(format!("invalid info request: {source}")))?;
+    // A body the venue cannot deserialize is the caller's fault, answered the
+    // way the real API answers it: HTTP 422 with a plain-text reason (measured
+    // live). The verifier once measured a 500 here, which reads as "the sim
+    // is broken".
+    let Ok(req) = serde_json::from_slice::<InfoRequest>(&body) else {
+        return Ok(deserialize_failure());
+    };
     match req {
-        // The archive read routes through the endpoint pool: the sim composes
-        // live marks, the candles are the upstream's, and the pool (several
-        // URLs, failover, budget) is the router. The original body is forwarded
-        // verbatim, so the wire contract stays the upstream's.
-        InfoRequest::CandleSnapshot { .. } => pass_through(&state, &body).await,
-        // hl_mock's contract for types it does not route.
-        InfoRequest::Unrouted => Ok(Json("unrouted").into_response()),
+        // A type the sim does not serve is a type the real API does not know:
+        // the same 422 (never a 200 with a bare string, which a typed client
+        // would parse as data).
+        InfoRequest::Unrouted => unrouted(&state, body).await,
         // ---- account-scoped: the sim's, or the venue's -------------------
         InfoRequest::ClearinghouseState { user, dex } => {
             clearinghouse(&state, body, user, dex).await
         }
         InfoRequest::SpotClearinghouseState { user } => spot_state(&state, body, user).await,
         InfoRequest::UserAbstraction { user } => abstraction(&state, body, user).await,
-        InfoRequest::OpenOrders { user, .. } => open_orders(&state, body, user).await,
-        InfoRequest::FrontendOpenOrders { user, .. } => {
-            frontend_open_orders(&state, body, user).await
+        InfoRequest::OpenOrders { user, dex } => open_orders(&state, body, user, dex).await,
+        InfoRequest::FrontendOpenOrders { user, dex } => {
+            frontend_open_orders(&state, body, user, dex).await
         }
         InfoRequest::OrderStatus { user, oid } => order_status(&state, body, user, oid).await,
-        InfoRequest::PerpsAtOpenInterestCap { .. } => {
-            let caps = state.feed.open_interest_caps().ok_or(Error::Warming)?;
-            Ok(Json(caps).into_response())
-        }
+        InfoRequest::PerpsAtOpenInterestCap { dex } => open_interest_caps(&dex, &state),
         InfoRequest::ActiveAssetData { user, coin } => active_asset(&state, body, user, coin).await,
         // ---- market-scoped: the feed's -----------------------------------
         InfoRequest::Meta { dex } => meta(&dex, &state),
         InfoRequest::MetaAndAssetCtxs { dex } => meta_and_ctxs(&dex, &state),
-        InfoRequest::PerpDexs => {
-            Ok(Json(state.feed.perp_dexs().ok_or(Error::Warming)?).into_response())
-        }
+        InfoRequest::PerpDexs => perp_dexs(&state),
         InfoRequest::L2Book {
             coin,
             n_sig_figs,
             mantissa,
-        } => l2_book(&coin, n_sig_figs, mantissa, &state),
+        } => l2_book(&coin, (n_sig_figs, mantissa), &state, &body).await,
         InfoRequest::MarginTable { id } => margin_table(id, &state),
         InfoRequest::ExchangeStatus => Ok(exchange_status()),
         InfoRequest::SpotMeta => {
             Ok(Json(state.feed.spot_meta().ok_or(Error::Warming)?).into_response())
         }
-        InfoRequest::AllMids { .. } => Ok(Json(state.feed.all_mids()).into_response()),
+        InfoRequest::AllMids { dex } => Ok(all_mids(&dex, &state)),
+        InfoRequest::AllPerpMetas => all_perp_metas(&state),
+        // Market data the sim holds no copy of: the same answer for every
+        // consumer, from the venue the marks come from. The annotations and
+        // categories describe the builder dexes' coins; the venue's
+        // are lists (never a bare string).
+        InfoRequest::CandleSnapshot { .. }
+        | InfoRequest::PerpConciseAnnotations
+        | InfoRequest::PerpCategories
+        | InfoRequest::SpotMetaAndAssetCtxs
+        | InfoRequest::FundingHistory { .. }
+        | InfoRequest::PredictedFundings
+        | InfoRequest::PerpDexLimits { .. }
+        | InfoRequest::PerpDexStatus { .. }
+        | InfoRequest::MaxMarketOrderNtls
+        | InfoRequest::VaultSummaries
+        | InfoRequest::TokenDetails { .. }
+        | InfoRequest::PerpDeployAuctionStatus
+        | InfoRequest::SpotPairDeployAuctionStatus
+        | InfoRequest::SpotDeployState { .. }
+        | InfoRequest::OutcomeMeta
+        | InfoRequest::AllBorrowLendReserveStates
+        | InfoRequest::BorrowLendReserveState { .. }
+        | InfoRequest::LeadingVaults { .. }
+        | InfoRequest::VaultDetails { .. } => pass_through(&state, &body).await,
+        InfoRequest::UserFills { user, .. } => user_fills(&state, body, user).await,
+        InfoRequest::UserFunding {
+            user,
+            start_time,
+            end_time,
+        } => user_funding(&state, body, user, start_time, end_time).await,
+        InfoRequest::UserNonFundingLedgerUpdates {
+            user,
+            start_time,
+            end_time,
+        } => ledger_updates(&state, body, user, (start_time, end_time)).await,
+        InfoRequest::MaxBuilderFee { user, builder } => max_fee(&state, body, user, builder).await,
+        InfoRequest::PreTransferCheck { user, source } => pre_transfer_check(&state, user, source),
     }
 }
 
-/// `clearinghouseState`: the sim's for a touched account (the default dex
-/// only: per-dex balances/collateral are not modeled), the venue's verbatim
-/// otherwise.
+/// The real API's answer for a `dex` it does not know, and for `ALL_DEXS` on
+/// the types that do not take it: HTTP 500 with the body `null` (measured on
+/// `meta`, `metaAndAssetCtxs`, `clearinghouseState`, `openOrders`,
+/// `frontendOpenOrders`, `perpsAtOpenInterestCap`).
+fn unknown_dex() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        [(header::CONTENT_TYPE, diorama_anvil::JSON_CONTENT_TYPE)],
+        "null",
+    )
+        .into_response()
+}
+
+/// A plain 200 `null` (the real `allMids` answer for an unknown dex).
+fn null_ok() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, diorama_anvil::JSON_CONTENT_TYPE)],
+        "null",
+    )
+        .into_response()
+}
+
+/// The dexes a request's `dex` selects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DexScope {
+    /// One dex (`""` = the default dex).
+    One(String),
+    /// `ALL_DEXS`.
+    All,
+}
+
+impl DexScope {
+    /// Whether a coin belongs to the selected dexes.
+    pub(crate) fn covers(&self, coin: &str) -> bool {
+        match self {
+            DexScope::One(dex) => dex_of_coin(coin) == dex,
+            DexScope::All => true,
+        }
+    }
+}
+
+/// Resolve a `dex` argument: `None` is the default dex, `ALL_DEXS` selects
+/// every dex only where `allow_all` (the types that take it), a listed name
+/// selects itself, and anything else is unknown (`None`).
+pub(crate) fn dex_scope(feed: &MarketFeed, dex: &str, allow_all: bool) -> Option<DexScope> {
+    if dex == ALL_DEXS {
+        return allow_all.then_some(DexScope::All);
+    }
+    (dex.is_empty() || feed.has_dex(dex)).then(|| DexScope::One(dex.to_string()))
+}
+
+/// `maxBuilderFee`: the maximum fee (tenths of a basis point) a simulated
+/// account approved for `builder` through CoreWriter `approveBuilderFee`, as a
+/// bare JSON integer (0 when never approved, as the venue answers); the venue's
+/// verbatim for an untouched account.
+async fn max_fee(
+    state: &ApiState,
+    body: Bytes,
+    user: Address,
+    builder: Address,
+) -> Result<Response> {
+    simulated(state, &body, user, |account| {
+        let max = account
+            .builder_approvals
+            .get(&builder)
+            .copied()
+            .unwrap_or(0);
+        Ok(Json(max).into_response())
+    })
+    .await
+}
+
+/// The most `userFills` serves (the venue's own page: the newest 2000).
+const USER_FILLS_PAGE: usize = 2_000;
+
+/// `userFills`: a simulated account's fills, newest first (the venue's
+/// order), or the venue's verbatim for an untouched one.
+async fn user_fills(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+    match state.sim.user_fills(user) {
+        Some(mut fills) => {
+            fills.reverse();
+            fills.truncate(USER_FILLS_PAGE);
+            Ok(Json(fills).into_response())
+        }
+        None => pass_through(state, &body).await,
+    }
+}
+
+/// `userFunding`: a simulated account's funding payments from `startTime`
+/// (to `endTime` when given), oldest first, each wrapped as the venue's ledger
+/// update; the venue's verbatim for an untouched account.
+async fn user_funding(
+    state: &ApiState,
+    body: Bytes,
+    user: Address,
+    start_time: u64,
+    end_time: Option<u64>,
+) -> Result<Response> {
+    let Some(fundings) = state.sim.user_fundings(user, start_time) else {
+        return pass_through(state, &body).await;
+    };
+    let rows: Vec<serde_json::Value> = fundings
+        .into_iter()
+        .filter(|f| end_time.is_none_or(|end| f.time <= end))
+        .map(|f| {
+            serde_json::json!({
+                "time": f.time,
+                "hash": ZERO_HASH,
+                "delta": {
+                    "type": "funding",
+                    "coin": f.coin,
+                    "usdc": crate::wire::decimal_nano::text(&f.usdc),
+                    "szi": crate::wire::decimal_nano::text(&f.szi),
+                    "fundingRate": crate::wire::decimal_nano::text(&f.funding_rate),
+                    "nSamples": f.n_samples,
+                },
+            })
+        })
+        .collect();
+    Ok(Json(rows).into_response())
+}
+
+/// `userNonFundingLedgerUpdates`: a simulated account's transfer rows
+/// (`spotTransfer`, `send`, `accountClassTransfer`, `accountActivationGas`),
+/// oldest first, each `{time, hash, delta}`; the venue's verbatim for an
+/// untouched account.
+async fn ledger_updates(
+    state: &ApiState,
+    body: Bytes,
+    user: Address,
+    window: (u64, Option<u64>),
+) -> Result<Response> {
+    match state.sim.ledger_updates(user, window) {
+        Some(rows) => Ok(Json(rows).into_response()),
+        None => pass_through(state, &body).await,
+    }
+}
+
+/// The hash the venue stamps on funding ledger rows (they have no transaction).
+const ZERO_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The real API's answer to a request it cannot deserialize (an unknown
+/// `type`, a missing field): HTTP 422, plain text.
+/// The neutral address the venue is asked about for a simulated account's
+/// figures the sim holds no ledger for (fee tier, rate limit, referral): a
+/// fresh account with no volume, which is what a sim account is.
+const NEUTRAL_USER: &str = "0x0000000000000000000000000000000000000001";
+
+/// The types the sim has no typed route for. The venue serves them, so the
+/// sim must too (a 422 for a type the venue knows would read as the sim being
+/// broken): the venue's market-wide ones are forwarded; `userFillsByTime` and
+/// `historicalOrders` are the account's own ledgers; the rest of the
+/// account-scoped ones answer for a simulated account like a fresh venue
+/// account (empty lists, or the venue's own answer for a neutral account) and
+/// are forwarded for any other user. A type the venue does not know is its 422.
+#[allow(clippy::too_many_lines)] // one table of account-scoped info types
+async fn unrouted(state: &ApiState, body: Bytes) -> Result<Response> {
+    let Ok(request) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return Ok(deserialize_failure());
+    };
+    let kind = request
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let user = request
+        .get("user")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|u| u.parse::<Address>().ok());
+    match (kind, user) {
+        ("recentTrades" | "validatorSummaries", _) => pass_through(state, &body).await,
+        ("userFillsByTime", Some(user)) => {
+            let Some(start) = request.get("startTime").and_then(serde_json::Value::as_u64) else {
+                return Ok(deserialize_failure());
+            };
+            let end = request.get("endTime").and_then(serde_json::Value::as_u64);
+            match state.sim.user_fills(user) {
+                Some(fills) => Ok(Json(
+                    fills
+                        .into_iter()
+                        .filter(|f| f.time >= start && end.is_none_or(|e| f.time <= e))
+                        .take(USER_FILLS_PAGE)
+                        .collect::<Vec<_>>(),
+                )
+                .into_response()),
+                None => pass_through(state, &body).await,
+            }
+        }
+        ("historicalOrders", Some(user)) => historical_orders(state, &body, user).await,
+        (
+            "userRole"
+            | "subAccounts"
+            | "userVaultEquities"
+            | "delegations"
+            | "twapHistory"
+            | "userTwapSliceFills"
+            | "extraAgents"
+            | "isVip"
+            | "userToMultiSigSigners"
+            | "userFees"
+            | "userRateLimit"
+            | "referral"
+            | "legalCheck"
+            | "delegatorSummary"
+            | "portfolio",
+            Some(user),
+        ) => fresh_account_read(state, &body, kind, user, &request).await,
+        _ => Ok(deserialize_failure()),
+    }
+}
+
+/// An account-scoped read the sim holds no ledger for: a simulated account is
+/// a fresh venue account.
+async fn fresh_account_read(
+    state: &ApiState,
+    body: &Bytes,
+    kind: &str,
+    user: Address,
+    request: &serde_json::Value,
+) -> Result<Response> {
+    if state.sim.account(user)?.is_none() {
+        return pass_through(state, body).await;
+    }
+    let fixed = match kind {
+        "userRole" => Some(serde_json::json!({"role": "user"})),
+        "subAccounts" | "userToMultiSigSigners" => Some(serde_json::Value::Null),
+        "isVip" => Some(serde_json::json!(false)),
+        "userVaultEquities" | "delegations" | "twapHistory" | "userTwapSliceFills"
+        | "extraAgents" => Some(serde_json::json!([])),
+        _ => None,
+    };
+    if let Some(answer) = fixed {
+        return Ok(Json(answer).into_response());
+    }
+    let mut neutral = request.clone();
+    neutral["user"] = serde_json::Value::String(NEUTRAL_USER.to_string());
+    pass_through(state, &Bytes::from(neutral.to_string())).await
+}
+
+/// `historicalOrders`: the account's open orders and its terminal history,
+/// newest first (by status time), at most a page.
+async fn historical_orders(state: &ApiState, body: &Bytes, user: Address) -> Result<Response> {
+    if state.sim.account(user)?.is_none() {
+        return pass_through(state, body).await;
+    }
+    let (resting, terminal) = state.sim.order_history(user)?;
+    let mut rows: Vec<StatusOrder> = resting
+        .iter()
+        .map(|r| StatusOrder {
+            order: status_inner(r, dtext(&r.sz)),
+            status: "open",
+            status_timestamp: r.placed_ms,
+        })
+        .chain(terminal.iter().map(|t| StatusOrder {
+            order: status_inner(&t.order, dtext(&t.order.sz)),
+            status: terminal_status_label(t.status),
+            status_timestamp: t.status_ms,
+        }))
+        .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.status_timestamp));
+    rows.truncate(USER_FILLS_PAGE);
+    Ok(Json(rows).into_response())
+}
+
+fn deserialize_failure() -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "Failed to deserialize the JSON body into the target type",
+    )
+        .into_response()
+}
+
+/// `preTransferCheck`: `user` is the destination, `source` the sender. The
+/// shape is the real venue's. The sim answers from its own state: `userExists`
+/// is whether the destination exists on the sim, `userHasSentTx` whether it
+/// exists and has paid its activation (it made its first outbound transfer, or
+/// was funded by a seed or `deal`), and `fee` is the 1 USDC activation the
+/// *source* would pay on this transfer (Circle's rule: charged once, on an
+/// account's first outbound action) or `0.0`. The real venue answers
+/// `fee: "1.0"` for a destination it has never seen; the sim does not tie the
+/// fee to the destination.
+fn pre_transfer_check(state: &ApiState, user: Address, source: Address) -> Result<Response> {
+    let check = state.sim.pre_transfer(user, source)?;
+    let fee = if check.source_owes {
+        crate::sim::fees::ACTIVATION_FEE
+    } else {
+        rust_decimal::Decimal::ZERO
+    };
+    Ok(Json(serde_json::json!({
+        "isSanctioned": false,
+        "userExists": check.destination_exists,
+        "fee": crate::sim::fees::real_text(fee),
+        "userHasSentTx": check.destination_has_sent,
+    }))
+    .into_response())
+}
+
+/// `clearinghouseState`: the sim's single-ledger clearinghouse for a touched
+/// account, the venue's verbatim otherwise. A dex the venue does not list (and
+/// `ALL_DEXS`, which this type does not take) is the venue's 500 `null`.
+///
+/// step-9: the account plane keeps one ledger, so a named builder dex answers
+/// the venue's empty shape rather than a per-dex partition of the positions.
+/// The per-dex ledgers (and the unified-account switch) give this read its
+/// dex's own margin summary.
 async fn clearinghouse(
     state: &ApiState,
     body: Bytes,
     user: Address,
     dex: Option<String>,
 ) -> Result<Response> {
-    if !dex.as_deref().unwrap_or("").is_empty() {
-        // Per-dex balances/collateral are not modeled (Phase A): a named dex
-        // answers the empty shape rather than the default dex's positions.
-        return Ok(Json(empty_clearinghouse(Sim::served_time(crate::now_ms()))).into_response());
+    let name = dex.as_deref().unwrap_or("");
+    let Some(DexScope::One(name)) = dex_scope(&state.feed, name, false) else {
+        return Ok(unknown_dex());
+    };
+    if !name.is_empty() {
+        return match state.sim.account(user)? {
+            Some(_) => {
+                Ok(Json(empty_clearinghouse(Sim::served_time(crate::now_ms()))).into_response())
+            }
+            None => pass_through(state, &body).await,
+        };
     }
     match clearinghouse_of(state, user)? {
         Some(served) => Ok(Json(served).into_response()),
@@ -179,6 +524,9 @@ pub(crate) struct OpenOrder {
     pub side: &'static str,
     pub sz: String,
     pub timestamp: u64,
+    pub orig_sz: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloid: Option<alloy_primitives::B128>,
 }
 
 /// One `frontendOpenOrders` row (the docs' fuller shape).
@@ -200,6 +548,16 @@ pub(crate) struct FrontendOpenOrder {
     /// venue's own vocabulary; ours names the condition).
     pub trigger_condition: String,
     pub trigger_px: String,
+    /// TP/SL children (the sim never creates them; the shape is the venue's).
+    pub children: Vec<ChildOrder>,
+    /// `null` for a trigger order, the limit's time in force otherwise.
+    pub tif: Option<&'static str>,
+    pub cloid: Option<alloy_primitives::B128>,
+}
+
+/// A decimal in the venue's text (see [`crate::wire::decimal_nano::text`]).
+pub(crate) fn dtext(value: &rust_decimal::Decimal) -> String {
+    crate::wire::decimal_nano::text(value)
 }
 
 pub(crate) fn side_letter(side: crate::sim::order::Side) -> &'static str {
@@ -230,21 +588,47 @@ fn trigger_condition(order: &crate::sim::order::RestingOrder) -> String {
     }
 }
 
+/// The account's resting orders in the selected dexes, newest first (the
+/// venue's order: the sampled lists run from the latest oid down).
+pub(crate) fn resting_in(
+    state: &ApiState,
+    user: Address,
+    scope: &DexScope,
+) -> Result<Vec<crate::sim::order::RestingOrder>> {
+    let mut rows: Vec<_> = state
+        .sim
+        .resting_orders(Some(user))?
+        .into_iter()
+        .filter(|r| scope.covers(&r.coin))
+        .collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.oid));
+    Ok(rows)
+}
+
 /// `openOrders`: the devnet's resting book for a touched account (the venue's
-/// own row shape); untouched accounts pass through.
-async fn open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+/// own row shape), per dex or `ALL_DEXS`; untouched accounts pass through; an
+/// unlisted dex is the venue's 500 `null`.
+async fn open_orders(
+    state: &ApiState,
+    body: Bytes,
+    user: Address,
+    dex: Option<String>,
+) -> Result<Response> {
+    let Some(scope) = dex_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
+        return Ok(unknown_dex());
+    };
     simulated(state, &body, user, |_| {
-        let rows: Vec<OpenOrder> = state
-            .sim
-            .resting_orders(Some(user))?
+        let rows: Vec<OpenOrder> = resting_in(state, user, &scope)?
             .into_iter()
             .map(|r| OpenOrder {
                 coin: r.coin.clone(),
-                limit_px: r.px.to_string(),
+                limit_px: dtext(&r.px),
                 oid: r.oid,
                 side: side_letter(r.side),
-                sz: r.sz.to_string(),
+                sz: dtext(&r.sz),
                 timestamp: r.placed_ms,
+                orig_sz: dtext(&r.orig_sz),
+                cloid: r.cloid,
             })
             .collect();
         Ok(Json(rows).into_response())
@@ -253,13 +637,19 @@ async fn open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Res
 }
 
 /// `frontendOpenOrders`: the same rows with the frontend's extra fields.
-async fn frontend_open_orders(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+async fn frontend_open_orders(
+    state: &ApiState,
+    body: Bytes,
+    user: Address,
+    dex: Option<String>,
+) -> Result<Response> {
+    let Some(scope) = dex_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
+        return Ok(unknown_dex());
+    };
     simulated(state, &body, user, |_| {
-        let rows: Vec<FrontendOpenOrder> = state
-            .sim
-            .resting_orders(Some(user))?
-            .into_iter()
-            .map(|r| frontend_row(&r))
+        let rows: Vec<FrontendOpenOrder> = resting_in(state, user, &scope)?
+            .iter()
+            .map(frontend_row)
             .collect();
         Ok(Json(rows).into_response())
     })
@@ -328,24 +718,31 @@ fn tif_name(tif: crate::sim::order::Tif) -> &'static str {
 /// One resting order's frontend-row fields: the single mapping the two served
 /// shapes share (`frontendOpenOrders` uses it whole; `orderStatus` extends it
 /// with its own fields).
-fn frontend_row(r: &crate::sim::order::RestingOrder) -> FrontendOpenOrder {
+pub(crate) fn frontend_row(r: &crate::sim::order::RestingOrder) -> FrontendOpenOrder {
     FrontendOpenOrder {
         coin: r.coin.clone(),
         is_position_tpsl: false,
         is_trigger: r.trigger.is_some(),
-        limit_px: r.px.to_string(),
+        limit_px: dtext(&r.px),
         oid: r.oid,
         order_type: order_type(r),
-        orig_sz: r.orig_sz.to_string(),
+        orig_sz: dtext(&r.orig_sz),
         reduce_only: matches!(r.reduce, crate::sim::order::Reduce::Only),
         side: side_letter(r.side),
-        sz: r.sz.to_string(),
+        sz: dtext(&r.sz),
         timestamp: r.placed_ms,
         trigger_condition: trigger_condition(r),
         trigger_px: r
             .trigger
-            .map(|t| t.trigger_px.to_string())
+            .map(|t| dtext(&t.trigger_px))
             .unwrap_or_else(|| "0.0".into()),
+        children: Vec::new(),
+        tif: if r.trigger.is_some() {
+            None
+        } else {
+            Some(tif_name(r.tif))
+        },
+        cloid: r.cloid,
     }
 }
 
@@ -382,7 +779,7 @@ fn status_inner(r: &crate::sim::order::RestingOrder, sz: String) -> StatusOrderI
 }
 
 /// The terminal status label (the docs' orderStatus strings).
-fn terminal_status_label(status: crate::sim::order::TerminalStatus) -> &'static str {
+pub(crate) fn terminal_status_label(status: crate::sim::order::TerminalStatus) -> &'static str {
     match status {
         crate::sim::order::TerminalStatus::Filled => "filled",
         crate::sim::order::TerminalStatus::Canceled => "canceled",
@@ -403,20 +800,20 @@ async fn order_status(
     }
     let found = match oid {
         crate::wire::OidOrCloid::Oid(o) => match state.sim.resting_by_oid(user, o)? {
-            Some(r) => Some((status_inner(&r, r.sz.to_string()), "open", r.placed_ms)),
+            Some(r) => Some((status_inner(&r, dtext(&r.sz)), "open", r.placed_ms)),
             None => state.sim.terminal_by_oid(user, o)?.map(|t| {
                 (
-                    status_inner(&t.order, t.order.sz.to_string()),
+                    status_inner(&t.order, dtext(&t.order.sz)),
                     terminal_status_label(t.status),
                     t.status_ms,
                 )
             }),
         },
         crate::wire::OidOrCloid::Cloid(c) => match state.sim.resting_by_cloid(user, c)? {
-            Some(r) => Some((status_inner(&r, r.sz.to_string()), "open", r.placed_ms)),
+            Some(r) => Some((status_inner(&r, dtext(&r.sz)), "open", r.placed_ms)),
             None => state.sim.terminal_by_cloid(user, c)?.map(|t| {
                 (
-                    status_inner(&t.order, t.order.sz.to_string()),
+                    status_inner(&t.order, dtext(&t.order.sz)),
                     terminal_status_label(t.status),
                     t.status_ms,
                 )
@@ -443,73 +840,157 @@ async fn active_asset(
     user: Address,
     coin: String,
 ) -> Result<Response> {
+    // A coin no dex lists is the venue's 500 `null` (on a builder coin as on
+    // a default one), whoever asks.
+    if state.feed.meta_for_coin(&coin).is_none() {
+        return Ok(unknown_dex());
+    }
     simulated(state, &body, user, |account| {
         Ok(Json(active_asset_data(state, user, account, &coin)?).into_response())
     })
     .await
 }
 
-/// `meta`: the cached metadata for the default dex, or a named builder dex's
-/// own cached meta. An unknown (or not-yet-polled) dex is a named 400 — never
-/// a silent fallback to the default dex's universe.
+/// `meta`: one dex's cached metadata (`""` or no `dex` = the default dex). A
+/// dex the venue does not list, and `ALL_DEXS`, are the venue's 500 `null`.
+///
+/// step-9: a builder dex's HIP-3 fee-scale fields are not modeled yet (see
+/// [`all_perp_metas`]).
 fn meta(dex: &Option<String>, state: &ApiState) -> Result<Response> {
-    let dex_name = dex.as_deref().unwrap_or("");
-    if dex_name.is_empty() {
-        return Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response());
+    match dex.as_deref().unwrap_or("") {
+        "" => Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response()),
+        name => Ok(state
+            .feed
+            .meta_of(name)
+            .map_or_else(unknown_dex, |meta| Json(meta).into_response())),
     }
-    let meta = state.feed.dex_meta(dex_name).ok_or_else(|| {
-        Error::bad_request(format!(
-            "unknown perp dex `{dex_name}` (not among the venue's cached HIP-3 dexes)"
-        ))
-    })?;
-    Ok(Json(meta).into_response())
 }
 
-/// `metaAndAssetCtxs`: the cached metadata + per-market ctxs. The default dex
-/// is served from the feed's core cache; a named builder dex (HIP-3) is served
-/// from its own cached meta and contexts — refusing it made every builder-dex
-/// book poll fail its context read while its ladder succeeded (the measured
-/// 2026-11-16 friction on the `xyz` dex).
-fn meta_and_ctxs(dex: &Option<String>, state: &ApiState) -> Result<Response> {
-    let dex_name = dex.as_deref().unwrap_or("");
-    if dex_name.is_empty() {
-        let MetaAndAssetCtxs(meta, ctxs) = state.feed.meta_and_ctxs().ok_or(Error::Warming)?;
-        return Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response());
+/// `allPerpMetas`: one metadata entry per perp dex, in `perpDexs` order.
+///
+/// step-9: a builder dex's `growthMode`/`lastFeeScaleChangeTime`/
+/// `deployerFeeScale` (the HIP-3 fee scale) are not modeled yet; the cached
+/// meta serves the venue's shape without them.
+fn all_perp_metas(state: &ApiState) -> Result<Response> {
+    let metas = state.feed.metas();
+    if metas.is_empty() {
+        return Err(Error::Warming);
     }
-    let MetaAndAssetCtxs(meta, ctxs) = state
-        .feed
-        .dex_meta_and_ctxs(dex_name)
-        .ok_or(Error::Warming)?;
+    Ok(Json(metas).into_response())
+}
+
+/// `metaAndAssetCtxs`: one dex's cached metadata and its coins' contexts, the
+/// two lists the same length (the venue's positional contract; a dex whose
+/// contexts have not all landed is warming, never a short list).
+fn meta_and_ctxs(dex: &Option<String>, state: &ApiState) -> Result<Response> {
+    let name = dex.as_deref().unwrap_or("");
+    let served = if name.is_empty() {
+        state.feed.meta_and_ctxs()
+    } else {
+        state.feed.dex_meta_and_ctxs(name)
+    };
+    if !name.is_empty() && served.is_none() {
+        return Ok(unknown_dex());
+    }
+    let MetaAndAssetCtxs(meta, ctxs) = served.ok_or(Error::Warming)?;
+    if ctxs.len() != meta.universe.len() {
+        return Err(Error::Warming);
+    }
     Ok(Json(MetaAndAssetCtxs(meta, ctxs)).into_response())
 }
 
-/// `l2Book`: the cached or scripted book for one coin, aggregated per the
+/// `allMids`: a dex's own keys (the default dex's also carry the spot `@N` and
+/// outcome `#N` keys), or every dex's at once for `ALL_DEXS`. An unlisted dex
+/// is the venue's 200 `null`.
+fn all_mids(dex: &Option<String>, state: &ApiState) -> Response {
+    let Some(scope) = dex_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
+        return null_ok();
+    };
+    Json(mids_in(&state.feed, &scope)).into_response()
+}
+
+/// The `allMids` map of the selected dexes: one dex's own keys (the default
+/// dex's also carry the spot `@N` and outcome `#N` keys), or every dex's at
+/// once.
+pub(crate) fn mids_in(feed: &MarketFeed, scope: &DexScope) -> crate::wire::AllMids {
+    match scope {
+        DexScope::One(name) => feed.all_mids_of(name),
+        DexScope::All => crate::wire::AllMids(
+            feed.dex_collateral_tokens()
+                .into_iter()
+                .map(|(name, _)| name)
+                .chain(std::iter::once(String::new()))
+                .flat_map(|name| feed.all_mids_of(&name).0)
+                .collect(),
+        ),
+    }
+}
+
+/// `perpDexs`: `null` for the default dex, then the venue's own record of each
+/// builder dex, in the upstream order (the order the HIP-3 asset namespace
+/// encodes).
+fn perp_dexs(state: &ApiState) -> Result<Response> {
+    let dexs = state.feed.perp_dexs().ok_or(Error::Warming)?;
+    if dexs.is_empty() {
+        return Err(Error::Warming);
+    }
+    Ok(Json(dexs).into_response())
+}
+
+/// `perpsAtOpenInterestCap`: one dex's coins at their cap. An unlisted dex,
+/// and `ALL_DEXS`, are the venue's 500 `null`.
+fn open_interest_caps(dex: &Option<String>, state: &ApiState) -> Result<Response> {
+    let Some(DexScope::One(name)) = dex_scope(&state.feed, dex.as_deref().unwrap_or(""), false)
+    else {
+        return Ok(unknown_dex());
+    };
+    let caps = state
+        .feed
+        .open_interest_caps_of(&name)
+        .ok_or(Error::Warming)?;
+    Ok(Json(caps).into_response())
+}
+
+/// `l2Book`: the cached, relayed or scripted book for one coin, aggregated per the
 /// request's parameters (docs: `nSigFigs ∈ {2,3,4,5}`, `mantissa ∈ {1,2,5}`
 /// only with `nSigFigs = 5`). A parameter outside the documented set is a
 /// named 400 — never silently ignored.
-fn l2_book(
+async fn l2_book(
     coin: &str,
-    n_sig_figs: Option<u8>,
-    mantissa: Option<u8>,
+    (n_sig_figs, mantissa): (Option<u8>, Option<u8>),
     state: &ApiState,
+    body: &Bytes,
 ) -> Result<Response> {
     book_params_ok(n_sig_figs, mantissa)?;
-    let now = crate::now_ms();
-    let Some(book) = state.feed.book(coin, now) else {
+    // An aggregated book is the venue's own, built from its whole depth (twenty
+    // aggregated levels a side); the sim holds twenty raw levels, which would
+    // merge into one or two. A coin the scenario owns the book of is the sim's.
+    if n_sig_figs.is_some()
+        && state.feed.meta_for_coin(coin).is_some()
+        && !state.feed.scripted_book(coin)
+    {
+        return pass_through(state, body).await;
+    }
+    // Every coin a dex lists (default or builder) is a market: its book is
+    // the relayed live one (the read keeps the coin's stream wanted), fetched
+    // once from the venue only when none has landed yet.
+    let book = state.feed.ensure_book(coin).await;
+    let Some(book) = book else {
         // The venue's own absence shape (measured live: `l2Book` for an
-        // unknown coin answers HTTP 200 `null`). A *configured* market with
-        // no book yet is a different fault — the plane is warming (503).
-        return if state.feed.markets.iter().any(|m| m == coin) {
+        // unknown coin answers HTTP 500 `null`, builder dexes included). A
+        // coin the venue lists with no book yet is a different fault: the
+        // plane is warming (503).
+        return if state.feed.meta_for_coin(coin).is_some() {
             Err(Error::Warming)
         } else {
-            Ok(Json(None::<crate::wire::L2Book>).into_response())
+            Ok(unknown_dex())
         };
     };
     Ok(Json(aggregate_book(book, n_sig_figs, mantissa.unwrap_or(1))).into_response())
 }
 
 /// The documented parameter set, refused by name otherwise.
-fn book_params_ok(n_sig_figs: Option<u8>, mantissa: Option<u8>) -> Result<()> {
+pub(crate) fn book_params_ok(n_sig_figs: Option<u8>, mantissa: Option<u8>) -> Result<()> {
     if let Some(n) = n_sig_figs {
         if !(2..=5).contains(&n) {
             return Err(Error::bad_request(format!(
@@ -533,7 +1014,7 @@ fn book_params_ok(n_sig_figs: Option<u8>, mantissa: Option<u8>) -> Result<()> {
 /// is `mantissa × 10^(integer digits − n)`), levels at the same rounded price
 /// merge (sizes and counts sum, saturating — a merge never panics), and each
 /// side keeps its order (bids descending, asks ascending).
-fn aggregate_book(
+pub(crate) fn aggregate_book(
     book: crate::wire::L2Book,
     n_sig_figs: Option<u8>,
     mantissa: u8,
@@ -541,7 +1022,14 @@ fn aggregate_book(
     let Some(n) = n_sig_figs else {
         return book;
     };
+    // The venue's aggregated books carry the raw book's spread (best ask less
+    // best bid, measured: `1.0` whatever the aggregation).
+    let spread = match (book.levels[0].first(), book.levels[1].first()) {
+        (Some(bid), Some(ask)) => Some(ask.px - bid.px),
+        _ => None,
+    };
     let mut out = book;
+    out.spread = spread;
     for side in 0..2usize {
         let mut merged: std::collections::BTreeMap<Decimal, (Decimal, u64)> =
             std::collections::BTreeMap::new();
@@ -604,22 +1092,23 @@ pub(crate) fn default_margin_table() -> crate::wire::MarginTable {
     }
 }
 
-/// `marginTable`: one table out of the cached metadata by id, with the
-/// venue's implicit default served for id 1.
+/// `marginTable`: one table by id, resolved across every dex's tables (the
+/// ids are the dexes' own: a builder dex's table 30 sits in its meta), with
+/// the venue's implicit default served for id 1. An id no dex lists is the
+/// venue's 500 `null`.
 fn margin_table(id: u32, state: &ApiState) -> Result<Response> {
     if id == 1 {
         return Ok(Json(default_margin_table()).into_response());
     }
-    let meta = state.feed.meta().ok_or(Error::Warming)?;
-    let table = meta
-        .margin_tables
+    let metas = state.feed.metas();
+    if metas.is_empty() {
+        return Err(Error::Warming);
+    }
+    Ok(metas
         .iter()
+        .flat_map(|meta| meta.margin_tables.iter())
         .find(|(tid, _)| *tid == id)
-        .map(|(_, t)| t.clone())
-        .ok_or_else(|| Error::NotFound {
-            what: format!("margin table {id}"),
-        })?;
-    Ok(Json(table).into_response())
+        .map_or_else(unknown_dex, |(_, table)| Json(table).into_response()))
 }
 
 /// `exchangeStatus`: the served clock.
@@ -631,9 +1120,10 @@ fn exchange_status() -> Response {
     .into_response()
 }
 
-/// The served `clearinghouseState` for a touched account: accrual *first*,
-/// then the read (the verifier caught the reverse order: the served figures
-/// lagged one accrual window behind the stored state).
+/// The default dex's served `clearinghouseState` for a touched account (the
+/// control plane's read): accrual *first*, then the read (the verifier caught
+/// the reverse order: the served figures lagged one accrual window behind the
+/// stored state).
 pub(crate) fn clearinghouse_of(
     state: &ApiState,
     address: Address,
@@ -675,6 +1165,25 @@ pub(crate) fn clearinghouse_of(
     Ok(Some(served))
 }
 
+/// The venue's empty shape (a dex whose ledger is not modeled yet).
+fn empty_clearinghouse(time: u64) -> ClearinghouseState {
+    let zero = MarginSummary {
+        account_value: Decimal::ZERO,
+        total_ntl_pos: Decimal::ZERO,
+        total_raw_usd: Decimal::ZERO,
+        total_margin_used: Decimal::ZERO,
+    };
+    ClearinghouseState {
+        margin_summary: zero.clone(),
+        cross_margin_summary: zero,
+        cross_maintenance_margin_used: Decimal::ZERO,
+        withdrawable: Decimal::ZERO,
+        asset_positions: Vec::new(),
+        time,
+        control_owned: false,
+    }
+}
+
 /// The venue's own answer for an untouched account (verbatim passthrough).
 /// The per-user read's guard: a simulated account computes the answer; an
 /// unconfigured one is passed through to the live venue verbatim (the
@@ -713,27 +1222,9 @@ async fn pass_through(state: &ApiState, body: &Bytes) -> Result<Response> {
         .into_response())
 }
 
-fn empty_clearinghouse(time: u64) -> ClearinghouseState {
-    let zero = MarginSummary {
-        account_value: Decimal::ZERO,
-        total_ntl_pos: Decimal::ZERO,
-        total_raw_usd: Decimal::ZERO,
-        total_margin_used: Decimal::ZERO,
-    };
-    ClearinghouseState {
-        margin_summary: zero.clone(),
-        cross_margin_summary: zero,
-        cross_maintenance_margin_used: Decimal::ZERO,
-        withdrawable: Decimal::ZERO,
-        asset_positions: Vec::new(),
-        time,
-        control_owned: false,
-    }
-}
-
 /// `activeAssetData`: the coin's mark, the user's leverage, and the sizes the
 /// withdrawable margin supports at that leverage.
-fn active_asset_data(
+pub(crate) fn active_asset_data(
     state: &ApiState,
     user: Address,
     account: &account::Account,
@@ -742,23 +1233,30 @@ fn active_asset_data(
     let mark = state.feed.mark(coin).ok_or_else(|| Error::NoMarket {
         coin: coin.to_string(),
     })?;
-    let meta = state.feed.margin_meta();
-    let leverage = account
-        .positions
-        .get(coin)
-        .map(|p| Leverage {
-            kind: p.leverage,
-            value: p.leverage_value,
-            raw_usd: None,
+    // The leverage the next order on the coin would use: the open position's
+    // own, else the account's last setting, else the venue's default (measured
+    // on real accounts with no position: cross at min(max, 20), isolated with
+    // `rawUsd: "0.0"` on an isolated-only market).
+    let meta = state.feed.meta_for_lookup(coin);
+    let setting = state.sim.leverage_setting_for(user, coin, meta.as_ref())?;
+    let raw_usd = (setting.mode == LeverageType::Isolated).then(|| {
+        // The row's figure: the isolated equity less the signed position value.
+        account.positions.get(coin).map_or(Decimal::ZERO, |p| {
+            let value = mark * p.szi.abs();
+            let signed = if p.szi.is_sign_negative() {
+                -value
+            } else {
+                value
+            };
+            let pnl = p.unrealized_pnl(mark).unwrap_or(Decimal::ZERO);
+            p.margin_used + pnl - signed
         })
-        // A no-position coin serves the venue's own default: the live sample
-        // measured `leverage: {type: "cross", value: 20}` for an account with
-        // no position (2026-10-23, §16.5's probe) — not a fabrication.
-        .unwrap_or(Leverage {
-            kind: LeverageType::Cross,
-            value: 20,
-            raw_usd: None,
-        });
+    });
+    let leverage = Leverage {
+        kind: setting.mode,
+        value: setting.leverage,
+        raw_usd,
+    };
     // `availableToTrade` is the free margin (value minus used minus the open
     // orders' reservations) — the same figure the placement check reads — not
     // `withdrawable`, which the docs' transfer rule bounds.
@@ -793,6 +1291,67 @@ pub(crate) fn abstraction_of(account: &account::Account) -> UserAbstraction {
 mod tests {
     use super::*;
 
+    fn state_with(feed: crate::feed::MarketFeed) -> Arc<ApiState> {
+        let api = crate::feed::rest::RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap();
+        Arc::new(
+            ApiState::new(
+                Arc::new(feed),
+                Arc::new(crate::sim::Sim::memory()),
+                api,
+                None,
+                None,
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn state_with_sim(feed: crate::feed::MarketFeed, sim: Arc<crate::sim::Sim>) -> Arc<ApiState> {
+        let api = crate::feed::rest::RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap();
+        Arc::new(
+            ApiState::new(
+                Arc::new(feed),
+                sim,
+                api,
+                None,
+                None,
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap(),
+        )
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).is_ok()
+                || status == StatusCode::UNPROCESSABLE_ENTITY,
+            "the body is not JSON: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn perp_dex(name: &str) -> crate::wire::PerpDex {
+        crate::wire::PerpDex {
+            name: name.into(),
+            full_name: format!("{name} dex"),
+            deployer: Address::repeat_byte(0x01),
+            oracle_updater: None,
+            fee_recipient: None,
+            asset_to_streaming_oi_cap: Vec::new(),
+            asset_to_funding_clamp: Vec::new(),
+            asset_to_funding_interest_rate: Vec::new(),
+            asset_to_funding_multiplier: Vec::new(),
+            sub_deployers: Vec::new(),
+        }
+    }
+
     /// The book aggregation follows the docs: prices round to `n` significant
     /// figures, levels at the same rounded price merge, and out-of-set
     /// parameters refuse by name.
@@ -820,8 +1379,11 @@ mod tests {
         assert_eq!(a.levels[0][0].sz, "3".parse().unwrap());
         assert_eq!(a.levels[0][0].n, 3);
         assert_eq!(a.levels[1][0].px, "110".parse().unwrap());
+        // The aggregated book carries the raw book's spread (106.0 - 100.4).
+        assert_eq!(a.spread, Some("5.6".parse().unwrap()));
         // No params: verbatim, both sides in their own order.
         let c = aggregate_book(book, None, 1);
+        assert_eq!(c.spread, None, "a raw book has no spread field");
         assert_eq!(c.levels[0].len(), 2);
         assert_eq!(c.levels[0][0].px, "100.4".parse().unwrap());
         // The documented parameter set, refused by name otherwise.
@@ -873,49 +1435,37 @@ mod tests {
         assert!(err.to_string().contains("not a simulated account"), "{err}");
     }
 
-    fn state_with(feed: crate::feed::MarketFeed) -> Arc<ApiState> {
+    /// `allPerpMetas` is `meta` in a one-element list (the first dex only);
+    /// the annotation and category lists are empty arrays, never a string.
+    #[test]
+    fn all_perp_metas_wraps_the_first_dex_meta() {
+        let feed = crate::sim::feed_with(&[("ETH", "100", "101")]);
+        feed.put_meta(crate::sim::meta_with("ETH", 10), crate::now_ms());
         let api = crate::feed::rest::RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap();
-        Arc::new(
-            ApiState::new(
-                Arc::new(feed),
-                Arc::new(crate::sim::Sim::memory()),
-                api,
-                None,
-                None,
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(1),
-            )
-            .unwrap(),
+        let state = ApiState::new(
+            Arc::new(feed),
+            Arc::new(crate::sim::Sim::memory()),
+            api,
+            None,
+            None,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
         )
-    }
-
-    async fn response_json(response: Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    fn perp_dex(name: &str) -> crate::wire::PerpDex {
-        crate::wire::PerpDex {
-            name: name.into(),
-            full_name: format!("{name} dex"),
-            deployer: Address::repeat_byte(0x01),
-            oracle_updater: None,
-            fee_recipient: None,
-            asset_to_streaming_oi_cap: Vec::new(),
-            asset_to_funding_clamp: Vec::new(),
-            asset_to_funding_interest_rate: Vec::new(),
-            asset_to_funding_multiplier: Vec::new(),
-            sub_deployers: Vec::new(),
-        }
+        .unwrap();
+        let metas = serde_json::to_value(vec![state.feed.meta().unwrap()]).unwrap();
+        let arr = metas.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["universe"][0]["name"], "ETH");
+        assert_eq!(arr[0]["collateralToken"], 0);
+        assert!(all_perp_metas(&state).is_ok());
     }
 
     /// `meta?dex=` answers the named builder dex's cached meta; the default
-    /// read stays the default dex, and an unknown (or not-yet-polled) dex is
-    /// a named 400 — never a silent fallback.
+    /// read stays the default dex, and an unknown dex (or `ALL_DEXS`, which
+    /// this type does not take) is the venue's 500 `null` — never a silent
+    /// fallback.
     #[tokio::test]
-    async fn meta_dex_serves_the_named_dexs_cached_meta() {
+    async fn meta_scopes_each_dex_and_refuses_an_unlisted_one() {
         let feed = crate::feed::MarketFeed::memory(vec!["xyz:NVDA".into()]);
         feed.put_meta(crate::sim::meta_of(&[("BTC", 40)]), 1);
         feed.put_dex_meta("xyz".into(), crate::sim::meta_of(&[("xyz:NVDA", 10)]), 2);
@@ -928,12 +1478,11 @@ mod tests {
         let default = response_json(meta(&None, &state).unwrap()).await;
         assert_eq!(default["universe"][0]["name"], "BTC");
 
-        let err = meta(&Some("unknown".into()), &state).unwrap_err();
-        assert!(matches!(err, Error::BadRequest { .. }), "{err}");
-        assert!(
-            err.to_string().contains("unknown perp dex `unknown`"),
-            "{err}"
-        );
+        for dex in ["unknown", ALL_DEXS] {
+            let response = meta(&Some(dex.into()), &state).unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(response_json(response).await.is_null());
+        }
     }
 
     /// `perpDexs` serves the upstream list verbatim: leading `null`, then the
@@ -951,5 +1500,144 @@ mod tests {
         assert!(out[0].is_null(), "the default dex is `null`");
         assert_eq!(out[1]["name"], "km");
         assert_eq!(out[2]["name"], "xyz");
+    }
+
+    /// `allMids` scopes to one dex (the default dex's spot and outcome keys
+    /// included), unions every dex for `ALL_DEXS`, and answers the venue's 200
+    /// `null` for a dex it does not list.
+    #[tokio::test]
+    async fn all_mids_scopes_each_dex_and_answers_null_for_an_unknown_one() {
+        let feed = crate::feed::MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        feed.put_meta(crate::sim::meta_of(&[("BTC", 40)]), 1);
+        feed.put_dex_meta("xyz".into(), crate::sim::meta_of(&[("xyz:NVDA", 10)]), 2);
+        feed.put_mids(
+            [
+                ("BTC".to_string(), "100".parse().unwrap()),
+                ("@107".to_string(), "1".parse().unwrap()),
+                ("xyz:NVDA".to_string(), "50".parse().unwrap()),
+            ]
+            .into_iter()
+            .collect(),
+            3,
+        );
+        let state = state_with(feed);
+
+        let default = response_json(all_mids(&None, &state)).await;
+        assert!(default.get("BTC").is_some());
+        assert!(default.get("@107").is_some(), "the default dex's spot keys");
+        assert!(default.get("xyz:NVDA").is_none());
+
+        let xyz = response_json(all_mids(&Some("xyz".into()), &state)).await;
+        assert_eq!(xyz.as_object().unwrap().len(), 1);
+        assert!(xyz.get("xyz:NVDA").is_some());
+
+        let all = response_json(all_mids(&Some(ALL_DEXS.into()), &state)).await;
+        assert!(all.get("BTC").is_some());
+        assert!(all.get("xyz:NVDA").is_some());
+
+        let unknown = all_mids(&Some("nope".into()), &state);
+        assert_eq!(unknown.status(), StatusCode::OK);
+        assert!(response_json(unknown).await.is_null());
+    }
+
+    /// `perpsAtOpenInterestCap` is one dex's list; an unlisted dex and
+    /// `ALL_DEXS` are the venue's 500 `null`.
+    #[tokio::test]
+    async fn open_interest_caps_are_per_dex() {
+        let feed = crate::feed::MarketFeed::memory(vec!["xyz:TSLA".into()]);
+        feed.put_meta(crate::sim::meta_of(&[("BTC", 40)]), 1);
+        feed.put_dex_meta("xyz".into(), crate::sim::meta_of(&[("xyz:TSLA", 10)]), 2);
+        feed.put_oi_caps(vec!["BTC".into()]);
+        feed.put_oi_caps_of("xyz", vec!["xyz:TSLA".into()]);
+        let state = state_with(feed);
+
+        let default = response_json(open_interest_caps(&None, &state).unwrap()).await;
+        assert_eq!(default, serde_json::json!(["BTC"]));
+        let xyz = response_json(open_interest_caps(&Some("xyz".into()), &state).unwrap()).await;
+        assert_eq!(xyz, serde_json::json!(["xyz:TSLA"]));
+
+        for dex in ["nope", ALL_DEXS] {
+            let response = open_interest_caps(&Some(dex.into()), &state).unwrap();
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(response_json(response).await.is_null());
+        }
+    }
+
+    /// A body the venue cannot deserialize is its 422 plain text, not a 500.
+    #[tokio::test]
+    async fn an_undeserializable_info_body_is_the_venues_422() {
+        let state = state_with(crate::feed::MarketFeed::memory(Vec::new()));
+        let response = info(State(state), Bytes::from(r#"{"type":"meta","dex":null}"#))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&bytes),
+            "Failed to deserialize the JSON body into the target type"
+        );
+    }
+
+    /// The account-scoped reads the sim keeps a ledger for answer from it:
+    /// `userFills`, `userFunding`, the transfer ledger, `maxBuilderFee` and
+    /// `preTransferCheck` (one dispatch through the typed wire).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one table of the sim's ledger reads: splitting it would hide their shared dispatch
+    async fn account_ledger_reads_answer_from_the_sim() {
+        let feed = crate::sim::feed_with(&[("ETH", "100", "101")]);
+        feed.put_meta(crate::sim::meta_with("ETH", 10), crate::now_ms());
+        let sim = Arc::new(crate::sim::Sim::memory());
+        let user = Address::repeat_byte(0xaa);
+        sim.deal(
+            &feed,
+            &crate::sim::Deal {
+                address: user,
+                class: crate::sim::DealClass::Perp,
+                coin: None,
+                amount: "100".parse().unwrap(),
+            },
+        )
+        .unwrap();
+        let state = state_with_sim(feed, sim);
+        let hex = format!("{user:#x}");
+        let builder = Address::repeat_byte(0xbb);
+
+        for (body, expected) in [
+            (
+                format!(r#"{{"type":"userFills","user":"{hex}"}}"#),
+                serde_json::json!([]),
+            ),
+            (
+                format!(r#"{{"type":"userFunding","user":"{hex}","startTime":0}}"#),
+                serde_json::json!([]),
+            ),
+            (
+                format!(r#"{{"type":"userNonFundingLedgerUpdates","user":"{hex}"}}"#),
+                serde_json::json!([]),
+            ),
+            (
+                format!(r#"{{"type":"maxBuilderFee","user":"{hex}","builder":"{builder:#x}"}}"#),
+                serde_json::json!(0),
+            ),
+        ] {
+            let response = info(State(state.clone()), Bytes::from(body)).await.unwrap();
+            assert_eq!(response_json(response).await, expected);
+        }
+
+        let response = info(
+            State(state),
+            Bytes::from(format!(
+                r#"{{"type":"preTransferCheck","user":"{hex}","source":"{hex}"}}"#
+            )),
+        )
+        .await
+        .unwrap();
+        let out = response_json(response).await;
+        assert_eq!(out["isSanctioned"], false);
+        assert_eq!(out["userExists"], true);
+        assert_eq!(out["fee"], "0.0");
+        assert_eq!(out["userHasSentTx"], true);
     }
 }

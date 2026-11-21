@@ -283,6 +283,7 @@ impl Poller {
         self.books().await;
         self.mids().await;
         self.oi_caps().await;
+        self.dex_oi_caps().await;
         self.feed.publish_metrics(crate::now_ms());
     }
 
@@ -317,6 +318,28 @@ impl Poller {
         {
             Ok(caps) => self.feed.put_oi_caps(caps),
             Err(e) => self.rest_fault("perpsAtOpenInterestCap", &e),
+        }
+    }
+
+    /// The configured builder dexes' cap lists: the `perpsAtOpenInterestCap`
+    /// read takes one dex at a time (an unlisted dex and `ALL_DEXS` answer
+    /// 500), so each configured dex is asked its own question. The default
+    /// dex is the poll above.
+    async fn dex_oi_caps(&self) {
+        for dex in configured_dexes(&self.feed.markets) {
+            if !self.gated(crate::feed::budget::weight::LIGHT) {
+                return;
+            }
+            match self
+                .api
+                .info::<Vec<String>>(&InfoRequest::PerpsAtOpenInterestCap {
+                    dex: Some(dex.clone()),
+                })
+                .await
+            {
+                Ok(caps) => self.feed.put_oi_caps_of(&dex, caps),
+                Err(e) => self.rest_fault("perpsAtOpenInterestCap(dex)", &e),
+            }
         }
     }
 
