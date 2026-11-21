@@ -13,7 +13,7 @@ diorama-config = { path = "../config" }
 diorama-anvil = { path = "../anvil" }
 diorama-devnet = { path = "../devnet" }
 alloy-consensus = { workspace = true }
-alloy-primitives = { workspace = true }
+alloy-primitives = { workspace = true, features = ["k256"] }
 alloy-rpc-types-eth = { workspace = true }
 alloy-rpc-types-trace = { workspace = true }
 alloy-sol-types = { workspace = true }

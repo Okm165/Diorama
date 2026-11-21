@@ -20,6 +20,7 @@
 //! `HyperliquidSignTransaction` domain whose chain id is the action's
 //! `signatureChainId`. Their field lists are [`USER_SIGNED`]; the account's own
 //! key signs them (an API wallet may not).
+#![allow(dead_code)] // the `/exchange` lane recovers the signer through these next
 use crate::wire::Signature;
 use alloy_primitives::{keccak256, Address, B256, U256};
 use alloy_sol_types::{eip712_domain, sol, Eip712Domain, SolStruct};

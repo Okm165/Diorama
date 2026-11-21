@@ -5,6 +5,7 @@
 //!
 //! The functions here are pure (state in, JSON out) so the session loop in
 //! `ws.rs` only decides *when* to push.
+#![allow(dead_code)] // the session loop's fast-channel pushes adopt these next
 use crate::feed::MarketFeed;
 use crate::wire::{decimal_nano, AssetCtx, L2Book, Level};
 use base64::Engine;

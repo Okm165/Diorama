@@ -388,11 +388,8 @@ impl Poller {
             };
             match self.api.info::<MetaAndAssetCtxs>(&req).await {
                 Ok(MetaAndAssetCtxs(meta, ctxs)) => {
-                    let now = crate::now_ms();
-                    for (asset, ctx) in meta.universe.iter().zip(ctxs) {
-                        self.feed.put_ctx(asset.name.clone(), ctx, now);
-                    }
-                    self.feed.put_dex_meta(dex, meta, now);
+                    self.feed
+                        .put_dex_ctxs(&dex, meta, ctxs, crate::now_ms());
                 }
                 Err(e) => self.rest_fault("metaAndAssetCtxs(dex)", &e),
             }

@@ -842,10 +842,9 @@ mod tests {
         assert_eq!(
             body,
             serde_json::json!({
-                // The wire serializer trims trailing zeros (nano
-                // granularity), so the measured "0.0" is served as "0".
+                // The venue's own text: a whole number carries ".0".
                 "description": "",
-                "marginTiers": [{"lowerBound": "0", "maxLeverage": 1}]
+                "marginTiers": [{"lowerBound": "0.0", "maxLeverage": 1}]
             })
         );
     }

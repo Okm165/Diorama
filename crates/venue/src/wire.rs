@@ -29,12 +29,82 @@ use std::collections::BTreeMap;
 /// arithmetic keeps wide scales (e.g. `45.9053659690`), and the consumer's
 /// `nanos_from_decimal_str` refuses any string with more than nine fraction
 /// digits — a formatting artifact must not read as a malformed venue response.
+#[allow(dead_code)] // the optional/pair serializers land with the shapes that carry them
 pub(crate) mod decimal_nano {
     use rust_decimal::Decimal;
     use serde::Serializer;
 
+    /// The venue's decimal text, for payloads built as JSON values: trailing
+    /// zeros trimmed and a whole number always carrying `.0` (measured on every
+    /// real info answer and websocket channel, compressed ones included: a
+    /// price is `"64891.0"`, a zero `"0.0"`, and never a bare `"64891"`).
+    pub(crate) fn text(value: &Decimal) -> String {
+        whole_with_point(value.round_dp(9).normalize().to_string())
+    }
+
+    /// A whole number's `.0`: the venue prints every decimal with a point.
+    pub(crate) fn whole_with_point(text: String) -> String {
+        if text.contains('.') {
+            text
+        } else {
+            format!("{text}.0")
+        }
+    }
+
     pub fn serialize<S: Serializer>(value: &Decimal, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&value.round_dp(9).normalize().to_string())
+        serializer.serialize_str(&text(value))
+    }
+
+    /// An optional decimal (`null` when absent; pair with `skip_serializing_if`
+    /// where the key is omitted instead).
+    pub fn serialize_opt<S: Serializer>(
+        value: &Option<Decimal>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(v) => serialize(v, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    /// A pair of decimals (`maxTradeSzs`, `availableToTrade`).
+    pub fn serialize_pair<S: Serializer>(
+        value: &[Decimal; 2],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(2))?;
+        for v in value {
+            seq.serialize_element(&text(v))?;
+        }
+        seq.end()
+    }
+
+    /// An optional pair (`impactPxs`).
+    pub fn serialize_opt_pair<S: Serializer>(
+        value: &Option<[Decimal; 2]>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(v) => serialize_pair(v, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+}
+
+/// `liquidationPx` on the wire: a computed price, which the venue prints with up
+/// to ten fractional digits (measured: `0.4927481777`, `21139.6026656483`),
+/// trailing zeros trimmed; `null` when there is none.
+#[allow(dead_code)] // the clearinghouse shape adopts it with the parity surface
+fn liquidation_px_text<S: serde::Serializer>(
+    value: &Option<Decimal>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(v) => serializer.serialize_str(&decimal_nano::whole_with_point(
+            v.round_dp(10).normalize().to_string(),
+        )),
+        None => serializer.serialize_none(),
     }
 }
 

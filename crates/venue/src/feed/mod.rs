@@ -18,6 +18,7 @@
 //! the same owned numbers the account plane computes with — the consumer must never
 //! read a different mark than the sim used for margin.
 pub(crate) mod budget;
+pub(crate) mod dex;
 pub(crate) mod metrics;
 pub(crate) mod rest;
 pub(crate) mod ws;
@@ -25,6 +26,7 @@ pub(crate) mod ws;
 use crate::error::Result;
 use crate::wire::{AllMids, AssetCtx, L2Book, Meta, PerpDex};
 use budget::Budget;
+use dex::{dex_of_coin, DexRegistry, PerpDexInfo};
 use diorama_devnet::store;
 use metrics::FeedMetrics;
 use rust_decimal::Decimal;
@@ -114,6 +116,11 @@ struct Cache {
     /// (`[0]` is the default dex, `null`). `None` until the poll lands: an
     /// index `a >= 100000` cannot be resolved without it.
     perp_dexs: Option<Vec<Option<PerpDex>>>,
+    /// The per-dex view derived from the three above on every write: the
+    /// default dex plus each `perpDexs` position whose meta has landed. Its
+    /// position is what the asset-id namespace encodes, so a dex is only in
+    /// it — and only resolvable — once both halves are known.
+    registry: DexRegistry,
     meta_at: Option<u64>,
     spot_meta: Option<crate::wire::SpotMeta>,
     ctxs: BTreeMap<String, AssetCtx>,
@@ -126,6 +133,66 @@ struct Cache {
     /// `None` = the market plane has not answered yet: the order lane refuses
     /// rather than treating an unknown cap set as "no caps".
     pub(crate) oi_caps: Option<Vec<String>>,
+}
+
+impl Cache {
+    /// Rebuild the per-dex view from the raw caches: the default dex first,
+    /// then each upstream `perpDexs` position whose meta has landed. A dex
+    /// with no meta, or a meta with no position, is not resolvable (its id
+    /// range is the venue's to define, not a fixture's insertion order).
+    fn rebuild_registry(&mut self) {
+        let mut dexs = Vec::new();
+        if let Some(info) = self
+            .meta
+            .clone()
+            .and_then(|meta| PerpDexInfo::new(0, String::new(), None, meta))
+        {
+            dexs.push(info);
+        }
+        for (index, slot) in self.perp_dexs.iter().flatten().enumerate().skip(1) {
+            let Some(raw) = slot else {
+                continue;
+            };
+            let Some(meta) = self.dex_metas.get(&raw.name) else {
+                continue;
+            };
+            if let Some(info) =
+                PerpDexInfo::new(index, raw.name.clone(), Some(raw.clone()), meta.clone())
+            {
+                dexs.push(info);
+            }
+        }
+        self.registry = DexRegistry::from_dexs(dexs);
+    }
+
+    /// Store one dex's meta (`""` = the default dex) and refresh the derived
+    /// views it feeds.
+    fn put_dex_meta(&mut self, dex: String, meta: Meta, now_ms: u64) {
+        if dex.is_empty() {
+            self.meta = Some(meta);
+        } else {
+            self.dex_metas.insert(dex, meta);
+        }
+        self.meta_at = Some(self.meta_at.map_or(now_ms, |at| at.max(now_ms)));
+        self.rebuild_margin_meta();
+        self.rebuild_registry();
+    }
+
+    /// The account-plane view from scratch: the default dex, then each dex's
+    /// universe absorbed in its cached form. Rebuilt on every write (instead
+    /// of mutating in place) so the default dex's poll never momentarily
+    /// erases a HIP-3 account's margin tiers — that would make every account
+    /// holding a HIP-3 market unpriceable once per poll cycle.
+    fn rebuild_margin_meta(&mut self) {
+        let Some(core) = self.meta.clone() else {
+            return;
+        };
+        let mut union = core;
+        for meta in self.dex_metas.values() {
+            union.absorb(meta.clone());
+        }
+        self.margin_meta = Some(union);
+    }
 }
 
 pub struct MarketFeed {
@@ -284,9 +351,7 @@ impl MarketFeed {
             return;
         }
         let mut c = self.write();
-        c.meta = Some(meta);
-        c.meta_at = Some(now_ms);
-        Self::rebuild_margin_meta(&mut c);
+        c.put_dex_meta(String::new(), meta, now_ms);
     }
 
     /// `perpDexs`: the venue's perp-dex list, kept verbatim **and in the
@@ -299,37 +364,46 @@ impl MarketFeed {
             tracing::debug!("live perpDexs dropped: the feed is stalled (the staleness drill)");
             return;
         }
-        self.write().perp_dexs = Some(dexs);
+        let mut c = self.write();
+        c.perp_dexs = Some(dexs);
+        c.rebuild_registry();
     }
 
-    /// One perp dex's meta, kept and folded into the account-plane view.
-    /// Polled for each configured dex the default meta does not cover, so an
-    /// account holding a HIP-3 market is priceable instead of refused.
+    /// One perp dex's meta, kept and folded into the account-plane view: the
+    /// fixtures' door for a second dex. The poller lands a dex's meta with its
+    /// contexts through [`Self::put_dex_ctxs`].
+    #[cfg(test)]
     pub(crate) fn put_dex_meta(&self, dex: String, meta: Meta, now_ms: u64) {
         if self.stalled() {
             tracing::debug!("live dex meta dropped: the feed is stalled (the staleness drill)");
             return;
         }
-        let mut c = self.write();
-        c.dex_metas.insert(dex, meta);
-        c.meta_at = Some(c.meta_at.map_or(now_ms, |at| at.max(now_ms)));
-        Self::rebuild_margin_meta(&mut c);
+        self.write().put_dex_meta(dex, meta, now_ms);
     }
 
-    /// The account-plane view from scratch: the default dex, then each dex's
-    /// universe absorbed in its cached form. Rebuilt on every write (instead
-    /// of mutating in place) so the default dex's poll never momentarily
-    /// erases a HIP-3 account's margin tiers — that would make every account
-    /// holding a HIP-3 market unpriceable once per poll cycle.
-    fn rebuild_margin_meta(c: &mut Cache) {
-        let Some(core) = c.meta.clone() else {
+    /// One builder dex's contexts, aligned to its universe by index, and its
+    /// fresh meta. A short `ctxs` array folds only the aligned prefix: a
+    /// missing slot leaves that coin unwarmed rather than shifting its
+    /// neighbour onto it.
+    pub(crate) fn put_dex_ctxs(&self, dex: &str, meta: Meta, ctxs: Vec<AssetCtx>, now_ms: u64) {
+        if self.stalled() {
+            tracing::debug!(dex = %dex, "live dex ctxs dropped: the feed is stalled (the staleness drill)");
             return;
-        };
-        let mut union = core;
-        for meta in c.dex_metas.values() {
-            union.absorb(meta.clone());
         }
-        c.margin_meta = Some(union);
+        if ctxs.len() != meta.universe.len() {
+            tracing::warn!(
+                dex = %dex,
+                universe = meta.universe.len(),
+                ctxs = ctxs.len(),
+                "dex ctxs are not aligned with the universe; folding the aligned prefix"
+            );
+        }
+        let mut c = self.write();
+        for (asset, ctx) in meta.universe.iter().zip(ctxs) {
+            c.ctx_at.insert(asset.name.clone(), now_ms);
+            c.ctxs.insert(asset.name.clone(), ctx);
+        }
+        c.put_dex_meta(dex.to_string(), meta, now_ms);
     }
 
     pub(crate) fn put_spot_meta(&self, spot: crate::wire::SpotMeta) {
@@ -617,6 +691,72 @@ impl MarketFeed {
         self.read().meta.clone()
     }
 
+    /// One dex's meta (`""` = the default dex). `None` = the dex is unknown
+    /// or has not landed: a named refusal, never a silent fallback to the
+    /// default dex's universe.
+    pub(crate) fn meta_of(&self, dex: &str) -> Option<Meta> {
+        if dex.is_empty() {
+            return self.meta();
+        }
+        self.dex_meta(dex)
+    }
+
+    /// The collateral token a dex margins against (`0` = USDC). A dex that
+    /// has not landed reads as USDC: the same reading the default dex has.
+    #[allow(dead_code)] // the fee/collateral lanes adopt it with the multi-dex serving phase
+    pub(crate) fn collateral_token_of(&self, dex: &str) -> u32 {
+        let c = self.read();
+        if dex.is_empty() {
+            return c.meta.as_ref().map_or(0, |meta| meta.collateral_token);
+        }
+        c.dex_metas
+            .get(dex)
+            .map_or(0, |meta| meta.collateral_token)
+    }
+
+    /// Every dex with its coin names in universe order: the default dex
+    /// first, then the other cached dexes in name order. This is the push
+    /// lanes' per-tick read, so only the names are copied.
+    pub(crate) fn dex_coins(&self) -> Vec<(String, Vec<String>)> {
+        let c = self.read();
+        let mut dexs: Vec<(String, Vec<String>)> = c
+            .dex_metas
+            .iter()
+            .map(|(dex, meta)| {
+                (
+                    dex.clone(),
+                    meta.universe.iter().map(|a| a.name.clone()).collect(),
+                )
+            })
+            .collect();
+        if let Some(meta) = &c.meta {
+            dexs.insert(
+                0,
+                (
+                    String::new(),
+                    meta.universe.iter().map(|a| a.name.clone()).collect(),
+                ),
+            );
+        }
+        dexs
+    }
+
+    /// Every dex name with its collateral token (cheap: no universes are
+    /// copied), in [`Self::dex_coins`] order.
+    pub(crate) fn dex_collateral_tokens(&self) -> Vec<(String, u32)> {
+        let c = self.read();
+        let mut dexs = Vec::with_capacity(c.dex_metas.len() + 1);
+        if let Some(meta) = &c.meta {
+            dexs.push((String::new(), meta.collateral_token));
+        }
+        dexs.extend(
+            c.dex_metas
+                .iter()
+                .map(|(dex, meta)| (dex.clone(), meta.collateral_token)),
+        );
+        dexs
+    }
+
     /// The upstream `perpDexs` list in the venue's order (the first element
     /// is the default dex, `null`). `None` until the poll lands.
     pub(crate) fn perp_dexs(&self) -> Option<Vec<Option<PerpDex>>> {
@@ -656,29 +796,7 @@ impl MarketFeed {
     /// `margin_meta` view is deliberately not consulted: it merges dexes for
     /// name-based margin lookups, not for index resolution.
     pub(crate) fn coin_of_asset(&self, asset: u32) -> Option<String> {
-        let c = self.read();
-        if asset < 10_000 {
-            return c
-                .meta
-                .as_ref()?
-                .universe
-                .get(asset as usize)
-                .map(|a| a.name.clone());
-        }
-        if asset < 100_000 {
-            return None; // the spot asset namespace: no perp order lives here
-        }
-        let offset = asset - 100_000;
-        let dex = c
-            .perp_dexs
-            .as_ref()?
-            .get((offset / 10_000) as usize)?
-            .as_ref()?;
-        c.dex_metas
-            .get(&dex.name)?
-            .universe
-            .get((offset % 10_000) as usize)
-            .map(|a| a.name.clone())
+        self.read().registry.coin_of_asset(asset)
     }
 
     /// The account-plane meta: the default dex plus every configured perp
@@ -716,7 +834,7 @@ impl MarketFeed {
     /// `metaAndAssetCtxs` with the overrides applied: the served contexts are
     /// exactly what the account plane prices from.
     pub(crate) fn meta_and_ctxs(&self) -> Option<crate::wire::MetaAndAssetCtxs> {
-        let meta = self.meta()?;
+        let meta = self.meta_of("")?;
         let overrides = self.read_overrides().clone();
         let stalled = self.stalled();
         let now = crate::now_ms();
@@ -738,11 +856,11 @@ impl MarketFeed {
     /// fresh. The dex metas are already cached here (`put_dex_meta`); serving
     /// them is the honest multi-dex shape, not a new plane.
     pub(crate) fn dex_meta_and_ctxs(&self, dex: &str) -> Option<crate::wire::MetaAndAssetCtxs> {
+        let meta = self.meta_of(dex)?;
         let overrides = self.read_overrides().clone();
         let stalled = self.stalled();
         let now = crate::now_ms();
         let c = self.read();
-        let meta = c.dex_metas.get(dex)?.clone();
         let ctxs = meta
             .universe
             .iter()
@@ -753,11 +871,28 @@ impl MarketFeed {
 
     /// `allMids` with the overrides applied.
     pub(crate) fn all_mids(&self) -> AllMids {
+        self.all_mids_of("")
+    }
+
+    /// `allMids` for one dex (`""` = the default dex): the coins of that dex
+    /// (by their name prefix), with an owned price winning for them.
+    ///
+    /// The cache holds the default `allMids` in one map (the socket's push
+    /// and the default REST read); a builder dex's keys are selected by their
+    /// `dex:` prefix until the poller fetches them per dex.
+    pub(crate) fn all_mids_of(&self, dex: &str) -> AllMids {
         let overrides = self.read_overrides().clone();
         let c = self.read();
-        let mut mids = c.mids.clone();
+        let mut mids: BTreeMap<String, Decimal> = c
+            .mids
+            .iter()
+            .filter(|(coin, _)| dex_of_coin(coin) == dex)
+            .map(|(coin, mid)| (coin.clone(), *mid))
+            .collect();
         for (coin, p) in &overrides.prices {
-            mids.insert(coin.clone(), p.mark);
+            if dex_of_coin(coin) == dex {
+                mids.insert(coin.clone(), p.mark);
+            }
         }
         AllMids(mids)
     }
@@ -1389,5 +1524,103 @@ mod tests {
         assert_eq!(feed.dex_index("km"), Some(1));
         assert_eq!(feed.dex_index("xyz"), Some(2));
         assert_eq!(feed.dex_index("nope"), None);
+    }
+
+    /// The feed serves every dex's universe (the push lanes' per-dex read) and
+    /// the default dex through the old single-dex accessors, while a dex's
+    /// collateral token is the dex meta's own.
+    #[test]
+    fn the_feed_lists_every_dex_and_the_default_through_meta() {
+        let feed = MarketFeed::memory(vec![]);
+        feed.put_meta(meta_with(&["BTC"]), 1);
+        let mut xyz = meta_with(&["xyz:XYZ100", "xyz:TSLA"]);
+        xyz.collateral_token = 360;
+        feed.put_dex_meta("xyz".into(), xyz, 2);
+        assert_eq!(feed.meta().unwrap().universe[0].name, "BTC");
+        assert_eq!(feed.meta_of("").unwrap().universe[0].name, "BTC");
+        assert_eq!(feed.meta_of("xyz").unwrap().universe.len(), 2);
+        assert!(feed.meta_of("nope").is_none());
+        assert_eq!(feed.collateral_token_of("xyz"), 360);
+        assert_eq!(feed.collateral_token_of(""), 0);
+        assert_eq!(feed.collateral_token_of("nope"), 0, "unknown reads as USDC");
+        assert_eq!(
+            feed.dex_coins(),
+            [
+                (String::new(), vec!["BTC".to_string()]),
+                (
+                    "xyz".to_string(),
+                    vec!["xyz:XYZ100".to_string(), "xyz:TSLA".to_string()]
+                ),
+            ]
+        );
+        assert_eq!(
+            feed.dex_collateral_tokens(),
+            [(String::new(), 0), ("xyz".to_string(), 360)]
+        );
+    }
+
+    /// A builder dex's contexts align to its universe by index, are quoted by
+    /// coin name (`mark`, the dex's own `metaAndAssetCtxs`) and a short array
+    /// folds only the prefix: a missing slot is skipped, not shifted onto its
+    /// neighbour.
+    #[test]
+    fn a_builder_dexs_contexts_are_quoted_by_coin_and_aligned_by_index() {
+        let feed = MarketFeed::memory(vec![]);
+        feed.put_meta(meta_with(&["BTC"]), 1);
+        feed.put_ctx("BTC".into(), test_ctx("100", "100"), 1);
+        feed.put_perp_dexs(vec![None, Some(perp_dex("xyz"))]);
+        // Two contexts for three assets: A and B are folded, C is not.
+        feed.put_dex_ctxs(
+            "xyz",
+            meta_with(&["xyz:A", "xyz:B", "xyz:C"]),
+            vec![test_ctx("1", "1"), test_ctx("2", "2")],
+            5,
+        );
+        assert_eq!(feed.mark("xyz:A"), Some(Decimal::from(1)));
+        assert_eq!(feed.mark("xyz:B"), Some(Decimal::from(2)));
+        assert_eq!(feed.mark("xyz:C"), None);
+        assert_eq!(feed.stale_ms("xyz:B", 15), Some(10));
+        let served = feed.dex_meta_and_ctxs("xyz").expect("the dex landed");
+        assert_eq!(served.1.len(), 2);
+        assert_eq!(feed.mark("BTC"), Some(Decimal::from(100)));
+        // The default dex's served contexts do not carry the builder coins.
+        assert_eq!(feed.meta_and_ctxs().unwrap().1.len(), 1);
+    }
+
+    /// `allMids` is selectable per dex by the coin's prefix (the default dex's
+    /// keys — perps, spot `@N`, outcomes `#N` — carry none), and an owned
+    /// price wins only in its own dex.
+    #[test]
+    fn all_mids_split_by_the_coins_dex() {
+        let feed = MarketFeed::memory(vec![]);
+        let mids: BTreeMap<String, Decimal> = [
+            ("BTC", "100"),
+            ("@107", "5"),
+            ("#10", "0.5"),
+            ("xyz:TSLA", "300"),
+        ]
+        .into_iter()
+        .map(|(coin, mid)| (coin.to_string(), mid.parse().unwrap()))
+        .collect();
+        feed.put_mids(mids, 4);
+        let default = feed.all_mids().0;
+        assert_eq!(default.len(), 3);
+        assert!(default.contains_key("@107") && default.contains_key("#10"));
+        let xyz = feed.all_mids_of("xyz").0;
+        assert_eq!(xyz.len(), 1);
+        assert_eq!(xyz["xyz:TSLA"], Decimal::from(300));
+        feed.own_price(
+            "xyz:TSLA",
+            PriceOverride {
+                mark: Decimal::from(7),
+                oracle: Decimal::from(7),
+            },
+        )
+        .unwrap();
+        assert_eq!(feed.all_mids_of("xyz").0["xyz:TSLA"], Decimal::from(7));
+        assert!(
+            !feed.all_mids().0.contains_key("xyz:TSLA"),
+            "an owned builder price is not a default-dex mid"
+        );
     }
 }
