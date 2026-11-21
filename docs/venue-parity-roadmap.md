@@ -138,6 +138,19 @@ minutes with **0 gaps** (all 23 accounts), no refusal lines outside the
 rollout window, gateway `healthy` with no advisories. The 13-probe action
 sweep still passes 13/13.
 
+**One wire fact worth knowing (found while measuring):** the account's
+ledger rows (`userFills`, `userFunding`, the transfer ledger) carry the
+mirror's **scenario** clock — `/control/advance` moves it forward, and it can
+sit minutes ahead of wall time — while `clearinghouseState.time` stays the
+wall clock (the freshness gate's fact). Fills were ~33 minutes "ahead" on the
+current mirror. Anything that windows fills by wall time is therefore wrong:
+`venue-roundtrip`/`venue-maker-cycle` anchored their fill snapshot on wall
+time and summed the wallet's pre-run history (131 bps reported for a round
+trip whose own fills cost 4.8 bps); they now anchor on the account's newest
+fill. Live re-measure: roundtrip 4.8 bps, maker cycle maker 1.5 / taker 4.5
+bps, each from its own oids only.
+
+
 
 
 ## Representation check against the real venue
