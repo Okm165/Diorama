@@ -1,0 +1,2526 @@
+{
+ "info": {
+  "allMids": {
+   "#114910": "0.5",
+   "#114911": "0.5",
+   "#114920": "0.132625"
+  },
+  "perpDexs": [
+   null,
+   {
+    "name": "xyz",
+    "fullName": "XYZ",
+    "deployer": "0x1111111111111111111111111111111111111111",
+    "oracleUpdater": null,
+    "feeRecipient": "0x1111111111111111111111111111111111111111",
+    "assetToStreamingOiCap": [
+     [
+      "xyz:AAOI",
+      "25000000.0"
+     ],
+     [
+      "xyz:AAPL",
+      "200000000.0"
+     ]
+    ],
+    "subDeployers": [
+     [
+      "registerAsset",
+      [
+       "0x1111111111111111111111111111111111111111",
+       "0x1111111111111111111111111111111111111111"
+      ]
+     ],
+     [
+      "setOracle",
+      [
+       "0x1111111111111111111111111111111111111111"
+      ]
+     ]
+    ],
+    "assetToFundingMultiplier": [
+     [
+      "xyz:AAOI",
+      "0.5"
+     ],
+     [
+      "xyz:AAPL",
+      "0.5"
+     ]
+    ],
+    "assetToFundingInterestRate": [
+     [
+      "xyz:EUR",
+      "0.0"
+     ],
+     [
+      "xyz:GBP",
+      "0.0"
+     ]
+    ],
+    "assetToFundingClamp": []
+   }
+  ],
+  "allPerpMetas": [
+   {
+    "universe": [
+     {
+      "szDecimals": 5,
+      "name": "BTC",
+      "maxLeverage": 40,
+      "marginTableId": 56
+     },
+     {
+      "szDecimals": 4,
+      "name": "ETH",
+      "maxLeverage": 25,
+      "marginTableId": 55
+     }
+    ],
+    "marginTables": [
+     [
+      50,
+      {
+       "description": "",
+       "marginTiers": [
+        {
+         "lowerBound": "0.0",
+         "maxLeverage": 50
+        }
+       ]
+      }
+     ],
+     [
+      51,
+      {
+       "description": "tiered 10x",
+       "marginTiers": [
+        {
+         "lowerBound": "0.0",
+         "maxLeverage": 10
+        },
+        {
+         "lowerBound": "3000000.0",
+         "maxLeverage": 5
+        }
+       ]
+      }
+     ]
+    ],
+    "collateralToken": 0
+   },
+   {
+    "universe": [
+     {
+      "szDecimals": 4,
+      "name": "xyz:XYZ100",
+      "maxLeverage": 30,
+      "marginTableId": 30,
+      "growthMode": "enabled",
+      "lastFeeScaleChangeTime": "2025-11-23T17:37:10.033211662",
+      "deployerFeeScale": "1.0"
+     },
+     {
+      "szDecimals": 3,
+      "name": "xyz:TSLA",
+      "maxLeverage": 20,
+      "marginTableId": 20,
+      "growthMode": "enabled",
+      "lastFeeScaleChangeTime": "2025-11-23T17:37:10.033211662",
+      "deployerFeeScale": "1.0"
+     }
+    ],
+    "marginTables": [
+     [
+      50,
+      {
+       "description": "",
+       "marginTiers": [
+        {
+         "lowerBound": "0.0",
+         "maxLeverage": 50
+        }
+       ]
+      }
+     ]
+    ],
+    "collateralToken": 0
+   }
+  ],
+  "meta": {
+   "universe": [
+    {
+     "szDecimals": 5,
+     "name": "BTC",
+     "maxLeverage": 40,
+     "marginTableId": 56
+    },
+    {
+     "szDecimals": 4,
+     "name": "ETH",
+     "maxLeverage": 25,
+     "marginTableId": 55
+    }
+   ],
+   "marginTables": [
+    [
+     50,
+     {
+      "description": "",
+      "marginTiers": [
+       {
+        "lowerBound": "0.0",
+        "maxLeverage": 50
+       }
+      ]
+     }
+    ],
+    [
+     51,
+     {
+      "description": "tiered 10x",
+      "marginTiers": [
+       {
+        "lowerBound": "0.0",
+        "maxLeverage": 10
+       },
+       {
+        "lowerBound": "3000000.0",
+        "maxLeverage": 5
+       }
+      ]
+     }
+    ]
+   ],
+   "collateralToken": 0
+  },
+  "metaAndAssetCtxs": [
+   {
+    "universe": [
+     {
+      "szDecimals": 5,
+      "name": "BTC",
+      "maxLeverage": 40,
+      "marginTableId": 56
+     },
+     {
+      "szDecimals": 4,
+      "name": "ETH",
+      "maxLeverage": 25,
+      "marginTableId": 55
+     }
+    ],
+    "marginTables": [
+     [
+      50,
+      {
+       "description": "",
+       "marginTiers": [
+        {
+         "lowerBound": "0.0",
+         "maxLeverage": 50
+        }
+       ]
+      }
+     ],
+     [
+      51,
+      {
+       "description": "tiered 10x",
+       "marginTiers": [
+        {
+         "lowerBound": "0.0",
+         "maxLeverage": 10
+        },
+        {
+         "lowerBound": "3000000.0",
+         "maxLeverage": 5
+        }
+       ]
+      }
+     ]
+    ],
+    "collateralToken": 0
+   },
+   [
+    {
+     "funding": "0.0000125",
+     "openInterest": "36321.77766",
+     "prevDayPx": "64607.0",
+     "dayNtlVlm": "3457564843.1571297646",
+     "premium": "-0.0004207574",
+     "oraclePx": "64170.0",
+     "markPx": "64147.0",
+     "midPx": "64142.5",
+     "impactPxs": [
+      "64142.0",
+      "64143.0"
+     ],
+     "dayBaseVlm": "53465.7558200001"
+    },
+    {
+     "funding": "0.0000060055",
+     "openInterest": "580977.5104000015",
+     "prevDayPx": "1808.4",
+     "dayNtlVlm": "772745658.8242380619",
+     "premium": "-0.0005539552",
+     "oraclePx": "1805.2",
+     "markPx": "1804.4",
+     "midPx": "1804.15",
+     "impactPxs": [
+      "1804.1",
+      "1804.2"
+     ],
+     "dayBaseVlm": "425016.4319000004"
+    }
+   ]
+  ],
+  "candleSnapshot": [
+   {
+    "t": 1794823200000,
+    "T": 1794826799999,
+    "s": "BTC",
+    "i": "1h",
+    "o": "64303.0",
+    "c": "64538.0",
+    "h": "64663.0",
+    "l": "64274.0",
+    "v": "865.71976",
+    "n": 15276
+   },
+   {
+    "t": 1794826800000,
+    "T": 1794830399999,
+    "s": "BTC",
+    "i": "1h",
+    "o": "64538.0",
+    "c": "64423.0",
+    "h": "64782.0",
+    "l": "64418.0",
+    "v": "2416.45882",
+    "n": 16799
+   }
+  ],
+  "clearinghouseState": {
+   "marginSummary": {
+    "accountValue": "46416.768657",
+    "totalNtlPos": "107353.69739",
+    "totalRawUsd": "153770.466047",
+    "totalMarginUsed": "21470.739478"
+   },
+   "crossMarginSummary": {
+    "accountValue": "46416.768657",
+    "totalNtlPos": "107353.69739",
+    "totalRawUsd": "153770.466047",
+    "totalMarginUsed": "21470.739478"
+   },
+   "crossMaintenanceMarginUsed": "1500.448131",
+   "withdrawable": "24946.029179",
+   "assetPositions": [
+    {
+     "type": "oneWay",
+     "position": {
+      "coin": "BTC",
+      "szi": "-1.34405",
+      "leverage": {
+       "type": "cross",
+       "value": 5
+      },
+      "entryPx": "64234.1",
+      "positionValue": "86216.77535",
+      "unrealizedPnl": "117.14108",
+      "returnOnEquity": "0.0067841866",
+      "liquidationPx": "97153.0623113026",
+      "marginUsed": "17243.35507",
+      "maxLeverage": 40,
+      "cumFunding": {
+       "allTime": "-496.85115",
+       "sinceOpen": "0.0",
+       "sinceChange": "0.0"
+      }
+     }
+    },
+    {
+     "type": "oneWay",
+     "position": {
+      "coin": "ETH",
+      "szi": "-11.7141",
+      "leverage": {
+       "type": "cross",
+       "value": 5
+      },
+      "entryPx": "1804.6",
+      "positionValue": "21136.92204",
+      "unrealizedPnl": "2.34282",
+      "returnOnEquity": "0.0005541394",
+      "liquidationPx": "5563.596895881",
+      "marginUsed": "4227.384408",
+      "maxLeverage": 25,
+      "cumFunding": {
+       "allTime": "-48.189729",
+       "sinceOpen": "0.0",
+       "sinceChange": "0.0"
+      }
+     }
+    }
+   ],
+   "time": 1794842902532
+  },
+  "spotClearinghouseState": {
+   "balances": []
+  },
+  "openOrders": [
+   {
+    "coin": "ETH",
+    "side": "A",
+    "limitPx": "1804.7",
+    "sz": "13.7874",
+    "oid": 607173982046,
+    "timestamp": 1794842902606,
+    "origSz": "13.7874",
+    "cloid": "0x0000000000000000000001a1d9c4d3dd"
+   },
+   {
+    "coin": "ETH",
+    "side": "B",
+    "limitPx": "1804.6",
+    "sz": "12.8691",
+    "oid": 607173981836,
+    "timestamp": 1794842902606,
+    "origSz": "12.8691",
+    "cloid": "0x0000000000000000000001a1d9c4d3de"
+   }
+  ],
+  "frontendOpenOrders": [
+   {
+    "coin": "ETH",
+    "side": "B",
+    "limitPx": "1804.6",
+    "sz": "12.8691",
+    "oid": 607173981836,
+    "timestamp": 1794842902606,
+    "triggerCondition": "N/A",
+    "isTrigger": false,
+    "triggerPx": "0.0",
+    "children": [],
+    "isPositionTpsl": false,
+    "reduceOnly": false,
+    "orderType": "Limit",
+    "origSz": "12.8691",
+    "tif": "Alo",
+    "cloid": "0x0000000000000000000001a1d9c4d3de"
+   }
+  ],
+  "activeAssetData": {
+   "user": "0x1111111111111111111111111111111111111111",
+   "coin": "BTC",
+   "leverage": {
+    "type": "cross",
+    "value": 5
+   },
+   "maxTradeSzs": [
+    "3.5304",
+    "1.55582"
+   ],
+   "availableToTrade": [
+    "45294.32592",
+    "19960.859436"
+   ],
+   "markPx": "64149.0"
+  },
+  "l2Book": {
+   "coin": "BTC",
+   "time": 1794842903894,
+   "levels": [
+    [
+     {
+      "px": "64154.0",
+      "sz": "15.98855",
+      "n": 35
+     },
+     {
+      "px": "64153.0",
+      "sz": "13.79807",
+      "n": 46
+     }
+    ],
+    [
+     {
+      "px": "64155.0",
+      "sz": "0.1142",
+      "n": 2
+     },
+     {
+      "px": "64159.0",
+      "sz": "0.03701",
+      "n": 1
+     }
+    ]
+   ]
+  },
+  "userFills": [
+   {
+    "coin": "ETH",
+    "px": "1804.6",
+    "sz": "14.0762",
+    "side": "A",
+    "time": 1794842899956,
+    "startPosition": "2.3621",
+    "dir": "Long > Short",
+    "closedPnl": "2.3621",
+    "hash": "0x7a6ba3b1dea762257be50448edb5d402052e009779aa80f71e344f049dab3c10",
+    "oid": 607173840604,
+    "crossed": false,
+    "fee": "-0.762057",
+    "tid": 135691036005092,
+    "cloid": "0x0000000000000000000001a1d9c4d3c1",
+    "feeToken": "USDC",
+    "twapId": null
+   },
+   {
+    "coin": "BTC",
+    "px": "64155.0",
+    "sz": "0.00277",
+    "side": "B",
+    "time": 1794842893032,
+    "startPosition": "-1.34682",
+    "dir": "Close Short",
+    "closedPnl": "0.219107",
+    "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "oid": 607173801792,
+    "crossed": false,
+    "fee": "-0.005331",
+    "tid": 927609500656998,
+    "cloid": "0x0000000000000000000001a1d9c4d3b9",
+    "feeToken": "USDC",
+    "twapId": null
+   }
+  ],
+  "userFunding": [
+   {
+    "time": 1794240000047,
+    "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "delta": {
+     "type": "funding",
+     "coin": "BTC",
+     "usdc": "-1.178318",
+     "szi": "1.24802",
+     "fundingRate": "0.0000125",
+     "nSamples": null
+    }
+   },
+   {
+    "time": 1794240000047,
+    "hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "delta": {
+     "type": "funding",
+     "coin": "ETH",
+     "usdc": "-0.126721",
+     "szi": "4.7206",
+     "fundingRate": "0.0000125",
+     "nSamples": null
+    }
+   }
+  ],
+  "userNonFundingLedgerUpdates": [
+   {
+    "time": 1794612628561,
+    "hash": "0x7238959d3912a4b573b20448bc76480201290082d415c387160140eff8167ea0",
+    "delta": {
+     "type": "send",
+     "user": "0x1111111111111111111111111111111111111111",
+     "destination": "0x1111111111111111111111111111111111111111",
+     "sourceDex": "spot",
+     "destinationDex": "spot",
+     "token": "USDC",
+     "amount": "51.976471",
+     "usdcValue": "51.976471",
+     "fee": "1.001427",
+     "nativeTokenFee": "0.0",
+     "nonce": 1794612627611,
+     "feeToken": "USDC"
+    }
+   },
+   {
+    "time": 1794611504439,
+    "hash": "0x168d15fc54edc3b718060448bc385e0000c82de1efe0e289ba55c14f13e19da1",
+    "delta": {
+     "type": "spotTransfer",
+     "token": "USDC",
+     "amount": "927.409346",
+     "usdcValue": "927.409346",
+     "user": "0x1111111111111111111111111111111111111111",
+     "destination": "0x1111111111111111111111111111111111111111",
+     "fee": "1.0",
+     "nativeTokenFee": "0.0",
+     "nonce": 5846044,
+     "feeToken": "USDC"
+    }
+   },
+   {
+    "time": 1794701572462,
+    "hash": "0xdf950fa078b151d6e10e0448cf76c5010200278613b470a8835dbaf337b52bc1",
+    "delta": {
+     "type": "accountClassTransfer",
+     "usdc": "0.000854",
+     "toPerp": false
+    }
+   },
+   {
+    "time": 1794614039350,
+    "hash": "0x47eb0f2d834ba40c49640448bcc23c00002627131e4ec2deebb3ba80424f7df6",
+    "delta": {
+     "type": "accountActivationGas",
+     "amount": "0.01397702",
+     "token": "HYPE"
+    }
+   }
+  ],
+  "preTransferCheck": {
+   "isSanctioned": false,
+   "userExists": true,
+   "fee": "0.0",
+   "userHasSentTx": true
+  },
+  "maxBuilderFee": 0,
+  "userAbstraction": "disabled",
+  "exchangeStatus": {
+   "specialStatuses": null,
+   "time": 1794842906569
+  },
+  "marginTable": {
+   "description": "tiered 40x",
+   "marginTiers": [
+    {
+     "lowerBound": "0.0",
+     "maxLeverage": 40
+    },
+    {
+     "lowerBound": "150000000.0",
+     "maxLeverage": 20
+    }
+   ]
+  },
+  "perpsAtOpenInterestCap": [
+   "CANTO",
+   "FTM"
+  ],
+  "perpConciseAnnotations": [
+   [
+    "flx:BTC",
+    {
+     "category": "crypto"
+    }
+   ],
+   [
+    "flx:COIN",
+    {
+     "category": "stocks"
+    }
+   ]
+  ],
+  "perpCategories": [
+   [
+    "flx:BTC",
+    "crypto"
+   ],
+   [
+    "flx:COIN",
+    "stocks"
+   ]
+  ],
+  "meta:xyz": {
+   "universe": [
+    {
+     "szDecimals": 4,
+     "name": "xyz:XYZ100",
+     "maxLeverage": 30,
+     "marginTableId": 30,
+     "growthMode": "enabled",
+     "lastFeeScaleChangeTime": "2025-11-23T17:37:10.033211662",
+     "deployerFeeScale": "1.0"
+    },
+    {
+     "szDecimals": 3,
+     "name": "xyz:TSLA",
+     "maxLeverage": 20,
+     "marginTableId": 20,
+     "growthMode": "enabled",
+     "lastFeeScaleChangeTime": "2025-11-23T17:37:10.033211662",
+     "deployerFeeScale": "1.0"
+    }
+   ],
+   "marginTables": [
+    [
+     50,
+     {
+      "description": "",
+      "marginTiers": [
+       {
+        "lowerBound": "0.0",
+        "maxLeverage": 50
+       }
+      ]
+     }
+    ]
+   ],
+   "collateralToken": 0
+  },
+  "metaAndAssetCtxs:xyz": [
+   {
+    "universe": [
+     {
+      "szDecimals": 4,
+      "name": "xyz:XYZ100",
+      "maxLeverage": 30,
+      "marginTableId": 30,
+      "growthMode": "enabled",
+      "lastFeeScaleChangeTime": "2025-11-23T17:37:10.033211662",
+      "deployerFeeScale": "1.0"
+     },
+     {
+      "szDecimals": 3,
+      "name": "xyz:TSLA",
+      "maxLeverage": 20,
+      "marginTableId": 20,
+      "growthMode": "enabled",
+      "lastFeeScaleChangeTime": "2025-11-23T17:37:10.033211662",
+      "deployerFeeScale": "1.0"
+     }
+    ],
+    "marginTables": [
+     [
+      50,
+      {
+       "description": "",
+       "marginTiers": [
+        {
+         "lowerBound": "0.0",
+         "maxLeverage": 50
+        }
+       ]
+      }
+     ]
+    ],
+    "collateralToken": 0
+   },
+   [
+    {
+     "funding": "-0.0000000937",
+     "openInterest": "10408.0372",
+     "prevDayPx": "27739.0",
+     "dayNtlVlm": "661787940.19599998",
+     "premium": "-0.0003115493",
+     "oraclePx": "27283.0",
+     "markPx": "27274.0",
+     "midPx": "27274.5",
+     "impactPxs": [
+      "27274.0",
+      "27275.0"
+     ],
+     "dayBaseVlm": "23920.5345"
+    },
+    {
+     "funding": "0.00000625",
+     "openInterest": "104658.978",
+     "prevDayPx": "388.55",
+     "dayNtlVlm": "31112458.8057999983",
+     "premium": "0.0001429479",
+     "oraclePx": "377.76",
+     "markPx": "377.81",
+     "midPx": "377.815",
+     "impactPxs": [
+      "377.791",
+      "377.837"
+     ],
+     "dayBaseVlm": "80787.5169999999"
+    }
+   ]
+  ],
+  "allMids:xyz": {
+   "xyz:AAOI": "45.731",
+   "xyz:AAPL": "352.205",
+   "xyz:ACN": "248.84"
+  },
+  "allMids:ALL_DEXS": {
+   "#114910": "0.5",
+   "#114911": "0.5",
+   "#114920": "0.132625"
+  },
+  "clearinghouseState:xyz": {
+   "marginSummary": {
+    "accountValue": "5.18377",
+    "totalNtlPos": "103.6754",
+    "totalRawUsd": "108.85917",
+    "totalMarginUsed": "5.18377"
+   },
+   "crossMarginSummary": {
+    "accountValue": "5.18377",
+    "totalNtlPos": "103.6754",
+    "totalRawUsd": "108.85917",
+    "totalMarginUsed": "5.18377"
+   },
+   "crossMaintenanceMarginUsed": "1.727923",
+   "withdrawable": "0.0",
+   "assetPositions": [
+    {
+     "type": "oneWay",
+     "position": {
+      "coin": "xyz:XYZ100",
+      "szi": "-0.0038",
+      "leverage": {
+       "type": "cross",
+       "value": 20
+      },
+      "entryPx": "27275.0",
+      "positionValue": "103.6754",
+      "unrealizedPnl": "-0.0304",
+      "returnOnEquity": "-0.0058661778",
+      "liquidationPx": "134116.3977566868",
+      "marginUsed": "5.18377",
+      "maxLeverage": 30,
+      "cumFunding": {
+       "allTime": "0.0",
+       "sinceOpen": "0.0",
+       "sinceChange": "0.0"
+      }
+     }
+    }
+   ],
+   "time": 1794856634341
+  },
+  "clearinghouseState:flx": {
+   "marginSummary": {
+    "accountValue": "0.0",
+    "totalNtlPos": "0.0",
+    "totalRawUsd": "0.0",
+    "totalMarginUsed": "0.0"
+   },
+   "crossMarginSummary": {
+    "accountValue": "0.0",
+    "totalNtlPos": "0.0",
+    "totalRawUsd": "0.0",
+    "totalMarginUsed": "0.0"
+   },
+   "crossMaintenanceMarginUsed": "0.0",
+   "withdrawable": "0.0",
+   "assetPositions": [],
+   "time": 1794856635941
+  },
+  "openOrders:xyz": [
+   {
+    "coin": "xyz:SP500",
+    "side": "B",
+    "limitPx": "7425.0",
+    "sz": "0.014",
+    "oid": 607378459359,
+    "timestamp": 1794856643800,
+    "origSz": "0.014"
+   }
+  ],
+  "frontendOpenOrders:ALL_DEXS": [
+   {
+    "coin": "xyz:SP500",
+    "side": "B",
+    "limitPx": "7425.0",
+    "sz": "0.014",
+    "oid": 607378459359,
+    "timestamp": 1794856643800,
+    "triggerCondition": "N/A",
+    "isTrigger": false,
+    "triggerPx": "0.0",
+    "children": [],
+    "isPositionTpsl": false,
+    "reduceOnly": false,
+    "orderType": "Limit",
+    "origSz": "0.014",
+    "tif": "Alo",
+    "cloid": null
+   }
+  ],
+  "l2Book:xyz:TSLA": {
+   "coin": "xyz:TSLA",
+   "time": 1794856654547,
+   "levels": [
+    [
+     {
+      "px": "378.1",
+      "sz": "0.653",
+      "n": 1
+     },
+     {
+      "px": "378.08",
+      "sz": "2.645",
+      "n": 1
+     }
+    ],
+    [
+     {
+      "px": "378.11",
+      "sz": "2.645",
+      "n": 1
+     },
+     {
+      "px": "378.12",
+      "sz": "18.278",
+      "n": 2
+     }
+    ]
+   ]
+  },
+  "activeAssetData:xyz:TSLA": {
+   "user": "0x1111111111111111111111111111111111111111",
+   "coin": "xyz:TSLA",
+   "leverage": {
+    "type": "cross",
+    "value": 20
+   },
+   "maxTradeSzs": [
+    "21.539",
+    "21.539"
+   ],
+   "availableToTrade": [
+    "407.17025",
+    "407.17025"
+   ],
+   "markPx": "378.08"
+  },
+  "perpsAtOpenInterestCap:xyz": [],
+  "marginTable:30": {
+   "description": "",
+   "marginTiers": [
+    {
+     "lowerBound": "0.0",
+     "maxLeverage": 30
+    }
+   ]
+  }
+ },
+ "ws": {
+  "allMids": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "allMids"
+     }
+    }
+   }
+  },
+  "activeAssetCtx": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "activeAssetCtx",
+      "coin": "BTC"
+     }
+    }
+   },
+   "first": {
+    "channel": "activeAssetCtx",
+    "data": {
+     "coin": "BTC",
+     "ctx": {
+      "funding": "0.0000125",
+      "openInterest": "36321.57904",
+      "prevDayPx": "64607.0",
+      "dayNtlVlm": "3457659232.3045291901",
+      "premium": "-0.0000545205",
+      "oraclePx": "64196.0",
+      "markPx": "64172.0",
+      "midPx": "64189.5",
+      "impactPxs": [
+       "64189.0",
+       "64192.5"
+      ],
+      "dayBaseVlm": "53467.2227200001"
+     }
+    }
+   },
+   "later": {
+    "channel": "activeAssetCtx",
+    "data": {
+     "coin": "BTC",
+     "ctx": {
+      "funding": "0.0000125",
+      "openInterest": "36321.58474",
+      "prevDayPx": "64607.0",
+      "dayNtlVlm": "3457662405.2057890892",
+      "premium": "0.0",
+      "oraclePx": "64196.0",
+      "markPx": "64172.0",
+      "midPx": "64195.5",
+      "impactPxs": [
+       "64195.0",
+       "64200.4"
+      ],
+      "dayBaseVlm": "53467.2720300001"
+     }
+    }
+   }
+  },
+  "l2Book": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "l2Book",
+      "coin": "BTC",
+      "nSigFigs": null,
+      "mantissa": null,
+      "fast": false
+     }
+    }
+   },
+   "first": {
+    "channel": "l2Book",
+    "data": {
+     "coin": "BTC",
+     "time": 1794842915202,
+     "levels": [
+      [
+       {
+        "px": "64195.0",
+        "sz": "14.97708",
+        "n": 34
+       },
+       {
+        "px": "64194.0",
+        "sz": "0.51694",
+        "n": 5
+       }
+      ],
+      [
+       {
+        "px": "64196.0",
+        "sz": "0.47449",
+        "n": 6
+       },
+       {
+        "px": "64198.0",
+        "sz": "0.00131",
+        "n": 1
+       }
+      ]
+     ]
+    }
+   }
+  },
+  "clearinghouseState": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "clearinghouseState",
+      "dex": "",
+      "user": "0x1111111111111111111111111111111111111111"
+     }
+    }
+   },
+   "first": {
+    "channel": "clearinghouseState",
+    "data": {
+     "dex": "",
+     "user": "0x1111111111111111111111111111111111111111",
+     "clearinghouseState": {
+      "marginSummary": {
+       "accountValue": "46331.898578",
+       "totalNtlPos": "137517.53677",
+       "totalRawUsd": "183849.435348",
+       "totalMarginUsed": "27503.507354"
+      },
+      "crossMarginSummary": {
+       "accountValue": "46331.898578",
+       "totalNtlPos": "137517.53677",
+       "totalRawUsd": "183849.435348",
+       "totalMarginUsed": "27503.507354"
+      },
+      "crossMaintenanceMarginUsed": "2103.230981",
+      "withdrawable": "18828.391224",
+      "assetPositions": [
+       {
+        "type": "oneWay",
+        "position": {
+         "coin": "BTC",
+         "szi": "-1.34405",
+         "leverage": {
+          "type": "cross",
+          "value": 5
+         },
+         "entryPx": "64234.1",
+         "positionValue": "86282.6338",
+         "unrealizedPnl": "51.28263",
+         "returnOnEquity": "0.0029700164",
+         "liquidationPx": "96696.7512095606",
+         "marginUsed": "17256.52676",
+         "maxLeverage": 40,
+         "cumFunding": {
+          "allTime": "-496.85115",
+          "sinceOpen": "0.0",
+          "sinceChange": "0.0"
+         }
+        }
+       },
+       {
+        "type": "oneWay",
+        "position": {
+         "coin": "ETH",
+         "szi": "-28.3677",
+         "leverage": {
+          "type": "cross",
+          "value": 5
+         },
+         "entryPx": "1805.48",
+         "positionValue": "51234.90297",
+         "unrealizedPnl": "-17.57115",
+         "returnOnEquity": "-0.0017153519",
+         "liquidationPx": "3334.6496822159",
+         "marginUsed": "10246.980594",
+         "maxLeverage": 25,
+         "cumFunding": {
+          "allTime": "-48.189729",
+          "sinceOpen": "0.0",
+          "sinceChange": "0.0"
+         }
+        }
+       }
+      ],
+      "time": 1794842919115
+     }
+    }
+   }
+  },
+  "openOrders": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "openOrders",
+      "dex": "",
+      "user": "0x1111111111111111111111111111111111111111"
+     }
+    }
+   },
+   "first": {
+    "channel": "openOrders",
+    "data": {
+     "dex": "",
+     "user": "0x1111111111111111111111111111111111111111",
+     "orders": [
+      {
+       "coin": "ETH",
+       "side": "A",
+       "limitPx": "1807.2",
+       "sz": "0.5013",
+       "oid": 607174350967,
+       "timestamp": 1794842922731,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": false,
+       "orderType": "Limit",
+       "origSz": "0.5013",
+       "tif": "Alo",
+       "cloid": "0x0000000000000000000001a1d9c4d425"
+      },
+      {
+       "coin": "ETH",
+       "side": "B",
+       "limitPx": "1807.1",
+       "sz": "13.9391",
+       "oid": 607174350966,
+       "timestamp": 1794842922731,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": false,
+       "orderType": "Limit",
+       "origSz": "13.9391",
+       "tif": "Alo",
+       "cloid": "0x0000000000000000000001a1d9c4d426"
+      }
+     ]
+    }
+   }
+  },
+  "spotState": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "spotState",
+      "user": "0x1111111111111111111111111111111111111111",
+      "ignorePortfolioMargin": false
+     }
+    }
+   },
+   "first": {
+    "channel": "spotState",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "spotState": {
+      "balances": []
+     }
+    }
+   },
+   "later": {
+    "channel": "spotState",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "spotState": {
+      "balances": []
+     }
+    }
+   }
+  },
+  "allDexsClearinghouseState": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "allDexsClearinghouseState",
+      "user": "0x1111111111111111111111111111111111111111"
+     }
+    }
+   },
+   "first": {
+    "channel": "allDexsClearinghouseState",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "clearinghouseStates": [
+      [
+       "",
+       {
+        "marginSummary": {
+         "accountValue": "0.0",
+         "totalNtlPos": "0.0",
+         "totalRawUsd": "0.0",
+         "totalMarginUsed": "0.0"
+        },
+        "crossMarginSummary": {
+         "accountValue": "0.0",
+         "totalNtlPos": "0.0",
+         "totalRawUsd": "0.0",
+         "totalMarginUsed": "0.0"
+        },
+        "crossMaintenanceMarginUsed": "0.0",
+        "withdrawable": "0.0",
+        "assetPositions": [],
+        "time": 1794856811054
+       }
+      ],
+      [
+       "abcd",
+       {
+        "marginSummary": {
+         "accountValue": "0.0",
+         "totalNtlPos": "0.0",
+         "totalRawUsd": "0.0",
+         "totalMarginUsed": "0.0"
+        },
+        "crossMarginSummary": {
+         "accountValue": "0.0",
+         "totalNtlPos": "0.0",
+         "totalRawUsd": "0.0",
+         "totalMarginUsed": "0.0"
+        },
+        "crossMaintenanceMarginUsed": "0.0",
+        "withdrawable": "0.0",
+        "assetPositions": [],
+        "time": 1794856811054
+       }
+      ]
+     ]
+    }
+   },
+   "later": {
+    "channel": "allDexsClearinghouseState",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "clearinghouseStates": [
+      [
+       "",
+       {
+        "marginSummary": {
+         "accountValue": "0.0",
+         "totalNtlPos": "0.0",
+         "totalRawUsd": "0.0",
+         "totalMarginUsed": "0.0"
+        },
+        "crossMarginSummary": {
+         "accountValue": "0.0",
+         "totalNtlPos": "0.0",
+         "totalRawUsd": "0.0",
+         "totalMarginUsed": "0.0"
+        },
+        "crossMaintenanceMarginUsed": "0.0",
+        "withdrawable": "0.0",
+        "assetPositions": [],
+        "time": 1794856812083
+       }
+      ],
+      [
+       "abcd",
+       {
+        "marginSummary": {
+         "accountValue": "0.0",
+         "totalNtlPos": "0.0",
+         "totalRawUsd": "0.0",
+         "totalMarginUsed": "0.0"
+        },
+        "crossMarginSummary": {
+         "accountValue": "0.0",
+         "totalNtlPos": "0.0",
+         "totalRawUsd": "0.0",
+         "totalMarginUsed": "0.0"
+        },
+        "crossMaintenanceMarginUsed": "0.0",
+        "withdrawable": "0.0",
+        "assetPositions": [],
+        "time": 1794856812083
+       }
+      ]
+     ]
+    }
+   }
+  },
+  "userFills": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "userFills",
+      "user": "0x1111111111111111111111111111111111111111",
+      "aggregateByTime": false
+     }
+    }
+   },
+   "first": {
+    "channel": "userFills",
+    "data": {
+     "isSnapshot": true,
+     "user": "0x1111111111111111111111111111111111111111",
+     "fills": [
+      {
+       "coin": "ETH",
+       "px": "1803.0",
+       "sz": "0.2716",
+       "side": "B",
+       "time": 1794842811893,
+       "startPosition": "15.2805",
+       "dir": "Open Long",
+       "closedPnl": "0.0",
+       "hash": "0xb2875ff49c987f6fb4010448edb111020e7400da379b9e4156500b475b9c595a",
+       "oid": 607172075787,
+       "crossed": false,
+       "fee": "-0.01469",
+       "tid": 616190594807885,
+       "cloid": "0x0000000000000000000001a1d9c4d24e",
+       "feeToken": "USDC",
+       "twapId": null
+      },
+      {
+       "coin": "ETH",
+       "px": "1802.8",
+       "sz": "3.363",
+       "side": "B",
+       "time": 1794842815656,
+       "startPosition": "15.5521",
+       "dir": "Open Long",
+       "closedPnl": "0.0",
+       "hash": "0x2ec6f2eec1ea514630400448edb143020a1700d45ced7018d28f9e4180ee2b30",
+       "oid": 607172181713,
+       "crossed": false,
+       "fee": "-0.181884",
+       "tid": 1069320377176829,
+       "cloid": "0x0000000000000000000001a1d9c4d26f",
+       "feeToken": "USDC",
+       "twapId": null
+      }
+     ]
+    }
+   },
+   "later": {
+    "channel": "userFills",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "fills": [
+      {
+       "coin": "BTC",
+       "px": "64258.0",
+       "sz": "0.15353",
+       "side": "A",
+       "time": 1794842933318,
+       "startPosition": "-1.34388",
+       "dir": "Open Short",
+       "closedPnl": "0.0",
+       "hash": "0xbf522cc2a794da35c0cb0448edb7ae0206d300a84297f907631ad8156698b420",
+       "oid": 607174556723,
+       "crossed": false,
+       "fee": "-0.295965",
+       "tid": 847253470766351,
+       "cloid": "0x0000000000000000000001a1d9c4d456",
+       "feeToken": "USDC",
+       "twapId": null
+      }
+     ]
+    }
+   }
+  },
+  "userFundings": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "userFundings",
+      "user": "0x1111111111111111111111111111111111111111"
+     }
+    }
+   },
+   "first": {
+    "channel": "userFundings",
+    "data": {
+     "isSnapshot": true,
+     "user": "0x1111111111111111111111111111111111111111",
+     "fundings": [
+      {
+       "time": 1794664800006,
+       "coin": "BTC",
+       "usdc": "0.407665",
+       "szi": "-0.63283",
+       "fundingRate": "0.0000096376",
+       "nSamples": null
+      },
+      {
+       "time": 1794664800006,
+       "coin": "ETH",
+       "usdc": "-0.033399",
+       "szi": "-3.6267",
+       "fundingRate": "-0.0000048624",
+       "nSamples": null
+      }
+     ]
+    }
+   }
+  },
+  "activeAssetData": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "activeAssetData",
+      "user": "0x1111111111111111111111111111111111111111",
+      "coin": "BTC"
+     }
+    }
+   },
+   "first": {
+    "channel": "activeAssetData",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "coin": "BTC",
+     "leverage": {
+      "type": "cross",
+      "value": 5
+     },
+     "maxTradeSzs": [
+      "4.7054",
+      "1.71058"
+     ],
+     "availableToTrade": [
+      "60481.32944",
+      "21987.111088"
+     ],
+     "markPx": "64268.0"
+    }
+   },
+   "later": {
+    "channel": "activeAssetData",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "coin": "BTC",
+     "leverage": {
+      "type": "cross",
+      "value": 5
+     },
+     "maxTradeSzs": [
+      "3.95346",
+      "1.70853"
+     ],
+     "availableToTrade": [
+      "50824.100376",
+      "21964.178268"
+     ],
+     "markPx": "64278.0"
+    }
+   }
+  },
+  "candle": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "candle",
+      "interval": "1m",
+      "coin": "BTC"
+     }
+    }
+   },
+   "first": {
+    "channel": "candle",
+    "data": {
+     "t": 1794842940000,
+     "T": 1794842999999,
+     "s": "BTC",
+     "i": "1m",
+     "o": "64283.0",
+     "c": "64276.0",
+     "h": "64283.0",
+     "l": "64270.0",
+     "v": "4.88488",
+     "n": 51
+    }
+   },
+   "later": {
+    "channel": "candle",
+    "data": {
+     "t": 1794842940000,
+     "T": 1794842999999,
+     "s": "BTC",
+     "i": "1m",
+     "o": "64283.0",
+     "c": "64275.0",
+     "h": "64283.0",
+     "l": "64270.0",
+     "v": "5.36841",
+     "n": 58
+    }
+   }
+  },
+  "fastAssetCtxs": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "fastAssetCtxs"
+     }
+    }
+   },
+   "first": {
+    "channel": "fastAssetCtxs",
+    "data": {
+     "#237381": {
+      "markPx": "0.892125",
+      "midPx": "0.77786"
+     },
+     "io:EWY": {
+      "markPx": "137.78",
+      "midPx": "137.84"
+     },
+     "#14880": {
+      "markPx": "0.14218",
+      "midPx": "0.142185"
+     }
+    }
+   },
+   "later": {
+    "channel": "fastAssetCtxs",
+    "data": {
+     "BCH": {
+      "midPx": "207.21"
+     },
+     "#358881": {
+      "markPx": "0.54051"
+     },
+     "xyz:SPCX": {
+      "midPx": "138.685"
+     }
+    }
+   }
+  },
+  "pac": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "pac"
+     }
+    }
+   },
+   "first": {
+    "channel": "pac",
+    "data": [
+     [
+      "",
+      [
+       {
+        "funding": "0.0000125",
+        "openInterest": "37310.0536",
+        "prevDayPx": "64956.0",
+        "dayNtlVlm": "3609184309.8946499825",
+        "oraclePx": "64845.0",
+        "markPx": "64818.0",
+        "midPx": "64826.5",
+        "dayBaseVlm": "55809.81104"
+       },
+       {
+        "funding": "0.0000044216",
+        "openInterest": "601294.3956",
+        "prevDayPx": "1824.8",
+        "dayNtlVlm": "847151498.3532096148",
+        "oraclePx": "1814.4",
+        "markPx": "1813.5",
+        "midPx": "1813.45",
+        "dayBaseVlm": "465700.5429999999"
+       }
+      ]
+     ],
+     [
+      "abcd",
+      [
+       {
+        "funding": "0.0",
+        "openInterest": "0.0",
+        "prevDayPx": "6980.0",
+        "dayNtlVlm": "0.0",
+        "oraclePx": "6980.0",
+        "markPx": "6980.0",
+        "midPx": null,
+        "dayBaseVlm": "0.0"
+       }
+      ]
+     ]
+    ]
+   },
+   "later": {
+    "channel": "pac",
+    "data": [
+     [
+      "",
+      [
+       {
+        "funding": "0.0000125",
+        "openInterest": "37310.0536",
+        "prevDayPx": "64956.0",
+        "dayNtlVlm": "3609184309.8946499825",
+        "oraclePx": "64845.0",
+        "markPx": "64818.0",
+        "midPx": "64826.5",
+        "dayBaseVlm": "55809.81104"
+       },
+       {
+        "funding": "0.0000044216",
+        "openInterest": "601294.3956",
+        "prevDayPx": "1824.8",
+        "dayNtlVlm": "847151498.3532096148",
+        "oraclePx": "1814.4",
+        "markPx": "1813.5",
+        "midPx": "1813.45",
+        "dayBaseVlm": "465700.5429999999"
+       }
+      ]
+     ],
+     [
+      "abcd",
+      [
+       {
+        "funding": "0.0",
+        "openInterest": "0.0",
+        "prevDayPx": "6980.0",
+        "dayNtlVlm": "0.0",
+        "oraclePx": "6980.0",
+        "markPx": "6980.0",
+        "midPx": null,
+        "dayBaseVlm": "0.0"
+       }
+      ]
+     ]
+    ]
+   }
+  },
+  "l2:l2": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "l2",
+      "c": "BTC",
+      "s": null,
+      "m": null
+     }
+    }
+   },
+   "first": {
+    "channel": "l2",
+    "data": {
+     "s": {
+      "coin": "BTC",
+      "time": 1794842954169,
+      "levels": [
+       [
+        {
+         "px": "64275.0",
+         "sz": "0.00315",
+         "n": 1
+        },
+        {
+         "px": "64274.0",
+         "sz": "2.87243",
+         "n": 1
+        }
+       ],
+       [
+        {
+         "px": "64276.0",
+         "sz": "11.14137",
+         "n": 31
+        },
+        {
+         "px": "64277.0",
+         "sz": "9.62347",
+         "n": 38
+        }
+       ]
+      ]
+     }
+    }
+   },
+   "later": {
+    "channel": "l2",
+    "data": {
+     "c": {
+      "c": "BTC",
+      "t": 1794842954677,
+      "l": [
+       [
+        {
+         "p": "64274.0",
+         "s": "0.00022"
+        },
+        {
+         "p": "64269.0",
+         "s": "1.01392"
+        }
+       ],
+       [
+        {
+         "p": "64275.0",
+         "s": "6.57661"
+        },
+        {
+         "p": "64276.0",
+         "s": "39.64911"
+        }
+       ]
+      ],
+      "r": [
+       [
+        4,
+        0
+       ],
+       [
+        19
+       ]
+      ]
+     }
+    }
+   }
+  },
+  "clearinghouseState:xyz": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "clearinghouseState",
+      "dex": "xyz",
+      "user": "0x1111111111111111111111111111111111111111"
+     }
+    }
+   },
+   "first": {
+    "channel": "clearinghouseState",
+    "data": {
+     "dex": "xyz",
+     "user": "0x1111111111111111111111111111111111111111",
+     "clearinghouseState": {
+      "marginSummary": {
+       "accountValue": "7.336256",
+       "totalNtlPos": "0.0",
+       "totalRawUsd": "7.336256",
+       "totalMarginUsed": "0.0"
+      },
+      "crossMarginSummary": {
+       "accountValue": "7.336256",
+       "totalNtlPos": "0.0",
+       "totalRawUsd": "7.336256",
+       "totalMarginUsed": "0.0"
+      },
+      "crossMaintenanceMarginUsed": "0.0",
+      "withdrawable": "0.072636",
+      "assetPositions": [],
+      "time": 1794856770235
+     }
+    }
+   },
+   "later": {
+    "channel": "clearinghouseState",
+    "data": {
+     "dex": "xyz",
+     "user": "0x1111111111111111111111111111111111111111",
+     "clearinghouseState": {
+      "marginSummary": {
+       "accountValue": "7.283272",
+       "totalNtlPos": "103.664",
+       "totalRawUsd": "-96.380728",
+       "totalMarginUsed": "5.1832"
+      },
+      "crossMarginSummary": {
+       "accountValue": "7.283272",
+       "totalNtlPos": "103.664",
+       "totalRawUsd": "-96.380728",
+       "totalMarginUsed": "5.1832"
+      },
+      "crossMaintenanceMarginUsed": "1.727733",
+      "withdrawable": "0.020792",
+      "assetPositions": [
+       {
+        "type": "oneWay",
+        "position": {
+         "coin": "xyz:XYZ100",
+         "szi": "0.0038",
+         "leverage": {
+          "type": "cross",
+          "value": 20
+         },
+         "entryPx": "27277.0",
+         "positionValue": "103.664",
+         "unrealizedPnl": "0.0114",
+         "returnOnEquity": "0.0021996554",
+         "liquidationPx": null,
+         "marginUsed": "5.1832",
+         "maxLeverage": 30,
+         "cumFunding": {
+          "allTime": "0.0",
+          "sinceOpen": "0.0",
+          "sinceChange": "0.0"
+         }
+        }
+       }
+      ],
+      "time": 1794856772539
+     }
+    }
+   }
+  },
+  "openOrders:xyz": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "openOrders",
+      "dex": "xyz",
+      "user": "0x1111111111111111111111111111111111111111"
+     }
+    }
+   },
+   "first": {
+    "channel": "openOrders",
+    "data": {
+     "dex": "xyz",
+     "user": "0x1111111111111111111111111111111111111111",
+     "orders": [
+      {
+       "coin": "xyz:SP500",
+       "side": "A",
+       "limitPx": "7424.9",
+       "sz": "0.014",
+       "oid": 607379970325,
+       "timestamp": 1794856776168,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": false,
+       "orderType": "Limit",
+       "origSz": "0.014",
+       "tif": "Alo",
+       "cloid": null
+      },
+      {
+       "coin": "xyz:SP500",
+       "side": "B",
+       "limitPx": "7422.6",
+       "sz": "0.014",
+       "oid": 607379970324,
+       "timestamp": 1794856776168,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": false,
+       "orderType": "Limit",
+       "origSz": "0.014",
+       "tif": "Alo",
+       "cloid": null
+      }
+     ]
+    }
+   },
+   "later": {
+    "channel": "openOrders",
+    "data": {
+     "dex": "xyz",
+     "user": "0x1111111111111111111111111111111111111111",
+     "orders": [
+      {
+       "coin": "xyz:XYZ100",
+       "side": "A",
+       "limitPx": "27278.0",
+       "sz": "0.0038",
+       "oid": 607380162414,
+       "timestamp": 1794856799221,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": true,
+       "orderType": "Limit",
+       "origSz": "0.0038",
+       "tif": "Alo",
+       "cloid": null
+      },
+      {
+       "coin": "xyz:SP500",
+       "side": "A",
+       "limitPx": "7424.9",
+       "sz": "0.014",
+       "oid": 607379970325,
+       "timestamp": 1794856776168,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": false,
+       "orderType": "Limit",
+       "origSz": "0.014",
+       "tif": "Alo",
+       "cloid": null
+      }
+     ]
+    }
+   }
+  },
+  "openOrders:ALL_DEXS": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "openOrders",
+      "dex": "ALL_DEXS",
+      "user": "0x1111111111111111111111111111111111111111"
+     }
+    }
+   },
+   "first": {
+    "channel": "openOrders",
+    "data": {
+     "dex": "ALL_DEXS",
+     "user": "0x1111111111111111111111111111111111111111",
+     "orders": [
+      {
+       "coin": "xyz:XYZ100",
+       "side": "A",
+       "limitPx": "27278.0",
+       "sz": "0.0038",
+       "oid": 607380162414,
+       "timestamp": 1794856799221,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": true,
+       "orderType": "Limit",
+       "origSz": "0.0038",
+       "tif": "Alo",
+       "cloid": null
+      },
+      {
+       "coin": "xyz:SP500",
+       "side": "A",
+       "limitPx": "7424.9",
+       "sz": "0.014",
+       "oid": 607379970325,
+       "timestamp": 1794856776168,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": false,
+       "orderType": "Limit",
+       "origSz": "0.014",
+       "tif": "Alo",
+       "cloid": null
+      }
+     ]
+    }
+   },
+   "later": {
+    "channel": "openOrders",
+    "data": {
+     "dex": "ALL_DEXS",
+     "user": "0x1111111111111111111111111111111111111111",
+     "orders": [
+      {
+       "coin": "xyz:XYZ100",
+       "side": "A",
+       "limitPx": "27278.0",
+       "sz": "0.0038",
+       "oid": 607380162414,
+       "timestamp": 1794856799221,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": true,
+       "orderType": "Limit",
+       "origSz": "0.0038",
+       "tif": "Alo",
+       "cloid": null
+      },
+      {
+       "coin": "xyz:SP500",
+       "side": "A",
+       "limitPx": "7424.9",
+       "sz": "0.014",
+       "oid": 607379970325,
+       "timestamp": 1794856776168,
+       "triggerCondition": "N/A",
+       "isTrigger": false,
+       "triggerPx": "0.0",
+       "children": [],
+       "isPositionTpsl": false,
+       "reduceOnly": false,
+       "orderType": "Limit",
+       "origSz": "0.014",
+       "tif": "Alo",
+       "cloid": null
+      }
+     ]
+    }
+   }
+  },
+  "allMids:ALL_DEXS": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "allMids",
+      "dex": "ALL_DEXS"
+     }
+    }
+   }
+  },
+  "webData3": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "webData3",
+      "user": "0x1111111111111111111111111111111111111111"
+     }
+    }
+   },
+   "first": {
+    "channel": "webData3",
+    "data": {
+     "userState": {
+      "agentAddress": "0x1111111111111111111111111111111111111111",
+      "agentValidUntil": 1794884673115,
+      "cumLedger": "-6134.83",
+      "serverTime": 1794856889277,
+      "isVault": false,
+      "user": "0x1111111111111111111111111111111111111111",
+      "abstraction": "unifiedAccount"
+     },
+     "perpDexStates": [
+      {
+       "totalVaultEquity": "0.0",
+       "perpsAtOpenInterestCap": [
+        "CANTO",
+        "FTM"
+       ]
+      },
+      {
+       "totalVaultEquity": "0.0"
+      }
+     ]
+    }
+   },
+   "later": {
+    "channel": "webData3",
+    "data": {
+     "userState": {
+      "agentAddress": "0x1111111111111111111111111111111111111111",
+      "agentValidUntil": 1794884673115,
+      "cumLedger": "-6134.83",
+      "serverTime": 1794856890524,
+      "isVault": false,
+      "user": "0x1111111111111111111111111111111111111111",
+      "abstraction": "unifiedAccount"
+     },
+     "perpDexStates": [
+      {
+       "totalVaultEquity": "0.0",
+       "perpsAtOpenInterestCap": [
+        "CANTO",
+        "FTM"
+       ]
+      },
+      {
+       "totalVaultEquity": "0.0"
+      }
+     ]
+    }
+   }
+  },
+  "activeAssetCtx:xyz:TSLA": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "activeAssetCtx",
+      "coin": "xyz:TSLA"
+     }
+    }
+   },
+   "first": {
+    "channel": "activeAssetCtx",
+    "data": {
+     "coin": "xyz:TSLA",
+     "ctx": {
+      "funding": "0.00000625",
+      "openInterest": "104659.904",
+      "prevDayPx": "388.23",
+      "dayNtlVlm": "31048638.6571000032",
+      "premium": "0.0000238196",
+      "oraclePx": "377.84",
+      "markPx": "377.88",
+      "midPx": "377.875",
+      "impactPxs": [
+       "377.818",
+       "377.88"
+      ],
+      "dayBaseVlm": "80624.131"
+     }
+    }
+   },
+   "later": {
+    "channel": "activeAssetCtx",
+    "data": {
+     "coin": "xyz:TSLA",
+     "ctx": {
+      "funding": "0.00000625",
+      "openInterest": "104659.904",
+      "prevDayPx": "388.23",
+      "dayNtlVlm": "31048638.6571000032",
+      "premium": "-0.0000793987",
+      "oraclePx": "377.84",
+      "markPx": "377.88",
+      "midPx": "377.82",
+      "impactPxs": [
+       "377.781",
+       "377.839"
+      ],
+      "dayBaseVlm": "80624.131"
+     }
+    }
+   }
+  },
+  "l2Book:xyz:TSLA": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "l2Book",
+      "coin": "xyz:TSLA",
+      "nSigFigs": null,
+      "mantissa": null,
+      "fast": false
+     }
+    }
+   },
+   "first": {
+    "channel": "l2Book",
+    "data": {
+     "coin": "xyz:TSLA",
+     "time": 1794856846433,
+     "levels": [
+      [
+       {
+        "px": "377.88",
+        "sz": "31.781",
+        "n": 2
+       },
+       {
+        "px": "377.86",
+        "sz": "36.325",
+        "n": 4
+       }
+      ],
+      [
+       {
+        "px": "377.91",
+        "sz": "2.646",
+        "n": 1
+       },
+       {
+        "px": "377.92",
+        "sz": "9.116",
+        "n": 1
+       }
+      ]
+     ]
+    }
+   },
+   "later": {
+    "channel": "l2Book",
+    "data": {
+     "coin": "xyz:TSLA",
+     "time": 1794856846433,
+     "levels": [
+      [
+       {
+        "px": "377.88",
+        "sz": "31.781",
+        "n": 2
+       },
+       {
+        "px": "377.86",
+        "sz": "36.325",
+        "n": 4
+       }
+      ],
+      [
+       {
+        "px": "377.91",
+        "sz": "2.646",
+        "n": 1
+       },
+       {
+        "px": "377.92",
+        "sz": "9.116",
+        "n": 1
+       }
+      ]
+     ]
+    }
+   }
+  },
+  "activeAssetData:xyz:TSLA": {
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "activeAssetData",
+      "user": "0x1111111111111111111111111111111111111111",
+      "coin": "xyz:TSLA"
+     }
+    }
+   },
+   "first": {
+    "channel": "activeAssetData",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "coin": "xyz:TSLA",
+     "leverage": {
+      "type": "cross",
+      "value": 20
+     },
+     "maxTradeSzs": [
+      "21.555",
+      "21.555"
+     ],
+     "availableToTrade": [
+      "407.172834",
+      "407.172834"
+     ],
+     "markPx": "377.78"
+    }
+   },
+   "later": {
+    "channel": "activeAssetData",
+    "data": {
+     "user": "0x1111111111111111111111111111111111111111",
+     "coin": "xyz:TSLA",
+     "leverage": {
+      "type": "cross",
+      "value": 20
+     },
+     "maxTradeSzs": [
+      "21.555",
+      "21.555"
+     ],
+     "availableToTrade": [
+      "407.172834",
+      "407.172834"
+     ],
+     "markPx": "377.78"
+    }
+   }
+  }
+ },
+ "errors": {
+  "meta:nope": {
+   "request": {
+    "type": "meta",
+    "dex": "nope"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "meta:ALL_DEXS": {
+   "request": {
+    "type": "meta",
+    "dex": "ALL_DEXS"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "meta:null": {
+   "request": {
+    "type": "meta",
+    "dex": null
+   },
+   "status": 422,
+   "body": "Failed to deserialize the JSON body into the target type"
+  },
+  "metaAndAssetCtxs:nope": {
+   "request": {
+    "type": "metaAndAssetCtxs",
+    "dex": "nope"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "metaAndAssetCtxs:ALL_DEXS": {
+   "request": {
+    "type": "metaAndAssetCtxs",
+    "dex": "ALL_DEXS"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "allMids:nope": {
+   "request": {
+    "type": "allMids",
+    "dex": "nope"
+   },
+   "status": 200,
+   "body": "null"
+  },
+  "allMids:null": {
+   "request": {
+    "type": "allMids",
+    "dex": null
+   },
+   "status": 422,
+   "body": "Failed to deserialize the JSON body into the target type"
+  },
+  "clearinghouseState:nope": {
+   "request": {
+    "type": "clearinghouseState",
+    "user": "$USER",
+    "dex": "nope"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "clearinghouseState:ALL_DEXS": {
+   "request": {
+    "type": "clearinghouseState",
+    "user": "$USER",
+    "dex": "ALL_DEXS"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "clearinghouseState:null": {
+   "request": {
+    "type": "clearinghouseState",
+    "user": "$USER",
+    "dex": null
+   },
+   "status": 422,
+   "body": "Failed to deserialize the JSON body into the target type"
+  },
+  "openOrders:nope": {
+   "request": {
+    "type": "openOrders",
+    "user": "$USER",
+    "dex": "nope"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "openOrders:null": {
+   "request": {
+    "type": "openOrders",
+    "user": "$USER",
+    "dex": null
+   },
+   "status": 422,
+   "body": "Failed to deserialize the JSON body into the target type"
+  },
+  "frontendOpenOrders:nope": {
+   "request": {
+    "type": "frontendOpenOrders",
+    "user": "$USER",
+    "dex": "nope"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "perpsAtOpenInterestCap:nope": {
+   "request": {
+    "type": "perpsAtOpenInterestCap",
+    "dex": "nope"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "perpsAtOpenInterestCap:ALL_DEXS": {
+   "request": {
+    "type": "perpsAtOpenInterestCap",
+    "dex": "ALL_DEXS"
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "marginTable:999": {
+   "request": {
+    "type": "marginTable",
+    "id": 999
+   },
+   "status": 500,
+   "body": "null"
+  },
+  "activeAssetData:xyz:NOPE": {
+   "request": {
+    "type": "activeAssetData",
+    "user": "$USER",
+    "coin": "xyz:NOPE"
+   },
+   "status": 500,
+   "body": "null"
+  }
+ },
+ "wsSilence": {
+  "allMids:xyz": {
+   "frames": 1,
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "allMids",
+      "dex": "xyz"
+     }
+    }
+   }
+  },
+  "allMids:empty": {
+   "frames": 1,
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "allMids"
+     }
+    }
+   }
+  },
+  "allMids:nope": {
+   "frames": 1,
+   "ack": {
+    "channel": "subscriptionResponse",
+    "data": {
+     "method": "subscribe",
+     "subscription": {
+      "type": "allMids",
+      "dex": "nope"
+     }
+    }
+   }
+  },
+  "clearinghouseState:nope": {
+   "frames": 0,
+   "ack": null
+  },
+  "clearinghouseState:ALL_DEXS": {
+   "frames": 0,
+   "ack": null
+  },
+  "openOrders:nope": {
+   "frames": 0,
+   "ack": null
+  }
+ },
+ "dexOrder": [
+  "",
+  "abcd",
+  "cash",
+  "flx",
+  "hyna",
+  "io",
+  "km",
+  "mkts",
+  "para",
+  "vntl",
+  "xyz"
+ ],
+ "wsErrors": {
+  "webData2": {
+   "channel": "error",
+   "data": "Error parsing JSON into valid websocket request: {\"method\":\"subscribe\",\"subscription\":{\"type\":\"webData2\",\"user\":\"0x1111111111111111111111111111111111111111\"}}"
+  },
+  "activeAssetCtx:xyz:NOPE": {
+   "channel": "error",
+   "data": "Invalid subscription {\"type\":\"activeAssetCtx\",\"coin\":\"xyz:NOPE\"}"
+  }
+ }
+}

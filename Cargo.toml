@@ -11,6 +11,8 @@ rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+base64 = "0.22"
 # Plan pins: alloy 2.5.0 (EIP-7928 BAL types live in alloy-eips::eip7928).
 alloy-primitives = { version = "1.7", features = ["serde"] }
 # "kzg" gives c-kzg (bundled mainnet trusted setup) so the engine can

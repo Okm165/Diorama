@@ -7,9 +7,13 @@
 //! mapping keeps the taxonomy's meaning on the wire: control refusals are
 //! 4xx, a warming market plane is 503, a venue fault is 502.
 pub(crate) mod control;
+pub(crate) mod cors;
 pub(crate) mod exchange;
 pub(crate) mod info;
+pub(crate) mod shape;
+pub(crate) mod signing;
 pub(crate) mod ws;
+pub(crate) mod ws_codec;
 
 use crate::error::Result;
 use crate::feed::rest::RestClient;

@@ -1,0 +1,292 @@
+{
+  "_about": "Real /exchange answers captured from the live venue (2026-11-16) with deliberately invalid bodies: a zero signature on every action, so nothing could execute. The sim must answer each request textually the same (api/exchange.rs tests).",
+  "probes": [
+    {
+      "name": "order_bogus_asset",
+      "request": "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":99999999,\"b\":true,\"p\":\"1\",\"s\":\"0.0001\",\"r\":false,\"t\":{\"limit\":{\"tif\":\"Gtc\"}}}],\"grouping\":\"na\"},\"nonce\":1794856594159,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "cancel",
+      "request": "{\"action\":{\"type\":\"cancel\",\"cancels\":[{\"a\":99999999,\"o\":1}]},\"nonce\":1794856594160,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "updateLeverage",
+      "request": "{\"action\":{\"type\":\"updateLeverage\",\"asset\":99999999,\"isCross\":true,\"leverage\":1},\"nonce\":1794856594161,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "usdClassTransfer",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"amount\":\"0.000001\",\"toPerp\":true,\"nonce\":1794856594162},\"nonce\":1794856594162,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "sendAsset",
+      "request": "{\"action\":{\"type\":\"sendAsset\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"destination\":\"0x0000000000000000000000000000000000000001\",\"sourceDex\":\"\",\"destinationDex\":\"spot\",\"token\":\"USDC\",\"amount\":\"0.000001\",\"fromSubAccount\":\"\",\"nonce\":1794856594163},\"nonce\":1794856594163,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "unknown_action",
+      "request": "{\"action\":{\"type\":\"nopeNotAnAction\"},\"nonce\":1794856594164,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "missing_signature",
+      "request": "{\"action\":{\"type\":\"noop\"},\"nonce\":1794856594165}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "non_json",
+      "request": "this is not json",
+      "status": 400,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to parse the request body as JSON"
+    },
+    {
+      "name": "noop",
+      "request": "{\"action\":{\"type\":\"noop\"},\"nonce\":1794856594166,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "approveBuilderFee",
+      "request": "{\"action\":{\"type\":\"approveBuilderFee\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"maxFeeRate\":\"0.001%\",\"builder\":\"0x0000000000000000000000000000000000000001\",\"nonce\":1794856594167},\"nonce\":1794856594167,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "spotSend",
+      "request": "{\"action\":{\"type\":\"spotSend\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"destination\":\"0x0000000000000000000000000000000000000001\",\"token\":\"USDC:0x6d1e7cde53ba9467b783cb7c530ce054\",\"amount\":\"0.000001\",\"time\":1794856594168},\"nonce\":1794856594168,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "approveAgent",
+      "request": "{\"action\":{\"type\":\"approveAgent\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"agentAddress\":\"0x0000000000000000000000000000000000000001\",\"agentName\":\"probe\",\"nonce\":1794856594169},\"nonce\":1794856594169,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "userSetAbstraction",
+      "request": "{\"action\":{\"type\":\"userSetAbstraction\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"user\":\"0x0000000000000000000000000000000000000001\",\"abstraction\":\"disabled\",\"nonce\":1794856594170},\"nonce\":1794856594170,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "withdraw3",
+      "request": "{\"action\":{\"type\":\"withdraw3\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"destination\":\"0x0000000000000000000000000000000000000001\",\"amount\":\"0.000001\",\"time\":1794856594171},\"nonce\":1794856594171,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "agentSetAbstraction",
+      "request": "{\"action\":{\"type\":\"agentSetAbstraction\",\"abstraction\":\"u\"},\"nonce\":1794856594172,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27},\"vaultAddress\":null,\"expiresAfter\":null}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "spotSend_time_not_nonce",
+      "request": "{\"action\":{\"type\":\"spotSend\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"destination\":\"0x0000000000000000000000000000000000000001\",\"token\":\"USDC:0x6d1e7cde53ba9467b783cb7c530ce054\",\"amount\":\"1\",\"time\":1794856594300},\"nonce\":1794856594305,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Nonce mismatch.\"}"
+    },
+    {
+      "name": "usdClassTransfer_nonce_not_outer",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594305,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Nonce mismatch.\"}"
+    },
+    {
+      "name": "sendAsset_nonce_not_outer",
+      "request": "{\"action\":{\"type\":\"sendAsset\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"destination\":\"0x0000000000000000000000000000000000000001\",\"sourceDex\":\"spot\",\"destinationDex\":\"\",\"token\":\"USDC:0x6d1e7cde53ba9467b783cb7c530ce054\",\"amount\":\"1\",\"fromSubAccount\":\"\",\"nonce\":1794856594300},\"nonce\":1794856594305,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Nonce mismatch.\"}"
+    },
+    {
+      "name": "usdClassTransfer_testnet",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Testnet\",\"signatureChainId\":\"0x66eee\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Mainnet and testnet require different signature.\"}"
+    },
+    {
+      "name": "usdClassTransfer_chain_lowercase",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"mainnet\",\"signatureChainId\":\"0x66eee\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "usdClassTransfer_chain_missing",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"signatureChainId\":\"0x66eee\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "usdClassTransfer_sigchain_no_prefix",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"66eee\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "usdClassTransfer_sigchain_empty_hex",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "usdClassTransfer_sigchain_number",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":421614,\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "usdClassTransfer_sigchain_huge",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0xffffffffffffffffffff\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "usdClassTransfer_extra_field",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":1794856594300,\"junk\":1},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "usdClassTransfer_amount_number",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"amount\":1,\"toPerp\":true,\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "usdClassTransfer_nonce_string",
+      "request": "{\"action\":{\"type\":\"usdClassTransfer\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"amount\":\"1\",\"toPerp\":true,\"nonce\":\"1794856594300\"},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "spotSend_destination_not_an_address",
+      "request": "{\"action\":{\"type\":\"spotSend\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"destination\":\"0x12\",\"token\":\"USDC:0x6d1e7cde53ba9467b783cb7c530ce054\",\"amount\":\"1\",\"time\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "sendAsset_destination_not_an_address",
+      "request": "{\"action\":{\"type\":\"sendAsset\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"destination\":\"junk\",\"sourceDex\":\"spot\",\"destinationDex\":\"\",\"token\":\"USDC:0x6d1e7cde53ba9467b783cb7c530ce054\",\"amount\":\"1\",\"fromSubAccount\":\"\",\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    },
+    {
+      "name": "sendAsset_missing_fromSubAccount",
+      "request": "{\"action\":{\"type\":\"sendAsset\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"destination\":\"0x0000000000000000000000000000000000000001\",\"sourceDex\":\"spot\",\"destinationDex\":\"\",\"token\":\"USDC:0x6d1e7cde53ba9467b783cb7c530ce054\",\"amount\":\"1\",\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "approveAgent_bad_address",
+      "request": "{\"action\":{\"type\":\"approveAgent\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"agentAddress\":\"0x12\",\"agentName\":\"x\",\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "userSetAbstraction_unknown",
+      "request": "{\"action\":{\"type\":\"userSetAbstraction\",\"hyperliquidChain\":\"Mainnet\",\"signatureChainId\":\"0x66eee\",\"user\":\"0x0000000000000000000000000000000000000001\",\"abstraction\":\"zzz\",\"nonce\":1794856594300},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "order_extra_key_on_action",
+      "request": "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":0,\"b\":true,\"p\":\"1\",\"s\":\"1\",\"r\":false,\"t\":{\"limit\":{\"tif\":\"Gtc\"}}}],\"grouping\":\"na\",\"zz\":1},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "order_bad_tif",
+      "request": "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":0,\"b\":true,\"p\":\"1\",\"s\":\"1\",\"r\":false,\"t\":{\"limit\":{\"tif\":\"Zz\"}}}],\"grouping\":\"na\"},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "order_bad_grouping",
+      "request": "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":0,\"b\":true,\"p\":\"1\",\"s\":\"1\",\"r\":false,\"t\":{\"limit\":{\"tif\":\"Gtc\"}}}],\"grouping\":\"zz\"},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "updateLeverage_missing_isCross",
+      "request": "{\"action\":{\"type\":\"updateLeverage\",\"asset\":0,\"leverage\":5},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "updateLeverage_zero",
+      "request": "{\"action\":{\"type\":\"updateLeverage\",\"asset\":0,\"isCross\":true,\"leverage\":0},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "cancel_extra_key",
+      "request": "{\"action\":{\"type\":\"cancel\",\"cancels\":[{\"a\":0,\"o\":1}],\"zz\":1},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "noop_extra_key",
+      "request": "{\"action\":{\"type\":\"noop\",\"zz\":1},\"nonce\":1794856594300,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 422,
+      "contentType": "text/plain; charset=utf-8",
+      "body": "Failed to deserialize the JSON body into the target type"
+    },
+    {
+      "name": "noop_expired",
+      "request": "{\"action\":{\"type\":\"noop\"},\"nonce\":1794856594300,\"expiresAfter\":1000,\"signature\":{\"r\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"s\":\"0x0000000000000000000000000000000000000000000000000000000000000000\",\"v\":27}}",
+      "status": 200,
+      "contentType": "application/json",
+      "body": "{\"status\":\"err\",\"response\":\"Unable to recover signer.\"}"
+    }
+  ]
+}

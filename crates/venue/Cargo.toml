@@ -7,6 +7,8 @@ license.workspace = true
 description = "The Venue Mirror: the fork driver over anvil V, the market/account simulator, the consumer-facing API"
 
 [dependencies]
+base64 = { workspace = true }
+flate2 = { workspace = true }
 diorama-config = { path = "../config" }
 diorama-anvil = { path = "../anvil" }
 diorama-devnet = { path = "../devnet" }
