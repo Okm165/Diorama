@@ -89,6 +89,12 @@ from decimal import Decimal
 import sys
 print((Decimal(sys.argv[1]) * Decimal(sys.argv[2])).normalize())" "$1" "$2"
 }
+sig5() { # the venue's own order-price format: at most 5 significant figures
+  python3 -c "
+from decimal import Context, Decimal
+import sys
+print(Context(prec=5).create_decimal(Decimal(sys.argv[1])).normalize())" "$1"
+}
 echo "== venue order-lane proof =="
 
 echo "-- preconditions"
@@ -179,7 +185,11 @@ spost /control/crash "{\"coin\":\"$COIN\"}" | json 'd["owned"]' | grep -q False 
 # The venue's nonce rule: the 100 highest per signer, window
 # (T − 2 d, T + 1 d) — so a fixture nonce must be a fresh millisecond stamp.
 nonce=$(date +%s%3N)
-x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":true,\"p\":\"3000\",\"s\":\"0.2\",\"t\":{\"limit\":{\"tif\":\"Ioc\"}}}]},\"user\":\"$ORDER_ACCT\",\"nonce\":$nonce,\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")
+# An IOC buy priced at the live ask plus 1% walks the served book to the
+# 0.2 size; a fixture price ("3000") would answer the venue's own
+# `Order price too far from oracle` guard on a live venue.
+ioc_px=$(sig5 "$(touch "$(book | json 'd["levels"][1][0]["px"]')" "1.01")")
+x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":true,\"p\":\"$ioc_px\",\"s\":\"0.2\",\"t\":{\"limit\":{\"tif\":\"Ioc\"}}}]},\"user\":\"$ORDER_ACCT\",\"nonce\":$nonce,\"signature\":{\"r\":\"0x01\",\"s\":\"0x02\",\"v\":27}}")
 st=$(echo "$x" | json 'd["response"]["data"]["statuses"][0].get("filled",{}).get("totalSz")')
 [ "$st" = "0.2" ] && ok "the compact order filled through /exchange (totalSz 0.2)" || bad "exchange: $x"
 # A resting tif needs its own price: the venue never walks a Gtc as a market
@@ -189,8 +199,11 @@ err=$(echo "$x" | json 'd["response"]["data"]["statuses"][0].get("error","")')
 [ "$err" = "Order has invalid price." ] && ok "a price-less Gtc refuses by name" \
   || bad "gtc: $x"
 # The resting lane: a priced Gtc rests, openOrders serves it, cancel closes it,
-# orderStatus reports the terminal state.
-px=$(touch "$(book | json 'd["levels"][0][0]["px"]')" "0.95")
+# orderStatus reports the terminal state. The price is the live mark scaled
+# down **and rounded to the venue's own 5-significant-figure rule** — an
+# unrounded factor failed that guard on a live venue (measured: `1558.9025`
+# answered `Order price has more than 5 significant figures.`).
+px=$(sig5 "$(touch "$(mark)" "0.95")")
 x=$(sipost /exchange "{\"action\":{\"type\":\"order\",\"orders\":[{\"a\":$idx,\"b\":true,\"p\":\"$px\",\"s\":\"0.1\",\"t\":{\"limit\":{\"tif\":\"Gtc\"}}}]},\"user\":\"$ORDER_ACCT\",\"nonce\":$(date +%s%3N)}")
 oid=$(echo "$x" | json 'd["response"]["data"]["statuses"][0].get("resting",{}).get("oid")')
 [ -n "$oid" ] && [ "$oid" != "None" ] && ok "a priced Gtc rests (oid $oid)" || bad "rest: $x"
