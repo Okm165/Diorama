@@ -21,6 +21,13 @@ spot" to a **1:1 HL exchange mirror** with honest book simulation.
   the book lane.
 - Downstream WS: leases per subscription, push-on-change (25 ms coalescing),
   socket-level tests.
+- Bridge: a CoreDepositWallet `deposit` / `depositFor` names the Core wallet
+  its funds land in (`destinationDex`: `u32::MAX` spot, `0` the default perp
+  dex, an index the `perpDexs` position). The route is read from the
+  transaction's call tree — depositor-made, exact amount, not reverted —
+  and the deposit credits that wallet; a plain system-address transfer still
+  credits the sender's spot wallet. The block's call traces are read once
+  and shared with the contract-internal CoreWriter calls.
 
 ## Endpoint checklist (mirror = shape, refusal, and edge behavior)
 
