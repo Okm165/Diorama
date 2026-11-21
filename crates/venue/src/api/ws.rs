@@ -35,14 +35,13 @@ use super::ApiState;
 use crate::feed::dex::ALL_DEXS;
 use crate::sim::Sim;
 use crate::wire::{
-    ActiveAssetData, AllMids, AssetCtx, ClearinghouseState, L2Book, MarginSummary,
+    ActiveAssetData, AllMids, AssetCtx, ClearinghouseState, L2Book,
     SpotClearinghouseState, UserAbstraction,
 };
 use alloy_primitives::Address;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -998,7 +997,7 @@ fn dex_state(
 ) -> crate::error::Result<ClearinghouseState> {
     Ok(match super::info::dex_clearinghouse_of(state, user, dex)? {
         Some(served) => served,
-        None => empty_clearinghouse(Sim::served_time(crate::now_ms())),
+        None => super::info::empty_clearinghouse(Sim::served_time(crate::now_ms())),
     })
 }
 
@@ -1310,32 +1309,8 @@ fn spot_state_of(state: &ApiState, user: Address) -> crate::error::Result<SpotCl
                 &state.feed,
             )?,
         },
-        None => SpotClearinghouseState {
-            balances: Vec::new(),
-            token_to_available_after_maintenance: Vec::new(),
-        },
+        None => super::info::empty_spot_state(),
     })
-}
-
-/// The venue's empty `clearinghouseState`: zero summaries, no positions, the
-/// served clock. This is the shape the live venue returns for an untouched
-/// address — not a fabricated position, and not a refusal.
-fn empty_clearinghouse(time: u64) -> ClearinghouseState {
-    let zero = MarginSummary {
-        account_value: Decimal::ZERO,
-        total_ntl_pos: Decimal::ZERO,
-        total_raw_usd: Decimal::ZERO,
-        total_margin_used: Decimal::ZERO,
-    };
-    ClearinghouseState {
-        margin_summary: zero.clone(),
-        cross_margin_summary: zero,
-        cross_maintenance_margin_used: Decimal::ZERO,
-        withdrawable: Decimal::ZERO,
-        asset_positions: Vec::new(),
-        time,
-        control_owned: false,
-    }
 }
 
 #[cfg(test)]

@@ -1,12 +1,15 @@
 //! The client-facing info API (8090): one `POST /info` endpoint, dispatched by
 //! the request's `type`.
 //!
-//! COW rule: a **touched** account is answered from the sim; an **untouched**
-//! one is passed through to the real venue (which serves its own empty shapes
-//! for addresses it has never seen — the consumer's "unconfigured accounts → empty
-//! shape, 200 OK" contract holds either way). Market data is answered from
-//! the composed feed, so a crashed mark is the same number the sim priced
-//! with.
+//! The account plane is the **mirror's own**: a **touched** account is
+//! answered from the sim, an **untouched** one with the venue's measured
+//! empty shape (the sim holds no Core state for it, so that is the truth here
+//! — and the same JSON the live venue returns for an address it has never
+//! seen). No per-user read waits on the live venue: a 250 ms round trip per
+//! poll turned the live API's rate budget into venue-series gaps and refused
+//! HF checks. The few types whose empty shape this mirror does not model keep
+//! the verbatim passthrough. Market data is answered from the composed feed,
+//! so a crashed mark is the same number the sim priced with.
 use super::ApiState;
 use crate::error::{Error, Result};
 use crate::feed::dex::{dex_of_coin, ALL_DEXS};
@@ -231,22 +234,27 @@ pub(crate) fn dex_scope(feed: &MarketFeed, dex: &str, allow_all: bool) -> Option
 
 /// `maxBuilderFee`: the maximum fee (tenths of a basis point) a simulated
 /// account approved for `builder` through CoreWriter `approveBuilderFee`, as a
-/// bare JSON integer (0 when never approved, as the venue answers); the venue's
-/// verbatim for an untouched account.
+/// bare JSON integer (0 when never approved — measured for an untouched
+/// account too).
 async fn max_fee(
     state: &ApiState,
-    body: Bytes,
+    _body: Bytes,
     user: Address,
     builder: Address,
 ) -> Result<Response> {
-    simulated(state, &body, user, |account| {
-        let max = account
-            .builder_approvals
-            .get(&builder)
-            .copied()
-            .unwrap_or(0);
-        Ok(Json(max).into_response())
-    })
+    served(
+        state,
+        user,
+        |account| {
+            let max = account
+                .builder_approvals
+                .get(&builder)
+                .copied()
+                .unwrap_or(0);
+            Ok(Json(max).into_response())
+        },
+        || Json(0u64).into_response(),
+    )
     .await
 }
 
@@ -254,30 +262,30 @@ async fn max_fee(
 const USER_FILLS_PAGE: usize = 2_000;
 
 /// `userFills`: a simulated account's fills, newest first (the venue's
-/// order), or the venue's verbatim for an untouched one.
-async fn user_fills(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+/// order); `[]` for an untouched one (measured).
+async fn user_fills(state: &ApiState, _body: Bytes, user: Address) -> Result<Response> {
     match state.sim.user_fills(user) {
         Some(mut fills) => {
             fills.reverse();
             fills.truncate(USER_FILLS_PAGE);
             Ok(Json(fills).into_response())
         }
-        None => pass_through(state, &body).await,
+        None => Ok(Json(serde_json::Value::Array(Vec::new())).into_response()),
     }
 }
 
 /// `userFunding`: a simulated account's funding payments from `startTime`
 /// (to `endTime` when given), oldest first, each wrapped as the venue's ledger
-/// update; the venue's verbatim for an untouched account.
+/// update; `[]` for an untouched account (measured).
 async fn user_funding(
     state: &ApiState,
-    body: Bytes,
+    _body: Bytes,
     user: Address,
     start_time: u64,
     end_time: Option<u64>,
 ) -> Result<Response> {
     let Some(fundings) = state.sim.user_fundings(user, start_time) else {
-        return pass_through(state, &body).await;
+        return Ok(Json(serde_json::Value::Array(Vec::new())).into_response());
     };
     let rows: Vec<serde_json::Value> = fundings
         .into_iter()
@@ -302,17 +310,17 @@ async fn user_funding(
 
 /// `userNonFundingLedgerUpdates`: a simulated account's transfer rows
 /// (`spotTransfer`, `send`, `accountClassTransfer`, `accountActivationGas`),
-/// oldest first, each `{time, hash, delta}`; the venue's verbatim for an
-/// untouched account.
+/// oldest first, each `{time, hash, delta}`; `[]` for an untouched account
+/// (measured).
 async fn ledger_updates(
     state: &ApiState,
-    body: Bytes,
+    _body: Bytes,
     user: Address,
     window: (u64, Option<u64>),
 ) -> Result<Response> {
     match state.sim.ledger_updates(user, window) {
         Some(rows) => Ok(Json(rows).into_response()),
-        None => pass_through(state, &body).await,
+        None => Ok(Json(serde_json::Value::Array(Vec::new())).into_response()),
     }
 }
 
@@ -362,7 +370,7 @@ async fn unrouted(state: &ApiState, body: Bytes) -> Result<Response> {
                         .collect::<Vec<_>>(),
                 )
                 .into_response()),
-                None => pass_through(state, &body).await,
+                None => Ok(Json(serde_json::Value::Array(Vec::new())).into_response()),
             }
         }
         ("historicalOrders", Some(user)) => historical_orders(state, &body, user).await,
@@ -418,9 +426,9 @@ async fn fresh_account_read(
 
 /// `historicalOrders`: the account's open orders and its terminal history,
 /// newest first (by status time), at most a page.
-async fn historical_orders(state: &ApiState, body: &Bytes, user: Address) -> Result<Response> {
+async fn historical_orders(state: &ApiState, _body: &Bytes, user: Address) -> Result<Response> {
     if state.sim.account(user)?.is_none() {
-        return pass_through(state, body).await;
+        return Ok(Json(serde_json::Value::Array(Vec::new())).into_response());
     }
     let (resting, terminal) = state.sim.order_history(user)?;
     let mut rows: Vec<StatusOrder> = resting
@@ -478,9 +486,13 @@ fn pre_transfer_check(state: &ApiState, user: Address, source: Address) -> Resul
 /// `clearinghouseState`: the sim's one-dex clearinghouse for a touched
 /// account, the venue's verbatim otherwise. A dex the venue does not list (and
 /// `ALL_DEXS`, which this type does not take) is the venue's 500 `null`.
+/// `clearinghouseState`: the sim's for an account it has touched; the venue's
+/// empty shape for an untouched one (this mirror's own truth: the sim holds no
+/// Core state for it — the same shape the live venue answers for an address it
+/// has never seen, and the same one the WS lane serves).
 async fn clearinghouse(
     state: &ApiState,
-    body: Bytes,
+    _body: Bytes,
     user: Address,
     dex: Option<String>,
 ) -> Result<Response> {
@@ -490,32 +502,71 @@ async fn clearinghouse(
     };
     match dex_clearinghouse_of(state, user, &name)? {
         Some(served) => Ok(Json(served).into_response()),
-        None => pass_through(state, &body).await,
+        None => Ok(Json(empty_clearinghouse(Sim::served_time(crate::now_ms()))).into_response()),
+    }
+}
+
+/// The venue's empty `clearinghouseState`: zero summaries, no positions, the
+/// served clock. This is the shape the live venue returns for an untouched
+/// address — not a fabricated position, and not a refusal.
+pub(crate) fn empty_clearinghouse(time: u64) -> crate::wire::ClearinghouseState {
+    let zero = crate::wire::MarginSummary {
+        account_value: Decimal::ZERO,
+        total_ntl_pos: Decimal::ZERO,
+        total_raw_usd: Decimal::ZERO,
+        total_margin_used: Decimal::ZERO,
+    };
+    crate::wire::ClearinghouseState {
+        margin_summary: zero.clone(),
+        cross_margin_summary: zero,
+        cross_maintenance_margin_used: Decimal::ZERO,
+        withdrawable: Decimal::ZERO,
+        asset_positions: Vec::new(),
+        time,
+        control_owned: false,
+    }
+}
+
+/// The venue's empty `spotClearinghouseState` (an address with no spot
+/// balances): the shape both the live venue and the WS lane answer.
+pub(crate) fn empty_spot_state() -> crate::wire::SpotClearinghouseState {
+    crate::wire::SpotClearinghouseState {
+        balances: Vec::new(),
+        token_to_available_after_maintenance: Vec::new(),
     }
 }
 
 /// `spotClearinghouseState`: the unified reconciliation
-/// (`available + maintenance == balance`), or the venue's verbatim.
-async fn spot_state(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
+/// (`available + maintenance == balance`), or the venue's empty shape.
+async fn spot_state(state: &ApiState, _body: Bytes, user: Address) -> Result<Response> {
     // Pure observation; the 1 Hz tick owns accrual and liquidation.
-    simulated(state, &body, user, |account| {
-        Ok(Json(crate::wire::SpotClearinghouseState {
-            balances: account::served_spot_balances(account, &state.feed)?,
-            token_to_available_after_maintenance: account::available_after_maintenance(
-                account,
-                &state.feed,
-            )?,
-        })
-        .into_response())
-    })
+    served(
+        state,
+        user,
+        |account| {
+            Ok(Json(crate::wire::SpotClearinghouseState {
+                balances: account::served_spot_balances(account, &state.feed)?,
+                token_to_available_after_maintenance: account::available_after_maintenance(
+                    account,
+                    &state.feed,
+                )?,
+            })
+            .into_response())
+        },
+        || Json(empty_spot_state()).into_response(),
+    )
     .await
 }
 
-/// `userAbstraction`: the account's parseable mode, or the venue's verbatim.
-async fn abstraction(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
-    simulated(state, &body, user, |account| {
-        Ok(Json(account::mode_of(account)).into_response())
-    })
+/// `userAbstraction`: the account's parseable mode (`default` for an account
+/// the sim has never touched, as the venue answers).
+async fn abstraction(state: &ApiState, _body: Bytes, user: Address) -> Result<Response> {
+    served(
+        state,
+        user,
+        |account| Ok(Json(account::mode_of(account)).into_response()),
+        || Json(crate::wire::UserAbstraction::default()).into_response(),
+    )
     .await
 }
 
@@ -613,53 +664,63 @@ pub(crate) fn resting_in(
 }
 
 /// `openOrders`: the devnet's resting book for a touched account (the venue's
-/// own row shape), per dex or `ALL_DEXS`; untouched accounts pass through; an
+/// own row shape), per dex or `ALL_DEXS`; `[]` for an untouched account; an
 /// unlisted dex is the venue's 500 `null`.
 async fn open_orders(
     state: &ApiState,
-    body: Bytes,
+    _body: Bytes,
     user: Address,
     dex: Option<String>,
 ) -> Result<Response> {
     let Some(scope) = account_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
         return Ok(unknown_dex());
     };
-    simulated(state, &body, user, |_| {
-        let rows: Vec<OpenOrder> = resting_in(state, user, &scope)?
-            .into_iter()
-            .map(|r| OpenOrder {
-                coin: r.coin.clone(),
-                limit_px: dtext(&r.px),
-                oid: r.oid,
-                side: side_letter(r.side),
-                sz: dtext(&r.sz),
-                timestamp: r.placed_ms,
-                orig_sz: dtext(&r.orig_sz),
-                cloid: r.cloid,
-            })
-            .collect();
-        Ok(Json(rows).into_response())
-    })
+    served(
+        state,
+        user,
+        |_| {
+            let rows: Vec<OpenOrder> = resting_in(state, user, &scope)?
+                .into_iter()
+                .map(|r| OpenOrder {
+                    coin: r.coin.clone(),
+                    limit_px: dtext(&r.px),
+                    oid: r.oid,
+                    side: side_letter(r.side),
+                    sz: dtext(&r.sz),
+                    timestamp: r.placed_ms,
+                    orig_sz: dtext(&r.orig_sz),
+                    cloid: r.cloid,
+                })
+                .collect();
+            Ok(Json(rows).into_response())
+        },
+        || Json(Vec::<OpenOrder>::new()).into_response(),
+    )
     .await
 }
 
 /// `frontendOpenOrders`: the same rows with the frontend's extra fields.
 async fn frontend_open_orders(
     state: &ApiState,
-    body: Bytes,
+    _body: Bytes,
     user: Address,
     dex: Option<String>,
 ) -> Result<Response> {
     let Some(scope) = account_scope(&state.feed, dex.as_deref().unwrap_or(""), true) else {
         return Ok(unknown_dex());
     };
-    simulated(state, &body, user, |_| {
-        let rows: Vec<FrontendOpenOrder> = resting_in(state, user, &scope)?
-            .iter()
-            .map(frontend_row)
-            .collect();
-        Ok(Json(rows).into_response())
-    })
+    served(
+        state,
+        user,
+        |_| {
+            let rows: Vec<FrontendOpenOrder> = resting_in(state, user, &scope)?
+                .iter()
+                .map(frontend_row)
+                .collect();
+            Ok(Json(rows).into_response())
+        },
+        || Json(Vec::<FrontendOpenOrder>::new()).into_response(),
+    )
     .await
 }
 
@@ -798,12 +859,13 @@ pub(crate) fn terminal_status_label(status: crate::sim::order::TerminalStatus) -
 /// docs' `unknownOid`.
 async fn order_status(
     state: &ApiState,
-    body: Bytes,
+    _body: Bytes,
     user: Address,
     oid: crate::wire::OidOrCloid,
 ) -> Result<Response> {
     if state.sim.account(user)?.is_none() {
-        return pass_through(state, &body).await;
+        // The venue's answer for an oid no account of its holds (measured).
+        return Ok(Json(serde_json::json!({"status": "unknownOid"})).into_response());
     }
     let found = match oid {
         crate::wire::OidOrCloid::Oid(o) => match state.sim.resting_by_oid(user, o)? {
@@ -1253,11 +1315,32 @@ pub(crate) fn dex_clearinghouse_of(
     Ok(Some(served))
 }
 
-/// The venue's own answer for an untouched account (verbatim passthrough).
 /// The per-user read's guard: a simulated account computes the answer; an
-/// unconfigured one is passed through to the live venue verbatim (the
-/// overlay's discipline — the sim's own state, or the venue's answer, never a
-/// guess). One shape for every per-user read.
+/// untouched one gets the venue's **measured empty shape** (`empty`).
+///
+/// The account plane is answered from the mirror's own truth. An account the
+/// sim has never touched holds no Core state here, so its state *is* empty —
+/// the same shape the live venue returns for an address it has never seen (and
+/// the shape the WS lane serves). A live-venue round trip (the `pass_through`
+/// below) answered the same JSON but cost 250–350 ms *and* a spot in the live
+/// API's rate budget on every poll: the indexer polls each account every 5 s,
+/// so the venue's latency became the swarm's, and a throttled live API turned
+/// into venue-series gaps and refused HF checks. Types whose empty shape this
+/// mirror does not model keep the verbatim passthrough ([`simulated`]).
+async fn served(
+    state: &ApiState,
+    user: Address,
+    compute: impl FnOnce(&crate::sim::account::Account) -> Result<Response>,
+    empty: impl FnOnce() -> Response,
+) -> Result<Response> {
+    match state.sim.account(user)? {
+        Some(account) => compute(&account),
+        None => Ok(empty()),
+    }
+}
+
+/// The venue's own answer for an untouched account (verbatim passthrough):
+/// the types whose empty shape this mirror does not model.
 async fn simulated(
     state: &ApiState,
     body: &Bytes,
@@ -1735,6 +1818,87 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&bytes),
             "Failed to deserialize the JSON body into the target type"
+        );
+    }
+
+    /// The account plane is the mirror's own: every per-user read for an
+    /// untouched account answers the venue's measured empty shape **locally**
+    /// (the test's venue client points at a dead address, so a passthrough
+    /// would fail instead of answering).
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one table: the empty shapes share one rule
+    async fn untouched_account_reads_are_the_venues_empty_shapes() {
+        let state = state_with(crate::feed::MarketFeed::memory(Vec::new()));
+        let user = Address::repeat_byte(0x11);
+        let ask = |body: String| {
+            let state = state.clone();
+            async move { info(State(state), Bytes::from(body)).await.unwrap() }
+        };
+        // Every per-user type answers 200 (the dead venue would fail a
+        // passthrough), and the shapes below are the venue's measured empties.
+        let bodies = [
+            format!(r#"{{"type":"clearinghouseState","user":"{user}"}}"#),
+            format!(r#"{{"type":"clearinghouseState","user":"{user}","dex":""}}"#),
+            format!(r#"{{"type":"spotClearinghouseState","user":"{user}"}}"#),
+            format!(r#"{{"type":"openOrders","user":"{user}"}}"#),
+            format!(r#"{{"type":"frontendOpenOrders","user":"{user}"}}"#),
+            format!(r#"{{"type":"userFills","user":"{user}"}}"#),
+            format!(r#"{{"type":"userFunding","user":"{user}","startTime":0}}"#),
+            format!(r#"{{"type":"userNonFundingLedgerUpdates","user":"{user}","startTime":0}}"#),
+            format!(r#"{{"type":"historicalOrders","user":"{user}"}}"#),
+            format!(r#"{{"type":"maxBuilderFee","user":"{user}","builder":"0x0000000000000000000000000000000000000001"}}"#),
+            format!(r#"{{"type":"userAbstraction","user":"{user}"}}"#),
+            format!(r#"{{"type":"orderStatus","user":"{user}","oid":123456789}}"#),
+        ];
+        for body in &bodies {
+            let response = ask(body.clone()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{body}");
+        }
+
+        let out = response_json(
+            ask(format!(r#"{{"type":"clearinghouseState","user":"{user}"}}"#)).await,
+        )
+        .await;
+        assert_eq!(out["marginSummary"]["accountValue"], "0.0");
+        assert_eq!(out["crossMarginSummary"]["accountValue"], "0.0");
+        assert_eq!(out["withdrawable"], "0.0");
+        assert_eq!(out["assetPositions"], serde_json::json!([]));
+        assert!(out["time"].as_u64().unwrap() > 0, "the served clock");
+
+        let out =
+            response_json(ask(format!(r#"{{"type":"spotClearinghouseState","user":"{user}"}}"#)).await)
+                .await;
+        assert_eq!(out["balances"], serde_json::json!([]));
+
+        for body in [
+            format!(r#"{{"type":"openOrders","user":"{user}"}}"#),
+            format!(r#"{{"type":"frontendOpenOrders","user":"{user}"}}"#),
+            format!(r#"{{"type":"userFills","user":"{user}"}}"#),
+            format!(r#"{{"type":"userFunding","user":"{user}","startTime":0}}"#),
+            format!(r#"{{"type":"userNonFundingLedgerUpdates","user":"{user}","startTime":0}}"#),
+            format!(r#"{{"type":"historicalOrders","user":"{user}"}}"#),
+        ] {
+            assert_eq!(
+                response_json(ask(body.clone()).await).await,
+                serde_json::json!([]),
+                "{body}"
+            );
+        }
+
+        assert_eq!(
+            response_json(ask(format!(r#"{{"type":"userAbstraction","user":"{user}"}}"#)).await)
+                .await,
+            serde_json::json!("default")
+        );
+        assert_eq!(
+            response_json(ask(format!(r#"{{"type":"maxBuilderFee","user":"{user}","builder":"0x0000000000000000000000000000000000000001"}}"#)).await)
+                .await,
+            serde_json::json!(0)
+        );
+        assert_eq!(
+            response_json(ask(format!(r#"{{"type":"orderStatus","user":"{user}","oid":123456789}}"#)).await)
+                .await,
+            serde_json::json!({"status": "unknownOid"})
         );
     }
 
