@@ -443,6 +443,103 @@ pub(crate) fn credit_entry(
     Ok(entry.total)
 }
 
+/// Settle one spot **taker** fill into the account's spot ledger.
+///
+/// The buyer pays the quote token and receives the base; the seller the
+/// reverse. Hyperliquid charges spot fees in the token **received** (the base
+/// on a buy, the quote on a sell), so the credited amount is net of the fee
+/// while the ledger's `fee` stays the USD figure. `entryNtl` is the base's
+/// cost basis: it grows by the buy's notional and shrinks pro rata on a sell.
+///
+/// Holds belong to the resting lane; an IOC never touches them. A balance the
+/// account does not have is refused **before** any write (the caller runs this
+/// on the account that will keep the result, and a refusal returns early).
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one money rule in one place: both directions and their balance checks; splitting it hides the debit/credit pairing"
+)]
+pub(crate) fn settle_spot_fill(
+    account: &mut Account,
+    base: crate::sim::TokenRef<'_>,
+    quote: crate::sim::TokenRef<'_>,
+    side: crate::sim::order::Side,
+    quantity: Decimal,
+    px: Decimal,
+    fee_usd: Decimal,
+) -> Result<FillEffect> {
+    use crate::sim::order::Side;
+    if quantity <= Decimal::ZERO {
+        return Err(crate::error::Error::bad_request("Order size must be positive."));
+    }
+    let free = |account: &Account, index: u32| -> Decimal {
+        account
+            .spot
+            .get(&index)
+            .map(|entry| entry.total - entry.hold)
+            .unwrap_or(Decimal::ZERO)
+    };
+    let notional = mul(quantity, px, "spot notional")?;
+    match side {
+        Side::Buy => {
+            if free(account, quote.index) < notional {
+                return Err(crate::error::Error::bad_request(format!(
+                    "Insufficient {} balance to buy {}.",
+                    quote.coin, base.coin
+                )));
+            }
+            let received = sub(quantity, div(fee_usd, px, "spot fee in base")?, "spot fee in base")?;
+            if received <= Decimal::ZERO {
+                return Err(crate::error::Error::bad_request(
+                    "The fee consumes the whole spot fill.",
+                ));
+            }
+            let quote_entry = spot_entry(account, quote);
+            quote_entry.total = sub(quote_entry.total, notional, "spot quote debit")?;
+            let base_entry = spot_entry(account, base);
+            base_entry.total = add(base_entry.total, received, "spot base credit")?;
+            base_entry.entry_ntl = add(base_entry.entry_ntl, notional, "spot cost basis")?;
+        }
+        Side::Sell => {
+            if free(account, base.index) < quantity {
+                return Err(crate::error::Error::bad_request(format!(
+                    "Insufficient {} balance to sell.",
+                    base.coin
+                )));
+            }
+            let proceeds = sub(notional, fee_usd, "spot fee in quote")?;
+            if proceeds < Decimal::ZERO {
+                return Err(crate::error::Error::bad_request(
+                    "The fee exceeds the spot fill's proceeds.",
+                ));
+            }
+            let base_entry = spot_entry(account, base);
+            let old = base_entry.total;
+            let new = sub(old, quantity, "spot base debit")?;
+            base_entry.entry_ntl = if old > Decimal::ZERO {
+                mul(
+                    base_entry.entry_ntl,
+                    ratio_or(new, old, Decimal::ZERO),
+                    "spot cost basis",
+                )?
+            } else {
+                Decimal::ZERO
+            };
+            base_entry.total = new;
+            let quote_entry = spot_entry(account, quote);
+            quote_entry.total = add(quote_entry.total, proceeds, "spot quote credit")?;
+        }
+    }
+    Ok(FillEffect {
+        start_position: Decimal::ZERO,
+        closed_pnl: Decimal::ZERO,
+        dir: match side {
+            Side::Buy => "Buy",
+            Side::Sell => "Sell",
+        },
+    })
+}
+
 /// The computed account figures, one pass over the positions.
 pub(crate) struct AccountView {
     pub margin_summary: MarginSummary,

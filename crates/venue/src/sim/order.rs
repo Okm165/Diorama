@@ -640,6 +640,11 @@ impl Sim {
         builder: Option<BuilderFee>,
     ) -> Result<Placed> {
         let placer = Placer { address, builder };
+        // A spot pair is a market with its own settlement: no leverage, no
+        // funding, no positions — the fill moves tokens in the spot ledger.
+        if let Some(pair) = feed.spot_pair(&req.coin) {
+            return self.place_spot(feed, placer, req, &pair);
+        }
         let meta = feed.meta_for_lookup(&req.coin);
         validate_order(feed, meta.as_ref(), req)?;
         self.pre_place_refusals(feed, address, req, meta.as_ref())?;
@@ -677,6 +682,153 @@ impl Sim {
         let remainder = req.size - fill.as_ref().map(|f| f.total_sz).unwrap_or(Decimal::ZERO);
         let resting = self.rest_remainder(feed, placer, req, remainder)?;
         Ok(Placed { fill, resting })
+    }
+
+    /// Spot taker fee: the venue's base tier is 0.070 % (perp taker is 0.045 %;
+    /// spot pays the extra). Charged in the received token.
+    fn spot_taker_fee() -> Decimal {
+        Decimal::new(7, 4)
+    }
+
+    /// `place` for a **spot pair**: the same served book is the executable
+    /// depth, but the fill moves tokens in the spot ledger instead of opening
+    /// a position. Only IOC is served — a resting spot order needs the hold
+    /// and maker-settlement lane, and a half-served order type would silently
+    /// lose the client's size — so `Gtc`/`Alo` refuse by name.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one placement path: validate, walk, settle, record, consume — read top to bottom in order"
+    )]
+    fn place_spot(
+        &self,
+        feed: &MarketFeed,
+        placer: Placer,
+        req: &Order,
+        pair: &crate::wire::SpotPair,
+    ) -> Result<Placed> {
+        if req.trigger.is_some() {
+            return Err(Error::bad_request(
+                "Trigger orders are not served for spot on this mirror.",
+            ));
+        }
+        if req.reduce_only {
+            return Err(Error::bad_request(
+                "Reduce-only is a perp order type; a spot sell spends the balance it owns.",
+            ));
+        }
+        if req.tif != Tif::Ioc {
+            return Err(Error::bad_request(
+                "Resting spot orders are not served on this mirror yet — send an IOC order.",
+            ));
+        }
+        if req.size <= Decimal::ZERO {
+            return Err(Error::bad_request("Order size must be positive."));
+        }
+        if let Some(px) = req.limit_px {
+            if px <= Decimal::ZERO {
+                return Err(Error::bad_request("Order price must be positive."));
+            }
+        }
+        let base = feed
+            .spot_token(pair.tokens[0])
+            .ok_or(Error::Warming)?;
+        let quote = feed
+            .spot_token(pair.tokens[1])
+            .ok_or(Error::Warming)?;
+        if req.size.normalize().scale() > u32::from(base.sz_decimals) {
+            return Err(Error::bad_request(format!(
+                "Order size has more than {} decimals for {}.",
+                base.sz_decimals, pair.name
+            )));
+        }
+        let book = feed.book(&req.coin, crate::now_ms()).ok_or(Error::Warming)?;
+        // The taker walks live depth only: spot resting orders do not exist on
+        // this lane yet, so there is no maker side to merge.
+        let (legs, filled, avg_px) = walk(&book, req, &[])?;
+        let notional = super::account::mul(filled, avg_px, super::account::FILL_NOTIONAL)?;
+        // The venue's minimum order value is $10 (both planes).
+        if notional < Decimal::from(10) {
+            return Err(Error::bad_request(
+                "Order value is too small: the venue's minimum is 10 USD.",
+            ));
+        }
+        let fee = super::account::mul(notional, Self::spot_taker_fee(), "spot taker fee")?;
+        let builder = placer.builder.map(|b| b.charge(notional)).transpose()?;
+        let base_ref = crate::sim::TokenRef {
+            index: base.index,
+            coin: &base.name,
+        };
+        let quote_ref = crate::sim::TokenRef {
+            index: quote.index,
+            coin: &quote.name,
+        };
+        let effect = self.with_account_now(placer.address, feed, |account| {
+            super::account::settle_spot_fill(
+                account,
+                base_ref,
+                quote_ref,
+                req.side(),
+                filled,
+                avg_px,
+                fee,
+            )
+        })?;
+        let oid = self.next_oid()?;
+        let facts = super::account::FillFacts {
+            coin: req.coin.clone(),
+            side: req.side(),
+            size: filled,
+            px: avg_px,
+            leverage: 1,
+            mode: crate::wire::LeverageType::Cross,
+            reduce: Reduce::Any,
+            fee,
+            builder,
+        };
+        self.record_fill(
+            placer.address,
+            &FillRecord {
+                liquidation: None,
+                facts: &facts,
+                effect,
+                oid,
+                cloid: req.cloid,
+                liquidity: Liquidity::Taker,
+                fee_token: if req.side() == Side::Buy {
+                    &base.name
+                } else {
+                    &quote.name
+                },
+            },
+        )?;
+        for leg in &legs {
+            if let Candidate::Live(c) = leg {
+                feed.consume(c.clone())?;
+            }
+        }
+        self.credit_builder(builder, dex_of_coin(&req.coin))?;
+        self.metrics
+            .orders_filled_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .fees_charged_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.mark_dirty()?;
+        Ok(Placed {
+            fill: Some(Fill {
+                total_sz: filled,
+                avg_px,
+                consumed: legs
+                    .into_iter()
+                    .filter_map(|leg| match leg {
+                        Candidate::Live(c) => Some(c),
+                        Candidate::Maker { .. } => None,
+                    })
+                    .collect(),
+                oid,
+            }),
+            resting: None,
+        })
     }
 
     /// The pre-place refusals (the open-interest cap and the margin-tier
@@ -1923,6 +2075,177 @@ mod tests {
             reduce_only: true,
             ..ioc(side, sz)
         }
+    }
+
+    fn spot_token(name: &str, index: u32, sz_decimals: u8) -> crate::wire::SpotToken {
+        crate::wire::SpotToken {
+            name: name.into(),
+            sz_decimals,
+            wei_decimals: 8,
+            index,
+            is_canonical: true,
+            evm_contract: None,
+            token_id: None,
+            full_name: None,
+            deployer_trading_fee_share: Decimal::ZERO,
+        }
+    }
+
+    /// A spot feed: `PURR/USDC` (pair index 0, tokens `[PURR=1, USDC=0]`), a
+    /// two-sided book at 0.074/0.075 and the venue's `allMids` value.
+    fn spot_feed() -> MarketFeed {
+        let now = crate::now_ms();
+        let feed = MarketFeed::memory(Vec::new()).with_spot_markets(vec!["PURR/USDC".into()]);
+        feed.put_spot_meta(crate::wire::SpotMeta {
+            tokens: vec![spot_token("USDC", 0, 8), spot_token("PURR", 1, 2)],
+            universe: vec![crate::wire::SpotPair {
+                tokens: [1, 0],
+                name: "PURR/USDC".into(),
+                index: 0,
+                is_canonical: true,
+            }],
+        });
+        feed.put_mids(
+            std::collections::BTreeMap::from([("PURR/USDC".into(), Decimal::new(75, 3))]),
+            now,
+        );
+        feed.put_book(
+            book("PURR/USDC", &[("0.074", "5000")], &[("0.075", "5000")]),
+            now,
+        );
+        feed
+    }
+
+    fn spot_order(side: Side, sz: &str, px: Option<&str>) -> Order {
+        Order {
+            coin: "PURR/USDC".into(),
+            is_buy: side.is_buy(),
+            size: sz.parse().unwrap(),
+            limit_px: px.map(|p| p.parse().unwrap()),
+            tif: Tif::Ioc,
+            reduce_only: false,
+            cloid: None,
+            trigger: None,
+        }
+    }
+
+    /// A spot account funded with `usdc` (spot token 0).
+    fn spot_account(feed: &MarketFeed, usdc: &str) -> (Sim, Address) {
+        let sim = Sim::memory();
+        let a = Address::repeat_byte(0x5b);
+        sim.deal(
+            feed,
+            &Deal {
+                address: a,
+                class: DealClass::Spot,
+                coin: None,
+                dex: None,
+                amount: usdc.parse().unwrap(),
+            },
+        )
+        .unwrap();
+        (sim, a)
+    }
+
+    /// **A spot buy is a token trade, not a position.** The quote leaves the
+    /// balance, the base arrives net of the fee (charged in the received
+    /// token — the venue's spot rule), `entryNtl` carries the cost basis, and
+    /// no perp position exists afterwards.
+    #[test]
+    fn a_spot_ioc_buy_settles_quote_into_base() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        let placed = sim
+            .place(&feed, a, &spot_order(Side::Buy, "1000", Some("0.08")))
+            .expect("the book has size at 0.075");
+        let fill = placed.fill.expect("a taker fill");
+        assert_eq!(fill.avg_px, Decimal::new(75, 3));
+        assert_eq!(fill.total_sz, Decimal::from(1000));
+
+        let account = sim.account(a).unwrap().expect("the account exists");
+        let purr = account.spot.get(&1).expect("base credited");
+        // 75 USD of notional at 0.070 % is 0.0525 USD = 0.7 PURR at 0.075.
+        assert_eq!(purr.total, Decimal::from(1000) - Decimal::new(7, 1));
+        assert_eq!(purr.entry_ntl, Decimal::from(75));
+        let usdc = account.spot.get(&0).expect("quote exists");
+        assert_eq!(usdc.total, Decimal::from(1000) - Decimal::from(75));
+        assert!(
+            account.positions.is_empty(),
+            "a spot fill never opens a perp position"
+        );
+        let fill = account.fills.back().expect("the fill is in the ledger");
+        assert_eq!(fill.dir, "Buy");
+        assert_eq!(fill.fee_token, "PURR");
+        assert_eq!(fill.closed_pnl, Decimal::ZERO, "spot realizes nothing at the trade");
+    }
+
+    /// A sell spends the base it owns and credits the quote net of the fee;
+    /// the cost basis shrinks pro rata.
+    #[test]
+    fn a_spot_ioc_sell_realizes_into_quote_and_shrinks_the_basis() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        sim.place(&feed, a, &spot_order(Side::Buy, "1000", Some("0.08")))
+            .expect("buy first");
+        sim.place(&feed, a, &spot_order(Side::Sell, "500", Some("0.07")))
+            .expect("the bid has size at 0.074");
+
+        let account = sim.account(a).unwrap().expect("the account exists");
+        let purr = account.spot.get(&1).unwrap();
+        // 999.3 PURR carried in (the buy's fee was charged in the base), less 500.
+        assert_eq!(purr.total, Decimal::new(4993, 1));
+        let expected_basis = (Decimal::from(75) * Decimal::new(4993, 1) / Decimal::new(9993, 1))
+            .round_dp(6);
+        assert_eq!(
+            purr.entry_ntl.round_dp(6),
+            expected_basis,
+            "the basis leaves pro rata with the size"
+        );
+        let usdc = account.spot.get(&0).unwrap();
+        // 500 × 0.074 = 37.0, fee 0.0259 → 36.9741 credited.
+        assert_eq!(*usdc, {
+            let mut expected = usdc.clone();
+            expected.total = Decimal::from(1000) - Decimal::from(75) + Decimal::new(369_741, 4);
+            expected
+        });
+        let fill = account.fills.back().expect("the fill is in the ledger");
+        assert_eq!(fill.dir, "Sell");
+        assert_eq!(fill.fee_token, "USDC");
+    }
+
+    /// A sell with no base balance is refused by name, not filled short (spot
+    /// has no short leg).
+    #[test]
+    fn a_spot_sell_without_the_base_balance_is_refused() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        let err = sim
+            .place(&feed, a, &spot_order(Side::Sell, "1000", Some("0.07")))
+            .expect_err("no PURR to sell");
+        assert!(err.to_string().contains("Insufficient PURR"), "{err}");
+    }
+
+    /// Resting spot orders are refused by name until the hold/maker lane
+    /// lands; a silently dropped remainder would lose the client's size.
+    #[test]
+    fn a_resting_spot_order_is_refused_by_name() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        let mut req = spot_order(Side::Buy, "1000", Some("0.08"));
+        req.tif = Tif::Gtc;
+        let err = sim.place(&feed, a, &req).expect_err("Gtc is not served");
+        assert!(err.to_string().contains("Resting spot orders"), "{err}");
+    }
+
+    /// The venue's $10 minimum applies to spot too.
+    #[test]
+    fn a_spot_order_below_the_minimum_value_is_refused() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        let err = sim
+            .place(&feed, a, &spot_order(Side::Buy, "10", Some("0.08")))
+            .expect_err("10 PURR is 0.75 USD");
+        assert!(err.to_string().contains("too small"), "{err}");
     }
 
     /// A fill's leverage is the position's, the account's setting, or the

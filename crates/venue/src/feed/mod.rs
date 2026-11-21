@@ -1209,6 +1209,17 @@ impl MarketFeed {
             .is_some_and(|meta| meta.universe.iter().any(|pair| pair.name == coin))
     }
 
+    /// The spot token at `index` (the pair's own token indices address these).
+    pub(crate) fn spot_token(&self, index: u32) -> Option<crate::wire::SpotToken> {
+        self.read()
+            .spot_meta
+            .as_ref()?
+            .tokens
+            .iter()
+            .find(|token| token.index == index)
+            .cloned()
+    }
+
     /// The spot token index for a coin name (`None` = not tracked).
     pub fn token_of(&self, coin: &str) -> Option<u32> {
         self.read()
