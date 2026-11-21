@@ -158,7 +158,10 @@ if [ -n "$JOB" ]; then
   fi
 fi
 
-SIM=$(try kubectl -n "$VENUE_NS" exec deploy/venue-sim -- curl -sf --max-time 5 http://127.0.0.1:8090/health)
+# `/readyz` is the market-plane gate (meta + every market's ctx/book inside the
+# staleness window); `/health` is process liveness only and stays 200 through a
+# market-plane stall. This row exists to report freshness, so it reads `/readyz`.
+SIM=$(try kubectl -n "$VENUE_NS" exec deploy/venue-sim -- curl -sf --max-time 5 http://127.0.0.1:8090/readyz)
 kv "venue sim" "${SIM:-unreadable}"
 if [ -z "${SIM:-}" ]; then degrade; fi
 

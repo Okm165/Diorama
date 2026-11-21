@@ -53,10 +53,11 @@ make smoke INSTANCE=diorama-venue    # the venue's end-to-end smoke test
 
 ## Reach the stack from the host
 
-The services are ClusterIP by design: the anvil cheatcode set and the
-`/admin`+`/control` APIs must never bind a host interface (a NodePort exposes
-them to the LAN). The host uses loopback port-forwards, and the harness's env
-is derived, never hand-written:
+The services are ClusterIP by design (one exception: the venue info listener,
+NodePort 31090, below): the anvil cheatcode set and the `/admin`+`/control` APIs
+must never bind a host interface (a NodePort exposes them to the LAN). The host
+uses loopback port-forwards, and the harness's env is derived, never
+hand-written:
 
 ```sh
 make port-forward INSTANCE=diorama-venue &   # the forwards chosen in harness.env
