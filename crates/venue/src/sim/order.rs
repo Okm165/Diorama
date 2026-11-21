@@ -3946,6 +3946,80 @@ mod tests {
         assert_eq!(balance(&sim, builder), dec("0.1"));
     }
 
+    /// The adversarial book drill (the roadmap's spoofing ask): a scripted
+    /// overlay that vanishes can never fill a resting order, and a re-staged
+    /// spoof fills exactly once. A passive fill consumes only the *served*
+    /// book at tick time, and a hand-back to live ([`MarketFeed::clear_book`],
+    /// I4) drops the coin's consumed deltas with the scenario-owned base — so
+    /// a level that existed only while scripted cannot credit a phantom fill
+    /// after it is gone, and the same price re-appearing live is fresh size.
+    #[test]
+    #[allow(clippy::too_many_lines)] // one drill: stage, fill, vanish, re-stage
+    fn a_vanished_spoof_never_fills_a_resting_order() {
+        // Real depth: bid 99. The maker rests a sell at 100, above the touch.
+        let feed = feed_with_book(
+            book("ETH", &[("99", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let rest = Order {
+            limit_px: Some(dec("100")),
+            tif: Tif::Gtc,
+            ..ioc(Side::Sell, "1")
+        };
+        let oid = sim
+            .place(&feed, a, &rest)
+            .unwrap()
+            .resting
+            .expect("above the touch, it rests");
+
+        // The spoof: a huge bid appears AT the maker's price. The next tick
+        // fills the maker — the scenario owns the depth it staged.
+        feed.own_book(&book("ETH", &[("100", "50")], &[("101", "5")])).unwrap();
+        sim.evaluate(&feed).unwrap();
+        let fills = sim.user_fills(a).expect("the account exists");
+        assert_eq!(fills.len(), 1, "the spoofed level filled the maker once");
+        assert_eq!(fills[0].px, dec("100"));
+        assert!(!fills[0].crossed, "a passive fill is the maker side");
+
+        // The spoof vanishes (hand-back to live): the bid is 99 again. No
+        // further tick may fill anything at 100 — the level existed only
+        // while scripted, and its consumed delta dropped with the overlay.
+        feed.clear_book("ETH").unwrap();
+        sim.evaluate(&feed).unwrap();
+        sim.evaluate(&feed).unwrap();
+        assert_eq!(
+            sim.user_fills(a).expect("the account exists").len(),
+            1,
+            "a vanished spoof credits no phantom fill"
+        );
+        assert!(
+            sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid),
+            "the maker's order was consumed by its one real fill"
+        );
+
+        // The same price re-appearing **live** is fresh size, not the consumed
+        // spoof: a new maker at 100 fills again against live depth exactly once.
+        feed.put_book(
+            book("ETH", &[("99", "5")], &[("101", "5")]),
+            crate::now_ms(),
+        );
+        let rest2 = Order {
+            limit_px: Some(dec("100")),
+            tif: Tif::Gtc,
+            ..ioc(Side::Sell, "1")
+        };
+        sim.place(&feed, a, &rest2).unwrap().resting.expect("rests");
+        feed.put_book(
+            book("ETH", &[("100", "50")], &[("101", "5")]),
+            crate::now_ms(),
+        );
+        sim.evaluate(&feed).unwrap();
+        let fills = sim.user_fills(a).expect("the account exists");
+        assert_eq!(fills.len(), 2, "the live level filled the new maker once");
+        assert_eq!(fills[0].px, dec("100"));
+    }
+
     /// The venue's default leverage for a coin the account never set (measured
     /// on real `activeAssetData`): cross at min(max, 20), isolated on an
     /// isolated-only market; a new position opens in the mode the account
