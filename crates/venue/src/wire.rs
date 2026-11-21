@@ -56,7 +56,6 @@ pub(crate) mod decimal_nano {
 
     /// An optional decimal (`null` when absent; pair with `skip_serializing_if`
     /// where the key is omitted instead).
-    #[allow(dead_code)] // the optional/pair info shapes carry them (step 6)
     pub fn serialize_opt<S: Serializer>(
         value: &Option<Decimal>,
         serializer: S,
@@ -68,7 +67,6 @@ pub(crate) mod decimal_nano {
     }
 
     /// A pair of decimals (`maxTradeSzs`, `availableToTrade`).
-    #[allow(dead_code)] // the optional/pair info shapes carry them (step 6)
     pub fn serialize_pair<S: Serializer>(
         value: &[Decimal; 2],
         serializer: S,
@@ -82,7 +80,6 @@ pub(crate) mod decimal_nano {
     }
 
     /// An optional pair (`impactPxs`).
-    #[allow(dead_code)] // the optional/pair info shapes carry them (step 6)
     pub fn serialize_opt_pair<S: Serializer>(
         value: &Option<[Decimal; 2]>,
         serializer: S,
@@ -97,7 +94,6 @@ pub(crate) mod decimal_nano {
 /// `liquidationPx` on the wire: a computed price, which the venue prints with up
 /// to ten fractional digits (measured: `0.4927481777`, `21139.6026656483`),
 /// trailing zeros trimmed; `null` when there is none.
-#[allow(dead_code)] // the clearinghouse shape adopts it with the parity surface
 fn liquidation_px_text<S: serde::Serializer>(
     value: &Option<Decimal>,
     serializer: S,
@@ -435,16 +431,17 @@ pub(crate) struct MarginSummary {
 }
 
 /// One position row. `positionValue` is unsigned on the wire; the side comes
-/// from the sign of `szi` (the venue's exact rule). `liquidationPx` is present
-/// for isolated positions only.
+/// from the sign of `szi` (the venue's exact rule). `liquidationPx` is a
+/// computed price and the key is always present; `null` when there is none
+/// (this step's cross rows serve none — the solver is deferred).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Position {
     pub coin: String,
-    #[serde(default)]
+    #[serde(default, serialize_with = "decimal_nano::serialize_opt")]
     pub entry_px: Option<Decimal>,
     pub leverage: Leverage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, serialize_with = "liquidation_px_text")]
     pub liquidation_px: Option<Decimal>,
     #[serde(serialize_with = "decimal_nano::serialize")]
     pub margin_used: Decimal,
@@ -471,8 +468,13 @@ pub(crate) struct Leverage {
     #[serde(rename = "type")]
     pub kind: LeverageType,
     pub value: u32,
-    /// `marginUsed − positionValue` (measured exact on the live sample).
-    #[serde(default)]
+    /// `marginUsed − positionValue` (measured exact on the live sample); the
+    /// venue omits the key on a cross position.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "decimal_nano::serialize_opt"
+    )]
     pub raw_usd: Option<Decimal>,
 }
 
@@ -737,15 +739,24 @@ pub(crate) struct AssetCtx {
     pub prev_day_px: Decimal,
     #[serde(serialize_with = "decimal_nano::serialize")]
     pub day_ntl_vlm: Decimal,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "decimal_nano::serialize_opt"
+    )]
     pub premium: Option<Decimal>,
     #[serde(serialize_with = "decimal_nano::serialize")]
     pub oracle_px: Decimal,
     #[serde(serialize_with = "decimal_nano::serialize")]
     pub mark_px: Decimal,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "decimal_nano::serialize_opt"
+    )]
     pub mid_px: Option<Decimal>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "decimal_nano::serialize_opt_pair"
+    )]
     pub impact_pxs: Option<[Decimal; 2]>,
     #[serde(default)]
     #[serde(serialize_with = "decimal_nano::serialize")]
@@ -813,9 +824,9 @@ pub(crate) struct PerpDex {
     pub name: String,
     pub full_name: String,
     pub deployer: Address,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The venue sends the key as `null` when there is no updater: served
+    /// verbatim, not omitted.
     pub oracle_updater: Option<Address>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fee_recipient: Option<Address>,
     /// Per-coin OI caps (the venue's credit terms; the sim's feed reads them).
     pub asset_to_streaming_oi_cap: Vec<(String, Decimal)>,
@@ -862,7 +873,9 @@ pub(crate) struct ActiveAssetData {
     pub user: Address,
     pub coin: String,
     pub leverage: Leverage,
+    #[serde(serialize_with = "decimal_nano::serialize_pair")]
     pub max_trade_szs: [Decimal; 2],
+    #[serde(serialize_with = "decimal_nano::serialize_pair")]
     pub available_to_trade: [Decimal; 2],
     #[serde(serialize_with = "decimal_nano::serialize")]
     pub mark_px: Decimal,
@@ -887,8 +900,19 @@ pub(crate) struct SpecialStatus {
 }
 
 /// `allMids`: a plain `{coin: px}` map (HIP-3 keys are `"#<id>"`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub(crate) struct AllMids(pub BTreeMap<String, Decimal>);
+
+impl Serialize for AllMids {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (coin, px) in &self.0 {
+            map.serialize_entry(coin, &decimal_nano::text(px))?;
+        }
+        map.end()
+    }
+}
 
 /// `spotMeta`: the spot token registry (`token` indices the spot state keys
 /// by) + the pair universe.

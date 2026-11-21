@@ -1259,10 +1259,17 @@ pub(crate) fn active_asset_data(
     };
     // `availableToTrade` is the free margin (value minus used minus the open
     // orders' reservations) — the same figure the placement check reads — not
-    // `withdrawable`, which the docs' transfer rule bounds.
+    // `withdrawable`, which the docs' transfer rule bounds. The account's view
+    // spans every dex (its positions may sit on a builder dex), so the union
+    // meta prices it, not the coin's own dex's.
     let available = state
         .sim
-        .available_for(&state.feed, user, None, meta.as_ref())?
+        .available_for(
+            &state.feed,
+            user,
+            None,
+            state.feed.margin_meta().as_ref(),
+        )?
         .ok_or_else(|| Error::NotFound {
             what: format!("{user} is not a simulated account"),
         })?

@@ -11,6 +11,10 @@ pub(crate) mod control;
 pub(crate) mod cors;
 pub(crate) mod exchange;
 pub(crate) mod info;
+#[cfg(test)]
+mod liquidation_parity;
+#[cfg(test)]
+mod parity;
 pub(crate) mod shape;
 pub(crate) mod signing;
 mod user_actions;
