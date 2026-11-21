@@ -63,7 +63,28 @@ the parity gate, never eyeballing.
   (so IOC walks beyond 20 levels meet plausible size).
 - **Adversarial book drills:** scripted overlays that mimic spoofing (large
   levels that vanish) to verify our consumption model never credits phantom
-  fills.
+  fills. *(Done 2026-11-21: the vanished-overlay drill — `a_vanished_spoof_never_fills_a_resting_order`.)*
 - **Cross-market coherence:** for mirrored spot+perp of the same asset
   (HYPE/@107...), check basis stays inside a plausible band; a basis blowout is
-  a sim bug, not a strategy signal.
+  a sim bug, not a strategy signal. *(Measured 2026-11-21: +0.97 bps HYPE — planes agree; worth a standing check.)*
+- **Participant books (1:1 symmetry, done 2026-11-21):** the served book is
+  the venue's honest composition — live ⊖ consumptions ⊕ the sim's own
+  resting orders (`with_resting`, in `/info l2Book` and both ws book
+  channels, before aggregation). A resting maker is displayed liquidity
+  exactly as on HL; a passive fill shrinks the maker's own size and consumes
+  **no** live level (the old consumption was a display proxy from when the
+  maker was invisible — it ate twice the liquidity one trade took).
+- **Participant-trade tape:** HL's `recentTrades` shows the venue's own
+  trades; the sim's fills (taker and passive maker) should join the served
+  tape the way `with_resting` joins the book, so a consumer reading trades
+  sees the liquidity their book showed disappear.
+- **Own-order optics option:** HL's UI highlights *your* resting levels in
+  the book; a per-user `l2Book` variant (or a flag on the ws sub) that tags
+  the caller's levels would let integrators verify placement without
+  polling `openOrders`.
+- **Impact symmetry check:** a standing property test — after any fill, the
+  total displayed size removed equals the traded size, never 2× (the
+  double-count class this pass fixed). Cheap to assert in the tick tests.
+- **Depth-regeneration from the tape:** when regenerating below the top-20,
+  seed sizes from the measured depth profile *and* the recent trade rate, so
+  quiet markets keep thin tails and active ones keep realistic walls.

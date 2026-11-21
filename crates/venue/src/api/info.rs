@@ -1014,6 +1014,9 @@ async fn l2_book(
             Ok(unknown_dex())
         };
     };
+    // The sim's resting makers are participants: their orders join the book
+    // before the aggregation (see `with_resting`).
+    let book = with_resting(book, &state.sim.resting_book(coin));
     Ok(Json(aggregate_book(book, n_sig_figs, mantissa.unwrap_or(1))).into_response())
 }
 
@@ -1036,6 +1039,54 @@ pub(crate) fn book_params_ok(n_sig_figs: Option<u8>, mantissa: Option<u8>) -> Re
         }
         _ => Ok(()),
     }
+}
+
+/// The served book gains the sim's own resting orders: the real venue's
+/// `l2Book` shows every participant's resting liquidity, and the sim's
+/// makers are participants. Each order's remaining size joins its price
+/// level (a level the live book doesn't have is created; a live level grows,
+/// its order count too — one order each). Composition order matters: this
+/// runs *after* `feed.book` (which already subtracted the order lane's
+/// consumed levels) and *before* the aggregation, so a resting order inside
+/// an aggregated tick shows up in the tick it belongs to, exactly as the
+/// venue's aggregation does.
+pub(crate) fn with_resting(
+    mut book: crate::wire::L2Book,
+    resting: &[(crate::sim::order::Side, rust_decimal::Decimal, rust_decimal::Decimal)],
+) -> crate::wire::L2Book {
+    use crate::sim::order::Side;
+    for (side, px, sz) in resting {
+        let levels = &mut book.levels[match side {
+            Side::Buy => 0,
+            Side::Sell => 1,
+        }];
+        match levels.iter_mut().find(|l| l.px == *px) {
+            Some(level) => {
+                level.sz = level.sz.saturating_add(*sz);
+                level.n = level.n.saturating_add(1);
+            }
+            None => levels.push(crate::wire::Level {
+                px: *px,
+                sz: *sz,
+                n: 1,
+            }),
+        }
+    }
+    // Keep the book's own ordering invariant (bids descending, asks
+    // ascending) after any inserted level.
+    book.levels[0].sort_by_key(|l| std::cmp::Reverse(l.px));
+    book.levels[1].sort_by_key(|l| l.px);
+    // A narrowed spread only matters where the venue reports one (the
+    // aggregated book): a raw book carries no `spread` field and must stay
+    // that way (the parity harness: the sim sends `spread`, the venue does
+    // not).
+    if book.spread.is_some() {
+        book.spread = match (book.levels[0].first(), book.levels[1].first()) {
+            (Some(bid), Some(ask)) => Some(ask.px - bid.px),
+            _ => None,
+        };
+    }
+    book
 }
 
 /// The venue's aggregation: prices round to `n` significant figures (the tick

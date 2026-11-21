@@ -759,6 +759,8 @@ pub(super) fn pushes(live: &mut Live, state: &ApiState, now_ms: u64) -> Vec<Stri
                     data: format!("coin `{c}` has no book in the venue's feed"),
                 });
             };
+            // The sim's resting makers join the book (see `with_resting`).
+            let book = super::info::with_resting(book, &state.sim.resting_book(c));
             let next = match s {
                 Some(_) => super::info::aggregate_book(book, *s, m.unwrap_or(1)),
                 None => book,
@@ -894,6 +896,8 @@ fn push_frame(sub: &Subscription, state: &ApiState, now_ms: u64) -> Option<Strin
             fast,
         } => match feed.book(coin, now_ms) {
             Some(book) => {
+                // The sim's resting makers join the book (see `with_resting`).
+                let book = super::info::with_resting(book, &state.sim.resting_book(coin));
                 let book = match n_sig_figs {
                     Some(_) => {
                         super::info::aggregate_book(book, *n_sig_figs, mantissa.unwrap_or(1))

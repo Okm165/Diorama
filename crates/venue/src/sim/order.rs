@@ -4020,6 +4020,65 @@ mod tests {
         assert_eq!(fills[0].px, dec("100"));
     }
 
+    /// The 1:1 book symmetry: a resting maker's order is **in** the served
+    /// book (the venue's `l2Book` shows every participant's resting orders),
+    /// and a passive fill shrinks exactly that order — the live level at the
+    /// same price is untouched (the maker *provides* liquidity; it consumes
+    /// none). The old model consumed a live level as a display proxy for a
+    /// fill of an invisible order: with the maker displayed, that proxy ate
+    /// twice the liquidity one trade took.
+    #[test]
+    fn a_resting_maker_shows_in_the_served_book_and_its_fill_eats_only_itself() {
+        let feed = feed_with_book(
+            book("ETH", &[("99", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let rest = Order {
+            limit_px: Some(dec("100")),
+            tif: Tif::Gtc,
+            ..ioc(Side::Sell, "1")
+        };
+        sim.place(&feed, a, &rest)
+            .unwrap()
+            .resting
+            .expect("above the touch, it rests");
+
+        // The maker's order is part of the composed book: the ask side gains
+        // a 100 @ 1 level the live feed never had.
+        let base = feed.book("ETH", crate::now_ms()).expect("the book exists");
+        let composed = crate::api::info::with_resting(base, &sim.resting_book("ETH"));
+        let ask100 = composed.levels[1].iter().find(|l| l.px == dec("100"));
+        assert_eq!(
+            ask100.map(|l| (l.sz, l.n)),
+            Some((dec("1"), 1)),
+            "the resting maker is displayed liquidity"
+        );
+
+        // The live book crosses the maker. One tick fills it at its price;
+        // the composed book then shows the maker gone and the live level at
+        // 100 exactly as the feed delivered it (no consumed delta).
+        feed.own_book(&book("ETH", &[("100", "5")], &[("101", "5")]))
+            .unwrap();
+        sim.evaluate(&feed).unwrap();
+        assert_eq!(
+            sim.user_fills(a).expect("the account exists").len(),
+            1,
+            "the cross filled the maker"
+        );
+        let base = feed.book("ETH", crate::now_ms()).expect("the book exists");
+        let composed = crate::api::info::with_resting(base, &sim.resting_book("ETH"));
+        assert!(
+            !composed.levels[1].iter().any(|l| l.px == dec("100")),
+            "the maker's order left the ask side with its fill"
+        );
+        assert_eq!(
+            composed.levels[0].iter().find(|l| l.px == dec("100")).map(|l| l.sz),
+            Some(dec("5")),
+            "the live bid at the maker's price kept its full size: a maker fill consumes nothing"
+        );
+    }
+
     /// The venue's default leverage for a coin the account never set (measured
     /// on real `activeAssetData`): cross at min(max, 20), isolated on an
     /// isolated-only market; a new position opens in the mode the account

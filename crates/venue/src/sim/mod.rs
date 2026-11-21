@@ -331,6 +331,28 @@ impl Sim {
 
     // ---- reads ------------------------------------------------------------
 
+    /// The coin's internal resting book: every unfilled Gtc/Alo order for the
+    /// coin as `(side, px, remaining sz)`. The served book must carry these —
+    /// the real venue's `l2Book` shows every participant's resting orders,
+    /// and a book without them lets a taker believe liquidity is thinner
+    /// than it is (and never shows the spread a maker is quoting into).
+    /// Fired triggers and Ioc orders are never here: an Ioc never rests, a
+    /// fired trigger is an executable order the tick resolves.
+    pub(crate) fn resting_book(&self, coin: &str) -> Vec<(crate::sim::order::Side, Decimal, Decimal)> {
+        // Infallible on purpose: market data must never fail because the
+        // state lock is contended or poisoned — a momentary empty participant
+        // book is the honest degradation, an error frame is not.
+        match self.state.lock() {
+            Ok(state) => state
+                .resting
+                .values()
+                .filter(|o| o.coin == coin && o.trigger.is_none())
+                .map(|o| (o.side, o.px, o.sz))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// The account, or `None` when it was never touched (the caller passes
     /// the read through to the real venue).
     pub(crate) fn account(&self, address: Address) -> Result<Option<Account>> {

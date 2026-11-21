@@ -246,7 +246,15 @@ impl Sim {
     }
 
     /// (c) Passive fills: a resting order the live book has crossed fills at
-    /// its own price (the maker side), consuming the crossed live levels.
+    /// its own price (the maker side). The maker *provides* the liquidity, so
+    /// it consumes no live level: the fill's book effect is the resting
+    /// order's remaining size shrinking, and that size is part of the served
+    /// book (`with_resting` — the venue's `l2Book` shows every participant's
+    /// resting orders). The old consumption here was a display proxy from
+    /// when the sim's resting book was invisible: eating a live level "showed"
+    /// the fill. With the maker's order displayed, that proxy double-counted
+    /// (−2·take of displayed liquidity for one trade) and destroyed liquidity
+    /// nobody took.
     fn passive_fills(&self, feed: &MarketFeed, now_ms: u64) -> Result<()> {
         for r in self.resting_orders(None)? {
             if r.trigger.is_some() {
@@ -277,7 +285,7 @@ impl Sim {
             // and a maker that could never be filled by the live book, measured
             // 2026-11-21.)
             if feed.spot_pair(&r.coin).is_some() {
-                if let Err(e) = self.passive_spot_fill(&r, take, best.px, feed) {
+                if let Err(e) = self.passive_spot_fill(&r, take, feed) {
                     tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "passive spot fill refused");
                 }
                 continue;
@@ -288,7 +296,7 @@ impl Sim {
                 tracing::warn!(account = %r.account, oid = r.oid, error = %e, "passive re-margin check failed");
                 continue;
             }
-            if let Err(e) = self.passive_fill(&r, take, best.px, feed) {
+            if let Err(e) = self.passive_fill(&r, take, feed) {
                 tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "passive fill refused");
             }
         }
@@ -297,10 +305,10 @@ impl Sim {
 
     /// One spot passive fill: the maker's token legs settle against the
     /// order's own hold (a buy spends reserved quote and receives the base net
-    /// of the maker fee; a sell the reverse), the live level is consumed and
-    /// the resting size shrinks. Mirrors the perp path's maker economics — the
-    /// same ledger record, the same level consumption — with tokens instead of
-    /// a position.
+    /// of the maker fee; a sell the reverse) and the resting size shrinks. No
+    /// live-level consumption — the maker provides the liquidity (see
+    /// `passive_fills`). Mirrors the perp path's maker economics — the same
+    /// ledger record — with tokens instead of a position.
     #[allow(
         clippy::too_many_lines,
         reason = "one spot maker settlement: tokens, ledger, level, shrink — read top to bottom"
@@ -309,7 +317,6 @@ impl Sim {
         &self,
         r: &crate::sim::order::RestingOrder,
         take: Decimal,
-        level_px: Decimal,
         feed: &MarketFeed,
     ) -> Result<()> {
         let pair = feed.spot_pair(&r.coin).ok_or(Error::Warming)?;
@@ -359,12 +366,6 @@ impl Sim {
             },
         )?;
         self.credit_builder(builder, crate::feed::dex::dex_of_coin(&r.coin))?;
-        feed.consume(crate::feed::Consumption {
-            coin: r.coin.clone(),
-            side: r.side.book_index() as u8,
-            price: level_px,
-            size: take,
-        })?;
         self.fill_resting_pub(r.oid, take, r.px)?;
         self.metrics.orders_filled_total.fetch_add(1, Ordering::Relaxed);
         self.metrics.fees_charged_total.fetch_add(1, Ordering::Relaxed);
@@ -384,12 +385,12 @@ impl Sim {
     }
 
     /// One passive fill: the maker's account update (their price, the maker
-    /// fee) plus the live level's consumption and the resting size's reduce.
+    /// fee) plus the resting size's reduce. No live-level consumption — the
+    /// maker provides the liquidity (see `passive_fills`).
     fn passive_fill(
         &self,
         r: &crate::sim::order::RestingOrder,
         take: Decimal,
-        level_px: Decimal,
         feed: &MarketFeed,
     ) -> Result<()> {
         let meta = feed.meta_for_lookup(&r.coin);
@@ -427,12 +428,6 @@ impl Sim {
                 fee_token: &feed.fee_token_of_coin(&r.coin),
             },
         )?;
-        feed.consume(crate::feed::Consumption {
-            coin: r.coin.clone(),
-            side: r.side.book_index() as u8,
-            price: level_px,
-            size: take,
-        })?;
         self.fill_resting_pub(r.oid, take, r.px)?;
         tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid, sz = %take, px = %r.px, "resting order filled passively");
         Ok(())
