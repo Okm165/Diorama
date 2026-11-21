@@ -9,7 +9,7 @@ use super::account::{self, Liquidation};
 use super::funding;
 use super::ledger::{FillRecord, Liquidity};
 use super::Sim;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::feed::{MarketFeed, Prices};
 use alloy_primitives::Address;
 use rust_decimal::Decimal;
@@ -148,7 +148,7 @@ impl Sim {
     /// armed triggers whose mark crossed execute, and resting orders the live
     /// book has crossed fill at their own price (they are the maker; the live
     /// levels they take are consumed — the impact lane).
-    fn run_resting(&self, feed: &MarketFeed, now_ms: u64) -> Result<()> {
+    pub(crate) fn run_resting(&self, feed: &MarketFeed, now_ms: u64) -> Result<()> {
         self.fire_scheduled_cancels(now_ms)?;
         self.fire_triggers(feed)?;
         self.passive_fills(feed, now_ms)
@@ -270,6 +270,18 @@ impl Sim {
             if take <= Decimal::ZERO {
                 continue;
             }
+            // A spot resting order reserves tokens, not margin: the hold *is*
+            // the cover, so no perp re-margin runs and the fill moves the spot
+            // ledger. (Before this branch the perp re-margin looked the pair up
+            // in the perp meta and refused every spot cross — a per-second WARN
+            // and a maker that could never be filled by the live book, measured
+            // 2026-11-21.)
+            if feed.spot_pair(&r.coin).is_some() {
+                if let Err(e) = self.passive_spot_fill(&r, take, best.px, feed) {
+                    tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "passive spot fill refused");
+                }
+                continue;
+            }
             // The same re-margin rule as the taker path: a maker that cannot
             // carry the fill is canceled, not filled.
             if let Err(e) = self.remargin_one(feed, &r) {
@@ -280,6 +292,83 @@ impl Sim {
                 tracing::warn!(account = %r.account, coin = %r.coin, oid = r.oid, error = %e, "passive fill refused");
             }
         }
+        Ok(())
+    }
+
+    /// One spot passive fill: the maker's token legs settle against the
+    /// order's own hold (a buy spends reserved quote and receives the base net
+    /// of the maker fee; a sell the reverse), the live level is consumed and
+    /// the resting size shrinks. Mirrors the perp path's maker economics — the
+    /// same ledger record, the same level consumption — with tokens instead of
+    /// a position.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one spot maker settlement: tokens, ledger, level, shrink — read top to bottom"
+    )]
+    fn passive_spot_fill(
+        &self,
+        r: &crate::sim::order::RestingOrder,
+        take: Decimal,
+        level_px: Decimal,
+        feed: &MarketFeed,
+    ) -> Result<()> {
+        let pair = feed.spot_pair(&r.coin).ok_or(Error::Warming)?;
+        let base = feed.spot_token(pair.tokens[0]).ok_or(Error::Warming)?;
+        let quote = feed.spot_token(pair.tokens[1]).ok_or(Error::Warming)?;
+        let notional = account::mul(take, r.px, "spot maker notional")?;
+        let fee = account::mul(notional, Self::spot_maker_fee(), "spot maker fee")?;
+        let builder = r.builder.map(|b| b.charge(notional)).transpose()?;
+        let effect = self.with_account_now(r.account, feed, |account| {
+            account::settle_spot_maker(
+                account,
+                r.side,
+                r.spot_hold,
+                r.px,
+                notional,
+                take,
+                fee,
+                base.index,
+                quote.index,
+            )
+        })?;
+        let facts = account::FillFacts {
+            coin: r.coin.clone(),
+            side: r.side,
+            size: take,
+            px: r.px,
+            leverage: 1,
+            mode: crate::wire::LeverageType::Cross,
+            reduce: r.reduce,
+            fee,
+            builder,
+        };
+        self.record_fill(
+            r.account,
+            &FillRecord {
+                liquidation: None,
+                facts: &facts,
+                effect,
+                oid: r.oid,
+                cloid: r.cloid,
+                liquidity: Liquidity::Maker,
+                fee_token: if r.side == crate::sim::order::Side::Buy {
+                    &base.name
+                } else {
+                    &quote.name
+                },
+            },
+        )?;
+        self.credit_builder(builder, crate::feed::dex::dex_of_coin(&r.coin))?;
+        feed.consume(crate::feed::Consumption {
+            coin: r.coin.clone(),
+            side: r.side.book_index() as u8,
+            price: level_px,
+            size: take,
+        })?;
+        self.fill_resting_pub(r.oid, take, r.px)?;
+        self.metrics.orders_filled_total.fetch_add(1, Ordering::Relaxed);
+        self.metrics.fees_charged_total.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(account = %r.account, coin = %r.coin, oid = r.oid, sz = %take, px = %r.px, "resting spot order filled passively");
         Ok(())
     }
 

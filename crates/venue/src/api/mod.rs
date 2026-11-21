@@ -121,34 +121,40 @@ impl ApiState {
             return false;
         }
         let now = crate::now_ms();
+        // **A cached book that froze is a fault; a book nobody asked for is
+        // not.** The book cache is demand-driven: after the relay's grace
+        // window an unread book is evicted and the next ask (an order, an
+        // `l2Book` read, a position) rebuilds it from the live socket or REST.
+        // Requiring every configured market's cached book to be fresh made
+        // readiness flap with a perfectly healthy plane (measured
+        // 2026-11-21: `ws_connected 1`, `rest_errors 0`, ctx 150 ms, and
+        // still `market plane warming up` every time a quiet market's book
+        // aged out — the upstream services then block writes on it). Readiness
+        // now fails a book that exists and stopped updating; a missing book is
+        // acceptable while the live plane is healthy, and the order lane still
+        // refuses a stale book it actually reads.
+        let plane_healthy = !self.feed.stalled() && self.feed.metrics.ws_up();
+        let book_ready = |coin: &str| match self.feed.book_age(coin, now, max_stale_ms) {
+            crate::feed::BookAge::Scripted | crate::feed::BookAge::Fresh => true,
+            crate::feed::BookAge::Warming => plane_healthy,
+            crate::feed::BookAge::Stale(_) => false,
+        };
         let perps_ready = self.feed.markets.iter().all(|coin| {
             let fresh_mark = self
                 .feed
                 .stale_ms(coin, now)
                 .map(|stale| stale <= max_stale_ms)
                 .unwrap_or(false);
-            // The served book is part of the same contract (the consumer's l2Book
-            // read). Presence is not enough: a live book older than the
-            // freshness window is stale and the order lane refuses it. A
-            // scripted book's present is never stale; a warming book is not
-            // ready.
-            let fresh_book = matches!(
-                self.feed.book_age(coin, now, max_stale_ms),
-                crate::feed::BookAge::Scripted | crate::feed::BookAge::Fresh
-            );
-            fresh_mark && fresh_book
+            fresh_mark && book_ready(coin)
         });
         // A mirrored spot pair has a book and an `allMids` entry, but no
         // `activeAssetCtx` (there is no spot funding). Requiring a ctx would
         // keep readiness false forever.
-        let spot_ready = self.feed.spot_markets.iter().all(|coin| {
-            let priced = self.feed.mark(coin).is_some();
-            let fresh_book = matches!(
-                self.feed.book_age(coin, now, max_stale_ms),
-                crate::feed::BookAge::Scripted | crate::feed::BookAge::Fresh
-            );
-            priced && fresh_book
-        });
+        let spot_ready = self
+            .feed
+            .spot_markets
+            .iter()
+            .all(|coin| self.feed.mark(coin).is_some() && book_ready(coin));
         perps_ready && spot_ready
     }
 }
@@ -247,3 +253,77 @@ pub async fn serve(addr: String, router: Router) -> Result<()> {
 // The HTTP mapping of the error taxonomy lives in the engine's `http` module
 // (one impl for both surfaces: the engine's admin routes and the simulator's
 // info/control routers).
+
+#[cfg(test)]
+mod readiness_tests {
+    //! Readiness is a liveness signal, not a completeness claim: the book
+    //! cache is demand-driven, so an idle (evicted) book is not a fault while
+    //! the live plane is healthy — but a cached book that froze is.
+
+    use super::*;
+    use crate::feed::{MarketFeed, rest::RestClient};
+    use rust_decimal::Decimal;
+    use std::time::Duration;
+
+    fn feed_with(coin: &str) -> MarketFeed {
+        let feed = MarketFeed::memory(vec![coin.into()]);
+        feed.put_meta(crate::sim::meta_with(coin, 10), 1);
+        feed.put_ctx(coin.into(), crate::wire::funding_ctx("101", "101"), crate::now_ms());
+        feed.put_mids(
+            std::collections::BTreeMap::from([(coin.to_string(), Decimal::from(101))]),
+            crate::now_ms(),
+        );
+        feed
+    }
+
+    fn state(feed: MarketFeed) -> Arc<ApiState> {
+        Arc::new(
+            ApiState::new(
+                Arc::new(feed),
+                Arc::new(crate::sim::Sim::memory()),
+                RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap(),
+                None,
+                None,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn an_idle_book_is_ready_while_the_plane_is_healthy() {
+        let feed = feed_with("ETH");
+        feed.put_spot_meta(crate::wire::SpotMeta { tokens: vec![], universe: vec![] });
+        feed.metrics.mark_ws_up();
+        // No book at all (evicted / never asked): the order lane rebuilds it.
+        assert!(state(feed).ready(MarketFeed::MAX_STALE_MS), "an idle cache is not a fault");
+    }
+
+    #[test]
+    fn a_frozen_cached_book_is_not_ready() {
+        let feed = feed_with("ETH");
+        feed.put_spot_meta(crate::wire::SpotMeta { tokens: vec![], universe: vec![] });
+        feed.metrics.mark_ws_up();
+        // A book stamped 10 minutes ago and never confirmed since: cached but
+        // frozen — exactly the failure the stamp exists to catch.
+        feed.put_book(
+            crate::wire::L2Book {
+                coin: "ETH".into(),
+                time: 1,
+                spread: None,
+                levels: [vec![], vec![]],
+            },
+            crate::now_ms() - 600_000,
+        );
+        assert!(!state(feed).ready(MarketFeed::MAX_STALE_MS), "a frozen book refuses readiness");
+    }
+
+    #[test]
+    fn a_missing_book_is_not_ready_with_the_plane_down() {
+        let feed = feed_with("ETH");
+        feed.put_spot_meta(crate::wire::SpotMeta { tokens: vec![], universe: vec![] });
+        // The socket never came up: an idle cache cannot be rebuilt on demand.
+        assert!(!state(feed).ready(MarketFeed::MAX_STALE_MS), "a dead plane is not ready");
+    }
+}

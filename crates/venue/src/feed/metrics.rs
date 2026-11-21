@@ -62,6 +62,13 @@ impl FeedMetrics {
         }
     }
 
+    /// The market socket is up. Readiness reads it: an idle book is evicted
+    /// by the demand model and rebuilt on the next ask, which is only honest
+    /// while the live plane is healthy.
+    pub fn ws_up(&self) -> bool {
+        self.ws_connected.load(Ordering::Relaxed)
+    }
+
     /// The WS link came up (the gauge renders it 0/1).
     pub fn mark_ws_up(&self) {
         self.ws_connected.store(true, Ordering::Relaxed);

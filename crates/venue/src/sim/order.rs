@@ -706,8 +706,9 @@ impl Sim {
     }
 
     /// Spot maker fee: the venue's base tier (the maker side of the same
-    /// schedule), charged in the received token.
-    fn spot_maker_fee() -> Decimal {
+    /// schedule), charged in the received token. Shared with the passive
+    /// (tick) maker path.
+    pub(crate) fn spot_maker_fee() -> Decimal {
         Decimal::new(4, 4)
     }
 
@@ -920,6 +921,18 @@ impl Sim {
                 r.filled_sz += sz;
                 r.filled_ntl += notional;
                 let out = (r.side, r.spot_hold, r.reduce, r.cloid, r.builder);
+                // The reservation follows the remaining size (the settlement
+                // below releases the filled slice from the account's hold).
+                if let Some(hold) = r.spot_hold {
+                    r.spot_hold = Some(SpotHold {
+                        token: hold.token,
+                        amount: if r.side == Side::Buy {
+                            super::account::mul(r.sz, r.px, "spot hold notional")?
+                        } else {
+                            r.sz
+                        },
+                    });
+                }
                 if r.sz <= Decimal::ZERO {
                     let done = st.resting.remove(oid).expect("just read");
                     terminalize(
@@ -1441,6 +1454,20 @@ impl Sim {
                 "filled notional",
             )?;
             if order.sz > Decimal::ZERO {
+                // The reservation follows the remaining size: a maker
+                // settlement releases the filled slice from the account's
+                // hold, so a cancel of the remainder must release only what
+                // the order still covers.
+                if let Some(hold) = order.spot_hold {
+                    order.spot_hold = Some(SpotHold {
+                        token: hold.token,
+                        amount: if order.side == Side::Buy {
+                            super::account::mul(order.sz, order.px, "spot hold notional")?
+                        } else {
+                            order.sz
+                        },
+                    });
+                }
                 return Ok(());
             }
             let Some(done) = st.resting.remove(&oid) else {
@@ -2183,6 +2210,7 @@ fn walk(
     let avg_px = super::account::ratio_or(notional, filled, Decimal::ZERO);
     Ok((legs, filled, avg_px))
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -4059,4 +4087,89 @@ mod tests {
             Some(BuilderFee { builder, f: 5 })
         );
     }
+    /// A resting spot sell is filled by the **live book** moving through its
+    /// price (the tick's passive pass), not only by a client taker: the maker's
+    /// hold converts into quote proceeds net of the maker fee, the live level
+    /// is consumed, and the order leaves the book. No perp re-margin runs — the
+    /// hold is the cover (before this lane the perp lookup refused every spot
+    /// cross with a per-second WARN).
+    #[test]
+    fn a_resting_spot_sell_fills_when_the_live_book_crosses_it() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        // A gets base via an IOC at the ask (1000 PURR, fee in the received base).
+        sim.place(&feed, a, &spot_order(Side::Buy, "1000", Some("0.08")))
+            .expect("the ask has size");
+        let mut sell = spot_order(Side::Sell, "500", Some("0.0745"));
+        sell.tif = Tif::Gtc;
+        let oid = sim
+            .place(&feed, a, &sell)
+            .expect("inside the spread, it rests")
+            .resting
+            .expect("rests");
+        assert_eq!(
+            sim.account(a).unwrap().unwrap().spot.get(&1).unwrap().hold,
+            Decimal::from(500)
+        );
+
+        // The live book moves up through the maker's price.
+        feed.put_book(
+            book("PURR/USDC", &[("0.076", "5000")], &[("0.0765", "5000")]),
+            crate::now_ms(),
+        );
+        sim.run_resting(&feed, crate::now_ms()).expect("the tick runs");
+
+        let account = sim.account(a).unwrap().unwrap();
+        let purr = account.spot.get(&1).unwrap();
+        let usdc = account.spot.get(&0).unwrap();
+        // 500 × 0.0745 = 37.25; the 0.040 % maker fee is charged in the
+        // received token (USDC): 37.25 × 0.9996 = 37.2351.
+        assert_eq!(usdc.total, Decimal::from(925) + Decimal::new(372_351, 4));
+        assert_eq!(purr.total, Decimal::new(9993, 1) - Decimal::from(500));
+        assert_eq!(purr.hold, Decimal::ZERO, "the hold converted into the fill");
+        let fill = account.fills.back().unwrap();
+        assert_eq!(fill.dir, "Sell");
+        assert_eq!(fill.fee_token, "USDC");
+        assert!(!fill.crossed, "a passive fill is the maker side");
+        assert!(sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid));
+    }
+
+    /// A **partial** passive fill shrinks the reservation with the order: the
+    /// remaining hold equals the remaining size, so a later cancel releases
+    /// exactly what the account still has (never more — the pre-fix cancel
+    /// released the original amount and clamped at zero, silently eating a
+    /// later order's reservation on the same token).
+    #[test]
+    fn a_partial_passive_fill_shrinks_the_hold_with_the_order() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        sim.place(&feed, a, &spot_order(Side::Buy, "1000", Some("0.08")))
+            .expect("the ask has size");
+        let mut sell = spot_order(Side::Sell, "500", Some("0.0745"));
+        sell.tif = Tif::Gtc;
+        let oid = sim
+            .place(&feed, a, &sell)
+            .expect("rests")
+            .resting
+            .expect("rests");
+
+        // The crossed level carries only 200: the maker fills partially.
+        feed.put_book(
+            book("PURR/USDC", &[("0.076", "200")], &[("0.0765", "5000")]),
+            crate::now_ms(),
+        );
+        sim.run_resting(&feed, crate::now_ms()).expect("the tick runs");
+
+        let account = sim.account(a).unwrap().unwrap();
+        assert_eq!(account.spot.get(&1).unwrap().hold, Decimal::from(300), "hold follows the size");
+        assert_eq!(sim.resting_orders(None).unwrap()[0].sz, Decimal::from(300));
+
+        sim.cancel(a, "PURR/USDC", oid, CancelSpeed::Normal).expect("cancel");
+        assert_eq!(
+            sim.account(a).unwrap().unwrap().spot.get(&1).unwrap().hold,
+            Decimal::ZERO,
+            "the cancel releases exactly the remaining reservation"
+        );
+    }
+
 }
