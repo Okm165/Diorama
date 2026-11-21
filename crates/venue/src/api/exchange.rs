@@ -1625,7 +1625,8 @@ mod tests {
     /// the spot wallet to the default dex and back, to another account
     /// (`spotSend` on spot, `usdSend` on the default dex), and an
     /// `sendAsset` back to spot. Each answers the no-data success and moves
-    /// exactly its two ledgers (the per-dex `sendAsset` legs wait for step 9).
+    /// exactly its two ledgers (the per-dex legs are the transfer matrix's
+    /// cases).
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // one request/response script: splitting it would hide the order of the moves
     async fn user_signed_transfers_move_the_signers_ledgers() {

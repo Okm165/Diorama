@@ -432,8 +432,8 @@ pub(crate) struct MarginSummary {
 
 /// One position row. `positionValue` is unsigned on the wire; the side comes
 /// from the sign of `szi` (the venue's exact rule). `liquidationPx` is a
-/// computed price and the key is always present; `null` when there is none
-/// (this step's cross rows serve none — the solver is deferred).
+/// computed price and the key is always present; `null` when the position
+/// carries no liquidation price.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Position {
@@ -829,7 +829,7 @@ pub(crate) struct MetaAndAssetCtxs(pub Meta, pub Vec<AssetCtx>);
 
 /// `perpDexs`: `[null, …]` (the first dex is null). The sim caches and
 /// serves the upstream list verbatim — its order is the HIP-3 asset index's
-/// dex namespace. Per-dex balances/collateral are not modeled.
+/// dex namespace. Each dex's balances and collateral are its own ledger.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PerpDex {

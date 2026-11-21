@@ -1019,7 +1019,6 @@ impl MarketFeed {
     /// `perpDexs` order; a fixture that only landed a dex's meta falls back to
     /// the default dex followed by the builder dexes in name order (the same
     /// order `dex_coins` serves).
-    #[allow(dead_code)] // the precompile mirror adopts it with step 9's bridge slice
     pub(crate) fn dex_name_at(&self, index: u32) -> Option<String> {
         let c = self.read();
         let index = usize::try_from(index).ok()?;

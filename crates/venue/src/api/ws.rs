@@ -17,8 +17,7 @@
 //!
 //! Books are on demand through the feed's one-shot read
 //! ([`MarketFeed::ensure_book`]): a coin subscription warms its book before
-//! admission. The fork's relay keeps a subscribed coin's stream live; that
-//! (and the per-dex books) is step 9.
+//! admission.
 //!
 //! `l2Book` pushes the composed book exactly as `/info`'s `l2Book` serves it
 //! (`{"coin","time","levels"}`, the live book stamped with its last update,
@@ -29,8 +28,7 @@
 //! `fastAssetCtxs` is one map over every dex's coins. The venue's quirks are
 //! mirrored: `allMids` for a named dex acks and pushes nothing, and
 //! `clearinghouseState`/`openOrders` for an unlisted dex are not even acked.
-//! A builder dex's clearinghouse is the venue's empty shape until step 9's
-//! per-dex ledger partitions the account.
+//! A builder dex's clearinghouse carries that dex's own ledger.
 use super::candles::CandleSub;
 use super::ws_codec::{self, FastCtx};
 use super::ApiState;
@@ -1978,8 +1976,8 @@ mod tests {
 
     /// `allDexsClearinghouseState` lists every dex of the registry for any
     /// account: the default dex first, then alphabetically (not in `perpDexs`
-    /// order). The per-dex clearinghouse ledger is deferred, so a builder
-    /// dex's state is the venue's empty shape.
+    /// order). Every dex carries the account's own ledger, so a builder dex
+    /// shows the positions it actually holds.
     #[test]
     fn all_dexs_states_list_every_dex_default_first_then_alphabetically() {
         let (state, user) = dex_world();

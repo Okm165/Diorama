@@ -1091,24 +1091,6 @@ pub(crate) fn feed_with_meta(marks: &[(&str, &str, &str)], meta: crate::wire::Me
     feed
 }
 
-/// The same fixture over several dexes: `(dex, assets)` pairs in `perpDexs`
-/// order, the default dex (`""`) first. Each dex's coins are `meta_of`'s, so a
-/// builder dex's assets are named with their prefix (`xyz:TSLA`). Marks are
-/// per coin as in [`feed_with`]; the registry's `perpDexs` record is absent
-/// (a fixture dex, not the venue's list).
-#[cfg(test)]
-#[allow(dead_code)] // the liquidation tests adopt it with step 9's test slice
-pub(crate) fn feed_with_dexs(
-    marks: &[(&str, &str, &str)],
-    dexs: &[(&str, &[(&str, u32)])],
-) -> MarketFeed {
-    let feed = feed_with(marks);
-    for (dex, assets) in dexs {
-        feed.put_dex_meta((*dex).to_string(), meta_of(assets), 1);
-    }
-    feed
-}
-
 /// The same fixture with the published hourly rate on every coin: the
 /// funding tests opt in (see `test_ctx` for why the shared fixture is
 /// rate-free).

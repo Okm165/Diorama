@@ -29,7 +29,7 @@ use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
 use crate::sim::fees::RowKind;
 use crate::sim::order::CancelSpeed;
-use crate::sim::transfer::CoreToEvm;
+use crate::sim::transfer::{CoreToEvm, Wallet};
 use crate::sim::{Applied, ClassTransfer, Direction};
 use crate::sim::{Sim, TokenRef};
 use crate::wire::UserAbstraction;
@@ -52,6 +52,27 @@ use system::{TokenInfo, Transfer};
 pub struct BridgePolicy {
     pub poll: Duration,
     pub system_gas_stipend: U256,
+}
+
+/// The two dex indices of a CoreWriter `sendAsset` (`u32::MAX` = the spot
+/// wallet, otherwise the `perpDexs` position).
+#[derive(Debug, Clone, Copy)]
+struct DexRoute {
+    source: u32,
+    destination: u32,
+}
+
+impl DexRoute {
+    fn new(source: u32, destination: u32) -> Self {
+        Self {
+            source,
+            destination,
+        }
+    }
+
+    fn spot_to_spot(self) -> bool {
+        self.source == corewriter::SPOT_DEX && self.destination == corewriter::SPOT_DEX
+    }
 }
 
 /// The bridge's own cursor and the persisted state it needs. The cursor lives
@@ -481,11 +502,10 @@ impl Bridge {
                 wei,
                 ..
             } => {
-                if self.refuse_off_spot_send_asset(caller, source_dex, destination_dex) {
-                    return Ok(());
-                }
                 if let Some(info) = self.token_info(tokens, token) {
-                    self.send_asset(caller, destination, info, wei).await?;
+                    let route = DexRoute::new(source_dex, destination_dex);
+                    self.send_asset((caller, destination), info, wei, route)
+                        .await?;
                 }
             }
             CoreAction::AddApiWallet { wallet, name } => {
@@ -647,29 +667,6 @@ impl Bridge {
         Ok(())
     }
 
-    /// The `sendAsset` dex guard: this sim models the spot dex, so a perp-dex
-    /// move (per-dex balances are not modeled — Phase A) is refused by name
-    /// and counted — never applied as a spot send. `true` when the action was
-    /// refused.
-    fn refuse_off_spot_send_asset(
-        &self,
-        caller: Address,
-        source_dex: u32,
-        destination_dex: u32,
-    ) -> bool {
-        if source_dex == corewriter::SPOT_DEX && destination_dex == corewriter::SPOT_DEX {
-            return false;
-        }
-        self.metrics.inc_refusals();
-        tracing::warn!(
-            caller = %caller,
-            source_dex,
-            destination_dex,
-            "bridge: sendAsset outside the spot dex refused (multi-dex is deferred)"
-        );
-        true
-    }
-
     /// The registry entry for a wire token index; an unknown index is counted
     /// and refused (the bridge never guesses a token).
     fn token_info<'a>(&self, tokens: &'a [TokenInfo], token: u64) -> Option<&'a TokenInfo> {
@@ -739,15 +736,17 @@ impl Bridge {
         }
     }
 
-    /// `sendAsset`: spot→spot inside Core, or Core→EVM when the destination
-    /// is the token's system address (completed by a system-address transfer).
+    /// `sendAsset`: spot→spot inside Core, Core→EVM when the destination is
+    /// the token's system address (completed by a system-address transfer),
+    /// and between the spot wallet and the perp dexes' clearinghouses (or two
+    /// dexes) otherwise.
     #[allow(clippy::too_many_lines)] // one rendering/transition table: splitting it would hide the field-to-line mapping
     async fn send_asset(
         &self,
-        caller: Address,
-        destination: Address,
+        (caller, destination): (Address, Address),
         info: &TokenInfo,
         wei: u64,
+        route: DexRoute,
     ) -> Result<()> {
         let Some(amount) = system::core_to_human(wei, info.wei_decimals) else {
             self.metrics.inc_refusals();
@@ -757,7 +756,21 @@ impl Bridge {
             );
             return Ok(());
         };
-        if destination == system::system_address(u64::from(info.index)) {
+        if !route.spot_to_spot() {
+            // A perp dex is an endpoint: the move is between ledgers (the
+            // token-checked, margin-bounded `sendAsset` of the sim), never to
+            // the EVM side.
+            if is_system_destination(destination, info) {
+                self.metrics.inc_refusals();
+                tracing::warn!(
+                    account = %caller,
+                    "bridge: sendAsset to a system address from a perp dex refused (Core→EVM leaves the spot wallet only)"
+                );
+                return Ok(());
+            }
+            return self.send_between_wallets((caller, destination), info, amount, route);
+        }
+        if is_system_destination(destination, info) {
             if !self.core_to_evm_allowed(caller, info, amount)? {
                 return Ok(());
             }
@@ -798,6 +811,55 @@ impl Bridge {
             }
         }
         Ok(())
+    }
+
+    /// A `sendAsset` with a perp dex at either end: the sim moves the token
+    /// between the two wallets (refusals are counted and logged, never a block
+    /// failure).
+    fn send_between_wallets(
+        &self,
+        (caller, destination): (Address, Address),
+        info: &TokenInfo,
+        amount: Decimal,
+        route: DexRoute,
+    ) -> Result<()> {
+        let (Some(source), Some(target)) = (
+            wallet_of(&self.feed, route.source),
+            wallet_of(&self.feed, route.destination),
+        ) else {
+            self.metrics.inc_refusals();
+            tracing::warn!(
+                account = %caller,
+                source_dex = route.source,
+                destination_dex = route.destination,
+                "bridge: sendAsset names a dex index the registry does not list; refused"
+            );
+            return Ok(());
+        };
+        let send = crate::sim::transfer::AssetSend {
+            from: caller,
+            to: destination,
+            token: TokenRef {
+                index: info.index,
+                coin: &info.name,
+            },
+            amount,
+            source,
+            destination: target,
+            kind: RowKind::Send,
+        };
+        match self.sim.send_asset(&send, &self.feed) {
+            Ok(()) => {
+                tracing::info!(account = %caller, to = %destination, token = %info.name, amount = %amount, "bridge: sendAsset between wallets");
+                Ok(())
+            }
+            Err(Error::BadRequest { reason }) => {
+                self.metrics.inc_refusals();
+                tracing::warn!(account = %caller, amount = %amount, %reason, "bridge: sendAsset between wallets refused");
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// The Core→EVM transfer bound: the venue's rule bounds the move by the
@@ -911,6 +973,20 @@ fn usd_class_amount(ntl: u64) -> Option<Decimal> {
     system::core_to_human(ntl, system::PERP_USD_DECIMALS)
 }
 
+/// The wallet a CoreWriter dex index names: `u32::MAX` is the spot wallet,
+/// any other index the dex at that `perpDexs` position (`None` = unlisted).
+fn wallet_of(feed: &MarketFeed, dex: u32) -> Option<Wallet> {
+    if dex == corewriter::SPOT_DEX {
+        return Some(Wallet::Spot);
+    }
+    feed.dex_name_at(dex).map(Wallet::Perp)
+}
+
+/// Whether `destination` is the token's Core↔EVM system address.
+fn is_system_destination(destination: Address, info: &TokenInfo) -> bool {
+    destination == system::system_address(u64::from(info.index))
+}
+
 /// Whether a funded mirror sender needs its stipend topped up: any balance
 /// below the stipend, not only a zero one. The live bug this answers is a
 /// writer holding *some* HYPE but less than one write's up-front cost — anvil
@@ -1017,6 +1093,46 @@ fn core_order(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `sendAsset`'s dex fields are wallet names: `u32::MAX` is the spot
+    /// wallet and any other index is the dex at that `perpDexs` position (the
+    /// default dex is index 0), so an unlisted index has no wallet at all.
+    #[test]
+    fn a_send_assets_dex_index_names_a_wallet() {
+        let feed = MarketFeed::memory(Vec::new());
+        let now = crate::now_ms();
+        feed.put_dex_meta(
+            "xyz".to_string(),
+            crate::sim::meta_of(&[("xyz:TSLA", 10)]),
+            now,
+        );
+        feed.put_dex_meta(
+            "abc".to_string(),
+            crate::sim::meta_of(&[("abc:GOLD", 10)]),
+            now,
+        );
+        assert!(matches!(
+            wallet_of(&feed, corewriter::SPOT_DEX),
+            Some(Wallet::Spot)
+        ));
+        // No registry: `["", "abc", "xyz"]`, default dex first then sorted.
+        let names: Vec<Option<String>> = [0, 1, 2, 3]
+            .into_iter()
+            .map(|dex| match wallet_of(&feed, dex) {
+                Some(Wallet::Perp(name)) => Some(name),
+                Some(Wallet::Spot) => panic!("index {dex} is not the spot wallet"),
+                None => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [Some(String::new()), Some("abc".into()), Some("xyz".into()), None]
+        );
+        assert!(DexRoute::new(corewriter::SPOT_DEX, corewriter::SPOT_DEX).spot_to_spot());
+        assert!(!DexRoute::new(corewriter::SPOT_DEX, 1).spot_to_spot());
+        assert!(!DexRoute::new(1, corewriter::SPOT_DEX).spot_to_spot());
+        assert!(!DexRoute::new(1, 2).spot_to_spot());
+    }
 
     /// The projection's unit rule: the mocks store raw core wei / raw USD
     /// 1e6, floored like every other Core→EVM conversion, and an
