@@ -140,7 +140,13 @@ impl Bridge {
     pub async fn run(self) {
         loop {
             if let Err(e) = self.pass().await {
-                tracing::warn!(error = %e, "venue bridge pass failed; will retry");
+                // Warm-up is a readiness state, not a fault: the feed has no
+                // meta yet, the pass retries and nothing is lost.
+                if matches!(e, Error::Warming) {
+                    tracing::debug!(error = %e, "venue bridge is waiting for the market plane");
+                } else {
+                    tracing::warn!(error = %e, "venue bridge pass failed; will retry");
+                }
             }
             tokio::time::sleep(self.poll).await;
         }
@@ -486,7 +492,8 @@ impl Bridge {
         )?;
         self.metrics.inc_credits();
         tracing::info!(
-            from = %recipient,
+            from = %credit.sender,
+            to = %recipient,
             token = %credit.token.name,
             amount = %credit.amount,
             wallet = ?wallet,
