@@ -7,6 +7,7 @@
 //! account.rs).
 use super::account::{self, Liquidation};
 use super::funding;
+use super::ledger::{FillRecord, Liquidity};
 use super::Sim;
 use crate::error::Result;
 use crate::feed::{MarketFeed, Prices};
@@ -287,9 +288,21 @@ impl Sim {
             reduce: r.reduce,
             fee: crate::sim::account::mul(notional, crate::sim::order::maker_fee(), "maker fee")?,
         };
-        self.with_account_now(r.account, feed, |account| {
+        let effect = self.with_account_now(r.account, feed, |account| {
             crate::sim::account::apply_fill(account, &facts, feed.margin_meta().as_ref())
         })?;
+        self.record_fill(
+            r.account,
+            &FillRecord {
+                liquidation: None,
+                facts: &facts,
+                effect,
+                oid: r.oid,
+                cloid: r.cloid,
+                liquidity: Liquidity::Maker,
+                fee_token: "USDC",
+            },
+        )?;
         feed.consume(crate::feed::Consumption {
             coin: r.coin.clone(),
             side: r.side.book_index() as u8,

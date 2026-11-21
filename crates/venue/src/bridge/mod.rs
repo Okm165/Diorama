@@ -26,7 +26,9 @@ pub(crate) mod system;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
+use crate::sim::fees::RowKind;
 use crate::sim::order::CancelSpeed;
+use crate::sim::transfer::CoreToEvm;
 use crate::sim::{Applied, ClassTransfer, Direction};
 use crate::sim::{Sim, TokenRef};
 use crate::wire::UserAbstraction;
@@ -573,13 +575,14 @@ impl Bridge {
             }
             return Ok(());
         };
-        self.sim.credit_spot(
+        self.sim.credit_evm_deposit(
             credit.sender,
             TokenRef {
                 index: credit.token.index,
                 coin: &credit.token.name,
             },
             credit.amount,
+            &self.feed,
         )?;
         self.metrics.inc_credits();
         tracing::info!(
@@ -605,13 +608,14 @@ impl Bridge {
         let Some(credit) = system::hype_received_of(data, token) else {
             return Ok(());
         };
-        self.sim.credit_spot(
+        self.sim.credit_evm_deposit(
             credit.sender,
             TokenRef {
                 index: token.index,
                 coin: &token.name,
             },
             credit.amount,
+            &self.feed,
         )?;
         self.metrics.inc_credits();
         tracing::info!(from = %credit.sender, amount = %credit.amount, "bridge: EVM→Core HYPE credit");
@@ -860,13 +864,13 @@ impl Bridge {
             return Ok(());
         };
         let applied = self.sim.spot_send(
-            caller,
-            destination,
+            (caller, destination),
             TokenRef {
                 index: info.index,
                 coin: &info.name,
             },
             amount,
+            &self.feed,
         )?;
         if matches!(applied, Applied::Refused) {
             self.metrics.inc_refusals();
@@ -927,22 +931,36 @@ impl Bridge {
             if !self.core_to_evm_allowed(caller, info, amount)? {
                 return Ok(());
             }
-            // Core→EVM: debit the caller, then complete on the EVM side.
-            let Some(_after) = self.sim.try_debit_spot(caller, info.index, amount)? else {
+            // Core→EVM: debit the caller (the amount, the HyperEVM gas and any
+            // owed activation), then complete on the EVM side.
+            let applied = self.sim.debit_core_to_evm(
+                &CoreToEvm {
+                    from: caller,
+                    destination,
+                    token: TokenRef {
+                        index: info.index,
+                        coin: &info.name,
+                    },
+                    amount,
+                    kind: RowKind::Send,
+                },
+                &self.feed,
+            )?;
+            if matches!(applied, Applied::Refused) {
                 self.metrics.inc_refusals();
-                tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (insufficient balance)");
+                tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (insufficient balance or fees)");
                 return Ok(());
-            };
+            }
             self.complete_core_to_evm(&caller, info, amount).await?;
         } else {
             let applied = self.sim.spot_send(
-                caller,
-                destination,
+                (caller, destination),
                 TokenRef {
                     index: info.index,
                     coin: &info.name,
                 },
                 amount,
+                &self.feed,
             )?;
             if matches!(applied, Applied::Refused) {
                 self.metrics.inc_refusals();

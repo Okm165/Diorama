@@ -13,6 +13,7 @@
 //! ```
 //!
 //! (verified exact on the live sample, `wire::tests::live_sample_identity_holds`).
+use super::ledger::{shared, FillEffect, UserFill, UserFunding};
 use super::seed::AccountSeed;
 use crate::error::{Error, Result};
 use crate::feed::{MarketFeed, Prices};
@@ -57,6 +58,24 @@ pub(crate) struct Account {
     /// The sim clock (ms) funding was last accrued to.
     #[serde(default)]
     pub funded_at_ms: u64,
+    /// The fills this account made, oldest first, bounded (`userFills`).
+    /// History only: no account figure reads it.
+    #[serde(
+        default,
+        skip_serializing_if = "shared::is_empty",
+        serialize_with = "shared::serialize",
+        deserialize_with = "shared::deserialize"
+    )]
+    pub fills: std::sync::Arc<std::collections::VecDeque<UserFill>>,
+    /// The funding payments this account made, oldest first, bounded
+    /// (`userFunding`). History only.
+    #[serde(
+        default,
+        skip_serializing_if = "shared::is_empty",
+        serialize_with = "shared::serialize",
+        deserialize_with = "shared::deserialize"
+    )]
+    pub fundings: std::sync::Arc<std::collections::VecDeque<UserFunding>>,
     /// API wallets the CoreWriter registered for this account.
     #[serde(default)]
     pub agents: Vec<AgentWallet>,
@@ -911,7 +930,7 @@ pub(crate) fn apply_fill(
     account: &mut Account,
     fill: &FillFacts,
     meta: Option<&crate::wire::Meta>,
-) -> Result<()> {
+) -> Result<FillEffect> {
     let signed = fill.size * fill.side.sign();
     let old = account
         .positions
@@ -923,14 +942,14 @@ pub(crate) fn apply_fill(
         .positions
         .entry(fill.coin.clone())
         .or_insert_with(|| fresh_position(fill));
-    let closed = if same_direction(old, signed) {
+    let (closed, realized) = if same_direction(old, signed) {
         apply_increase(position, old, fill)?;
-        Decimal::ZERO
+        (Decimal::ZERO, Decimal::ZERO)
     } else {
         let closed = old.abs().min(fill.size);
         let realized = apply_reduction(position, old, fill)?;
         account.perp_balance = add(account.perp_balance, realized, "realized PnL")?;
-        closed
+        (closed, realized)
     };
     // The trading fee (the venue's base tier): charged on the fill's notional,
     // on both sides of a trade, in USDC — so a closing fill pays it too.
@@ -941,14 +960,15 @@ pub(crate) fn apply_fill(
     // re-looks the position up) can borrow the account whole.
     let flat = position.szi.is_zero();
     release_isolated_margin(account, &fill.coin, old, closed, meta)?;
+    let effect = FillEffect::of(old, signed, realized);
     if flat {
         account.positions.remove(&fill.coin);
-        return Ok(());
+        return Ok(effect);
     }
     if let Some(position) = account.positions.get_mut(&fill.coin) {
         settle_margin(position)?;
     }
-    Ok(())
+    Ok(effect)
 }
 
 /// The margin a close releases (docs): a fully closed isolated position

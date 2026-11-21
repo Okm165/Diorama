@@ -13,6 +13,7 @@
 //! verified (the devnet has no keys — the anvil-impersonation analogue), and
 //! the depth is the served book's (the live book minus what the devnet
 //! already consumed, so a second order sees the first one's impact).
+use super::ledger::{FillLiquidation, FillRecord, LiquidationMethod, Liquidity};
 use super::validate::{validate_order, validate_trigger_side};
 use super::Sim;
 use crate::error::{Error, Result};
@@ -705,6 +706,7 @@ impl Sim {
     /// A liquidation's market close: the same walk as an order, but with no
     /// fee (docs: "there is no clearance fee on liquidations") and no opening
     /// probe (the venue closes regardless of the resulting margin).
+    #[allow(clippy::too_many_lines)] // the walk and its liquidation-ledger record: one close
     pub(crate) fn liquidate_position(
         &self,
         feed: &MarketFeed,
@@ -741,11 +743,27 @@ impl Sim {
         let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), &req, &resting)?;
         let leverage = self.leverage_for(address, coin, meta.as_ref())?;
         let facts = super::account::FillFacts::close(coin, req.side(), filled, avg_px, leverage);
-        self.with_account_now(address, feed, |account| {
+        let effect = self.with_account_now(address, feed, |account| {
             super::account::apply_fill(account, &facts, meta.as_ref())
         })?;
-        self.settle_legs(feed, &req, &legs, meta.as_ref())?;
         let oid = self.next_oid()?;
+        self.record_fill(
+            address,
+            &FillRecord {
+                liquidation: Some(FillLiquidation::new(
+                    address,
+                    feed.mark_or(coin, avg_px),
+                    LiquidationMethod::Market,
+                )),
+                facts: &facts,
+                effect,
+                oid,
+                cloid: None,
+                liquidity: Liquidity::Taker,
+                fee_token: "USDC",
+            },
+        )?;
+        self.settle_legs(feed, &req, &legs, meta.as_ref())?;
         self.mark_dirty()?;
         Ok(Fill {
             total_sz: filled,
@@ -833,9 +851,21 @@ impl Sim {
             reduce: req.reduce(),
             fee: super::account::mul(notional, taker_fee(), "taker fee")?,
         };
-        self.land_fill(feed, address, &facts, meta.as_ref())?;
-        let consumed = self.settle_legs(feed, req, &legs, meta.as_ref())?;
+        let effect = self.land_fill(feed, address, &facts, meta.as_ref())?;
         let oid = self.next_oid()?;
+        self.record_fill(
+            address,
+            &FillRecord {
+                liquidation: None,
+                facts: &facts,
+                effect,
+                oid,
+                cloid: req.cloid,
+                liquidity: Liquidity::Taker,
+                fee_token: "USDC",
+            },
+        )?;
+        let consumed = self.settle_legs(feed, req, &legs, meta.as_ref())?;
         self.metrics
             .orders_filled_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -871,18 +901,32 @@ impl Sim {
                 Candidate::Maker { oid, maker, px, sz } => {
                     let leverage = self.leverage_for(*maker, &req.coin, meta)?;
                     let notional = super::account::mul(*sz, *px, "maker notional")?;
+                    let reduce = self.resting_flag(*oid)?;
+                    let cloid = self.resting_cloid(*oid)?;
                     let facts = super::account::FillFacts {
                         coin: req.coin.clone(),
                         side: req.side().flip(),
                         size: *sz,
                         px: *px,
                         leverage,
-                        reduce: self.resting_flag(*oid)?,
+                        reduce,
                         fee: super::account::mul(notional, maker_fee(), "maker fee")?,
                     };
-                    self.with_account_now(*maker, feed, |account| {
+                    let effect = self.with_account_now(*maker, feed, |account| {
                         super::account::apply_fill(account, &facts, meta)
                     })?;
+                    self.record_fill(
+                        *maker,
+                        &FillRecord {
+                            liquidation: None,
+                            facts: &facts,
+                            effect,
+                            oid: *oid,
+                            cloid,
+                            liquidity: Liquidity::Maker,
+                            fee_token: "USDC",
+                        },
+                    )?;
                     self.fill_resting(*oid, *sz, *px)?;
                     tracing::info!(maker = %maker, oid, "resting order filled");
                 }
@@ -955,6 +999,11 @@ impl Sim {
             .get(&oid)
             .map(|r| r.reduce)
             .unwrap_or(Reduce::Any))
+    }
+
+    /// The resting order's client id (the maker's fill echoes it).
+    fn resting_cloid(&self, oid: u64) -> Result<Option<alloy_primitives::B128>> {
+        Ok(self.state.lock()?.resting.get(&oid).and_then(|r| r.cloid))
     }
 
     /// `updateLeverage`: the account's per-coin setting (docs: "subject to
@@ -1319,7 +1368,7 @@ impl Sim {
         address: Address,
         facts: &super::account::FillFacts,
         meta: Option<&crate::wire::Meta>,
-    ) -> Result<()> {
+    ) -> Result<super::ledger::FillEffect> {
         let coin = facts.coin.clone();
         // The venue settles funding at the trade: accrue to now on the
         // *pre-fill* size, then the size change restarts since-change. The

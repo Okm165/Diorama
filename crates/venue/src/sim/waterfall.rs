@@ -13,6 +13,7 @@
 //! book — an empty ranking leaves the position for the next tick (named in
 //! the log).
 use super::account::{self, Liquidation};
+use super::ledger::{FillRecord, Liquidity};
 use super::{Account, Sim, BACKSTOP};
 use crate::error::Result;
 use crate::feed::MarketFeed;
@@ -483,8 +484,22 @@ impl Sim {
         meta: Option<&crate::wire::Meta>,
     ) -> Result<()> {
         let (own, theirs) = fills;
-        self.with_account(address, |a| account::apply_fill(a, own, meta))?;
-        self.with_account(other, |a| account::apply_fill(a, theirs, meta))?;
+        let own_effect = self.with_account(address, |a| account::apply_fill(a, own, meta))?;
+        let their_effect = self.with_account(other, |a| account::apply_fill(a, theirs, meta))?;
+        for (who, facts, effect) in [(address, own, own_effect), (other, theirs, their_effect)] {
+            self.record_fill(
+                who,
+                &FillRecord {
+                    liquidation: None,
+                    facts,
+                    effect,
+                    oid: 0,
+                    cloid: None,
+                    liquidity: Liquidity::Taker,
+                    fee_token: "USDC",
+                },
+            )?;
+        }
         self.metrics
             .adl_closes_total
             .fetch_add(1, Ordering::Relaxed);

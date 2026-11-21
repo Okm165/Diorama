@@ -2,9 +2,12 @@
 //! persistence, and the self-advance automaton.
 //!
 //! The modules: `account` (the account math and the position totals), `seed`
-//! (the served-shape patch), `funding` (the hourly interval), `order` (the
-//! matching lane), `validate` (the lane's rules), `waterfall` (the liquidation
-//! ladder), `tick` (the self-advance automaton), `metrics` (the registry).
+//! (the served-shape patch), `funding` (the hourly interval), `ledger` (the
+//! per-account fill and funding history), `order` (the matching lane),
+//! `validate` (the lane's rules), `waterfall` (the liquidation ladder), `tick`
+//! (the self-advance automaton), `transfer` (collateral moves between the spot
+//! wallet and the perp clearinghouse), `fees` (what a transfer costs and the
+//! ledger rows), `metrics` (the registry).
 //!
 //! Untouched accounts are not the sim's business — the API layer passes those
 //! reads through to the real venue. A *touched* account (dealt funds, seeded,
@@ -25,11 +28,16 @@
 const ARTIFACT: &str = "sim state";
 
 pub(crate) mod account;
+pub(crate) mod fees;
 pub(crate) mod funding;
+pub(crate) mod ledger;
 pub(crate) mod metrics;
 pub(crate) mod order;
 pub(crate) mod seed;
 pub(crate) mod tick;
+pub(crate) mod transfer;
+#[cfg(test)]
+mod transfer_matrix_tests;
 pub(crate) mod validate;
 pub(crate) mod waterfall;
 
@@ -89,6 +97,11 @@ pub(crate) struct SimState {
     /// The matching lane's order-id counter (monotonic across the scenario).
     #[serde(default)]
     pub next_oid: u64,
+    /// The fill ledger's trade-id counter: unique and strictly increasing
+    /// across the sim (a reset does not rewind it: a consumer that dedupes
+    /// by `tid` must never see one reused).
+    #[serde(default)]
+    pub next_tid: u64,
     #[serde(default)]
     pub accounts: Accounts,
     /// The devnet's resting book (the venue's open orders): keyed by oid.
@@ -117,6 +130,38 @@ pub(crate) struct SimState {
     /// The previous tick's mark per coin (ADL closes at the previous mark).
     #[serde(default)]
     pub prev_marks: std::collections::BTreeMap<String, Decimal>,
+    /// The addresses that exist on the venue (they received or held
+    /// something). An address first funded by a transfer or deposit while it
+    /// is not in this set (and holds nothing) owes its activation. Every
+    /// account a state file already carries is folded in on load
+    /// ([`SimState::migrate`]).
+    #[serde(default)]
+    pub activated: std::collections::BTreeSet<Address>,
+    /// The accounts that owe the 1 USDC activation fee (Circle: earmarked when
+    /// the account is first funded by a deposit or an inbound transfer, charged
+    /// on its first outbound transfer, then cleared). Never set by `deal`,
+    /// seeds or `/control`, and empty in a state saved before the fee existed:
+    /// an existing address owes nothing.
+    #[serde(default)]
+    pub activation_owed: std::collections::BTreeSet<Address>,
+    /// The transfer ledger per account (`userNonFundingLedgerUpdates` rows
+    /// the sim writes): history only, bounded, never read by the account math.
+    #[serde(default)]
+    pub transfer_ledger:
+        std::collections::BTreeMap<Address, std::collections::VecDeque<fees::LedgerUpdate>>,
+    /// The ledger rows' hash counter.
+    #[serde(default)]
+    pub next_ledger_id: u64,
+}
+
+impl SimState {
+    /// Fold what an older state file carries into the current shape: every
+    /// saved account exists, so only accounts created from now on can owe an
+    /// activation.
+    pub(crate) fn migrate(&mut self) {
+        let known: Vec<Address> = self.accounts.keys().copied().collect();
+        self.activated.extend(known);
+    }
 }
 
 /// One `deal`: mint funds into the account (perp wallet or spot token).
@@ -198,7 +243,8 @@ impl Sim {
         Self::from_state(SimState::default(), None, 1024)
     }
 
-    fn from_state(state: SimState, path: Option<PathBuf>, terminal_orders: usize) -> Self {
+    fn from_state(mut state: SimState, path: Option<PathBuf>, terminal_orders: usize) -> Self {
+        state.migrate();
         let sim = Self {
             state: Shared::new(ARTIFACT, state),
             path,
@@ -470,7 +516,11 @@ impl Sim {
 
     // ---- the Core↔EVM bridge's effects -----------------------------------
 
-    /// EVM→Core: credit a spot token (creates the account on first touch).
+    /// Credit a spot token (creates the account on first touch): the tests'
+    /// funding helper. The bridge's EVM→Core credit is
+    /// [`Sim::credit_evm_deposit`] (it owes the activation and writes the
+    /// ledger row).
+    #[cfg(test)]
     pub(crate) fn credit_spot(
         &self,
         address: Address,
@@ -485,35 +535,6 @@ impl Sim {
             account::credit_entry(account, token, amount, "spot credit")?;
             Ok(())
         })
-    }
-
-    /// Core→EVM / spot send: debit the spot balance; `None` when the account
-    /// or the balance is short (the bridge counts the refusal — a system
-    /// transfer never goes negative).
-    pub fn try_debit_spot(
-        &self,
-        address: Address,
-        token: u32,
-        amount: Decimal,
-    ) -> Result<Option<Decimal>> {
-        let debited = self.with_state(|state| {
-            let Some(account) = state.accounts.get_mut(&address) else {
-                return Ok(None);
-            };
-            let Some(entry) = account.spot.get_mut(&token) else {
-                return Ok(None);
-            };
-            if entry.total < amount {
-                return Ok(None);
-            }
-            entry.total = account::sub(entry.total, amount, "spot debit")?;
-            Ok(Some(entry.total))
-        })?;
-        let Some(after) = debited else {
-            return Ok(None);
-        };
-        self.touch();
-        Ok(Some(after))
     }
 
     /// USD class transfer (CoreWriter action 7): spot USDC ↔ perp wallet.
@@ -581,38 +602,31 @@ impl Sim {
             Ok(Applied::Applied)
         })?;
         if matches!(applied, Applied::Applied) {
-            self.touch();
+            self.record_class_transfer(address, transfer, clock)?;
         }
         Ok(applied)
     }
 
-    /// Core spot send: debit the sender, credit the recipient. `Refused` when
-    /// the sender is short.
-    pub(crate) fn spot_send(
+    /// The `accountClassTransfer` row a class transfer writes (the venue's
+    /// `userNonFundingLedgerUpdates` row) and the sender's existence.
+    fn record_class_transfer(
         &self,
-        from: Address,
-        to: Address,
-        token: TokenRef<'_>,
-        amount: Decimal,
-    ) -> Result<Applied> {
-        let debited = self.with_state(|state| {
-            let Some(sender) = state.accounts.get_mut(&from) else {
-                return Ok(Applied::Refused);
-            };
-            let Some(entry) = sender.spot.get_mut(&token.index) else {
-                return Ok(Applied::Refused);
-            };
-            if entry.total < amount {
-                return Ok(Applied::Refused);
-            }
-            entry.total = account::sub(entry.total, amount, "spot send")?;
-            Ok(Applied::Applied)
+        address: Address,
+        transfer: &ClassTransfer<'_>,
+        clock: u64,
+    ) -> Result<()> {
+        let delta = serde_json::json!({
+            "type": "accountClassTransfer",
+            "usdc": fees::real_text(transfer.amount),
+            "toPerp": transfer.direction == Direction::ToPerp,
+        });
+        self.with_state(|state| {
+            state.activated.insert(address);
+            state.record_ledger(&[address], clock, &delta);
+            Ok(())
         })?;
-        if matches!(debited, Applied::Refused) {
-            return Ok(Applied::Refused);
-        }
-        self.credit_spot(to, token, amount)?;
-        Ok(Applied::Applied)
+        self.touch();
+        Ok(())
     }
 
     /// Record an API wallet (CoreWriter action 9).
@@ -662,6 +676,9 @@ impl Sim {
             state.liq_cooldown_until.clear();
             state.waterfall_retry_after.clear();
             state.prev_marks.clear();
+            state.activated.clear();
+            state.activation_owed.clear();
+            state.transfer_ledger.clear();
             state.next_oid = 0;
             state.clock_offset_ms = 0;
             state.epoch += 1;
@@ -1161,13 +1178,13 @@ mod tests {
             )
             .unwrap();
             sim.spot_send(
-                a,
-                Address::repeat_byte(0xbb),
+                (a, Address::repeat_byte(0xbb)),
                 TokenRef {
                     index: 0,
                     coin: "USDC",
                 },
                 Decimal::ONE,
+                &feed,
             )
             .unwrap();
             let _ = &feed;

@@ -3,6 +3,7 @@
 //! path settles the pre-fill size first (order.rs); the automaton sweeps
 //! every account (tick.rs).
 use super::account::{add, mul, Account};
+use super::ledger::{record_funding, UserFunding, LEDGER_BOUND};
 use crate::error::Result;
 use crate::feed::{MarketFeed, Prices};
 use rust_decimal::Decimal;
@@ -10,6 +11,28 @@ use rust_decimal::Decimal;
 /// One hour in milliseconds: the funding interval (the docs: "funding is
 /// paid every hour").
 const HOUR_MS: u64 = 3_600_000;
+
+/// The ledger keeps one entry per boundary crossed, stamped with the boundary
+/// (the served rate prices every one, as the balance does): the last `hours`
+/// boundaries up to `to_ms`, at most the ledger's bound.
+fn record_boundaries(
+    list: &mut std::sync::Arc<std::collections::VecDeque<UserFunding>>,
+    entry: &UserFunding,
+    span: (u64, u64),
+) {
+    let (to_ms, hours) = span;
+    let through = to_ms / HOUR_MS;
+    let kept = hours.min(LEDGER_BOUND as u64);
+    for boundary in (through + 1 - kept)..=through {
+        record_funding(
+            list,
+            UserFunding {
+                time: boundary * HOUR_MS,
+                ..entry.clone()
+            },
+        );
+    }
+}
 
 /// Accrue funding from the account's stamp to `to_ms` at the live rates:
 /// the docs' interval is hourly and all-or-nothing ("the funding rate is
@@ -60,15 +83,12 @@ pub(crate) fn accrue_funding(
         let Some(rate) = feed.funding(coin) else {
             continue;
         };
-        let payment = mul(
-            mul(
-                mul(-p.szi, oracle, "funding notional")?,
-                rate,
-                "funding payment",
-            )?,
-            Decimal::from(hours),
+        let hourly = mul(
+            mul(-p.szi, oracle, "funding notional")?,
+            rate,
             "funding payment",
         )?;
+        let payment = mul(hourly, Decimal::from(hours), "funding payment")?;
         if payment.is_zero() {
             continue;
         }
@@ -76,6 +96,8 @@ pub(crate) fn accrue_funding(
         p.funding_all_time = add(p.funding_all_time, payment, "cum funding")?;
         p.funding_since_open = add(p.funding_since_open, payment, "cum funding")?;
         p.funding_since_change = add(p.funding_since_change, payment, "cum funding")?;
+        let entry = UserFunding::hourly(coin, p.szi, (hourly, rate));
+        record_boundaries(&mut account.fundings, &entry, (to_ms, hours));
         moved += 1;
     }
     account.funded_at_ms = to_ms;
@@ -158,5 +180,48 @@ mod tests {
             account.perp_balance,
             -Decimal::ONE * Decimal::from(101) * Decimal::new(125, 7)
         );
+    }
+
+    /// Every payment is on the ledger, stamped with its hour boundary: the
+    /// signed balance delta (a long pays: negative), the signed size and the
+    /// rate that priced it, one entry per boundary crossed, summing to the
+    /// balance's move.
+    #[test]
+    fn funding_payments_are_recorded_per_boundary() {
+        let feed = feed_with_funding(&[("BTC", "100", "101")]);
+        let mut account = funding_account();
+        // Inside the hour: nothing recorded.
+        accrue_funding(&mut account, &feed, 7_140_000).unwrap();
+        assert!(account.fundings.is_empty());
+        // The boundary at 2 h pays once.
+        accrue_funding(&mut account, &feed, 7_200_000).unwrap();
+        let hourly = -Decimal::ONE * Decimal::from(101) * Decimal::new(125, 7);
+        assert_eq!(account.fundings.len(), 1);
+        let first = &account.fundings[0];
+        assert_eq!(first.time, 7_200_000);
+        assert_eq!(first.coin, "BTC");
+        assert_eq!(first.usdc, hourly);
+        assert_eq!(first.szi, Decimal::ONE);
+        assert_eq!(first.funding_rate, Decimal::new(125, 7));
+        assert_eq!(first.n_samples, None);
+        // A jump over three more boundaries records each one.
+        accrue_funding(&mut account, &feed, 18_000_000 + 1).unwrap();
+        let times: Vec<u64> = account.fundings.iter().map(|f| f.time).collect();
+        assert_eq!(times, [7_200_000, 10_800_000, 14_400_000, 18_000_000]);
+        let recorded: Decimal = account.fundings.iter().map(|f| f.usdc).sum();
+        assert_eq!(
+            recorded, account.perp_balance,
+            "the ledger sums to the balance"
+        );
+    }
+
+    /// A deferred accrual (a coin with no live context) records nothing.
+    #[test]
+    fn a_deferred_accrual_records_nothing() {
+        let feed = feed_with_funding(&[("BTC", "100", "100")]);
+        let mut account = funding_account();
+        account.positions.insert("ETH".into(), long_btc());
+        accrue_funding(&mut account, &feed, 7_200_000).unwrap();
+        assert!(account.fundings.is_empty());
     }
 }
