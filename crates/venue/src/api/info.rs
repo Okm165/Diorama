@@ -65,10 +65,15 @@ pub(crate) async fn readyz(State(state): State<Arc<ApiState>>) -> Response {
     if let Err(refusal) = super::sim_gate(&state) {
         return refusal.into_response();
     }
-    if state.ready(crate::feed::MarketFeed::MAX_STALE_MS) {
-        (StatusCode::OK, "ready").into_response()
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "market plane warming up").into_response()
+    match state.readiness(crate::feed::MarketFeed::MAX_STALE_MS) {
+        Ok(()) => (StatusCode::OK, "ready").into_response(),
+        // The body names the failing market: a 503 with no reason is what made
+        // the venue's flapping readiness indistinguishable from an outage.
+        Err(reason) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("market plane warming up: {reason}"),
+        )
+            .into_response(),
     }
 }
 

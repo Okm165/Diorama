@@ -95,9 +95,17 @@ impl ApiState {
 
     /// Readiness: the market plane has a meta and every configured market's
     /// context is fresher than `max_stale_ms` (the plan's freshness gate).
+    #[cfg(test)]
     pub fn ready(&self, max_stale_ms: u64) -> bool {
+        self.readiness(max_stale_ms).is_ok()
+    }
+
+    /// [`Self::ready`] with the **reason** a gate failed: an operator reading a
+    /// 503 needs to know whether the plane is down, a registry row is missing,
+    /// or one market's book froze — the body names it.
+    pub fn readiness(&self, max_stale_ms: u64) -> Result<(), String> {
         if self.feed.meta().is_none() {
-            return false;
+            return Err("meta not loaded".into());
         }
         // A configured HIP-3 market (`xyz:*`) is addressable only through the
         // upstream `perpDexs` list: the asset index encodes that list's
@@ -109,7 +117,7 @@ impl ApiState {
                 continue;
             };
             if self.feed.dex_index(dex).is_none() {
-                return false;
+                return Err(format!("dex `{dex}` not resolved"));
             }
         }
         // The spot token registry is part of the served contract (spot deals,
@@ -118,7 +126,7 @@ impl ApiState {
         // passed between the two left the first spot deal hitting the gap
         // (found by the local run).
         if !self.feed.spot_registry_loaded() {
-            return false;
+            return Err("spot token registry not loaded".into());
         }
         let now = crate::now_ms();
         // **A cached book that froze is a fault; a book nobody asked for is
@@ -139,23 +147,34 @@ impl ApiState {
             crate::feed::BookAge::Warming => plane_healthy,
             crate::feed::BookAge::Stale(_) => false,
         };
-        let perps_ready = self.feed.markets.iter().all(|coin| {
-            let fresh_mark = self
-                .feed
-                .stale_ms(coin, now)
-                .map(|stale| stale <= max_stale_ms)
-                .unwrap_or(false);
-            fresh_mark && book_ready(coin)
-        });
+        for coin in &self.feed.markets {
+            match self.feed.stale_ms(coin, now) {
+                Some(stale) if stale <= max_stale_ms => {}
+                Some(stale) => return Err(format!("{coin}: context stale {stale} ms")),
+                None => return Err(format!("{coin}: no live context")),
+            }
+            if !book_ready(coin) {
+                return Err(match self.feed.book_age(coin, now, max_stale_ms) {
+                    crate::feed::BookAge::Stale(age) => format!("{coin}: book frozen {age} ms"),
+                    _ => format!("{coin}: book not ready"),
+                });
+            }
+        }
         // A mirrored spot pair has a book and an `allMids` entry, but no
         // `activeAssetCtx` (there is no spot funding). Requiring a ctx would
         // keep readiness false forever.
-        let spot_ready = self
-            .feed
-            .spot_markets
-            .iter()
-            .all(|coin| self.feed.mark(coin).is_some() && book_ready(coin));
-        perps_ready && spot_ready
+        for coin in &self.feed.spot_markets {
+            if self.feed.mark(coin).is_none() {
+                return Err(format!("{coin}: no mark"));
+            }
+            if !book_ready(coin) {
+                return Err(match self.feed.book_age(coin, now, max_stale_ms) {
+                    crate::feed::BookAge::Stale(age) => format!("{coin}: book frozen {age} ms"),
+                    _ => format!("{coin}: book not ready"),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
