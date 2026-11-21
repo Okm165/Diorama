@@ -1762,6 +1762,9 @@ mod tests {
         });
 
         let client_feed = Arc::new(MarketFeed::memory(vec!["BTC".into()]));
+        // The relay's permanent contexts come from the registry: the client
+        // must know the coin's market row to stream its context.
+        client_feed.put_meta(crate::sim::meta_of(&[("BTC", 40)]), 1);
         let ws_pool = diorama_anvil::EndpointPool::new(
             &[format!("ws://{addr}/ws")],
             diorama_anvil::Scheme::Ws,

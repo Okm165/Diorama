@@ -19,6 +19,9 @@ pub(crate) struct FeedMetrics {
     budget_skips: AtomicU64,
     /// Weight spent in the rolling window (the poller publishes it).
     budget_used: AtomicU64,
+    /// Upstream streams the relay carries on the live socket, by channel.
+    relay_book_streams: AtomicU64,
+    relay_ctx_streams: AtomicU64,
     /// Milliseconds since each coin's last live context update.
     stale_ms: BTreeMap<String, AtomicU64>,
     /// Devnet-owned book levels (the order lane's consumption records): live
@@ -34,6 +37,21 @@ pub(crate) struct FeedMetrics {
 }
 
 impl FeedMetrics {
+    /// The relay's live stream counts, for the readiness probes and tests.
+    #[cfg_attr(not(test), allow(dead_code, reason = "read by tests today; a /metrics line is the next consumer"))]
+    pub fn relay_streams(&self) -> (u64, u64) {
+        (
+            self.relay_book_streams.load(Ordering::Relaxed),
+            self.relay_ctx_streams.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The relay's live stream counts (the ws lane sets them each sync).
+    pub fn set_relay_streams(&self, books: u64, ctxs: u64) {
+        self.relay_book_streams.store(books, Ordering::Relaxed);
+        self.relay_ctx_streams.store(ctxs, Ordering::Relaxed);
+    }
+
     pub fn new(markets: &[String]) -> Self {
         Self {
             stale_ms: markets

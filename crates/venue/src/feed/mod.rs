@@ -132,7 +132,12 @@ struct Cache {
     ctxs: BTreeMap<String, AssetCtx>,
     ctx_at: BTreeMap<String, u64>,
     books: BTreeMap<String, L2Book>,
+    /// The served instant of the book (its last update; `book()` stamps it).
     book_at: BTreeMap<String, u64>,
+    /// The freshness stamp: the last update **or** the last relay confirmation
+    /// (a quiet book on a live `l2` stream is current — the venue pushes on
+    /// change only).
+    book_live_at: BTreeMap<String, u64>,
     mids: BTreeMap<String, Decimal>,
     mids_at: Option<u64>,
     /// `perpsAtOpenInterestCap`'s last answer per dex (the venue's cap list).
@@ -367,6 +372,22 @@ impl MarketFeed {
         let mut c = self.write();
         c.books.remove(coin);
         c.book_at.remove(coin);
+        c.book_live_at.remove(coin);
+    }
+
+    /// A relay stream is live for these coins' books: the venue pushes a book
+    /// on change only, so a quiet book is current as long as its stream is
+    /// healthy. The websocket lane calls this while the socket is delivering.
+    pub(crate) fn confirm_books<'a>(&self, coins: impl IntoIterator<Item = &'a str>, now_ms: u64) {
+        if self.stalled() {
+            return;
+        }
+        let mut c = self.write();
+        for coin in coins {
+            if c.books.contains_key(coin) {
+                c.book_live_at.insert(coin.to_string(), now_ms);
+            }
+        }
     }
 
     /// The coins the poller backfills books for: every wanted coin (the ones
@@ -386,14 +407,19 @@ impl MarketFeed {
     /// is wanted.
     #[allow(dead_code, reason = "wired when the ws lane diffs the desired stream set")]
     pub(crate) fn permanent_ctx_coins(&self) -> Vec<String> {
+        // Every coin whose registry row landed, keyed by name: a context
+        // stream is coin-name keyed, so a dex's meta is enough to stream it —
+        // it does not need the upstream dex list that *resolvability* needs.
         let c = self.read();
-        c.registry
-            .dexs()
-            .iter()
-            .flat_map(|d| d.meta.universe.iter())
-            .filter(|a| !a.is_delisted.unwrap_or(false))
-            .map(|a| a.name.clone())
-            .collect()
+        let mut coins: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for meta in c.meta.iter().chain(c.dex_metas.values()) {
+            for asset in &meta.universe {
+                if !asset.is_delisted.unwrap_or(false) {
+                    coins.insert(asset.name.clone());
+                }
+            }
+        }
+        coins.into_iter().collect()
     }
 
     /// The streams the upstream socket should carry now, and the books whose
@@ -412,7 +438,8 @@ impl MarketFeed {
         // The book's own stamp, not the context's: a REST-only book stall
         // leaves `ctx_at` advancing on the WS lane while `l2Book` freezes.
         // Gating on the context is what let a stale book pass readiness.
-        match self.read().book_at.get(coin).copied() {
+        // The stamp is the last update or the last relay confirmation.
+        match self.read().book_live_at.get(coin).copied() {
             None => BookAge::Warming,
             Some(at) => {
                 let age = now_ms.saturating_sub(at);
@@ -654,6 +681,7 @@ impl MarketFeed {
         }
         let mut c = self.write();
         c.book_at.insert(book.coin.clone(), now_ms);
+        c.book_live_at.insert(book.coin.clone(), now_ms);
         c.books.insert(book.coin.clone(), book);
     }
 
