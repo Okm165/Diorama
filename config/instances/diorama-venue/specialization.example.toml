@@ -74,6 +74,27 @@ roles = ["market_ws"]
 [endpoints.engine_admin]
 # The venue engine's admin API (in-namespace service DNS).
 http = ["http://engine:8080"]
+# The x-* spot plane's on-chain oracle control is this same admin surface:
+# `POST /admin/feed {"feed": "<agg>", "mode": "set"|"crash"|"rally", "answer"|"pct"}`
+# writes a `MirrorPriceFeed` (silent `anvil_setStorageAt`, fresh timestamp,
+# strictly increasing round, journaled).
+#
+# **A venue-sim mirror's x-* prints must stay inside the indexer's two
+# ingestion bounds, and a print is seeded once at deploy unless a scenario
+# moves it.** The indexer refuses a round that (a) diverges >1500 bps from the
+# sim venue's own `oraclePx` or (b) moves >2000 bps in a single round; on a
+# refusal it keeps the previous served price and warns. Measured 2026-11-21:
+# the seeded prints sat 4–12 % above the sim's oracle across the whole x-* set
+# (xSOXL 29 % — refused, held at the deploy print, so the asset was
+# unpricable), while the sim walked. Two consequences for an operator:
+#   * align a drifted print with `set` **in steps** ≤ 19 % per round, waiting
+#     for an ingest cycle between steps (a single 29 % correction is itself
+#     refused by bound (b));
+#   * align to the venue **oracle**, not the mark: the guard compares the
+#     printed answer with `oraclePx`.
+# A long-running sim wants the prints re-synced on the venue tick; until that
+# exists, the drift is visible as `oracle_ingestion_guards` warns on the
+# indexer's `/health`.
 
 # The explicit fork base. A configured pin preserves the deployment epoch
 # across restarts; omit it (or comment the line out) to resolve a fresh pin
