@@ -1850,6 +1850,181 @@ mod tests {
         server.abort();
     }
 
+
+    type ClientSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    async fn serve_and_connect(
+        state: Arc<ApiState>,
+        n: usize,
+    ) -> (tokio::task::JoinHandle<()>, Vec<ClientSocket>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, super::super::info_router(state))
+                .await
+                .unwrap();
+        });
+        let mut sockets = Vec::new();
+        for _ in 0..n {
+            let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+                .await
+                .unwrap();
+            sockets.push(socket);
+        }
+        (server, sockets)
+    }
+
+    async fn subscribe_raw(socket: &mut ClientSocket, subscription: &str) {
+        use futures_util::SinkExt;
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                format!(r#"{{"method":"subscribe","subscription":{subscription}}}"#).into(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    /// Every frame that arrives within `window`, as (channel, arrival).
+    async fn frames_within(
+        socket: &mut ClientSocket,
+        window: Duration,
+    ) -> Vec<(String, tokio::time::Instant)> {
+        use futures_util::StreamExt;
+        let started = tokio::time::Instant::now();
+        let mut out = Vec::new();
+        while let Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) =
+            tokio::time::timeout(window.saturating_sub(started.elapsed()), socket.next()).await
+        {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let channel = value["channel"].as_str().unwrap_or_default().to_string();
+            if channel != "subscriptionResponse" {
+                out.push((channel, tokio::time::Instant::now()));
+            }
+        }
+        out
+    }
+
+    fn count(frames: &[(String, tokio::time::Instant)], channel: &str) -> usize {
+        frames.iter().filter(|(c, _)| c == channel).count()
+    }
+
+    fn market_world() -> (Arc<ApiState>, Arc<MarketFeed>, Address) {
+        let feed = Arc::new(MarketFeed::memory(Vec::new()));
+        feed.put_meta(crate::sim::meta_of(&[("BTC", 10)]), 1);
+        feed.put_ctx("BTC".into(), test_ctx("100", "101"), 1);
+        feed.put_book(test_book("BTC", "100"), 1_000);
+        feed.put_mids([("BTC".to_string(), Decimal::from(100))].into(), 1_000);
+        let state = api_state(feed.clone());
+        let user = Address::repeat_byte(0xaa);
+        fund_perp(&state, &feed, user);
+        (state, feed, user)
+    }
+
+    /// The market channels send the first frame at once and then nothing while
+    /// nothing changes (the real venue pushes on change, not on a clock), and
+    /// the account channel keeps its 1 s tick.
+    #[tokio::test]
+    async fn an_unchanged_market_sends_nothing_and_the_account_tick_is_kept() {
+        let (state, feed, user) = market_world();
+        let (server, mut sockets) = serve_and_connect(state, 1).await;
+        let socket = &mut sockets[0];
+        for sub in [
+            r#"{"type":"l2Book","coin":"BTC"}"#.to_string(),
+            r#"{"type":"bbo","coin":"BTC"}"#.to_string(),
+            r#"{"type":"activeAssetCtx","coin":"BTC"}"#.to_string(),
+            r#"{"type":"allMids"}"#.to_string(),
+            r#"{"type":"l2Book","coin":"BTC","nSigFigs":4}"#.to_string(),
+            format!(r#"{{"type":"webData3","user":"{user}"}}"#),
+        ] {
+            subscribe_raw(socket, &sub).await;
+        }
+        let frames = frames_within(socket, Duration::from_millis(3_300)).await;
+        assert_eq!(
+            count(&frames, "l2Book"),
+            2,
+            "one first frame per book subscription"
+        );
+        assert_eq!(count(&frames, "bbo"), 1);
+        assert_eq!(count(&frames, "activeAssetCtx"), 1);
+        assert_eq!(count(&frames, "allMids"), 1);
+        let accounts = count(&frames, "webData3");
+        assert!(
+            (3..=5).contains(&accounts),
+            "the account channel keeps the 1 s tick: {accounts}"
+        );
+        // A relay confirmation (the stream says the book is unchanged) and an
+        // identical rewrite of the book are not changes.
+        feed.confirm_books(["BTC"], crate::now_ms());
+        feed.put_book(test_book("BTC", "100"), crate::now_ms());
+        let frames = frames_within(socket, Duration::from_millis(400)).await;
+        assert_eq!(
+            count(&frames, "l2Book") + count(&frames, "bbo"),
+            0,
+            "{frames:?}"
+        );
+        socket.close(None).await.ok();
+        server.abort();
+    }
+
+    /// A change reaches the subscriber within a coalescing window, not a tick;
+    /// a burst of writes is one frame; every subscription on the coin (and on
+    /// other connections) gets it.
+    #[tokio::test]
+    async fn a_change_is_pushed_at_once_and_a_burst_is_one_frame() {
+        let (state, feed, _user) = market_world();
+        let (server, mut sockets) = serve_and_connect(state, 3).await;
+        for socket in &mut sockets {
+            for sub in [
+                r#"{"type":"l2Book","coin":"BTC"}"#,
+                r#"{"type":"bbo","coin":"BTC"}"#,
+                r#"{"type":"l2","c":"BTC"}"#,
+            ] {
+                subscribe_raw(socket, sub).await;
+            }
+        }
+        for socket in &mut sockets {
+            let first = frames_within(socket, Duration::from_millis(300)).await;
+            assert_eq!(count(&first, "l2Book"), 1);
+            assert_eq!(count(&first, "bbo"), 1);
+        }
+        // One change: a frame on every connection and every channel on the
+        // coin, well under the old tick.
+        let put_at = tokio::time::Instant::now();
+        feed.put_book(test_book("BTC", "101"), crate::now_ms());
+        let all = futures_util::future::join_all(
+            sockets
+                .iter_mut()
+                .map(|socket| frames_within(socket, Duration::from_millis(150))),
+        )
+        .await;
+        for frames in all {
+            for channel in ["l2Book", "bbo", "l2"] {
+                let at = frames
+                    .iter()
+                    .find(|(c, _)| c == channel)
+                    .unwrap_or_else(|| panic!("no {channel} frame after the change: {frames:?}"))
+                    .1;
+                assert!(
+                    at.duration_since(put_at) < Duration::from_millis(100),
+                    "{channel} took {:?}",
+                    at.duration_since(put_at)
+                );
+            }
+        }
+        // A burst of ten writes with no await between them: one frame each.
+        for step in 0..10u32 {
+            feed.put_book(test_book("BTC", &(102 + step).to_string()), crate::now_ms());
+        }
+        for socket in &mut sockets {
+            let frames = frames_within(socket, Duration::from_millis(400)).await;
+            assert_eq!(count(&frames, "l2Book"), 1, "{frames:?}");
+            assert_eq!(count(&frames, "bbo"), 1, "{frames:?}");
+        }
+        server.abort();
+    }
+
     /// The session lane itself (not just the frame builders): a raw subscriber
     /// acks both new channels and receives their pushes, each parsed through
     /// the client's own parser.
