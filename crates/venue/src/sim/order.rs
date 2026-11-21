@@ -1029,8 +1029,9 @@ impl Sim {
         Ok(Some(oid))
     }
 
-    /// The pre-place refusals (the open-interest cap and the margin-tier
-    /// limit): each gate's reason is the venue's refusal envelope.
+    /// The pre-place refusals (reduce-only, the open-order limit, the
+    /// open-interest cap, the margin-tier limit): each gate's reason is the
+    /// venue's refusal envelope.
     fn pre_place_refusals(
         &self,
         feed: &MarketFeed,
@@ -1038,6 +1039,7 @@ impl Sim {
         req: &Order,
         meta: Option<&crate::wire::Meta>,
     ) -> Result<()> {
+        self.reduce_only_refusal(address, req)?;
         if let Some(reason) = self.open_order_limit_refusal(address)? {
             tracing::warn!(coin = %req.coin, "order refused: open-order limit");
             return Err(Error::bad_request(reason));
@@ -1051,6 +1053,35 @@ impl Sim {
             return Err(Error::bad_request(reason));
         }
         Ok(())
+    }
+
+    /// The venue's reduce-only placement rule (docs, error responses: `Order /
+    /// ReduceOnly`): an order that cannot reduce the position it names is
+    /// refused now rather than resting into a fill it could never make. A
+    /// flat account has nothing to reduce, and the position's own side would
+    /// increase it.
+    fn reduce_only_refusal(&self, address: Address, req: &Order) -> Result<()> {
+        if !req.reduce_only {
+            return Ok(());
+        }
+        let old = self.position_szi(address, &req.coin)?;
+        let signed = req.size * req.side().sign();
+        if super::account::same_direction(old, signed) {
+            tracing::warn!(coin = %req.coin, "order refused: reduce-only cannot reduce");
+            return Err(Error::bad_request(
+                "Reduce only order would increase position.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The account's signed position in `coin` (0 when none): the reduce-only
+    /// guard's and the passive-fill lane's shared read.
+    pub(crate) fn position_szi(&self, address: Address, coin: &str) -> Result<Decimal> {
+        Ok(self
+            .account(address)?
+            .and_then(|a| a.positions.get(coin).map(|p| p.szi))
+            .unwrap_or(Decimal::ZERO))
     }
 
     /// The match-time re-margin: the maker's *current* available
@@ -2963,13 +2994,83 @@ mod tests {
             format!("{err}").contains("Insufficient margin to place order."),
             "{err}"
         );
-        // A reduce-only order reserves nothing.
+        // A reduce-only order reserves nothing (it needs a position to
+        // reduce: open one first, then rest the close above the market).
+        let opened = sim.order(&feed, a, &ioc(Side::Buy, "0.2")).unwrap();
+        assert_eq!(opened.total_sz, "0.2".parse().unwrap());
         let mut close = reduce(Side::Sell, "0.2");
         close.tif = Tif::Gtc;
         close.limit_px = Some("105".parse().unwrap());
         assert!(
             sim.place(&feed, a, &close).is_ok(),
             "reduce-only rests free"
+        );
+    }
+
+    /// The venue's reduce-only placement rule (docs' error responses, `Order /
+    /// ReduceOnly`): an order that cannot reduce the position it names is
+    /// refused now, with the venue's string — never a resting order that can
+    /// only ever be refused at fill time.
+    #[test]
+    fn a_reduce_only_order_with_nothing_to_reduce_is_refused() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        // Flat: nothing to reduce, in either direction.
+        for side in [Side::Buy, Side::Sell] {
+            let mut o = reduce(side, "0.2");
+            o.tif = Tif::Gtc;
+            o.limit_px = Some("105".parse().unwrap());
+            let err = sim.place(&feed, a, &o).unwrap_err();
+            assert!(
+                format!("{err}").contains("Reduce only order would increase position."),
+                "{err}"
+            );
+        }
+        // Long: the same side would increase it; the other side reduces it.
+        sim.order(&feed, a, &ioc(Side::Buy, "0.2")).unwrap();
+        let mut same_side = reduce(Side::Buy, "0.2");
+        same_side.tif = Tif::Gtc;
+        same_side.limit_px = Some("99".parse().unwrap());
+        let err = sim.place(&feed, a, &same_side).unwrap_err();
+        assert!(
+            format!("{err}").contains("Reduce only order would increase position."),
+            "{err}"
+        );
+        let mut closing = reduce(Side::Sell, "0.2");
+        closing.tif = Tif::Gtc;
+        closing.limit_px = Some("105".parse().unwrap());
+        assert!(sim.place(&feed, a, &closing).is_ok(), "the close rests");
+    }
+
+    /// A resting reduce-only order is canceled, not refused on every tick,
+    /// once its position is gone: the venue does not keep an order that can
+    /// never reduce anything.
+    #[test]
+    fn a_resting_reduce_only_order_is_canceled_when_its_position_is_gone() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        sim.order(&feed, a, &ioc(Side::Buy, "0.2")).unwrap();
+        // The close rests above the market (inside the ask, so a later book
+        // move crosses it).
+        let mut close = reduce(Side::Sell, "0.2");
+        close.tif = Tif::Gtc;
+        close.limit_px = Some("105".parse().unwrap());
+        let oid = sim.place(&feed, a, &close).unwrap().resting.unwrap();
+        // Another order closes the position while the close still rests.
+        sim.order(&feed, a, &ioc(Side::Sell, "0.2")).unwrap();
+        // The book crosses the resting close; the tick must cancel it.
+        let crossed = book("ETH", &[("106", "5")], &[("108", "5")]);
+        let crossed = feed_with_book(crossed, meta_with("ETH", 10));
+        sim.run_resting(&crossed, crate::now_ms() + 1).unwrap();
+        assert!(
+            sim.resting_by_oid(a, oid).unwrap().is_none(),
+            "a close with no position must not keep resting"
         );
     }
 

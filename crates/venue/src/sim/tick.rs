@@ -278,6 +278,13 @@ impl Sim {
             if take <= Decimal::ZERO {
                 continue;
             }
+            // A reduce-only maker can only ever fill against the position it
+            // names: the size is capped to it, and an order whose position is
+            // gone (closed while it rested) or flipped is canceled — the
+            // venue does not keep an order that can never reduce anything.
+            let Some(take) = self.reduce_only_take(&r, take)? else {
+                continue;
+            };
             // A spot resting order reserves tokens, not margin: the hold *is*
             // the cover, so no perp re-margin runs and the fill moves the spot
             // ledger. (Before this branch the perp re-margin looked the pair up
@@ -301,6 +308,31 @@ impl Sim {
             }
         }
         Ok(())
+    }
+
+    /// A reduce-only maker's fill size against its own position: capped to
+    /// the position it names, or `None` (the order canceled) when that
+    /// position is gone or flipped — never a per-tick refusal of an order
+    /// that can never reduce anything.
+    fn reduce_only_take(
+        &self,
+        r: &crate::sim::order::RestingOrder,
+        take: Decimal,
+    ) -> Result<Option<Decimal>> {
+        if r.reduce != crate::sim::order::Reduce::Only {
+            return Ok(Some(take));
+        }
+        let held = self.position_szi(r.account, &r.coin)?;
+        if crate::sim::account::same_direction(held, r.side.sign() * r.sz) {
+            let _ = self.cancel(
+                r.account,
+                &r.coin,
+                r.oid,
+                crate::sim::order::CancelSpeed::Normal,
+            );
+            return Ok(None);
+        }
+        Ok(Some(take.min(held.abs())))
     }
 
     /// One spot passive fill: the maker's token legs settle against the

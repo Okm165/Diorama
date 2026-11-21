@@ -37,6 +37,40 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### Live action sweep (2026-11-21)
+
+Every action above was exercised against the running mirror with a funded
+account, and each effect was read back from `/info` (not from the action's own
+answer). The sweep proved, end to end:
+
+- **Resting Gtc**: `openOrders` row with the oid, and the same oid visible as a
+  level in `/info l2Book` (the participant book). `cancelByCloid` removes it.
+- **`modify` / `batchModify`**: the documented cancel-and-place — a new oid at
+  the new price, the venue's `{"type":"default"}` answer (the docs' response
+  carries no oid). This is the `always_place` semantics, not an in-place edit.
+- **Post-only (Alo) crossing**: refused with the venue's string
+  (`Post only order would have immediately matched, bbo was …`), no fill.
+- **`updateLeverage`**: `activeAssetData.leverage.value` follows.
+- **Trigger stop-loss**: armed (visible with `isTrigger=true`, `triggerPx`, a
+  non-`N/A` trigger condition), then **fired** on a controlled 5 % crash
+  (`/control/crash`): the position closed, the trigger left `openOrders`, and
+  `userFills` recorded a `Close Long` fill. This is the first live proof of the
+  trigger lane (before, only unit-tested).
+- **`scheduleCancel` (dead-man's switch)**: resting orders stayed until the
+  deadline and were gone after it.
+- **`usdClassTransfer`**: spot −25, perp +25, and an `accountClassTransfer` row
+  in `userNonFundingLedgerUpdates`.
+
+One real deviation was found and fixed: a **reduce-only order that cannot
+reduce** (flat account, or the position's own side) used to be accepted and
+rested, although the venue documents that case as an order error
+(`Order / ReduceOnly → "Reduce only order would increase position."`). It is
+now refused at placement with that string, and a reduce-only maker whose
+position disappears while it rests is canceled (its fill size capped to the
+live position) instead of being refused on every tick. Regression tests:
+`a_reduce_only_order_with_nothing_to_reduce_is_refused`,
+`a_resting_reduce_only_order_is_canceled_when_its_position_is_gone`.
+
 ## Ideas, ordered by value
 
 1. **Maker (resting spot) lane on the fast books.** Our taker lane settles
