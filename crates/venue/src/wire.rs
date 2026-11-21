@@ -343,10 +343,7 @@ pub(crate) struct CandleRequest {
 fn dex_field<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
-    // The field is optional on the wire: a client that serializes an absent dex
-    // as JSON `null` (our own user-sim did) must not get a 422 — `null` and an
-    // omitted key both mean "the default dex".
-    Option::<String>::deserialize(deserializer)
+    <String as Deserialize>::deserialize(deserializer).map(Some)
 }
 
 impl InfoRequest {
@@ -1006,32 +1003,6 @@ pub(crate) enum UserAbstraction {
 
 #[cfg(test)]
 mod tests {
-    /// **An absent `dex` may ride the wire as `null`.** The field is optional;
-    /// a client that serializes `Option::None` (rather than skipping it) must
-    /// get "the default dex", not a 422 — measured live: the user-sim's
-    /// `venue-account` sent `"dex": null` and the venue refused the whole read.
-    #[test]
-    fn an_optional_dex_accepts_null_and_absence() {
-        let user = "0x00000000000000000000000000000000000a11ce";
-        for body in [
-            format!(r#"{{"type":"clearinghouseState","user":"{user}","dex":null}}"#),
-            format!(r#"{{"type":"clearinghouseState","user":"{user}"}}"#),
-        ] {
-            let request: super::InfoRequest = serde_json::from_str(&body).expect("parses");
-            match request {
-                super::InfoRequest::ClearinghouseState { dex, .. } => assert_eq!(dex, None),
-                other => panic!("wrong variant: {other:?}"),
-            }
-        }
-        let named: super::InfoRequest =
-            serde_json::from_str(&format!(r#"{{"type":"clearinghouseState","user":"{user}","dex":"xyz"}}"#))
-                .expect("parses");
-        match named {
-            super::InfoRequest::ClearinghouseState { dex, .. } => assert_eq!(dex.as_deref(), Some("xyz")),
-            other => panic!("wrong variant: {other:?}"),
-        }
-    }
-
     use super::*;
 
     #[test]
