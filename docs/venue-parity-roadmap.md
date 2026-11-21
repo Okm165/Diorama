@@ -208,6 +208,37 @@ still sees a stale zero, the suspect is its own read cache, not the bridge.
 The gateway's `top_up_quote` route now also quotes the creation fee on
 top-ups (the report's "empty revert" integrator complaint).
 
+### The venue position is the loan's collateral — measured live (2026-11-21)
+
+The report's never-tested core idea ran end to end on loan `0xefe3ef00`
+(10 WHYPE collateral, 60 USDC debt, agent account `0x609e8618…`, a
+**unified** account holding 60 USDC spot on the venue):
+
+| step | agent venue equity | loan `venue_term_usd` | loan HF |
+|---|---|---|---|
+| flat (baseline) | 0 perp + 60 spot | 66.08 | 8.44 |
+| 0.1 ETH long opened (spot collateral backs the order — no perp balance needed) | −0.07 (fees) | — | — |
+| `/control/crash` ETH −5 % | −8.48 (uPnL −8.40) | 54.24 | **8.341** |
+| rally handed back | −0.003 | — | — |
+| flattened | −0.05 (fees) | 66.02 | **8.455** |
+
+The chain that moved: venue fill → sim account equity → indexer
+`venue_account_ticks` (5 s) → operator's HF fold → `position_health`. The
+unified-account mechanics are live parity too: `usdClassTransfer` is refused
+on an active unified account (`Action disabled when unified account is
+active`, as the venue serves), and the perp order is margined from the
+account's spot collateral.
+
+**New repeating pattern (section-4 material):** a scenario price move
+(`/control/crash`/`rally` **with** a pct) freezes that coin's served mark
+until its **hand-back** (the same verb with **no** pct). While held, the
+indexer's projection refuses the coin's marks (`409 … no observation within
+the bound — the market plane is held`) and the operator's HF scan goes blind
+for every holder of the coin (`positions were excluded from this HF scan`,
+1/9 during the measurement). Always hand a move back; a held plane is a
+silent, swarm-wide degradation, not a local scenario state.
+
+
 
 
 ## Ideas, ordered by value
