@@ -1,0 +1,27 @@
+# local-reth: the fully local chain-1 source for the Mainnet Mirror.
+#
+# The default mainnet stack reads chain 1 from the source host's reth over the
+# LAN (`k8s/base/diorama-mainnet/kustomization.yaml`). That is one cross-host
+# tie — the source address is DHCP, and a re-pin needs it reachable. This
+# component closes the tie: the instance's own reth (the manifest pair the base
+# already carries) plus its claims.
+#
+# Enable it from the mainnet overlay's kustomization:
+#
+#     components:
+#       - ../../../components/local-reth
+#
+# then, once only:
+#     kubectl apply -f k8s/components/local-reth/pvcs.yaml
+#     make snapshot INSTANCE=diorama-mainnet      # reth download, ~266 GB, resumable
+#     # after reth serves: point specialization.toml [endpoints.evm] at
+#     # http://reth:8545 (the example's value) and `make deploy-engine`
+#
+# Not included by default on purpose: reth is a 400 Gi claim and a multi-hour
+# sync; the LAN source is the correct default until the local one is sourced.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - ../../base/diorama-mainnet/reth.yaml
+  - ../../base/diorama-mainnet/lighthouse.yaml
+  - ../../base/diorama-mainnet/reth-config.yaml
