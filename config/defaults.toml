@@ -125,10 +125,14 @@ port = 8080
 # The market plane's REST cache cadence. WS pushes (allMids, activeAssetCtx)
 # are the primary freshness source; the REST poller backfills meta/books and
 # is gated by the rate budget meter (1200 weight/min: metaAndAssetCtxs = 20,
-# spotMeta = 20, l2Book/allMids = 2). 5 s gives ~600 weight/min for the
-# default four-market set (20+20+4x2+2 = 50 per pass, 12 passes/min).
+# spotMeta = 20, l2Book/allMids = 2). 5 s gave ~600 weight/min for the
+# default four-market set (20+20+4x2+2 = 50 per pass, 12 passes/min); the
+# 45-market mirror spends 132 per pass, and 12 passes of that is 1584/min —
+# over the venue's own cap, so the meter skipped reads every pass (measured
+# 2026-11-21: budget_skips_total 11768 and pinned at cap). 8 s keeps the full
+# pass under the cap (≈990/min) with headroom for passthrough reads.
 [services.venue_sim]
-poll_interval_ms = 5000
+poll_interval_ms = 8000
 # The account plane's self-advance tick (funding, liquidations, persist).
 tick_interval_ms = 1000
 # The `orderStatus` terminal-history bound (a deployment memory policy).
