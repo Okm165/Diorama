@@ -758,7 +758,7 @@ impl MarketFeed {
     /// lists, a feed with no venue client, a spent request budget, or a venue
     /// that did not answer in time: the caller carries on as it did without
     /// the book.
-    // step-9: the fork's demand-driven relay keeps a wanted coin's `l2Book`
+    // The fork's demand-driven relay keeps a wanted coin's `l2Book`
     // stream live (an order, a held position or a downstream subscription);
     // this one-shot read is the order door's and the ws subscription's gap
     // fill until then.

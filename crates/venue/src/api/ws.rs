@@ -383,7 +383,7 @@ fn coin_of(sub: &Subscription) -> Option<&str> {
 
 /// Warm one subscribe request's coin, when it names one: the feed's one-shot
 /// on-demand read, so a book that has not landed yet is fetched before the
-/// subscription is admitted. `// step-9:` the fork's relay keeps the stream
+/// subscription is admitted. The fork's relay keeps the stream
 /// live after the first read (and per-dex books); this is the gap fill until
 /// then.
 async fn warm(text: &str, state: &ApiState) {
@@ -560,7 +560,7 @@ fn admit(sub: &Subscription, state: &ApiState) -> Result<Mem, Refusal> {
     let has_book = |coin: &str| {
         // The session warms a coin subscription through the feed's one-shot
         // on-demand read before admission; a book still absent is refused
-        // (a coin no dex lists included). `// step-9:` the fork's relay keeps
+        // (a coin no dex lists included). The fork's relay keeps
         // the stream live; this is the gap fill until then.
         if feed.book(coin, crate::now_ms()).is_some() {
             Ok(())

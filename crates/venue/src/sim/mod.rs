@@ -33,6 +33,8 @@ mod dex_tests;
 pub(crate) mod fees;
 pub(crate) mod funding;
 pub(crate) mod ledger;
+#[cfg(test)]
+mod liquidation_tests;
 pub(crate) mod metrics;
 pub(crate) mod order;
 pub(crate) mod seed;

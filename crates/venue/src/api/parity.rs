@@ -15,12 +15,8 @@
 //!
 //! The fork's capture also covers the websocket channels (`ws`, `wsSilence`,
 //! `wsErrors`, `dexOrder`); the ported session machinery is held to them
-//! below, shape for shape.
-//!
-//! The capture rows that exercise deferred machinery are not compared: this
-//! step keeps one USDC clearinghouse and no HIP-3 fee-scale fields, so a
-//! builder dex's clearinghouse and meta are marked deferred (see
-//! [`DEFERRED_INFO`]) rather than compared against an empty stand-in.
+//! below, shape for shape. Every captured info row and error case is
+//! compared: nothing is deferred.
 use super::ws::{pushes, request_reply, Live};
 use super::{info, ws_codec, ApiState};
 use crate::feed::MarketFeed;
@@ -303,8 +299,7 @@ async fn info_json(state: &Arc<ApiState>, body: Value) -> Value {
     serde_json::from_slice(&bytes).expect("json body")
 }
 
-/// The info requests compared against their captured answers. Rows whose
-/// machinery is deferred ([`DEFERRED_INFO`]) are absent on purpose.
+/// The info requests compared against their captured answers.
 #[allow(clippy::too_many_lines)] // one table of info requests
 fn info_cases(user: Address) -> Vec<(&'static str, Value)> {
     vec![

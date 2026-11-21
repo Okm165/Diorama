@@ -272,9 +272,6 @@ fn destination_of(text: &str) -> std::result::Result<Address, String> {
 }
 
 /// The transfer and account-setup actions (`user_actions.rs`).
-// step-9: the unified-account switch (and the refusal it carries for
-// `usdClassTransfer`/`spotSend`) is deferred with the per-dex ledgers; see
-// `user_actions.rs` for the two action-level pointers.
 #[allow(clippy::too_many_lines)] // one dispatch arm per user-signed action
 fn user_action(state: &Arc<ApiState>, owner: Address, action: &ExchangeAction) -> Response {
     match action {

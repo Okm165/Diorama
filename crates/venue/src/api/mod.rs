@@ -167,9 +167,9 @@ pub(crate) fn sim_gate(state: &ApiState) -> Result<(), SimPoisoned> {
 }
 
 /// The info router (8090): the venue's `POST /info`, liveness, readiness.
-// step-9: the market channels' live relay pushes (the fork's relay) replace
-// this step's tick + dedup; the candle hub is attached and its `candle`
-// channel subscribes it.
+// The market channels ride this step's tick + dedup (the fork's relay is a
+// separate lane); the candle hub is attached and its `candle` channel
+// subscribes it.
 pub fn info_router(state: Arc<ApiState>) -> Router {
     Router::new()
         .route(
