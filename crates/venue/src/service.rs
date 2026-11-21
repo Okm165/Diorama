@@ -256,6 +256,14 @@ fn spawn_tick(sim: &Arc<crate::sim::Sim>, feed: &Arc<crate::feed::MarketFeed>, t
         let mut ticker = tokio::time::interval(tick);
         loop {
             ticker.tick().await;
+            // A coin an account holds or rests an order on keeps its book
+            // wanted: the poller refreshes it however long it sits idle.
+            match tick_sim.held_coins() {
+                Ok(coins) => tick_feed.want_books(coins.iter().map(String::as_str)),
+                Err(e) => {
+                    tracing::warn!(error = %e, "held coins unavailable; books not kept wanted");
+                }
+            }
             if let Err(e) = tick_sim.evaluate(&tick_feed) {
                 tracing::warn!(error = %e, "sim tick failed; will retry");
             }

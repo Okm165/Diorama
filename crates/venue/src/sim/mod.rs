@@ -359,6 +359,29 @@ impl Sim {
         })
     }
 
+    /// Every coin the sim currently holds a position on or rests an order
+    /// for: the tick keeps these coins' books wanted so a used market never
+    /// idles stale.
+    pub(crate) fn held_coins(&self) -> Result<Vec<String>> {
+        self.with_state(|state| {
+            let mut coins: std::collections::BTreeSet<String> = state
+                .resting
+                .values()
+                .map(|order| order.coin.clone())
+                .collect();
+            for account in state.accounts.values() {
+                coins.extend(
+                    account
+                        .positions
+                        .iter()
+                        .filter(|(_, p)| !p.szi.is_zero())
+                        .map(|(coin, _)| coin.clone()),
+                );
+            }
+            Ok(coins.into_iter().collect())
+        })
+    }
+
     /// The sim clock (ms) at wall time `now_ms`.
     pub fn clock(&self, now_ms: u64) -> Result<u64> {
         let offset = self.with_state(|state| Ok(state.clock_offset_ms))?;

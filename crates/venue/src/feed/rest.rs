@@ -422,7 +422,16 @@ impl Poller {
     async fn books(&self) {
         let now = crate::now_ms();
         let window = u64::try_from(self.interval.as_millis()).unwrap_or(u64::MAX);
-        for coin in self.feed.book_coins() {
+        // The configured set is always served; the relay's wanted coins (a
+        // held position, a resting order, a downstream subscription) join it
+        // so a coin outside the config never idles stale while it is used.
+        let mut coins: Vec<String> = self.feed.book_coins().cloned().collect();
+        for coin in self.feed.wanted_coins(now) {
+            if !coins.contains(&coin) {
+                coins.push(coin);
+            }
+        }
+        for coin in &coins {
             // WSS primary, REST gap reconciliation: a book the socket updated
             // within one poll interval is not re-read. A scripted book owns the
             // coin and is never polled; a warming or stale one is.

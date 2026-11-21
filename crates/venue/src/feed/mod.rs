@@ -19,7 +19,9 @@
 //! read a different mark than the sim used for margin.
 pub(crate) mod budget;
 pub(crate) mod dex;
+pub(crate) mod l2;
 pub(crate) mod metrics;
+pub(crate) mod relay;
 pub(crate) mod rest;
 pub(crate) mod ws;
 
@@ -225,6 +227,10 @@ pub struct MarketFeed {
     /// service; absent in fixtures, where [`Self::ensure_book`] only serves
     /// what is cached).
     rest: std::sync::OnceLock<rest::RestClient>,
+    /// The upstream subscription relay: which coins' books and contexts the
+    /// socket carries (contexts permanent, books demand-driven). See
+    /// [`relay`] for the two policies and the venue's own budgets.
+    pub(crate) relay: std::sync::Arc<relay::Relay>,
 }
 
 impl MarketFeed {
@@ -242,6 +248,7 @@ impl MarketFeed {
             persist_lock: std::sync::Mutex::new(()),
             stalled_until_ms: AtomicU64::new(0),
             rest: std::sync::OnceLock::new(),
+            relay: std::sync::Arc::default(),
         })
     }
 
@@ -259,6 +266,7 @@ impl MarketFeed {
             persist_lock: std::sync::Mutex::new(()),
             stalled_until_ms: AtomicU64::new(0),
             rest: std::sync::OnceLock::new(),
+            relay: std::sync::Arc::default(),
         }
     }
 
@@ -318,6 +326,85 @@ impl MarketFeed {
     /// `None` for a scripted book (the scenario's present is never stale) and
     /// for a coin whose live base has not landed yet (that read is `Warming`,
     /// a different fault — absence, not staleness).
+    /// Ask for `coin`'s book to be kept live (an order on it, a position or
+    /// resting order in it, an `l2Book` read): the upstream socket carries its
+    /// `l2Book` stream until the grace window after the last such ask has run
+    /// out. `true` when some dex lists the coin; anything else is `false` (an
+    /// unlisted coin is never subscribed: the venue closes the socket on one).
+    #[allow(dead_code, reason = "wired when the ws lane subscribes the relay's stream set (next port step)")]
+    pub(crate) fn want_book(&self, coin: &str) -> bool {
+        self.want_book_at(coin, crate::now_ms())
+    }
+
+    fn want_book_at(&self, coin: &str, now_ms: u64) -> bool {
+        if self.meta_for_coin(coin).is_none() {
+            return false;
+        }
+        self.relay.touch(coin, now_ms);
+        true
+    }
+
+    /// [`Self::want_book`] for every coin of a held position or resting order
+    /// (the tick calls this, so a coin that is held never idles out).
+    pub(crate) fn want_books<'a>(&self, coins: impl IntoIterator<Item = &'a str>) {
+        let now = crate::now_ms();
+        for coin in coins {
+            self.want_book_at(coin, now);
+        }
+    }
+
+    /// Hold `coin` wanted for as long as the lease lives (a downstream
+    /// websocket subscription on it). `None` for a coin no dex lists.
+    #[allow(dead_code, reason = "wired when the downstream ws lane takes a lease per subscription")]
+    pub(crate) fn lease_coin(&self, coin: &str) -> Option<relay::Lease> {
+        self.meta_for_coin(coin)?;
+        Some(self.relay.lease(coin, crate::now_ms()))
+    }
+
+    /// Drop an expired coin's cached book: a book nobody wants must not keep
+    /// memory or gauges, and a re-wanted coin starts from a fresh stream.
+    fn evict_book(&self, coin: &str) {
+        let mut c = self.write();
+        c.books.remove(coin);
+        c.book_at.remove(coin);
+    }
+
+    /// The coins the poller backfills books for: every wanted coin (the ones
+    /// the relay carries a stream for), most important first. A coin whose
+    /// grace ran out is dropped here with its cached book.
+    pub(crate) fn wanted_coins(&self, now_ms: u64) -> Vec<String> {
+        let (wanted, expired) = self.relay.sweep(now_ms);
+        for coin in &expired {
+            self.evict_book(coin);
+        }
+        wanted
+    }
+
+    /// The coins whose context stream is permanent: every live (not delisted)
+    /// coin of every dex. A delisted coin's mark is a settlement price that
+    /// barely moves; it is refreshed by the REST sweep, or streamed while it
+    /// is wanted.
+    #[allow(dead_code, reason = "wired when the ws lane diffs the desired stream set")]
+    pub(crate) fn permanent_ctx_coins(&self) -> Vec<String> {
+        let c = self.read();
+        c.registry
+            .dexs()
+            .iter()
+            .flat_map(|d| d.meta.universe.iter())
+            .filter(|a| !a.is_delisted.unwrap_or(false))
+            .map(|a| a.name.clone())
+            .collect()
+    }
+
+    /// The streams the upstream socket should carry now, and the books whose
+    /// grace has run out (evicted from the cache).
+    #[allow(dead_code, reason = "wired when the ws lane diffs the desired stream set")]
+    pub(crate) fn desired_streams(&self, now_ms: u64) -> std::collections::BTreeSet<relay::Stream> {
+        let wanted = self.wanted_coins(now_ms);
+        let permanent = self.permanent_ctx_coins();
+        self.relay.desired(&permanent, &wanted, now_ms)
+    }
+
     pub fn book_age(&self, coin: &str, now_ms: u64, max_ms: u64) -> BookAge {
         if self.read_overrides().books.contains_key(coin) {
             return BookAge::Scripted;
