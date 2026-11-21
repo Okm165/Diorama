@@ -256,7 +256,12 @@ pub(super) fn approve_builder_fee(
 
 /// Set the account's mode; portfolio margin is refused by the sim.
 fn set_mode(state: &ApiState, account: Address, mode: UserAbstraction) -> Response {
-    answer(state.sim.set_mode(account, mode).map_err(|e| e.to_string()))
+    answer(
+        state
+            .sim
+            .set_mode(account, mode, &state.feed)
+            .map_err(|e| e.to_string()),
+    )
 }
 
 /// `userSetAbstraction`: the signer sets its own account's mode.

@@ -16,6 +16,7 @@
 use super::ledger::{shared, FillEffect, UserFill, UserFunding};
 use super::seed::AccountSeed;
 use crate::error::{Error, Result};
+use crate::feed::dex::dex_of_coin;
 use crate::feed::{MarketFeed, Prices};
 use crate::wire::{
     AssetCtx, AssetPosition, ClearinghouseState, CumFunding, Leverage, LeverageType, MarginSummary,
@@ -41,16 +42,36 @@ pub(crate) struct AgentWallet {
     pub name: String,
 }
 
+/// One dex's clearinghouse ledger of an account: the raw collateral balance
+/// (before cost basis; USDC on the default dex, the dex's own collateral
+/// token on a builder dex) and the sim clock (ms) its funding was last
+/// accrued to. The real venue keeps one such clearinghouse per (user, dex).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct DexLedger {
+    #[serde(default)]
+    pub balance: Decimal,
+    /// The sim clock (ms) funding was last accrued to (0 = never).
+    #[serde(default)]
+    pub funded_at_ms: u64,
+}
+
 /// One simulated account (persisted). The fields are the *inputs*; the wire
 /// shape is derived per read.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Account {
-    /// The perp wallet's raw USDC balance (before cost basis).
-    // step-9: the per-dex clearinghouse ledger (`perps`/`DexLedger`, one
-    // stamp and balance per dex, USDH collateral included) replaces this
-    // single balance; every `perp_balance` read becomes `perp_balance(dex)`.
-    #[serde(default)]
-    pub perp_balance: Decimal,
+    /// The perp clearinghouses, one per dex (`""` = the default dex). Cross
+    /// margin of different dexes never shares: each ledger funds only its own
+    /// dex's positions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub perps: BTreeMap<String, DexLedger>,
+    /// The single USDC balance a state file written before the per-dex
+    /// ledgers carries. Read on load and folded into `perps[""]` by
+    /// [`Account::migrate_legacy`]; never written back.
+    #[serde(default, rename = "perp_balance", skip_serializing)]
+    pub(crate) legacy_perp_balance: Option<Decimal>,
+    /// The single funding stamp of the same older files (see above).
+    #[serde(default, rename = "funded_at_ms", skip_serializing)]
+    pub(crate) legacy_funded_at_ms: Option<u64>,
     #[serde(default)]
     pub positions: BTreeMap<String, Position>,
     /// Spot balances by token index (USDC = 0).
@@ -58,9 +79,6 @@ pub(crate) struct Account {
     pub spot: BTreeMap<u32, SpotEntry>,
     #[serde(default = "default_mode")]
     pub mode: UserAbstraction,
-    /// The sim clock (ms) funding was last accrued to.
-    #[serde(default)]
-    pub funded_at_ms: u64,
     /// The fills this account made, oldest first, bounded (`userFills`).
     /// History only: no account figure reads it.
     #[serde(
@@ -112,6 +130,112 @@ pub(crate) struct Account {
 
 fn default_mode() -> UserAbstraction {
     UserAbstraction::Default
+}
+
+/// Credit (negative: debit) one dex's ledger in the ledger map itself, so a
+/// caller holding a borrow of the account's positions can still settle cash
+/// (a disjoint-field borrow, which a method on the whole account is not).
+pub(crate) fn credit_ledger(
+    perps: &mut BTreeMap<String, DexLedger>,
+    dex: &str,
+    amount: Decimal,
+    what: &'static str,
+) -> Result<Decimal> {
+    let ledger = perps.entry(dex.to_string()).or_default();
+    ledger.balance = add(ledger.balance, amount, what)?;
+    Ok(ledger.balance)
+}
+
+/// The ledger map of a default-dex-only account (the tests' shorthand).
+#[cfg(test)]
+pub(crate) fn default_perps(balance: Decimal, funded_at_ms: u64) -> BTreeMap<String, DexLedger> {
+    BTreeMap::from([(
+        String::new(),
+        DexLedger {
+            balance,
+            funded_at_ms,
+        },
+    )])
+}
+
+impl Account {
+    /// Fold the legacy single balance and funding stamp (a state file written
+    /// before the per-dex ledgers) into the default dex's ledger. Idempotent:
+    /// the legacy fields are consumed, and a ledger the file already carries
+    /// wins over them.
+    pub(crate) fn migrate_legacy(&mut self) {
+        let balance = self.legacy_perp_balance.take();
+        let stamp = self.legacy_funded_at_ms.take();
+        if balance.is_none() && stamp.is_none() {
+            return;
+        }
+        if self.perps.contains_key("") {
+            return;
+        }
+        self.perps.insert(
+            String::new(),
+            DexLedger {
+                balance: balance.unwrap_or_default(),
+                funded_at_ms: stamp.unwrap_or_default(),
+            },
+        );
+    }
+
+    /// The dex's raw collateral balance (zero for a dex the account never
+    /// funded).
+    pub(crate) fn perp_balance(&self, dex: &str) -> Decimal {
+        self.perps.get(dex).map_or(Decimal::ZERO, |l| l.balance)
+    }
+
+    /// The dex's ledger, created empty on first touch.
+    pub(crate) fn ledger_mut(&mut self, dex: &str) -> &mut DexLedger {
+        self.perps.entry(dex.to_string()).or_default()
+    }
+
+    /// The dex's balance for mutation (the ledger is created on first touch).
+    pub(crate) fn perp_balance_mut(&mut self, dex: &str) -> &mut Decimal {
+        &mut self.ledger_mut(dex).balance
+    }
+
+    /// The sim clock (ms) the dex's funding was last accrued to (0 = never).
+    pub(crate) fn funded_at_ms(&self, dex: &str) -> u64 {
+        self.perps.get(dex).map_or(0, |l| l.funded_at_ms)
+    }
+
+    /// Credit (or, negative, debit) the dex's balance, naming the context in
+    /// an overflow; the new balance is returned.
+    pub(crate) fn credit_perp(
+        &mut self,
+        dex: &str,
+        amount: Decimal,
+        what: &'static str,
+    ) -> Result<Decimal> {
+        credit_ledger(&mut self.perps, dex, amount, what)
+    }
+
+    /// The dexes the account holds a non-flat position in, sorted (`""`
+    /// first). The waterfall walks these: a balance alone carries no risk.
+    pub(crate) fn position_dexs(&self) -> Vec<String> {
+        let dexs: std::collections::BTreeSet<&str> = self
+            .positions
+            .iter()
+            .filter(|(_, p)| !p.szi.is_zero())
+            .map(|(coin, _)| dex_of_coin(coin))
+            .collect();
+        dexs.into_iter().map(str::to_string).collect()
+    }
+
+    /// The dexes the account has a clearinghouse in: one with a ledger (it was
+    /// funded or traded) or a position. Sorted, `""` first.
+    pub(crate) fn dexs_with_activity(&self) -> Vec<String> {
+        let mut dexs: std::collections::BTreeSet<String> = self.perps.keys().cloned().collect();
+        dexs.extend(
+            self.positions
+                .keys()
+                .map(|coin| dex_of_coin(coin).to_string()),
+        );
+        dexs.into_iter().collect()
+    }
 }
 
 /// One `updateLeverage` setting (the venue stores cross/isolated + value; it
@@ -461,6 +585,7 @@ fn position_row(
 /// sample); with no isolated positions it equals the margin summary.
 fn assemble(
     account: &Account,
+    dex: &str,
     totals: &PositionTotals,
     rows: Vec<AssetPosition>,
     facts: BTreeMap<String, PositionFacts>,
@@ -482,7 +607,7 @@ fn assemble(
     // included; and the cross summary is the total minus the isolated legs'
     // contribution: value minus their equity (`margin + pnl`), raw minus
     // (equity − signed value).
-    let cash = account.perp_balance + totals.isolated_margin;
+    let cash = account.perp_balance(dex) + totals.isolated_margin;
     let total_raw = cash - totals.cost_basis;
     let account_value = total_raw + totals.signed_value;
     let margin_summary = MarginSummary {
@@ -541,19 +666,20 @@ fn withdrawable_of(cross_account_value: Decimal, totals: &PositionTotals) -> Res
     Ok(sub(cross_account_value, floor, "withdrawable")?.max(Decimal::ZERO))
 }
 
-/// Compute the served figures at the feed's current marks.
-pub(crate) fn view(
-    account: &Account,
-    feed: &MarketFeed,
-    meta: Option<&crate::wire::Meta>,
-) -> Result<AccountView> {
+/// Compute one dex's served figures at the feed's current marks: the dex's
+/// own ledger, its positions only, margined against the dex's own meta. The
+/// venue keeps one clearinghouse per (user, dex) and cross margin never
+/// crosses dexes.
+pub(crate) fn view(account: &Account, feed: &MarketFeed, dex: &str) -> Result<AccountView> {
+    let meta = feed.meta_of(dex);
+    let meta = meta.as_ref();
     let mut totals = PositionTotals::default();
     let mut rows = Vec::with_capacity(account.positions.len());
     let mut by_coin = BTreeMap::new();
     for (coin, p) in &account.positions {
         // Flat rows are dropped from the served state (the consumer's gate): a
         // zero-size position is a closed one, not a row.
-        if p.szi.is_zero() {
+        if p.szi.is_zero() || dex_of_coin(coin) != dex {
             continue;
         }
         let facts = PositionFacts::of(coin, p, feed, meta)?;
@@ -561,17 +687,18 @@ pub(crate) fn view(
         rows.push(position_row(coin, p, &facts, meta)?);
         by_coin.insert(coin.clone(), facts);
     }
-    assemble(account, &totals, rows, by_coin)
+    assemble(account, dex, &totals, rows, by_coin)
 }
 
-/// The served `clearinghouseState` (fresh `time` from the caller's wall clock).
+/// The served `clearinghouseState` of one dex (fresh `time` from the caller's
+/// wall clock).
 pub(crate) fn clearinghouse(
     account: &Account,
     feed: &MarketFeed,
-    meta: Option<&crate::wire::Meta>,
+    dex: &str,
     time_ms: u64,
 ) -> Result<ClearinghouseState> {
-    let v = view(account, feed, meta)?;
+    let v = view(account, feed, dex)?;
     // The account's figures are a simulation when either a mark behind them is
     // scenario-owned **or** the account's balances were written by the control
     // plane. The old derivation read only the marks, so a balance patch on a
@@ -585,7 +712,7 @@ pub(crate) fn clearinghouse(
         || account
             .positions
             .keys()
-            .any(|coin| feed.market_is_owned(coin));
+            .any(|coin| dex_of_coin(coin) == dex && feed.market_is_owned(coin));
     Ok(ClearinghouseState {
         margin_summary: v.margin_summary,
         cross_margin_summary: v.cross_margin_summary,
@@ -626,7 +753,17 @@ pub(crate) fn identity_holds(state: &ClearinghouseState) -> bool {
         .unwrap_or(false)
 }
 
-/// The served spot balances (USDC token 0 sorts first, like the venue's).
+/// The spot balances as `/info` and the websocket serve them. The control
+/// plane and the seed read [`spot_balances`], the stored state.
+#[allow(clippy::unnecessary_wraps)] // the served hold computes per token in the unified switch
+pub(crate) fn served_spot_balances(
+    account: &Account,
+    _feed: &MarketFeed,
+) -> Result<Vec<SpotBalance>> {
+    Ok(spot_balances(account))
+}
+
+/// The stored spot balances (USDC token 0 sorts first, like the venue's).
 pub(crate) fn spot_balances(account: &Account) -> Vec<SpotBalance> {
     let mut rows: Vec<SpotBalance> = account
         .spot
@@ -668,35 +805,104 @@ pub(crate) fn refuse_unmodeled_mode(mode: UserAbstraction) -> Result<()> {
 /// default, `collateral_token = 0`).
 pub(crate) const COLLATERAL_TOKEN: u32 = 0;
 
-/// The unified account's `tokenToAvailableAfterMaintenance`: the collateral
-/// token's balance minus the perp maintenance — the identity the consumer
-/// reconciles (`available + maintenance == the token's balance`, its hard
-/// gate, measured live against the venue). Standard accounts serve none: their
-/// spot side is not read for equity.
+/// The unified account's `tokenToAvailableAfterMaintenance`: each collateral
+/// token's balance minus the perp maintenance of every dex margining against
+/// it — the identity the consumer reconciles (`available + maintenance == the
+/// token's balance`, its hard gate, measured live against the venue). Standard
+/// accounts serve none: their spot side is not read for equity.
+///
+/// Every collateral token the account holds in spot is reported (the default
+/// dex's USDC and any builder dex's own token), net of the maintenance of
+/// every dex that margins against that token.
 pub(crate) fn available_after_maintenance(
     account: &Account,
     feed: &MarketFeed,
-    meta: Option<&crate::wire::Meta>,
 ) -> Result<Vec<(u32, Decimal)>> {
     if account.mode != UserAbstraction::UnifiedAccount {
         return Ok(Vec::new());
     }
-    let Some(entry) = account.spot.get(&COLLATERAL_TOKEN) else {
-        return Ok(Vec::new());
-    };
-    let v = view(account, feed, meta)?;
-    let isolated = v
-        .asset_positions
-        .iter()
-        .filter(|row| row.position.leverage.kind == LeverageType::Isolated)
-        .try_fold(Decimal::ZERO, |acc, row| {
-            add(acc, row.position.margin_used, ISOLATED_MARGIN)
-        })?;
-    let maintenance = add(v.cross_maintenance_margin_used, isolated, "maintenance")?;
-    Ok(vec![(
-        COLLATERAL_TOKEN,
-        sub(entry.total, maintenance, "available after maintenance")?,
-    )])
+    let mut maintenance: BTreeMap<u32, Decimal> = BTreeMap::new();
+    for dex in account.position_dexs() {
+        let v = view(account, feed, &dex)?;
+        let isolated = v
+            .asset_positions
+            .iter()
+            .filter(|row| row.position.leverage.kind == LeverageType::Isolated)
+            .try_fold(Decimal::ZERO, |acc, row| {
+                add(acc, row.position.margin_used, ISOLATED_MARGIN)
+            })?;
+        let of_dex = add(v.cross_maintenance_margin_used, isolated, "maintenance")?;
+        let token = feed.collateral_token_of(&dex);
+        let total = maintenance.entry(token).or_insert(Decimal::ZERO);
+        *total = add(*total, of_dex, "maintenance")?;
+    }
+    let mut collateral: Vec<u32> = feed
+        .dex_collateral_tokens()
+        .into_iter()
+        .map(|(_, token)| token)
+        .collect();
+    collateral.push(COLLATERAL_TOKEN);
+    let mut out = Vec::new();
+    for (token, entry) in &account.spot {
+        if !collateral.contains(token) {
+            continue;
+        }
+        let held = maintenance.get(token).copied().unwrap_or(Decimal::ZERO);
+        out.push((
+            *token,
+            sub(entry.total, held, "available after maintenance")?,
+        ));
+    }
+    Ok(out)
+}
+
+/// The spot balance of `token` free for margin: total minus hold (zero when
+/// the account holds none).
+fn spot_collateral(account: &Account, token: u32) -> Result<Decimal> {
+    match account.spot.get(&token) {
+        Some(entry) => sub(entry.total, entry.hold, "spot hold"),
+        None => Ok(Decimal::ZERO),
+    }
+}
+
+/// The initial margin the account's positions hold on every dex that margins
+/// against `token`, except `except` (the dex under check).
+fn pooled_margin(
+    account: &Account,
+    feed: &MarketFeed,
+    token: u32,
+    except: Option<&str>,
+) -> Result<Decimal> {
+    let mut tokens: BTreeMap<String, u32> = BTreeMap::new();
+    let mut total = Decimal::ZERO;
+    for (coin, p) in &account.positions {
+        let dex = dex_of_coin(coin);
+        if Some(dex) == except || p.szi.is_zero() {
+            continue;
+        }
+        let of_dex = *tokens
+            .entry(dex.to_string())
+            .or_insert_with(|| feed.collateral_token_of(dex));
+        if of_dex == token {
+            total = add(total, p.margin_used, "pooled margin")?;
+        }
+    }
+    Ok(total)
+}
+
+/// The spot collateral a unified account's dex can margin against. THE ONE
+/// PLACE that encodes the non-USDC collateral rule, which is modeled, not
+/// measured (no sampled account held a position on a USDH dex): a dex
+/// margins against the spot balance of its own `collateralToken`, and the
+/// balance is pooled across every dex sharing that token, so the margin the
+/// account's other dexes hold on the same token is not available to this one.
+fn unified_spot_available(account: &Account, feed: &MarketFeed, dex: &str) -> Result<Decimal> {
+    let token = feed.collateral_token_of(dex);
+    sub(
+        spot_collateral(account, token)?,
+        pooled_margin(account, feed, token, Some(dex))?,
+        "pooled spot collateral",
+    )
 }
 
 /// The account's free margin for an order: the perp sub-ledger's value, plus a
@@ -710,14 +916,22 @@ pub(crate) fn available_after_maintenance(
 /// same account can still trade perps against that spot collateral. The order
 /// lane's placement and post-fill checks read this figure; the served summary
 /// does not change.
-pub(crate) fn available_margin(account: &Account, view: &AccountView) -> Result<Decimal> {
+///
+/// Per dex: `dex`'s own ledger, plus (unified) the spot collateral of the
+/// dex's token net of the margin the account's other dexes hold on that token.
+pub(crate) fn available_margin(
+    account: &Account,
+    feed: &MarketFeed,
+    dex: &str,
+    view: &AccountView,
+) -> Result<Decimal> {
     let mut value = view.margin_summary.account_value;
     if account.mode == UserAbstraction::UnifiedAccount {
-        let spot = match account.spot.get(&COLLATERAL_TOKEN) {
-            Some(entry) => sub(entry.total, entry.hold, "spot hold")?,
-            None => Decimal::ZERO,
-        };
-        value = add(value, spot, "unified spot collateral")?;
+        value = add(
+            value,
+            unified_spot_available(account, feed, dex)?,
+            "unified spot collateral",
+        )?;
     }
     sub(
         value,
@@ -730,14 +944,19 @@ pub(crate) fn available_margin(account: &Account, view: &AccountView) -> Result<
 /// sub-ledger's cross value plus a **unified** account's spot collateral. The
 /// waterfall must see the same unified balance the order lane trades against;
 /// a spot-only unified account with a small perp position is not insolvent.
-pub(crate) fn unified_equity(account: &Account, view: &AccountView) -> Result<Decimal> {
+pub(crate) fn unified_equity(
+    account: &Account,
+    feed: &MarketFeed,
+    dex: &str,
+    view: &AccountView,
+) -> Result<Decimal> {
     let mut equity = view.cross_margin_summary.account_value;
     if account.mode == UserAbstraction::UnifiedAccount {
-        let spot = match account.spot.get(&COLLATERAL_TOKEN) {
-            Some(entry) => sub(entry.total, entry.hold, "spot hold")?,
-            None => Decimal::ZERO,
-        };
-        equity = add(equity, spot, "unified spot collateral")?;
+        equity = add(
+            equity,
+            unified_spot_available(account, feed, dex)?,
+            "unified spot collateral",
+        )?;
     }
     Ok(equity)
 }
@@ -757,29 +976,36 @@ pub(crate) fn unified_equity(account: &Account, view: &AccountView) -> Result<De
 pub(crate) fn spot_bridge_bound(
     account: &Account,
     feed: &MarketFeed,
-    meta: Option<&crate::wire::Meta>,
     token: u32,
 ) -> Result<Option<Decimal>> {
     if account.mode != UserAbstraction::UnifiedAccount {
         return Ok(None);
     }
-    Ok(available_after_maintenance(account, feed, meta)?
+    Ok(available_after_maintenance(account, feed)?
         .into_iter()
         .find(|(t, _)| *t == token)
         .map(|(_, available)| available))
 }
 
-/// The unified account's USD-class-transfer bound: the docs' transfer rule at
-/// the live marks — the served `withdrawable` (the margin floor; "transferring
-/// includes ... transfer to spot wallet"). `None` when a mark behind the
-/// account's positions is not served: the caller refuses rather than guesses.
-/// The sibling unified figure is [`available_after_maintenance`].
-pub(crate) fn unified_transfer_bound(
+/// What one dex's perp wallet may send out now: the docs' transfer rule at the
+/// live marks, the served `withdrawable` (the margin floor; "transferring
+/// includes ... transfer to spot wallet"), so the margin in use never leaves.
+/// A unified account's perp view is one slice of a pool and may go negative,
+/// so the floor alone bounds it; a standard account's wallet also never sends
+/// more than its cash. `None` when a mark behind the dex's positions is not
+/// served: the caller refuses rather than guesses. The sibling unified figure
+/// is [`available_after_maintenance`].
+pub(crate) fn perp_transfer_bound(
     account: &Account,
     feed: &MarketFeed,
-    meta: Option<&crate::wire::Meta>,
+    dex: &str,
 ) -> Option<Decimal> {
-    view(account, feed, meta).ok().map(|v| v.withdrawable)
+    let withdrawable = view(account, feed, dex).ok()?.withdrawable;
+    Some(if account.mode == UserAbstraction::UnifiedAccount {
+        withdrawable
+    } else {
+        withdrawable.min(account.perp_balance(dex).max(Decimal::ZERO))
+    })
 }
 
 /// The maintenance-margin rate for a notional: the margin tier's
@@ -980,6 +1206,7 @@ impl FillFacts {
 
 /// Apply one fill to the account; the effect (the size before, the realized
 /// PnL of the closed part, the direction) is what the ledger records.
+#[allow(clippy::too_many_lines)] // one ledger update: position, margin and realized pnl
 pub(crate) fn apply_fill(
     account: &mut Account,
     fill: &FillFacts,
@@ -992,6 +1219,8 @@ pub(crate) fn apply_fill(
         .map(|p| p.szi)
         .unwrap_or(Decimal::ZERO);
     refuse_non_reducing(old, signed, fill)?;
+    // The fill settles in its own dex's clearinghouse.
+    let dex = dex_of_coin(&fill.coin).to_string();
     let position = account
         .positions
         .entry(fill.coin.clone())
@@ -1008,23 +1237,29 @@ pub(crate) fn apply_fill(
     } else {
         let closed = old.abs().min(fill.size);
         let realized = apply_reduction(position, old, fill)?;
-        account.perp_balance = add(account.perp_balance, realized, "realized PnL")?;
+        credit_ledger(&mut account.perps, &dex, realized, "realized PnL")?;
         (closed, realized)
     };
     // An isolated position funds its own margin: the increase's initial margin
     // leaves the cross balance for the position (the venue's isolated open).
     if !allocated.is_zero() {
-        account.perp_balance = sub(account.perp_balance, allocated, "isolated margin allocation")?;
+        credit_ledger(
+            &mut account.perps,
+            &dex,
+            -allocated,
+            "isolated margin allocation",
+        )?;
     }
     // The trading fee (the venue's base tier): charged on the fill's notional,
-    // on both sides of a trade, in USDC — so a closing fill pays it too.
+    // on both sides of a trade, in the dex's collateral token — so a closing
+    // fill pays it too.
     if !fill.fee.is_zero() {
-        account.perp_balance = sub(account.perp_balance, fill.fee, "trading fee")?;
+        credit_ledger(&mut account.perps, &dex, -fill.fee, "trading fee")?;
     }
     // The builder fee rides on top of the trading fee (the order's `builder`),
     // debited from the same balance; the builder's credit is the caller's.
     if let Some(charge) = &fill.builder {
-        account.perp_balance = sub(account.perp_balance, charge.amount, "builder fee")?;
+        credit_ledger(&mut account.perps, &dex, -charge.amount, "builder fee")?;
     }
     // The position's last use: the borrow ends here, so the release (which
     // re-looks the position up) can borrow the account whole.
@@ -1080,7 +1315,7 @@ fn release_isolated_margin(
         released,
         "isolated margin release",
     )?;
-    account.perp_balance = add(account.perp_balance, released, "isolated margin release")?;
+    account.credit_perp(dex_of_coin(coin), released, "isolated margin release")?;
     Ok(())
 }
 
@@ -1195,12 +1430,12 @@ fn apply_reduction(position: &mut Position, old: Decimal, fill: &FillFacts) -> R
 pub(crate) fn liquidate_if_needed(
     account: &mut Account,
     feed: &MarketFeed,
-    meta: Option<&crate::wire::Meta>,
+    dex: &str,
 ) -> Result<Option<Liquidation>> {
     if account.positions.is_empty() {
         return Ok(None);
     }
-    let v = view(account, feed, meta)?;
+    let v = view(account, feed, dex)?;
     let maintenance = add(
         v.cross_maintenance_margin_used,
         isolated_maintenance(account, &v)?,
@@ -1209,7 +1444,12 @@ pub(crate) fn liquidate_if_needed(
     if v.margin_summary.account_value >= maintenance {
         return Ok(None);
     }
-    let closed: Vec<String> = account.positions.keys().cloned().collect();
+    let closed: Vec<String> = account
+        .positions
+        .keys()
+        .filter(|coin| dex_of_coin(coin) == dex)
+        .cloned()
+        .collect();
     let mut realized = Decimal::ZERO;
     for (coin, p) in &account.positions {
         // The facts cover every non-flat position; a flat row contributes no
@@ -1218,8 +1458,8 @@ pub(crate) fn liquidate_if_needed(
             realized = add(realized, p.unrealized_pnl(facts.mark)?, "realized PnL")?;
         }
     }
-    account.positions.clear();
-    account.perp_balance = add(account.perp_balance, realized, "liquidated balance")?;
+    account.positions.retain(|coin, _| dex_of_coin(coin) != dex);
+    account.credit_perp(dex, realized, "liquidated balance")?;
     Ok(Some(Liquidation {
         positions_closed: closed,
         account_value: v.margin_summary.account_value,
@@ -1295,7 +1535,7 @@ pub(crate) type Accounts = BTreeMap<Address, Account>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::{feed_with, meta_with, meta_with_table};
+    use crate::sim::{feed_with, feed_with_meta, meta_with, meta_with_table};
 
     /// The unified account's `tokenToAvailableAfterMaintenance` closes the consumer's
     /// reconciliation identity: `available + maintenance == the collateral
@@ -1311,13 +1551,15 @@ mod tests {
     /// transfer, not a spot→EVM bridge; using it refused the whole recovery.
     #[test]
     fn the_spot_bridge_bound_is_the_spot_available_not_the_perp_withdrawable() {
-        let feed = feed_with(&[]);
-        let meta = meta_with_table("BTC", 10);
+        let feed = feed_with_meta(&[], meta_with_table("BTC", 10));
         let mut account = Account {
             // The `cf16` seed's shape: the perp wallet carries the 0.000000455
             // residue, the spot class the 240.510247 principal.
-            perp_balance: "0.000000455".parse::<Decimal>().unwrap()
-                - "240.510247".parse::<Decimal>().unwrap(),
+            perps: crate::sim::account::default_perps(
+                "0.000000455".parse::<Decimal>().unwrap()
+                    - "240.510247".parse::<Decimal>().unwrap(),
+                0,
+            ),
             mode: UserAbstraction::UnifiedAccount,
             ..Account::default()
         };
@@ -1329,18 +1571,18 @@ mod tests {
             },
         )
         .total = "240.510247".parse().unwrap();
-        let bound = spot_bridge_bound(&account, &feed, Some(&meta), COLLATERAL_TOKEN)
+        let bound = spot_bridge_bound(&account, &feed, COLLATERAL_TOKEN)
             .expect("the bound resolves")
             .expect("a unified account carries the spot bound");
         assert_eq!(bound, "240.510247".parse::<Decimal>().unwrap());
         assert!(
-            bound > view(&account, &feed, Some(&meta)).unwrap().withdrawable,
+            bound > view(&account, &feed, "").unwrap().withdrawable,
             "the perp withdrawable must not bound the spot bridge"
         );
         // A standard account has no unified spot bound: the balance alone applies.
         account.mode = UserAbstraction::Default;
         assert_eq!(
-            spot_bridge_bound(&account, &feed, Some(&meta), COLLATERAL_TOKEN).unwrap(),
+            spot_bridge_bound(&account, &feed, COLLATERAL_TOKEN).unwrap(),
             None
         );
     }
@@ -1362,10 +1604,9 @@ mod tests {
     /// perp equity negative (the live `cf16` recovery).
     #[test]
     fn the_unified_spot_is_a_separate_ledger_from_the_perp_summary() {
-        let feed = feed_with(&[("BTC", "100.0", "100.0")]);
-        let meta = meta_with_table("BTC", 10);
+        let feed = feed_with_meta(&[("BTC", "100.0", "100.0")], meta_with_table("BTC", 10));
         let mut account = Account {
-            perp_balance: Decimal::ZERO,
+            perps: crate::sim::account::default_perps(Decimal::ZERO, 0),
             mode: UserAbstraction::UnifiedAccount,
             ..Account::default()
         };
@@ -1377,7 +1618,7 @@ mod tests {
             },
         )
         .total = "250".parse().unwrap();
-        let v = view(&account, &feed, Some(&meta)).unwrap();
+        let v = view(&account, &feed, "").unwrap();
         assert_eq!(
             v.margin_summary.total_raw_usd,
             Decimal::ZERO,
@@ -1385,13 +1626,13 @@ mod tests {
         );
         assert_eq!(v.margin_summary.account_value, Decimal::ZERO);
         assert_eq!(
-            available_after_maintenance(&account, &feed, Some(&meta)).unwrap(),
+            available_after_maintenance(&account, &feed).unwrap(),
             vec![(COLLATERAL_TOKEN, "250".parse().unwrap())],
             "the spot collateral is served as the spot available"
         );
         // The same account in standard mode: the spot side is not read.
         account.mode = UserAbstraction::Default;
-        let v = view(&account, &feed, Some(&meta)).unwrap();
+        let v = view(&account, &feed, "").unwrap();
         assert_eq!(v.margin_summary.account_value, Decimal::ZERO);
     }
 
@@ -1403,10 +1644,9 @@ mod tests {
     /// `unifiedAccount` applies.
     #[test]
     fn unified_available_closes_the_reconciliation() {
-        let feed = feed_with(&[("BTC", "100.0", "100.0")]);
-        let meta = meta_with_table("BTC", 10);
+        let feed = feed_with_meta(&[("BTC", "100.0", "100.0")], meta_with_table("BTC", 10));
         let mut account = Account {
-            perp_balance: Decimal::ZERO,
+            perps: crate::sim::account::default_perps(Decimal::ZERO, 0),
             mode: UserAbstraction::UnifiedAccount,
             ..Account::default()
         };
@@ -1433,9 +1673,9 @@ mod tests {
                 entry_ntl: Decimal::ZERO,
             },
         );
-        let rows = available_after_maintenance(&account, &feed, Some(&meta)).unwrap();
+        let rows = available_after_maintenance(&account, &feed).unwrap();
         let available = rows.iter().find(|(t, _)| *t == 0).unwrap().1;
-        let v = view(&account, &feed, Some(&meta)).unwrap();
+        let v = view(&account, &feed, "").unwrap();
         assert!(v.cross_maintenance_margin_used > Decimal::ZERO);
         assert_eq!(
             available + v.cross_maintenance_margin_used,
@@ -1443,7 +1683,7 @@ mod tests {
         );
 
         account.mode = UserAbstraction::Default;
-        assert!(available_after_maintenance(&account, &feed, Some(&meta))
+        assert!(available_after_maintenance(&account, &feed)
             .unwrap()
             .is_empty());
     }
@@ -1495,7 +1735,7 @@ mod tests {
     fn flat_rows_are_dropped_from_the_served_state() {
         let feed = feed_with(&[("BTC", "100", "100")]);
         let mut account = Account {
-            perp_balance: Decimal::from(10),
+            perps: crate::sim::account::default_perps(Decimal::from(10), 0),
             ..Account::default()
         };
         account.positions.insert(
@@ -1512,7 +1752,7 @@ mod tests {
                 funding_since_change: Decimal::ZERO,
             },
         );
-        let s = clearinghouse(&account, &feed, None, 1).unwrap();
+        let s = clearinghouse(&account, &feed, "", 1).unwrap();
         assert!(s.asset_positions.is_empty(), "flat row served");
         assert_eq!(s.margin_summary.account_value, Decimal::from(10));
     }
@@ -1523,10 +1763,10 @@ mod tests {
     fn empty_account_never_liquidates() {
         let feed = feed_with(&[("BTC", "50", "50")]);
         let mut account = Account {
-            perp_balance: Decimal::from(-100),
+            perps: crate::sim::account::default_perps(Decimal::from(-100), 0),
             ..Account::default()
         };
-        assert!(liquidate_if_needed(&mut account, &feed, None)
+        assert!(liquidate_if_needed(&mut account, &feed, "")
             .unwrap()
             .is_none());
     }
@@ -1535,10 +1775,9 @@ mod tests {
     /// becomes the account value.
     #[test]
     fn liquidation_closes_at_the_mark() {
-        let feed = feed_with(&[("BTC", "50", "50")]);
-        let meta = meta_with_table("BTC", 10);
+        let feed = feed_with_meta(&[("BTC", "50", "50")], meta_with_table("BTC", 10));
         let mut account = Account {
-            perp_balance: Decimal::from(1), // tiny balance
+            perps: crate::sim::account::default_perps(Decimal::from(1), 0), // tiny balance
             ..Account::default()
         };
         account.positions.insert(
@@ -1556,12 +1795,12 @@ mod tests {
             },
         );
         // accountValue = 1 − 50 = −49; maintenance = 50·1/(2·10) = 2.5 → liquidate.
-        let liq = liquidate_if_needed(&mut account, &feed, Some(&meta))
+        let liq = liquidate_if_needed(&mut account, &feed, "")
             .unwrap()
             .expect("liquidated");
         assert_eq!(liq.positions_closed, vec!["BTC"]);
         assert!(account.positions.is_empty());
-        assert_eq!(account.perp_balance, Decimal::from(1) - Decimal::from(50));
+        assert_eq!(account.perp_balance(""), Decimal::from(1) - Decimal::from(50));
     }
 
     /// The isolated liquidation price follows the exact formula.
@@ -1624,15 +1863,14 @@ mod tests {
     #[allow(clippy::too_many_lines)] // one scenario: the served figures and the waterfall's verdict
     fn an_isolated_loss_beyond_the_free_cash_is_not_a_cross_liquidation() {
         for long in [true, false] {
-            let feed = feed_with(&[("ETH", "100", "100")]);
-            feed.put_meta(meta_with("ETH", 10), crate::now_ms());
+            let feed = feed_with_meta(&[("ETH", "100", "100")], meta_with("ETH", 10));
             feed.put_oi_caps(Vec::new());
             let sim = crate::sim::Sim::memory();
             let a = Address::repeat_byte(0xa6);
             let signed = if long { Decimal::ONE } else { -Decimal::ONE };
             sim.with_account(a, |account| {
                 // 110 funded, 10 at 10x: 100 parked on the isolated position.
-                account.perp_balance = Decimal::from(10);
+                *account.perp_balance_mut("") = Decimal::from(10);
                 account.positions.insert(
                     "ETH".into(),
                     Position {
@@ -1650,7 +1888,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-            let cash = sim.account(a).unwrap().unwrap().perp_balance;
+            let cash = sim.account(a).unwrap().unwrap().perp_balance("");
             // 4 % against the position: a loss of 40 on a margin of 100, far
             // more than the free cash, still above the leg's 5 % maintenance
             // (48).
@@ -1673,7 +1911,7 @@ mod tests {
             );
             let account = sim.account(a).unwrap().unwrap();
             assert_ne!(account.positions["ETH"].szi, Decimal::ZERO);
-            let served = clearinghouse(&account, &feed, feed.meta().as_ref(), 0).unwrap();
+            let served = clearinghouse(&account, &feed, "", 0).unwrap();
             assert_eq!(
                 served.cross_margin_summary.account_value, cash,
                 "the cross figure is the free cash alone"

@@ -466,6 +466,7 @@ impl MarketFeed {
     /// The default dex's cached cap list. `None` until the venue has answered:
     /// an unknown cap set is refused by the order lane, never read as
     /// "nothing is capped".
+    #[allow(dead_code)] // the per-dex callers read `open_interest_caps_of`
     pub fn open_interest_caps(&self) -> Option<Vec<String>> {
         self.open_interest_caps_of("")
     }
@@ -916,6 +917,40 @@ impl MarketFeed {
         dexs
     }
 
+    /// The name of spot token `index` (the venue's spot meta). Token 0 is
+    /// `USDC` even before the registry lands; any other index needs the
+    /// registry (`None` = unknown).
+    pub(crate) fn token_name(&self, index: u32) -> Option<String> {
+        let c = self.read();
+        let named = c
+            .spot_meta
+            .as_ref()
+            .and_then(|s| s.tokens.iter().find(|t| t.index == index))
+            .map(|t| t.name.clone());
+        named.or_else(|| (index == 0).then(|| "USDC".to_string()))
+    }
+
+    /// The token a fill on `coin` pays its fee in: the dex's collateral token
+    /// name (`USDC`, `USDH`, ...). A token the registry cannot name falls back
+    /// to its index, never to a USDC that would be wrong for the dex.
+    pub(crate) fn fee_token_of_coin(&self, coin: &str) -> String {
+        let token = self.collateral_token_of(dex_of_coin(coin));
+        self.token_name(token).unwrap_or_else(|| token.to_string())
+    }
+
+    /// Whether `token` is the collateral token of some perp dex (USDC, the
+    /// default dex's, always counts): a balance of it backs margin, so a
+    /// transfer out of the spot wallet is bounded by the margin its positions
+    /// hold.
+    pub(crate) fn is_collateral_token(&self, token: u32) -> bool {
+        token == 0
+            || self
+                .read()
+                .dex_metas
+                .values()
+                .any(|meta| meta.collateral_token == token)
+    }
+
     /// Every dex name with its collateral token (cheap: no universes are
     /// copied), in [`Self::dex_coins`] order.
     pub(crate) fn dex_collateral_tokens(&self) -> Vec<(String, u32)> {
@@ -936,6 +971,67 @@ impl MarketFeed {
     /// is the default dex, `null`). `None` until the poll lands.
     pub(crate) fn perp_dexs(&self) -> Option<Vec<Option<PerpDex>>> {
         self.read().perp_dexs.clone()
+    }
+
+    /// Every coin the sim may hold a mark for: each dex's universe plus any
+    /// coin a context has landed for (a fixture feed may have contexts and no
+    /// registry).
+    pub(crate) fn all_coins(&self) -> Vec<String> {
+        let c = self.read();
+        let mut coins: Vec<String> = c.ctxs.keys().cloned().collect();
+        if let Some(meta) = &c.meta {
+            coins.extend(meta.universe.iter().map(|a| a.name.clone()));
+        }
+        for meta in c.dex_metas.values() {
+            coins.extend(meta.universe.iter().map(|a| a.name.clone()));
+        }
+        drop(c);
+        coins.sort_unstable();
+        coins.dedup();
+        coins
+    }
+
+    /// Every delisted coin of every dex.
+    pub(crate) fn delisted_coins(&self) -> Vec<String> {
+        let c = self.read();
+        let mut coins: Vec<String> = Vec::new();
+        if let Some(meta) = &c.meta {
+            coins.extend(
+                meta.universe
+                    .iter()
+                    .filter(|a| a.is_delisted.unwrap_or(false))
+                    .map(|a| a.name.clone()),
+            );
+        }
+        for meta in c.dex_metas.values() {
+            coins.extend(
+                meta.universe
+                    .iter()
+                    .filter(|a| a.is_delisted.unwrap_or(false))
+                    .map(|a| a.name.clone()),
+            );
+        }
+        coins
+    }
+
+    /// The dex name at a zero-based registry index (`None` past the list):
+    /// the precompiles' `perpDexIndex` mapping. The live registry is the
+    /// `perpDexs` order; a fixture that only landed a dex's meta falls back to
+    /// the default dex followed by the builder dexes in name order (the same
+    /// order `dex_coins` serves).
+    #[allow(dead_code)] // the precompile mirror adopts it with step 9's bridge slice
+    pub(crate) fn dex_name_at(&self, index: u32) -> Option<String> {
+        let c = self.read();
+        let index = usize::try_from(index).ok()?;
+        if let Some(dex) = c.registry.dexs().get(index) {
+            return Some(dex.name.clone());
+        }
+        if !c.registry.dexs().is_empty() {
+            return None;
+        }
+        let mut names = vec![String::new()];
+        names.extend(c.dex_metas.keys().cloned());
+        names.get(index).cloned()
     }
 
     /// A named perp dex's position in the upstream `perpDexs` list — the

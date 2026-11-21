@@ -1,17 +1,9 @@
-//! The transfer matrix: every direction a balance can move (spot, the perp
-//! clearinghouse under each dex name, another account, the EVM side), with
-//! the balances, holds, fees and refusals each one carries. The fee rules are
-//! researched in [`super::fees`]: an account first funded by a deposit or an
-//! inbound transfer pays 1 USDC on top of its first outbound transfer (Circle),
-//! a Core to EVM transfer costs HyperEVM gas.
-//!
-//! The sim's account plane keeps one USDC perp clearinghouse (the per-dex
-//! ledger is the next account-plane step): a transfer names its dex (the
-//! venue's `sourceDex`/`destinationDex` strings), every USDC dex moves the
-//! same cash, and a USDH-collateral dex is refused by name. The tests that
-//! need independent per-dex balances, the unified-ledger merge and the Core
-//! precompiles are the next step's; they are not expressed here rather than
-//! asserted against a state the sim does not build.
+//! The transfer matrix: every direction a balance can move (spot, the default
+//! perp dex, builder dexes, another account, the EVM side), with the balances,
+//! holds, fees and refusals each one carries. The fee rules are researched in
+//! [`super::fees`]: an account first funded by a deposit or an inbound
+//! transfer pays 1 USDC on top of its first outbound transfer (Circle), a Core
+//! to EVM transfer costs HyperEVM gas.
 use super::account::Account;
 use super::fees::{RowKind, ACTIVATION_FEE};
 use super::order::{Order, Tif};
@@ -77,24 +69,22 @@ fn book(coin: &str, px: &str) -> L2Book {
 /// builder dex (`flx`); the spot registry lists USDC, PURR, HYPE and USDH, and
 /// HYPE trades at 5 USDC (pair `@107`).
 fn feed() -> MarketFeed {
-    let feed = MarketFeed::memory(vec![
-        "ETH".into(),
-        "xyz:TSLA".into(),
-        "abc:GOLD".into(),
-        "flx:TSLA".into(),
-    ]);
+    let feed = MarketFeed::memory(Vec::new());
     let now = crate::now_ms();
     feed.put_meta(meta_with("ETH", 10), now);
-    feed.put_dex_meta("xyz".into(), meta_of(&[("xyz:TSLA", 10)]), now);
-    feed.put_dex_meta("abc".into(), meta_of(&[("abc:GOLD", 10)]), now);
+    feed.put_dex_meta(("xyz").to_string(), meta_of(&[("xyz:TSLA", 10)]), now);
+    feed.put_dex_meta(("abc").to_string(), meta_of(&[("abc:GOLD", 10)]), now);
     let mut flx = meta_of(&[("flx:TSLA", 10)]);
     flx.collateral_token = 360;
-    feed.put_dex_meta("flx".into(), flx, now);
+    feed.put_dex_meta(("flx").to_string(), flx, now);
     for coin in ["ETH", "xyz:TSLA", "abc:GOLD", "flx:TSLA"] {
         feed.put_ctx(coin.into(), crate::wire::test_ctx("100", "100"), now);
         feed.put_book(book(coin, "100"), now);
     }
     feed.put_oi_caps(Vec::new());
+    for dex in ["xyz", "abc", "flx"] {
+        feed.put_oi_caps_of(dex, Vec::new());
+    }
     feed.put_spot_meta(SpotMeta {
         tokens: vec![
             token("USDC", 0),
@@ -122,15 +112,13 @@ fn spot(sim: &Sim, who: Address, token: TokenRef<'_>, amount: &str) {
 }
 
 fn deal_perp(sim: &Sim, feed: &MarketFeed, who: Address, dex: Option<&str>, amount: &str) {
-    // The sim's perp wallet is the USDC clearinghouse: the dex name is the
-    // action's, not a separate balance yet.
-    let _ = dex;
     sim.deal(
         feed,
         &Deal {
             address: who,
             class: DealClass::Perp,
             coin: None,
+            dex: dex.map(str::to_string),
             amount: dec(amount),
         },
     )
@@ -181,10 +169,9 @@ fn spot_of(sim: &Sim, who: Address, token: TokenRef<'_>) -> Decimal {
 }
 
 fn perp_of(sim: &Sim, who: Address, dex: &str) -> Decimal {
-    let _ = dex;
     sim.account(who)
         .unwrap()
-        .map_or(Decimal::ZERO, |a| a.perp_balance)
+        .map_or(Decimal::ZERO, |a| a.perp_balance(dex))
 }
 
 fn owes(sim: &Sim, who: Address) -> bool {
@@ -218,116 +205,134 @@ fn buy(coin: &str, size: &str) -> Order {
     }
 }
 
-// ---- spot and the perp clearinghouse ----------------------------------------
+// ---- spot, the default dex and every builder dex ------------------------------
 
-/// An own-wallet move costs nothing (it is the account's own money): spot to a
-/// USDC builder dex and back conserves the total, and each row carries the
-/// venue's `sourceDex` / `destinationDex` names.
+/// Every wallet pair a USDC balance can move between, in a ring: spot to the
+/// default dex to `xyz` to `abc` and back to spot. The total never changes
+/// (no fee: it is the account's own money) and each wallet keeps its own ledger.
 #[test]
-fn own_wallet_moves_carry_the_dex_names_and_cost_nothing() {
+fn usdc_moves_through_every_usdc_wallet_and_the_total_is_conserved() {
     let feed = feed();
     let sim = Sim::memory();
     spot(&sim, ME, USDC, "100");
-
-    send(&sim, &feed, (ME, ME), (USDC, "40"), (Wallet::Spot, perp("xyz"))).unwrap();
-    assert_eq!(
-        (spot_of(&sim, ME, USDC), perp_of(&sim, ME, "")),
-        (dec("60"), dec("40"))
-    );
-    send(&sim, &feed, (ME, ME), (USDC, "15"), (perp("xyz"), Wallet::Spot)).unwrap();
+    let total = || {
+        let a = account(&sim, ME);
+        a.spot[&0].total + a.perp_balance("") + a.perp_balance("xyz") + a.perp_balance("abc")
+    };
+    let hop = |amount: &str, from: Wallet, to: Wallet| {
+        send(&sim, &feed, (ME, ME), (USDC, amount), (from, to)).unwrap();
+        assert_eq!(total(), dec("100"), "an own transfer never costs anything");
+    };
+    hop("60", Wallet::Spot, perp(""));
+    hop("50", perp(""), perp("xyz"));
+    hop("40", perp("xyz"), perp("abc"));
+    hop("30", perp("abc"), Wallet::Spot);
+    hop("5", perp("xyz"), perp(""));
+    hop("5", Wallet::Spot, perp("abc"));
     let a = account(&sim, ME);
-    assert_eq!(a.spot[&0].total + a.perp_balance, dec("100"));
-    assert_eq!(perp_of(&sim, ME, ""), dec("25"));
-
+    assert_eq!(
+        (
+            a.spot[&0].total,
+            a.perp_balance(""),
+            a.perp_balance("xyz"),
+            a.perp_balance("abc")
+        ),
+        (dec("65"), dec("15"), dec("5"), dec("15"))
+    );
+    assert!(account(&sim, ME).spot.len() == 1, "only USDC moved");
+    // None of those moves is a fee row: the ledger holds six fee-free sends.
     let rows = deltas(&sim, ME);
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 6);
     assert!(rows
         .iter()
         .all(|r| r["fee"] == "0.0" && r["feeToken"] == ""));
     assert_eq!(rows[0]["sourceDex"], "spot");
-    assert_eq!(rows[0]["destinationDex"], "xyz");
-    assert_eq!(rows[1]["sourceDex"], "xyz");
-    assert_eq!(rows[1]["destinationDex"], "spot");
+    assert_eq!(rows[0]["destinationDex"], "");
+    assert_eq!(rows[1]["sourceDex"], "");
+    assert_eq!(rows[1]["destinationDex"], "xyz");
 }
 
-/// The token must be the collateral of every perp endpoint: USDH does not go
-/// to a USDC dex (or the default dex), and the USDH-collateral dex is outside
-/// the single USDC clearinghouse.
+/// USDH lives on the `flx` dex only: spot to `flx` and back work, and every
+/// pairing of a USDH transfer with a USDC dex, or a USDC transfer with the USDH
+/// dex, is a token mismatch that moves nothing.
 #[test]
-fn a_token_that_is_not_the_dexs_collateral_is_refused() {
+fn a_usdh_dex_takes_usdh_only_in_both_directions() {
     let feed = feed();
     let sim = Sim::memory();
     spot(&sim, ME, USDC, "100");
     spot(&sim, ME, USDH, "100");
-
-    let reason = refusal(send(
+    send(
         &sim,
         &feed,
         (ME, ME),
-        (USDH, "10"),
-        (Wallet::Spot, perp("xyz")),
-    ));
-    assert!(reason.contains("(0)"), "{reason}");
-    refusal(send(
-        &sim,
-        &feed,
-        (ME, ME),
-        (USDH, "10"),
-        (Wallet::Spot, perp("")),
-    ));
-    // The matching token reaches the USDH dex's endpoint, which this account
-    // plane cannot express: the name says why, and nothing moves.
-    let reason = refusal(send(
-        &sim,
-        &feed,
-        (ME, ME),
-        (USDH, "10"),
+        (USDH, "40"),
         (Wallet::Spot, perp("flx")),
-    ));
-    assert!(reason.contains("USDC clearinghouse only"), "{reason}");
+    )
+    .unwrap();
+    send(
+        &sim,
+        &feed,
+        (ME, ME),
+        (USDH, "10"),
+        (perp("flx"), Wallet::Spot),
+    )
+    .unwrap();
     assert_eq!(
-        (spot_of(&sim, ME, USDH), perp_of(&sim, ME, "")),
-        (dec("100"), Decimal::ZERO)
+        (perp_of(&sim, ME, "flx"), spot_of(&sim, ME, USDH)),
+        (dec("30"), dec("70"))
     );
-}
-
-/// A zero, a negative and an unknown sender are refused and move nothing;
-/// an unknown dex is a named refusal.
-#[test]
-fn degenerate_sends_are_refused() {
-    let feed = feed();
-    let sim = Sim::memory();
-    spot(&sim, ME, USDC, "10");
-    for amount in ["0", "-1"] {
-        refusal(send(
+    let before = account(&sim, ME);
+    for (token, source, destination) in [
+        (USDC, Wallet::Spot, perp("flx")),
+        (USDC, perp("flx"), Wallet::Spot),
+        (USDH, Wallet::Spot, perp("")),
+        (USDH, Wallet::Spot, perp("xyz")),
+        (USDH, perp("flx"), perp("xyz")),
+        (USDC, perp("xyz"), perp("flx")),
+    ] {
+        let reason = refusal(send(
             &sim,
             &feed,
-            (ME, YOU),
-            (USDC, amount),
-            (Wallet::Spot, Wallet::Spot),
+            (ME, ME),
+            (token, "1"),
+            (source, destination),
         ));
+        assert!(reason.contains("collateral token"), "{reason}");
     }
+    assert_eq!(account(&sim, ME), before, "a mismatch moves nothing");
+}
+
+/// A perp wallet sends no more than its dex lets it withdraw: with a position
+/// open on each of two USDC dexes, each keeps its own margin, and the other's
+/// balance never backs it.
+#[test]
+fn each_dex_keeps_its_own_margin_and_never_the_others() {
+    let feed = feed();
+    let sim = Sim::memory();
+    deal_perp(&sim, &feed, ME, Some("xyz"), "100");
+    deal_perp(&sim, &feed, ME, Some("abc"), "100");
+    sim.order(&feed, ME, &buy("xyz:TSLA", "1")).unwrap();
+    let bound = super::account::perp_transfer_bound(&account(&sim, ME), &feed, "xyz").unwrap();
+    assert!(bound < dec("95") && bound > dec("85"), "{bound}");
+    // Asking for the whole of xyz is refused although abc holds plenty.
     let reason = refusal(send(
         &sim,
         &feed,
         (ME, ME),
-        (USDC, "1"),
-        (Wallet::Spot, perp("nope")),
+        (USDC, "99"),
+        (perp("xyz"), Wallet::Spot),
     ));
-    assert!(
-        reason.contains("not in the venue's dex registry"),
-        "{reason}"
-    );
-    let reason = refusal(send(
+    assert!(reason.contains("exceeds what perp dex `xyz`"), "{reason}");
+    // abc has no position: its whole balance can leave.
+    send(
         &sim,
         &feed,
-        (NEWCOMER, ME),
-        (USDC, "1"),
-        (Wallet::Spot, Wallet::Spot),
-    ));
-    assert!(reason.contains("not a venue-sim account"), "{reason}");
-    assert_eq!(spot_of(&sim, ME, USDC), dec("10"));
-    assert!(sim.account(YOU).unwrap().is_none());
+        (ME, ME),
+        (USDC, "100"),
+        (perp("abc"), perp("")),
+    )
+    .unwrap();
+    assert_eq!(perp_of(&sim, ME, ""), dec("100"));
 }
 
 /// A resting order's hold stays in the spot wallet: only what is free moves.
@@ -362,15 +367,15 @@ fn what_a_spot_hold_covers_cannot_be_sent() {
 }
 
 /// A unified account's spot USDC is one pool behind the positions of every dex
-/// that margins against it: a position on `xyz` and one on the default dex both
-/// lower what spot can send. A standard account's spot is free of its perp
-/// margin.
+/// that margins against it: a position on `xyz` and one on the default dex
+/// both lower what spot can send. A standard account's spot is free of its
+/// perp margin (its perp wallets are separate ledgers).
 #[test]
 fn a_unified_spot_pool_keeps_the_maintenance_of_every_dex_sharing_the_token() {
     let feed = feed();
     let unified = Sim::memory();
     unified
-        .set_mode(ME, UserAbstraction::UnifiedAccount)
+        .set_mode(ME, UserAbstraction::UnifiedAccount, &feed)
         .unwrap();
     spot(&unified, ME, USDC, "100");
     unified.order(&feed, ME, &buy("ETH", "1")).unwrap();
@@ -390,7 +395,7 @@ fn a_unified_spot_pool_keeps_the_maintenance_of_every_dex_sharing_the_token() {
     ));
     assert!(reason.contains("the spot wallet may send"), "{reason}");
 
-    // Standard: the same 100 in spot is not margin for the perp clearinghouse.
+    // Standard: the same 100 in spot is not margin for the perp dex.
     let standard = Sim::memory();
     spot(&standard, ME, USDC, "100");
     deal_perp(&standard, &feed, ME, None, "50");
@@ -401,38 +406,32 @@ fn a_unified_spot_pool_keeps_the_maintenance_of_every_dex_sharing_the_token() {
     );
 }
 
-/// The perp wallet keeps the margin its positions hold: with a position open
-/// only the clearinghouse's withdrawable can leave, never the whole cash.
+/// A zero, a negative and a malformed send, and a sender the sim never held,
+/// are refused and move nothing.
 #[test]
-fn the_margin_in_use_cannot_be_transferred_out() {
+fn degenerate_sends_are_refused() {
     let feed = feed();
     let sim = Sim::memory();
-    deal_perp(&sim, &feed, ME, None, "100");
-    // 1 ETH at 100, 10x: initial margin 10, notional 100.
-    sim.order(&feed, ME, &buy("ETH", "1")).unwrap();
-
-    // The transfer floor is max(initial 10, 10% of 100 = 10): about 90 may
-    // move, never the whole balance.
+    spot(&sim, ME, USDC, "10");
+    for amount in ["0", "-1"] {
+        refusal(send(
+            &sim,
+            &feed,
+            (ME, YOU),
+            (USDC, amount),
+            (Wallet::Spot, Wallet::Spot),
+        ));
+    }
     let reason = refusal(send(
         &sim,
         &feed,
-        (ME, ME),
-        (USDC, "95"),
-        (perp(""), Wallet::Spot),
+        (NEWCOMER, ME),
+        (USDC, "1"),
+        (Wallet::Spot, Wallet::Spot),
     ));
-    assert!(
-        reason.contains("exceeds what the default perp dex may send"),
-        "{reason}"
-    );
-    send(
-        &sim,
-        &feed,
-        (ME, ME),
-        (USDC, "85"),
-        (perp(""), Wallet::Spot),
-    )
-    .unwrap();
-    assert_eq!(spot_of(&sim, ME, USDC), dec("85"));
+    assert!(reason.contains("not a venue-sim account"), "{reason}");
+    assert_eq!(spot_of(&sim, ME, USDC), dec("10"));
+    assert!(sim.account(YOU).unwrap().is_none());
 }
 
 // ---- the activation fee --------------------------------------------------------
@@ -570,17 +569,17 @@ fn a_dust_deposit_succeeds_and_its_first_outbound_transfer_fails() {
     assert_eq!(core_to_evm(&sim, &feed, USDC, "0.1"), Applied::Refused);
 }
 
-/// `spotSend` writes a `spotTransfer` row and `usdSend` (a perp wallet to a
-/// perp wallet) a `send` row with its dexes; both are outbound transfers that
-/// pay the owed activation, from the sending wallet.
+/// `spotSend` writes a `spotTransfer` row and `usdSend` (default dex to
+/// default dex) a `send` row with empty dexes; both are outbound transfers
+/// that pay the owed activation, from the sending wallet.
 #[test]
 #[allow(clippy::too_many_lines)] // one script: the sends in order, then the rows they wrote
 fn spot_send_and_usd_send_pay_the_owed_activation() {
     let feed = feed();
     let sim = Sim::memory();
     spot(&sim, ME, USDC, "100");
-    // YOU is created by a spot receipt, NEWCOMER by a perp-wallet one.
-    sim.spot_send((ME, YOU), USDC, dec("10"), &feed)
+    // YOU is created by a spot receipt, NEWCOMER by a default-dex one.
+    sim.spot_send((ME, YOU), USDC, dec("10"), (RowKind::SpotTransfer, &feed))
         .unwrap();
     send(
         &sim,
@@ -592,7 +591,8 @@ fn spot_send_and_usd_send_pay_the_owed_activation() {
     .unwrap();
     assert!(owes(&sim, YOU) && owes(&sim, NEWCOMER));
     assert_eq!(
-        sim.spot_send((YOU, ME), USDC, dec("3"), &feed).unwrap(),
+        sim.spot_send((YOU, ME), USDC, dec("3"), (RowKind::SpotTransfer, &feed))
+            .unwrap(),
         Applied::Applied
     );
     assert_eq!(spot_of(&sim, YOU, USDC), dec("6"));
@@ -605,7 +605,7 @@ fn spot_send_and_usd_send_pay_the_owed_activation() {
         ),
         ("spotTransfer".into(), "1.0".into(), "USDC".into())
     );
-    // usdSend: NEWCOMER's perp wallet to ME's.
+    // usdSend: the default dex of NEWCOMER to the default dex of ME.
     send(
         &sim,
         &feed,
@@ -617,7 +617,7 @@ fn spot_send_and_usd_send_pay_the_owed_activation() {
     assert_eq!(
         perp_of(&sim, NEWCOMER, ""),
         dec("5"),
-        "the fee came out of the sending wallet"
+        "the fee came out of the sending dex"
     );
     let row = deltas(&sim, NEWCOMER).pop().unwrap();
     assert_eq!(
@@ -714,26 +714,25 @@ fn an_own_transfer_neither_pays_nor_clears_the_activation() {
         &feed,
         (YOU, YOU),
         (USDC, "10"),
-        (Wallet::Spot, perp("")),
+        (Wallet::Spot, perp("xyz")),
     )
     .unwrap();
-    assert_eq!(perp_of(&sim, YOU, ""), dec("10"));
+    assert_eq!(perp_of(&sim, YOU, "xyz"), dec("10"));
     assert!(owes(&sim, YOU));
-    // The fee is then paid from the wallet the transfer leaves.
+    // The fee is then paid from the dex the transfer leaves.
     send(
         &sim,
         &feed,
         (YOU, ME),
         (USDC, "5"),
-        (perp(""), Wallet::Spot),
+        (perp("xyz"), Wallet::Spot),
     )
     .unwrap();
-    assert_eq!(perp_of(&sim, YOU, ""), dec("4"));
+    assert_eq!(perp_of(&sim, YOU, "xyz"), dec("4"));
     assert!(!owes(&sim, YOU));
 }
 
-/// An inbound transfer into a builder dex's wallet creates the account too,
-/// and the row names the destination dex.
+/// An inbound transfer into a builder dex's ledger creates the account too.
 #[test]
 fn an_inbound_send_into_a_builder_dex_creates_the_account_and_its_debt() {
     let feed = feed();
@@ -748,7 +747,7 @@ fn an_inbound_send_into_a_builder_dex_creates_the_account_and_its_debt() {
     )
     .unwrap();
     assert_eq!(
-        (spot_of(&sim, ME, USDC), perp_of(&sim, YOU, "")),
+        (spot_of(&sim, ME, USDC), perp_of(&sim, YOU, "xyz")),
         (dec("10"), dec("10"))
     );
     assert_eq!(deltas(&sim, YOU)[0]["destinationDex"], "xyz");
@@ -948,11 +947,11 @@ fn a_deposited_account_pays_its_activation_on_its_first_outbound_transfer() {
         .unwrap());
 }
 
-/// A CoreDepositWallet deposit names the wallet it lands in: the perp wallet
-/// credits the perp balance and no spot, the row records the send from the
-/// system address; the spot wallet stays the plain deposit's default.
+/// A CoreDepositWallet deposit names the wallet it lands in: the default perp
+/// dex (`destinationDex` 0) credits the perp balance and no spot, a builder
+/// dex its own, and the ledger row records the send from the system address.
 #[test]
-fn a_deposit_can_land_in_the_perp_wallet_instead_of_spot() {
+fn a_deposit_can_land_in_a_perp_dex_instead_of_spot() {
     let feed = feed();
     let sim = Sim::memory();
     sim.credit_evm_deposit_to((ME, &Wallet::Perp(String::new())), USDC, dec("10"), &feed)
@@ -968,11 +967,17 @@ fn a_deposit_can_land_in_the_perp_wallet_instead_of_spot() {
     // The account exists from now on and owes its activation, as for a spot deposit.
     assert!(owes(&sim, ME));
 
+    sim.credit_evm_deposit_to((ME, &Wallet::Perp("xyz".into())), USDC, dec("4"), &feed)
+        .unwrap();
+    assert_eq!(perp_of(&sim, ME, "xyz"), dec("4"));
+    assert_eq!(perp_of(&sim, ME, ""), dec("10"));
+    assert_eq!(deltas(&sim, ME)[1]["destinationDex"], "xyz");
+
     // The spot wallet stays the default of the plain deposit.
     sim.credit_evm_deposit_to((ME, &Wallet::Spot), USDC, dec("1"), &feed)
         .unwrap();
     assert_eq!(spot_of(&sim, ME, USDC), dec("1"));
-    assert_eq!(deltas(&sim, ME)[1]["type"], "spotTransfer");
+    assert_eq!(deltas(&sim, ME)[2]["type"], "spotTransfer");
 }
 
 /// The debt follows the account, not the destination: a deposited account's
@@ -1021,7 +1026,8 @@ fn hype_deposits_come_from_the_hype_system_address_and_unified_bounds_apply() {
         deltas(&sim, YOU)[0]["user"],
         "0x2222222222222222222222222222222222222222"
     );
-    sim.set_mode(ME, UserAbstraction::UnifiedAccount).unwrap();
+    sim.set_mode(ME, UserAbstraction::UnifiedAccount, &feed)
+        .unwrap();
     spot(&sim, ME, USDC, "100");
     spot(&sim, ME, HYPE, "1");
     sim.order(&feed, ME, &buy("ETH", "1")).unwrap();
@@ -1066,4 +1072,20 @@ fn the_ledger_serves_class_transfers_in_the_requested_window() {
         0
     );
     assert!(sim.ledger_updates(NEWCOMER, (0, None)).is_none());
+}
+
+/// A standard account's spot serves no margin hold.
+#[test]
+fn a_standard_account_serves_no_margin_hold() {
+    let feed = feed();
+    let standard = Sim::memory();
+    deal_perp(&standard, &feed, YOU, None, "100");
+    standard.order(&feed, YOU, &buy("ETH", "1")).unwrap();
+    spot(&standard, YOU, USDC, "5");
+    let acct = account(&standard, YOU);
+    let served = super::account::served_spot_balances(&acct, &feed).unwrap();
+    assert_eq!(
+        served.iter().find(|b| b.token == 0).unwrap().hold,
+        Decimal::ZERO
+    );
 }

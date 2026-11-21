@@ -6,9 +6,10 @@
 //! 2026-10-23 live here.
 use super::account::{
     add, available_after_maintenance, refuse_unmodeled_mode, spot_balances, sub, view, Account,
-    Position, SpotEntry, COLLATERAL_TOKEN, COST_BASIS,
+    Position, SpotEntry, COST_BASIS,
 };
 use crate::error::Result;
+use crate::feed::dex::dex_of_coin;
 use crate::feed::MarketFeed;
 use crate::wire::{AssetPosition, LeverageType, MarginSummary, SpotBalance, UserAbstraction};
 use rust_decimal::Decimal;
@@ -149,14 +150,19 @@ impl AccountSeed {
     /// panic (the overflow-poison lesson).
     #[allow(clippy::too_many_lines)]
     pub fn apply_to(&self, account: &mut Account, clock: u64) -> Result<()> {
-        self.validate(account)?;
+        // The patch is one dex's clearinghouse state (`dex`, the default dex
+        // when unnamed): its positions replace that dex's positions only, and
+        // its summary sets that dex's ledger. Another dex of the account is a
+        // different clearinghouse and is left alone.
+        let dex = self.dex.as_deref().unwrap_or("");
+        self.validate(account, dex)?;
 
         if let Some(mode) = self.user_abstraction {
             refuse_unmodeled_mode(mode)?;
             account.mode = mode;
         }
         if let Some(positions) = &self.asset_positions {
-            apply_positions(account, positions)?;
+            apply_positions(account, positions, dex)?;
         }
         if let Some(balances) = &self.spot_balances {
             apply_spot_balances(account, balances);
@@ -172,15 +178,16 @@ impl AccountSeed {
         // patch moved `7.82` to `-7.074333` and was liquidated on the
         // resulting fake deficit.
         if let Some(summary) = &self.margin_summary {
-            let isolated = isolated_margin_total(account);
-            let cost = cost_basis_total(account)?;
+            let isolated = isolated_margin_total(account, dex);
+            let cost = cost_basis_total(account, dex)?;
             let perp = add(
                 sub(summary.total_raw_usd, isolated, "seed perp raw")?,
                 cost,
                 "seed balance",
             )?;
-            account.perp_balance = perp;
-            account.funded_at_ms = clock;
+            let ledger = account.ledger_mut(dex);
+            ledger.balance = perp;
+            ledger.funded_at_ms = clock;
         }
         Ok(())
     }
@@ -190,7 +197,7 @@ impl AccountSeed {
     /// The fixture's own identity checks: a summary-only patch on an open
     /// book, or a patch whose `accountValue` disagrees with its positions, is
     /// refused before it touches the account.
-    fn validate(&self, account: &Account) -> Result<()> {
+    fn validate(&self, account: &Account, dex: &str) -> Result<()> {
         // A summary-only patch cannot be checked against an open book: the
         // summary's `accountValue` is the whole-book value at the caller's
         // mark, while the account's existing positions are at a different
@@ -199,8 +206,8 @@ impl AccountSeed {
         if let Some(summary) = &self.margin_summary {
             let has_open_positions = account
                 .positions
-                .values()
-                .any(|position| !position.szi.is_zero());
+                .iter()
+                .any(|(coin, position)| dex_of_coin(coin) == dex && !position.szi.is_zero());
             if self.asset_positions.is_none() && has_open_positions {
                 return Err(crate::error::Error::bad_request(
                     "a marginSummary patch on an account with open positions must also name assetPositions: the summary's accountValue cannot be checked against an unnamed book",
@@ -234,11 +241,12 @@ impl AccountSeed {
 
 /// The isolated legs' margin, which the venue's whole-account raw carries as
 /// cash parked on the positions.
-fn isolated_margin_total(account: &Account) -> Decimal {
+fn isolated_margin_total(account: &Account, dex: &str) -> Decimal {
     account
         .positions
-        .values()
-        .map(|position| position.isolated_margin)
+        .iter()
+        .filter(|(coin, _)| dex_of_coin(coin) == dex)
+        .map(|(_, position)| position.isolated_margin)
         .fold(Decimal::ZERO, |sum, margin| sum + margin)
 }
 
@@ -267,10 +275,12 @@ pub(crate) fn control_view(
     fixture: Option<&AccountSeed>,
     account: &Account,
     feed: &MarketFeed,
-    meta: Option<&crate::wire::Meta>,
 ) -> Result<AccountSeed> {
     let f = fixture.cloned().unwrap_or_default();
-    let v = view(account, feed, meta)?;
+    // The fixture names the dex it is the state of (the default dex when it
+    // does not): the read-back derives that dex's clearinghouse.
+    let dex = f.dex.clone().unwrap_or_default();
+    let v = view(account, feed, &dex)?;
     // hl_mock's `effective`: an unnamed cross view mirrors the margin summary.
     let mirror = f.margin_summary.clone();
     Ok(AccountSeed {
@@ -288,8 +298,8 @@ pub(crate) fn control_view(
         spot_balances: f.spot_balances.or_else(|| Some(spot_balances(account))),
         token_to_available_after_maintenance: f
             .token_to_available_after_maintenance
-            .or(Some(available_after_maintenance(account, feed, meta)?)),
-        spot_token: f.spot_token.or(Some(COLLATERAL_TOKEN)),
+            .or(Some(available_after_maintenance(account, feed)?)),
+        spot_token: f.spot_token.or(Some(feed.collateral_token_of(&dex))),
         dex: f.dex,
     })
 }
@@ -300,11 +310,12 @@ pub(crate) fn control_view(
 /// zero-cost basis; a flat row's entry price is irrelevant.
 /// The account's positions' cost basis, summed — the seed's fold (the raw
 /// USDC is the balance minus it; the patch's balance is the raw plus it).
-fn cost_basis_total(account: &Account) -> Result<Decimal> {
+fn cost_basis_total(account: &Account, dex: &str) -> Result<Decimal> {
     account
         .positions
-        .values()
-        .try_fold(Decimal::ZERO, |acc, p| {
+        .iter()
+        .filter(|(coin, _)| dex_of_coin(coin) == dex)
+        .try_fold(Decimal::ZERO, |acc, (_, p)| {
             add(acc, p.cost_basis()?, COST_BASIS)
         })
 }
@@ -327,8 +338,19 @@ fn apply_spot_balances(account: &mut Account, balances: &[SpotBalance]) {
     }
 }
 
-fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result<()> {
-    account.positions.clear();
+fn apply_positions(account: &mut Account, positions: &[AssetPosition], dex: &str) -> Result<()> {
+    // A patch is one dex's state: a row of another dex is a mislabelled seed.
+    if let Some(stray) = positions
+        .iter()
+        .find(|row| dex_of_coin(&row.position.coin) != dex)
+    {
+        return Err(crate::error::Error::bad_request(format!(
+            "position {} belongs to dex `{}`, not the patch's dex `{dex}` (name the dex in the patch)",
+            stray.position.coin,
+            dex_of_coin(&stray.position.coin)
+        )));
+    }
+    account.positions.retain(|coin, _| dex_of_coin(coin) != dex);
     for asset in positions {
         let p = &asset.position;
         let entry = match p.entry_px {
@@ -369,8 +391,8 @@ fn apply_positions(account: &mut Account, positions: &[AssetPosition]) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::account::clearinghouse;
-    use crate::sim::feed_with;
+    use crate::sim::account::{clearinghouse, COLLATERAL_TOKEN};
+    use crate::sim::{feed_with, feed_with_meta};
     use crate::sim::meta_with;
     use crate::sim::meta_with_table;
 
@@ -378,10 +400,9 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // one transition table: splitting it would hide the rule
     fn identity_holds_for_seeded_positions() {
-        let feed = feed_with(&[("ETH", "2985.9", "2986.0")]);
-        let meta = meta_with_table("ETH", 50);
+        let feed = feed_with_meta(&[("ETH", "2985.9", "2986.0")], meta_with_table("ETH", 50));
         let mut account = Account {
-            perp_balance: Decimal::from(1000),
+            perps: crate::sim::account::default_perps(Decimal::from(1000), 0),
             ..Account::default()
         };
         account.positions.insert(
@@ -398,7 +419,7 @@ mod tests {
                 funding_since_change: Decimal::ZERO,
             },
         );
-        let s = clearinghouse(&account, &feed, Some(&meta), 1_000).unwrap();
+        let s = clearinghouse(&account, &feed, "", 1_000).unwrap();
         let p = &s.asset_positions[0].position;
         let signed = if p.szi.is_sign_negative() {
             -p.position_value
@@ -416,7 +437,7 @@ mod tests {
         // totalRawUsd = balance − szi·entry (exactly).
         assert_eq!(
             s.margin_summary.total_raw_usd,
-            account.perp_balance - p.szi * p.entry_px.unwrap()
+            account.perp_balance("") - p.szi * p.entry_px.unwrap()
         );
         // Cross view with no isolated positions equals the summary.
         assert_eq!(
@@ -460,12 +481,11 @@ mod tests {
         let mut account = Account::default();
         seed.apply_to(&mut account, 0).unwrap();
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             Decimal::from(100) + Decimal::new(105, 2) * Decimal::from(10)
         );
-        let feed = feed_with(&[("BTC", "10.0", "10.0")]);
-        let meta = meta_with("BTC", 20);
-        let s = clearinghouse(&account, &feed, Some(&meta), 1).unwrap();
+        let feed = feed_with_meta(&[("BTC", "10.0", "10.0")], meta_with("BTC", 20));
+        let s = clearinghouse(&account, &feed, "", 1).unwrap();
         assert_eq!(s.margin_summary.total_raw_usd, Decimal::from(100));
     }
 
@@ -489,7 +509,7 @@ mod tests {
         let mut account = Account::default();
         seed.apply_to(&mut account, 0).unwrap();
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             "0.5".parse().unwrap(),
             "the perp raw is the named figure, not the spot side"
         );
@@ -499,7 +519,7 @@ mod tests {
             "the spot ledger is separate and preserved"
         );
         let feed = feed_with(&[("HYPE", "87.0", "87.0")]);
-        let live = view(&account, &feed, None).unwrap();
+        let live = view(&account, &feed, "").unwrap();
         assert_eq!(live.margin_summary.total_raw_usd, "0.5".parse().unwrap());
         assert_eq!(live.margin_summary.account_value, "0.5".parse().unwrap());
     }
@@ -560,9 +580,8 @@ mod tests {
         .unwrap();
         let mut account = Account::default();
         seed.apply_to(&mut account, 0).unwrap();
-        let feed = feed_with(&[("HYPE", "87.454", "87.454")]);
-        let meta = meta_with("HYPE", 10);
-        let live = view(&account, &feed, Some(&meta)).unwrap();
+        let feed = feed_with_meta(&[("HYPE", "87.454", "87.454")], meta_with("HYPE", 10));
+        let live = view(&account, &feed, "").unwrap();
         assert_eq!(live.margin_summary.total_raw_usd, "1.25".parse().unwrap());
         assert_eq!(
             live.margin_summary.account_value,
@@ -580,7 +599,7 @@ mod tests {
     #[test]
     fn a_positions_only_patch_preserves_cash_across_a_mode_switch() {
         let mut account = Account {
-            perp_balance: "7.82".parse().unwrap(),
+            perps: crate::sim::account::default_perps("7.82".parse().unwrap(), 0),
             ..Account::default()
         };
         account.spot.insert(
@@ -609,13 +628,12 @@ mod tests {
         .unwrap();
         seed.apply_to(&mut account, 0).unwrap();
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             "7.82".parse().unwrap(),
             "positions do not move cash"
         );
-        let feed = feed_with(&[("HYPE", "87.9545", "87.9545")]);
-        let meta = meta_with("HYPE", 10);
-        let live = view(&account, &feed, Some(&meta)).unwrap();
+        let feed = feed_with_meta(&[("HYPE", "87.9545", "87.9545")], meta_with("HYPE", 10));
+        let live = view(&account, &feed, "").unwrap();
         assert_eq!(
             live.margin_summary.total_raw_usd,
             "14.856360".parse().unwrap(),
@@ -636,7 +654,7 @@ mod tests {
     #[test]
     fn a_summary_only_patch_cannot_rewrite_an_open_book() {
         let mut account = Account {
-            perp_balance: "7.82".parse().unwrap(),
+            perps: crate::sim::account::default_perps("7.82".parse().unwrap(), 0),
             ..Account::default()
         };
         account.spot.insert(
@@ -674,7 +692,7 @@ mod tests {
             "the refusal names the missing book: {error}"
         );
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             "7.82".parse().unwrap(),
             "the refused patch did not move cash"
         );
@@ -691,7 +709,7 @@ mod tests {
     #[test]
     fn seed_patches_named_fields_only() {
         let mut account = Account {
-            perp_balance: Decimal::from(500),
+            perps: crate::sim::account::default_perps(Decimal::from(500), 0),
             ..Account::default()
         };
         account.spot.insert(
@@ -708,7 +726,7 @@ mod tests {
                 .unwrap();
         seed.apply_to(&mut account, 7).unwrap();
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             Decimal::from(100),
             "the named summary replaces the raw base"
         );
@@ -717,7 +735,7 @@ mod tests {
             Decimal::from(250),
             "unnamed balances keep their value"
         );
-        assert_eq!(account.funded_at_ms, 7);
+        assert_eq!(account.funded_at_ms(""), 7);
 
         let clear: AccountSeed = serde_json::from_str(r#"{"spotBalances": []}"#).unwrap();
         clear.apply_to(&mut account, 8).unwrap();
@@ -726,12 +744,12 @@ mod tests {
             "a named empty spotBalances list clears"
         );
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             Decimal::from(100),
             "a spotBalances-only patch keeps the perp side"
         );
         assert_eq!(
-            account.funded_at_ms, 7,
+            account.funded_at_ms(""), 7,
             "a spotBalances-only patch does not re-stamp the funding baseline"
         );
 
@@ -773,19 +791,18 @@ mod tests {
         let mut account = Account::default();
         seed.apply_to(&mut account, 0).unwrap();
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             Decimal::from(80_000),
             "entryPx 0.0: raw == perp balance"
         );
 
-        let feed = feed_with(&[("HYPE", "300", "300")]);
-        let meta = meta_with("HYPE", 10);
-        let before = control_view(Some(&seed), &account, &feed, Some(&meta)).unwrap();
+        let feed = feed_with_meta(&[("HYPE", "300", "300")], meta_with("HYPE", 10));
+        let before = control_view(Some(&seed), &account, &feed).unwrap();
         assert_eq!(
             before.margin_summary.unwrap().account_value,
             Decimal::from(50_000)
         );
-        let live = view(&account, &feed, Some(&meta)).unwrap();
+        let live = view(&account, &feed, "").unwrap();
         assert_eq!(
             live.margin_summary.account_value,
             Decimal::from(50_000),
@@ -793,13 +810,13 @@ mod tests {
         );
 
         feed.put_ctx("HYPE".into(), crate::wire::test_ctx("310", "310"), 2);
-        let after = control_view(Some(&seed), &account, &feed, Some(&meta)).unwrap();
+        let after = control_view(Some(&seed), &account, &feed).unwrap();
         assert_eq!(
             after.margin_summary.unwrap().account_value,
             Decimal::from(50_000),
             "the fixture read must not move with the mark"
         );
-        let live = view(&account, &feed, Some(&meta)).unwrap();
+        let live = view(&account, &feed, "").unwrap();
         assert_eq!(
             live.margin_summary.account_value,
             Decimal::from(49_000),

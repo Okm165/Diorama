@@ -14,7 +14,7 @@ use crate::feed::MarketFeed;
 use crate::sim::{account, Sim};
 use crate::wire::{
     ActiveAssetData, ClearinghouseState, ExchangeStatus, InfoRequest, Leverage, LeverageType,
-    MarginSummary, MetaAndAssetCtxs, UserAbstraction,
+    MetaAndAssetCtxs, UserAbstraction,
 };
 use alloy_primitives::Address;
 use axum::body::Bytes;
@@ -453,14 +453,9 @@ fn pre_transfer_check(state: &ApiState, user: Address, source: Address) -> Resul
     .into_response())
 }
 
-/// `clearinghouseState`: the sim's single-ledger clearinghouse for a touched
+/// `clearinghouseState`: the sim's one-dex clearinghouse for a touched
 /// account, the venue's verbatim otherwise. A dex the venue does not list (and
 /// `ALL_DEXS`, which this type does not take) is the venue's 500 `null`.
-///
-/// step-9: the account plane keeps one ledger, so a named builder dex answers
-/// the venue's empty shape rather than a per-dex partition of the positions.
-/// The per-dex ledgers (and the unified-account switch) give this read its
-/// dex's own margin summary.
 async fn clearinghouse(
     state: &ApiState,
     body: Bytes,
@@ -471,15 +466,7 @@ async fn clearinghouse(
     let Some(DexScope::One(name)) = dex_scope(&state.feed, name, false) else {
         return Ok(unknown_dex());
     };
-    if !name.is_empty() {
-        return match state.sim.account(user)? {
-            Some(_) => {
-                Ok(Json(empty_clearinghouse(Sim::served_time(crate::now_ms()))).into_response())
-            }
-            None => pass_through(state, &body).await,
-        };
-    }
-    match clearinghouse_of(state, user)? {
+    match dex_clearinghouse_of(state, user, &name)? {
         Some(served) => Ok(Json(served).into_response()),
         None => pass_through(state, &body).await,
     }
@@ -490,13 +477,11 @@ async fn clearinghouse(
 async fn spot_state(state: &ApiState, body: Bytes, user: Address) -> Result<Response> {
     // Pure observation; the 1 Hz tick owns accrual and liquidation.
     simulated(state, &body, user, |account| {
-        let meta = state.feed.margin_meta();
         Ok(Json(crate::wire::SpotClearinghouseState {
-            balances: account::spot_balances(account),
+            balances: account::served_spot_balances(account, &state.feed)?,
             token_to_available_after_maintenance: account::available_after_maintenance(
                 account,
                 &state.feed,
-                meta.as_ref(),
             )?,
         })
         .into_response())
@@ -853,9 +838,6 @@ async fn active_asset(
 
 /// `meta`: one dex's cached metadata (`""` or no `dex` = the default dex). A
 /// dex the venue does not list, and `ALL_DEXS`, are the venue's 500 `null`.
-///
-/// step-9: a builder dex's HIP-3 fee-scale fields are not modeled yet (see
-/// [`all_perp_metas`]).
 fn meta(dex: &Option<String>, state: &ApiState) -> Result<Response> {
     match dex.as_deref().unwrap_or("") {
         "" => Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response()),
@@ -867,10 +849,6 @@ fn meta(dex: &Option<String>, state: &ApiState) -> Result<Response> {
 }
 
 /// `allPerpMetas`: one metadata entry per perp dex, in `perpDexs` order.
-///
-/// step-9: a builder dex's `growthMode`/`lastFeeScaleChangeTime`/
-/// `deployerFeeScale` (the HIP-3 fee scale) are not modeled yet; the cached
-/// meta serves the venue's shape without them.
 fn all_perp_metas(state: &ApiState) -> Result<Response> {
     let metas = state.feed.metas();
     if metas.is_empty() {
@@ -1121,12 +1099,21 @@ fn exchange_status() -> Response {
 }
 
 /// The default dex's served `clearinghouseState` for a touched account (the
-/// control plane's read): accrual *first*, then the read (the verifier caught
-/// the reverse order: the served figures lagged one accrual window behind the
-/// stored state).
+/// control plane's read).
 pub(crate) fn clearinghouse_of(
     state: &ApiState,
     address: Address,
+) -> Result<Option<ClearinghouseState>> {
+    dex_clearinghouse_of(state, address, "")
+}
+
+/// The served `clearinghouseState` of one dex for a touched account: accrual
+/// *first*, then the read (the verifier caught the reverse order: the served
+/// figures lagged one accrual window behind the stored state).
+pub(crate) fn dex_clearinghouse_of(
+    state: &ApiState,
+    address: Address,
+    dex: &str,
 ) -> Result<Option<ClearinghouseState>> {
     let now = crate::now_ms();
     let served_time = Sim::served_time(now);
@@ -1137,7 +1124,6 @@ pub(crate) fn clearinghouse_of(
     let Some(account) = state.sim.account(address)? else {
         return Ok(None);
     };
-    let meta = state.feed.margin_meta();
     // The served `time` is the **oldest live mark** the account is priced
     // from, not the read's clock. A stalled feed keeps its old mark; stamping
     // the read's clock made that stale mark look fresh and passed the
@@ -1146,11 +1132,12 @@ pub(crate) fn clearinghouse_of(
     let observation_time = account
         .positions
         .keys()
+        .filter(|coin| dex_of_coin(coin) == dex)
         .filter(|coin| !state.feed.market_is_owned(coin))
         .filter_map(|coin| state.feed.last_ctx_at(coin))
         .min()
         .map_or(served_time, |oldest| served_time.min(oldest));
-    let served = account::clearinghouse(&account, &state.feed, meta.as_ref(), observation_time)?;
+    let served = account::clearinghouse(&account, &state.feed, dex, observation_time)?;
     if !account::identity_holds(&served) {
         state
             .sim
@@ -1163,25 +1150,6 @@ pub(crate) fn clearinghouse_of(
         );
     }
     Ok(Some(served))
-}
-
-/// The venue's empty shape (a dex whose ledger is not modeled yet).
-fn empty_clearinghouse(time: u64) -> ClearinghouseState {
-    let zero = MarginSummary {
-        account_value: Decimal::ZERO,
-        total_ntl_pos: Decimal::ZERO,
-        total_raw_usd: Decimal::ZERO,
-        total_margin_used: Decimal::ZERO,
-    };
-    ClearinghouseState {
-        margin_summary: zero.clone(),
-        cross_margin_summary: zero,
-        cross_maintenance_margin_used: Decimal::ZERO,
-        withdrawable: Decimal::ZERO,
-        asset_positions: Vec::new(),
-        time,
-        control_owned: false,
-    }
 }
 
 /// The venue's own answer for an untouched account (verbatim passthrough).
@@ -1264,12 +1232,7 @@ pub(crate) fn active_asset_data(
     // meta prices it, not the coin's own dex's.
     let available = state
         .sim
-        .available_for(
-            &state.feed,
-            user,
-            None,
-            state.feed.margin_meta().as_ref(),
-        )?
+        .available_for(&state.feed, user, crate::feed::dex::dex_of_coin(coin), None)?
         .ok_or_else(|| Error::NotFound {
             what: format!("{user} is not a simulated account"),
         })?
@@ -1603,6 +1566,7 @@ mod tests {
                 address: user,
                 class: crate::sim::DealClass::Perp,
                 coin: None,
+                dex: None,
                 amount: "100".parse().unwrap(),
             },
         )

@@ -37,11 +37,11 @@ use std::time::Duration;
 
 const REAL: &str = include_str!("fixtures/real.json");
 
-/// The capture rows this step defers, one entry per deferred machinery (the
+/// The capture rows still deferred, one entry per deferred machinery (the
 /// fork's harness has no skip mechanism; this list is the port's own, and the
 /// info test checks each row is still in the capture). Values are the venue's
 /// answer key and the reason.
-const DEFERRED_INFO: [(&str, &str); 5] = [
+const DEFERRED_INFO: [(&str, &str); 3] = [
     (
         "meta:xyz",
         "step-9: a builder dex's HIP-3 fee-scale fields (growthMode, \
@@ -54,14 +54,6 @@ const DEFERRED_INFO: [(&str, &str); 5] = [
     (
         "allPerpMetas[1..]",
         "step-9: the same HIP-3 fee-scale fields on a builder dex's meta",
-    ),
-    (
-        "clearinghouseState:xyz",
-        "step-9: the per-dex clearinghouse ledger",
-    ),
-    (
-        "clearinghouseState:flx",
-        "step-9: the per-dex clearinghouse ledger",
     ),
 ];
 
@@ -270,22 +262,21 @@ fn world_on(venue: &str) -> (Arc<ApiState>, Address) {
         .unwrap(),
     );
     let user = Address::repeat_byte(0xaa);
-    // step-9: the account plane keeps one ledger, so the deal has no dex and
-    // the second funding is the same balance. A builder coin's position is
-    // still opened (and margined) by the order lane through the feed's union
-    // meta; the per-dex *clearinghouse* partition is what stays deferred.
-    state
-        .sim
-        .deal(
-            &feed,
-            &Deal {
-                address: user,
-                class: DealClass::Perp,
-                coin: None,
-                amount: Decimal::from(10_000),
-            },
-        )
-        .unwrap();
+    for dex in [None, Some("xyz".to_string())] {
+        state
+            .sim
+            .deal(
+                &feed,
+                &Deal {
+                    address: user,
+                    class: DealClass::Perp,
+                    coin: None,
+                    dex,
+                    amount: Decimal::from(10_000),
+                },
+            )
+            .unwrap();
+    }
     let order = |coin: &str, is_buy: bool, size: &str, px: Option<&str>, tif: Tif| Order {
         coin: coin.into(),
         is_buy,
@@ -350,6 +341,14 @@ fn info_cases(user: Address) -> Vec<(&'static str, Value)> {
         (
             "clearinghouseState",
             serde_json::json!({"type": "clearinghouseState", "user": user}),
+        ),
+        (
+            "clearinghouseState:xyz",
+            serde_json::json!({"type": "clearinghouseState", "user": user, "dex": "xyz"}),
+        ),
+        (
+            "clearinghouseState:flx",
+            serde_json::json!({"type": "clearinghouseState", "user": user, "dex": "flx"}),
         ),
         (
             "spotClearinghouseState",
@@ -580,17 +579,35 @@ async fn decimals_are_printed_the_venues_way() {
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
-/// The sim's own per-dex figures: the resting orders split by dex (`ALL_DEXS`
-/// lists them all, newest first), a table id resolves across the dexes'
-/// tables, and a builder coin's active data uses its own mark.
-///
-/// step-9: the positions are *not* split by dex — the account plane keeps one
-/// clearinghouse, so a named builder dex answers the venue's empty shape
-/// (`info.rs` marks the read) and every position lives on the default one.
+/// The sim's own per-dex figures: a builder dex's clearinghouse holds its
+/// position and none of the others', an untouched dex is empty, the resting
+/// orders split by dex (`ALL_DEXS` lists them all, newest first), a table id
+/// resolves across the dexes' tables, and a builder coin's active data uses
+/// its own mark.
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // one fixture world read per dex
 async fn the_per_dex_reads_hold_only_that_dexs_figures() {
     let (state, user) = world();
+    let positions = |state: &Arc<ApiState>, dex: &'static str| {
+        let state = state.clone();
+        async move {
+            let ch = info_json(
+                &state,
+                serde_json::json!({"type": "clearinghouseState", "user": user, "dex": dex}),
+            )
+            .await;
+            ch["assetPositions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["position"]["coin"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(positions(&state, "").await, ["ETH"]);
+    assert_eq!(positions(&state, "xyz").await, ["xyz:TSLA"]);
+    assert!(positions(&state, "flx").await.is_empty());
+
     let coins = |rows: &Value| -> Vec<String> {
         rows.as_array()
             .unwrap()
@@ -938,7 +955,7 @@ async fn the_transfer_ledger_and_the_activation_check_have_the_venues_shapes() {
     .await;
     state
         .sim
-        .spot_send((other, third), usdc, Decimal::from(5), &state.feed)
+        .spot_send((other, third), usdc, Decimal::from(5), (RowKind::SpotTransfer, &state.feed))
         .unwrap();
     state
         .sim
@@ -1084,6 +1101,14 @@ fn websocket_acks_and_frames_have_the_venues_shapes() {
         (
             "clearinghouseState",
             serde_json::json!({"type": "clearinghouseState", "user": user}),
+        ),
+        (
+            "clearinghouseState:xyz",
+            serde_json::json!({"type": "clearinghouseState", "user": user, "dex": "xyz"}),
+        ),
+        (
+            "clearinghouseState:flx",
+            serde_json::json!({"type": "clearinghouseState", "user": user, "dex": "flx"}),
         ),
         (
             "openOrders",

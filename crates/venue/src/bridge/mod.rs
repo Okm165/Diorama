@@ -315,12 +315,12 @@ impl Bridge {
     async fn changed_figures(
         &self,
         usdc: &system::TokenInfo,
-        meta: Option<&crate::wire::Meta>,
+        _meta: Option<&crate::wire::Meta>,
         _head: u64,
     ) -> Result<Vec<(Address, [u64; 3])>> {
         let mut current = std::collections::HashMap::new();
         for address in self.sim.account_addresses()? {
-            match self.core_figures(address, usdc, meta) {
+            match self.core_figures(address, usdc, _meta) {
                 Ok(figures) => {
                     current.insert(address, figures);
                     if self
@@ -388,7 +388,7 @@ impl Bridge {
         &self,
         address: Address,
         token: &system::TokenInfo,
-        meta: Option<&crate::wire::Meta>,
+        _meta: Option<&crate::wire::Meta>,
     ) -> Result<[u64; 3]> {
         let Some(account) = self.sim.account(address)? else {
             return Ok([0; 3]);
@@ -396,7 +396,7 @@ impl Bridge {
         let entry = account.spot.get(&token.index);
         let total = entry.map_or(Decimal::ZERO, |e| e.total);
         let hold =
-            match crate::sim::account::available_after_maintenance(&account, &self.feed, meta)?
+            match crate::sim::account::available_after_maintenance(&account, &self.feed)?
                 .into_iter()
                 .find(|(t, _)| *t == token.index)
                 .map(|(_, available)| available)
@@ -404,7 +404,7 @@ impl Bridge {
                 Some(available) if available < total => total - available,
                 _ => entry.map_or(Decimal::ZERO, |e| e.hold),
             };
-        let view = crate::sim::account::view(&account, &self.feed, meta)?;
+        let view = crate::sim::account::view(&account, &self.feed, "")?;
         Ok([
             core_units(total, token.wei_decimals)?,
             core_units(hold, token.wei_decimals)?,
@@ -870,7 +870,7 @@ impl Bridge {
                 coin: &info.name,
             },
             amount,
-            &self.feed,
+            (RowKind::SpotTransfer, &self.feed),
         )?;
         if matches!(applied, Applied::Refused) {
             self.metrics.inc_refusals();
@@ -900,7 +900,7 @@ impl Bridge {
                 return;
             }
         };
-        match self.sim.set_mode(user, mode) {
+        match self.sim.set_mode(user, mode, &self.feed) {
             Ok(()) => tracing::info!(account = %user, ?mode, "bridge: abstraction set"),
             Err(e) => {
                 self.metrics.inc_refusals();
@@ -960,7 +960,7 @@ impl Bridge {
                     coin: &info.name,
                 },
                 amount,
-                &self.feed,
+                (RowKind::SpotTransfer, &self.feed),
             )?;
             if matches!(applied, Applied::Refused) {
                 self.metrics.inc_refusals();
@@ -995,9 +995,8 @@ impl Bridge {
             tracing::warn!(account = %caller, amount = %amount, "bridge: Core→EVM refused (unknown account)");
             return Ok(false);
         };
-        let meta = self.feed.margin_meta();
         if let Some(bound) =
-            crate::sim::account::spot_bridge_bound(&account, &self.feed, meta.as_ref(), info.index)?
+            crate::sim::account::spot_bridge_bound(&account, &self.feed, info.index)?
         {
             if amount > bound {
                 self.metrics.inc_refusals();

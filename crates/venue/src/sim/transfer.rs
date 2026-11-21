@@ -9,17 +9,16 @@
 //! dex; and the token sent must match the collateral token of a perp-dex
 //! endpoint.
 //!
-//! Our sim's account plane is the USDC clearinghouse (one perp wallet for the
-//! default dex and every USDC-collateral builder dex — the per-dex ledger is
-//! the next account-plane step). A USDH-collateral dex is therefore outside
-//! what the account can express and is refused by name; the spot wallet, the
-//! token registry and the ledger rows are the real shapes.
+//! A perp endpoint's token must be its dex's collateral, so USDC moves to and
+//! from the default dex and the dexes that collateralise in USDC, USDH to a
+//! USDH dex, and a USDH transfer into the default dex is refused. The spot
+//! wallet, the token registry and the ledger rows are the real shapes.
 //!
-//! Bounds: the perp wallet gives up what its clearinghouse lets it withdraw
-//! (the served `withdrawable`: the margin in use stays — the docs' transfer
-//! floor), a unified account's spot wallet what is left after the maintenance
-//! its positions hold on every dex margining against the token (and never what
-//! a resting spot order holds).
+//! Bounds: a perp wallet gives up what its dex lets it withdraw (the served
+//! `withdrawable`: margin in use stays, and a standard account never sends more
+//! than the wallet's cash), a unified account's spot wallet what is left after
+//! the maintenance its positions hold on every dex margining against the token
+//! (and never what a resting spot order holds).
 //!
 //! Fees ([`super::fees`]): an account's first outbound transfer to another
 //! account pays the 1 USDC activation fee on top of the amount (Circle's rule;
@@ -33,16 +32,11 @@ use crate::feed::MarketFeed;
 use alloy_primitives::Address;
 use rust_decimal::Decimal;
 
-/// One end of a transfer: the spot wallet or the perp clearinghouse. The
-/// dex name is the venue's `sourceDex` / `destinationDex`; the sim's perp
-/// cash is one USDC ledger, so every `Perp` name reads the same balance until
-/// the per-dex ledger lands.
+/// One end of a transfer: the spot wallet or one perp dex's clearinghouse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Wallet {
     Spot,
-    /// A perp dex by name (`""` = the default dex). Constructed by the
-    /// transfer tests and by the `/exchange` action dispatch; the sim's one
-    /// perp wallet reads every name as the same cash.
+    /// A perp dex by name (`""` = the default dex).
     Perp(String),
 }
 
@@ -113,19 +107,13 @@ fn check_shape(send: &AssetSend<'_>, feed: &MarketFeed) -> Result<()> {
         }
         let collateral = feed.collateral_token_of(dex);
         if collateral != send.token.index {
+            let named = feed
+                .token_name(collateral)
+                .unwrap_or_else(|| collateral.to_string());
             return Err(refuse(format!(
-                "token {} is not the collateral token of {} ({collateral}); the token sent must \
+                "token {} is not the collateral token of {} ({named}); the token sent must \
                  match the collateral token of a perp dex endpoint",
                 send.token.coin,
-                wallet.describe()
-            )));
-        }
-        // One perp wallet, denominated in the quote token: a dex margining
-        // against another token needs the per-dex clearinghouse ledger.
-        if collateral != QUOTE_TOKEN.index {
-            return Err(refuse(format!(
-                "{} margins against token {collateral}; the sim models the USDC \
-                 clearinghouse only",
                 wallet.describe()
             )));
         }
@@ -144,12 +132,10 @@ pub(crate) fn spot_free(account: &Account, feed: &MarketFeed, token: u32) -> Res
         Some(e) => account::sub(e.total, e.hold.max(Decimal::ZERO), "spot hold")?,
         None => Decimal::ZERO,
     };
-    Ok(
-        match account::spot_bridge_bound(account, feed, feed.margin_meta().as_ref(), token)? {
-            Some(free) => held.min(free),
-            None => held,
-        },
-    )
+    Ok(match account::spot_bridge_bound(account, feed, token)? {
+        Some(free) => held.min(free),
+        None => held,
+    })
 }
 
 /// What the source wallet may give up now (see the module docs).
@@ -161,17 +147,9 @@ fn source_bound(
 ) -> Result<Decimal> {
     match wallet {
         Wallet::Spot => spot_free(account, feed, token),
-        // The venue's bound is the clearinghouse's `withdrawable`: the margin
-        // the open positions use stays (the docs' transfer floor). Our account
-        // plane has the one USDC clearinghouse, so the account's figure is the
-        // wallet's. A mark not served yet is a refusal, never a guess.
-        Wallet::Perp(_) => match account::view(account, feed, feed.margin_meta().as_ref()) {
-            Ok(view) => Ok(view.withdrawable),
-            Err(Error::Warming) => Err(refuse(
-                "the marks behind the perp wallet's positions are not served yet",
-            )),
-            Err(e) => Err(e),
-        },
+        Wallet::Perp(dex) => account::perp_transfer_bound(account, feed, dex).ok_or_else(|| {
+            refuse("the marks behind the source dex's positions are not served yet")
+        }),
     }
 }
 
@@ -186,7 +164,7 @@ fn check_headroom(
     let current = match (account, wallet) {
         (None, _) => Decimal::ZERO,
         (Some(a), Wallet::Spot) => a.spot.get(&token).map_or(Decimal::ZERO, |e| e.total),
-        (Some(a), Wallet::Perp(_)) => a.perp_balance,
+        (Some(a), Wallet::Perp(dex)) => a.perp_balance(dex),
     };
     account::add(current, amount, "asset send")?;
     Ok(())
@@ -247,8 +225,8 @@ fn debit_sender(state: &mut SimState, send: &AssetSend<'_>, due: Decimal) -> Res
             let entry = account::spot_entry(from, send.token);
             entry.total = account::sub(entry.total, out, "asset send")?;
         }
-        Wallet::Perp(_) => {
-            from.perp_balance = account::sub(from.perp_balance, out, "asset send")?;
+        Wallet::Perp(dex) => {
+            from.credit_perp(dex, -out, "asset send")?;
         }
     }
     if !quote && due > Decimal::ZERO {
@@ -265,8 +243,8 @@ fn credit_recipient(state: &mut SimState, send: &AssetSend<'_>) -> Result<()> {
         Wallet::Spot => {
             account::credit_entry(to, send.token, send.amount, "asset send")?;
         }
-        Wallet::Perp(_) => {
-            to.perp_balance = account::add(to.perp_balance, send.amount, "asset send")?;
+        Wallet::Perp(dex) => {
+            to.credit_perp(dex, send.amount, "asset send")?;
         }
     }
     Ok(())
@@ -456,7 +434,7 @@ impl Sim {
         (from, to): (Address, Address),
         token: TokenRef<'_>,
         amount: Decimal,
-        feed: &MarketFeed,
+        (kind, feed): (RowKind, &MarketFeed),
     ) -> Result<Applied> {
         let asset = AssetSend {
             from,
@@ -465,7 +443,7 @@ impl Sim {
             amount,
             source: Wallet::Spot,
             destination: Wallet::Spot,
-            kind: RowKind::SpotTransfer,
+            kind,
         };
         match self.send_asset(&asset, feed) {
             Ok(()) => Ok(Applied::Applied),
@@ -542,9 +520,8 @@ impl Sim {
                 Wallet::Spot => {
                     account::credit_entry(account, token, amount, "spot credit")?;
                 }
-                Wallet::Perp(_) => {
-                    account.perp_balance =
-                        account::add(account.perp_balance, amount, "perp credit")?;
+                Wallet::Perp(dex) => {
+                    account.credit_perp(dex, amount, "perp credit")?;
                 }
             }
             state.activated.insert(address);

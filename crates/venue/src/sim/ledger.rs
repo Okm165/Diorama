@@ -444,6 +444,7 @@ mod tests {
                 address: who,
                 class: DealClass::Perp,
                 coin: None,
+                dex: None,
                 amount: amount.parse().unwrap(),
             },
         )
@@ -753,7 +754,7 @@ mod tests {
         assert_eq!(state.next_tid, 0);
         assert!(state.accounts[&a].fills.is_empty());
         assert!(state.accounts[&a].fundings.is_empty());
-        assert_eq!(state.accounts[&a].perp_balance, dec("12"));
+        assert_eq!(state.accounts[&a].perp_balance(""), dec("12"));
 
         let mut next_tid = state.next_tid;
         let facts = FillFacts::close("ETH", Side::Buy, dec("1"), dec("2"), 1);
@@ -785,7 +786,7 @@ mod tests {
         let mut back: crate::sim::SimState = serde_json::from_str(&json).unwrap();
         back.migrate();
         assert_eq!(back, state);
-        assert_eq!(back.accounts[&a].perp_balance, dec("12"));
+        assert_eq!(back.accounts[&a].perp_balance(""), dec("12"));
         assert_eq!(back.next_tid, 1);
         assert_eq!(back.accounts[&a].fills[0].dir, "Close Short");
     }

@@ -2,9 +2,10 @@
 //! boundary crossed, oracle-priced, all-or-nothing per account. The trade
 //! path settles the pre-fill size first (order.rs); the automaton sweeps
 //! every account (tick.rs).
-use super::account::{add, mul, Account};
+use super::account::{add, credit_ledger, mul, Account};
 use super::ledger::{record_funding, UserFunding, LEDGER_BOUND};
 use crate::error::Result;
+use crate::feed::dex::dex_of_coin;
 use crate::feed::{MarketFeed, Prices};
 use rust_decimal::Decimal;
 
@@ -50,36 +51,55 @@ fn record_boundaries(
 /// position's boundaries settle before its size moves; the rate served at
 /// the accrual prices every boundary crossed since the last one (the sim
 /// keeps no per-boundary rate history — the gaps table names it).
-// step-9: funding is per dex (one clearinghouse per (user, dex)): each dex's
-// own stamp, ledger and dex-scoped all-or-nothing gate (the fork's
-// `accrue_dex` split) land with the per-dex ledger.
+/// Funding is per dex (the venue keeps one clearinghouse per (user, dex)):
+/// each dex has its own stamp, its payments land in its own ledger, and the
+/// all-or-nothing deferral is scoped to the dex, so one unpriced coin holds
+/// back only its own dex's accrual.
 pub(crate) fn accrue_funding(
     account: &mut Account,
     feed: &MarketFeed,
     to_ms: u64,
 ) -> Result<usize> {
-    if account.funded_at_ms == 0 {
-        account.funded_at_ms = to_ms;
+    let mut moved = 0;
+    for dex in account.dexs_with_activity() {
+        moved += accrue_dex(account, feed, &dex, to_ms)?;
+    }
+    Ok(moved)
+}
+
+/// Whether every position of `dex` has a live price and funding rate (the
+/// all-or-nothing gate of its accrual).
+fn dex_is_priced(account: &Account, feed: &MarketFeed, dex: &str) -> bool {
+    account
+        .positions
+        .keys()
+        .filter(|coin| dex_of_coin(coin) == dex)
+        .all(|coin| feed.required_prices(coin).is_some() && feed.funding(coin).is_some())
+}
+
+/// One dex's accrual (see [`accrue_funding`]): the number of payments moved.
+fn accrue_dex(account: &mut Account, feed: &MarketFeed, dex: &str, to_ms: u64) -> Result<usize> {
+    let from = account.funded_at_ms(dex);
+    if from == 0 {
+        account.ledger_mut(dex).funded_at_ms = to_ms;
         return Ok(0);
     }
-    let from = account.funded_at_ms;
     if to_ms <= from {
         return Ok(0);
     }
     let hours = (to_ms / HOUR_MS).saturating_sub(from / HOUR_MS);
     if hours == 0 {
-        account.funded_at_ms = to_ms;
+        account.ledger_mut(dex).funded_at_ms = to_ms;
         return Ok(0);
     }
-    let priced = account
-        .positions
-        .keys()
-        .all(|coin| feed.required_prices(coin).is_some() && feed.funding(coin).is_some());
-    if !priced {
+    if !dex_is_priced(account, feed, dex) {
         return Ok(0);
     }
     let mut moved = 0;
     for (coin, p) in account.positions.iter_mut() {
+        if dex_of_coin(coin) != dex {
+            continue;
+        }
         let Some(Prices { oracle, .. }) = feed.required_prices(coin) else {
             continue;
         };
@@ -95,7 +115,7 @@ pub(crate) fn accrue_funding(
         if payment.is_zero() {
             continue;
         }
-        account.perp_balance = add(account.perp_balance, payment, "funding balance")?;
+        credit_ledger(&mut account.perps, dex, payment, "funding balance")?;
         p.funding_all_time = add(p.funding_all_time, payment, "cum funding")?;
         p.funding_since_open = add(p.funding_since_open, payment, "cum funding")?;
         p.funding_since_change = add(p.funding_since_change, payment, "cum funding")?;
@@ -103,7 +123,7 @@ pub(crate) fn accrue_funding(
         record_boundaries(&mut account.fundings, &entry, (to_ms, hours));
         moved += 1;
     }
-    account.funded_at_ms = to_ms;
+    account.ledger_mut(dex).funded_at_ms = to_ms;
     Ok(moved)
 }
 
@@ -132,8 +152,7 @@ mod tests {
     /// A zero-balance account stamped at the 1 h mark, holding `long_btc`.
     fn funding_account() -> Account {
         let mut account = Account {
-            perp_balance: Decimal::ZERO,
-            funded_at_ms: 3_600_000,
+            perps: crate::sim::account::default_perps(Decimal::ZERO, 3_600_000),
             ..Account::default()
         };
         account.positions.insert("BTC".into(), long_btc());
@@ -149,7 +168,7 @@ mod tests {
         let moved = accrue_funding(&mut account, &feed, 7_200_000).unwrap();
         assert_eq!(moved, 1);
         let expected = -Decimal::ONE * Decimal::from(101) * Decimal::new(125, 7);
-        assert_eq!(account.perp_balance, expected);
+        assert_eq!(account.perp_balance(""), expected);
         assert_eq!(account.positions["BTC"].funding_since_open, expected);
     }
 
@@ -161,10 +180,10 @@ mod tests {
         let mut account = funding_account();
         account.positions.insert("ETH".into(), long_btc());
         assert_eq!(accrue_funding(&mut account, &feed, 7_200_000).unwrap(), 0);
-        assert_eq!(account.funded_at_ms, 3_600_000, "the stamp stays put");
+        assert_eq!(account.funded_at_ms(""), 3_600_000, "the stamp stays put");
         feed.put_ctx("ETH".into(), crate::wire::funding_ctx("100", "100"), 1);
         assert_eq!(accrue_funding(&mut account, &feed, 7_200_000).unwrap(), 2);
-        assert_eq!(account.funded_at_ms, 7_200_000);
+        assert_eq!(account.funded_at_ms(""), 7_200_000);
     }
 
     /// The docs' interval is all-or-nothing: a read inside the hour moves no
@@ -175,12 +194,12 @@ mod tests {
         let mut account = funding_account();
         // 59 minutes past the baseline: inside the interval, nothing moves.
         assert_eq!(accrue_funding(&mut account, &feed, 7_140_000).unwrap(), 0);
-        assert_eq!(account.perp_balance, Decimal::ZERO);
+        assert_eq!(account.perp_balance(""), Decimal::ZERO);
         // The next boundary pays the whole hour, not the elapsed fraction.
         let moved = accrue_funding(&mut account, &feed, 7_200_000).unwrap();
         assert_eq!(moved, 1);
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             -Decimal::ONE * Decimal::from(101) * Decimal::new(125, 7)
         );
     }
@@ -213,7 +232,7 @@ mod tests {
         assert_eq!(times, [7_200_000, 10_800_000, 14_400_000, 18_000_000]);
         let recorded: Decimal = account.fundings.iter().map(|f| f.usdc).sum();
         assert_eq!(
-            recorded, account.perp_balance,
+            recorded, account.perp_balance(""),
             "the ledger sums to the balance"
         );
     }

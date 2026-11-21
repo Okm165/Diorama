@@ -12,10 +12,11 @@
 //! ADL's opposite side is the sim's accounts, not the real venue's whole
 //! book — an empty ranking leaves the position for the next tick (named in
 //! the log).
-use super::account::{self, Liquidation};
-use super::ledger::{FillRecord, Liquidity};
+use super::account::{self, FillFacts, Liquidation};
+use super::ledger::{self, FillEffect, FillLiquidation, FillRecord, LiquidationMethod, Liquidity};
 use super::{Account, Sim, BACKSTOP};
 use crate::error::Result;
+use crate::feed::dex::dex_of_coin;
 use crate::feed::MarketFeed;
 use alloy_primitives::Address;
 use rust_decimal::Decimal;
@@ -110,31 +111,68 @@ impl Sim {
             );
             return Ok(None);
         }
+        // One clearinghouse per dex: each dex of the account is walked on its
+        // own (its own cross leg with its own equity and its own isolated
+        // legs); a liquidation on one dex never touches another.
+        let mut closed = Vec::new();
+        let mut equity = Decimal::ZERO;
+        for dex in account.position_dexs() {
+            // A builder dex whose view cannot be priced (a coin the feed has
+            // no mark for yet) skips only itself, so it can never stall the
+            // default dex's or another account's liquidation. The default dex
+            // keeps the pass's fail-loud contract.
+            let outcome = self.check_dex(feed, (address, &dex), account, now_ms);
+            let (dex_closed, dex_equity) = match outcome {
+                Ok(done) => done,
+                Err(e) if !dex.is_empty() => {
+                    tracing::warn!(account = %address, dex = %dex, error = %e, "waterfall: dex skipped (not priced yet)");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+            if !dex_closed.is_empty() {
+                equity = account::add(equity, dex_equity, "liquidation equity")?;
+            }
+            closed.extend(dex_closed);
+        }
+        if closed.is_empty() {
+            return Ok(None);
+        }
+        self.liquidated(closed, equity)
+    }
+
+    /// One (account, dex) clearinghouse's waterfall: its cross leg and every
+    /// isolated leg of its positions. Returns the coins closed and the dex's
+    /// equity (the unified fold) at the check.
+    fn check_dex(
+        &self,
+        feed: &MarketFeed,
+        target: (Address, &str),
+        account: &Account,
+        now_ms: u64,
+    ) -> Result<(Vec<String>, Decimal)> {
+        let (address, dex) = target;
         // A rescue that found no executable action backs off for one partial
         // cooldown. Without it the thin venue retries the same refused close
         // every tick (measured at 1 Hz for 63 minutes) and floods the log.
+        let key = super::DexKey::new(address, dex);
         let retry_after =
-            self.with_state(|state| Ok(state.waterfall_retry_after.get(&address).copied()))?;
+            self.with_state(|state| Ok(state.waterfall_retry_after.get(&key).copied()))?;
         if retry_after.is_some_and(|until| now_ms < until) {
-            return Ok(None);
+            return Ok((Vec::new(), Decimal::ZERO));
         }
-        if account.positions.is_empty() {
-            return Ok(None);
-        }
-        let meta = feed.margin_meta();
-        let v = account::view(account, feed, meta.as_ref())?;
+        let v = account::view(account, feed, dex)?;
         let pass = Pass {
             feed,
             address,
+            dex,
             account,
             now_ms,
         };
         let mut closed = self.check_cross_leg(&pass, &v)?;
         closed.extend(self.check_isolated_legs(&pass, &v, account)?);
-        if closed.is_empty() {
-            return Ok(None);
-        }
-        self.liquidated(closed, account::unified_equity(account, &v)?)
+        let equity = account::unified_equity(account, feed, dex, &v)?;
+        Ok((closed, equity))
     }
 
     /// The cross leg: the venue's own cross figure (the total minus the
@@ -145,7 +183,7 @@ impl Sim {
         // though the served `crossMarginSummary` excludes it. The order lane
         // trades against it; the waterfall must not liquidate the position it
         // just allowed.
-        let equity = account::unified_equity(pass.account, v)?;
+        let equity = account::unified_equity(pass.account, pass.feed, pass.dex, v)?;
         let maintenance = v.cross_maintenance_margin_used;
         self.rescue_leg(
             pass,
@@ -166,7 +204,7 @@ impl Sim {
     ) -> Result<Vec<String>> {
         let mut closed = Vec::new();
         for (coin, p) in &account.positions {
-            if p.leverage != crate::wire::LeverageType::Isolated {
+            if p.leverage != crate::wire::LeverageType::Isolated || dex_of_coin(coin) != pass.dex {
                 continue;
             }
             let Some(facts) = v.facts.get(coin) else {
@@ -219,7 +257,7 @@ impl Sim {
         if equity < Decimal::ZERO {
             let closed = self.adl(pass, leg)?;
             if closed.is_empty() {
-                self.defer_waterfall(pass.address, pass.now_ms)?;
+                self.defer_waterfall(pass)?;
             }
             return Ok(closed);
         }
@@ -228,7 +266,7 @@ impl Sim {
         if backstop {
             let closed = self.backstop(pass, leg)?;
             if closed.is_empty() {
-                self.defer_waterfall(pass.address, pass.now_ms)?;
+                self.defer_waterfall(pass)?;
             }
             return Ok(closed);
         }
@@ -239,16 +277,18 @@ impl Sim {
     /// interval is the docs' partial-liquidation cooldown (30 s); the account
     /// is still checked by the next pass after it, and a market move that makes
     /// the rescue executable is not blocked by anything but this short pause.
-    fn defer_waterfall(&self, address: Address, now_ms: u64) -> Result<()> {
+    fn defer_waterfall(&self, pass: &Pass<'_>) -> Result<()> {
         const RETRY_AFTER_MS: u64 = 30_000;
+        let key = super::DexKey::new(pass.address, pass.dex);
         self.with_state(|state| {
             state
                 .waterfall_retry_after
-                .insert(address, now_ms.saturating_add(RETRY_AFTER_MS));
+                .insert(key, pass.now_ms.saturating_add(RETRY_AFTER_MS));
             Ok(())
         })?;
         tracing::warn!(
-            account = %address,
+            account = %pass.address,
+            dex = %pass.dex,
             retry_after_ms = RETRY_AFTER_MS,
             "waterfall: no executable action; backing off"
         );
@@ -261,13 +301,9 @@ impl Sim {
     /// expected — the remainder stays with the account.
     fn liquidate_via_book(&self, pass: &Pass<'_>, leg: Leg<'_>) -> Result<Vec<String>> {
         const COOLDOWN_MS: u64 = 30_000;
-        let cooldown = self.with_state(|state| {
-            Ok(state
-                .liq_cooldown_until
-                .get(&pass.address)
-                .copied()
-                .unwrap_or(0))
-        })?;
+        let key = super::DexKey::new(pass.address, pass.dex);
+        let cooldown =
+            self.with_state(|state| Ok(state.liq_cooldown_until.get(&key).copied().unwrap_or(0)))?;
         let cooldown = if pass.now_ms < cooldown {
             PartialCooldown::Active
         } else {
@@ -276,7 +312,7 @@ impl Sim {
         let mut closed = Vec::new();
         let mut fill = Fill::Whole;
         for (coin, p) in &pass.account.positions {
-            if !leg.holds(coin, p) {
+            if !pass.owns(leg, coin, p) {
                 continue;
             }
             let outcome = self.liquidate_one(pass, (coin, p), cooldown)?;
@@ -288,7 +324,7 @@ impl Sim {
         if matches!(fill, Fill::Partial) {
             let until = pass.now_ms.saturating_add(COOLDOWN_MS);
             self.with_state(|state| {
-                state.liq_cooldown_until.insert(pass.address, until);
+                state.liq_cooldown_until.insert(key, until);
                 Ok(())
             })?;
             self.metrics
@@ -353,6 +389,8 @@ impl Sim {
     /// is named.
     fn vault_take(&self, pass: &Pass<'_>, leg: Leg<'_>) -> Result<Vec<String>> {
         let mut closed = Vec::new();
+        // The ledger's stamp: read before the lock (`clock()` takes it).
+        let clock = self.clock(crate::now_ms())?;
         self.with_state(|st| {
             let mut me = st.accounts.remove(&pass.address).unwrap_or_default();
             let mut vault = st.accounts.remove(&BACKSTOP).unwrap_or_default();
@@ -363,15 +401,20 @@ impl Sim {
                 let holds = me
                     .positions
                     .get(&coin)
-                    .map(|p| leg.holds(&coin, p))
+                    .map(|p| pass.owns(leg, &coin, p))
                     .unwrap_or(false);
                 if !holds {
                     continue;
                 }
                 held = Held::Any;
-                if let Some(taken) =
-                    vault_take_coin(&mut vault, &mut me, pass.address, &coin, pass.feed)
-                {
+                let stamp = (&mut st.next_tid, clock);
+                if let Some(taken) = vault_take_coin(
+                    &mut vault,
+                    &mut me,
+                    (pass.address, &coin),
+                    pass.feed,
+                    stamp,
+                ) {
                     margin = account::add(margin, taken, "backstop margin")?;
                     closed.push(coin);
                 }
@@ -379,14 +422,16 @@ impl Sim {
             // The cross margin moves with the cross backstop (docs); if every
             // cross transfer was refused, nothing moves at all — the log names
             // each refusal.
+            // Only the dex's own ledger moves: another dex's balance is a
+            // different clearinghouse.
             if matches!(leg, Leg::Cross) && (held == Held::None || !closed.is_empty()) {
                 margin = account::add(
                     margin,
-                    std::mem::take(&mut me.perp_balance),
+                    std::mem::take(me.perp_balance_mut(pass.dex)),
                     "backstop margin",
                 )?;
             }
-            vault.perp_balance = account::add(vault.perp_balance, margin, "backstop balance")?;
+            vault.credit_perp(pass.dex, margin, "backstop balance")?;
             st.accounts.insert(pass.address, me);
             st.accounts.insert(BACKSTOP, vault);
             Ok(closed)
@@ -397,12 +442,12 @@ impl Sim {
     /// ranked by `(mark/entry)·(notional/account_value)` and closed at the
     /// *previous* mark against the underwater account (docs).
     fn adl(&self, pass: &Pass<'_>, leg: Leg<'_>) -> Result<Vec<String>> {
-        let meta = pass.feed.margin_meta();
         let mut closed = Vec::new();
         for (coin, p) in &pass.account.positions {
-            if !leg.holds(coin, p) {
+            if !pass.owns(leg, coin, p) {
                 continue;
             }
+            let meta = pass.feed.meta_for_lookup(coin);
             if matches!(
                 self.adl_coin(pass, coin, p, meta.as_ref())?,
                 AdlOutcome::Acted
@@ -440,7 +485,6 @@ impl Sim {
                 prev_mark,
                 direction,
             },
-            meta,
         )?;
         ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
         if ranked.is_empty() {
@@ -462,7 +506,7 @@ impl Sim {
             let own =
                 account::FillFacts::close(coin, mine.flip(), take, prev_mark, p.leverage_value);
             let theirs = account::FillFacts::close(coin, mine, take, prev_mark, 1);
-            self.adl_close_pair(pass.address, other, (&own, &theirs), meta)?;
+            self.adl_close_pair(pass.feed, (pass.address, other), (&own, &theirs), meta)?;
             tracing::warn!(account = %pass.address, other = %other, coin = %coin, sz = %take, px = %prev_mark, "ADL close at the previous mark");
             left = left.saturating_sub(take);
         }
@@ -478,11 +522,12 @@ impl Sim {
     /// as one close.
     fn adl_close_pair(
         &self,
-        address: Address,
-        other: Address,
+        feed: &MarketFeed,
+        parties: (Address, Address),
         fills: (&account::FillFacts, &account::FillFacts),
         meta: Option<&crate::wire::Meta>,
     ) -> Result<()> {
+        let (address, other) = parties;
         let (own, theirs) = fills;
         let own_effect = self.with_account(address, |a| account::apply_fill(a, own, meta))?;
         let their_effect = self.with_account(other, |a| account::apply_fill(a, theirs, meta))?;
@@ -496,7 +541,7 @@ impl Sim {
                     oid: 0,
                     cloid: None,
                     liquidity: Liquidity::Taker,
-                    fee_token: "USDC",
+                    fee_token: &feed.fee_token_of_coin(&facts.coin),
                 },
             )?;
         }
@@ -513,7 +558,6 @@ impl Sim {
         feed: &MarketFeed,
         address: Address,
         target: AdlTarget<'_>,
-        meta: Option<&crate::wire::Meta>,
     ) -> Result<Vec<(Decimal, Address, Decimal, Decimal)>> {
         let AdlTarget {
             coin,
@@ -532,7 +576,7 @@ impl Sim {
                 if op.direction() == direction || op.szi.is_zero() {
                     continue;
                 }
-                let ov = account::view(oa, feed, meta)?;
+                let ov = account::view(oa, feed, dex_of_coin(coin))?;
                 if ov.margin_summary.account_value <= Decimal::ZERO {
                     continue;
                 }
@@ -622,22 +666,35 @@ enum Rescue {
 /// same side, entered there) and the position's own isolated margin moves
 /// with it. A refused transfer names itself and moves nothing — the
 /// position stays for the next pass.
+///
+/// Both sides' ledgers record the takeover at the mark: the vault's carries the
+/// liquidated position's own label (`Liquidated Cross Long`, the aggressor), the
+/// account's the close of the position it lost, its `closedPnl` the position's
+/// pnl at that mark (the takeover moves no pnl into the balance: the margin goes
+/// with the position). `stamp` is the sim's trade-id counter and the sim clock
+/// (ms).
+#[allow(clippy::too_many_lines)] // the takeover and both ledgers' records, one transfer
 fn vault_take_coin(
     vault: &mut Account,
     me: &mut Account,
-    address: Address,
-    coin: &str,
+    target: (Address, &str),
     feed: &MarketFeed,
+    stamp: (&mut u64, u64),
 ) -> Option<Decimal> {
-    let (taken, direction, size, entry_px, leverage) = me.positions.get(coin).map(|p| {
-        (
-            p.isolated_margin,
-            p.direction(),
-            p.szi.abs(),
-            p.entry_px,
-            p.leverage_value,
-        )
-    })?;
+    let (address, coin) = target;
+    let (next_tid, time) = stamp;
+    let (taken, direction, size, entry_px, leverage, margin_mode) =
+        me.positions.get(coin).map(|p| {
+            (
+                p.isolated_margin,
+                p.direction(),
+                p.szi.abs(),
+                p.entry_px,
+                p.leverage_value,
+                p.leverage,
+            )
+        })?;
+    let szi = me.positions.get(coin).map_or(Decimal::ZERO, |p| p.szi);
     let facts = account::FillFacts {
         coin: coin.to_string(),
         // The vault takes the position on the same side (entered at the mark).
@@ -650,12 +707,74 @@ fn vault_take_coin(
         fee: Decimal::ZERO,
         builder: None,
     };
-    if let Err(e) = account::apply_fill(vault, &facts, feed.margin_meta().as_ref()) {
-        tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
-        return None;
-    }
+    let vault_effect = match account::apply_fill(vault, &facts, feed.meta_for_lookup(coin).as_ref())
+    {
+        // The takeover carries the liquidated position's own label (measured
+        // live on the liquidator's fills), not an `Open`.
+        Ok(effect) => FillEffect {
+            dir: ledger::liquidated_dir(margin_mode, direction),
+            ..effect
+        },
+        Err(e) => {
+            tracing::warn!(account = %address, coin = %coin, error = %e, "backstop transfer refused");
+            return None;
+        }
+    };
+    let fee_token = feed.fee_token_of_coin(coin);
+    let tag = FillLiquidation::new(address, facts.px, LiquidationMethod::Backstop);
+    let vault_fill = FillRecord {
+        liquidation: Some(tag.clone()),
+        facts: &facts,
+        effect: vault_effect,
+        oid: 0,
+        cloid: None,
+        // The liquidator is the aggressor of its takeover (measured live:
+        // `crossed: true`).
+        liquidity: Liquidity::Taker,
+        fee_token: &fee_token,
+    };
+    ledger::record_fill(vault, next_tid, time, &vault_fill);
+    let lost = LostPosition { szi, entry_px };
+    record_loss(me, &facts, &lost, (next_tid, time), (&fee_token, tag));
     me.positions.remove(coin);
     Some(taken)
+}
+
+/// The position a backstop takeover removed from an account.
+struct LostPosition {
+    szi: Decimal,
+    entry_px: Decimal,
+}
+
+/// The account's ledger entry for the position it lost: the closing fill (the
+/// vault's fill flipped) at the takeover price, its `closedPnl` the position's
+/// pnl there.
+fn record_loss(
+    me: &mut Account,
+    vault_fill: &FillFacts,
+    lost: &LostPosition,
+    stamp: (&mut u64, u64),
+    tagged: (&str, FillLiquidation),
+) {
+    let (next_tid, time) = stamp;
+    let (fee_token, tag) = tagged;
+    let pnl = account::sub(vault_fill.px, lost.entry_px, "backstop pnl")
+        .and_then(|d| account::mul(lost.szi, d, "backstop pnl"))
+        .unwrap_or(Decimal::ZERO);
+    let closing = FillFacts {
+        side: vault_fill.side.flip(),
+        ..vault_fill.clone()
+    };
+    let my_fill = FillRecord {
+        liquidation: Some(tag),
+        facts: &closing,
+        effect: FillEffect::of(lost.szi, closing.size * closing.side.sign(), pnl),
+        oid: 0,
+        cloid: None,
+        liquidity: Liquidity::Taker,
+        fee_token,
+    };
+    ledger::record_fill(me, next_tid, time, &my_fill);
 }
 
 fn rescue_step(equity: Decimal, maintenance: Decimal) -> Rescue {
@@ -680,8 +799,19 @@ struct AdlTarget<'a> {
 struct Pass<'a> {
     feed: &'a MarketFeed,
     address: Address,
+    /// The dex whose clearinghouse this pass walks (`""` = the default dex).
+    dex: &'a str,
     account: &'a Account,
     now_ms: u64,
+}
+
+impl Pass<'_> {
+    /// Whether `leg` of this pass's dex owns the position: the leg's scope,
+    /// within the dex's own coins (another dex's position is another
+    /// clearinghouse's and never moves with this one).
+    fn owns(&self, leg: Leg<'_>, coin: &str, p: &account::Position) -> bool {
+        dex_of_coin(coin) == self.dex && leg.holds(coin, p)
+    }
 }
 
 /// The two independent scopes of an account's waterfall (docs: "Liquidations
@@ -777,7 +907,7 @@ mod tests {
     ) {
         let (balance, entry, szi, leverage) = facts;
         sim.with_account(address, |acc| {
-            acc.perp_balance = balance;
+            *acc.perp_balance_mut("") = balance;
             acc.positions.insert(
                 coin.into(),
                 crate::sim::account::Position {
@@ -826,7 +956,7 @@ mod tests {
             .map(|p| p.szi.is_zero())
             .unwrap_or(true));
         assert_eq!(
-            a_acc.perp_balance,
+            a_acc.perp_balance(""),
             Decimal::ZERO,
             "the maintenance is not returned"
         );
@@ -944,7 +1074,7 @@ mod tests {
             .map(|p| p.szi.is_zero())
             .unwrap_or(true));
         // A closed at 90: (90 − 100)·1 = −10 → balance 0 (solvent, no bad debt).
-        assert_eq!(a_acc.perp_balance, Decimal::ZERO);
+        assert_eq!(a_acc.perp_balance(""), Decimal::ZERO);
         let b_acc = sim.account(b).unwrap().unwrap();
         assert!(b_acc
             .positions
@@ -952,7 +1082,7 @@ mod tests {
             .map(|p| p.szi.is_zero())
             .unwrap_or(true));
         // B bought back at the previous mark 90: (100 − 90)·1 = +10.
-        assert_eq!(b_acc.perp_balance, Decimal::from(20));
+        assert_eq!(b_acc.perp_balance(""), Decimal::from(20));
         assert_eq!(
             sim.metrics
                 .adl_closes_total
@@ -1001,7 +1131,7 @@ mod tests {
         let acc = sim.account(a).unwrap().unwrap();
         assert!(acc.positions.is_empty(), "the book closed the position");
         // The close at the book's 80: (80 − 100)·1 = −20 → balance −10.
-        assert_eq!(acc.perp_balance, Decimal::from(-10));
+        assert_eq!(acc.perp_balance(""), Decimal::from(-10));
         assert_eq!(
             sim.metrics
                 .adl_closes_total
@@ -1073,7 +1203,7 @@ mod tests {
             "the cross side is untouched"
         );
         assert_eq!(
-            acc.perp_balance,
+            acc.perp_balance(""),
             Decimal::from(10),
             "the cross balance is untouched"
         );
@@ -1090,7 +1220,7 @@ mod tests {
             Some(Decimal::ONE)
         );
         assert_eq!(
-            vault.perp_balance,
+            vault.perp_balance(""),
             Decimal::ONE,
             "the isolated margin moved with it"
         );
@@ -1131,7 +1261,7 @@ mod tests {
             "the vault took the cross position"
         );
         assert_eq!(
-            acc.perp_balance,
+            acc.perp_balance(""),
             Decimal::ZERO,
             "the cross margin moved with it"
         );
@@ -1184,7 +1314,7 @@ mod tests {
         let acc = sim.account(a).unwrap().unwrap();
         assert!(acc.positions.is_empty(), "the position is closed");
         assert_eq!(
-            acc.perp_balance,
+            acc.perp_balance(""),
             Decimal::from(4),
             "the isolated margin came back"
         );
@@ -1235,7 +1365,7 @@ mod tests {
             "released proportionally"
         );
         assert_eq!(
-            acc.perp_balance,
+            acc.perp_balance(""),
             Decimal::from(4),
             "the released half landed in the cross balance"
         );
@@ -1268,7 +1398,7 @@ mod tests {
             Some(Decimal::from(10)),
             "the initial margin is parked on the position"
         );
-        assert_eq!(acc.perp_balance, Decimal::from(40));
+        assert_eq!(acc.perp_balance(""), Decimal::from(40));
         sim.set_leverage(
             a,
             "ETH",
@@ -1284,7 +1414,7 @@ mod tests {
             acc.positions.get("ETH").map(|p| p.isolated_margin),
             Some(Decimal::ZERO)
         );
-        assert_eq!(acc.perp_balance, Decimal::from(50), "the margin came back");
+        assert_eq!(acc.perp_balance(""), Decimal::from(50), "the margin came back");
     }
 
     /// The measured served identities with an isolated leg (probe: two live
@@ -1310,7 +1440,7 @@ mod tests {
             (Decimal::from(100), Decimal::ONE, 10, Decimal::from(6)),
         );
         let acc = sim.account(a).unwrap().unwrap();
-        let v = crate::sim::account::view(&acc, &feed, feed.meta().as_ref()).unwrap();
+        let v = crate::sim::account::view(&acc, &feed, "").unwrap();
         // Total: cash 50 + 6, cost basis 200, signed 200 → value 56, raw −144.
         assert_eq!(v.margin_summary.account_value, Decimal::from(56));
         assert_eq!(v.margin_summary.total_raw_usd, Decimal::from(-144));
@@ -1323,7 +1453,7 @@ mod tests {
         assert_eq!(v.cross_margin_summary.account_value, Decimal::from(50));
         assert_eq!(v.cross_margin_summary.total_raw_usd, Decimal::from(-50));
         let state =
-            crate::sim::account::clearinghouse(&acc, &feed, feed.meta().as_ref(), 0).unwrap();
+            crate::sim::account::clearinghouse(&acc, &feed, "", 0).unwrap();
         assert!(crate::sim::account::identity_holds(&state));
     }
 }

@@ -160,9 +160,6 @@ fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Result<(), Stri
     if orders.is_empty() {
         return Err("venue-sim: an empty order batch is rejected (docs: pre-validation)".into());
     }
-    // One account-plane view: the default dex's tables plus every builder
-    // dex's, with the margin-table ids renumbered on absorb.
-    let meta = state.feed.margin_meta();
     for action in orders {
         let Ok(order) = action.to_order(|a| state.feed.coin_of_asset(a)) else {
             continue; // a per-order mapping error keeps its own status
@@ -172,6 +169,7 @@ fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Result<(), Stri
                 "venue-sim: TP/SL orders must be reduce-only (docs: pre-validation)".into(),
             );
         }
+        let meta = state.feed.meta_for_coin(&order.coin);
         if let Err(e) = crate::sim::validate::validate_order(&state.feed, meta.as_ref(), &order) {
             let reason = e.to_string();
             if reason.contains("too far from oracle") {
@@ -490,8 +488,8 @@ fn leverage_action(
     mode: crate::wire::LeverageType,
     leverage: u32,
 ) -> Response {
-    let meta = state.feed.margin_meta();
     asset_action(state, asset, |coin| {
+        let meta = state.feed.meta_for_lookup(coin);
         state.sim.set_leverage(
             owner,
             coin,
@@ -1118,6 +1116,7 @@ mod tests {
                     address: who.parse().unwrap(),
                     class: DealClass::Perp,
                     coin: None,
+                    dex: None,
                     amount: amount.parse().unwrap(),
                 },
             )
@@ -1277,7 +1276,7 @@ mod tests {
             .account(who.parse().unwrap())
             .unwrap()
             .unwrap()
-            .perp_balance
+            .perp_balance("")
     }
 
     /// The frontend flow end to end: an order carrying a builder the account
@@ -1571,6 +1570,7 @@ mod tests {
             );
         }
         feed.put_oi_caps(Vec::new());
+        feed.put_oi_caps_of("xyz", Vec::new());
         feed.put_spot_meta(usdc_registry());
         let sim = Arc::new(crate::sim::Sim::memory());
         let api = crate::feed::rest::RestClient::new(&["http://127.0.0.1:1".to_string()]).unwrap();
@@ -1588,9 +1588,8 @@ mod tests {
         )
     }
 
-    /// Fund `who` with `amount` in a wallet: spot USDC, or the perp
-    /// clearinghouse (one USDC ledger until step 9's per-dex ledgers).
-    fn fund(state: &ApiState, who: Address, class: DealClass, amount: &str) {
+    /// Fund `who` with `amount` in a wallet: spot USDC, or a perp dex's ledger.
+    fn fund(state: &ApiState, who: Address, class: DealClass, dex: Option<&str>, amount: &str) {
         state
             .sim
             .deal(
@@ -1599,18 +1598,19 @@ mod tests {
                     address: who,
                     class,
                     coin: None,
+                    dex: dex.map(str::to_string),
                     amount: amount.parse().unwrap(),
                 },
             )
             .unwrap();
     }
 
-    fn ledger(state: &ApiState, who: Address) -> Decimal {
+    fn ledger(state: &ApiState, who: Address, dex: &str) -> Decimal {
         state
             .sim
             .account(who)
             .unwrap()
-            .map_or(Decimal::ZERO, |a| a.perp_balance)
+            .map_or(Decimal::ZERO, |a| a.perp_balance(dex))
     }
 
     fn spot_usdc(state: &ApiState, who: Address) -> Decimal {
@@ -1638,7 +1638,7 @@ mod tests {
         let state = dex_state();
         let (me_key, me) = key(0x11);
         let (_, other) = key(0x22);
-        fund(&state, me, Spot, "1000");
+        fund(&state, me, Spot, None, "1000");
         let nonce = crate::now_ms();
         let ok = |out: &serde_json::Value| assert_eq!(out["status"], "ok", "{out}");
 
@@ -1649,7 +1649,7 @@ mod tests {
         );
         ok(&post(&state, signed(&me_key, &action, nonce)).await);
         assert_eq!(
-            (ledger(&state, me), spot_usdc(&state, me)),
+            (ledger(&state, me, ""), spot_usdc(&state, me)),
             (dec("100"), dec("900"))
         );
         let n = nonce + 1;
@@ -1659,7 +1659,7 @@ mod tests {
         );
         ok(&post(&state, signed(&me_key, &action, n)).await);
         assert_eq!(
-            (ledger(&state, me), spot_usdc(&state, me)),
+            (ledger(&state, me, ""), spot_usdc(&state, me)),
             (dec("70"), dec("930"))
         );
         // More than the dex holds is refused, and nothing moves.
@@ -1670,7 +1670,7 @@ mod tests {
         );
         let out = post(&state, signed(&me_key, &action, n)).await;
         assert_eq!(out["status"], "err", "{out}");
-        assert_eq!(ledger(&state, me), dec("70"));
+        assert_eq!(ledger(&state, me, ""), dec("70"));
 
         // sendAsset: the default dex back to the spot wallet.
         let n = nonce + 3;
@@ -1682,7 +1682,7 @@ mod tests {
         );
         ok(&post(&state, signed(&me_key, &action, n)).await);
         assert_eq!(
-            (ledger(&state, me), spot_usdc(&state, me)),
+            (ledger(&state, me, ""), spot_usdc(&state, me)),
             (dec("50"), dec("950"))
         );
         // An unknown destination dex is refused by name.
@@ -1719,7 +1719,7 @@ mod tests {
         );
         ok(&post(&state, signed(&me_key, &action, n)).await);
         assert_eq!(
-            (ledger(&state, me), ledger(&state, other)),
+            (ledger(&state, me, ""), ledger(&state, other, "")),
             (dec("30"), dec("20"))
         );
         // An unknown token is refused by name.
@@ -1748,7 +1748,7 @@ mod tests {
         let state = dex_state();
         let (me_key, me) = key(0x11);
         let (other_key, other) = key(0x22);
-        fund(&state, me, Spot, "30");
+        fund(&state, me, Spot, None, "30");
         let nonce = crate::now_ms();
         let spot_send = |to: Address, amount: &str, n: u64| {
             user_signed(
@@ -1835,7 +1835,7 @@ mod tests {
         let (_, me) = key(0x11);
         let (agent_key, agent) = key(0x33);
         let (stranger_key, stranger) = key(0x44);
-        fund(&state, me, Spot, "100");
+        fund(&state, me, Spot, None, "100");
         state.sim.note_agent(me, agent, "bot").unwrap();
         let nonce = crate::now_ms();
         let action = user_signed(
@@ -1887,7 +1887,7 @@ mod tests {
         let (me_key, me) = key(0x11);
         let (agent_key, agent) = key(0x33);
         let builder: Address = BUILDER.parse().unwrap();
-        fund(&state, me, Spot, "100");
+        fund(&state, me, Spot, None, "100");
         let next = std::cell::Cell::new(crate::now_ms());
         // The next body: its nonce is the action's and the envelope's.
         let send = |key: &k256::ecdsa::SigningKey, build: &dyn Fn(u64) -> String| {
@@ -2005,13 +2005,13 @@ mod tests {
         use crate::sim::DealClass::Spot;
         let state = dex_state();
         let who: Address = OWNER.parse().unwrap();
-        fund(&state, who, Spot, "100");
+        fund(&state, who, Spot, None, "100");
         let body = format!(
             r#"{{"action":{{"type":"usdClassTransfer","amount":"40","toPerp":true}},"user":"{OWNER}"}}"#
         );
         let out = post(&state, body).await;
         assert_eq!(out["status"], "ok", "{out}");
-        assert_eq!(ledger(&state, who), dec("40"));
+        assert_eq!(ledger(&state, who, ""), dec("40"));
     }
 
     const TSLA: u32 = 110_000;
@@ -2039,7 +2039,7 @@ mod tests {
         use crate::sim::DealClass::Perp;
         let state = dex_state();
         let who: Address = OWNER.parse().unwrap();
-        fund(&state, who, Perp, "1000");
+        fund(&state, who, Perp, Some("xyz"), "1000");
         let orders =
             |envelope: &serde_json::Value| envelope["response"]["data"]["statuses"][0].clone();
 
@@ -2054,7 +2054,7 @@ mod tests {
         .await;
         assert_eq!(out["status"], "ok", "{out}");
         assert_eq!(orders(&out)["filled"]["totalSz"], "1.0", "{out}");
-        assert!(ledger(&state, who) < dec("1000"), "the fee left the ledger");
+        assert!(ledger(&state, who, "xyz") < dec("1000"), "the fee left the ledger");
         assert!(state
             .sim
             .account(who)
@@ -2078,7 +2078,7 @@ mod tests {
         let margin = |state: &ApiState| {
             state.sim.account(who).unwrap().unwrap().positions["xyz:TSLA"].isolated_margin
         };
-        let (before, ledger_before) = (margin(&state), ledger(&state, who));
+        let (before, ledger_before) = (margin(&state), ledger(&state, who, "xyz"));
         let out = act(
             &state,
             &format!(
@@ -2093,7 +2093,7 @@ mod tests {
             "the position holds 5 more"
         );
         assert_eq!(
-            ledger(&state, who),
+            ledger(&state, who, "xyz"),
             ledger_before - dec("5"),
             "taken from the ledger"
         );
@@ -2227,6 +2227,7 @@ mod tests {
         );
         feed.put_ctx("xyz:TSLA".into(), test_ctx("200", "200"), now);
         feed.put_oi_caps(Vec::new());
+        feed.put_oi_caps_of("xyz", Vec::new());
         let api = crate::feed::rest::RestClient::new(&[url]).unwrap();
         feed.attach_rest(api.clone());
         let state = Arc::new(
@@ -2242,7 +2243,7 @@ mod tests {
             .unwrap(),
         );
         let who: Address = OWNER.parse().unwrap();
-        fund(&state, who, Perp, "1000");
+        fund(&state, who, Perp, Some("xyz"), "1000");
         assert!(
             state.feed.book("xyz:TSLA", crate::now_ms()).is_none(),
             "no book yet"

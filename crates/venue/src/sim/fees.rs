@@ -65,14 +65,6 @@ pub(crate) fn core_to_evm_gas_hype() -> Decimal {
     Decimal::from_i128_with_scale(CORE_TO_EVM_GAS * BASE_GAS_PRICE_WEI, 18)
 }
 
-/// Whether a perp dex margins against `token`: the collateral-token test the
-/// transfer shape reads (the default dex's token included).
-fn is_collateral_token(feed: &MarketFeed, token: u32) -> bool {
-    feed.dex_collateral_tokens()
-        .iter()
-        .any(|(_, collateral)| *collateral == token)
-}
-
 /// The USD value of one `token`: USDC is 1, a token with a USDC spot pair its
 /// mid, any other perp collateral token (a stable) 1; `None` when unpriced.
 pub(crate) fn token_usd(feed: &MarketFeed, token: u32) -> Option<Decimal> {
@@ -87,7 +79,7 @@ pub(crate) fn token_usd(feed: &MarketFeed, token: u32) -> Option<Decimal> {
     if let Some(mid) = pair.and_then(|p| feed.all_mids().0.get(&p.name).copied()) {
         return Some(mid);
     }
-    is_collateral_token(feed, token).then_some(Decimal::ONE)
+    feed.is_collateral_token(token).then_some(Decimal::ONE)
 }
 
 /// The venue's decimal text on ledger rows: trimmed, with a `.0` on a whole
@@ -101,11 +93,11 @@ pub(crate) fn real_text(value: Decimal) -> String {
     }
 }
 
-/// Whether the account holds or ever held anything: a balance, a position or
-/// a fill.
+/// Whether the account holds or ever held anything: a balance row, a
+/// clearinghouse, a position or a fill.
 fn holds_anything(account: &Account) -> bool {
     !account.spot.is_empty()
-        || !account.perp_balance.is_zero()
+        || !account.perps.is_empty()
         || !account.positions.is_empty()
         || !account.fills.is_empty()
 }

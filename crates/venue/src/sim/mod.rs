@@ -28,6 +28,8 @@
 const ARTIFACT: &str = "sim state";
 
 pub(crate) mod account;
+#[cfg(test)]
+mod dex_tests;
 pub(crate) mod fees;
 pub(crate) mod funding;
 pub(crate) mod ledger;
@@ -43,7 +45,6 @@ pub(crate) mod waterfall;
 
 use crate::error::{Error, Result};
 use crate::feed::MarketFeed;
-use crate::wire::UserAbstraction;
 use account::{Account, Accounts, Liquidation};
 use alloy_primitives::Address;
 use diorama_devnet::store;
@@ -70,6 +71,9 @@ pub(crate) enum Applied {
     Applied,
     Refused,
 }
+
+/// The default perp dex's name (the venue's `""`).
+pub(crate) const DEFAULT_DEX: &str = "";
 
 /// One USD-class transfer's inputs (CoreWriter action 7 applied): the token
 /// moved, the amount, and the direction. One struct keeps the applied
@@ -118,15 +122,17 @@ pub(crate) struct SimState {
     #[serde(default)]
     pub scheduled_cancels: std::collections::BTreeMap<Address, u64>,
     /// The 30 s cooldown after a partial liquidation (docs: during it, market
-    /// liquidation orders are for the entire position).
+    /// liquidation orders are for the entire position). Per (account, dex):
+    /// the waterfall runs one cross leg per dex.
     #[serde(default)]
-    pub liq_cooldown_until: std::collections::BTreeMap<Address, u64>,
-    /// The next instant the waterfall may retry an account whose rescue found
-    /// no executable action (a refused book close with an empty ADL). Without
-    /// this the thin venue retries at the tick cadence forever — measured at
-    /// 1 Hz for 63 minutes — and floods the log with the same refusal.
+    pub liq_cooldown_until: std::collections::BTreeMap<DexKey, u64>,
+    /// The next instant the waterfall may retry an account's dex whose rescue
+    /// found no executable action (a refused book close with an empty ADL).
+    /// Without this the thin venue retries at the tick cadence forever,
+    /// measured at 1 Hz for 63 minutes, and floods the log with the same
+    /// refusal.
     #[serde(default)]
-    pub waterfall_retry_after: std::collections::BTreeMap<Address, u64>,
+    pub waterfall_retry_after: std::collections::BTreeMap<DexKey, u64>,
     /// The previous tick's mark per coin (ADL closes at the previous mark).
     #[serde(default)]
     pub prev_marks: std::collections::BTreeMap<String, Decimal>,
@@ -156,11 +162,63 @@ pub(crate) struct SimState {
 
 impl SimState {
     /// Fold what an older state file carries into the current shape: every
-    /// saved account exists, so only accounts created from now on can owe an
-    /// activation.
+    /// account's single `perp_balance` and `funded_at_ms` become its default
+    /// dex's ledger (the waterfall maps need no fold: a bare address key
+    /// already reads as the default dex, see [`DexKey`]). Every account a
+    /// saved state carries exists: only accounts created from now on can owe
+    /// an activation.
     pub(crate) fn migrate(&mut self) {
+        for account in self.accounts.values_mut() {
+            account.migrate_legacy();
+        }
         let known: Vec<Address> = self.accounts.keys().copied().collect();
         self.activated.extend(known);
+    }
+}
+
+/// A map key of one account's one dex (`""` = the default dex): the waterfall's
+/// cooldown and retry state is per clearinghouse. Persisted as a plain string:
+/// the default dex is the bare address, byte-for-byte the key a state file
+/// written before per-dex clearinghouses carries (so those files load as the
+/// default dex's entries), a builder dex is `address|dex`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct DexKey {
+    pub address: Address,
+    pub dex: String,
+}
+
+impl DexKey {
+    pub(crate) fn new(address: Address, dex: &str) -> Self {
+        Self {
+            address,
+            dex: dex.to_string(),
+        }
+    }
+}
+
+impl Serialize for DexKey {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        if self.dex.is_empty() {
+            self.address.serialize(serializer)
+        } else {
+            serializer.collect_str(&format_args!("{}|{}", self.address, self.dex))
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DexKey {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        let (address, dex) = text.split_once('|').unwrap_or((text.as_str(), ""));
+        let address = address
+            .parse::<Address>()
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self::new(address, dex))
     }
 }
 
@@ -179,8 +237,10 @@ pub(crate) struct Deal {
     /// The spot coin (`None` = USDC).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coin: Option<String>,
-    // step-9: the per-dex ledger gives this a `dex` (the fork's `/control/deal`
-    // and seed shapes); today every deal lands on the one clearinghouse.
+    /// The perp dex a `perp` deal funds (`None` = the default dex). The dex's
+    /// ledger is denominated in its own collateral token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dex: Option<String>,
     pub amount: Decimal,
 }
 
@@ -417,13 +477,20 @@ impl Sim {
     pub(crate) fn deal(&self, feed: &MarketFeed, deal: &Deal) -> Result<Decimal> {
         let now = crate::now_ms();
         let clock = self.clock(now)?;
+        let dex = deal.dex.as_deref().unwrap_or("");
+        if !dex.is_empty() && feed.meta_of(dex).is_none() {
+            return Err(Error::bad_request(format!(
+                "perp dex `{dex}` is not in the venue's dex registry"
+            )));
+        }
         let after = self.with_account(deal.address, |account| {
             stamp_funding_baseline(account, clock);
             match deal.class {
                 DealClass::Perp => {
-                    account.perp_balance =
-                        account::add(account.perp_balance, deal.amount, "perp deal")?;
-                    Ok(account.perp_balance)
+                    let after = account.credit_perp(dex, deal.amount, "perp deal")?;
+                    // The first funding of a dex starts its funding clock.
+                    stamp_funding_baseline(account, clock);
+                    Ok(after)
                 }
                 DealClass::Spot => {
                     let coin = deal.coin.as_deref().unwrap_or("USDC");
@@ -466,7 +533,7 @@ impl Sim {
         let now = crate::now_ms();
         let clock = self.clock(now)?;
         self.with_account(address, |account| {
-            let before_perp = account.perp_balance;
+            let before_perp = account.perps.clone();
             let before_spot = account.spot.clone();
             let before_positions = account.positions.len();
             let patch = seed.clone();
@@ -484,8 +551,8 @@ impl Sim {
             tracing::warn!(
                 account = %address,
                 patch_id = now,
-                before_perp_balance = %before_perp,
-                after_perp_balance = %account.perp_balance,
+                before_perp = ?before_perp,
+                after_perp = ?account.perps,
                 before_spot = ?before_spot,
                 after_spot = ?account.spot,
                 before_positions,
@@ -594,32 +661,26 @@ impl Sim {
                         return Ok(Applied::Refused);
                     }
                     entry.total = account::sub(entry.total, transfer.amount, "usd class transfer")?;
-                    account.perp_balance =
-                        account::add(account.perp_balance, transfer.amount, "usd class transfer")?;
+                    account.credit_perp(DEFAULT_DEX, transfer.amount, "usd class transfer")?;
+                    stamp_funding_baseline(account, clock);
                 }
                 Direction::ToSpot => {
-                    if account.mode == UserAbstraction::UnifiedAccount {
-                        let meta = feed.margin_meta();
-                        // A mark not yet served (`view` faults) is a refusal,
-                        // never a guess — the caller re-sends.
-                        let Some(bound) =
-                            account::unified_transfer_bound(account, feed, meta.as_ref())
-                        else {
-                            tracing::warn!(account = %address, amount = %transfer.amount,
-                                "usd class transfer refused: the unified account's marks are not served yet");
-                            return Ok(Applied::Refused);
-                        };
-                        if transfer.amount > bound {
-                            tracing::warn!(account = %address, amount = %transfer.amount, withdrawable = %bound,
-                                "usd class transfer refused: the amount exceeds the unified account's withdrawable (the docs' transfer floor)");
-                            return Ok(Applied::Refused);
-                        }
-                    } else if account.perp_balance < transfer.amount {
+                    // A mark not yet served (`view` faults) is a refusal,
+                    // never a guess; the caller re-sends. The margin in use
+                    // stays on the dex (the docs' transfer floor); a standard
+                    // account's wallet also never sends more than its cash.
+                    let Some(bound) = account::perp_transfer_bound(account, feed, DEFAULT_DEX)
+                    else {
+                        tracing::warn!(account = %address, amount = %transfer.amount,
+                            "usd class transfer refused: the account's marks are not served yet");
+                        return Ok(Applied::Refused);
+                    };
+                    if transfer.amount > bound {
+                        tracing::warn!(account = %address, amount = %transfer.amount, withdrawable = %bound,
+                            "usd class transfer refused: the amount exceeds what the default dex may send (the docs' transfer floor)");
                         return Ok(Applied::Refused);
                     }
-                    // The unified pool re-splits: the perp view may go negative.
-                    account.perp_balance =
-                        account::sub(account.perp_balance, transfer.amount, "usd class transfer")?;
+                    account.credit_perp(DEFAULT_DEX, -transfer.amount, "usd class transfer")?;
                     account::credit_entry(account, transfer.token, transfer.amount, "usd class transfer")?;
                 }
             }
@@ -729,15 +790,14 @@ impl Sim {
         }
     }
 
-    /// Set the account's abstraction mode (CoreWriter action 16). Portfolio
-    /// margin is refused by name (see `account::refuse_unmodeled_mode`).
-    // step-9: switching to `unifiedAccount` merges the perp ledgers into spot
-    // first (`fold_ledgers_into_spot`, fed by each dex's collateral token);
-    // the unified switch and the signed actions it refuses land then.
+    /// Set the account's abstraction mode (CoreWriter action 16, and the signed
+    /// `userSetAbstraction` / `agentSetAbstraction`). Portfolio margin is
+    /// refused by name (see `account::refuse_unmodeled_mode`).
     pub(crate) fn set_mode(
         &self,
         address: Address,
         mode: crate::wire::UserAbstraction,
+        _feed: &MarketFeed,
     ) -> Result<()> {
         account::refuse_unmodeled_mode(mode)?;
         self.mutate_account(address, |account| {
@@ -840,7 +900,8 @@ impl Sim {
         ntli: i64,
         feed: &MarketFeed,
     ) -> Result<()> {
-        let meta = feed.margin_meta();
+        let meta = feed.meta_for_coin(coin);
+        let dex = crate::feed::dex::dex_of_coin(coin);
         let delta = Decimal::from(ntli) / Decimal::from(1_000_000);
         if delta < Decimal::ZERO && account::strict_isolated(coin, meta.as_ref()) {
             return Err(crate::error::Error::bad_request(
@@ -874,7 +935,7 @@ impl Sim {
                     )));
                 }
             }
-            account.perp_balance = account::sub(account.perp_balance, delta, "isolated margin move")?;
+            account::credit_ledger(&mut account.perps, dex, -delta, "isolated margin move")?;
             p.isolated_margin = next;
             p.leverage = crate::wire::LeverageType::Isolated;
             if !next.is_zero() {
@@ -976,8 +1037,11 @@ pub(crate) struct AdvanceOutcome {
 /// First touch of an account establishes its funding baseline (an account
 /// created by the bridge must not inherit funding from the epoch's start).
 fn stamp_funding_baseline(account: &mut Account, clock: u64) {
-    if account.funded_at_ms == 0 {
-        account.funded_at_ms = clock;
+    for dex in account.dexs_with_activity() {
+        let ledger = account.ledger_mut(&dex);
+        if ledger.funded_at_ms == 0 {
+            ledger.funded_at_ms = clock;
+        }
     }
 }
 
@@ -989,6 +1053,33 @@ pub(crate) fn feed_with(marks: &[(&str, &str, &str)]) -> MarketFeed {
     let feed = MarketFeed::memory(marks.iter().map(|(c, _, _)| c.to_string()).collect());
     for (coin, mark, oracle) in marks {
         feed.put_ctx(coin.to_string(), crate::wire::test_ctx(mark, oracle), 1);
+    }
+    feed
+}
+
+/// [`feed_with`] plus the default dex's meta (the account math reads the
+/// meta from the feed: maintenance tiers, leverage bounds).
+#[cfg(test)]
+pub(crate) fn feed_with_meta(marks: &[(&str, &str, &str)], meta: crate::wire::Meta) -> MarketFeed {
+    let feed = feed_with(marks);
+    feed.put_meta(meta, crate::now_ms());
+    feed
+}
+
+/// The same fixture over several dexes: `(dex, assets)` pairs in `perpDexs`
+/// order, the default dex (`""`) first. Each dex's coins are `meta_of`'s, so a
+/// builder dex's assets are named with their prefix (`xyz:TSLA`). Marks are
+/// per coin as in [`feed_with`]; the registry's `perpDexs` record is absent
+/// (a fixture dex, not the venue's list).
+#[cfg(test)]
+#[allow(dead_code)] // the liquidation tests adopt it with step 9's test slice
+pub(crate) fn feed_with_dexs(
+    marks: &[(&str, &str, &str)],
+    dexs: &[(&str, &[(&str, u32)])],
+) -> MarketFeed {
+    let feed = feed_with(marks);
+    for (dex, assets) in dexs {
+        feed.put_dex_meta((*dex).to_string(), meta_of(assets), 1);
     }
     feed
 }
@@ -1101,6 +1192,7 @@ mod tests {
                 address: a,
                 class: DealClass::Perp,
                 coin: None,
+                dex: None,
                 amount: "7.82".parse().unwrap(),
             },
         )
@@ -1119,7 +1211,7 @@ mod tests {
             .account(a)
             .unwrap()
             .expect("the seed registers the account");
-        let before = account::clearinghouse(&acct, &feed, Some(&meta), 1).unwrap();
+        let before = account::clearinghouse(&acct, &feed, "", 1).unwrap();
         // The perp view: raw 7.82 (deal 7.82 − the short's cost basis),
         // accountValue 0.7904 (raw − 7.0296 positionValue). The 7.865 note is
         // a separate spot ledger; the whole account is 8.6554.
@@ -1161,7 +1253,7 @@ mod tests {
             "the venue's own rule allows the move"
         );
         let acct = sim.account(a).unwrap().unwrap();
-        let after = account::clearinghouse(&acct, &feed, Some(&meta), 1).unwrap();
+        let after = account::clearinghouse(&acct, &feed, "", 1).unwrap();
         let spot_after = acct
             .spot
             .get(&account::COLLATERAL_TOKEN)
@@ -1214,6 +1306,7 @@ mod tests {
                 address: a,
                 class: DealClass::Perp,
                 coin: None,
+                dex: None,
                 amount: "0.79".parse().unwrap(),
             },
         )
@@ -1274,7 +1367,7 @@ mod tests {
                     coin: "USDC",
                 },
                 Decimal::ONE,
-                &feed,
+                (fees::RowKind::SpotTransfer, &feed),
             )
             .unwrap();
             let _ = &feed;
@@ -1300,6 +1393,7 @@ mod tests {
                     address: a,
                     class: DealClass::Perp,
                     coin: None,
+                    dex: None,
                     amount: "100.5".parse().unwrap(),
                 },
             )
@@ -1312,6 +1406,7 @@ mod tests {
                     address: a,
                     class: DealClass::Perp,
                     coin: None,
+                    dex: None,
                     amount: "0.5".parse().unwrap(),
                 },
             )
@@ -1358,6 +1453,7 @@ mod tests {
                 address: a,
                 class: DealClass::Perp,
                 coin: None,
+                dex: None,
                 amount: max,
             },
         )
@@ -1369,6 +1465,7 @@ mod tests {
                     address: a,
                     class: DealClass::Perp,
                     coin: None,
+                    dex: None,
                     amount: Decimal::ONE,
                 },
             )
@@ -1376,7 +1473,7 @@ mod tests {
         assert!(matches!(err, Error::Overflow { .. }), "{err}");
         // The state is intact and readable (no poison).
         assert!(!sim.is_poisoned());
-        assert_eq!(sim.account(a).unwrap().unwrap().perp_balance, max);
+        assert_eq!(sim.account(a).unwrap().unwrap().perp_balance(""), max);
         let err = sim
             .deal(
                 &feed,
@@ -1384,6 +1481,7 @@ mod tests {
                     address: a,
                     class: DealClass::Spot,
                     coin: Some("USDC".into()),
+                    dex: None,
                     amount: max,
                 },
             )
@@ -1396,6 +1494,7 @@ mod tests {
                     address: a,
                     class: DealClass::Spot,
                     coin: Some("USDC".into()),
+                    dex: None,
                     amount: Decimal::ONE,
                 },
             )
@@ -1430,6 +1529,7 @@ mod tests {
             address: a,
             class: DealClass::Spot,
             coin: Some("USDC".into()),
+            dex: None,
             amount: amount.parse().unwrap(),
         };
 
@@ -1532,6 +1632,7 @@ mod tests {
                 address: a,
                 class: DealClass::Spot,
                 coin: Some("USDC".into()),
+                dex: None,
                 amount: Decimal::from(250),
             },
         )
@@ -1548,7 +1649,7 @@ mod tests {
         .unwrap();
         let account = sim.account(a).unwrap().unwrap();
         assert_eq!(
-            account.perp_balance,
+            account.perp_balance(""),
             Decimal::from(100),
             "the named summary landed"
         );
@@ -1586,13 +1687,13 @@ mod tests {
         )
         .unwrap();
         let account = sim.account(a).unwrap().unwrap();
-        let served = super::account::clearinghouse(&account, &feed, None, 1).unwrap();
+        let served = super::account::clearinghouse(&account, &feed, "", 1).unwrap();
         assert!(served.control_owned, "a balance patch is a control write");
         assert_eq!(served.margin_summary.total_raw_usd, "0.5".parse().unwrap());
 
         assert!(sim.clear_control_fixture(a).unwrap());
         let account = sim.account(a).unwrap().unwrap();
-        let served = super::account::clearinghouse(&account, &feed, None, 1).unwrap();
+        let served = super::account::clearinghouse(&account, &feed, "", 1).unwrap();
         assert!(
             !served.control_owned,
             "an explicit fixture clear restores market provenance"
@@ -1618,7 +1719,7 @@ mod tests {
         )
         .unwrap();
         let account = sim.account(a).unwrap().unwrap();
-        let served = super::account::clearinghouse(&account, &feed, None, 1).unwrap();
+        let served = super::account::clearinghouse(&account, &feed, "", 1).unwrap();
         assert!(
             !served.control_owned,
             "a mode-only patch keeps market provenance"
@@ -1679,6 +1780,7 @@ mod tests {
                 address: a,
                 class: DealClass::Perp,
                 coin: None,
+                dex: None,
                 amount: Decimal::ONE,
             },
         )
@@ -1713,10 +1815,10 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let before = sim.account(a).unwrap().unwrap().perp_balance;
+        let before = sim.account(a).unwrap().unwrap().perp_balance("");
         let outcome = sim.advance(&feed, 3600, 1).unwrap();
         assert_eq!(outcome.advanced_ms, 3_600_000);
-        let after = sim.account(a).unwrap().unwrap().perp_balance;
+        let after = sim.account(a).unwrap().unwrap().perp_balance("");
         // One hour of funding at rate 1.25e-5 on oracle 100, long 1.0: paid.
         assert_eq!(before - after, Decimal::new(125, 5));
     }
@@ -1727,8 +1829,9 @@ mod tests {
     #[test]
     fn portfolio_margin_is_refused_by_name() {
         let sim = Sim::memory();
+        let feed = MarketFeed::memory(Vec::new());
         let a = Address::repeat_byte(0xaa);
-        let refused = sim.set_mode(a, crate::wire::UserAbstraction::PortfolioMargin);
+        let refused = sim.set_mode(a, crate::wire::UserAbstraction::PortfolioMargin, &feed);
         assert!(refused.is_err(), "portfolio margin is not modeled");
         assert!(refused
             .unwrap_err()
@@ -1739,7 +1842,7 @@ mod tests {
             None,
             "nothing entered the state"
         );
-        sim.set_mode(a, crate::wire::UserAbstraction::UnifiedAccount)
+        sim.set_mode(a, crate::wire::UserAbstraction::UnifiedAccount, &feed)
             .unwrap();
         assert_eq!(
             sim.account(a).unwrap().unwrap().mode,
@@ -1824,6 +1927,7 @@ mod tests {
                 address: owner,
                 class: DealClass::Perp,
                 coin: None,
+                dex: None,
                 amount: Decimal::ONE,
             },
         )
@@ -1842,6 +1946,7 @@ mod tests {
                 address: other,
                 class: DealClass::Perp,
                 coin: None,
+                dex: None,
                 amount: Decimal::ONE,
             },
         )

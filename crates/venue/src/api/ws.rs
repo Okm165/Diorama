@@ -932,19 +932,12 @@ fn account_push(sub: &Subscription, state: &ApiState) -> Option<WsPush> {
 /// The account's perp state on one dex: the sim's clearinghouse for a touched
 /// account, the venue's empty shape for an untouched one (the WS lane cannot
 /// pass through).
-// step-9: the account plane keeps one ledger, so only the default dex's
-// clearinghouse is computed; a builder dex serves the venue's empty shape
-// until the per-dex clearinghouse ledger lands (matching the info surface's
-// deferred rows). The default dex's read is the union view until then.
 fn dex_state(
     state: &ApiState,
     user: Address,
     dex: &str,
 ) -> crate::error::Result<ClearinghouseState> {
-    if !dex.is_empty() {
-        return Ok(empty_clearinghouse(Sim::served_time(crate::now_ms())));
-    }
-    Ok(match super::info::clearinghouse_of(state, user)? {
+    Ok(match super::info::dex_clearinghouse_of(state, user, dex)? {
         Some(served) => served,
         None => empty_clearinghouse(Sim::served_time(crate::now_ms())),
     })
@@ -1249,17 +1242,13 @@ fn web_data3(state: &ApiState, user: Address) -> crate::error::Result<WebData3Da
 /// venue's empty shape (the `/info` passthrough's documented contract); the WS
 /// lane cannot pass through, so it serves that same shape rather than
 /// refusing.
-// step-9: the unified switch's served hold (`served_spot_balances`) and its
-// per-dex token partition land with the account-ledger step; the stored
-// balances are what the rest of this step's account plane serves.
 fn spot_state_of(state: &ApiState, user: Address) -> crate::error::Result<SpotClearinghouseState> {
     Ok(match state.sim.account(user)? {
         Some(account) => SpotClearinghouseState {
-            balances: crate::sim::account::spot_balances(&account),
+            balances: crate::sim::account::served_spot_balances(&account, &state.feed)?,
             token_to_available_after_maintenance: crate::sim::account::available_after_maintenance(
                 &account,
                 &state.feed,
-                state.feed.margin_meta().as_ref(),
             )?,
         },
         None => SpotClearinghouseState {
@@ -1356,6 +1345,7 @@ mod tests {
                     address: user,
                     class: DealClass::Perp,
                     coin: None,
+                    dex: None,
                     amount: Decimal::from(1_000),
                 },
             )
@@ -1403,6 +1393,7 @@ mod tests {
                     address: user,
                     class: DealClass::Spot,
                     coin: Some("USDC".into()),
+                    dex: None,
                     amount: Decimal::from(25),
                 },
             )
@@ -1924,18 +1915,23 @@ mod tests {
         );
         let state = api_state(feed.clone());
         let user = Address::repeat_byte(0xaa);
-        state
-            .sim
-            .deal(
-                &feed,
-                &Deal {
-                    address: user,
-                    class: DealClass::Perp,
-                    coin: None,
-                    amount: Decimal::from(1_000),
-                },
-            )
-            .unwrap();
+        let deal = |dex: Option<&str>| {
+            state
+                .sim
+                .deal(
+                    &feed,
+                    &Deal {
+                        address: user,
+                        class: DealClass::Perp,
+                        coin: None,
+                        dex: dex.map(str::to_string),
+                        amount: Decimal::from(1_000),
+                    },
+                )
+                .unwrap();
+        };
+        deal(None);
+        deal(Some("xyz"));
         let order = |coin: &str, px: Option<&str>, tif| crate::sim::order::Order {
             coin: coin.into(),
             is_buy: true,
@@ -1998,15 +1994,12 @@ mod tests {
         let states = value["data"]["clearinghouseStates"].as_array().unwrap();
         let names: Vec<&str> = states.iter().map(|s| s[0].as_str().unwrap()).collect();
         assert_eq!(names, ["", "flx", "xyz"]);
-        // step-9: the per-dex clearinghouse ledger; a builder dex is empty.
-        assert!(states[1][1]["assetPositions"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        assert!(states[2][1]["assetPositions"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        let positions = |i: usize| states[i][1]["assetPositions"].as_array().unwrap().len();
+        assert_eq!((positions(0), positions(1), positions(2)), (0, 0, 1));
+        assert_eq!(
+            states[2][1]["assetPositions"][0]["position"]["coin"],
+            "xyz:TSLA"
+        );
         // An account the sim never saw is served the empty state of every dex.
         let stranger = Address::repeat_byte(0xfe);
         let frame = push_frame(
@@ -2046,12 +2039,13 @@ mod tests {
         );
         let frames = frames_of(subs.last_mut().unwrap(), &state);
         assert_eq!(frames[0]["data"]["dex"], "xyz");
-        // step-9: the per-dex clearinghouse ledger; the shape is the venue's
-        // empty state for now.
-        assert!(frames[0]["data"]["clearinghouseState"]["assetPositions"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            frames[0]["data"]["clearinghouseState"]["assetPositions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         // The default dex's subscription is acked with the empty dex string.
         let ack = subscribe_to(
             &state,
@@ -2065,6 +2059,10 @@ mod tests {
         );
         let frames = frames_of(subs.last_mut().unwrap(), &state);
         assert_eq!(frames[0]["data"]["dex"], "");
+        assert!(frames[0]["data"]["clearinghouseState"]["assetPositions"]
+            .as_array()
+            .unwrap()
+            .is_empty());
 
         let before = subs.len();
         for dex in ["nope", "ALL_DEXS"] {

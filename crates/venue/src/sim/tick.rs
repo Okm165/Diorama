@@ -22,25 +22,39 @@ impl Sim {
     /// open orders are cancelled and every position is closed at the served
     /// oracle — the docs' settlement price is the 1 h TWAP spot oracle, a
     /// named simplification; no fee is charged (a settlement is not a trade).
+    ///
+    /// Every dex's delisted coins settle (a builder dex's `xyz:TSLA` as much
+    /// as the default dex's).
     fn settle_delisted(&self, feed: &MarketFeed) -> Result<()> {
-        let Some(meta) = feed.margin_meta() else {
-            return Ok(());
-        };
-        for coin in feed.markets.clone() {
-            let delisted = meta
-                .asset(&coin)
-                .and_then(|a| a.is_delisted)
-                .unwrap_or(false);
-            if !delisted {
-                continue;
-            }
+        for coin in feed.delisted_coins() {
             let Some(oracle) = feed.oracle(&coin) else {
                 continue;
             };
+            // The meta lists every delisted coin of its dex; the lookup only
+            // fails if the registry changed under us (skip the coin).
+            let Some(meta) = feed.meta_for_coin(&coin) else {
+                continue;
+            };
+            if !self.has_market_state(&coin)? {
+                continue;
+            }
             self.cancel_market_orders(&coin)?;
             self.settle_market_positions(feed, &coin, oracle, &meta)?;
         }
         Ok(())
+    }
+
+    /// Whether any resting order or account position references `coin`: a
+    /// delisted coin nobody touches costs the tick one lookup, not a state
+    /// copy per coin (a venue lists hundreds of delisted coins).
+    fn has_market_state(&self, coin: &str) -> Result<bool> {
+        self.with_state(|st| {
+            Ok(st.resting.values().any(|r| r.coin == coin)
+                || st
+                    .accounts
+                    .values()
+                    .any(|a| a.positions.get(coin).is_some_and(|p| !p.szi.is_zero())))
+        })
     }
 
     /// The delisting's first clause: "open orders are cancelled".
@@ -89,9 +103,21 @@ impl Sim {
                 oracle,
                 position.leverage_value.max(1),
             );
-            self.with_account_now(address, feed, |account| {
+            let effect = self.with_account_now(address, feed, |account| {
                 account::apply_fill(account, &facts, Some(meta))
             })?;
+            self.record_fill(
+                address,
+                &FillRecord {
+                    liquidation: None,
+                    facts: &facts,
+                    effect,
+                    oid: 0,
+                    cloid: None,
+                    liquidity: Liquidity::Taker,
+                    fee_token: &feed.fee_token_of_coin(coin),
+                },
+            )?;
             tracing::info!(account = %address, coin = %coin, %size, %oracle, "delisted position settled at the oracle");
         }
         Ok(())
@@ -105,7 +131,7 @@ impl Sim {
     /// without ever calling `advance` (funding steps at the hour). A warming
     /// market plane (no meta yet) is a no-op, not a fault storm.
     pub fn evaluate(&self, feed: &MarketFeed) -> Result<Vec<Liquidation>> {
-        if feed.margin_meta().is_none() {
+        if feed.meta().is_none() {
             return Ok(Vec::new());
         }
         let now = crate::now_ms();
@@ -277,7 +303,8 @@ impl Sim {
         level_px: Decimal,
         feed: &MarketFeed,
     ) -> Result<()> {
-        let setting = self.leverage_setting_for(r.account, &r.coin, feed.margin_meta().as_ref())?;
+        let meta = feed.meta_for_lookup(&r.coin);
+        let setting = self.leverage_setting_for(r.account, &r.coin, meta.as_ref())?;
         let notional = crate::sim::account::mul(take, r.px, "maker notional")?;
         let facts = crate::sim::account::FillFacts {
             coin: r.coin.clone(),
@@ -291,9 +318,9 @@ impl Sim {
             builder: r.builder.map(|b| b.charge(notional)).transpose()?,
         };
         let effect = self.with_account_now(r.account, feed, |account| {
-            crate::sim::account::apply_fill(account, &facts, feed.margin_meta().as_ref())
+            crate::sim::account::apply_fill(account, &facts, meta.as_ref())
         })?;
-        self.credit_builder(facts.builder)?;
+        self.credit_builder(facts.builder, crate::feed::dex::dex_of_coin(&r.coin))?;
         self.record_fill(
             r.account,
             &FillRecord {
@@ -303,7 +330,7 @@ impl Sim {
                 oid: r.oid,
                 cloid: r.cloid,
                 liquidity: Liquidity::Maker,
-                fee_token: "USDC",
+                fee_token: &feed.fee_token_of_coin(&r.coin),
             },
         )?;
         feed.consume(crate::feed::Consumption {
@@ -339,7 +366,9 @@ impl Sim {
     /// Record the marks the ADL step reads as "the previous mark".
     pub(super) fn record_marks(&self, feed: &MarketFeed) -> Result<()> {
         self.with_state(|st| {
-            for coin in feed.markets.clone() {
+            // Every dex's coins: a builder dex's ADL close prices from the
+            // same previous mark.
+            for coin in feed.all_coins() {
                 if let Some(mark) = feed.mark(&coin) {
                     st.prev_marks.insert(coin, mark);
                 }
