@@ -364,6 +364,9 @@ struct OrderMem {
 pub(crate) struct Live {
     sub: Subscription,
     mem: Mem,
+    /// The upstream relay lease: the coin's book stays wanted while this
+    /// subscription lives (dropped on unsubscribe or disconnect).
+    _lease: Option<crate::feed::relay::Lease>,
 }
 
 /// The coin whose book a subscription reads, if any (the session warms it
@@ -491,10 +494,13 @@ pub(super) fn request_reply(text: &str, subs: &mut Vec<Live>, state: &ApiState) 
                 Err(Refusal::Silent) => return WsPush::Silent,
             };
             // The coin's book was warmed before admission (the session's
-            // `warm`); the subscription itself carries no relay lease yet.
+            // `warm`); the subscription now holds the relay lease, so the
+            // upstream stream stays on it while this client wants it.
+            let lease = coin_of(&subscription).and_then(|coin| state.feed.lease_coin(coin));
             subs.push(Live {
                 sub: subscription.clone(),
                 mem,
+                _lease: lease,
             });
             WsPush::SubscriptionResponse {
                 data: SubscriptionAck {
