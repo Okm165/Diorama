@@ -67,9 +67,18 @@ the parity gate, never eyeballing.
 
 ## Book-simulation ideas (the "proper sims of books" ask)
 
-- **Depth regeneration:** upstream diffs keep the top-20 honest; below that,
-  synthesize resting depth with a per-coin depth profile measured from HL
-  (so IOC walks beyond 20 levels meet plausible size).
+- **Depth regeneration (investigated 2026-11-21, deliberately not built):**
+  the real venue's `/info l2Book` itself returns **20 levels per side**
+  (measured live on BTC and ETH) — deeper liquidity is hidden from every
+  venue client, and the mirror's 20-level books are exactly what the venue
+  exposes. Synthesizing depth below the top-20 would invent liquidity no
+  venue consumer can see, breaking the mirror's honesty rule. The named
+  simplification stays: a taker larger than visible depth fills the visible
+  book and its remainder behaves per its TIF (an IOC cancels), while real HL
+  can fill against hidden depth — so the sim is **conservative**, never
+  over-filling. `venue-calibrate` is the tool that quantifies when visible
+  depth binds (a size bucket whose measured slippage exceeds the book's)
+  and the measured numbers, not synthesized walls, drive any later decision.
 - **Adversarial book drills:** scripted overlays that mimic spoofing (large
   levels that vanish) to verify our consumption model never credits phantom
   fills. *(Done 2026-11-21: the vanished-overlay drill — `a_vanished_spoof_never_fills_a_resting_order`.)*
