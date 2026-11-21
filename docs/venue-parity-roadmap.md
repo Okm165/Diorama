@@ -50,9 +50,15 @@ the parity gate, never eyeballing.
 3. **Funding accuracy.** Funding is priced from HL marks (trusted in witness);
    charge it on the real cadence (hourly, premium-weighted) and reconcile our
    accrued funding against HL's published `fundingRate` history per coin.
-4. **Fee tiers by 24 h volume.** HL's taker/maker schedule is volume-tiered;
-   the sim's accounts can carry a rolling volume counter and the same tier
-   table, so fee expectations in strategies are realistic.
+4. **Fee tiers by 24 h volume (investigated 2026-11-21, deliberately not
+   built):** the venue's API never exposes a user's fee tier — `webData2`
+   carries no fee fields and `userRole` answers `missing` (probed live);
+   only the charged `fee` per fill is observable. A tier schedule keyed on
+   rolling volume would therefore be behavior no venue consumer can verify
+   against — unobservable complexity. The mirror keeps the base constants
+   (measured 4.5/1.5 bps taker/maker, matching observed charges) and the
+   honesty metric stays: the sim's charged fees vs the fill rows, which a
+   later per-user tier would have to show up in anyway.
 5. **Sub-accounts and vault endpoints.** `vaultRoles`/`userRole` and a minimal
    vault transfer surface let multi-entity strategies (curator/vault) run on
    the venue like they do on HL.
