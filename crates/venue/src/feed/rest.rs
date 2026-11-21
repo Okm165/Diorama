@@ -330,16 +330,7 @@ impl Poller {
     /// measured 2026-11-21: `para:SMH` answered "open-interest caps are not
     /// known yet" with its meta loaded and its book served).
     async fn dex_oi_caps(&self) {
-        let mut targets: Vec<(String, bool)> = configured_dexes(&self.feed.markets)
-            .into_iter()
-            .map(|dex| (dex, true))
-            .collect();
-        for name in self.feed.advertised_dex_names() {
-            if !targets.iter().any(|(dex, _)| *dex == name) {
-                targets.push((name, false));
-            }
-        }
-        for (dex, configured) in targets {
+        for (dex, configured) in self.feed.dex_poll_targets() {
             if !configured && self.feed.oi_caps_known(&dex) {
                 continue;
             }
@@ -407,16 +398,7 @@ impl Poller {
     /// unconfigured dexes: their metadata is static enough that a boot load
     /// is honest, and nine extra heavy polls would starve the book lane.
     async fn dex_metas(&self, core: &crate::wire::Meta) {
-        let mut targets: Vec<(String, bool)> = configured_dexes(&self.feed.markets)
-            .into_iter()
-            .map(|dex| (dex, true))
-            .collect();
-        for name in self.feed.advertised_dex_names() {
-            if !targets.iter().any(|(dex, _)| *dex == name) {
-                targets.push((name, false));
-            }
-        }
-        for (dex, configured) in targets {
+        for (dex, configured) in self.feed.dex_poll_targets() {
             if configured {
                 // A configured dex whose every configured market resolves in
                 // the default meta needs no call (the names are unambiguous).
@@ -534,38 +516,14 @@ fn dex_of(coin: &str) -> Option<&str> {
         .filter(|dex| !dex.is_empty())
 }
 
-/// The distinct perp dexes the venue's configured markets name, in first-seen
-/// order (deterministic poll order).
-fn configured_dexes(markets: &[String]) -> Vec<String> {
-    let mut dexes: Vec<String> = Vec::new();
-    for dex in markets.iter().filter_map(|coin| dex_of(coin)) {
-        if !dexes.iter().any(|known| known == dex) {
-            dexes.push(dex.to_string());
-        }
-    }
-    dexes
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{configured_dexes, dex_of, venue_method_refusal};
+    use super::venue_method_refusal;
     use reqwest::StatusCode;
 
     /// The configured market list names its dexes; the poller must fetch each
     /// one's meta once, in first-seen order (a HIP-3 market's maintenance
     /// tier is not in the default dex's meta).
-    #[test]
-    fn configured_dexes_are_deduplicated_in_first_seen_order() {
-        let markets: Vec<String> = ["BTC", "xyz:NVDA", "xyz:SOXL", "ETH", "km:JPY"]
-            .iter()
-            .map(|coin| (*coin).to_string())
-            .collect();
-        assert_eq!(configured_dexes(&markets), vec!["xyz", "km"]);
-        assert_eq!(dex_of("xyz:NVDA"), Some("xyz"));
-        assert_eq!(dex_of("BTC"), None);
-        assert_eq!(dex_of(":broken"), None);
-    }
-
     /// A bad request is the venue's answer; an endpoint wall is a failover.
     /// This is the boundary the old `raw_info` collapsed: it retried every
     /// non-2xx and then returned the last body as `Ok`, so an outage could

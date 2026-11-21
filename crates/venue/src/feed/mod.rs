@@ -654,6 +654,31 @@ impl MarketFeed {
     pub(crate) fn oi_caps_known(&self, dex: &str) -> bool {
         self.read().oi_caps.contains_key(dex)
     }
+    /// The dexes a poll pass loads, as `(name, configured)`: the dexes the
+    /// configured markets name (refreshed every pass) plus every other dex
+    /// the relayed `perpDexs` advertises (cold-loaded once). Both per-dex
+    /// poll lanes — metas and OI caps — walk this same list.
+    pub(crate) fn dex_poll_targets(&self) -> Vec<(String, bool)> {
+        let mut targets: Vec<(String, bool)> = self
+            .markets
+            .iter()
+            .filter_map(|coin| {
+                let dex = dex_of_coin(coin);
+                (!dex.is_empty()).then(|| (dex.to_string(), true))
+            })
+            .fold(Vec::new(), |mut acc, (dex, cfg)| {
+                if !acc.iter().any(|(d, _)| d == &dex) {
+                    acc.push((dex, cfg));
+                }
+                acc
+            });
+        for name in self.advertised_dex_names() {
+            if !targets.iter().any(|(dex, _)| *dex == name) {
+                targets.push((name, false));
+            }
+        }
+        targets
+    }
 
     /// The default dex's cached cap list. `None` until the venue has answered:
     /// an unknown cap set is refused by the order lane, never read as
