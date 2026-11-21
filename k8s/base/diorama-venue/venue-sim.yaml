@@ -54,18 +54,23 @@ spec:
           # never kills a booting container (measured: exit 137 at ~2 minutes
           # when a dependency restarted under a rolling engine). Readiness
           # stays the market-plane freshness gate.
+          # timeoutSeconds must exceed a busy scrape: the default 1 s made a healthy
+          # pod report `context deadline exceeded` under load (measured 2026-11-21).
           startupProbe:
             httpGet: { path: /healthz, port: 8090 }
             periodSeconds: 10
+            timeoutSeconds: 3
             failureThreshold: 30
           readinessProbe:
             httpGet: { path: /readyz, port: 8090 }
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
           livenessProbe:
             httpGet: { path: /healthz, port: 8090 }
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: 3
           resources:
             # No CPU limit. Measured 2026-10-31 (60 s sample): ~4m CPU,
             # 23-24 MiB RSS. The request tracks the measured steady state; the
