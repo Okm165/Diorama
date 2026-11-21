@@ -13,7 +13,7 @@ use crate::feed::dex::{dex_of_coin, ALL_DEXS};
 use crate::feed::MarketFeed;
 use crate::sim::{account, Sim};
 use crate::wire::{
-    ActiveAssetData, ClearinghouseState, ExchangeStatus, InfoRequest, Leverage, LeverageType,
+    ActiveAssetData, ClearinghouseState, ExchangeStatus, InfoRequest, Leverage, LeverageType, Meta,
     MetaAndAssetCtxs, UserAbstraction,
 };
 use alloy_primitives::Address;
@@ -853,15 +853,36 @@ async fn active_asset(
     .await
 }
 
+/// The metadata of a dex the venue **advertises** but this mirror carries no
+/// book for: an empty universe.
+///
+/// The mirror relays the venue's full `perpDexs` list (the order encodes the
+/// HIP-3 asset index) while carrying metadata for the configured dexes only.
+/// A consumer enumerates every advertised dex; a dex the venue knows and this
+/// mirror does not carry has no markets here, which is an empty universe — not
+/// the unknown-dex 500. Same rule as [`account_scope`], which closed the
+/// account-side half of this (measured 2026-11-21: `flx`/`vntl`/… advertised,
+/// no metadata, the risk-engine pin-poll and indexer reads failing on a 500).
+fn empty_meta() -> Meta {
+    Meta {
+        universe: Vec::new(),
+        margin_tables: Vec::new(),
+        collateral_token: 0,
+    }
+}
+
 /// `meta`: one dex's cached metadata (`""` or no `dex` = the default dex). A
-/// dex the venue does not list, and `ALL_DEXS`, are the venue's 500 `null`.
+/// dex the venue does not list, and `ALL_DEXS`, are the venue's 500 `null`; a
+/// listed dex this mirror carries no book for is [`empty_meta`], and a listed
+/// dex whose metadata has not landed yet is warming.
 fn meta(dex: &Option<String>, state: &ApiState) -> Result<Response> {
     match dex.as_deref().unwrap_or("") {
         "" => Ok(Json(state.feed.meta().ok_or(Error::Warming)?).into_response()),
-        name => Ok(state
-            .feed
-            .meta_of(name)
-            .map_or_else(unknown_dex, |meta| Json(meta).into_response())),
+        name => Ok(match state.feed.meta_of(name) {
+            Some(meta) => Json(meta).into_response(),
+            None if state.feed.advertises_dex(name) => Json(empty_meta()).into_response(),
+            None => unknown_dex(),
+        }),
     }
 }
 
@@ -884,8 +905,15 @@ fn meta_and_ctxs(dex: &Option<String>, state: &ApiState) -> Result<Response> {
     } else {
         state.feed.dex_meta_and_ctxs(name)
     };
+    // Same triage as [`meta`]: listed-but-unmirrored is an empty pair, a
+    // mirrored dex whose metadata or contexts have not landed is warming, and
+    // only a name the venue does not list is the unknown-dex 500.
     if !name.is_empty() && served.is_none() {
-        return Ok(unknown_dex());
+        return Ok(if state.feed.advertises_dex(name) {
+            Json(MetaAndAssetCtxs(empty_meta(), Vec::new())).into_response()
+        } else {
+            unknown_dex()
+        });
     }
     let MetaAndAssetCtxs(meta, ctxs) = served.ok_or(Error::Warming)?;
     if ctxs.len() != meta.universe.len() {
@@ -1510,6 +1538,48 @@ mod tests {
             Bytes::from_static(br#"{}"#),
             user,
             Some("not-a-dex".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response_json(response).await.is_null());
+    }
+
+    /// A dex `perpDexs` advertises with no mirror book answers an empty
+    /// universe (and an empty context list), never the unknown-dex 500: a
+    /// consumer enumerates every advertised dex, and a name the venue knows is
+    /// not a name it does not. A name the venue does not list is still the 500
+    /// `null`.
+    #[tokio::test]
+    async fn meta_of_a_listed_but_unmirrored_dex_is_an_empty_universe() {
+        let feed = crate::feed::MarketFeed::memory(vec!["xyz:NVDA".into()]);
+        feed.put_perp_dexs(vec![None, Some(perp_dex("flx")), Some(perp_dex("xyz"))]);
+        let state = state_with(feed);
+
+        let response = info(
+            State(state.clone()),
+            Bytes::from_static(br#"{"type":"meta","dex":"flx"}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let out = response_json(response).await;
+        assert!(out["universe"].as_array().unwrap().is_empty());
+
+        let response = info(
+            State(state.clone()),
+            Bytes::from_static(br#"{"type":"metaAndAssetCtxs","dex":"flx"}"#),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let out = response_json(response).await;
+        assert!(out[0]["universe"].as_array().unwrap().is_empty());
+        assert!(out[1].as_array().unwrap().is_empty());
+
+        let response = info(
+            State(state),
+            Bytes::from_static(br#"{"type":"meta","dex":"not-a-dex"}"#),
         )
         .await
         .unwrap();
