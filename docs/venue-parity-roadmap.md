@@ -99,6 +99,36 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
    must drive the same push the close path uses. The Direct product dodged it
    only because its CM salt differs from the unified one.
 
+### Why a venue-native dex cannot be priced: the band has no declaration vehicle (2026-11-22)
+
+With the para data hole closed (`VENUE_BOOK_FEEDS` -> 40 instruments snapshotting,
+**33 of 40 already carry a σ fit**, σ 0.186–2.488), a para leg still refuses —
+and the code proves the refusal is structural, not a gap in the data:
+
+- `services/indexer/src/state.rs` builds `venue_vol_bands` **only from market
+  rows** (`resolved_markets`), with the stated rule: *"the venue-leg σ estimator
+  reads the market's own band, not a global prior"*. A coin collateralised by
+  markets that disagree is left absent on purpose.
+- A venue-native HIP-3 perp has **no market row and never will**: a market row
+  is *collateral token -> principal token*, and the risk engine's own provenance
+  says so — *"no per-venue `risk_configs` row exists, by the identity wall:
+  venue legs are never collateral"*.
+- The constants that do exist (`VENUE_SIGMA_FLOOR_ANNUAL 0.02` /
+  `VENUE_SIGMA_CEILING_ANNUAL 3.0`) are the **fitter's acceptance band** — the
+  bound a converged fit must sit inside — not a pricing band. Substituting them
+  at quote time would be exactly the "another prior dressed as this asset's"
+  that the refusal exists to prevent.
+
+So the remaining step is a **config-schema addition**: a declaration vehicle for
+a venue-native instrument's pricing band (e.g. a `[[venue_instrument]]` block per
+dex, or an explicit per-dex band policy) with the bands as risk policy. The
+measurement that makes that declaration a copy-paste now exists — per-instrument
+GARCH σ for 33 of 40 para names, persisted and refreshed each cycle.
+
+This is the same decision the 19 Nov report circled from the outside ("42 assets
+late, HIP-3 marks missing"): the venue can trade every market, and the risk
+plane can price only markets the collateral matrix declares.
+
 ### The capital plan, measured: draw capacity under trading, live (2026-11-22)
 
 One unified book (WETH-1 → USDC-999, note 43.24), capacity read before and
