@@ -479,6 +479,34 @@ user-sim end to end while the venue book was traded:
    and "empty venue + cash on the agent" is *nothing to recall*, not a missing
    bridge.
 
+### Reality check against the 19 Nov report's blockers
+
+The report's four standing complaints, checked against today's mirror rather than
+assumed:
+
+1. **"No order path"** — the path exists and was used for every trade in this
+   round: the **venue-sim** answers `/info` and `/exchange` on NodePort **31090**
+   (the gateway is the *credit* plane and has no trading routes by design).
+   Spot pairs are addressed the venue's way: `PURR/USDC`, and `@107` = HYPE/USDC,
+   asset id `10000 + pair.index`; `venue-order --coin @107` resolves it. What the
+   report could not do on generation `20261119m` is drive *venue* positions from
+   the loan's account — that works now (`venue-order/venue-account/
+   venue-portfolio`), and the three-dex book in this round was real venue state,
+   not paper.
+2. **"The Unified agent refuses `registerAgentWallet`"** — by design: only the
+   proof executor may register, and under the mock regime the registration rides
+   the quote, so the account's trading key is the quote signer's key. A separate
+   strategy key needs the interactive MPC path, not an owner call.
+3. **"One stuck loan degrades the whole gateway"** — measured today with 9 live
+   positions and two operator anomalies: gateway `healthy`, `advisories []`,
+   operator anomalies served as named advisories (the route-scoped health work).
+   A stuck position is still a *blocking* fact for the operator's own status when
+   it sits past the action grace, but it no longer 503s the borrow plane.
+4. **"recallAllFromCore reverts ZeroAmount right after Active"** — the async
+   CoreWriter deposit; the close prep now waits for the venue classes to appear
+   (30 s settle window) before it reads them, and the two closes in this round
+   had no such revert.
+
 ### The hedge measurement (operator rolled, 2026-11-22 01:2x)
 
 With the correlation expansion live, the canonical book was measured on a fresh
