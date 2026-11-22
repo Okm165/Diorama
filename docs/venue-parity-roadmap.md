@@ -509,6 +509,17 @@ hours** (the 1,647 rewind-era failures are closed). `indexer_db`:
 loans (oldest 175 h), no new Failed. Gateway healthy; the only advisory is the
 named venue-σ coverage boundary.
 
+**Portfolio margin is refused by name, not approximated.** The real venue's PM
+unifies HYPE (65% LTV) and BTC (50% LTV) spot collateral with auto-borrowing, an
+hourly borrow interest, a PMR ≥ 95% liquidation trigger and partial/full borrow
+liquidations (docs measured 2026-11-22). The mirror's single-collateral model
+cannot reproduce that accounting, so `portfolioMargin` is refused at every path
+(signed `userSetAbstraction`, `agentSetAbstraction`, the seed patch, CoreWriter
+action 16) with the reason — the same fail-closed rule as a delivered-only
+market. `unifiedAccount` is the mode the margin agents use and is served: its
+identity `available + maintenance == the collateral token's balance` holds to
+the digit (the live check behind `relay-39b81f9b`).
+
 ### 2026-11-22 audit pass 2: the ρ table was history, the margin math is exact, the maker fills from the market
 
 **The venue-ρ table was append-only, and the operator read the history.** The
