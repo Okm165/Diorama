@@ -717,9 +717,9 @@ impl Sim {
 
     /// `place` for a **spot pair**: the same served book is the executable
     /// depth, but the fill moves tokens in the spot ledger instead of opening
-    /// a position. Only IOC is served — a resting spot order needs the hold
-    /// and maker-settlement lane, and a half-served order type would silently
-    /// lose the client's size — so `Gtc`/`Alo` refuse by name.
+    /// a position. An IOC takes at the taker fee; `Gtc`/`Alo` rest with their
+    /// balance held (`spotClearinghouseState.hold`) and fill as makers at the
+    /// maker fee when the book crosses them (the tick's passive spot lane).
     #[allow(
         clippy::too_many_lines,
         reason = "one placement path: validate, walk, settle, record, consume — read top to bottom in order"
@@ -741,11 +741,6 @@ impl Sim {
                 "Reduce-only is a perp order type; a spot sell spends the balance it owns.",
             ));
         }
-        if req.tif == Tif::Alo {
-            return Err(Error::bad_request(
-                "Post-only is not served for spot on this mirror.",
-            ));
-        }
         if req.size <= Decimal::ZERO {
             return Err(Error::bad_request("Order size must be positive."));
         }
@@ -765,6 +760,40 @@ impl Sim {
                 "Order size has more than {} decimals for {}.",
                 base.sz_decimals, pair.name
             )));
+        }
+        // Post-only on a spot pair: the point of the order is the maker fee,
+        // so an order that would take is refused (the venue's string, with the
+        // bbo), never quietly filled as a taker. A non-crossing order rests
+        // with its balance held, exactly like a Gtc remainder.
+        if req.tif == Tif::Alo {
+            let Some(px) = req.limit_px else {
+                return Err(Error::bad_request(
+                    "Post only order needs a limit price (a market order cannot rest).",
+                ));
+            };
+            let own = self.resting_orders(Some(placer.address))?;
+            if crosses(feed, req, &own) {
+                let bbo = bbo(feed, &req.coin, req.side())
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "none".into());
+                tracing::warn!(coin = %req.coin, bbo = %bbo, "post-only refused");
+                return Err(Error::bad_request(format!(
+                    "Post only order would have immediately matched, bbo was {bbo}."
+                )));
+            }
+            let value = super::account::mul(req.size, px, "spot order value")?;
+            if value < Decimal::from(10) {
+                return Err(Error::bad_request(
+                    "Order value is too small: the venue's minimum is 10 USD.",
+                ));
+            }
+            let oid = self
+                .rest_spot_remainder(placer, req, req.size, (base.index, quote.index))?
+                .ok_or_else(|| Error::bad_request("Post only order could not rest."))?;
+            return Ok(Placed {
+                fill: None,
+                resting: Some(oid),
+            });
         }
         let book = feed.book(&req.coin, crate::now_ms()).ok_or(Error::Warming)?;
         // The venue's self-trade rule first (it releases holds via cancel):
@@ -1006,7 +1035,8 @@ impl Sim {
         Ok(absorbed)
     }
 
-    /// Reserve the remainder's balance and rest it (a Gtc spot order).
+    /// Reserve the remainder's balance and rest it (a Gtc or post-only spot
+    /// order).
     fn rest_spot_remainder(
         &self,
         placer: Placer,
@@ -1014,7 +1044,7 @@ impl Sim {
         remainder: Decimal,
         tokens: (u32, u32),
     ) -> Result<Option<u64>> {
-        if req.tif != Tif::Gtc || remainder <= Decimal::ZERO {
+        if !matches!(req.tif, Tif::Gtc | Tif::Alo) || remainder <= Decimal::ZERO {
             return Ok(None);
         }
         let Some(px) = req.limit_px else {
@@ -2607,6 +2637,44 @@ mod tests {
         assert_eq!(fill.dir, "Sell");
         assert_eq!(fill.fee_token, "USDC");
         assert!(sim.resting_orders(None).unwrap().iter().all(|r| r.oid != oid));
+    }
+
+    /// **Post-only on a spot pair is the maker's promise.** An ALO that would
+    /// take is refused with the venue's string (it must never pay the 7 bp
+    /// taker fee by accident), and a non-crossing one rests with its balance
+    /// held exactly like a Gtc — with the same self-cross refusal.
+    #[test]
+    fn a_spot_post_only_order_refuses_to_take_and_rests_when_passive() {
+        let feed = spot_feed();
+        let (sim, a) = spot_account(&feed, "1000");
+        let mut taking = spot_order(Side::Buy, "100", Some("0.075"));
+        taking.tif = Tif::Alo;
+        let err = sim.place(&feed, a, &taking).expect_err("the ask is 0.075");
+        assert!(
+            err.to_string()
+                .contains("Post only order would have immediately matched"),
+            "{err}"
+        );
+        let mut passive = spot_order(Side::Buy, "1000", Some("0.0745"));
+        passive.tif = Tif::Alo;
+        let placed = sim.place(&feed, a, &passive).expect("inside the spread it rests");
+        assert!(placed.fill.is_none(), "a post-only order never takes");
+        let oid = placed.resting.expect("it rests");
+        let usdc = sim.account(a).unwrap().unwrap().spot.get(&0).cloned().unwrap();
+        assert_eq!(usdc.hold, Decimal::new(745, 1), "1000 × 0.0745 held");
+        // Crossing one's own resting buy is a match, so the sell is refused.
+        let mut own_cross = spot_order(Side::Sell, "100", Some("0.0745"));
+        own_cross.tif = Tif::Alo;
+        let err = sim.place(&feed, a, &own_cross).expect_err("crosses its own buy");
+        assert!(
+            err.to_string()
+                .contains("Post only order would have immediately matched"),
+            "{err}"
+        );
+        assert!(
+            sim.resting_by_oid(a, oid).unwrap().is_some(),
+            "the refused sell did not disturb the resting buy"
+        );
     }
 
     /// The venue's $10 minimum applies to spot too.
