@@ -44,6 +44,48 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The multi-loan portfolio runtime, live — and the gaps it exposed (2026-11-22)
+
+**A real two-loan portfolio ran end to end on one wallet:** loan A = unified,
+WETH-1 → USDC-999; loan B = Direct borrow, WHYPE-999 → USDC-999; both Active on
+the same venue account (`0xA2dF…`), real taker round trips on two dexes during
+runtime (ETH at the base 4.5 bps, `para:SMH` at its dex's own 0.9 bps — each
+`closedPnl` reconciled to the fill-to-fill identity from the venue's own fills),
+the `venue-portfolio` statement served per-dex account values with evidence
+fills, and both loans closed clean (gateway healthy, 0 advisories).
+
+**Gaps it exposed, ranked:**
+
+1. **The whole `para` dex has zero σ calibration (34 instruments).**
+   `venue_calibration` holds the default dex (BTC/ETH/HYPE/SOL) and all 41 `xyz`
+   instruments — nothing from `para`. Trading *any* para asset therefore makes
+   the portfolio's debt operations refuse, escalating through three shapes:
+   "the venue leg carries no usable σ" → "the portfolio admission carries no
+   finite PM realizable value" → "draw capacity 0.0, binding stress_capacity".
+   The venue *trades* the asset fine (books, marks, fees, fills all live); the
+   risk plane cannot price it. This is the coverage-gap decision made concrete:
+   either calibrate the para dex (the ticks exist) or refuse the trade at the
+   venue, before capital is in. Also noted: the portfolio **admission** computed
+   `stress_capacity 9.64` at 04:30:29 while the **draw** reported 0.0 — an
+   admission-vs-draw inconsistency to reconcile.
+2. **The second loan on a wallet must be a same-chain Direct loan** (live: a
+   second *unified* create is refused, "an append requires a same-chain Direct
+   portfolio"). The multi-loan shape is therefore unified + Direct, and the
+   Direct product requires the principal on the venue chain (999).
+3. **The WHYPE-999 CM trap, confirmed live with amounts.** The CM address is
+   CREATE2-derived per (borrower, asset) and **reused across positions**
+   (`dedfb171…` served 6 WETH positions), creation refuses a non-empty CM
+   ("pre-funding the CM bypasses the creation fee"), and the CM has **no
+   borrower-side withdraw** (only proof-executor `pull`/`push`). A cancelled
+   intent that already settled Phase1 therefore strands its collateral until
+   some later intent's failure-leftover sweep happens to empty that CM —
+   measured: the 100 WHYPE from a 11-21 `MarginBridging`→`Cancelled` intent
+   blocked two fresh creations (04:23, 04:55), and the 04:23 failure's leftover
+   pass swept it back (the wallet recovered 100 + 3 WHYPE, all conserved). A
+   protocol fix is owed: the cancel path (and any terminal state after Phase1)
+   must drive the same push the close path uses. The Direct product dodged it
+   only because its CM salt differs from the unified one.
+
 ### Execution and PnL accounting verified exact to the wei, live (2026-11-22)
 
 A controlled round trip on a HIP-3 market (`para:SMH`, isolated 10×) against
