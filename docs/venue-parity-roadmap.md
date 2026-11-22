@@ -83,14 +83,25 @@ not the 43.25 the stale claim implied. What is missing is control, not value:
 the CM and debt token have no code, so the protocol cannot close or seize, and
 the agent key is not in this environment.
 
-**The retirement fix is a migration, not a patch.** `cm_loss_retire_target`
-deliberately returns `None` for a live status, and the lifecycle graph pins
-`Active`'s out-degree at 5 with a 39-row DB edge census (`0028`/`0030`). The
-economically right target for a chain-state loss is **`Failed`** (soft-terminal:
-a restored chain can revive it), not `Defaulted` (a market loss), and landing it
-means one new edge in `EDGES` + `position_transition_edges` + the census and
-phase assertions, plus the `cm_absent_since` gate the escrow path already has.
-That is the deliberate next change; it is not attempted here.
+**The retirement fix is a migration, and the only layer-consistent target is
+`Defaulted` — which the code deliberately withholds from a live status.** The
+escrow-loss path's target function (`cm_loss_retire_target`) already returns
+`Some(Defaulted)` for *any* status whose graph edge exists; a live `Active` book
+gets `None`, pinned by
+`a_codeless_cm_retires_to_the_lifecycle_sink`. `Failed` is **not** an option:
+it sits in the earlier lifecycle layer (C1a) and every `C1b → C1a` edge
+(`Closing → Failed`) was removed as reversible; only the trivially-terminal sink
+is admissible. The lifecycle graph pins `Active`'s out-degree at 5 and the DB's
+edge table at 39 rows (`0028`/`0030`), so the change is one edge in `EDGES` +
+`position_transition_edges` + the census and degree assertions, with no logic
+change at the call site.
+
+**Why it is not applied here:** the no-op is a recorded policy choice — a live
+claim may still be repayable if a wiped estate is restored, and auto-defaulting
+would recognize a loss on a judgeable book. The measured cost of the policy is
+one blind Active book holding capacity with no exit; the honest remedial path is
+a **manual retirement** (operator control-plane action, or a sweep + write-off)
+after a human confirms the estate is gone. That is the deliberate next change.
 
 ### The para draw reached the pricing gate and was refused one layer deeper — and exposed a protocol gap (2026-11-22)
 
