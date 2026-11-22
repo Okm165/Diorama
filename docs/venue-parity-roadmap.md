@@ -478,6 +478,28 @@ user-sim end to end while the venue book was traded:
    and "empty venue + cash on the agent" is *nothing to recall*, not a missing
    bridge.
 
+### The open coverage gap: the mirror prices 2 of the venue's 11 dexes
+
+Measured in `risk_db`: `venue_calibration` holds **46 instruments** — main
+(BTC, ETH, HYPE, SOL) and `xyz` (42) — while `/info perpDexs` lists **11
+dexes** (main, xyz, flx, vntl, hyna, km, mkts, para, abcd, cash, io) and the
+venue accepts orders on all of them. The consequence is not cosmetic: a book
+holding one position on an uncalibrated dex refuses the **whole account's**
+portfolio-margin value ("the venue asset's configured vol_floor_annual/
+vol_ceiling_annual band is unavailable"), which is exactly what a `para:SMH`
+leg did to the live loan (682 operator WARNs in 10 minutes, and the gateway's
+`-4024` refusal on every requote). Two coherent ends, one must be picked:
+
+- **tradeable = priceable**: the venue refuses orders on instruments the mirror
+  does not price, so a strategy cannot trap its own credit line; or
+- **price everything**: add the missing assets and their measured bands and let
+  the calibration pass cover the other nine dexes (≈200 instruments — the book
+  poller and the hourly fits are the cost).
+
+Doing neither is the current state: every venue market is tradeable, and most
+of them make the loan unpriceable after the trade. Until it is chosen, the
+honest scenario rule is: trade main and `xyz` only.
+
 ### Economic property measured while the book was open
 
 Draw capacity is not linear in the venue notional: a 13 USD *long* `xyz:NVDA`
