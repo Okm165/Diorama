@@ -44,6 +44,54 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The order lane is live-proven end to end, and the close reconciles to the cent (2026-11-22)
+
+The 19 Nov report's first blocker — "our bot cannot place orders into the mirror's
+simulated venue" — is **not true of the mirror**: `venue-sim` serves
+`/info` and `/exchange` on NodePort **31090** (and in-cluster on `:8090`), the
+devnet envelope recovers `user` without a signature, and `daloc-user-sim
+venue-order` posts the exact Hyperliquid action. This session closed the live
+`para:SMH` leg through that lane and measured the whole path:
+
+| what | measured |
+|---|---|
+| order | `Ioc` reduce-only sell `0.03 para:SMH` at `411.06` (best bid) |
+| fill | `411.06`, `closedPnl 0.0192`, oid 456 — **5.10 bp from mid** `411.27` (the calibration's predicted impact for this size, bit-identical) |
+| fee | `0.001109862` = **0.9 bp** = base `4.5 bp` × HIP-3 growth `0.2` (scale `1.0`, `growthMode: enabled`) — the venue's own multiplier, not the 2× an un-grown scale would charge |
+| hold | spot `hold 1.23126 → 0`, `total 43.239737` unchanged |
+| ledger | `para` balance `0.889328 → −0.349642`; dex now flat |
+| indexer | `venue_account_ticks` within 5 s: `account_equity 43.2397`, `perp_equity −0.7885`, `hold 0` |
+
+**The whole-account identity held through the close**, and the one apparent
+anomaly was a measurement error worth recording. The consumer's whole is
+`(spot_total − spot_hold) + Σ served perp`, and the served perp carries the
+isolated margin as cash (`relay-3c7c25b1`); the two cancel only because
+`served hold == Σ position.margin_used`. Across the close the whole moved
+`−0.00771 = −0.0066 (uPnL between the two reads' marks) − 0.00111 (fee)` — no
+money created or destroyed. The first reading looked like a `1.239` loss
+because the wire `marginUsed` is **`isolated_margin + unrealized`** for an
+isolated leg: reading it at a mark `0.0066` above the fill inflates the margin
+figure, and comparing a pre-close served summary (2× a margin that included
+uPnL) with a post-close ledger (1× the realized margin) is not a like-for-like
+comparison. The identity, not the single decimal, is the check.
+
+**The stranded loan is now flat and nearly whole.** Its venue account holds
+`43.239737` USDC free (all dexes flat) against the ledger's `43.239737` debt
+figure; the borrower's attributable shortfall is the agent's prior
+`default`/`xyz` ledger losses (`−0.438872`), i.e. **~0.44 USDC of LP exposure**,
+not the 43.25 the stale claim implied. What is missing is control, not value:
+the CM and debt token have no code, so the protocol cannot close or seize, and
+the agent key is not in this environment.
+
+**The retirement fix is a migration, not a patch.** `cm_loss_retire_target`
+deliberately returns `None` for a live status, and the lifecycle graph pins
+`Active`'s out-degree at 5 with a 39-row DB edge census (`0028`/`0030`). The
+economically right target for a chain-state loss is **`Failed`** (soft-terminal:
+a restored chain can revive it), not `Defaulted` (a market loss), and landing it
+means one new edge in `EDGES` + `position_transition_edges` + the census and
+phase assertions, plus the `cm_absent_since` gate the escrow path already has.
+That is the deliberate next change; it is not attempted here.
+
 ### The para draw reached the pricing gate and was refused one layer deeper — and exposed a protocol gap (2026-11-22)
 
 At the 22nd contiguous bucket the bounded draw fired. The requote **got past the
