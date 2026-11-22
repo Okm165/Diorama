@@ -438,7 +438,15 @@ jump cannot re-charge (the accrual stamp is absolute).
 
 **Operational rule:** any stark scenario that calls `/control/advance` must end
 with `POST /control/clock {"offset_ms":0}` before the mirror is left running.
-The next real boundary (14:00Z) is the first charged at the wall-clock hour.
+
+**The 14:00Z boundary, measured after the clock fix — exact to the last digit.**
+Charged at **14:00:00.572Z** with rate **−0.0000029488**, `rate_source =
+boundary_value`, equal to the real venue's `fundingHistory` for the hour
+(−0.0000029488, same premium). Payment +0.00537330336 = −0.03 × 60,740 ×
+−0.0000029488; the standing 0.1968 BTC long was charged +0.0352488700416 on the
+same rule. The 1 Hz sampler shows the rate in force at 13:59:59
+(−0.000002949/−0.0000029488) and the real venue re-converging at 14:00:00 — the
+mirror charged the pre-boundary value, not the post-boundary prediction.
 
 ### Universe and spot parity, measured (2026-11-22)
 
