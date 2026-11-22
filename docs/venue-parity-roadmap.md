@@ -127,6 +127,41 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
   WARN-severity is right; the consuming harnesses that hard-block writes on any
   indexer advisory (the soak runner) amplify it.
 
+### Slippage/impact fidelity: mirror vs real Hyperliquid, ladder-walk measured (2026-11-22)
+
+Ladder-walk buy-side slippage (20 levels), mirror vs real HL (read-only /info),
+same instant:
+
+| coin | notional | mirror bp | real bp | spread m/r (bp) |
+|---|---|---|---|---|
+| BTC | $10k–$200k | 0.08 | 0.08 | 0.17 / 0.17 |
+| ETH | $5k–$100k | 0.30 | 0.30 (all sizes) | 0.60 / 0.60 |
+| SOL | $2.5k–$12.5k | 0.07 | 0.07 | 0.15 / 0.15 |
+| SOL | $50k | 0.23 | 0.07 | 0.15 / 0.15 |
+| HYPE | $2.5k–$50k | 0.40 → 1.77 | 0.40 → 1.77 | 0.17 / 0.17 |
+
+The mirror reproduces real impact **to the hundredth of a basis point at nearly
+every size** — spreads identical, HYPE's thin-book scaling (0.40 → 0.68 → 1.77)
+matched exactly. Two named deviations at this instant: BTC's mirror 20-level
+depth 1.56× real (a fast-book snapshot artifact) and SOL beyond level 1 at
+$50k slightly thinner (0.23 vs 0.07 bp). Both are level-distribution deltas on
+a moving book, not a mechanics difference. The sim's dynamics are the real
+dynamics — because the mirror's books are built from the real chain's deltas.
+
+### Two wallets, two products, one runtime — concurrent open, trade, flatten, close (2026-11-22)
+
+Unified (wallet 1, WETH-1 → USDC-999) and Simple (wallet 2, WHYPE-999 →
+USDC-999) loans opened **concurrently** (both Active in one round), traded
+**simultaneously** (parallel `/exchange` fills: W1 ETH 0.03 @ 1651.7, W2
+xyz:ANT 0.5 @ 88.722), flattened (W1 1651.9, closedPnl +0.006 with fees
+0.0223/side — ledger evidence exact; W2 sold 0.22 @ 88.707 after the venue's
+**reduce-only cap correctly refused** an oversize sell — real HL semantics:
+reduce-only is capped at the position, "would increase position"), and both
+closed clean. `venue-portfolio` served the multi-account statement from the
+venue's own ledgers (per-dex account values, evidence fills with
+`crossed`/`dir`/`fee`). All three products have now run in this runtime family
+(unified, simple, direct), singly and concurrently.
+
 ### Portfolio runtime: one loan, three dexes, active trading throughout (2026-11-22)
 
 A unified book (WETH-1 → USDC-999) traded live across every dex during runtime:
