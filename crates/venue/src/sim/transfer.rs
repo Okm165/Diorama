@@ -345,32 +345,44 @@ fn charge_gas(account: &Account, feed: &MarketFeed, token: TokenRef<'_>, costs: 
         return;
     }
     let gas = fees::core_to_evm_gas_hype();
-    let hype = feed.token_of(fees::GAS_TOKEN);
-    if let Some(index) = hype {
-        if spot_free(account, feed, index).is_ok_and(|free| free >= gas) {
-            let coin = TokenRef {
-                index,
-                coin: fees::GAS_TOKEN,
-            };
-            costs.add(coin, gas);
-            costs.paid.native = gas;
-            return;
-        }
+    if hype_gas_is_payable(account, feed, gas) {
+        let coin = TokenRef {
+            index: feed.token_of(fees::GAS_TOKEN).expect("a payable HYPE gas implies the token resolves"),
+            coin: fees::GAS_TOKEN,
+        };
+        costs.add(coin, gas);
+        costs.paid.native = gas;
+        return;
     }
-    let priced = hype
-        .and_then(|h| fees::token_usd(feed, h))
-        .zip(fees::token_usd(feed, token.index));
-    let Some((hype_usd, token_usd)) = priced.filter(|(_, t)| !t.is_zero()) else {
+    let Some(fee) = gas_priced_in_token(feed, token) else {
         tracing::warn!(
             token = token.coin,
             "Core to EVM gas not charged: no HYPE or token price is served"
         );
         return;
     };
-    let fee = gas * hype_usd / token_usd;
     costs.add(token, fee);
     costs.paid.fee += fee;
     costs.paid.fee_token = token.coin.to_string();
+}
+
+/// Whether the account can pay the HyperEVM gas in HYPE (it holds at least the
+/// gas in its Core spot wallet). A mirror with no spot HYPE token answers `false`
+/// for every account, and the gas is then priced in the transferred token.
+fn hype_gas_is_payable(account: &Account, feed: &MarketFeed, gas: Decimal) -> bool {
+    feed.token_of(fees::GAS_TOKEN)
+        .is_some_and(|index| spot_free(account, feed, index).is_ok_and(|free| free >= gas))
+}
+
+/// The HyperEVM gas priced in the **transferred** token, when HYPE cannot pay it.
+fn gas_priced_in_token(feed: &MarketFeed, token: TokenRef<'_>) -> Option<Decimal> {
+    let gas = fees::core_to_evm_gas_hype();
+    let priced = feed
+        .token_of(fees::GAS_TOKEN)
+        .and_then(|h| fees::token_usd(feed, h))
+        .zip(fees::token_usd(feed, token.index));
+    let (hype_usd, token_usd) = priced.filter(|(_, t)| !t.is_zero())?;
+    Some(gas * hype_usd / token_usd)
 }
 
 /// The activation a deposited account still owes, charged on its first
@@ -455,7 +467,47 @@ impl Sim {
         }
     }
 
+    /// The amount a Core→EVM transfer of `amount` actually moves when the wallet
+    /// cannot pay the HyperEVM gas in HYPE (the mirror has no spot HYPE token, so
+    /// that is every wallet): the venue deducts the gas **in kind**, out of the
+    /// amount, exactly as a transfer of the whole balance must work on the real
+    /// venue (`recallAllFromCore` asks for `total − hold`, and a request refused
+    /// because the gas does not fit on top of it can never be made).
+    ///
+    /// Only the exact-full case is clamped: a request that fits the free balance
+    /// but not the gas is reduced by the gas; a request above the free balance is
+    /// left to the shortfall refusal (a partial fill of an over-request would be
+    /// a different, silent ledger rule).
+    pub(crate) fn core_to_evm_amount_net_of_gas(
+        &self,
+        from: Address,
+        token: TokenRef<'_>,
+        amount: Decimal,
+        feed: &MarketFeed,
+    ) -> Result<Decimal> {
+        let net = self.with_state(|state| {
+            let Some(account) = state.accounts.get(&from) else {
+                return Ok(amount);
+            };
+            let gas = fees::core_to_evm_gas_hype();
+            if token.coin == fees::GAS_TOKEN || hype_gas_is_payable(account, feed, gas) {
+                return Ok(amount);
+            }
+            let Some(fee) = gas_priced_in_token(feed, token) else {
+                return Ok(amount);
+            };
+            let free = spot_free(account, feed, token.index)?;
+            Ok(if amount <= free && amount + fee > free {
+                free - fee
+            } else {
+                amount
+            })
+        })?;
+        Ok(net)
+    }
+
     /// Core to EVM: debit the sender's spot wallet for the amount, the HyperEVM
+    /// gas and any owed activation, and write the ledger row.    /// Core to EVM: debit the sender's spot wallet for the amount, the HyperEVM
     /// gas and any owed activation, and write the ledger row. `Refused` (the
     /// reason logged) when the wallet cannot pay; nothing moves then. The
     /// bridge completes the transfer on the EVM side.

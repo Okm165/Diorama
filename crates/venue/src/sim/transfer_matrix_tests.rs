@@ -1308,3 +1308,33 @@ fn a_standard_account_serves_no_margin_hold() {
         Decimal::ZERO
     );
 }
+
+/// **A full Core→EVM transfer succeeds: the gas is taken in kind.** With no spot
+/// HYPE the gas is priced in the transferred token; charging it *on top* made a
+/// transfer of the whole balance — `recallAllFromCore`'s `total − hold` — refuse
+/// forever, so a funded unified loan could never be recalled for its close. The
+/// venue now deducts the gas from the amount instead: the sender moves
+/// everything it holds, the row records the gas, and an over-request is still a
+/// refusal (never a silent partial fill).
+#[test]
+fn a_full_core_to_evm_transfer_moves_everything_less_the_in_kind_gas() {
+    let feed = feed();
+    let sim = Sim::memory();
+    spot(&sim, ME, USDC, "100");
+    let token = USDC;
+    // The whole balance is clamped by exactly the gas (0.00002 HYPE x 5 = 0.0001 USDC).
+    assert_eq!(
+        sim.core_to_evm_amount_net_of_gas(ME, token, dec("100"), &feed).unwrap(),
+        dec("99.9999")
+    );
+    // An amount that already leaves room for the gas is untouched.
+    assert_eq!(
+        sim.core_to_evm_amount_net_of_gas(ME, token, dec("99"), &feed).unwrap(),
+        dec("99")
+    );
+    // An over-request is not partially filled: it stays a shortfall refusal.
+    assert_eq!(
+        sim.core_to_evm_amount_net_of_gas(ME, token, dec("200"), &feed).unwrap(),
+        dec("200")
+    );
+}

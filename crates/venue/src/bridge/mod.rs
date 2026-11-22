@@ -909,6 +909,26 @@ impl Bridge {
             return self.send_between_wallets((caller, destination), info, amount, route);
         }
         if is_system_destination(destination, info) {
+            // The HyperEVM gas is paid **in kind** when the wallet cannot pay it
+            // in HYPE: a transfer of the whole free balance — what
+            // `recallAllFromCore` asks for — is reduced by the gas rather than
+            // refused, so the account can always move everything it holds. The
+            // gas still appears on the ledger row (its `fee`), and the EVM side
+            // receives what the Core side debited.
+            let amount = self.sim.core_to_evm_amount_net_of_gas(
+                caller,
+                TokenRef {
+                    index: info.index,
+                    coin: &info.name,
+                },
+                amount,
+                &self.feed,
+            )?;
+            if amount.is_zero() {
+                self.metrics.inc_refusals();
+                tracing::warn!(account = %caller, "bridge: Core→EVM amount is zero after the in-kind gas; refused");
+                return Ok(());
+            }
             if !self.core_to_evm_allowed(caller, info, amount)? {
                 return Ok(());
             }
