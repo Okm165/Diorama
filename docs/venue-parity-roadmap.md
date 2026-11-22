@@ -44,6 +44,32 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### Two swarm frictions measured while the para series matured (2026-11-22)
+
+**`anvil-v` OOM at a 40 GiB cap is the real trigger behind the chain-1 rewind
+burst.** At 05:46:18 the fork RPC was `OOMKilled` (exit 137) at its 40 GiB
+limit; it had been running 11 h and sat at 7.5 GiB after the restart. The
+restart made the indexer's scan cursor regress and it logged 46 "shallow reorg,
+rewinding" warnings in a single 05:47 burst, reset the SSE publisher (subscribers
+disconnected), and the gateway read blocking-degraded for ~1–2 min. The chain-1
+metrics recovered (`blocks_behind 2`, head age 39 s, healthy). This is upstream
+foundry `anvil` fork-cache growth, not DALOC code, but it is the mechanism by
+which an environmental restart becomes a protocol-wide advisory: a known-time
+rolling restart (or a lower cap with a graceful restart) would move the burst
+off an arbitrary instant. Named, not patched (the restart is the fork RPC's).
+
+**A venue calibration row can outlive a config correction because the key
+carries the redundant `dex`.** `venue_calibration` is keyed
+`(venue, dex, instrument)`, but a coin name already carries its dex
+(`para:ANTH`): the live table held a stale `para:ANTH` row under `dex='xyz'`
+(window ended 11-19) beside the fresh `dex='para'` row, inflating `xyz`'s count
+to 42 against 41 configured. The consumer is safe (the operator keys by
+instrument and takes the newest `window_end`, so the fresh row wins), and the
+stray row was deleted live (back to 78 = the configured count). The root-cause
+simplification is a `(venue, instrument)` primary key, so a config correction
+cannot leave a second identity behind; that migration is queued as the next
+risk-engine change, not a workaround.
+
 ### A unified account's venue equity was short by its isolated margin — found, fixed, rolled (2026-11-22)
 
 The live `para:SMH` loan exposed it on the real book, not in a fixture:
