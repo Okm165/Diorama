@@ -44,6 +44,28 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### Depth fidelity: the mirror's book is the real 20-level ladder, not a mid-price shadow (2026-11-22)
+
+Marks were already exact; this round compared the **whole served book** against
+the real venue at the same instant. Cumulative notional within 5 bp and 10 bp of
+the mid, both sides, on six instruments:
+
+| coin | levels real/mirror | bid 5 bp | ask 5 bp | bid 10 bp | ask 10 bp |
+|---|---|---|---|---|---|
+| BTC | 20/20 | $4,365,020 = $4,365,020 | $3,370,155 = $3,370,155 | ratio 1.00 | ratio 1.00 |
+| ETH | 20/20 | $2,577,566 = (8 levels both) | $3,376,886 = (9 both) | $7,125,426 = (17 both) | $7,098,775 = (17 both) |
+| SOL | 20/20 | $175,828 = | $521,280 = | ratio 1.00 | ratio 1.00 |
+| HYPE | 20/20 | $119,501 = | $67,035 = | ratio 1.00 | ratio 1.00 |
+| xyz:ANT | 20/20 | $12,879 = (13 both) | $67,502 = (18 both) | $18,285 = (20 both) | $72,644 = (20 both) |
+| para:SMH | 20/20 | **$100 (1 level)** | $760 (3) | $100 (1) | $760 (3) |
+
+Every level count and every cumulative figure is identical — the mirror is the
+real ladder, so the simulated slippage *is* the market's, including the places
+where the market is thin: `para:SMH` carries **$100 of bid depth inside 10 bp**,
+so the 0.03 SMH close measured earlier was 12% of the visible bid and its 5.10 bp
+is a real cost, not a model artifact. A strategy must size against this book
+exactly as it would on the venue, which is the point of the mirror.
+
 ### DB sweep: the scan is fresh; a terminal row keeps its last collateral mirror with no as-of (2026-11-22)
 
 Non-terminal books at 07:04Z: 10 Active, HF fresh on all nine backed ones
