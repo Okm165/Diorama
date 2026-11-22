@@ -553,6 +553,59 @@ residual when the touch is thinner than the size — the venue's partial fill is
 correct; the flatten needs a retry loop. Fees on the runtime's legs measured
 4.5 bp taker per fill.
 
+### 2026-11-22 15:15Z: xANT exits again — the pool re-seeded through the operator cheatcode, the $2k route re-measured
+
+**The blocker was never the mint — it was the adder's empty balance.** The
+earlier session's "opaque revert through every callback shape" was the mint
+callback's `IERC20.transfer` failing on a zero balance. The operator cheatcode
+path resolves it: `anvil_dealERC20` (in-cluster RPC, `kubectl exec
+deploy/indexer`) funds the mirror's `V3LiquidityAdder`
+(`0x0bbcbded5bf9552160a3c5a185cd9e447994e3f1`), then one
+`add(pool, token0, token1, −1260, −840, 2.6968e12)` transaction
+(`0x14e8bb40…656e09e9`) seeded the wrapper's HyperSwap pool
+(`0xad336b5070bfafc91d3f833b3bded367c2348e7a`, tier 3000, anchor 90.013, the
+2026-11-19 seeding the 2026-11-20 recovery dropped): **liquidity 2.6968e12,
+300 xANT / $26.4k USDC in-band** across a ±2% band. The adder keeps its
+over-dealt float (66,938 xANT / $6.03M) for future re-anchors — operator
+custody, not a user account.
+
+**The $2k sale route measures 0.3775%.** QuoterV2 (the feed's own read,
+`quoteExactInputSingle` — note the struct field order is
+`tokenIn, tokenOut, amountIn, fee, limit`): $200 → 199.38 (−0.31%), **$2,000 →
+1,992.45 (−0.3775%)**, $5,000 → −0.49%, $10,000 → 9,931.30 (−0.69%). The
+pool's 90.013 anchor is static while the live mark moves (89.6065 at seeding,
++0.45% drift) and that drift rides inside the measured discount. `delivered_only`
+drops; the provenance is `measured wrapper-pool-2k-usd-quote-2026-11-22` with
+2% liquidation slippage ≈ 5× headroom, MAX_SALE_DISCOUNT_BPS still the hard
+bound. Both trees carry the same row (`e81b9d72` worktree, `c805db39` deploy);
+`risk_configs` has the row again (chain 999, θ 0.79); the indexer's swap-rate
+series quotes it live (rate 0.8968 raw = **89.68 USDC/xANT** at the $2k probe —
+the monitor counts 48 pairs); the eternal `swap_rate_coverage` warn stays gone.
+
+**Two latent crashes surfaced by the apply — both fixed in git, not patched
+live.** (1) `cctp-relay`'s committed yaml lacked the `DATABASE_URL` secretKeyRef
+the running spec carried as live-only drift: my apply snapped it to the
+committed shape and the relay crash-looped at boot
+("DATABASE_URL must be set"). The env is now committed
+(`daloc-secrets/DATABASE_URL_INDEXER` — the relay reads the indexer's
+`scan_watermarks`), and the relay rolled to `rel-06fbe52d`: its old pin
+`rel-f73daf45` **predates the `[[venue_instrument]]` config field** (ca7ade88)
+the rendered tree has carried since 06:27 — any restart since was a latent
+"unknown field venue_instrument" crash. (2) The **seed jobs** still ran
+`local-20261121-91f15f0a` (the same pre-field binary): the risk-engine seed
+refused the tree. Pinned to the live service images and re-ran: 48 measured
+pairs, the route-executability guard passed on every declared route. Deployment
+lesson, recorded: `kubectl apply -f k8s/deploy/` does **not** recurse into
+`env-maps/` — the subdirectory must be applied explicitly, and a stale
+last-applied annotation is how live-only drift hides.
+
+**The 15:00Z funding boundary charged exactly under the zeroed clock.** 1 Hz
+sampler: at 14:59:59.285 mirror −0.00000131 = real −0.0000013103 (the
+pre-boundary rate); at 15:00:02.540 mirror +0.000000959 = real +0.000000959 to
+the last digit, marks identical throughout. The boundary charged the
+pre-boundary rate, as the rule says; no clock offset anywhere (the sampler ran
+without any `/control/advance` since the 13:00 incident).
+
 ### 2026-11-22 audit pass 2: the ρ table was history, the margin math is exact, the maker fills from the market
 
 **The venue-ρ table was append-only, and the operator read the history.** The
