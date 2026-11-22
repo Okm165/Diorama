@@ -44,6 +44,31 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The upgrade's own automation retired itself on a failed read (2026-11-22)
+
+The scheduled beacon upgrade had a self-removing hourly cron. At 21:17 it ran
+without `HOME`/`KUBECONFIG` (cron's minimal environment; the other mirror crons
+export both explicitly), so the underwriter-key read returned garbage, the
+status call failed, and the script's `status | grep waiting || remove` arm
+treated **an unreadable status as "no pending op"** and deleted itself. The
+scheduled operation was untouched on chain — the automation was simply gone,
+silently, six hours into a 24 h delay.
+
+Rebuilt fail-closed: env pinned, an empty key read or an empty status read is a
+logged retry, the cron is retired **only** when the beacon's own implementation
+equals the target (after a re-read), and an unparsed operation keeps the cron
+with a line that asks for operator attention. Dry-run verified: the execute
+correctly refuses "not ready: 81 526 seconds remain" and the cron stays. The
+lesson is the one the swarm keeps teaching: an automation that deletes itself on
+a failed read is not a scheduler, it is a one-shot that hopes.
+
+**And WHYPE's close cost closed itself:** the swap-rate row the last entry named
+as missing now serves (`rate_wad 62151744`, fresh at 21:47:27) and the
+operator's 4.7% policy-prior warnings for `1baeb46d…` stopped — the miss was the
+producer's pre-restart window (the rotating post-restart timeouts are the
+connection-establishment wake), not a token-specific gap. The named
+producer-load question stays as a watch item, not an incident.
+
 ### WHYPE's close cost is a policy prior because its swap-rate read times out (2026-11-22)
 
 The operator's escrow-cost valuation warns honestly: the Borrow book `1baeb46d…`
