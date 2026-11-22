@@ -179,14 +179,17 @@ impl AccountSeed {
         // resulting fake deficit.
         if let Some(summary) = &self.margin_summary {
             let isolated = isolated_margin_total(account, dex);
-            // The seed stores the perp ledger's cash convention. A standard
+            // The seed stores the perp ledger's cash convention: a standard
             // account's isolated open debits the ledger by its margin and the
             // served summary re-adds it; a **unified** account's served summary
-            // also carries the *whole* position margin as cash (the spot
-            // `hold`, which the real venue's perp `accountValue` includes). The
-            // live ledger already debits the isolated part, so the seed
-            // subtracts the isolated margin once more and the cross margin once,
-            // reproducing the patch's `totalRawUsd` exactly.
+            // also carries the spot-funded margin (the real venue's perp
+            // `accountValue` is `hold + unrealized`), but only the margin the
+            // wallet's own cash does not cover. A patch whose `totalRawUsd`
+            // covers its margin funds it from the wallet (the committed `4a`
+            // shape, spot hold 0), so the stored ledger is the named raw; an
+            // isolated unified patch debits the ledger and the served add
+            // restores it. The extra isolated subtraction reproduces the
+            // patch's `totalRawUsd` in both.
             let margin = match account.mode {
                 UserAbstraction::UnifiedAccount => add(isolated, isolated, "seed isolated margin")?,
                 _ => isolated,

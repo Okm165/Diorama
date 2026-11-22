@@ -650,9 +650,12 @@ fn a_unified_account_liquidates_against_its_spot_collateral() {
     rig.fund_unified(a, "150");
     rig.open(a, "ETH", (true, "10", 10));
     let state = rig.served(a, "");
+    // The served perp summary carries the spot-funded margin as cash (the real
+    // venue's `hold + unrealized`); the spot collateral is what the order lane
+    // and the waterfall both margin against.
     assert!(
-        state.margin_summary.account_value < Decimal::ONE,
-        "the perp view alone holds no collateral: {}",
+        state.margin_summary.account_value > Decimal::ONE,
+        "the summary carries the spot-funded margin: {}",
         state.margin_summary.account_value
     );
     let liq = rig

@@ -3088,10 +3088,11 @@ mod tests {
     }
 
     /// **A unified account trades against its spot collateral.** The served
-    /// perp summary stays the perp sub-ledger alone (`accountValue = 0`), but
-    /// the order lane's placement and post-fill checks count the unified spot
-    /// USDC. Without this, the product's unified agent — whose note arrives in
-    /// the spot class — cannot open its perp hedge at all.
+    /// perp summary carries the spot-funded margin as cash (the real venue's
+    /// `hold + unrealized`), and the order lane's placement and post-fill
+    /// checks count the unified spot USDC. Without this, the product's unified
+    /// agent — whose note arrives in the spot class — cannot open its perp
+    /// hedge at all.
     #[test]
     #[allow(clippy::too_many_lines)] // the two ledgers and the standard arm in one test
     fn a_unified_account_trades_against_its_spot_collateral() {
@@ -3137,10 +3138,15 @@ mod tests {
         assert_eq!(fill.total_sz, "0.5".parse().unwrap());
         let account = sim.account(a).unwrap().unwrap();
         let view = super::super::account::view(&account, &feed, "").unwrap();
+        let hold = super::super::account::unified_hold(&account, &feed, 0).unwrap();
         assert!(
-            view.margin_summary.account_value < Decimal::ZERO,
-            "the served perp summary stays the perp ledger (the fee is its only move), got {}",
-            view.margin_summary.account_value
+            hold > Decimal::ZERO,
+            "the position's margin is held on the spot token"
+        );
+        assert_eq!(
+            view.margin_summary.account_value,
+            view.perp_account_value + hold,
+            "the served unified summary is the perp cash plus the spot-funded margin"
         );
         assert_eq!(
             account.spot.get(&0).map(|e| e.total).unwrap_or_default(),

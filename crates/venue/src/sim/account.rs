@@ -831,6 +831,7 @@ fn assemble(
     totals: &PositionTotals,
     rows: Vec<AssetPosition>,
     facts: BTreeMap<String, PositionFacts>,
+    held_on_spot: Decimal,
 ) -> Result<AccountView> {
     // The venue's `marginSummary` is the **perp sub-ledger's** summary. A
     // unified account's spot collateral is a separate ledger: the committed
@@ -856,22 +857,30 @@ fn assemble(
     // margin, which `cash` adds back).
     let perp_account_value = perp_total_raw + totals.signed_value;
     // The **served** unified summary carries the spot `hold` as cash. The real
-    // venue's perp `accountValue` includes the collateral moved in from spot:
+    // venue's perp `accountValue` is `hold + unrealized` for a unified account:
     // the committed capture reads spot `161.455092` with hold/perp
     // `12.955364`, and the `0x75b9` book reads hold `140.678682` with perp
     // `−108.417391`. The consumer's whole is
-    // `(spot_total − spot_hold) + perp_account_value`; a unified summary that
-    // omits the hold therefore understates the account by the whole position
-    // margin — the live `para:SMH` book measured `41.209924` where the venue
-    // equity was `42.4400`, short by its `1.23126` hold. The ledger already
-    // adds the isolated margin once (`cash` above); the served summary adds it
-    // once more so the margin the live open debited is carried as cash. The
-    // add is **served-only**: `perp_account_value` above keeps the order lane
-    // and the waterfall exactly where they were. A cross position's margin is
-    // a reservation on the wallet's own cash (not moved in), so it is not
-    // re-added — the positions-only mode-switch regression pins that.
+    // `(spot_total − spot_hold) + perp_account_value`; a summary that omits
+    // the hold understates the account by the whole position margin — the live
+    // `para:SMH` book measured `41.209924` where the venue equity was
+    // `42.4400`, short by its `1.23126` hold.
+    //
+    // **The hold is every position's margin on the dex, not only the isolated
+    // ones.** Measured live (2026-11-22) on a cross position after an account
+    // was switched to unified: the cash folded to spot (perp ledger 0), spot
+    // `294.76203024` with hold `290.99832`, and the perp summary served
+    // `−9.0528` (unrealized only) — so the consumer's whole read `−5.29` for
+    // an account whose equity was `285.71`, short by exactly the cross margin.
+    // The isolated-only add was the `para:SMH` book's shape and missed this.
+    // A cross margin and an isolated margin are both `p.margin_used`, both
+    // held on the collateral token (`unified_hold` sums both), so both are
+    // carried here; `cash` already re-adds the isolated margin the open
+    // debited, and the served add is what the spot `hold` subtracts from the
+    // spot side. The add is **served-only**: `perp_account_value` above keeps
+    // the order lane and the waterfall exactly where they were.
     let served_cash = match account.mode {
-        UserAbstraction::UnifiedAccount => cash + totals.isolated_margin,
+        UserAbstraction::UnifiedAccount => add(cash, held_on_spot, "served spot hold")?,
         _ => cash,
     };
     let total_raw = served_cash - totals.cost_basis;
@@ -954,7 +963,11 @@ pub(crate) fn view(account: &Account, feed: &MarketFeed, dex: &str) -> Result<Ac
         rows.push(position_row(coin, p, &facts, meta)?);
         by_coin.insert(coin.clone(), facts);
     }
-    let mut v = assemble(account, dex, &totals, rows, by_coin)?;
+    // The spot hold the perp summary must carry back: the position margin the
+    // venue holds on the dex's collateral token — the part the wallet's own
+    // cash does not cover, bounded by the token's balance.
+    let held_on_spot = spot_funded_margin(account, feed, feed.collateral_token_of(dex), dex)?;
+    let mut v = assemble(account, dex, &totals, rows, by_coin, held_on_spot)?;
     fill_cross_liquidation_px(account, feed, dex, &mut v, meta)?;
     Ok(v)
 }
@@ -1256,7 +1269,90 @@ pub(crate) fn unified_hold(account: &Account, feed: &MarketFeed, token: u32) -> 
     if account.mode != UserAbstraction::UnifiedAccount {
         return Ok(Decimal::ZERO);
     }
-    pooled_margin(account, feed, token, None)
+    let mut total = Decimal::ZERO;
+    for dex in spot_margined_dexs(account, feed, token) {
+        total = add(
+            total,
+            spot_funded_margin(account, feed, token, &dex)?,
+            "unified hold",
+        )?;
+    }
+    Ok(total)
+}
+
+/// The **position margin a dex reserves from the spot token**, as opposed to
+/// the margin its own perp wallet already carries. This is the figure the
+/// unified perp summary must carry back as cash (the real venue's
+/// `accountValue` is `hold + unrealized`) and the spot row's hold adds.
+///
+/// The two funding shapes are measured, not assumed: a cross open reserves
+/// against the perp ledger's own cash (the committed `4a` capture: perp raw
+/// `1.25`, spot `1.25`, hold `0`), while a `unifiedAccount` switch folds the
+/// cash into spot and the margin then reads as spot hold (live 2026-11-22:
+/// spot `294.76203024`, hold `290.99832`, perp ledger `0`). The margin a dex
+/// funds from spot is therefore `margin − its positive perp cash`, and it is
+/// bounded by the token's free balance (a reserve cannot exceed the holding;
+/// the indexer refuses `hold > total`). The bound is allocated in dex order
+/// (`""` first) so the per-dex adds sum exactly to the served hold even in
+/// the undercollateralized shape, and the consumer's
+/// `(spot_total − spot_hold) + Σ perp_account_value` stays `spot + cash + pnl`
+/// in every shape.
+pub(crate) fn spot_funded_margin(
+    account: &Account,
+    feed: &MarketFeed,
+    token: u32,
+    dex: &str,
+) -> Result<Decimal> {
+    if account.mode != UserAbstraction::UnifiedAccount {
+        return Ok(Decimal::ZERO);
+    }
+    let bounds = account.spot.get(&token);
+    let total = bounds.map_or(Decimal::ZERO, |e| e.total);
+    let orders = bounds.map_or(Decimal::ZERO, |e| e.hold);
+    let mut remaining = sub(total, orders, "spot free for margin")?.max(Decimal::ZERO);
+    for d in spot_margined_dexs(account, feed, token) {
+        let share = spot_shortfall(account, feed, token, &d)?.min(remaining);
+        remaining = sub(remaining, share, "spot margin allocation")?;
+        if d == dex {
+            return Ok(share);
+        }
+    }
+    Ok(Decimal::ZERO)
+}
+
+/// The dexes holding a non-flat position on the token, sorted (`""` first) —
+/// the allocation order that makes the spot hold exactly the sum of its
+/// per-dex shares.
+fn spot_margined_dexs(
+    account: &Account,
+    feed: &MarketFeed,
+    token: u32,
+) -> std::collections::BTreeSet<String> {
+    account
+        .positions
+        .iter()
+        .filter(|(_, p)| !p.szi.is_zero())
+        .map(|(coin, _)| dex_of_coin(coin).to_string())
+        .filter(|dex| feed.collateral_token_of(dex) == token)
+        .collect()
+}
+
+fn spot_shortfall(account: &Account, feed: &MarketFeed, token: u32, dex: &str) -> Result<Decimal> {
+    if feed.collateral_token_of(dex) != token {
+        return Ok(Decimal::ZERO);
+    }
+    let (mut margin, mut isolated, mut cost) = (Decimal::ZERO, Decimal::ZERO, Decimal::ZERO);
+    for (coin, p) in &account.positions {
+        if p.szi.is_zero() || dex_of_coin(coin) != dex {
+            continue;
+        }
+        margin = add(margin, p.margin_used, "dex margin on the token")?;
+        isolated = add(isolated, p.isolated_margin, "dex isolated margin")?;
+        cost = add(cost, p.cost_basis()?, "dex cost basis")?;
+    }
+    let wallet = add(account.perp_balance(dex), isolated, "dex wallet")?;
+    let raw = sub(wallet, cost, "dex wallet raw")?;
+    Ok(sub(margin, raw.max(Decimal::ZERO), "spot-funded margin")?.max(Decimal::ZERO))
 }
 
 /// The account's free margin for an order: the perp sub-ledger's value, plus a
@@ -2268,6 +2364,65 @@ mod tests {
         assert_eq!(
             Decimal::from(50) - hold + v.margin_summary.account_value,
             Decimal::from(60)
+        );
+    }
+
+    /// The served unified summary carries a **cross** position's margin too,
+    /// not only an isolated one. After a mode switch the cash is on spot and
+    /// the perp summary is `hold + unrealized`; an isolated-only add served
+    /// unrealized alone and the consumer's whole lost the whole margin.
+    /// Pinned on the live measurement (2026-11-22): spot `294.76203024`, hold
+    /// `290.99832`, perp `−9.0528` made the consumer read `−5.29` for an
+    /// account whose equity was `285.71`.
+    #[test]
+    fn the_unified_perp_summary_carries_a_cross_margin_too() {
+        let feed = feed_with_meta(&[("BTC", "105.0", "105.0")], meta_with_table("BTC", 10));
+        let mut account = Account {
+            mode: UserAbstraction::UnifiedAccount,
+            ..Account::default()
+        };
+        // The switch folded the perp cash into spot: the ledger is empty and
+        // the position's margin is held on the spot token.
+        account.positions.insert(
+            "BTC".into(),
+            Position {
+                szi: Decimal::ONE,
+                entry_px: Decimal::from(100),
+                leverage: LeverageType::Cross,
+                leverage_value: 10,
+                margin_used: Decimal::from(10),
+                isolated_margin: Decimal::ZERO,
+                funding_all_time: Decimal::ZERO,
+                funding_since_open: Decimal::ZERO,
+                funding_since_change: Decimal::ZERO,
+            },
+        );
+        account.spot.insert(
+            COLLATERAL_TOKEN,
+            SpotEntry {
+                coin: "USDC".into(),
+                total: Decimal::from(50),
+                hold: Decimal::from(10),
+                entry_ntl: Decimal::ZERO,
+            },
+        );
+        let v = view(&account, &feed, "").unwrap();
+        assert_eq!(
+            v.margin_summary.account_value,
+            Decimal::from(15),
+            "the held margin (10) plus the unrealized pnl (5)"
+        );
+        assert_eq!(
+            v.perp_account_value,
+            Decimal::from(5),
+            "the order lane keeps the perp-cash figure (unrealized only)"
+        );
+        let hold = unified_hold(&account, &feed, COLLATERAL_TOKEN).unwrap();
+        assert_eq!(hold, Decimal::from(10));
+        assert_eq!(
+            Decimal::from(50) - hold + v.margin_summary.account_value,
+            Decimal::from(55),
+            "the consumer's whole is spot + pnl, not spot − margin + pnl"
         );
     }
 
