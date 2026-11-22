@@ -44,6 +44,29 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### WHYPE's close cost is a policy prior because its swap-rate read times out (2026-11-22)
+
+The operator's escrow-cost valuation warns honestly: the Borrow book `1baeb46d…`
+(2 WHYPE collateral, 999) estimates its close cost at the **4.7% labelled policy
+prior** because `swap_rate_refusal = Missing`. Chased to the producer, not the
+trade: WHYPE→USDC is configured in `SWAP_RATE_FEEDS` (fee 3000, 1 WHYPE probe)
+and the quote **answers directly** — `quoteExactInputSingle` returns 62.151744
+USDC for 1 WHYPE against the 62.52 venue mark — but the producer's reads
+time out at the shared 30 s `RPC_TIMEOUT` under a 5 s cadence across 48 pairs
+against one anvil (24 `swap rate fetch failed … timed out after 30s` in 15 min;
+43 of 48 rows serve, WHYPE among the missing). The refusal and the prior are the
+designed honest fallback; the remaining friction is the producer's
+load/timeout behaviour, named here rather than papered over with a hand-written
+rate.
+
+**Also checked:** a portfolio-level runtime needs a second live leg, and there
+is none to borrow — `fbaa118c` (five WETH legs on one agent) is four closed plus
+one Active, and opening a new leg needs the borrower's key, which this side does
+not hold. The multi-leg runtime stays a scenario that requires a dealt wallet
+with a key, not a protocol gap. And the one-minute indexer WS reconnect at 20:56
+(47 lines, `backend connection task has stopped`) explains that minute's feed
+batch: a reconnect's gap reads are the poller's designed wake, not a writer.
+
 ### The feed writer now honours Chainlink's own invariant, and one account traded two dexes across a funding boundary (2026-11-22)
 
 **The regression churn was a writer, not a poller.** oracle-liveness is a Python
