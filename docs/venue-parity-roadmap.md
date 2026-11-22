@@ -99,6 +99,42 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
    must drive the same push the close path uses. The Direct product dodged it
    only because its CM salt differs from the unified one.
 
+### The venue-native band vehicle, built and verified end to end (2026-11-22)
+
+The schema step this roadmap kept naming as "the owner's declaration" is now a
+**declaration vehicle that exists and works**:
+
+- **`[[venue_instrument]]`** rows in the markets TOML (`daloc-config` ca7ade88,
+  deployed configmap 40c5b2e9): `chain_id`, `coin` (the venue's symbol), `dex`,
+  `vol_floor_annual`, `vol_ceiling_annual`, the same `vol_band_provenance`
+  shape a market's band carries, validated at parse time (inverted band,
+  unknown chain, duplicate coin all refuse the config).
+- The indexer's band builder merges declarations **only where no market names
+  the coin** (a market-derived band keeps precedence, so no wrapped asset's band
+  can change). Boot log proves it: `venue_vol_bands: 44 -> 77` (44 market-derived
+  + 33 declared).
+- Populated with the **33 measured para GARCH fits** (floor = max(0.10, 0.5σ),
+  ceiling = min(3.0, 2σ), provenance naming the fit) — measured data, not a
+  global prior. The 7 unfitted para coins carry no row and keep refusing.
+
+**Verified live, the refusal moved exactly as designed:**
+
+| state | refusal |
+|---|---|
+| before | `the venue asset's configured vol_floor_annual/vol_ceiling_annual band is unavailable` |
+| after the vehicle | **`the venue mark series holds 10 contiguous mark(s); the estimator needs at least 21`** |
+
+So the band is found and accepted; the only remaining bound is **data
+maturity** — the pricing estimator samples 5-minute book buckets and needs 21
+contiguous ones (≈ 105 min), and the para feed started at 05:00. The bucket
+series was verified contiguous (04:40→05:45, no empty buckets), so a quiet
+market does not starve the estimator: it is purely elapsed time. At ~06:45 the
+same draw should price. (One process note: the first apply took the configmap
+from the code worktree, which lacks the deploy-branch config edit — the band map
+stayed 44 until the deploy branch's rendered configmap was applied. The lesson
+is the two artefacts: code rolls from the worktree, config from the deploy
+branch.)
+
 ### Market liveness measured end to end — the WSS primary delivers, and two "staleness" scares were designs, not defects (2026-11-22)
 
 - **Served freshness is sub-second for active markets.** Sampled `venue_book_snapshots.polled_at`
