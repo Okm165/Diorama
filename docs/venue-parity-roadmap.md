@@ -44,6 +44,29 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The unified-margin model's remaining half: a **spot-funded cross** position is short by its margin (2026-11-22)
+
+The isolated case is fixed and measured. The same accounting is exact for a
+**cross** position only when the perp wallet's own cash already covers the
+margin; the gateway funds the venue account through **spot**, so a unified cross
+trade has an empty perp wallet and the margin is never moved in. Worked exactly:
+
+| unified cross, spot 50, margin 10, no pnl | perp | hold | whole `(spot−hold)+perp` | truth |
+|---|---|---|---|---|
+| wallet-funded (perp cash 10) | 10 | 10 | **50** | 50 |
+| spot-funded (perp cash 0) | 0 | 10 | **40** | 50 |
+
+So a spot-funded unified **cross** position understates the account by its
+margin, exactly the family the isolated fix closed. No unified cross position is
+live (every cross book on the mirror is `default` mode), so nothing is
+mispriced today. The root-cause fix is the **uniform transfer model**: a unified
+open moves its initial margin *into* the perp ledger (credit) and the close moves
+it back (debit), for cross and isolated alike — then `accountValue = hold + pnl`,
+the seed needs no double subtraction, and `(spot − hold) + accountValue` reduces
+to `spot + pnl` for every position type. That is a deliberate next change (it
+needs a one-time balance migration for the live isolated book), not a patch to
+bolt on under the pending draw proof.
+
 ### Funding is live-identical in rate but phase-shifted by the sim clock (+33.183 min) (2026-11-22)
 
 The reconciliation tool (`venue-funding-check`) returns `upstream_rate: null` for
