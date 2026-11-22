@@ -44,6 +44,22 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The venue restart left the σ series contiguous, and the HF blind is the same σ gate (2026-11-22)
+
+Rolling the venue-sim at 06:05 did **not** punch a hole in the five-minute book
+series: `para:SMH` reads `05:00 05:05 … 06:15` with zero gaps > 5 min (the REST
+reconciliation backstop kept every bucket while the WSS was down). The σ
+estimator's contiguity is therefore intact through the restart.
+
+The operator's `hf_scan_age_s` is 1 s and nine of the ten Active positions have a
+fresh `position_health` row (06:16:52). The one stale row is the para loan
+itself (computed 05:46:13, `venue_equity_usd 41.199` — the pre-fix figure). Its
+HF compute is the single `hf_scan_blind_positions = 1`, and the blind cause is
+`compute` (not `price` or `venue_term`): the same para σ that refuses the draw
+refuses the HF compute. It is counted, non-blocking, and resolves with the same
+data maturity — so the draw and the enforcement path unblock together, and the
+enforcement path has not been silently pricing the understated equity.
+
 ### Two swarm frictions measured while the para series matured (2026-11-22)
 
 **`anvil-v` OOM at a 40 GiB cap is the real trigger behind the chain-1 rewind
