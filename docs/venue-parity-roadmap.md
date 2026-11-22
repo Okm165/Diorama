@@ -66,6 +66,38 @@ so the 0.03 SMH close measured earlier was 12% of the visible bid and its 5.10 b
 is a real cost, not a model artifact. A strategy must size against this book
 exactly as it would on the venue, which is the point of the mirror.
 
+### The ghosts, quantified on chain: 2,544.95 USDC of underwriter exposure sits on 7 cancelled books (2026-11-22)
+
+The instrumented pass (operator `rel-d7c4d0d7`) now separates "could not ask" from
+"non-zero", and the reads **answered**: every one of the seven is non-zero. Read
+directly from the underwriting vault (`positionExposure(bytes32)` at
+`0x015f…c53d3`, chain 999):
+
+| position (first 10) | registered exposure |
+|---|---|
+| `0add8d7b…` | **2,406.989682 USDC** |
+| `54fdebd4…` | 23.220223 |
+| `532711a1…` | 23.365159 |
+| `ca194203…` | 23.277872 |
+| `a96dbf6b…` | 22.830490 |
+| `7f483a67…` | 22.685085 |
+| `f68658be…` | 22.579994 |
+| **total** | **2,544.948505 USDC** |
+
+`totalExposure()` reads **6,730.687294 USDC**, exactly the LP view's
+`value_at_work`. So **37.8% of the underwriter's live exposure is registered
+against positions whose status is `Cancelled`** — no book, no borrower, no
+repayment. The single `0add8d7b` creation (VaultFunded → UnifiedMarginAgent,
+WHYPE collateral, both chains 999) is 2,406.99 of it; its agent
+(`0xad19ca84…`), agent wallet (`0xa0209608…`) and margin agent all hold **0 USDC**
+on the venue, while the vault holds 6,997,275.18 USDC idle and `unclaimedTotal`
+reads 7,456.44 — consistent with the cash having returned to `unclaimed` and only
+the **exposure** never being decreased. That is an accounting defect in the
+cancel path, not (on this evidence) a capital loss: the fix is to pair
+`MarginBridging → Cancelled` with `settle`/`decreaseExposure` (or refuse to
+cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
+of cancelled rows until it is fixed.
+
 ### DB sweep: the scan is fresh; a terminal row keeps its last collateral mirror with no as-of (2026-11-22)
 
 Non-terminal books at 07:04Z: 10 Active, HF fresh on all nine backed ones
