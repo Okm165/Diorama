@@ -99,6 +99,60 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
    must drive the same push the close path uses. The Direct product dodged it
    only because its CM salt differs from the unified one.
 
+### Market liveness measured end to end — the WSS primary delivers, and two "staleness" scares were designs, not defects (2026-11-22)
+
+- **Served freshness is sub-second for active markets.** Sampled `venue_book_snapshots.polled_at`
+  every 4 s for six instruments across all three dexes: default-dex and xyz books
+  0.0–0.8 s old throughout; para books 0.1–7.6 s — and the para wiggle is the
+  venue's own change-driven push (a quiet HIP-3 book), not pipeline lag:
+  `polled_at` and `venue_observed_at` ages are equal, i.e. the mirror adds no
+  measurable latency over the venue's stream.
+- **The "rows every 300 s" reading was the bucket design.** `venue_book_snapshots`
+  keeps **one row per five-minute bucket** (`uq_venue_book_bucket`) — an upsert
+  refreshes mark/funding/ladder and moves `polled_at`; a per-coin lag analysis
+  over rows therefore measures bucket boundaries, not poll cadence. The
+  resolution any reader takes is the newest row, and it is fresh.
+- **Residual risk, named and bounded:** the REST reconciliation is a serial pass
+  over all instruments (two HTTP reads per coin), so one full pass over the
+  current 85 instruments takes ~5 min. While the WSS primary is healthy this is
+  invisible (fresh coins are skipped); if WSS dies, marks go last-good for up to
+  ~one pass before REST catches up. The "venue engine UNOBSERVED" advisory covers
+  exactly this window. Accepted as backstop design; the fix if instrument count
+  grows much further is bounded parallelism in `poll_feed`, not now.
+- **The `position_terminal_open_commitments` advisory is a self-healing lag
+  gauge, not stuck state.** The view (terminal settlement evidence with no
+  event-keyed close) was non-empty during the scan and **empty on inspection
+  minutes later** — the fold caught up. The "indexer blip every 10 min" pattern
+  in the 19 Nov report is this lag window flipping health degraded transiently.
+  WARN-severity is right; the consuming harnesses that hard-block writes on any
+  indexer advisory (the soak runner) amplify it.
+
+### Portfolio runtime: one loan, three dexes, active trading throughout (2026-11-22)
+
+A unified book (WETH-1 → USDC-999) traded live across every dex during runtime:
+
+| step | fill | fee (per-fill, verified) |
+|---|---|---|
+| buy 0.03 ETH @ 1655.1 → sell 0.06 @ 1653.1 (flip to short) → buy 0.03 @ 1652.9 (cover) | 4.5 bps (0.0223/0.0446/0.0223) |
+| buy 0.5 xyz:ANT @ 88.715 → sell 0.5 @ 88.611 | 0.9 bps (0.004) |
+| buy 0.03 para:SMH @ 410.38 → sell 0.03 @ 410.22 | 0.9 bps (0.0011) |
+
+- The venue ledger reconciles the whole runtime: 8 fills, closed PnL −0.1228,
+  fees 0.1219, **net −0.2447 USDC** — round-trip cost is fees + crossed spread
+  only, on all three dexes. Per-dex fee tiers exact (ETH taker 4.5 bps; the
+  HIP-3 dexes 0.9 bps = deployer 1.0 × growth 0.1 × 2).
+- **The capital plan binds coherently under load:** flat capacity 9.73
+  (`stress_capacity`); with a ~$50 ETH long it flipped to 4.84
+  (`price_hurdle`); with ETH + ANT open it read **0.0** (`stress_capacity`);
+  flattening restored it. One fail-closed consequence measured: an open
+  **para** leg makes the whole account's requote refuse (the band-declaration
+  gap above) — trading para on a unified book freezes debt operations until
+  the leg is flat. Honest, but it makes the schema step more urgent.
+- **Venue parity refuses correctly at the door:** para orders under $10
+  notional are refused ("Order must have minimum value of $10") — HL's own
+  minimum, mirrored.
+- Loan closed clean (cross-chain close, `Closed`); account flat, zero residue.
+
 ### Why a venue-native dex cannot be priced: the band has no declaration vehicle (2026-11-22)
 
 With the para data hole closed (`VENUE_BOOK_FEEDS` -> 40 instruments snapshotting,
