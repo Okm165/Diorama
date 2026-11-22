@@ -148,8 +148,10 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
   taker tier (observed: `maker_leg_fee_bps_measured: None`, the resting order
   expired with `self-crossing resting order expired (expire-maker)` in the
   venue log). A live cross-account maker fill (maker fee 1.5 bps measured from
-  the ledger) needs two funded agents — the next dual-loan runtime should run
-  the scenario cross-account and close the loop.
+  the ledger) needs two funded agents — **closed the same session**: with two
+  funded agents the cycle measured `maker_leg 1.5 bps (crossed: false)` /
+  `taker_leg 4.5 bps (crossed: true)` from the ledger — every tier exact, HL
+  parity confirmed. The scenario must always run with maker ≠ taker.
 - Fee tiers re-measured from the ledger in the same session: ETH taker 4.50 bps,
   xyz taker 0.90 bps — exact, both dexes.
 
