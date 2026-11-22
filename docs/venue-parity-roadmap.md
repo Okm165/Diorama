@@ -44,6 +44,25 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The fix's cross-layer coupling: the PM's `+ hold` was the missing term, not a rule (2026-11-22)
+
+The venue fix made the served unified perp summary **carry the hold as cash**.
+The operator's portfolio-margin path computed its venue figure as
+`whole + spot_hold` — which was correct **only because the mirror's perp summary
+omitted the hold**: the `+ hold` was the mirror's missing term, not a model rule.
+With the hold restored, adding it again counted the margin twice, and the live
+`para:SMH` book would have priced `43.674` where the account is `42.4427` —
+inflating the draw capacity and the HF by exactly the `1.23126` hold, at the
+moment the σ gate opened.
+
+**Fixed in the same session (`rel-cf8599e3`):** the PM's venue figure is now
+`venue_equity(state)` — the whole — and the hold is *inside* it. The semantics
+are unchanged for every wallet whose perp summary already carried the hold (real
+venue books, seeded fixtures); only the mirror's non-conforming summary needed
+the compensation. 566 operator tests green; a new test pins the composition on a
+non-zero hold (`42.008477 + 0.434263 = 42.44274`, and explicitly not
+`+ 1.23126`). The retest was held back until the operator matched.
+
 ### The unified-margin model's remaining half: a **spot-funded cross** position is short by its margin (2026-11-22)
 
 The isolated case is fixed and measured. The same accounting is exact for a
