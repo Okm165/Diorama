@@ -479,6 +479,42 @@ user-sim end to end while the venue book was traded:
    and "empty venue + cash on the agent" is *nothing to recall*, not a missing
    bridge.
 
+### Multi-loan, multi-product session (2026-11-22 01:2x–01:47)
+
+Two wallets, two products, both cross-chain (WETH-1 collateral, USDC-999
+principal), books traded concurrently and closed:
+
+| Loan | Product / wallet | Runtime ops while the other book traded | Close |
+| --- | --- | --- | --- |
+| `0xaf0e4316…` | unified, wallet 1 | short 0.02 ETH; **draw +1** landed with the position open (capacity was the binding 1.03 — the stress line, see the hedge section) | recall-all → `Closed` |
+| `0x473545fe…` | simple, wallet 2 | long 0.08 `xyz:NVDA`; **resize −1** deferred (`insufficient EVM balance for the in-batch repay`), settled 45 s after the agent was funded: 17.3236 → 16.3236 | `Closed` in 35 s |
+
+Final `venue-portfolio` over both accounts: A 23 fills, fees 0.2561, realized
+−0.1325, flat; B 2 fills, fees 0.0019, realized −0.0024, flat, 3.00 USDC left in
+its spot (the owner's, recallable).
+
+**Three tool/ops gaps this session exposed:**
+
+1. **No `fund-venue` command.** The deposits differ per product — the unified
+   agent takes `depositToCore(uint256)`, the simple agent
+   `depositToCore(uint256,uint32)` (the dex; `0xFF..FF` = spot) — and user-sim
+   has neither. A simple book additionally needs the cash moved to the *trading
+   dex*: a simple account is **not** unified (only `UnifiedMarginAgent` sends
+   `setAbstraction(2)`), so spot does not back its perp margin — the order lane
+   refused `xyz:NVDA` with 17 USDC in spot until `sendAsset spot→xyz` moved 12.
+   The canary's "fund-venue" was always a hand-built tx.
+2. **The simple resize prep does not self-serve.** The unified prep recalls the
+   shortfall from the venue; the simple prep plans none, so with 0.32 USDC on the
+   agent and a 1 USDC repay the proof deferred until the owner transferred cash.
+   It should plan the same recall (the simple agent has
+   `recallFromCore(RecallSource[], uint64)`).
+3. **A pre-funded CM blocks its own creation forever.** The wallet's WHYPE CM
+   (`0xD9F42f…`) holds 100 WHYPE from an earlier session, so the same-chain
+   WHYPE loan refuses at Phase1 ("a first creation must start empty; pre-funding
+   the CM bypasses the creation fee") — the guard is right, the stranded pot has
+   no owner path back (no loan exists to recall against). Worth a decision: an
+   owner sweep for an empty-book CM, or a documented "this collateral is spent".
+
 ### Reality check against the 19 Nov report's blockers
 
 The report's four standing complaints, checked against today's mirror rather than
