@@ -356,6 +356,7 @@ impl Sim {
         let quote = feed.spot_token(pair.tokens[1]).ok_or(Error::Warming)?;
         let notional = account::mul(take, r.px, "spot maker notional")?;
         let fee = account::mul(notional, Self::spot_maker_fee(), "spot maker fee")?;
+        let fee_recorded = account::spot_fee_in_received(fee, r.px, r.side)?;
         let builder = r.builder.map(|b| b.charge(notional)).transpose()?;
         let effect = self.with_account_now(r.account, feed, |account| {
             account::settle_spot_maker(
@@ -378,7 +379,7 @@ impl Sim {
             leverage: 1,
             mode: crate::wire::LeverageType::Cross,
             reduce: r.reduce,
-            fee,
+            fee: fee_recorded,
             builder,
         };
         self.record_fill(

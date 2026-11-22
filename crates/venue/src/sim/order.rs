@@ -792,6 +792,14 @@ impl Sim {
             ));
         }
         let fee = super::account::mul(notional, Self::spot_taker_fee(), "spot taker fee")?;
+        // The wire pair `fee`/`feeToken` is in the received token's units. A
+        // resting (unfilled) order has no price and records no fill; keep the
+        // quote figure there so the unfilled path never divides by zero.
+        let fee_recorded = if filled.is_zero() {
+            fee
+        } else {
+            super::account::spot_fee_in_received(fee, avg_px, req.side())?
+        };
         let builder = placer.builder.map(|b| b.charge(notional)).transpose()?;
         let base_ref = crate::sim::TokenRef {
             index: base.index,
@@ -832,7 +840,7 @@ impl Sim {
             leverage: 1,
             mode: crate::wire::LeverageType::Cross,
             reduce: Reduce::Any,
-            fee,
+            fee: fee_recorded,
             builder,
         };
         if filled > Decimal::ZERO {
@@ -946,6 +954,7 @@ impl Sim {
                 Ok(out)
             })?;
             let fee = super::account::mul(notional, Self::spot_maker_fee(), "spot maker fee")?;
+            let fee_recorded = super::account::spot_fee_in_received(fee, *px, side)?;
             let builder = builder.map(|b| b.charge(notional)).transpose()?;
             let effect = self.with_account_now(*maker, feed, |account| {
                 super::account::settle_spot_maker(
@@ -968,7 +977,7 @@ impl Sim {
                 leverage: 1,
                 mode: crate::wire::LeverageType::Cross,
                 reduce,
-                fee,
+                fee: fee_recorded,
                 builder,
             };
             self.record_fill(
@@ -2433,6 +2442,10 @@ mod tests {
         let fill = account.fills.back().expect("the fill is in the ledger");
         assert_eq!(fill.dir, "Buy");
         assert_eq!(fill.fee_token, "PURR");
+        // **The fee and its token agree in units.** 1000 PURR at 7 bp is 0.7 PURR
+        // received-token units; recording the quote value (70 USDC) under `PURR`
+        // made every spot buy's cost read ~price× too large (2026-11-22).
+        assert_eq!(fill.fee.round_dp(6), Decimal::new(7, 1), "the recorded fee is 0.7 PURR, not 70 USDC");
         assert_eq!(fill.closed_pnl, Decimal::ZERO, "spot realizes nothing at the trade");
     }
 

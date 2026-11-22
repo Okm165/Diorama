@@ -454,6 +454,23 @@ pub(crate) fn credit_entry(
 /// Holds belong to the resting lane; an IOC never touches them. A balance the
 /// account does not have is refused **before** any write (the caller runs this
 /// on the account that will keep the result, and a refusal returns early).
+/// The spot fee in the **token the fill delivers**.
+///
+/// The venue charges spot fees in the received token (HL's own rule), so the wire
+/// pair `fee` / `feeToken` must agree in units. A buy receives the base token, so
+/// its fee is the quote fee divided by the price; a sell receives the quote token,
+/// so the quote fee is already the received amount. The ledger deduction is
+/// unchanged — [`settle_spot_fill`]/[`settle_spot_maker`] take the quote value and
+/// convert. Recording the quote value under the base token made a spot buy's fee
+/// read ~price× too large (measured 2026-11-22: `0.0116354` reported under `UETH`
+/// where the account's UETH fell by exactly `0.000007`).
+pub(crate) fn spot_fee_in_received(fee_quote: Decimal, px: Decimal, side: super::order::Side) -> Result<Decimal> {
+    match side {
+        super::order::Side::Buy => div(fee_quote, px, "spot fee in base"),
+        super::order::Side::Sell => Ok(fee_quote),
+    }
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
