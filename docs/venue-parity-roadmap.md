@@ -191,6 +191,61 @@ refresher instead of stacking. Measured after the roll: the only slow acquires
 are the single startup burst at `08:32:53` (all 103 in one second, while
 migrations and repairs run); steady state since is zero.
 
+### The stranded CCTP burn was recovered, not retried (2026-11-22)
+
+The 05:46 rewind left one Ethereum→HyperEVM burn parked: its mint **had landed**
+(`relay_tx 0x2809ef2f…`, `relayed_ms` 1795326134351) and the destination was then
+rewound past it, so the mint was no longer on-chain while the destination nonce
+was free again. The record's own verdict named the remedy: *"destination rewound
+or re-pinned: the mint is no longer on-chain … (re-run the transfer, or reattest
+to re-arm)"* — a prior-epoch park is unrecoverable by retrying the relay, which
+is why the relay correctly refused to retry it for 3.5 h and the gateway kept
+cross-chain capacity refused.
+
+A deliberate reattest (`POST /v2/reattest/{nonce}` on the bridge) re-armed the
+record, the relayer re-minted, and the measured end state is `parked 0`,
+`relayed 103`, bridge `status ok`, the DALOC relay `healthy` with `bridge ok`,
+and both underwriters healthy. The gateway's aggregate stayed green throughout
+(the lane is route-scoped); what changed is that cross-chain capacity is
+admissible again. The lesson is operational, not a code defect: a rewind parks
+the transfers it undid, and the reattest is the named operator action.
+
+### Terminal residuals are one fact per agent (operator rel-07ba1d4e, 2026-11-22)
+
+Thirteen closed legs share one live sibling's margin agent (`0xccda2db9…`, the
+codeless CollateralManager). The live claim (`position_health.venue_equity_usd`)
+for that sibling can never be fresh — its HF term is refused because the CM has
+no code — so each closed leg reported "no fresh equity claim was recorded" and
+the operator's `/health` carried **11 identical lines** in one message, on every
+scrape. The anomaly is now grouped by `(agent, detail)`: the measured message
+dropped from 13 anomalies to 3, with the residual reading *"terminal position
+still has a live venue account (11 terminal legs share this agent, one
+balance): …"*. A single-leg residual reads exactly as before. The underlying
+balance is still unattributable until that sibling is retired — the grouping
+removes the repetition, not the fact.
+
+### Funding: the 09:00 boundary did **not** match, and the lane now says why (relay-24fed842, 2026-11-22)
+
+The pre-boundary-rate fix was measured on `para:SMH` at 07:00, where the rate
+served at 06:59:57 (`−0.0000319981`) equalled the real venue's charged rate
+exactly. At the **09:00** boundary on the disposable BTC book the mirror charged
+`0.000007361` while the real venue's `fundingHistory` carries `0.0000125` for
+the same boundary — a 41 % rate error, `−0.0866` USDC charged against `−0.1472`
+due. The served rate was `0.0000125` at 08:54:59, 08:59:59 (the indexer's bucket
+rows), 08:56:45 (direct read) and every second for a minute after 09:00 (15
+samples), so the charged sample is not any value the feed is known to have
+served around the boundary: the rate that priced the boundary came from a
+sample this process captured but did not expose.
+
+The lane now logs every charge — coin, boundary, rate, `rate_source`
+(`pre_boundary` | `current_fallback`), oracle, size and payment — so the 10:00
+boundary is decided by the mirror's own log rather than a re-derivation, and a
+one-second sampler records the served rate on both sides across it. Until that
+reads, the honest statement is: the mechanism is pinned by a unit test, the
+para:SMH boundary matched exactly, the BTC boundary did not, and the cause is
+open (a transient served sample or a stale-frame overwrite are the two
+candidates; the feed accepts every ctx write without an ordering check).
+
 ### The maker lane and book impact, measured live (2026-11-22)
 
 A maker/taker cycle on `para:SMH` with two fresh dealt accounts (no loan
