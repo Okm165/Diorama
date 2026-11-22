@@ -98,6 +98,32 @@ cancel path, not (on this evidence) a capital loss: the fix is to pair
 cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
 of cancelled rows until it is fixed.
 
+### The trigger lane, proven live; the market plane is fresh on every instrument (2026-11-22)
+
+A stop-loss on a disposable unified account (fresh dealt address, no loan touched):
+
+| step | result |
+|---|---|
+| long `0.15 ETH` IOC at `1666.8` | filled, fee `0.112509` = 4.5 bp |
+| sell stop `0.15`, `reduceOnly`, `isMarket`, trigger `1666.2` (below mid) | armed as oid 464; the venue **refuses a trigger on the wrong side of the mid** by name |
+| ETH mark `1665.2` | the 1 Hz tick fired it: market close at `1665.0`, `dir: Close Long`, `closedPnl −0.27` = `(1665.0 − 1666.8) × 0.15`, fee `0.1123875` |
+| account identity | whole `(spot_total − hold) + perp` = 332.459134 = 350 dealt − 5.238 BTC fee − 0.225 ETH fees − 0.27 ETH pnl − 11.808 BTC unrealized — exact |
+
+Also measured: the cross liquidation price **moves with the account's other
+activity** (a 50 USDC wallet credit and a −0.5 USDC realised loss both moved the
+BTC `liquidationPx`), which is the cross-portfolio coupling the product's
+margin model claims; a reduce-only order reserves nothing (`reserved_margin`
+skips `Reduce::Only`), so a resting stop cannot itself starve the position.
+
+**Market-plane liveness (the representative-quality check):** all **85**
+configured venue instruments have a book snapshot younger than **20 s** (oldest
+6.0 s, `xyz:KR200`); 85 fresh / 0 lagging / 0 stale. The earlier "`xyz:ANT` stale
+half the time" is gone because the freshness bound now derives from the feed's
+own cadence (8 s) plus the venue observation gate (6 s = 14 s), not the 5 s
+account cadence. The venue's REST pools (`api.hyperliquid.xyz`, a second zan
+endpoint) and WS report healthy with zero failures and `venue_feed_overrides 0`
+— no scenario price is in the served book.
+
 ### The unified perp summary carried only the isolated margin — a cross position lost its whole margin (relay-39b81f9b, 2026-11-22)
 
 A live unified-margin probe on a fresh dealt account (`/control/deal`, a disposable
