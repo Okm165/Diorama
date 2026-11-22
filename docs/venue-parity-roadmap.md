@@ -44,6 +44,22 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The matching lane fills the served book exactly, level by level (2026-11-22)
+
+The report's slippage question — "with all markets dynamics slippages" — has a
+hard answer now. On the Active loan's agent: a buy sized to walk **three** ask
+levels (8.5 `xyz:TSLA`) filled at `avgPx 359.55618470588…`, which is the
+snapshot's own walk to the last digit (6.729 @ 359.55 + 0.056 @ 359.57 +
+1.715 @ 359.58); the engine's response carries `consumed` naming exactly those
+three levels and sizes. The sell side, sized to walk three bid levels, filled at
+`359.51823411764…` against the same-authored walk (3.445 @ 359.54 + 0.573 @
+359.53 + 4.482 @ 359.50). The round trip's identity closes: closed PnL −0.32258,
+fees 0.27506 + 0.27503, **ΔAV −0.87267 exactly**. So slippage is not modelled or
+approximated — it is the book's own levels, the same levels `/info` serves, and
+the same accounting the venue reports. The direct `POST /control/order` route
+(no gateway envelope; `tif` lowercase: `ioc`/`gtc`/`alo`) is the door a harness
+should use for deterministic matching tests.
+
 ### The upgrade's own automation retired itself on a failed read (2026-11-22)
 
 The scheduled beacon upgrade had a self-removing hourly cron. At 21:17 it ran
