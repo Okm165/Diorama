@@ -137,6 +137,60 @@ of cancelled rows until it is fixed.
   `13.98 bp` upstream for the same reason (the mirror's sampled ladder was the
   earlier, thinner one). Read `delta_bps` with `mark_drift_bps`.
 
+### A reduce-only close is capped, not refused (relay-d6e103b0, 2026-11-22)
+
+The real venue **caps** a reduce-only order at the position it names — its
+statuses carry `origSz` = requested and `sz` = what the position allowed (the
+capped terminal state is documented in ccxt #30839 and freqtrade #13671, both
+found by a client mis-reading `origSz - sz` as the fill). The mirror walked the
+requested size and the fill-time guard (`fill.size > old.abs()`) then refused the
+**whole** order, so a flatten sized from a stale read — the common `size =
+balance` pattern — could not complete until a fresh read happened to agree to
+the share.
+
+`cap_reduce_only` now cuts the size before the walk and before an order rests,
+in both the placement and the direct take entry; the post-fill guard stays as the
+invariant. Measured live on a fresh dealt account: a reduce-only sell of `0.5`
+against a `0.1` long filled exactly `0.1` (`totalSz: 0.1`), `closedPnl −0.01` =
+`(411.92 − 412.02) × 0.1`, and the position read flat — never short. The same
+oversize in the position's own direction still refuses with the venue's string.
+
+### Spot post-only is served (relay-3e75501f, 2026-11-22)
+
+`place_spot` refused `Alo` by name, with a comment that resting spot orders
+"need the hold and maker-settlement lane" — but that lane has been live since
+2026-11-21 (`rest_spot_remainder`, `SpotHold`, the tick's `passive_spot_fill`).
+The stale refusal meant a spot maker could not express its one guarantee: never
+pay the 7 bp taker fee. A crossing `Alo` is now refused with the venue's own
+string and the served bbo, a passive one rests with its balance held, and the
+self-cross rule refuses rather than expiring the older order.
+
+Measured live on `@151` (spot asset id `10000 + 151`): an `Alo` buy at the ask
+`1688.9` → `Post only order would have immediately matched, bbo was 1688.9.`;
+passive `Alo` buys `0.01 @ 1684.5` + `0.05 @ 1682.0` → `hold = 100.945` USDC
+(exactly `16.845 + 84.1`); cancelling **by spot asset id** (`a = 10151`) released
+the hold to `0.0`. Cancelling with the bare pair index (`a = 151`) is refused
+(`Order was never placed…`) exactly as the real venue's asset-id namespace does.
+`venue-order --tif Alo` now names the flag it already forwarded.
+
+### Health reads were starving the pool and blinding venue ticks (rel-ba450d41, 2026-11-22)
+
+The indexer's market-data health aggregate is the service's most expensive read
+(the 60-day price-coverage scan alone is ~1.4 s of a measured ~2 s), and it sat
+behind a plain 10 s cache with **no single flight**: every consumer that scraped
+after expiry (kubelet, gateway, operator, risk engine) ran the whole 30-subquery
+statement. Over a 45-minute window: 81 slow pool acquires (2.1 s against a 2 s
+threshold), venue account ticks delayed past the 11 s observation gate, and the
+chain that followed — indexer `409 CONFLICT` projections, refused venue HF
+terms, and a terminal position's residual that could not be attributed to its
+live sibling (`no fresh equity claim was recorded`, 19 operator advisories).
+
+One refresher now runs; a reader that finds it in flight serves the last
+snapshot (never older than one refresh), and a cold start waits for the
+refresher instead of stacking. Measured after the roll: the only slow acquires
+are the single startup burst at `08:32:53` (all 103 in one second, while
+migrations and repairs run); steady state since is zero.
+
 ### The maker lane and book impact, measured live (2026-11-22)
 
 A maker/taker cycle on `para:SMH` with two fresh dealt accounts (no loan
