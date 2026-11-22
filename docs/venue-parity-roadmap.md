@@ -246,6 +246,34 @@ para:SMH boundary matched exactly, the BTC boundary did not, and the cause is
 open (a transient served sample or a stale-frame overwrite are the two
 candidates; the feed accepts every ctx write without an ordering check).
 
+### The displayed level is ahead of a maker that joined it (relay-1182b391, 2026-11-22)
+
+The walk put the devnet's own resting orders **first** at an equal price ("they
+are time-stamped; the live level's age is unknowable"), so a maker that joined an
+occupied price jumped the queue and collected fills the real venue would have
+given to the size already displayed. Measured on `@151` with a maker and a taker
+on fresh dealt accounts:
+
+| step | before the fix (09:11) | after the fix (09:20) |
+|---|---|---|
+| live ask at the maker's price | `0.9755` | `1.0983` |
+| maker rests `0.1` / `0.09` at that price | served `1.0755` (= live + maker) | served `1.1883` (= live + maker) |
+| taker buys the maker's size at that price | **maker fills** `0.1`, `crossed:false`, live level untouched | **taker fills from the level** (`crossed:true`), maker gets **no fill** and keeps resting |
+| spot maker fee | `0.067264` USDC = exactly **4 bp** of `168.16`, fee in the received token, hold released | — |
+
+The taker now consumes the live level first at an equal price and the devnet
+makers after it in time order (oid ascending). The passive lane applies the same
+rule to a cross: the crossing size is the opposite touch's size and only the part
+above the queue at the maker's own price can reach it. A maker resting in an
+empty price (inside the spread) is unchanged, and the conservative case — a
+level that formed at the maker's price after it rested — is still treated as
+ahead, because a simulator must not manufacture fills.
+
+What remains unmodelled, and is named rather than approximated: **queue
+position within a level** (a maker's place among the displayed size is not
+tracked beyond "behind the level"), and **trade prints** (the mirror sees
+book snapshots, not the venue's trade tape, so a fill is inferred from a cross).
+
 ### The maker lane and book impact, measured live (2026-11-22)
 
 A maker/taker cycle on `para:SMH` with two fresh dealt accounts (no loan
