@@ -127,6 +127,32 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
   WARN-severity is right; the consuming harnesses that hard-block writes on any
   indexer advisory (the soak runner) amplify it.
 
+### Maker-side mechanics: resting orders, the served book, and a named self-trade deviation (2026-11-22)
+
+- **Resting orders merge into the served `l2Book`** (`resting_book` folded into
+  `with_resting`) — a maker quoting inside the spread is visible to every
+  consumer, exactly as on the real venue. Cancels work, including the named
+  "already filled / never placed" refusals.
+- **The maker fill path is fully implemented perp-side**: a consumed resting
+  order books a `Liquidity::Maker` fill at the maker fee tier
+  (`maker_fee() × dex_fee_multiplier`), releases the remaining hold, and moves
+  the order to terminal history. Verified in code and unit tests.
+- **Named deviation from real HL: self-trade prevention (expire-maker).** The
+  sim expires a taker's own crossing resting orders ("expire-maker, never a
+  self-match"); real Hyperliquid has no STP and fills both legs (one account
+  paying taker and earning maker fees on itself). This is defensible for a
+  shared mirror — it prevents accidental self-churn — but it is a **mechanics
+  difference a single-account strategy will hit**: any book that rests and
+  crosses on one account never sees a maker fill here. It also means the
+  `venue-maker-cycle` scenario, run with maker == taker, can only measure the
+  taker tier (observed: `maker_leg_fee_bps_measured: None`, the resting order
+  expired with `self-crossing resting order expired (expire-maker)` in the
+  venue log). A live cross-account maker fill (maker fee 1.5 bps measured from
+  the ledger) needs two funded agents — the next dual-loan runtime should run
+  the scenario cross-account and close the loop.
+- Fee tiers re-measured from the ledger in the same session: ETH taker 4.50 bps,
+  xyz taker 0.90 bps — exact, both dexes.
+
 ### Slippage/impact fidelity: mirror vs real Hyperliquid, ladder-walk measured (2026-11-22)
 
 Ladder-walk buy-side slippage (20 levels), mirror vs real HL (read-only /info),
