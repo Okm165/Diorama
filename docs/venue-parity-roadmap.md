@@ -98,6 +98,45 @@ cancel path, not (on this evidence) a capital loss: the fix is to pair
 cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
 of cancelled rows until it is fixed.
 
+### Scope boundaries and transient states, named rather than fixed (2026-11-22)
+
+- **Spot universe is curated, not complete:** the mirror serves the real token
+  registry (519 tokens) but **8 of the real venue's 354 spot pairs** — the ones
+  whose base is a configured collateral (`@107/@142/@151/@156/@166/@188/@272`).
+  A strategy that reads `spotMeta` sees exactly those; any other pair is
+  `unknown pair` at the order lane. This is a deliberate load/scope choice (the
+  full ladder set is 354 books at a 5–8 s cadence), recorded so it is not
+  mistaken for a venue defect. Adding a pair is a config row + feed entry.
+- **New listings fail closed for 21 h.** The seven `para:*` markets
+  (`CAMBRICON, H100, HYPE2, INNOLIGHT, NAVER, PAPER, TENCENT`) were added ~4 h
+  ago; GARCH needs 21 completed hourly marks, so the risk engine refuses to
+  quote them (`got 2 ticks, need 21`) and `venue_calibration` warns
+  `78/85`. The refusal is per-instrument (the cycle never fails), self-clears
+  after 21 h, and `wstETH` has the same shape on the price-calibration side
+  (fewer than 168 hourly buckets). The health text could carry the remaining
+  hours; the behaviour is correct.
+- **A venue roll blinds the HF scan for ~15 s.** 25 account polls failed at
+  08:07:0x — exactly the rollout instant — and the operator refused those
+  venue terms rather than folding a zero (the design). The series recorded the
+  gaps; no breach could be decided for that window. Rolling the venue under an
+  open book is a known blind window, not a defect.
+- **The CCTP relay's `bridge_parked` verdict is route-scoped, as designed.** One
+  burn stranded by the 05:46 rewind makes the relay `unhealthy`; the gateway
+  advertises `cross_chain_ready = false` per pair and refuses cross-chain
+  prepare, while same-chain products and the aggregate stay green
+  (`a_route_scoped_failure_is_visible_but_not_aggregate`). The operator's
+  "cross-chain settlement is unavailable" is therefore accurate for the
+  cross-chain lane only; the remedy is a re-run/reattest of that transfer
+  (prior-epoch park), not a retry.
+- **Impact calibration: the mirror's structural slippage matches the real book.**
+  `venue-calibrate para:SMH` (three samples per bucket, read-only upstream)
+  reported mirror `13.08 bp` vs upstream `4.38 bp` at size 0.1 with
+  `mark_drift_bps −8.51` — i.e. `13.08 − 8.51 = 4.57 bp` of structure against
+  the real book's 4.38, a 0.2 bp difference; the whole "delta" was the book
+  moving between the two reads. At size 5 the mirror walks `27.7 bp` vs
+  `13.98 bp` upstream for the same reason (the mirror's sampled ladder was the
+  earlier, thinner one). Read `delta_bps` with `mark_drift_bps`.
+
 ### The maker lane and book impact, measured live (2026-11-22)
 
 A maker/taker cycle on `para:SMH` with two fresh dealt accounts (no loan
