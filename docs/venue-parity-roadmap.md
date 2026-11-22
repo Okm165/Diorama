@@ -44,6 +44,34 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### Execution and PnL accounting verified exact to the wei, live (2026-11-22)
+
+A controlled round trip on a HIP-3 market (`para:SMH`, isolated 10×) against
+snapshots of the venue's own persisted ledger (`/state/sim.json` around each
+leg):
+
+- **Fills equal the book.** A taker IOC of a size that spans the top level filled
+  at exactly the level's price (`0.2 @ 411.43`, then `0.2 @ 410.68`), no price
+  improvement, no extra slippage, and the reported `avgPx` matched the
+  book-walk arithmetic computed from a snapshot taken immediately before.
+- **The per-dex ledger reconciles to the wei.** Open debits
+  `initial_margin = notional / leverage` (exact: `8.2220` for an 82.220 notional
+  at 10×) plus the taker fee; close credits back the isolated margin, the
+  fill-to-fill realized PnL (`closedPnl −0.13 = (410.78 − 411.43) × 0.2` exactly),
+  and charges the exit fee. Round-trip equity change = fees + crossed spread,
+  with no other term — measured on two independent round trips (0.2 and 0.025).
+- **Fee parity is exact, including HIP-3's deployer fee.** The fills charged
+  **0.9 bps**, not the base 4.5 — because the real market carries
+  `deployerFeeScale: "1.0"` with `growthMode: "enabled"` (the docs' HIP-3 rule:
+  `2·s` from scale 1 up, ×0.1 in growth mode → 4.5 × 2 × 0.1). The mirror serves
+  the identical `deployerFeeScale`, `growthMode` and `lastFeeScaleChangeTime`
+  (to the nanosecond) from the relayed registry. Spot cash is *never* debited for
+  a perp fill — it only carries the isolated margin as `hold` (the two consumers'
+  documented compensation, pre-hold for the PM, post-hold for the HF arm).
+- An earlier reading of a "−0.058 leak" was a mis-attribution: the para ledger
+  already carried −0.058164 from earlier session activity before the first
+  snapshot. The ledger itself is exact.
+
 ### The platform's two liveness defects, found by auditing the swarm's logs (2026-11-22)
 
 The 19 Nov report's dominant pattern — "a blocking `operator`/`indexer` advisory
