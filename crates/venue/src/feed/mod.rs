@@ -137,12 +137,15 @@ struct Cache {
     ctx_at: BTreeMap<String, u64>,
     /// Each coin's published funding-rate **step history** — `(at_ms, rate)`
     /// ascending, the rate in force from `at_ms` until the next sample. The
-    /// venue charges an hour the *average* of its premium samples ("the premium
-    /// is sampled every 5 seconds and averaged over the hour", docs), and the
-    /// served rate moves by multiples within seconds (measured 2026-11-22:
-    /// `0.0000125 -> 0.0000115296 -> 0.000003993 -> 0.0000023271` inside 40 s),
-    /// so the last sample before a boundary is not the charge. Bounded to three
-    /// hours (the current hour plus the two a late tick may still need).
+    /// venue's served rate **is** the running estimate of the current hour's
+    /// charge: constant through an hour and re-converging in the seconds after a
+    /// boundary (measured 2026-11-22: `0.0000125` all hour, then
+    /// `0.000003993 -> 0.000002327 -> 0.00001153 -> 0.0000125` inside 15 s), so
+    /// the charge is the value **in force at the boundary** — and it must be
+    /// captured as the value each write *introduces*. (The previous design
+    /// recorded the outgoing value, which priced the 09:00 BTC boundary with the
+    /// rate the feed had just replaced: `0.000007361` against the venue's
+    /// `0.0000125`.) Bounded to three hours.
     rate_samples: BTreeMap<String, std::collections::VecDeque<(u64, Decimal)>>,
     books: BTreeMap<String, L2Book>,
     /// The served instant of the book (its last update; `book()` stamps it).
@@ -207,30 +210,16 @@ impl Cache {
         }
     }
 
-    /// The time-weighted average funding rate `coin` published over
-    /// `[from_ms, to_ms)` — the rate the venue charges an hour, from its own
-    /// 5-second-average rule. Returns the average and the covered milliseconds
-    /// (`< to_ms - from_ms` when this process saw only part of the hour: a
-    /// boot, a gap — the caller names the coverage instead of hiding it).
-    fn rate_average(&self, coin: &str, from_ms: u64, to_ms: u64) -> Option<(Decimal, u64)> {
-        let samples = self.rate_samples.get(coin)?;
-        let mut covered = 0u64;
-        let mut weighted = Decimal::ZERO;
-        for (index, (at, rate)) in samples.iter().enumerate() {
-            let next = samples.get(index + 1).map_or(to_ms, |(next, _)| *next);
-            let start = (*at).max(from_ms);
-            let end = next.min(to_ms);
-            if end <= start {
-                continue;
-            }
-            let span = Decimal::from(end - start);
-            weighted += rate * span;
-            covered += end - start;
-        }
-        if covered == 0 {
-            return None;
-        }
-        Some((weighted / Decimal::from(covered), covered))
+    /// The rate `coin` published **in force at** `at_ms` — the last sample
+    /// stamped strictly before it. Strictly, because a context that lands on the
+    /// boundary millisecond already carries the next hour's value.
+    fn rate_at(&self, coin: &str, at_ms: u64) -> Option<Decimal> {
+        self.rate_samples
+            .get(coin)?
+            .iter()
+            .rev()
+            .find(|(at, _)| *at < at_ms)
+            .map(|(_, rate)| *rate)
     }
 
     /// Store one dex's meta (`""` = the default dex) and refresh the derived
@@ -571,13 +560,12 @@ impl MarketFeed {
         self.read().ctx_at.get(coin).copied()
     }
 
-    /// The average funding rate `coin` published over the hour ending at
-    /// `boundary_ms` — what the venue charges that boundary — with the covered
-    /// milliseconds. `None` when this process has no sample inside the hour (a
-    /// boot, a gap): the caller falls back to the current rate and names it.
-    pub(crate) fn funding_hour_average(&self, coin: &str, boundary_ms: u64) -> Option<(Decimal, u64)> {
-        self.read()
-            .rate_average(coin, boundary_ms.saturating_sub(FUNDING_HOUR_MS), boundary_ms)
+    /// The funding rate `coin` published at `boundary_ms` — what the venue
+    /// charges that boundary. `None` when this process holds no sample from
+    /// before it (a boot, a gap): the caller falls back to the current rate and
+    /// names the approximation.
+    pub(crate) fn funding_at(&self, coin: &str, boundary_ms: u64) -> Option<Decimal> {
+        self.read().rate_at(coin, boundary_ms)
     }
 
     /// Milliseconds since the last live `allMids` update, or `None` before the
