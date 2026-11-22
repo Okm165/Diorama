@@ -599,6 +599,28 @@ lesson, recorded: `kubectl apply -f k8s/deploy/` does **not** recurse into
 `env-maps/` — the subdirectory must be applied explicitly, and a stale
 last-applied annotation is how live-only drift hides.
 
+**The quote needed one more config fact: the executor's per-token tier map.**
+After the pool, the feed pair and the rate series were all live, the gateway
+still refused every xANT quote (`-4015 no considered route is executable`) while
+xNVDA quoted through the identical path. Root cause:
+`config/operations/liquidator.toml`'s `liquidation_swap_fee_tiers` names each
+collateral's executor tier, xANT had no entry, and an absent token prices as
+"no executable route" — the tier is per-token by design, not a chain default.
+xANT = 3000 like its siblings (`56dbf924` worktree, `535a29e3` deploy); after
+the roll the gateway serves the quote: **accepted LTV 3822 bps, liquidation
+7865 bps, max borrow 344.45 USDC on 10 xANT at a fresh $90.10 mark** (the
+delivered-only era served nothing). The lesson for the next wrapper: a market
+row's admission touches **four** per-token surfaces — the market row, the
+SWAP_RATE_FEEDS pair, COLLATERAL_TOKENS, and the executor tier map — and the
+ownership gate checks only the first three.
+
+**Re-running the risk-engine seed briefly clears the derived kernel cache.**
+The 15:15:40 seed re-run emptied the kernel table; the engine re-installed the
+shipped artifacts by 15:15:54, rejecting 136 live quotes in the 14-second
+window ("no position kernel available") and then recovering on its own. A rare
+operator action with a named, bounded blast radius — recorded so the next seed
+re-run is not read as an outage.
+
 **The 15:00Z funding boundary charged exactly under the zeroed clock.** 1 Hz
 sampler: at 14:59:59.285 mirror −0.00000131 = real −0.0000013103 (the
 pre-boundary rate); at 15:00:02.540 mirror +0.000000959 = real +0.000000959 to
