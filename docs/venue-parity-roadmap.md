@@ -44,6 +44,46 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The para draw reached the pricing gate and was refused one layer deeper — and exposed a protocol gap (2026-11-22)
+
+At the 22nd contiguous bucket the bounded draw fired. The requote **got past the
+σ gate** (the data-maturity bound that refused for hours) and was refused one
+layer deeper:
+
+```
+code -1008 · the book is not backed for pricing (Unbacked)
+— debt token 0x11bdca3d… has no code on chain 999
+```
+
+**Root cause: the 05:46 `anvil-v` OOM rewound chain 999 to before this loan's
+contracts.** Measured on-chain: the loan's debt token `0x11bdca3d…` and its
+collateral manager `0xdedfb171…` both return **no code**; the margin agent
+`0xa2df6fdb…` does (it is pre-deployed, not per-loan). The loan was created
+05:43, the fork lost its deployments 05:46, and the re-fork never replays them.
+The venue agent's own book is untouched (spot `43.239737`, the `para:SMH` leg,
+the funding credit) — the borrower's venue assets survive, the protocol's claim
+does not.
+
+**The protocol gap this exposes:** an **Active** loan whose contracts no longer
+exist has **no path to a terminal state**. The operator counts it
+(`unbacked_positions = 1`, the union of every blind Active family) as a warning
+and nothing else: the HF scan is blind forever, the borrower cannot close (the
+close needs the CM), the LP's claim is phantom and holds capacity, and the
+position is absent from `enforcement_redrive_state` (9 rows, all older
+positions) and from the strand write-off (its conditions are sub-dust and
+frozen-agent, neither of which applies to a 43.25 debt). On 16–17 Nov the same
+shape read "settlement dead".
+
+**The economically correct design**: the operator should detect
+"Active + CM absent on-chain" and drive a deterministic retirement — fail the
+position with a named reason (a rewind retirement, like the
+`enforcement_redrive_state` rows carry), sweep whatever venue residue belongs to
+the borrower's own account, and recognize the LP's loss as a strand write-off
+with the witness evidence. Re-deploying the CM would restore an **empty** one
+(the rewind lost its storage too), so the state is unrecoverable and the
+retirement is the honest terminal. Recorded as the next protocol change; not
+patched here, and the test loan's 43.25 is the cost of finding it.
+
 ### The fix's cross-layer coupling: the PM's `+ hold` was the missing term, not a rule (2026-11-22)
 
 The venue fix made the served unified perp summary **carry the hold as cash**.
