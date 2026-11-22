@@ -44,6 +44,34 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### A control-owned mark is a simulation input, on all three consumers (2026-11-22)
+
+The crash/rally control is only safe if nothing downstream mistakes it for a
+market fact. Verified live with an open `xyz:TSLA` position on the Active
+loan's agent, rallying the mark +5%:
+
+* **The venue follows it, exactly:** mark 358.66 → 376.593, and the position's
+  uPnL moved +18.023 on one share — the arithmetic of the move, not an
+  approximation.
+* **The chain oracle does not:** across the writer's own 15 s boundary
+  (round ts 1795385964 → 1795385997) the 0e2126 feed stayed at its held pin
+  (raw 8071899962, unchanged) while the mark was 5% above the book. The
+  fixture's rule — the chain oracle must not follow a mark the executable book
+  does not confirm — holds on the live path.
+* **The protocol refuses to adjudicate on it:** the operator's HF scan for the
+  same book logged a gated venue read — *"the venue account's marks are
+  scenario-owned (control plane) — a simulation input, not a market fact;
+  refusing the venue term for a verdict"* — and the circuit returned no
+  headroom verdict rather than a wrong one. The gateway stayed healthy with
+  zero advisories throughout, and the named refusal stopped the moment the coin
+  was handed back (`{coin}` with no `pct`), the mark restored to the live book
+  (358.63/359.2), and the close filled at 358.56.
+
+The round trip's own identity closes (ΔAV −0.074 = −0.01 gross − 0.064 fees),
+the deal was disposed by negative amount, and the whole scenario left no
+advisory behind. So the scenario plane can move prices for strategies, and the
+adjudication plane provably cannot be fooled by it.
+
 ### The matching lane fills the served book exactly, level by level (2026-11-22)
 
 The report's slippage question — "with all markets dynamics slippages" — has a
