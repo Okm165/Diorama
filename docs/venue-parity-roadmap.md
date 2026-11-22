@@ -405,6 +405,14 @@ the conservative variance-max endpoint); the `xyz:*` book rows keyed `dex=''` ar
 venue-σ fit covers 78 of 85 configured instruments (thin/new series refuse by
 name).
 
+**The fixed restart, proven live.** Ran the production script at 12:08Z: the
+Deployment scaled to zero, the old pod dumped 1.63 GB at 12:08:28 on SIGTERM,
+the replacement started at 12:08:32 and loaded it — head **51,573,289, above the
+pre-restart mark, no dip to the pin**, boot marker refreshed. 25 s end to end.
+The absent-state guard also distinguishes a first boot: a marker written on the
+volume means "this PVC has a history"; an absent state with the marker is the
+incident case and refuses, while a brand-new PVC still forks from the pin.
+
 ### Universe and spot parity, measured (2026-11-22)
 
 **Perps: complete.** The mirror serves exactly the real venue's universe on
