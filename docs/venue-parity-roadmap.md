@@ -98,6 +98,42 @@ cancel path, not (on this evidence) a capital loss: the fix is to pair
 cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
 of cancelled rows until it is fixed.
 
+### The unified perp summary carried only the isolated margin — a cross position lost its whole margin (relay-39b81f9b, 2026-11-22)
+
+A live unified-margin probe on a fresh dealt account (`/control/deal`, a disposable
+address — no loan touched) found the served whole-account figure collapsing by the
+position's margin the moment the position was **cross**, not isolated:
+
+| step | served |
+|---|---|
+| standard account, 300 USDC perp, open `0.1968 BTC` at 40× (margin 290.99832) | `marginSummary.accountValue` 285.71 = cash + pnl |
+| set `userSetAbstraction: unifiedAccount` | cash folds to spot: spot `294.76203024`, **hold `290.99832`**, perp ledger 0 |
+| served perp summary after the fold | **−9.05** (unrealized only) |
+| consumer's whole `(spot_total − spot_hold) + perp` | **−5.29** for an equity of **285.71** |
+
+The arithmetic is exact: the whole was short by the cross margin (`290.99832`).
+The venue's earlier fix added only `totals.isolated_margin`; a cross margin is
+also `p.margin_used` and also held on the collateral token (`unified_hold` sums
+both), so the served summary now carries the **spot-funded margin** — the
+position margin the dex's own perp cash does not cover. That discriminator is
+measured, not assumed: the committed `4a` capture has perp raw `1.25`, spot
+`1.25` and hold `0` (the wallet funds its own margin), while the folded shape
+above funds it from spot. The figure is bounded by the token's free balance and
+allocated in dex order, so per-dex adds sum to the served hold even when the
+account is undercollateralized. Result after the roll: perp summary `280.76472`
+(= hold `290.99832` + unrealized `−10.2336`), whole `284.52843` = spot `294.762`
++ pnl `−10.234` — exact.
+
+**Why it had not bitten yet:** the live DB sweep shows no tracked account holding
+a position at the time (`spot_collateral_hold_usd = 0` on every row; the one
+non-zero perp figure is cash in the wallet). The first unified agent to trade a
+cross perp would have read a whole equity short by its margin — the same
+false-collapse direction that would drive a spurious HF breach. Pinned by
+`the_unified_perp_summary_carries_a_cross_margin_too`; 393 venue tests green.
+Deploy pin `relay-39b81f9b`. The old `the served perp summary stays the perp
+ledger` assertions in the order/liquidation tests were the wrong convention and
+are corrected to `perp cash + spot-funded margin`.
+
 ### The spot lane, traded live — and a fee-unit defect fixed (relay-62b9d933, 2026-11-22)
 
 A full spot round trip through the venue's own `/exchange` (`@151` = spot UETH/USDC,
