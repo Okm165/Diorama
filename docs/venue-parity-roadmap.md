@@ -413,6 +413,33 @@ The absent-state guard also distinguishes a first boot: a marker written on the
 volume means "this PVC has a history"; an absent state with the marker is the
 incident case and refuses, while a brand-new PVC still forks from the pin.
 
+### The funding clock was 33 minutes ahead — the rate rule was right, the hour was not
+
+**Measured 2026-11-22 13:00Z.** The mirror charged its 13:00 BTC funding at
+**12:26:49Z** (`funding boundary charged, boundary_ms 1795352400000`) with rate
+`0.0000125`. The sim's `clock_offset_ms` was **+1,991,000** — 33 min 11 s — left
+by an earlier `/control/advance` and persisted in `sim.json`. The funding lane
+itself was behaving exactly as designed (strictly pre-boundary rate, oracle
+priced, logged with `rate_source`); the *scenario clock* under it was shifted, so
+every boundary — and every liquidation evaluation — ran 33 minutes early. The
+12:00 and 11:00 checks had matched only because the rate was constant across the
+hour; the 13:00 settled rate (`0.0000124025`) differed from the early-charge
+value (`0.0000125`) and exposed the offset.
+
+**The defect was observability, not selection.** The offset had no reader and
+no way back except `/control/reset`, which blanks every account: a persisted
+scenario fact that silently moves money and cannot be inspected or undone is a
+trap. `GET /control/clock` now reports `{offset_ms, sim_ms, wall_ms}`;
+`POST /control/clock {"offset_ms": n}` sets it (signed, persisted). The offset
+was zeroed live with the roll (`relay-65788d21`): sim_ms == wall_ms, the 0.03
+BTC position and its funding history intact, `sim.json` persisted at 0. Boundary
+semantics are unchanged — a forward jump is charged by the next tick, a backward
+jump cannot re-charge (the accrual stamp is absolute).
+
+**Operational rule:** any stark scenario that calls `/control/advance` must end
+with `POST /control/clock {"offset_ms":0}` before the mirror is left running.
+The next real boundary (14:00Z) is the first charged at the wall-clock hour.
+
 ### Universe and spot parity, measured (2026-11-22)
 
 **Perps: complete.** The mirror serves exactly the real venue's universe on
