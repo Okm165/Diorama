@@ -44,6 +44,50 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The indexer store lost its history strand, and the designed recovery channel closed the one live gap it made (2026-11-22)
+
+The Borrow loan `43b0d4f4…` (24.915109 USDC principal, 1 WETH collateral, 1 h
+term, originated 11-15 04:54) has been stuck `Active` for seven days past
+maturity: its Enforcement proof faulted on 11-15 06:37 with **"event history
+missing — the principal event history is absent for a debt whose proven
+accumulator is 0xb854e573… (0 events)"** and never retried. The chain event
+logs tell the whole story: the indexer's event store (`direct_events`,
+`indexed_events`, `event_subjects`, `applied_chain_events` ≥ hub nonce 144)
+only reaches back to blocks ~51.0–51.5 M, while the debt ledger's state — the
+accumulator, `totalSupply` 24,915,109 — still lives on chain 999. The store was
+reset under the rolling mirror; every projection lost the creation history; and
+the enforcement witness (unlike the close witness) never consulted the
+`PRINCIPAL_EVENT_RECOVERY_FILE` channel that exists precisely for this class.
+
+**Recovery, done exactly as designed.** The ledger's fold preimage is
+`keccak256(0 ‖ 1(Minted) ‖ amount ‖ block.timestamp ‖ hubNonce)`; with the
+amount bounded by the ledger's own `totalSupply`, the (nonce, timestamp) space
+is tiny. Brute force hit **exactly**: mint 24,915,109 at hub nonce **96**,
+block second **1794718508** (2026-11-15 04:55:08Z — the `DebtIssued` instant the
+operator recorded), folding onto the accumulator bit-for-bit. The stream (one
+event; final supply = the mint = `totalSupply` now, so it is complete) went into
+the recovery ConfigMap at 18:39Z; the re-arm fired at 18:41:22.
+
+**Two defects fell out of the live re-arm, both fixed (`c91247fc`):**
+
+1. The enforcement arm never read the recovery channel — only close did. The
+   prover now fetches the stream for the target **and each portfolio sibling**
+   (the file is keyed by position id) and the witness admits it through the same
+   `select_principal_events` chooser: fold-verified against the storage-proven
+   accumulator, the indexer stream still preferred whenever it reconciles, a
+   mismatched file a retryable refusal.
+2. The orphan monitor's "trigger cleared" family cancelled the re-armed row the
+   same second it revived ("the position is Active and its current HF is above
+   the breach line") — a reading only valid for HF-breach triggers. A matured
+   borrower loan with debt outstanding goes to enforcement **because** it did
+   not honor the loan's end; a solvent matured loan is above the breach line by
+   definition. Past maturity the escalation arm owns the trigger; Family 0 now
+   stands down there (`family0_may_cancel_on_healthy_hf`).
+
+The systemic half — the indexer store losing pre-~51 M history on resets, and
+needing a re-index/backfill path so no future ledger needs a hand-built stream —
+is open.
+
 ### The 17:40Z anvil restart kept the head continuous (2026-11-22)
 
 The every-two-hours cron restart replaced the pod at 17:40 and the chain head
