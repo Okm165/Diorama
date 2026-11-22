@@ -2231,8 +2231,17 @@ fn walk_served_book(
 }
 
 /// Where a merged candidate comes from: a live book level, or the devnet's
-/// own resting order. The order matters at equal prices: the resting orders
-/// go first (they are time-stamped; the live level's age is unknowable).
+/// own resting order.
+///
+/// At an equal price the **live level goes first**: the venue's price-time
+/// priority gives the orders already displayed precedence over one that rested
+/// afterwards, and a devnet maker that joined an occupied price is behind that
+/// queue. Measured 2026-11-22 on `@151`: a maker rested `0.1` behind a live ask
+/// of `0.9755`, a `0.1` taker buy filled the **maker** (`crossed: false`) and
+/// left the live level untouched — the mirror gave the maker a fill the real
+/// queue could not. A maker that rested in an empty price (inside the spread)
+/// is the one case where the book level at its price formed later; that maker
+/// is then conservatively treated as behind (a sim must not manufacture fills).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Origin {
     Book,
@@ -2261,7 +2270,11 @@ fn merge_candidates(
             Side::Buy => a.0.cmp(&b.0),
             Side::Sell => b.0.cmp(&a.0),
         };
-        by_px.then_with(|| b.1.cmp(&a.1))
+        // Equal price: the live level first (it was displayed before the devnet
+        // order rested), then the devnet makers in time order (oid ascending).
+        by_px
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
     });
     candidates
 }
@@ -4397,6 +4410,86 @@ mod tests {
             Some(dec("5")),
             "the live bid at the maker's price kept its full size: a maker fill consumes nothing"
         );
+    }
+
+    /// **A taker's flow consumes the live level before a devnet maker at the
+    /// same price.** The queue at a price belongs to the orders already
+    /// displayed; a maker that joined it is behind them. Measured 2026-11-22 on
+    /// `@151`: a maker rested `0.1` behind a live ask of `0.9755`, a `0.1` taker
+    /// buy filled the **maker** and left the live level untouched — a fill the
+    /// real queue could not give.
+    #[test]
+    fn a_taker_consumes_the_live_level_before_a_maker_at_the_same_price() {
+        let feed = feed_with_book(
+            book("ETH", &[("99", "5")], &[("100", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let rest = Order {
+            limit_px: Some(dec("100")),
+            tif: Tif::Gtc,
+            ..ioc(Side::Sell, "1")
+        };
+        let oid = sim.place(&feed, a, &rest).unwrap().resting.expect("joins the ask");
+        let b = Address::repeat_byte(0x5d);
+        sim.deal(
+            &feed,
+            &Deal {
+                address: b,
+                class: DealClass::Perp,
+                coin: None,
+                dex: None,
+                amount: dec("1000"),
+            },
+        )
+        .unwrap();
+        let fill = sim
+            .order(&feed, b, &ioc(Side::Buy, "1"))
+            .expect("the live level fills it");
+        assert_eq!(fill.total_sz, dec("1"));
+        assert_eq!(fill.avg_px, dec("100"));
+        assert!(
+            sim.user_fills(a).unwrap().is_empty(),
+            "the maker behind the displayed level is not filled by flow the level absorbed"
+        );
+        assert!(
+            sim.resting_by_oid(a, oid).unwrap().is_some(),
+            "and its order still rests"
+        );
+    }
+
+    /// **A maker behind a live level does not fill on a cross smaller than the
+    /// queue.** The crossing size is the opposite touch's size; only the part
+    /// above the queue ahead (the displayed size at the maker's own price) can
+    /// reach it.
+    #[test]
+    fn a_maker_behind_a_live_level_needs_a_cross_larger_than_the_queue() {
+        let feed = feed_with_book(
+            book("ETH", &[("99", "5")], &[("100", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        let rest = Order {
+            limit_px: Some(dec("100")),
+            tif: Tif::Gtc,
+            ..ioc(Side::Sell, "0.5")
+        };
+        sim.place(&feed, a, &rest).unwrap().resting.expect("joins the ask");
+        // A 0.4 bid at 100 crosses, but the ask queue at 100 is still 5 deep:
+        // the flow is smaller than what is ahead of the maker.
+        feed.put_book(book("ETH", &[("100", "0.4")], &[("100", "5")]), crate::now_ms());
+        sim.evaluate(&feed).unwrap();
+        assert!(
+            sim.user_fills(a).unwrap().is_empty(),
+            "0.4 of flow cannot reach a maker behind a 5-deep level"
+        );
+        // 6 of flow leaves 1 above the queue: the maker fills fully.
+        feed.put_book(book("ETH", &[("100", "6")], &[("100", "5")]), crate::now_ms());
+        sim.evaluate(&feed).unwrap();
+        let fills = sim.user_fills(a).unwrap();
+        assert_eq!(fills.len(), 1, "the flow above the queue reaches the maker");
+        assert_eq!(fills[0].sz, dec("0.5"));
+        assert!(!fills[0].crossed);
     }
 
     /// The venue's default leverage for a coin the account never set (measured

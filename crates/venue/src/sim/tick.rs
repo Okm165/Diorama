@@ -274,7 +274,24 @@ impl Sim {
             if !crossed {
                 continue;
             }
-            let take = r.sz.min(best.sz);
+            // The queue ahead on the maker's **own** side: a displayed level at
+            // its price was there before it rested, so the flow that reaches
+            // that price must consume it first (measured 2026-11-22: a maker
+            // behind a 0.9755 ask filled from a 0.1 taker buy while the level
+            // stayed untouched). The crossing size is the opposite touch's
+            // size; only the part above the queue ahead can reach the maker.
+            // `book_index` is the side a taker of the maker's side consumes
+            // (a buy maker consumes the asks); the queue ahead is on the maker's
+            // **own** side.
+            let own = 1 - r.side.book_index();
+            let ahead = book.levels[own]
+                .iter()
+                .filter(|level| level.px == r.px)
+                .map(|level| level.sz)
+                .max()
+                .unwrap_or(Decimal::ZERO);
+            let reachable = best.sz - ahead;
+            let take = r.sz.min(reachable.max(Decimal::ZERO));
             if take <= Decimal::ZERO {
                 continue;
             }
