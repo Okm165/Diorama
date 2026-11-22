@@ -44,6 +44,50 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### xANT collateral has no executable exit — and the platform prices it at 37% LTV anyway (2026-11-22)
+
+The `xANT` market row admits the tokenized `xyz:ANT` wrapper as collateral
+(`liquidation_threshold 0.79`, 5% bonus, 2% declared sale cost, provenance
+"measured $2k quote against the wrapper's own HyperSwap pool"). The asset file
+is explicit that the wrapper **has no redemption path** — "its exit is the
+market sale". That exit does not exist:
+
+- the configured feed (`SWAP_RATE_FEEDS`, chain 999, xANT→USDC, tier 3000)
+  returns `no_pool` — `QuoterV2.quoteExactInputSingle` reverts with empty data;
+- it reverts at **every** supported tier (100 / 500 / 3000 / 10000), on the
+  **mirror** (`127.0.0.1:18546`) and on the **real upstream** the engine reads;
+- the quoter itself is healthy — WHYPE→USDC and the other 40-odd chain-999
+  feeds quote normally, and the token, USDC and quoter all have code;
+- so the 2% "measured" cost can never be re-measured, the portfolio margin falls
+  back to the labelled prior, and — decisively — **a forced sale has no route**,
+  which the liquidator's own min-profit gate refuses by design.
+
+The platform still originates it. A live read-only quote
+(`daloc-user-sim quote --collateral xANT --principal USDC --amount 10`) returns
+`accepted_ltv_bps 3701`, `liquidation_ltv_bps 7864`, `max_borrow 330.25 USDC`.
+So a loan can be opened against collateral whose only exit the platform cannot
+price, with a 78.6% liquidation line it can never enforce by sale. The 19 Nov
+xANT loan failed at settlement for an unrelated reason; had it gone Active it
+would have been the first unliquidatable book.
+
+**This is a design invariant, not a number.** Collateral must be admitted only
+with a *live, executable exit*: the measured swap route the signer freezes into
+the threshold must be the route the liquidator can actually take. Two honest
+fixes, owner's choice:
+
+1. **Measure the real route** — the wrapper's pool sits on a different factory
+   than the configured QuoterV2 (measured: the named USDC/f60e 3000 pool is on
+   factory `0xb1c0fa0b…`), so the feed kind must quote that venue (a
+   `pool_address + slot0/liquidity` read or a router quote), and the same route
+   must be wired for the sale; or
+2. **Refuse admission while the exit is unmeasured** — one named refusal at
+   origination ("collateral has no measured exit route"), not a prior, so the
+   quote that advertises 37% LTV becomes a refusal instead.
+
+Recorded, not patched: the market row and feed are deployment config, and
+delisting a product is the owner's call. The measurement above is reproducible
+with `eth_call` against either chain.
+
 ### The order lane is live-proven end to end, and the close reconciles to the cent (2026-11-22)
 
 The 19 Nov report's first blocker — "our bot cannot place orders into the mirror's
