@@ -102,9 +102,16 @@ fn accrue_dex(account: &mut Account, feed: &MarketFeed, dex: &str, to_ms: u64) -
             // rate, its source, the oracle it was priced at and the payment, so a
             // reconciliation against the real venue's `fundingHistory` reads from
             // the mirror's own log rather than a re-derivation.
-            let (rate, source) = match feed.funding_before(coin, boundary_ms) {
-                Some(rate) => (rate, "pre_boundary"),
-                None => (current, "current_fallback"),
+            let (rate, source, covered_s) = match feed.funding_hour_average(coin, boundary_ms) {
+                Some((rate, covered_ms)) => {
+                    let source = if covered_ms >= HOUR_MS {
+                        "hour_average"
+                    } else {
+                        "partial_hour_average"
+                    };
+                    (rate, source, covered_ms / 1000)
+                }
+                None => (current, "current_fallback", 0),
             };
             let payment = mul(
                 mul(-p.szi, oracle, "funding notional")?,
@@ -116,6 +123,7 @@ fn accrue_dex(account: &mut Account, feed: &MarketFeed, dex: &str, to_ms: u64) -
                 boundary_ms,
                 rate = %rate,
                 rate_source = source,
+                covered_s,
                 oracle = %oracle,
                 szi = %p.szi,
                 payment = %payment,
@@ -227,6 +235,34 @@ mod tests {
         feed.put_ctx("ETH".into(), crate::wire::funding_ctx("100", "100"), 1);
         assert_eq!(accrue_funding(&mut account, &feed, 7_200_000).unwrap(), 2);
         assert_eq!(account.funded_at_ms(""), 7_200_000);
+    }
+
+    /// **An hour is charged its time-weighted average rate, not the last
+    /// sample.** The venue samples the premium every 5 s and averages it over
+    /// the hour (docs), and the served rate moves by multiples within seconds —
+    /// measured 2026-11-22: `0.0000125 → 0.0000115296 → 0.000003993 →
+    /// 0.0000023271` inside 40 s, while the venue's own charged rates stayed a
+    /// smooth `-0.0000115 … 0.0000125` series. Pricing the hour with whatever
+    /// sample the tick saw at the boundary (the previous design) is off by the
+    /// rate's own swing: the 09:00 BTC boundary charged `0.000007361` against
+    /// the venue's `0.0000125`.
+    #[test]
+    fn an_hour_is_charged_its_time_weighted_average_rate() {
+        let feed = feed_with_funding(&[("BTC", "100", "101")]);
+        let mut account = funding_account();
+        // The stream served 0.0000125 until the half hour and 0.0000375 after.
+        let mut higher = crate::wire::funding_ctx("100", "101");
+        higher.funding = Decimal::new(375, 7);
+        feed.put_ctx("BTC".into(), higher, 5_400_000);
+        let moved = accrue_funding(&mut account, &feed, 7_200_000).unwrap();
+        assert_eq!(moved, 1);
+        let average = (Decimal::new(125, 7) + Decimal::new(375, 7)) / Decimal::TWO;
+        assert_eq!(
+            account.perp_balance(""),
+            -Decimal::ONE * Decimal::from(101) * average,
+            "the half hour at each rate averages; the last sample alone (0.0000375) is not the charge"
+        );
+        assert_eq!(account.fundings[0].funding_rate, average);
     }
 
     /// The docs' interval is all-or-nothing: a read inside the hour moves no

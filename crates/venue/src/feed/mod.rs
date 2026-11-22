@@ -135,11 +135,15 @@ struct Cache {
     spot_meta: Option<crate::wire::SpotMeta>,
     ctxs: BTreeMap<String, AssetCtx>,
     ctx_at: BTreeMap<String, u64>,
-    /// The published funding rate **in force just before** each hour boundary
-    /// (`boundary ms -> rate`), per coin: the venue charges a boundary the
-    /// rate published before it, while the first sample after the boundary is
-    /// already the next hour's prediction. Bounded to the last two days.
-    boundary_rates: BTreeMap<String, BTreeMap<u64, Decimal>>,
+    /// Each coin's published funding-rate **step history** — `(at_ms, rate)`
+    /// ascending, the rate in force from `at_ms` until the next sample. The
+    /// venue charges an hour the *average* of its premium samples ("the premium
+    /// is sampled every 5 seconds and averaged over the hour", docs), and the
+    /// served rate moves by multiples within seconds (measured 2026-11-22:
+    /// `0.0000125 -> 0.0000115296 -> 0.000003993 -> 0.0000023271` inside 40 s),
+    /// so the last sample before a boundary is not the charge. Bounded to three
+    /// hours (the current hour plus the two a late tick may still need).
+    rate_samples: BTreeMap<String, std::collections::VecDeque<(u64, Decimal)>>,
     books: BTreeMap<String, L2Book>,
     /// The served instant of the book (its last update; `book()` stamps it).
     book_at: BTreeMap<String, u64>,
@@ -185,26 +189,48 @@ impl Cache {
         self.registry = DexRegistry::from_dexs(dexs);
     }
 
-    /// Remember the rate in force just before every hour boundary this update
-    /// crossed. Called **before** the new context replaces the old one: the
-    /// crossing is `prev_at < boundary <= now`, and the rate the venue charged
-    /// at that boundary is the one it published before it — the sample that
-    /// lands after the boundary is already the next hour's prediction.
-    fn note_boundary_rates(&mut self, coin: &str, prev_at: u64, prev_rate: Decimal, now_ms: u64) {
-        if prev_at == 0 {
-            return;
+    /// Append one rate sample: the rate the venue published **at** `at_ms`, in
+    /// force until the next sample. Called after the context lands, so the step
+    /// history is exactly what the venue served and its last segment is the
+    /// current rate.
+    fn note_rate_sample(&mut self, coin: &str, at_ms: u64, rate: Decimal, now_ms: u64) {
+        let keep_from = now_ms.saturating_sub(3 * FUNDING_HOUR_MS);
+        let samples = self.rate_samples.entry(coin.to_owned()).or_default();
+        // A burst of updates inside one millisecond replaces rather than
+        // duplicates (the last write to that instant is what was served).
+        match samples.back_mut() {
+            Some(last) if last.0 == at_ms => last.1 = rate,
+            _ => samples.push_back((at_ms, rate)),
         }
-        let first = prev_at / FUNDING_HOUR_MS + 1;
-        let last = now_ms / FUNDING_HOUR_MS;
-        if last < first {
-            return;
+        while samples.front().is_some_and(|(at, _)| *at < keep_from) {
+            samples.pop_front();
         }
-        let rates = self.boundary_rates.entry(coin.to_owned()).or_default();
-        for boundary in first..=last {
-            rates.insert(boundary * FUNDING_HOUR_MS, prev_rate);
+    }
+
+    /// The time-weighted average funding rate `coin` published over
+    /// `[from_ms, to_ms)` — the rate the venue charges an hour, from its own
+    /// 5-second-average rule. Returns the average and the covered milliseconds
+    /// (`< to_ms - from_ms` when this process saw only part of the hour: a
+    /// boot, a gap — the caller names the coverage instead of hiding it).
+    fn rate_average(&self, coin: &str, from_ms: u64, to_ms: u64) -> Option<(Decimal, u64)> {
+        let samples = self.rate_samples.get(coin)?;
+        let mut covered = 0u64;
+        let mut weighted = Decimal::ZERO;
+        for (index, (at, rate)) in samples.iter().enumerate() {
+            let next = samples.get(index + 1).map_or(to_ms, |(next, _)| *next);
+            let start = (*at).max(from_ms);
+            let end = next.min(to_ms);
+            if end <= start {
+                continue;
+            }
+            let span = Decimal::from(end - start);
+            weighted += rate * span;
+            covered += end - start;
         }
-        let keep_from = last.saturating_sub(47);
-        rates.retain(|at, _| *at >= keep_from * FUNDING_HOUR_MS);
+        if covered == 0 {
+            return None;
+        }
+        Some((weighted / Decimal::from(covered), covered))
     }
 
     /// Store one dex's meta (`""` = the default dex) and refresh the derived
@@ -545,15 +571,13 @@ impl MarketFeed {
         self.read().ctx_at.get(coin).copied()
     }
 
-    /// The funding rate published **before** `boundary_ms` for `coin` — the
-    /// rate the venue charged that boundary. `None` when this process has no
-    /// sample from before it (a boot, a gap): the caller falls back to the
-    /// current rate and the served ledger's rate keeps the approximation.
-    pub(crate) fn funding_before(&self, coin: &str, boundary_ms: u64) -> Option<Decimal> {
+    /// The average funding rate `coin` published over the hour ending at
+    /// `boundary_ms` — what the venue charges that boundary — with the covered
+    /// milliseconds. `None` when this process has no sample inside the hour (a
+    /// boot, a gap): the caller falls back to the current rate and names it.
+    pub(crate) fn funding_hour_average(&self, coin: &str, boundary_ms: u64) -> Option<(Decimal, u64)> {
         self.read()
-            .boundary_rates
-            .get(coin)
-            .and_then(|rates| rates.get(&boundary_ms).copied())
+            .rate_average(coin, boundary_ms.saturating_sub(FUNDING_HOUR_MS), boundary_ms)
     }
 
     /// Milliseconds since the last live `allMids` update, or `None` before the
@@ -664,12 +688,7 @@ impl MarketFeed {
         }
         let mut c = self.write();
         for (asset, ctx) in meta.universe.iter().zip(ctxs) {
-            if let (Some(prev_at), Some(prev_rate)) = (
-                c.ctx_at.get(&asset.name).copied(),
-                c.ctxs.get(&asset.name).map(|prev| prev.funding),
-            ) {
-                c.note_boundary_rates(&asset.name, prev_at, prev_rate, now_ms);
-            }
+            c.note_rate_sample(&asset.name, now_ms, ctx.funding, now_ms);
             c.ctx_at.insert(asset.name.clone(), now_ms);
             c.ctxs.insert(asset.name.clone(), ctx);
         }
@@ -758,12 +777,7 @@ impl MarketFeed {
             return;
         }
         let mut c = self.write();
-        if let (Some(prev_at), Some(prev_rate)) = (
-            c.ctx_at.get(&coin).copied(),
-            c.ctxs.get(&coin).map(|prev| prev.funding),
-        ) {
-            c.note_boundary_rates(&coin, prev_at, prev_rate, now_ms);
-        }
+        c.note_rate_sample(&coin, now_ms, ctx.funding, now_ms);
         c.ctx_at.insert(coin.clone(), now_ms);
         c.ctxs.insert(coin, ctx);
         drop(c);
