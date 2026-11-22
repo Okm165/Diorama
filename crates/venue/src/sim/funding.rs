@@ -95,12 +95,32 @@ fn accrue_dex(account: &mut Account, feed: &MarketFeed, dex: &str, to_ms: u64) -
         };
         for boundary in first..=last {
             let boundary_ms = boundary * HOUR_MS;
-            let rate = feed.funding_before(coin, boundary_ms).unwrap_or(current);
+            // The rate the venue published before the boundary, or — named, not
+            // silent — the current one when this process has no pre-boundary
+            // sample (a boot, a gap; the served ledger's rate is then the
+            // approximation). Funding is money: every charge is logged with the
+            // rate, its source, the oracle it was priced at and the payment, so a
+            // reconciliation against the real venue's `fundingHistory` reads from
+            // the mirror's own log rather than a re-derivation.
+            let (rate, source) = match feed.funding_before(coin, boundary_ms) {
+                Some(rate) => (rate, "pre_boundary"),
+                None => (current, "current_fallback"),
+            };
             let payment = mul(
                 mul(-p.szi, oracle, "funding notional")?,
                 rate,
                 "funding payment",
             )?;
+            tracing::info!(
+                coin = %coin,
+                boundary_ms,
+                rate = %rate,
+                rate_source = source,
+                oracle = %oracle,
+                szi = %p.szi,
+                payment = %payment,
+                "funding boundary charged"
+            );
             if payment.is_zero() {
                 continue;
             }
