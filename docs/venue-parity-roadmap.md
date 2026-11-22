@@ -411,6 +411,26 @@ collateral reference ("the unified loan projection is account-scoped: no
 collateral asset"), so a draw against a chain-1-collateral loan is not
 drivable from user-sim yet.
 
+### Two systemic gaps the repair exposed (2026-11-22)
+
+1. **The mock MPC regime records no account.** `underwriter_db_hyper.mpc_portfolios = 0`
+   while ten unified loans trade: the `keygen_at_quote` branch derives the key and
+   carries the registration on the quote, but skips `mpc_accounts::record`. So
+   `GET /v1/me/prime/unified` lists nothing for any wallet, and every
+   account-scoped read must guess its `{ref}` (the draw had to be given the
+   collateral explicitly). One record per account at quote time — the same row
+   the interactive path writes — makes the list, the views and the tooling agree.
+2. **No boot-time selector preflight.** The beacon sat on an implementation
+   without `registerAgentWallet` and only the prover noticed — ten retries, a
+   cancel, a stranded principal. Comparing the selectors the prover composes
+   against the live implementation's dispatcher is a cheap startup refusal that
+   would have named this in seconds.
+
+**Also open:** `draw`'s post-draw settle wait still reads the loan unscoped, so
+a successful cross-chain draw reports failure after the fact (the draw itself
+lands: debt 87.1409 → 89.1405). Thread the same collateral scope through
+`wait_for_debt_change`.
+
 ## Book-simulation ideas (the "proper sims of books" ask)
 
 - **Depth regeneration (investigated 2026-11-21, deliberately not built):**
