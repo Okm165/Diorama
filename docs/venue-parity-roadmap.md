@@ -691,6 +691,20 @@ sim-level CoreWriter path now applies. Venue rolled as `relay-0b1ce18d`
 previously-stranded close then settled** (`Closing → PendingCloseUnwind →
 Closed`), and the action sweep passed 13/13 on the new image.
 
+**Borrow product exercised** (the three-product matrix is complete): unified,
+simple, and now a 0.15 WHYPE escrow-only Borrow loan created, served (HF 2.094),
+and closed — `0xa4647580…`, all three `Closed` this round.
+
+**The indexer's chain-999 backlog is cursor lag, not missing data.** The
+blocking `indexer_chain_coverage` advisory reports `scanned` 219 714 blocks
+behind the head while `indexed_events` is **197 blocks** behind it — the
+aggregator cursors (`scan_cursors`, 900-block batches) trail the actual
+ingestion and catch up at ~15 blocks/s against a 1.36 blocks/s chain (~4.5 h to
+clear). The cursor *timestamps* advance throughout, so the scanner is working,
+not stalled; the advisory's "stalled >10 s" wording is wrong for this shape.
+Chronic (the 19 Nov report's "indexer blip every 10 min"), not caused by today's
+rolls.
+
 ### Reality check against the 19 Nov report's blockers
 
 The report's four standing complaints, checked against today's mirror rather than
