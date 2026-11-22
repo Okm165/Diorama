@@ -44,6 +44,27 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### A stopped clock was silent: the terminal fault on a live position had no health surface (2026-11-22)
+
+`probe_proof_queue_terminal_24h` ages a terminal proof refusal out after 24 h so a
+resolved incident stops degrading the surface — right for a fault whose position
+then moved. The measured `43b0d4f4` book was the other case: the fault *was* what
+held the position, and from 11-16 on the health surface said nothing for six days
+while the maturity arm dispatched every five minutes into a guard that never
+re-queued. Nothing in the swarm named it.
+
+New `positions_with_terminal_proof_fault` (operator, `25f4075b`): a non-terminal
+position whose proof row is failed with a non-retryable verdict **in the
+position's current generation** (`failed_at >= status_changed_at` — a refusal
+before the last status change is the previous generation's audit record), with no
+live `pending`/`proving` row, older than 1 h. The same environment-loss exclusions
+the 24 h probe makes: a rewind-retired keeper submission is a fact about the
+mirror, not a refusal to prove — verified live, the 7 Active books that each carry
+one correctly do not fire, and the query returns 0 today. The anomaly names the
+remedy by class: the event-history class points at `PRINCIPAL_EVENT_RECOVERY_FILE`
+and the re-arm's one-shot digest watch; every other class names the operator
+decision, never a promise of automatic retry.
+
 ### The indexer store lost its history strand, and the designed recovery channel closed the one live gap it made (2026-11-22)
 
 The Borrow loan `43b0d4f4…` (24.915109 USDC principal, 1 WETH collateral, 1 h
