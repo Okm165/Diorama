@@ -44,6 +44,43 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### A unified account's venue equity was short by its isolated margin — found, fixed, rolled (2026-11-22)
+
+The live `para:SMH` loan exposed it on the real book, not in a fixture:
+
+| figure | mirror (before) | truth |
+|---|---|---|
+| spot USDC | `43.239737` | `43.239737` |
+| spot `hold` (the isolated margin) | `1.23126` | `1.23126` |
+| perp `accountValue` (para) | `−0.358181` | `+0.873139` |
+| **whole account** `(spot − hold) + perp` | **`41.211424`** | **`42.442684`** |
+
+The shortfall was exactly the `1.23126` hold. **Root cause, one sentence:** the
+live isolated-open path debits the perp ledger by the position margin, while the
+same margin is served as spot `hold`; the consumer's real-venue-faithful whole
+(`(spot_total − spot_hold) + perp_account_value`) then subtracts it twice. The
+real venue's unified perp `accountValue` *includes* the collateral moved in from
+spot — the committed capture reads spot `161.455092` with hold/perp
+`12.955364`, and the `0x75b9` book reads hold `140.678682` with perp
+`−108.417391` — so the mirror's served summary was the outlier.
+
+**Fix (`relay-3c7c25b1`):** the served unified summary adds the isolated margin
+once more (the cash the live open debited), so
+`perp_account_value = hold + realized + unrealized`. The add is **served-only**:
+`AccountView::perp_account_value` keeps the order lane and the waterfall on the
+perp-cash figure they have always used, so no trigger moves. A cross position's
+margin is a reservation on the wallet's own cash, not moved in, so it is not
+re-added (the positions-only mode-switch regression pins that). The seed stores
+the same convention (a unified isolated patch subtracts the margin twice) and
+reproduces the patch's own `totalRawUsd`/`accountValue` exactly. Two new tests
+pin the served invariant and the seed round trip; **392 venue tests green**.
+
+**Verified live after the roll:** the para dex now serves `accountValue
+0.873139`, the indexer tick composes `42.0085 + 0.4343 = 42.4428`, and the
+position (`0.03 para:SMH`, unrealized `+0.01017`) is intact. The gateway's venue
+equity term for the loan is now the real figure; the draw's remaining refusal is
+the σ data-maturity bound, not pricing.
+
 ### The multi-loan portfolio runtime, live — and the gaps it exposed (2026-11-22)
 
 **A real two-loan portfolio ran end to end on one wallet:** loan A = unified,
