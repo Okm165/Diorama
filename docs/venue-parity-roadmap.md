@@ -405,6 +405,35 @@ the conservative variance-max endpoint); the `xyz:*` book rows keyed `dex=''` ar
 venue-σ fit covers 78 of 85 configured instruments (thin/new series refuse by
 name).
 
+### Portfolio runtime and the maker lane, measured live (2026-11-22)
+
+**A three-market runtime with operations in flight.** Account `…aa08`
+(400 perp + 500 spot dealt): transfer 150 spot→perp, open ETH −0.05, SOL +1.0,
+HYPE +2; then **transfer 60 perp→spot while the positions are open**, reduce ETH
+by 0.02, flip SOL through zero to −1.0, close all three, transfer 90 spot→perp.
+Twelve fills, no refusal. The whole-account statement reconstructed from the
+fill ledger — spot cash flows, USDC fees, the in-kind UETH fee, realized PnL,
+funding, unrealized — matches the served balances to **diff 0.000000000**. The
+only trap was in the reconstruction, not the venue: valuing the spot token at
+mid *and* subtracting its in-kind fee double-counts; the exact form values each
+fill's fee in the token it was charged in.
+
+**The maker lane, both ways.** At the same price the live level goes first: a
+maker that joined the live ETH ask (172 ETH deep) received **nothing** from a
+0.1 taker — the taker filled entirely against the live level, the maker's
+remainder cancelled. Inside the spread the maker is first: AVAX rested at
+6.7015 (bid 6.7007 / ask 6.7018), a 2 AVAX taker filled **the maker at its own
+price** (`maker_filled 2.0`), and the maker flattened at the touch.
+Fee tiers measured from the ledger: **maker 1.5 bps, taker 4.5 bps**, maker net
+after the cycle −0.00944 (the spread it paid to exit). The $10 minimum refused a
+$0.67 AVAX order by name, as the venue does.
+
+**DB sweep.** `keeper_db`/`keeper_db_hyper`: **zero failed submissions in six
+hours** (the 1,647 rewind-era failures are closed). `indexer_db`:
+`position_terminal_open_commitments` = 0. `operator_db`: 10 standing Active test
+loans (oldest 175 h), no new Failed. Gateway healthy; the only advisory is the
+named venue-σ coverage boundary.
+
 ### 2026-11-22 11:40Z: the clean-restart schedule replaced 298k blocks — and how it was put back
 
 **What happened.** The hourly `DALOC-ANVIL-RESTART` fired and the chain came back
