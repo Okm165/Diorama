@@ -405,6 +405,38 @@ the conservative variance-max endpoint); the `xyz:*` book rows keyed `dex=''` ar
 venue-σ fit covers 78 of 85 configured instruments (thin/new series refuse by
 name).
 
+### Universe and spot parity, measured (2026-11-22)
+
+**Perps: complete.** The mirror serves exactly the real venue's universe on
+every dex — default 235, `xyz` 147, `para` 40, `flx` 16, `hyna` 25, `io` 26,
+`km` 23, `mkts` 24, `vntl` 15: **551 instruments, zero missing, zero extra**.
+Sampled books across four dexes (BTC/ETH/SOL/HYPE/DOGE/AVAX, `xyz:SP500`,
+`xyz:GOLD`, `xyz:ANT`, `para:ANTH`, `io:OAI`) are **identical to 0.000 bp** on
+both touches with the same 20 levels and the same top-5 depth. Books that are
+empty on the real venue (`flx:TSLA`, `vntl:SPACEX`, `vntl:OPENAI`) are empty on
+the mirror too — the empty state is reproduced, not invented.
+
+**Spot: the declared 8-pair set, at parity.** 354 real spot pairs exist; the
+mirror serves the eight the platform declares (`PURR/USDC`, HYPE, UBTC, UETH,
+USOL, USDT0, UPUMP, UZEC), all within 5 bp (measured 0 bp). This is a scope
+boundary, not a fidelity defect.
+
+**Spot lifecycle measured.** Buy → post-only rest 5 % above the ask → the
+served `hold` is exactly the resting size (0.006) → cancel → hold returns to 0.
+A resting post-only sell under the $10 minimum is refused by name; a
+hand-computed flatten of `0.02003` was refused with **"Order size has more than
+4 decimals for @151"**, and the residue below one lot (0.000044 UETH) cannot be
+sold at any price — the in-kind fee residue is sub-lot by construction. (A
+`venue-order --size max` that floors to the pair's lot remains a tooling gap.)
+
+**Funding at 12:00Z, exact under the live fix.** The mirror's `fundingHistory`
+row equals the real venue's (`0.0000125`, same premium, same timestamp), and
+the standing 0.1968 BTC long was charged **−0.15013134** = 0.1968 × 61,028.35
+× 0.0000125. The 09:00 row still shows the old off-by-one capture
+(`0.000007361`); 10:00, 11:00 and 12:00 all equal the real rate. A fresh 0.03
+BTC long opened at 12:02 is held through 13:00 as the first charge on a
+position opened under the fix.
+
 ### Portfolio runtime and the maker lane, measured live (2026-11-22)
 
 **A three-market runtime with operations in flight.** Account `…aa08`
