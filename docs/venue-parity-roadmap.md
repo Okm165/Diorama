@@ -515,6 +515,63 @@ its spot (the owner's, recallable).
    no owner path back (no loan exists to recall against). Worth a decision: an
    owner sweep for an empty-book CM, or a documented "this collateral is spent".
 
+### The 2026-11-22 audit: five findings, one fix rolled
+
+**Market-data fidelity re-measured and confirmed excellent.** Six samples
+across `BTC/ETH/SOL/xyz:ANT/para:SMH/xyz:XYZ100`: mid Δ 0 bp p50/p95 on every
+coin, spread identical to the real venue to the fourth decimal, 10 bp book
+depth within 0.1–2 % of real, and the mirror's book age ~300 ms — *fresher*
+than the real API's ~500–700 ms. The mirror claim is a measurement now, not a
+design note. Funding Δ ~1e-8, mark Δ 0. `para:SMH`'s 7.99 bp spread and $100
+10 bp depth are the real market's thinness, not a sim artifact.
+
+**1. A `Closing` leg proposed Enforcement (fixed, rolled as `rel-19415ef7`).**
+Every ordinary close left the position in `Closing` while debt was still whole
+and the collateral/venue term was already moving; the HF scan's group fold read
+that transient state, crossed the breach line and queued an Enforcement
+proposal the orphan monitor then cancelled. **Measured: 36 cancelled proposals
+across 5 ordinary closes** (10/6/8/6/2). The fix skips the proposal for a
+`Closing` leg — the close path is authoritative — while the blind scan still
+observes it. `Active`/`Liquidating` remain the proposal sources.
+
+**2. Multi-loan portfolios are same-chain only, and w1's stranded CM blocks
+the one same-chain unified loan.** `create-unified` on an existing cross-chain
+portfolio refuses: *"an append requires a same-chain Direct portfolio"*. The
+append path needs the WHYPE-999 CM, which still holds 100 WHYPE pre-funded in
+an earlier session — no owner path back (`push` is proof-executor only; no
+sweep exists for a position-less CM). **The stranded pot now blocks the
+multi-loan demonstration, not just the same-chain one** — that is the strongest
+argument yet for the owner-sweep decision.
+
+**3. Simple margin cannot draw** ("draw requires a unified-margin agent —
+simple margin has no venue deposit") — by design, and now demonstrated. A
+simple book's runtime ops are resize (repay) and close only. Its venue cash is
+the owner's, moved by hand.
+
+**4. The simple resize prep still does not self-serve** (re-confirmed live).
+Loan `0xca2590c3…` (simple same-chain): the prep approved the agent's USDC to
+the proof executor and accepted the resize, then the proof deferred with
+*"insufficient EVM balance for the in-batch repay"* — the agent held 0.15 USDC
+against a 1 USDC repay while 12 sat on the venue's `xyz` dex. It settled 50 s
+after a manual top-up. The unified prep recalls the shortfall; the simple prep
+plans none, though the simple agent has `recallFromCore(RecallSource[],
+uint64)`.
+
+**5. A short position id is left-padded into a misleading 404.**
+`parse_hex_id` left-pads any id shorter than 32 bytes, so a truncated id reads
+as a valid `MarginId` and the gateway answers *"position not found:
+0x0000…ca2590…"* — the caller cannot tell a typo from a missing loan. Either
+refuse short ids for `position_id` paths or name the padding in the error.
+
+**Multi-loan, multi-product session (02 loans + 1 multi-loan portfolio, all
+closed):** unified cross-chain `0x562fb541…` (short 0.007 ETH, draw +1, resize
+−1, all with the position open, closed after a reduce-only flatten), simple
+cross-chain `0x38fec111…`, simple same-chain `0xca2590c3…` (NVDA long) — the
+two simple loans share one agent, so one venue account carried two concurrent
+positions on two dexes (a real multi-loan venue book). Multi-PnL:
+account A 24 fills / fees 0.2614 / realized −0.1325 / unrealized +0.0036;
+account B+C 4 fills / fees 0.0078 / realized −0.0024 / unrealized +0.0065.
+
 ### Reality check against the 19 Nov report's blockers
 
 The report's four standing complaints, checked against today's mirror rather than
