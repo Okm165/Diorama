@@ -44,6 +44,17 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The 17:40Z anvil restart kept the head continuous (2026-11-22)
+
+The every-two-hours cron restart replaced the pod at 17:40 and the chain head
+ran continuously across it (51,594,051 at 16:17 → 51,601,121 at 17:42, ~6 s per
+block, no drop, chain id 0x3e7). The only line in the window was the indexer's
+event-spine repair head read failing for the ~4 s boot gap and self-retrying;
+the gateway and every dependency read healthy after it. The host watcher that
+detects this used the wrong pod label (`app=anvil-v`; the live label is
+`app.kubernetes.io/name=anvil-v`) and was blind to the replacement — fixed for
+the next runs.
+
 ### HIP-3 funding is exact at the boundary, on a live builder-dex position (2026-11-22)
 
 A short 0.5 `xyz:TSLA` ($179, aa09's `xyz` dex, dealt 300 USDC there) was held
