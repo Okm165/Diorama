@@ -62,7 +62,11 @@ loan's agent, rallying the mark +5%:
   same book logged a gated venue read — *"the venue account's marks are
   scenario-owned (control plane) — a simulation input, not a market fact;
   refusing the venue term for a verdict"* — and the circuit returned no
-  headroom verdict rather than a wrong one. The gateway stayed healthy with
+  headroom verdict rather than a wrong one. The guard is not single-point: the
+  indexer's projection refused the same leg independently
+  (`refusal: ControlOwned`, "this position's HF check will be refused rather
+  than decided on a numerator missing the venue leg"), so both the operator's
+  scan and the projected numerator drop the scenario term. The gateway stayed healthy with
   zero advisories throughout, and the named refusal stopped the moment the coin
   was handed back (`{coin}` with no `pct`), the mark restored to the live book
   (358.63/359.2), and the close filled at 358.56.
