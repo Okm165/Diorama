@@ -92,11 +92,15 @@ epoch rule. After the roll the relay is `1/1` and both its scanners read healthy
 (999: 21 blocks behind head).
 
 **Also recorded from the same audit (not defects):**
-- **Boot-time feed-round burst.** 33 `feed round regressed` WARNs, *all* in the
-  one second after an indexer restart: the persisted round pointer is rebuilt
-  from DB rows that can be a few seconds newer than the mock feeds' first read.
-  The handler treats the lower round as canonical and supersedes the rows above
-  it (by design). One burst per boot, never continuous.
+- **Feed-round bursts follow a pointer rebuild, not the clock.** 33
+  `feed round regressed` WARNs in the one second after an indexer restart, then
+  19 more in a single 3 s burst at 04:08:55 — the moment the venue engine
+  recovered from `UNOBSERVED` and served a ctx a few seconds older than the row
+  the feed had already served. A *poller* read is the feed's canonical pointer by
+  design (a restored feed must be able to rewind), and the handler marks the rows
+  above the pointer **superseded rather than deleting them**, so history stays
+  auditable and consumers cannot select the abandoned epoch. Transient: chain-999
+  price writer is `wss` at 1 s age and 85 blocks behind after the burst.
 - **The venue stress-tail advisory is correct, not noise.** It fired on a 2.3×
   short book (equity 43.43, venue maintenance 2.00, notional 100.34) with
   `venue_liquidation_move 0.416` — i.e. the venue's maintenance line is ~42 %
