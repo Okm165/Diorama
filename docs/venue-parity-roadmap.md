@@ -44,6 +44,57 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The unified agent's residual claim is scheduled onto the live beacon, and the chain-1 feed control came back from the dead (2026-11-22)
+
+**The upgrade is real, not a plan.** `pushResidualToOwner` (`e07ddfe5`, forge 741/741)
+went through the protocol's own upgrade path end to end: `daloc-upgrade
+snapshot-layout` recorded the deployed revision's baseline (96decb9e, on-chain
+codehash-verified, 5 storage variables, layout unchanged), `deploy-impl` broadcast
+the new implementation `0x8D1F0cd1…` from the worktree, and `schedule` **first
+proved the whole sequence on a fork** (schedule → 24 h warp → execute → beacon
+implementation matches) before broadcasting. The timelock operation
+`0xf7c3ce5d…` is `waiting`, ready at Unix 1795465517 (~2026-11-23 20:05 UTC);
+an hourly self-removing host cron executes it at maturity. The governance keys:
+the beacon owner `0x63a866…` (which is also the hub's `feeCollector` — fees
+accumulate under timelock custody) holds proposer/executor/canceller; the mirror's
+anvil `--auto-impersonate` plus the tooling's `--unlocked` mirror mode is the
+designed operator path, and the timelock's 86 400 s delay and role checks still
+govern. `0x1cf668…` (the underwriter key) holds **no** timelock role.
+
+**Two facts were wrong and are now fixed.** `CHAIN_999_TIMELOCK_ADDRESS` in the
+deployment envs said `0x9031…` — an orphaned contract that owns nothing; every
+live beacon answers `owner() = 0x63a866…`. Corrected on disk (the deployment dir
+is live state, gitignored by design; the upgrade tooling was never exposed — it
+derives the timelock from the beacon's live owner, and the forge ops script
+validates against it). And the host cron for the chain-1 mirror feed refresh
+called a script that was renamed into the repo
+(`k8s/scripts/refresh-chain1-price-feeds.sh`) **with python3** — it had failed
+silently every 20 minutes since ~16 Nov. Repointed to the repo script with bash
+and verified: WSTETH/STETH/USDC/USDT re-stamped at 1795379553.
+
+**The 999 feed "round regressed" churn is a writer discipline gap, named.** The
+indexer's poller warned ~28×/45 min on four 999 feeds (xTLT/xURNM precompile
+mocks, USDT/USDC) after the roll. Traced: the USDC/USDT feeds are
+oracle-liveness-written (1 s cadence, storage + events); the 0e21xx x-asset feed
+mocks are written by pure `anvil_setStorageAt` (no events), and their round
+**timestamps are non-monotonic** (scattered past stamps, one future-dated row in
+`prices`). The poller's rewind arm is the designed repair — it re-canonicalizes
+the pointer to the on-chain truth and supersedes the fresher rows — so served
+prices stay honest; the cost is WARN churn and history churn. The root fix is the
+writer's round-stamp discipline (stamp the mirror's own monotonic clock, not the
+source observation's ts); the writer's source lives on the pinned
+`local-20261121-motion` branch, so it is named here, not hand-waved away.
+
+**Also named:** the LF liquidation path on 999 has no flash-loan provider — only
+a test mock exists and the deploy graph has no provider node, so the liquidator
+runs the flashless recovery path and borrow-dependent liquidations refuse. The
+deploy-graph node (and the env pairing `FLASH_LOAN_PROVIDER_ADDRESS` +
+`FLASH_LOAN_FEE_BPS`, already enforced) is the completion. cctp-relay's 27
+"pending unusually long" warnings were the anvil-wedge wake (health: parked 0,
+pending 0, bridge ok), and the operator's `RecoveryExpectationStored` fallback
+WARNs were the post-roll sweep of two liquidated books — quiet since, the
+designed fallback, not a missing write.
+
 ### A stopped clock was silent: the terminal fault on a live position had no health surface (2026-11-22)
 
 `probe_proof_queue_terminal_24h` ages a terminal proof refusal out after 24 h so a
