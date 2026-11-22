@@ -661,6 +661,36 @@ HF-side `venue_equity_usd` correctly stays the conservative post-hold breach
 figure (34.266 → 33.416, the hold removed once for the breach comparison). The
 book was then flattened and closed cleanly.
 
+### Funding verified live, and the stranded-PnL wedge it exposed (venue rolled as `relay-0b1ce18d`)
+
+**Funding is charged — with the correct sign and magnitude — at the *chain* hour
+boundary.** A unified book held a live −0.06 ETH short (notional 100.34) across
+a boundary: `cumFunding.allTime = 0.000379853`, `userFunding` one row, rate
+−3.8e-6 → the short paid 3.8e-6 × 100.34 = 0.00038. The boundary fires at the
+**chain clock's** hour, not the host's: the sim carries `clock_offset_ms =
++33.18 min` (the ledger clock is the chain's — correct for a mirror), so the
+boundary lands at wall `:26:40`. Reading `cumFunding` before the chain boundary
+reads 0.0 and looks like a gap; it is not one. (An earlier reading of this as
+"funding is never applied" was wrong — the offset explains it.)
+
+**The funding test exposed a real wedge: a profitable unified book could not
+close.** The close's recall asked for spot 43.328106 + perp cash 0.287176 (the
+realized PnL from a profitable reduce-only) = 43.615282 against a 43.328106
+available. The perp→spot class leg was refused by the sim's
+`usd_class_transfer` — "Action disabled when unified account is active" — which
+is the **CoreWriter action 7** path: the margin agent contract's own
+`transferUsdClass`, i.e. exactly how a unified agent recalls its perp-class
+cash. Refusing there stranded the realized PnL and deferred the close forever.
+**Every earlier close had a negative perp ledger (fees over PnL), which is why
+it never showed — a profitable book is the one that wedges.**
+
+The fix: the user-signed API action stays refused
+(`user_actions::refuse_on_unified` pins it at the layer that owns it); the
+sim-level CoreWriter path now applies. Venue rolled as `relay-0b1ce18d`
+(390 tests; the API refusal is still pinned by the exchange tests). **The
+previously-stranded close then settled** (`Closing → PendingCloseUnwind →
+Closed`), and the action sweep passed 13/13 on the new image.
+
 ### Reality check against the 19 Nov report's blockers
 
 The report's four standing complaints, checked against today's mirror rather than
