@@ -44,6 +44,44 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The σ coverage gap was a config split-brain, not a fitter gap (2026-11-22)
+
+The standing "78/85 fits" open resolved into a precise story, and it is not a
+calibration problem:
+
+* **85 = 45 + 40 targets**: 41 xyz + 4 default-dex + 40 para instruments the
+  risk config declares as `[[venue_instrument]]` pricing bands. 78 fitted =
+  45 fresh + 33 para (whose last fit was 12:49Z). The 7 un-fitted
+  (para:H100, NAVER, TENCENT, CAMBRICON, INNOLIGHT, PAPER, HYPE2) are in the
+  designed warm-up state — "waiting for the indexer's venue history backfill"
+  — young series, not refusals. They mature with ~21 h of collection.
+* **The para collection stopped at 11:54Z by config accident.** Two commits
+  23 minutes apart: `3f208f8f` (xANT delivered-only) re-rendered
+  `VENUE_BOOK_FEEDS` from a source that had lost the para feed `2c12d32a` had
+  added — the same rendered-artefact-only failure mode `bf00ddf6` then fixed
+  for the `[[venue_instrument]]` bands, but `bf00ddf6` synced only the markets
+  tree, not the env maps. Result: the fitter kept 33 configured targets whose
+  book feed was gone, refused every cycle since (the refused-set latch logs
+  transitions only — a stable refusal is silent), and the operator warned
+  "jump shares are stale / funding tails are stale — pricing the no-jump arm /
+  forward rate for the dropped instruments" on every scan.
+* **The fix was the feed, not the fitter.** Restored the para feed verbatim
+  (40 coins, dex para) to both env maps (deploy `d7cdbbe5`), rolled, and
+  collection resumed at 22:40Z; the next cycle fits 78. The para σ clocks stay
+  at 12:49 by design (same-window refits do not advance `calibrated_at`) until
+  the first post-restart completed hour moves the window; the operator
+  warnings are honest until then and stop when the rows go fresh.
+* **Guarded the failure mode at the writer**: the σ table now prunes to the
+  config's instruments (`75e47878`) — the same snapshot rule the ρ table
+  states — with the keep set being the *config* list, not the fitted one, so a
+  refusing instrument keeps its last measured fit and only a genuinely retired
+  identity is dropped. Scoped to the σ pass's venues (the `coin` key belongs
+  to the ρ writer).
+
+The lesson recorded: two artefacts must agree on the instrument universe (the
+markets tree ↔ the env maps' feed), and neither has a cross-check; the
+render-drop class has now bitten both files and both are guarded.
+
 ### A control-owned mark is a simulation input, on all three consumers (2026-11-22)
 
 The crash/rally control is only safe if nothing downstream mistakes it for a
