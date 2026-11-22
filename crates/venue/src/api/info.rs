@@ -388,12 +388,35 @@ async fn unrouted(state: &ApiState, body: Bytes) -> Result<Response> {
             | "userRateLimit"
             | "referral"
             | "legalCheck"
-            | "delegatorSummary"
-            | "portfolio",
+            | "delegatorSummary",
             Some(user),
         ) => fresh_account_read(state, &body, kind, user, &request).await,
+        // A simulated account keeps no value/PnL history: the old answer
+        // forwarded the request to the real venue with a neutral user, so the
+        // account read **another account's** series (measured 2026-11-22: a dealt
+        // account with a 448 USDC book saw `day` 17.92 and `perpDay` a flat 0.1).
+        // A wrong number is worse than a refusal; the fills are the ledger.
+        ("portfolio", Some(user)) => portfolio(state, &body, user).await,
         _ => Ok(deserialize_failure()),
     }
+}
+
+/// `portfolio`: the venue's account-value/PnL history. The sim prices every
+/// read from live state and keeps no history, so for a simulated account it
+/// refuses by name instead of forwarding the read to the real venue with a
+/// neutral user (that served a stranger's balances and PnL). A real account's
+/// read still passes through.
+async fn portfolio(state: &ApiState, body: &Bytes, user: Address) -> Result<Response> {
+    if state.sim.account(user)?.is_none() {
+        return pass_through(state, body).await;
+    }
+    Ok((
+        StatusCode::UNPROCESSABLE_ENTITY,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "venue-sim: portfolio history is not tracked for a simulated account (the sim prices every read \
+         from live state); the account's fills and their closedPnl are in userFills",
+    )
+        .into_response())
 }
 
 /// An account-scoped read the sim holds no ledger for: a simulated account is
@@ -1814,6 +1837,38 @@ mod tests {
             assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
             assert!(response_json(response).await.is_null());
         }
+    }
+
+    /// **`portfolio` is refused by name for a simulated account.** The older
+    /// answer forwarded the read to the real venue with a neutral user, so a
+    /// simulated book was served a stranger's value and PnL (measured
+    /// 2026-11-22: `day` 17.92 and `perpDay` 0.1 for a 448 USDC account). The
+    /// sim keeps no history to serve; `userFills` is the ledger.
+    #[tokio::test]
+    async fn a_simulated_accounts_portfolio_history_is_refused_by_name() {
+        let feed = crate::feed::MarketFeed::memory(Vec::new());
+        let sim = Arc::new(crate::sim::Sim::memory());
+        let user = Address::repeat_byte(0x11);
+        sim.set_account(
+            user,
+            crate::sim::seed::AccountSeed {
+                user_abstraction: Some(crate::wire::UserAbstraction::UnifiedAccount),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let state = state_with_sim(feed, sim);
+        let body = Bytes::from(format!(r#"{{"type":"portfolio","user":"{user}"}}"#));
+        let response = portfolio(&state, &body, user).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            text.contains("portfolio history is not tracked"),
+            "the refusal names the reason: {text}"
+        );
     }
 
     /// A body the venue cannot deserialize is its 422 plain text, not a 500.
