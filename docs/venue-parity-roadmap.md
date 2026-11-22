@@ -126,6 +126,37 @@ The DB sum reads **2,544.933161**, the chain's `positionExposure` sum
 (unknown), never zero, when the read fails. 566 operator tests green; deploy pin
 `ce0e1c69`.
 
+### D-73, read from the contracts: the clearing call exists and needs no flag — only a way to send it (2026-11-22)
+
+Reading the settlement contracts sharpens D-73. `writeOff(positionId, amount)` is the
+wrong tool for a cancelled creation: it requires
+`AUTHORIZATION_FLAGS.isAuthorized(positionId)`, and a flag can only be written by
+the ProofExecutor from an **enforcement proof** (`write(positionId, block, ts,
+factHash)`; `writePortfolio` needs a leg-set proof). A cancelled creation has no
+breach and no debt, so no flag can ever exist → `NotFlagged`, structurally.
+
+But the accounting-correct call is already there and **does not need a flag**:
+
+```solidity
+settle(bytes32 positionId, uint256 capitalAmount, uint256 exposureAmount)
+    external onlyProofExecutorOrExecutor
+```
+
+`_settle(pid, 0, registered_exposure)` subtracts the exposure, reduces
+`totalExposure` by the effective amount, and — when the position's exposure reaches
+zero — releases its remaining risk escrow back to its funders. That is exactly the
+state the seven cancelled books are in: exposure registered, no debt, cash already
+back in `unclaimed`/idle. So the fix is not a loss write-off (which would book a
+loss the evidence does not support); it is a **settlement instruction**.
+
+What is missing is only the way to send it: a cancelled creation has no proof
+batch, and `settle` is restricted to `PROOF_EXECUTOR`/`LIQUIDATION_EXECUTOR`.
+The minimal protocol change is a proof-bound (or operator-signed)
+`settleCancelled(positionId)` path — ProofExecutor → Underwriter
+`settle(pid, 0, positionExposure[pid])` — with the circuit attesting the
+`MarginBridging → Cancelled` transition. Until then the operator names the size
+(2,544.93 USDC, `rel-50d6dd71`) and the chain keeps counting it.
+
 ### DB sweep: the scan is fresh; a terminal row keeps its last collateral mirror with no as-of (2026-11-22)
 
 Non-terminal books at 07:04Z: 10 Active, HF fresh on all nine backed ones
