@@ -448,6 +448,7 @@ user-sim end to end while the venue book was traded:
 | Resize during runtime | `recallFromCore` 1 USDC out of free spot (90.35), debt 96.6396 → 95.6396, Active in 3 s |
 | Flatten | all three dexes flat, spot 94.6378 |
 | Close | recall-all (in-kind gas) → shortfall 1.002454 → owner top-up on 999 → `Closing` → `PendingCloseUnwind` → **`Closed`** in 68 s; collateral 0.1 WETH-1 released to the wallet |
+| Close, second loan, after the venue fix | shortfall **0.001228 USDC** — exactly the deducted bridge gas — funded from the wallet, `Closed` in 62 s: the in-kind rule is confirmed to the micro-dollar |
 
 ### Bugs this lifecycle exposed (all fixed in source, two pending a roll)
 
@@ -477,6 +478,45 @@ user-sim end to end while the venue book was traded:
    (`09dff59e`): 1 bp gas allowance (≈70× the measured gas, at least $0.005),
    and "empty venue + cash on the agent" is *nothing to recall*, not a missing
    bridge.
+
+### The hedge measurement (operator rolled, 2026-11-22 01:2x)
+
+With the correlation expansion live, the canonical book was measured on a fresh
+cross-chain loan (`0x39cecb6d…`, 0.05 WETH-1 ≈ $87.65, debt 43.31, HF 1.6756):
+
+| Book | venue equity | venue term | HF | stress capacity |
+| --- | --- | --- | --- | --- |
+| flat | 43.13 | 43.13 | 1.6756 | **9.86** |
+| matched hedge: short 0.05 ETH | 38.85 | 37.16 | 1.5379 | **2.82** |
+| double long: long 0.05 ETH | 38.76 | 37.08 | 1.5359 | **0.00** |
+
+So the model does recognize the hedge (2.82 vs 0.00 for the same notional), but a
+delta-neutral book still costs **7.0 of a 9.86 line**. The decomposition from the
+venue's own numbers (spot total 43.308905, hold 4.216 = `totalMarginUsed`, perp
+accountValue −0.1528):
+
+- `hold` 4.216 — the reserved margin, subtracted from spot **and** not present in
+  the perp account value;
+- venue maintenance 1.686 — charged again by the PM;
+- basis + direction stress ≈ 1.1.
+
+**The first two are a double deduction of the same margin.** `whole_account_equity_usd`
+documents its two components as disjoint "because `perp_equity_usd` already
+contains that hold" — but the mirror's perp `accountValue` does not
+(`totalRawUsd` is the position's own notional and `accountValue` is fees only), so
+the sum `(spot − hold) + perp` loses the reserved margin outright. Measured: the
+account's true equity is 43.14, the operator's base is 38.94.
+
+The correct shape is the one the PM already has two arms for:
+- **forced close** (`margin_value`): `spot − hold + perp` — unwinding consumes
+  the margin;
+- **going concern** (`capacity_equity`): `spot + perp − maintenance` — the hold
+  is still the account's cash, and the venue execution line is the maintenance
+  the model already charges.
+
+That needs the input to carry the live equity beside the forced-close one
+(today `venue_equity_usd` is both). Until then the mirror systematically
+under-lends a hedged book — and a hedged book is the product.
 
 ### The open coverage gap: the mirror prices 2 of the venue's 11 dexes
 
