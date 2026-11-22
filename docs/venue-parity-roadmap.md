@@ -520,6 +520,24 @@ market. `unifiedAccount` is the mode the margin agents use and is served: its
 identity `available + maintenance == the collateral token's balance` holds to
 the digit (the live check behind `relay-39b81f9b`).
 
+**A multi-dex portfolio with live operations, measured.** One account (`…aa10`)
+dealt 300/150/100 to the default, `xyz` and `para` collateral pools: three
+separate `clearinghouseState` views, each exactly its own ledger (cross margin
+never crossed a dex). BTC 0.003 (default), `xyz:SP500` 0.02 and `para:ANTH` 0.5
+were open at once; BTC was then closed while xyz/para stayed live and
+`xyz:GOLD` 0.01 was opened and closed on the xyz dex. Every dex ended flat, and
+the statement's per-dex values sum exactly to the whole: 299.83316535 +
+149.90563918 + 99.716419665 = **549.455224195**, and 550 − 0.2835 realized −
+0.261275805 fees = the same number. The per-dex view is the honest unit: a
+HIP-3 position lives with its dex's collateral, not a shared pot.
+
+**A fail-safe, not a blind spot: partial agent discovery.** The indexer's agent
+fallback has a 2 s budget inside the 5 s venue tick; it was exhausted 4 times in
+three hours, both pairs during the 13:40 chain stall. The event path is primary
+and the fallback keeps its partial set, so this is an over-approximation
+(conservative classification), not a missing account — the design says so at the
+line, and it is named here so a future scan does not read it as noise.
+
 ### 2026-11-22 audit pass 2: the ρ table was history, the margin math is exact, the maker fills from the market
 
 **The venue-ρ table was append-only, and the operator read the history.** The
