@@ -572,6 +572,65 @@ positions on two dexes (a real multi-loan venue book). Multi-PnL:
 account A 24 fills / fees 0.2614 / realized −0.1325 / unrealized +0.0036;
 account B+C 4 fills / fees 0.0078 / realized −0.0024 / unrealized +0.0065.
 
+### The 2026-11-22 second audit: information flow, liveness, and the control plane
+
+**The venue control plane exists and is not exposed.** Port 8091 carries
+`/control/{deal,order,advance,crash,rally,stall,set_book,set_funding,
+set_account,clear_account,clear_fixture,state/{address},reset,epoch_new}`.
+Only 8090 is NodePort-exposed (31090); 8091 is cluster-only, so a host-side
+scenario runner cannot drive controlled scenarios without a port-forward. This
+is the missing piece for the "scenario matrix": `advance` crosses funding
+boundaries and runs the liquidation waterfall, `crash`/`rally` move mark+oracle,
+`set_book` scripts depth. **Do not advance the shared clock** while the nine
+live fixtures hold positions (it charges their funding and can liquidate the
+HF-1.03 book); a scenario run needs a dedicated epoch/account, not this mirror.
+Recommendation: expose 8091 as a NodePort (additive) or document the forward.
+
+**Funding is modelled faithfully — confirmed, not assumed.** `sim/funding.rs`
+accrues one *whole hourly* payment per crossed boundary at the live,
+oracle-priced rate, from the account's stamp to now; 14 funding tests pass. A
+position held under an hour pays nothing — the real venue's rule, so a
+short-horizon strategy's PnL is faithful (it simply never crosses a boundary).
+
+**Venue-account ticks are refused on a spot/perp read-skew.** Measured on the
+unified agent `0xA2dF…` at 02:05:54: the indexer paired a *post-recall* spot
+total (0.5) with a *pre-flatten* perp hold (0.59045) and hit its own
+`hold ≤ total` invariant, recording a gap. The value is never wrong (fail-
+closed), but the producer composes a spot snapshot and a perp snapshot taken at
+different instants. Root cause: non-atomic snapshot composition, not the venue.
+A re-read within a small skew window (or clamping a transient over-hold) would
+keep the series continuous.
+
+**The position-book fold drops closes whose opening predates its window** (6 in
+2 h, including loan `0x38fec111…`). It deliberately refuses to invent an
+opening block and advances the cursor, so `position_state` goes stale for those
+positions. The operator's `positions` table stays authoritative; only the
+indexer's read model is affected.
+
+**Two sale-cost gaps in the quote path.** `swap rate fetch failed … class
+no_pool` (8 in 2 h) — a collateral token (`0x6a8E…`) has no pool to sell the 1 %
+fee/liquidation into; and the underwriter logs `escrow sale: re-priced at the
+measured cost (worse than the indicative prepare figure)` (4). The indicative
+prepare is optimistic by the measured sale cost, and an unpriced token has no
+sale at all.
+
+**Engine freshness probe is transient, engine is healthy.** 7 × `venue engine
+UNOBSERVED` in 6 h came from `engine:8080/status` being momentarily unreachable
+while the engine itself followed at lag 0–4 blocks (4 804 windows applied). When
+it happens, marks are held last-good and pollers write gaps — the fail-safe, but
+worth a retry before declaring unobserved.
+
+**Top-up verified end-to-end.** `top-up --amount 0.05` quoted `total_pull_wei =
+0.05/0.99 = 50505050505050506`, approved exactly that, pulled exactly that from
+the wallet, credited the CM the net 0.05 (0.12 → 0.17), and sold the
+0.00505 fee in-kind. The 19 Nov "approve exactly, empty revert" bug is gone: the
+tool now reads the gateway's total-pull quote. The remaining question is policy,
+not mechanics — a top-up is charged the 1 % *creation* fee.
+
+**Post-fix close is clean:** a simple same-chain create→close produced zero
+Enforcement proposals and zero cancellations under `rel-19415ef7` (pre-fix the
+same path produced 6).
+
 ### Reality check against the 19 Nov report's blockers
 
 The report's four standing complaints, checked against today's mirror rather than
