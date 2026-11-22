@@ -274,6 +274,25 @@ position within a level** (a maker's place among the displayed size is not
 tracked beyond "behind the level"), and **trade prints** (the mirror sees
 book snapshots, not the venue's trade tape, so a fill is inferred from a cross).
 
+### `portfolio` served another account's PnL (relay-91ab1112, 2026-11-22)
+
+The venue's `/info portfolio` is the account value/PnL history. The sim keeps no
+history (every read is priced from live state), and its fallback forwarded the
+request to the real venue with the **neutral user** — so a simulated account was
+served a stranger's series. Measured on the disposable account whose book held
+448 USDC: `day` read `17.921652` and `perpDay` a flat `0.1`. A strategy reading
+that history would size on someone else's equity.
+
+The read is now refused by name for a simulated account: HTTP 422, *"portfolio
+history is not tracked for a simulated account (the sim prices every read from
+live state); the account's fills and their closedPnl are in userFills"*. A real
+account's read still passes through, and `userFills` — the ledger that
+reconciles to the last decimal (`value = dealt + Σ closedPnl − Σ fees +
+Σ funding + Σ unrealized`, diff `0.0` on three measured accounts) — is
+unchanged. The other account-shaped reads (`userFees`, `referral`,
+`userRateLimit`, `isVip`, `userRole`) keep the neutral answer: their shape is
+account-independent, so it is not a fabricated balance.
+
 ### The maker lane and book impact, measured live (2026-11-22)
 
 A maker/taker cycle on `para:SMH` with two fresh dealt accounts (no loan
