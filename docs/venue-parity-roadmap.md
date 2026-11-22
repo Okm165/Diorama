@@ -237,14 +237,30 @@ samples), so the charged sample is not any value the feed is known to have
 served around the boundary: the rate that priced the boundary came from a
 sample this process captured but did not expose.
 
-The lane now logs every charge — coin, boundary, rate, `rate_source`
-(`pre_boundary` | `current_fallback`), oracle, size and payment — so the 10:00
-boundary is decided by the mirror's own log rather than a re-derivation, and a
-one-second sampler records the served rate on both sides across it. Until that
-reads, the honest statement is: the mechanism is pinned by a unit test, the
-para:SMH boundary matched exactly, the BTC boundary did not, and the cause is
-open (a transient served sample or a stale-frame overwrite are the two
-candidates; the feed accepts every ctx write without an ordering check).
+The lane now logs every charge — coin, boundary, rate, `rate_source`, oracle,
+size and payment — and a one-second sampler recorded the served rate on both
+sides across the next boundary. **The cause was the sampling rule, and the 10:00
+boundary read proves it.**
+
+Across 39 one-second samples around 10:00 the served rate moved
+`0.0000125 → 0.0000115296 → 0.000003993 → 0.0000023271` and back — a 3–4× swing
+in seconds, identically on the mirror and the real venue. The venue's *charged*
+rate is the **average of the hour's 5-second premium samples** (docs), and its
+hourly series is smooth (`−0.0000115 … 0.0000125`). Pricing a boundary with the
+last sample the tick saw is therefore pricing an instantaneous value as if it
+were the hour's mean; at 10:00 the last sample happened to equal the average
+(`0.0000125`, charged exactly) and at 09:00 it did not (`0.000007361`).
+
+### An hour's funding is its time-weighted average rate (relay-b2b3c4cd, 2026-11-22)
+
+The feed keeps each coin's served rate as a step history — `(at_ms, rate)`
+appended on every context write, three hours retained — and `accrue_dex` charges
+each boundary the **time-weighted average over the hour**, logging its coverage
+(`hour_average` / `partial_hour_average` + `covered_s`, so a boot or a gap names
+the missing part instead of hiding it). Pin: half an hour at `0.0000125` and
+half at `0.0000375` charges `0.000025`, never the last sample. The 11:00
+boundary is the first to run the new estimator (rolled at 10:06, so it reports
+`partial_hour_average` with ~53 min covered); the fully covered read is 12:00.
 
 ### The displayed level is ahead of a maker that joined it (relay-1182b391, 2026-11-22)
 
