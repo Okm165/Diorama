@@ -373,6 +373,44 @@ than assumed:
    the bridge's refusal speech already uses. Do not roll this alone: it
    belongs with the next operator roll.
 
+### Root cause of every wedged unified creation: the beacon's implementation (2026-11-22)
+
+The `MarginBridging` stall, the "no order path" symptom and the operator's
+phantom exposures are one fault, measured end to end on a fresh cross-chain
+loan (`0x51bb077e…`, 0.1 WETH-1 → 87.158 USDC):
+
+- Phase-2's batch calls `UnifiedMarginAgent.registerAgentWallet` (`0x99630f7d`)
+  at instruction 7 and reverts with **empty data** (`InstructionFailed(7, 0x)`).
+- The payload is well formed (33-byte name, two 65-byte signatures), the
+  factory deploys at the predicted address, the beacon and its implementation
+  hold code, and the CoreWriter mock accepts the `addApiWallet` action.
+- **The live implementation (`0x4AA02a23…`) does not contain the selector
+  `0x99630f7d` at all; the staged one (`0x8C4f85c6…`, the timelock's upgrade
+  target) does.** A dispatcher miss is exactly an empty revert. The mirror's
+  last restore left the beacon on the older implementation.
+- Repair: `upgradeTo(0x8C4f85c6…)` on the beacon `0x9b1F08…` as its owner (the
+  timelock), executed early on the mirror because every unified creation was
+  blocked. The exact batch calldata then returns success, the keeper's retry
+  lands, and the loan reaches `Active`. All four agents on that beacon
+  (`0x8ff0…`, `0x2a48…`, `0x609e…`, `0xee98…`) still read `owner`/
+  `portfolioId` after the upgrade; the agent on the other beacon
+  (`0xacfb…`) was untouched.
+- Consequence for the tooling: **`registerAgentWallet` cannot be exercised
+  against a downgraded beacon** — any "register rejected" measurement taken
+  before this repair was a dispatcher miss, not a policy refusal.
+
+**Venue term while positions are open (measured):** `V = spot_total − spot_hold
++ perp_equity`. The new loan read `87.141` flat, then `82.449` the moment three
+positions opened (hold `4.643`) — HF `1.6697 → 1.5796` — and the term did not
+recover on a hand-back because the margin stayed reserved. Locked margin is
+not lender collateral; that is the correct, and economically load-bearing,
+shape.
+
+**Tool gap found:** `draw` cannot resolve a cross-chain unified loan's
+collateral reference ("the unified loan projection is account-scoped: no
+collateral asset"), so a draw against a chain-1-collateral loan is not
+drivable from user-sim yet.
+
 ## Book-simulation ideas (the "proper sims of books" ask)
 
 - **Depth regeneration (investigated 2026-11-21, deliberately not built):**
