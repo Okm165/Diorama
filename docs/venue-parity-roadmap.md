@@ -509,6 +509,59 @@ hours** (the 1,647 rewind-era failures are closed). `indexer_db`:
 loans (oldest 175 h), no new Failed. Gateway healthy; the only advisory is the
 named venue-σ coverage boundary.
 
+### 2026-11-22 audit pass 2: the ρ table was history, the margin math is exact, the maker fills from the market
+
+**The venue-ρ table was append-only, and the operator read the history.** The
+calibration upserted each cycle but never removed a pair it stopped estimating.
+Measured: the 13:50 cycle wrote 946 fresh pairs while **5,286 rows from the
+pre-incident cycle (window_end 11:00)** still sat in
+`venue_asset_correlations` — for both `hyperliquid` and `coin`. The operator's
+freshness gate reads every row, so it emitted a standing **80-instrument**
+"measured venue correlations are stale" warning every 10 minutes, while pricing
+exactly the variance-maximising endpoint it prices for a pair with **no row at
+all** (the pair's row was stale, so it never earned the measured ρ). The pass
+now prunes, from the DB clock, the rows it did not touch — scoped to the venues
+it serves plus `coin` (the coin↔coin rows share the table and are the pass's
+last write). Rolled `risk-engine:rel-82529767`: 3,272 + 3,003 rows pruned,
+**0 stale rows remain** (all window ends 73 min, bound 150 min), the warning is
+gone, gateway healthy.
+
+**The margin and liquidation math is exact against the real rules.** Maintenance
+is half the initial margin at max leverage (docs: 1.25% at 40×), tiered per
+asset. With three cross positions (BTC 0.01 @40×, ETH 0.2 @25×, AVAX 2 @10×,
+notional 961.81) the mirror served `crossMaintenanceMarginUsed` **15.082975** =
+607.13/80 + 341.34/50 + 13.34/20 = 7.589 + 6.827 + 0.667. The BTC liquidation
+price **3,691.5815** is the exact root of `account_value(P) = maintenance(P)`
+(equity 7.9561 vs maintenance 7.9559 at P). The docs' closed-form estimate is
+*less* exact with another position open (it holds the other legs' maintenance
+constant and gives ≈2,960), so the served value is the better number, not a
+drift. Leverage does not move a cross position's liquidation price, exactly as
+the docs say. `withdrawable` = AV − max(initial at the setting, 10% of
+notional) — a declared transfer bound (the docs do not state a formula); it is
+conservative, never optimistic.
+
+**A resting maker fills from the real market, not only from our taker.** BTC bid
+60,689 / ask 60,690; a 0.01 resting buy at 60,689 filled **within 5 s** as the
+real ask ticked down to 60,684, with no simulated taker involved. The passive
+lane is live-from-deltas, which is what a market-making strategy's runtime
+needs.
+
+**The maker cycle had a silent side effect.** Its taker's crossing IOC opens a
+position the maker's flatten does not touch; two runs left 0.2 ETH and 2 AVAX on
+the taker, and the verdict never said so. The cycle now reads the taker's size
+before, restores exactly the delta after (HIP-3-aware), and reports
+before/after/residual (verified: before 0 → after 4 → restored 4 → residual 0).
+
+**Cross-dex funding history is exact.** At 14:00Z the mirror's `fundingHistory`
+matched the real venue's to the last digit for `HYPE`, `xyz:NVDA`, `xyz:ANT` and
+`para:SMH` (same rate, same premium, same timestamp) — the per-dex lane carries
+each dex's own rate.
+
+**DB growth is bounded by policy, not accident.** `indexer_db` is 4.8 GB
+(`venue_account_ticks` 1.5 GB / 1.87M rows, `prices` 1.28 GB, book snapshots
+1.1 GB); retention is declared (93-day TOML window, floor 90 days ≥ the
+estimator's 60-day window) and enforced by the indexer's retention monitor.
+
 ### 2026-11-22 11:40Z: the clean-restart schedule replaced 298k blocks — and how it was put back
 
 **What happened.** The hourly `DALOC-ANVIL-RESTART` fired and the chain came back
