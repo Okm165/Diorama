@@ -628,6 +628,11 @@ pub(crate) fn settle_spot_maker(
 /// The computed account figures, one pass over the positions.
 pub(crate) struct AccountView {
     pub margin_summary: MarginSummary,
+    /// The perp wallet's own cash-and-pnl figure, **without** the unified
+    /// summary's carried spot hold. The order lane and the waterfall read this
+    /// (the figure they have always used); the served `margin_summary` is the
+    /// real venue's shape.
+    pub(crate) perp_account_value: Decimal,
     pub cross_margin_summary: MarginSummary,
     pub cross_maintenance_margin_used: Decimal,
     pub withdrawable: Decimal,
@@ -828,7 +833,31 @@ fn assemble(
     // contribution: value minus their margins, raw minus (margin − signed
     // value).
     let cash = account.perp_balance(dex) + totals.isolated_margin;
-    let total_raw = cash - totals.cost_basis;
+    let perp_total_raw = cash - totals.cost_basis;
+    // The perp wallet's own value: the figure every trigger reads. It keeps the
+    // legacy ledger convention (an isolated open debits the ledger by its
+    // margin, which `cash` adds back).
+    let perp_account_value = perp_total_raw + totals.signed_value;
+    // The **served** unified summary carries the spot `hold` as cash. The real
+    // venue's perp `accountValue` includes the collateral moved in from spot:
+    // the committed capture reads spot `161.455092` with hold/perp
+    // `12.955364`, and the `0x75b9` book reads hold `140.678682` with perp
+    // `−108.417391`. The consumer's whole is
+    // `(spot_total − spot_hold) + perp_account_value`; a unified summary that
+    // omits the hold therefore understates the account by the whole position
+    // margin — the live `para:SMH` book measured `41.209924` where the venue
+    // equity was `42.4400`, short by its `1.23126` hold. The ledger already
+    // adds the isolated margin once (`cash` above); the served summary adds it
+    // once more so the margin the live open debited is carried as cash. The
+    // add is **served-only**: `perp_account_value` above keeps the order lane
+    // and the waterfall exactly where they were. A cross position's margin is
+    // a reservation on the wallet's own cash (not moved in), so it is not
+    // re-added — the positions-only mode-switch regression pins that.
+    let served_cash = match account.mode {
+        UserAbstraction::UnifiedAccount => cash + totals.isolated_margin,
+        _ => cash,
+    };
+    let total_raw = served_cash - totals.cost_basis;
     let account_value = total_raw + totals.signed_value;
     let margin_summary = MarginSummary {
         account_value,
@@ -836,8 +865,8 @@ fn assemble(
         total_raw_usd: total_raw,
         total_margin_used: totals.margin,
     };
-    let cross_account_value = account_value - totals.isolated_equity;
-    let cross_raw = total_raw - totals.isolated_equity + totals.isolated_signed;
+    let cross_account_value = perp_account_value - totals.isolated_equity;
+    let cross_raw = perp_total_raw - totals.isolated_equity + totals.isolated_signed;
     let cross_margin_summary = MarginSummary {
         account_value: cross_account_value,
         total_ntl_pos: totals.cross_notional,
@@ -846,6 +875,7 @@ fn assemble(
     };
     Ok(AccountView {
         margin_summary,
+        perp_account_value,
         cross_margin_summary,
         cross_maintenance_margin_used: totals.cross_maintenance,
         withdrawable: withdrawable_of(cross_account_value, totals)?,
@@ -1232,7 +1262,7 @@ pub(crate) fn available_margin(
     dex: &str,
     view: &AccountView,
 ) -> Result<Decimal> {
-    let mut value = view.margin_summary.account_value;
+    let mut value = view.perp_account_value;
     if account.mode == UserAbstraction::UnifiedAccount {
         value = add(
             value,
@@ -2164,6 +2194,64 @@ mod tests {
         assert!(available_after_maintenance(&account, &feed)
             .unwrap()
             .is_empty());
+    }
+
+    /// The **served** unified perp summary carries the spot `hold` as cash, so
+    /// the consumer's whole (`(spot_total − spot_hold) + perp_account_value`)
+    /// is `spot + realized + unrealized` — the real venue's unified equity.
+    /// Committed captures pin the shape: spot `161.455092` with hold/perp
+    /// `12.955364`, and the `0x75b9` book hold `140.678682` with perp
+    /// `−108.417391`. The live `para:SMH` book measured `41.209924` where the
+    /// venue equity was `42.4400`: the perp summary omitted its `1.23126`
+    /// hold. The triggers keep reading `perp_account_value`.
+    #[test]
+    fn the_unified_perp_summary_carries_the_spot_hold_as_cash() {
+        let feed = feed_with_meta(&[("BTC", "110.0", "110.0")], meta_with_table("BTC", 10));
+        let mut account = Account {
+            mode: UserAbstraction::UnifiedAccount,
+            ..Account::default()
+        };
+        // The live lane debits an isolated open's margin: 50 spot, and the
+        // ledger is 10 short before the position's own value.
+        account
+            .credit_perp("", Decimal::from(-10), "test isolated debit")
+            .unwrap();
+        account.positions.insert(
+            "BTC".into(),
+            Position {
+                szi: Decimal::ONE,
+                entry_px: Decimal::from(100),
+                leverage: LeverageType::Isolated,
+                leverage_value: 10,
+                margin_used: Decimal::from(10),
+                isolated_margin: Decimal::from(10),
+                funding_all_time: Decimal::ZERO,
+                funding_since_open: Decimal::ZERO,
+                funding_since_change: Decimal::ZERO,
+            },
+        );
+        account.spot.insert(
+            COLLATERAL_TOKEN,
+            SpotEntry {
+                coin: "USDC".into(),
+                total: Decimal::from(50),
+                hold: Decimal::ZERO,
+                entry_ntl: Decimal::ZERO,
+            },
+        );
+        let v = view(&account, &feed, "").unwrap();
+        // The perp summary carries the 10 margin plus the 10 unrealized: the
+        // real venue's shape.
+        assert_eq!(v.margin_summary.account_value, Decimal::from(20));
+        // The triggers keep the perp-cash figure (unrealized only).
+        assert_eq!(v.perp_account_value, Decimal::from(10));
+        // The consumer's whole: post-hold spot 40 + perp 20 = spot + pnl.
+        let hold = unified_hold(&account, &feed, COLLATERAL_TOKEN).unwrap();
+        assert_eq!(hold, Decimal::from(10));
+        assert_eq!(
+            Decimal::from(50) - hold + v.margin_summary.account_value,
+            Decimal::from(60)
+        );
     }
 
     /// Maintenance is never fabricated: no meta is warming, an unknown asset

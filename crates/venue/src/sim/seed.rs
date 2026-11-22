@@ -179,9 +179,21 @@ impl AccountSeed {
         // resulting fake deficit.
         if let Some(summary) = &self.margin_summary {
             let isolated = isolated_margin_total(account, dex);
+            // The seed stores the perp ledger's cash convention. A standard
+            // account's isolated open debits the ledger by its margin and the
+            // served summary re-adds it; a **unified** account's served summary
+            // also carries the *whole* position margin as cash (the spot
+            // `hold`, which the real venue's perp `accountValue` includes). The
+            // live ledger already debits the isolated part, so the seed
+            // subtracts the isolated margin once more and the cross margin once,
+            // reproducing the patch's `totalRawUsd` exactly.
+            let margin = match account.mode {
+                UserAbstraction::UnifiedAccount => add(isolated, isolated, "seed isolated margin")?,
+                _ => isolated,
+            };
             let cost = cost_basis_total(account, dex)?;
             let perp = add(
-                sub(summary.total_raw_usd, isolated, "seed perp raw")?,
+                sub(summary.total_raw_usd, margin, "seed perp raw")?,
                 cost,
                 "seed balance",
             )?;
@@ -586,6 +598,46 @@ mod tests {
         assert_eq!(
             live.margin_summary.account_value,
             "-5.74632".parse().unwrap()
+        );
+    }
+
+    /// **A unified seed with an isolated position reproduces the patch
+    /// exactly.** The live ledger debits an isolated open's margin and the
+    /// served unified summary re-adds it as cash (the spot `hold`); the seed
+    /// therefore stores the balance net of the margin **twice**, so the served
+    /// `totalRawUsd` and `accountValue` are the patch's own figures. The
+    /// consumer's whole is `(spot_total − hold) + accountValue` = spot + pnl.
+    #[test]
+    fn a_unified_isolated_seed_reproduces_the_served_summary() {
+        let seed: AccountSeed = serde_json::from_str(
+            r#"{
+                "marginSummary": {"accountValue": "10.0", "totalNtlPos": "100.0", "totalRawUsd": "-90.0", "totalMarginUsed": "10.0"},
+                "assetPositions": [{
+                    "type": "oneWay",
+                    "position": {
+                        "coin": "BTC", "entryPx": "100.0", "leverage": {"type": "isolated", "value": 10},
+                        "marginUsed": "10.0", "maxLeverage": 10, "positionValue": "100.0",
+                        "returnOnEquity": "0", "szi": "1.0", "unrealizedPnl": "0",
+                        "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
+                    }
+                }],
+                "spotBalances": [{"coin": "USDC", "token": 0, "hold": "0", "total": "50.0", "entryNtl": "0"}],
+                "userAbstraction": "unifiedAccount"
+            }"#,
+        )
+        .unwrap();
+        let mut account = Account::default();
+        seed.apply_to(&mut account, 0).unwrap();
+        let feed = feed_with_meta(&[("BTC", "100.0", "100.0")], meta_with_table("BTC", 10));
+        let live = view(&account, &feed, "").unwrap();
+        assert_eq!(live.margin_summary.total_raw_usd, "-90.0".parse().unwrap());
+        assert_eq!(live.margin_summary.account_value, "10.0".parse().unwrap());
+        let served_hold = crate::sim::account::unified_hold(&account, &feed, COLLATERAL_TOKEN).unwrap();
+        assert_eq!(served_hold, "10.0".parse().unwrap());
+        assert_eq!(
+            "50.0".parse::<Decimal>().unwrap() - served_hold + live.margin_summary.account_value,
+            "50.0".parse::<Decimal>().unwrap(),
+            "the whole account is the spot balance (no pnl)"
         );
     }
 
