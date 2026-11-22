@@ -142,12 +142,32 @@ settle(bytes32 positionId, uint256 capitalAmount, uint256 exposureAmount)
     external onlyProofExecutorOrExecutor
 ```
 
-`_settle(pid, 0, registered_exposure)` subtracts the exposure, reduces
-`totalExposure` by the effective amount, and — when the position's exposure reaches
-zero — releases its remaining risk escrow back to its funders. That is exactly the
-state the seven cancelled books are in: exposure registered, no debt, cash already
-back in `unclaimed`/idle. So the fix is not a loss write-off (which would book a
-loss the evidence does not support); it is a **settlement instruction**.
+**Where the cash actually is (measured, and it corrected two earlier guesses).**
+The underwriter's USDC balance is `6,997,275.176569`; its tracked partition is
+`bufferEscrowed 0.162595 + totalIdle 6,987,271.645401 + unclaimedTotal
+7,456.435412 + totalEscrow 0 = 6,994,728.243408`. The difference is
+**2,546.933161 USDC of untracked surplus** — and `2,546.933161 − 2,544.933161
+(the stranded principals) = exactly 2.000000`, two 1-USDC activation fees.
+`idleOf(vault) = 0`, so the surplus is not protocol idle either: the money is in
+the vault and attributed to **nobody**. Each position's `positionFigures` still
+reads `supply == exposure`, `accReturned == 0`, `escrow == 0`, so the funders'
+shares are live and cannot be claimed. (The earlier "cash already returned to
+unclaimed/idle" reading was wrong; so was "writeOff is the fix".)
+
+So the recovery instruction is precise and flag-free:
+
+```
+settle(pid, capitalAmount = registeredExposure, exposureAmount = registeredExposure)
+```
+
+`_settle` passes the `actual >= tracked + capitalAmount` check because the surplus
+is already there, credits the cash to the position's funders via `creditCash`
+(`supply > 0`), subtracts the exposure from `totalExposure`, and `_syncTracked`
+returns the partition to `balance == tracked`. `settle(pid, 0, exposure)` would
+clear the exposure but leave the 2,546.93 untracked — the attribution is the
+point. A `writeOff` would additionally book a loss the evidence does not support
+(and needs a flag no cancelled creation can ever have). Only the **executor/proof
+path** to send the `settle` is missing.
 
 What is missing is only the way to send it: a cancelled creation has no proof
 batch, and `settle` is restricted to `PROOF_EXECUTOR`/`LIQUIDATION_EXECUTOR`.
