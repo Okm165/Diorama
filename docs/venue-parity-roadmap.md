@@ -98,6 +98,39 @@ cancel path, not (on this evidence) a capital loss: the fix is to pair
 cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
 of cancelled rows until it is fixed.
 
+### The spot lane, traded live — and a fee-unit defect fixed (relay-62b9d933, 2026-11-22)
+
+A full spot round trip through the venue's own `/exchange` (`@151` = spot UETH/USDC,
+the agent account, keyless devnet envelope):
+
+| | |
+|---|---|
+| buy `0.01 UETH` | fill `1662.2`; `fee 0.0116354` under `feeToken: UETH`; UETH fell by **0.000007** |
+| sell `0.0099 UETH` | fill `1662.1`; `fee 0.011518353` under `feeToken: USDC` |
+| costs | 7 bp per side (spot base tier), charged in the **received** token |
+| venue rules hit | **$10 minimum order value** (a 0.002 order was refused by name); **size lot = 4 decimals** (the fee-in-kind leaves `0.000093 UETH`, below the lot, so it cannot be sold) |
+
+**The defect the trade exposed:** the buy's `fee` was the **quote value** while
+`feeToken` named the **base** token. A client reading the pair saw a fee
+`0.0116354 UETH` (≈ $19.3) for a $16.6 fill — **price× too large** — while the
+account had actually paid `0.000007 UETH`. Perps were already consistent (both
+units are USDC); only spot buys disagreed, in all three spot paths (taker,
+matched maker, passive maker).
+
+Fixed in `relay-62b9d933`: `spot_fee_in_received` converts the quote fee to the
+received token (base on a buy, quote on a sell) for the ledger record; the cash
+deduction is unchanged. 392 venue tests green, with a pin
+(`fill.fee == 0.7 PURR`, not 70 USDC). Verified live after the roll: a `0.02`
+buy at `1660.5` records `fee 0.000014` under `UETH` and the balance moves
+`0.000093 → 0.020079` (exactly `0.02 − 0.000014`); the sell records
+`0.0232512` under `USDC`. Round-trip cost ≈ 12.2 bp = two 7 bp fees less the
+favourable fill. Deploy pin `b6ea74b`.
+
+**Remaining spot friction (tool, not venue):** a fee charged in the received
+token leaves a sub-lot dust that the venue's own lot rule refuses to sell, so a
+strategy that round-trips spot must floor to the lot and carry the dust.
+`venue-order` has no `--size max` that floors to the pair's lot; recorded.
+
 ### The stranded exposure is D-73, and the health surface now names its size (rel-50d6dd71, 2026-11-22)
 
 The cancel path has **no settlement exit to pair**: `report_applied_anomalies`
