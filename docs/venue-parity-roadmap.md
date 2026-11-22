@@ -631,6 +631,36 @@ not mechanics — a top-up is charged the 1 % *creation* fee.
 Enforcement proposals and zero cancellations under `rel-19415ef7` (pre-fix the
 same path produced 6).
 
+### The two-arm equity fix — implemented, rolled, and live (`rel-f540696d`)
+
+The decision recorded above is now code. The producer's served
+`account_equity_usd` is the *post-hold* spot component, so feeding it to a fold
+that also subtracts `venue_maintenance_usd` charged the held margin **twice**:
+the hold is still the account's own money (it backs the position and returns on
+close), and on the mirror the hold equals the maintenance line, so the charge
+was exactly 2 × margin. That is the hedge measurement's unexplained
+`4.2 + 1.69 ≈ 7.0` of 9.86.
+
+The fix: the projection now serves the raw `spot_collateral_hold_usd` (it was
+persisted but never served), and the PM input prices the **pre-hold** equity —
+`whole_account_equity + spot_hold` — leaving the waterfall's one maintenance
+deduction as the only charge. Forced close realizes the hold back into cash, so
+`pre-hold − close cost` is the right forced figure; going concern deducts
+maintenance once, so `pre-hold − maintenance` is the survivable figure. The HF
+breach arm keeps the conservative post-hold figure (`whole_account_equity_usd`
+is untouched) — exactly the two arms the decision called for.
+
+Tests: client 184, operator 565, indexer 292 — all green. Rolled as
+`rel-f540696d` (operator + indexer; pins `6788a074`).
+
+**Live A/B on one book** (unified `0x79d91f36…`, 0.04 WETH escrow, 34.66 USDC
+bridged, debt 34.66): flat, `capacity_equity 61.488`; short 0.01 ETH opened
+(notional 16.69, spot hold 0.8344): `capacity_equity 61.282` — a **0.34 %**
+move, where the pre-fix double deduction would have charged 2 × 0.8344. The
+HF-side `venue_equity_usd` correctly stays the conservative post-hold breach
+figure (34.266 → 33.416, the hold removed once for the breach comparison). The
+book was then flattened and closed cleanly.
+
 ### Reality check against the 19 Nov report's blockers
 
 The report's four standing complaints, checked against today's mirror rather than
