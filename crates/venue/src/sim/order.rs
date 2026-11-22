@@ -661,7 +661,8 @@ impl Sim {
             return self.place_spot(feed, placer, req, &pair);
         }
         let meta = feed.meta_for_lookup(&req.coin);
-        validate_order(feed, meta.as_ref(), req)?;
+        let position_szi = self.signed_position(address, &req.coin)?;
+        validate_order(feed, meta.as_ref(), req, position_szi)?;
         self.pre_place_refusals(feed, address, req, meta.as_ref())?;
         // A trigger arms instead of walking.
         if let Some(trigger) = req.trigger {
@@ -1255,7 +1256,14 @@ impl Sim {
         // docs sentence; the close is a market order to the book).
         self.expire_self_crossing(address, feed, &req)?;
         let resting = self.resting_orders(None)?;
-        let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), &req, &resting)?;
+        let (legs, filled, avg_px) =
+            walk_served_book(
+                feed,
+                meta.as_ref(),
+                &req,
+                &resting,
+                self.signed_position(address, coin)?,
+            )?;
         let leverage = self.leverage_for(address, coin, meta.as_ref())?;
         let facts = super::account::FillFacts::close(coin, req.side(), filled, avg_px, leverage);
         let effect = self.with_account_now(address, feed, |account| {
@@ -1370,7 +1378,8 @@ impl Sim {
         // oracle moves after placement). A maker whose account cannot carry
         // the fill is canceled (the venue's `marginCanceled`), never filled.
         let resting = self.remargin_makers(feed, req, resting)?;
-        let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), req, &resting)?;
+        let position_szi = self.signed_position(address, &req.coin)?;
+        let (legs, filled, avg_px) = walk_served_book(feed, meta.as_ref(), req, &resting, position_szi)?;
         let setting = self.leverage_setting_for(address, &req.coin, meta.as_ref())?;
         let notional = super::account::mul(filled, avg_px, super::account::FILL_NOTIONAL)?;
         let facts = super::account::FillFacts {
@@ -2135,6 +2144,16 @@ pub(crate) fn crosses(feed: &MarketFeed, req: &Order, resting: &[RestingOrder]) 
     })
 }
 
+impl Sim {
+    /// The account's signed position on the coin, or `None` when the account
+    /// is unknown or flat — the input the minimum-value exception reads.
+    fn signed_position(&self, address: Address, coin: &str) -> Result<Option<Decimal>> {
+        Ok(self
+            .account(address)?
+            .and_then(|account| account.positions.get(coin).map(|p| p.szi)))
+    }
+}
+
 /// Walk the served book (the live depth minus what the devnet already
 /// consumed) and validate the request: positive size, real depth within the
 /// limit (an `Ioc`; a resting tif takes the rest path instead).
@@ -2143,8 +2162,9 @@ fn walk_served_book(
     meta: Option<&crate::wire::Meta>,
     req: &Order,
     resting: &[RestingOrder],
+    position_szi: Option<Decimal>,
 ) -> Result<(Vec<Candidate>, Decimal, Decimal)> {
-    validate_order(feed, meta, req)?;
+    validate_order(feed, meta, req, position_szi)?;
     let now = crate::now_ms();
     let book = feed.book(&req.coin, now).ok_or(Error::Warming)?;
     let (legs, filled, avg_px) = walk(&book, req, resting)?;
@@ -2946,6 +2966,51 @@ mod tests {
         let mut o = ioc(Side::Buy, "0.1");
         o.limit_px = Some("101".parse().unwrap());
         assert!(sim.order(&feed, a, &o).is_ok(), "a valid order fills");
+    }
+
+    /// The $10 minimum **exempts a reduce-only order that fully closes the
+    /// position** (exchange docs: "an order that exactly closes a position
+    /// with reduce-only bypasses this minimum"). Measured live 2026-11-22: a
+    /// `0.006 ETH` long worth `$9.98` could not be sold — the mirror stranded a
+    /// position the real venue lets out, and a dust liquidation would be
+    /// refused by the book and escalate to the vault.
+    #[test]
+    fn a_reduce_only_full_close_below_the_minimum_is_accepted() {
+        let feed = feed_with_book(
+            book("ETH", &[("98.6", "5")], &[("98.8", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "100");
+        // 0.1013 × 98.8 = 10.0104 ≥ $10 to open; at the bid it is 9.988.
+        let mut open = ioc(Side::Buy, "0.1013");
+        open.limit_px = Some("98.8".parse().unwrap());
+        sim.order(&feed, a, &open).expect("the open clears the minimum");
+        // A partial reduce-only is not a full close: the minimum still binds.
+        let mut partial = ioc(Side::Sell, "0.05");
+        partial.reduce_only = true;
+        partial.limit_px = Some("98.6".parse().unwrap());
+        let err = sim.order(&feed, a, &partial).unwrap_err();
+        assert!(format!("{err}").contains("minimum"), "{err}");
+        // A full close without the reduce-only flag is not the exempt shape.
+        let mut close_any = ioc(Side::Sell, "0.1013");
+        close_any.limit_px = Some("98.6".parse().unwrap());
+        let err = sim.order(&feed, a, &close_any).unwrap_err();
+        assert!(format!("{err}").contains("minimum"), "{err}");
+        // The full reduce-only close is accepted and leaves the book flat.
+        let mut close = ioc(Side::Sell, "0.1013");
+        close.reduce_only = true;
+        close.limit_px = Some("98.6".parse().unwrap());
+        let fill = sim.order(&feed, a, &close).expect("the exempt close fills");
+        assert_eq!(fill.total_sz, "0.1013".parse().unwrap());
+        assert!(
+            sim.account(a)
+                .unwrap()
+                .unwrap()
+                .positions
+                .get("ETH")
+                .is_none_or(|p| p.szi.is_zero()),
+            "the position is flat"
+        );
     }
 
     /// Every refusal is by name: resting orders, reduce-only that would not

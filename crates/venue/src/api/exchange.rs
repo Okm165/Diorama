@@ -156,7 +156,12 @@ fn expired(req: &ExchangeBody, now_ms: u64) -> Result<(), String> {
 
 /// The docs' pre-validation pass: `Err(reason)` refuses the whole payload
 /// with one error (the venue duplicates it n times for their clients).
-fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Result<(), String> {
+fn prevalidate(
+    state: &Arc<ApiState>,
+    user: Address,
+    orders: &[OrderAction],
+) -> Result<(), String> {
+    let account = state.sim.account(user).ok().flatten();
     if orders.is_empty() {
         return Err("venue-sim: an empty order batch is rejected (docs: pre-validation)".into());
     }
@@ -170,7 +175,12 @@ fn prevalidate(state: &Arc<ApiState>, orders: &[OrderAction]) -> Result<(), Stri
             );
         }
         let meta = state.feed.meta_for_coin(&order.coin);
-        if let Err(e) = crate::sim::validate::validate_order(&state.feed, meta.as_ref(), &order) {
+        let position_szi = account
+            .as_ref()
+            .and_then(|a| a.positions.get(&order.coin).map(|p| p.szi));
+        if let Err(e) =
+            crate::sim::validate::validate_order(&state.feed, meta.as_ref(), &order, position_szi)
+        {
             let reason = e.to_string();
             if reason.contains("too far from oracle") {
                 return Err(reason);
@@ -526,7 +536,7 @@ fn order_action(
     // The docs' pre-validation class: one error for the whole payload
     // (empty batches, non-reduce-only TP/SL, an order too far from the
     // reference price) — every status carries it, as their clients expect.
-    if let Err(reason) = prevalidate(state, orders) {
+    if let Err(reason) = prevalidate(state, owner, orders) {
         let statuses = orders
             .iter()
             .map(|_| OrderStatus::Error(reason.clone()))

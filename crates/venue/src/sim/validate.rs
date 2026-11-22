@@ -10,10 +10,14 @@ use rust_decimal::Decimal;
 
 /// The shared order validations — size, tick/lot, the $10 minimum, and the
 /// freshness window — used by the walk and every resting path.
+/// `position_szi` is the account's current signed position on the order's
+/// coin (`None` when the account is unknown or flat). Only the minimum-value
+/// exception reads it: a reduce-only order that closes the position is exempt.
 pub(crate) fn validate_order(
     feed: &MarketFeed,
     meta: Option<&crate::wire::Meta>,
     req: &Order,
+    position_szi: Option<Decimal>,
 ) -> Result<()> {
     // An unknown coin is a permanent refusal, not a warming one: the meta is
     // the venue's served universe, so a name it does not carry can never warm
@@ -50,7 +54,7 @@ pub(crate) fn validate_order(
         ));
     }
     validate_tick_lot(meta, req)?;
-    validate_min_notional(feed, req)?;
+    validate_min_notional(feed, req, position_szi)?;
     validate_price_band(feed, req)?;
     validate_order_value(feed, meta, req)?;
     // The freshness discipline (stale ≠ absent): a live-sourced book older
@@ -198,11 +202,40 @@ pub(crate) fn validate_trigger_side(
     Ok(())
 }
 
+/// Whether a reduce-only order **fully closes** the account's position on the
+/// coin: a sell against a long, a buy against a short, with size at least the
+/// position's. The venue's own exception to the minimum (exchange docs: "an
+/// order that exactly closes a position with reduce-only bypasses this
+/// minimum"); without it a position worth under $10 could never be closed and
+/// a dust liquidation would be refused by the book and escalate to the vault.
+fn closes_position(req: &Order, position_szi: Option<Decimal>) -> bool {
+    if !req.reduce_only {
+        return false;
+    }
+    let Some(szi) = position_szi.filter(|s| !s.is_zero()) else {
+        return false;
+    };
+    match (req.is_buy, szi.is_sign_negative()) {
+        (false, false) => req.size >= szi,
+        (true, true) => req.size >= -szi,
+        _ => false,
+    }
+}
+
 /// The venue's minimum order value: a perp order's notional (size × the
 /// limit, else the mark) is at least $10. The refusal is the venue's own
 /// string from the exchange docs' error sample ("Order must have minimum
-/// value of $10."), so a client matching on it sees the real message.
-pub(crate) fn validate_min_notional(feed: &MarketFeed, req: &Order) -> Result<()> {
+/// value of $10."), so a client matching on it sees the real message. A
+/// reduce-only order that fully closes the position is exempt (see
+/// [`closes_position`]).
+pub(crate) fn validate_min_notional(
+    feed: &MarketFeed,
+    req: &Order,
+    position_szi: Option<Decimal>,
+) -> Result<()> {
+    if closes_position(req, position_szi) {
+        return Ok(());
+    }
     let notional = if let Some(px) = req.limit_px {
         super::account::mul(req.size, px, "order notional")?
     } else {
