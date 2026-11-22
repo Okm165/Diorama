@@ -344,6 +344,67 @@ keeps the peak around ~20 GiB, the ~40 s chain pause lands away from the :00
 funding boundary, and every downstream consumer already treats a venue gap as
 fail-closed and self-healing.
 
+### The 2026-11-22 audit pass: what the DBs and logs actually said
+
+**Feed information flow (the mirror's core claim).** Across 15 minutes of live
+book snapshots the real venue's observation reaches the mirror's served/persisted
+book at **0.01–0.07 s average, 0.85 s worst** (`polled_at − observed_at` on
+`observed_at_source='venue'` rows), and `venue-calibrate` puts the mirror's
+structural slippage within **0.54 bp** of the real book at 0.5 BTC and **0.49 bp**
+at 5 BTC (ETH exact). The markets are live-from-deltas, not replayed.
+
+**The one broken collateral is xANT, and it is declared, not judged.** Measured:
+`totalSupply` 0, deployer balance 0, QuoterV2 reverts on xANT/USDC at **every**
+fee tier (100/500/3000/10000) while **42 of 43** declared chain-999 collateral
+pairs quote. The market row's "measured $2k quote" described the 2026-11-19 seed
+that the 2026-11-20 corrupt-state recovery did not carry. The row is now
+`delivered_only` (excluded from `asset_pairs`/`risk_configs` — no intent can be
+originated), the provenance is a refusal placeholder, and the swap-rate health
+warn is the true missing-route signal. A seeded pool was created during the
+investigation and **remains empty**: the fork's `mint` reverts opaquely through
+every callback shape (the three branded names, a selector-agnostic fallback, a
+low-level call that ignores the return data), and the RPC guard refuses
+`debug_traceCall`/`trace_call` (operator-only). The follow-up is the operator
+cheatcode path (`anvil_dealERC20` + the fork's seeder) — not more client-side
+guessing.
+
+**The deploy pins had drifted from the cluster.** Gateway, keepers and
+liquidators were pinned to `local-20261121-91f15f0a` while the pods ran the older
+`648b5dd1` base — missing the `daloc-client` log_scanner reorg rule and the
+live-subscription deferral, both material for a mirror fed by real-chain
+deltas. The operator was pinned to `rel-50d6dd71` while running `rel-07ba1d4e`.
+All six are rebuilt at HEAD, rolled serially, and the pins now name what runs.
+
+**The deploy branch's config tree was stale by 287 lines** against its own
+rendered configmap (the 33 `[[venue_instrument]]` bands existed only in the
+artefact). A `regenerate.sh --write` would have silently dropped them; the
+source was synced first, and the re-render now shows a delta of exactly the
+xANT change.
+
+**Keeper "failures" are rewind archaeology.** `keeper_db_hyper` carries 1,647
+failed submissions, 1,400 of them `chain_rewind_receipt_missing` in distinct
+epochs (2, 9, 10, 38) — the anvil OOM restarts. None since 05:42, i.e. since the
+clean-restart schedule took effect. The class is closed by scheduling, not by
+retrying.
+
+**Live multi-market scenario, measured.** Account A (dealt 400): BTC open/close +
+ETH short → flip → close, five fills including a flip. Whole-account identity
+(`spot − hold + Σ perp`) = dealt + ΣclosedPnl − fees + Σfunding + Σunrealized:
+**diff 0.000000000**. Account B (dealt 400 perp + 500 spot): spot buy, two
+`usdClassTransfer`s, SOL round trip — the only residual is the spot token valued
+at the current mid rather than its cost (the in-kind fee is in the token), which
+`venue-account` carries correctly. Two refusals in the first pass were **my
+script's** wrong asset index (SOL priced as BTC hit the tick rule, ETH as BTC hit
+the oracle band) — the venue's guards behaved exactly like the real venue's.
+
+**Named, not fixed:** the operator's blind-scan WARN repeats once a minute by
+design for a permanent blind set (the codeless CM; the metric `hf_scan_blind_active`
+is continuous); the venue-ρ stale warning re-arms on each set change (pricing is
+the conservative variance-max endpoint); the `xyz:*` book rows keyed `dex=''` are
+6-day-old pre-migration artefacts (fresh rows exist under `dex='xyz'`); the
+venue-σ fit covers 78 of 85 configured instruments (thin/new series refuse by
+name).
+
 ### The maker lane and book impact, measured live (2026-11-22)
 
 A maker/taker cycle on `para:SMH` with two fresh dealt accounts (no loan
