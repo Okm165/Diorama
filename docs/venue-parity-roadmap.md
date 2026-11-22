@@ -98,6 +98,34 @@ cancel path, not (on this evidence) a capital loss: the fix is to pair
 cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
 of cancelled rows until it is fixed.
 
+### The $10 minimum stranded a sub-$10 position the real venue would let out (relay-a6c48bda, 2026-11-22)
+
+Measured live on a disposable account: a `0.006 ETH` long opened at `$10.002`
+(just over the minimum) fell to `$9.98` with the mark, and **every** sell that
+could still cross was refused — `Order must have minimum value of $10.` — at
+every limit that made the notional ≥ $10 and did not cross. The position was
+stuck: the venue's rule bound reduce-only closes exactly like opens.
+
+The real venue exempts the case (exchange docs: *"an order that exactly closes a
+position with reduce-only bypasses this minimum"*), and the sim applied the
+minimum everywhere. Two economic consequences beyond a stuck test position: a
+strategy whose entry is at the minimum can be trapped by ordinary drift, and a
+**dust liquidation** would have its book close refused (`liquidate_position`
+walks the same validation) and escalate to the vault/ADL instead of the book.
+
+Fixed: `validate_order` now takes the account's signed position on the coin
+(`place`, `walk_served_book`, the `/exchange` pre-validation, and the
+liquidation close) and `validate_min_notional` skips a **reduce-only order that
+fully closes** it. A partial reduce-only and a full close *without* the flag
+still face the minimum — pinned. Verified live after the roll: the same
+`0.006 ETH` reduce-only sell filled at `1666.1` (`$9.9966`), `dir: Close Long`,
+`closedPnl −0.0054`, fee `0.00449847` (4.5 bp). 394 venue tests green; deploy
+pin `relay-a6c48bda`.
+
+**Practical rule for strategies:** still size entries above `$10 + drift`
+(the exemption covers the exact close, not a partial trim); a position between
+$10 and the next lot is closeable, a partial reduce below $10 is not.
+
 ### The trigger lane, proven live; the market plane is fresh on every instrument (2026-11-22)
 
 A stop-loss on a disposable unified account (fresh dealt address, no loan touched):
