@@ -368,6 +368,16 @@ current rate exactly as before, so the served ledger never hides the
 approximation. Pinned: a post-boundary sample at `0.0009` does not price the
 hour that just ended. 395 venue tests green; pin `relay-5c4f5f3e`.
 
+**Corrected 2026-11-22 (`relay-8286c64a`).** The diagnosis above was half right:
+the *value* the venue charges a boundary is the one the feed was serving at that
+instant (the served field is the running estimate of the current hour's charge,
+constant through the hour). What was actually wrong was the **capture**: the old
+writer recorded the rate it was *replacing* on each update, so an update landing
+just before the boundary stamped the outgoing value. The 07:00 `para:SMH` match
+was real but not a proof of the rule; the 09:00 BTC boundary priced
+`0.000007361` against `0.0000125` and exposed it. The feed now keeps the
+introduced values as a step history and charges `funding_at(boundary)`.
+
 ### The $10 minimum stranded a sub-$10 position the real venue would let out (relay-a6c48bda, 2026-11-22)
 
 Measured live on a disposable account: a `0.006 ETH` long opened at `$10.002`
