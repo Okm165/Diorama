@@ -31,7 +31,9 @@ spec:
       # A full state dump is ~430 MB; SIGKILL mid-write is exactly how a torn
       # state file is made, and a torn file used to mean a silent re-fork at the
       # pin (a 329 k-block history replacement measured 2026-11-19 21:53Z).
-      terminationGracePeriodSeconds: 180
+      # 600 s: a 1.6 GB state dump takes minutes. At 180 s a dump was killed
+      # mid-write on 2026-11-22 (measured), and the torn file parked.
+      terminationGracePeriodSeconds: 600
       initContainers:
         # Resolve a *fresh* pin on every start, like T: the source serves
         # `latest` at archive depth, so a restart re-forks at a current block
@@ -171,8 +173,25 @@ spec:
               # pin; soaks that had settled above the pin lost their receipts).
               # A torn/absent file is therefore a **hard failure**, not a quiet
               # rewind: refuse to serve a new history unless the operator says so
-              # with ALLOW_PIN_FALLBACK=1. `--state-interval 300` re-dumps while
-              # running; anvil dumps on a clean SIGTERM and the pod has 180 s.
+              # with ALLOW_PIN_FALLBACK=1. `--state-interval 900` re-dumps while
+              # running (every dump is retained in RSS: at 300 s the measured
+              # growth was ~268 MB/min, i.e. one 1.6 GB dump per interval); anvil
+              # dumps on a clean SIGTERM and the pod now has 600 s.
+              #
+              # **The absent case is the dangerous one** (measured 2026-11-22):
+              # a replacement pod starts while the outgoing pod is still writing
+              # its shutdown dump, reads a mid-write file, parks it, and exits 1;
+              # the kubelet restarts the container, the file is now *absent*, and
+              # the old code happily forked from the pin — replacing 298 k blocks
+              # of history. (The parked file was complete by the time the old pod
+              # exited and was recovered intact.) Both cases refuse now.
+              if [ ! -f /state/anvil-state.json ]; then
+                if [ "${ALLOW_PIN_FALLBACK:-0}" != "1" ]; then
+                  echo "anvil-v: no state file at /state/anvil-state.json. Refusing to boot from the pin ($PIN): that would replace every block above it and strand confirmed settlements. Restore a dump from /state, or set ALLOW_PIN_FALLBACK=1 for a deliberate new history." >&2
+                  exit 1
+                fi
+                echo "anvil-v: ALLOW_PIN_FALLBACK=1 — no state file; starting a new history from the pin ($PIN)" >&2
+              fi
               if [ -f /state/anvil-state.json ] && [ "$(tail -c 64 /state/anvil-state.json | tr -d '[:space:]' | tail -c 1)" != "}" ]; then
                 CORRUPT="/state/anvil-state.json.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
                 mv /state/anvil-state.json "$CORRUPT"
@@ -197,7 +216,7 @@ spec:
                 --prune-history 10000 \
                 --transaction-block-keeper 100000 \
                 --state /state/anvil-state.json \
-                --state-interval 300 \
+                --state-interval 900 \
                 --no-rate-limit \
                 --no-request-size-limit \
                 --no-fork-node-info
