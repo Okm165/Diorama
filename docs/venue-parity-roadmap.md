@@ -44,6 +44,26 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### DB sweep: the scan is fresh; a terminal row keeps its last collateral mirror with no as-of (2026-11-22)
+
+Non-terminal books at 07:04Z: 10 Active, HF fresh on all nine backed ones
+(`position_health.computed_at` age **1 s**), one at HF **1.0313** (escrow
+`4999.00` vs debt `3877.69`, `seizable 3877.71` — coherent, 3% above its
+`1.0001` breach line) and the known blind `0xccda2db9` (row frozen at 05:46).
+No stale proofs: `proof_queue pending = 0` older than 10 minutes, `pending = 0`.
+
+One hygiene gap: **56 terminal positions still carry a non-zero
+`live_collateral_balance`** — 45/45 `Failed`, 10/10 `Cancelled`, 1/1
+`Liquidated`, i.e. *every* terminal row of those classes, the oldest from 11-13.
+The field is the operator's live root mirror, refreshed by the CM pass, and the
+pass does not run for terminal rows, so the value is the last read from before
+the row died. It is not served to clients (the gateway zeroes a settled row's
+collateral), and the health surface counts only rows with a *live* CM read
+(`positions_terminal_owner_recoverable`), so nothing is currently mispriced —
+but a consumer of the operator DB cannot tell "the CM still holds X" from "X
+was true at some past instant". A terminal write should clear it (or the column
+needs an `observed_at`); recorded, not patched.
+
 ### A bridge-timeout cancel strands the underwriter's registered exposure — 7 ghosts, and no automatic settlement (2026-11-22)
 
 `phantom_exposure_transitions_24h` reads **7** on the live operator. The probe is
