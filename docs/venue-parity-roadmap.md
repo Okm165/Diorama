@@ -44,6 +44,45 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### A bridge-timeout cancel strands the underwriter's registered exposure — 7 ghosts, and no automatic settlement (2026-11-22)
+
+`phantom_exposure_transitions_24h` reads **7** on the live operator. The probe is
+precise: it counts `MarginBridging → Cancelled` transitions in the last 24 h with
+no `phantom_exposure_settlements` row (a non-zero `ExposureDecreased`) and no
+`phantom_exposure_clearances` row (a chain read proving `positionExposure == 0`).
+The seven are 11-21 08:59:58 → 19:54:14, six of them in a ~70-minute burst.
+
+**Why it happens.** That edge is the **timeout** edge
+(`TIMEOUT_EDGES`, `MarginBridging → Cancelled`, `BRIDGE_TRANSIT_WINDOW_SECS`):
+creation Phase 1 already deployed the underwriter's capital and registered the
+position's exposure; the bridge then exceeded its transit window, and the stuck
+detector cancelled the position. Cancellation has no companion settlement, so
+the underwriter's `positionExposure[positionId]` stays registered
+("permanently inflated until a manual `writeOff`", per the probe's own doc), the
+LP's capital sits against a dead position, and `capacity_view` still reports
+`synced`. The CCTP relay currently carries a parked burn, so the timer will fire
+again.
+
+**The second half is a silent unknown.** `verify_zero_phantom_exposures` runs
+every monitor tick and would record a clearance for a zero exposure; none of the
+seven has one after ~22 h. A read that *fails* only `debug!`s, so `/health`
+cannot distinguish "the exposure is non-zero" (real ghost capital) from "the
+read silently failed" (unknown). That is the same false-zero/false-green class
+the rest of the surface eliminated.
+
+**Fix directions**, owner's call: (1) count and name the failed exposure reads
+so unknown is never reported as an incident count; (2) give the cancel path a
+settlement leg — `settle(positionId, 0, exposure)`/`writeOff` as the timeout's
+own exit, or refuse to cancel once Phase 1 has registered exposure and route the
+book to enforcement instead. A cancel that cannot return the capital is not a
+cancel.
+
+**Environment readiness is otherwise green.** `daloc-user-sim preflight
+--environment` passes **24/24** with `DALOC_ALLOW_BLIND_SCAN=1` acknowledging the
+one blind Active book named below (the port-forward `svc/operator 32003:8080`
+is required by the gate; it is not a NodePort). Without the acknowledgement the
+gate refuses on exactly that book — which is the honest reading.
+
 ### xANT collateral has no executable exit — and the platform prices it at 37% LTV anyway (2026-11-22)
 
 The `xANT` market row admits the tokenized `xyz:ANT` wrapper as collateral
