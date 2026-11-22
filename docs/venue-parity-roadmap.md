@@ -44,6 +44,69 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The platform's two liveness defects, found by auditing the swarm's logs (2026-11-22)
+
+The 19 Nov report's dominant pattern — "a blocking `operator`/`indexer` advisory
+that nobody can explain, indices 10 min of blips, one stuck loan flips the whole
+dependency tree" — reduced to **two scanner defects**, both fixed in
+`daloc-client`/`indexer` and rolled (`rel-2a804af6` for the indexer,
+`rel-f73daf45` for the indexer + cctp-relay).
+
+**1. The reconciliation cursor drained at 15 blocks/s.** With a live WSS
+subscription the HTTP arm is deferred to one pass per `wss_reconcile_interval`
+(60 s); correct while the cursor is at the tip, catastrophic while it is not.
+Measured: chain-999 cursor 51,310,127 vs head 51,533,250 — `indexed_events` was
+**197 blocks** behind the head (WSS was carrying everything) while the *cursor*
+was 220 062 behind, and the gateway read degraded with
+`chain 999: 220062 blocks behind`. At 900 blocks/60 s that drain needs 4.5 h; it
+is an artifact of a restore/hub-redeploy starting the cursor low, not missing
+data. **A backup that is behind is not a backup**: when the cursor trails the
+observed tip by more than one batch the deferral now lifts and passes run back to
+back, paced by `poll_interval`, until a **captured** drain target is reached (so
+steady-state tip drift still takes the deferred cadence). Measured after the
+roll: 51,321,827 → 51,534,767 in **3 min 57 s** (899 blocks/s), the
+"backlog drained" line at the end, and the gateway went `healthy` with **zero
+advisories** for the first time this session.
+
+**2. A dead hub's cursor poisoned the coverage read.** `scan_pointers` is keyed
+`(chain_id, hub_address)` and `load_cursor` never prunes a sibling, so a hub
+redeploy/mirror restore leaves the old hub's row frozen forever. The coverage
+read takes `MAX(last_block)` per chain, so the dead row (frozen 2026-11-20 at
+51,313,188) sat *above* the live cursor (51,310,127) and pinned `blocks_behind`
+at the dead epoch's distance — a figure catching up could not improve until it
+crossed the stale height. A chain has exactly one hub (the rest of the schema —
+`indexed_events`, `book_fold_cursor`, `scan_cursors` — carries no hub column),
+so the live scanner now prunes sibling-hub rows at boot.
+
+**3. A shallow head regression triggered a 256k-block replay.** The cctp-relay's
+`cctp-999-sent` scanner read the head 371 blocks below its cursor (an anvil
+re-mine, or a lagging replica) and `scan_once`'s only regression arm rewound to
+the configured floor (51,274,127) — **256 216 blocks**, 4.7 h at the deferred
+cadence. The pod therefore read `0/1` (`503 scanners: cctp-999-sent: stale
+scan`) for over an hour and the gateway carried the relay as unhealthy. A head
+movement smaller than one scan batch cannot be an epoch change: the shallow arm
+now rewinds to `head − regression` (the suffix that can have changed) and lets
+the idempotent discovery re-read it, the processor's own rewind finding the true
+hash fork inside that window. Deeper regressions (a mirror restore) keep the
+epoch rule. After the roll the relay is `1/1` and both its scanners read healthy
+(999: 21 blocks behind head).
+
+**Also recorded from the same audit (not defects):**
+- **Boot-time feed-round burst.** 33 `feed round regressed` WARNs, *all* in the
+  one second after an indexer restart: the persisted round pointer is rebuilt
+  from DB rows that can be a few seconds newer than the mock feeds' first read.
+  The handler treats the lower round as canonical and supersedes the rows above
+  it (by design). One burst per boot, never continuous.
+- **The venue stress-tail advisory is correct, not noise.** It fired on a 2.3×
+  short book (equity 43.43, venue maintenance 2.00, notional 100.34) with
+  `venue_liquidation_move 0.416` — i.e. the venue's maintenance line is ~42 %
+  away, inside the tail scenario's move. That is exactly the statement it makes:
+  in the stress tail the venue acts before DALOC.
+- **Manifest drift on the relay.** `k8s/deploy/cctp-relay.yaml` pinned
+  `local-20261121-91f15f0a` while the live image was `...-648b5dd1`; `release.sh
+  status` reports that class, and it is how the relay kept running the pre-fix
+  scanner. Both pins now name `rel-f73daf45`.
+
 ### Live action sweep (2026-11-21)
 
 Every action above was exercised against the running mirror with a funded
