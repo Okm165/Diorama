@@ -253,8 +253,15 @@ write introduced`, three hours retained) and `accrue_dex` charges
 millisecond already carries the next hour's value), logging `rate_source`
 (`boundary_value` | `current_fallback`) with every charge. Pin: half an hour at
 `0.0000375` followed by a write introducing `0.0000125` at `7 199 999 ms`
-charges `0.0000125`, never the replaced value. The 11:00 boundary is the first
-charge under the new capture.
+charges `0.0000125`, never the replaced value.
+
+**Confirmed live at 11:00, the first charge under the new capture.** The sampler
+saw the served rate hold `0.0000125` for the whole `10:00–11:00` hour, then
+re-converge in the seconds after the boundary (`0.000000908 → −0.000000026 →
+0.000007806 → 0.0000125` inside 17 s) — and the ledger charged `0.0000125`, none
+of the post-boundary values. The real venue's `fundingHistory` carries
+`0.0000125` at `…5200049`: **exact match**, and `−0.14979` USDC on the `0.1968`
+book is the venue's own arithmetic.
 
 ### An hour's funding is its time-weighted average rate (relay-b2b3c4cd, 2026-11-22)
 
@@ -313,6 +320,29 @@ reconciles to the last decimal (`value = dealt + Σ closedPnl − Σ fees +
 unchanged. The other account-shaped reads (`userFees`, `referral`,
 `userRateLimit`, `isVip`, `userRole`) keep the neutral answer: their shape is
 account-independent, so it is not a fabricated balance.
+
+### The chain node's OOMs were a schedule problem, and a SIGTERM is the clean death (2026-11-22)
+
+`anvil-v`'s RSS grows ~268 MB/min at the mirror's block cadence — almost exactly
+one full state dump (the 1.55 GB `/state/anvil-state.json`) per
+`--state-interval 300`, i.e. the periodic serialization is what the process
+keeps. At the 40 Gi limit that is an OOM every ~2 h (3 restarts measured on the
+pod), and an OOM is an **unclean** death: the node reopens the last 5-minute
+dump and rewinds chain state, which is what stranded the 05:46 CCTP burn and
+forced the reattest remedy. The failure mode is not the memory limit but *when*
+the death happens — uncontrolled, at the moment of peak memory, with a rewind
+attached.
+
+The remedy is a **scheduled clean restart** (`scripts/anvil-clean-restart.sh`,
+root crontab `DALOC-ANVIL-RESTART` hourly at :40): a SIGTERM gives the node its
+180 s grace, and the live proof at 11:03 is that anvil **flushed the state file
+at termination** (`state_mtime` moved to the restart second), the height after
+the replacement (`51568843`) never dipped below the pre-restart mark
+(`51568707`) — nothing rewound, nothing for the CCTP watchers to
+re-reconcile — and the fresh node serves at ~2.3 GiB RSS. The hourly schedule
+keeps the peak around ~20 GiB, the ~40 s chain pause lands away from the :00
+funding boundary, and every downstream consumer already treats a venue gap as
+fail-closed and self-healing.
 
 ### The maker lane and book impact, measured live (2026-11-22)
 
