@@ -708,11 +708,17 @@ impl Sim {
     ) -> Result<Applied> {
         let clock = self.clock(crate::now_ms())?;
         let applied = self.with_account(address, |account| {
-            if account.mode == crate::wire::UserAbstraction::UnifiedAccount {
-                tracing::warn!(account = %address, amount = %transfer.amount,
-                    "usd class transfer refused: {UNIFIED_ACTION_REFUSAL}");
-                return Ok(Applied::Refused);
-            }
+            // The **API layer** refuses a user-signed class transfer for a unified
+            // account (`user_actions::refuse_on_unified`) — a unified account's funds
+            // are contract-controlled, so the wallet cannot move classes itself. This
+            // function is also the **CoreWriter action 7** path: the margin agent
+            // contract's own `transferUsdClass`, which is exactly how a unified agent
+            // recalls its perp-class cash (realized PnL) to spot for the Core→EVM
+            // bridge. Refusing here stranded that cash: measured 2026-11-22, a unified
+            // book's recall asked for spot 43.328106 + perp cash 0.287176 = 43.615282
+            // against a 43.328106 available, the class leg was refused by this arm,
+            // and the close deferred forever (the perp ledger was positive — every
+            // earlier close had a *negative* one, which is why it never showed).
             stamp_funding_baseline(account, clock);
             match transfer.direction {
                 Direction::ToPerp => {
@@ -1207,13 +1213,21 @@ pub(crate) fn meta_with_table(coin: &str, max_leverage: u32) -> crate::wire::Met
 mod tests {
     use super::*;
 
-    /// A unified account cannot class-transfer in either direction: its USDC is
-    /// one pool, and the venue disables the action ("Action disabled when
-    /// unified account is active", measured on testnet 2026-11-18). The sim
-    /// refuses and moves nothing; it is a `Refused`, never an `Err`, because an
-    /// error would stall the bridge's block scan on a CoreWriter action 7.
+    /// A unified account's **sim-level** class transfer applies: this function is
+    /// the CoreWriter action 7 path — the margin agent contract's own
+    /// `transferUsdClass`, which is how a unified agent recalls its perp-class
+    /// cash (realized PnL) to spot for the Core→EVM bridge. The *user-signed* API
+    /// action is what is disabled ("Action disabled when unified account is
+    /// active", measured on testnet 2026-11-18), and that refusal lives at the API
+    /// layer (`user_actions::refuse_on_unified`), pinned by the exchange tests.
+    /// Refusing here stranded the agent's realized PnL: measured 2026-11-22, a
+    /// unified book's recall asked for spot 43.328106 + perp cash 0.287176 against
+    /// a 43.328106 available, the class leg was refused, and the close deferred
+    /// forever — every earlier close had a *negative* perp ledger, which is why it
+    /// never showed. It is an `Applied`, never an `Err`, because an error would
+    /// stall the bridge's block scan.
     #[test]
-    fn a_unified_account_cannot_class_transfer() {
+    fn a_unified_account_class_transfers_at_the_sim_level() {
         let feed = feed_with(&[("HYPE", "87.87", "87.87")]);
         let sim = Sim::memory();
         let a = Address::repeat_byte(0xb0);
@@ -1239,32 +1253,42 @@ mod tests {
         let before = sim.account(a).unwrap().unwrap();
         assert_eq!(before.spot[&0].total, Decimal::from(15));
 
-        for direction in [Direction::ToSpot, Direction::ToPerp] {
-            let applied = sim
-                .usd_class_transfer(
-                    a,
-                    &ClassTransfer {
-                        token: usdc,
-                        amount: Decimal::ONE,
-                        direction,
-                    },
-                    &feed,
-                )
-                .unwrap();
-            assert!(
-                matches!(applied, Applied::Refused),
-                "{direction:?} is disabled on a unified account"
-            );
-        }
+        // The fixture merged the perp cash into spot (15 on one balance, perp 0),
+        // so the deposit leg runs first: spot funds the perp class.
+        let applied = sim
+            .usd_class_transfer(
+                a,
+                &ClassTransfer {
+                    token: usdc,
+                    amount: Decimal::ONE,
+                    direction: Direction::ToPerp,
+                },
+                &feed,
+            )
+            .unwrap();
+        assert!(matches!(applied, Applied::Applied), "the deposit leg applies");
         assert_eq!(
-            sim.account(a).unwrap().unwrap(),
-            before,
-            "a refused transfer moves nothing"
+            sim.account(a).unwrap().unwrap().spot[&0].total,
+            Decimal::from(14)
         );
-        assert!(
-            sim.ledger_updates(a, (0, None))
-                .is_none_or(|rows| rows.is_empty()),
-            "and writes no ledger row"
+        // ToSpot: the agent's recall leg — the perp class's cash returns to the
+        // one spot pool, which is the leg the Core→EVM bridge needs.
+        let applied = sim
+            .usd_class_transfer(
+                a,
+                &ClassTransfer {
+                    token: usdc,
+                    amount: Decimal::ONE,
+                    direction: Direction::ToSpot,
+                },
+                &feed,
+            )
+            .unwrap();
+        assert!(matches!(applied, Applied::Applied), "the recall leg applies");
+        assert_eq!(
+            sim.account(a).unwrap().unwrap().spot[&0].total,
+            Decimal::from(15),
+            "the two legs round-trip"
         );
     }
 
