@@ -553,6 +553,72 @@ residual when the touch is thinner than the size — the venue's partial fill is
 correct; the flatten needs a retry loop. Fees on the runtime's legs measured
 4.5 bp taker per fill.
 
+### 2026-11-22 15:45Z: the release is one fact again, and the seeded pool survives the cron restart
+
+**Eleven images, one tag, and a generation that names them.** The per-service
+`rel-<sha>` pins named their running images (the audit rule held) but
+`DALOC_GENERATION` still reported the last full release
+(`local-20261121-91f15f0a`), so every `/health` told an auditor a different
+build. Only risk-engine's code had changed since `rel-5859230f` (everything
+else is the same tree), but identity is not something to launder by re-tagging
+old builds: all eleven images were rebuilt from the worktree HEAD
+(`06fbe52d`), pinned as `local-20261122-06fbe52d` across every Deployment and
+seed Job, stamped into `DALOC_GENERATION`, and recorded in the release lock.
+Three drift finds fell out of the pin/verify cycle: (1) the **oracle-liveness
+fixture's manifest** pinned `local-20261120-nonce` while the live pod ran the
+newer `local-20261121-motion` — the apply downgraded it, and it was restored
+and the manifest corrected (the same manifest-vs-live class as cctp-relay);
+(2) the **per-workload env maps** carried a stale `DALOC_GENERATION` from an
+older `set-release` that the committed source no longer writes — `kubectl
+apply` never prunes a foreign key, so indexer/risk-engine shadowed the base
+map; the keys were removed and both re-rolled; (3) `contracts/deployments/
+hyperevm.env` named a **pre-epoch timelock** (`0x63a8…`; the live deployment
+record has `0x9031…`) — both have code, and a future deploy from the stale
+artefact would have targeted the retired one; refreshed from the PVC with
+`sync-deployed-env.sh --write`. `apply.sh`'s own generation check caught a
+real ordering race (the roll can finish before a re-rendered env map reaches
+the slow pods) — it fails loudly and the two pods are re-rolled explicitly.
+
+**The seeded xANT pool survives the state dump.** The 15:40 cron restart
+replaced the pod (boot marker 15:40) with the head **continuous**
+(51,591,108 → 51,591,311, no drop) and the pool's liquidity bit-identical
+(2,696,836,740,588) with the $2k quote still 1,992.71 USDC (−0.37%). The
+cheatcode seeding is durable state, not a live-only artefact.
+
+**The risk-engine's kernel table is derived, and its recovery waits for a
+monitor cycle.** A seed run (or its migrations) clears the kernel tables; the
+engine's next monitor pass re-installs the shipped artefacts (measured: the
+"table is empty → re-installing" latch fired at 15:12:54 and 15:15:40, each
+install completing ~3 s after detection, with the quotes in between refused
+fail-closed — 623 + 136 rejections across the two windows of a roll+seed
+pair). Bounded by design and loud; the cost is a per-roll quote-refusal window
+of up to one monitor cycle, not more.
+
+**The CCTP queue self-resolves at boot; nothing is stuck.** The 27 "pending
+unusually long" lines were one 5-second boot pass over 27 old burns: every
+message resolved in the pass — the used-nonce guard dropped the two whose
+served message was already consumed (0xc5c2adde, 0x8a3f653f — the attestations
+were served; the burns are real 43.34 and 17.34 USDC on chain 1), and the
+Ethereum-bound nonce-consumed records parked and were reconciled away by the
+next pass. Final state: **parked 0, pending 0, oldest_pending_s 0**. The
+2-message "forever retry" was a boot-time log ordering artefact (the stale
+warn is emitted before the attempt in the same pass), not an unresolved queue.
+
+**The dead curator vault is a bounded, named state.** `0x64986E86…` (chain
+999) has no code after the epoch re-pin (INV-2026-11-18-004): the vault
+registry is the indexer's own event spine (every vault ever deployed), the
+monitor samples every listed vault, and a codeless one pauses its own series
+with one loud line per state and keeps the last sample. Nothing live consumes
+it — the underwriter capacity (the gateway's `VaultFunded` capital) reads its
+own live vault and priced the xANT quote — so it is a frozen audit series at
+an epoch boundary, not a broken funding path.
+
+**Table growth, measured.** `keeper_db_hyper.submission_history` 11,453 rows
+over 10 days (83/hour now) and `operator_db.proof_queue` 808 rows (800 failed,
+all pre-05:48 today: the chain-rewind and orphaned-proof archaeology) — both
+bounded audit tables, no retention policy declared, no operational pressure
+(sub-MB each). `indexer_db` remains 4.9 GB under its declared 93-day retention.
+
 ### 2026-11-22 15:15Z: xANT exits again — the pool re-seeded through the operator cheatcode, the $2k route re-measured
 
 **The blocker was never the mint — it was the adder's empty balance.** The
