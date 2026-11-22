@@ -405,6 +405,70 @@ the conservative variance-max endpoint); the `xyz:*` book rows keyed `dex=''` ar
 venue-σ fit covers 78 of 85 configured instruments (thin/new series refuse by
 name).
 
+### 2026-11-22 11:40Z: the clean-restart schedule replaced 298k blocks — and how it was put back
+
+**What happened.** The hourly `DALOC-ANVIL-RESTART` fired and the chain came back
+at the fork pin (51,273,700), 298,134 local blocks below where it had been. The
+cause was the restart **shape**, not anvil: `kubectl delete pod` let the
+Deployment create the replacement immediately, and it mounted the same RWO
+volume. It read the outgoing pod's *mid-write* shutdown dump, parked it as torn
+and exited 1; the kubelet restarted the container, the file was now *absent*,
+and the startup guard — which only refused a **torn** file — forked a fresh
+history from the pin. (At 170 s the 1.6 GB dump had not finished either: the
+parked file was still being written by the outgoing pod, and it turned out to be
+**complete JSON** at block 51,571,639 once the old pod exited.)
+
+**Recovery, measured.** The parked 1.61 GB file was loaded back and the node
+restored to head 51,571,639 exactly (no state loss); it was swapped in with the
+Deployment at zero replicas so no race could repeat. The indexer re-scanned the
+displaced range from its own cursor; CCTP re-parked the two rewind-epoch burns,
+and both were re-armed with `POST /v2/reattest/{nonce}` on the bridge —
+destination nonces were already consumed, so the relay recorded them `relayed`
+(no double mint): parked 0, relayed 103, bridge `ok`.
+
+**Two more invariants the incident exposed.**
+
+- **A chain restore must restore the engine's source cursor.** The engine had
+  been live-caught-up with the real source (lag 3–5 blocks at 11:39). The reset
+  rebased its cursor to the pin, and it began re-composing 660k *already
+  composed* source blocks — measured `writes 0, applied 0` for every window, i.e.
+  pure replay at ~20 blocks/s (hours). The restored state already carried the
+  composition through source block 51,942,050 (the 11:39 follow), so the cursor
+  was restored to that height and its block hash with the engine at zero
+  replicas; it composed the 387-block gap and returned to **lag 3,
+  `guard: following`**. A restore is therefore *two* artefacts: the chain dump
+  and the engine cursor.
+
+- **The restart must never let two pods share the volume.** The script now
+  scales the Deployment to zero and waits for the old pod (and its dump) to be
+  gone before starting the replacement; the pod spec carries a 600 s grace (a
+  1.6 GB dump does not finish in 170 s) and `--state-interval 900` (one dump per
+  interval is what RSS retains; at 900 s the growth is ~107 MB/min, so a 2 h
+  cycle peaks near ~15 GiB under the 40 Gi limit). Both the torn **and absent**
+  cases refuse to boot without `ALLOW_PIN_FALLBACK=1`, so a failed dump is a
+  loud unavailable rollout, never a silent rewind. Schedule: every 2 h at :40.
+
+**Dependency drift, found by dependency rather than by tag date.** The
+underwriters at `rel-09dff59e` carried three `daloc-client` scanner commits
+after their tag (the shallow-head reorg rule and the live-subscription
+deferral) — material for a mirror fed by real-chain deltas. They were rebuilt
+at HEAD and rolled; every deploy pin now names the running image.
+
+**xANT: the declaration stopped claiming a route.** The market row is
+`delivered_only` (no origination), and the ownership gate now honours that: a
+delivered-only row is exempt from `COLLATERAL_TOKENS_999` and `SWAP_RATE_FEEDS`
+while its oracle feed requirement stays. xANT is removed from both lists, which
+removes the eternal `swap_rate_coverage` warn for a pair that must not exist;
+the measured absence stays in the provenance row. A seed remains blocked by the
+fork's opaque mint revert (tracing is operator-only); the follow-up is the
+operator cheatcode path.
+
+**Post-recovery fidelity, re-measured.** Book snapshots persist the venue's
+observation within **0.18–0.76 s** average (worst 0.76 s) over ten minutes
+across the restarted indexer — sub-second, still live-from-deltas. Venue
+account ticks resume at the 5 s poll (newest 3 s old). Gateway healthy; the only
+standing advisory is the named 78/85 venue-σ calibration boundary.
+
 ### The maker lane and book impact, measured live (2026-11-22)
 
 A maker/taker cycle on `para:SMH` with two fresh dealt accounts (no loan
