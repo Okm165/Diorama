@@ -553,6 +553,46 @@ residual when the touch is thinner than the size — the venue's partial fill is
 correct; the flatten needs a retry loop. Fees on the runtime's legs measured
 4.5 bp taker per fill.
 
+### 2026-11-22 16:00Z: funding charged on a real position at the boundary, and `--size max` flattens to the lot
+
+**The report's unmet funding item is met.** A 0.05 BTC short ($3,039 notional)
+was opened on `…aa09` at 15:53Z and held across the 16:00Z boundary. The
+venue's `userFunding` row lands at **exactly `time` 16:00:00.000Z** with
+`fundingRate −0.000001597` — the **pre-boundary** rate, matching the real
+venue's `−0.0000015967` at the same instant — `szi −0.05` and
+**`usdc −0.004861313`**: the short **paid**, which is the real venue's
+`−szi × mark × rate` convention (negative size and negative rate ⇒ a charge).
+The sampler caught the rate switch cleanly (mirror = real at every 1 Hz
+sample through the boundary). Flattened through the new `--size max`; the
+whole-account identity closes exact: `400 + closedPnL(−5.29166) −
+fees(3.126872) + funding(−0.004861) = spot 0 + AV 391.576606`, diff −1e-9.
+
+**`venue-order --size max` is the flatten, floored to the pair's own lot.**
+The tool had no size resolver: an operator hand-rendered sizes, and a spot
+token's balance (`UETH`) is not its order lane's pair (`@151`) — the measured
+UETH dust produced a bare 4-decimal venue refusal. Now `--size max` reads the
+venue's own perp position (or the spot balance, resolving a token to its
+unambiguous pair), floors to `szDecimals`, refuses a wrong-side request by
+name ("the account is short — ask for the reducing side"), and **names sub-lot
+dust** instead of rounding up into an opposite-side order. Verified live: the
+0.05 BTC short flattened as `0.05, reduce-only`; the UETH dust refused as
+"0.000044 is smaller than one lot (0.0001)". The dry run prints the resolved
+envelope (`62f6f9fe`).
+
+**Log sweep, post-release.** Every SSE failure and the venue engine's
+`pending-tx mine failed` lines were the 2–4-second anvil restart window
+(transport, self-retried); the liquidator's executor probe failed on the same
+blip and re-verified at head 60 s later ("portfolio execution re-enabled").
+The HF scan is 10 positions with 1 blind (the named codeless CM, unchanged).
+The CCTP boot warnings were the relay's backfill re-walking history behind its
+watermark (`cctp-backfill-1` at 26,466,169, still below the old burns at
+26,468,500) — the watermark advances only when the queue is fully handled by
+design, and the 999 watermark is already at head. A stale liquidation flag on
+the **already-Liquidated** xGOLD position (11-19) retries with backoff because
+the code deliberately keeps an empty CM read "not terminal" (the drain is the
+flag's own TTL; the comment names the live class a first-read drain once
+stranded). All bounded, none an active defect.
+
 ### 2026-11-22 15:45Z: the release is one fact again, and the seeded pool survives the cron restart
 
 **Eleven images, one tag, and a generation that names them.** The per-service
