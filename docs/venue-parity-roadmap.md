@@ -65,18 +65,25 @@ calibration problem:
   transitions only — a stable refusal is silent), and the operator warned
   "jump shares are stale / funding tails are stale — pricing the no-jump arm /
   forward rate for the dropped instruments" on every scan.
-* **The fix was the feed, not the fitter.** Restored the para feed verbatim
-  (40 coins, dex para) to both env maps (deploy `d7cdbbe5`), rolled, and
-  collection resumed at 22:40Z; the next cycle fits 78. The para σ clocks stay
-  at 12:49 by design (same-window refits do not advance `calibrated_at`) until
-  the first post-restart completed hour moves the window; the operator
-  warnings are honest until then and stop when the rows go fresh.
-* **Guarded the failure mode at the writer**: the σ table now prunes to the
-  config's instruments (`75e47878`) — the same snapshot rule the ρ table
-  states — with the keep set being the *config* list, not the fitted one, so a
-  refusing instrument keeps its last measured fit and only a genuinely retired
-  identity is dropped. Scoped to the σ pass's venues (the `coin` key belongs
-  to the ρ writer).
+* **The fix was the feed, not the fitter — and the feed is the target list.**
+  The risk engine's calibration instruments are `VENUE_BOOK_FEEDS` itself
+  (risk-engine `config.rs`), so the feed drop shrank the fitter's target set
+  from 85 to 45 while the `[[venue_instrument]]` TOML bands stayed: those rows
+  declare the σ bands, not the instrument universe. Restoring the feed
+  restores the targets.
+* **The restore itself taught the layer rule.** First restored to the rendered
+  configmaps (deploy `d7cdbbe5`) — but those are outputs: the release pin
+  re-rendered them from `deploy/env-facts.yaml` within the hour and the feed
+  dropped again, exactly the `2c12d32a` mistake repeated. The fix lives at the
+  source (deploy `0d7ee9f9`): env-facts.yaml + re-render, then the renderer is
+  the correctness boundary.
+* **The σ prune proved itself live.** With the feed (target set) at 45, the
+  new prune (`75e47878`) retired the 33 para rows — the honest state for a
+  config that does not target them. With the feed restored the cycle completes
+  78/85 and the rows re-insert fresh (calibrated_at = the re-fit instant): the
+  drop/return is lossless, the conservative arm priced every gap. The
+  keep-set-is-config semantics held: the 7 warm-up instruments keep no rows
+  yet, and a refusing (configured) instrument would have kept its last fit.
 
 The lesson recorded: two artefacts must agree on the instrument universe (the
 markets tree ↔ the env maps' feed), and neither has a cross-check; the
