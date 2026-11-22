@@ -44,6 +44,26 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### Funding charged on a live mirror position at the chain boundary — measured (2026-11-22)
+
+The open `para:SMH` leg (0.03 long, entry 410.42) crossed the venue's hourly
+chain boundary (wall `06:26:49`, venue clock +33.183 min). First tick after it:
+
+| figure | value |
+|---|---|
+| wire `cumFunding.sinceOpen` | `0.0 → −0.000558591` |
+| internal `funding_since_open` (+ = received) | `+0.000558591281` |
+| para ledger balance | `−1.5995508325 → −1.5989922412` (credited `+0.00055859`) |
+| `fundings` row | `para:SMH +0.000558591` |
+| prediction from the boundary rate | rate `−0.000045236` × notional `12.3405` = **`0.00055823` received** |
+
+Sign, magnitude and the ledger booking all agree: a long under a negative rate
+is **credited**, the wire cost accumulator reads negative, and the internal
+ledger moved by exactly the payment. This is the position-level funding proof
+the earlier runs could not make (no order path); it now holds on a real mirror
+position, with the rate the live venue publishes (bit-identical at any instant —
+the boundary *time* follows the mirror's chain clock, +33.18 min from wall).
+
 ### The venue restart left the σ series contiguous, and the HF blind is the same σ gate (2026-11-22)
 
 Rolling the venue-sim at 06:05 did **not** punch a hole in the five-minute book
