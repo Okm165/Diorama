@@ -538,6 +538,21 @@ and the fallback keeps its partial set, so this is an over-approximation
 (conservative classification), not a missing account — the design says so at the
 line, and it is named here so a future scan does not read it as noise.
 
+**A live strategy runtime ran end-to-end on the mirror's own books.** One
+account (`…aa09`, dealt 400) traded a momentum loop off the live feed for
+7 minutes: up to **three concurrent perp positions** (BTC/ETH/SOL/HYPE), entries
+on a 25 s ≥ 6 bp move, exits by age, **10 fills, all venue-side** — and two
+mid-flight `usdClassTransfer` operations (perp→spot 50 at t+200, spot→perp 50 at
+t+340) with positions open across them. Both transfers appear in
+`userNonFundingLedgerUpdates`; trading continued across them; the whole-account
+identity closed **exact to 1e-9** once flat: `spot + perp AV = dealt +
+closedPnl − fees (+ unrealized while a position is open — the −0.0224 residual
+mid-run was the open short's uPnl, not drift)`. One harness flaw found in my own
+runtime (not the venue's): a final flatten as a single reduce-only IOC leaves a
+residual when the touch is thinner than the size — the venue's partial fill is
+correct; the flatten needs a retry loop. Fees on the runtime's legs measured
+4.5 bp taker per fill.
+
 ### 2026-11-22 audit pass 2: the ρ table was history, the margin math is exact, the maker fills from the market
 
 **The venue-ρ table was append-only, and the operator read the history.** The
