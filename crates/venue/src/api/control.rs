@@ -278,6 +278,50 @@ pub(crate) struct LiquidationReport {
     pub maintenance: Decimal,
 }
 
+/// The scenario clock, on the control plane: the offset from wall time, the
+/// scenario instant it produces, and the wall clock it is measured against.
+#[derive(Debug, Serialize)]
+pub(crate) struct ClockView {
+    pub offset_ms: i64,
+    pub sim_ms: u64,
+    pub wall_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClockRequest {
+    /// The scenario clock's offset from wall time, in milliseconds (signed).
+    pub offset_ms: i64,
+}
+
+fn clock_view(state: &ApiState, offset_ms: i64) -> Result<ClockView> {
+    let wall_ms = crate::now_ms();
+    Ok(ClockView {
+        offset_ms,
+        sim_ms: state.sim.clock(wall_ms)?,
+        wall_ms,
+    })
+}
+
+/// Read the scenario clock. Before this route the accumulated offset was
+/// invisible: a persisted jump silently moved every funding boundary and
+/// liquidation evaluation (measured 2026-11-22: +1,991,000 ms).
+pub(crate) async fn get_clock(State(state): State<Arc<ApiState>>) -> Result<Json<ClockView>> {
+    Ok(Json(clock_view(&state, state.sim.clock_offset()?)?))
+}
+
+/// Set the scenario clock's offset (signed, persisted). `0` returns the sim to
+/// wall time without touching accounts — the complement to `/control/reset`,
+/// which blanks the venue. A forward jump's crossed boundaries are charged by
+/// the next tick; a backward jump cannot re-charge.
+pub(crate) async fn set_clock(
+    State(state): State<Arc<ApiState>>,
+    Json(req): Json<ClockRequest>,
+) -> Result<Json<ClockView>> {
+    let offset = state.sim.set_clock_offset(req.offset_ms)?;
+    Ok(Json(clock_view(&state, offset)?))
+}
+
 pub(crate) async fn advance(
     State(state): State<Arc<ApiState>>,
     Json(req): Json<AdvanceRequest>,

@@ -257,6 +257,10 @@ pub fn control_router(state: Arc<ApiState>) -> Router {
         .route("/control/deal", post(control::deal))
         .route("/control/order", post(control::order))
         .route("/control/advance", post(control::advance))
+        .route(
+            "/control/clock",
+            get(control::get_clock).post(control::set_clock),
+        )
         .route("/control/crash", post(control::crash))
         .route("/control/rally", post(control::rally))
         .route("/control/stall", post(control::stall))

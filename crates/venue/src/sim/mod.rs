@@ -404,6 +404,30 @@ impl Sim {
         })
     }
 
+    /// The scenario clock's offset from wall time, in milliseconds.
+    ///
+    /// Scenario time ([`Self::clock`]) drives funding boundaries and liquidation
+    /// evaluation. The offset is set by `/control/advance` and must be
+    /// **readable and settable** on its own: measured 2026-11-22, a persisted
+    /// +1,991,000 ms jump (33 min 11 s) left every funding boundary firing 33
+    /// minutes early, and the only way back was `/control/reset` — which blanks
+    /// every account. An unobservable, irreversible scenario fact is a trap.
+    pub fn clock_offset(&self) -> Result<i64> {
+        self.with_state(|state| Ok(state.clock_offset_ms))
+    }
+
+    /// Set (not add) the scenario clock's offset from wall time, persisted.
+    /// A jump forward is charged by the next tick like any other boundary
+    /// crossing; a jump back cannot re-charge (the accrual stamp is absolute).
+    pub fn set_clock_offset(&self, offset_ms: i64) -> Result<i64> {
+        self.with_state(|state| {
+            state.clock_offset_ms = offset_ms;
+            Ok(offset_ms)
+        })?;
+        self.save()?;
+        Ok(offset_ms)
+    }
+
     /// The sim clock (ms) at wall time `now_ms`.
     pub fn clock(&self, now_ms: u64) -> Result<u64> {
         let offset = self.with_state(|state| Ok(state.clock_offset_ms))?;
@@ -1226,6 +1250,23 @@ mod tests {
     /// forever — every earlier close had a *negative* perp ledger, which is why it
     /// never showed. It is an `Applied`, never an `Err`, because an error would
     /// stall the bridge's block scan.
+    /// Scenario time is a first-class, reversible fact: the offset that
+    /// `/control/advance` accumulates can be read and returned to zero without
+    /// `/control/reset` (which would blank the venue). Measured live
+    /// 2026-11-22: a persisted +1,991,000 ms jump had every funding boundary
+    /// firing 33 minutes early with no read route and no way back.
+    #[test]
+    fn the_scenario_clock_offset_is_readable_and_settable() {
+        let sim = Sim::memory();
+        assert_eq!(sim.clock_offset().unwrap(), 0);
+        sim.set_clock_offset(1_991_000).unwrap();
+        assert_eq!(sim.clock_offset().unwrap(), 1_991_000);
+        let wall = 1_795_352_400_000u64;
+        assert_eq!(sim.clock(wall).unwrap(), wall + 1_991_000);
+        sim.set_clock_offset(0).unwrap();
+        assert_eq!(sim.clock(wall).unwrap(), wall);
+    }
+
     #[test]
     fn a_unified_account_class_transfers_at_the_sim_level() {
         let feed = feed_with(&[("HYPE", "87.87", "87.87")]);
