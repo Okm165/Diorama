@@ -224,32 +224,37 @@ balance): …"*. A single-leg residual reads exactly as before. The underlying
 balance is still unattributable until that sibling is retired — the grouping
 removes the repetition, not the fact.
 
-### Funding: the 09:00 boundary did **not** match, and the lane now says why (relay-24fed842, 2026-11-22)
+### Funding: the 09:00 boundary was priced with the rate the feed had just replaced (relay-8286c64a, 2026-11-22)
 
 The pre-boundary-rate fix was measured on `para:SMH` at 07:00, where the rate
 served at 06:59:57 (`−0.0000319981`) equalled the real venue's charged rate
 exactly. At the **09:00** boundary on the disposable BTC book the mirror charged
-`0.000007361` while the real venue's `fundingHistory` carries `0.0000125` for
-the same boundary — a 41 % rate error, `−0.0866` USDC charged against `−0.1472`
-due. The served rate was `0.0000125` at 08:54:59, 08:59:59 (the indexer's bucket
-rows), 08:56:45 (direct read) and every second for a minute after 09:00 (15
-samples), so the charged sample is not any value the feed is known to have
-served around the boundary: the rate that priced the boundary came from a
-sample this process captured but did not expose.
+`0.000007361` while the real venue's `fundingHistory` carries `0.0000125` — a
+41 % rate error, `−0.0866` USDC charged against `−0.1472` due.
 
-The lane now logs every charge — coin, boundary, rate, `rate_source`, oracle,
-size and payment — and a one-second sampler recorded the served rate on both
-sides across the next boundary. **The cause was the sampling rule, and the 10:00
-boundary read proves it.**
+A one-second sampler across the next boundary settled what the served field is:
+it **is the running estimate of the current hour's charge**. Measured on BTC:
+`0.0000125` for the whole `09:00–10:00` hour, then `0.000003993 → 0.000002327 →
+0.00001153 → 0.0000125` inside the fifteen seconds after 10:00 — the next hour's
+estimate re-converging, identical on the mirror and the real venue. The charge
+for an hour is therefore the value **in force at** its boundary.
 
-Across 39 one-second samples around 10:00 the served rate moved
-`0.0000125 → 0.0000115296 → 0.000003993 → 0.0000023271` and back — a 3–4× swing
-in seconds, identically on the mirror and the real venue. The venue's *charged*
-rate is the **average of the hour's 5-second premium samples** (docs), and its
-hourly series is smooth (`−0.0000115 … 0.0000125`). Pricing a boundary with the
-last sample the tick saw is therefore pricing an instantaneous value as if it
-were the hour's mean; at 10:00 the last sample happened to equal the average
-(`0.0000125`, charged exactly) and at 09:00 it did not (`0.000007361`).
+The 09:00 error was an **off-by-one write** in the capture. The old
+`note_boundary_rates` recorded the *outgoing* rate on every context write: a
+write landing just before the boundary recorded the value it was replacing (the
+feed had just moved `0.000007361 → 0.0000125` at `08:59:59`, and the boundary was
+stamped with the outgoing `0.000007361`). The 10:00 boundary matched
+(`0.0000125`) because at that boundary the last write introduced the same value
+it replaced.
+
+The feed now keeps each coin's rate as a **step history** (`at_ms → the rate that
+write introduced`, three hours retained) and `accrue_dex` charges
+`funding_at(boundary)`, strictly before it (a context landing on the boundary
+millisecond already carries the next hour's value), logging `rate_source`
+(`boundary_value` | `current_fallback`) with every charge. Pin: half an hour at
+`0.0000375` followed by a write introducing `0.0000125` at `7 199 999 ms`
+charges `0.0000125`, never the replaced value. The 11:00 boundary is the first
+charge under the new capture.
 
 ### An hour's funding is its time-weighted average rate (relay-b2b3c4cd, 2026-11-22)
 
