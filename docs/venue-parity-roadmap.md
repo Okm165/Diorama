@@ -56,16 +56,26 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
 
 **Gaps it exposed, ranked:**
 
-1. **The whole `para` dex has zero σ calibration (34 instruments).**
+1. **The whole `para` dex had zero σ calibration — root found upstream and fixed (40 instruments).**
    `venue_calibration` holds the default dex (BTC/ETH/HYPE/SOL) and all 41 `xyz`
    instruments — nothing from `para`. Trading *any* para asset therefore makes
    the portfolio's debt operations refuse, escalating through three shapes:
    "the venue leg carries no usable σ" → "the portfolio admission carries no
    finite PM realizable value" → "draw capacity 0.0, binding stress_capacity".
    The venue *trades* the asset fine (books, marks, fees, fills all live); the
-   risk plane cannot price it. This is the coverage-gap decision made concrete:
-   either calibrate the para dex (the ticks exist) or refuse the trade at the
-   venue, before capital is in. Also noted: the portfolio **admission** computed
+   risk plane cannot price it. **Root found upstream, not in the risk plane:**
+   `venue_book_snapshots` held **zero para rows in 48 h** (vs 49 h of data for
+   the default dex and xyz) — the poller and the fitter both derive their
+   instrument set from the single env `VENUE_BOOK_FEEDS`, which carried the
+   default dex and xyz only. One additive feed spec closes the data hole:
+   **rolled** (`2c12d32a`, indexer + risk-engine configmaps) — 40 para
+   instruments now snapshot every poll, and the fitter calibrates them after
+   ~21 five-minute buckets (~105 min from the roll). The **remaining** blocker
+   is the quote-time band: the market matrix's declared
+   `vol_floor_annual/vol_ceiling_annual` per instrument, which the code
+   deliberately refuses to substitute ("refusing rather than applying a global
+   prior") — the owner's declaration, with the measured σ the fitter is now
+   producing as its input. Also noted: the portfolio **admission** computed
    `stress_capacity 9.64` at 04:30:29 while the **draw** reported 0.0 — an
    admission-vs-draw inconsistency to reconcile.
 2. **The second loan on a wallet must be a same-chain Direct loan** (live: a
