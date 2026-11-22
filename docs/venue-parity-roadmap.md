@@ -99,6 +99,30 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
    must drive the same push the close path uses. The Direct product dodged it
    only because its CM salt differs from the unified one.
 
+### Measured flap: an indexer restart blocks the gateway for ~1–2 min (2026-11-22)
+
+Restarting the indexer (the band vehicle roll) flipped the gateway to
+**degraded with a blocking `operator: dependencies: indexer_sse`** advisory for
+~1–2 minutes, then it self-healed. The full chain, measured:
+
+- the SSE subscribers reconnected (operator `/health`: both chains
+  `connected: true`, `healthy: true`);
+- but `IndexerSseHealth::is_healthy` also requires a **completed hub-refresh
+  probe** within `PROBE_LIVENESS_SECS` (3 × the refresh interval), and the probe
+  reads the indexer's HTTP API — which was down during the restart, so probes
+  failed until the next pass after the indexer came back;
+- the gateway surfaces any degraded dependency as blocking, so the whole gate
+  read 503-degraded while the streams were already reconnected.
+
+It is bounded and self-healing, and it only fires when a dependency is
+restarted (which the operator controls). The fix direction if it ever matters:
+re-probe immediately on a probe failure/reconnect instead of waiting for the
+next interval — a small change to the operator's probe loop, deliberately not
+made mid-session for a 2-minute window caused by our own restarts. Also observed
+alongside: `cctp_relay` reports `bridge_parked: 1` — an old parked burn from a
+rewound epoch (the destination nonce prevents a double mint; named as
+non-recoverable-by-retry in its own health text), not new.
+
 ### Two σ estimators, 3.8× apart on the same instrument — named, and priced honestly (2026-11-22)
 
 While the para band matured, the two σ surfaces were compared on the same coin:
