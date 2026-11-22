@@ -98,6 +98,33 @@ cancel path, not (on this evidence) a capital loss: the fix is to pair
 cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
 of cancelled rows until it is fixed.
 
+### Funding was charged one hour ahead — the boundary rate is the one published *before* it (relay-5c4f5f3e, 2026-11-22)
+
+The lane read the served `funding` rate at the moment it crossed the hour
+boundary, and that sample is already the **next** hour's prediction. Measured on
+the live mirror at the 07:00 boundary (the agent's `para:SMH` book):
+
+| value | rate |
+|---|---|
+| served just **before** the boundary, 06:59:57 | **−0.0000319981** |
+| real venue's charged rate for 07:00 (`fundingHistory`) | **−0.0000319981** — exact |
+| served just **after** the boundary, 07:04:55 | −0.000099071 |
+| what the lane charged (`userFunding`) | −0.000045236 |
+
+So the mirror paid neither the elapsed hour's rate nor the next prediction: it
+priced the boundary with whatever sample the tick happened to see. The absolute
+error on this small book was 0.13 bp of notional per hour, but the *rate* (what a
+funding-carry strategy trades) was off by 41 %, and the error flips sign when
+funding flips.
+
+The feed now records, per coin, the rate in force **before** each hour boundary
+(the previous sample, bounded to two days) and `accrue_dex` prices each crossed
+boundary with it, writing one ledger entry per boundary at its own rate. A
+boundary with no captured pre-boundary sample (a boot, a gap) falls back to the
+current rate exactly as before, so the served ledger never hides the
+approximation. Pinned: a post-boundary sample at `0.0009` does not price the
+hour that just ended. 395 venue tests green; pin `relay-5c4f5f3e`.
+
 ### The $10 minimum stranded a sub-$10 position the real venue would let out (relay-a6c48bda, 2026-11-22)
 
 Measured live on a disposable account: a `0.006 ETH` long opened at `$10.002`
