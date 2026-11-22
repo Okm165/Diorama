@@ -156,7 +156,12 @@ perp-cash figure they have always used, so no trigger moves. A cross position's
 margin is a reservation on the wallet's own cash, not moved in, so it is not
 re-added (the positions-only mode-switch regression pins that). The seed stores
 the same convention (a unified isolated patch subtracts the margin twice) and
-reproduces the patch's own `totalRawUsd`/`accountValue` exactly. Two new tests
+reproduces the patch's own `totalRawUsd`/`accountValue` exactly — and it
+**round-trips the live state**: on this book the new served `totalRawUsd`
+`−11.4496308325` seeds back to the ledger balance `−1.5995508325`, which is
+the balance the trading path holds. One representation, both directions:
+a control-plane re-seed of a live account reproduces it, and a served
+snapshot describes the ledger it came from. Two new tests
 pin the served invariant and the seed round trip; **392 venue tests green**.
 
 **Verified live after the roll:** the para dex now serves `accountValue
