@@ -98,6 +98,33 @@ cancel path, not (on this evidence) a capital loss: the fix is to pair
 cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
 of cancelled rows until it is fixed.
 
+### The maker lane and book impact, measured live (2026-11-22)
+
+A maker/taker cycle on `para:SMH` with two fresh dealt accounts (no loan
+touched), judged from the venue's own fill rows:
+
+| leg | fill | fee |
+|---|---|---|
+| maker rests a sell `0.5 @ 411.25` (inside the spread) | `crossed: false`, `Open Short` | `0.00616875` = **0.3 bp** (1.5 bp maker × HIP-3 growth 0.2) |
+| taker buys `1.0 @ 411.25`, fills `0.5` from the maker | `crossed: true`, `Open Long` | `0.01850625` = **0.9 bp** (4.5 bp taker × 0.2) |
+| maker flattens by lifting the ask `411.33` | `Close Short`, `closedPnl −0.04` = `(411.25 − 411.33) × 0.5` | `0.01850985` = 0.9 bp |
+
+Maker net `−0.0646786`, taker net `−0.01850625` — the spread capture was negative
+because the flatten lifted an ask that had moved up, which is the real cost of a
+0.5-unit position in a book whose touch is 0.24–0.93 units.
+
+**Book impact is exact.** `para:SMH` ask `411.33 × 0.427`; an IOC buy of `0.4`
+filled and the served ladder read `411.33 × 0.027` immediately after — the fill
+consumed the real level (`0.427 − 0.4`), and the next poll restored the venue's
+own depth. A 0.9-unit round trip then walked two levels (`0.682` and the rest)
+and cost `0.81 USDC` on `369` notional ≈ **29 bp** — the thin-book cost a
+strategy must size around, reproduced by the mirror rather than assumed.
+
+`venue-account` now reports the whole unified account (`whole_account_usd`,
+`spot_usdc`, `spot_usdc_hold`) like the portfolio statement — it previously
+summed only the perp ledgers (perp `339.03270413` + free spot `3.76371024` =
+`342.79641437`).
+
 ### Funding was charged one hour ahead — the boundary rate is the one published *before* it (relay-5c4f5f3e, 2026-11-22)
 
 The lane read the served `funding` rate at the moment it crossed the hour
