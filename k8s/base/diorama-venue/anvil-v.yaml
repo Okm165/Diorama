@@ -185,12 +185,19 @@ spec:
               # the old code happily forked from the pin — replacing 298 k blocks
               # of history. (The parked file was complete by the time the old pod
               # exited and was recovered intact.) Both cases refuse now.
+              #
+              # **First boot is not the dangerous case.** A brand-new PVC has no
+              # state and no history to replace, so it must still fork from the
+              # pin. The marker is written once the node has booted on this
+              # volume: absent marker + absent state = first boot; present marker
+              # + absent state = the state vanished after a boot, and that is the
+              # case that refuses.
               if [ ! -f /state/anvil-state.json ]; then
-                if [ "${ALLOW_PIN_FALLBACK:-0}" != "1" ]; then
-                  echo "anvil-v: no state file at /state/anvil-state.json. Refusing to boot from the pin ($PIN): that would replace every block above it and strand confirmed settlements. Restore a dump from /state, or set ALLOW_PIN_FALLBACK=1 for a deliberate new history." >&2
+                if [ -f /state/.anvil-booted ] && [ "${ALLOW_PIN_FALLBACK:-0}" != "1" ]; then
+                  echo "anvil-v: no state file at /state/anvil-state.json, but this volume has booted before. Refusing to boot from the pin ($PIN): that would replace every block above it and strand confirmed settlements. Restore a dump from /state, or set ALLOW_PIN_FALLBACK=1 for a deliberate new history." >&2
                   exit 1
                 fi
-                echo "anvil-v: ALLOW_PIN_FALLBACK=1 — no state file; starting a new history from the pin ($PIN)" >&2
+                echo "anvil-v: no prior boot on this volume (or ALLOW_PIN_FALLBACK=1) — starting a new history from the pin ($PIN)" >&2
               fi
               if [ -f /state/anvil-state.json ] && [ "$(tail -c 64 /state/anvil-state.json | tr -d '[:space:]' | tail -c 1)" != "}" ]; then
                 CORRUPT="/state/anvil-state.json.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -201,6 +208,8 @@ spec:
                 fi
                 echo "anvil-v: ALLOW_PIN_FALLBACK=1 — starting a new history from the pin (parked $CORRUPT)" >&2
               fi
+              # The boot marker: this volume now has a history to protect.
+              date -u +%Y-%m-%dT%H:%M:%SZ > /state/.anvil-booted 2>/dev/null || true
               exec anvil \
                 --host 0.0.0.0 --port 8545 \
                 --fork-url "$EVM_FORK_URL" \
