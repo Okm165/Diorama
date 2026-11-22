@@ -99,6 +99,29 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
    must drive the same push the close path uses. The Direct product dodged it
    only because its CM salt differs from the unified one.
 
+### Two σ estimators, 3.8× apart on the same instrument — named, and priced honestly (2026-11-22)
+
+While the para band matured, the two σ surfaces were compared on the same coin:
+
+- **the GARCH fitter** (`venue_calibration`, hourly book series, 1440 returns):
+  `para:SMH` σ = **0.641** — this is the number the declared band was derived
+  from ([0.32, 1.28]);
+- **the pricing estimator** (`venue_sigma`, 5-minute buckets, 21 marks ≈ 2 h):
+  measured from the live mirror series **σ ≈ 0.17** — the mirror book is far
+  smoother at 5-minute resolution than the fit's hourly returns imply.
+
+That is a **3.8× disagreement on the same instrument**, and it is the honest
+description of the design: the fitter's window answers "what regime is this
+name in", the pricer's window answers "how much has the served book moved in
+the last two hours". The declared band brackets the fit; the pricer's low read
+is **lifted to the floor** (`floor_breach = premium` — 0.32), so the leg prices
+at the declared policy premium rather than refusing. Everything behaves as
+specified — but the practical consequence is worth naming for the owner: on
+this mirror the floor carries the pricing, and a name whose live σ drifts above
+the band's ceiling (2× the fit) refuses rather than clamping. If the pricing
+σ should track the fit more closely, that is a deliberate estimator-window
+decision, not a bug to patch.
+
 ### The venue-native band vehicle, built and verified end to end (2026-11-22)
 
 The schema step this roadmap kept naming as "the owner's declaration" is now a
