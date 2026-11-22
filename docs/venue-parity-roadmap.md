@@ -98,6 +98,34 @@ cancel path, not (on this evidence) a capital loss: the fix is to pair
 cancel after Phase 1 and route to enforcement), and to make `value_at_work` net
 of cancelled rows until it is fixed.
 
+### The stranded exposure is D-73, and the health surface now names its size (rel-50d6dd71, 2026-11-22)
+
+The cancel path has **no settlement exit to pair**: `report_applied_anomalies`
+already emits `PHANTOM_EXPOSURE` at the transition, and its own text records the
+blocker — *"the `writeOff` exit reverts `NotFlagged` on an unflagged position,
+so no proof path clears this exposure today (register D-73)"*. So the earlier
+"pair the cancel with settle/decreaseExposure" direction is not an operator
+change; it needs a contract/proof-path change first. What could be fixed is the
+information: the count (`7`) read as bookkeeping while the capital behind it was
+invisible on the health surface.
+
+`operator rel-50d6dd71` adds `probe_phantom_exposure_stranded_usdc` (the same
+predicate, summed over `principal_amount`) and the advisory
+`phantom_exposure_stranded_usdc`. Live:
+
+```
+warn phantom_exposure_transitions_24h :: 7
+warn phantom_exposure_stranded_usdc  :: 2544.933161 USDC of underwriter exposure
+     sits on creations cancelled after Phase 1 in the last 24 h
+     (the writeOff exit reverts NotFlagged — D-73; no proof path clears it).
+```
+
+The DB sum reads **2,544.933161**, the chain's `positionExposure` sum
+**2,544.948505** (15 micro-USDC apart), and `totalExposure` is 6,730.687294 —
+37.8% of the underwriter's `value_at_work` is on books with no debt. `None`
+(unknown), never zero, when the read fails. 566 operator tests green; deploy pin
+`ce0e1c69`.
+
 ### DB sweep: the scan is fresh; a terminal row keeps its last collateral mirror with no as-of (2026-11-22)
 
 Non-terminal books at 07:04Z: 10 Active, HF fresh on all nine backed ones
