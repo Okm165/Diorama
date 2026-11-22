@@ -44,6 +44,28 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### Funding is live-identical in rate but phase-shifted by the sim clock (+33.183 min) (2026-11-22)
+
+The reconciliation tool (`venue-funding-check`) returns `upstream_rate: null` for
+the charged boundary: the mirror charged at its chain-clock hour 07:00
+(`boundary 1795330800000` = wall **06:26:49**), while the real venue publishes
+`fundingHistory` at wall `:00`. No boundary coincides, so there is nothing to
+pair — the tool reports a null rather than a delta, which reads as "the real
+venue had no funding" when the truth is "the phases differ". The *rate* the
+mirror applied at its boundary (`−0.000045236`) is the live venue's rate at that
+wall instant (the venue's rates are bit-identical at any instant, measured
+above); only the hourly *phase* is offset.
+
+This is a genuine representative-quality caveat for any strategy that holds
+across a boundary: funding, interest and maturities all follow the sim clock,
+which sits `+33.183 min` from wall. It is not patched here — the shared mirror
+deliberately runs at a fixed clock offset (the control plane's `advance`/`crash`
+are off-limits on it), and a backward jump would suppress accrual until the
+clock caught up. The honest fix direction is either to run the mirror's clock at
+wall (offset 0) for market-fidelity runs, or to have the reconciler pair the
+nearest published boundary and report the skew — never a bare null. Named, with
+the measured skew.
+
 ### Funding charged on a live mirror position at the chain boundary — measured (2026-11-22)
 
 The open `para:SMH` leg (0.03 long, entry 410.42) crossed the venue's hourly
