@@ -44,6 +44,84 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### HIP-3 funding is exact at the boundary, on a live builder-dex position (2026-11-22)
+
+A short 0.5 `xyz:TSLA` ($179, aa09's `xyz` dex, dealt 300 USDC there) was held
+across the 17:00Z boundary. The `userFunding` row lands at **exactly**
+`1795366800000` (17:00:00.000Z) with rate **`0.00000625` — the pre-boundary
+rate**, byte-identical to the real venue's published boundary row (same rate,
+same premium, same millisecond), `szi −0.5`, `usdc +0.001120438`: the short
+**received** (positive rate pays shorts). The 1 Hz sampler saw the mirror's
+rate switch to the new hour at the same sample the real venue's did. Flattened
+through `--size max` (which needed its own fix: a HIP-3 coin's lot lives in its
+**dex's** meta, not the default one — `40281d31`), and the builder-dex
+identity closes exactly: `300 + closedPnL(−0.195) − fees(0.032266) +
+funding(+0.001120438) = 299.773854088 = AV`, diff 0.0.
+
+### The settle-and-retire loop: two phantom books closed, and the mirror's own rewinds named (2026-11-22)
+
+**The liquidator deferred a settled book 871 times.** The empty-CM read in the
+snapshot loader returned `Skipped` *before* `execution_admission` ran, so the
+admission's terminal arms were unreachable on the exact case that needs them.
+Chain truth for `0x9df1c8c9…` (xGOLD, liquidated 11-19): `IssuedDebt.totalSupply
+0`, `liquidated 1`, CM empty — `AlreadyLiquidated` by the admission's own
+predicate — yet the flag row sat at 871 attempts, one line every five minutes
+since 11-19. The empty read is now classified from the ledger the snapshot
+already holds: zero debt drains as already liquidated, an expired flag drains
+terminally (`FLAG_TTL_BLOCKS` is the sole expiry; no flag is ever cleared
+early), and only debt outstanding with a live flag keeps waiting for the
+asynchronous seizure (`64028dc1`). Rolled in `309e4d29`; the row drained on the
+first pass (`executed=t`, attempt 875) and the liquidator has been silent since.
+
+**A creation the surviving chain never had.** `0xccda…` (cross-chain WETH) was
+`Active` because the operator folded the chain-999 Phase2 batch `0x479649a5…`
+at 05:43:03; the keeper found that receipt absent at the current head at
+05:48:43 (epoch 205) and retired the proof terminally with *"the operator must
+re-prove if the action is still required"* — and nothing did. Ten hours later:
+the debt note has no code, `Underwriter.positionExposure` is exactly 0, the
+chain-1 CM holds the borrower's 0.05 WETH, and the HF scan refused the book
+every minute while the terminal-residual probe could not attribute the agent's
+venue balance ("a live sibling backs this agent").
+
+`rewind_creation_reconcile` closes it with the same rule as the close
+reconciler — chain truth wins — gated on the economic state: the newest
+principal-chain `Creation` submission is terminally rewind-retired after the
+status move and past a one-hour dwell, the debt note has **no code** at head,
+and the underwriter's exposure is **exactly zero**. Then it writes a named
+`epoch_casualty_adjudications` row (`creation_never_landed`, evidence carries
+the collateral escrow), and retires the book to `Failed` through the new
+rewind edge `Active → Failed` (`REWIND_CREATION_EDGES`, migration 0049; the
+lifecycle census grows 39 → 40 and the guarded graph still refuses the pair).
+Live capital with an absent note is a **different** casualty (Phase2-only) and
+is kept, never written over.
+
+**No redrive, and that is the economics, not a deferral.** The two chains are
+independent anvils: a chain-999 epoch bump does not rewind chain 1. The
+collateral pull (chain-1 tx `0x2712390e…`, block 26,469,835, epoch 204)
+survived, so re-proving creation would pull the 0.05 WETH a **second** time
+before it could settle. The truthful closure is the creation-failure sink plus
+the collateral recorded as owner-recoverable — there is no protocol cancel
+circuit for a half-creation, which is the structural gap this measured shape
+exposes (a candidate protocol extension, not an operator action).
+
+**The first roll found the scan's own bug.** The monitor's scan selected
+`ks.tx_hash`, a column migration 0031 dropped as write-only; it failed every
+tick against the live schema (`ff9f9c6d`). The same day's data also showed why
+the retirement trigger must stay behind chain gates: on this mirror the rewind
+retires submissions whose action later re-landed, so the scan alone admits 9 of
+10 Active books — only the note-code + exposure reads decide a closure.
+
+**Market representative quality, measured against the real venue.** Same-instant
+VWAP slippage over the served 20-level book: BTC/ETH/HYPE/`xyz:TSLA` delta
+**0.0 bp** at every bucket (0.01–5 BTC, 0.1–50 ETH, 10–5 000 HYPE, 1–100
+TSLA); SOL −0.13/−0.43 bp at 100/500; `xyz:ANT` +0.005…+0.18 bp; mark drift 0.0
+everywhere. Top-of-book churn over 12 s: 22/24 samples on BTC, 12/24 on
+`xyz:ANT`, 10/24 on spot. `para:H100`/`para:TENCENT` are empty **on the real
+venue too** (the mirror is faithfully empty, not broken). The 8 mirrored spot
+pairs are the protocol-relevant USDC markets (PURR, HYPE, UBTC, UETH, USOL,
+USDT0, UPUMP, UZEC); the other 346 real pairs still serve read-only books that
+match the real venue.
+
 ### Depth fidelity: the mirror's book is the real 20-level ladder, not a mid-price shadow (2026-11-22)
 
 Marks were already exact; this round compared the **whole served book** against
