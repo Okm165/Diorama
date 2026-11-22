@@ -662,6 +662,8 @@ impl Sim {
         }
         let meta = feed.meta_for_lookup(&req.coin);
         let position_szi = self.signed_position(address, &req.coin)?;
+        let capped = cap_reduce_only(req, position_szi);
+        let req = capped.as_ref().unwrap_or(req);
         validate_order(feed, meta.as_ref(), req, position_szi)?;
         self.pre_place_refusals(feed, address, req, meta.as_ref())?;
         // A trigger arms instead of walking.
@@ -2154,6 +2156,23 @@ impl Sim {
     }
 }
 
+/// The venue's reduce-only cap: an order may only ever reduce the position it
+/// names, so a larger size is cut to it (the real venue's capped orders carry
+/// `origSz` = requested and `sz` = what the position allowed). Without the cap
+/// a flatten sized from a stale read — `size = balance` — walked the requested
+/// size and the fill-time guard then refused the *whole* order, so a strategy
+/// could not close until a fresh read happened to agree.
+fn cap_reduce_only(req: &Order, position_szi: Option<Decimal>) -> Option<Order> {
+    let szi = position_szi.filter(|szi| !szi.is_zero())?;
+    if !req.reduce_only || req.size <= szi.abs() {
+        return None;
+    }
+    Some(Order {
+        size: szi.abs(),
+        ..req.clone()
+    })
+}
+
 /// Walk the served book (the live depth minus what the devnet already
 /// consumed) and validate the request: positive size, real depth within the
 /// limit (an `Ioc`; a resting tif takes the rest path instead).
@@ -2164,6 +2183,8 @@ fn walk_served_book(
     resting: &[RestingOrder],
     position_szi: Option<Decimal>,
 ) -> Result<(Vec<Candidate>, Decimal, Decimal)> {
+    let capped = cap_reduce_only(req, position_szi);
+    let req = capped.as_ref().unwrap_or(req);
     validate_order(feed, meta, req, position_szi)?;
     let now = crate::now_ms();
     let book = feed.book(&req.coin, now).ok_or(Error::Warming)?;
@@ -3010,6 +3031,52 @@ mod tests {
                 .get("ETH")
                 .is_none_or(|p| p.szi.is_zero()),
             "the position is flat"
+        );
+    }
+
+    /// **A reduce-only order larger than the position is capped to it, not
+    /// refused.** The real venue caps the close (its status carries `origSz` =
+    /// requested, `sz` = what the position allowed); the mirror used to walk
+    /// the requested size and then refuse the whole fill
+    /// (`fill.size > old.abs()`), so a flatten that sized from a stale read
+    /// could never complete. Now the walk sees the capped size, the position
+    /// closes exactly, and nothing flips.
+    #[test]
+    fn a_reduce_only_order_larger_than_the_position_is_capped_to_it() {
+        let feed = feed_with_book(
+            book("ETH", &[("100", "5")], &[("101", "5")]),
+            meta_with("ETH", 10),
+        );
+        let (sim, a) = funded_sim(&feed, "1000");
+        sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
+        let mut oversized = reduce(Side::Sell, "0.5");
+        oversized.limit_px = Some("100".parse().unwrap());
+        let fill = sim
+            .order(&feed, a, &oversized)
+            .expect("the capped close fills");
+        assert_eq!(
+            fill.total_sz,
+            "0.1".parse().unwrap(),
+            "the venue caps at the position"
+        );
+        assert!(
+            sim.account(a)
+                .unwrap()
+                .unwrap()
+                .positions
+                .get("ETH")
+                .is_none_or(|p| p.szi.is_zero()),
+            "flat, never short"
+        );
+        // The same oversize in the position's own direction still refuses:
+        // capping must not turn an increase into a close.
+        sim.order(&feed, a, &ioc(Side::Buy, "0.1")).unwrap();
+        let err = sim
+            .order(&feed, a, &reduce(Side::Buy, "0.5"))
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("Reduce only order would increase position."),
+            "{err}"
         );
     }
 
