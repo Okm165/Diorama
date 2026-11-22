@@ -44,6 +44,41 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The feed writer now honours Chainlink's own invariant, and one account traded two dexes across a funding boundary (2026-11-22)
+
+**The regression churn was a writer, not a poller.** oracle-liveness is a Python
+fixture (`k8s/oracle-liveness/liveness.py`) that stamps each feed with its head
+block's timestamp. It shares every feed with other writers (the venue engine's
+control-owned marks sit ahead of the chain head by their poll cadence), so a
+tick could write a stamp **behind** what was already served; the indexer's
+poller correctly read that as a feed rewind, warned, and superseded the fresher
+rows — 29 warns in one minute, prices identical. The fixture now obeys
+Chainlink's own identity: each write reads the slot's current stamp and refuses
+to write at or below it (`max(head ts, served + 1)`, data and block timestamps
+moving together), for both the adapter's stable slots and the 41 wrapper feeds;
+the invariant is pinned in the fixture's self-test. Rolled as the fixture image
+`local-20261122-monotone` (the release lock re-records its digest; every Rust
+service stays on the release). Measured: the 20:56 batch was the transition, and
+**zero regressions since** while the writer churns every 15 s.
+
+**One account, two dexes, a resting maker and a taker across the boundary.** On
+the Active unified loan `efe3ef…`'s agent (dealt 300 default + 100 `xyz`):
+a post-only `xyz:TSLA` bid rested at 355 (oid 571; visible only dex-scoped —
+the report's read quirk, confirmed again) while a taker BTC long (0.005 @
+60 607, oid 570) crossed the 21:00:00.000Z boundary. Funding landed at exactly
+`1795381200000` — **+0.002862429 USDC** at the pre-boundary rate −9.398e−6 (a
+long receives on a negative rate). The maker cancelled cleanly (one cancel, no
+residual hold), the BTC closed at 60 849 (oid 572, reduce-only), and the
+identity closes: 299.5917 + 1.21 − 0.2733 fees + 0.00286 funding = **300.5313 =
+ΔAV**. Both deals were disposed by negative amount afterwards (the scenario's
+own profit left on the account), and the gateway stayed healthy with zero
+advisories through the temporary 300-credit, the open positions and the cancel.
+
+**Still named:** the chain-1 archive backfill (256 refused samples on one
+mirror-written feed) — the anvil's state window physically cannot serve the
+deep history the backfill samples, so the warning is honest and the retry
+cadence is the remaining friction to bound.
+
 ### The order path exists: a live loan's venue account traded, and the protocol priced the PnL (2026-11-22)
 
 The Marcello report's blocking item — "no order path, so venue PnL raising
