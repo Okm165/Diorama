@@ -44,6 +44,36 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The order path exists: a live loan's venue account traded, and the protocol priced the PnL (2026-11-22)
+
+The Marcello report's blocking item — "no order path, so venue PnL raising
+collateral was never tested" — is a discovery gap, not a product gap. The path
+is the gateway's user-sim `venue-order` (it signs through the gateway and posts
+the venue's own `/exchange`; the mirror's devnet envelope recovers no
+signature), and the venue-sim also exposes `/control/order` and `/control/deal`
+on the control port. Proven live on the **Active** unified loan `efe3ef…`
+(agent `0x609e…`, the idx29 book):
+
+* baseline perp wallet −0.193; `/control/deal` perp +300 → balance 299.807;
+* taker buy 0.01 BTC filled at the ask 60 593.0 (oid 568); the venue made the
+  trade visible on every surface the protocol prices from — `clearinghouseState`
+  (entry, uPnL, 20× cross, liq. price 25 013.7) and the indexer's own
+  `venue-position-state` series (mark, uPnL, maintenance 7.575, funding rate
+  −1.47e−5/h, σ, basis);
+* the mark moved 60 593 → 60 618.5 → 60 626.0 while held; uPnL tracked it
+  (+0.26 at the second read);
+* close at 60 626.0 (oid 569, reduce-only): gross +0.33, fees 0.2727 + 0.2728
+  (taker 4.5 bp/side), **net −0.2155**, and the observed ΔAV is −0.2155. The
+  identity closes to the cent;
+* disposal by the sim's own rule (negative deal, −300) → balance −0.408
+  (the pre-existing debit plus the experiment's realized loss), flat.
+
+So "venue profit counts as collateral" is mechanically live: the venue series
+the valuation reads carries the position and its PnL, and the collateral jump
+from dealt funds flowed through the loan's book without a single advisory. What
+the report's harness could not do was find the door; the door is the gateway
+envelope, not a raw `/exchange` call from the tailnet.
+
 ### The unified agent's residual claim is scheduled onto the live beacon, and the chain-1 feed control came back from the dead (2026-11-22)
 
 **The upgrade is real, not a plan.** `pushResidualToOwner` (`e07ddfe5`, forge 741/741)
