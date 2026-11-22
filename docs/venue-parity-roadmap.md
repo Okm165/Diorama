@@ -44,6 +44,52 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### The enforceable numerator is immune to venue P&L — proven live, with the account book exact (2026-11-22)
+
+The report's oldest ask — "venue profit counts as collateral" — got its negative
+proof on a real unified book (portfolio `fbaa118c`, debt 971.49, one Active
+WETH leg, venue agent `0x8ff0175f` holding the loan's 971.493278 in **spot**):
+
+* **Baseline read, then a controlled drill:** the venue account held spot
+  971.493278 only. Dealt +300 perp, opened 1 `xyz:TSLA` at 359.74 (ioc, one
+  level), rallied the mark +2% → uPnL +6.8786 visible in the venue's
+  clearinghouseState, with the account's own books closing exactly:
+  perp cash 300 − fee 0.0324 + uPnL 6.8786 = 306.846.
+* **The enforceable numerator did not move.** `venue_leg_usd` stayed at its
+  drift value (0.003984), `hf_numerator_usd` moved only by coupon drift
+  (1454.9908 → 1454.9948), HF held 1.497689 across the rally. The venue term
+  is capped at the seizure right (note + buffers) and netted by the note — the
+  documented R5/D.37.1 rule: the venue's report cannot be proven at
+  enforcement, so venue profit above the lender's claim never inflates the
+  breach figure. A mark move cannot manufacture headroom.
+* **The account book is exact.** The served `marginSummary.accountValue` =
+  cross summary + margin used (324.833 = 306.846 + 17.987) **by design**: the
+  served perp equity carries the spot hold, and the whole-account read
+  subtracts it once from the spot side — `(spot − hold) + perp =
+  (971.493 − 17.987) + 324.833 = 1278.34`, the true whole, verified against
+  the position's own identity. The real-venue fixtures (`real.json`,
+  `real_liquidation.json`) confirm the identity `accountValue = raw +
+  signed_notional` the sim's assembly reproduces.
+* **Round trip closed and disposed:** close at 360.21 (+0.47 gross, 0.064
+  fees net +0.4052), the -300 deal disposed, the agent keeps its earned
+  0.4052 (real venue state, not dealt money), venue_equity read back
+  971.898483 = spot 971.493 + perp 0.405 **exactly**, mark handed back to the
+  live book, no advisory raised.
+
+### A terminal book's account verdict no longer outlives it (2026-11-22)
+
+The transition reactor retires a portfolio's `portfolio_health` row when its
+terminal edge leaves no live sibling — but a status set outside that reactor
+(monitor-driven failure, manual repair) never announces its edge there.
+Measured: `5bc4726c` (the 14-terminal-leg shared-agent book) kept a health row
+frozen at 11:46 serving debt 43.239737 / HF 1.67 — the reactor's own documented
+defect arriving through the other door. The scan now reconciles at the end of
+every completed fold: a health row with **no leg in
+`HEALTH_ROW_LIVE` (Active, Closing)** is stale by definition and is deleted
+(one query; a dangling row with no portfolio goes with it). Released with
+`local-20261122-b39d98af`; it deletes exactly the one orphan and leaves the
+eight live portfolios' rows untouched.
+
 ### The σ coverage gap was a config split-brain, not a fitter gap (2026-11-22)
 
 The standing "78/85 fits" open resolved into a precise story, and it is not a
