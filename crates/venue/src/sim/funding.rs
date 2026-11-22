@@ -3,37 +3,16 @@
 //! path settles the pre-fill size first (order.rs); the automaton sweeps
 //! every account (tick.rs).
 use super::account::{add, credit_ledger, mul, Account};
-use super::ledger::{record_funding, UserFunding, LEDGER_BOUND};
+use super::ledger::{record_funding, UserFunding};
 use crate::error::Result;
 use crate::feed::dex::dex_of_coin;
 use crate::feed::{MarketFeed, Prices};
+#[cfg(test)]
 use rust_decimal::Decimal;
 
 /// One hour in milliseconds: the funding interval (the docs: "funding is
 /// paid every hour").
 const HOUR_MS: u64 = 3_600_000;
-
-/// The ledger keeps one entry per boundary crossed, stamped with the boundary
-/// (the served rate prices every one, as the balance does): the last `hours`
-/// boundaries up to `to_ms`, at most the ledger's bound.
-fn record_boundaries(
-    list: &mut std::sync::Arc<std::collections::VecDeque<UserFunding>>,
-    entry: &UserFunding,
-    span: (u64, u64),
-) {
-    let (to_ms, hours) = span;
-    let through = to_ms / HOUR_MS;
-    let kept = hours.min(LEDGER_BOUND as u64);
-    for boundary in (through + 1 - kept)..=through {
-        record_funding(
-            list,
-            UserFunding {
-                time: boundary * HOUR_MS,
-                ..entry.clone()
-            },
-        );
-    }
-}
 
 /// Accrue funding from the account's stamp to `to_ms` at the live rates:
 /// the docs' interval is hourly and all-or-nothing ("the funding rate is
@@ -87,8 +66,16 @@ fn accrue_dex(account: &mut Account, feed: &MarketFeed, dex: &str, to_ms: u64) -
     if to_ms <= from {
         return Ok(0);
     }
-    let hours = (to_ms / HOUR_MS).saturating_sub(from / HOUR_MS);
-    if hours == 0 {
+    // The boundaries strictly after the stamp, through `to_ms`: the stamp sits
+    // just after the last settled boundary, so a normal tick crosses exactly
+    // one. Each boundary is priced with the rate the venue published **before**
+    // it (`feed.funding_before`) — the charge for hour T is the rate in force
+    // at T, not the prediction the venue publishes at T+1 s. A boundary with no
+    // captured pre-boundary sample (a boot, a gap) falls back to the current
+    // rate, which is what the lane served before the history existed.
+    let first = from / HOUR_MS + 1;
+    let last = to_ms / HOUR_MS;
+    if last < first {
         account.ledger_mut(dex).funded_at_ms = to_ms;
         return Ok(0);
     }
@@ -103,25 +90,33 @@ fn accrue_dex(account: &mut Account, feed: &MarketFeed, dex: &str, to_ms: u64) -
         let Some(Prices { oracle, .. }) = feed.required_prices(coin) else {
             continue;
         };
-        let Some(rate) = feed.funding(coin) else {
+        let Some(current) = feed.funding(coin) else {
             continue;
         };
-        let hourly = mul(
-            mul(-p.szi, oracle, "funding notional")?,
-            rate,
-            "funding payment",
-        )?;
-        let payment = mul(hourly, Decimal::from(hours), "funding payment")?;
-        if payment.is_zero() {
-            continue;
+        for boundary in first..=last {
+            let boundary_ms = boundary * HOUR_MS;
+            let rate = feed.funding_before(coin, boundary_ms).unwrap_or(current);
+            let payment = mul(
+                mul(-p.szi, oracle, "funding notional")?,
+                rate,
+                "funding payment",
+            )?;
+            if payment.is_zero() {
+                continue;
+            }
+            credit_ledger(&mut account.perps, dex, payment, "funding balance")?;
+            p.funding_all_time = add(p.funding_all_time, payment, "cum funding")?;
+            p.funding_since_open = add(p.funding_since_open, payment, "cum funding")?;
+            p.funding_since_change = add(p.funding_since_change, payment, "cum funding")?;
+            record_funding(
+                &mut account.fundings,
+                UserFunding {
+                    time: boundary_ms,
+                    ..UserFunding::hourly(coin, p.szi, (payment, rate))
+                },
+            );
+            moved += 1;
         }
-        credit_ledger(&mut account.perps, dex, payment, "funding balance")?;
-        p.funding_all_time = add(p.funding_all_time, payment, "cum funding")?;
-        p.funding_since_open = add(p.funding_since_open, payment, "cum funding")?;
-        p.funding_since_change = add(p.funding_since_change, payment, "cum funding")?;
-        let entry = UserFunding::hourly(coin, p.szi, (hourly, rate));
-        record_boundaries(&mut account.fundings, &entry, (to_ms, hours));
-        moved += 1;
     }
     account.ledger_mut(dex).funded_at_ms = to_ms;
     Ok(moved)
@@ -170,6 +165,34 @@ mod tests {
         let expected = -Decimal::ONE * Decimal::from(101) * Decimal::new(125, 7);
         assert_eq!(account.perp_balance(""), expected);
         assert_eq!(account.positions["BTC"].funding_since_open, expected);
+    }
+
+    /// A boundary is charged the rate published **before** it — the venue's
+    /// sample that lands after the boundary is already the next hour's
+    /// prediction. Measured on the live mirror (2026-11-22): the served rate at
+    /// `06:59:57` (`-3.1998e-05`) was *exactly* the real venue's charged rate
+    /// for `07:00`, while the first post-boundary sample was `-9.9071e-05`; the
+    /// lane charged a third value because it read the ctx just after the
+    /// boundary. The history now prices the elapsed hour.
+    #[test]
+    fn a_boundary_is_charged_the_rate_published_before_it() {
+        let feed = feed_with_funding(&[("BTC", "100", "101")]);
+        let mut account = funding_account();
+        // The next hour's prediction lands one second after the 2 h boundary.
+        let mut next = crate::wire::funding_ctx("100", "101");
+        next.funding = Decimal::new(9, 4);
+        feed.put_ctx("BTC".into(), next, 7_200_001);
+        let moved = accrue_funding(&mut account, &feed, 7_200_001).unwrap();
+        assert_eq!(moved, 1);
+        let charged = -Decimal::ONE * Decimal::from(101) * Decimal::new(125, 7);
+        assert_eq!(
+            account.perp_balance(""),
+            charged,
+            "the pre-boundary rate (0.0000125), not the 0.0009 prediction"
+        );
+        assert_eq!(account.fundings.len(), 1);
+        assert_eq!(account.fundings[0].funding_rate, Decimal::new(125, 7));
+        assert_eq!(account.fundings[0].time, 7_200_000);
     }
 
     /// A missing coin's context defers the whole account's accrual: no silent

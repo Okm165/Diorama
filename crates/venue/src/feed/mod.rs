@@ -103,6 +103,10 @@ pub(crate) enum BookAge {
     Stale(u64),
 }
 
+/// One funding hour (the docs' interval): the boundary grid the rate history
+/// is keyed on.
+const FUNDING_HOUR_MS: u64 = 3_600_000;
+
 /// The live cache (never persisted: it is a cache, and a stale file would
 /// masquerade as fresh data).
 #[derive(Default)]
@@ -131,6 +135,11 @@ struct Cache {
     spot_meta: Option<crate::wire::SpotMeta>,
     ctxs: BTreeMap<String, AssetCtx>,
     ctx_at: BTreeMap<String, u64>,
+    /// The published funding rate **in force just before** each hour boundary
+    /// (`boundary ms -> rate`), per coin: the venue charges a boundary the
+    /// rate published before it, while the first sample after the boundary is
+    /// already the next hour's prediction. Bounded to the last two days.
+    boundary_rates: BTreeMap<String, BTreeMap<u64, Decimal>>,
     books: BTreeMap<String, L2Book>,
     /// The served instant of the book (its last update; `book()` stamps it).
     book_at: BTreeMap<String, u64>,
@@ -174,6 +183,28 @@ impl Cache {
             }
         }
         self.registry = DexRegistry::from_dexs(dexs);
+    }
+
+    /// Remember the rate in force just before every hour boundary this update
+    /// crossed. Called **before** the new context replaces the old one: the
+    /// crossing is `prev_at < boundary <= now`, and the rate the venue charged
+    /// at that boundary is the one it published before it — the sample that
+    /// lands after the boundary is already the next hour's prediction.
+    fn note_boundary_rates(&mut self, coin: &str, prev_at: u64, prev_rate: Decimal, now_ms: u64) {
+        if prev_at == 0 {
+            return;
+        }
+        let first = prev_at / FUNDING_HOUR_MS + 1;
+        let last = now_ms / FUNDING_HOUR_MS;
+        if last < first {
+            return;
+        }
+        let rates = self.boundary_rates.entry(coin.to_owned()).or_default();
+        for boundary in first..=last {
+            rates.insert(boundary * FUNDING_HOUR_MS, prev_rate);
+        }
+        let keep_from = last.saturating_sub(47);
+        rates.retain(|at, _| *at >= keep_from * FUNDING_HOUR_MS);
     }
 
     /// Store one dex's meta (`""` = the default dex) and refresh the derived
@@ -514,6 +545,17 @@ impl MarketFeed {
         self.read().ctx_at.get(coin).copied()
     }
 
+    /// The funding rate published **before** `boundary_ms` for `coin` — the
+    /// rate the venue charged that boundary. `None` when this process has no
+    /// sample from before it (a boot, a gap): the caller falls back to the
+    /// current rate and the served ledger's rate keeps the approximation.
+    pub(crate) fn funding_before(&self, coin: &str, boundary_ms: u64) -> Option<Decimal> {
+        self.read()
+            .boundary_rates
+            .get(coin)
+            .and_then(|rates| rates.get(&boundary_ms).copied())
+    }
+
     /// Milliseconds since the last live `allMids` update, or `None` before the
     /// first one. The REST poller uses this to skip a mids read the socket has
     /// already served within the poll interval.
@@ -622,6 +664,12 @@ impl MarketFeed {
         }
         let mut c = self.write();
         for (asset, ctx) in meta.universe.iter().zip(ctxs) {
+            if let (Some(prev_at), Some(prev_rate)) = (
+                c.ctx_at.get(&asset.name).copied(),
+                c.ctxs.get(&asset.name).map(|prev| prev.funding),
+            ) {
+                c.note_boundary_rates(&asset.name, prev_at, prev_rate, now_ms);
+            }
             c.ctx_at.insert(asset.name.clone(), now_ms);
             c.ctxs.insert(asset.name.clone(), ctx);
         }
@@ -710,6 +758,12 @@ impl MarketFeed {
             return;
         }
         let mut c = self.write();
+        if let (Some(prev_at), Some(prev_rate)) = (
+            c.ctx_at.get(&coin).copied(),
+            c.ctxs.get(&coin).map(|prev| prev.funding),
+        ) {
+            c.note_boundary_rates(&coin, prev_at, prev_rate, now_ms);
+        }
         c.ctx_at.insert(coin.clone(), now_ms);
         c.ctxs.insert(coin, ctx);
         drop(c);
