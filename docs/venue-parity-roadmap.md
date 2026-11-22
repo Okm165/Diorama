@@ -75,9 +75,12 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
    `vol_floor_annual/vol_ceiling_annual` per instrument, which the code
    deliberately refuses to substitute ("refusing rather than applying a global
    prior") — the owner's declaration, with the measured σ the fitter is now
-   producing as its input. Also noted: the portfolio **admission** computed
-   `stress_capacity 9.64` at 04:30:29 while the **draw** reported 0.0 — an
-   admission-vs-draw inconsistency to reconcile.
+   producing as its input. (An earlier note here claimed an admission-vs-draw
+   inconsistency — `stress_capacity 9.64` vs a draw's 0.0. It was a measurement
+   error on my side: the admission query took `LIMIT 1` **across portfolios**, so
+   it read another party's book, and the first requote ran before the fresh
+   admission recomputed. Measured properly, the numbers agree to the cent; see
+   the capacity ladder below.)
 2. **The second loan on a wallet must be a same-chain Direct loan** (live: a
    second *unified* create is refused, "an append requires a same-chain Direct
    portfolio"). The multi-loan shape is therefore unified + Direct, and the
@@ -95,6 +98,25 @@ fills, and both loans closed clean (gateway healthy, 0 advisories).
    protocol fix is owed: the cancel path (and any terminal state after Phase1)
    must drive the same push the close path uses. The Direct product dodged it
    only because its CM salt differs from the unified one.
+
+### The capital plan, measured: draw capacity under trading, live (2026-11-22)
+
+One unified book (WETH-1 → USDC-999, note 43.24), capacity read before and
+after each action — the admission's `incremental_line` and the draw's
+`draw_capacity_usd` agree to the hundredth:
+
+| state | draw capacity | binding |
+|---|---|---|
+| flat, note 43.24 | **9.73** | `stress_capacity` |
+| after drawing 5.00 (debt 48.2387, HF 1.33) | 4.84 | `stress_capacity` |
+| + a 0.03 ETH long open (≈ $49.8 notional) | **4.84** | **`price_hurdle`** |
+| position flattened | **7.38** | `stress_capacity` |
+
+So the capital plan is coherent end to end: the draw consumes capacity exactly
+(9.73 − 5.00 ≈ 4.73, read 4.84 after the marks moved), an open position
+consumes it and *changes the binding constraint* to `price_hurdle`, and
+flattening returns it. The debt moved by exactly the drawn amount
+(43.2387 → 48.2387) and the loan closed clean.
 
 ### Execution and PnL accounting verified exact to the wei, live (2026-11-22)
 
