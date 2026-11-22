@@ -426,10 +426,69 @@ drivable from user-sim yet.
    against the live implementation's dispatcher is a cheap startup refusal that
    would have named this in seconds.
 
-**Also open:** `draw`'s post-draw settle wait still reads the loan unscoped, so
-a successful cross-chain draw reports failure after the fact (the draw itself
-lands: debt 87.1409 → 89.1405). Thread the same collateral scope through
-`wait_for_debt_change`.
+**Both fixed in source 2026-11-22, and the draw wait too:**
+`f077a054` records the account at mock quote time (same parts, same CM address,
+same registration the quote carries); `39846403`/`cc0e6d97` give the opencode
+lane the account scope, the trim-row debt fold, and the 1,000-raw truncation
+tolerance the settle wait lacked; `e55ee49f` fixes the correlation expansion
+below. The underwriter and operator rolls carry them.
+
+## The full cross-chain unified lifecycle, live (2026-11-22)
+
+One loan (`0x51bb077e…`, 0.1 WETH-1 collateral, USDC-999 principal) driven from
+user-sim end to end while the venue book was traded:
+
+| Step | Measured |
+| --- | --- |
+| Collateral + bridge | 87.158 USDC landed, relay clean |
+| Flat health | debt 87.141, HF 1.6697 |
+| Draws (3, during runtime) | 87.141 → 96.639, each verified by its own settle wait; HF 1.4945 |
+| 3-dex book | ETH 0.01 + `xyz:NVDA` 0.1 + `para:SMH` 0.1; margin used 6.26, spot hold 6.287 |
+| Venue fold while held | V = 96.639 − 6.2871 + (−0.1162) = 90.2357 = the operator's `venue_equity_usd`; term 85.136 (equity − 5.0997 maintenance); HF 1.3866 |
+| Resize during runtime | `recallFromCore` 1 USDC out of free spot (90.35), debt 96.6396 → 95.6396, Active in 3 s |
+| Flatten | all three dexes flat, spot 94.6378 |
+| Close | recall-all (in-kind gas) → shortfall 1.002454 → owner top-up on 999 → `Closing` → `PendingCloseUnwind` → **`Closed`** in 68 s; collateral 0.1 WETH-1 released to the wallet |
+
+### Bugs this lifecycle exposed (all fixed in source, two pending a roll)
+
+1. **A WETH-escrowed loan holding an ETH perp refused every requote and draw.**
+   The canonical hedged book. `portfolio-margin value refused —
+   CorrelationDimension { declared: 2, expected: 3 }`: the operator collapses
+   same-series factors (WETH escrow ≡ ETH perp) but labelled the matrix with the
+   *series* count while the PM validates one factor per declared leg. The
+   expansion now repeats the series' row/column back into the declared space
+   (`e55ee49f`, unit-tested, 565 operator tests pass). **Ships with the next
+   operator roll.**
+2. **`recallAllFromCore()` could never move a full venue balance.** The
+   Core→EVM gas was charged *on top* of the transferred amount; the mirror's
+   normal account holds no spot HYPE, so the fee is always priced in the moved
+   token and a transfer of `total − hold` was refused forever
+   (`94.63902833 needed … 94.63780003 free`). Every close of a venue-funded
+   unified loan was blocked. The venue now takes the gas **in kind** (the real
+   venue's rule) for the exact-full case only; an over-request is still a
+   shortfall refusal (`bf1b17f`, rolled as `relay-bf1b17f`, 390 tests, sweep
+   13/13). The bridge's own fill times are the **chain** clock (+1 h vs the
+   host here) — correct for a mirror, but a reader must not mistake it for wall
+   time.
+3. **The close's presence test was stricter than the bridge.** It demanded the
+   exact expected amount and called a landed recall a failure once the in-kind
+   gas was deducted, and it waited 30 s for a creation deposit when a previous
+   attempt had already swept the venue (the cash was on the agent). Both fixed
+   (`09dff59e`): 1 bp gas allowance (≈70× the measured gas, at least $0.005),
+   and "empty venue + cash on the agent" is *nothing to recall*, not a missing
+   bridge.
+
+### Economic property measured while the book was open
+
+Draw capacity is not linear in the venue notional: a 13 USD *long* `xyz:NVDA`
+perp on a 175 USD escrow took the PM's `stress_capacity` line from 15.14 to
+**0**, while the flat realizable value moved only 2.40 (the 1σ venue stress).
+The binding arm is the venue-liquidation **tail**, not the grid: an unhedged
+long perp adds directional risk to a long escrow, so the lender stops lending
+through the book. That is defensible — but it means the *hedge* case had to be
+measured with the same-series perp, which bug 1 blocked. After the operator roll
+the experiment is: WETH escrow long + ETH perp short → the line should stay
+near the flat 15.1 (basis-only risk). Any other result is a tail-model problem.
 
 ## Book-simulation ideas (the "proper sims of books" ask)
 
