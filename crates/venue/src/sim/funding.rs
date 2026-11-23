@@ -57,6 +57,7 @@ fn dex_is_priced(account: &Account, feed: &MarketFeed, dex: &str) -> bool {
 }
 
 /// One dex's accrual (see [`accrue_funding`]): the number of payments moved.
+#[allow(clippy::too_many_lines)] // one dex's accrual: the boundary walk, the per-coin rate, the ledger post
 fn accrue_dex(account: &mut Account, feed: &MarketFeed, dex: &str, to_ms: u64) -> Result<usize> {
     let from = account.funded_at_ms(dex);
     if from == 0 {

@@ -496,9 +496,9 @@ impl Sim {
             let Some(fee) = gas_priced_in_token(feed, token) else {
                 return Ok(amount);
             };
-            let free = spot_free(account, feed, token.index)?;
-            Ok(if amount <= free && amount + fee > free {
-                free - fee
+            let available = spot_free(account, feed, token.index)?;
+            Ok(if amount <= available && amount + fee > available {
+                available - fee
             } else {
                 amount
             })

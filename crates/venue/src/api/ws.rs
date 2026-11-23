@@ -1568,6 +1568,7 @@ mod tests {
     /// entries that arrived after its last push and nothing twice, and the
     /// frame parses through the client's own vocabulary.
     #[test]
+    #[allow(clippy::too_many_lines)] // one tape lifecycle: empty, batch, no-repeat, out-of-order tid
     fn the_trade_tape_pushes_new_trades_once() {
         let feed = Arc::new(MarketFeed::memory(vec!["BTC".into()]));
         feed.put_book(test_book("BTC", "100"), 1_000);

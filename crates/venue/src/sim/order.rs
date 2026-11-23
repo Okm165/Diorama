@@ -1387,6 +1387,7 @@ impl Sim {
     /// served book plus the devnet's resting orders. The taker pays the taker
     /// fee; each maker's account is settled at their own price with the maker
     /// fee (no opening probe: the venue reserves margin at placement).
+    #[cfg(test)]
     pub(crate) fn order(&self, feed: &MarketFeed, address: Address, req: &Order) -> Result<Fill> {
         self.order_with_builder(
             feed,

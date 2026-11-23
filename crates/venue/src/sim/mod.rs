@@ -1268,6 +1268,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // one scenario: fund, transfer, and the identity measured in one body
     fn a_unified_account_class_transfers_at_the_sim_level() {
         let feed = feed_with(&[("HYPE", "87.87", "87.87")]);
         let sim = Sim::memory();

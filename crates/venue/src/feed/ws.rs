@@ -427,6 +427,7 @@ impl WsClient {
     /// The subscribe/unsubscribe frames that bring this socket's live set to
     /// the desired one, bounded by the send budget (the rest waits for the
     /// next sync). Updates the live set as if the frames were sent.
+    #[allow(clippy::too_many_lines)] // one diff of the live set to the desired one: books, contexts and tapes
     fn sync_frames(&self, state: &mut SessionState, now_ms: u64) -> Result<Vec<String>, WsError> {
         let desired = self.feed.desired_streams(now_ms);
         let mut frames = Vec::new();

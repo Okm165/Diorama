@@ -825,6 +825,7 @@ fn position_row(
 /// construction (`accountValue == totalRawUsd + Σ signed(positionValue)`), and
 /// the cross view carves isolated margin out (measured exact on the live
 /// sample); with no isolated positions it equals the margin summary.
+#[allow(clippy::too_many_arguments)] // one explicit input per part of the view; the caller owns each
 fn assemble(
     account: &Account,
     dex: &str,
