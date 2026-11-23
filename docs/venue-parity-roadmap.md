@@ -171,6 +171,40 @@ warnings are the honest bounded prior (USDC collateral closes into USDC at 0;
 WHYPE at 4.79% because the measured probe cannot bound the full sale), and the
 risk engine's σ floor is the designed policy premium — neither is a defect.
 
+### One order, one oid — a partial take's remainder split from its fill (2026-11-23)
+
+The order-identity defect a strategy hits when it manages a marketable order that
+partially fills: the take and its resting remainder were given **two different
+oids**. Measured live: a marketable GTC filled under oid 629 and rested under
+oid 630, so `openOrders` showed the remainder under 630, `userFills` showed the
+fill under 629, and `orderStatus(629)` — the oid the client was handed — answered
+**`unknownOid`** (the fill path does not terminalize when a remainder rests, and
+the remainder sat under a different oid). The order was unmanageable after its
+fill: it could not be queried, and a cancel by the returned oid failed.
+
+Root cause: `place_with_builder` called the taker (`next_oid` for the fill) and
+then `rest_remainder` → `rest_order` (`next_oid` again for the remainder). The
+venue's model is **one order, one oid**. Fixed at the seam (`ef551ee`, venue
+`relay-ef551ee`): the remainder resumes the take's oid (`RestCarry` carries the
+oid and what already filled), so:
+
+* `openOrders`/`orderStatus` report the order under the oid the client was
+  handed, `sz` = remainder, **`origSz` = the whole order** (not the remainder);
+* the carried fill makes a later terminal report's `avg_px` the order's true
+  average over all its fills;
+* the same fix applies to a crossing **spot** GTC's remainder.
+
+Also simplified `terminalize`: it stored a caller-passed `filled_sz` that
+duplicated the order's own field, and three call sites passed the wrong figure
+(the last maker fill's size, a notional, and zero). The parameter is gone —
+the terminal row reads `order.filled_sz`, one source.
+
+Live after the roll: a 5.49 QNT GTC filled 3.49 and rested 2.0 under **oid 631
+for both**; `openOrders[631]` = `sz 2.0 / origSz 5.49`, `orderStatus(631)` =
+`open` then `filled` (`sz 0.0 / origSz 5.49`) once a second account filled the
+remainder. Regression test:
+`a_partial_take_and_its_remainder_are_one_order_one_oid`.
+
 ### Open finding: an uncalibrated venue coin blinds the HF check (2026-11-23)
 
 Measured during the drill, then closed on purpose as a **bounded** finding: with
