@@ -230,6 +230,29 @@ reads `orderType "Take Profit Market"`, `triggerCondition "Price above 29.885"`;
 a sell stop-limit reads `"Stop Limit"`, `"Price below 28.144"`. Regression test
 `a_trigger_reports_the_venue_order_type_and_condition`.
 
+### The ρ freshness sawtooth — `window_end` was the bucket start, not its close (2026-11-23)
+
+The operator repeatedly logged "measured venue correlations are stale — pricing
+the variance-maximising endpoint for the dropped pairs". The fallback is
+conservative, but the *cause* was an off-by-one-hour: the indexer labels each
+hourly price tick with the bucket **start** (`date_trunc('hour', …)`) while its
+price is the hour's **close** (the last round at or before the hour end), and the
+calibration stored that start as the correlation `window_end`. So every row read
+an hour older than it is: at the 03:51 cycle the last completed bucket was
+02:00, stored as the end, and age at 04:51 reached 2 h 51 m — crossing the
+operator's 2 h 30 m freshness gate for **~21 min every hour**, pricing freshly
+measured ρ as the conservative endpoint (measured: `window_end = 02:00` at
+04:20, age 2 h 20 m, sawtooth stale at 03:30/03:45/03:51).
+
+Root-cause fix (`b2fe3699`, release `local-20261123-b2fe3699`): the estimate's
+`window_end_seconds` is the last bucket's **close** (`start + 1h`). `window_end`
+is informational only — it never enters the ρ math (alignment and returns use the
+tick stamps, unchanged), so the fix alters only freshness accounting. Live
+after the roll: the restart's cycle wrote `window_end = 04:00` (the 03:00 bucket's
+close), age **33 min** instead of ~1 h 33 m; the operator's stale warnings stop
+(the two at 04:32:51 were the pre-fix value mid-restart). Regression test
+`window_end_is_the_last_bucket_close_not_its_start`.
+
 ### Open finding: an uncalibrated venue coin blinds the HF check (2026-11-23)
 
 Measured during the drill, then closed on purpose as a **bounded** finding: with
