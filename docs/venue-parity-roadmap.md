@@ -44,6 +44,64 @@ Discipline: every endpoint gets a measured-live fixture (we already hold
 `real.json` / `real_exchange.json` / `real_liquidation.json`); a fixture diff is
 the parity gate, never eyeballing.
 
+### Market fidelity, measured against the real venue (2026-11-23)
+
+Read-only probes of the real Hyperliquid beside the mirror's served data,
+same instant, two dexes (default + xyz):
+
+* **Marks and oracles**: 0.0 to −0.42 bp — the deltas are the relay's poll age,
+  not a model. Funding matches to five decimal places (`ETH −1.644e−06`
+  mirror vs `−1.6444e−06` real).
+* **Books**: 20/20 levels both sides everywhere; top-of-book within a tick
+  (BTC bid 61260/61262; ETH bid/ask **identical** 1722.1/1722.2; the xyz
+  spreads differ by one tick's quantization, i.e. the instant). The mirror's
+  executable depth is the real venue's own, which is the "books come from the
+  chain's deltas" claim made concrete.
+* **Indexer book cadence is uniform** across feeds (8 snapshots / 30 min per
+  instrument — default, xyz and para alike), so the para restoration introduced
+  no slower lane; the 78/85 σ warm-up closes as hourly buckets accrue.
+
+### The nearest-to-breach book closes from first principles (2026-11-23)
+
+`194bec1c` (the portfolio 3% above its line) recomputed by hand: collateral
+4998.9976 USDC × θ 0.80 = 3999.1981, minus pending coupon 0.039812 =
+**3999.1583** — the row's `hf_numerator_usd` to the last digit; HF 1.031324 =
+numerator / debt 3877.6918. Simple-escrow book, no venue leg, no defect. A
+book one bad fix away from liquidating is exactly where the arithmetic must
+be exact.
+
+### The same orphan rule reached the admission line; the CCTP slow lane stopped crying wolf (2026-11-23)
+
+Two serving-cache findings from the live tables:
+
+* **`portfolio_admissions` had the same orphan the health sweep had just
+  retired**: `5bc4726c` kept `total_line_usd 52.236` / `hf_line_usd 28.786`
+  (computed 11:46) after its health row was gone — the reactor's terminal
+  cleanup names both tables, so the bypass path skipped both. The scan
+  reconciliation now retires both with one predicate (no leg in
+  `HEALTH_ROW_LIVE`); verified live: admissions 5 → 4, exactly the orphan,
+  the four live lines untouched.
+* **The CCTP "pending unusually long" line fired before the used-nonce
+  guard**: every restart's re-scan warned "still retrying" for burns that
+  settled hours ago (measured: a 22-hour-old burn warned on every restart and
+  was dropped three seconds later). The warning now follows the attempt and
+  only names an outcome that is actually still pending; verified live after
+  the roll: **0** stale-pending lines while 54 already-relayed burns dropped
+  silently.
+
+### The control door honors the tif it advertises (2026-11-23)
+
+The `/control/order` request carries `tif` into the venue's own `Order`, but
+the handler routed every request through the taker entry: a non-crossing
+`alo` refused *"Order could not immediately match against any resting
+orders"* instead of resting (measured on `para:10Y`: an ALO one tick below the
+bid refused; `openOrders` empty). The door now places through `Sim::place`
+(the wire's own entry) — ALO refuses a crossing order with the venue's bbo
+string, GTC rests its remainder, and the fill-shaped response gains
+`resting: true` for a placement that rests. This was the control lane's own
+fidelity gap, found by probing the restored para dex rather than assuming the
+advertised surface was true.
+
 ### The enforceable numerator is immune to venue P&L — proven live, with the account book exact (2026-11-22)
 
 The report's oldest ask — "venue profit counts as collateral" — got its negative
